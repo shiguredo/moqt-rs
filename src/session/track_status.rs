@@ -1,11 +1,11 @@
 //! TRACK_STATUS 関連 (送信側と受信側の両方)
 //!
-//! draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS) に対応する。
+//! draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS) に対応する。
 //! TRACK_STATUS は "A potential subscriber sends TRACK_STATUS ... to obtain information about
 //! the current status of a given track." と定義され、本ライブラリは subscriber 側の送信と
 //! 応答受信に加え、publisher 側の受信と応答送信も扱う。
 //!
-//! §9.13: "The receiver of a TRACK_STATUS message treats it identically as if it had received
+//! §9.12: "The receiver of a TRACK_STATUS message treats it identically as if it had received
 //! a SUBSCRIBE message, except it does not create downstream subscription state or send any
 //! Objects. If successful, the publisher responds with a TRACK_STATUS_OK with the same
 //! parameters and Track Properties it would have set in a SUBSCRIBE_OK. Track Alias is not
@@ -56,7 +56,7 @@ impl Session {
 
     /// 応答済み (Ok / Error) または終端済みの TRACK_STATUS を除去する
     ///
-    /// draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): TRACK_STATUS_OK / REQUEST_ERROR は
+    /// draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS): TRACK_STATUS_OK / REQUEST_ERROR は
     /// FIN で送られる。bidi stream 終端を `recv_request_stream_closed` で通知してから
     /// 呼ぶこと (終端前に除去すると、後から届く終端が unknown id となり
     /// `PROTOCOL_VIOLATION` で session が Closing になる)。応答前に stream が終端した
@@ -80,7 +80,7 @@ impl Session {
 
     // ─── 送信 API ──────────────────────────────────────────
 
-    /// TRACK_STATUS を送信する (draft §9.13 (TRACK_STATUS)、自側が subscriber)
+    /// TRACK_STATUS を送信する (draft §9.12 (TRACK_STATUS)、自側が subscriber)
     pub fn send_track_status(
         &mut self,
         track_namespace: TrackNamespace,
@@ -91,7 +91,7 @@ impl Session {
         self.check_peer_goaway()?;
         // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は送出しない
         Self::validate_outgoing_track_name(&track_name)?;
-        // draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces): single period `.` 予約名前空間への TRACK_STATUS は送信不可
+        // draft-ietf-moq-transport-23 §2.4.3 (Reserved Namespaces): single period `.` 予約名前空間への TRACK_STATUS は送信不可
         if track_namespace.is_single_period() {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
@@ -99,12 +99,12 @@ impl Session {
             )
             .into());
         }
-        // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
+        // draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
         // 送信前に値域を検証し、不正値の送出と状態登録を防ぐ
         if let Some(v) = parameters.include_properties() {
             super::subscription::validation::validate_include_properties(v)?;
         }
-        // draft §9.20.1 (Parameter Scope): TRACK_STATUS で許可されないパラメータを含む送信は
+        // draft §9.19.1 (Parameter Scope): TRACK_STATUS で許可されないパラメータを含む送信は
         // API 呼び出し時に拒否する。検証がないと、TrackStatusEntry の登録・ control deadline
         // の開始・ SendRequest の push まで完了した後に I/O 層のエンコード時 (validate_scope)
         // で非同期に失敗し、アプリがエンコードエラーを無視すると control deadline
@@ -155,7 +155,7 @@ impl Session {
 
     /// peer から TRACK_STATUS を受信する (自側が publisher)
     ///
-    /// draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): "The receiver of a TRACK_STATUS
+    /// draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS): "The receiver of a TRACK_STATUS
     /// message treats it identically as if it had received a SUBSCRIBE message, except it
     /// does not create downstream subscription state or send any Objects." 受信前の検証は
     /// SUBSCRIBE と共通の `Session::accept_incoming_track_request` を使い、`Track Alias is
@@ -179,7 +179,7 @@ impl Session {
         )? {
             return Ok(());
         }
-        // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
+        // draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
         // 値域外 (0 / 1 以外) の受信は MUST でセッションを INVALID_PARAMETER (0x305) により
         // 閉じる (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
         let include_properties = track_status.parameters.include_properties();
@@ -209,12 +209,12 @@ impl Session {
 
     /// TRACK_STATUS_OK 送信時の状態遷移と Track Properties の解決
     ///
-    /// draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): "If successful, the publisher
+    /// draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS): "If successful, the publisher
     /// responds with a TRACK_STATUS_OK with the same parameters and Track Properties it would
     /// have set in a SUBSCRIBE_OK." 送信する Track Properties はアプリが渡した値であり、
     /// 本関数は `INCLUDE_PROPERTIES=0` のときの空化と応答済み記録だけを行う。
     ///
-    /// draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter): "If
+    /// draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter): "If
     /// INCLUDE_PROPERTIES is 0, the Track Properties are still present in the message, but
     /// they SHOULD be empty." 空化は `Session::send_subscribe_ok` と同じく entry に保持した
     /// 値で判断する。
@@ -257,7 +257,7 @@ impl Session {
             largest_location: None,
             expires_ms: None,
         });
-        // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter): 空化の判断は
+        // draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter): 空化の判断は
         // entry の借用を解放してから行う
         let include_properties = entry.include_properties;
         self.clear_control_message_deadline(request_id);
@@ -270,7 +270,7 @@ impl Session {
 
     /// 受信した TRACK_STATUS への REQUEST_ERROR 送信時の状態遷移
     ///
-    /// draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): "A publisher responds to a failed
+    /// draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS): "A publisher responds to a failed
     /// TRACK_STATUS with an appropriate TRACK_STATUS_ERROR message. The bidi stream is closed
     /// with a FIN after TRACK_STATUS_OK or TRACK_STATUS_ERROR are sent." 自側が responder の entry を
     /// 応答済み (`Error`) として確定し、呼び出し元 (`Session::send_request_error`) が
@@ -318,7 +318,7 @@ impl Session {
     /// 要求を `Error` として確定する。既に `Ok` / `Error` なら状態維持 (応答確定済みで
     /// stream 終端は情報量ゼロ)。
     ///
-    /// 自側が responder のときは `entry.response` を変更しない。draft-ietf-moq-transport-22
+    /// 自側が responder のときは `entry.response` を変更しない。draft-ietf-moq-transport-23
     /// §6.4.2.2 (Graceful Request Stream Closure) の FIN は方向ごとの終端であり cancel では
     /// ないため、requester の FIN を受けても TRACK_STATUS_OK / REQUEST_ERROR の送出経路を
     /// 塞がない (呼び出し元が peer FIN の受信を記録して終端を遅延させる)。
@@ -334,7 +334,7 @@ impl Session {
                 "bidi request stream close for unknown TRACK_STATUS request id",
             ));
         };
-        // draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection): "Once a
+        // draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection): "Once a
         // request stream has been opened, the request MAY be cancelled by either endpoint."
         // 自側の送信方向が閉じたため、以後の応答は送れない。
         entry.terminated = true;
@@ -346,7 +346,7 @@ impl Session {
 
     /// 受信した REQUEST_OK (TRACK_STATUS_OK) を requester 側の entry に反映する
     ///
-    /// draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): TRACK_STATUS_OK を送るのは publisher
+    /// draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS): TRACK_STATUS_OK を送るのは publisher
     /// (responder) であり、自側は subscriber (requester) である。
     ///
     /// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): TRACK_STATUS_OK は EXPIRES と
@@ -388,7 +388,7 @@ impl Session {
             .get_mut(&request_id)
             .expect("locate_request guarantees key presence");
         // REQUEST_OK を送るのは TRACK_STATUS を受けた側 (responder) であり、自側が
-        // responder の entry に REQUEST_OK が届くのは peer の違反である (§9.13)
+        // responder の entry に REQUEST_OK が届くのは peer の違反である (§9.12)
         if entry.my_role != TrackRole::Subscriber {
             let err = SessionError::new(
                 SESSION_ROLE_VIOLATION,
@@ -437,7 +437,7 @@ impl Session {
             self.terminate_malformed_track(request_id, None, err.reason());
             return Ok(());
         }
-        // draft §9.20.17 (LARGEST OBJECT Parameter): TRACK_STATUS への REQUEST_OK は LARGEST_OBJECT を含み得る
+        // draft §9.19.17 (LARGEST OBJECT Parameter): TRACK_STATUS への REQUEST_OK は LARGEST_OBJECT を含み得る
         let largest_location = parameters
             .largest_object()
             .map(|(group_id, object_id)| Location {
@@ -466,7 +466,7 @@ impl Session {
 
     /// 受信した REQUEST_ERROR を requester 側の entry に反映する
     ///
-    /// draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): REQUEST_ERROR を送るのは publisher
+    /// draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS): REQUEST_ERROR を送るのは publisher
     /// (responder) であり、自側は subscriber (requester) である。ローカル終端済みの entry を
     /// 吸収する経路を持たない理由は
     /// [`Session::handle_ok_for_track_status`] の doc と同じである。
@@ -479,7 +479,7 @@ impl Session {
             .get_mut(&request_id)
             .expect("locate_request guarantees key presence");
         // REQUEST_ERROR を送るのは TRACK_STATUS を受けた側 (responder) であり、自側が
-        // responder の entry に REQUEST_ERROR が届くのは peer の違反である (§9.13)
+        // responder の entry に REQUEST_ERROR が届くのは peer の違反である (§9.12)
         if entry.my_role != TrackRole::Subscriber {
             let err = SessionError::new(
                 SESSION_ROLE_VIOLATION,

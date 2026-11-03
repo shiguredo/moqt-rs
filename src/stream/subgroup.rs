@@ -1,4 +1,4 @@
-//! SUBGROUP_HEADER / SUBGROUP_OBJECT (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))
+//! SUBGROUP_HEADER / SUBGROUP_OBJECT (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
 //!
 //! Type Flags の定義済み bit: bit0 (0x01) / bits 1-2 (mask 0x06) / bit3 (0x08) /
 //! bit4 (0x10、必須) / bit5 (0x20) / bit6 (0x40)。
@@ -19,7 +19,7 @@ use crate::{error::MessageError, varint};
 use alloc::vec::Vec;
 
 /// SUBGROUP_HEADER の定義済み Type Flags bit
-/// (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))
+/// (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
 const SUBGROUP_HEADER_KNOWN_MASK: u64 = 0x01 | 0x06 | 0x08 | 0x10 | 0x20 | 0x40;
 
 /// Subgroup ID のエンコードモード
@@ -33,7 +33,7 @@ pub enum SubgroupIdMode {
     Explicit(u64),
 }
 
-/// SUBGROUP_HEADER (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))
+/// SUBGROUP_HEADER (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubgroupHeader {
     /// 対象トラックの Alias
@@ -49,7 +49,7 @@ pub struct SubgroupHeader {
     /// このヘッダが Group の末尾を含むかどうか
     pub end_of_group: bool,
     /// このサブグループストリームの最初のオブジェクトが original publisher によって
-    /// そのサブグループに公開された最初のオブジェクトであるか (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))
+    /// そのサブグループに公開された最初のオブジェクトであるか (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
     pub first_object: bool,
 }
 
@@ -173,7 +173,7 @@ impl SubgroupHeader {
     }
 }
 
-/// サブグループストリーム内のオブジェクトヘッダ (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))
+/// サブグループストリーム内のオブジェクトヘッダ (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
 ///
 /// 構造:
 /// - Object ID Delta (vi64)
@@ -233,9 +233,9 @@ impl SubgroupObject {
                 "object status must not be present when payload length > 0",
             ));
         }
-        // draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header): PROPERTIES ビットが立っている場合は
-        // Object Properties (draft-ietf-moq-transport-22 §11.1.2 (Object Properties)) が必須。
-        // 空でも Properties Length = 0 を含む (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))
+        // draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header): PROPERTIES ビットが立っている場合は
+        // Object Properties (draft-ietf-moq-transport-23 §11.1.2 (Object Properties)) が必須。
+        // 空でも Properties Length = 0 を含む (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
         if has_properties && properties_data.is_none() {
             return Err(MessageError::ProtocolViolation(
                 "properties data is required when has_properties is true",
@@ -253,22 +253,22 @@ impl SubgroupObject {
                 "properties data must not be present when has_properties is false",
             ));
         }
-        // draft-ietf-moq-transport-22 §11.1.1 (Object Status): 値域検証は書き込み前に済ませ、
+        // draft-ietf-moq-transport-23 §11.1.1 (Object Status): 値域検証は書き込み前に済ませ、
         // 不正 status で buf に部分バイトを残さない。status 依存の他の検証より先に行い、
         // 未知 status をより正確なエラーで報告する
         if let Some(status) = self.status {
             validate_object_status(status)?;
         }
 
-        // draft-ietf-moq-transport-22 §11.1.2 (Object Properties): Properties Length と実データ長の
+        // draft-ietf-moq-transport-23 §11.1.2 (Object Properties): Properties Length と実データ長の
         // 一致を status を問わず書き込み前に検証する
         if let Some(props) = properties_data {
             let prop_len = validate_properties_blob(props)?;
-            // draft-ietf-moq-transport-22 §11.1.2 (Object Properties): status が Normal (0x0) 以外の
+            // draft-ietf-moq-transport-23 §11.1.2 (Object Properties): status が Normal (0x0) 以外の
             // オブジェクトに実際のプロパティデータ (Properties Length > 0) が付いている場合は
             // INVALID_OBJECT_STATUS。
             // PROPERTIES bit はストリーム全体のフラグであり、non-Normal オブジェクトは
-            // Properties Length = 0 で「プロパティなし」を表現する (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))。
+            // Properties Length = 0 で「プロパティなし」を表現する (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))。
             if prop_len > 0 && matches!(self.status, Some(s) if s != OBJECT_STATUS_NORMAL) {
                 return Err(MessageError::InvalidObjectStatus(
                     "properties on non-Normal status object is not allowed",
@@ -309,7 +309,7 @@ impl SubgroupObject {
         pos += n;
 
         // Properties: SUBGROUP_HEADER の PROPERTIES ビットが立っている場合は存在する
-        // draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header):
+        // draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header):
         // "Objects with no properties or non-Normal status set Properties Length to 0."
         // Subgroup object では Properties Length = 0 は合法 (Datagram とは異なる)
         let properties_bytes = if has_properties {
@@ -335,10 +335,10 @@ impl SubgroupObject {
             None
         };
 
-        // draft-ietf-moq-transport-22 §11.1.2 (Object Properties): status が Normal (0x0) 以外のオブジェクトに
+        // draft-ietf-moq-transport-23 §11.1.2 (Object Properties): status が Normal (0x0) 以外のオブジェクトに
         // 実際のプロパティデータ (Properties Length > 0) が付いている場合は INVALID_OBJECT_STATUS。
         // PROPERTIES bit はストリーム全体のフラグであり、non-Normal オブジェクトは
-        // Properties Length = 0 で「プロパティなし」を表現する (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))。
+        // Properties Length = 0 で「プロパティなし」を表現する (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))。
         // Properties Length の読み取りは encode 側と同じ validate_properties_blob に寄せる。
         // ここへ渡る properties_bytes は checked_len で「Length varint + ちょうど Length バイト」に
         // 切り出したスライスであり、encode と同じ契約 (データ長と Length の一致) を常に満たす

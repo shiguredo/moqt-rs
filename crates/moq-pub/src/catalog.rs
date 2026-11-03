@@ -283,7 +283,7 @@ pub async fn send_catalog(params: CatalogParams<'_>) -> Result<Vec<u8>> {
 /// publish し直す」を SHOULD とするため、呼び出し側が間隔を決める。
 ///
 /// 戻り値は購読フィルタの評価結果である。`ObjectFilterOutcome::Skip` はどの購読にも
-/// 届かなかったことを示す (draft-ietf-moq-transport-22 §3.3.1 (Location Filters) /
+/// 届かなかったことを示す (draft-ietf-moq-transport-23 §3.3.1 (Location Filters) /
 /// §3.3.3 (Combining Filters))。送り直しでは Skip を正常系として扱い、同じ Location を
 /// 再送しないために Group ID だけを進める。
 pub async fn publish_catalog_object(
@@ -316,8 +316,8 @@ pub async fn publish_catalog_object(
 
 /// FETCH に応答するときの方針
 ///
-/// draft-ietf-moq-transport-22 §3.2 (Fetch) / §3.2.1 (Fetch Object Delivery) /
-/// §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER Parameter) に基づく。
+/// draft-ietf-moq-transport-23 §3.2 (Fetch) / §3.2.1 (Fetch Object Delivery) /
+/// §3.3.1 (Location Filters) / §9.19.9 (LOCATION FILTER Parameter) に基づく。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatalogFetchResponse {
     /// 要求 range にカタログの Object が含まれる。FETCH_OK の応答範囲の終端は
@@ -334,7 +334,7 @@ pub enum CatalogFetchResponse {
 /// FETCH の Location Filter とカタログの Location から応答方針を決める
 ///
 /// - フィルタ省略時は `{0, 0}` から Largest Object までを要求されたものとして扱う
-///   (draft-ietf-moq-transport-22 §3.2)
+///   (draft-ietf-moq-transport-23 §3.2)
 /// - 開始 Location が Largest Object を超える場合は INVALID_RANGE が MUST (§3.2)
 /// - range に Object が無い場合は空の FETCH 応答を返す (§3.2.1)
 /// - 要求 range の外の Object を送ってはならない (§3.3.1)
@@ -841,7 +841,7 @@ mod tests {
 
     /// フィルタ省略の FETCH は `{0, 0}` から Largest Object までを要求したものとして扱うこと
     ///
-    /// draft-ietf-moq-transport-22 §3.2 (Fetch): フィルタ省略時の range は `{0, 0}` と
+    /// draft-ietf-moq-transport-23 §3.2 (Fetch): フィルタ省略時の range は `{0, 0}` と
     /// Largest Object。カタログがその範囲にあるため Object を返す。
     #[test]
     fn catalog_fetch_without_filter_serves_the_object() {
@@ -859,7 +859,7 @@ mod tests {
 
     /// カタログを含む絶対 range の FETCH は Object を返すこと
     ///
-    /// draft-ietf-moq-transport-22 §3.5.1 (Dynamically Starting New Groups) の
+    /// draft-ietf-moq-transport-23 §3.5.1 (Dynamically Starting New Groups) の
     /// "observe the Largest Object in the response" パターンが要求する範囲である。
     #[test]
     fn catalog_fetch_with_range_containing_the_catalog_serves_the_object() {
@@ -885,7 +885,7 @@ mod tests {
 
     /// range の外にある FETCH は Object を返さず、要求 range の終端で空応答にすること
     ///
-    /// draft-ietf-moq-transport-22 §3.2.1 (Fetch Object Delivery): 要求 range に Object が
+    /// draft-ietf-moq-transport-23 §3.2.1 (Fetch Object Delivery): 要求 range に Object が
     /// 無いときは uni stream を開いて FETCH_HEADER だけを送り FIN する。§3.3.1
     /// (Location Filters): publisher は要求 range の外の Object を送ってはならない。
     /// Group ID を 0 に固定して要求する古い形の FETCH がこれに該当する。
@@ -916,7 +916,7 @@ mod tests {
 
     /// 開始 Location が Largest Object を超える FETCH は INVALID_RANGE にすること
     ///
-    /// draft-ietf-moq-transport-22 §3.2 (Fetch): "If no Objects have been published for the
+    /// draft-ietf-moq-transport-23 §3.2 (Fetch): "If no Objects have been published for the
     /// track or Start Location is greater than the Largest Object the publisher MUST return
     /// FETCH_ERROR with error code INVALID_RANGE."
     #[test]

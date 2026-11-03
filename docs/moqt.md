@@ -14,9 +14,13 @@
   - PUBLISH は Subscription Parameters を運び、auth token のコピーを禁じる
 - PUBLISH_STATE_NOTIFY
 - SUBSCRIBE / SUBSCRIBE_OK / REQUEST_UPDATE
-- FETCH / FETCH_OK
+  - REQUEST_UPDATE は到着順に処理し、REQUEST_UPDATE_OK も受信順に返す。1 本の request stream 上で
+    完結する応答のため Request ID を運ばない (§9.5)。FILL_PARAMETERS を含む REQUEST_UPDATE は
+    coalescing せず 1 通ずつ適用する (§9.5 / §9.19.15)
+- FETCH / FETCH_OK (FETCH への REQUEST_OK の別名であり、専用のワイヤメッセージはない。旧 FETCH_OK の Type `0x18` は予約値として拒否する)
   - 単一形式のみ (range は LOCATION_FILTER で指定、Standalone / Joining の種別とメッセージ内 Start / End Location は廃止済み)
   - Group Order が Descending (0x02) のときは `FetchStreamDecoder::new_with_group_order` に 0x02 を渡す必要があり、ギャップの意味解釈 (非存在 / 不明の区別、末尾ギャップの FIN 判定) はアプリ責務
+  - 相対 Location Filter (Location Filter Type 0x01 / 0x05) を含む FETCH は受信時に REQUEST_ERROR の INVALID_RANGE (`0x11`) で拒否し、送信時は送出前に拒否する (§3.2 / §9.19.9)
 - TRACK_STATUS (subscriber 側の送信と応答受信、publisher 側の受信と応答送信の両方。受信側は subscription state も Track Alias も作らない)
   - TRACK_STATUS_OK の EXPIRES は同じ Track の SUBSCRIBE_OK で提示される見込みの購読期限であり、要求自体の期限ではない。
     単発要求のため期限タイマーは起動せず、`TrackStatusEntry::expires_ms` で参照する (FIN と破棄の条件は EXPIRES の有無で変わらない)
@@ -30,6 +34,10 @@
   - Gone は元の publisher が再配送できないが存在自体は否定しない状態であり (draft-ietf-moq-transport-23 §2.1.2)、Non-Existent (存在しないと確定した状態) とは区別する
 - Object Datagram
 - Object の Delivery Mode (Subgroup / Datagram) を Object 単位で追跡し、重複 Object の Malformed 検出 (§12.1 の条件 7) に使う。送信側の強制は行わない
+- Malformed Track (§12.1) の検出は条件 1〜10 のうち、重複 Object の Payload / Immutable Properties の不一致 (条件 6)、
+  Delivery Mode の不一致 (条件 7)、サポートする Property のスコープ外受信 (条件 8)、複数を許さない Property の
+  重複 (条件 9)、不存在と記録した Object の受信と受信済み Object の不存在通知 (条件 10) に対応する。
+  検出時は同じ Track の購読を取消し、アプリへ `MalformedTrack` を通知する (送信側の強制は行わない)
 - Object Status (Normal / End of Group / End of Track)
 - Object Properties
 - Padding (stream / datagram、stream 側は読み捨て)
@@ -46,6 +54,7 @@
 - `MOQT_IMPLEMENTATION`
 - `MAX_REQUEST_UPDATES`
 - `MAX_FILTER_RANGES`
+- `MAX_CONTROL_MESSAGE_SIZE` (受信上限と peer へ提示する送信上限。省略時の既定値と最小値は 65535)
 
 ## Message Parameters
 
@@ -55,8 +64,10 @@
 - Expires (すべての OK 応答で受理する。TRACK_STATUS_OK の値は仮の購読期限であり期限タイマーを起動しない。
   FETCH_OK の値は `Fetch::expires_ms` と `FetchOkReceived.expires_ms`、TRACK_STATUS_OK は受信した値を `TrackStatusEntry::expires_ms` で参照できる)
 - Fill Timeout
-- Fill Parameters (fill fetch stream 対応)
-- Forward
+- Fill Parameters (FILL_PARAMETERS は「Number of Parameters (vi64) + その個数の Parameters」で符号化し、
+  外側の byte length ではない。内側は FILL_PARAMETERS を再帰させず、§9.19.15 の許可型に限る。
+  fill fetch stream に対応する)
+- Paused / Unpaused (旧 FORWARD を置き換えた PAUSED。Type `0x11`、0 = unpaused / 1 = paused、既定 0)
 - Group Order
 - Include Properties
 - Largest Object (SUBSCRIBE_OK / PUBLISH / 購読と FETCH の REQUEST_UPDATE_OK / PUBLISH_STATE_NOTIFY では session 層が
@@ -66,7 +77,7 @@
   FETCH_OK は要求範囲と Largest Object から応答範囲の終端を導出し、Largest Object が要求範囲内なら
   LARGEST_OBJECT を載せて応答をそこへ切り詰め、範囲外なら取り除く。要求が End を省略している場合の End は
   Largest Object なので、自前のキャッシュから Largest Object を把握している利用者は `send_fetch_ok` に渡す)
-- Location Filter (range を LOCATION_FILTER で指定。§9.20.9 の Location Filter Type ごとに後続フィールドが決まる符号化で、Type 0x00 (None) と 0x05 (Next Object) を区別する)
+- Location Filter (range を LOCATION_FILTER で指定。§9.19.9 の Location Filter Type ごとに後続フィールドが決まる符号化で、Type 0x00 (None) と 0x05 (Next Object) を区別する)
   - publisher の送信側は subscription に加え、FETCH 応答と fill fetch stream の Object Location を
     要求範囲 (FETCH_OK の応答範囲の終端を含む) で検証する (`send_fetch_object` が範囲外を
     `LocalFilterMismatch` で拒否する)。End of Range は Object ではないため `send_fetch_end_of_range`
@@ -78,10 +89,10 @@
 - Range Filters (Subgroup / ObjectID / Priority / Object Property / Track Property)
   - codec と MAX_FILTER_RANGES / 重複 / 構造の検証
   - session 層で Object の forward 判定 (`object_passes_filters` / `header_passes_filters`)
-  - TRACK_PROPERTY_FILTER は PUBLISH の選別を行わない。draft-22 は TRACK_PROPERTY_FILTER を
-    SUBSCRIBE_TRACKS の応答として返る PUBLISH の選別に使うが、本ライブラリは MoQ リレー専用機能
-    (SUBSCRIBE_TRACKS) を対象外としているため、選別の対象が存在しない (draft から削除された
-    仕様ではない)
+  - TRACK_PROPERTY_FILTER は PUBLISH の選別を行わない。draft-23 §3.6.2 (Parameters on
+    SUBSCRIBE_TRACKS) は TRACK_PROPERTY_FILTER を SUBSCRIBE_TRACKS 自身に適用するが、本ライブラリは
+    MoQ リレー専用機能 (SUBSCRIBE_TRACKS) を対象外としているため、選別の対象が存在しない
+    (draft から削除された仕様ではない)
 - Subscribe Tracks ID (PUBLISH のみ。SUBSCRIBE_TRACKS の Request ID を相関情報として `Subscription`
   に保持する。本ライブラリは SUBSCRIBE_TRACKS を実装しないため、対応する namespace 要求の有無は
   検証せず、要求が無い PUBLISH でも通常の検証と受理判断へ進む。SUBSCRIBE_TRACKS 起因の PUBLISH に
@@ -111,6 +122,8 @@
 
 - GREASE 値の生成と判定 (`grease::{generate / is_grease}`)
 - Namespace / Track Name のシリアライズ表現とパース (`name::{parse_name / parse_name_with_percent_encoding / serialize_name / parse_namespace / serialize_namespace / parse_track_name / serialize_track_name}`)
+- 空 (0 バイト長) の Track Name を拒否する (§2.4.1。`.session` の旧例外は draft から削除済み)
+- `NEW_GROUP_REQUEST` は `DYNAMIC_GROUPS` を受信していなくても受理する (§3.5.1 / §9.19.19)
 - Subgroup 再オープン禁止の検証 (`subgroup_tracker::SubgroupTracker`)
 - 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期の遅延制御、音声と映像の共通の時間軸、表示時刻に合わせたフレームの選択、時間圧縮・伸長と欠落の補間 (`playout::{timeline, scheduler, buffer, stretch, expansion, predictor, gap, splice_fade, timing, catch_up}`)
 - メディア時刻の Unix epoch の壁時計への換算 (`media_clock::WallClockMapper`)
@@ -306,7 +319,7 @@ End of Unknown Range (`0x10C`、§11.4.2 (End of Range)) で示して残りの�
 `Session` は GOAWAY を移行の合図として扱い、接続の張り替え自体は I/O 層とアプリに任せます (Sans-I/O)。仕様と実装の責務は次のとおりです。
 
 - 受信側: `GoawayReceived { new_session_uri, timeout, on_request_stream }` を発行し、`peer_goaway()` でも同じ情報を参照できます。control stream の GOAWAY は session 全体、request stream の GOAWAY は当該 request だけが対象です (`on_request_stream`)。control GOAWAY の受信後、自側からの
-  新規 SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS は `SendRequestError::PeerGoawayReceived` で拒否されます (draft-ietf-moq-transport-22 §9.2 の SHOULD NOT)。
+  新規 SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS は `SendRequestError::PeerGoawayReceived` で拒否されます (draft-ietf-moq-transport-23 §9.2 の SHOULD NOT)。
 - 送信側: `send_goaway` / `send_goaway_on_request_stream` で送ります。client は空の New Session URI を送る MUST、URI は 8192 バイト以下です。二重受信は `UNEXPECTED_MESSAGE` (`0x303`)、client からの非空 URI は `ROLE_VIOLATION` (`0x304`)、8192 バイト超は `FIELD_LENGTH_EXCEEDED` (`0x401`) です。`tick(now_ms)` が期限を進め、
   open request が残ったまま期限を過ぎると `CloseSession(GOAWAY_TIMEOUT)` を積みます (control stream)。request stream の GOAWAY は期限で当該 request stream を `GOING_AWAY` で reset します。
 - request stream の GOAWAY の role: 送れるのは request の receiver だけです (draft-ietf-moq-transport-23 §9.2 (GOAWAY) の "Only the receiver of a request can send GOAWAY on its request stream.")。

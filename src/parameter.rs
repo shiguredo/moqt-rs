@@ -387,20 +387,20 @@ pub enum SetupOptionValue {
     /// 奇数型番号の Setup Option 値 (バイト列、最大 65535 バイト)
     Bytes(Vec<u8>),
     /// AUTHORIZATION_TOKEN (Option Type 0x03) の Token 構造
-    /// (draft-ietf-moq-transport-22 §9.1.4 (AUTHORIZATION TOKEN))
+    /// (draft-ietf-moq-transport-23 §9.1.4 (AUTHORIZATION TOKEN))
     AuthorizationToken(AuthorizationToken),
 }
 
 /// 単一の Setup Option
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetupOption {
-    /// Setup Option の型番号 (draft-ietf-moq-transport-22 §16.4 (Setup Options))
+    /// Setup Option の型番号 (draft-ietf-moq-transport-23 §16.4 (Setup Options))
     pub option_type: u64,
     /// Setup Option の値 (型番号が偶数なら varint、奇数ならバイト列)
     pub value: SetupOptionValue,
 }
 
-/// Setup Options リスト (draft-ietf-moq-transport-22 §9.1 (SETUP))
+/// Setup Options リスト (draft-ietf-moq-transport-23 §9.1 (SETUP))
 ///
 /// カウントプレフィックスなしで、エンコード時に `option_type` の昇順にソートして
 /// デルタエンコードを適用する。デコード時はバッファ末尾まで KVP を読む。
@@ -435,15 +435,15 @@ impl SetupOptions {
         self.0.iter()
     }
 
-    /// Setup Options をバッファにエンコードする (draft-ietf-moq-transport-22 §9.1 (SETUP))
+    /// Setup Options をバッファにエンコードする (draft-ietf-moq-transport-23 §9.1 (SETUP))
     ///
     /// カウントプレフィックスなし。デルタエンコードされた KVP を直接書き出す。
     ///
-    /// draft-ietf-moq-transport-22 §9.1 (SETUP): AUTHORIZATION_TOKEN 以外の同一 Option Type の
+    /// draft-ietf-moq-transport-23 §9.1 (SETUP): AUTHORIZATION_TOKEN 以外の同一 Option Type の
     /// 重複送信は禁止されている。重複がある場合は `InvalidParameter` を返す。
     ///
     /// 注意: この関数はワイヤフォーマットのエンコードのみを行う。
-    /// draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) が要求する以下の検証は上位層で行うこと:
+    /// draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) が要求する以下の検証は上位層で行うこと:
     /// - PATH / AUTHORITY は client のみが送信可能 (server からの送信は MUST NOT)
     /// - WebTransport 使用時は PATH / AUTHORITY を送信してはならない (MUST NOT)
     ///
@@ -460,7 +460,7 @@ impl SetupOptions {
         let mut sorted = self.0.clone();
         sorted.sort_by_key(|p| p.option_type);
 
-        // draft-ietf-moq-transport-22 §9.1 (SETUP): 同一 Option Type の重複送信禁止
+        // draft-ietf-moq-transport-23 §9.1 (SETUP): 同一 Option Type の重複送信禁止
         // AUTHORIZATION_TOKEN (0x03) は複数回出現が許可されている
         for window in sorted.windows(2) {
             if window[0].option_type == window[1].option_type
@@ -470,7 +470,7 @@ impl SetupOptions {
             }
         }
 
-        // draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN の
+        // draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN の
         // (Token Type, Token Value) は alias 解決後に一意でなければならない
         validate_auth_token_uniqueness(sorted.iter().filter_map(|p| {
             if p.option_type == SETUP_OPTION_AUTHORIZATION_TOKEN
@@ -499,7 +499,7 @@ impl SetupOptions {
 
         let mut prev_type: u64 = 0;
         for option in &sorted {
-            // draft-ietf-moq-transport-22 §9.1 (SETUP): 偶数型は varint、奇数型は長さ付きバイト列
+            // draft-ietf-moq-transport-23 §9.1 (SETUP): 偶数型は varint、奇数型は長さ付きバイト列
             // 型と値形式の整合性を検証する。
             // AUTHORIZATION_TOKEN (0x03) は Token 構造専用であり、生バイト列の Bytes
             // variant は受理しない (decode が常に AuthorizationToken を返すこととの対称のため)。
@@ -531,7 +531,7 @@ impl SetupOptions {
                     }
                 }
                 SetupOptionValue::Bytes(bytes) => {
-                    // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): 値長上限は 2^16-1 バイト
+                    // draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): 値長上限は 2^16-1 バイト
                     if bytes.len() > 65535 {
                         return Err(MessageError::FieldLengthExceeded(
                             "setup option value too long",
@@ -541,10 +541,10 @@ impl SetupOptions {
                     buf.extend_from_slice(bytes);
                 }
                 SetupOptionValue::AuthorizationToken(token) => {
-                    // draft-ietf-moq-transport-22 §9.1.4 (AUTHORIZATION TOKEN):
+                    // draft-ietf-moq-transport-23 §9.1.4 (AUTHORIZATION TOKEN):
                     // SETUP で DELETE / USE_ALIAS は ROLE_VIOLATION
                     token.validate_setup_scope()?;
-                    // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): 値長上限は 2^16-1 バイト
+                    // draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): 値長上限は 2^16-1 バイト
                     let bytes = token.encode_to_bytes();
                     if bytes.len() > 65535 {
                         return Err(MessageError::FieldLengthExceeded(
@@ -561,13 +561,13 @@ impl SetupOptions {
     }
 
     /// バッファの先頭から末尾まで Setup Options をデコードし `SetupOptions` を返す
-    /// (draft-ietf-moq-transport-22 §9.1 (SETUP))
+    /// (draft-ietf-moq-transport-23 §9.1 (SETUP))
     ///
     /// カウントプレフィックスなし。バッファ末尾まで KVP を読む。完全な Setup Options ブロック
     /// (メッセージ payload の残り全体) を受け取る前提である。
     ///
     /// 注意: この関数はワイヤフォーマットのデコードのみを行う。
-    /// draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) が要求する以下の検証は上位層で行うこと:
+    /// draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) が要求する以下の検証は上位層で行うこと:
     /// - server から PATH / AUTHORITY を受信した場合は INVALID_PATH / INVALID_AUTHORITY で閉じる
     /// - WebTransport 上で PATH / AUTHORITY を受信した場合は INVALID_PATH / INVALID_AUTHORITY で閉じる
     ///
@@ -648,7 +648,7 @@ impl SetupOptions {
                         "setup option value too long",
                     ));
                 }
-                // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): Type を理解した
+                // draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): Type を理解した
                 // うえで Length/Value が直列化と一致しない場合は MALFORMED_KEY_VALUE。
                 // `varint::checked_len` は他の用途と共有しているため、ここで文脈に応じた
                 // variant へ写す。
@@ -661,7 +661,7 @@ impl SetupOptions {
                 pos += len;
 
                 if option_type == SETUP_OPTION_AUTHORIZATION_TOKEN {
-                    // draft-ietf-moq-transport-22 §9.1.4 (AUTHORIZATION TOKEN): Message Parameter の AUTHORIZATION_TOKEN と
+                    // draft-ietf-moq-transport-23 §9.1.4 (AUTHORIZATION TOKEN): Message Parameter の AUTHORIZATION_TOKEN と
                     // 機能的に等価。Token 構造としてデコードする。
                     // draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression):
                     // デコード失敗時は MALFORMED_AUTH_TOKEN
@@ -679,7 +679,7 @@ impl SetupOptions {
             prev_type = option_type;
         }
 
-        // draft-ietf-moq-transport-22 §9.1 (SETUP): 同一 Option Type の重複送信禁止
+        // draft-ietf-moq-transport-23 §9.1 (SETUP): 同一 Option Type の重複送信禁止
         // AUTHORIZATION_TOKEN (0x03) は複数回出現が許可されている
         // 未知オプションの重複は許容する
         // デルタエンコーディングにより options は type 昇順で並んでいる
@@ -704,7 +704,7 @@ impl SetupOptions {
             }
         }
 
-        // draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN の
+        // draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN の
         // (Token Type, Token Value) は alias 解決後に一意でなければならない
         validate_auth_token_uniqueness(options.iter().filter_map(|p| {
             if p.option_type == SETUP_OPTION_AUTHORIZATION_TOKEN
@@ -719,14 +719,14 @@ impl SetupOptions {
         Ok((Self(options), pos))
     }
 
-    /// SETUP Option: PATH (type 0x01, draft-ietf-moq-transport-22 §9.1 (SETUP))
+    /// SETUP Option: PATH (type 0x01, draft-ietf-moq-transport-23 §9.1 (SETUP))
     pub fn path(&self) -> Option<&[u8]> {
         self.find_bytes(SETUP_OPTION_PATH)
     }
 
     /// すべての AUTHORIZATION_TOKEN (type 0x03) を返す
     ///
-    /// draft-ietf-moq-transport-22 §9.1.4 (AUTHORIZATION TOKEN): SETUP で複数の Token を指定できる
+    /// draft-ietf-moq-transport-23 §9.1.4 (AUTHORIZATION TOKEN): SETUP で複数の Token を指定できる
     pub fn authorization_tokens(&self) -> Vec<&AuthorizationToken> {
         self.0
             .iter()
@@ -742,24 +742,24 @@ impl SetupOptions {
             .collect()
     }
 
-    /// SETUP Option: MAX_AUTH_TOKEN_CACHE_SIZE (type 0x04, draft-ietf-moq-transport-22 §9.1 (SETUP))
+    /// SETUP Option: MAX_AUTH_TOKEN_CACHE_SIZE (type 0x04, draft-ietf-moq-transport-23 §9.1 (SETUP))
     pub fn max_auth_token_cache_size(&self) -> Option<u64> {
         self.find_varint(SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE)
     }
 
-    /// SETUP Option: AUTHORITY (type 0x05, draft-ietf-moq-transport-22 §9.1 (SETUP))
+    /// SETUP Option: AUTHORITY (type 0x05, draft-ietf-moq-transport-23 §9.1 (SETUP))
     pub fn authority(&self) -> Option<&[u8]> {
         self.find_bytes(SETUP_OPTION_AUTHORITY)
     }
 
-    /// SETUP Option: MAX_REQUEST_UPDATES (type 0x08, draft-ietf-moq-transport-22 §9.1.7 (MAX_REQUEST_UPDATES))
+    /// SETUP Option: MAX_REQUEST_UPDATES (type 0x08, draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES))
     ///
     /// デフォルト値 0 は無制限を意味する。
     pub fn max_request_updates(&self) -> Option<u64> {
         self.find_varint(SETUP_OPTION_MAX_REQUEST_UPDATES)
     }
 
-    /// SETUP Option: MAX_FILTER_RANGES (type 0x06, draft-ietf-moq-transport-22 §9.1.6 (MAX FILTER RANGES))
+    /// SETUP Option: MAX_FILTER_RANGES (type 0x06, draft-ietf-moq-transport-23 §9.1.6 (MAX FILTER RANGES))
     ///
     /// デフォルト値 0 は Range Filter の送信を禁止する。
     pub fn max_filter_ranges(&self) -> Option<u64> {

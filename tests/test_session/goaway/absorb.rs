@@ -9,7 +9,7 @@ use super::*;
 /// deadline 満了で終端した PUBLISH 起点 subscription へ peer publisher の PUBLISH_DONE が
 /// 遅延して届いてもセッションを閉じない
 ///
-/// request stream は方向ごとに独立に閉じるため (draft-ietf-moq-transport-22 §6.4.2.2
+/// request stream は方向ごとに独立に閉じるため (draft-ietf-moq-transport-23 §6.4.2.2
 /// (Graceful Request Stream Closure))、送信方向の reset 後も peer の送信方向は開いたままである。
 /// peer が GOAWAY / reset を観測する前に送った PUBLISH_DONE は正当な traffic であり、
 /// `SESSION_PROTOCOL_VIOLATION` でセッションを閉じてはならない。吸収した応答は状態を作らない。
@@ -53,7 +53,7 @@ fn request_stream_goaway_timeout_absorbs_late_publish_done() {
 
 /// peer が正当な送信者である REQUEST_UPDATE / PUBLISH_STATE_NOTIFY は終端後も吸収する
 ///
-/// draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE) の 2 ケースは「request の送信側」と
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE) の 2 ケースは「request の送信側」と
 /// 「PUBLISH 起点 subscription の subscriber」であり、§9.10 (PUBLISH_STATE_NOTIFY) は
 /// publisher だけが送れる。いずれも peer が GOAWAY / reset を観測する前に送ったものであり、
 /// 終端済み request へ届いてもセッションを閉じない。
@@ -236,7 +236,7 @@ fn request_stream_goaway_timeout_absorbs_request_update_from_legitimate_sender()
 /// 応答の内容に対する MUST close は吸収より優先される
 ///
 /// 吸収は「ローカル終端済み request へ届いた応答」を対象にするが、メッセージ内容そのものの
-/// 違反 (draft-ietf-moq-transport-22 §9.3 (REQUEST_OK) の Track Properties、
+/// 違反 (draft-ietf-moq-transport-23 §9.3 (REQUEST_OK) の Track Properties、
 /// draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT) の Connect URI) は終端後も検出して
 /// セッションを閉じる。
 #[test]
@@ -318,7 +318,7 @@ fn request_stream_goaway_timeout_does_not_absorb_invalid_response_content() {
 
 /// PUBLISH 起点 subscription の subscriber 側でも遅延 REQUEST_UPDATE_OK でセッションを閉じない
 ///
-/// draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE): PUBLISH 起点の subscription では
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): PUBLISH 起点の subscription では
 /// subscriber も REQUEST_UPDATE を送れる。その応答 (REQUEST_UPDATE_OK) が self の reset を
 /// peer が観測する前に届く場合、終端済みでも MUST 検証だけを行って状態遷移せず受理する。
 #[test]
@@ -378,7 +378,7 @@ fn request_stream_goaway_timeout_absorbs_late_request_ok_for_publish_origin_subs
 
 /// 終端済みでも自側 publisher への遅延 REQUEST_OK は拒否する
 ///
-/// draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE): REQUEST_UPDATE を送れるのは request の
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): REQUEST_UPDATE を送れるのは request の
 /// 送信側と PUBLISH 起点 subscription の subscriber だけである。自側が SUBSCRIBE を受けた
 /// publisher である場合、peer からの REQUEST_OK は正当な応答になり得ないため、
 /// 終端済みでも従来どおり PROTOCOL_VIOLATION で閉じる。

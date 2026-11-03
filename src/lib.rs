@@ -1,7 +1,7 @@
 // no_std 環境向けライブラリ
 #![no_std]
 
-//! shiguredo_moqt: draft-ietf-moq-transport-22 に基づく sans I/O な MoQ ライブラリ
+//! shiguredo_moqt: draft-ietf-moq-transport-23 に基づく sans I/O な MoQ ライブラリ
 //!
 //! I/O を持たない純粋なコーデック層と、1 本の MOQT Transport Session に閉じた
 //! sans I/O なセッション状態機械を提供する。
@@ -20,7 +20,7 @@ struct ReadmeDoctests;
 // 概要と根拠は src/audio_clock.rs の //! ドキュメントに書く。ここに /// を置くと rustdoc が
 // モジュール内の intra-doc link をクレート直下の名前空間で解決してしまう
 pub mod audio_clock;
-/// shiguredo_moqt: draft-ietf-moq-transport-22 に基づく sans I/O MoQ ライブラリ
+/// shiguredo_moqt: draft-ietf-moq-transport-23 に基づく sans I/O MoQ ライブラリ
 ///
 /// WebTransport over HTTP/2 ・ WebTransport over HTTP/3 ・ QUIC 上で動作する前提で、
 /// I/O を持たない純粋なコーデック層と、1 本の `MOQT Transport Session` に閉じた
@@ -34,7 +34,7 @@ pub mod audio_clock;
 /// 発行・検証し、`moqt` クレームの認可判定を行う。
 pub mod c4m;
 pub mod decoder;
-/// エラー型と終了コード定義 (draft-ietf-moq-transport-22 §16.11 (Error Codes))
+/// エラー型と終了コード定義 (draft-ietf-moq-transport-23 §16.12 (Error Codes))
 pub mod error;
 pub mod grease;
 pub mod group_switch_gate;
@@ -44,13 +44,13 @@ pub mod loc;
 /// メディア時刻を Unix epoch の壁時計へ換算する処理 (draft-ietf-moq-loc-04 §2.3.1.1)
 pub mod media_clock;
 pub mod message;
-/// メッセージ パラメータ群 (draft-ietf-moq-transport-22 §9.20 (Control Message Parameters))
+/// メッセージ パラメータ群 (draft-ietf-moq-transport-23 §9.19 (Control Message Parameters))
 pub mod message_parameter;
 /// MOQT Streaming Format のカタログとタイムラインのコーデック (draft-ietf-moq-msf-01)
 pub mod msf;
 pub mod name;
 pub mod object_properties;
-/// SETUP 用の Setup Options (draft-ietf-moq-transport-22 §9.1 (SETUP))
+/// SETUP 用の Setup Options (draft-ietf-moq-transport-23 §9.1 (SETUP))
 pub mod parameter;
 // 概要と根拠は src/pending_subgroup_buffer.rs の //! ドキュメントに書く。ここに /// を
 // 置くと rustdoc がモジュール内の intra-doc link をクレート直下の名前空間で解決してしまう
@@ -62,9 +62,9 @@ pub(crate) mod property_scope;
 pub mod session;
 pub mod stream;
 pub mod subgroup_tracker;
-/// トラック プロパティ群 (draft-ietf-moq-transport-22 §8.4 (Track and Object Properties))
+/// トラック プロパティ群 (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties))
 pub mod track_properties;
-/// 可変長整数 (Variable-Length Integer) のコーデック (draft-ietf-moq-transport-22 §8.1 (Variable-Length Integers))
+/// 可変長整数 (Variable-Length Integer) のコーデック (draft-ietf-moq-transport-23 §8.1 (Variable-Length Integers))
 pub mod varint;
 // 概要と根拠は src/video_decode_order.rs の //! ドキュメントに書く。ここに /// を置くと
 // rustdoc がモジュール内の intra-doc link をクレート直下の名前空間で解決してしまう

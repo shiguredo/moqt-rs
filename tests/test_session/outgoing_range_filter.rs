@@ -1,6 +1,6 @@
 //! 送信経路の Range Filter 検証テスト
 //!
-//! draft-ietf-moq-transport-22 §3.3.2 (Range Filters) は同一 (Parameter Type, SetID,
+//! draft-ietf-moq-transport-23 §3.3.2 (Range Filters) は同一 (Parameter Type, SetID,
 //! Property Type) の重複に対して受信側の MUST 拒否 (REQUEST_ERROR / INVALID_FILTER) を
 //! 規定する。§9.1.6 は peer が MAX_FILTER_RANGES を宣言していない場合の MUST NOT を
 //! 規定する。どちらも「peer が必ず拒否するメッセージ」なので、Range Filter を載せられる
@@ -88,7 +88,7 @@ fn assert_publish_rejected(session: &mut Session, err: SendRequestError, reason:
 
 /// Range Filter 群に FETCH range ({0, 0}-{5, 0}) の LOCATION_FILTER を足す
 ///
-/// draft-ietf-moq-transport-22 §9.11 (FETCH): range は LOCATION_FILTER で指定する。
+/// draft-ietf-moq-transport-23 §9.11 (FETCH): range は LOCATION_FILTER で指定する。
 /// range 構築は共有ヘルパー `fetch_range_params` に委譲する。
 fn with_fetch_range(mut params: MessageParameters) -> MessageParameters {
     for p in fetch_range_params(
@@ -172,7 +172,7 @@ fn fetch_rejects_duplicate_range_filters() {
 
 /// PUBLISH_OK context の REQUEST_OK は重複 Range Filter を送信前に拒否する
 ///
-/// なお draft-ietf-moq-transport-22 Appendix A.3 #1790 以降、PUBLISH_OK は EXPIRES のみを
+/// なお draft-ietf-moq-transport-23 Appendix A.4 #1790 以降、PUBLISH_OK は EXPIRES のみを
 /// 運ぶため、正当な Range Filter であっても後段のスコープ検証で拒否される。
 /// 本テストは前段の outgoing 検証 (重複検出) が先に発火することを確認する。
 #[test]
@@ -202,14 +202,14 @@ fn publish_ok_rejects_duplicate_range_filters() {
 
 /// peer が MAX_FILTER_RANGES を宣言していなければ 2 経路すべてが送信を拒否する
 ///
-/// draft-ietf-moq-transport-22 §9.1.6 の MUST NOT (peer が MAX_FILTER_RANGES を宣言しない
+/// draft-ietf-moq-transport-23 §9.1.6 の MUST NOT (peer が MAX_FILTER_RANGES を宣言しない
 /// (default 0) 場合、送信側は Range Filter を含む request を送出してはならない)。この判定を
 /// 集約する `validate_outgoing_range_filters` の呼び出しが 2 経路 (FETCH / PUBLISH_OK)
 /// すべてに繋がっていることを確認する。
 /// (draft-20 で Joining FETCH は廃止された)
 ///
 /// なお PUBLISH_OK (send_request_ok) への到達確認は本テストの対象外である。
-/// draft-ietf-moq-transport-22 Appendix A.3 #1790 以降、PUBLISH_OK は EXPIRES のみを運ぶため、
+/// draft-ietf-moq-transport-23 Appendix A.4 #1790 以降、PUBLISH_OK は EXPIRES のみを運ぶため、
 /// Range Filter を含む PUBLISH_OK は後段のスコープ検証でも拒否される。
 /// 本テストは前段の outgoing 検証 (MAX 未宣言検出) が先に発火することを確認する。
 #[test]
@@ -286,7 +286,7 @@ fn send_paths_accept_distinct_set_id_range_filters_and_publish_ok_rejects() {
     server
         .recv_request(pub_msg)
         .expect("PUBLISH の受信に成功すること");
-    // draft-ietf-moq-transport-22 Appendix A.3 #1790: PUBLISH_OK は EXPIRES のみを
+    // draft-ietf-moq-transport-23 Appendix A.4 #1790: PUBLISH_OK は EXPIRES のみを
     // 運ぶため、Range Filter を含む PUBLISH_OK は送信側で拒否される
     let err = server
         .send_request_ok(

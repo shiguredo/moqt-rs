@@ -1,4 +1,4 @@
-//! draft-ietf-moq-transport-22 §8.1 (Variable-Length Integers) に準拠した Variable-Length Integer (vi64)
+//! draft-ietf-moq-transport-23 §8.1 (Variable-Length Integers) に準拠した Variable-Length Integer (vi64)
 //!
 //! Leading-1-bits 方式でエンコード長を決定する:
 //!
@@ -14,7 +14,7 @@
 //! | 11111110 | 8 | 56 | 0-72,057,594,037,927,935 |
 //! | 11111111 | 9 | 64 | 0-18,446,744,073,709,551,615 |
 //!
-//! draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1595: 非最小エンコーディングを許容 (decode 側はエラーにしない)。
+//! draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1595: 非最小エンコーディングを許容 (decode 側はエラーにしない)。
 //! encode 側は引き続き最小バイト数でエンコードする。
 //!
 //! 注意: この仕様はドラフト段階であり、将来変更される可能性がある。
@@ -35,7 +35,7 @@ const THRESHOLD_4: u64 = 268_435_455;
 const THRESHOLD_5: u64 = 34_359_738_367;
 /// 6 バイトの最大値 (2^42 - 1)
 const THRESHOLD_6: u64 = 4_398_046_511_103;
-/// 7 バイトの最大値 (2^49 - 1) — draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1595 で追加
+/// 7 バイトの最大値 (2^49 - 1) — draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1595 で追加
 const THRESHOLD_7: u64 = 562_949_953_421_311;
 /// 8 バイトの最大値 (2^56 - 1)
 const THRESHOLD_8: u64 = 72_057_594_037_927_935;
@@ -76,7 +76,7 @@ pub fn encode(val: u64, buf: &mut Vec<u8>) {
         buf.push((val >> 8) as u8);
         buf.push(val as u8);
     } else if val <= THRESHOLD_7 {
-        // 1111110x xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx (7 バイト, draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1595)
+        // 1111110x xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx (7 バイト, draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1595)
         buf.push(0xFC | (val >> 48) as u8);
         buf.push((val >> 40) as u8);
         buf.push((val >> 32) as u8);
@@ -110,7 +110,7 @@ pub fn encode(val: u64, buf: &mut Vec<u8>) {
 
 /// `buf` の先頭から vi64 をデコードし `(値, 消費バイト数)` を返す
 ///
-/// draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1595: 非最小エンコーディングを許容する。
+/// draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1595: 非最小エンコーディングを許容する。
 pub fn decode(buf: &[u8]) -> Result<(u64, usize), MessageError> {
     if buf.is_empty() {
         return Err(MessageError::UnexpectedEof);
@@ -179,7 +179,7 @@ pub fn decode(buf: &[u8]) -> Result<(u64, usize), MessageError> {
             Ok((val, 6))
         }
         6 => {
-            // leading_ones=6: first = 1111110x → 7 バイト (49 bit, draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1595)
+            // leading_ones=6: first = 1111110x → 7 バイト (49 bit, draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1595)
             // 非最小エンコーディング許容のため先頭バイトのプレフィックス不要ビットも受理する
             if buf.len() < 7 {
                 return Err(MessageError::UnexpectedEof);

@@ -1,6 +1,6 @@
 //! `GroupSwitchGate` の保留判定の PBT
 //!
-//! 映像は Group ごとに別の Subgroup ストリームで届く (draft-ietf-moq-transport-22
+//! 映像は Group ごとに別の Subgroup ストリームで届く (draft-ietf-moq-transport-23
 //! §2.2 (Subgroups)) ため、前の Group の stream が終わる前に次の Group の Object が届く。
 //! そのとき次の Group を保留し、前の Group の stream の終端か 50 ms の期限で解除する。
 //!

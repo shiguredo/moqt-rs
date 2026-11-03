@@ -34,7 +34,7 @@ type RangeFilterSpec = (u64, Option<(u8, u64)>);
 /// Range Filter インスタンスの中身 (SetID と Property Type) を生成する
 ///
 /// SetID と Property Type の候補を狭く取り、重複キーが十分な確率で生成されるようにする。
-/// draft-ietf-moq-transport-22 §9.20.13 / §9.20.14: Property Type は偶数でなければならない。
+/// draft-ietf-moq-transport-23 §9.19.13 / §9.19.14: Property Type は偶数でなければならない。
 fn sample_range_filter_inner(ctx: &mut noprop::TestCaseContext) -> Option<(u8, u64)> {
     if noprop::sample_bool(ctx) {
         let set_id = noprop::sample_usize_in(ctx, 0..=2) as u8;
@@ -56,7 +56,7 @@ fn sample_range_filter_spec(ctx: &mut noprop::TestCaseContext) -> RangeFilterSpe
 ///
 /// ワイヤフォーマット: SetID (1 byte) | [Property Type (vi64)] | Range...
 /// Start=1 の open-ended な 1 Range に固定する。デルタ溢出を起こさず、
-/// PRIORITY_FILTER (0x27) の 0..=255 制約 (§9.20.12) も満たすため、
+/// PRIORITY_FILTER (0x27) の 0..=255 制約 (§9.19.12) も満たすため、
 /// `validate_range_filters()` が返すエラーの原因を重複キーだけに絞れる。
 fn range_filter_bytes_from_spec(spec: RangeFilterSpec) -> Vec<u8> {
     let (param_type, inner) = spec;
@@ -73,7 +73,7 @@ fn range_filter_bytes_from_spec(spec: RangeFilterSpec) -> Vec<u8> {
 
 /// 生成指示が §3.3.2 の重複判定キーに寄与する場合のキーを返す
 ///
-/// draft-ietf-moq-transport-22 §3.3.2 の重複判定キーは
+/// draft-ietf-moq-transport-23 §3.3.2 の重複判定キーは
 /// (Parameter Type, SetID, Property Type) で、Property Type は 0x28 / 0x29 のみ。
 /// Length=0 は SetID フィールド自体を持たないため対象外 (`None`)。
 fn duplicate_key_from_spec(spec: RangeFilterSpec) -> Option<(u64, u8, Option<u64>)> {
@@ -98,7 +98,7 @@ fn params_from_specs(specs: &[RangeFilterSpec]) -> MessageParameters {
     params
 }
 
-/// draft-ietf-moq-transport-22 §3.3.2 (Range Filters): `validate_range_filters()` は
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters): `validate_range_filters()` は
 /// (Parameter Type, SetID, Property Type) の重複があるとき、かつそのときに限りエラーを返す。
 ///
 /// 生成される Range は Start=1 の 1 Range 固定でデルタ溢出も PRIORITY_FILTER の値域超過も
@@ -149,7 +149,7 @@ fn validate_range_filters_errs_exactly_on_duplicate_keys() -> noprop::TestResult
     Ok(())
 }
 
-/// draft-ietf-moq-transport-22 §3.3.2 (Range Filters): 同一 Parameter Type の複数インスタンスが
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters): 同一 Parameter Type の複数インスタンスが
 /// encode → decode を経ても件数・内容・出現順ごと保たれる。
 ///
 /// §3.3.2 の意味論としてはインスタンスの順序に意味はない (SetID は各インスタンスの
@@ -204,7 +204,7 @@ fn range_filter_instances_survive_roundtrip() -> noprop::TestResult {
     Ok(())
 }
 
-/// draft-ietf-moq-transport-22 §3.3.2 (Range Filters): REQUEST_UPDATE のマージは
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters): REQUEST_UPDATE のマージは
 /// Range Filter を型単位で全置換する。
 ///
 /// "In REQUEST_UPDATE, Length of 0 removes the filter; non-zero replaces it entirely."
@@ -277,7 +277,7 @@ fn merge_from_replaces_range_filters_per_type() -> noprop::TestResult {
     Ok(())
 }
 
-/// draft-ietf-moq-transport-22 §3.3.1 (Location Filters): NextObject の実効 Start は {group, object + 1} (飽和付き)。
+/// draft-ietf-moq-transport-23 §3.3.1 (Location Filters): NextObject の実効 Start は {group, object + 1} (飽和付き)。
 #[test]
 fn next_object_start_derivation() -> noprop::TestResult {
     let mut runner = test_runner()?;
@@ -296,7 +296,7 @@ fn next_object_start_derivation() -> noprop::TestResult {
     Ok(())
 }
 
-/// draft-ietf-moq-transport-22 §3.3.1 (Location Filters): RelativeGroup の実効 Start は {Largest Group + 1 - StartGroup, 0}。
+/// draft-ietf-moq-transport-23 §3.3.1 (Location Filters): RelativeGroup の実効 Start は {Largest Group + 1 - StartGroup, 0}。
 /// sample は小さい varint 同士なので Largest Group + 1 はオーバーフローせず、StartGroup が大きければ 0 にクランプされる。
 #[test]
 fn relative_group_start_derivation() -> noprop::TestResult {
@@ -319,7 +319,7 @@ fn relative_group_start_derivation() -> noprop::TestResult {
     Ok(())
 }
 
-/// draft-ietf-moq-transport-22 §3.3.1 (Location Filters): Absolute 系は largest によらず start を恒等で返す。
+/// draft-ietf-moq-transport-23 §3.3.1 (Location Filters): Absolute 系は largest によらず start を恒等で返す。
 /// AbsoluteRange の End は {start.group + delta, u64::MAX} (End Group の全 Object)、
 /// AbsoluteRangeWithEnd の End は {start.group + delta, end_object}。
 #[test]
@@ -375,7 +375,7 @@ fn absolute_filters_identity() -> noprop::TestResult {
     Ok(())
 }
 
-/// draft-ietf-moq-transport-22 §3.3.1 (Location Filters): 同一 largest に対し RelativeGroup{0} の Start は NextObject の Start 以上。
+/// draft-ietf-moq-transport-23 §3.3.1 (Location Filters): 同一 largest に対し RelativeGroup{0} の Start は NextObject の Start 以上。
 /// Location は group 優先の辞書順なので {G+1, 0} > {G, O+1} が object 値によらず常に成立する。
 #[test]
 fn relative_group_zero_ge_next_object() -> noprop::TestResult {
@@ -480,7 +480,7 @@ fn has_duplicate_type_value(specs: &[AuthTokenSpec]) -> bool {
     false
 }
 
-/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression):
+/// draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression):
 /// `validate_auth_token_uniqueness()` は alias 解決を要さない Token (REGISTER / USE_VALUE) の
 /// (Token Type, Token Value) が重複するとき、かつそのときに限り `MalformedAuthToken` を返す。
 ///
@@ -536,7 +536,7 @@ fn validate_auth_token_uniqueness_errs_exactly_on_duplicate_type_value() -> nopr
 
 /// 生成指示 1 件の Token 構造のワイヤバイト列を組み立てる
 ///
-/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression):
+/// draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression):
 /// Alias Type (vi64) と、REGISTER は Alias + Token Type + Token Value、USE_VALUE は
 /// Token Type + Token Value、USE_ALIAS / DELETE は Alias を続ける。
 fn auth_token_wire_bytes(spec: AuthTokenSpec) -> Vec<u8> {
@@ -589,7 +589,7 @@ fn auth_params_wire_bytes(specs: &[AuthTokenSpec]) -> Vec<u8> {
     buf
 }
 
-/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression):
+/// draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression):
 /// decode は重複した (Token Type, Token Value) を拒否せず、encode は拒否する。
 ///
 /// decode が重複を拒否すると Request ID が失われ、メッセージ単位の
@@ -737,13 +737,13 @@ fn sample_fill_location_filter(ctx: &mut noprop::TestCaseContext) -> LocationFil
 
 /// Range Filter 1 インスタンスのバイト列を生成する
 ///
-/// draft-ietf-moq-transport-22 §8.6 (Range Filter Structure): SetID (8 bits) と、
+/// draft-ietf-moq-transport-23 §8.6 (Range Filter Structure): SetID (8 bits) と、
 /// 0x28 系のみが持つ Property Type (偶数) のあとに、開始位置 1 の open-ended な Range を
 /// 1 つ置く。PRIORITY_FILTER (0x27) の 0..=255 制約も満たす。
 fn sample_range_filter_value(ctx: &mut noprop::TestCaseContext, param_type: u64) -> Vec<u8> {
     let mut bytes = vec![noprop::sample_u8(ctx)];
     if has_property_type_field(param_type) {
-        // draft-ietf-moq-transport-22 §9.20.13 / §9.20.14: Property Type MUST be even
+        // draft-ietf-moq-transport-23 §9.19.13 / §9.19.14: Property Type MUST be even
         varint::encode(noprop::sample_choice(ctx, &[0u64, 2u64]), &mut bytes);
     }
     varint::encode(1, &mut bytes);

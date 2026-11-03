@@ -1,4 +1,4 @@
-//! Object-scoped Properties (draft-ietf-moq-transport-22 §16.8 (Properties) Table 15)
+//! Object-scoped Properties (draft-ietf-moq-transport-23 §16.8 (Properties) Table 15)
 //!
 //! SUBGROUP_OBJECT / ObjectDatagram のヘッダに含まれる Object 単位の Properties を扱う。
 //! Track-scoped Properties は `track_properties` モジュールを参照。
@@ -8,18 +8,18 @@
 //!
 //! `Properties Length (varint) | Key-Value-Pairs...`
 //!
-//! Key-Value-Pair は draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) の delta encoding。prop_type 昇順にソートし、
+//! Key-Value-Pair は draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の delta encoding。prop_type 昇順にソートし、
 //! 差分を varint として書き出す。偶数型は varint 値、奇数型は長さ付きバイト列。
 //!
-//! # 対象 Property (draft-ietf-moq-transport-22 §16.8 (Properties) Table 15)
+//! # 対象 Property (draft-ietf-moq-transport-23 §16.8 (Properties) Table 15)
 //!
 //! | Type | Name                 | Scope        | Spec  |
 //! |-----:|----------------------|--------------|-------|
-//! | 0x02 | OBJECT_DELIVERY_TIMEOUT | Track,Object | draft-ietf-moq-transport-22 §10.2 (OBJECT_DELIVERY_TIMEOUT) |
-//! | 0x06 | SUBGROUP_DELIVERY_TIMEOUT | Track,Object | draft-ietf-moq-transport-22 §10.1 (SUBGROUP_DELIVERY_TIMEOUT) |
-//! | 0x0B | IMMUTABLE_PROPERTIES | Track,Object | draft-ietf-moq-transport-22 §10.7 (Immutable Properties) |
-//! | 0x3C | PRIOR_GROUP_ID_GAP   | Object       | draft-ietf-moq-transport-22 §10.8 (Prior Group ID Gap) |
-//! | 0x3E | PRIOR_OBJECT_ID_GAP  | Object       | draft-ietf-moq-transport-22 §10.9 (Prior Object ID Gap) |
+//! | 0x02 | OBJECT_DELIVERY_TIMEOUT | Track,Object | draft-ietf-moq-transport-23 §10.2 (OBJECT_DELIVERY_TIMEOUT) |
+//! | 0x06 | SUBGROUP_DELIVERY_TIMEOUT | Track,Object | draft-ietf-moq-transport-23 §10.1 (SUBGROUP_DELIVERY_TIMEOUT) |
+//! | 0x0B | IMMUTABLE_PROPERTIES | Track,Object | draft-ietf-moq-transport-23 §10.7 (Immutable Properties) |
+//! | 0x3C | PRIOR_GROUP_ID_GAP   | Object       | draft-ietf-moq-transport-23 §10.8 (Prior Group ID Gap) |
+//! | 0x3E | PRIOR_OBJECT_ID_GAP  | Object       | draft-ietf-moq-transport-23 §10.9 (Prior Object ID Gap) |
 //!
 //! 0x02 / 0x06 は Track scope の定義元 (`track_properties` モジュール) と共通の型番号で、
 //! Object scope では本モジュールのアクセサ (`object_delivery_timeout` / `subgroup_delivery_timeout`) から参照する。
@@ -42,7 +42,7 @@
 //!
 //! IMMUTABLE_PROPERTIES (0x0B) は奇数型だが、その値は「入れ子の Key-Value-Pair リスト」。
 //! 入れ子の IMMUTABLE_PROPERTIES は許されず、検出した場合は MalformedTrack
-//! (draft-ietf-moq-transport-22 §10.7 (Immutable Properties): "An Object contains an Immutable Properties property that contains
+//! (draft-ietf-moq-transport-23 §10.7 (Immutable Properties): "An Object contains an Immutable Properties property that contains
 //! another Immutable Properties key" → malformed)。
 //!
 //! # 注意
@@ -57,12 +57,12 @@ use crate::{error::MessageError, varint};
 use alloc::vec::Vec;
 use hashbrown::HashMap;
 
-/// PRIOR_GROUP_ID_GAP (draft-ietf-moq-transport-22 §10.8 (Prior Group ID Gap), Property Type 0x3C)
+/// PRIOR_GROUP_ID_GAP (draft-ietf-moq-transport-23 §10.8 (Prior Group ID Gap), Property Type 0x3C)
 ///
 /// 直前の存在しない Group の個数を示す varint。
 pub const PROP_PRIOR_GROUP_ID_GAP: u64 = 0x3C;
 
-/// PRIOR_OBJECT_ID_GAP (draft-ietf-moq-transport-22 §10.9 (Prior Object ID Gap), Property Type 0x3E)
+/// PRIOR_OBJECT_ID_GAP (draft-ietf-moq-transport-23 §10.9 (Prior Object ID Gap), Property Type 0x3E)
 ///
 /// 直前の存在しない Object の個数を示す varint。
 pub const PROP_PRIOR_OBJECT_ID_GAP: u64 = 0x3E;
@@ -98,7 +98,7 @@ pub enum ObjectPropertyValue {
 /// 単一の Object Property
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectProperty {
-    /// プロパティ型 (draft-ietf-moq-transport-22 §16.8 Table 15)
+    /// プロパティ型 (draft-ietf-moq-transport-23 §16.8 Table 15)
     pub prop_type: u64,
     /// プロパティ値 (偶数型は varint、奇数型はバイト列)
     pub value: ObjectPropertyValue,
@@ -143,7 +143,7 @@ impl ObjectProperties {
 
     /// Object Properties ブロック全体を `buf` に追記する
     ///
-    /// 空の場合は Properties Length = 0 のみを書き出す (draft-ietf-moq-transport-22 §11.1.2 (Object Properties) / §11.3.1 (Subgroup Header))。
+    /// 空の場合は Properties Length = 0 のみを書き出す (draft-ietf-moq-transport-23 §11.1.2 (Object Properties) / §11.3.1 (Subgroup Header))。
     /// prop_type の昇順にソートし、delta encoding で圧縮する。未知の型は複数インスタンスを
     /// 保持したまま書き出す (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties)
     /// の "MUST allow multiple instances of the Property")。同一 Type の並び順はソートが
@@ -220,8 +220,8 @@ impl ObjectProperties {
     /// バッファ全体を 1 つの Object Properties ブロックとしてデコードする
     ///
     /// [`decode`](Self::decode) と異なり、末尾に余分なバイトが残る場合は拒否する。
-    /// draft-ietf-moq-transport-22 §11.1.2 (Object Properties): "Object Properties are
-    /// serialized as a length in bytes followed by Key-Value-Pairs (see Figure 3)." および
+    /// draft-ietf-moq-transport-23 §11.1.2 (Object Properties): "Object Properties are
+    /// serialized as a length in bytes followed by Key-Value-Pairs (see Figure 4)." および
     /// §8.4 (Track and Object Properties): "Object Properties (Section 11.1.2) are preceded by
     /// an explicit length field." のとおり、Properties Length と実データ長は一致しなければ
     /// ならない。
@@ -330,12 +330,12 @@ impl ObjectProperties {
         Ok(())
     }
 
-    /// OBJECT_DELIVERY_TIMEOUT の値を返す (draft-ietf-moq-transport-22 §10.2)
+    /// OBJECT_DELIVERY_TIMEOUT の値を返す (draft-ietf-moq-transport-23 §10.2)
     pub fn object_delivery_timeout(&self) -> Option<u64> {
         self.find_varint(PROP_OBJECT_DELIVERY_TIMEOUT)
     }
 
-    /// SUBGROUP_DELIVERY_TIMEOUT の値を返す (draft-ietf-moq-transport-22 §10.1)
+    /// SUBGROUP_DELIVERY_TIMEOUT の値を返す (draft-ietf-moq-transport-23 §10.1)
     pub fn subgroup_delivery_timeout(&self) -> Option<u64> {
         self.find_varint(PROP_SUBGROUP_DELIVERY_TIMEOUT)
     }
@@ -352,7 +352,7 @@ impl ObjectProperties {
 
     /// IMMUTABLE_PROPERTIES の生バイト列を返す
     ///
-    /// 中身は入れ子 K-V ペア列 (draft-ietf-moq-transport-22 §10.7 (Immutable Properties))。
+    /// 中身は入れ子 K-V ペア列 (draft-ietf-moq-transport-23 §10.7 (Immutable Properties))。
     /// 検証はデコード時に済んでいるため、生バイト列の解釈は application 層の責務。
     pub fn immutable_properties(&self) -> Option<&[u8]> {
         for p in &self.0 {
@@ -367,7 +367,7 @@ impl ObjectProperties {
 
     /// IMMUTABLE_PROPERTIES (0x0B) の内側 KVP をデコードして返す
     ///
-    /// 破損していれば空 Vec を返す (draft-ietf-moq-transport-22 §10.7 (Immutable Properties)「MUST search both」対応)。
+    /// 破損していれば空 Vec を返す (draft-ietf-moq-transport-23 §10.7 (Immutable Properties)「MUST search both」対応)。
     /// 最初の IMMUTABLE_PROPERTIES のみを対象とする。0x0B は単一に限られるため、`decode` が
     /// 保持した重複や `push` で積んだ重複は [`ObjectProperties::validate`] が malformed Track
     /// として拒否する。2 つ目以降の内側を探索しないのは、その前提が破れた入力に対する防御で
@@ -381,10 +381,10 @@ impl ObjectProperties {
 
     /// 偶数型 Object Property から varint 値を取得する
     ///
-    /// draft-ietf-moq-transport-22 §10.7 (Immutable Properties)「MUST search both」に従い、mutable リストに無ければ
+    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties)「MUST search both」に従い、mutable リストに無ければ
     /// IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。mutable リストを優先する。
     ///
-    /// draft-ietf-moq-transport-22 §3.3.2 (Range Filters) の OBJECT_PROPERTY_FILTER は任意の
+    /// draft-ietf-moq-transport-23 §3.3.2 (Range Filters) の OBJECT_PROPERTY_FILTER は任意の
     /// 偶数 Property Type を対象にできるため、型別 accessor では足りず本メソッドを公開している。
     /// 同じ型が複数インスタンスある場合 (未知の型で許される重複) は最初のインスタンスを返す。
     pub fn find_varint(&self, prop_type: u64) -> Option<u64> {
@@ -402,7 +402,7 @@ impl ObjectProperties {
 
     /// 指定 prop_type のインスタンス数を mutable リストと IMMUTABLE_PROPERTIES 内側の両方で数える
     ///
-    /// draft-ietf-moq-transport-22 §10.8 (Prior Group ID Gap) / §10.9 (Prior Object ID Gap):
+    /// draft-ietf-moq-transport-23 §10.8 (Prior Group ID Gap) / §10.9 (Prior Object ID Gap):
     /// "An Object MUST NOT contain more than one instance of this property." 同じ型が
     /// mutable リストと IMMUTABLE_PROPERTIES 内側の両方に現れた場合も 2 インスタンスと数える
     /// (§10.7 (Immutable Properties) が両方への出現を許すのは複数の値を許すプロパティに限る)。
@@ -524,7 +524,7 @@ impl ObjectPropertyTracker {
         object_id: u64,
         properties: Option<&ObjectProperties>,
     ) -> Result<(), MessageError> {
-        // draft-ietf-moq-transport-22 §10.8 (Prior Group ID Gap) / §10.9 (Prior Object ID Gap):
+        // draft-ietf-moq-transport-23 §10.8 (Prior Group ID Gap) / §10.9 (Prior Object ID Gap):
         // "An Object MUST NOT contain more than one instance of this property." 同じ型が
         // mutable リストと IMMUTABLE_PROPERTIES 内側の両方に現れた場合も 2 インスタンスと数える。
         // §12.1 (Malformed Tracks) の列挙は網羅ではないため、この条件も malformed に含まれる。
@@ -643,12 +643,12 @@ impl ObjectPropertyTracker {
 /// draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) の "An endpoint that
 /// supports a Property and receives it outside its scope (e.g. a Track-only Property as an
 /// Object Property) MUST treat the Track as malformed" / §12.1 (Malformed Tracks) 条件 8 と、
-/// draft-ietf-moq-transport-22 §3.7 (Mandatory to Understand Track Properties) の
+/// draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties) の
 /// "An Object received with a Mandatory Track Property as an Object Property is malformed"。
 /// mutable リストと IMMUTABLE_PROPERTIES の内側のどちらにも適用する (§10.7 (Immutable
 /// Properties))。
 ///
-/// draft-ietf-moq-transport-22 §3.7 の 0x4000-0x7FFF のうち GREASE 予約値
+/// draft-ietf-moq-transport-23 §3.7 の 0x4000-0x7FFF のうち GREASE 予約値
 /// (§16.8 (Properties) Table 15 が Scope Any として予約する `0x7f * N + 0x9D`) は、IANA に
 /// 登録された Property ではないため Mandatory Track Property に含めない。この解釈は §13
 /// (Grease) の "Endpoints MUST NOT close the session solely because they received an unknown
@@ -674,7 +674,7 @@ fn validate_object_property_type(prop_type: u64) -> Result<(), MessageError> {
 /// IMMUTABLE_PROPERTIES の中身バイト列を書式として検証する
 ///
 /// 内側に IMMUTABLE_PROPERTIES を含む場合や、KVP の宣言長が残りバイトを超える場合に失敗する
-/// (入れ子 IMMUTABLE_PROPERTIES は draft-ietf-moq-transport-22 §10.7 (Immutable Properties)
+/// (入れ子 IMMUTABLE_PROPERTIES は draft-ietf-moq-transport-23 §10.7 (Immutable Properties)
 /// により禁止)。内側の意味検証 (スコープと多重可否) は
 /// [`ObjectProperties::validate`] が mutable リストと合わせて行う。
 fn validate_immutable_inner(bytes: &[u8]) -> Result<(), MessageError> {
@@ -690,7 +690,7 @@ fn validate_immutable_inner(bytes: &[u8]) -> Result<(), MessageError> {
 /// "MUST allow multiple instances of the Property" により未知の Type の複数は正当である)。
 ///
 /// `allow_immutable` が false の場合、IMMUTABLE_PROPERTIES (0x0B) の出現を拒否する
-/// (入れ子 IMMUTABLE_PROPERTIES は draft-ietf-moq-transport-22 §10.7 (Immutable Properties) により禁止)。
+/// (入れ子 IMMUTABLE_PROPERTIES は draft-ietf-moq-transport-23 §10.7 (Immutable Properties) により禁止)。
 fn decode_kv_pairs(
     inner: &[u8],
     allow_immutable: bool,
@@ -704,7 +704,7 @@ fn decode_kv_pairs(
 
         if !allow_immutable && prop_type == PROP_IMMUTABLE_PROPERTIES {
             return Err(MessageError::ProtocolViolation(
-                "nested IMMUTABLE_PROPERTIES is not allowed (draft-ietf-moq-transport-22 §10.7 (Immutable Properties))",
+                "nested IMMUTABLE_PROPERTIES is not allowed (draft-ietf-moq-transport-23 §10.7 (Immutable Properties))",
             ));
         }
         prev_type = prop_type;
@@ -741,9 +741,9 @@ fn decode_kv_pairs(
     Ok(props)
 }
 
-// ─── 重複 Object のフィールド一貫性追跡 (draft-ietf-moq-transport-22 §12.1 条件 6/7, §7.1) ───
+// ─── 重複 Object のフィールド一貫性追跡 (draft-ietf-moq-transport-23 §12.1 条件 6/7, §7.1) ───
 
-/// Object の Delivery Mode (draft-ietf-moq-transport-22 §2.1.1 (Object Fields))
+/// Object の Delivery Mode (draft-ietf-moq-transport-23 §2.1.1 (Object Fields))
 ///
 /// Object を Subgroup で送ったか Datagram で送ったかを表す。Original Publisher が
 /// 初回送信の方法で Object の Delivery Mode を確定し、購読では Object を Delivery Mode に
@@ -763,11 +763,11 @@ pub enum DeliveryMode {
 
 /// 重複受信した Object のフィールド一貫性を追跡するトラッカー
 ///
-/// draft-ietf-moq-transport-22 §7.1 (Caching Relays):
+/// draft-ietf-moq-transport-23 §7.1 (Caching Relays):
 /// "An endpoint that receives a duplicate Object with a different Delivery Mode,
 /// Subgroup ID, Priority or Payload MUST treat the track as Malformed."
 ///
-/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 6/7 の検出に使う。
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 6/7 の検出に使う。
 /// 判定単位は Object 単位 (Group ID, Object ID)。同一 Track 内で Object ごとに
 /// Delivery Mode が異なるだけの正当な Track を Malformed 扱いしない
 /// (§2.1 の "An Original Publisher MAY use both Subgroups and Datagrams within a Group or
@@ -816,7 +816,7 @@ pub struct ObjectFieldTracker {
 }
 
 impl Default for ObjectFieldTracker {
-    /// group 順序を Ascending (draft-ietf-moq-transport-22 §10.5 (DEFAULT PUBLISHER GROUP ORDER) の既定) として作る
+    /// group 順序を Ascending (draft-ietf-moq-transport-23 §10.5 (DEFAULT PUBLISHER GROUP ORDER) の既定) として作る
     ///
     /// 順序が不明な文脈向けの既定であり、subscription の実効順序が分かる場合は
     /// [`ObjectFieldTracker::new`] を使うこと。
@@ -874,7 +874,7 @@ impl core::error::Error for ObjectFieldMismatch {}
 impl ObjectFieldTracker {
     /// 保持する記録数の上限
     ///
-    /// 1 レコードは IMMUTABLE_PROPERTIES の生バイト列 (最大 65535 バイト。draft-ietf-moq-transport-22
+    /// 1 レコードは IMMUTABLE_PROPERTIES の生バイト列 (最大 65535 バイト。draft-ietf-moq-transport-23
     /// §8.3 (Key-Value-Pair Structure) の "The maximum length of a value is 2^16-1 bytes") と
     /// payload_key を保持するため、datagram の
     /// [`MAX_DATAGRAM_TRACKING_ENTRIES_PER_SUBSCRIPTION`](crate::session::core::MAX_DATAGRAM_TRACKING_ENTRIES_PER_SUBSCRIPTION)
@@ -885,7 +885,7 @@ impl ObjectFieldTracker {
 
     /// 空のトラッカーを作成する
     ///
-    /// `ascending` は subscription の実効 group 順序 (draft-ietf-moq-transport-22 §5.1.1) を
+    /// `ascending` は subscription の実効 group 順序 (draft-ietf-moq-transport-23 §5.1.1) を
     /// `true` = Ascending (0x1) / `false` = Descending (0x2) で渡す。順序が不明な場合は
     /// [`ObjectFieldTracker::default`] (Ascending) を使ってよい。
     pub fn new(ascending: bool) -> Self {
@@ -915,7 +915,7 @@ impl ObjectFieldTracker {
     /// `Err(ObjectFieldMismatch)` を返す。
     ///
     /// `delivery_mode` が [`DeliveryMode::Datagram`] の場合は `subgroup_id` に `None` を渡す
-    /// (draft-ietf-moq-transport-22 §2.1.1: "Objects sent in Datagrams do not have a Subgroup ID.")。
+    /// (draft-ietf-moq-transport-23 §2.1.1: "Objects sent in Datagrams do not have a Subgroup ID.")。
     pub fn observe_object_fields(
         &mut self,
         group_id: u64,
@@ -937,7 +937,7 @@ impl ObjectFieldTracker {
 
     /// 重複受信した Object を、immutable properties と payload の比較キーも含めて追跡する
     ///
-    /// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 6: "The same Object is
+    /// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 6: "The same Object is
     /// received more than once with different Payload or other immutable properties."
     ///
     /// 初回受信時は記録して `Ok(())` を返す。判定規則と保持量は [`ObjectFieldTracker`] の
@@ -950,7 +950,7 @@ impl ObjectFieldTracker {
     /// の重複検出が及ばない範囲がある)。
     ///
     /// `delivery_mode` が [`DeliveryMode::Datagram`] の場合は `subgroup_id` に `None` を渡す
-    /// (draft-ietf-moq-transport-22 §2.1.1: "Objects sent in Datagrams do not have a Subgroup ID.")。
+    /// (draft-ietf-moq-transport-23 §2.1.1: "Objects sent in Datagrams do not have a Subgroup ID.")。
     ///
     /// `immutable_properties` は IMMUTABLE_PROPERTIES (0x0B) の内側の生バイト列
     /// (`ObjectProperties::immutable_properties` の戻り値)。`payload_key` は呼び出し側が算出した
@@ -1112,7 +1112,7 @@ impl ObjectFieldTracker {
 mod tests {
     use super::*;
 
-    // ObjectFieldTracker の上限と破棄の規則 (draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) の
+    // ObjectFieldTracker の上限と破棄の規則 (draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) の
     // 重複検出を有界の保持量で行うための best-effort な破棄) を検証する。
     //
     // `records` は private のため、件数は `len` で検査する (`tests/` は公開 API にだけ書く規約)。

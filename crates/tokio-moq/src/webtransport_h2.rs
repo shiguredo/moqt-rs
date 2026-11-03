@@ -698,7 +698,7 @@ impl WtH2Session {
     /// peer の STOP_SENDING の観測 receiver を取り出す
     ///
     /// MOQT 層は観測した cancel を該当する subscription / fetch の状態遷移に使う
-    /// (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))。
+    /// (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))。
     /// 詳細は `take_uni_receiver` を参照する。
     pub fn take_stop_sending_receiver(&mut self) -> Option<StopSendingReceiver> {
         self.stop_sending_rx.take()
@@ -977,7 +977,7 @@ impl WtH2RecvStream {
 
     /// 受信方向へ `WT_STOP_SENDING` capsule を送る
     ///
-    /// draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection): 受信方向の
+    /// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection): 受信方向の
     /// cancel は STOP_SENDING で行う。
     pub fn stop_sending(&mut self, error_code: u64) -> Result<()> {
         self.cmd_tx
@@ -1462,7 +1462,7 @@ impl DriverState {
                 fin,
             } => {
                 if self.stop_sending_sent.contains(&stream_id) {
-                    // draft-ietf-moq-transport-22 §6.4.2.3: STOP_SENDING 後のデータは破棄する。
+                    // draft-ietf-moq-transport-23 §6.4.2.3: STOP_SENDING 後のデータは破棄する。
                     // ストリームウィンドウも拡張しない (draft-ietf-webtrans-http2-15 §6.6)
                     if fin {
                         self.streams.remove(&stream_id);
@@ -1981,7 +1981,7 @@ mod tests {
     /// 台帳に無い終端は `StreamClosed` のままにすること
     ///
     /// peer の STOP_SENDING で終端したストリームだけを `StreamReset` にする
-    /// (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))。
+    /// (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))。
     /// FIN / reset 済みのストリームまで `StreamReset` にすると、セッション終了と区別できない
     /// 失敗が pipeline の致命判定から外れてしまう。
     #[test]
@@ -2553,7 +2553,7 @@ mod tests {
     ///
     /// driver は受信した WT_STOP_SENDING を台帳 (ストリーム ID → エラーコード) に記録し、
     /// 未送信データの失敗と以降の送信の拒否を `StreamReset` にする。これによりアプリは
-    /// セッション終了と該当ストリームの終端を区別できる (draft-ietf-moq-transport-22
+    /// セッション終了と該当ストリームの終端を区別できる (draft-ietf-moq-transport-23
     /// §6.4.2.3 (Request Cancellation and Rejection))。併せて観測チャネルで MOQT 層へ
     /// cancel が伝わることを固定する。
     #[tokio::test(flavor = "multi_thread")]

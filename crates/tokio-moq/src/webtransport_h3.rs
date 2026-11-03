@@ -1906,7 +1906,7 @@ fn resolve_buffered_datagrams(
 ///
 /// MOQT のエラーコードは §12.5 (Stream Reset Error Codes) の登録値だけでなく、
 /// §13 (Grease) の greasing 値 (`0x7f * N + 0x9D`。`0x9D, 0x11C, ..., 0x3fffffffffffffde` を取り得る) も含む。
-/// §16.11.4 の Stream Reset Error Codes registry も同じ greasing 予約を持つ。
+/// §16.12.4 の Stream Reset Error Codes registry も同じ greasing 予約を持つ。
 /// §4.4 は WebTransport のアプリケーションエラーコードを 32 ビットに限るため、
 /// 32 ビットを超える greasing 値は WebTransport 経路では remap できずリセットを送れない。
 /// 黙って切り捨てずエラーにする (2^32 以上 2^62 未満は従来は remap せず wire に載っていたため、
@@ -2240,7 +2240,7 @@ impl WtRecvStream {
 
     /// 受信方向へ STOP_SENDING を送出する (QUIC STOP_SENDING)
     ///
-    /// draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection): 受信方向の
+    /// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection): 受信方向の
     /// cancel は STOP_SENDING で行う。error code は §12.5 (Stream Reset Error Codes) から選ぶ。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub fn stop_sending(&mut self, error_code: u64) -> Result<()> {

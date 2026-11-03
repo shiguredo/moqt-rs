@@ -1,4 +1,4 @@
-//! PUBLISH_STATE_NOTIFY のテスト (draft-ietf-moq-transport-22 §9.10)
+//! PUBLISH_STATE_NOTIFY のテスト (draft-ietf-moq-transport-23 §9.10)
 //!
 //! 送受信の往復、subscription 状態への反映、LARGEST_OBJECT の条件付き必須、
 //! スコープ違反の拒否、subscriber 送信・非 subscription 宛の拒否、
@@ -86,7 +86,7 @@ fn take_notify(session: &mut Session) -> (u64, MessageParameters) {
 }
 
 /// PAUSED 通知の往復で subscriber 側 paused が更新される
-/// (draft-ietf-moq-transport-22 §9.10 / draft-ietf-moq-transport-23 §9.19.18)
+/// (draft-ietf-moq-transport-23 §9.10 / draft-ietf-moq-transport-23 §9.19.18)
 #[test]
 fn notify_paused_round_trip_updates_paused_state() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object(0, 0);
@@ -113,7 +113,7 @@ fn notify_paused_round_trip_updates_paused_state() {
 }
 
 /// LOCATION_FILTER と LARGEST_OBJECT が subscriber 側状態に反映される
-/// (draft-ietf-moq-transport-22 §9.10 / §9.20.9 / §9.20.17)
+/// (draft-ietf-moq-transport-23 §9.10 / §9.19.9 / §9.19.17)
 #[test]
 fn notify_filter_and_largest_reflected() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object(0, 0);
@@ -160,7 +160,7 @@ fn notify_filter_and_largest_reflected() {
 }
 
 /// 観測 Largest がある場合、LARGEST_OBJECT なしの通知に自動で補われる
-/// (draft-ietf-moq-transport-22 §9.10 / §9.20.17 の条件付き必須)
+/// (draft-ietf-moq-transport-23 §9.10 / §9.19.17 の条件付き必須)
 #[test]
 fn notify_injects_largest_object_when_observed() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object(2, 0);
@@ -198,7 +198,7 @@ fn notify_injects_largest_object_when_observed() {
 }
 
 /// 観測 Largest がない場合、LARGEST_OBJECT なしの通知は省略のまま送れる
-/// (draft-ietf-moq-transport-22 §9.20.17 の省略可)
+/// (draft-ietf-moq-transport-23 §9.19.17 の省略可)
 #[test]
 fn notify_without_largest_stays_omitted_when_nothing_published() {
     let (mut client, mut server) = establish_pair();
@@ -257,7 +257,7 @@ fn notify_upgrades_smaller_largest_object() {
 }
 
 /// 許可外パラメータの通知送信は送信前に拒否し副作用を残さない
-/// (draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope))
+/// (draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope))
 #[test]
 fn notify_with_disallowed_parameter_rejected_without_side_effects() {
     let (_client, mut server, sub_rid) = establish_sub_with_object(0, 0);
@@ -335,7 +335,7 @@ fn notify_send_requires_publisher_established() {
 }
 
 /// publisher 側で通知を受信したら PROTOCOL_VIOLATION でセッションを閉じる
-/// (draft-ietf-moq-transport-22 §9.10: subscriber からの受信は MUST close)
+/// (draft-ietf-moq-transport-23 §9.10: subscriber からの受信は MUST close)
 #[test]
 fn notify_received_on_publisher_side_closes_session() {
     let (mut client, mut server) = establish_pair();
@@ -367,7 +367,7 @@ fn notify_received_on_publisher_side_closes_session() {
 }
 
 /// subscription 以外への通知受信は PROTOCOL_VIOLATION でセッションを閉じる
-/// (draft-ietf-moq-transport-22 §9.10)
+/// (draft-ietf-moq-transport-23 §9.10)
 #[test]
 fn notify_for_non_subscription_closes_session() {
     let (mut client, mut server, _sub_rid) = establish_sub_with_object(0, 0);
@@ -462,7 +462,7 @@ fn notify_with_invalid_paused_closes_session() {
 }
 
 /// Location Filter Type 0x00 (None) の LOCATION_FILTER の通知で filter が削除される
-/// (draft-ietf-moq-transport-22 §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER Parameter))
+/// (draft-ietf-moq-transport-23 §3.3.1 (Location Filters) / §9.19.9 (LOCATION FILTER Parameter))
 #[test]
 fn notify_with_removed_filter_clears_filter() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object(0, 0);
@@ -531,7 +531,7 @@ fn notify_with_removed_filter_clears_filter() {
 }
 
 /// 省略されたフィールドは通知で変更されない
-/// (draft-ietf-moq-transport-22 §9.10: 省略時は unchanged)
+/// (draft-ietf-moq-transport-23 §9.10: 省略時は unchanged)
 #[test]
 fn notify_omitted_fields_stay_unchanged() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object(0, 0);
@@ -611,7 +611,7 @@ fn notify_omitted_fields_stay_unchanged() {
 }
 
 /// PUBLISH_STATE_NOTIFY は MAX_REQUEST_UPDATES のクレジットを消費しない
-/// (draft-ietf-moq-transport-22 §9.10)
+/// (draft-ietf-moq-transport-23 §9.10)
 ///
 /// PUBLISH 起点の subscription で publisher (initiator) が REQUEST_UPDATE を送り、
 /// 通知を挟んで再度送ると上限超過になること (通知が回復も消費もしない証拠) で検証する。
@@ -702,7 +702,7 @@ fn notify_send_with_invalid_paused_rejected_without_side_effects() {
 }
 
 /// EndGroupDelta がオーバーフローする filter の通知送信は送信前に拒否し副作用を残さない
-/// (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))
+/// (draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter))
 #[test]
 fn notify_send_with_filter_end_group_overflow_rejected_without_side_effects() {
     let (_client, mut server, sub_rid) = establish_sub_with_object(0, 0);
@@ -733,7 +733,7 @@ fn notify_send_with_filter_end_group_overflow_rejected_without_side_effects() {
 }
 
 /// EndGroupDelta がオーバーフローする filter の通知受信は PROTOCOL_VIOLATION で
-/// セッションを閉じる (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))
+/// セッションを閉じる (draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter))
 #[test]
 fn notify_with_filter_end_group_overflow_closes_session() {
     let (mut _client, mut server, sub_rid) = establish_sub_with_object(0, 0);

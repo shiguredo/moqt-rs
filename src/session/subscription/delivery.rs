@@ -1,5 +1,5 @@
 //! 配信タイムアウト計算、EXPIRES の設定、PUBLISH_DONE 記録、LARGEST_OBJECT の集約
-//! (draft-ietf-moq-transport-22 §3.1, §5.2, §9.5, §9.9, §9.20.3, §9.20.4, §9.20.16, §9.20.17)
+//! (draft-ietf-moq-transport-23 §3.1, §5.2, §9.5, §9.9, §9.19.3, §9.19.4, §9.19.16, §9.19.17)
 //!
 //! 将来 draft 側で変更される可能性がある。
 
@@ -10,7 +10,7 @@ use super::super::core::{PUBLISH_DONE_STREAM_COUNT_UNKNOWN, Session};
 use super::super::types::{DeadlineTimer, Subscription, SubscriptionPublishDone, TrackRole};
 
 /// delivery timeout (ms) を「タイムアウトなし」の表現に正規化する
-/// (draft-ietf-moq-transport-22 §5.2 (Delivery Timeouts and Data Reliability))
+/// (draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability))
 ///
 /// §5.2 は OBJECT_DELIVERY_TIMEOUT / SUBGROUP_DELIVERY_TIMEOUT の値 0 を
 /// 「timeout を設定しない」と規定するため、`Some(0)` は `None` に正規化する。
@@ -23,7 +23,7 @@ pub fn normalize_delivery_timeout_ms(delivery_timeout_ms: Option<u64>) -> Option
 }
 
 /// subscriber 申告と publisher 申告から effective な delivery timeout (ms) を計算する
-/// (draft-ietf-moq-transport-22 §5.2 (Delivery Timeouts and Data Reliability))
+/// (draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability))
 ///
 /// §5.2 の「publisher の値と subscriber の値がともに non-zero なら小さい方を使う」に従い、
 /// 双方を [`normalize_delivery_timeout_ms`] で正規化したうえで、両方 `Some` なら小さい方、
@@ -50,7 +50,7 @@ pub fn compute_effective_delivery_timeout_ms(
 /// OBJECT_DELIVERY_TIMEOUT の effective 値を subscriber / publisher の現在値から再計算する
 ///
 /// `DeliveryTimeoutState::effective_object_ms` の更新を 1 箇所に集約するための内部関数。
-/// 計算規則は [`compute_effective_delivery_timeout_ms`] (draft-ietf-moq-transport-22 §5.2) に従う。
+/// 計算規則は [`compute_effective_delivery_timeout_ms`] (draft-ietf-moq-transport-23 §5.2) に従う。
 fn refresh_effective_object_delivery_timeout(subscription: &mut Subscription) {
     subscription.delivery_timeouts.effective_object_ms = compute_effective_delivery_timeout_ms(
         subscription.delivery_timeouts.subscriber_object_ms,
@@ -61,7 +61,7 @@ fn refresh_effective_object_delivery_timeout(subscription: &mut Subscription) {
 /// SUBGROUP_DELIVERY_TIMEOUT の effective 値を subscriber / publisher の現在値から再計算する
 ///
 /// `DeliveryTimeoutState::effective_subgroup_ms` の更新を 1 箇所に集約するための内部関数。
-/// 計算規則は [`compute_effective_delivery_timeout_ms`] (draft-ietf-moq-transport-22 §5.2) に従う。
+/// 計算規則は [`compute_effective_delivery_timeout_ms`] (draft-ietf-moq-transport-23 §5.2) に従う。
 fn refresh_effective_subgroup_delivery_timeout(subscription: &mut Subscription) {
     subscription.delivery_timeouts.effective_subgroup_ms = compute_effective_delivery_timeout_ms(
         subscription.delivery_timeouts.subscriber_subgroup_ms,
@@ -70,9 +70,9 @@ fn refresh_effective_subgroup_delivery_timeout(subscription: &mut Subscription) 
 }
 
 /// subscription の EXPIRES 期限を設定する
-/// (draft-ietf-moq-transport-22 §9.20.16 (EXPIRES Parameter))
+/// (draft-ietf-moq-transport-23 §9.19.16 (EXPIRES Parameter))
 ///
-/// §9.20.16 は「EXPIRES が 0 または不在なら subscription は expire しないか、不明な時刻に
+/// §9.19.16 は「EXPIRES が 0 または不在なら subscription は expire しないか、不明な時刻に
 /// expire する」と規定するため、`None` に加えて `Some(0)` も「期限なし」(`None`) に正規化する。
 /// 呼び出し側が正規化済みとは限らない場面でも安全に扱えるよう、ここでも防御的に正規化する。
 /// `None` を渡すと既存の期限はクリアされる。`now_ms` は `DeadlineTimer` の起点であり、
@@ -88,8 +88,8 @@ pub fn set_subscription_expires(
 }
 
 /// parameters に EXPIRES が存在する場合のみ subscription の期限を更新する
-/// (draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE), §9.5.1 (Updating Subscriptions),
-/// §9.20.16 (EXPIRES Parameter))
+/// (draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE), §9.5.1 (Updating Subscriptions),
+/// §9.19.16 (EXPIRES Parameter))
 ///
 /// EXPIRES が不在の場合は §9.5 の「要求に含まれないパラメータの値は変更されない」に従い
 /// 前回値を維持する (累積パラメータ。§9.5.1 は複数の REQUEST_UPDATE を合体して適用することを
@@ -110,7 +110,7 @@ pub fn update_subscription_expires_if_present(
 /// subscriber 申告の OBJECT_DELIVERY_TIMEOUT を設定し effective 値を再計算する
 ///
 /// [`update_subscription_subscriber_delivery_timeouts_if_present`] からのみ呼ばれる内部関数で、
-/// REQUEST_UPDATE の OBJECT_DELIVERY_TIMEOUT parameter (draft-ietf-moq-transport-22 §9.20.4) を
+/// REQUEST_UPDATE の OBJECT_DELIVERY_TIMEOUT parameter (draft-ietf-moq-transport-23 §9.19.4) を
 /// 反映する。SUBSCRIBE の送受信時の初期値は `Subscription` の構築時に直接設定する。
 /// `None` は「タイムアウトなし」を表す。値 0 の正規化は effective 値の計算時に行われる
 /// ([`compute_effective_delivery_timeout_ms`])。
@@ -125,7 +125,7 @@ fn set_subscription_subscriber_object_delivery_timeout(
 /// subscriber 申告の SUBGROUP_DELIVERY_TIMEOUT を設定し effective 値を再計算する
 ///
 /// [`update_subscription_subscriber_delivery_timeouts_if_present`] からのみ呼ばれる内部関数で、
-/// REQUEST_UPDATE の SUBGROUP_DELIVERY_TIMEOUT parameter (draft-ietf-moq-transport-22 §9.20.3)
+/// REQUEST_UPDATE の SUBGROUP_DELIVERY_TIMEOUT parameter (draft-ietf-moq-transport-23 §9.19.3)
 /// を反映する。SUBSCRIBE の送受信時の初期値は `Subscription` の構築時に直接設定する。
 /// `None` は「タイムアウトなし」を表す。値 0 の正規化は effective 値の計算時に行われる
 /// ([`compute_effective_delivery_timeout_ms`])。
@@ -138,7 +138,7 @@ fn set_subscription_subscriber_subgroup_delivery_timeout(
 }
 
 /// publisher 申告の OBJECT_DELIVERY_TIMEOUT を設定し effective 値を再計算する
-/// (draft-ietf-moq-transport-22 §10.2 (OBJECT_DELIVERY_TIMEOUT), §5.2)
+/// (draft-ietf-moq-transport-23 §10.2 (OBJECT_DELIVERY_TIMEOUT), §5.2)
 ///
 /// publisher 側の値は Track Property として通知されるため、subscriber 役では SUBSCRIBE_OK の
 /// Track Properties から、publisher 役では自側が `send_subscribe_ok` に渡した Track Properties
@@ -154,7 +154,7 @@ pub fn set_subscription_publisher_object_delivery_timeout(
 }
 
 /// publisher 申告の SUBGROUP_DELIVERY_TIMEOUT を設定し effective 値を再計算する
-/// (draft-ietf-moq-transport-22 §10.1 (SUBGROUP_DELIVERY_TIMEOUT), §5.2)
+/// (draft-ietf-moq-transport-23 §10.1 (SUBGROUP_DELIVERY_TIMEOUT), §5.2)
 ///
 /// publisher 側の値は Track Property として通知されるため、subscriber 役では SUBSCRIBE_OK の
 /// Track Properties から、publisher 役では自側が `send_subscribe_ok` に渡した Track Properties
@@ -170,8 +170,8 @@ pub fn set_subscription_publisher_subgroup_delivery_timeout(
 }
 
 /// parameters に含まれる subscriber 申告の delivery timeout を subscription に反映する
-/// (draft-ietf-moq-transport-22 §9.20.3 (SUBGROUP_DELIVERY_TIMEOUT Parameter),
-/// §9.20.4 (OBJECT_DELIVERY_TIMEOUT Parameter), §9.5 (REQUEST_UPDATE),
+/// (draft-ietf-moq-transport-23 §9.19.3 (SUBGROUP_DELIVERY_TIMEOUT Parameter),
+/// §9.19.4 (OBJECT_DELIVERY_TIMEOUT Parameter), §9.5 (REQUEST_UPDATE),
 /// §9.5.1 (Updating Subscriptions), §5.2)
 ///
 /// OBJECT_DELIVERY_TIMEOUT / SUBGROUP_DELIVERY_TIMEOUT が存在する項目だけを
@@ -193,7 +193,7 @@ pub fn update_subscription_subscriber_delivery_timeouts_if_present(
 }
 
 /// PUBLISH_DONE 受信時の状態を subscription に記録する
-/// (draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE))
+/// (draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE))
 ///
 /// drain timer は §9.9 の「subscriber は late-arriving object に備えて
 /// SUBGROUP_DELIVERY_TIMEOUT と OBJECT_DELIVERY_TIMEOUT の大きい方以上の timer を設定する
@@ -230,7 +230,7 @@ pub fn record_publish_done(
     });
 }
 
-/// 報告すべき最大 Location を計算する (draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter))
+/// 報告すべき最大 Location を計算する (draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter))
 ///
 /// subscriber 側で保存した広告値 (`largest_location`) と実際の受信最大値
 /// (`largest_received_location`) の大きい方を返す。publisher 側では
@@ -270,18 +270,18 @@ impl Session {
     /// publisher が観測した Track の Largest Object を返す
     ///
     /// 同一 Track の全 publisher 役 subscription の `effective_largest_object` の
-    /// 最大値を返す Track 単位の集約である (draft-ietf-moq-transport-22
+    /// 最大値を返す Track 単位の集約である (draft-ietf-moq-transport-23
     /// §3.1.4 (Largest Object))。値は subscription が保持するほか、自側が publisher 役と
     /// して送信した Object は Track 単位でも保持するため、publisher 役 subscription をすべて
     /// forget した後も publish 済みの最大を返す (subscriber 役で受信した Object は含めない)。
     /// 用途:
-    /// - draft-ietf-moq-transport-22 §3.4 (Fill Semantics): fill range は
+    /// - draft-ietf-moq-transport-23 §3.4 (Fill Semantics): fill range は
     ///   Largest Object を超えない
-    /// - draft-ietf-moq-transport-22 §3.2 (Fetch): 要求 Start が Largest Object を
+    /// - draft-ietf-moq-transport-23 §3.2 (Fetch): 要求 Start が Largest Object を
     ///   上回る場合の INVALID_RANGE 判定
-    /// - draft-ietf-moq-transport-22 §3.3.1 (Location Filters): 受信した SUBSCRIBE の
+    /// - draft-ietf-moq-transport-23 §3.3.1 (Location Filters): 受信した SUBSCRIBE の
     ///   Largest Object 相対フィルタを解決する基準位置
-    /// - draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter):
+    /// - draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter):
     ///   SUBSCRIBE_OK / REQUEST_UPDATE_OK / PUBLISH_STATE_NOTIFY / PUBLISH に載せる
     ///   largest
     pub(crate) fn publisher_track_largest(
@@ -307,7 +307,7 @@ impl Session {
             .filter_map(effective_largest_object)
             .max();
         // publisher 役 subscription をすべて forget した後も、自側が publish した Track 最大を
-        // §9.20.17 の LARGEST_OBJECT に載せるため、Track 単位で保持した値との大きい方を返す。
+        // §9.19.17 の LARGEST_OBJECT に載せるため、Track 単位で保持した値との大きい方を返す。
         let from_published = self
             .published_track_largest
             .get(&(track_namespace.clone(), track_name.to_vec()))
@@ -320,7 +320,7 @@ impl Session {
 
     /// 自側が publisher 役として送信した Object の Location を Track 単位の最大へ反映する
     ///
-    /// draft-ietf-moq-transport-22 §3.1.4 (Largest Object) / §9.20.17 (LARGEST OBJECT
+    /// draft-ietf-moq-transport-23 §3.1.4 (Largest Object) / §9.19.17 (LARGEST OBJECT
     /// Parameter): LARGEST_OBJECT は Track 単位の値であり、publisher 役 subscription を
     /// forget した後も応答に載せる必要がある。比較は `Location` の (group_id, object_id) の
     /// 辞書順最大で、subscriber 役で受信した Object は含めない。
@@ -425,7 +425,7 @@ mod tests {
     #[test]
     fn expires_zero_clears_subscription_expires() {
         // EXPIRES=0 は「期限なし」を意味し、既存の期限値も None にクリアする。
-        // draft-ietf-moq-transport-22 §9.20.16
+        // draft-ietf-moq-transport-23 §9.19.16
         let mut subscription = empty_subscription();
         subscription.expires = Some(DeadlineTimer::new(300, Some(1000)));
         let mut params = MessageParameters::new();
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn expires_non_zero_sets_subscription_expires() {
         // EXPIRES=n（n > 0）では subscription.expires に DeadlineTimer が設定される。
-        // draft-ietf-moq-transport-22 §9.20.16
+        // draft-ietf-moq-transport-23 §9.19.16
         let mut subscription = empty_subscription();
         let mut params = MessageParameters::new();
         params.push(MessageParameter {
@@ -460,7 +460,7 @@ mod tests {
     #[test]
     fn missing_expires_keeps_existing_subscription_expires() {
         // EXPIRES 不在の場合は累積パラメータとして前回値を維持する。
-        // draft-ietf-moq-transport-22 §9.5, §9.5.1 (Updating Subscriptions)
+        // draft-ietf-moq-transport-23 §9.5, §9.5.1 (Updating Subscriptions)
         let mut subscription = empty_subscription();
         subscription.expires = Some(DeadlineTimer::new(300, Some(1000)));
         let params = MessageParameters::new();

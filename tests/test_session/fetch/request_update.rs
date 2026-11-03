@@ -106,7 +106,7 @@ fn fetch_request_update_full_cycle() {
 /// FETCH 確立後の REQUEST_ERROR は update 失敗応答として扱い、両側の fetch を
 /// `Terminated` に遷移させる
 ///
-/// draft-ietf-moq-transport-22 §3.2.4: "A FETCH_ERROR indicates that both endpoints can
+/// draft-ietf-moq-transport-23 §3.2.4: "A FETCH_ERROR indicates that both endpoints can
 /// immediately remove state." および "A subscriber keeps FETCH state until it cancels
 /// the request (see Section 6.4.2.3), receives FETCH_ERROR, or the FETCH data stream
 /// receives a FIN or is reset." REQUEST_UPDATE 失敗応答の REQUEST_ERROR も「REQUEST_ERROR
@@ -291,7 +291,7 @@ fn fetch_request_update_ok_emits_request_ok_received_event_with_kind_fetch() {
 }
 
 /// REQUEST_UPDATE 失敗応答で fetch が `Terminated` に遷移し、
-/// draft-ietf-moq-transport-22 §9.5.1 の "When a REQUEST_UPDATE fails for a FETCH, the
+/// draft-ietf-moq-transport-23 §9.5.1 の "When a REQUEST_UPDATE fails for a FETCH, the
 /// publisher MUST reset the FETCH data stream." (MUST) が Session から自動発火されること。
 ///
 /// ワイヤ順序は REQUEST_ERROR (bidi) → RESET_STREAM (uni data) で、SessionEvent の
@@ -443,7 +443,7 @@ fn request_error_update_failure_transitions_to_terminated_and_auto_resets_data_s
 /// `Terminated` 遷移後の fetch への REQUEST_UPDATE 受信が `validate_fetch_request_update` で
 /// 拒否され、セッションが PROTOCOL_VIOLATION で閉じること
 ///
-/// draft-ietf-moq-transport-22 §9.5: "The sender of a request (SUBSCRIBE, PUBLISH, FETCH,
+/// draft-ietf-moq-transport-23 §9.5: "The sender of a request (SUBSCRIBE, PUBLISH, FETCH,
 /// ...) can later send a REQUEST_UPDATE on the same bidi stream as the request to modify
 /// it." の two cases の 1 つ目に FETCH が含まれるため、`Terminated` の fetch への再
 /// REQUEST_UPDATE は MUST close の対象外であり、非 `Established` での拒否は仕様が規定
@@ -530,7 +530,7 @@ fn terminated_fetch_rejects_late_request_update() {
 /// RESET が、`recv_data_stream_closed` の dispatch ガード (fetch が `Terminated` なら無視)
 /// により吸収されること
 ///
-/// draft-ietf-moq-transport-22 §9.5.1: "When a REQUEST_UPDATE fails for a FETCH, the
+/// draft-ietf-moq-transport-23 §9.5.1: "When a REQUEST_UPDATE fails for a FETCH, the
 /// publisher MUST reset the FETCH data stream." 失敗応答の受信で fetch は `Terminated` に
 /// 遷移済みのため、後から届く RESET は `recv_data_stream_closed` の Fetch 分岐の dispatch
 /// ガード (`src/session/data.rs`。`Terminated` なら `Ok(())` で無視) により吸収される。
@@ -629,8 +629,8 @@ fn terminated_fetch_absorbs_reset_via_recv_data_stream_closed() {
 
 /// FETCH の REQUEST_UPDATE_OK に、publish 観測済み Track の LARGEST_OBJECT が自動補完されること
 ///
-/// draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter): "If Objects have been
-/// published on this Track the Publisher MUST include this parameter."
+/// draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter): "If the sending endpoint
+/// has published or received any Objects in the Track, it MUST include this parameter."
 #[test]
 fn fetch_request_update_ok_includes_auto_largest_object() {
     use shiguredo_moqt::message::common::Location;

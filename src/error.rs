@@ -10,8 +10,9 @@ pub enum MessageError {
     UnexpectedEof,
     /// 未知のメッセージ型 ID
     ///
-    /// draft-ietf-moq-transport-22 §9 (Control Messages):
-    /// "An endpoint that receives an unknown message type MUST close the session." (MUST)
+    /// draft-ietf-moq-transport-23 §9 (Control Messages):
+    /// "An endpoint that receives an unknown message type MUST close the session with
+    /// UNEXPECTED_MESSAGE." (MUST)
     ///
     /// `ControlMessage::decode` は既にデコード済みの型を扱う Session の外側 (I/O 層) に
     /// 本エラーを伝える。`Session::recv_control` / `recv_request` は decode 済みの
@@ -46,7 +47,7 @@ pub enum MessageError {
     /// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の INVALID_FIELD (0x301)
     /// に対応する。制御メッセージとしては解析できたが、フィールドの値が定義に反する場合に返る。
     InvalidField(&'static str),
-    /// Reason Phrase が 1024 バイトを超えた (draft-ietf-moq-transport-22 §8.5 (Reason Phrase Structure))
+    /// Reason Phrase が 1024 バイトを超えた (draft-ietf-moq-transport-23 §8.5 (Reason Phrase Structure))
     ReasonPhraseTooLong,
     /// Parameter エンコードが不正 (型と値の不一致、長さ超過など)
     InvalidParameter,
@@ -54,7 +55,7 @@ pub enum MessageError {
     ProtocolViolation(&'static str),
     /// Malformed Track の検出 (説明付き)
     ///
-    /// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) が列挙する条件に該当する検出。
+    /// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) が列挙する条件に該当する検出。
     /// 同節は該当する subscription / fetch の cancel (MUST) とアプリへのエラー通知 (SHOULD)
     /// を求めており、セッションは終了しない。§6.4.2.3 (Request Cancellation and Rejection) の
     /// cancel は送信方向の RESET_STREAM と受信方向の STOP_SENDING で表現される。
@@ -208,7 +209,7 @@ impl MessageError {
 
     /// `MalformedTrack` の理由を取り出す (他の variant は `None`)
     ///
-    /// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) の検出かどうかを判定しつつ
+    /// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) の検出かどうかを判定しつつ
     /// 説明文を取り出すために使う。
     pub fn malformed_track_reason(&self) -> Option<&'static str> {
         match self {
@@ -262,10 +263,10 @@ impl MessageError {
 
 // ─── ローカル専用エラーコード (wire には出ない) ──────────────────
 
-/// フィルタ不一致による自端の送信拒否 (draft-ietf-moq-transport-22 §3.3.3 (Combining Filters))
+/// フィルタ不一致による自端の送信拒否 (draft-ietf-moq-transport-23 §3.3.3 (Combining Filters))
 ///
 /// **この値を wire に送出してはならない。** draft の Session Termination Error Codes
-/// (§16.11.1) にも REQUEST_ERROR Codes (§16.11.2) にも存在しない実装内部の値である。
+/// (§16.12.1) にも REQUEST_ERROR Codes (§16.12.2) にも存在しない実装内部の値である。
 /// 割り当て済みコードと衝突しないよう u64 の上端付近を使い、誤って送出したときに
 /// 意図しない値であることが一目で分かるようにしている。
 ///
@@ -277,7 +278,7 @@ impl MessageError {
 /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
 pub const SESSION_LOCAL_FILTER_MISMATCH: u64 = 0xFFFF_FFFF_FFFF_FF01;
 
-/// Datagram の delivery timeout 超過による送信抑止 (draft-ietf-moq-transport-22 §5.2 (Delivery Timeouts and Data Reliability))
+/// Datagram の delivery timeout 超過による送信抑止 (draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability))
 ///
 /// **この値を wire に送出してはならない。** `SESSION_LOCAL_FILTER_MISMATCH` と同様に
 /// 実装内部の値であり、peer のプロトコル違反ではない。
@@ -300,7 +301,7 @@ pub(crate) fn is_local_error_code(code: u64) -> bool {
 
 // ─── Session Termination Error Codes ──────────────────────────
 //
-// draft-ietf-moq-transport-22 §16.11.1 (Session Termination Error Codes)
+// draft-ietf-moq-transport-23 §16.12.1 (Session Termination Error Codes)
 // セッション終了時に使用されるエラーコード。
 // これらのコードは QUIC CONNECTION_CLOSE や WebTransport session close で使用される。
 
@@ -342,7 +343,7 @@ pub const SESSION_EXPIRED_AUTH_TOKEN: u64 = 0x18;
 pub const SESSION_INVALID_AUTHORITY: u64 = 0x19;
 /// 不正な Authority フォーマット
 pub const SESSION_MALFORMED_AUTHORITY: u64 = 0x1A;
-/// REQUEST_UPDATE 上限超過 (draft-ietf-moq-transport-22 §9.1.7 (MAX_REQUEST_UPDATES))
+/// REQUEST_UPDATE 上限超過 (draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES))
 pub const SESSION_TOO_MANY_REQUEST_UPDATES: u64 = 0x1B;
 // draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) で追加・整理されたコード。
 // 0x200-0x2FF はデータストリーム / データグラム、0x300-0x3FF は制御ストリーム /
@@ -436,7 +437,7 @@ pub const REQUEST_UNSUPPORTED_EXTENSION: u64 = 0x33;
 pub const REQUEST_REDIRECT: u64 = 0x34;
 /// 競合するフィルタ
 pub const REQUEST_CONFLICTING_FILTERS: u64 = 0x35;
-/// 無効なフィルタ (draft-ietf-moq-transport-22 §3.3.2 (Range Filters))
+/// 無効なフィルタ (draft-ietf-moq-transport-23 §3.3.2 (Range Filters))
 pub const REQUEST_INVALID_FILTER: u64 = 0x36;
 
 // ─── PUBLISH_DONE Codes ──────────────────────────────────────
@@ -483,7 +484,7 @@ pub const PUBLISH_DONE_MALFORMED_TRACK: u64 = 0x12;
 // draft-ietf-moq-transport-23 §12.5 (Stream Reset Error Codes)
 // (IANA レジストリは draft-ietf-moq-transport-23 §16.12.4 (Stream Reset Error Codes))
 // QUIC RESET_STREAM / RESET_STREAM_AT フレームで任意のストリームを
-// リセットする際に使用されるエラーコード。draft-ietf-moq-transport-22 で全リクエスト
+// リセットする際に使用されるエラーコード。draft-ietf-moq-transport-23 で全リクエスト
 // ストリームに適用されるよう汎用化された。
 
 /// 実装固有のエラー

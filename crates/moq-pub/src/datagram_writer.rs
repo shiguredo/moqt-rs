@@ -1,7 +1,7 @@
 //! Object Datagram ライター
 //!
 //! 1 つの Group に対応する Object Datagram を送信する。
-//! draft-ietf-moq-transport-22 §11.2.1 (Object Datagram) に準拠する。
+//! draft-ietf-moq-transport-23 §11.2.1 (Object Datagram) に準拠する。
 
 use shiguredo_moqt::loc::LocProperties;
 use shiguredo_moqt::message::common::Location;
@@ -13,7 +13,7 @@ use tokio_moq::transport;
 
 /// Object Datagram ライター
 ///
-/// draft-ietf-moq-transport-22 §11.2.1 (Object Datagram) の OBJECT_DATAGRAM を送信する。
+/// draft-ietf-moq-transport-23 §11.2.1 (Object Datagram) の OBJECT_DATAGRAM を送信する。
 /// 上限サイズを超える object は送らずにエラーにする (datagram は 1 つの QUIC パケットに
 /// 収まる必要がある)。
 pub struct DatagramWriter {
@@ -85,7 +85,7 @@ impl DatagramWriter {
     ///
     /// LOC プロパティとペイロードを含むオブジェクトを datagram で送信する。
     /// Session のフィルタ評価を先に行い、通過時のみワイヤへ出す
-    /// (draft-ietf-moq-transport-22 §3.3.3 (Combining Filters): "The publisher MUST forward
+    /// (draft-ietf-moq-transport-23 §3.3.3 (Combining Filters): "The publisher MUST forward
     /// only objects that pass all filters.")。フィルタ不通過
     /// (`SendRequestError::LocalFilterMismatch`) のオブジェクトはワイヤに出さず `Skip` を返す。
     /// オブジェクト ID だけ進める (datagram は絶対 ID のため delta の考慮は不要)。
@@ -164,7 +164,7 @@ impl DatagramWriter {
 
         // RFC 9221 §3 は peer が広告した max_datagram_frame_size を超える DATAGRAM の送信を
         // MUST NOT とし、受信側は PROTOCOL_VIOLATION で接続を閉じる MUST を負う。path MTU を
-        // 超えた datagram は s2n-quic が通知なく破棄し、draft-ietf-moq-transport-22 §11.2 も
+        // 超えた datagram は s2n-quic が通知なく破棄し、draft-ietf-moq-transport-23 §11.2 も
         // 「上限を超えた object は通知なく破棄される」と定める。送信前にサイズを判定して
         // 原因と対処が分かるエラーにする。
         check_datagram_size(buf.len(), self.max_size)?;

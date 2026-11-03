@@ -1,6 +1,6 @@
 /// GREASE ユーティリティの単体テスト
 ///
-/// draft-ietf-moq-transport-22 §13 (Grease) の境界条件および near-miss 値など、
+/// draft-ietf-moq-transport-23 §13 (Grease) の境界条件および near-miss 値など、
 /// PBT では書きにくいケースを集中的に検証する。
 use shiguredo_moqt::grease::{GREASE_BASE, GREASE_INTERVAL, GREASE_MAX, generate, is_grease};
 

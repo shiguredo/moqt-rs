@@ -1,4 +1,4 @@
-//! SUBGROUP_HEADER / SUBGROUP_OBJECT (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header)) のラウンドトリップ PBT
+//! SUBGROUP_HEADER / SUBGROUP_OBJECT (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header)) のラウンドトリップ PBT
 
 use pbt::common::test_runner;
 use shiguredo_moqt::{
@@ -37,7 +37,7 @@ fn sample_subgroup_header(ctx: &mut noprop::TestCaseContext) -> SubgroupHeader {
 
 /// properties 付き SUBGROUP_OBJECT で有効な (payload_length, status) の組を生成する。
 ///
-/// properties は Normal(0x0) 以外の status には付けられない (draft-ietf-moq-transport-22 §11.1.2 (Object Properties)) ため、
+/// properties は Normal(0x0) 以外の status には付けられない (draft-ietf-moq-transport-23 §11.1.2 (Object Properties)) ため、
 /// 「ペイロードあり (status = None)」または「zero-length Normal status (payload_length = 0,
 /// status = Some(0x0))」の 2 通りのみが有効。
 fn sample_subgroup_payload_status_with_properties(
@@ -47,7 +47,7 @@ fn sample_subgroup_payload_status_with_properties(
         // ペイロードあり: payload_length > 0、status は None
         (sample_varint(ctx).max(1), None)
     } else {
-        // zero-length Normal status (draft-ietf-moq-transport-22 §11.1.1 (Object Status))
+        // zero-length Normal status (draft-ietf-moq-transport-23 §11.1.1 (Object Status))
         (0u64, Some(0u64))
     }
 }
@@ -70,7 +70,7 @@ fn subgroup_header_roundtrip() -> noprop::TestResult {
 }
 
 /// SUBGROUP_OBJECT (ペイロードあり・ properties なし) のラウンドトリップ。
-/// payload_length > 0 のとき status は None でなければならない (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))。
+/// payload_length > 0 のとき status は None でなければならない (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))。
 #[test]
 fn subgroup_object_roundtrip_with_payload() -> noprop::TestResult {
     let mut runner = test_runner()?;
@@ -97,7 +97,7 @@ fn subgroup_object_roundtrip_with_payload() -> noprop::TestResult {
 
 /// SUBGROUP_OBJECT (status オブジェクト・ properties なし) のラウンドトリップ。
 /// payload_length == 0 のとき status は必須。値域は Normal(0x0) / EndOfGroup(0x3) /
-/// EndOfTrack(0x4) のみ (draft-ietf-moq-transport-22 §11.1.1 (Object Status))。
+/// EndOfTrack(0x4) のみ (draft-ietf-moq-transport-23 §11.1.1 (Object Status))。
 #[test]
 fn subgroup_object_roundtrip_status_object() -> noprop::TestResult {
     let mut runner = test_runner()?;
@@ -125,7 +125,7 @@ fn subgroup_object_roundtrip_status_object() -> noprop::TestResult {
 /// SUBGROUP_OBJECT (properties あり) のラウンドトリップ。
 /// has_properties = true のとき Properties Length + データの生バイト列を渡す。
 /// 有効なのは「ペイロードあり (status = None)」と「zero-length Normal status
-/// (status = Some(0x0))」の 2 通り (draft-ietf-moq-transport-22 §11.1.2 (Object Properties): Normal 以外には付けられない)。
+/// (status = Some(0x0))」の 2 通り (draft-ietf-moq-transport-23 §11.1.2 (Object Properties): Normal 以外には付けられない)。
 #[test]
 fn subgroup_object_roundtrip_with_properties() -> noprop::TestResult {
     let mut runner = test_runner()?;

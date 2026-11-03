@@ -155,7 +155,7 @@ fn paused_still_allows_publish_done() {
     server
         .send_publish_done(
             rid,
-            0x2, // PUBLISH_DONE Code: Track ended (draft-ietf-moq-transport-22 §16.11.3) の値
+            0x2, // PUBLISH_DONE Code: Track ended (draft-ietf-moq-transport-23 §16.12.3) の値
             0,
             shiguredo_moqt::message::ReasonPhrase::new("done").expect("有効な reason"),
         )
@@ -196,7 +196,7 @@ fn location_filter_before_start_is_rejected() {
 
 /// AbsoluteRange の End Group より後は拒否される
 ///
-/// draft-ietf-moq-transport-22 §3.3.1 (Location Filters): End Group は Group 単位で inclusive。
+/// draft-ietf-moq-transport-23 §3.3.1 (Location Filters): End Group は Group 単位で inclusive。
 #[test]
 fn location_filter_after_end_group_is_rejected() {
     let mut params = MessageParameters::new();
@@ -231,7 +231,7 @@ fn location_filter_after_end_group_is_rejected() {
 
 /// End Group 超過の拒否後も subscription は Established のままである
 ///
-/// draft-ietf-moq-transport-22 §3.3.1 / §9.9 (PUBLISH_DONE): Largest Object が
+/// draft-ietf-moq-transport-23 §3.3.1 / §9.9 (PUBLISH_DONE): Largest Object が
 /// End Group を超えても subscription は終了しない。PUBLISH_DONE status
 /// SUBSCRIPTION_ENDED (0x3) は削除されたため、End Group 超過だけでは終了しない。
 #[test]
@@ -271,7 +271,7 @@ fn location_filter_end_exceeded_keeps_subscription_established() {
 
 /// AbsoluteRangeWithEnd の EndObject より後は拒否される
 ///
-/// draft-ietf-moq-transport-22 §3.3.1 (Location Filters): 4 フィールドの End は
+/// draft-ietf-moq-transport-23 §3.3.1 (Location Filters): 4 フィールドの End は
 /// {StartGroup + EndGroupDelta, EndObject} で inclusive。同一 End Group 内でも
 /// EndObject を超えた Object は通らない。
 #[test]
@@ -429,7 +429,7 @@ fn object_property_filter_uses_properties() {
 
 /// 同一 SetID の複数フィルタは AND、SetID 間は OR で結合される
 ///
-/// draft-ietf-moq-transport-22 §3.3.2 (Range Filters): "Filter parameters with the same
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters): "Filter parameters with the same
 /// SetID are AND'd; distinct SetIDs are OR'd."
 #[test]
 fn range_filters_and_within_set_or_across_sets() {
@@ -469,7 +469,7 @@ fn range_filters_and_within_set_or_across_sets() {
 
 /// datagram には Subgroup ID フィールドが無いので SUBGROUP_FILTER は評価されない
 ///
-/// draft-ietf-moq-transport-22 §11.2.1 (Object Datagram) のワイヤ構造に Subgroup ID は無く、
+/// draft-ietf-moq-transport-23 §11.2.1 (Object Datagram) のワイヤ構造に Subgroup ID は無く、
 /// §3.3.2 が対象とする "other Object header fields (Subgroup ID, ...)" が存在しない。
 #[test]
 fn subgroup_filter_does_not_apply_to_datagram() {
@@ -534,7 +534,7 @@ fn filter_mismatch_does_not_close_session() {
 /// 解決され、publisher 側の subgroup id (拒否された ID) と subscriber 側の認識 (最初に
 /// 受信したオブジェクトの ID) が食い違う。filter 拒否時は内部状態を一切変更せず、
 /// 通過した最初のオブジェクトの ID で解決されることを検証する
-/// (draft-ietf-moq-transport-22 §11.3.1 の SUBGROUP_ID_MODE 0b01: "the Subgroup ID is the
+/// (draft-ietf-moq-transport-23 §11.3.1 の SUBGROUP_ID_MODE 0b01: "the Subgroup ID is the
 /// Object ID of the first Object transmitted in this Subgroup")。
 #[test]
 fn first_object_id_subgroup_out_of_filter_rejected_without_state_change() {
@@ -599,7 +599,7 @@ fn first_object_id_subgroup_out_of_filter_rejected_without_state_change() {
 
 /// 同一 Group 内で start > end の空範囲はエラーを返し何も通さない
 ///
-/// draft-ietf-moq-transport-22 §3.3.1 (Location Filters): subscription のフィルタは
+/// draft-ietf-moq-transport-23 §3.3.1 (Location Filters): subscription のフィルタは
 /// 常時 valid のためエラーにはならない。空範囲は何も通さない。
 /// Group 差分は非負のため、開始 Group を上回る End Group の逆転は wire 上表現できず、
 /// 同一 Group 内の Object 逆転のみが到達可能である。

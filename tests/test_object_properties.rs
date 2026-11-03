@@ -1,6 +1,6 @@
 /// Object-scoped Properties の単体テスト
 ///
-/// draft-ietf-moq-transport-22 §10.7 (Immutable Properties) / draft-ietf-moq-transport-22 §10.8 (Prior Group ID Gap) / draft-ietf-moq-transport-22 §10.9 (Prior Object ID Gap) の境界条件・エラーパス
+/// draft-ietf-moq-transport-23 §10.7 (Immutable Properties) / draft-ietf-moq-transport-23 §10.8 (Prior Group ID Gap) / draft-ietf-moq-transport-23 §10.9 (Prior Object ID Gap) の境界条件・エラーパス
 /// および IMMUTABLE_PROPERTIES の入れ子検出など PBT で書きにくいケースと、
 /// `ObjectFieldMismatch` が `core::error::Error` を実装していることを検証する。
 use shiguredo_moqt::error::MessageError;
@@ -533,7 +533,7 @@ fn object_field_mismatch_converts_into_boxed_error() {
 
 /// GREASE の Property Type は 0x4000-0x7FFF に入っていても Object scope で malformed にならない
 ///
-/// draft-ietf-moq-transport-22 §16.8 (Properties) の Table 15 は GREASE の Property Type
+/// draft-ietf-moq-transport-23 §16.8 (Properties) の Table 15 は GREASE の Property Type
 /// (`0x7f * N + 0x9D`) を Scope Any として予約しており、その一部 (N = 128 の 0x401D から
 /// N = 256 の 0x7F9D まで) は §3.7 (Mandatory to Understand Track Properties) の 0x4000-0x7FFF に入る。
 /// GREASE 値は IANA に登録された Property ではないため malformed としない (§13 (Grease) の
@@ -575,7 +575,7 @@ fn grease_property_in_mandatory_range_is_accepted() {
 
 /// GREASE 値でない 0x4000-0x7FFF は Object scope で malformed のままである
 ///
-/// draft-ietf-moq-transport-22 §3.7 (Mandatory to Understand Track Properties): "An Object received with a
+/// draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties): "An Object received with a
 /// Mandatory Track Property as an Object Property is malformed".
 #[test]
 fn non_grease_mandatory_property_in_object_scope_is_malformed() {
@@ -632,7 +632,7 @@ fn properties_with_single_inner(inner_prop: ObjectProperty) -> ObjectProperties 
 
 /// PRIOR_GROUP_ID_GAP / PRIOR_OBJECT_ID_GAP の二重インスタンスは malformed になる
 ///
-/// draft-ietf-moq-transport-22 §10.8 (Prior Group ID Gap) / §10.9 (Prior Object ID Gap):
+/// draft-ietf-moq-transport-23 §10.8 (Prior Group ID Gap) / §10.9 (Prior Object ID Gap):
 /// "An Object MUST NOT contain more than one instance of this property." 同じ型を mutable
 /// リストと IMMUTABLE_PROPERTIES 内側の両方に置いた場合も 2 インスタンスと数える (§10.7)。
 #[test]

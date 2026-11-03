@@ -1,4 +1,4 @@
-//! FETCH_HEADER / FETCH_STREAM_OBJECT (draft-ietf-moq-transport-22 §11.4.1 (Fetch Header)) のラウンドトリップ PBT
+//! FETCH_HEADER / FETCH_STREAM_OBJECT (draft-ietf-moq-transport-23 §11.4.1 (Fetch Header)) のラウンドトリップ PBT
 //!
 //! `FetchStreamObject` / `FetchStreamEntry` の encode/decode は prior 参照文脈
 //! (`FetchPriorContext`) を要求し、文脈によって有効なフィールドが変わる。単一エントリの

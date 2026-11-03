@@ -21,7 +21,7 @@ mod subgroup;
 ///
 /// `SUBGROUP_OBJECT` / `FETCH_STREAM_OBJECT` / `OBJECT_DATAGRAM` の `properties_data` は、
 /// Properties Length を含む生バイト列を要求する
-/// (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header) / §11.4.1 (Fetch Header) /
+/// (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header) / §11.4.1 (Fetch Header) /
 /// §11.2.1 (Object Datagram): 空でも Length=0 を含む。ただし datagram は Length=0 が禁止)。
 pub(crate) fn length_prefixed_properties(data: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();

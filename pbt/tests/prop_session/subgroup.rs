@@ -1,6 +1,6 @@
 //! 受信 subgroup 経路のプロパティテスト
 //!
-//! draft-ietf-moq-transport-22 §3.1 (Subscriptions): "Because subscriptions can share a
+//! draft-ietf-moq-transport-23 §3.1 (Subscriptions): "Because subscriptions can share a
 //! Track Alias, the subscriber re-applies each subscription's filter to determine which
 //! subscription a received Object belongs to."
 //!
@@ -46,7 +46,7 @@ use super::common::{take_send_control, take_send_on_stream, take_send_request};
 /// `SUBGROUP_DELIVERY_TIMEOUT` と `OBJECT_DELIVERY_TIMEOUT` を持つ Properties バイト列
 ///
 /// 先頭 Object に付与すると per-subgroup delivery timeout override が登録される
-/// (draft-ietf-moq-transport-22 §10.1 (SUBGROUP_DELIVERY_TIMEOUT) /
+/// (draft-ietf-moq-transport-23 §10.1 (SUBGROUP_DELIVERY_TIMEOUT) /
 /// §10.2 (OBJECT_DELIVERY_TIMEOUT))。両 Property は偶数型なので varint 値で encode する。
 /// `ObjectProperties::encode` の出力は Properties Length varint を含む完全なブロックである。
 fn delivery_timeout_properties(subgroup_ms: u64, object_ms: u64) -> Vec<u8> {
@@ -240,7 +240,7 @@ struct StreamSpec {
     group_id: u64,
     /// 次の Object に使う Object ID
     ///
-    /// stream 内で単調増加させる。draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 2 の
+    /// stream 内で単調増加させる。draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 2 の
     /// `check_object_after_fin` と、最大位置が単調最大になる性質の両方を満たす。
     next_object_id: u64,
     /// header 時に紐づいた (stream を所有する) subscription の request_id
@@ -268,7 +268,7 @@ struct StreamSpec {
 /// subscription を確立する。
 ///
 /// Range Filter を送るには peer (server) が SETUP で MAX_FILTER_RANGES を宣言している
-/// 必要がある (draft-ietf-moq-transport-22 §9.1.6 (MAX FILTER RANGES)) ため、SETUP 交換は
+/// 必要がある (draft-ietf-moq-transport-23 §9.1.6 (MAX FILTER RANGES)) ため、SETUP 交換は
 /// `establish_pair` ではなく本関数で行う。
 fn establish_shared_alias_subs(
     alias: u64,
@@ -1372,7 +1372,7 @@ fn decoded_subgroup_header_and_object_do_not_break_session() -> noprop::TestResu
 /// 先頭 Object の SUBGROUP_DELIVERY_TIMEOUT / OBJECT_DELIVERY_TIMEOUT が帰属先
 /// subscription の per-subgroup override として登録され、stream 終端 / forget 後に
 /// 残留しないことを検証する。fill fetch stream も Stream Count の open 数に含まれるため
-/// (draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE))、subgroup stream と同じ会計を通る
+/// (draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE))、subgroup stream と同じ会計を通る
 /// ことを合わせて検証する。
 #[test]
 fn subgroup_delivery_timeout_override_lifecycle() -> noprop::TestResult {

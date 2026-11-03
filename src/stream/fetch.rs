@@ -28,7 +28,7 @@ use super::{FETCH_HEADER_TYPE, validate_properties_blob};
 use crate::{error::MessageError, varint};
 use alloc::vec::Vec;
 
-/// FETCH_HEADER (draft-ietf-moq-transport-22 §11.4.1 (Fetch Header))
+/// FETCH_HEADER (draft-ietf-moq-transport-23 §11.4.1 (Fetch Header))
 #[derive(Debug, Clone, PartialEq)]
 pub struct FetchHeader {
     /// 対応する FETCH 要求の Request ID
@@ -228,7 +228,7 @@ pub enum FetchStreamEntry {
     EndOfTrack,
 }
 
-/// Fetch ストリーム内のオブジェクトヘッダ (draft-ietf-moq-transport-22 §11.4.1 (Fetch Header))
+/// Fetch ストリーム内のオブジェクトヘッダ (draft-ietf-moq-transport-23 §11.4.1 (Fetch Header))
 ///
 /// ペイロードデータ自体は含まない。呼び出し元が `payload_length` バイト分のペイロードを
 /// 後続のバッファから読み書きする。
@@ -254,7 +254,7 @@ pub struct FetchStreamObject {
     pub publisher_priority: Option<u8>,
     /// Properties フィールドが存在するか
     pub has_properties: bool,
-    /// Datagram 起源のオブジェクトか (draft-ietf-moq-transport-22 §11.4.1.1 (Flags): bit 0x40)
+    /// Datagram 起源のオブジェクトか (draft-ietf-moq-transport-23 §11.4.1.1 (Flags): bit 0x40)
     ///
     /// true の場合、元の Delivery Mode が Datagram であり Subgroup ID を持たない。
     pub is_datagram_origin: bool,
@@ -268,7 +268,7 @@ impl FetchStreamEntry {
     /// `prior_context` で prior object 参照の妥当性を検証する。
     ///
     /// `properties_data` は Properties Length varint を含む生バイト列である
-    /// (draft-ietf-moq-transport-22 §11.1.2 (Object Properties))。
+    /// (draft-ietf-moq-transport-23 §11.1.2 (Object Properties))。
     /// `has_properties` が true の場合に渡し、プロパティが空でも
     /// Properties Length = 0 を含むデータ (`&[0x00]` など) を渡す。
     /// 空スライス (`Some(&[])`) は Properties Length varint を含まない契約違反入力である。
@@ -562,21 +562,21 @@ impl FetchStreamObject {
         prior_context: FetchPriorContext,
         buf: &mut Vec<u8>,
     ) -> Result<(), MessageError> {
-        // draft-ietf-moq-transport-22 §11.4.1.1 (Flags): Datagram 起源のオブジェクトは Subgroup ID を持たない
+        // draft-ietf-moq-transport-23 §11.4.1.1 (Flags): Datagram 起源のオブジェクトは Subgroup ID を持たない
         if self.is_datagram_origin && !matches!(self.subgroup_id, FetchSubgroupIdMode::Zero) {
             return Err(MessageError::ProtocolViolation(
                 "datagram origin object must not have a Subgroup ID",
             ));
         }
 
-        // draft-ietf-moq-transport-22 §11.4.1.1 (Flags): has_properties と properties_data の整合性を検証する
+        // draft-ietf-moq-transport-23 §11.4.1.1 (Flags): has_properties と properties_data の整合性を検証する
         // 0x20 bit が立っているときだけ Properties フィールドが present であるべき
         if self.has_properties && properties_data.is_none() {
             return Err(MessageError::ProtocolViolation(
                 "has_properties is set but properties_data is not provided",
             ));
         }
-        // draft-ietf-moq-transport-22 §11.1.2 (Object Properties): Properties は
+        // draft-ietf-moq-transport-23 §11.1.2 (Object Properties): Properties は
         // Properties Length (vi64) + Properties の構造であり、空スライスは Length varint を
         // 含まない契約違反入力。呼び出し側は Length = 0 を含むデータ (`&[0x00]` 等) を渡すこと。
         // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
@@ -590,7 +590,7 @@ impl FetchStreamObject {
                 "properties_data is provided but has_properties is not set",
             ));
         }
-        // draft-ietf-moq-transport-22 §11.1.2 (Object Properties): Properties Length と
+        // draft-ietf-moq-transport-23 §11.1.2 (Object Properties): Properties Length と
         // 実データ長の一致を書き込み前に検証する
         if let Some(props) = properties_data {
             validate_properties_blob(props)?;
@@ -625,7 +625,7 @@ impl FetchStreamObject {
         if self.has_properties {
             flags |= 0x20;
         }
-        // draft-ietf-moq-transport-22 §11.4.1.1 (Flags): Datagram 起源のオブジェクトは bit 0x40 を設定し、
+        // draft-ietf-moq-transport-23 §11.4.1.1 (Flags): Datagram 起源のオブジェクトは bit 0x40 を設定し、
         // 下位 2 bit を 0 にする
         if self.is_datagram_origin {
             flags |= 0x40;
@@ -722,7 +722,7 @@ impl FetchStreamObject {
 
         let mut pos = 0;
 
-        // draft-ietf-moq-transport-22 §11.4.1.1 (Flags): bit 0x40 は Datagram 起源を示す
+        // draft-ietf-moq-transport-23 §11.4.1.1 (Flags): bit 0x40 は Datagram 起源を示す
         // bit 0x40 が立っている場合、下位 2 bit は無視する (MUST)
         let is_datagram_origin = flags & 0x40 != 0;
         let subgroup_id_mode = if is_datagram_origin {
@@ -777,7 +777,7 @@ impl FetchStreamObject {
         };
 
         // Properties を Properties Length varint 込みの生バイト列として切り出す
-        // draft-ietf-moq-transport-22 §11.4.1 (Fetch Header): Fetch object でも Properties Length = 0 は合法
+        // draft-ietf-moq-transport-23 §11.4.1 (Fetch Header): Fetch object でも Properties Length = 0 は合法
         let properties_bytes = if has_properties {
             let prop_start = pos;
             let (prop_len, n) = varint::decode(&buf[pos..])?;

@@ -34,7 +34,7 @@ fn request_update_full_cycle() {
     server
         .recv_stream_message(rid, upd_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1540: REQUEST_UPDATE のパラメータは即座に適用されず、
+    // draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1540: REQUEST_UPDATE のパラメータは即座に適用されず、
     // pending_update_params に蓄積される。REQUEST_OK 応答後に paused が反映される。
     assert!(
         server
@@ -70,7 +70,7 @@ fn request_update_full_cycle() {
 
 /// REQUEST_UPDATE は購読とは別の Request ID を消費し、peer はその ID を受理する
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.1 (Request ID): REQUEST_UPDATE は Request ID を
+/// draft-ietf-moq-transport-23 §6.4.2.1 (Request ID): REQUEST_UPDATE は Request ID を
 /// 消費するメッセージとして列挙され、購読の Request ID の再利用は重複 Request ID の
 /// MUST 違反になる。対象の購読は同じ bidi request stream 上で送ることで識別される。
 /// 送信側は購読の Request ID の次の値から 2 ずつ採番し、受信側はそれを購読と一致しなくても
@@ -130,9 +130,9 @@ fn request_update_consumes_new_request_id() {
 
 /// parity が送信側の規則に合わない Request ID の REQUEST_UPDATE は INVALID_REQUEST_ID で閉じる
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.1 (Request ID): "If an endpoint receives a Request ID
-/// where the least significant bit is incorrect for the sender, or a duplicate Request ID,
-/// it MUST close the session with INVALID_REQUEST_ID."
+/// draft-ietf-moq-transport-23 §6.4.2.1 (Request ID): "If an endpoint receives a Request ID
+/// where the least significant bit is incorrect for the sender, it MUST close the session with
+/// INVALID_REQUEST_ID."
 /// REQUEST_UPDATE も Request ID を消費するメッセージとして列挙されるため、この MUST の
 /// 対象になる。client は偶数を採番するので、奇数を載せた REQUEST_UPDATE は parity 違反になる。
 #[test]
@@ -164,7 +164,7 @@ fn request_update_with_wrong_parity_closes_session() {
 
 /// 使用済みの Request ID を再利用した REQUEST_UPDATE は INVALID_REQUEST_ID で閉じる
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.1 (Request ID): 重複した Request ID の受信も
+/// draft-ietf-moq-transport-23 §6.4.2.1 (Request ID): 重複した Request ID の受信も
 /// INVALID_REQUEST_ID でのセッションクローズ MUST の対象である。
 /// REQUEST_UPDATE が購読の Request ID を再利用していた旧実装ではこの検証が無く、
 /// draft 準拠の peer との間でセッションが閉じていた。
@@ -193,7 +193,7 @@ fn request_update_with_duplicate_request_id_closes_session() {
 
 /// GOAWAY 送信後でも既存 subscription への REQUEST_UPDATE は受理される
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY): "The GOAWAY message does not impact
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY): "The GOAWAY message does not impact
 /// subscription state." / "A subscriber SHOULD individually unsubscribe from each existing
 /// subscription, while a publisher MAY reject new requests after sending a GOAWAY."
 /// GOAWAY 送信側が拒否してよいのは新規 request であり、既存の bidi request stream 上を流れる
@@ -259,7 +259,7 @@ fn request_update_after_goaway_is_accepted() {
 #[test]
 fn request_ok_with_expires_zero_clears_existing_expires() {
     // EXPIRES=0 は「期限なし」を意味し、REQUEST_UPDATE_OK 経路でも既存の期限を
-    // None にクリアする。draft-ietf-moq-transport-22 §9.20.16
+    // None にクリアする。draft-ietf-moq-transport-23 §9.19.16
     let (mut client, mut server) = establish_pair();
     let rid = client
         .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
@@ -309,7 +309,7 @@ fn request_ok_with_expires_zero_clears_existing_expires() {
 }
 
 /// REQUEST_UPDATE への REQUEST_OK で LARGEST_OBJECT parameter が
-/// subscription.largest_location に保存される (draft-ietf-moq-transport-22 §3.1 (Subscriptions) / draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) / draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions))
+/// subscription.largest_location に保存される (draft-ietf-moq-transport-23 §3.1 (Subscriptions) / draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter) / draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions))
 #[test]
 fn request_ok_largest_object_updates_largest_location() {
     use shiguredo_moqt::message::common::Location;
@@ -443,7 +443,7 @@ fn request_ok_without_largest_object_leaves_largest_location() {
     );
 }
 
-/// draft-ietf-moq-transport-22 §9.7 (SUBSCRIBE_OK) / §9.6 (SUBSCRIBE): SUBSCRIBE 初回応答は SUBSCRIBE_OK であり
+/// draft-ietf-moq-transport-23 §9.7 (SUBSCRIBE_OK) / §9.6 (SUBSCRIBE): SUBSCRIBE 初回応答は SUBSCRIBE_OK であり
 /// REQUEST_OK ではない。Pending(Subscriber) 状態の subscription に対して peer が REQUEST_OK を送ってきたら
 /// PROTOCOL_VIOLATION で session を閉じる。
 #[test]
@@ -472,7 +472,7 @@ fn peer_request_ok_for_subscription_in_pending_subscriber_closes_session() {
 }
 
 /// Pending(Publisher) 状態 (自側 PUBLISH 後、REQUEST_OK (publish context) 未受信) で peer が
-/// draft-ietf-moq-transport-22 §9.3 (REQUEST_OK): REQUEST_OK が PUBLISH_OK を統合。Pending(Publisher) で REQUEST_OK を受信すると
+/// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): REQUEST_OK が PUBLISH_OK を統合。Pending(Publisher) で REQUEST_OK を受信すると
 /// Established に遷移する。
 #[test]
 fn peer_request_ok_for_subscription_in_pending_publisher_establishes() {
@@ -526,7 +526,7 @@ fn send_request_ok_for_subscription_in_pending_subscriber_errors() {
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
 }
 
-/// draft-ietf-moq-transport-22 §9.3 (REQUEST_OK): subscriber responder は Pending(Publisher) 状態で REQUEST_OK を送信できる
+/// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): subscriber responder は Pending(Publisher) 状態で REQUEST_OK を送信できる
 /// (旧 PUBLISH_OK 相当)。Pending → Established に遷移する。
 #[test]
 fn send_request_ok_for_subscription_in_pending_publisher_establishes() {
@@ -556,7 +556,7 @@ fn send_request_ok_for_subscription_in_pending_publisher_establishes() {
     );
 }
 
-/// draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE) / draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions): REQUEST_UPDATE への REQUEST_ERROR は
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE) / draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions): REQUEST_UPDATE への REQUEST_ERROR は
 /// Established から Terminated に遷移し、PUBLISH_DONE(UPDATE_FAILED) が
 /// REQUEST_ERROR 直後に自動送信される
 #[test]
@@ -651,7 +651,7 @@ fn send_request_error_for_subscription_in_established_transitions_to_terminated(
 /// Established 状態で peer から REQUEST_ERROR (REQUEST_UPDATE 失敗応答) を受けると
 /// subscription は Terminated に遷移し、RequestErrorReceived イベントが発行される。
 ///
-/// draft-ietf-moq-transport-22 §3.1.2 (Subscription State Management): "A subscriber
+/// draft-ietf-moq-transport-23 §3.1.2 (Subscription State Management): "A subscriber
 /// keeps subscription state until it cancels the request (see Section 6.4.2.3), or until receipt
 /// of a PUBLISH_DONE or REQUEST_ERROR." により、REQUEST_UPDATE 失敗応答の REQUEST_ERROR も
 /// subscription state を終える条件に該当する。
@@ -743,7 +743,7 @@ fn peer_request_error_for_subscription_in_established_transitions_to_terminated_
 }
 
 /// REQUEST_UPDATE 失敗応答の REQUEST_ERROR で Terminated に遷移した後、publisher が
-/// draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions) の MUST に基づいて送る
+/// draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions) の MUST に基づいて送る
 /// PUBLISH_DONE(UPDATE_FAILED) を subscriber 側が受理し、`PublishDoneReceived` イベントを
 /// 発行してセッションを fail しないこと。
 #[test]
@@ -797,7 +797,7 @@ fn subscription_terminated_by_peer_request_error_accepts_subsequent_publish_done
     );
 
     let (_, done_msg) = take_send_on_stream(&mut server);
-    // draft-ietf-moq-transport-22 §9.5.1 の MUST で publisher が送る後続 PUBLISH_DONE を
+    // draft-ietf-moq-transport-23 §9.5.1 の MUST で publisher が送る後続 PUBLISH_DONE を
     // Terminated 状態でも受理し、セッションを fail させないこと
     client
         .recv_stream_message(rid, done_msg)
@@ -979,7 +979,7 @@ fn subscription_terminated_by_peer_request_error_forgets_after_stream_fin_and_pu
 
 /// Established で REQUEST_ERROR を送ると PUBLISH_DONE(UPDATE_FAILED) が自動送信され、
 /// 後続の手動 send_publish_done は Terminated 状態のため失敗する
-/// (draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions))。
+/// (draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions))。
 #[test]
 fn publish_done_auto_sent_after_request_error_in_established() {
     let (mut client, mut server) = establish_pair();
@@ -1057,7 +1057,7 @@ fn publish_done_auto_sent_after_request_error_in_established() {
 /// `Terminated` 状態の subscription への `send_subgroup_object` が
 /// `Err(SESSION_PROTOCOL_VIOLATION)` を返し、内部状態を汚染しないこと
 ///
-/// draft-ietf-moq-transport-22 §3.1.2 (Subscription State Management):
+/// draft-ietf-moq-transport-23 §3.1.2 (Subscription State Management):
 /// "Objects MUST NOT be sent for requests that end with an error." REQUEST_UPDATE 失敗応答として
 /// `send_request_error` を送ると subscription は `Terminated` に遷移するが、outgoing stream は
 /// `forget_subscription` まで `data_streams.outgoing` に残るため、`Terminated` 後の送信を
@@ -1066,7 +1066,7 @@ fn publish_done_auto_sent_after_request_error_in_established() {
 /// REQUEST_UPDATE 失敗応答で open 中の outgoing subgroup stream がある場合、PUBLISH_DONE
 /// が保留され、全 stream 終端後に自動送信されること
 ///
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE): "A sender MUST NOT send PUBLISH_DONE
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE): "A sender MUST NOT send PUBLISH_DONE
 /// until it has closed all streams it will ever open, and has no further datagrams to send,
 /// for a subscription." (§3.1.2 も同旨)。§9.5.1 の MUST (REQUEST_UPDATE 失敗時、publisher
 /// は PUBLISH_DONE (UPDATE_FAILED) を送る) と両立させるため、open 中の outgoing subgroup
@@ -1406,7 +1406,7 @@ fn establish_publisher_with_pending_publish_done(
 /// `send_data_stream_closed(Reset)` で最後の outgoing stream を閉じると、保留 PUBLISH_DONE が
 /// 1 回だけ自動送信される
 ///
-/// draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions): "When a REQUEST_UPDATE is
+/// draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions): "When a REQUEST_UPDATE is
 /// unsuccessful, the publisher MUST also terminate the subscription by sending a PUBLISH_DONE
 /// with error code UPDATE_FAILED." I/O 層が先に stream を reset して通知する経路でも MUST を果たす。
 #[test]
@@ -1455,7 +1455,7 @@ fn pending_publish_done_flushed_on_data_stream_closed_reset() {
 /// open 中の outgoing stream が残っている間は `send_data_stream_closed(Reset)` でも
 /// PUBLISH_DONE を送らず、最後の 1 本を閉じたときに 1 回だけ送る
 ///
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE): "A sender MUST NOT send PUBLISH_DONE
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE): "A sender MUST NOT send PUBLISH_DONE
 /// until it has closed all streams it will ever open, and has no further datagrams to send,
 /// for a subscription."
 #[test]
@@ -1505,7 +1505,7 @@ fn pending_publish_done_flushed_once_after_last_stream_reset() {
 /// `reset_outgoing_data_stream` / `reset_outgoing_data_stream_at` 経由では、保留
 /// PUBLISH_DONE がある場合もイベント順が `ResetDataStream` → PUBLISH_DONE のままである
 ///
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE) の MUST NOT により、RESET_STREAM を
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE) の MUST NOT により、RESET_STREAM を
 /// 送る前に PUBLISH_DONE を送ってはならない。`reset_outgoing_data_stream_at` は
 /// `reliable_size` 付きの RESET_STREAM_AT を指定する経路で、イベントにもそれが乗る。
 ///
@@ -1588,7 +1588,7 @@ fn reset_outgoing_data_stream_keeps_reset_before_publish_done() {
 /// delivery timeout の tick 経路でも、I/O 層が `send_data_stream_closed(Reset)` を呼んだ
 /// 時点で flush 条件を満たせば PUBLISH_DONE が 1 回だけ送られる
 ///
-/// draft-ietf-moq-transport-22 §5.2 (Delivery Timeouts and Data Reliability) の DELIVERY_TIMEOUT で
+/// draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability) の DELIVERY_TIMEOUT で
 /// Session が `ResetDataStream` を発行した後、I/O 層がワイヤ RESET_STREAM を送って
 /// `send_data_stream_closed(Reset)` を呼ぶ契約である (§9.5.1 の MUST を果たす)。
 #[test]
@@ -1642,7 +1642,7 @@ fn pending_publish_done_flushed_after_delivery_timeout_reset() {
 /// REQUEST_UPDATE 失敗応答で subscription が Terminated になるとき、open 中の fill fetch
 /// stream は同時に reset されるため、fill stream が保留 PUBLISH_DONE の flush を妨げない
 ///
-/// draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams): "When the
+/// draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams): "When the
 /// subscription is cancelled, the publisher MUST reset any open fill fetch streams." この reset が
 /// Terminated への遷移と同じ箇所 (`send_err_for_subscription`) で先に行われるため、
 /// `send_request_error` の保留判定 (`has_open_outgoing_data_streams_for_request`) に fill fetch
@@ -1732,7 +1732,7 @@ fn request_error_resets_open_fill_streams_before_publish_done() {
 /// アプリが stream を閉じないまま `forget_subscription` を呼んだ場合、保留中の
 /// PUBLISH_DONE が push されずに破棄されること
 ///
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE): "A sender MUST NOT send PUBLISH_DONE
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE): "A sender MUST NOT send PUBLISH_DONE
 /// until it has closed all streams it will ever open..." の MUST NOT により、stream が
 /// 閉じるまで PUBLISH_DONE を送れない。stream を閉じないまま subscription を破棄した
 /// 場合は、§9.5.1 の MUST (REQUEST_UPDATE 失敗時、publisher は PUBLISH_DONE (UPDATE_FAILED)
@@ -1830,7 +1830,7 @@ fn pending_publish_done_discarded_on_forget_subscription() {
 
 /// PUBLISH 経路: publisher (client) が REQUEST_UPDATE 失敗応答として REQUEST_ERROR を送ると、
 /// PUBLISH_DONE(UPDATE_FAILED) が REQUEST_ERROR 直後に自動送信される
-/// (draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions))
+/// (draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions))
 #[test]
 fn send_request_error_for_publish_path_in_established_sends_publish_done() {
     let (mut client, mut server) = establish_pair();
@@ -1915,7 +1915,7 @@ fn send_request_error_for_publish_path_in_established_sends_publish_done() {
 
 /// published_stream_count > 0 の場合、PUBLISH_DONE(UPDATE_FAILED) の stream_count に
 /// publisher が実際に開いた stream 数が反映される
-/// (draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions) / §9.9 (PUBLISH_DONE))
+/// (draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions) / §9.9 (PUBLISH_DONE))
 #[test]
 fn send_request_error_in_established_with_open_streams_uses_published_stream_count() {
     let (mut client, mut server) = establish_pair();
@@ -2142,7 +2142,7 @@ fn request_error_received_event_emitted_for_pending_subscription() {
     );
 }
 
-/// draft-ietf-moq-transport-22 §3.1 (Subscriptions):
+/// draft-ietf-moq-transport-23 §3.1 (Subscriptions):
 /// REQUEST_UPDATE は Established 状態の self loop として定義されており、
 /// Pending(Subscriber) (自側 SUBSCRIBE 送信後 SUBSCRIBE_OK 未受信) からは送信できない。
 #[test]
@@ -2266,7 +2266,7 @@ fn peer_request_update_in_pending_publisher_closes_session() {
     assert_eq!(server.state(), SessionState::Closing);
 }
 
-/// draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE): "A subscriber can also send REQUEST_UPDATE to
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): "A subscriber can also send REQUEST_UPDATE to
 /// modify parameters of a subscription established with PUBLISH."
 /// PUBLISH で確立された subscription に対して、subscriber 側 (non-initiator) から
 /// REQUEST_UPDATE を送れる。
@@ -2326,7 +2326,7 @@ fn send_request_update_by_subscriber_on_publish_established_subscription() {
     client
         .recv_stream_message(rid, upd_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1540: REQUEST_UPDATE のパラメータは pending_update_params に蓄積される
+    // draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1540: REQUEST_UPDATE のパラメータは pending_update_params に蓄積される
     let pending = client
         .subscription(rid)
         .expect("テストフィクスチャの前提条件を満たす")
@@ -2384,7 +2384,7 @@ fn send_request_ok_by_publisher_on_subscribe_established_subscription_succeeds()
     );
 }
 
-/// draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1540, draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions): 同一サブスクリプション上の複数 REQUEST_UPDATE が
+/// draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1540, draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions): 同一サブスクリプション上の複数 REQUEST_UPDATE が
 /// 合体 (coalesce) される。後の値が前を上書きし、累積結果のみが適用される。
 #[test]
 fn multiple_request_updates_are_coalesced() {
@@ -2523,7 +2523,7 @@ fn multiple_request_updates_are_coalesced() {
     assert!(sub.pending_update_params.is_empty());
 }
 
-/// draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1540: REQUEST_UPDATE 合体後に REQUEST_ERROR で応答すると
+/// draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1540: REQUEST_UPDATE 合体後に REQUEST_ERROR で応答すると
 /// pending_update_params が破棄される。
 #[test]
 fn request_error_discards_coalesced_pending_params() {
@@ -2592,7 +2592,7 @@ fn request_error_discards_coalesced_pending_params() {
     );
 }
 
-/// draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1583:
+/// draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1583:
 /// REQUEST_UPDATE で購読が再開された (PAUSED 1→0) 後、STOP_SENDING で停止された
 /// サブグループを publisher が再オープンできる
 #[test]
@@ -2678,7 +2678,7 @@ fn resume_allows_reopen_of_stopped_by_peer_subgroup() {
             .paused
     );
 
-    // publisher (server) が同じサブグループを再オープンできる (draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1583)
+    // publisher (server) が同じサブグループを再オープンできる (draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1583)
     // 再オープン成功自体が StoppedByPeer 記録の裏付けになる (他状態からは再オープン不可)
     let stream_id2 = DataStreamId(61);
     server
@@ -2691,7 +2691,7 @@ fn resume_allows_reopen_of_stopped_by_peer_subgroup() {
 }
 
 /// 受信側対称性: SUBSCRIBE 経由 (peer=publisher, self=subscriber) で peer が
-/// REQUEST_UPDATE を送ってきた場合、publisher は draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE) の送信資格がないので
+/// REQUEST_UPDATE を送ってきた場合、publisher は draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE) の送信資格がないので
 /// PROTOCOL_VIOLATION でセッションを閉じる。
 #[test]
 fn peer_request_update_from_publisher_on_subscribe_closes_session() {
@@ -2776,7 +2776,7 @@ fn send_request_update_rejects_invalid_paused_value() {
 /// send_request_update に不正な Location Filter を渡すと SESSION_PROTOCOL_VIOLATION が返り、
 /// 値の検証失敗時に delivery timeout と paused が適用されないこと
 ///
-/// draft-ietf-moq-transport-22 §3.3.1 (Location Filters): 定義された serialization と
+/// draft-ietf-moq-transport-23 §3.3.1 (Location Filters): 定義された serialization と
 /// 一致しない LOCATION_FILTER は受信側の MUST で session close になるが、ローカル API の
 /// 送信検証では同じ `SESSION_PROTOCOL_VIOLATION` コードの `Err` を返す (peer に未送信のため fail しない)。
 #[test]
@@ -2915,7 +2915,7 @@ fn send_request_update_applies_valid_location_filter() {
 
 /// REQUEST_UPDATE の Location Filter Type 0x00 (None) で Location Filter が削除されること
 ///
-/// draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter): Type 0x00 は no filter であり、
+/// draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter): Type 0x00 は no filter であり、
 /// REQUEST_UPDATE ではフィルタ削除になる。パラメータ省略時は値 unchanged のため、
 /// フィルタなしの更新では既存フィルタが維持される。
 #[test]
@@ -3018,7 +3018,7 @@ fn send_request_update_no_filter_location_filter_removes_filter() {
 /// peer からの REQUEST_UPDATE (Set → Location Filter Type 0x00) を REQUEST_OK で適用すると
 /// フィルタが削除されること
 ///
-/// draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter): Type 0x00 は no filter であり、
+/// draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter): Type 0x00 は no filter であり、
 /// REQUEST_UPDATE ではフィルタ削除になる。受信側は pending_update_params に合体し、
 /// REQUEST_OK 応答時に適用する。
 #[test]
@@ -3258,7 +3258,7 @@ fn send_request_update_rejects_invalid_paused_before_invalid_filter() {
 #[test]
 fn subscribe_ok_with_expires_zero_clears_expires() {
     // EXPIRES=0 は「期限なし」を意味し、subscription.expires が None のままとなる。
-    // draft-ietf-moq-transport-22 §9.20.16
+    // draft-ietf-moq-transport-23 §9.19.16
     let (mut client, mut server) = establish_pair();
     client.tick(2_000);
 
@@ -3480,11 +3480,11 @@ fn publish_request_update_ok_emits_request_ok_received_event_with_kind_publish()
     );
 }
 
-// ─── Range Filter パラメータスコープ検証 (draft-ietf-moq-transport-22 §3.3.2 (Range Filters)) ────
+// ─── Range Filter パラメータスコープ検証 (draft-ietf-moq-transport-23 §3.3.2 (Range Filters)) ────
 
 /// SUBSCRIBE 確立後に TRACK_PROPERTY_FILTER 付き REQUEST_UPDATE が
 /// PROTOCOL_VIOLATION で拒否されること
-/// (draft-ietf-moq-transport-22 §3.3.2 (Range Filters): TRACK_PROPERTY_FILTER は
+/// (draft-ietf-moq-transport-23 §3.3.2 (Range Filters): TRACK_PROPERTY_FILTER は
 /// SUBSCRIBE_TRACKS 専用であり、SUBSCRIBE の REQUEST_UPDATE には出現不可)
 #[test]
 fn subscribe_request_update_with_track_property_filter_rejected() {
@@ -3529,7 +3529,7 @@ fn subscribe_request_update_with_track_property_filter_rejected() {
 }
 
 /// SUBSCRIBE 確立後に SUBGROUP_FILTER 付き REQUEST_UPDATE が受理されること (回帰)
-/// (draft-ietf-moq-transport-22 §3.3.2 (Range Filters): Range Filter 0x25-0x28 は
+/// (draft-ietf-moq-transport-23 §3.3.2 (Range Filters): Range Filter 0x25-0x28 は
 /// subscription の REQUEST_UPDATE に出現可能)
 #[test]
 fn subscribe_request_update_with_subgroup_filter_accepted() {
@@ -3537,7 +3537,7 @@ fn subscribe_request_update_with_subgroup_filter_accepted() {
         MessageParameter, MessageParameterValue, PARAM_SUBGROUP_FILTER,
     };
     // 送信側は peer が MAX_FILTER_RANGES を宣言していないと Range Filter を送出できない
-    // (draft-ietf-moq-transport-22 §9.1.6)。本テストの主題はパラメータスコープ検証なので、
+    // (draft-ietf-moq-transport-23 §9.1.6)。本テストの主題はパラメータスコープ検証なので、
     // peer (server) 側に上限を宣言させて送出できる状態を作る。
     let (mut client, mut server) =
         establish_pair_with_options(SetupOptions::new(), opts_with(0x06, 1));
@@ -3647,7 +3647,7 @@ fn peer_request_update_with_invalid_paused_closes_session() {
     assert!(!got, "値域違反時に RequestUpdateReceived が発火しないこと");
 }
 
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE) は "A publisher sends a PUBLISH_DONE message"
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE) は "A publisher sends a PUBLISH_DONE message"
 /// と規定するため、subscriber 側 (my_role != Publisher) からの Established subscription に対する
 /// send_request_error は role 逆転で PUBLISH_DONE を誤送出する経路となる。release ビルドでも捕捉して
 /// SESSION_PROTOCOL_VIOLATION でセッションを閉じることを検証する。
@@ -3714,7 +3714,7 @@ fn send_request_error_from_subscriber_side_on_established_closes_session() {
 
 /// REQUEST_UPDATE の相対フィルタが更新時点の largest 基準で解決される
 ///
-/// draft-ietf-moq-transport-22 §3.3.1 (Location Filters): 相対フィルタは解決時点の
+/// draft-ietf-moq-transport-23 §3.3.1 (Location Filters): 相対フィルタは解決時点の
 /// largest で 1 度だけ解決する。{0, 2} まで受信後に RelativeGroup{0} (Next Group) へ
 /// 更新すると filter_start は {1, 0} になる (先頭 {0, 0} ではない)。
 #[test]
@@ -3784,7 +3784,7 @@ fn request_update_relative_filter_resolves_with_current_largest() {
 /// publisher (initiator) がその REQUEST_OK を返せる。responder 側はセッションを閉じずに
 /// 受理し、RequestOkReceived(request_kind=Publish) を発火する。送信側では LARGEST_OBJECT が
 /// 注入され、受信側では EXPIRES と LARGEST_OBJECT が反映される
-/// (draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE), §9.20.17 (LARGEST OBJECT Parameter))。
+/// (draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE), §9.19.17 (LARGEST OBJECT Parameter))。
 #[test]
 fn publish_originated_request_update_ok_round_trip_emits_publish_kind() {
     use shiguredo_moqt::message_parameter::{
@@ -3928,7 +3928,7 @@ fn publish_originated_request_update_ok_round_trip_emits_publish_kind() {
 
 /// PUBLISH 起点で publisher (initiator) が購読を再開する (PAUSED 1→0)
 /// REQUEST_UPDATE に REQUEST_OK を返すと、STOP_SENDING で記録した再オープン禁止が解除される
-/// (draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE), §11.3.2 (Closing Subgroup Streams))。
+/// (draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE), §11.3.2 (Closing Subgroup Streams))。
 #[test]
 fn publish_originated_resume_allows_reopen_of_stopped_by_peer_subgroup() {
     use shiguredo_moqt::message_parameter::{
@@ -4167,7 +4167,7 @@ fn subscribe_originated_initiator_request_ok_in_established_is_rejected() {
 
 /// PUBLISH 起点で publisher (initiator) が REQUEST_OK を返すと、publisher が受信側として
 /// 数える MAX_REQUEST_UPDATES クレジットが回復し、続く REQUEST_UPDATE を受理できる
-/// (draft-ietf-moq-transport-22 §9.1.7 (MAX_REQUEST_UPDATES))。
+/// (draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES))。
 #[test]
 fn publish_originated_request_update_credit_recovers_after_ok() {
     // publisher (client) が MAX_REQUEST_UPDATES=1 を宣言する
@@ -4224,7 +4224,7 @@ fn publish_originated_request_update_credit_recovers_after_ok() {
 }
 
 /// publisher が宣言した MAX_REQUEST_UPDATES=1 を超えて subscriber が REQUEST_UPDATE を送ると
-/// セッションを閉じる (draft-ietf-moq-transport-22 §9.1.7 (MAX_REQUEST_UPDATES))。
+/// セッションを閉じる (draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES))。
 /// 同じ SETUP を使うクレジット回復テストの前提 (上限が実際に適用されること) を固定する。
 #[test]
 fn publish_originated_request_update_exceeding_max_closes_session() {

@@ -1,7 +1,7 @@
 //! MOQT セッション状態機械の型定義
 //!
 //! 1 本の `MOQT Transport Session` に閉じた [`crate::session::core::Session`] 構造体以外の
-//! 全 public 型をまとめる。draft-ietf-moq-transport-22 由来の実装のため将来変更される
+//! 全 public 型をまとめる。draft-ietf-moq-transport-23 由来の実装のため将来変更される
 //! 可能性がある。
 
 use crate::message::{
@@ -13,7 +13,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use hashbrown::HashMap;
 
-/// `Transport Session` における endpoint の役割 (draft-ietf-moq-transport-22 §6.2 (Session establishment))
+/// `Transport Session` における endpoint の役割 (draft-ietf-moq-transport-23 §6.2 (Session establishment))
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     /// セッションを開始する側
@@ -22,7 +22,7 @@ pub enum Role {
     Server,
 }
 
-/// 下位トランスポート種別 (draft-ietf-moq-transport-22 §6.2 (Session establishment))
+/// 下位トランスポート種別 (draft-ietf-moq-transport-23 §6.2 (Session establishment))
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transport {
     /// QUIC connection 直接 (moqt:// URI)
@@ -32,7 +32,7 @@ pub enum Transport {
     /// QMux (draft-ietf-quic-qmux-02) 経由
     ///
     /// 順序保証された 1 本の双方向バイトストリーム (TLS over TCP) の上で、QUIC version 1 の
-    /// ストリーム操作と DATAGRAM 操作を多重化する。draft-ietf-moq-transport-22 §6.2 は
+    /// ストリーム操作と DATAGRAM 操作を多重化する。draft-ietf-moq-transport-23 §6.2 は
     /// 「TCP など他のトランスポート上で直接動かす方法は定義しない」としており、QMux 上の
     /// MOQT を扱うのは individual draft (`refs/moq/draft-nandakumar-moq-qmux-moqt-00.txt`) で
     /// ある。同 draft は MOQT draft-16 を前提としているため、本実装は QUIC version 1 との
@@ -44,7 +44,7 @@ pub enum Transport {
 }
 
 /// この endpoint から見た 1 本の `Transport Session` の状態
-/// (draft-ietf-moq-transport-22 §6.3 (Session initialization))
+/// (draft-ietf-moq-transport-23 §6.3 (Session initialization))
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
     /// 自側の SETUP をイベントとして発行済み、相手側 SETUP 未受信
@@ -87,10 +87,10 @@ impl PeerControlMessageSizeLimit {
     }
 }
 
-/// セッション終了エラー (draft-ietf-moq-transport-22 §16.11.1 (Session Termination Error Codes))
+/// セッション終了エラー (draft-ietf-moq-transport-23 §16.12.1 (Session Termination Error Codes))
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionError {
-    /// Session Termination Error Code (draft-ietf-moq-transport-22 §16.11.1 (Session Termination Error Codes))
+    /// Session Termination Error Code (draft-ietf-moq-transport-23 §16.12.1 (Session Termination Error Codes))
     pub code: u64,
     /// 人間が読むための説明 (英語、静的文字列)
     pub reason: &'static str,
@@ -113,7 +113,7 @@ impl core::error::Error for SessionError {}
 
 /// 送信側 API (`send_*`) が拒否される理由を表す型。
 ///
-/// `SessionError` (draft-ietf-moq-transport-22 §16.11.1 由来) とは分離し、wire への流出を防ぐ。
+/// `SessionError` (draft-ietf-moq-transport-23 §16.12.1 由来) とは分離し、wire への流出を防ぐ。
 /// アプリは本エラーが持つ値を wire コードとして公開 API に渡してはならない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendRequestError {
@@ -208,7 +208,7 @@ pub enum SessionEvent {
     /// REQUEST_OK)、requester 側フォローアップ (REQUEST_UPDATE)、publisher 側通知
     /// (PUBLISH_STATE_NOTIFY) のいずれも含む。
     /// `fin` が true の場合はメッセージ送信後に FIN で閉じる
-    /// (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection):
+    /// (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection):
     /// "it SHOULD send a REQUEST_ERROR and FIN the stream" / §9.9 (PUBLISH_DONE):
     /// "A publisher sends a PUBLISH_DONE message as the final message before closing
     /// the subscription's bidi stream")。
@@ -238,7 +238,7 @@ pub enum SessionEvent {
         parameters: MessageParameters,
     },
     /// peer からの PUBLISH_STATE_NOTIFY を受信した
-    /// (draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY))
+    /// (draft-ietf-moq-transport-23 §9.10 (PUBLISH_STATE_NOTIFY))
     ///
     /// 応答は不要であり、MAX_REQUEST_UPDATES のクレジットも消費しない。
     /// PAUSED / LOCATION_FILTER / LARGEST_OBJECT は session 層で
@@ -262,7 +262,7 @@ pub enum SessionEvent {
     /// `parameters` に載りうるのは、応答の種別ごとの許可集合 (`src/message.rs` の
     /// `SUBSCRIBE_OK_ALLOWED_PARAMS` / `PUBLISH_OK_ALLOWED_PARAMS` /
     /// `REQUEST_UPDATE_OK_ALLOWED_PARAMS` / `TRACK_STATUS_OK_ALLOWED_PARAMS`) にある型だけである。
-    /// 現状は EXPIRES (§9.20.16) と LARGEST_OBJECT (§9.20.17) の 2 種で、
+    /// 現状は EXPIRES (§9.19.16) と LARGEST_OBJECT (§9.19.17) の 2 種で、
     /// REQUEST_OK にその他の型が載ると codec / session 層が PROTOCOL_VIOLATION で閉じる。
     ///
     /// PAUSED (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter)) は REQUEST_OK には
@@ -341,7 +341,7 @@ pub enum SessionEvent {
     },
     /// peer からの REQUEST_ERROR を受信した
     ///
-    /// draft-ietf-moq-transport-22 §9.4 (REQUEST_ERROR): REQUEST_ERROR は任意の request への失敗応答。
+    /// draft-ietf-moq-transport-23 §9.4 (REQUEST_ERROR): REQUEST_ERROR は任意の request への失敗応答。
     /// - `Pending*` 状態からの受信: 初回 SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS への
     ///   失敗応答で、対象 request は Terminated に遷移済み。
     /// - `Established` 状態からの受信: REQUEST_UPDATE への失敗応答。
@@ -351,7 +351,7 @@ pub enum SessionEvent {
     ///   PUBLISH_DONE(UPDATE_FAILED) を自動送信する (ワイヤ順序は
     ///   REQUEST_ERROR → PUBLISH_DONE、open 中の outgoing data stream (subgroup / fill fetch)
     ///   がある場合は §9.9 の MUST NOT に従い全 stream 終端後に送信、
-    ///   draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions))。
+    ///   draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions))。
     ///   残存 outgoing data stream の FIN / RESET の実行 (Session が自動発行した fill fetch
     ///   stream の reset を含む) はアプリケーション層の責務である。
     RequestErrorReceived {
@@ -384,7 +384,7 @@ pub enum SessionEvent {
         error_details: ErrorDetails,
     },
     /// bidi request stream の終端 (または REQUEST_ERROR 等による) で request が
-    /// Terminated 状態に遷移した (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))
+    /// Terminated 状態に遷移した (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))
     ///
     /// `reason` に応じて:
     /// - `PeerStreamFin` / `PeerStreamReset`: 相手側が bidi request stream を閉じた
@@ -411,7 +411,7 @@ pub enum SessionEvent {
         /// 理由
         reason: TerminationReason,
     },
-    /// peer からの GOAWAY を受信した (draft-ietf-moq-transport-22 §9.2 (GOAWAY))
+    /// peer からの GOAWAY を受信した (draft-ietf-moq-transport-23 §9.2 (GOAWAY))
     GoawayReceived {
         /// 移行先セッション URI
         new_session_uri: Vec<u8>,
@@ -424,7 +424,7 @@ pub enum SessionEvent {
     },
     /// 自側が送信した GOAWAY の drain が完了した
     ///
-    /// draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration): GOAWAY を送った側は、
+    /// draft-ietf-moq-transport-23 §6.6.1 (Graceful Session Migration): GOAWAY を送った側は、
     /// open request が無くなった時点で NO_ERROR でセッションを閉じるのが RECOMMENDED である。
     /// [`Session::goaway_drain_ready`](crate::session::core::Session::goaway_drain_ready) を
     /// ポーリングする代わりに、このイベントで早期 close の契機を得る。同じセッションで
@@ -452,7 +452,7 @@ pub enum SessionEvent {
     /// `error_code` は [`STREAM_DELIVERY_TIMEOUT`](crate::error::STREAM_DELIVERY_TIMEOUT) (0x2) を使用する。
     /// `reliable_size` が `Some(n)` の場合は RESET_STREAM_AT を `n` で発行し、
     /// `None` の場合は従来の RESET_STREAM を発行する
-    /// (draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams))。
+    /// (draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams))。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     ResetDataStream {
         /// 対象 data stream の ID
@@ -462,7 +462,7 @@ pub enum SessionEvent {
         /// RESET_STREAM_AT の reliable size (`None` は RESET_STREAM)
         reliable_size: Option<u64>,
     },
-    /// 受信 data stream に STOP_SENDING を送る (draft-ietf-moq-transport-22 §12.2 (Session Termination Codes))
+    /// 受信 data stream に STOP_SENDING を送る (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))
     ///
     /// I/O 層は `stream_id` に相当する uni data stream の受信方向に `error_code` で
     /// STOP_SENDING を送る。`error_code` は §12.5 (Stream Reset Error Codes) のコードを使う。
@@ -490,7 +490,7 @@ pub enum SessionEvent {
         /// Stream Reset Error Code (§12.5)
         error_code: u64,
     },
-    /// fill fetch stream を開く (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))
+    /// fill fetch stream を開く (draft-ietf-moq-transport-23 §3.4 (Fill Semantics))
     ///
     /// publisher が FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE を unpaused で
     /// 処理したとき、または FILL_PARAMETERS 付き PUBLISH を unpaused で送るとき
@@ -507,7 +507,7 @@ pub enum SessionEvent {
     /// にそのまま `request_id` を渡して登録すること。
     /// `request_id` は起因メッセージの Request ID である。SUBSCRIBE / PUBLISH 起因なら
     /// subscription の Request ID、REQUEST_UPDATE 起因なら REQUEST_UPDATE 自身の
-    /// Request ID (draft-ietf-moq-transport-22 §6.4.2.1 (Request ID)) であり、
+    /// Request ID (draft-ietf-moq-transport-23 §6.4.2.1 (Request ID)) であり、
     /// 同じ subscription でも両者は一致しない。
     /// 1 つの subscription に複数本の fill stream が
     /// 同時に開くことがあり、いずれも同じ `request_id` (起因メッセージのもの) を載せる。
@@ -534,7 +534,7 @@ pub enum SessionEvent {
     },
     /// bidi request stream の送信方向を RESET_STREAM で打ち切る
     ///
-    /// draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection):
+    /// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection):
     /// "Implementations cancel a request by abruptly terminating any directions of the
     /// stream that are still open, using RESET_STREAM for a direction they are sending
     /// and STOP_SENDING for a direction they are receiving."
@@ -560,7 +560,7 @@ pub enum SessionEvent {
     },
     /// bidi request stream の受信方向を STOP_SENDING で打ち切る
     ///
-    /// draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection) の
+    /// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection) の
     /// 受信方向の打ち切り。I/O 層は `request_id` に対応する bidi stream の受信方向に
     /// `error_code` で STOP_SENDING を送る。`error_code` は §12.5 のコードを使う。
     /// Session が本イベントを発行するのは、新規に `Terminated` へ遷移させる次の 2 経路である
@@ -587,7 +587,7 @@ pub enum SessionEvent {
     },
     /// bidi request stream の送信方向を FIN で閉じる
     ///
-    /// draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure):
+    /// draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure):
     /// "A FIN sent by the responder after its response and any subsequent messages for the
     /// request signals that the request is complete; if it has not already done so, the
     /// requester SHOULD then send a FIN on its direction, gracefully closing the stream."
@@ -710,7 +710,7 @@ pub enum TrackDataAcceptance {
     UnknownTrackAlias,
     /// キャンセル済み subscription の alias に届いた不要 Object として破棄した
     ///
-    /// draft-ietf-moq-transport-22 §3.1.3 (Track Alias): "Objects can arrive after a
+    /// draft-ietf-moq-transport-23 §3.1.3 (Track Alias): "Objects can arrive after a
     /// subscription has been cancelled. Subscribers SHOULD retain sufficient state to quickly
     /// discard these unwanted Objects, rather than treating them as belonging to an unknown
     /// Track Alias."
@@ -720,17 +720,18 @@ pub enum TrackDataAcceptance {
     Discarded,
     /// 候補 subscription は存在するが、フィルタ再適用の結果どの subscription にも属さなかった
     ///
-    /// draft-ietf-moq-transport-22 §3.1 (Subscriptions): "the subscriber re-applies each
+    /// draft-ietf-moq-transport-23 §3.1 (Subscriptions): "the subscriber re-applies each
     /// subscription's filter to determine which subscription a received Object belongs to."
     /// どのフィルタも通らない Object はセッションを閉じずに破棄する (§3.1 / §11.2 は
     /// 受信側の破棄を要求していないが、紐づけ先がないため受け入れられない)。
     FilteredOut,
 }
 
-/// `Session::recv_datagram` の判定結果 (draft-ietf-moq-transport-22 §11 (Data Streams and Datagrams))
+/// `Session::recv_datagram` の判定結果 (draft-ietf-moq-transport-23 §11 (Data Streams and Datagrams))
 ///
 /// datagram 先頭の type varint で分岐した結果を表す。unknown type は §11 の
-/// "An endpoint that receives an unknown datagram type MUST close the session." により
+/// "An endpoint that receives an unknown datagram type MUST close the session with
+/// INVALID_STREAM_HEADER." により
 /// `Err` になるので、この enum には現れない。
 /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -765,12 +766,12 @@ pub enum FetchHeaderAcceptance {
 
 // ─── bidi request stream のライフサイクル型 ─────────────────
 //
-// draft-ietf-moq-transport-22 §6.3 (Session initialization) / §6.4.2.3 (Request Cancellation and Rejection)
+// draft-ietf-moq-transport-23 §6.3 (Session initialization) / §6.4.2.3 (Request Cancellation and Rejection)
 // bidi request stream のライフサイクルを追跡するための基礎型。
 // 将来 draft が変更される可能性がある。
 
 /// 本実装が扱う bidi request stream の開始メッセージ種別
-/// (draft-ietf-moq-transport-22 §6.3 (Session initialization))
+/// (draft-ietf-moq-transport-23 §6.3 (Session initialization))
 ///
 /// §6.3 は bidi request stream の先頭メッセージを 7 種類 (TRACK_STATUS / SUBSCRIBE / PUBLISH /
 /// FETCH / PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) に限る。本実装が
@@ -779,7 +780,7 @@ pub enum FetchHeaderAcceptance {
 /// `.session` の Track Namespace Prefix なら DOES_NOT_EXIST) で拒否する。
 /// `SUBSCRIBE_TRACKS` は Range Filter を載せられるため、§3.3.2 に違反する場合は
 /// `INVALID_FILTER` で拒否する。`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` は Range Filter を
-/// 許可しないため、載っていた場合は §9.20.1 (Parameter Scope) 違反でセッションを閉じる)。
+/// 許可しないため、載っていた場合は §9.19.1 (Parameter Scope) 違反でセッションを閉じる)。
 /// `request_id` からどの種別で開始されたかを逆引きする用途に使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RequestKind {
@@ -793,7 +794,7 @@ pub enum RequestKind {
     TrackStatus,
 }
 
-/// bidi request stream の終端原因 (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))
+/// bidi request stream の終端原因 (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))
 ///
 /// `Session::recv_request_stream_closed` / `Session::recv_control_stream_closed`
 /// の引数として使う。FIN と RESET_STREAM を区別する。FETCH データ stream (uni)
@@ -833,7 +834,7 @@ pub(crate) fn terminationreason_from_end(end: RequestStreamEnd) -> TerminationRe
     }
 }
 
-/// request が終端した原因 (draft-ietf-moq-transport-22 §3.1 (Subscriptions) / §6.4.2.3 (Request Cancellation and Rejection) / §9.2 (GOAWAY) / §12.1 (Malformed Tracks))
+/// request が終端した原因 (draft-ietf-moq-transport-23 §3.1 (Subscriptions) / §6.4.2.3 (Request Cancellation and Rejection) / §9.2 (GOAWAY) / §12.1 (Malformed Tracks))
 ///
 /// `SessionEvent::RequestTerminated` の payload として使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -882,7 +883,7 @@ pub enum TerminationReason {
         reason: &'static str,
     },
     /// request stream 上の GOAWAY の timeout 満了で自側が送信方向を reset し、request を終端した
-    /// (draft-ietf-moq-transport-22 §9.2 (GOAWAY))
+    /// (draft-ietf-moq-transport-23 §9.2 (GOAWAY))
     ///
     /// §9.2: "When sent on a request stream, the sender SHOULD reset the stream with
     /// GOING_AWAY after the indicated timeout." の reset 時点でまだ終端していなかった
@@ -997,7 +998,7 @@ impl core::error::Error for RecvDataStreamError {}
 
 // ─── Subscription 状態管理 ────────────────────────────────────
 //
-// draft-ietf-moq-transport-22 §3.1 (Subscriptions), §3.1.2 (Subscription State Management)
+// draft-ietf-moq-transport-23 §3.1 (Subscriptions), §3.1.2 (Subscription State Management)
 
 /// Subscription を開始した側 (draft §3.1 (Subscriptions))
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1057,8 +1058,8 @@ pub struct DeadlineTimer {
 impl DeadlineTimer {
     /// 新しい `DeadlineTimer` を作成する。
     ///
-    /// `duration_ms == 0` は即期限切れとして扱う。例えば draft-ietf-moq-transport-22
-    /// §9.20.16（将来の draft で変更される可能性がある）の EXPIRES=0 を「期限なし」
+    /// `duration_ms == 0` は即期限切れとして扱う。例えば draft-ietf-moq-transport-23
+    /// §9.19.16（将来の draft で変更される可能性がある）の EXPIRES=0 を「期限なし」
     /// と扱いたい場合は、呼び出し側で `None` に正規化してから渡すこと。
     pub(crate) fn new(duration_ms: u64, now_ms: Option<u64>) -> Self {
         match now_ms {
@@ -1278,7 +1279,7 @@ mod tests {
 
 /// PUBLISH_DONE 受信後の subscriber-side 補助状態
 ///
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE):
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE):
 /// "Once the timer has expired, the receiver destroys subscription state once all open streams
 /// for the subscription have closed." drain timer 満了後、かつ全 open stream が閉じれば
 /// subscriber は subscription state を破棄する。
@@ -1303,7 +1304,7 @@ pub struct SubscriptionPublishDone {
     pub stream_count_overrun: bool,
 }
 
-/// draft-ietf-moq-transport-22 §5.2 (Delivery Timeouts and Data Reliability) の
+/// draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability) の
 /// OBJECT_DELIVERY_TIMEOUT / SUBGROUP_DELIVERY_TIMEOUT の subscriber 申告 /
 /// publisher 申告 / effective 値の 3 つ組と、§10.1 / §10.2 の per-subgroup オーバーライドを保持する。
 #[derive(Debug, Clone)]
@@ -1325,7 +1326,7 @@ pub struct DeliveryTimeoutState {
     pub effective_object_ms: Option<u64>,
     /// SUBGROUP_DELIVERY_TIMEOUT の effective 値 (ms)
     pub effective_subgroup_ms: Option<u64>,
-    /// subgroup 固有の delivery timeout オーバーライド (draft-ietf-moq-transport-22 §10.1 / §10.2)
+    /// subgroup 固有の delivery timeout オーバーライド (draft-ietf-moq-transport-23 §10.1 / §10.2)
     ///
     /// キー: (group_id, subgroup_id)、値: (subgroup_timeout, object_timeout)。
     /// subgroup の先頭 object に付与された Object Property から抽出した raw 値を保持する。
@@ -1333,7 +1334,7 @@ pub struct DeliveryTimeoutState {
     pub subgroup_overrides: HashMap<(u64, u64), (Option<u64>, Option<u64>)>,
 }
 
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE) の Stream Count 監視と
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE) の Stream Count 監視と
 /// cleanup_ready() の回収判定で連携する 3 フィールドを保持する。
 #[derive(Debug, Clone)]
 pub struct StreamCountState {
@@ -1453,7 +1454,7 @@ pub struct Subscription {
     /// REQUEST_UPDATE / PUBLISH_STATE_NOTIFY で PAUSED を省略した場合は現在値を維持する。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub paused: bool,
-    /// 広告された Largest Object (draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter))
+    /// 広告された Largest Object (draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter))
     ///
     /// peer が SUBSCRIBE_OK / PUBLISH / REQUEST_UPDATE_OK / PUBLISH_STATE_NOTIFY の
     /// LARGEST_OBJECT parameter で広告した値を subscriber 側で保存する。
@@ -1461,7 +1462,7 @@ pub struct Subscription {
     /// `effective_largest_object` の max 導出に使う。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub largest_location: Option<Location>,
-    /// 購読に紐づく object の最大 Location (draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter))
+    /// 購読に紐づく object の最大 Location (draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter))
     ///
     /// draft §3.3.1 (Location Filters) は「Largest Object updates when the first byte
     /// of an Object with a Location larger than the previous value is published or received
@@ -1472,7 +1473,7 @@ pub struct Subscription {
     /// - Publisher: 自端点が送信した subgroup object (`send_subgroup_object`) /
     ///   datagram object (`send_object_datagram`) の (group_id, object_id) 最大値。
     ///
-    /// draft-ietf-moq-transport-22 §9.20.17 は LARGEST_OBJECT parameter が SUBSCRIBE_OK / PUBLISH /
+    /// draft-ietf-moq-transport-23 §9.19.17 は LARGEST_OBJECT parameter が SUBSCRIBE_OK / PUBLISH /
     /// REQUEST_UPDATE_OK / TRACK_STATUS_OK / PUBLISH_STATE_NOTIFY に乗ると規定する。
     /// 自端点が送信する LARGEST_OBJECT 計算に `largest_location` との max を取るために使う。
     pub largest_received_location: Option<Location>,
@@ -1504,7 +1505,7 @@ pub struct Subscription {
     pub default_publisher_priority: Option<u8>,
     /// Track Property の DEFAULT_PUBLISHER_GROUP_ORDER (draft §10.5 (DEFAULT PUBLISHER GROUP ORDER))
     ///
-    /// publisher の選好であり、§9.20.8 の GROUP ORDER Parameter が運ぶ subscriber からの
+    /// publisher の選好であり、§9.19.8 の GROUP ORDER Parameter が運ぶ subscriber からの
     /// 要求 (`group_order`) とは別の値なので、上書きせず別フィールドで保持する。
     /// 宣言されていなければ `None` で、その場合の実効値は §10.5 のデフォルト Ascending (0x1)。
     /// 実効値の解決は [`effective_publisher_group_order`](Self::effective_publisher_group_order)。
@@ -1516,7 +1517,7 @@ pub struct Subscription {
     /// REQUEST_UPDATE 失敗応答 (`send_request_error`) で保留された PUBLISH_DONE
     /// (UPDATE_FAILED) の stream_count
     ///
-    /// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE): "A sender MUST NOT send
+    /// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE): "A sender MUST NOT send
     /// PUBLISH_DONE until it has closed all streams it will ever open..." の MUST NOT と
     /// §9.5.1 の MUST (REQUEST_UPDATE 失敗時、publisher は PUBLISH_DONE (UPDATE_FAILED) を
     /// 送る) を両立するため、open 中の outgoing data stream (subgroup / fill fetch) が
@@ -1530,19 +1531,19 @@ pub struct Subscription {
     /// (reset 後に bidi request stream へ書き込めないため。既に `Terminated` の subscription
     /// でも破棄だけは行う)。
     pub pending_publish_done: Option<u64>,
-    /// Subscription Filter (draft-ietf-moq-transport-22 §3.3.1 (Location Filters), §9.20.9 (LOCATION FILTER Parameter))
+    /// Subscription Filter (draft-ietf-moq-transport-23 §3.3.1 (Location Filters), §9.19.9 (LOCATION FILTER Parameter))
     ///
     /// SUBSCRIBE / REQUEST_UPDATE に含まれる。
-    /// `None` は unfiltered subscription に相当する (draft-ietf-moq-transport-22 §3.3.1 (Location Filters))。
+    /// `None` は unfiltered subscription に相当する (draft-ietf-moq-transport-23 §3.3.1 (Location Filters))。
     pub filter: Option<LocationFilter>,
-    /// Subscriber Priority (draft-ietf-moq-transport-22 §9.20.7 (SUBSCRIBER PRIORITY Parameter))
+    /// Subscriber Priority (draft-ietf-moq-transport-23 §9.19.7 (SUBSCRIBER PRIORITY Parameter))
     ///
     /// SUBSCRIBE / FETCH / PUBLISH_OK / REQUEST_UPDATE に含まれ、動的に変更可能。
     /// 省略時は `None` で、application 層が default (128) を適用する。
     pub subscriber_priority: Option<u8>,
-    /// Group Order (draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter))
+    /// Group Order (draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter))
     ///
-    /// SUBSCRIBE / SUBSCRIBE_TRACKS / FETCH に含まれる。draft-ietf-moq-transport-22 §5.1.1 (Definitions) により
+    /// SUBSCRIBE / SUBSCRIBE_TRACKS / FETCH に含まれる。draft-ietf-moq-transport-23 §5.1.1 (Definitions) により
     /// 確定後は変更不可。
     pub group_order: Option<u8>,
     /// PUBLISH を生じさせた SUBSCRIBE_TRACKS の Request ID
@@ -1726,7 +1727,7 @@ impl PendingUpdateGroup {
     }
 }
 
-/// subscription に適用されている Range Filter 群 (draft-ietf-moq-transport-22 §3.3.2 (Range Filters))
+/// subscription に適用されている Range Filter 群 (draft-ietf-moq-transport-23 §3.3.2 (Range Filters))
 ///
 /// Object 系 Range Filter (0x25-0x28) を型付きで保持する。TRACK_PROPERTY_FILTER (0x29) は
 /// PUBLISH 選別に使うもので subscription の Object 判定には使わないため含めない。
@@ -1773,12 +1774,12 @@ impl SubscriptionRangeFilters {
     }
 }
 
-/// DEFAULT_PUBLISHER_PRIORITY の既定値 (draft-ietf-moq-transport-22 §10.4 (DEFAULT PUBLISHER PRIORITY))
+/// DEFAULT_PUBLISHER_PRIORITY の既定値 (draft-ietf-moq-transport-23 §10.4 (DEFAULT PUBLISHER PRIORITY))
 ///
 /// §10.4: "If omitted, the Default Publisher Priority is 128."
 pub const PUBLISHER_PRIORITY_DEFAULT: u8 = 128;
 
-/// DEFAULT_PUBLISHER_GROUP_ORDER の既定値 Ascending (draft-ietf-moq-transport-22 §10.5 (DEFAULT PUBLISHER GROUP ORDER))
+/// DEFAULT_PUBLISHER_GROUP_ORDER の既定値 Ascending (draft-ietf-moq-transport-23 §10.5 (DEFAULT PUBLISHER GROUP ORDER))
 ///
 /// §10.5: "If omitted, the publisher's preference is Ascending (0x1)."
 pub const DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING: u8 = 0x1;
@@ -1788,7 +1789,7 @@ impl Subscription {
     ///
     /// SUBGROUP_HEADER の DEFAULT_PRIORITY bit が立っている場合は `header_priority` に
     /// `None` を渡す。DEFAULT_PRIORITY bit が立った Object Datagram も同じ解決を使う
-    /// (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram) の「購読を確立した制御メッセージで
+    /// (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram) の「購読を確立した制御メッセージで
     /// 指定された Publisher Priority」がこれにあたる)。
     pub fn resolve_header_publisher_priority(&self, header_priority: Option<u8>) -> u8 {
         header_priority
@@ -1808,7 +1809,7 @@ impl Subscription {
     /// publisher の実効 Group Order 選好を返す (draft §10.5 (DEFAULT PUBLISHER GROUP ORDER))
     ///
     /// 宣言が無ければ既定値 Ascending (0x1)。subscriber からの要求である
-    /// `group_order` (§9.20.8) とは別の値である。
+    /// `group_order` (§9.19.8) とは別の値である。
     pub fn effective_publisher_group_order(&self) -> u8 {
         self.default_publisher_group_order
             .unwrap_or(DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING)
@@ -1909,7 +1910,8 @@ impl Subscription {
 
 // ─── Fetch 状態管理 ───────────────────────────────────────────
 //
-// draft-ietf-moq-transport-22 §3.2.4 (Fetch State Management) / §9.11 (FETCH) / §9.12 (FETCH_OK)
+// draft-ietf-moq-transport-23 §3.2.4 (Fetch State Management) / §9.11 (FETCH) / §9.3 (REQUEST_OK)
+// (FETCH の成功応答は REQUEST_OK で届き、FETCH_OK はその別名である (§1.5))
 
 /// Fetch の状態機械 (draft §3.2.4 (Fetch State Management))
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1927,7 +1929,7 @@ pub enum FetchState {
     /// REQUEST_ERROR / STOP_SENDING / FIN / RESET_STREAM、または request stream 上の
     /// GOAWAY の deadline 満了 ([`TerminationReason::GoawayTimeout`]) で終了
     ///
-    /// draft-ietf-moq-transport-22 §3.2 (Fetch) により、FIN 後に
+    /// draft-ietf-moq-transport-23 §3.2 (Fetch) により、FIN 後に
     /// FETCH_OK / REQUEST_ERROR が届いても `Terminated` のまま受理する
     /// (FETCH_OK 受理時は終端情報を保存する。REQUEST_ERROR 受理時はフラグ設定と
     /// イベント発行のみ)。`Established` に戻すと fetch が回収不能になるため。
@@ -2002,8 +2004,8 @@ pub struct Fetch {
     ///
     /// `send_fetch_data_stream_closed` が呼ばれた時点で `true` になる (FIN と RESET の
     /// 両方の終端通知を含む)。「1 本以上の outgoing stream の終端」を意味し、全ストリーム
-    /// の終端はアプリの責務 (draft-ietf-moq-transport-22 §11 は 1 つの FETCH に
-    /// 対する応答を 1 本のデータストリームに限定する)。draft-ietf-moq-transport-22 §3.2.4
+    /// の終端はアプリの責務 (draft-ietf-moq-transport-23 §11 は 1 つの FETCH に
+    /// 対する応答を 1 本のデータストリームに限定する)。draft-ietf-moq-transport-23 §3.2.4
     /// (Fetch State Management): "It can remove all FETCH state after closing the data
     /// stream with a FIN." に従い、データストリーム終端済みの publisher 側 fetch は
     /// `Established` のままでも破棄可能にするための記録。subscriber 側は常に false のまま
@@ -2030,17 +2032,17 @@ pub struct Fetch {
     /// subscriber 側は常に `None` のまま。
     /// この節番号・規則は draft 由来であり将来 draft 改版で変わる可能性がある。
     pub peer_stop_sending_error_code: Option<Option<u64>>,
-    /// Subscriber Priority (draft-ietf-moq-transport-22 §9.20.7 (SUBSCRIBER PRIORITY Parameter))
+    /// Subscriber Priority (draft-ietf-moq-transport-23 §9.19.7 (SUBSCRIBER PRIORITY Parameter))
     ///
     /// SUBSCRIBE / FETCH / PUBLISH_OK / REQUEST_UPDATE に含まれ、動的に変更可能。
     /// 省略時は `None` で、application 層が default (128) を適用する。
     pub subscriber_priority: Option<u8>,
-    /// Group Order (draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter))
+    /// Group Order (draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter))
     ///
-    /// SUBSCRIBE / SUBSCRIBE_TRACKS / FETCH に含まれる。draft-ietf-moq-transport-22 §5.1.1 (Definitions) により
+    /// SUBSCRIBE / SUBSCRIBE_TRACKS / FETCH に含まれる。draft-ietf-moq-transport-23 §5.1.1 (Definitions) により
     /// 確定後は変更不可。
     pub group_order: Option<u8>,
-    /// INCLUDE_PROPERTIES (draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter))
+    /// INCLUDE_PROPERTIES (draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter))
     ///
     /// peer が FETCH で指定した値。`Some(0)` のとき FETCH_OK の Track Properties を
     /// 空にする。`None` (省略時) は default 1 として扱い従来どおり含める。
@@ -2108,7 +2110,7 @@ pub struct TrackStatusEntry {
     /// 対象 Track 名
     pub track_name: Vec<u8>,
     /// peer が TRACK_STATUS で指定した INCLUDE_PROPERTIES
-    /// (draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter))
+    /// (draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter))
     ///
     /// 自側が responder のときだけ値が入る。`Some(0)` のとき TRACK_STATUS_OK の
     /// Track Properties を空にする。`None` (省略時) は default 1 として扱い従来どおり含める。
@@ -2161,9 +2163,9 @@ impl TrackStatusEntry {
 
 // ─── GOAWAY / Migration ────────────────────────────────────
 //
-// draft-ietf-moq-transport-22 §6.6 (Termination), §6.6.1 (Graceful Session Migration), §9.2 (GOAWAY)
+// draft-ietf-moq-transport-23 §6.6 (Termination), §6.6.1 (Graceful Session Migration), §9.2 (GOAWAY)
 
-/// New Session URI の最大長 (draft-ietf-moq-transport-22 §9.2 (GOAWAY))
+/// New Session URI の最大長 (draft-ietf-moq-transport-23 §9.2 (GOAWAY))
 pub const MAX_NEW_SESSION_URI_LENGTH: usize = 8192;
 
 /// peer から受信した GOAWAY の情報

@@ -1,6 +1,6 @@
 //! Request ID 管理
 //!
-//! draft-ietf-moq-transport-22 §6.4.2.1 (Request ID) に基づく。
+//! draft-ietf-moq-transport-23 §6.4.2.1 (Request ID) に基づく。
 //! draft 由来の実装のため将来変更される可能性がある。
 
 use alloc::collections::BTreeSet;
@@ -11,7 +11,7 @@ use super::types::{Role, SessionError};
 
 /// Request ID 採番器 (自側)
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.1 (Request ID):
+/// draft-ietf-moq-transport-23 §6.4.2.1 (Request ID):
 /// - Client は偶数 (0, 2, 4, ...) を採番
 /// - Server は奇数 (1, 3, 5, ...) を採番
 /// - 各エンドポイントは +2 ずつインクリメント
@@ -53,7 +53,7 @@ impl RequestIdGenerator {
 
 /// 相手側の Request ID 追跡器
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.1 (Request ID):
+/// draft-ietf-moq-transport-23 §6.4.2.1 (Request ID):
 /// - parity が送信者の role と合わない → INVALID_REQUEST_ID
 /// - 重複した Request ID → INVALID_REQUEST_ID
 ///

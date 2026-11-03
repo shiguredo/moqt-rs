@@ -67,7 +67,7 @@ fn peer_authority_over_webtransport_rejected() {
 
 /// WebTransport で自側 (Client) が AUTHORITY を送ろうとしたら INVALID_AUTHORITY
 ///
-/// draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY): "It MUST NOT be used by the
+/// draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY): "It MUST NOT be used by the
 /// server, or when WebTransport is used."
 /// validate_setup_role_transport 自側経路の単体テスト。
 #[test]
@@ -83,7 +83,7 @@ fn local_authority_over_webtransport_rejected() {
 
 /// WebTransport で自側 (Client) が PATH を送ろうとしたら INVALID_PATH
 ///
-/// draft-ietf-moq-transport-22 §9.1.2 (PATH): "It MUST NOT be used by the
+/// draft-ietf-moq-transport-23 §9.1.2 (PATH): "It MUST NOT be used by the
 /// server, or when WebTransport is used."
 /// validate_setup_role_transport 自側経路の単体テスト。
 #[test]
@@ -99,7 +99,7 @@ fn local_path_over_webtransport_rejected() {
 
 /// WebTransport で自側 (Server) が AUTHORITY を送ろうとしたら INVALID_AUTHORITY
 ///
-/// draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY): "It MUST NOT be used by the
+/// draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY): "It MUST NOT be used by the
 /// server, or when WebTransport is used."
 /// validate_setup_role_transport 自側 Server 経路の単体テスト。
 #[test]
@@ -115,7 +115,7 @@ fn local_authority_over_webtransport_rejected_server() {
 
 /// WebTransport で自側 (Server) が PATH を送ろうとしたら INVALID_PATH
 ///
-/// draft-ietf-moq-transport-22 §9.1.2 (PATH): "It MUST NOT be used by the
+/// draft-ietf-moq-transport-23 §9.1.2 (PATH): "It MUST NOT be used by the
 /// server, or when WebTransport is used."
 /// validate_setup_role_transport 自側 Server 経路の単体テスト。
 #[test]
@@ -147,7 +147,7 @@ fn peer_server_sending_path_rejected() {
 
 /// Client 視点: Server から AUTHORITY 付きの SETUP が来たら INVALID_AUTHORITY (Server 送信禁止)
 ///
-/// draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY): AUTHORITY は Client のみ送信可能で、Server が送ると INVALID_AUTHORITY。
+/// draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY): AUTHORITY は Client のみ送信可能で、Server が送ると INVALID_AUTHORITY。
 /// PATH 版 (`peer_server_sending_path_rejected`) と対をなす Server-only 検証経路
 /// (`validate_setup_role_transport`) を踏む。
 #[test]
@@ -237,7 +237,7 @@ fn peer_malformed_authority_rejected() {
 
 /// AUTHORIZATION_TOKEN REGISTER を含む SETUP を受信すると peer cache に登録される
 ///
-/// draft-ietf-moq-transport-22 §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE): `peer_auth_token_cache` の上限は「自側」の MAX_AUTH_TOKEN_CACHE_SIZE。
+/// draft-ietf-moq-transport-23 §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE): `peer_auth_token_cache` の上限は「自側」の MAX_AUTH_TOKEN_CACHE_SIZE。
 #[test]
 fn peer_authorization_token_register_populates_cache() {
     let mut server_opts = SetupOptions::new();
@@ -269,7 +269,7 @@ fn peer_authorization_token_register_populates_cache() {
 }
 
 /// 自側 MAX_AUTH_TOKEN_CACHE_SIZE を超える peer REGISTER は登録されないが、
-/// セッションは閉じない (draft-ietf-moq-transport-22 §9.1.4 (AUTHORIZATION TOKEN): SETUP では USE_VALUE として扱う)。
+/// セッションは閉じない (draft-ietf-moq-transport-23 §9.1.4 (AUTHORIZATION TOKEN): SETUP では USE_VALUE として扱う)。
 /// peer 側の MAX が大きくても、保持判定は自側の MAX で行う。
 #[test]
 fn peer_authorization_token_register_over_self_limit_is_ignored() {
@@ -510,11 +510,11 @@ fn next_local_request_id_requires_established() {
     assert_eq!(client.state(), SessionState::LocalSetupSent);
 }
 
-// ─── peer_max_auth_token_cache_size (draft-ietf-moq-transport-22 §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE)) ─────
+// ─── peer_max_auth_token_cache_size (draft-ietf-moq-transport-23 §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE)) ─────
 
 /// peer SETUP 未受信時の `peer_max_auth_token_cache_size` はデフォルト 0 を返す
 ///
-/// draft-ietf-moq-transport-22 §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE): 未指定は 0。
+/// draft-ietf-moq-transport-23 §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE): 未指定は 0。
 #[test]
 fn peer_max_auth_token_cache_size_defaults_to_zero_before_setup() {
     // 自側が MAX を宣言していても、peer SETUP 未受信なら 0 (自側 MAX へフォールバックしない)

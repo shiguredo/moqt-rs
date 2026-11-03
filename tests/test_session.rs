@@ -227,7 +227,7 @@ fn take_send_on_stream_with_fin(s: &mut Session) -> (u64, ControlMessage, bool) 
 
 /// `ControlMessage::RequestUpdate` の Request ID を取り出す
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.1 (Request ID): REQUEST_UPDATE は購読とは別に
+/// draft-ietf-moq-transport-23 §6.4.2.1 (Request ID): REQUEST_UPDATE は購読とは別に
 /// 新しい Request ID を消費する。この値は `SendOnStream` の request_id (送信先 bidi
 /// request stream の識別子) とは異なる。
 fn request_update_request_id(message: &ControlMessage) -> u64 {
@@ -298,7 +298,7 @@ fn ns(parts: &[&[u8]]) -> TrackNamespace {
 
 /// FETCH の range 指定 (AbsoluteRangeWithEnd) を持つ MessageParameters を作る
 ///
-/// draft-ietf-moq-transport-22 §9.11 (FETCH): range は LOCATION_FILTER
+/// draft-ietf-moq-transport-23 §9.11 (FETCH): range は LOCATION_FILTER
 /// パラメータで指定する。`end.group_id < start.group_id` の場合は delta が
 /// 求まらないため panic する (テストフィクスチャの前提)。
 fn fetch_range_params(start: Location, end: Location) -> MessageParameters {
@@ -503,7 +503,7 @@ fn one_range_subgroup_filter_with_set_id(set_id: u8) -> MessageParameter {
 /// MAX_FILTER_RANGES を宣言する server 用 SetupOptions を作る
 ///
 /// Range Filter を送るには peer (server) 側の宣言が必要
-/// (draft-ietf-moq-transport-22 §9.1.6 (MAX FILTER RANGES))。
+/// (draft-ietf-moq-transport-23 §9.1.6 (MAX FILTER RANGES))。
 fn max_filter_options() -> SetupOptions {
     let mut opts = SetupOptions::new();
     opts.push(SetupOption {

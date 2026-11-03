@@ -58,18 +58,18 @@ const MSG_PUBLISH_SKIPPED: u64 = 0x0F;
 const MSG_SUBSCRIBE_NAMESPACE: u64 = 0x50;
 const MSG_SUBSCRIBE_TRACKS: u64 = 0x51;
 
-// ─── パラメータスコープテーブル (draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope)) ────
+// ─── パラメータスコープテーブル (draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope)) ────
 
-/// SUBSCRIBE で許可されるパラメータ型 (draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope))
+/// SUBSCRIBE で許可されるパラメータ型 (draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope))
 ///
 /// 送信側の `send_subscribe` (src/session/subscription/send.rs) が request_id 発行前に
 /// スコープ検証するため、および受信側の `Session::accept_peer_request` が API 経路で
 /// 検証するために `pub(crate)` で公開している。
 pub(crate) const SUBSCRIBE_ALLOWED_PARAMS: &[u64] = &[
     PARAM_AUTHORIZATION_TOKEN,
-    // draft-ietf-moq-transport-22 §9.20.6 (RENDEZVOUS TIMEOUT Parameter):
-    // "The RENDEZVOUS_TIMEOUT parameter (Parameter Type 0x04) MAY appear in a SUBSCRIBE
-    // message." 本ライブラリは値を解釈しないが、定義済みパラメータのため受理する。
+    // draft-ietf-moq-transport-23 §9.19.6 (RENDEZVOUS TIMEOUT Parameter):
+    // "It MAY appear in a SUBSCRIBE message." 本ライブラリは値を解釈しないが、
+    // 定義済みパラメータのため受理する。
     PARAM_RENDEZVOUS_TIMEOUT,
     PARAM_OBJECT_DELIVERY_TIMEOUT,
     PARAM_SUBGROUP_DELIVERY_TIMEOUT,
@@ -86,14 +86,14 @@ pub(crate) const SUBSCRIBE_ALLOWED_PARAMS: &[u64] = &[
     PARAM_OBJECT_PROPERTY_FILTER,
 ];
 
-/// SUBSCRIBE_OK で許可されるパラメータ型 (draft-ietf-moq-transport-22 §9.20.16 (EXPIRES Parameter) /
-/// §9.20.17 (LARGEST OBJECT Parameter) の MAY appear 列挙)
+/// SUBSCRIBE_OK で許可されるパラメータ型 (draft-ietf-moq-transport-23 §9.19.16 (EXPIRES Parameter) /
+/// §9.19.17 (LARGEST OBJECT Parameter) の MAY appear 列挙)
 ///
 /// 送信側の `send_subscribe_ok` (src/session/subscription/send.rs) が状態遷移前に
 /// スコープ検証するために `pub(crate)` で公開している。
 pub(crate) const SUBSCRIBE_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LARGEST_OBJECT];
 
-/// REQUEST_OK で許可されるパラメータ型 (draft-ietf-moq-transport-22 §9.3 (REQUEST_OK))
+/// REQUEST_OK で許可されるパラメータ型 (draft-ietf-moq-transport-23 §9.3 (REQUEST_OK))
 ///
 /// これは codec 層が REQUEST_OK のワイヤ妥当性検証に用いる許可集合である。
 /// §9.3 は応答 context ごとの許可パラメータを列挙し、その和集合は `EXPIRES` と
@@ -111,22 +111,22 @@ const REQUEST_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LARGEST_OBJECT]
 
 // ─── REQUEST_OK の応答 context 別許可パラメータ集合 ─────────────────
 //
-// draft-ietf-moq-transport-22 §9.3 (REQUEST_OK): REQUEST_OK (Type 0x07) は PUBLISH_OK /
+// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): REQUEST_OK (Type 0x07) は PUBLISH_OK /
 // REQUEST_UPDATE_OK / TRACK_STATUS_OK が共有する単一ワイヤメッセージ。
 // draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope) は許可されない context に出現したパラメータの受信を
 // INVALID_PARAMETER でクローズすることを MUST で要求する。各集合は §9.3 の context 別列挙と
 // 各 Parameter 節の "MAY appear in" から導出している (将来 draft 改版で変わりうる)。
 
-/// PUBLISH_OK context で許可されるパラメータ型 (draft-ietf-moq-transport-22 §9.20.16 (EXPIRES Parameter) の MAY appear 列挙)
+/// PUBLISH_OK context で許可されるパラメータ型 (draft-ietf-moq-transport-23 §9.19.16 (EXPIRES Parameter) の MAY appear 列挙)
 ///
-/// draft-ietf-moq-transport-22 Appendix A.3 #1790 (Subscription parameters appear in
+/// draft-ietf-moq-transport-23 Appendix A.4 #1790 (Subscription parameters appear in
 /// REQUEST_UPDATE, not PUBLISH_OK) により、subscription 更新用パラメータは
 /// REQUEST_UPDATE (要求) に出現し、PUBLISH_OK は EXPIRES のみとなる。
 pub(crate) const PUBLISH_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES];
 
 /// REQUEST_UPDATE_OK context で許可されるパラメータ型 (subscription / fetch 共通)
 ///
-/// draft-ietf-moq-transport-22 §9.20.16 (EXPIRES Parameter) / draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) のみ許可。
+/// draft-ietf-moq-transport-23 §9.19.16 (EXPIRES Parameter) / draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter) のみ許可。
 pub(crate) const REQUEST_UPDATE_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LARGEST_OBJECT];
 
 /// TRACK_STATUS_OK context で許可されるパラメータ型
@@ -139,19 +139,19 @@ pub(crate) const TRACK_STATUS_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM
 
 // ─── REQUEST_UPDATE の context 別許可パラメータ集合 ─────────────────
 //
-// draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope): REQUEST_UPDATE は
+// draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): REQUEST_UPDATE は
 // subscription / fetch / track status の 3 種で許可されるが、context ごとに
-// 許可パラメータが異なる。各定数は draft-ietf-moq-transport-22 §9.20.2 以降の各 Parameter 節の
+// 許可パラメータが異なる。各定数は draft-ietf-moq-transport-23 §9.19.2 以降の各 Parameter 節の
 // "MAY appear in" スコープ定義から導出している (将来 draft 改版で変わりうる)。
 // エンコード層の REQUEST_UPDATE_ALLOWED_PARAMS は全 context の和集合であり、
 // context 別の厳密な検証はセッション層でこれらの定数を用いて行う。
 
-/// FETCH context の REQUEST_UPDATE で許可されるパラメータ型 (draft-ietf-moq-transport-22 §9.20.2 (AUTHORIZATION TOKEN Parameter) / §9.20.7 (SUBSCRIBER PRIORITY Parameter))
+/// FETCH context の REQUEST_UPDATE で許可されるパラメータ型 (draft-ietf-moq-transport-23 §9.19.2 (AUTHORIZATION TOKEN Parameter) / §9.19.7 (SUBSCRIBER PRIORITY Parameter))
 pub(crate) const FETCH_UPDATE_ALLOWED_PARAMS: &[u64] =
     &[PARAM_AUTHORIZATION_TOKEN, PARAM_SUBSCRIBER_PRIORITY];
 
 /// SUBSCRIBE (Subscription) context の REQUEST_UPDATE で許可されるパラメータ型
-/// (draft-ietf-moq-transport-22 §3.3.2 (Range Filters): Range Filter 0x25-0x28 は
+/// (draft-ietf-moq-transport-23 §3.3.2 (Range Filters): Range Filter 0x25-0x28 は
 /// subscription の REQUEST_UPDATE に出現可能だが、TRACK_PROPERTY_FILTER (0x29) は
 /// SUBSCRIBE_TRACKS 専用であるため除外する)
 pub(crate) const SUBSCRIPTION_UPDATE_ALLOWED_PARAMS: &[u64] = &[
@@ -169,7 +169,7 @@ pub(crate) const SUBSCRIPTION_UPDATE_ALLOWED_PARAMS: &[u64] = &[
     PARAM_OBJECT_PROPERTY_FILTER,
 ];
 
-/// REQUEST_UPDATE で許可されるパラメータ型 (draft-ietf-moq-transport-22 §3.3.2 (Range Filters): subscriber からの REQUEST_UPDATE に Range Filter 出現可能)
+/// REQUEST_UPDATE で許可されるパラメータ型 (draft-ietf-moq-transport-23 §3.3.2 (Range Filters): subscriber からの REQUEST_UPDATE に Range Filter 出現可能)
 const REQUEST_UPDATE_ALLOWED_PARAMS: &[u64] = &[
     PARAM_AUTHORIZATION_TOKEN,
     PARAM_OBJECT_DELIVERY_TIMEOUT,
@@ -209,7 +209,7 @@ const REQUEST_UPDATE_ALLOWED_PARAMS: &[u64] = &[
 /// よる受理・拒否判断へ進む。送信側は SUBSCRIBE_TRACKS 起因の PUBLISH にだけ指定する
 /// (`Session::send_publish` の doc 参照)。
 ///
-/// draft-ietf-moq-transport-22 §3.6.2 (Parameters on SUBSCRIBE_TRACKS):
+/// draft-ietf-moq-transport-23 §3.6.2 (Parameters on SUBSCRIBE_TRACKS):
 /// SUBSCRIBE_TRACKS 由来の PUBLISH には SUBSCRIBE_TRACKS の Parameters が
 /// initial subscription parameters として明示的に載る (AUTHORIZATION TOKEN を除く)。
 /// 受信した PUBLISH が SUBSCRIBE_TRACKS 起因かを判別する制御は行わず、全 PUBLISH で
@@ -247,9 +247,9 @@ pub(crate) const PUBLISH_STATE_NOTIFY_ALLOWED_PARAMS: &[u64] =
 
 /// FETCH で許可されるパラメータ型
 ///
-/// draft-ietf-moq-transport-22 §9.11 (FETCH): range は LOCATION_FILTER
-/// パラメータで指定する。`PARAM_FILL_TIMEOUT` は draft-ietf-moq-transport-22
-/// §9.20.5 で FETCH 直下と FILL_PARAMETERS 内の両方に出現可能なため残す。
+/// draft-ietf-moq-transport-23 §9.11 (FETCH): range は LOCATION_FILTER
+/// パラメータで指定する。`PARAM_FILL_TIMEOUT` は draft-ietf-moq-transport-23
+/// §9.19.5 で FETCH 直下と FILL_PARAMETERS 内の両方に出現可能なため残す。
 /// Range Filter 0x25-0x28 は FETCH に出現可能 (§3.3.2 (Range Filters))。
 /// TRACK_PROPERTY_FILTER (0x29) は SUBSCRIBE_TRACKS 専用のため含めない。
 ///
@@ -301,13 +301,13 @@ pub(crate) const TRACK_STATUS_ALLOWED_PARAMS: &[u64] =
 
 /// PUBLISH_NAMESPACE で許可されるパラメータ型
 ///
-/// draft-ietf-moq-transport-22 §9.14 (PUBLISH_NAMESPACE): "The only parameter that can appear
+/// draft-ietf-moq-transport-23 §9.13 (PUBLISH_NAMESPACE): "The only parameter that can appear
 /// in a PUBLISH_NAMESPACE is AUTHORIZATION_TOKEN."
 const PUBLISH_NAMESPACE_ALLOWED_PARAMS: &[u64] = &[PARAM_AUTHORIZATION_TOKEN];
 
 /// SUBSCRIBE_NAMESPACE で許可されるパラメータ型
 ///
-/// draft-ietf-moq-transport-22 §9.15 (SUBSCRIBE_NAMESPACE): "The only parameter that can
+/// draft-ietf-moq-transport-23 §9.14 (SUBSCRIBE_NAMESPACE): "The only parameter that can
 /// appear in a SUBSCRIBE_NAMESPACE is AUTHORIZATION_TOKEN."
 const SUBSCRIBE_NAMESPACE_ALLOWED_PARAMS: &[u64] = &[PARAM_AUTHORIZATION_TOKEN];
 
@@ -374,7 +374,7 @@ pub(crate) fn unsupported_request_allowed_params(type_id: u64) -> Option<&'stati
 ///
 /// SUBSCRIBE / PUBLISH / TRACK_STATUS はいずれも Request ID (vi64) の次に Track Namespace が
 /// 続く (PUBLISH はその後に Track Name などが続き、TRACK_STATUS は SUBSCRIBE と同じ
-/// フィールド配置。draft-ietf-moq-transport-22 §9 各メッセージ節)。
+/// フィールド配置。draft-ietf-moq-transport-23 §9 各メッセージ節)。
 fn encode_request_id_and_namespace(
     request_id: u64,
     ns: &TrackNamespace,
@@ -395,7 +395,7 @@ fn decode_request_id_and_namespace(
     Ok((request_id, ns))
 }
 
-/// Reason Phrase (draft-ietf-moq-transport-22 §8.5 (Reason Phrase Structure)) — UTF-8 文字列、最大 1024 バイト。
+/// Reason Phrase (draft-ietf-moq-transport-23 §8.5 (Reason Phrase Structure)) — UTF-8 文字列、最大 1024 バイト。
 /// 将来 draft 改定で上限値や節番号が変更される可能性がある。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReasonPhrase(String);
@@ -409,7 +409,7 @@ impl ReasonPhrase {
     /// 文字列から ReasonPhrase を構築する
     ///
     /// 1024 バイトを超える場合は `MessageError::ReasonPhraseTooLong` を返す
-    /// (draft-ietf-moq-transport-22 §8.5 (Reason Phrase Structure))。
+    /// (draft-ietf-moq-transport-23 §8.5 (Reason Phrase Structure))。
     pub fn new(s: impl Into<String>) -> Result<Self, MessageError> {
         let s = s.into();
         if s.len() > 1024 {
@@ -443,10 +443,10 @@ impl ReasonPhrase {
 
 // ─── メッセージ型 ─────────────────────────────────────────────
 
-/// SETUP メッセージ (draft-ietf-moq-transport-22 §9.1 (SETUP))
+/// SETUP メッセージ (draft-ietf-moq-transport-23 §9.1 (SETUP))
 #[derive(Debug, Clone, PartialEq)]
 pub struct Setup {
-    /// 交換する Setup Options (draft-ietf-moq-transport-22 §9.1 (SETUP))
+    /// 交換する Setup Options (draft-ietf-moq-transport-23 §9.1 (SETUP))
     pub options: SetupOptions,
 }
 
@@ -464,9 +464,9 @@ impl Setup {
     }
 }
 
-/// GOAWAY メッセージ (draft-ietf-moq-transport-22 §9.2 (GOAWAY))
+/// GOAWAY メッセージ (draft-ietf-moq-transport-23 §9.2 (GOAWAY))
 ///
-/// draft-ietf-moq-transport-22 Appendix A.4 (Since draft-ietf-moq-transport-18) #1623:
+/// draft-ietf-moq-transport-23 Appendix A.5 (Since draft-ietf-moq-transport-18) #1623:
 /// Request ID フィールドは削除された。Message Body は New Session URI + Timeout のみ。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Goaway {
@@ -523,12 +523,12 @@ impl Goaway {
     }
 }
 
-/// REQUEST_OK メッセージ (draft-ietf-moq-transport-22 §9.3 (REQUEST_OK))
+/// REQUEST_OK メッセージ (draft-ietf-moq-transport-23 §9.3 (REQUEST_OK))
 #[derive(Debug, Clone, PartialEq)]
 pub struct RequestOk {
-    /// 応答に付随するメッセージ パラメータ (draft-ietf-moq-transport-22 §9.3 (REQUEST_OK))
+    /// 応答に付随するメッセージ パラメータ (draft-ietf-moq-transport-23 §9.3 (REQUEST_OK))
     pub parameters: MessageParameters,
-    /// 応答に付随するトラック プロパティ (draft-ietf-moq-transport-22 §9.3 (REQUEST_OK))
+    /// 応答に付随するトラック プロパティ (draft-ietf-moq-transport-23 §9.3 (REQUEST_OK))
     pub track_properties: TrackProperties,
 }
 
@@ -1061,16 +1061,16 @@ impl RequestError {
     }
 }
 
-/// SUBSCRIBE メッセージ (draft-ietf-moq-transport-22 §9.6 (SUBSCRIBE))
+/// SUBSCRIBE メッセージ (draft-ietf-moq-transport-23 §9.6 (SUBSCRIBE))
 #[derive(Debug, Clone, PartialEq)]
 pub struct Subscribe {
-    /// 購読要求を識別する Request ID (draft-ietf-moq-transport-22 §9.6 (SUBSCRIBE))
+    /// 購読要求を識別する Request ID (draft-ietf-moq-transport-23 §9.6 (SUBSCRIBE))
     pub request_id: u64,
-    /// 購読対象トラックの名前空間 (draft-ietf-moq-transport-22 §9.6 (SUBSCRIBE))
+    /// 購読対象トラックの名前空間 (draft-ietf-moq-transport-23 §9.6 (SUBSCRIBE))
     pub track_namespace: TrackNamespace,
-    /// 購読対象のトラック名 (draft-ietf-moq-transport-22 §9.6 (SUBSCRIBE))
+    /// 購読対象のトラック名 (draft-ietf-moq-transport-23 §9.6 (SUBSCRIBE))
     pub track_name: Vec<u8>,
-    /// 購読に付随するメッセージ パラメータ (draft-ietf-moq-transport-22 §9.6 (SUBSCRIBE))
+    /// 購読に付随するメッセージ パラメータ (draft-ietf-moq-transport-23 §9.6 (SUBSCRIBE))
     pub parameters: MessageParameters,
 }
 
@@ -1112,14 +1112,14 @@ impl Subscribe {
     }
 }
 
-/// SUBSCRIBE_OK メッセージ (draft-ietf-moq-transport-22 §9.7 (SUBSCRIBE_OK))
+/// SUBSCRIBE_OK メッセージ (draft-ietf-moq-transport-23 §9.7 (SUBSCRIBE_OK))
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubscribeOk {
-    /// データストリーム上でトラックを指す Track Alias (draft-ietf-moq-transport-22 §9.7 (SUBSCRIBE_OK))
+    /// データストリーム上でトラックを指す Track Alias (draft-ietf-moq-transport-23 §9.7 (SUBSCRIBE_OK))
     pub track_alias: u64,
-    /// 応答に付随するメッセージ パラメータ (draft-ietf-moq-transport-22 §9.7 (SUBSCRIBE_OK))
+    /// 応答に付随するメッセージ パラメータ (draft-ietf-moq-transport-23 §9.7 (SUBSCRIBE_OK))
     pub parameters: MessageParameters,
-    /// 応答に付随するトラック プロパティ (draft-ietf-moq-transport-22 §9.7 (SUBSCRIBE_OK))
+    /// 応答に付随するトラック プロパティ (draft-ietf-moq-transport-23 §9.7 (SUBSCRIBE_OK))
     pub track_properties: TrackProperties,
 }
 
@@ -1158,12 +1158,12 @@ impl SubscribeOk {
     }
 }
 
-/// REQUEST_UPDATE メッセージ (draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE))
+/// REQUEST_UPDATE メッセージ (draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE))
 #[derive(Debug, Clone, PartialEq)]
 pub struct RequestUpdate {
-    /// 更新対象の要求を指す Request ID (draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE))
+    /// 更新対象の要求を指す Request ID (draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE))
     pub request_id: u64,
-    /// 更新内容のメッセージ パラメータ (draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE))
+    /// 更新内容のメッセージ パラメータ (draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE))
     pub parameters: MessageParameters,
 }
 
@@ -1195,20 +1195,20 @@ impl RequestUpdate {
     }
 }
 
-/// PUBLISH メッセージ (draft-ietf-moq-transport-22 §9.8 (PUBLISH))
+/// PUBLISH メッセージ (draft-ietf-moq-transport-23 §9.8 (PUBLISH))
 #[derive(Debug, Clone, PartialEq)]
 pub struct Publish {
-    /// 公開要求を識別する Request ID (draft-ietf-moq-transport-22 §9.8 (PUBLISH))
+    /// 公開要求を識別する Request ID (draft-ietf-moq-transport-23 §9.8 (PUBLISH))
     pub request_id: u64,
-    /// 公開対象トラックの名前空間 (draft-ietf-moq-transport-22 §9.8 (PUBLISH))
+    /// 公開対象トラックの名前空間 (draft-ietf-moq-transport-23 §9.8 (PUBLISH))
     pub track_namespace: TrackNamespace,
-    /// 公開対象のトラック名 (draft-ietf-moq-transport-22 §9.8 (PUBLISH))
+    /// 公開対象のトラック名 (draft-ietf-moq-transport-23 §9.8 (PUBLISH))
     pub track_name: Vec<u8>,
-    /// データストリーム上でトラックを指す Track Alias (draft-ietf-moq-transport-22 §9.8 (PUBLISH))
+    /// データストリーム上でトラックを指す Track Alias (draft-ietf-moq-transport-23 §9.8 (PUBLISH))
     pub track_alias: u64,
-    /// 公開に付随するメッセージ パラメータ (draft-ietf-moq-transport-22 §9.8 (PUBLISH))
+    /// 公開に付随するメッセージ パラメータ (draft-ietf-moq-transport-23 §9.8 (PUBLISH))
     pub parameters: MessageParameters,
-    /// 公開に付随するトラック プロパティ (draft-ietf-moq-transport-22 §9.8 (PUBLISH))
+    /// 公開に付随するトラック プロパティ (draft-ietf-moq-transport-23 §9.8 (PUBLISH))
     pub track_properties: TrackProperties,
 }
 
@@ -1261,14 +1261,14 @@ impl Publish {
     }
 }
 
-/// PUBLISH_DONE メッセージ (draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE))
+/// PUBLISH_DONE メッセージ (draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE))
 #[derive(Debug, Clone, PartialEq)]
 pub struct PublishDone {
-    /// 公開終了のステータスコード (draft-ietf-moq-transport-22 §16.11.3 (PUBLISH_DONE Codes))
+    /// 公開終了のステータスコード (draft-ietf-moq-transport-23 §16.12.3 (PUBLISH_DONE Codes))
     pub status_code: u64,
-    /// 当該トラック用に開いたデータストリーム数。正確な数を把握できない場合は 2^64 - 1 (unknown) を送る (draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE))
+    /// 当該トラック用に開いたデータストリーム数。正確な数を把握できない場合は 2^64 - 1 (unknown) を送る (draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE))
     pub stream_count: u64,
-    /// 人間可読な終了理由 (draft-ietf-moq-transport-22 §8.5 (Reason Phrase Structure))
+    /// 人間可読な終了理由 (draft-ietf-moq-transport-23 §8.5 (Reason Phrase Structure))
     pub reason: ReasonPhrase,
 }
 
@@ -1300,7 +1300,7 @@ impl PublishDone {
     }
 }
 
-/// PUBLISH_STATE_NOTIFY メッセージ (draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY))
+/// PUBLISH_STATE_NOTIFY メッセージ (draft-ietf-moq-transport-23 §9.10 (PUBLISH_STATE_NOTIFY))
 ///
 /// publisher が subscriber 発 REQUEST_UPDATE 以外の理由で subscription 状態が
 /// 変わったことを通知する一方向メッセージ。応答を要求せず、
@@ -1309,7 +1309,7 @@ impl PublishDone {
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 #[derive(Debug, Clone, PartialEq)]
 pub struct PublishStateNotify {
-    /// 通知する購読状態のメッセージ パラメータ (draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY))
+    /// 通知する購読状態のメッセージ パラメータ (draft-ietf-moq-transport-23 §9.10 (PUBLISH_STATE_NOTIFY))
     pub parameters: MessageParameters,
 }
 
@@ -1330,16 +1330,16 @@ impl PublishStateNotify {
     }
 }
 
-/// FETCH メッセージ (draft-ietf-moq-transport-22 §9.11 (FETCH))
+/// FETCH メッセージ (draft-ietf-moq-transport-23 §9.11 (FETCH))
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fetch {
-    /// 取得要求を識別する Request ID (draft-ietf-moq-transport-22 §9.11 (FETCH))
+    /// 取得要求を識別する Request ID (draft-ietf-moq-transport-23 §9.11 (FETCH))
     pub request_id: u64,
-    /// 取得対象トラックの名前空間 (draft-ietf-moq-transport-22 §9.11 (FETCH))
+    /// 取得対象トラックの名前空間 (draft-ietf-moq-transport-23 §9.11 (FETCH))
     pub track_namespace: TrackNamespace,
-    /// 取得対象のトラック名 (draft-ietf-moq-transport-22 §9.11 (FETCH))
+    /// 取得対象のトラック名 (draft-ietf-moq-transport-23 §9.11 (FETCH))
     pub track_name: Vec<u8>,
-    /// 取得に付随するメッセージ パラメータ (draft-ietf-moq-transport-22 §9.11 (FETCH))
+    /// 取得に付随するメッセージ パラメータ (draft-ietf-moq-transport-23 §9.11 (FETCH))
     pub parameters: MessageParameters,
 }
 
@@ -1383,16 +1383,16 @@ impl Fetch {
     }
 }
 
-/// TRACK_STATUS メッセージ (draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS))
+/// TRACK_STATUS メッセージ (draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS))
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackStatus {
-    /// 状態照会要求を識別する Request ID (draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS))
+    /// 状態照会要求を識別する Request ID (draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS))
     pub request_id: u64,
-    /// 照会対象トラックの名前空間 (draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS))
+    /// 照会対象トラックの名前空間 (draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS))
     pub track_namespace: TrackNamespace,
-    /// 照会対象のトラック名 (draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS))
+    /// 照会対象のトラック名 (draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS))
     pub track_name: Vec<u8>,
-    /// 照会に付随するメッセージ パラメータ (draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS))
+    /// 照会に付随するメッセージ パラメータ (draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS))
     pub parameters: MessageParameters,
 }
 
@@ -1437,7 +1437,7 @@ impl TrackStatus {
 
 // ─── ControlMessage ──────────────────────────────────────────
 
-/// 本ライブラリが実装しない定義済み request メッセージ型 (draft-ietf-moq-transport-22 §9 Table 5)
+/// 本ライブラリが実装しない定義済み request メッセージ型 (draft-ietf-moq-transport-23 §9 Table 5)
 ///
 /// relay 専用の namespace 発見・告知機構のうち、request stream の先頭として届く型と
 /// その応答の型である。request として届くのは先頭 3 種 (PUBLISH_NAMESPACE /
@@ -1464,33 +1464,33 @@ pub(crate) const UNSUPPORTED_MESSAGE_TYPES_WITH_REQUEST_ID: &[u64] = &[
 /// MOQT コントロールメッセージの列挙型
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlMessage {
-    /// SETUP メッセージ (draft-ietf-moq-transport-22 §9.1 (SETUP))
+    /// SETUP メッセージ (draft-ietf-moq-transport-23 §9.1 (SETUP))
     Setup(Setup),
-    /// GOAWAY メッセージ (draft-ietf-moq-transport-22 §9.2 (GOAWAY))
+    /// GOAWAY メッセージ (draft-ietf-moq-transport-23 §9.2 (GOAWAY))
     Goaway(Goaway),
-    /// REQUEST_OK メッセージ (draft-ietf-moq-transport-22 §9.3 (REQUEST_OK))
+    /// REQUEST_OK メッセージ (draft-ietf-moq-transport-23 §9.3 (REQUEST_OK))
     RequestOk(RequestOk),
-    /// REQUEST_ERROR メッセージ (draft-ietf-moq-transport-22 §9.4 (REQUEST_ERROR))
+    /// REQUEST_ERROR メッセージ (draft-ietf-moq-transport-23 §9.4 (REQUEST_ERROR))
     RequestError(RequestError),
-    /// SUBSCRIBE メッセージ (draft-ietf-moq-transport-22 §9.6 (SUBSCRIBE))
+    /// SUBSCRIBE メッセージ (draft-ietf-moq-transport-23 §9.6 (SUBSCRIBE))
     Subscribe(Subscribe),
-    /// SUBSCRIBE_OK メッセージ (draft-ietf-moq-transport-22 §9.7 (SUBSCRIBE_OK))
+    /// SUBSCRIBE_OK メッセージ (draft-ietf-moq-transport-23 §9.7 (SUBSCRIBE_OK))
     SubscribeOk(SubscribeOk),
-    /// REQUEST_UPDATE メッセージ (draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE))
+    /// REQUEST_UPDATE メッセージ (draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE))
     RequestUpdate(RequestUpdate),
-    /// PUBLISH メッセージ (draft-ietf-moq-transport-22 §9.8 (PUBLISH))
+    /// PUBLISH メッセージ (draft-ietf-moq-transport-23 §9.8 (PUBLISH))
     Publish(Publish),
-    /// PUBLISH_DONE メッセージ (draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE))
+    /// PUBLISH_DONE メッセージ (draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE))
     PublishDone(PublishDone),
-    /// PUBLISH_STATE_NOTIFY メッセージ (draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY))
+    /// PUBLISH_STATE_NOTIFY メッセージ (draft-ietf-moq-transport-23 §9.10 (PUBLISH_STATE_NOTIFY))
     PublishStateNotify(PublishStateNotify),
-    /// FETCH メッセージ (draft-ietf-moq-transport-22 §9.11 (FETCH))
+    /// FETCH メッセージ (draft-ietf-moq-transport-23 §9.11 (FETCH))
     Fetch(Fetch),
-    /// TRACK_STATUS メッセージ (draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS))
+    /// TRACK_STATUS メッセージ (draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS))
     TrackStatus(TrackStatus),
     /// 定義済みだが本ライブラリが実装しない制御メッセージ
     ///
-    /// draft-ietf-moq-transport-22 §1.6 (Modularity): "Limited endpoints SHOULD respond to any
+    /// draft-ietf-moq-transport-23 §1.6 (Modularity): "Limited endpoints SHOULD respond to any
     /// unsupported messages with the appropriate NOT_SUPPORTED error code, rather than ignoring
     /// them." §9 の Table 5 に定義済みの型であって本ライブラリが扱わないものを、型 ID と
     /// 本体の生バイト列のまま保持する。Table 5 に無い型は従来どおり
@@ -1502,14 +1502,14 @@ pub enum ControlMessage {
     ///
     /// 本体は生バイト列のまま保持するが、request として届く 3 種は
     /// [`crate::session::core::Session::recv_request`] が本体を解析し、パラメータのスコープ検証
-    /// (draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope))、`.` 単独または `.session` の
+    /// (draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope))、`.` 単独または `.session` の
     /// Track Namespace Prefix の検証 (§2.4.3 (Reserved Namespaces) / §6.5 (Session-Level
     /// Tracks and Namespaces))、Range Filter の検証 (§3.3.2 (Range Filters) / §9.1.6
     /// (MAX FILTER RANGES))、AUTHORIZATION_TOKEN の適用 (§8.9 (Authorization Token
     /// Compression)) を行う。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     Unsupported {
-        /// 制御メッセージ型 ID (draft-ietf-moq-transport-22 §9 Table 5)
+        /// 制御メッセージ型 ID (draft-ietf-moq-transport-23 §9 Table 5)
         type_id: u64,
         /// 本体が Request ID (vi64) で始まる型 (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE /
         /// SUBSCRIBE_TRACKS) のときだけ `Some`。応答専用の型 (NAMESPACE / NAMESPACE_DONE /
@@ -1568,7 +1568,7 @@ impl ControlMessage {
     /// 長さ宣言の段階で行う必要があるため [`crate::decoder::MessageDecoder`] が担う。
     ///
     /// AUTHORIZATION_TOKEN の (Token Type, Token Value) 重複を本 decode が検出するのは
-    /// SETUP だけである (draft-ietf-moq-transport-22 §9.1.4 (AUTHORIZATION TOKEN)。
+    /// SETUP だけである (draft-ietf-moq-transport-23 §9.1.4 (AUTHORIZATION TOKEN)。
     /// Request ID を持たずメッセージ単位の reject ができないため decode 時に
     /// `MalformedAuthToken` で拒否する)。
     ///
@@ -1729,7 +1729,7 @@ impl ControlMessage {
                 let (m, n) = TrackStatus::decode_message_body(payload)?;
                 (Self::TrackStatus(m), n)
             }
-            // draft-ietf-moq-transport-22 §1.6 (Modularity) の SHOULD に従い、§9 Table 5 に
+            // draft-ietf-moq-transport-23 §1.6 (Modularity) の SHOULD に従い、§9 Table 5 に
             // 定義済みで本ライブラリが実装しない型は、未知型として拒否せず NOT_SUPPORTED で
             // 応答できるようにする。
             // 本体は解析せず生バイト列のまま保持する。

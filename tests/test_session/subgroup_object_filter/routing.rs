@@ -328,7 +328,7 @@ fn first_object_id_resolves_subgroup_id_before_subgroup_filter() {
 /// FirstObjectId の最初の Object がフィルタ不通過でも subgroup_id 解決と priority 記録を
 /// 行うこと
 ///
-/// draft-ietf-moq-transport-22 §3.1 (Subscriptions) のフィルタ再適用で Object は破棄されるが、
+/// draft-ietf-moq-transport-23 §3.1 (Subscriptions) のフィルタ再適用で Object は破棄されるが、
 /// wire 構造の subgroup_id 解決と §12.1 (Malformed Tracks) 条件 1 の priority 記録は
 /// フィルタ判定に依存させない。
 #[test]
@@ -497,7 +497,7 @@ fn filtered_out_object_does_not_update_subscription_state() {
 
 /// フィルタ不通過 Object でも data stream activity が更新されること
 ///
-/// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の
+/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の
 /// DATA_STREAM_TIMEOUT (0x12) は "fields of a stream header or an object header within
 /// a data stream" も activity に含む。
 /// フィルタ不通過で破棄する Object でも activity を更新し、timeout を誤発火させない。
@@ -548,7 +548,7 @@ fn filtered_out_object_updates_data_stream_activity() {
     );
 
     // Object 受信から 50ms 以上経過すると DATA_STREAM_TIMEOUT の期限に達する。
-    // draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) は open な subgroup stream の
+    // draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) は open な subgroup stream の
     // timeout の措置として STOP_SENDING を挙げるため、セッションは閉じず指示だけを発行する。
     client.tick(91);
     let mut got = false;

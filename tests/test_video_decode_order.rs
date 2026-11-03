@@ -1,9 +1,10 @@
 //! 映像 Object の復号順を判定する規則のテスト
 //!
 //! [`VideoDecodeOrder`] の公開 API の契約を確認する。Group ごとに別の Subgroup ストリームで
-//! 届くため、前の Group の末尾が次の Group の先頭より後に届く (draft-ietf-moq-transport-22
-//! §2.1.2 (Object States): "Since Objects can be delivered out of order")。前の Group の
-//! delta を復号すると参照フレームが壊れるため、復号してよい Object だけを通す。
+//! 届くため、前の Group の末尾が次の Group の先頭より後に届く (draft-ietf-moq-transport-23
+//! §2.2 (Subgroups): 1 つの Group は Subgroup ごとに別の stream で届き、順序が保証されるのは
+//! stream 内だけである)。前の Group の delta を復号すると参照フレームが壊れるため、
+//! 復号してよい Object だけを通す。
 //!
 //! ここでは実際に起きる到着の形と、捨てる理由 ([`VideoObjectSkipReason::Stale`] と
 //! [`VideoObjectSkipReason::MissingReference`]) の区別を固定する。任意の Object 列に対する
@@ -56,7 +57,7 @@ fn delta(group_id: u64, object_id: u64, prior_object_id_gap: u64) -> VideoObject
 /// 次の Group のキーフレームの後に届いた前の Group の delta は古いとして捨てる
 ///
 /// Group ごとに別の Subgroup ストリームで届くため、前の Group の末尾が次の Group の先頭より
-/// 後に届く (draft-ietf-moq-transport-22 §2.1.2)。前の Group の delta を復号すると、次の
+/// 後に届く (draft-ietf-moq-transport-23 §2.2 (Subgroups))。前の Group の delta を復号すると、次の
 /// Group のキーフレームから始めた参照が壊れる。
 #[test]
 fn delta_of_older_group_after_newer_group_keyframe_is_stale() {
@@ -101,7 +102,7 @@ fn delta_of_older_group_after_newer_group_keyframe_is_stale() {
 /// Group 内で Object が欠けたら、次のキーフレームまで delta を捨てる
 ///
 /// Object 2 が届かない (損失、または reset された Subgroup の残り)。Object 3 以降は参照先が
-/// 無いため復号しない。draft-ietf-moq-transport-22 §2.1.2 は "A gap in the observed Object IDs
+/// 無いため復号しない。draft-ietf-moq-transport-23 §2.1.2 は "A gap in the observed Object IDs
 /// does not by itself convey any information about the skipped Objects" とするため、欠けた
 /// Object が存在しないとは言えない。
 #[test]
@@ -146,7 +147,7 @@ fn delta_after_a_gap_is_missing_reference_until_the_next_keyframe() {
 
 /// Prior Object ID Gap が示す非存在の範囲に収まる欠けは連続とみなす
 ///
-/// draft-ietf-moq-transport-22 §10.9 (Prior Object ID Gap): Object 3 の Prior Object ID Gap が
+/// draft-ietf-moq-transport-23 §10.9 (Prior Object ID Gap): Object 3 の Prior Object ID Gap が
 /// 2 なら Object 1 と 2 は存在しない。Object 3 は Object 0 の次に存在する Object である。
 #[test]
 fn prior_object_id_gap_covers_the_missing_objects() {
@@ -171,7 +172,7 @@ fn prior_object_id_gap_covers_the_missing_objects() {
 /// Prior Object ID Gap が欠けの一部しか覆わなければ欠落として扱う
 ///
 /// Object 4 の Prior Object ID Gap は 2 (Object 2 と 3 が存在しない) だが、Object 1 は非存在と
-/// 示されていない。draft-ietf-moq-transport-22 §2.1.2 は欠けた Object ID がそれだけでは何も
+/// 示されていない。draft-ietf-moq-transport-23 §2.1.2 は欠けた Object ID がそれだけでは何も
 /// 示さないとするため、Object 1 は届いていないだけかもしれない。
 #[test]
 fn prior_object_id_gap_covering_only_part_of_the_gap_is_missing_reference() {
@@ -464,7 +465,7 @@ fn accessors_report_the_state_after_each_admission() {
 
 /// Object Properties から Prior Object ID Gap を読む
 ///
-/// Property が無ければ 0 とし (draft-ietf-moq-transport-22 §10.9)、書式違反は「Property 無し」
+/// Property が無ければ 0 とし (draft-ietf-moq-transport-23 §10.9)、書式違反は「Property 無し」
 /// に潰さない。
 #[test]
 fn prior_object_id_gap_of_reads_the_property() {
@@ -500,7 +501,7 @@ fn prior_object_id_gap_of_reads_the_property() {
         "PRIOR_OBJECT_ID_GAP の値を読むこと"
     );
 
-    // IMMUTABLE_PROPERTIES の内側に置かれた場合も探索する (draft-ietf-moq-transport-22
+    // IMMUTABLE_PROPERTIES の内側に置かれた場合も探索する (draft-ietf-moq-transport-23
     // §10.7 (Immutable Properties) の "MUST search both")
     let mut immutable = ObjectProperties::new();
     immutable.push(ObjectProperty {

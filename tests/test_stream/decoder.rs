@@ -373,7 +373,7 @@ fn test_subgroup_finish_without_header_errors() {
 
 /// ヘッダーのみ + FIN（オブジェクト 0 個）の空 Subgroup で finish が Ok を返す
 ///
-/// draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams) 冒頭の
+/// draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams) 冒頭の
 /// "If a sender has delivered all objects in a Subgroup to the QUIC stream, except any
 /// Objects with Locations smaller than the subscription's Start Location, it MUST close
 /// the stream with a FIN." により、配達すべきオブジェクトが 0 個の Subgroup では
@@ -466,7 +466,7 @@ fn test_subgroup_finish_with_partial_header_errors() {
 /// `SubgroupIdMode::FirstObjectId` の空 Subgroup で finish が Ok を返し、
 /// subgroup_id が未解決 (`None`) のままである
 ///
-/// draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header) の SUBGROUP_ID_MODE 0b01 は
+/// draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header) の SUBGROUP_ID_MODE 0b01 は
 /// "the Subgroup ID is the Object ID of the first Object transmitted in this Subgroup"
 /// と定義しており、オブジェクト 0 個では Subgroup ID が仕様上未定義になる。
 /// 受信側 session は `subgroup_id` が `None` の場合に tracker 更新をスキップして
@@ -1001,7 +1001,7 @@ fn test_fetch_rejects_group_id_delta_overflow_in_ascending_mode() {
         is_datagram_origin: false,
         payload_length: 1,
     });
-    // draft-ietf-moq-transport-22 §11.4.1.1 (Flags): 非初回 Object の group_id はデルタ (prev_group + delta + 1)
+    // draft-ietf-moq-transport-23 §11.4.1.1 (Flags): 非初回 Object の group_id はデルタ (prev_group + delta + 1)
     // delta = u64::MAX でオーバーフローを起こさせる
     let second = FetchStreamEntry::Object(FetchStreamObject {
         group_id: Some(u64::MAX), // デルタオーバーフロー
@@ -1492,7 +1492,7 @@ fn test_fetch_finish_without_header_errors() {
 
 /// ヘッダーのみ + FIN（エントリ 0 個）は正規の空 FETCH 応答として成功を返す
 ///
-/// draft-ietf-moq-transport-22 §3.2.1 (Fetch Object Delivery): "If no Objects exist in the
+/// draft-ietf-moq-transport-23 §3.2.1 (Fetch Object Delivery): "If no Objects exist in the
 /// requested range, the publisher opens the unidirectional stream, sends the FETCH_HEADER
 /// (see Section 11.4.1) and closes the stream with a FIN."
 #[test]
@@ -1666,7 +1666,7 @@ fn test_fetch_finish_after_end_of_range_ok() {
 
 /// FETCH 応答の Object Properties が Properties Length varint 込みで公開されること
 ///
-/// draft-ietf-moq-transport-22 §11.4.1 (Fetch Header) の Fetch Object は Properties フィールドを持ち、
+/// draft-ietf-moq-transport-23 §11.4.1 (Fetch Header) の Fetch Object は Properties フィールドを持ち、
 /// その構造は §11.4.1.1 (Flags) の "The Object Properties structure is defined in Section 11.1.2."
 /// により §11.1.2 (Object Properties) と同じである。
 /// draft-ietf-moq-loc-04 §2.2 (MOQ Object Mapping) は LOC の Public Properties を
@@ -1737,7 +1737,7 @@ fn test_fetch_object_properties_are_exposed() {
 
 /// 非最小形の Properties Length varint も wire の生バイトのまま保持されること
 ///
-/// draft-ietf-moq-transport-22 §8.1 (Variable-Length Integers) は
+/// draft-ietf-moq-transport-23 §8.1 (Variable-Length Integers) は
 /// "Variable-length integers do not need to be encoded using the minimum number of bytes" と定めるため、
 /// Properties Length = 0 は `0x00` 以外の形でも送られ得る。デコーダは正規化せず生バイトを保持する
 /// (Subgroup 経路の `non_minimal_properties_length_accepted` と対称)。

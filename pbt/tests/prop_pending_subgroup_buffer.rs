@@ -4,7 +4,7 @@
 //! 購読の確立・タイムアウト・上限超過・削除を任意の順序で与え、テスト側の独立した
 //! モデルと突き合わせる。
 //!
-//! draft-ietf-moq-transport-22 §3.1.3.1 (Unknown Track Alias) の "buffer it briefly" は
+//! draft-ietf-moq-transport-23 §3.1.3.1 (Unknown Track Alias) の "buffer it briefly" は
 //! 上限を定めていないため、この実装は per-stream / per-session のバイト上限と
 //! タイムアウトで保持量を抑える。検証する性質は次の 4 つである。
 //!

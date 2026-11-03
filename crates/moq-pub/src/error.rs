@@ -41,7 +41,7 @@ pub enum Error {
     /// peer がこのストリームの送信方向を終端した (STOP_SENDING)
     ///
     /// セッションは継続し該当ストリームだけが終端するため、pipeline は致命エラーにしない
-    /// (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))。
+    /// (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))。
     StreamReset {
         /// peer が載せた wire のエラーコード
         error_code: u64,

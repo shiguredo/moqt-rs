@@ -1,4 +1,4 @@
-//! OBJECT_DATAGRAM (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))
+//! OBJECT_DATAGRAM (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram))
 //!
 //! Type Flags の定義済み bit: 0x01 / 0x02 / 0x04 / 0x08 / 0x20。
 //! 0x10 は予約、0x40 は未定義であり、意味未定義の set bit があれば
@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 
 /// Datagram の Object Properties 生バイト列 (Properties Length + Properties) を検証する
 ///
-/// draft-ietf-moq-transport-22 §11.2.1 (Object Datagram): Datagram の properties_data は
+/// draft-ietf-moq-transport-23 §11.2.1 (Object Datagram): Datagram の properties_data は
 /// Properties Length varint + Properties の生バイト列であり、SubgroupObject /
 /// FetchStreamObject と同じく Length を含む規約である。Datagram では Properties Length = 0 は
 /// プロトコル違反 (受信側は MALFORMED_OBJECT。draft-ietf-moq-transport-23 §11.2.1
@@ -41,10 +41,10 @@ pub(crate) fn validate_datagram_properties_blob(data: &[u8]) -> Result<(), Messa
 }
 
 /// OBJECT_DATAGRAM の定義済み Type Flags bit
-/// (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))
+/// (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram))
 const OBJECT_DATAGRAM_KNOWN_MASK: u64 = 0x01 | 0x02 | 0x04 | 0x08 | 0x20;
 
-/// Object Datagram Type として有効か検証する (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))
+/// Object Datagram Type として有効か検証する (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram))
 ///
 /// draft-ietf-moq-transport-23 §11.2.1 (Object Datagram) は無効な Type 値を列挙し
 /// "If an endpoint receives a datagram with any of these values, it MUST close the session
@@ -74,24 +74,24 @@ pub fn validate_object_datagram_type(type_id: u64) -> Result<(), MessageError> {
     Ok(())
 }
 
-/// OBJECT_DATAGRAM (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))
+/// OBJECT_DATAGRAM (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram))
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectDatagram {
     /// 対象トラックの Alias
     pub track_alias: u64,
     /// 対象 Group ID
     pub group_id: u64,
-    /// ZERO_OBJECT_ID bit が立っている場合は 0 (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))
+    /// ZERO_OBJECT_ID bit が立っている場合は 0 (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram))
     pub object_id: u64,
     /// `None` = DEFAULT_PRIORITY bit が立っている (サブスクリプションの優先度を継承)
     pub publisher_priority: Option<u8>,
     /// Object Properties の生バイト列 (Properties Length varint + Properties)
-    /// (draft-ietf-moq-transport-22 §11.1.2 (Object Properties))
+    /// (draft-ietf-moq-transport-23 §11.1.2 (Object Properties))
     ///
     /// `Some(data)` の場合は PROPERTIES bit を立て、data をそのまま書き込む
     /// (SubgroupObject / FetchStreamObject と同じく Properties Length を含む)。
     /// `None` の場合は PROPERTIES bit を立てない。
-    /// draft-ietf-moq-transport-22 §11.2.1 (Object Datagram): Datagram では Properties Length = 0 はプロトコル違反。
+    /// draft-ietf-moq-transport-23 §11.2.1 (Object Datagram): Datagram では Properties Length = 0 はプロトコル違反。
     pub properties_data: Option<Vec<u8>>,
     /// この Datagram が Group の末尾かどうか
     pub end_of_group: bool,
@@ -123,11 +123,11 @@ impl ObjectDatagram {
                 "STATUS and END_OF_GROUP cannot both be set",
             ));
         }
-        // draft-ietf-moq-transport-22 §11.2.1 (Object Datagram): Datagram では Properties Length = 0 はプロトコル違反
+        // draft-ietf-moq-transport-23 §11.2.1 (Object Datagram): Datagram では Properties Length = 0 はプロトコル違反
         if let Some(ref data) = self.properties_data {
             validate_datagram_properties_blob(data)?;
         }
-        // draft-ietf-moq-transport-22 §11.1.2 (Object Properties): status が Normal 以外のオブジェクトに Properties は不可
+        // draft-ietf-moq-transport-23 §11.1.2 (Object Properties): status が Normal 以外のオブジェクトに Properties は不可
         if self.properties_data.is_some() && matches!(self.status, Some(s) if s != 0) {
             return Err(MessageError::InvalidObjectStatus(
                 "properties on non-Normal status object is not allowed",
@@ -136,7 +136,7 @@ impl ObjectDatagram {
 
         let has_properties = self.properties_data.is_some();
         let mut type_byte: u8 = 0x00;
-        // draft-ietf-moq-transport-22 §11.2.1 (Object Datagram): ZERO_OBJECT_ID bit は Object ID == 0 のとき立てる
+        // draft-ietf-moq-transport-23 §11.2.1 (Object Datagram): ZERO_OBJECT_ID bit は Object ID == 0 のとき立てる
         let zero_object_id = self.object_id == 0;
 
         if has_properties {
@@ -169,7 +169,7 @@ impl ObjectDatagram {
             buf.extend_from_slice(data);
         }
         if let Some(status) = self.status {
-            // draft-ietf-moq-transport-22 §11.1.1 (Object Status): 値域検証
+            // draft-ietf-moq-transport-23 §11.1.1 (Object Status): 値域検証
             validate_object_status(status)?;
             varint::encode(status, &mut buf);
         }
@@ -209,7 +209,7 @@ impl ObjectDatagram {
         let (group_id, n) = varint::decode(&buf[pos..])?;
         pos += n;
 
-        // draft-ietf-moq-transport-22 §11.2.1 (Object Datagram): ZERO_OBJECT_ID bit が立っている場合、Object ID は 0
+        // draft-ietf-moq-transport-23 §11.2.1 (Object Datagram): ZERO_OBJECT_ID bit が立っている場合、Object ID は 0
         let object_id = if zero_object_id {
             0
         } else {
@@ -262,7 +262,7 @@ impl ObjectDatagram {
             None
         };
 
-        // draft-ietf-moq-transport-22 §11.1.2 (Object Properties): status が Normal (0x0) 以外のオブジェクトに
+        // draft-ietf-moq-transport-23 §11.1.2 (Object Properties): status が Normal (0x0) 以外のオブジェクトに
         // Properties が付いている場合は INVALID_OBJECT_STATUS
         if properties_data.is_some() && matches!(status, Some(s) if s != 0) {
             return Err(MessageError::InvalidObjectStatus(

@@ -1,7 +1,7 @@
 //! 1 つの Transport Session 上で複数のトラック (SUBSCRIBE / PUBLISH / FETCH) を
 //! 多重保持できることを検証する integration test。
 //!
-//! draft-ietf-moq-transport-22 §6.4.2.1 (Request ID) は「1 つの Transport Session 上で複数の
+//! draft-ietf-moq-transport-23 §6.4.2.1 (Request ID) は「1 つの Transport Session 上で複数の
 //! リクエストを Request ID で識別する (各 endpoint が parity 付きで採番し、複数の
 //! リクエストを 1 Session 上で同時に扱える)」性質を定める。relay 採用のシナリオでは
 //! 1 Session で多数のトラックを同時に扱うため、HashMap ベースの多重保持で ID 衝突・
@@ -61,7 +61,7 @@ fn run_multi_subscribe(subscriber: &mut Session, publisher: &mut Session) {
     }
 
     // SUBSCRIBE_OK を順不同 (逆順) で返し、各 subscription を Established にする。
-    // SUBSCRIBE への応答は SUBSCRIBE_OK であり REQUEST_OK ではない (draft-ietf-moq-transport-22 §9.7 (SUBSCRIBE_OK))。
+    // SUBSCRIBE への応答は SUBSCRIBE_OK であり REQUEST_OK ではない (draft-ietf-moq-transport-23 §9.7 (SUBSCRIBE_OK))。
     for i in (0..tracks.len()).rev() {
         let alias = tracks[i].2;
         publisher
@@ -125,7 +125,7 @@ fn run_multi_subscribe(subscriber: &mut Session, publisher: &mut Session) {
     );
 
     // 1 つの subscription を終端 (bidi request stream の FIN) してから forget する。
-    // forget は Terminated かつ cleanup 可能な subscription のみ除去する (draft-ietf-moq-transport-22 §3.1.2 (Subscription State Management))。
+    // forget は Terminated かつ cleanup 可能な subscription のみ除去する (draft-ietf-moq-transport-23 §3.1.2 (Subscription State Management))。
     subscriber
         .recv_request_stream_closed(rids[0], RequestStreamEnd::Fin)
         .expect("テストフィクスチャの前提条件を満たす");
@@ -188,7 +188,7 @@ fn multi_subscribe_holds_distinct_tracks_server_role() {
 /// 異なる Track Alias の 3 つの PUBLISH を 1 Session で多重保持する。
 ///
 /// `publisher` が 3 つの PUBLISH を順次発行し、`subscriber` が REQUEST_OK で応答する
-/// (draft-ietf-moq-transport-22 では PUBLISH_OK は REQUEST_OK に統合)。track_alias が distinct であること、
+/// (draft-ietf-moq-transport-23 では PUBLISH_OK は REQUEST_OK に統合)。track_alias が distinct であること、
 /// 各 publish の outgoing subgroup stream が独立してカウントされること、重複 DataStreamId
 /// が拒否されることを検証する。
 fn run_multi_publish(publisher: &mut Session, subscriber: &mut Session) {
@@ -218,7 +218,7 @@ fn run_multi_publish(publisher: &mut Session, subscriber: &mut Session) {
         rids.push(rid);
     }
 
-    // draft-ietf-moq-transport-22 では PUBLISH の成功応答は REQUEST_OK に統合されている (旧 PUBLISH_OK, draft-ietf-moq-transport-22 §9.3 (REQUEST_OK))。
+    // draft-ietf-moq-transport-23 では PUBLISH の成功応答は REQUEST_OK に統合されている (旧 PUBLISH_OK, draft-ietf-moq-transport-23 §9.3 (REQUEST_OK))。
     for &rid in &rids {
         subscriber
             .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
@@ -467,7 +467,7 @@ fn multi_fetch_holds_distinct_requests_server_role() {
 ///
 /// `local` が 5 つのリクエストを自ら発行して共存させ、各リクエストのデータストリームが
 /// 互いに干渉しないことを検証する。あわせて peer から SUBSCRIBE を受けた後に
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY) どおり Request ID 無しの GOAWAY を送信できることを確認する。
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY) どおり Request ID 無しの GOAWAY を送信できることを確認する。
 fn run_mixed(local: &mut Session, peer: &mut Session, _local_is_client: bool) {
     use shiguredo_moqt::message::common::Location;
 
@@ -613,10 +613,10 @@ fn run_mixed(local: &mut Session, peer: &mut Session, _local_is_client: bool) {
         "subscriber 役の subscription は outgoing subgroup を持たない"
     );
 
-    // --- GOAWAY: Request ID 無しで送信できる (draft-ietf-moq-transport-22 §9.2 (GOAWAY) / Appendix A.4 #1623) ---
+    // --- GOAWAY: Request ID 無しで送信できる (draft-ietf-moq-transport-23 §9.2 (GOAWAY) / Appendix A.4 #1623) ---
     // peer から 2 つの SUBSCRIBE を local が受信し、その後 GOAWAY を control stream で発行する。
     // Client は new_session_uri を空にする必要がある。
-    // timeout=0 は specific timeout なし (draft-ietf-moq-transport-22 §9.2 (GOAWAY)) で deadline を設定しない。
+    // timeout=0 は specific timeout なし (draft-ietf-moq-transport-23 §9.2 (GOAWAY)) で deadline を設定しない。
     for namespace in [ns(&[b"mixed-peer-x"]), ns(&[b"mixed-peer-y"])] {
         let _peer_rid = peer
             .send_subscribe(namespace, b"peer-trk".to_vec(), MessageParameters::new())

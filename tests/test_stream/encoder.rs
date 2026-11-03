@@ -638,7 +638,7 @@ fn test_subgroup_change_with_object_id_absent() {
     }
 }
 
-/// draft-ietf-moq-transport-22 §11.4.1 (Fetch Header) Table 8:
+/// draft-ietf-moq-transport-23 §11.4.1 (Fetch Header) Table 8:
 /// encode_end_of_timed_out_range で生成したバイト列がデコーダで
 /// DecodedFetchEntry::EndOfTimedOutRange としてアプリに通知されること
 #[test]
@@ -675,7 +675,7 @@ fn end_of_timed_out_range_notifies_app() {
 
 /// Group Order を指定する公開コンストラクタが decoder と対称に値域検証すること
 ///
-/// draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter):
+/// draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter):
 /// Ascending (0x01) と Descending (0x02) のみ許可される。
 #[test]
 fn test_new_with_group_order_validates_value() {
@@ -802,7 +802,7 @@ fn decode_descending_locations(stream: &[u8], count: usize) -> Vec<(u64, u64)> {
 
 /// Descending (0x02) で複数 Group をスキップしても絶対値が保存されること
 ///
-/// draft-ietf-moq-transport-22 §3.2.2 (Gaps in a Fetch Stream) は Descending Group Order で
+/// draft-ietf-moq-transport-23 §3.2.2 (Gaps in a Fetch Stream) は Descending Group Order で
 /// Start と End Location が異なる Group にある場合のギャップの期待順序を定める。
 /// デコーダは絶対 Location を返すだけでギャップの意味解釈 (非存在 / 不明の区別や
 /// 末尾ギャップの FIN 判定) はアプリ責務であるため、ここではスキップした Group でも
@@ -1042,7 +1042,7 @@ fn end_of_gone_range_then_object() {
         .expect("エントリ境界で終端したストリームは finish で受容される");
 }
 
-/// draft-ietf-moq-transport-22 §11.4.1 (Fetch Header) Table 8:
+/// draft-ietf-moq-transport-23 §11.4.1 (Fetch Header) Table 8:
 /// End of Timed-Out Range の後に Object が正しくラウンドトリップすること
 /// (NoPriorActualObject 文脈の相互作用を検証する)
 #[test]
@@ -1107,7 +1107,7 @@ fn end_of_timed_out_range_then_object() {
 }
 
 // ============================================================================
-// Publisher Priority の Subgroup 単位検証 (draft-ietf-moq-transport-22 §12.1)
+// Publisher Priority の Subgroup 単位検証 (draft-ietf-moq-transport-23 §12.1)
 // ============================================================================
 //
 // §12.1 (Malformed Tracks) 条件 1:

@@ -7,7 +7,7 @@
 //!   - LOC Public Properties: MOQ Object Properties に含まれ、リレーから参照可能
 //!   - LOC Private Properties: MOQ Object Payload に含まれ、E2E 暗号化で保護可能
 //!
-//! エンコード形式は draft-ietf-moq-transport-22 §11.1.2 (Object Properties) および draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) に従う。
+//! エンコード形式は draft-ietf-moq-transport-23 §11.1.2 (Object Properties) および draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) に従う。
 //!
 //! 本モジュールは Public/Private の区別なくプロパティの encode/decode を提供する。
 //! Public/Private の配置はアプリケーション層の責務である。
@@ -40,7 +40,7 @@ const AUDIO_LEVEL_MAX: u64 = 255;
 
 /// 既知プロパティの値域を検証する
 ///
-/// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure):
+/// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure):
 /// 受信側が既知 Type の Value が定義された serialization と一致しない場合、
 /// MALFORMED_KEY_VALUE でセッションを閉じなければならない (MUST)。
 ///
@@ -57,7 +57,7 @@ fn validate_known_property(prop_id: u64, value: u64) -> Result<(), MessageError>
 /// 既知プロパティのバイト列長を検証する
 ///
 /// draft-ietf-moq-loc-04 §2.3.2.2: Video Frame Marking の `Length: Varies (1-4 bytes)`。
-/// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure):
+/// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure):
 /// 受信側が既知 Type の Length が定義された serialization と一致しない場合、
 /// MALFORMED_KEY_VALUE でセッションを閉じなければならない (MUST)。
 ///
@@ -223,7 +223,7 @@ impl LocProperties {
     /// - 既知プロパティの値域違反 (Audio Level が 255 超過): `MalformedKeyValue`
     /// - Video Frame Marking の長さが 1-4 バイトでない: `MalformedKeyValue`
     pub fn encode(&self) -> Result<Vec<u8>, MessageError> {
-        // draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header):
+        // draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header):
         // "Objects with no properties or non-Normal status set Properties Length to 0."
         if self.0.is_empty() {
             let mut buf = Vec::new();
@@ -305,7 +305,7 @@ impl LocProperties {
         let (prop_len, n) = varint::decode(&buf[pos..])?;
         pos += n;
 
-        // draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header):
+        // draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header):
         // "Objects with no properties or non-Normal status set Properties Length to 0."
         if prop_len == 0 {
             return Ok((Self(Vec::new()), pos));

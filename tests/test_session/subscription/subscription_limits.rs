@@ -1,6 +1,6 @@
 //! MAX_REQUEST_UPDATES / MAX_FILTER_RANGES / GROUP_ORDER 値域のセッション層テスト
 //!
-//! draft-ietf-moq-transport-22 §9.1.7 (MAX_REQUEST_UPDATES) /
+//! draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES) /
 //! §3.3.2 / §9.1.6 (MAX FILTER RANGES)
 //!
 //! 各テストは「エラーコード」だけでなく、キューに積まれたイベント・
@@ -83,7 +83,7 @@ fn assert_no_send_on_stream(s: &mut Session) {
 
 /// 自側 publisher の subscription が INVALID_FILTER で拒否されたときの副作用を検証する
 ///
-/// draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions): REQUEST_UPDATE が失敗した
+/// draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions): REQUEST_UPDATE が失敗した
 /// publisher は PUBLISH_DONE(UPDATE_FAILED) を送って subscription を終端する MUST。
 ///
 /// - REQUEST_ERROR (INVALID_FILTER) がちょうど 1 件、続いて PUBLISH_DONE(UPDATE_FAILED) が出る
@@ -257,7 +257,7 @@ fn establish_publish_with(
 
 /// peer が宣言した MAX_REQUEST_UPDATES=1 を超える送信は拒否され、メッセージは積まれない
 ///
-/// draft-ietf-moq-transport-22 §9.1.7
+/// draft-ietf-moq-transport-23 §9.1.7
 #[test]
 fn outgoing_request_update_exceeds_peer_max() {
     // peer (server) だけが上限 1 を宣言する。client 側の送信チェックは peer 宣言を見る。
@@ -281,7 +281,7 @@ fn outgoing_request_update_exceeds_peer_max() {
 
 /// 自側が宣言した MAX_REQUEST_UPDATES=1 を超える受信はセッションを閉じる
 ///
-/// draft-ietf-moq-transport-22 §9.1.7
+/// draft-ietf-moq-transport-23 §9.1.7
 ///
 /// 送信側 API は peer 宣言 (こちらでは server=1) で 2 通目を拒否するため、
 /// 受信超過を検証するには 2 通目をメッセージ注入する。
@@ -319,7 +319,7 @@ fn incoming_request_update_exceeds_local_max() {
 
 /// REQUEST_OK でクレジットが回復すると、再度 REQUEST_UPDATE を送れ SendOnStream に積まれる
 ///
-/// draft-ietf-moq-transport-22 §9.1.7
+/// draft-ietf-moq-transport-23 §9.1.7
 #[test]
 fn request_update_credit_recovers_after_ok() {
     let (mut client, mut server, rid) =
@@ -354,7 +354,7 @@ fn request_update_credit_recovers_after_ok() {
 
 /// 検証失敗で REQUEST_UPDATE が送信されない場合、クレジットが消費されないこと
 ///
-/// draft-ietf-moq-transport-22 §9.1.7 (MAX_REQUEST_UPDATES):
+/// draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES):
 /// "A REQUEST_UPDATE is considered outstanding from when it is sent until the sender
 /// receives the corresponding REQUEST_OK or REQUEST_ERROR response."
 /// 送信されなかった REQUEST_UPDATE は outstanding にならず、クレジットを消費しない。
@@ -482,7 +482,7 @@ fn too_many_request_updates_does_not_mutate_paused_state() {
 
 /// peer の MAX_FILTER_RANGES=1 を超える 2 Range の送信は拒否され、メッセージは積まれない
 ///
-/// draft-ietf-moq-transport-22 §3.3.2 / §9.1.6
+/// draft-ietf-moq-transport-23 §3.3.2 / §9.1.6
 #[test]
 fn outgoing_range_filters_exceed_peer_max() {
     let (mut client, _server, rid) =
@@ -497,7 +497,7 @@ fn outgoing_range_filters_exceed_peer_max() {
 
 /// 異種 Range Filter の Range 合計が peer MAX を超えると送信拒否される
 ///
-/// draft-ietf-moq-transport-22 §9.1.6: 全 Range Filter 内の Range 総数
+/// draft-ietf-moq-transport-23 §9.1.6: 全 Range Filter 内の Range 総数
 #[test]
 fn outgoing_cross_type_range_filters_exceed_peer_max() {
     let (mut client, _server, rid) =
@@ -519,7 +519,7 @@ fn outgoing_cross_type_range_filters_exceed_peer_max() {
 
 /// MAX_FILTER_RANGES 未交渉 (デフォルト 0) では非空 Range Filter の送信が拒否される
 ///
-/// draft-ietf-moq-transport-22 §9.1.6
+/// draft-ietf-moq-transport-23 §9.1.6
 #[test]
 fn outgoing_range_filters_rejected_when_max_is_zero() {
     let (mut client, _server, rid) = establish_subscribe_track(1);
@@ -533,7 +533,7 @@ fn outgoing_range_filters_rejected_when_max_is_zero() {
 
 /// MAX_FILTER_RANGES 未交渉 (デフォルト 0) で受信した非空 Range Filter は INVALID_FILTER
 ///
-/// draft-ietf-moq-transport-22 §9.1.6 / §3.3.2
+/// draft-ietf-moq-transport-23 §9.1.6 / §3.3.2
 ///
 /// 送信 API は peer_max=0 で拒否するため、受信経路はメッセージ注入で検証する。
 #[test]
@@ -549,7 +549,7 @@ fn incoming_range_filters_rejected_when_max_is_zero() {
 
 /// 自側 MAX_FILTER_RANGES=1 を超える受信は INVALID_FILTER で拒否される
 ///
-/// draft-ietf-moq-transport-22 §3.3.2
+/// draft-ietf-moq-transport-23 §3.3.2
 #[test]
 fn incoming_range_filters_exceed_local_max() {
     // server が local max=1 を宣言。client の peer_max も 1 になるため 2 Range は
@@ -612,7 +612,7 @@ fn request_update_rejection_close_goes_through_request_streams() {
 
 /// MAX_FILTER_RANGES=1 で Range 1 個の REQUEST_UPDATE は受理され、状態に反映される
 ///
-/// draft-ietf-moq-transport-22 §3.3.2
+/// draft-ietf-moq-transport-23 §3.3.2
 #[test]
 fn incoming_range_filters_within_max_accepted() {
     let (mut client, mut server, rid) =
@@ -649,11 +649,11 @@ fn incoming_range_filters_within_max_accepted() {
     assert_eq!(pending.count_range_filters(), 1);
 }
 
-// ─── FILL_PARAMETERS 内側の Range Filter の合算 (§3.3.2 / §9.1.6 / §9.20.15) ────
+// ─── FILL_PARAMETERS 内側の Range Filter の合算 (§3.3.2 / §9.1.6 / §9.19.15) ────
 
 /// FILL_PARAMETERS (0x23) の内側に `inner` を持つパラメータを作る
 ///
-/// draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter) の内側スコープで
+/// draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter) の内側スコープで
 /// 置ける Range Filter は 0x25-0x28 である (0x29 TRACK_PROPERTY_FILTER は含まれない)。
 fn fill_parameters_param(inner: MessageParameters) -> MessageParameter {
     MessageParameter {
@@ -664,7 +664,7 @@ fn fill_parameters_param(inner: MessageParameters) -> MessageParameter {
 
 /// 同一 (Parameter Type, SetID, Property Type) の Range Filter 2 本を持つパラメータ群を作る
 ///
-/// draft-ietf-moq-transport-22 §3.3.2 (Range Filters): "If the same combination of Parameter
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters): "If the same combination of Parameter
 /// Type, SetID, and Property Type ... repeat in any message, an endpoint MUST reject this with
 /// REQUEST_ERROR with error code INVALID_FILTER."
 fn duplicate_range_filters_inner() -> MessageParameters {
@@ -687,9 +687,9 @@ fn outer_and_inner_one_range() -> MessageParameters {
 
 /// FILL 内側の Range も peer の MAX_FILTER_RANGES に合算され、送信が拒否される
 ///
-/// draft-ietf-moq-transport-22 §3.3.2 (Range Filters) / §9.1.6 (MAX FILTER RANGES):
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters) / §9.1.6 (MAX FILTER RANGES):
 /// 上限は "the peer's total number of Ranges ... in all Range filter Section 3.3.2 parameters
-/// for a given subscription or fetch" であり、§9.20.15 の内側も同じ subscription に適用される。
+/// for a given subscription or fetch" であり、§9.19.15 の内側も同じ subscription に適用される。
 #[test]
 fn outgoing_fill_parameters_ranges_exceed_peer_max() {
     let (mut client, _server, rid) =
@@ -742,7 +742,7 @@ fn outgoing_fill_parameters_inner_range_within_peer_max() {
 
 /// FILL 内側の Range も peer の MAX_FILTER_RANGES に合算され、SUBSCRIBE の送信が拒否される
 ///
-/// draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter) は FILL_PARAMETERS を
+/// draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter) は FILL_PARAMETERS を
 /// SUBSCRIBE に置けるとしているため、SUBSCRIBE の単体検証でも内側を合算する。
 #[test]
 fn outgoing_subscribe_with_fill_parameters_ranges_exceed_peer_max() {
@@ -820,7 +820,7 @@ fn incoming_subscribe_with_fill_parameters_ranges_exceed_local_max() {
 
 /// 外側に Range Filter が無く FILL 内側にだけ Range がある場合も peer の宣言を要求する
 ///
-/// draft-ietf-moq-transport-22 §9.1.6 (MAX FILTER RANGES): "The default value is 0, so if not
+/// draft-ietf-moq-transport-23 §9.1.6 (MAX FILTER RANGES): "The default value is 0, so if not
 /// specified, the peer MUST NOT send any such filter parameters." の条件は Range 数ではなく
 /// Range Filter パラメータの有無であり、FILL 内側だけに存在する場合も該当する。
 /// 有無の判定を外側だけで行うと、この入力が上限判定を素通りして送出される。
@@ -938,7 +938,7 @@ fn incoming_fill_parameters_outer_and_inner_within_local_max() {
 
 /// 自側 MAX_FILTER_RANGES 未宣言 (デフォルト 0) でも FILL 内側の Range は INVALID_FILTER で拒否される
 ///
-/// draft-ietf-moq-transport-22 §9.1.6 (MAX FILTER RANGES): "The default value is 0, so if not
+/// draft-ietf-moq-transport-23 §9.1.6 (MAX FILTER RANGES): "The default value is 0, so if not
 /// specified, the peer MUST NOT send any such filter parameters." の受信側の帰結。
 #[test]
 fn incoming_fill_parameters_only_ranges_rejected_when_local_max_is_zero() {
@@ -994,7 +994,7 @@ fn incoming_fill_parameters_inner_range_within_local_max() {
         SubscriptionState::Established,
         "subscription は Established のまま"
     );
-    // 内側は subscription 状態として保持されない (draft §9.20.15)
+    // 内側は subscription 状態として保持されない (draft §9.19.15)
     let pending = server
         .subscription(rid)
         .expect("subscription が存在する")
@@ -1052,7 +1052,7 @@ fn incoming_update_with_only_inner_ranges_uses_cumulative_max() {
 
 /// 前回メッセージの内側は次の REQUEST_UPDATE の累積に数え直されない
 ///
-/// draft-ietf-moq-transport-22 §9.20.15: "FILL_PARAMETERS is not retained as subscription
+/// draft-ietf-moq-transport-23 §9.19.15: "FILL_PARAMETERS is not retained as subscription
 /// state." のため、2 通目に FILL_PARAMETERS が無ければ累積は保持済みの外側だけになる。
 /// 内側を保持する実装では 1 通目の内側 1 個と 2 通目の外側 1 個が合算されて上限 1 を超え、
 /// 2 通目が誤って拒否される。
@@ -1127,7 +1127,7 @@ fn incoming_zero_range_filters_inside_fill_accepted_when_local_max_is_zero() {
 
 /// FETCH は FILL_PARAMETERS を運べないため、外側の Range Filter が従来どおり上限検証の対象になる
 ///
-/// draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter) が FILL_PARAMETERS を
+/// draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter) が FILL_PARAMETERS を
 /// 許すのは SUBSCRIBE と subscription の REQUEST_UPDATE であり、FETCH のパラメータスコープには
 /// 含まれない。したがって FETCH では合算の対象が存在せず、外側の総数がそのまま上限と比較される。
 #[test]
@@ -1149,7 +1149,7 @@ fn outgoing_fetch_range_filters_exceed_peer_max() {
     assert_no_send_on_stream(&mut client);
 }
 
-// ─── 同一 Parameter Type の複数出現 (draft-ietf-moq-transport-22 §3.3.2) ──────
+// ─── 同一 Parameter Type の複数出現 (draft-ietf-moq-transport-23 §3.3.2) ──────
 
 /// SetID=0 のみで Range を 1 つも持たない SUBGROUP_FILTER を作る
 ///
@@ -1164,7 +1164,7 @@ fn zero_range_subgroup_filter() -> MessageParameter {
 
 /// Range 0 個の同一 (Parameter Type, SetID) が重複したら INVALID_FILTER で拒否される
 ///
-/// draft-ietf-moq-transport-22 §3.3.2: "If the same combination of Parameter Type, SetID,
+/// draft-ietf-moq-transport-23 §3.3.2: "If the same combination of Parameter Type, SetID,
 /// and Property Type ... repeat in any message, an endpoint MUST reject this with
 /// REQUEST_ERROR with error code INVALID_FILTER."
 ///
@@ -1194,7 +1194,7 @@ fn incoming_zero_range_duplicate_filters_are_rejected() {
 /// open 中の outgoing subgroup stream がある場合、Range Filter 拒否の PUBLISH_DONE は
 /// 全 stream 終端後に自動送信される
 ///
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE): "A sender MUST NOT send PUBLISH_DONE
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE): "A sender MUST NOT send PUBLISH_DONE
 /// until it has closed all streams it will ever open ..." と §9.5.1 の MUST
 /// (REQUEST_UPDATE 失敗時は PUBLISH_DONE(UPDATE_FAILED)) を両立させる。
 #[test]
@@ -1287,7 +1287,7 @@ fn invalid_filter_rejection_defers_publish_done_until_streams_close() {
 /// fin 付き REQUEST_ERROR を送らず state machine の違反としてセッションを閉じる
 ///
 /// 保留中の PUBLISH_DONE を持つ bidi stream に fin 付き REQUEST_ERROR を送ると
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE) の「PUBLISH_DONE が最終メッセージ」
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE) の「PUBLISH_DONE が最終メッセージ」
 /// が守れなくなるため、Terminated への REQUEST_UPDATE は
 /// `validate_subscription_request_update` の state 検証と同じ経路で閉じる。
 #[test]
@@ -1365,7 +1365,7 @@ fn second_invalid_filter_rejection_after_termination_closes_session() {
 /// Pending の subscription に Range Filter 違反付き REQUEST_UPDATE が届いても
 /// state machine の違反としてセッションを閉じる (valid な REQUEST_UPDATE と同じ経路)
 ///
-/// draft-ietf-moq-transport-22 §3.1 (Subscriptions): REQUEST_UPDATE は Established の
+/// draft-ietf-moq-transport-23 §3.1 (Subscriptions): REQUEST_UPDATE は Established の
 /// self loop のみ。Range Filter の内容検証を理由に状態違反のクローズを回避させない。
 #[test]
 fn invalid_filter_rejection_on_pending_subscription_closes_session() {
@@ -1428,7 +1428,7 @@ fn invalid_filter_rejection_by_subscriber_sends_request_error_only() {
 
 /// SetID が異なる同一型 Range Filter 2 本は送信 API から受信状態反映まで通る
 ///
-/// draft-ietf-moq-transport-22 §3.3.2: 同一 Parameter Type は複数回出現でき、
+/// draft-ietf-moq-transport-23 §3.3.2: 同一 Parameter Type は複数回出現でき、
 /// SetID ごとの結果は OR 結合される。1 インスタンスは 1 SetID しか持てないため、
 /// 複数 SetID を表現するには複数出現が必須になる。
 #[test]
@@ -1475,7 +1475,7 @@ fn incoming_distinct_set_id_range_filters_are_accepted() {
 
 /// PUBLISH_OK に Range Filter が来たらスコープ検証でセッションを閉じる
 ///
-/// draft-ietf-moq-transport-22 Appendix A.3 #1790 (Subscription parameters appear in
+/// draft-ietf-moq-transport-23 Appendix A.4 #1790 (Subscription parameters appear in
 /// REQUEST_UPDATE, not PUBLISH_OK): PUBLISH_OK は EXPIRES のみを運ぶ。
 /// Range Filter を含む PUBLISH_OK はスコープ外として INVALID_PARAMETER で
 /// セッションを閉じる。
@@ -1527,7 +1527,7 @@ fn publish_ok_with_range_filter_closes_session() {
 
 /// 同一 (Parameter Type, SetID) が重複した Range Filter は送信 API で拒否される
 ///
-/// draft-ietf-moq-transport-22 §3.3.2 により peer は必ず INVALID_FILTER で拒否するため、
+/// draft-ietf-moq-transport-23 §3.3.2 により peer は必ず INVALID_FILTER で拒否するため、
 /// 自側で送信前に弾く。セッションは閉じず Err を返すだけに留まる。
 #[test]
 fn outgoing_duplicate_range_filters_are_rejected() {
@@ -1562,7 +1562,7 @@ fn outgoing_duplicate_range_filters_are_rejected() {
 
 /// プロトコル層が自動送出する REQUEST_ERROR でもクレジットが回復する
 ///
-/// draft-ietf-moq-transport-22 §9.1.7: "Each REQUEST_OK or REQUEST_ERROR response
+/// draft-ietf-moq-transport-23 §9.1.7: "Each REQUEST_OK or REQUEST_ERROR response
 /// restores one credit on that stream"。アプリ層 API を経由しない自動応答も
 /// REQUEST_ERROR であり、回復対象に含まれる。
 ///
@@ -1603,7 +1603,7 @@ fn request_update_credit_recovers_after_protocol_level_error() {
 
 /// 拒否を繰り返しても上限がちょうど 1 のまま保たれる
 ///
-/// draft-ietf-moq-transport-22 §9.1.7 の回復は「加算した分を戻す」ものであり、
+/// draft-ietf-moq-transport-23 §9.1.7 の回復は「加算した分を戻す」ものであり、
 /// 拒否のたびに +1 / -1 が釣り合う。釣り合いが崩れると上限判定が緩むか、
 /// 逆に正当な REQUEST_UPDATE を拒否してしまう。
 /// 自側 publisher の subscription は拒否で終端されるため、拒否後も Established を
@@ -1642,7 +1642,7 @@ fn repeated_protocol_level_errors_keep_update_limit() {
 
 /// 1 つの REQUEST_UPDATE に応答を 2 回送っても outstanding が 0 を割り込まない
 ///
-/// draft-ietf-moq-transport-22 §9.1.7 の回復は加算分を戻すものなので、
+/// draft-ietf-moq-transport-23 §9.1.7 の回復は加算分を戻すものなので、
 /// outstanding 0 の状態でさらに減算してはならない。outstanding のエントリは
 /// 応答後も 0 の値で残るため、同一 request_id に REQUEST_OK と REQUEST_ERROR を
 /// 続けて送ると 2 回目の回復が 0 に対して走る。減算が符号なし整数を回り込むと
@@ -1725,7 +1725,7 @@ fn zero_range_filter_forms() -> [(&'static str, MessageParameters); 3] {
 
 /// peer が MAX_FILTER_RANGES を宣言していなければ Range を持たない Range Filter も送出できない
 ///
-/// draft-ietf-moq-transport-22 §9.1.6: "The default value is 0, so if not specified,
+/// draft-ietf-moq-transport-23 §9.1.6: "The default value is 0, so if not specified,
 /// the peer MUST NOT send any such filter parameters."
 /// 条件は "such filter parameters" であり Range 数ではないため、Range 総数 0 でも送れない。
 #[test]
@@ -1807,8 +1807,8 @@ fn outgoing_zero_range_filters_inside_fill_allowed_when_peer_max_declared() {
 
 /// FILL 内側の Range Filter の構造不正 (重複) は上限内でも送信前に拒否される
 ///
-/// draft-ietf-moq-transport-22 §3.3.2 (Range Filters): 同一 (Parameter Type, SetID,
-/// Property Type) の重複は INVALID_FILTER。§9.20.15 の内側スコープも同じ検証を行う
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters): 同一 (Parameter Type, SetID,
+/// Property Type) の重複は INVALID_FILTER。§9.19.15 の内側スコープも同じ検証を行う
 /// (上限内の入力なので上限判定では弾かれない)。
 #[test]
 fn outgoing_duplicate_range_filters_inside_fill_are_rejected() {
@@ -1853,7 +1853,7 @@ fn incoming_duplicate_range_filters_inside_fill_are_rejected() {
 
 /// 受信側は MAX_FILTER_RANGES=0 でも Range を持たない Range Filter を受理する
 ///
-/// draft-ietf-moq-transport-22 §3.3.2 の MUST reject は「上限超過」しか条件にしていないため、
+/// draft-ietf-moq-transport-23 §3.3.2 の MUST reject は「上限超過」しか条件にしていないため、
 /// Range 総数 0 を拒否する規範が無い。MUST で要求されていない拒否で peer のリクエストを
 /// 失敗させない、という送信保守・受信寛容の判断を固定する。
 #[test]
@@ -1941,12 +1941,12 @@ fn incoming_unparsable_range_filter_is_rejected() {
     assert_eq!(server.state(), SessionState::Established);
 }
 
-/// 初回 PUBLISH の Range Filter は §9.20.1 のパラメータスコープ違反として
+/// 初回 PUBLISH の Range Filter は §9.19.1 のパラメータスコープ違反として
 /// PROTOCOL_VIOLATION でセッションを閉じる
 ///
 /// PUBLISH は Range Filter (SUBGROUP_FILTER 等) を許可しない (§3.3.2 は SUBSCRIBE / FETCH /
 /// SUBSCRIBE_TRACKS / REQUEST_UPDATE に限定)。`PUBLISH_ALLOWED_PARAMS` に含まれないため、
-/// Range Filter の総数検証 (INVALID_FILTER の REQUEST_ERROR) より先に §9.20.1 の MUST close が
+/// Range Filter の総数検証 (INVALID_FILTER の REQUEST_ERROR) より先に §9.19.1 の MUST close が
 /// 発火する。
 #[test]
 fn initial_publish_with_range_filter_closes_session_with_protocol_violation() {
@@ -1991,7 +1991,7 @@ fn initial_publish_with_range_filter_closes_session_with_protocol_violation() {
 /// 初回 FETCH の Range Filter は許可パラメータであり、従来どおり
 /// REQUEST_ERROR (INVALID_FILTER) のみでセッションを閉じない
 ///
-/// `FETCH_ALLOWED_PARAMS` は Range Filter を含むため、§9.20.1 のスコープ違反にはならず、
+/// `FETCH_ALLOWED_PARAMS` は Range Filter を含むため、§9.19.1 のスコープ違反にはならず、
 /// `check_incoming_range_filters` の INVALID_FILTER 拒否が働く
 /// (SUBSCRIBE 初回は `incoming_unparsable_range_filter_is_rejected` が担う)。
 #[test]
@@ -2043,7 +2043,7 @@ fn one_range_objectid_filter() -> MessageParameters {
 
 /// 型をまたぐ Range Filter の累積が自側 MAX_FILTER_RANGES を超えたら拒否される
 ///
-/// draft-ietf-moq-transport-22 §9.1.6 (MAX FILTER RANGES) が宣言する上限は、同節の
+/// draft-ietf-moq-transport-23 §9.1.6 (MAX FILTER RANGES) が宣言する上限は、同節の
 /// "the peer's total number of Ranges (Start/End pairs) allowed concurrently in all Range
 /// filter Section 3.3.2 parameters for a given subscription or fetch" であり、1 メッセージ単位
 /// ではなく subscription 単位の同時保持数。
@@ -2185,7 +2185,7 @@ fn cumulative_overflow_does_not_mutate_pending_params() {
 
 /// 自側 publisher の累積上限超過も単一メッセージ超過と同じ終端になる
 ///
-/// draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions): REQUEST_UPDATE が
+/// draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions): REQUEST_UPDATE が
 /// 失敗した publisher は PUBLISH_DONE(UPDATE_FAILED) で subscription を終端する MUST。
 #[test]
 fn cumulative_overflow_terminates_publisher_subscription() {
@@ -2294,12 +2294,12 @@ fn cumulative_range_filters_at_local_max_accepted() {
     assert_eq!(pending.count_range_filters(), 2);
 }
 
-// ─── GROUP_ORDER 値域検証 (draft §9.20.8) ──────────────────────────────────
+// ─── GROUP_ORDER 値域検証 (draft §9.19.8) ──────────────────────────────────
 
-/// GROUP_ORDER 値域外の SUBSCRIBE 受信は PROTOCOL_VIOLATION でセッションを閉じる
+/// GROUP_ORDER 値域外の SUBSCRIBE 受信は INVALID_PARAMETER でセッションを閉じる
 ///
-/// draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): 値域外の値は
-/// "MUST close the session with PROTOCOL_VIOLATION"。ワイヤデコード層は値域外を
+/// draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter): 値域外の値は
+/// "MUST close the session with INVALID_PARAMETER"。ワイヤデコード層は値域外を
 /// 弾くため、セッション層に到達するのはアプリが MessageParameters を直接構築して
 /// 渡した場合のみ。
 #[test]
@@ -2337,7 +2337,7 @@ fn subscribe_with_invalid_group_order_closes_session() {
 
 /// 値域外 GROUP_ORDER を含む send_subscribe はエラーを返し、セッションは閉じない
 ///
-/// draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): MUST クローズは
+/// draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter): MUST クローズは
 /// 受信側の義務であり、送信側の検証はエラーを返すだけ。検証失敗後も正常な送信が
 /// 継続できること (状態非汚染) を確認する。
 #[test]

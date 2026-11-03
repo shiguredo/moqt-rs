@@ -2,9 +2,9 @@
 
 調査日: 2026-10-14 (develop の f91baf3 時点)。
 
-最終更新: 2026-10-24 (§6.6 の GOAWAY によるセッション移行のみ現状に更新)。
+最終更新: 2026-11-04 (対象仕様を MOQT draft-23 に更新し、節番号・パラメータ名を追随させた)。
 
-対象仕様は `refs/moq/` の MOQT `draft-ietf-moq-transport-22`、LOC `draft-ietf-moq-loc-04`、
+対象仕様は `refs/moq/` の MOQT `draft-ietf-moq-transport-23`、LOC `draft-ietf-moq-loc-04`、
 MSF `draft-ietf-moq-msf-01`、C4M `draft-ietf-moq-c4m-01` である。
 対象コードは `src/` (ライブラリ)、`crates/moq-pub`、`crates/moq-sub`、
 `crates/tokio-moq` (transport 層)。
@@ -12,13 +12,13 @@ MSF `draft-ietf-moq-msf-01`、C4M `draft-ietf-moq-c4m-01` である。
 `CODEBASE.md` の「クライアントとサーバーのみで MoQ リレーには対応しないこと」により、
 MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUBSCRIBE_TRACKS` /
 `NAMESPACE` / `NAMESPACE_DONE` / `PUBLISH_SKIPPED`、§7 全体、§3.2.3 Relay Fetch Handling、
-§7.4.1 / §7.6.1 Relay Switchover、namespace 発見・forwarding) は本稿の対象外とする。
+§7.5.1 / §7.7.1 Relay Switchover、namespace 発見・forwarding) は本稿の対象外とする。
 `docs/moqt.md` / `docs/msf.md` / `docs/loc.md` / `docs/c4m.md` の「未対応」に
 書かれている内容も既知として扱い、重複して数え上げない。
 
 ## 1. 結論
 
-ライブラリ (`src/`) のプロトコル被覆は高い。draft-22 の制御メッセージ、Setup Options (7 種すべて)、
+ライブラリ (`src/`) のプロトコル被覆は高い。draft-23 の制御メッセージ、Setup Options (8 種すべて)、
 メッセージパラメータ、Track / Object Property、エラーコードはほぼ実装済みである。
 足りていないのは次の 4 層に分かれる。
 
@@ -62,7 +62,7 @@ MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUB
 | 機能 | API / 現状 | 仕様 | 影響 |
 | --- | --- | --- | --- |
 | FETCH の要求 | `Session::send_fetch` はあるが、`MoqtClient` に発行 API が無い (削除済み) | §3.2 / §9.11 | moq-sub は過去の Object を取得できない。シーク、巻き戻し、切断後の追いつきができない |
-| TRACK_STATUS | `send_track_status` / `forget_track_status` | §9.13 | 購読前にトラックの存在・最新 Object を確認できない。moq-pub 側は受信しても `NOT_SUPPORTED` で拒否する |
+| TRACK_STATUS | `send_track_status` / `forget_track_status` | §9.12 | 購読前にトラックの存在・最新 Object を確認できない。moq-pub 側は受信しても `NOT_SUPPORTED` で拒否する |
 | Media / Event Timeline | `msf::encode_media_timeline` / `encode_event_timeline` | MSF §7 / §8 | moq-pub はタイムラインを配信せず、moq-sub も受信しない |
 | Timeline のテンプレート展開 | `MsfTemplate::resolve_entry` | MSF §7.4 | テンプレート形式の Timeline を使えない |
 | MSF の変数置換 | `msf::resolve_catalog_variables` | MSF §5.4 / §5.2.43 | moq-pub が `authInfo` に `"%c4m%"` を書くのに、moq-sub が解決しないため認可トークンの受け渡しが example 間で成立しない |
@@ -81,14 +81,14 @@ MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUB
 | catalog の delta update 生成 | `MsfCatalogDocument::Delta` | MSF §5.1.6 / §5.3 | moq-pub は常に Full のみ。MAY なので違反ではない |
 | `PUBLISH_STATE_NOTIFY` の送信 | `Session::send_publish_state_notify` に `MoqtClient` のラッパーが無い | §9.10 | publisher から状態変化を通知できない |
 | PUBLISH_OK 前の Object 送信 | `send_subgroup_header` / `send_object_datagram` が `Established` を要求する | §3.1 (MAY) | publisher は PUBLISH_OK を待つ分だけ購読確立が遅れる (違反ではない) |
-| FETCH_OK 前の Object 送信 | `send_fetch_header` が `FetchState::Established` を要求する | §3.2 (MAY) | End Location が確定するまで FETCH 応答 Object を送れない。fill fetch は `Pending` を許容するため非対称 |
+| FETCH_OK 前の Object 送信 | `send_fetch_header` が `FetchState::Established` を要求する | §3.2 (MAY) | 応答範囲の終端 (LARGEST_OBJECT が要求範囲内か) が確定するまで FETCH 応答 Object を送れない。fill fetch は `Pending` を許容するため非対称 |
 | moqt URI のパース | `msf::uri` は fragment 必須で `msf:` 以外を拒否する。authority / path / query の分解は example 側の `parse_url` にのみある | §6.1 / §6.1.1 / §6.1.2 | ライブラリ利用者は URI 解釈を毎回自前実装する (意図的に example へ置いている可能性あり) |
 
 ## 4. MUST 未達・仕様違反になりうる箇所
 
 ### 4.1 Object 側 `IMMUTABLE_PROPERTIES` を探索しない (§10.7、ライブラリ)
 
-draft-22 §10.7 は「When looking for the value of a property, processors MUST search both the
+draft-23 §10.7 は「When looking for the value of a property, processors MUST search both the
 mutable properties and the contents of Immutable Properties.」と定める。
 MOQT の `ObjectProperties` 側は探索する実装がある (`src/object_properties.rs:266-300`) が、
 LOC 側の `LocProperties` はトップレベルの KVP しか走査しない (`src/loc.rs:393-415`)。
@@ -174,8 +174,8 @@ moq-pub は終了時に `PUBLISH_DONE(GOING_AWAY = 0x4)` を送るだけであ�
 example から使われず、catalog は `is_complete: false` / `isLive: true` 固定で
 `trackDuration` も設定しない (`crates/moq-pub/src/catalog.rs:154-205`)。
 購読側は配信が正常終了したことを判別できない。
-なお MSF §11.3 は `SUBSCRIBE_DONE` と書くが、draft-22 で `PUBLISH_DONE` に改名されている
-(コードは `src/error.rs:258` の `PUBLISH_DONE_TRACK_ENDED = 0x2`)。
+なお MSF §11.3 は `SUBSCRIBE_DONE` と書くが、MOQT は draft-13 以降 `PUBLISH_DONE` に
+改名している (コードは `src/error.rs:258` の `PUBLISH_DONE_TRACK_ENDED = 0x2`)。
 
 ### 5.2 PUBLISH に Message Parameters を載せられない
 
@@ -183,8 +183,8 @@ example から使われず、catalog は `is_complete: false` / `isLive: true` �
 `MessageParameters` を引数に取らず、内部で空のパラメータを渡す。
 ライブラリ側は `Session::send_publish(..., parameters, ...)` で任意のパラメータを受け付ける
 (`src/session/subscription/send.rs:254-261`) ため、transport 層のラッパーの制約である。
-結果として `EXPIRES` (§9.20.16)・`SUBSCRIBER_PRIORITY` (§9.20.7)・
-Delivery Timeout (§9.20.3 / §9.20.4)・`FORWARD` (§9.20.18)・`GROUP_ORDER` (§9.20.8) を
+結果として `EXPIRES` (§9.19.16)・`SUBSCRIBER_PRIORITY` (§9.19.7)・
+Delivery Timeout (§9.19.3 / §9.19.4)・`PAUSED` (§9.19.18)・`GROUP_ORDER` (§9.19.8) を
 PUBLISH に載せられない。
 
 ### 5.3 配送タイムアウトを載せていない
@@ -211,7 +211,7 @@ CLI に優先度のオプションも無い。音声と映像が同じ優先度�
 PUBLISH に載せる Track Property は `DYNAMIC_GROUPS` など一部だけで、以下は
 `crates/` に出現しない (`MAX_CACHE_DURATION` §10.3、`DEFAULT_PUBLISHER_PRIORITY` §10.4、
 `DEFAULT_PUBLISHER_GROUP_ORDER` §10.5、`IMMUTABLE_PROPERTIES` §10.7、
-`EXPIRES` §9.20.16)。保持期間や既定値を宣言しないため、subscriber は
+`EXPIRES` §9.19.16)。保持期間や既定値を宣言しないため、subscriber は
 いつまで取得できるかを判断できない。
 
 ### 5.6 Range Filters を有効にできない
@@ -229,7 +229,7 @@ moq-pub の peer request 処理は SUBSCRIBE と FETCH だけを扱い、それ�
 `REQUEST_NOT_SUPPORTED` で拒否する (`crates/moq-pub/src/pipeline.rs:1911-1916`)。
 ライブラリは TRACK_STATUS の受信と応答に対応している
 (`src/session/track_status.rs`) ため example 側の実装漏れである。
-§9.13 は SUBSCRIBE_OK と同じ Track Properties を持つ応答を求めるが、
+§9.12 は SUBSCRIBE_OK と同じ Track Properties を持つ応答を求めるが、
 transport 層の `send_request_ok` も Track Properties を渡せない
 (`crates/tokio-moq/src/moqt_client.rs:1697-1703`)。
 
@@ -247,7 +247,7 @@ open な publisher 起点 data stream を破棄対象へ移し、
 FETCH に応答するのは catalog track だけで、映像 / 音声の FETCH は `DOES_NOT_EXIST` で
 拒否する (`crates/moq-pub/src/pipeline.rs:1825-1910`)。fill fetch も catalog のみで、
 映像 / 音声は reset する (`pipeline.rs:1303-1367`)。
-draft-22 §3.2 は FETCH を「過去の Object を取得する」機構として定義しており、
+draft-23 §3.2 は FETCH を「過去の Object を取得する」機構として定義しており、
 publisher が保持していれば応答できる。現状はメディアを保持もしないため、
 subscriber は途中参加より前の Group を取得できない。
 
@@ -255,7 +255,7 @@ subscriber は途中参加より前の Group を取得できない。
 
 受信する REQUEST_UPDATE (`crates/moq-pub/src/pipeline.rs:1368-1414`) は
 常に `REQUEST_OK` を返し、実質的に扱うのは `NEW_GROUP_REQUEST` だけである。
-フィルタ変更と Forward (pause) はライブラリが反映する
+フィルタ変更と PAUSED (pause) はライブラリが反映する
 (`src/session/subscription/recv.rs`、`src/session/subscription/validation.rs`) が、
 priority の変更は購読状態に保存されるだけで送信に反映されず、
 `EXPIRES` の延長は `REQUEST_UPDATE_OK` に載せる経路が無い
@@ -380,18 +380,18 @@ session は `error_details` と `retry_interval` をイベントに載せる
 
 ### 6.8 TRACK_STATUS を使わない
 
-購読前にトラックの有無や最新 Object を確認する §9.13 の経路を持たない。
+購読前にトラックの有無や最新 Object を確認する §9.12 の経路を持たない。
 `--no-video` / `--no-audio` は catalog の内容だけで判断する。
 
 ### 6.9 REQUEST_UPDATE が固定 priority の 1 回だけ
 
 REQUEST_UPDATE の送信は `crates/moq-sub/src/pipeline.rs:784-794` の 1 箇所だけで、
 固定値 192 の `SUBSCRIBER_PRIORITY` を送る (コメント上もサンプル)。§9.5 が購読で
-許す更新のうち、Forward (pause / 再開、§3.1.1)・Group Order・Location Filter・
+許す更新のうち、PAUSED (pause / 再開、§3.1.1)・Group Order・Location Filter・
 Range Filter・Delivery Timeout はいずれも送らない。REQUEST_UPDATE_OK も
-catch-all で読み捨てる (`pipeline.rs:1280`)。`FORWARD=0` による一時停止ができない。
+catch-all で読み捨てる (`pipeline.rs:1280`)。`PAUSED=1` による一時停止ができない。
 
-購読中の `NEW_GROUP_REQUEST` (§9.20.19、§3.5.1) も送れない。session は
+購読中の `NEW_GROUP_REQUEST` (§9.19.19、§3.5.1) も送れない。session は
 `DYNAMIC_GROUPS` を受けて保持する (`src/session/subscription/recv.rs:638`) が、
 `MoqtClient` に公開 accessor が無く (`crates/tokio-moq/src/moqt_client.rs:261-271`)、
 購読確立後に新しい Group を要求する経路が API として存在しない。
@@ -403,15 +403,15 @@ moq-sub が実際に載せるのは catalog の `LOCATION_FILTER` + `FILL_PARAME
 映像への REQUEST_UPDATE の `SUBSCRIBER_PRIORITY=192` (`pipeline.rs:784-794`) である。
 音声の SUBSCRIBE はパラメータ無し (`pipeline.rs:817-819`)。以下は未使用である。
 
-- メディアの `LOCATION_FILTER` (§9.20.9、§3.3.1)。開始位置を指定できないため、
+- メディアの `LOCATION_FILTER` (§9.19.9、§3.3.1)。開始位置を指定できないため、
   Group 途中で参加するとキーフレームまで破棄する (`pipeline.rs:3026-3043`)
-- Delivery Timeout (§9.20.3 / §9.20.4)。購読側から許容時間を指定できない
-- `GROUP_ORDER` (§9.20.8)
-- Range Filters (§9.20.10〜§9.20.13、§3.3.2)。そもそも `MAX_FILTER_RANGES` が
+- Delivery Timeout (§9.19.3 / §9.19.4)。購読側から許容時間を指定できない
+- `GROUP_ORDER` (§9.19.8)
+- Range Filters (§9.19.10〜§9.19.13、§3.3.2)。そもそも `MAX_FILTER_RANGES` が
   宣言されていないため送れない (5.6)
-- `INCLUDE_PROPERTIES` (§9.20.21)
-- `FILL_TIMEOUT` (§9.20.5、§9.20.15)
-- `EXPIRES` (§9.20.16)。`SubscribeResult` は `largest_object` しか公開せず
+- `INCLUDE_PROPERTIES` (§9.19.22)
+- `FILL_TIMEOUT` (§9.19.5、§9.19.15)
+- `EXPIRES` (§9.19.16)。`SubscribeResult` は `largest_object` しか公開せず
   (`crates/tokio-moq/src/moqt_client.rs:261-271`)、期限延長の要求ができない
 
 ### 6.11 Object Status / PUBLISH_DONE / Largest Object を判断に使わない
@@ -424,7 +424,7 @@ moq-sub が実際に載せるのは catalog の `LOCATION_FILTER` + `FILL_PARAME
   検知できない
 - PUBLISH_DONE (§9.9) はログのみ (`pipeline.rs:1214-1223`)。`stream_count` の突き合わせや
   §12.4 の status code 別の扱いをしない
-- Largest Object (§3.1.4、§9.20.17) はログのみ (`pipeline.rs:667-672`)。
+- Largest Object (§3.1.4、§9.19.17) はログのみ (`pipeline.rs:667-672`)。
   fill range の判断に使わない
 
 ### 6.12 MSF の Timeline・範囲指定・buffers を使わない
@@ -487,19 +487,33 @@ moqt-js (HEAD `6da25d10`) の playout のうち、次の 2 つは移植してい
   `RESET_STREAM_AT` を実装しないため、reset の `reliable_size` は常に `None` になる
 - QMux 上の MOQT を扱う individual draft
   (`refs/moq/draft-nandakumar-moq-qmux-moqt-00.txt`) は MOQT draft-16 を前提としており、
-  同 draft の control stream (双方向 stream 0) は draft-ietf-moq-transport-22 §6.4.1
+  同 draft の control stream (双方向 stream 0) は draft-ietf-moq-transport-23 §6.4.1
   (control stream は単方向) と矛盾する。本実装は QUIC version 1 との 1 対 1 の対応を採る
 - `--cert` を省略すると証明書検証をスキップする。mTLS (§15.3.1) には対応しない
 - 0-RTT (§6.3.1) と再接続 / セッション再開は未対応 (`rg 'early_data|0-rtt|resumption' crates/` が 0 件)
 - 無通信時の切断対策が無い。§15.6.1 が挙げる 3 つの選択肢 (transport の keep-alive、
   定期 control message、切断後の再接続) のいずれも実装していない
-- STOP_SENDING の error code を指定できない (`pipeline.rs:1389-1393`、§12.5 は SHOULD)
-- DPoP proof (`cnf` / `catdpop` 付きトークン) を送らない (C4M §3.2.2)
-- Extension Negotiation (§6.3.2) の枠組みが無い。拡張を使わないので現状の実害は無い
-- WebTransport 経由の datagram 受信は現行コードでは `take_buffered_datagrams` 経由で
-  実装されている (`crates/tokio-moq/src/transport.rs:431-438`)。
-  `issues/pending/0010` は削除済みの `examples/moq-transport` を指すため、
-  現行で再現するかは要確認である
+- §15.6 (Timeouts) が挙げる待機箇所と、ライブラリが自前のタイマーで課す上限の対応は次のとおり。
+  §15.6 は「実装ごとに値を決める」とだけ定め、一律の値も MUST も課していないため、ライブラリは
+  既定値を固定せずアプリが `set_control_message_timeout_ms` / `set_data_stream_timeout_ms` と
+  `tick(now_ms)` で与える
+  - 要求への応答待ち: `CONTROL_MESSAGE_TIMEOUT` (`0x11`)。SUBSCRIBE / PUBLISH / FETCH /
+    TRACK_STATUS の送信時に deadline を開始し、応答または要求の終端で解除する
+  - データストリームのヘッダ / Object の残り (Track Alias 未確立の stream を含む):
+    `DATA_STREAM_TIMEOUT` (`0x12`)。`set_data_stream_timeout_ms` の無通信期限と、購読の
+    `SUBGROUP_DELIVERY_TIMEOUT` / `OBJECT_DELIVERY_TIMEOUT` (§5.2 / §10.1 / §10.2) から導く期限
+  - open な Subgroup / FETCH stream の次の Object または FIN: 購読の Delivery Timeout による
+    `DATA_STREAM_TIMEOUT`。subgroup stream は STOP_SENDING と購読維持、FETCH stream は
+    セッション終了 (§12.2 が代替措置を示さないため)
+  - 購読の次の Subgroup / Datagram: 購読の `OBJECT_DELIVERY_TIMEOUT` と
+    `SUBGROUP_DELIVERY_TIMEOUT`。期限到達で当該 stream を `DELIVERY_TIMEOUT` (`0x2`) で reset する
+  - PUBLISH_DONE が数えるデータストリーム: タイマー無し。`send_data_stream_closed` を呼ぶ契約で、
+    呼び忘れると Stream Count が確定しない (§9.9)
+  - GOAWAY 後のセッション終了と drain: `GOAWAY_TIMEOUT` (`0x10`)。request stream の GOAWAY は
+    セッションを閉じず当該 stream を `GOING_AWAY` (`0x4`) で reset する
+- §15.6 が挙げるトレードオフ (短いと遅いが正しい peer を切り、長いと不正な peer がリソースを
+  保持し続ける) はアプリの設定に委ねる。ライブラリは期限到達時に「セッションを閉じるより狭い
+  措置」(STOP_SENDING + 購読維持) を選べる箇所で選び、§12.2 の最も具体的なコードを使う
 
 ## 8. 付録: ドキュメントと実装の齟齬
 
@@ -511,7 +525,7 @@ moqt-js (HEAD `6da25d10`) の playout のうち、次の 2 つは移植してい
 - `crates/moq-sub/README.md:76` は「moq-pub は `--audio-datagram` でこの配送を選べる」と
   書くが、そのようなフラグは無い (既定が datagram で、subgroup にするのが `--audio-subgroup`)。
   `crates/moq-sub/src/pipeline.rs:4775` のコメントも同じ
-- MSF §11.3 は `SUBSCRIBE_DONE` と書くが、draft-22 で `PUBLISH_DONE` に改名されている。
+- MSF §11.3 は `SUBSCRIBE_DONE` と書くが、MOQT は draft-13 以降 `PUBLISH_DONE` に改名している。
   実装は改名後に追従している
 
 ## 9. 優先度の目安

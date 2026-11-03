@@ -39,10 +39,10 @@ use shiguredo_moqt::msf::uri::{MsfConnectionType, MsfFragment, parse_msf_fragmen
 
 use crate::error::TransportError;
 
-/// draft-ietf-moq-transport-22 §9.1 (SETUP) に基づく基本 Setup Options を構築する
+/// draft-ietf-moq-transport-23 §9.1 (SETUP) に基づく基本 Setup Options を構築する
 ///
 /// path (0x01) と authority (0x05) は QUIC 接続時にのみ含まれ、
-/// WebTransport 使用時は draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY) /
+/// WebTransport 使用時は draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY) /
 /// §9.1.2 (PATH) により MUST NOT のため呼び出し側で None を渡す。
 /// §9.1.5 (MOQT IMPLEMENTATION) の `impl_name` (option type 0x07) は常に含まれる。
 ///
@@ -51,7 +51,7 @@ use crate::error::TransportError;
 /// AUTHORIZATION_TOKEN を含めない。
 /// peer が内容を制御できる文字列をログ出力用にサニタイズする
 ///
-/// draft-ietf-moq-transport-22 §15.9 (Logging of Untrusted String Fields): Reason Phrase や
+/// draft-ietf-moq-transport-23 §15.9 (Logging of Untrusted String Fields): Reason Phrase や
 /// MOQT_IMPLEMENTATION は sender 制御のテキストであり、ログや描画の前にサニタイズすることを
 /// SHOULD とする ("an endpoint that logs or renders them SHOULD sanitize them first (for example,
 /// by escaping bytes outside the printable ASCII range)")。ANSI エスケープシーケンスによる
@@ -121,7 +121,7 @@ pub fn build_setup_options(
 /// AUTHORIZATION_TOKEN (param type 0x03) の双方で同じ表現を使う。
 /// Token Type は CAT (0x01) を使い (draft-ietf-moq-c4m-01 §7.1.1)、alias の登録・参照を
 /// 行わないため USE_VALUE (Alias Type 0x3) を使う
-/// (draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression))。
+/// (draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression))。
 pub(crate) fn c4m_authorization_token(token_value: &[u8]) -> AuthorizationToken {
     AuthorizationToken::UseValue {
         token_type: MOQT_AUTH_TOKEN_TYPE_CAT,
@@ -222,7 +222,7 @@ impl Transport {
 
 /// moqt URI の fragment (`<type>:<value>`)
 ///
-/// draft-ietf-moq-transport-22 §6.1.1 (Fragment Identifiers) は fragment をサーバーへ
+/// draft-ietf-moq-transport-23 §6.1.1 (Fragment Identifiers) は fragment をサーバーへ
 /// 送信せず、クライアントが MOQT セッション確立後にローカルで処理すると定める。
 /// `:path` / PATH option / SNI には渡さない。
 ///
@@ -261,7 +261,7 @@ pub struct ServerUrl {
     pub path: String,
     /// MOQT の fragment (`#` 以降)
     ///
-    /// draft-ietf-moq-transport-22 §6.1.1 (Fragment Identifiers) によりサーバーへは
+    /// draft-ietf-moq-transport-23 §6.1.1 (Fragment Identifiers) によりサーバーへは
     /// 送信しない。接続経路 (`:path` / PATH option / SNI) では参照しない。
     /// `msf` fragment の track-identifier とパラメータの解釈結果は [`ServerUrl::msf`]、
     /// 予約パラメータ `c4m` の認可トークンは [`ServerUrl::c4m_tokens`] に取り出している。
@@ -286,7 +286,7 @@ pub struct ServerUrl {
     ///
     /// `msf` 以外の fragment と `c4m` パラメータ無しの `msf` fragment では空。
     /// 同一のトークンが複数回現れた場合は 1 つに畳む
-    /// (draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) は
+    /// (draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression) は
     /// alias 解決後の (Token Type, Token Value) の重複を拒否するため)。
     pub c4m_tokens: Vec<Vec<u8>>,
 }
@@ -301,7 +301,7 @@ pub struct ServerUrl {
 /// 文字列をそのまま保持する (RFC 3986 §6.2.2.1 は scheme と host を大文字小文字非区別とするが、
 /// host を入力のまま使うのは DNS / SNI の非区別性に依存する設計判断である)。
 ///
-/// fragment は `:path` と PATH option には含めない。draft-ietf-moq-transport-22 §6.1.1
+/// fragment は `:path` と PATH option には含めない。draft-ietf-moq-transport-23 §6.1.1
 /// (Fragment Identifiers) の `<type>:<value>` として解釈し、同節の文字種の MUST に
 /// 一致しない場合はエラーにする。同 draft §16.2 (Media Type Registration) は
 /// "Fragment identifiers for application/moqt follow the syntax defined in Section 6.1.1."
@@ -329,7 +329,7 @@ pub fn parse_url(url: &str) -> Result<ServerUrl, String> {
     if !scheme.eq_ignore_ascii_case("moqt") {
         return Err(format!("unsupported URL scheme: {url} (use moqt://)"));
     }
-    // RFC 3986 §3 は `//` の有無で authority の有無が決まり、draft-ietf-moq-transport-22
+    // RFC 3986 §3 は `//` の有無で authority の有無が決まり、draft-ietf-moq-transport-23
     // §6.1 も `moqt-URI = "moqt" "://" authority ...` と `//` を必須にする。未対応 scheme と
     // 区別できるよう、`//` の欠落は authority の欠落として報告する。
     let requires_authority =
@@ -392,7 +392,7 @@ impl ServerUrl {
 
 /// `--namespace` の指定と `--url` の MSF fragment から Track Namespace を解決する
 ///
-/// `explicit` が `Some` のときは draft-ietf-moq-transport-22 §8.8 (Representing Namespace and
+/// `explicit` が `Some` のときは draft-ietf-moq-transport-23 §8.8 (Representing Namespace and
 /// Track Names) の表現としてパースする。`None` のときは `--url` の `msf` fragment
 /// (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation)) の track-identifier が
 /// 示す namespace を使う。moq-pub / moq-sub が共通で使う。
@@ -421,7 +421,7 @@ pub fn resolve_namespace(
             // フィールド内のリテラルな `-` は `.2d` として書く
             shiguredo_moqt::name::parse_namespace(value).map_err(|e| {
                 format!(
-                    "{e} ('-' separates namespace fields; use the draft-ietf-moq-transport-22 §8.8 form)"
+                    "{e} ('-' separates namespace fields; use the draft-ietf-moq-transport-23 §8.8 form)"
                 )
             })?
         }
@@ -442,7 +442,7 @@ pub fn resolve_namespace(
 /// WebTransport の実装 (HTTP/3 / HTTP/2) を指定しないため、本 example は `wt-h3` (HTTP/3 上の
 /// WebTransport) を既定にし、`wt-h2` は `--transport wt-h2` を明示したときだけ使う。WebTransport の
 /// 主経路は HTTP/3 であり、`wt-h2` は relay の capsule 対応に依存する experimental な経路である
-/// (draft-ietf-moq-transport-22 §6.2 (Session establishment) は HTTP/2 上の WebTransport も
+/// (draft-ietf-moq-transport-23 §6.2 (Session establishment) は HTTP/2 上の WebTransport も
 /// 許容する)。
 ///
 /// 解決の規則は次のとおりである。
@@ -558,7 +558,7 @@ fn first_url_whitespace<'a>(authority: &'a str, path: &'a str) -> Option<(&'a st
 
 /// moqt URI の fragment を `<type>:<value>` として解釈する
 ///
-/// draft-ietf-moq-transport-22 §6.1.1 (Fragment Identifiers) は moqt URI の fragment を
+/// draft-ietf-moq-transport-23 §6.1.1 (Fragment Identifiers) は moqt URI の fragment を
 /// 登録済みの fragment type と `:` で始めると MUST で定め、type の文字種を
 /// "Fragment type identifiers MUST consist of ASCII lowercase letters, digits, and hyphens (a-z, 0-9, -)."
 /// と定める (§6.1.1 に ABNF は無く、本文の MUST で示される)。`:` が無い fragment と
@@ -589,7 +589,7 @@ fn parse_moqt_fragment(url: &str, fragment: &str) -> Result<MoqtFragment, String
     })
 }
 
-/// fragment type が draft-ietf-moq-transport-22 §6.1.1 の文字種の MUST に一致するかを返す
+/// fragment type が draft-ietf-moq-transport-23 §6.1.1 の文字種の MUST に一致するかを返す
 fn is_fragment_type(fragment_type: &str) -> bool {
     !fragment_type.is_empty()
         && fragment_type
@@ -629,7 +629,7 @@ fn parse_c4m_tokens(url: &str, msf: &MsfFragment) -> Result<Vec<Vec<u8>>, String
     let mut tokens: Vec<Vec<u8>> = Vec::new();
     for text in msf.c4m_tokens() {
         let token = decode_c4m_token(url, text)?;
-        // draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression):
+        // draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression):
         // alias 解決後の (Token Type, Token Value) の重複は送れないため、同一トークンは畳む
         if !tokens.contains(&token) {
             tokens.push(token);
@@ -700,7 +700,7 @@ fn hex_digit(byte: u8) -> u8 {
 
 /// authority と path を分離する
 ///
-/// path には query (`?` 以降) を含める。draft-ietf-moq-transport-22 §9.1.2 (PATH) は
+/// path には query (`?` 以降) を含める。draft-ietf-moq-transport-23 §9.1.2 (PATH) は
 /// query が存在する場合に `?` と query を PATH option へ連結することを MUST とするため。
 ///
 /// RFC 3986 §3.2 は authority が `/` / `?` / `#` で終端すると定めるため、`#` 以降
@@ -755,7 +755,7 @@ pub fn host_from_authority(authority: &str) -> &str {
 
 /// URI でポートを省略したときに使う既定ポート
 ///
-/// draft-ietf-moq-transport-22 §6.1.2 (Dereferencing a MOQT URI) は
+/// draft-ietf-moq-transport-23 §6.1.2 (Dereferencing a MOQT URI) は
 /// "If the port is omitted in the URI, a default port of 443 is used." と定める。
 /// QUIC 直結と WebTransport (HTTP/3 / HTTP/2) のどの経路でも同じ 443 を既定値として使う。
 /// この仕様は将来 draft 改訂で変更される可能性がある。
@@ -788,7 +788,7 @@ impl AuthorityParts<'_> {
 ///
 /// host は [`host_from_authority`] と同じ規則で取り出す (IPv6 リテラルは `[` から `]`
 /// まで)。port が省略されている場合は [`DEFAULT_MOQT_PORT`] にする
-/// (draft-ietf-moq-transport-22 §6.1.2)。
+/// (draft-ietf-moq-transport-23 §6.1.2)。
 ///
 /// 受理する host は RFC 3986 §3.2.2 (Host) の `IP-literal / IPv4address / reg-name` のうち
 /// IPv6 リテラル・IPv4 リテラル・reg-name である。IPvFuture は受け付けない。
@@ -798,7 +798,7 @@ impl AuthorityParts<'_> {
 /// RFC 3986 §3.2.2 は "This syntax does not support IPv6 scoped addressing zone identifiers."
 /// と定め、[`std::net::SocketAddr`] も zone id を解釈できない。
 ///
-/// 次の authority はエラーにする。draft-ietf-moq-transport-22 §6.1 (MOQT URI Scheme) は
+/// 次の authority はエラーにする。draft-ietf-moq-transport-23 §6.1 (MOQT URI Scheme) は
 /// "The authority portion MUST NOT contain an empty host portion." と定める
 /// (この仕様は将来 draft 改訂で変更される可能性がある)。
 ///
@@ -807,7 +807,7 @@ impl AuthorityParts<'_> {
 /// としては妥当だが接続先として使えないため受け付けない。
 ///
 /// userinfo も受け付けない。RFC 3986 §3.2 の authority 構文は userinfo を許すが、
-/// draft-ietf-moq-transport-22 §6.1 は userinfo に言及せず、RFC 3986 §3.2.1 は受け取った
+/// draft-ietf-moq-transport-23 §6.1 は userinfo に言及せず、RFC 3986 §3.2.1 は受け取った
 /// reference 中の userinfo を reject する選択を許す
 /// ("Applications may choose to ignore or reject such data when it is received as part of a reference")。
 ///
@@ -892,7 +892,7 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// host が IP リテラルなら `SocketAddr` に直接パースして 1 件の列にし、ホスト名なら
 /// `tokio::net::lookup_host` で解決した結果を解決順のまま列にする。ポートが省略された
-/// authority は既定ポート 443 を使う (draft-ietf-moq-transport-22 §6.1.2)。
+/// authority は既定ポート 443 を使う (draft-ietf-moq-transport-23 §6.1.2)。
 ///
 /// 名前解決は [`RESOLVE_TIMEOUT`] で打ち切る。打ち切った場合は
 /// [`TransportError::ResolutionFailed`] になり、接続を試みずに終わる。
@@ -982,7 +982,7 @@ where
 
 /// GOAWAY の New Session URI から移行先を決める
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY) / §6.6.1 (Graceful Session Migration) に従う。
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY) / §6.6.1 (Graceful Session Migration) に従う。
 ///
 /// - control stream の GOAWAY (`on_request_stream` が `None`) は session 全体を移行する
 ///   ([`MigrationScope::Session`])。
@@ -1054,10 +1054,10 @@ pub fn migration_target(
 
 /// 2 つの [`ServerUrl`] が同じ origin を指すか
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY) は New Session URI に同じ scheme を使うことを
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY) は New Session URI に同じ scheme を使うことを
 /// SHOULD とする。scheme は [`parse_url`] が `moqt://` に固定しているため、ここでは host と
 /// port を比較する。host は RFC 3986 §3.2.2 により大文字小文字を区別せず、port の省略時は
-/// 既定ポート 443 を使う (draft-ietf-moq-transport-22 §6.1.2)。
+/// 既定ポート 443 を使う (draft-ietf-moq-transport-23 §6.1.2)。
 fn same_origin(a: &ServerUrl, b: &ServerUrl) -> bool {
     let (Ok(a), Ok(b)) = (authority_parts(&a.authority), authority_parts(&b.authority)) else {
         return false;
@@ -1085,7 +1085,7 @@ pub struct MigrationTarget {
 
 /// GOAWAY の Timeout を移行期限として管理する
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY) の Timeout は、GOAWAY を送った側が
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY) の Timeout は、GOAWAY を送った側が
 /// セッションを閉じるまで待つ時間 (ミリ秒) である。受信側は「GOAWAY を受信した時刻 +
 /// Timeout」を移行期限として扱い、期限を過ぎたら移行を打ち切る。
 ///
@@ -1569,7 +1569,7 @@ mod tests {
         );
     }
 
-    /// query は path に含める (draft-ietf-moq-transport-22 §9.1.2 PATH)
+    /// query は path に含める (draft-ietf-moq-transport-23 §9.1.2 PATH)
     #[test]
     fn split_authority_path_keeps_query_in_path() {
         assert_eq!(
@@ -1710,7 +1710,7 @@ mod tests {
 
     /// `//` が無い、または `//` の直後の authority が空の URL は authority の欠落として報告する
     ///
-    /// RFC 3986 §3 は `//` の有無で authority の有無が決まり、draft-ietf-moq-transport-22 §6.1 も
+    /// RFC 3986 §3 は `//` の有無で authority の有無が決まり、draft-ietf-moq-transport-23 §6.1 も
     /// `moqt-URI = "moqt" "://" authority path-abempty [ "?" query ]` と `//` を必須にする。
     /// scheme の比較は大文字小文字を区別しない (RFC 3986 §3.1)。
     #[test]
@@ -1774,7 +1774,7 @@ mod tests {
         }
     }
 
-    /// fragment は path に含めない (draft-ietf-moq-transport-22 §6.1.1)
+    /// fragment は path に含めない (draft-ietf-moq-transport-23 §6.1.1)
     #[test]
     fn parse_url_excludes_fragment_from_path() {
         let url =
@@ -1783,7 +1783,7 @@ mod tests {
         assert_eq!(url.path, "/app");
     }
 
-    /// query の後ろの fragment も path に含めない (draft-ietf-moq-transport-22 §9.1.2 PATH)
+    /// query の後ろの fragment も path に含めない (draft-ietf-moq-transport-23 §9.1.2 PATH)
     #[test]
     fn parse_url_excludes_fragment_from_path_with_query() {
         let url =
@@ -1875,7 +1875,7 @@ mod tests {
         }
     }
 
-    /// `:` を含まない fragment はエラーになる (draft-ietf-moq-transport-22 §6.1.1)
+    /// `:` を含まない fragment はエラーになる (draft-ietf-moq-transport-23 §6.1.1)
     #[test]
     fn parse_url_rejects_fragment_without_colon() {
         assert_eq!(
@@ -1885,7 +1885,7 @@ mod tests {
         );
     }
 
-    /// fragment のみ (`#` だけ) は type が無いためエラーになる (draft-ietf-moq-transport-22 §6.1.1)
+    /// fragment のみ (`#` だけ) は type が無いためエラーになる (draft-ietf-moq-transport-23 §6.1.1)
     #[test]
     fn parse_url_rejects_empty_fragment() {
         assert_eq!(
@@ -1987,7 +1987,7 @@ mod tests {
         assert_eq!(with_fragment.path, without_fragment.path);
     }
 
-    /// SETUP の PATH option に fragment を含めない (draft-ietf-moq-transport-22 §9.1.2)
+    /// SETUP の PATH option に fragment を含めない (draft-ietf-moq-transport-23 §9.1.2)
     #[test]
     fn setup_options_path_excludes_fragment() {
         let url =
@@ -2493,7 +2493,7 @@ mod tests {
         assert_eq!(host_from_authority("example.com"), "example.com");
     }
 
-    /// ポート省略の authority は既定ポート 443 を使う (draft-ietf-moq-transport-22 §6.1.2)
+    /// ポート省略の authority は既定ポート 443 を使う (draft-ietf-moq-transport-23 §6.1.2)
     #[test]
     fn authority_parts_defaults_to_443_for_ipv4() {
         // `moqt://127.0.0.1/app` の authority
@@ -2608,7 +2608,7 @@ mod tests {
 
     /// userinfo を含む authority は名前解決に回さずエラーになる
     ///
-    /// draft-ietf-moq-transport-22 §6.1 は userinfo に言及せず、RFC 3986 §3.2.1 は
+    /// draft-ietf-moq-transport-23 §6.1 は userinfo に言及せず、RFC 3986 §3.2.1 は
     /// reference 中の userinfo を reject する選択を許す。
     #[test]
     fn authority_parts_rejects_userinfo() {
@@ -2679,7 +2679,7 @@ mod tests {
         assert!(authority_parts("2001:db8::1").is_err());
     }
 
-    /// host が空の authority はエラーになる (draft-ietf-moq-transport-22 §6.1 は MUST NOT)
+    /// host が空の authority はエラーになる (draft-ietf-moq-transport-23 §6.1 は MUST NOT)
     #[test]
     fn authority_parts_rejects_empty_host() {
         assert!(authority_parts("").is_err());

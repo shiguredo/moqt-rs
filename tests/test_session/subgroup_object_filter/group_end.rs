@@ -7,7 +7,7 @@ use shiguredo_moqt::message_parameter::PARAM_OBJECTID_FILTER;
 /// END_OF_GROUP + FIN の Group 終端確定が stream 所有者ではなく Object の帰属先へ
 /// 反映されること
 ///
-/// draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header): END_OF_GROUP bit + FIN は
+/// draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header): END_OF_GROUP bit + FIN は
 /// 「その Group の最終 Object」を確定する ("the subscriber can infer the final Object in
 /// the Group when the data stream is terminated by a FIN")。共有 Track Alias で Object の
 /// 帰属先が stream 所有者と異なる場合、終端を帰属先に記録しないと帰属先で Malformed

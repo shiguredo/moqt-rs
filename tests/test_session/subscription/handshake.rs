@@ -38,7 +38,7 @@ fn subscribe_handshake_client_to_server() {
 
 /// PUBLISH_OK に PAUSED を含めると送信側で拒否される
 ///
-/// draft-ietf-moq-transport-22 Appendix A.3 #1790 (Subscription parameters appear in
+/// draft-ietf-moq-transport-23 Appendix A.4 #1790 (Subscription parameters appear in
 /// REQUEST_UPDATE, not PUBLISH_OK): subscription 更新用パラメータは REQUEST_UPDATE
 /// (要求) に出現し、PUBLISH_OK は EXPIRES のみとなる。PAUSED の更新は
 /// REQUEST_UPDATE 経路で行う。
@@ -81,7 +81,7 @@ fn publish_ok_with_paused_is_rejected() {
 
 /// PUBLISH_OK で PAUSED を省略しても paused は PUBLISH 時の値のまま維持される
 ///
-/// draft-ietf-moq-transport-22 Appendix A.3 #1790: PUBLISH_OK は EXPIRES のみを運び、
+/// draft-ietf-moq-transport-23 Appendix A.4 #1790: PUBLISH_OK は EXPIRES のみを運び、
 /// paused の更新は REQUEST_UPDATE (要求) 経路に委譲する。
 #[test]
 fn publish_ok_without_paused_keeps_publish_paused_state() {
@@ -132,7 +132,7 @@ fn publish_ok_without_paused_keeps_publish_paused_state() {
 }
 
 /// REQUEST_OK (publish context) 受信で `RequestOkReceived` イベントが発行され、EXPIRES
-/// parameter を application が取得できる (draft-ietf-moq-transport-22 §9.20.16 (EXPIRES Parameter))
+/// parameter を application が取得できる (draft-ietf-moq-transport-23 §9.19.16 (EXPIRES Parameter))
 #[test]
 fn publish_ok_emits_publish_ok_received_event_with_parameters() {
     use shiguredo_moqt::message_parameter::{
@@ -182,7 +182,7 @@ fn publish_ok_emits_publish_ok_received_event_with_parameters() {
 
 /// PUBLISH_OK に LOCATION_FILTER を含めると送受信ともに拒否される
 ///
-/// draft-ietf-moq-transport-22 Appendix A.3 #1790 (Subscription parameters appear in
+/// draft-ietf-moq-transport-23 Appendix A.4 #1790 (Subscription parameters appear in
 /// REQUEST_UPDATE, not PUBLISH_OK): LOCATION_FILTER は REQUEST_UPDATE (要求) に出現し、
 /// PUBLISH_OK には出現しない。送信側は状態を変更せずエラーを返し、受信側は
 /// INVALID_PARAMETER でセッションを閉じる。
@@ -321,7 +321,7 @@ fn request_error_terminates_pending_subscription() {
     );
 }
 
-/// draft-ietf-moq-transport-22 §3.1: 同一 Track への複数同時 subscription が許可されたため、
+/// draft-ietf-moq-transport-23 §3.1: 同一 Track への複数同時 subscription が許可されたため、
 /// 2 件目の SUBSCRIBE も正常に受理される
 #[test]
 fn duplicate_subscribe_is_accepted_in_draft_20() {
@@ -392,7 +392,7 @@ fn send_subscribe_before_established_errors() {
     assert_eq!(client.state(), SessionState::LocalSetupSent);
 }
 
-/// 未知の必須トラックプロパティを含む SUBSCRIBE_OK は購読をキャンセルする (draft-ietf-moq-transport-22 §3.7 (Mandatory to Understand Track Properties))
+/// 未知の必須トラックプロパティを含む SUBSCRIBE_OK は購読をキャンセルする (draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties))
 #[test]
 fn subscribe_ok_with_unknown_mandatory_property_cancels_subscription() {
     use shiguredo_moqt::error::STREAM_CANCELLED;
@@ -464,7 +464,7 @@ fn subscribe_ok_with_unknown_mandatory_property_cancels_subscription() {
         found,
         "expected RequestTerminated event for cancelled subscription"
     );
-    // draft-ietf-moq-transport-22 §3.7 (Mandatory to Understand Track Properties) / §6.4.2.3
+    // draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties) / §6.4.2.3
     // (Request Cancellation and Rejection): cancel は開いている方向を打ち切る
     assert!(
         saw_stop_sending,
@@ -483,7 +483,7 @@ fn subscribe_ok_with_unknown_mandatory_property_cancels_subscription() {
 
 /// GREASE の Track Property を含む SUBSCRIBE_OK は購読をキャンセルしない
 ///
-/// draft-ietf-moq-transport-22 §16.8 (Properties) の Table 15 は GREASE の Property Type
+/// draft-ietf-moq-transport-23 §16.8 (Properties) の Table 15 は GREASE の Property Type
 /// (`0x7f * N + 0x9D`) を Scope Any として予約しており、N = 128 の 0x401D から N = 256 の
 /// 0x7F9D までは §3.7 (Mandatory to Understand Track Properties) の 0x4000-0x7FFF に入る。GREASE 値は
 /// IANA 登録された Property ではないため §3.7 の対象外とし、§8.4 (Track and Object Properties)
@@ -722,7 +722,7 @@ fn publish_session_namespace_empty_track_name_closes_session() {
 }
 
 /// single period `.` 予約名前空間の SUBSCRIBE は DOES_NOT_EXIST で拒否され、subscription は作成されない
-/// (draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces))
+/// (draft-ietf-moq-transport-23 §2.4.3 (Reserved Namespaces))
 #[test]
 fn subscribe_single_period_namespace_rejected() {
     use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
@@ -750,7 +750,7 @@ fn subscribe_single_period_namespace_rejected() {
 /// REQUEST_ERROR で拒否した request のストリームクローズは no-op で吸収され、
 /// セッションが fail しないこと
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection):
+/// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection):
 /// "When an endpoint rejects a request without performing any application processing,
 /// it SHOULD send a REQUEST_ERROR and FIN the stream." 拒否された request は
 /// `request_streams` に未登録のため、peer が自分の送信方向を閉じても
@@ -826,7 +826,7 @@ fn rejected_subscribe_stream_close_does_not_fail_session() {
 }
 
 /// single period `.` 予約名前空間の PUBLISH は DOES_NOT_EXIST で拒否され、subscription は作成されない
-/// (draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces))
+/// (draft-ietf-moq-transport-23 §2.4.3 (Reserved Namespaces))
 #[test]
 fn publish_single_period_namespace_rejected() {
     use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
@@ -854,7 +854,7 @@ fn publish_single_period_namespace_rejected() {
 }
 
 /// send_subscribe に single period `.` 予約名前空間を渡すと SESSION_PROTOCOL_VIOLATION が返る
-/// (draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces))
+/// (draft-ietf-moq-transport-23 §2.4.3 (Reserved Namespaces))
 #[test]
 fn send_subscribe_single_period_namespace_rejected() {
     let (mut client, _server) = establish_pair();
@@ -870,7 +870,7 @@ fn send_subscribe_single_period_namespace_rejected() {
 }
 
 /// send_publish に single period `.` 予約名前空間を渡すと SESSION_PROTOCOL_VIOLATION が返る
-/// (draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces))
+/// (draft-ietf-moq-transport-23 §2.4.3 (Reserved Namespaces))
 #[test]
 fn send_publish_single_period_namespace_rejected() {
     let (mut client, _server) = establish_pair();
@@ -1172,10 +1172,10 @@ fn publish_with_paused_sets_paused_state() {
 
 /// 予約名前空間の拒否は値域外パラメータの MUST close より優先される (SUBSCRIBE)
 ///
-/// draft-ietf-moq-transport-22 は §2.4.3 / §6.5 の予約名前空間拒否と §9.20.8 (GROUP ORDER Parameter) /
+/// draft-ietf-moq-transport-23 は §2.4.3 / §6.5 の予約名前空間拒否と §9.19.8 (GROUP ORDER Parameter) /
 /// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter) /
-/// draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter) の値域 MUST、
-/// §9.20.9 (LOCATION FILTER Parameter) の StartGroup + EndGroupDelta オーバーフロー (値域 MUST) の
+/// draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter) の値域 MUST、
+/// §9.19.9 (LOCATION FILTER Parameter) の StartGroup + EndGroupDelta オーバーフロー (値域 MUST) の
 /// 優先順位を規定しない。宛先自体が存在しない予約名前空間の拒否を優先する意図した選択であり、
 /// API 経路で手組みしたメッセージで観測できる。
 #[test]
@@ -1236,9 +1236,9 @@ fn subscribe_reserved_namespace_precedes_parameter_range() {
 
 /// 予約名前空間の拒否は値域外パラメータの MUST close より優先される (PUBLISH)
 ///
-/// draft-ietf-moq-transport-22 は §2.4.3 / §6.5 の予約名前空間拒否と §9.20.8 (GROUP ORDER Parameter) /
+/// draft-ietf-moq-transport-23 は §2.4.3 / §6.5 の予約名前空間拒否と §9.19.8 (GROUP ORDER Parameter) /
 /// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter) の値域 MUST、
-/// draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter) の
+/// draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter) の
 /// StartGroup + EndGroupDelta オーバーフロー (値域 MUST) の優先順位を規定しない。宛先自体が存在しない
 /// 予約名前空間の拒否を優先する意図した選択である。
 #[test]
@@ -1303,7 +1303,7 @@ fn publish_reserved_namespace_precedes_parameter_range() {
 
 /// responder の FIN を受けた requester に FinishRequestStream を発行する
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure): "A FIN sent by
+/// draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure): "A FIN sent by
 /// the responder after its response and any subsequent messages for the request signals that
 /// the request is complete; if it has not already done so, the requester SHOULD then send a
 /// FIN on its direction, gracefully closing the stream."

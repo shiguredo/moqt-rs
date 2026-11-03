@@ -1,11 +1,11 @@
 //! `ObjectPropertyTracker` / `ObjectFieldTracker` の状態追跡 PBT
 //!
 //! - `ObjectPropertyTracker`: PRIOR_GROUP_ID_GAP が示す欠落 Group を再受信したら拒否する
-//!   (draft-ietf-moq-transport-22 §10.8 (Prior Group ID Gap))
+//!   (draft-ietf-moq-transport-23 §10.8 (Prior Group ID Gap))
 //! - `ObjectFieldTracker`: 同一 Object の再受信は全フィールド一致のときのみ成功する
-//!   (draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 6/7、§7.1 (Caching Relays))
+//!   (draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 6/7、§7.1 (Caching Relays))
 //! - `ObjectFieldTracker::observe_object_fields_with_content`: immutables / payload_key は
-//!   両方 `Some` のときだけ比較する (draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 6)
+//!   両方 `Some` のときだけ比較する (draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 6)
 
 use pbt::common::test_runner;
 use shiguredo_moqt::error::MessageError;
@@ -155,7 +155,7 @@ fn object_field_tracker_accepts_iff_fields_match() -> noprop::TestResult {
 
 /// 内容込みの再観測は「全フィールド一致」かつ「比較可能な内容が一致」のときのみ成功する
 ///
-/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 6: "The same Object is received
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 6: "The same Object is received
 /// more than once with different Payload or other immutable properties."
 /// `immutable_properties` と `payload_key` の比較は**両方** `Some` のときだけ行い、片方でも
 /// `None` なら比較しない (見逃し側に倒す)。この規則を全入力の組み合わせで固定する。

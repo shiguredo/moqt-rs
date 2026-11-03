@@ -1,6 +1,6 @@
 //! DEFAULT_PUBLISHER_PRIORITY / DEFAULT_PUBLISHER_GROUP_ORDER の Session 配線テスト
 //!
-//! draft-ietf-moq-transport-22 §10.4 (DEFAULT PUBLISHER PRIORITY) /
+//! draft-ietf-moq-transport-23 §10.4 (DEFAULT PUBLISHER PRIORITY) /
 //! §10.5 (DEFAULT PUBLISHER GROUP ORDER)
 //!
 //! 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
@@ -120,7 +120,7 @@ fn publish_track_properties_are_stored_on_both_sides() {
 
 /// DEFAULT_PRIORITY header では Track Property の値が解決値になる
 ///
-/// draft-ietf-moq-transport-22 §10.4: "Subgroups and Datagrams for this subscription inherit
+/// draft-ietf-moq-transport-23 §10.4: "Subgroups and Datagrams for this subscription inherit
 /// this priority, unless they specifically override it."
 #[test]
 fn default_priority_header_resolves_from_track_property() {
@@ -175,7 +175,7 @@ fn default_priority_header_resolves_from_track_property() {
 
 /// Track Property も無ければ DEFAULT_PRIORITY header は既定値 128 に解決される
 ///
-/// draft-ietf-moq-transport-22 §10.4: "If omitted, the Default Publisher Priority is 128."
+/// draft-ietf-moq-transport-23 §10.4: "If omitted, the Default Publisher Priority is 128."
 #[test]
 fn default_priority_header_falls_back_to_128() {
     let alias = 911;
@@ -208,7 +208,7 @@ fn default_priority_header_falls_back_to_128() {
 
 /// header が優先度を明示している場合は Track Property を上書きする
 ///
-/// draft-ietf-moq-transport-22 §10.4 の "unless they specifically override it" に対応する。
+/// draft-ietf-moq-transport-23 §10.4 の "unless they specifically override it" に対応する。
 #[test]
 fn explicit_header_priority_overrides_track_property() {
     let alias = 912;
@@ -251,7 +251,7 @@ fn explicit_header_priority_overrides_track_property() {
         .expect("subgroup header の通知に成功すること");
 
     // 受信した header の明示値は候補ごとに `resolve_header_publisher_priority` へ渡され、
-    // Track Property より優先される (draft-ietf-moq-transport-22 §10.4 の
+    // Track Property より優先される (draft-ietf-moq-transport-23 §10.4 の
     // "unless they specifically override it")。
     let sub = client.subscription(rid).expect("subscription が存在する");
     assert_eq!(
@@ -268,7 +268,7 @@ fn explicit_header_priority_overrides_track_property() {
 
 /// DEFAULT_PUBLISHER_GROUP_ORDER は GROUP ORDER Parameter とは別に保持される
 ///
-/// draft-ietf-moq-transport-22 §10.5 は publisher の選好、§9.20.8 は subscriber からの要求で
+/// draft-ietf-moq-transport-23 §10.5 は publisher の選好、§9.19.8 は subscriber からの要求で
 /// 別の値である。片方が他方を上書きしてはいけない。
 #[test]
 fn publisher_group_order_is_independent_from_group_order_parameter() {
@@ -304,7 +304,7 @@ fn publisher_group_order_is_independent_from_group_order_parameter() {
     assert_eq!(
         sub.group_order,
         Some(2),
-        "subscriber の要求 (§9.20.8) は Descending のまま保たれること"
+        "subscriber の要求 (§9.19.8) は Descending のまま保たれること"
     );
     assert_eq!(
         sub.default_publisher_group_order,
@@ -316,7 +316,7 @@ fn publisher_group_order_is_independent_from_group_order_parameter() {
 
 /// MAX_FILTER_RANGES を宣言した server と Range Filter 付き SUBSCRIBE を確立する
 ///
-/// Range Filter を送るには peer (server) 側の宣言が必要 (draft-ietf-moq-transport-22
+/// Range Filter を送るには peer (server) 側の宣言が必要 (draft-ietf-moq-transport-23
 /// §9.1.6 (MAX FILTER RANGES))。
 fn establish_with_priority_filter(
     filter_priority: u64,
@@ -363,7 +363,7 @@ fn establish_with_priority_filter(
 /// DEFAULT_PRIORITY の datagram は直近 SUBGROUP_HEADER ではなく、購読を確立した
 /// SUBSCRIBE_OK の DEFAULT_PUBLISHER_PRIORITY を継承すること
 ///
-/// draft-ietf-moq-transport-22 §11.2.1 (Object Datagram): "When set to 1, the Priority field
+/// draft-ietf-moq-transport-23 §11.2.1 (Object Datagram): "When set to 1, the Priority field
 /// is omitted and this Object inherits the Publisher Priority specified in the control message
 /// that established the subscription." (同趣旨が §11.3.1 (Subgroup Header) にもある)
 #[test]
@@ -427,7 +427,7 @@ fn default_priority_datagram_inherits_track_property_not_recent_header() {
 
 /// 送信する datagram のローカルフィルタ評価も購読を確立した DEFAULT_PUBLISHER_PRIORITY を使うこと
 ///
-/// draft-ietf-moq-transport-22 §11.2.1 (Object Datagram) / §3.3.3 (Combining Filters):
+/// draft-ietf-moq-transport-23 §11.2.1 (Object Datagram) / §3.3.3 (Combining Filters):
 /// publisher は送信する Object にもフィルタを適用する。datagram は常に DEFAULT_PRIORITY bit を
 /// 立てるため、評価に使う Publisher Priority は購読確立メッセージの Track Property になる。
 #[test]

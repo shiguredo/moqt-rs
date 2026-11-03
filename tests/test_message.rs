@@ -221,7 +221,7 @@ mod goaway {
 
     /// New Session URI が 8192 バイトを超える GOAWAY はデコードで拒否される
     ///
-    /// draft-ietf-moq-transport-22 §9.2 (GOAWAY): New Session URI は最大 8192 バイト。
+    /// draft-ietf-moq-transport-23 §9.2 (GOAWAY): New Session URI は最大 8192 バイト。
     #[test]
     fn uri_longer_than_8192_is_rejected_on_decode() {
         use shiguredo_moqt::varint;
@@ -241,7 +241,7 @@ mod goaway {
 
     /// New Session URI がちょうど 8192 バイトの GOAWAY はデコードに成功する
     ///
-    /// draft-ietf-moq-transport-22 §9.2 (GOAWAY): 上限は 8192 バイト (含む)。
+    /// draft-ietf-moq-transport-23 §9.2 (GOAWAY): 上限は 8192 バイト (含む)。
     #[test]
     fn uri_exactly_8192_decodes_successfully() {
         use shiguredo_moqt::message::Goaway;
@@ -268,7 +268,7 @@ mod goaway {
 
     /// New Session URI が 8192 バイトを超える GOAWAY はエンコードで拒否される
     ///
-    /// draft-ietf-moq-transport-22 §9.2 (GOAWAY): New Session URI は最大 8192 バイト。
+    /// draft-ietf-moq-transport-23 §9.2 (GOAWAY): New Session URI は最大 8192 バイト。
     #[test]
     fn uri_longer_than_8192_is_rejected_on_encode() {
         use shiguredo_moqt::message::Goaway;
@@ -990,7 +990,7 @@ mod fetch {
         use shiguredo_moqt::message_parameter::{
             MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
         };
-        // draft-ietf-moq-transport-22 §9.11 (FETCH): 単一形式の往復
+        // draft-ietf-moq-transport-23 §9.11 (FETCH): 単一形式の往復
         let mut parameters = MessageParameters::new();
         parameters.push(MessageParameter {
             param_type: PARAM_LOCATION_FILTER,
@@ -1170,7 +1170,7 @@ mod redirect_full_track_name {
 
     /// 合計 4,096 バイトを超える Redirect target は encode で拒否される
     ///
-    /// draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure): "If an endpoint receives a
+    /// draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): "If an endpoint receives a
     /// Track Namespace or a Full Track Name exceeding 4,096 bytes, it MUST close the session
     /// with FIELD_LENGTH_EXCEEDED."
     #[test]
@@ -1432,7 +1432,7 @@ mod error_cases {
     fn subscribe_with_kvp_length_exceeding_payload_is_key_value_formatting_error() {
         // payload 長は実際のバイト数と一致しているが、パラメータの KVP が宣言長 10 に対して
         // 3 バイトしか持たない。外側フレームは正常で、Type を理解したうえで Length/Value が
-        // 直列化と一致しないため、draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure)
+        // 直列化と一致しないため、draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure)
         // の MUST により MALFORMED_KEY_VALUE になる。
         let payload: Vec<u8> = vec![
             0x00, // Request ID
@@ -1456,7 +1456,7 @@ mod error_cases {
 
     /// Track Properties の KVP 宣言長超過が MALFORMED_KEY_VALUE になること
     ///
-    /// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) は既知 Type の
+    /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) は既知 Type の
     /// Length/Value が定義と一致しない場合に MALFORMED_KEY_VALUE (0x6) でセッションを
     /// 閉じる MUST。SUBSCRIBE_OK の Track Properties は KVP 列であり、宣言長が残りバイトを
     /// 超える場合は TrackProperties::decode の分類がそのままメッセージ層へ返る。
@@ -1551,13 +1551,13 @@ mod error_cases {
         assert_eq!(rp.as_str(), "hello");
     }
 
-    // ─── パラメータスコープ検証 (draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope)) ──────────────────
+    // ─── パラメータスコープ検証 (draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope)) ──────────────────
 
     /// RENDEZVOUS_TIMEOUT (0x04) は定義済みパラメータのため encode / decode で受理される
     ///
-    /// draft-ietf-moq-transport-22 §9.20.6 (RENDEZVOUS TIMEOUT Parameter): "The
-    /// RENDEZVOUS_TIMEOUT parameter (Parameter Type 0x04) MAY appear in a SUBSCRIBE message."
-    /// §16.7 (Message Parameters) の Table 14 にも登録されており、§9.20 (Control Message
+    /// draft-ietf-moq-transport-23 §9.19.6 (RENDEZVOUS TIMEOUT Parameter): "It MAY appear in
+    /// a SUBSCRIBE message."
+    /// §16.7 (Message Parameters) の Table 14 にも登録されており、§9.19 (Control Message
     /// Parameters) が INVALID_PARAMETER を要求する「未知のパラメータ」には該当しない。
     /// 本ライブラリは値を解釈しないが、受理して `MessageParameters` に残す。
     #[test]
@@ -1598,7 +1598,7 @@ mod error_cases {
 
     /// Table 5 に定義済みで本ライブラリが実装しない型は Unsupported として decode できる
     ///
-    /// draft-ietf-moq-transport-22 §1.6 (Modularity): "Limited endpoints SHOULD respond to any
+    /// draft-ietf-moq-transport-23 §1.6 (Modularity): "Limited endpoints SHOULD respond to any
     /// unsupported messages with the appropriate NOT_SUPPORTED error code, rather than ignoring
     /// them." decode した本体を encode で再構成できることも固定する。
     #[test]
@@ -1754,7 +1754,7 @@ mod error_cases {
 
     /// Table 14 に無い未定義のパラメータ型は encode / decode で拒否される
     ///
-    /// draft-ietf-moq-transport-22 §9.20 (Control Message Parameters): "An endpoint that
+    /// draft-ietf-moq-transport-23 §9.19 (Control Message Parameters): "An endpoint that
     /// receives an unknown Message Parameter MUST close the session with INVALID_PARAMETER."
     #[test]
     fn subscribe_with_undefined_parameter_type_is_rejected() {
@@ -2011,7 +2011,7 @@ mod publish_state_notify {
 
     #[test]
     fn round_trip() {
-        // draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY) の往復
+        // draft-ietf-moq-transport-23 §9.10 (PUBLISH_STATE_NOTIFY) の往復
         let msg = ControlMessage::PublishStateNotify(PublishStateNotify {
             parameters: sample_params(),
         });
@@ -2065,8 +2065,8 @@ mod request_ok {
 
     /// 和集合外のパラメータを含む REQUEST_OK は codec 層で INVALID_PARAMETER になる
     ///
-    /// draft-ietf-moq-transport-22 §9.3 (REQUEST_OK) が応答 context ごとに列挙する許可パラメータの
-    /// 和集合は `EXPIRES` と `LARGEST_OBJECT` の 2 型であり、それ以外は §9.20.1 (Parameter Scope) の
+    /// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK) が応答 context ごとに列挙する許可パラメータの
+    /// 和集合は `EXPIRES` と `LARGEST_OBJECT` の 2 型であり、それ以外は §9.19.1 (Parameter Scope) の
     /// MUST により INVALID_PARAMETER で閉じる。encode と decode の両経路で同じ検証が働くことを
     /// 固定する。和集合外の 10 型すべてを対象にし、1 型だけ受理する退行も検出できるようにする。
     #[test]

@@ -30,7 +30,7 @@ fn roundtrip() -> noprop::TestResult {
 }
 
 /// MAX_CACHE_DURATION (0x04) を含む TrackProperties が往復し、
-/// デコード後も同じ値を返すこと (draft-ietf-moq-transport-22 §10.3 (MAX CACHE DURATION))。
+/// デコード後も同じ値を返すこと (draft-ietf-moq-transport-23 §10.3 (MAX CACHE DURATION))。
 /// 値域制約は無いため full u64 域 (varint は 9 バイトまでで全域対応) を生成する。
 #[test]
 fn max_cache_duration_roundtrip() -> noprop::TestResult {

@@ -17,7 +17,7 @@ pub struct Config {
     pub transport: Transport,
     /// TLS CA 証明書パス
     pub cert: Option<String>,
-    /// Track Namespace (draft-ietf-moq-transport-22 §8.8 表現をパースしたもの)
+    /// Track Namespace (draft-ietf-moq-transport-23 §8.8 表現をパースしたもの)
     pub namespace: TrackNamespace,
     /// 映像トラックを受信するかどうか
     pub video_enabled: bool,
@@ -132,7 +132,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     // track-identifier が示す namespace を使う。どちらにも無い場合はエラーになる。
     let namespace_opt = noargs::opt("namespace")
         .ty("NS")
-        .doc("Track namespace (draft-ietf-moq-transport-22 §8.8 form; '-' separates namespace fields, e.g. moq-example). Defaults to the namespace of the MSF fragment in --url")
+        .doc("Track namespace (draft-ietf-moq-transport-23 §8.8 form; '-' separates namespace fields, e.g. moq-example). Defaults to the namespace of the MSF fragment in --url")
         // 省略可能だが、help モードで値が無いと namespace の解決に失敗するため、ヘルプ表示の
         // ための例を与える (通常の実行では、指定が無いときに例は使われない)
         .example("moq-example")

@@ -1,4 +1,4 @@
-//! draft-ietf-moq-transport-22 §13 (Grease) に準拠した GREASE ユーティリティ
+//! draft-ietf-moq-transport-23 §13 (Grease) に準拠した GREASE ユーティリティ
 //!
 //! GREASE (Generate Random Extensions And Sustain Extensibility) は、
 //! 未知値の無視が実装されていることを確認し将来の拡張互換性を確保するための
@@ -6,23 +6,23 @@
 //!
 //! # 値パターン
 //!
-//! `0x7F * N + 0x9D` (N は非負整数)。上限は draft-ietf-moq-transport-22 §13 (Grease) が示す `0x3FFFFFFFFFFFFFDE`
+//! `0x7F * N + 0x9D` (N は非負整数)。上限は draft-ietf-moq-transport-23 §13 (Grease) が示す `0x3FFFFFFFFFFFFFDE`
 //! (62-bit varint の範囲に収まる値)。
 //!
-//! # 対象レジストリ (draft-ietf-moq-transport-22 §13 (Grease))
+//! # 対象レジストリ (draft-ietf-moq-transport-23 §13 (Grease))
 //!
-//! - Setup Options (draft-ietf-moq-transport-22 §16.4 (Setup Options))
-//! - Properties (draft-ietf-moq-transport-22 §16.8 (Properties))
-//! - Session Termination Error Codes (draft-ietf-moq-transport-22 §16.11.1 (Session Termination Error Codes))
-//! - REQUEST_ERROR Codes (draft-ietf-moq-transport-22 §16.11.2 (REQUEST_ERROR Codes))
-//! - PUBLISH_DONE Codes (draft-ietf-moq-transport-22 §16.11.3 (PUBLISH_DONE Codes))
-//! - Stream Reset Error Codes (draft-ietf-moq-transport-22 §16.11.4 (Stream Reset Error Codes))
+//! - Setup Options (draft-ietf-moq-transport-23 §16.4 (Setup Options))
+//! - Properties (draft-ietf-moq-transport-23 §16.8 (Properties))
+//! - Session Termination Error Codes (draft-ietf-moq-transport-23 §16.12.1 (Session Termination Error Codes))
+//! - REQUEST_ERROR Codes (draft-ietf-moq-transport-23 §16.12.2 (REQUEST_ERROR Codes))
+//! - PUBLISH_DONE Codes (draft-ietf-moq-transport-23 §16.12.3 (PUBLISH_DONE Codes))
+//! - Stream Reset Error Codes (draft-ietf-moq-transport-23 §16.12.4 (Stream Reset Error Codes))
 //! - MOQT Auth Token Type
 //!
 //! # 注意
 //!
 //! 本計算式は draft 由来であり、将来の改訂で base/interval/upper bound が
-//! 変更される可能性がある (draft-ietf-moq-transport-22 §13 (Grease) に計算式が明示)。
+//! 変更される可能性がある (draft-ietf-moq-transport-23 §13 (Grease) に計算式が明示)。
 //!
 //! # 例
 //!
@@ -36,13 +36,13 @@
 //! assert!(!is_grease(0x9C));
 //! ```
 
-/// GREASE 値の基数 (draft-ietf-moq-transport-22 §13 (Grease) "0x7f * N + 0x9D")
+/// GREASE 値の基数 (draft-ietf-moq-transport-23 §13 (Grease) "0x7f * N + 0x9D")
 pub const GREASE_BASE: u64 = 0x9D;
 
-/// GREASE 値の間隔 (draft-ietf-moq-transport-22 §13 (Grease) "0x7f * N + 0x9D")
+/// GREASE 値の間隔 (draft-ietf-moq-transport-23 §13 (Grease) "0x7f * N + 0x9D")
 pub const GREASE_INTERVAL: u64 = 0x7F;
 
-/// GREASE 値の上限 (draft-ietf-moq-transport-22 §13 (Grease) "0x3fffffffffffffde")
+/// GREASE 値の上限 (draft-ietf-moq-transport-23 §13 (Grease) "0x3fffffffffffffde")
 ///
 /// `0x7F * N + 0x9D` の最大値。生成値はこれを超えてはならない。
 pub const GREASE_MAX: u64 = 0x3FFF_FFFF_FFFF_FFDE;

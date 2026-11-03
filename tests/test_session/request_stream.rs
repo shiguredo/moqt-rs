@@ -16,7 +16,7 @@ use shiguredo_moqt::parameter::SETUP_OPTION_MAX_FILTER_RANGES;
 
 // ─── request_streams lifecycle ─────────────────────
 //
-// draft-ietf-moq-transport-22 §6.3 (Session initialization) が規定する 7 種類の bidi request stream
+// draft-ietf-moq-transport-23 §6.3 (Session initialization) が規定する 7 種類の bidi request stream
 // それぞれについて、`send_*` / `handle_peer_*` で種別ごとのテーブルに insert
 // され、`forget_*` で remove されることを検証する。未登録 request_id に対する
 // テーブル参照が `None` を返すことも併せて確認する。
@@ -215,7 +215,7 @@ fn unknown_id_tables_return_none() {
 
 // ─── SETUP 前 request の扱い ─────────────────────
 
-/// draft-ietf-moq-transport-22 §6.3 (Session initialization): SETUP 完了前の request は session を落とさず
+/// draft-ietf-moq-transport-23 §6.3 (Session initialization): SETUP 完了前の request は session を落とさず
 /// `RecvRequestError::BeforeSessionEstablished` を返す (buffer するか reset するか)
 #[test]
 fn recv_request_before_setup_returns_deferred_not_closing_session() {
@@ -330,8 +330,8 @@ fn recv_request_unsupported_message_closes_session() {
 /// 定義済みパラメータ RENDEZVOUS_TIMEOUT (0x04) を含む SUBSCRIBE を受信しても
 /// セッションを閉じない
 ///
-/// draft-ietf-moq-transport-22 §9.20.6 (RENDEZVOUS TIMEOUT Parameter): "The
-/// RENDEZVOUS_TIMEOUT parameter (Parameter Type 0x04) MAY appear in a SUBSCRIBE message."
+/// draft-ietf-moq-transport-23 §9.19.6 (RENDEZVOUS TIMEOUT Parameter): "It MAY appear in
+/// a SUBSCRIBE message."
 /// 本ライブラリは値を解釈せず `Subscription` にも保持しない。
 #[test]
 fn recv_subscribe_with_rendezvous_timeout_is_accepted() {
@@ -367,7 +367,7 @@ fn recv_subscribe_with_rendezvous_timeout_is_accepted() {
 
 /// 前縁より先の Request ID を大量に受信してもセッションを閉じない
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.1 (Request ID) が `INVALID_REQUEST_ID` での
+/// draft-ietf-moq-transport-23 §6.4.2.1 (Request ID) が `INVALID_REQUEST_ID` での
 /// セッション終了を MUST とするのは parity 違反と重複の 2 条件だけであり、
 /// 未到達 Request ID の保持数に上限は設けない。
 #[test]
@@ -411,7 +411,7 @@ fn recv_many_out_of_order_request_ids_keeps_session_open() {
 
 // ─── 未対応 request の本体 (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) ───
 //
-// draft-ietf-moq-transport-22 §9.14 (PUBLISH_NAMESPACE) / §9.15 (SUBSCRIBE_NAMESPACE) /
+// draft-ietf-moq-transport-23 §9.13 (PUBLISH_NAMESPACE) / §9.14 (SUBSCRIBE_NAMESPACE) /
 // draft-ietf-moq-transport-23 §9.17 (SUBSCRIBE_TRACKS) の 3 種は共通して Request ID (vi64) →
 // Track Namespace Prefix (..) → Number of Parameters (vi64) → Parameters (..) の順に直列化する。
 // Track Namespace の encode API は crate 内に閉じているため、wire 表現を直接組み立てる。
@@ -639,7 +639,7 @@ fn assert_token_alias(server: &Session, alias: u64) {
 
 /// 定義済みだが未実装の request は NOT_SUPPORTED で拒否し、セッションを維持する
 ///
-/// draft-ietf-moq-transport-22 §1.6 (Modularity): "Limited endpoints SHOULD respond to any
+/// draft-ietf-moq-transport-23 §1.6 (Modularity): "Limited endpoints SHOULD respond to any
 /// unsupported messages with the appropriate NOT_SUPPORTED error code, rather than ignoring
 /// them." §9 の Table 5 で request として届く型 (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE /
 /// SUBSCRIBE_TRACKS) が対象である。
@@ -695,7 +695,7 @@ fn unsupported_request_is_rejected_with_not_supported() {
 
 /// 未対応 request の `.` 単独予約名前空間は DOES_NOT_EXIST で拒否し、セッションを維持する
 ///
-/// draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces): "A Track Namespace whose first
+/// draft-ietf-moq-transport-23 §2.4.3 (Reserved Namespaces): "A Track Namespace whose first
 /// field is exactly . (a single period, 0x2e) is reserved and MUST NOT be used for any purpose;
 /// endpoints MUST NOT publish tracks or namespaces under it and MUST reject requests
 /// referencing it with DOES_NOT_EXIST." 先頭フィールドが `.` 単独かの判定は
@@ -748,7 +748,7 @@ fn unsupported_request_single_period_namespace_is_rejected_with_does_not_exist()
 
 /// 未対応 request の `.session` 名前空間は DOES_NOT_EXIST で拒否する
 ///
-/// draft-ietf-moq-transport-22 §6.5 (Session-Level Tracks and Namespaces): "An endpoint that
+/// draft-ietf-moq-transport-23 §6.5 (Session-Level Tracks and Namespaces): "An endpoint that
 /// receives a request for an unrecognized session-level track or namespace MUST reject it with
 /// REQUEST_ERROR using error code DOES_NOT_EXIST rather than passing it to the Application."
 #[test]
@@ -784,7 +784,7 @@ fn unsupported_request_session_namespace_is_rejected_with_does_not_exist() {
 
 /// `.foo` など `.` 単独でも `.session` でもないプレフィックスは NOT_SUPPORTED のままとする
 ///
-/// draft-ietf-moq-transport-22 §2.4.3 第 1 段落は未認識の予約名前空間への request を
+/// draft-ietf-moq-transport-23 §2.4.3 第 1 段落は未認識の予約名前空間への request を
 /// Application へ渡すことを MUST とするが、本ライブラリには未対応 request を Application へ
 /// 渡す経路が無い。そのため該当するプレフィックスは従来どおり NOT_SUPPORTED で拒否し、
 /// `.` 単独と `.session` だけを DOES_NOT_EXIST にする。
@@ -911,7 +911,7 @@ fn unsupported_request_single_period_register_without_cache_closes_session() {
 
 /// `.` 単独の予約名前空間で拒否しても REGISTER は token cache に登録される
 ///
-/// draft-ietf-moq-transport-22 §8.9: "The receiver of a message carrying an Authorization Token
+/// draft-ietf-moq-transport-23 §8.9: "The receiver of a message carrying an Authorization Token
 /// with Alias Type REGISTER that does not result in a Session error MUST register the Token
 /// Alias in the token cache, even if the message fails for other reasons, including
 /// Unauthorized."
@@ -932,7 +932,7 @@ fn unsupported_request_single_period_registers_auth_token_alias() {
 
 /// SUBSCRIBE_TRACKS の重複 Range Filter は INVALID_FILTER で拒否する
 ///
-/// draft-ietf-moq-transport-22 §3.3.2 (Range Filters): "If the same combination of Parameter
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters): "If the same combination of Parameter
 /// Type, SetID, and Property Type ... repeat in any message, an endpoint MUST reject this with
 /// REQUEST_ERROR with error code INVALID_FILTER." 上限判定に落ちないよう、server の
 /// MAX_FILTER_RANGES は Range 総数 (2) 以上に宣言する。
@@ -960,7 +960,7 @@ fn unsupported_request_duplicate_range_filters_is_rejected_with_invalid_filter()
 
 /// SUBSCRIBE_TRACKS の MAX_FILTER_RANGES 超過は INVALID_FILTER で拒否する
 ///
-/// draft-ietf-moq-transport-22 §3.3.2 / §9.1.6 (MAX FILTER RANGES): 上限は "the total number of
+/// draft-ietf-moq-transport-23 §3.3.2 / §9.1.6 (MAX FILTER RANGES): 上限は "the total number of
 /// Ranges allowed in all Range Filter parameters" であり、超過は REQUEST_ERROR の
 /// INVALID_FILTER で拒否する MUST。
 #[test]
@@ -1005,7 +1005,7 @@ fn unsupported_request_range_filters_with_default_max_is_rejected_with_invalid_f
 
 /// FILL_PARAMETERS の内側の重複 Range Filter も INVALID_FILTER で拒否する
 ///
-/// draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter): FILL の内側のパラメータも
+/// draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter): FILL の内側のパラメータも
 /// 同じ検証を受ける。Range 総数は内側も合算されるため、合計 2 Range を上限内に収めた
 /// MAX_FILTER_RANGES=2 で重複検出そのものを固定する。
 #[test]
@@ -1130,7 +1130,7 @@ fn publish_fill_inner_duplicate_range_filters_is_rejected() {
 
 /// Length=0 の Range Filter (Range 0 個) は上限判定を通過し NOT_SUPPORTED のまま拒否する
 ///
-/// draft-ietf-moq-transport-22 §3.3.2 は受信側に Range 数 0 の拒否 MUST を課していないため、
+/// draft-ietf-moq-transport-23 §3.3.2 は受信側に Range 数 0 の拒否 MUST を課していないため、
 /// `check_incoming_range_filters` の既存方針どおり受理する。
 #[test]
 fn unsupported_request_empty_range_filter_is_rejected_with_not_supported() {
@@ -1151,8 +1151,8 @@ fn unsupported_request_empty_range_filter_is_rejected_with_not_supported() {
 /// PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE の Range Filter はスコープ検証で
 /// PROTOCOL_VIOLATION になる
 ///
-/// draft-ietf-moq-transport-22 §9.14 (PUBLISH_NAMESPACE) / §9.15 (SUBSCRIBE_NAMESPACE): "The only
-/// parameter that can appear ... is AUTHORIZATION_TOKEN." §9.20.1 (Parameter Scope) の MUST は
+/// draft-ietf-moq-transport-23 §9.13 (PUBLISH_NAMESPACE) / §9.14 (SUBSCRIBE_NAMESPACE): "The only
+/// parameter that can appear ... is AUTHORIZATION_TOKEN." §9.19.1 (Parameter Scope) の MUST は
 /// Range Filter の検証より先に評価される (検証順 4 → 7)。
 #[test]
 fn unsupported_request_range_filter_in_namespace_request_closes_session() {
@@ -1256,7 +1256,7 @@ fn unsupported_request_range_filter_rejection_prefers_session_terminating_checks
 
 /// INVALID_FILTER で拒否する場合も REGISTER は token cache に登録される
 ///
-/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): "The receiver of a message
+/// draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression): "The receiver of a message
 /// carrying an Authorization Token with Alias Type REGISTER that does not result in a Session
 /// error MUST register the Token Alias in the token cache, even if the message fails for other
 /// reasons, including Unauthorized."
@@ -1332,7 +1332,7 @@ fn unsupported_request_after_local_goaway_returns_going_away() {
 
 /// 未対応 request の本体に載った REGISTER は、拒否後も §8.9 の MUST で alias が登録される
 ///
-/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): "The receiver of a
+/// draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression): "The receiver of a
 /// message carrying an Authorization Token with Alias Type REGISTER that does not result in a
 /// Session error MUST register the Token Alias in the token cache, even if the message fails
 /// for other reasons, including Unauthorized."
@@ -1368,7 +1368,7 @@ fn unsupported_request_after_goaway_registers_auth_token_alias() {
 
 /// 未対応 request の重複トークンは MALFORMED_AUTH_TOKEN で拒否し、GOING_AWAY より優先する
 ///
-/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) のメッセージ拒否は MUST、
+/// draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression) のメッセージ拒否は MUST、
 /// §9.2 (GOAWAY) の新規 request 拒否は MAY のため、両方が成立する場合は MALFORMED_AUTH_TOKEN を
 /// 返す。失敗したメッセージでも REGISTER は適用する (§8.9)。
 #[test]
@@ -1397,7 +1397,7 @@ fn unsupported_request_with_duplicate_tokens_is_rejected_with_malformed_auth_tok
 
 /// 未対応 request で登録済み alias を再登録すると DUPLICATE_AUTH_TOKEN_ALIAS でセッションを閉じる
 ///
-/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): "The receiver of a
+/// draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression): "The receiver of a
 /// message attempting to register an Alias which is already registered MUST close the Session
 /// with DUPLICATE_AUTH_TOKEN_ALIAS."
 #[test]
@@ -1425,7 +1425,7 @@ fn unsupported_request_reregistering_alias_closes_session() {
 /// 自側が MAX_AUTH_TOKEN_CACHE_SIZE を宣言していないセッションでは REGISTER で
 /// AUTH_TOKEN_CACHE_OVERFLOW となり、REQUEST_ERROR は送らない
 ///
-/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): "If a registration
+/// draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression): "If a registration
 /// outside of SETUP is attempted that would cause this limit to be exceeded, the receiver MUST
 /// terminate the Session with an AUTH_TOKEN_CACHE_OVERFLOW error."
 #[test]
@@ -1459,7 +1459,7 @@ fn unsupported_request_register_without_cache_closes_session() {
 /// 未対応 request の本体が共通構造に従わない場合は原因に応じた終了コードでセッションを閉じる
 ///
 /// draft-ietf-moq-transport-23 §9 (Control Messages) の Length と本体の不一致は
-/// MALFORMED_MESSAGE、draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) の Token
+/// MALFORMED_MESSAGE、draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の Token
 /// 直列化の不整合は MALFORMED_KEY_VALUE で閉じる。
 #[test]
 fn unsupported_request_body_decode_errors_close_session() {
@@ -1563,7 +1563,7 @@ fn unsupported_request_body_decode_errors_close_session() {
 
 /// 未対応 request のパラメータ KVP の宣言長で終了コードが分かれること
 ///
-/// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): Type を理解したうえで
+/// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): Type を理解したうえで
 /// Length/Value が直列化と一致しない場合は MALFORMED_KEY_VALUE、値長が 2^16-1 バイトを
 /// 超える場合は PROTOCOL_VIOLATION でセッションを閉じる。
 #[test]
@@ -1612,15 +1612,15 @@ fn unsupported_request_kvp_length_errors_close_with_mapped_code() {
 
 /// 未対応 request でもメッセージ型ごとの許可パラメータ集合を検証する
 ///
-/// draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope): "If a parameter appears in some other
-/// type of message, the receiving endpoint MUST close the connection with a PROTOCOL_VIOLATION."
+/// draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): "If a parameter appears in some other
+/// type of message, the receiving endpoint MUST close the session with INVALID_PARAMETER."
 #[test]
 fn unsupported_request_rejects_out_of_scope_parameter() {
     use shiguredo_moqt::message_parameter::{
         PARAM_FILL_TIMEOUT, PARAM_GROUP_ORDER, PARAM_SUBSCRIBER_PRIORITY,
     };
 
-    // PUBLISH_NAMESPACE が許可するのは AUTHORIZATION_TOKEN だけ (§9.14)
+    // PUBLISH_NAMESPACE が許可するのは AUTHORIZATION_TOKEN だけ (§9.13)
     let (_client, mut server) = establish_pair();
     let mut parameters = MessageParameters::new();
     parameters.push(MessageParameter {
@@ -1652,7 +1652,7 @@ fn unsupported_request_rejects_out_of_scope_parameter() {
     assert_request_error(&mut server, 0, REQUEST_NOT_SUPPORTED);
 
     // SUBSCRIBE_TRACKS でも FILL_TIMEOUT は許可されない
-    // (draft-ietf-moq-transport-22 §9.20.5 (FILL TIMEOUT Parameter) は FETCH と
+    // (draft-ietf-moq-transport-23 §9.19.5 (FILL TIMEOUT Parameter) は FETCH と
     // FILL_PARAMETERS 内だけに出現を認める)
     let (_client, mut server) = establish_pair();
     let mut parameters = MessageParameters::new();
@@ -1674,7 +1674,7 @@ fn unsupported_request_rejects_out_of_scope_parameter() {
 
 /// 未対応 request の重複トークンは NOT_SUPPORTED よりも MALFORMED_AUTH_TOKEN を優先する
 ///
-/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) のメッセージ拒否は MUST、
+/// draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression) のメッセージ拒否は MUST、
 /// §1.6 (Modularity) の NOT_SUPPORTED は SHOULD のため、両方が成立する場合は
 /// MALFORMED_AUTH_TOKEN を返す。失敗したメッセージでも REGISTER は適用する (§8.9)。
 #[test]
@@ -1882,8 +1882,8 @@ fn subscribe_tracks_rejects_single_track_only_parameters() {
 
 /// SUBSCRIBE_NAMESPACE の許可集合は AUTHORIZATION_TOKEN だけである
 ///
-/// draft-ietf-moq-transport-22 §9.15 (SUBSCRIBE_NAMESPACE): "The only parameter that can appear
-/// in a SUBSCRIBE_NAMESPACE is AUTHORIZATION_TOKEN." 許可されないパラメータの受信は §9.20.1
+/// draft-ietf-moq-transport-23 §9.14 (SUBSCRIBE_NAMESPACE): "The only parameter that can appear
+/// in a SUBSCRIBE_NAMESPACE is AUTHORIZATION_TOKEN." 許可されないパラメータの受信は §9.19.1
 /// (Parameter Scope) の MUST により PROTOCOL_VIOLATION でセッションを閉じる。
 #[test]
 fn subscribe_namespace_parameter_scope_is_validated() {
@@ -1927,7 +1927,7 @@ fn subscribe_namespace_parameter_scope_is_validated() {
 /// 未登録 alias を参照する USE_ALIAS を含む未対応 request は NOT_SUPPORTED で拒否し、
 /// セッションを維持する
 ///
-/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) の REGISTER 適用 MUST は
+/// draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression) の REGISTER 適用 MUST は
 /// REGISTER だけを対象とし、DELETE / USE_ALIAS / USE_VALUE は失敗するメッセージのパラメータと
 /// して適用しない (`apply_peer_message_auth_token_registers_only` の doc 参照)。GOAWAY 拒否の
 /// 経路と同じ扱いであり、未登録 alias を理由にした UNKNOWN_AUTH_TOKEN_ALIAS でのセッション終了は
@@ -1951,7 +1951,7 @@ fn unsupported_request_with_unknown_alias_is_rejected_with_not_supported() {
 ///
 /// 未対応 request の拒否経路でも AUTHORIZATION_TOKEN の一意性は alias 解決後まで含めて検証する。
 /// 未登録 alias の扱い (NOT_SUPPORTED でセッション維持) は変えないが、解決できる alias の
-/// 重複は draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) の MUST に従って
+/// 重複は draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression) の MUST に従って
 /// `MALFORMED_AUTH_TOKEN` のメッセージ単位 reject を `NOT_SUPPORTED` より優先する。
 #[test]
 fn unsupported_request_with_duplicate_resolved_alias_is_rejected() {
@@ -2002,7 +2002,7 @@ fn unsupported_request_with_duplicate_resolved_alias_is_rejected() {
 
 /// 応答専用の型を request stream の先頭で受けるとセッションを閉じる
 ///
-/// draft-ietf-moq-transport-22 §9 Table 5 で NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED は
+/// draft-ietf-moq-transport-23 §9 Table 5 で NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED は
 /// "First" を持たず、応答先の request も存在しない。`ControlMessage::decode` は応答専用の型に
 /// Request ID を付けないが、公開 enum を手組みして付けた場合も §6.3 (Session initialization)
 /// 違反として扱う。
@@ -2053,7 +2053,7 @@ fn response_only_message_as_request_start_closes_session() {
 /// 自側が requester のとき responder の FIN で subscription が Terminated に遷移し、
 /// RequestTerminated(PeerStreamFin) が発火する
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure): responder の FIN は
+/// draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure): responder の FIN は
 /// 「応答とそれに続くメッセージを送り終えた」通知であり、requester は送信方向を閉じる
 /// (SHOULD)。cancel を定める §6.4.2.3 (Request Cancellation and Rejection) は RESET_STREAM /
 /// STOP_SENDING であり、FIN は含まない。
@@ -2097,7 +2097,7 @@ fn request_stream_closed_terminates_subscribe() {
     assert!(got, "RequestTerminated(PeerStreamFin) イベントが期待された");
 }
 
-/// draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection) (request の cancel) + draft-ietf-moq-transport-22 §3.1 (Subscriptions) (PUBLISH_DONE/終端):
+/// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection) (request の cancel) + draft-ietf-moq-transport-23 §3.1 (Subscriptions) (PUBLISH_DONE/終端):
 /// PUBLISH の bidi request stream を RESET_STREAM で閉じると subscription が Terminated、
 /// エラーコードも伝わる
 #[test]
@@ -2265,7 +2265,7 @@ fn request_stream_closed_unknown_id_closes_session() {
     assert_eq!(client.state(), SessionState::Closing);
 }
 
-// ─── requester の FIN と responder の応答 (draft-ietf-moq-transport-22 §6.4.2.2) ────
+// ─── requester の FIN と responder の応答 (draft-ietf-moq-transport-23 §6.4.2.2) ────
 //
 // §6.4.2.2 (Graceful Request Stream Closure): "A FIN only indicates that an endpoint will send
 // no further messages in that direction; it is not a request cancellation." FIN を cancel と
@@ -2548,7 +2548,7 @@ fn publish_done_after_requester_fin_terminates_request() {
 
 /// responder が先に PUBLISH_DONE を送り、後から requester の FIN を受けても終端する
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure) の FIN は方向ごとの
+/// draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure) の FIN は方向ごとの
 /// 終端であり、bidi stream は方向ごとに独立に閉じる。したがってどちらの方向が先に閉じても、
 /// 両方向が閉じた時点で request の終端が確定しなければならない。
 #[test]
@@ -2606,7 +2606,7 @@ fn publish_done_before_requester_fin_terminates_request() {
 /// PUBLISH を送った側 (publisher 役) は peer subscriber の FIN を受けても購読を終端せず、
 /// PUBLISH_DONE を送れる
 ///
-/// draft-ietf-moq-transport-22 §3.1 (Subscriptions) は購読の終端を publisher の PUBLISH_DONE と
+/// draft-ietf-moq-transport-23 §3.1 (Subscriptions) は購読の終端を publisher の PUBLISH_DONE と
 /// subscriber の STOP_SENDING に限る。§6.4.2.2 (Graceful Request Stream Closure) の FIN は
 /// 方向ごとの終端であり cancel ではないため、subscriber の FIN で購読を終端すると publisher は
 /// "the publisher of an Established subscription MUST send PUBLISH_DONE, before sending a FIN."
@@ -2694,7 +2694,7 @@ fn publish_sender_survives_peer_fin_and_sends_publish_done() {
 
 /// PUBLISH を送った側が先に PUBLISH_DONE を送り、後から peer FIN を受けても終端する
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure) の FIN は方向ごとの
+/// draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure) の FIN は方向ごとの
 /// 終端であるため、どちらの方向が先に閉じても両方向が閉じた時点で終端が確定しなければならない。
 #[test]
 fn publish_sender_publish_done_before_peer_fin_terminates_request() {
@@ -2751,7 +2751,7 @@ fn publish_sender_publish_done_before_peer_fin_terminates_request() {
 
 /// peer FIN で遅延している間に peer の RESET_STREAM (cancel) が届いたら即時に終端する
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure) の FIN は方向ごとの
+/// draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure) の FIN は方向ごとの
 /// 終端であり cancel ではないため遅延するが、§6.4.2.3 (Request Cancellation and Rejection) の
 /// cancel (RESET_STREAM / STOP_SENDING) は即時に終端する。
 #[test]
@@ -2810,7 +2810,7 @@ fn publish_sender_peer_reset_during_deferral_terminates_request() {
 
 /// PUBLISH を送った直後 (Pending(Publisher)) の peer FIN は要求未完として終端する
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure): "An endpoint that
+/// draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure): "An endpoint that
 /// receives a FIN before all required messages have arrived treats the request as failed."
 #[test]
 fn publish_sender_pending_peer_fin_terminates_subscription() {
@@ -2869,7 +2869,7 @@ fn publish_sender_pending_peer_fin_terminates_subscription() {
 ///
 /// `Session::send_fetch_ok` は送信方向を閉じない (`fin: false`) ため、FETCH の responder が
 /// 終端するのは単独の REQUEST_ERROR を最終メッセージとして送ったときである
-/// (draft-ietf-moq-transport-22 §9.11 (FETCH) / §6.4.2.2 (Graceful Request Stream Closure))。
+/// (draft-ietf-moq-transport-23 §9.11 (FETCH) / §6.4.2.2 (Graceful Request Stream Closure))。
 #[test]
 fn fetch_responder_terminates_on_request_error_after_requester_fin() {
     use shiguredo_moqt::message::ReasonPhrase;
@@ -2939,7 +2939,7 @@ fn fetch_responder_terminates_on_request_error_after_requester_fin() {
 
 /// peer の RESET_STREAM では responder 側でも request が即時に終端する
 ///
-/// RESET_STREAM は cancel である (draft-ietf-moq-transport-22 §6.4.2.3) ため、
+/// RESET_STREAM は cancel である (draft-ietf-moq-transport-23 §6.4.2.3) ため、
 /// FIN と異なり自側の役割にかかわらず request を終端する。
 #[test]
 fn responder_terminates_subscription_on_peer_reset() {
@@ -3036,7 +3036,7 @@ fn requester_receives_responder_fin_and_finishes_request_stream() {
 
 // ─── Pending(Subscriber) supersede by PUBLISH ────
 
-/// draft-ietf-moq-transport-22 §3.1 (Subscriptions): 既存 Pending(Subscriber) subscription に対して
+/// draft-ietf-moq-transport-23 §3.1 (Subscriptions): 既存 Pending(Subscriber) subscription に対して
 /// 同一 track の PUBLISH を受信すると、既存を Terminated に遷移させた上で
 /// 新 PUBLISH を受諾する (SUBSCRIBE と PUBLISH が交差したケース)
 #[test]
@@ -3135,7 +3135,7 @@ fn publish_supersedes_pending_subscriber_for_same_track() {
     let _ = sub_msg;
 }
 
-/// draft-ietf-moq-transport-22 §3.1: 同一 Track への複数同時 subscription が許可されたため、
+/// draft-ietf-moq-transport-23 §3.1: 同一 Track への複数同時 subscription が許可されたため、
 /// Established subscription が存在する Track への PUBLISH も受理される
 #[test]
 fn publish_on_established_subscription_is_accepted_in_draft_20() {
@@ -3616,7 +3616,7 @@ fn client_receives_error_with_unknown_details_accepted() {
 
 /// Client の採番は偶数で、SUBSCRIBE 送信で +2 進む
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.1 (Request ID):
+/// draft-ietf-moq-transport-23 §6.4.2.1 (Request ID):
 /// Client は 0 から始まり +2 ずつインクリメントする。
 #[test]
 fn client_request_id_advances_even() {
@@ -3637,7 +3637,7 @@ fn client_request_id_advances_even() {
 
 /// Server の採番は奇数で、PUBLISH 送信で +2 進む
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.1 (Request ID):
+/// draft-ietf-moq-transport-23 §6.4.2.1 (Request ID):
 /// Server は 1 から始まり +2 ずつインクリメントする。
 #[test]
 fn server_request_id_advances_odd() {

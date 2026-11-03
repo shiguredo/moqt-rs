@@ -80,7 +80,7 @@ fn auth_token_cache_delete_forgets() -> noprop::TestResult {
 }
 
 /// max_size = 0 の場合は REGISTER は常に容量超過扱い (Ok(false))
-/// draft-ietf-moq-transport-22 §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE): 未指定時のデフォルトは 0、alias 利用不可
+/// draft-ietf-moq-transport-23 §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE): 未指定時のデフォルトは 0、alias 利用不可
 #[test]
 fn auth_token_cache_zero_limit_rejects_all() -> noprop::TestResult {
     let mut runner = test_runner()?;

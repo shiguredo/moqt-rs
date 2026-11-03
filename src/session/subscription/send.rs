@@ -1,7 +1,7 @@
 //! SUBSCRIBE / PUBLISH / REQUEST_UPDATE / PUBLISH_DONE / PUBLISH_STATE_NOTIFY の送信
 //!
-//! draft-ietf-moq-transport-22 §9.6-§9.9 と
-//! draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY) に対応。
+//! draft-ietf-moq-transport-23 §9.6-§9.9 と
+//! draft-ietf-moq-transport-23 §9.10 (PUBLISH_STATE_NOTIFY) に対応。
 //! 将来 draft 側で変更される可能性がある。
 
 use crate::error::{
@@ -45,7 +45,7 @@ use super::validation::{
 impl Session {
     /// Subscribe / Publish の bidi request stream 終端時の共通処理
     ///
-    /// draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure) / §6.4.2.3
+    /// draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure) / §6.4.2.3
     /// (Request Cancellation and Rejection): FIN はその方向に送るメッセージが終わったこと
     /// だけを示し、cancel は RESET_STREAM / STOP_SENDING で表現される。
     ///
@@ -76,7 +76,7 @@ impl Session {
             ));
         };
         sub.state = SubscriptionState::Terminated;
-        // draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams):
+        // draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams):
         // "When the subscription is cancelled, the publisher MUST reset any open fill fetch
         // streams." 自側が publisher 役のときは open 中の fill fetch stream を持ちうるため、
         // 終端時は reset する (subscriber 役の subscription は fill fetch stream を開かない
@@ -114,7 +114,7 @@ impl Session {
         self.check_peer_goaway()?;
         // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は送出しない
         Self::validate_outgoing_track_name(&track_name)?;
-        // draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces): single period `.` 予約名前空間への SUBSCRIBE は送信不可
+        // draft-ietf-moq-transport-23 §2.4.3 (Reserved Namespaces): single period `.` 予約名前空間への SUBSCRIBE は送信不可
         if track_namespace.is_single_period() {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
@@ -122,9 +122,9 @@ impl Session {
             )
             .into());
         }
-        // draft-ietf-moq-transport-22 §3.3.2 (Range Filters): peer の MAX_FILTER_RANGES 超過は送信不可
+        // draft-ietf-moq-transport-23 §3.3.2 (Range Filters): peer の MAX_FILTER_RANGES 超過は送信不可
         self.validate_outgoing_range_filters(&parameters)?;
-        // draft §9.20.1 (Parameter Scope): SUBSCRIBE で許可されないパラメータを含む
+        // draft §9.19.1 (Parameter Scope): SUBSCRIBE で許可されないパラメータを含む
         // 送信は API 呼び出し時に拒否する。検証がないと request 登録・ SendRequest の push
         // まで完了した後に I/O 層のエンコード時 (validate_scope) で非同期に失敗し、アプリ
         // は送信成功と誤認したまま peer に届かない (受信側はワイヤ層で検証済みのため、
@@ -140,7 +140,7 @@ impl Session {
             )
             .into());
         }
-        // draft-ietf-moq-transport-22 §3.1: 同一 Track への複数同時 subscription が許可されたため、
+        // draft-ietf-moq-transport-23 §3.1: 同一 Track への複数同時 subscription が許可されたため、
         // 自側 subscriber role の重複チェックは行わない。
         //
         // draft §10.4 / §10.5: SUBSCRIBE に TrackProperties は乗らない。peer publisher が
@@ -168,7 +168,7 @@ impl Session {
                 .into());
             }
         };
-        // draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter):
+        // draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter):
         // FILL 内側の Table 7 スコープと LOCATION_FILTER も送信前に検証し、
         // 不正値の送出と状態登録を防ぐ
         super::fill::validate_outgoing_fill_parameters(&parameters)?;
@@ -307,7 +307,7 @@ impl Session {
         self.check_peer_goaway()?;
         // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は送出しない
         Self::validate_outgoing_track_name(&track_name)?;
-        // draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces): single period `.` 予約名前空間への PUBLISH は送信不可
+        // draft-ietf-moq-transport-23 §2.4.3 (Reserved Namespaces): single period `.` 予約名前空間への PUBLISH は送信不可
         if track_namespace.is_single_period() {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
@@ -341,9 +341,9 @@ impl Session {
             )
             .into());
         }
-        // draft-ietf-moq-transport-22 §3.1: 同一 Track への複数同時 subscription が許可されたため、
+        // draft-ietf-moq-transport-23 §3.1: 同一 Track への複数同時 subscription が許可されたため、
         // 自側 publisher role の重複チェックは行わない。
-        // draft §9.20.1 (Parameter Scope): PUBLISH で許可されないパラメータを含む送信は
+        // draft §9.19.1 (Parameter Scope): PUBLISH で許可されないパラメータを含む送信は
         // API 呼び出し時に拒否する。検証がないと request 登録・ SendRequest の push まで
         // 完了した後に I/O 層のエンコード時 (validate_scope) で非同期に失敗し、アプリは
         // 送信成功と誤認したまま peer に届かない (受信側はワイヤ層で検証済みのため、
@@ -373,7 +373,7 @@ impl Session {
         // (既定 0) Range Filter を載せた PUBLISH を送出してしまい、相手に INVALID_FILTER の
         // 拒否 MUST を強いる。検証は request_id 発行より前に置き、エラー時に欠番を作らない。
         self.validate_outgoing_range_filters(&parameters)?;
-        // draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): GROUP_ORDER は
+        // draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter): GROUP_ORDER は
         // SUBSCRIBE / PUBLISH / SUBSCRIBE_TRACKS / FETCH に出現可能であり、値域は Ascending
         // (0x1) / Descending (0x2) のみ。値域外は API 呼び出し時に拒否する (検証がないと
         // request 登録・ SendRequest の push まで完了した後に I/O 層のエンコード時
@@ -384,7 +384,7 @@ impl Session {
         if let Some(order) = parameters.group_order() {
             validate_group_order(order)?;
         }
-        // draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter):
+        // draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter):
         // 不正形式の LOCATION_FILTER は送信前に拒否し、不正値の送出と状態登録を防ぐ
         // (request_id 発行より前に置き、エラー時に欠番を作らない)。
         // `location_filter_update()` は `Result<LocationFilterUpdate, MessageError>` を
@@ -402,7 +402,7 @@ impl Session {
                 .into());
             }
         };
-        // draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter): Track に Object を
+        // draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter): Track に Object を
         // publish 済みなら Publisher は LARGEST_OBJECT を必ず含めなければならない。
         // `publisher_track_largest` が返す Track 最大 (live な publisher 役 subscription 群の
         // 最大値と、Track 単位で保持した自側 publish 済み最大の大きい方) で補完する
@@ -432,7 +432,7 @@ impl Session {
         // draft §10.4 (DEFAULT PUBLISHER PRIORITY) / §10.5 (DEFAULT PUBLISHER GROUP ORDER)
         let default_publisher_priority = track_properties.default_publisher_priority();
         let default_publisher_group_order = track_properties.default_publisher_group_order();
-        // draft-ietf-moq-transport-22 §9.8 (PUBLISH): PUBLISH の Parameters に現れる
+        // draft-ietf-moq-transport-23 §9.8 (PUBLISH): PUBLISH の Parameters に現れる
         // subscription パラメータは初期状態として保持する (受信側と対称)。
         // 解決時点の largest を持たないため、相対フィルタは先頭から解決される。
         // delivery timeout の Parameters は保持しない。§5.2 の規則
@@ -443,7 +443,7 @@ impl Session {
         let (filter_start, filter_end) =
             resolve_location_filter(filter.as_ref(), None, LocationFilterContext::Subscription);
         let range_filters = SubscriptionRangeFilters::default();
-        // draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): GROUP_ORDER は
+        // draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter): GROUP_ORDER は
         // SUBSCRIBE / PUBLISH / SUBSCRIBE_TRACKS / FETCH に出現可能であり、PUBLISH にも
         // 直接含められる。初期状態として保持する。
         let subscription = Subscription {
@@ -562,7 +562,7 @@ impl Session {
     /// draft §3.1 (Subscriptions): Pending (Subscriber) → Established に遷移する。
     /// `track_alias` は draft §3.1.3 (Track Alias) に従い自側 (publisher) が一意に採番する。
     ///
-    /// draft §9.20.1 (Parameter Scope): SUBSCRIBE_OK で許可されるパラメータは
+    /// draft §9.19.1 (Parameter Scope): SUBSCRIBE_OK で許可されるパラメータは
     /// EXPIRES / LARGEST_OBJECT のみ。スコープ外パラメータを含む SUBSCRIBE_OK は
     /// `SESSION_PROTOCOL_VIOLATION` で拒否され、subscription の状態・ track_alias ・
     /// パラメータは一切変更されない。
@@ -579,11 +579,10 @@ impl Session {
     ) -> Result<(), SessionError> {
         self.require_established()?;
         let now_ms = self.timing.last_tick_ms;
-        // draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) /
+        // draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter) /
         // §3.1.4 (Largest Object):
-        // "It contains the Largest Object (Section 3.1.4) in the Track from the perspective
-        //  of the sending endpoint. If Objects have been published on this Track the Publisher
-        //  MUST include this parameter."
+        // "If the sending endpoint has published or received any Objects in the Track, it
+        //  MUST include this parameter in the above messages it sends."
         // LARGEST_OBJECT は Track 単位の値であるため、`publisher_track_largest` が返す
         // Track 最大 (live な publisher 役 subscription 群の最大値と、Track 単位で保持した
         // 自側 publish 済み最大の大きい方) を使う。新規 subscription は観測値を持たないが、
@@ -606,9 +605,9 @@ impl Session {
                 "send_subscribe_ok requires publisher role in Pending(Subscriber) state",
             ));
         }
-        // draft §9.20.1 (Parameter Scope): SUBSCRIBE_OK で許可されるパラメータは
-        // EXPIRES / LARGEST_OBJECT のみ (draft-ietf-moq-transport-22 §9.20.16 (EXPIRES Parameter) /
-        // §9.20.17 (LARGEST OBJECT Parameter) の MAY appear 列挙)。
+        // draft §9.19.1 (Parameter Scope): SUBSCRIBE_OK で許可されるパラメータは
+        // EXPIRES / LARGEST_OBJECT のみ (draft-ietf-moq-transport-23 §9.19.16 (EXPIRES Parameter) /
+        // §9.19.17 (LARGEST OBJECT Parameter) の MAY appear 列挙)。
         // スコープ外パラメータを含む SUBSCRIBE_OK では状態を一切変更せずエラーを返す。
         // 受信側はワイヤ層 (`SubscribeOk::decode_message_body` の validate_scope) で検証済みのため、
         // ここは送信側の状態整合性のための検証。検証が状態遷移後に走ると、subscription が
@@ -736,12 +735,12 @@ impl Session {
     /// `SESSION_PROTOCOL_VIOLATION` を返す (`SUBSCRIBE` での foreknowledge 無しの送信は
     /// 許可されるため対象外)。
     ///
-    /// draft-ietf-moq-transport-22 §9.1.7 (MAX_REQUEST_UPDATES): クレジットは送信が
+    /// draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES): クレジットは送信が
     /// 確定したときのみ消費される (検証失敗で送信されない場合は消費されない。
     /// "A REQUEST_UPDATE is considered outstanding from when it is sent until the sender
     /// receives the corresponding REQUEST_OK or REQUEST_ERROR response.")。
     ///
-    /// draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure): peer の FIN を
+    /// draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure): peer の FIN を
     /// 受信済みの request への送信は `SESSION_PROTOCOL_VIOLATION` を返す。FIN は「その方向に
     /// もうメッセージを送らない」表明であり応答が届かないため、応答待ちのまま
     /// `CONTROL_MESSAGE_TIMEOUT` でセッションを閉じることを防ぐ送信側ローカルの拒否である
@@ -752,10 +751,10 @@ impl Session {
         parameters: MessageParameters,
     ) -> Result<(), SessionError> {
         self.require_established()?;
-        // draft-ietf-moq-transport-22 §3.3.2 (Range Filters): peer の MAX_FILTER_RANGES 超過は送信不可
+        // draft-ietf-moq-transport-23 §3.3.2 (Range Filters): peer の MAX_FILTER_RANGES 超過は送信不可
         self.validate_outgoing_range_filters(&parameters)?;
 
-        // draft-ietf-moq-transport-22 §9.1.7 (MAX_REQUEST_UPDATES): peer の SETUP で宣言された
+        // draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES): peer の SETUP で宣言された
         // MAX_REQUEST_UPDATES を超える outstanding REQUEST_UPDATE の送信を禁止する。
         // デフォルト値 0 は無制限を意味する。
         // 上限チェックは楽観的に state を更新する検証 (`send_update_for_*` 内、
@@ -792,7 +791,7 @@ impl Session {
             }
         }
 
-        // draft §9.20.1 (Parameter Scope): context 別の許可パラメータ集合で
+        // draft §9.19.1 (Parameter Scope): context 別の許可パラメータ集合で
         // 検証する。
         let table = self.locate_request(request_id);
         let context_allowed = match table {
@@ -835,7 +834,7 @@ impl Session {
             *self.outgoing_request_updates.entry(request_id).or_insert(0) += 1;
         }
         self.start_control_message_deadline(request_id);
-        // draft-ietf-moq-transport-22 §6.4.2.1 (Request ID): REQUEST_UPDATE は
+        // draft-ietf-moq-transport-23 §6.4.2.1 (Request ID): REQUEST_UPDATE は
         // SUBSCRIBE / PUBLISH とは別に新しい Request ID を消費する。購読の
         // Request ID を再利用すると重複 Request ID となり、draft の MUST に反する。
         // 対象 request は「同じ bidi stream 上で送る」ことで識別されるため、
@@ -843,7 +842,7 @@ impl Session {
         // Request ID のままにする。採番は全検証の後に行い、送信されなかった
         // REQUEST_UPDATE が peer 側の Request ID の欠番を作らないようにする。
         let update_request_id = self.request_ids.local_generator.next_id();
-        // draft-ietf-moq-transport-22 §3.4 (Fill Semantics): REQUEST_UPDATE 起因の
+        // draft-ietf-moq-transport-23 §3.4 (Fill Semantics): REQUEST_UPDATE 起因の
         // fill fetch stream は REQUEST_UPDATE 自身の Request ID を FETCH_HEADER に載せる。
         // 受信した fill fetch stream を購読へ帰属させるため対応を登録する。
         // fill fetch stream を開きうるのは FILL_PARAMETERS を持つ REQUEST_UPDATE だけ。
@@ -894,7 +893,7 @@ impl Session {
                 "request_update requires Established subscription",
             ));
         }
-        // draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure): peer の FIN は
+        // draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure): peer の FIN は
         // 「その方向にもうメッセージを送らない」表明であり、同節は REQUEST_UPDATE に応答する
         // 必要が無い場合の FIN を想定している。peer FIN を受信済みの request へ送ると応答が
         // 届かず、CONTROL_MESSAGE_TIMEOUT でセッションを閉じることになるため送信を拒否する。
@@ -922,7 +921,7 @@ impl Session {
                 ));
             }
         };
-        // draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter):
+        // draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter):
         // FILL 内側の Table 7 スコープと LOCATION_FILTER も送信前に検証し、
         // 不正値の送出を防ぐ (楽観的状態更新より前に置き、エラー時に更新済み状態を残さない)
         super::fill::validate_outgoing_fill_parameters(parameters)?;
@@ -945,7 +944,7 @@ impl Session {
         if let Some(new_paused) = new_paused {
             subscription.paused = new_paused;
         }
-        // draft-ietf-moq-transport-22 §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER Parameter):
+        // draft-ietf-moq-transport-23 §3.3.1 (Location Filters) / §9.19.9 (LOCATION FILTER Parameter):
         // REQUEST_UPDATE に LOCATION_FILTER が含まれる場合は更新し、Type 0x00 (None) なら削除する。
         // 省略時は値 unchanged。解決済み値もフィルタに追随させる。
         match filter_update {
@@ -969,17 +968,17 @@ impl Session {
                 subscription.filter_end = end;
             }
         }
-        // draft-ietf-moq-transport-22 §9.20.7 (SUBSCRIBER PRIORITY Parameter): REQUEST_UPDATE に SUBSCRIBER_PRIORITY が含まれる場合は更新
+        // draft-ietf-moq-transport-23 §9.19.7 (SUBSCRIBER PRIORITY Parameter): REQUEST_UPDATE に SUBSCRIBER_PRIORITY が含まれる場合は更新
         if let Some(priority) = parameters.subscriber_priority() {
             subscription.subscriber_priority = Some(priority);
         }
-        // draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): GROUP_ORDER は確定後変更不可 (draft-ietf-moq-transport-22 §5.1.1 (Definitions)) のため更新しない
+        // draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter): GROUP_ORDER は確定後変更不可 (draft-ietf-moq-transport-23 §5.1.1 (Definitions)) のため更新しない
         Ok(())
     }
 
     /// PUBLISH_STATE_NOTIFY を送信する (自側が publisher)
     ///
-    /// draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY):
+    /// draft-ietf-moq-transport-23 §9.10 (PUBLISH_STATE_NOTIFY):
     /// subscriber 発 REQUEST_UPDATE 以外の理由で subscription 状態が変わったことを
     /// 通知する一方向メッセージ。応答を要求せず、MAX_REQUEST_UPDATES の
     /// クレジットも消費しない。LARGEST_OBJECT は観測済みなら必須
@@ -1003,7 +1002,7 @@ impl Session {
                 "subscription not found for publish_state_notify",
             )
         })?;
-        // draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter):
+        // draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter):
         // LARGEST_OBJECT は Track 単位の値であるため、`publisher_track_largest` が返す
         // Track 最大 (live な publisher 役 subscription 群の最大値と、Track 単位で保持した
         // 自側 publish 済み最大の大きい方) を使う。
@@ -1026,7 +1025,7 @@ impl Session {
         }
         // 値の検証をパラメータの適用より前に実行する。検証エラー時は `Err` のみを返し、
         // 適用済みパラメータを残留させない (REQUEST_UPDATE 送信経路と同じ設計判断)。
-        // draft §9.20.1 (Parameter Scope): スコープ外パラメータを含む PUBLISH_STATE_NOTIFY では
+        // draft §9.19.1 (Parameter Scope): スコープ外パラメータを含む PUBLISH_STATE_NOTIFY では
         // 状態を一切変更せずエラーを返す。受信側はワイヤ層で検証済みのため、
         // ここは送信側の状態整合性のための検証。なお本検証はパラメータのスコープのみを
         // 対象とし、スコープ内の同一型の重複出現・型不一致は検出されず encode 層で
@@ -1062,7 +1061,7 @@ impl Session {
         if let Some(new_paused) = new_paused {
             subscription.paused = new_paused;
         }
-        // draft-ietf-moq-transport-22 §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER Parameter):
+        // draft-ietf-moq-transport-23 §3.3.1 (Location Filters) / §9.19.9 (LOCATION FILTER Parameter):
         // LOCATION_FILTER が含まれる場合は更新し、Type 0x00 (None) なら削除する。
         // 省略時は値 unchanged。解決済み値もフィルタに追随させる。
         match filter_update {
@@ -1084,8 +1083,8 @@ impl Session {
                 subscription.filter_end = end;
             }
         }
-        // draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY) /
-        // §9.20.17 (LARGEST OBJECT Parameter): LARGEST_OBJECT は観測済みなら必須の
+        // draft-ietf-moq-transport-23 §9.10 (PUBLISH_STATE_NOTIFY) /
+        // §9.19.17 (LARGEST OBJECT Parameter): LARGEST_OBJECT は観測済みなら必須の
         // ため、観測値がある場合は送出パラメータに補う (未公開なら省略可のまま残す)。
         if let Some(ref loc) = track_largest {
             update_largest_object_in_parameters(&mut parameters, loc);
@@ -1101,7 +1100,7 @@ impl Session {
 
     /// PUBLISH_DONE を送信する (publisher 側のみ)
     ///
-    /// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE): subscription 終了を通知する最後のメッセージ。
+    /// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE): subscription 終了を通知する最後のメッセージ。
     /// subscription state を Terminated に遷移させる。
     ///
     /// # Errors
@@ -1158,7 +1157,7 @@ impl Session {
                 "publish_done requires all outgoing streams closed",
             ));
         }
-        // draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE):
+        // draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE):
         // - stream を 1 本も開かなかった場合 (published_stream_count == 0) は MUST 0
         // - published_stream_count > 0 のときは Session が tracking した exact 値との一致、
         //   または正確な数を表明できない場合の escape として
@@ -1184,7 +1183,7 @@ impl Session {
         // 未応答の REQUEST_UPDATE と MAX_REQUEST_UPDATES のクレジットを解放する。
         // 応答を返す経路が残らないため、保持し続ける理由がない。
         self.release_request_update_state(request_id);
-        // draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams):
+        // draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams):
         // subscription の終了時は open 中の fill fetch stream を reset する (MUST)。
         // PUBLISH_DONE の MUST NOT (全 stream 終端まで送信禁止) と両立するため、
         // 呼び出し側は本関数より前に fill stream を終端していること。

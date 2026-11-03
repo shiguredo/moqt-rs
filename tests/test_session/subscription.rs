@@ -13,7 +13,7 @@ fn recv_response_helper(session: &mut Session, request_id: u64, msg: ControlMess
 /// 送信 API が先に弾いてしまうケースを受信側で検証するため、wire を経由せず
 /// 直接メッセージを組み立てる。
 ///
-/// `update_request_id` は wire に載せる Request ID である。draft-ietf-moq-transport-22
+/// `update_request_id` は wire に載せる Request ID である。draft-ietf-moq-transport-23
 /// §6.4.2.1 (Request ID): REQUEST_UPDATE も Request ID を消費し、受信側は parity 違反と
 /// 重複を INVALID_REQUEST_ID で拒否するため、購読の Request ID をそのまま渡すことはできない。
 /// 受信させる session の peer が使う Request ID (peer が server なら奇数、client なら偶数) を、

@@ -7,10 +7,10 @@
 //! - 各 Group の先頭 (Object ID 0) はキーフレームであり、以降は直前の Object を参照する
 //!   delta である
 //! - publisher は Object ID を飛ばすことがあり、飛ばした数は次の Object の Prior Object ID
-//!   Gap (draft-ietf-moq-transport-22 §10.9 (Prior Object ID Gap)) で示す
+//!   Gap (draft-ietf-moq-transport-23 §10.9 (Prior Object ID Gap)) で示す
 //! - 経路では任意の Object が失われ、到着順は任意に入れ替わり、同じ Object がもう一度届く
-//!   ことがある (draft-ietf-moq-transport-22 §2.1.2 (Object States): "Since Objects can be
-//!   delivered out of order")
+//!   ことがある (draft-ietf-moq-transport-23 §2.2 (Subgroups): 1 つの Group は Subgroup ごとに
+//!   別の stream で届き、順序が保証されるのは stream 内だけである)
 //!
 //! 検証する性質は次の 5 つである。
 //!
@@ -371,7 +371,8 @@ fn branch_of(step: &Step) -> Option<Branch> {
 /// 復号した Object の Group は単調に増える
 ///
 /// 次の Group のキーフレームを復号した後に前の Group の Object を復号しない
-/// (draft-ietf-moq-transport-22 §2.1.2)。
+/// (draft-ietf-moq-transport-23 §2.2 (Subgroups): Group ごとに別の stream で届き、順序が
+/// 保証されるのは stream 内だけである)。
 #[test]
 fn decoded_groups_are_non_decreasing() -> noprop::TestResult {
     // ゲート: Group が進む復号 (新しい Group のキーフレーム) と、同じ Group の復号の
@@ -539,7 +540,8 @@ fn decoded_deltas_reference_the_previously_decoded_object() -> noprop::TestResul
 /// 欠落を検出したら、キーフレームを復号するまで delta を復号しない
 ///
 /// 参照するフレームが欠けた delta は、キーフレームで参照の連鎖を切り直すまで復号しない
-/// (draft-ietf-moq-transport-22 §2.1.2)。
+/// (draft-ietf-moq-transport-23 §2.1.2 (Object States): 欠けた Object ID はそれだけでは
+/// 存在しないことを示さない)。
 #[test]
 fn missing_reference_blocks_delta_until_a_key_frame() -> noprop::TestResult {
     // ゲート: 欠落の検出と、キーフレームでの復帰の両方が観測されること。復帰が 0 なら
@@ -726,7 +728,7 @@ fn without_loss_or_reorder_every_object_is_decoded() -> noprop::TestResult {
 
 /// Object Properties に書いた Prior Object ID Gap をそのまま読み戻す
 ///
-/// Property が無い Object は 0 として扱う (draft-ietf-moq-transport-22 §10.9 (Prior Object ID
+/// Property が無い Object は 0 として扱う (draft-ietf-moq-transport-23 §10.9 (Prior Object ID
 /// Gap))。判定に使う値が Property から取れなくなると、欠落の判定がすべて欠落側に倒れる。
 #[test]
 fn prior_object_id_gap_roundtrips_through_object_properties() -> noprop::TestResult {

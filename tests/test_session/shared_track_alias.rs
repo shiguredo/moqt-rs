@@ -1,6 +1,6 @@
 //! 同一 Track への Track Alias 共有テスト
 //!
-//! draft-ietf-moq-transport-22 §3.1 (Subscriptions):
+//! draft-ietf-moq-transport-23 §3.1 (Subscriptions):
 //! "An endpoint MAY have multiple concurrent subscriptions to the same Track, each identified
 //! by a unique Request ID. A publisher MAY assign the same or different Track Aliases to
 //! these subscriptions."
@@ -89,7 +89,7 @@ fn same_track_two_subscriptions_share_alias_via_publish() {
 
 /// 異なる Track への同一 Alias 再利用は送信 API で拒否される (PUBLISH)
 ///
-/// draft-ietf-moq-transport-22 §3.1.3 の 1 文目 (送信側 MUST NOT)。
+/// draft-ietf-moq-transport-23 §3.1.3 の 1 文目 (送信側 MUST NOT)。
 #[test]
 fn different_track_same_alias_rejected_on_send_publish() {
     const ALIAS: u64 = 1002;
@@ -146,7 +146,7 @@ fn different_track_same_alias_rejected_on_send_subscribe_ok() {
 
 /// 異なる Track の Established subscription と衝突する PUBLISH 受信はセッションを閉じる
 ///
-/// draft-ietf-moq-transport-22 §3.1.3 の 2 文目 (受信側 MUST)。
+/// draft-ietf-moq-transport-23 §3.1.3 の 2 文目 (受信側 MUST)。
 #[test]
 fn different_track_same_alias_closes_session_on_recv_publish() {
     const ALIAS: u64 = 1004;
@@ -252,7 +252,7 @@ fn forget_one_shared_alias_subscription_keeps_the_other() {
 
 /// 共有 alias の全 subscription を forget したら alias 解決先が無くなる
 ///
-/// 直後は draft-ietf-moq-transport-22 §3.1.3 (Track Alias) の discard 用 tombstone が効くため
+/// 直後は draft-ietf-moq-transport-23 §3.1.3 (Track Alias) の discard 用 tombstone が効くため
 /// `Discarded` になり、保持期間が切れると `UnknownTrackAlias` に戻る。
 #[test]
 fn forget_all_shared_alias_subscriptions_makes_alias_unknown() {
@@ -426,7 +426,7 @@ fn establish_shared_alias_with_objectid_filters() -> (Session, Session, u64, u64
 
 /// datagram 経路: OBJECTID_FILTER で異なる subscription に振り分けられる
 ///
-/// draft-ietf-moq-transport-22 §3.1 (Subscriptions):
+/// draft-ietf-moq-transport-23 §3.1 (Subscriptions):
 /// "the subscriber re-applies each subscription's filter to determine which subscription
 /// a received Object belongs to."
 #[test]
@@ -495,7 +495,7 @@ fn datagram_routed_by_objectid_filter() {
 
 /// datagram 経路: どの候補のフィルタも通らない Object は FilteredOut になりセッションは閉じない
 ///
-/// draft-ietf-moq-transport-22 §3.1 / §11.2: 受信側の破棄を要求していないため
+/// draft-ietf-moq-transport-23 §3.1 / §11.2: 受信側の破棄を要求していないため
 /// セッションを閉じてはならない。
 #[test]
 fn datagram_no_matching_filter_returns_filtered_out() {
@@ -541,7 +541,7 @@ fn datagram_no_matching_filter_returns_filtered_out() {
 
 /// subgroup stream 経路: SUBGROUP_FILTER で異なる subscription に振り分けられる
 ///
-/// draft-ietf-moq-transport-22 §3.1 (Subscriptions):
+/// draft-ietf-moq-transport-23 §3.1 (Subscriptions):
 /// "the subscriber re-applies each subscription's filter to determine which subscription
 /// a received Object belongs to."
 ///

@@ -89,7 +89,7 @@ fn roundtrip_non_immutable() -> noprop::TestResult {
 
 /// IMMUTABLE_PROPERTIES (0x0B) に入れ子 KVP を入れた roundtrip と `find_varint` の統合検索
 ///
-/// draft-ietf-moq-transport-22 §10.7 (Immutable Properties): 値は入れ子の KVP リスト。
+/// draft-ietf-moq-transport-23 §10.7 (Immutable Properties): 値は入れ子の KVP リスト。
 /// `find_varint` は mutable なプロパティを優先し、無ければ IMMUTABLE_PROPERTIES の内側を探索する。
 #[test]
 fn roundtrip_immutable_and_find_varint() -> noprop::TestResult {
@@ -117,7 +117,7 @@ fn roundtrip_immutable_and_find_varint() -> noprop::TestResult {
             .encode(&mut encoded_inner)
             .expect("正当なテスト入力の encode は成功する");
         // ObjectProperties::encode は Properties Length (varint) を前置するが、
-        // IMMUTABLE_PROPERTIES の値は長さ前置なしの KVP 列 (draft-ietf-moq-transport-22 §10.7 (Immutable Properties))
+        // IMMUTABLE_PROPERTIES の値は長さ前置なしの KVP 列 (draft-ietf-moq-transport-23 §10.7 (Immutable Properties))
         let (inner_len, prefix_len) =
             shiguredo_moqt::varint::decode(&encoded_inner).expect("length prefix は varint");
         assert_eq!(inner_len as usize, encoded_inner.len() - prefix_len);

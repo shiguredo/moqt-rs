@@ -37,7 +37,7 @@ fn include_properties_params(value: u8) -> MessageParameters {
 
 /// PUBLISH_OK + NEW_GROUP_REQUEST は送信側で拒否される
 ///
-/// draft-ietf-moq-transport-23 Appendix A.3 #1790 (Subscription parameters appear in
+/// draft-ietf-moq-transport-23 Appendix A.4 #1790 (Subscription parameters appear in
 /// REQUEST_UPDATE, not PUBLISH_OK): PUBLISH_OK は EXPIRES のみを運ぶ。
 /// NEW_GROUP_REQUEST は SUBSCRIBE / REQUEST_UPDATE にのみ出現する
 /// (draft-ietf-moq-transport-23 §9.19.19 (NEW GROUP REQUEST Parameter))。
@@ -867,7 +867,7 @@ fn peer_subscribe_auth_token_use_alias_known_accepted() {
     assert_eq!(server.state(), SessionState::Established);
 }
 
-// ─── Mandatory Track Properties (draft-ietf-moq-transport-22 §3.7 (Mandatory to Understand Track Properties)) ──────
+// ─── Mandatory Track Properties (draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties)) ──────
 
 /// 未知の必須トラックプロパティを含む PUBLISH は REQUEST_ERROR (UNSUPPORTED_EXTENSION) で拒否される
 #[test]
@@ -907,7 +907,7 @@ fn publish_with_unknown_mandatory_property_rejected() {
 
 /// GREASE の Track Property を含む PUBLISH は unknown mandatory として拒否しない
 ///
-/// draft-ietf-moq-transport-22 §16.8 (Properties) の Table 15 は GREASE の Property Type
+/// draft-ietf-moq-transport-23 §16.8 (Properties) の Table 15 は GREASE の Property Type
 /// (`0x7f * N + 0x9D`) を Scope Any として予約しており、N = 128 の 0x401D から N = 256 の
 /// 0x7F9D までは §3.7 (Mandatory to Understand Track Properties) の 0x4000-0x7FFF に入る。GREASE 値は
 /// IANA 登録された Property ではないため §3.7 の対象外とし、§8.4 (Track and Object Properties)
@@ -1143,7 +1143,7 @@ fn client_receives_unsupported_property_details_for_rejected_publish() {
     );
 }
 
-// ─── REQUEST_OK の応答 context 別パラメータスコープ検証 (draft-ietf-moq-transport-22 §9.3 (REQUEST_OK)) ────
+// ─── REQUEST_OK の応答 context 別パラメータスコープ検証 (draft-ietf-moq-transport-23 §9.3 (REQUEST_OK)) ────
 //
 // REQUEST_OK (Type 0x07) は PUBLISH_OK / REQUEST_UPDATE_OK / TRACK_STATUS_OK が
 // 共有する単一ワイヤメッセージ。
@@ -1156,7 +1156,7 @@ fn client_receives_unsupported_property_details_for_rejected_publish() {
 // (PBT では表現できない) のための単体テスト。
 
 /// PUBLISH_OK 応答に LARGEST_OBJECT を載せると送信側で PROTOCOL_VIOLATION
-/// (draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter): LARGEST_OBJECT は
+/// (draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter): LARGEST_OBJECT は
 /// SUBSCRIBE_OK / PUBLISH / REQUEST_UPDATE_OK / TRACK_STATUS_OK にのみ出現可能で、
 /// PUBLISH_OK は列挙されていない。`send_request_ok` が送信側で検出する)
 #[test]
@@ -1194,7 +1194,7 @@ fn publish_ok_with_largest_object_rejected() {
 }
 
 /// REQUEST_UPDATE_OK (subscription) 応答に GROUP_ORDER を載せると PROTOCOL_VIOLATION
-/// (draft-ietf-moq-transport-22 §9.20.16 (EXPIRES Parameter) / draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter): REQUEST_UPDATE_OK は EXPIRES / LARGEST_OBJECT のみ許可。
+/// (draft-ietf-moq-transport-23 §9.19.16 (EXPIRES Parameter) / draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter): REQUEST_UPDATE_OK は EXPIRES / LARGEST_OBJECT のみ許可。
 /// 送信側が `send_ok_for_subscription` で検出する)
 #[test]
 fn request_update_ok_subscription_with_group_order_rejected() {
@@ -1222,8 +1222,8 @@ fn request_update_ok_subscription_with_group_order_rejected() {
 
 /// スコープ外パラメータを含む REQUEST_UPDATE_OK は subscription の状態を変更しない
 ///
-/// draft-ietf-moq-transport-22 §9.20.16 (EXPIRES Parameter) / §9.20.17 (LARGEST OBJECT Parameter):
-/// REQUEST_UPDATE_OK は EXPIRES / LARGEST_OBJECT のみ許可 (draft §9.20.1 は受信側の
+/// draft-ietf-moq-transport-23 §9.19.16 (EXPIRES Parameter) / §9.19.17 (LARGEST OBJECT Parameter):
+/// REQUEST_UPDATE_OK は EXPIRES / LARGEST_OBJECT のみ許可 (draft §9.19.1 は受信側の
 /// PROTOCOL_VIOLATION MUST を規定)。スコープ検証は状態遷移・パラメータ適用より前に
 /// 実行されるため、pending_update_params が消費されず、OBJECT_DELIVERY_TIMEOUT や
 /// EXPIRES も適用されない。
@@ -1279,8 +1279,10 @@ fn request_update_ok_with_out_of_scope_parameter_keeps_subscription_state() {
 }
 
 /// 挙動変更点: REQUEST_UPDATE_OK (subscription) に OBJECT_DELIVERY_TIMEOUT を載せると
-/// 新たに PROTOCOL_VIOLATION になる (draft-ietf-moq-transport-22 §9.20.4 (OBJECT_DELIVERY_TIMEOUT Parameter) は REQUEST_UPDATE には許可するが
-/// REQUEST_UPDATE_OK には許可しない。送信側が `send_ok_for_subscription` で検出する)
+/// 送信側の検証で SESSION_PROTOCOL_VIOLATION になる (draft-ietf-moq-transport-23
+/// §9.19.4 (OBJECT_DELIVERY_TIMEOUT Parameter) は REQUEST_UPDATE には許可するが
+/// REQUEST_UPDATE_OK には許可しない。送信側が `send_ok_for_subscription` で検出する。
+/// 受信側の規則 (§9.19.1 (Parameter Scope)) は INVALID_PARAMETER)
 #[test]
 fn request_update_ok_subscription_with_object_delivery_timeout_rejected() {
     let (mut client, mut server, rid) = establish_subscribe_track(32);
@@ -1302,8 +1304,10 @@ fn request_update_ok_subscription_with_object_delivery_timeout_rejected() {
 }
 
 /// 挙動変更点: REQUEST_UPDATE_OK (subscription) に SUBGROUP_DELIVERY_TIMEOUT を載せると
-/// 新たに PROTOCOL_VIOLATION になる (draft-ietf-moq-transport-22 §9.20.3 (SUBGROUP_DELIVERY_TIMEOUT Parameter) は REQUEST_UPDATE には許可するが
-/// REQUEST_UPDATE_OK には許可しない。`send_ok_for_subscription` で送信側が先に検出する)
+/// 送信側の検証で SESSION_PROTOCOL_VIOLATION になる (draft-ietf-moq-transport-23
+/// §9.19.3 (SUBGROUP_DELIVERY_TIMEOUT Parameter) は REQUEST_UPDATE には許可するが
+/// REQUEST_UPDATE_OK には許可しない。`send_ok_for_subscription` で送信側が先に検出する。
+/// 受信側の規則 (§9.19.1 (Parameter Scope)) は INVALID_PARAMETER)
 #[test]
 fn request_update_ok_subscription_with_subgroup_delivery_timeout_rejected() {
     use shiguredo_moqt::message_parameter::{
@@ -1328,7 +1332,7 @@ fn request_update_ok_subscription_with_subgroup_delivery_timeout_rejected() {
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
 }
 
-/// draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): GROUP_ORDER の
+/// draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter): GROUP_ORDER の
 /// MAY appear 列挙 (SUBSCRIBE / SUBSCRIBE_TRACKS / FETCH) に PUBLISH_OK は含まれないため、
 /// PUBLISH_OK に GROUP_ORDER を載せると拒否される (送信側で PROTOCOL_VIOLATION)
 #[test]
@@ -1365,9 +1369,9 @@ fn publish_ok_with_group_order_rejected_in_draft_20() {
 /// GROUP_ORDER を含む PUBLISH の送信が許可され、アプリが渡した値と同一の GROUP_ORDER が
 /// 送信メッセージに含まれ、ワイヤエンコードできること
 ///
-/// draft-ietf-moq-transport-22 §3.6.2 (Parameters on SUBSCRIBE_TRACKS): "Any Parameter that can be
-/// specified on a Subscription (ie: in SUBSCRIBE) is valid in SUBSCRIBE_TRACKS, unless otherwise
-/// specified." GROUP_ORDER は §9.20.8 (GROUP ORDER Parameter) に定義される。
+/// draft-ietf-moq-transport-23 §3.6.2 (Parameters on SUBSCRIBE_TRACKS) は SUBSCRIBE_TRACKS に
+/// 載せられるパラメータを §9.17 の明示リストに限り、それ以外を PUBLISH の初期購読パラメータとして
+/// 伝播する。GROUP_ORDER は §9.19.8 (GROUP ORDER Parameter) に定義される。
 /// SUBSCRIBE_TRACKS 由来の PUBLISH に GROUP_ORDER を載せる伝播を実現するため、
 /// `PUBLISH_ALLOWED_PARAMS` に GROUP_ORDER を追加した。
 #[test]
@@ -1456,7 +1460,7 @@ fn publish_with_group_order_roundtrips() {
 
 /// 値域外 GROUP_ORDER (0x1 / 0x2 以外) を含む PUBLISH の送信が API 呼び出し時に拒否されること
 ///
-/// draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): "The allowed values are
+/// draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter): "The allowed values are
 /// Ascending (0x1) or Descending (0x2)." 検証がないと、request 登録・ SendRequest の push
 /// まで完了した後に I/O 層のエンコード時 (validate_param_encoding) で非同期に失敗し、
 /// アプリは送信成功と誤認したまま peer に届かない。検証は request_id 発行より前に置き、
@@ -1557,9 +1561,9 @@ fn publish_invalid_group_order_does_not_start_control_deadline() {
 /// PAUSED=1 を含む PUBLISH の送信が許可され、アプリが渡した値と同一の PAUSED が
 /// 送信メッセージに含まれ、ワイヤエンコードできること
 ///
-/// draft-ietf-moq-transport-22 §3.6.2 (Parameters on SUBSCRIBE_TRACKS): "Any Parameter that can be
-/// specified on a Subscription (ie: in SUBSCRIBE) is valid in SUBSCRIBE_TRACKS, unless otherwise
-/// specified." PAUSED は draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter) に定義される。
+/// draft-ietf-moq-transport-23 §3.6.2 (Parameters on SUBSCRIBE_TRACKS) は SUBSCRIBE_TRACKS に
+/// 載せられるパラメータを §9.17 の明示リストに限り、それ以外を PUBLISH の初期購読パラメータとして
+/// 伝播する。PAUSED は draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter) に定義される。
 /// SUBSCRIBE_TRACKS 由来の PUBLISH に PAUSED を載せる伝播を実現するため、
 /// `PUBLISH_ALLOWED_PARAMS` に PAUSED が含まれており、`send_publish` は PAUSED=1 を
 /// 受容する。
@@ -1680,7 +1684,7 @@ fn publish_without_paused_no_auto_inject() {
 
 /// スコープ外パラメータを含む SUBSCRIBE の送信が API 呼び出し時に拒否されること
 ///
-/// draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope): SUBSCRIBE で許可されない
+/// draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): SUBSCRIBE で許可されない
 /// パラメータを含む送信は、検証がないと request 登録・ SendRequest の push まで完了した
 /// 後に I/O 層のエンコード時で非同期に失敗する。検証は request_id 発行より前に置き、
 /// エラー時に欠番を作らない。
@@ -1733,7 +1737,7 @@ fn subscribe_with_out_of_scope_parameter_rejected_without_state_change() {
 
 /// スコープ外パラメータを含む PUBLISH の送信が API 呼び出し時に拒否されること
 ///
-/// draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope): PUBLISH で許可されない
+/// draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): PUBLISH で許可されない
 /// パラメータを含む送信は、検証がないと request 登録・ SendRequest の push まで完了した
 /// 後に I/O 層のエンコード時で非同期に失敗する。検証は request_id 発行より前に置き、
 /// エラー時に欠番を作らない。
@@ -1804,7 +1808,7 @@ fn publish_with_out_of_scope_parameter_rejected_without_state_change() {
 /// 値域外 GROUP_ORDER を含む PUBLISH の受信が `MessageParameters::decode` の値域検証で
 /// 拒否されること
 ///
-/// draft-ietf-moq-transport-22 §9.20.8: "The allowed values are Ascending (0x1) or
+/// draft-ietf-moq-transport-23 §9.19.8: "The allowed values are Ascending (0x1) or
 /// Descending (0x2)." 送信側は encode が先に失敗するため roundtrip では受信側に
 /// 到達できないため、手作りバイト列で `MessageParameters::decode` を直接呼んで検証する。
 /// 先頭バイトはパラメータ数 (count)、続いて delta-key (GROUP_ORDER = 0x22) と
@@ -2091,7 +2095,7 @@ fn publish_ok_with_subscribe_tracks_id_rejected() {
 
 /// スコープ外パラメータを含む PUBLISH_OK は subscription の状態を変更しない
 ///
-/// draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope): スコープ外パラメータを含む
+/// draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): スコープ外パラメータを含む
 /// REQUEST_OK は、受信側が PROTOCOL_VIOLATION で接続を閉じる (MUST) ため、
 /// 送信側でも防御的に検証して PROTOCOL_VIOLATION を返す。スコープ検証は状態遷移・
 /// パラメータ適用より前に実行されるため、subscription は Pending(Publisher) のままで、
@@ -2148,7 +2152,7 @@ fn publish_ok_with_out_of_scope_parameter_keeps_subscription_pending() {
 /// PAUSED を含む REQUEST_OK (Pending(Publisher) 分岐) で、subscription の状態が
 /// 遷移せず・パラメータも適用されないこと
 ///
-/// draft-ietf-moq-transport-22 Appendix A.3 #1790: subscription パラメータは
+/// draft-ietf-moq-transport-23 Appendix A.4 #1790: subscription パラメータは
 /// PUBLISH_OK に出現しない (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter) の
 /// MAY appear 列挙にも PUBLISH_OK は無い) ため、スコープ検証で拒否される
 /// (値検証には到達しない)。スコープ検証は状態遷移・パラメータ適用より前に実行されるため、
@@ -2216,7 +2220,7 @@ fn request_ok_publish_with_paused_keeps_subscription_pending() {
 /// LOCATION_FILTER を含む REQUEST_OK (Pending(Publisher) 分岐) で、
 /// subscription の状態が遷移せず・パラメータも適用されないこと
 ///
-/// draft-ietf-moq-transport-22 Appendix A.3 #1790: LOCATION_FILTER は PUBLISH_OK に
+/// draft-ietf-moq-transport-23 Appendix A.4 #1790: LOCATION_FILTER は PUBLISH_OK に
 /// 出現しないため、スコープ検証で拒否される (値検証には到達しない)。
 #[test]
 fn request_ok_publish_with_location_filter_keeps_subscription_pending() {
@@ -2238,7 +2242,7 @@ fn request_ok_publish_with_location_filter_keeps_subscription_pending() {
     server
         .recv_request(pub_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // LOCATION_FILTER を含む REQUEST_OK。draft-ietf-moq-transport-22 §9.3 (REQUEST_OK) は
+    // LOCATION_FILTER を含む REQUEST_OK。draft-ietf-moq-transport-23 §9.3 (REQUEST_OK) は
     // PUBLISH 応答 context に LOCATION_FILTER を許可しないため、スコープ検証で拒否される
     let mut ok_params = MessageParameters::new();
     ok_params.push(MessageParameter {
@@ -2274,8 +2278,8 @@ fn request_ok_publish_with_location_filter_keeps_subscription_pending() {
 /// スコープ外パラメータを含む SUBSCRIBE_OK は送信が拒否され、subscription が Pending のまま・
 /// track_alias も設定されないこと
 ///
-/// draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope): SUBSCRIBE_OK で許可されるパラメータは
-/// EXPIRES / LARGEST_OBJECT のみ (§9.20.16 / §9.20.17 の MAY appear 列挙)。受信側は
+/// draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): SUBSCRIBE_OK で許可されるパラメータは
+/// EXPIRES / LARGEST_OBJECT のみ (§9.19.16 / §9.19.17 の MAY appear 列挙)。受信側は
 /// ワイヤ層で検証済みのため、ここは送信側の状態整合性のための検証。スコープ検証は
 /// 状態遷移より前に実行されるため、subscription は Pending のまま維持される
 /// (検証が遷移後に走ると、subscription が Established に遷移済みのまま後段のエンコード
@@ -2349,7 +2353,7 @@ fn subscribe_ok_with_out_of_scope_parameter_keeps_subscription_pending() {
 /// 値域違反の track_properties を含む SUBSCRIBE_OK は送信が拒否され、subscription が
 /// Pending のまま・ track_alias も設定されないこと
 ///
-/// draft-ietf-moq-transport-22 §10.4 (DEFAULT PUBLISHER PRIORITY): 0-255 のみ。
+/// draft-ietf-moq-transport-23 §10.4 (DEFAULT PUBLISHER PRIORITY): 0-255 のみ。
 /// 検証がないと、状態遷移・ track_alias 代入・パラメータ適用の後に I/O 層のエンコード
 /// (エンコードは sans-I/O のため I/O 層で行われる) で失敗し、subscription が Established
 /// に遷移済みのまま peer に SUBSCRIBE_OK が送られない孤児状態が残る。
@@ -2450,12 +2454,12 @@ fn subscribe_ok_with_invalid_track_properties_variants_rejected() {
     };
     // 各不正 track_properties のフィクスチャ (値域違反 2 種・型不整合・重複・ IMMUTABLE 内側)
     let cases: Vec<Vec<TrackProperty>> = vec![
-        // DEFAULT_PUBLISHER_GROUP_ORDER が 1 / 2 以外 (draft-ietf-moq-transport-22 §10.5)
+        // DEFAULT_PUBLISHER_GROUP_ORDER が 1 / 2 以外 (draft-ietf-moq-transport-23 §10.5)
         vec![TrackProperty {
             prop_type: PROP_DEFAULT_PUBLISHER_GROUP_ORDER,
             value: TrackPropertyValue::VarInt(3),
         }],
-        // DYNAMIC_GROUPS が 0 / 1 以外 (draft-ietf-moq-transport-22 §10.6)
+        // DYNAMIC_GROUPS が 0 / 1 以外 (draft-ietf-moq-transport-23 §10.6)
         vec![TrackProperty {
             prop_type: PROP_DYNAMIC_GROUPS,
             value: TrackPropertyValue::VarInt(2),
@@ -2876,7 +2880,8 @@ fn fetch_ok_with_expires_is_accepted_and_stored() {
 }
 
 /// REQUEST_UPDATE_OK (fetch) に非空 TrackProperties を渡すと
-/// send_request_ok で PROTOCOL_VIOLATION (draft §9.3 (REQUEST_OK): fetch は TrackProperties 空必須)
+/// send_request_ok で SESSION_PROTOCOL_VIOLATION (draft §9.3 (REQUEST_OK): fetch は
+/// TrackProperties 空必須。受信側の規則は INVALID_FIELD)
 #[test]
 fn send_request_ok_for_fetch_with_non_empty_track_properties_rejected() {
     use shiguredo_moqt::message::common::Location;
@@ -2933,7 +2938,7 @@ fn send_request_ok_for_fetch_with_non_empty_track_properties_rejected() {
 /// PUBLISH_OK (Subscription context) に非空 TrackProperties を渡すと
 /// send_request_ok で PROTOCOL_VIOLATION
 ///
-/// draft-ietf-moq-transport-22 §9.3 (REQUEST_OK): PUBLISH_OK を含む全非 TRACK_STATUS_OK context で
+/// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): PUBLISH_OK を含む全非 TRACK_STATUS_OK context で
 /// TrackProperties は空でなければならない。
 #[test]
 fn send_request_ok_for_subscription_with_non_empty_track_properties_rejected() {
@@ -3216,7 +3221,7 @@ fn publish_advertised_largest_preserved_after_publish_ok() {
 /// PAUSED を含む REQUEST_OK (Pending(Publisher) 分岐) の受信で、subscription が
 /// Established に遷移せず・パラメータも適用されないこと
 ///
-/// draft-ietf-moq-transport-22 Appendix A.3 #1790: subscription パラメータは
+/// draft-ietf-moq-transport-23 Appendix A.4 #1790: subscription パラメータは
 /// PUBLISH_OK に出現しない (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter) の
 /// MAY appear 列挙にも PUBLISH_OK は無い) ため、スコープ検証で PROTOCOL_VIOLATION により
 /// 閉じる。スコープ検証は状態遷移・パラメータ適用より前に実行されるため、部分適用は
@@ -3298,7 +3303,7 @@ fn request_ok_publish_with_paused_keeps_subscription_pending_on_recv() {
 /// LOCATION_FILTER を含む REQUEST_OK (Pending(Publisher) 分岐) の受信で、
 /// subscription が Established に遷移せず・パラメータも適用されないこと
 ///
-/// draft-ietf-moq-transport-22 Appendix A.3 #1790: LOCATION_FILTER は PUBLISH_OK に
+/// draft-ietf-moq-transport-23 Appendix A.4 #1790: LOCATION_FILTER は PUBLISH_OK に
 /// 出現しないため、スコープ検証で PROTOCOL_VIOLATION により閉じる (値検証には
 /// 到達しないことを意図どおりとする)。
 #[test]
@@ -3412,10 +3417,10 @@ fn request_ok_publish_with_largest_object_closes_session_on_recv() {
 
 // ─── 公開受信 API (Session::recv_request) のパラメータスコープ検証 ─────────────────
 //
-// draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope) は許可されないパラメータの受信に
+// draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope) は許可されないパラメータの受信に
 // PROTOCOL_VIOLATION でのセッション終了を MUST とする。wire 経路は decode 層が検証するが、
 // recv_request は decode 済みメッセージを直接受け取るため session 層でも検証する。
-// FILL_PARAMETERS の内側は §9.20.15 (FILL PARAMETERS Parameter) が同じ MUST を課す。
+// FILL_PARAMETERS の内側は §9.19.15 (FILL PARAMETERS Parameter) が同じ MUST を課す。
 
 /// EXPIRES を 1 つ持つパラメータ列 (SUBSCRIBE / TRACK_STATUS では不許可)
 fn expires_parameters() -> MessageParameters {
@@ -3472,7 +3477,7 @@ fn fill_parameters(inner: MessageParameters) -> MessageParameters {
     parameters
 }
 
-/// 手組みメッセージを recv_request に渡し、§9.20.1 / §9.20.15 の MUST close を検証する
+/// 手組みメッセージを recv_request に渡し、§9.19.1 / §9.19.15 の MUST close を検証する
 fn assert_scope_violation(server: &mut Session, message: ControlMessage, label: &str) {
     match server.recv_request(message) {
         Err(shiguredo_moqt::session::types::RecvRequestError::Session(err)) => {
@@ -3503,7 +3508,7 @@ fn assert_scope_violation(server: &mut Session, message: ControlMessage, label: 
 }
 
 /// 許可外トップレベルパラメータを含む手組み SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS が
-/// §9.20.1 の MUST close になる
+/// §9.19.1 の MUST close になる
 #[test]
 fn recv_request_with_disallowed_parameter_closes_session() {
     use shiguredo_moqt::message::{
@@ -3706,7 +3711,7 @@ fn recv_request_scope_violation_precedes_going_away_rejection() {
     );
 }
 
-/// FILL_PARAMETERS の内側に許可外パラメータを含む手組み SUBSCRIBE が §9.20.15 の
+/// FILL_PARAMETERS の内側に許可外パラメータを含む手組み SUBSCRIBE が §9.19.15 の
 /// MUST close になる
 #[test]
 fn recv_request_fill_parameters_inner_scope_violation_closes_session() {
@@ -3740,7 +3745,7 @@ fn recv_request_fill_parameters_with_allowed_inner_is_accepted() {
     assert_eq!(server.state(), SessionState::Established);
 }
 
-/// 重複した FILL_PARAMETERS は §9.20 (Control Message Parameters) の受信側 SHOULD 検証として
+/// 重複した FILL_PARAMETERS は §9.19 (Control Message Parameters) の受信側 SHOULD 検証として
 /// PROTOCOL_VIOLATION で閉じる
 #[test]
 fn recv_request_duplicate_fill_parameters_closes_session() {
@@ -3852,7 +3857,7 @@ fn recv_request_update_fill_parameters_with_allowed_inner_is_accepted() {
     assert_eq!(server.state(), SessionState::Established);
 }
 
-/// REQUEST_UPDATE の FILL_PARAMETERS 内側も §9.20.15 の MUST close で検証される
+/// REQUEST_UPDATE の FILL_PARAMETERS 内側も §9.19.15 の MUST close で検証される
 #[test]
 fn recv_request_update_fill_parameters_inner_scope_violation_closes_session() {
     use shiguredo_moqt::message::RequestUpdate;

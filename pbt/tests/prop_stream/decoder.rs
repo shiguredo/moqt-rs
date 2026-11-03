@@ -2,7 +2,7 @@
 //!
 //! `MessageDecoder` と同じく、QUIC / WebTransport のフレーム境界とオブジェクト境界は
 //! 一致しない。受信バッファへの蓄積と分割デコードで結果が変わってはならない
-//! (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header) / §11.4.1 (Fetch Header))。
+//! (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header) / §11.4.1 (Fetch Header))。
 
 use pbt::common::{sample_varint, test_runner};
 use shiguredo_moqt::stream::decoder::{
@@ -203,7 +203,7 @@ fn drive_fetch(
 
 /// Group Order を指定して Fetch バイト列をデコードする
 ///
-/// `0x01` は昇順、`0x02` は降順 (draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter))。
+/// `0x01` は昇順、`0x02` は降順 (draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter))。
 /// エンコーダと同じ Group Order を渡さないとデルタ解決が一致しない。
 pub(crate) fn drive_fetch_with_group_order(
     chunks: &[&[u8]],

@@ -57,10 +57,10 @@ pub fn sample_namespace_prefix(ctx: &mut noprop::TestCaseContext) -> TrackNamesp
 /// leading-ones 形式) のバイト長境界に揃えた境界値と全域を混ぜて生成する。境界値は
 /// `src/varint.rs` の THRESHOLD_n (1 バイト=2^7-1=127, 2 バイト=2^14-1, 3 バイト=2^21-1,
 /// 4 バイト=2^28-1, 5 バイト=2^35-1, 6 バイト=2^42-1, 7 バイト=2^49-1 (7 バイト長は
-/// draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1595 由来),
+/// draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1595 由来),
 /// 8 バイト=2^56-1) に対応する。0 も含むため `ObjectDatagram` の
 /// ZERO_OBJECT_ID (object_id == 0) 経路も踏める。9 バイト (64 bit 全域,
-/// draft-ietf-moq-transport-22 §8.1 (Variable-Length Integers)) は
+/// draft-ietf-moq-transport-23 §8.1 (Variable-Length Integers)) は
 /// 境界値 `u64::MAX` と内部サンプラーの一様分布でカバーする。
 /// 5〜7 バイト域は一様分布ではほぼ生成されない (2^-15 以下) ため境界値を明示する。
 pub fn sample_varint(ctx: &mut noprop::TestCaseContext) -> u64 {
@@ -95,7 +95,7 @@ pub fn sample_small_varint(ctx: &mut noprop::TestCaseContext) -> u64 {
     noprop::sample_u64_in(ctx, 0..1000)
 }
 
-/// reg-name ラベルに使える 1 バイトを生成する (draft-ietf-moq-transport-22 §9.1 (SETUP) の PATH / AUTHORITY)
+/// reg-name ラベルに使える 1 バイトを生成する (draft-ietf-moq-transport-23 §9.1 (SETUP) の PATH / AUTHORITY)
 pub fn sample_reg_name_char(ctx: &mut noprop::TestCaseContext) -> u8 {
     noprop::sample_choice(
         ctx,
@@ -298,7 +298,7 @@ pub fn sample_non_immutable_property(ctx: &mut noprop::TestCaseContext) -> Track
             prop_type: PROP_DYNAMIC_GROUPS,
             value: TrackPropertyValue::VarInt(noprop::sample_choice(ctx, &[0u64, 1u64])),
         },
-        // MAX_CACHE_DURATION (0x04): 値域制約なしの varint (draft-ietf-moq-transport-22 §10.3 (MAX CACHE DURATION))
+        // MAX_CACHE_DURATION (0x04): 値域制約なしの varint (draft-ietf-moq-transport-23 §10.3 (MAX CACHE DURATION))
         3 => TrackProperty {
             prop_type: PROP_MAX_CACHE_DURATION,
             value: TrackPropertyValue::VarInt(sample_small_varint(ctx)),
@@ -388,7 +388,7 @@ pub fn sample_track_properties(ctx: &mut noprop::TestCaseContext) -> TrackProper
 
 /// Range Filter パラメータ型 (0x25-0x29) の一覧
 ///
-/// draft-ietf-moq-transport-22 §3.3.2 (Range Filters)。
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters)。
 /// `src/message_parameter.rs` の `is_range_filter_type` と同期して更新すること。
 pub const RANGE_FILTER_TYPES: &[u64] = &[
     PARAM_SUBGROUP_FILTER,
@@ -400,7 +400,7 @@ pub const RANGE_FILTER_TYPES: &[u64] = &[
 
 /// Range Filter パラメータ型 (0x25-0x29) かどうかを返す
 ///
-/// draft-ietf-moq-transport-22 §3.3.2 (Range Filters)
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters)
 pub fn is_range_filter_type(param_type: u64) -> bool {
     RANGE_FILTER_TYPES.contains(&param_type)
 }

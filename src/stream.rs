@@ -1,11 +1,11 @@
-//! QUIC ストリームおよびデータグラムのヘッダ型 (draft-ietf-moq-transport-22 §11 (Data Streams and Datagrams))
+//! QUIC ストリームおよびデータグラムのヘッダ型 (draft-ietf-moq-transport-23 §11 (Data Streams and Datagrams))
 //!
 //! ストリーム型 ID はビットフラグを含む varint で表される。
 //!
 //! サブモジュール構成:
-//! - `subgroup`: SUBGROUP_HEADER / SUBGROUP_OBJECT (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))
-//! - `fetch`: FETCH_HEADER / FETCH_STREAM_OBJECT (draft-ietf-moq-transport-22 §11.4.1 (Fetch Header))
-//! - `datagram`: OBJECT_DATAGRAM (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))
+//! - `subgroup`: SUBGROUP_HEADER / SUBGROUP_OBJECT (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
+//! - `fetch`: FETCH_HEADER / FETCH_STREAM_OBJECT (draft-ietf-moq-transport-23 §11.4.1 (Fetch Header))
+//! - `datagram`: OBJECT_DATAGRAM (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram))
 //! - `decoder`: Subgroup / Fetch ストリームのインクリメンタルデコーダ (sans I/O)
 //! - `encoder`: Fetch ストリームのデルタ圧縮エンコーダ (sans I/O)
 use crate::error::MessageError;
@@ -25,11 +25,11 @@ pub mod subgroup;
 /// それ以外の uni stream について本種別を使って Session の data plane API に接続する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DataStreamType {
-    /// Fetch レスポンスストリーム (draft-ietf-moq-transport-22 §11.4.1)
+    /// Fetch レスポンスストリーム (draft-ietf-moq-transport-23 §11.4.1)
     Fetch,
-    /// Subgroup ストリーム (draft-ietf-moq-transport-22 §11.3.1)
+    /// Subgroup ストリーム (draft-ietf-moq-transport-23 §11.3.1)
     Subgroup,
-    /// 帯域幅プロービング用パディングストリーム (draft-ietf-moq-transport-22 §11.5.1 (Padding Streams))
+    /// 帯域幅プロービング用パディングストリーム (draft-ietf-moq-transport-23 §11.5.1 (Padding Streams))
     ///
     /// §11.5.1 は "The receiver MUST discard all data received on a padding stream to
     /// prevent exhausting flow control." と無条件の破棄を要求する。したがって
@@ -42,18 +42,18 @@ pub enum DataStreamType {
     Padding,
 }
 
-/// FETCH_HEADER の type 値 (draft-ietf-moq-transport-22 §11.4.1 (Fetch Header))
+/// FETCH_HEADER の type 値 (draft-ietf-moq-transport-23 §11.4.1 (Fetch Header))
 pub const FETCH_HEADER_TYPE: u64 = 0x05;
 
-/// パディングストリームの type 値 (draft-ietf-moq-transport-22 §11.5.1 (Padding Streams))
+/// パディングストリームの type 値 (draft-ietf-moq-transport-23 §11.5.1 (Padding Streams))
 pub const PADDING_STREAM_TYPE: u64 = 0x132B_3E28;
 
-/// パディングデータグラムの type 値 (draft-ietf-moq-transport-22 §11.5.2 (Padding Datagrams))
+/// パディングデータグラムの type 値 (draft-ietf-moq-transport-23 §11.5.2 (Padding Datagrams))
 pub const PADDING_DATAGRAM_TYPE: u64 = 0x132B_3E29;
 
-/// SETUP 制御ストリームの stream type (draft-ietf-moq-transport-22 §6.4.1 (Unidirectional Streams) Table 2)
+/// SETUP 制御ストリームの stream type (draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams) Table 2)
 ///
-/// draft-ietf-moq-transport-22 §9.1 (SETUP) Figure 6 の SETUP メッセージ type と同じ値だが、
+/// draft-ietf-moq-transport-23 §9.1 (SETUP) Figure 7 の SETUP メッセージ type と同じ値だが、
 /// stream type と message type は異なる名前空間である。
 pub const SETUP_STREAM_TYPE: u64 = 0x2F00;
 
@@ -69,14 +69,14 @@ pub const SETUP_STREAM_TYPE: u64 = 0x2F00;
 /// `INVALID_STREAM_HEADER` として reject する。
 pub fn classify_data_stream_type(type_id: u64) -> Option<DataStreamType> {
     // control stream (SETUP_STREAM_TYPE = 0x2F00) は data stream ではないため除外する
-    // (draft-ietf-moq-transport-22 §6.4.1 (Unidirectional Streams) Table 2 で制御ストリームは別扱い)
+    // (draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams) Table 2 で制御ストリームは別扱い)
     if type_id == SETUP_STREAM_TYPE {
         return None;
     }
     if type_id == FETCH_HEADER_TYPE {
         return Some(DataStreamType::Fetch);
     }
-    // draft-ietf-moq-transport-22 §11.5.1 (Padding Streams): パディングストリーム
+    // draft-ietf-moq-transport-23 §11.5.1 (Padding Streams): パディングストリーム
     if type_id == PADDING_STREAM_TYPE {
         return Some(DataStreamType::Padding);
     }
@@ -115,20 +115,20 @@ pub fn encode_control_stream_setup(
     Ok(buf)
 }
 
-/// Object Status: Normal (draft-ietf-moq-transport-22 §11.1.1 (Object Status))
+/// Object Status: Normal (draft-ietf-moq-transport-23 §11.1.1 (Object Status))
 pub(crate) const OBJECT_STATUS_NORMAL: u64 = 0x0;
-/// Object Status: End of Group (draft-ietf-moq-transport-22 §11.1.1 (Object Status))
+/// Object Status: End of Group (draft-ietf-moq-transport-23 §11.1.1 (Object Status))
 ///
 /// §11.1.1: "Indicates that no objects with the specified Group ID and the Object ID that is
 /// greater than or equal to the one specified exist in the group identified by the Group ID."
 pub const OBJECT_STATUS_END_OF_GROUP: u64 = 0x3;
-/// Object Status: End of Track (draft-ietf-moq-transport-22 §11.1.1 (Object Status))
+/// Object Status: End of Track (draft-ietf-moq-transport-23 §11.1.1 (Object Status))
 ///
 /// §11.1.1: "Indicates that no objects with the Location that is equal to or greater than the
 /// one specified exist."
 pub const OBJECT_STATUS_END_OF_TRACK: u64 = 0x4;
 
-/// draft-ietf-moq-transport-22 §11.1.1 (Object Status): Object Status の値域を検証する
+/// draft-ietf-moq-transport-23 §11.1.1 (Object Status): Object Status の値域を検証する
 ///
 /// 有効値は IANA Object Status registry に登録された値 (0x0 Normal, 0x3 End of Group,
 /// 0x4 End of Track)。未知の status code は draft-ietf-moq-transport-23 §11.1.1
@@ -146,7 +146,7 @@ pub(crate) fn validate_object_status(status: u64) -> Result<(), MessageError> {
 
 /// Properties 生バイト列の Properties Length と実データ長の一致を検証し、Length を返す
 ///
-/// draft-ietf-moq-transport-22 §11.1.2 (Object Properties): Properties は
+/// draft-ietf-moq-transport-23 §11.1.2 (Object Properties): Properties は
 /// Properties Length (vi64) + Properties の構造で、Length は後続バイト数を表す。
 /// 空スライス、Properties Length varint が途中で切れた blob、長さの一致しない blob は
 /// `MalformedObject` とする。

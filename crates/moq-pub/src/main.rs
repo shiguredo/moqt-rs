@@ -4,7 +4,7 @@
 //! `--input-mp4` を指定した場合はカメラ / マイクを使わず、MP4 ファイルの映像トラックを
 //! 再エンコードせずに PUBLISH する。`--input-mp4-reencode` を指定した場合は MP4 ファイルの
 //! 映像 / 音声をデコードして再エンコードして PUBLISH する。
-//! draft-ietf-moq-transport-22、draft-ietf-moq-loc-04、draft-ietf-moq-msf-01 に準拠。
+//! draft-ietf-moq-transport-23、draft-ietf-moq-loc-04、draft-ietf-moq-msf-01 に準拠。
 //!
 //! 使い方:
 //!   cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --fake-capture-device

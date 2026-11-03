@@ -1,9 +1,9 @@
 //! LARGEST_OBJECT を Track 単位で算出する回帰テスト
-//! (draft-ietf-moq-transport-22 §3.1.4 (Largest Object) / §9.20.17 (LARGEST OBJECT Parameter))
+//! (draft-ietf-moq-transport-23 §3.1.4 (Largest Object) / §9.19.17 (LARGEST OBJECT Parameter))
 //!
 //! "It contains the Largest Object (Section 3.1.4) in the Track from the perspective of the
-//!  sending endpoint. If Objects have been published on this Track the Publisher MUST include
-//!  this parameter."
+//!  sending endpoint. If the sending endpoint has published or received any Objects in the
+//!  Track, it MUST include this parameter in the above messages it sends"
 //! 自側 publisher 役が応答系 (SUBSCRIBE_OK / REQUEST_UPDATE_OK / PUBLISH_STATE_NOTIFY) に載せる
 //! LARGEST_OBJECT は、live な publisher 役 subscription 群の最大値と、Track 単位で保持した
 //! 自側 publish 済み最大の大きい方 (`publisher_track_largest`) から算出する。2 本目の
@@ -125,7 +125,7 @@ fn subscribe_ok_uses_track_wide_largest_object() {
 
 /// publisher 役 subscription を forget する (送信 stream の終端 → PUBLISH_DONE → forget)
 ///
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE): Stream Count は publisher が開いた
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE): Stream Count は publisher が開いた
 /// data stream 数 (空の Subgroup を含む) を通知する。publisher は開いた全 stream を閉じるまで
 /// PUBLISH_DONE を送れない (同節の MUST NOT)。忘れた後も LARGEST_OBJECT を載せられることを
 /// 検証するための前提を作る。
@@ -163,8 +163,8 @@ fn forget_first_publisher_subscription(
 
 /// publisher 役 subscription を forget した後も、publish 済みの Track 最大を載せる
 ///
-/// draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter): "If Objects have been
-/// published on this Track the Publisher MUST include this parameter." LARGEST_OBJECT は
+/// draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter): "If the sending endpoint
+/// has published or received any Objects in the Track, it MUST include this parameter." LARGEST_OBJECT は
 /// Track 単位の値であるため、publisher 役 subscription を forget しても、自側が publish した
 /// 最大を保持して応答に載せる必要がある。
 #[test]

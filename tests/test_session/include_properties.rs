@@ -1,6 +1,6 @@
 //! INCLUDE_PROPERTIES パラメータのテスト
 //!
-//! draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
+//! draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
 //! Parameter Type 0x35 (uint8) は SUBSCRIBE / TRACK_STATUS / FETCH /
 //! SUBSCRIBE_TRACKS に出現可能。0 を指定すると OK 応答または resulting PUBLISH の
 //! Track Properties は存在するが空になる (SHOULD)。許容値は 0 / 1 (default 1) であり、
@@ -28,7 +28,7 @@ fn non_empty_track_properties() -> TrackProperties {
 
 /// SUBSCRIBE + INCLUDE_PROPERTIES=0 → SUBSCRIBE_OK の Track Properties が空になる
 ///
-/// draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter)
+/// draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter)
 #[test]
 fn subscribe_include_properties_zero_empties_subscribe_ok() {
     let (mut client, mut server) = establish_pair();
@@ -76,7 +76,7 @@ fn subscribe_include_properties_zero_empties_subscribe_ok() {
 
 /// SUBSCRIBE の INCLUDE_PROPERTIES 省略時 (default 1) は Track Properties が含まれる
 ///
-/// draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter)
+/// draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter)
 #[test]
 fn subscribe_include_properties_omitted_keeps_properties() {
     let (mut client, mut server) = establish_pair();
@@ -119,7 +119,7 @@ fn subscribe_include_properties_omitted_keeps_properties() {
 
 /// SUBSCRIBE の INCLUDE_PROPERTIES=1 (明示) は Track Properties が含まれる
 ///
-/// draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
+/// draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
 /// default 1 と明示 1 は同等に扱う。
 #[test]
 fn subscribe_include_properties_one_keeps_properties() {
@@ -160,7 +160,7 @@ fn subscribe_include_properties_one_keeps_properties() {
 
 /// FETCH + INCLUDE_PROPERTIES=0 → FETCH_OK の Track Properties が空になる
 ///
-/// draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter)
+/// draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter)
 #[test]
 fn fetch_include_properties_zero_empties_fetch_ok() {
     use shiguredo_moqt::message::common::Location;
@@ -221,7 +221,7 @@ fn fetch_include_properties_zero_empties_fetch_ok() {
 
 /// 値域外 INCLUDE_PROPERTIES の SUBSCRIBE 受信は INVALID_PARAMETER でセッションを閉じる
 ///
-/// draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
+/// draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
 /// 値域外の値は "MUST close the session with INVALID_PARAMETER"。
 /// ワイヤデコード層は値域外を弾くため、セッション層に到達するのはアプリが
 /// MessageParameters を直接構築して渡した場合のみ。
@@ -252,7 +252,7 @@ fn subscribe_with_invalid_include_properties_closes_session() {
 
 /// 値域外 INCLUDE_PROPERTIES を含む send_subscribe はエラーを返し、セッションは閉じない
 ///
-/// draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
+/// draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
 /// MUST クローズは受信側の義務であり、送信側の検証はエラーを返すだけ。
 /// 検証失敗後も正常な送信が継続できること (状態非汚染) を確認する。
 #[test]
@@ -289,7 +289,7 @@ fn send_subscribe_with_invalid_include_properties_returns_error_without_closing(
 /// 値域外 INCLUDE_PROPERTIES の FETCH / TRACK_STATUS / SUBSCRIBE_TRACKS 受信は
 /// INVALID_PARAMETER でセッションを閉じる
 ///
-/// draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
+/// draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
 /// 受信経路は独立配線のため、SUBSCRIBE 代表に加えて FETCH と TRACK_STATUS も検証する。
 #[test]
 fn invalid_include_properties_closes_session_for_fetch_and_track_status() {

@@ -55,7 +55,7 @@ fn first_object_false_does_not_set_bit() {
 #[test]
 fn undefined_bits_at_or_above_128_rejected() {
     // type に 128 以上の未定義 bit が立つと PROTOCOL_VIOLATION
-    // (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))
+    // (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
     // 0x90 = bit4 (必須) + bit7 (未定義)。1 バイトに収まらないため
     // varint::encode で構築する (raw バイト列では別値に解釈される)。
     let mut buf = Vec::new();
@@ -71,7 +71,7 @@ fn undefined_bits_at_or_above_128_rejected() {
 #[test]
 fn type_flags_known_mask_boundary() {
     // mode 0b11 (予約) を除いた正当値の最大値 0x7D は受理され、0x80 は拒否される
-    // (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))。
+    // (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))。
     // 0x7F は mask 清浄だが mode 0b11 (予約) を含むため正当なヘッダにならない。
     let hdr = SubgroupHeader {
         track_alias: 1,

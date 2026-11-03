@@ -70,7 +70,7 @@ const MAX_DISPLAY_BACKLOG: i64 = 20;
 ///
 /// 途中参加した購読者は購読より前に publish された Object を受け取れない。SUBSCRIBE_OK が
 /// 運んだ Largest Object を基準に直近の Group を FETCH で埋める
-/// (draft-ietf-moq-transport-22 §3.5.1 (Dynamically Starting New Groups) が示す
+/// (draft-ietf-moq-transport-23 §3.5.1 (Dynamically Starting New Groups) が示す
 /// 「SUBSCRIBE で Largest Object を観測し、Group の先頭まで FETCH で遡る」パターン)。
 /// 映像はこの範囲のキーフレームから復号を始められる。音声の明示 FETCH は発行しないため、
 /// この値を使うのは映像だけである。
@@ -118,10 +118,10 @@ struct AudioDeliveryCounters {
 ///
 /// 音声は 1 Object = 1 Group で届き (draft-ietf-moq-loc-04 §4.1 (Application with one audio
 /// track))、購読より前に publish された Group は relay の replay で届きうる。購読の境界は
-/// `SUBSCRIBE_OK` が運んだ Largest Object であり (draft-ietf-moq-transport-22 §3.1.4
-/// (Largest Object) / §9.20.17 (LARGEST OBJECT Parameter))、境界以下は購読より前の配信で
+/// `SUBSCRIBE_OK` が運んだ Largest Object であり (draft-ietf-moq-transport-23 §3.1.4
+/// (Largest Object) / §9.19.17 (LARGEST OBJECT Parameter))、境界以下は購読より前の配信で
 /// ある。音声の明示 FETCH は発行しないが、境界の判定は relay の replay への防御として残す
-/// (将来 fill を入れる場合は、fill range が Largest Object を超えず (draft-ietf-moq-transport-22
+/// (将来 fill を入れる場合は、fill range が Largest Object を超えず (draft-ietf-moq-transport-23
 /// §3.4 (Fill Semantics))、起動時の購読では fill で届く Object がすべて境界以下になるため、
 /// 境界の規則を同時に見直す必要がある)。
 ///
@@ -134,8 +134,8 @@ struct AudioDeliveryCounters {
 ///   両方で届きうるが、どちらも境界以下であるため二重に送出されない。moqt-js の CatchUpGate
 ///   が `SUBSCRIBE_OK` の `LARGEST_OBJECT` を境界に cache の分を再生しない扱いと同じである。
 /// - 境界より後は、送出済みの TIMESTAMP より古い Object を送出しない ([`Self::admit`])。
-///   live の datagram は並び替わって届きうる (draft-ietf-moq-transport-22 §2.1.2
-///   (Object States) / §2.3.1 (Group IDs)) ため、境界とは別の防御として持つ。
+///   live の datagram は並び替わって届きうる (draft-ietf-moq-transport-23 §2.2 (Subgroups) /
+///   §2.3.1 (Group IDs)) ため、境界とは別の防御として持つ。
 ///
 /// どちらの判定も位置と TIMESTAMP だけで決まり、時計も I/O も扱わない。購読ごとに 1 つ持ち、
 /// 音声の配送経路 (datagram / subgroup stream) で共有する。落とした Object の
@@ -176,7 +176,7 @@ impl AudioDeliveryOrder {
     /// 購読の境界を設定する
     ///
     /// `None` は `SUBSCRIBE_OK` が Largest Object を告知しなかった場合であり、すべて live と
-    /// して扱う (draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) は Object が
+    /// して扱う (draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter) は Object が
     /// publish されていれば MUST 含むと定めるため、省略は未 publish を意味する)。
     fn set_boundary(&mut self, boundary: Option<Location>) {
         self.boundary = boundary;
@@ -186,7 +186,7 @@ impl AudioDeliveryOrder {
     ///
     /// 旧 session で最後に受信した Object の Location を新しい境界にする。移行先の購読は
     /// その位置を Location Filter の Absolute Start (0x02) にして張り直すため
-    /// (draft-ietf-moq-transport-22 §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER
+    /// (draft-ietf-moq-transport-23 §3.3.1 (Location Filters) / §9.19.9 (LOCATION FILTER
     /// Parameter) Table 6。draft 由来の仕様であり将来変更されうる)、境界と同じ位置の
     /// Object だけが再送される。境界を「最後に受信した位置」にすることで、移行中に抜けた
     /// それ以降の音声は live として通り、移行前の音声を再生し直さずに済む。
@@ -286,7 +286,7 @@ impl AudioDeliveryOrder {
 ///
 /// 音声の [`AudioDeliveryOrder`] と同じく、購読より前に publish された映像 Object (relay の
 /// replay や FETCH の応答で届く) は表示しない。購読の境界は `SUBSCRIBE_OK` が運んだ Largest
-/// Object であり (draft-ietf-moq-transport-22 §3.1.4 (Largest Object) / §9.20.17 (LARGEST
+/// Object であり (draft-ietf-moq-transport-23 §3.1.4 (Largest Object) / §9.19.17 (LARGEST
 /// OBJECT Parameter))、境界以下は購読より前の配信である。境界の位置の Object は live と
 /// FETCH の両方で届きうるため、どちらも境界以下として落とし二重送出を防ぐ。
 ///
@@ -305,7 +305,7 @@ impl AudioDeliveryOrder {
 /// 前になったり `None` になったりするため、そのまま設定すると購読より前の Object が再送
 /// されたときに表示経路へ戻る。進めた境界は「その位置まで受信済み」を意味するため、境界
 /// より前で未受信の Object が後から届いても表示しない (out-of-order の取りこぼしは許容する。
-/// draft-ietf-moq-transport-22 §2.1.2 (Object States))。
+/// draft-ietf-moq-transport-23 §2.2 (Subgroups))。
 #[derive(Debug)]
 struct VideoDeliveryOrder {
     /// 購読の境界 (`SUBSCRIBE_OK` の Largest Object、再購読では最後に受信した Location)。
@@ -415,7 +415,7 @@ fn log_audio_delivery_counters(
 
 /// datagram で届いた音声 Object の位置
 ///
-/// OBJECT_DATAGRAM のヘッダが位置を持つ (draft-ietf-moq-transport-22 §11.2.1)。
+/// OBJECT_DATAGRAM のヘッダが位置を持つ (draft-ietf-moq-transport-23 §11.2.1)。
 fn datagram_object_location(datagram: &ObjectDatagram) -> Location {
     Location {
         group_id: datagram.group_id,
@@ -425,7 +425,7 @@ fn datagram_object_location(datagram: &ObjectDatagram) -> Location {
 
 /// subgroup stream で届いた音声 Object の位置
 ///
-/// Group ID は Subgroup Header が持ち (draft-ietf-moq-transport-22 §11.3.1)、Object ID は
+/// Group ID は Subgroup Header が持ち (draft-ietf-moq-transport-23 §11.3.1)、Object ID は
 /// Subgroup 内のデルタが解決済みの値を使う。呼び出し側が別の Group ID を渡せないよう、
 /// Header そのものを受け取る。
 fn subgroup_object_location(header: &SubgroupHeader, object: &DecodedSubgroupObject) -> Location {
@@ -614,8 +614,8 @@ impl AudioDelivery<'_> {
             (delivery_order.admit(pts_us), previous_pts_us)
         };
         if admission == AudioDeliveryAdmission::Stale {
-            // 境界より後の live の音声が並び替わって届いた場合である (draft-ietf-moq-transport-22
-            // §2.1.2 (Object States) / §2.3.1 (Group IDs))。購読より前に publish された音声は
+            // 境界より後の live の音声が並び替わって届いた場合である (draft-ietf-moq-transport-23
+            // §2.2 (Subgroups) / §2.3.1 (Group IDs))。購読より前に publish された音声は
             // 境界の判定で既に落ちている。異常ではないため warn にはしない
             tracing::debug!(
                 "Skipping an audio object that is older than the delivered frame: \
@@ -835,7 +835,7 @@ async fn close_session(client: &mut MoqtClient, termination: SessionError) {
 /// 正常終了の後始末で STOP_SENDING を送るか
 ///
 /// peer が subscription / session を終了させた場合 (購読は既に Terminated で、
-/// draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection) により
+/// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection) により
 /// STOP_SENDING は拒否される) と、自側で終了コード付きに閉じた場合 (session が
 /// Closing / Closed で状態機械に拒否される) は送らない。
 /// GOAWAY は subscription state に影響しないため、この条件には含めない。
@@ -920,7 +920,7 @@ fn skip_object_on_properties_error(
 
 /// data stream の decoder が返した復号エラーを受けてセッション終了を main ループへ依頼する
 ///
-/// draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header) / §11.1.2 (Object Properties) の
+/// draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header) / §11.1.2 (Object Properties) の
 /// MUST に従い、不正な header / Object / Properties はセッション終了を要求する。
 /// `UnexpectedEof` と `MalformedTrack` は
 /// [`tokio_moq::error::data_stream_termination_code`] が `None` を返すため依頼しない
@@ -945,7 +945,7 @@ fn request_session_termination_for_decode_error(
 
 /// peer request を拒否するときの REQUEST_ERROR コードと理由を返す
 ///
-/// draft-ietf-moq-transport-22 §9.8 (PUBLISH): "A subscriber receiving a PUBLISH for a Track
+/// draft-ietf-moq-transport-23 §9.8 (PUBLISH): "A subscriber receiving a PUBLISH for a Track
 /// it does not wish to receive SHOULD send PUBLISH_ERROR with error code UNINTERESTED"。
 /// PUBLISH_ERROR は §1.5 (Response Message Naming) の shorthand で wire 上は REQUEST_ERROR
 /// である。UNINTERESTED (0x20) は PUBLISH / PUBLISH_NAMESPACE への応答用 (§12.3) であり、
@@ -1188,7 +1188,7 @@ struct VideoBoundaryCandidates {
 ///
 /// GOAWAY または transport drain による再購読では、新しい `SUBSCRIBE_OK` の Largest Object を
 /// 境界にしない。Largest Object は「publisher がそのメッセージを処理した時点で、その Track で
-/// 最大の Location」であるため (draft-ietf-moq-transport-22 §3.1.4 (Largest Object))、移行中・
+/// 最大の Location」であるため (draft-ietf-moq-transport-23 §3.1.4 (Largest Object))、移行中・
 /// 再発行中に publish された Object を境界以下として捨ててしまう。境界は経路ごとに次の位置を
 /// 使う。
 ///
@@ -1220,7 +1220,7 @@ fn select_video_subscription_boundary(
 ///
 /// セッション移行では、再購読の Location Filter を「最後に届いた Object の位置」から
 /// 始めることで、移行中に publish された Object の取りこぼしを抑える
-/// (draft-ietf-moq-transport-22 §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER
+/// (draft-ietf-moq-transport-23 §3.3.1 (Location Filters) / §9.19.9 (LOCATION FILTER
 /// Parameter) Table 6 の Type 0x02 (Absolute Start))。Object は各 stream task が配送経路へ
 /// 流すため、`Arc<Mutex<...>>` で共有し、配送のたびに最大値を記録する。
 ///
@@ -1293,7 +1293,7 @@ fn record_last_location(
 ///
 /// `last_locations` は前の session で最後に受信した Object の位置である。映像と音声は
 /// これを Location Filter の Absolute Start (0x02) として SUBSCRIBE に載せ、移行中に
-/// publish された Object を取得し直す (draft-ietf-moq-transport-22 §3.3.1 / §9.20.9。
+/// publish された Object を取得し直す (draft-ietf-moq-transport-23 §3.3.1 / §9.19.9。
 /// draft 由来の仕様であり将来変更されうる)。位置が分からない場合 (まだ 1 つも配送して
 /// いない) はフィルタを載せず、起動時と同じ「購読後の live のみ」になる。
 ///
@@ -1356,7 +1356,7 @@ async fn resubscribe_tracks(
             }
             // FETCH は購読の優先度を変えたあとに発行する。先に発行すると、FETCH 応答の
             // Object が既定の SUBSCRIBER_PRIORITY で届く
-            // (draft-ietf-moq-transport-22 §9.20.7 (SUBSCRIBER PRIORITY Parameter) / §9.11)
+            // (draft-ietf-moq-transport-23 §9.19.7 (SUBSCRIBER PRIORITY Parameter) / §9.11)
             fetch_recent_video_groups(client, &mut fetch_targets, target, sub.largest_object).await;
             Some(sub)
         }
@@ -1395,13 +1395,13 @@ async fn resubscribe_tracks(
 ///
 /// 購読の確立と同時に新しい Group の開始を要求する。`NEW_GROUP_REQUEST=0` は「購読者が
 /// Group の情報を持たない」ことを示し、publisher はできるだけ早く新しい Group を開始する
-/// (draft-ietf-moq-transport-22 §9.20.19)。Group の途中で参加した購読者は、次の周期
+/// (draft-ietf-moq-transport-23 §9.19.19)。Group の途中で参加した購読者は、次の周期
 /// キーフレームを待たずに復号を始められる。同節は DYNAMIC_GROUPS の告知が無くても
 /// SUBSCRIBE に載せてよいと定める。
 ///
 /// `last` は前の session で最後に受信した Object の位置である。移行後の再購読では
 /// Location Filter の Absolute Start (Table 6 の Type 0x02) として載せ、移行中に publish
-/// された Object を取得し直す (§3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER
+/// された Object を取得し直す (§3.3.1 (Location Filters) / §9.19.9 (LOCATION FILTER
 /// Parameter))。フィルタは境界の位置の Object を含むため同じ Object が再送されうるが、
 /// 映像の復号順の判定 ([`VideoDecodeOrder`]) が復号済みの位置を捨てる。draft 由来の
 /// 仕様であり、将来変更される可能性がある。
@@ -1427,7 +1427,7 @@ fn video_subscribe_parameters(last: Option<Location>) -> MessageParameters {
 /// 起動時の購読は「購読後の live のみ」でありパラメータを載せない。移行後の再購読では、
 /// [`video_subscribe_parameters`] と同じ理由で Location Filter の Absolute Start (0x02)
 /// を載せ、移行中に publish された音声を取得し直す
-/// (draft-ietf-moq-transport-22 §3.3.1 / §9.20.9 Table 6)。音声も境界の位置の Object が
+/// (draft-ietf-moq-transport-23 §3.3.1 / §9.19.9 Table 6)。音声も境界の位置の Object が
 /// 再送されうるが、[`AudioDeliveryOrder`] が直近に届いた Object の重複を捨てる。
 /// draft 由来の仕様であり、将来変更される可能性がある。
 fn audio_subscribe_parameters(last: Option<Location>) -> MessageParameters {
@@ -1445,8 +1445,8 @@ fn audio_subscribe_parameters(last: Option<Location>) -> MessageParameters {
 
 /// 購読した映像 track の直近 Group を FETCH で要求する range を決める
 ///
-/// `largest` は SUBSCRIBE_OK が運んだ Largest Object (draft-ietf-moq-transport-22
-/// §3.1.4 (Largest Object) / §9.20.17 (LARGEST_OBJECT Parameter)) である。購読より前に
+/// `largest` は SUBSCRIBE_OK が運んだ Largest Object (draft-ietf-moq-transport-23
+/// §3.1.4 (Largest Object) / §9.19.17 (LARGEST_OBJECT Parameter)) である。購読より前に
 /// publish された Object の存在はこれでしか分からないため、無い場合は FETCH しない。
 /// 開始 Location は Largest Object の Group を含む `groups` 個の Group の先頭
 /// (Largest Object の Group が G なら G - (groups - 1))、終端は Largest Object とする。
@@ -1467,13 +1467,13 @@ fn plan_fetch_range(largest: Option<Location>, groups: u64) -> Option<(Location,
 
 /// メディア FETCH のメッセージパラメータを組み立てる
 ///
-/// 要求 range は LOCATION_FILTER (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER
+/// 要求 range は LOCATION_FILTER (draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER
 /// Parameter)) の Type 0x04 (Absolute Range) で指定する。Start は絶対 Location、End は
 /// StartGroup からの差分 (EndGroupDelta) と EndObject で表す (同節 Table 6)。
 /// `start.group_id <= end.group_id` は [`plan_fetch_range`] が保証するため差分は
 /// underflow しない。
 ///
-/// INCLUDE_PROPERTIES (§9.20.21) は載せない。同節が指定するのは OK メッセージに載る
+/// INCLUDE_PROPERTIES (§9.19.22) は載せない。同節が指定するのは OK メッセージに載る
 /// Track Properties であり、応答 Object の Object Properties は常に運ばれるためである。
 fn fetch_range_parameters(start: Location, end: Location) -> MessageParameters {
     let mut parameters = MessageParameters::new();
@@ -1568,7 +1568,7 @@ fn is_audio_only_subscription(subscribe_video: bool, subscribe_audio: bool) -> b
 /// 2 つの接続先が同じ session を指すか
 ///
 /// request stream の GOAWAY は「New Session URI が空なら現在の session で再発行する」
-/// (draft-ietf-moq-transport-22 §9.2 (GOAWAY)。draft 由来の仕様であり将来変更されうる)。
+/// (draft-ietf-moq-transport-23 §9.2 (GOAWAY)。draft 由来の仕様であり将来変更されうる)。
 /// `migration_target` は空 URI のとき現在の URL をそのまま返すため、同じ URL かどうかで
 /// 「同一 session での再発行」を判定できる。`ServerUrl` は全体の `PartialEq` を持たないため、
 /// session を決める authority / path / fragment を比較する (c4m の認可トークンは同じ URL なら
@@ -1617,7 +1617,7 @@ enum MigrationStart {
 /// 移行を開始してよいかを判定し、開始する場合は連鎖防止の記録を行う
 ///
 /// 移行中は記録しない。連鎖防止の記録を「実際に開始した移行」に限ることで、移行中の
-/// 2 回目の GOAWAY (draft-ietf-moq-transport-22 §9.2 (GOAWAY) は control stream の
+/// 2 回目の GOAWAY (draft-ietf-moq-transport-23 §9.2 (GOAWAY) は control stream の
 /// GOAWAY を 1 回までとするため通常は届かないが、request stream の GOAWAY は届きうる) で
 /// 記録を消費しない。draft 由来の仕様であり将来変更されうる。
 fn begin_migration(
@@ -1730,7 +1730,7 @@ type MigrationResult = std::result::Result<MigrationOutcome, MigrationFailure>;
 /// 途中まで確立した session (接続はできたが購読の張り直しに失敗した場合) は、試行ごとに
 /// NO_ERROR で閉じる。放置すると peer が timeout まで資源を保持するためである。
 ///
-/// draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration) / §9.2 (GOAWAY) は
+/// draft-ietf-moq-transport-23 §6.6.1 (Graceful Session Migration) / §9.2 (GOAWAY) は
 /// draft 由来の仕様であり、将来変更される可能性がある。
 async fn migrate_to_target(
     request: MigrationRequest,
@@ -1817,7 +1817,7 @@ async fn migrate_to_target(
 /// 移行の途中で確立した session を閉じる
 ///
 /// 購読の張り直しに失敗した試行の session を放置すると、peer が GOAWAY の Timeout まで
-/// 資源を保持する。NO_ERROR で閉じる (draft-ietf-moq-transport-22 §6.6.1 (Graceful Session
+/// 資源を保持する。NO_ERROR で閉じる (draft-ietf-moq-transport-23 §6.6.1 (Graceful Session
 /// Migration)。draft 由来の仕様であり将来変更されうる)。
 async fn close_abandoned_migration_session(client: &mut MoqtClient) {
     if let Err(e) = client.close(0, "").await {
@@ -1857,7 +1857,7 @@ async fn wait_before_migration_retry(
 /// バックグラウンドの移行タスクを起動する
 ///
 /// main ループは旧 session の受信・catalog の適用・stream の accept を続け、結果は
-/// oneshot で受け取る (draft-ietf-moq-transport-22 §6.6.1 は移行をアプリケーションへ
+/// oneshot で受け取る (draft-ietf-moq-transport-23 §6.6.1 は移行をアプリケーションへ
 /// 透過的に行うことを求める。draft 由来の仕様であり将来変更されうる)。送信側を
 /// 呼び出し元へ返さないのは、移行タスクが結果を必ず 1 件送るためである。
 fn spawn_migration(
@@ -1883,7 +1883,7 @@ fn spawn_migration(
 /// 移行後に旧 session を終了するタスクを起動する
 ///
 /// 旧 session の購読に STOP_SENDING を送り、NO_ERROR で閉じる
-/// (draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration) は、Established の
+/// (draft-ietf-moq-transport-23 §6.6.1 (Graceful Session Migration) は、Established の
 /// 購読が無くなった時点で NO_ERROR で閉じることを RECOMMENDED とする。draft 由来の仕様で
 /// あり将来変更されうる)。GOAWAY の Timeout は待たない。待つと移行先の処理を始めるのが
 /// 遅れ、main ループを塞ぐことにもなるためである。送信と close を別タスクにすることで
@@ -1921,7 +1921,7 @@ struct ReissuedRequest {
 
 /// request stream の GOAWAY で、現在の session に同じ購読を再発行する
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY): request stream 上の GOAWAY は当該 request
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY): request stream 上の GOAWAY は当該 request
 /// だけの移行であり、session は維持する。New Session URI が空 (現在の URI の再利用) の
 /// 場合だけ、同じ session で購読を再発行する。別 URI への request 単位移行は 2 session の
 /// 併走が必要になるため行わない (呼び出し側が判定する)。
@@ -1938,7 +1938,7 @@ async fn reissue_request(
     last_locations: &LastReceivedLocations,
 ) -> Result<ReissuedRequest> {
     // 旧 request stream を閉じる。購読は Terminated へ遷移する
-    // (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))。
+    // (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))。
     // peer が既に終端させていた場合は状態機械に拒否されるが、その場合も再発行は続ける
     if let Err(e) = client.stop_sending(request_id).await {
         tracing::warn!(
@@ -2100,11 +2100,11 @@ pub async fn run(
     //
     // MSF は catalog の取得に "SUBSCRIBE with a Joining FETCH (offset = 0)" を MUST とする
     // (draft-ietf-moq-msf-01 §5 (Catalog))。Joining FETCH は draft-20 で削除され
-    // (draft-ietf-moq-transport-22 Appendix A.3 の "Since draft-ietf-moq-transport-19" に記録)、
+    // (draft-ietf-moq-transport-23 Appendix A.4 の "Since draft-ietf-moq-transport-19" に記録)、
     // §3.5 (Joining an Ongoing Track) が示す購読パターンに置き換わった:
     //
-    // 1. catalog track を Location Filter Next Object (§9.20.9 Table 6 の Type 0x05) と
-    //    FILL_PARAMETERS (§9.20.15) で SUBSCRIBE する。FILL 内側の Location Filter は
+    // 1. catalog track を Location Filter Next Object (§9.19.9 Table 6 の Type 0x05) と
+    //    FILL_PARAMETERS (§9.19.15) で SUBSCRIBE する。FILL 内側の Location Filter は
     //    現在 Group の先頭から埋める Relative Start (Type 0x01 の StartGroup=1) にする
     // 2. publisher は fill range を fill fetch stream (§3.4) で送る。購読より前に publish
     //    された独立カタログがこれで届き、以後の delta は購読で届く。どちらも同じ
@@ -2220,7 +2220,7 @@ pub async fn run(
     // 応答 Object は通常の再生経路へ流すが、どの track の応答かは FETCH 応答 stream の
     // FETCH_HEADER が運ぶ Request ID でしか分からないため、ここで記録する。
     // catalog 購読の Request ID も登録する。FILL_PARAMETERS 付き SUBSCRIBE には publisher が
-    // fill fetch stream を返し (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))、その
+    // fill fetch stream を返し (draft-ietf-moq-transport-23 §3.4 (Fill Semantics))、その
     // FETCH_HEADER は起因 SUBSCRIBE の Request ID を運ぶ。移行後に catalog を張り直したとき
     // の fill をカタログとして適用するため、種別をここで対応づける。
     // 移行 (GOAWAY) では、張り直した購読に対して発行した FETCH の対応表へ差し替える
@@ -2240,7 +2240,7 @@ pub async fn run(
     // 映像であり、復号はするが表示しない
     let mut video_largest_object: Option<Location> = None;
     // 映像 Object を復号してよいかの判定状態は購読で 1 つ持つ。Group ごとに別の Subgroup
-    // ストリームで届くため (draft-ietf-moq-transport-22 §2.2 (Subgroups))、stream ごとに
+    // ストリームで届くため (draft-ietf-moq-transport-23 §2.2 (Subgroups))、stream ごとに
     // 判定を持つと「前の Group の Object が次の Group のキーフレームより後に届く」場合を
     // 判定できない。映像のトラックを切り替えて decoder を作り直す経路を足すときは、
     // この状態を reset してから次のキーフレームで復号を始め直すこと。
@@ -2288,8 +2288,8 @@ pub async fn run(
 
         // 購読より前に publish された Group は購読では届かない。SUBSCRIBE_OK の
         // Largest Object を基準に直近の Group を FETCH で要求し、映像はその範囲の
-        // キーフレームから復号を始められるようにする (draft-ietf-moq-transport-22 §3.5.1)。
-        // 購読の優先度を変えたあとに発行する (§9.20.7 の SUBSCRIBER PRIORITY を
+        // キーフレームから復号を始められるようにする (draft-ietf-moq-transport-23 §3.5.1)。
+        // 購読の優先度を変えたあとに発行する (§9.19.7 の SUBSCRIBER PRIORITY を
         // FETCH 応答にも効かせるため)
         fetch_recent_video_groups(
             &mut client,
@@ -2661,7 +2661,7 @@ pub async fn run(
             let batch_len = datagrams.len();
             for raw in datagrams {
                 // type 分岐は Session が行う。未知 type は
-                // draft-ietf-moq-transport-22 §11 (Data Streams and Datagrams) に従いセッションクローズになる。
+                // draft-ietf-moq-transport-23 §11 (Data Streams and Datagrams) に従いセッションクローズになる。
                 // アプリ側で decode を代行せず raw を渡すのは、wire の検証順序と終了コードを
                 // Session に一本化するためである (payload は改めて decode する)
                 let acceptance = match data_plane_for_datagram.recv_datagram(&raw) {
@@ -2674,7 +2674,7 @@ pub async fn run(
                 };
                 // Padding Datagram と、フィルタを通過しなかった Object・キャンセル済み
                 // subscription の Object はメディアとして扱わない
-                // (draft-ietf-moq-transport-22 §3.1 (Subscriptions) / §11.5.2 (Padding Datagrams))
+                // (draft-ietf-moq-transport-23 §3.1 (Subscriptions) / §11.5.2 (Padding Datagrams))
                 let DatagramAcceptance::Object(TrackDataAcceptance::Accepted) = acceptance else {
                     continue;
                 };
@@ -2884,7 +2884,7 @@ pub async fn run(
                                 "Received GOAWAY (timeout={timeout}, on_request_stream={on_request_stream:?})"
                             );
                             // 移行の判断は tokio-moq の共通関数が持つ
-                            // (draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration) /
+                            // (draft-ietf-moq-transport-23 §6.6.1 (Graceful Session Migration) /
                             // §9.2 (GOAWAY)。draft 由来の仕様であり将来変更されうる)
                             match tokio_moq::migration_target(
                                 &new_session_uri,
@@ -3199,7 +3199,7 @@ pub async fn run(
                         })) => {
                             // subscriber は outgoing data stream (subgroup / fill fetch) を
                             // 開かないため、reset すべき stream を持たない。届いた場合は
-                            // 観測できるようにログだけ残す (draft-ietf-moq-transport-22
+                            // 観測できるようにログだけ残す (draft-ietf-moq-transport-23
                             // §5.2 (Delivery Timeouts and Data Reliability))。
                             tracing::debug!(
                                 "Ignoring ResetDataStream for a stream this example does not own: \
@@ -3223,7 +3223,7 @@ pub async fn run(
                             Ok(false)
                         }
                         Some(ClientEvent::RequestUpdate(update)) => {
-                            // draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE):
+                            // draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE):
                             // 受信側は必ず 1 通の REQUEST_OK / REQUEST_ERROR で応答する MUST。
                             // 本 example が受信する更新は、publisher から PUBLISH で確立した
                             // 購読に対するものであり (SUBSCRIBE 起点の購読では publisher は
@@ -3347,7 +3347,7 @@ pub async fn run(
                         // 移行先の購読はその位置を Location Filter の Absolute Start (0x02) に
                         // して張り直すため、境界と同じ位置だけが再送される。移行先の Largest
                         // Object を境界にすると、移行中に抜けた音声 (最後の受信位置より後) を
-                        // 境界以下として捨ててしまう (draft-ietf-moq-transport-22 §9.20.9
+                        // 境界以下として捨ててしまう (draft-ietf-moq-transport-23 §9.19.9
                         // (LOCATION FILTER Parameter) Table 6。draft 由来の仕様であり将来
                         // 変更されうる)
                         let audio_boundary = last_received_locations
@@ -3472,7 +3472,7 @@ pub async fn run(
                     Ok(Err(failure)) => {
                         // 期限超過・再試行不能なエラーである。旧 session はまだ生きており、
                         // GOAWAY は subscription state に影響しない
-                        // (draft-ietf-moq-transport-22 §9.2。draft 由来の仕様であり将来変更
+                        // (draft-ietf-moq-transport-23 §9.2。draft 由来の仕様であり将来変更
                         // されうる) ため、購読を STOP_SENDING で終了してから GOAWAY /
                         // 正常 close を送る既存の後始末へ進む (peer_ended は立てない。この分岐は
                         // 直接受信ループを抜けるため、後始末の判定に使う `goaway_received` は
@@ -3642,7 +3642,7 @@ pub async fn run(
 
     // select! で別の終了要因 (accept の終了 / GOAWAY / PUBLISH_DONE / peer の close /
     // shutdown など) が先に成立していても、既に届いている終了依頼があればそのコードで閉じる
-    // (draft-ietf-moq-transport-22 §8.3 の MUST を終了コード 0x0 で上書きしない)。
+    // (draft-ietf-moq-transport-23 §8.3 の MUST を終了コード 0x0 で上書きしない)。
     if fatal_error.is_none()
         && !session_terminated
         && let Ok(termination) = termination_rx.try_recv()
@@ -3655,7 +3655,7 @@ pub async fn run(
     let session_alive = fatal_error.is_none();
 
     // peer が subscription を終了させた場合は送信先の購読が既に Terminated であり、
-    // STOP_SENDING は state machine に拒否される (draft-ietf-moq-transport-22 §3.1
+    // STOP_SENDING は state machine に拒否される (draft-ietf-moq-transport-23 §3.1
     // (Subscriptions) は Pending / Established のみ STOP_SENDING を認める)。
     // stream task の join より先に送るのは、受信待ちの live stream で join が終わらない
     // ことを防ぐためである。
@@ -3777,7 +3777,7 @@ fn is_transport_session_end(error: &Error) -> bool {
 ///
 /// s2n-quic は peer の STOP_SENDING を受信したストリームの送信 API を `StreamReset` で
 /// 失敗させる。これは該当ストリームだけの終端でありセッションは継続するため
-/// (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))、
+/// (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))、
 /// pipeline は致命エラーにしない。
 ///
 /// WebTransport over HTTP/2 も driver が受領した `WT_STOP_SENDING` のエラーコードを
@@ -3816,7 +3816,7 @@ fn log_failure(message: std::fmt::Arguments<'_>, expected: bool) {
 ///
 /// Session が DATA_STREAM_TIMEOUT で STOP_SENDING を指示した場合は、受信半に STOP_SENDING を
 /// 送出して読み取りを打ち切る (`SessionEvent::StopSendingDataStream` の doc と
-/// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) を参照)。
+/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) を参照)。
 /// セッションは閉じないため、購読と他の stream の受信は継続する。
 /// 登録済み data stream の受信結果
 enum RegisteredStreamData {
@@ -3957,9 +3957,9 @@ const CATALOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// カタログ購読のメッセージパラメータを組み立てる
 ///
-/// draft-ietf-moq-transport-22 §3.5 (Joining an Ongoing Track) の購読パターンに従い、
-/// 購読の Location Filter を Next Object (§9.20.9 Table 6 の Type 0x05) にしつつ、
-/// FILL_PARAMETERS (§9.20.15) で現在 Group の先頭から埋める fill を要求する
+/// draft-ietf-moq-transport-23 §3.5 (Joining an Ongoing Track) の購読パターンに従い、
+/// 購読の Location Filter を Next Object (§9.19.9 Table 6 の Type 0x05) にしつつ、
+/// FILL_PARAMETERS (§9.19.15) で現在 Group の先頭から埋める fill を要求する
 /// (内側の Location Filter は Relative Start の StartGroup=1)。
 /// 内側を省略すると購読の Next Object を継承してしまい、購読より前に publish された
 /// 独立カタログが fill range に入らない。
@@ -3986,7 +3986,7 @@ fn catalog_subscribe_parameters() -> MessageParameters {
 /// カタログを取得する
 ///
 /// 次の 2 経路で届く Object を到着順に適用する
-/// (draft-ietf-moq-transport-22 §3.4 (Fill Semantics) / §3.5 (Joining an Ongoing Track))。
+/// (draft-ietf-moq-transport-23 §3.4 (Fill Semantics) / §3.5 (Joining an Ongoing Track))。
 ///
 /// 1. fill fetch stream (`fill_request_id` は起因 SUBSCRIBE の Request ID。FETCH_HEADER に
 ///    載る値と一致することを確認してから読む)。購読より前に publish された独立カタログが届く
@@ -4012,7 +4012,7 @@ async fn receive_catalog(
 ) -> Result<CatalogResolution> {
     let deadline = tokio::time::Instant::now() + CATALOG_TIMEOUT;
     // delta の namespace 継承は catalog JSON の `namespace` との文字列比較になるため、
-    // publisher が書く表現と同じ draft-ietf-moq-transport-22 §8.8 の表現へ直す
+    // publisher が書く表現と同じ draft-ietf-moq-transport-23 §8.8 の表現へ直す
     let mut state = catalog::CatalogState::new(serialize_namespace(&catalog_namespace));
     while state.catalog().is_none() {
         let accepted =
@@ -4053,12 +4053,12 @@ async fn receive_catalog(
         data_plane.recv_data_stream_type(stream_id, stream_type_id)?;
         match stream_type {
             StreamType::Padding => {
-                // draft-ietf-moq-transport-22 §11.5.1 (Padding Streams)
+                // draft-ietf-moq-transport-23 §11.5.1 (Padding Streams)
                 let _ = drain_registered_stream_to_end(&mut stream, data_plane, stream_id).await;
             }
             StreamType::Fetch => {
                 // fill fetch stream は FETCH_HEADER に起因 SUBSCRIBE の Request ID を載せる
-                // (draft-ietf-moq-transport-22 §3.4)。購読で届くカタログと同じ状態へ適用する
+                // (draft-ietf-moq-transport-23 §3.4)。購読で届くカタログと同じ状態へ適用する
                 // 読みにも期限を適用する。fill fetch stream が stall すると期限が効かず、
                 // 購読で届くカタログを待つ経路へ戻れなくなる
                 match tokio::time::timeout_at(
@@ -4622,7 +4622,7 @@ fn catalog_target_latency_ms(
 /// namespace を上書きする」と定める。宣言が無ければ catalog track の namespace を継承する
 /// (MSF の継承の規則。delta 適用時の継承は [`catalog::CatalogState`] が扱う)。
 ///
-/// 宣言された namespace は draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track
+/// 宣言された namespace は draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track
 /// Names。MSF では §11.1.2 に再掲) の表現として [`parse_namespace`] で解決する。§8.8 の形式は
 /// RECOMMENDED であり、draft-ietf-moq-msf-01 §5.2.2 (Track namespace) も catalog JSON の
 /// `namespace` を String と定めるのみで符号化を規定しない。本 example は moq-pub が書く §8.8
@@ -4642,7 +4642,7 @@ fn resolve_track_namespace(track: &MsfTrack, inherited: &TrackNamespace) -> Resu
         Some(declared) => parse_namespace(declared).map_err(|e| {
             Error::Other(format!(
                 "catalog media track {:?} has an invalid namespace {declared:?}: {e} \
-                 ('-' separates namespace fields; use the draft-ietf-moq-transport-22 \
+                 ('-' separates namespace fields; use the draft-ietf-moq-transport-23 \
                  §8.8 form)",
                 track.name
             ))
@@ -5055,7 +5055,7 @@ async fn handle_stream_body(
             }
         }
         StreamType::Padding => {
-            // draft-ietf-moq-transport-22 §11.5.1 (Padding Streams):
+            // draft-ietf-moq-transport-23 §11.5.1 (Padding Streams):
             // パディングバイトを読み捨てる。session には recv_data_stream_type で登録済み。
             let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
         }
@@ -5289,7 +5289,7 @@ async fn handle_stream_body(
 
 /// Subgroup header を Session へ登録する
 ///
-/// Track Alias が未確立 (`UnknownTrackAlias`) の場合は、draft-ietf-moq-transport-22
+/// Track Alias が未確立 (`UnknownTrackAlias`) の場合は、draft-ietf-moq-transport-23
 /// §3.1.3.1 (Unknown Track Alias) の "buffer it briefly" に従い、購読が確立するまで
 /// 短時間ストリームを保持する。保持の上限とタイムアウトは
 /// [`shiguredo_moqt::pending_subgroup_buffer::PendingSubgroupBuffer`] が管理する。
@@ -5332,7 +5332,7 @@ async fn register_subgroup_header(
     match data_plane.recv_subgroup_header(stream_id, header) {
         Ok(TrackDataAcceptance::Accepted) => return true,
         Ok(TrackDataAcceptance::UnknownTrackAlias) => {}
-        // draft-ietf-moq-transport-22 §3.1.3 (Track Alias): キャンセル済み subscription へ
+        // draft-ietf-moq-transport-23 §3.1.3 (Track Alias): キャンセル済み subscription へ
         // 遅れて届いた Object。未知 alias と違い確実に不要なので保持しない。
         Ok(TrackDataAcceptance::Discarded) => {
             tracing::debug!(
@@ -5342,7 +5342,7 @@ async fn register_subgroup_header(
             abort_subgroup_stream(stream, data_plane, stream_id).await;
             return false;
         }
-        // draft-ietf-moq-transport-22 §3.1 (Subscriptions): フィルタ再適用の結果
+        // draft-ietf-moq-transport-23 §3.1 (Subscriptions): フィルタ再適用の結果
         // どの subscription にも属さなかった Object。セッションは閉じずに捨てる。
         Ok(TrackDataAcceptance::FilteredOut) => {
             tracing::debug!(
@@ -5485,7 +5485,7 @@ async fn register_subgroup_header(
         }
 
         // 期限までは読み続けて保持する。読まないと peer のフロー制御が止まり、確立が
-        // 遅れたぶんだけ転送が滞る (draft-ietf-moq-transport-22 §3.1.3.1 は
+        // 遅れたぶんだけ転送が滞る (draft-ietf-moq-transport-23 §3.1.3.1 は
         // "withhold stream flow control" も MAY とするが、本 example は上限付きで読む)
         let remaining_us = deadline_us.saturating_sub(monotonic_now_us());
         if remaining_us <= 0 {
@@ -5546,7 +5546,7 @@ fn monotonic_now_us() -> i64 {
 /// 1 本の Subgroup ストリームから映像 Object を取り出して復号する
 ///
 /// `group_id` は Subgroup ヘッダの Group ID である。Subgroup ストリームの Object はすべて
-/// 同じ Group に属する (draft-ietf-moq-transport-22 §2.2 (Subgroups)) ため、Object ごとに
+/// 同じ Group に属する (draft-ietf-moq-transport-23 §2.2 (Subgroups)) ため、Object ごとに
 /// 読む必要はない。
 /// `video_decode_order` は購読で共有する復号順の判定である。復号の直前に通し、復号してよい
 /// Object だけを decoder へ渡す。
@@ -5831,7 +5831,7 @@ async fn deliver_video_object(
         Err(e) => return video_delivery_on_properties_error(termination_tx, &e),
     };
     // 復号してよい Object か判定する。Group ごとに別の stream で届くため、判定の状態は
-    // 購読で共有する (draft-ietf-moq-transport-22 §2.1.2 (Object States))。ロックは判定の
+    // 購読で共有する (draft-ietf-moq-transport-23 §2.2 (Subgroups))。ロックは判定の
     // 間だけ持ち、復号 (block_in_place) の間は持たない。
     let admission = {
         let mut decode_order = video_decode_order.lock().await;
@@ -6271,7 +6271,7 @@ fn plan_datagram<'a>(raw: &'a [u8], track_map: &HashMap<u64, TrackKind>) -> Data
         tracing::warn!("Failed to decode an object datagram the session already accepted");
         return DatagramAction::Ignore;
     };
-    // Object Status のみの Object は payload を持たない (draft-ietf-moq-transport-22 §11.2.1)
+    // Object Status のみの Object は payload を持たない (draft-ietf-moq-transport-23 §11.2.1)
     if datagram.status.is_some() {
         return DatagramAction::Ignore;
     }
@@ -6501,7 +6501,7 @@ async fn read_fetch_entry(
         };
         // entry を読むたびに Session の activity を更新する。Object と End of Range /
         // marker のどれも DATA_STREAM_TIMEOUT の activity に含まれる
-        // (draft-ietf-moq-transport-22 §12.2 (Session Termination Codes))。
+        // (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
         // 失敗は読み取りを打ち切る (この stream の会計が進まない)
         data_plane.recv_fetch_entry(stream_id, &entry)?;
         let payload = match &entry {
@@ -6756,7 +6756,7 @@ mod tests {
     /// 映像トラックの SUBSCRIBE が新しい Group の開始を要求すること
     ///
     /// `NEW_GROUP_REQUEST=0` は「購読者が Group の情報を持たない」ことを示し、publisher は
-    /// できるだけ早く新しい Group を開始する (draft-ietf-moq-transport-22 §9.20.19)。
+    /// できるだけ早く新しい Group を開始する (draft-ietf-moq-transport-23 §9.19.19)。
     /// 起動時 (前の session が無い) は Location Filter を載せない。
     #[test]
     fn video_subscribe_parameters_request_a_new_group() {
@@ -6786,7 +6786,7 @@ mod tests {
 
     /// 移行後の再購読では最後に受信した位置を Absolute Start として載せること
     ///
-    /// draft-ietf-moq-transport-22 §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER
+    /// draft-ietf-moq-transport-23 §3.3.1 (Location Filters) / §9.19.9 (LOCATION FILTER
     /// Parameter) Table 6 の Type 0x02。移行中に publish された Object を取りこぼさない
     /// ために必要である。
     #[test]
@@ -6915,8 +6915,8 @@ mod tests {
     /// 通り、移行前の音声は再生し直さない。
     ///
     /// 送出済みの TIMESTAMP と直近の Object の記憶は維持し、再送された Object の重複と
-    /// TIMESTAMP の巻き戻りを落とす (draft-ietf-moq-transport-22 §3.3.1 (Location Filters)
-    /// / §9.20.9 (LOCATION FILTER Parameter) Table 6。draft 由来の仕様であり将来変更
+    /// TIMESTAMP の巻き戻りを落とす (draft-ietf-moq-transport-23 §3.3.1 (Location Filters)
+    /// / §9.19.9 (LOCATION FILTER Parameter) Table 6。draft 由来の仕様であり将来変更
     /// されうる)。
     #[test]
     fn audio_delivery_order_reset_for_migration_updates_only_the_boundary() {
@@ -7212,7 +7212,7 @@ mod tests {
     ///
     /// draft-ietf-moq-msf-01 §5.2.2 (Track namespace) は track が宣言した namespace が継承した
     /// namespace を上書きすると定める。MOQT の購読は Full Track Name に対して行うため
-    /// (draft-ietf-moq-transport-22 §2.4.1 (Track Naming))、catalog track の namespace を使うと
+    /// (draft-ietf-moq-transport-23 §2.4.1 (Track Naming))、catalog track の namespace を使うと
     /// 別の track を購読するか DOES_NOT_EXIST になる。
     #[test]
     fn video_track_info_uses_declared_namespace() {
@@ -8384,7 +8384,7 @@ mod tests {
 
     /// カタログ購読が FILL_PARAMETERS 付きで、fill range が現在 Group の先頭からであること
     ///
-    /// draft-ietf-moq-transport-22 §3.5 (Joining an Ongoing Track): 購読の Location Filter は
+    /// draft-ietf-moq-transport-23 §3.5 (Joining an Ongoing Track): 購読の Location Filter は
     /// Next Object、FILL_PARAMETERS 内側の Location Filter は現在 Group の先頭 (Relative Start の
     /// StartGroup=1)。内側を省略すると購読の Next Object を継承し、購読より前に publish された
     /// 独立カタログが fill range に入らない (同 §3.4 (Fill Semantics))。
@@ -8518,7 +8518,7 @@ mod tests {
 
     /// FETCH の LOCATION_FILTER が要求 range を Absolute Range で指定すること
     ///
-    /// draft-ietf-moq-transport-22 §9.20.9 Table 6 の Type 0x04 は Start を絶対 Location、
+    /// draft-ietf-moq-transport-23 §9.19.9 Table 6 の Type 0x04 は Start を絶対 Location、
     /// End を StartGroup からの差分 (EndGroupDelta) と EndObject で表す。
     #[test]
     fn fetch_range_parameters_request_an_absolute_range() {
@@ -8555,7 +8555,7 @@ mod tests {
     /// catalog 購読の fill fetch stream はカタログとして適用する (移行後に catalog を張り
     /// 直すと、FILL_PARAMETERS 付き SUBSCRIBE への fill fetch stream で完全な catalog が
     /// 届く。読み捨てると移行中に更新された catalog が反映されない。
-    /// draft-ietf-moq-transport-22 §3.4 (Fill Semantics)。draft 由来の仕様であり将来変更
+    /// draft-ietf-moq-transport-23 §3.4 (Fill Semantics)。draft 由来の仕様であり将来変更
     /// されうる)。
     #[test]
     fn fetch_stream_action_routes_media_fetches() {
@@ -8853,7 +8853,7 @@ mod tests {
 
     /// Object Status のみの Object と未知の alias はメディアとして扱わないこと
     ///
-    /// Object Status のみの Object は payload を持たず (draft-ietf-moq-transport-22 §11.2.1)、
+    /// Object Status のみの Object は payload を持たず (draft-ietf-moq-transport-23 §11.2.1)、
     /// 未知の alias は Session が Accepted にしない。どちらも payload を decode しない。
     #[test]
     fn plan_datagram_ignores_objects_without_media() {
@@ -9015,7 +9015,7 @@ mod tests {
 
     /// LOC Properties の書式違反でセッション終了を依頼すること
     ///
-    /// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) は書式違反の受信を
+    /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) は書式違反の受信を
     /// セッション終了の対象とする MUST を定める。datagram 経路も stream 経路と同じ扱いにする。
     #[tokio::test]
     async fn audio_delivery_requests_session_termination_on_malformed_loc_properties() {
@@ -9642,8 +9642,8 @@ mod tests {
 
     /// live の音声が並び替わって届いても、送出済みの TIMESTAMP を巻き戻さないこと
     ///
-    /// live の datagram は並び替わって届きうる (draft-ietf-moq-transport-22 §2.1.2
-    /// (Object States) / §2.3.1 (Group IDs))。音声の再生は TIMESTAMP の順を前提とする
+    /// live の datagram は並び替わって届きうる (draft-ietf-moq-transport-23 §2.2 (Subgroups) /
+    /// §2.3.1 (Group IDs))。音声の再生は TIMESTAMP の順を前提とする
     /// (映像と違い、復号の出力がそのまま提示の順になる) ため、古い音声は送出しない。
     ///
     /// 判定が無いと、遅れて届いた古い TIMESTAMP が再生経路へ流れ、送出済みの TIMESTAMP
@@ -9828,7 +9828,7 @@ mod tests {
     /// 購読の境界以下の音声が再生経路へ流れないこと
     ///
     /// 購読の境界は `SUBSCRIBE_OK` の Largest Object であり、その位置の Object は live と relay の
-    /// replay の両方で届きうる (draft-ietf-moq-transport-22 §3.1.4)。境界以下を送出しないため、
+    /// replay の両方で届きうる (draft-ietf-moq-transport-23 §3.1.4)。境界以下を送出しないため、
     /// どちらで届いても再生経路へは流れない。
     ///
     /// 境界より後の live の音声は従来どおり送出し、TIMESTAMP による送出順の判定は境界より後の
@@ -10113,7 +10113,7 @@ mod tests {
 
     /// Largest Object を告知しない購読では、すべての音声を live として送出すること
     ///
-    /// draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) は Object が publish
+    /// draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter) は Object が publish
     /// されていれば LARGEST_OBJECT を MUST 含むと定めるため、省略は未 publish を意味する。
     /// 境界が無いことを理由に無音にしない。
     #[tokio::test]
@@ -10405,7 +10405,7 @@ mod tests {
     /// 境界より後の live の音声が並び替わって届いたときも、TIMESTAMP が巻き戻らないこと
     ///
     /// 境界の判定は購読より前の音声だけを落とすため、境界より後の並び替え
-    /// (draft-ietf-moq-transport-22 §2.1.2 (Object States) / §2.3.1 (Group IDs)) は
+    /// (draft-ietf-moq-transport-23 §2.2 (Subgroups) / §2.3.1 (Group IDs)) は
     /// TIMESTAMP の判定が防ぐ。GOAWAY の移行直後などに起こりうる。
     #[tokio::test]
     async fn audio_delivery_drops_reordered_live_objects_after_the_boundary() {
@@ -10722,7 +10722,7 @@ mod tests {
         ///
         /// 境界と同じ位置も含める。境界の位置の Object は live と FETCH の両方で届きうる
         /// ため、どちらも落とさないと二重に表示される。`Location` の順序は (group_id,
-        /// object_id) の辞書順である (draft-ietf-moq-transport-22 §8.2)。
+        /// object_id) の辞書順である (draft-ietf-moq-transport-23 §8.2)。
         #[test]
         fn video_delivery_order_detects_objects_at_or_before_the_boundary() {
             let mut order = VideoDeliveryOrder::new(Some(loc(100, 5)));

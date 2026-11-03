@@ -1,4 +1,4 @@
-//! fill fetch stream のテスト (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))
+//! fill fetch stream のテスト (draft-ietf-moq-transport-23 §3.4 (Fill Semantics))
 //!
 //! FILL_PARAMETERS の送受信、fill fetch stream の開設条件 (PAUSED /
 //! fill range / Largest Object)、複数 stream の同時存在、FETCH_HEADER の
@@ -140,9 +140,9 @@ fn establish_pub_side() -> (Session, Session, u64) {
 
 /// REQUEST_UPDATE を client から server へ送り、REQUEST_UPDATE 自身の Request ID を返す
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.1 (Request ID): REQUEST_UPDATE は SUBSCRIBE とは
+/// draft-ietf-moq-transport-23 §6.4.2.1 (Request ID): REQUEST_UPDATE は SUBSCRIBE とは
 /// 別に新しい Request ID を消費する。fill fetch stream の FETCH_HEADER はこの ID を
-/// 載せる (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))。
+/// 載せる (draft-ietf-moq-transport-23 §3.4 (Fill Semantics))。
 fn send_update_to_server(
     client: &mut Session,
     server: &mut Session,
@@ -170,7 +170,7 @@ fn send_update_to_server(
 }
 
 /// Largest Object 未知のまま FILL_PARAMETERS 付き SUBSCRIBE を受けても fill stream は開かない
-/// (draft-ietf-moq-transport-22 §3.4: fill range が定まらないため)
+/// (draft-ietf-moq-transport-23 §3.4: fill range が定まらないため)
 #[test]
 fn subscribe_with_fill_but_no_largest_object_opens_nothing() {
     let (mut client, mut server) = establish_pair();
@@ -195,7 +195,7 @@ fn subscribe_with_fill_but_no_largest_object_opens_nothing() {
 }
 
 /// PAUSED=1 の SUBSCRIBE に FILL_PARAMETERS が付いても fill stream は開かない
-/// (draft-ietf-moq-transport-22 §3.4.1 / draft-ietf-moq-transport-23 §3.1.1。
+/// (draft-ietf-moq-transport-23 §3.4.1 / draft-ietf-moq-transport-23 §3.1.1。
 /// Largest 確定済みでも paused が優先する)
 #[test]
 fn subscribe_with_fill_and_paused_opens_nothing() {
@@ -226,7 +226,7 @@ fn subscribe_with_fill_and_paused_opens_nothing() {
 }
 
 /// unpaused (PAUSED=0) の FILL_PARAMETERS 付き SUBSCRIBE 処理で fill stream が開く
-/// (draft-ietf-moq-transport-22 §3.4.1。SUBSCRIBE 経路の positive)
+/// (draft-ietf-moq-transport-23 §3.4.1。SUBSCRIBE 経路の positive)
 #[test]
 fn subscribe_with_fill_opens_fill_stream() {
     let (mut client, mut server, _sub_rid) = establish_sub_with_object();
@@ -273,7 +273,7 @@ fn drain_open_fill_stream_events(s: &mut Session) -> Vec<(u64, u64, Location, Lo
 
 /// fill fetch stream のイベントが解決済みの fill range と購読の Request ID を運ぶこと
 ///
-/// draft-ietf-moq-transport-22 §3.4 (Fill Semantics): fill range は内側の LOCATION_FILTER が
+/// draft-ietf-moq-transport-23 §3.4 (Fill Semantics): fill range は内側の LOCATION_FILTER が
 /// 決め、終端は Largest Object を超えない。Relative Start の StartGroup=1 は現在の Group の
 /// 先頭 (`{Largest Group, 0}`) を指す。REQUEST_UPDATE 起因の fill では `request_id` が
 /// REQUEST_UPDATE 自身の Request ID になり、対象 subscription の Request ID とは一致しない
@@ -309,7 +309,7 @@ fn fill_stream_event_carries_the_resolved_range() {
 }
 
 /// unpaused (PAUSED=0) で FILL_PARAMETERS 付き REQUEST_UPDATE を処理すると fill stream が開く
-/// (draft-ietf-moq-transport-22 §3.4.1)
+/// (draft-ietf-moq-transport-23 §3.4.1)
 #[test]
 fn request_update_with_fill_opens_fill_stream() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
@@ -375,7 +375,7 @@ fn subscribe_paused_and_ok(client: &mut Session, server: &mut Session, paused: u
 /// paused な購読への REQUEST_UPDATE は FILL を持っても、PAUSED 省略なら fill を開かない
 ///
 /// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): REQUEST_UPDATE で PAUSED を
-/// 省略した場合は現在の状態を維持する。paused のままなので §3.4.1 (Fill Semantics) の
+/// 省略した場合は現在の状態を維持する。paused のままなので §3.4.1 (Opening and Closing Fill Fetch Streams) の
 /// "FILL_PARAMETERS carried while the subscription is paused opens no fill fetch stream."
 /// に従い開設しない。
 #[test]
@@ -398,7 +398,7 @@ fn request_update_with_fill_and_omitted_paused_stays_paused() {
 /// paused な購読への FILL + PAUSED=0 の REQUEST_UPDATE は再開して fill を開く
 ///
 /// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): PAUSED=0 は unpaused を明示する。
-/// 再開後の購読は配送対象になり、§3.4.1 (Fill Semantics) に従って fill fetch stream を開く。
+/// 再開後の購読は配送対象になり、§3.4.1 (Opening and Closing Fill Fetch Streams) に従って fill fetch stream を開く。
 #[test]
 fn request_update_with_fill_and_unpaused_resumes_and_opens_fill_stream() {
     let (mut client, mut server, _sub_rid) = establish_sub_with_object();
@@ -419,7 +419,7 @@ fn request_update_with_fill_and_unpaused_resumes_and_opens_fill_stream() {
 /// unpaused な購読への FILL + PAUSED=1 の REQUEST_UPDATE は fill を開かない
 ///
 /// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): 同じ REQUEST_UPDATE で
-/// paused にする場合、fill を開設してはならない (§3.4.1 (Fill Semantics))。
+/// paused にする場合、fill を開設してはならない (§3.4.1 (Opening and Closing Fill Fetch Streams))。
 #[test]
 fn request_update_with_fill_and_pause_opens_nothing() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
@@ -437,7 +437,7 @@ fn request_update_with_fill_and_pause_opens_nothing() {
 }
 
 /// FILL 内側の Location Filter Type 0x00 (None) は subscription filter を継承せず
-/// track 全体を指す (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))
+/// track 全体を指す (draft-ietf-moq-transport-23 §3.4 (Fill Semantics))
 ///
 /// subscription filter を Next Group (`RelativeGroup { start_group: 0 }`) にすると
 /// Largest `{0, 0}` に対して fill range が空になり開設されないため、内側 Type 0x00 が
@@ -461,7 +461,7 @@ fn request_update_with_fill_no_filter_overrides_subscription_filter() {
 }
 
 /// FILL 内側を省略した場合は subscription filter を継承する
-/// (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))
+/// (draft-ietf-moq-transport-23 §3.4 (Fill Semantics))
 ///
 /// 直前のテストと同じ subscription filter で内側を省略すると、継承した Next Group が
 /// Largest `{0, 0}` より後ろになり開設されない。内側省略と Type 0x00 が別扱いであることを固定する。
@@ -483,7 +483,7 @@ fn request_update_with_fill_omitted_inner_inherits_subscription_filter() {
 }
 
 /// fill range が Largest Object より後に始まる場合は fill stream を開かない
-/// (draft-ietf-moq-transport-22 §3.4)
+/// (draft-ietf-moq-transport-23 §3.4)
 #[test]
 fn request_update_with_fill_start_after_largest_opens_nothing() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
@@ -503,7 +503,7 @@ fn request_update_with_fill_start_after_largest_opens_nothing() {
 }
 
 /// FILL_PARAMETERS のない REQUEST_UPDATE では fill stream を開かない
-/// (draft-ietf-moq-transport-22 §3.4.1)
+/// (draft-ietf-moq-transport-23 §3.4.1)
 #[test]
 fn request_update_without_fill_opens_nothing() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
@@ -521,7 +521,7 @@ fn request_update_without_fill_opens_nothing() {
 }
 
 /// FILL_PARAMETERS 付き REQUEST_UPDATE ごとに新規 fill stream が開き、既存は残る
-/// (draft-ietf-moq-transport-22 §3.4: 暗黙キャンセルしない)
+/// (draft-ietf-moq-transport-23 §3.4: 暗黙キャンセルしない)
 #[test]
 fn second_request_update_with_fill_opens_another_stream() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
@@ -560,7 +560,7 @@ fn second_request_update_with_fill_opens_another_stream() {
 }
 
 /// fill stream が open 中は PUBLISH_DONE を送れない
-/// (draft-ietf-moq-transport-22 §9.9 の MUST NOT が fill を含むことの裏付け)
+/// (draft-ietf-moq-transport-23 §9.9 の MUST NOT が fill を含むことの裏付け)
 #[test]
 fn publish_done_rejected_while_fill_stream_open() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
@@ -586,7 +586,7 @@ fn publish_done_rejected_while_fill_stream_open() {
 }
 
 /// FILL_PARAMETERS は累積パラメータに保持されない (sticky 対象外)
-/// (draft-ietf-moq-transport-22 §9.20.15)
+/// (draft-ietf-moq-transport-23 §9.19.15)
 #[test]
 fn fill_not_retained_in_pending_update_params() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
@@ -616,7 +616,7 @@ fn fill_not_retained_in_pending_update_params() {
 }
 
 /// fill fetch stream の header 登録・ Object 通知・終端と Stream Count の計上
-/// (draft-ietf-moq-transport-22 §3.4 / §9.9 / §11.4.1)
+/// (draft-ietf-moq-transport-23 §3.4 / §9.9 / §11.4.1)
 #[test]
 fn fill_fetch_header_object_close_flow() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
@@ -670,7 +670,7 @@ fn fill_fetch_header_object_close_flow() {
 }
 
 /// subscriber は起因 REQUEST_UPDATE の Request ID を載せた fill 用 FETCH_HEADER を受理する
-/// (draft-ietf-moq-transport-22 §3.4)。複数本の同時存在も許す。
+/// (draft-ietf-moq-transport-23 §3.4)。複数本の同時存在も許す。
 #[test]
 fn subscriber_accepts_fill_fetch_headers() {
     use shiguredo_moqt::stream::FETCH_HEADER_TYPE;
@@ -787,9 +787,9 @@ fn fill_fetch_header_with_unknown_request_id_is_retryable() {
 }
 
 /// subscription のキャンセル時は open 中の fill fetch stream を reset する
-/// (draft-ietf-moq-transport-22 §3.4.1)
+/// (draft-ietf-moq-transport-23 §3.4.1)
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection) は cancel を
+/// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection) は cancel を
 /// RESET_STREAM / STOP_SENDING と定める。FIN は「その方向にもうメッセージを送らない」
 /// ことだけを示し cancel ではないため、キャンセルは RESET_STREAM で表現する。
 #[test]
@@ -841,7 +841,7 @@ fn cancel_subscription_resets_open_fill_streams() {
 /// PUBLISH 起点で自側が publisher の subscription は、peer の終端 (FIN) で終端せず
 /// open 中の fill fetch stream も reset しない
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure): "A FIN only indicates
+/// draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure): "A FIN only indicates
 /// that an endpoint will send no further messages in that direction; it is not a request
 /// cancellation." §3.4.1 (Opening and Closing Fill Fetch Streams) の reset の MUST は cancel
 /// (STOP_SENDING / RESET_STREAM) に対するものであり、購読が継続する限り fill の配送も継続する。
@@ -996,7 +996,7 @@ fn open_fill_for_publish_sender(
 /// PUBLISH 起点 publisher 役で自側 REQUEST_UPDATE の失敗応答を受けると open 中の
 /// fill fetch stream を reset し、残る subgroup stream の終端で PUBLISH_DONE を送る
 ///
-/// draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams) は
+/// draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams) は
 /// subscription の終了時に open 中の fill fetch stream の reset を MUST とする。
 /// §9.9 (PUBLISH_DONE) の MUST NOT (全 stream を閉じるまで送ってはならない) により
 /// PUBLISH_DONE は保留され、最後の outgoing stream の終端で送られる (§9.5.1 の MUST)。
@@ -1120,7 +1120,7 @@ fn publish_origin_update_failed_resets_open_fill_streams_and_flushes_publish_don
 /// PUBLISH 起点 publisher 役でも peer の RESET_STREAM (cancel) では open 中の
 /// fill fetch stream を reset する
 ///
-/// draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams): "When the
+/// draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams): "When the
 /// subscription is cancelled, the publisher MUST reset any open fill fetch streams."
 #[test]
 fn publish_origin_peer_reset_resets_open_fill_streams() {
@@ -1170,7 +1170,7 @@ fn publish_origin_peer_reset_resets_open_fill_streams() {
 }
 
 /// FILL 内側の Range Filter 不正は INVALID_FILTER で拒否し fill を開かない
-/// (draft-ietf-moq-transport-22 §9.20.15 / §3.3.2)
+/// (draft-ietf-moq-transport-23 §9.19.15 / §3.3.2)
 #[test]
 fn fill_inner_range_filter_violation_rejected_with_invalid_filter() {
     use shiguredo_moqt::error::REQUEST_INVALID_FILTER;
@@ -1264,7 +1264,7 @@ fn request_update_with_non_location_filter_inner_opens_nothing() {
 }
 
 /// Table 7 外の内側パラメータを持つ FILL の送信は送信前に拒否し副作用を残さない
-/// (draft-ietf-moq-transport-22 §9.20.15)
+/// (draft-ietf-moq-transport-23 §9.19.15)
 #[test]
 fn send_with_out_of_scope_inner_fill_rejected_without_side_effects() {
     use shiguredo_moqt::message_parameter::PARAM_PAUSED as INNER_PAUSED;
@@ -1328,7 +1328,7 @@ fn send_with_out_of_scope_inner_fill_rejected_without_side_effects() {
 }
 
 /// peer の STOP_SENDING による fill 単体の cancel は吸収し subscription に影響しない
-/// (draft-ietf-moq-transport-22 §3.4.1)
+/// (draft-ietf-moq-transport-23 §3.4.1)
 #[test]
 fn peer_stop_sending_on_fill_absorbed() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
@@ -1359,7 +1359,7 @@ fn peer_stop_sending_on_fill_absorbed() {
 }
 
 /// fill stream の単体 reset は ResetDataStream イベントを発行する
-/// (draft-ietf-moq-transport-22 §3.4.1 の失敗時即 reset 経路)
+/// (draft-ietf-moq-transport-23 §3.4.1 の失敗時即 reset 経路)
 #[test]
 fn reset_single_fill_stream_emits_reset_event() {
     use shiguredo_moqt::session::types::DataStreamResetReason;
@@ -1404,7 +1404,7 @@ fn reset_single_fill_stream_emits_reset_event() {
 }
 
 /// 内側省略時は subscription の filter が fill range になる
-/// (draft-ietf-moq-transport-22 §3.4)
+/// (draft-ietf-moq-transport-23 §3.4)
 #[test]
 fn fill_without_inner_filter_inherits_subscription_filter() {
     // subscription filter RelativeGroup{0} (= Next Group): Largest {0, 0} に対して
@@ -1447,7 +1447,7 @@ fn fill_without_inner_filter_inherits_subscription_filter() {
 }
 
 /// 同一 UPDATE での filter 変更は fill 評価に反映される (処理後観点)
-/// (draft-ietf-moq-transport-22 §3.4)
+/// (draft-ietf-moq-transport-23 §3.4)
 #[test]
 fn fill_evaluated_with_updated_filter_in_same_update() {
     // unfiltered で確立 → 同一 UPDATE で範囲外 filter + FILL → 開かない
@@ -1475,7 +1475,7 @@ fn fill_evaluated_with_updated_filter_in_same_update() {
 }
 
 /// fill range が empty (Start > End) の場合は fill stream を開かない
-/// (draft-ietf-moq-transport-22 §3.4)
+/// (draft-ietf-moq-transport-23 §3.4)
 #[test]
 fn fill_with_empty_range_opens_nothing() {
     let (mut client, mut server, sub_rid) = establish_sub_with_group_object(5, 10);
@@ -1514,9 +1514,9 @@ fn fill_with_next_object_overflow_opens_saturated_range() {
 }
 
 /// 複数本の fill stream はキャンセル時にまとめて reset される
-/// (draft-ietf-moq-transport-22 §3.4.1)
+/// (draft-ietf-moq-transport-23 §3.4.1)
 ///
-/// キャンセルは draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection) に
+/// キャンセルは draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection) に
 /// 従い RESET_STREAM で表現する (FIN は cancel ではない)。
 #[test]
 fn cancel_subscription_resets_all_open_fill_streams() {
@@ -1574,7 +1574,7 @@ fn cancel_subscription_resets_all_open_fill_streams() {
 }
 
 /// REQUEST_UPDATE 失敗応答時は open 中の fill を reset して PUBLISH_DONE を送る
-/// (draft-ietf-moq-transport-22 §3.4.1 / §9.5.1)
+/// (draft-ietf-moq-transport-23 §3.4.1 / §9.5.1)
 #[test]
 fn request_error_resets_fills_and_sends_publish_done() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
@@ -1679,7 +1679,7 @@ fn establish_publish_with_object() -> (Session, Session, u64) {
 
 /// GOAWAY の deadline 満了で終端した subscription への遅延 fill fetch stream は受理する
 ///
-/// request stream は方向ごとに独立に閉じるため (draft-ietf-moq-transport-22 §6.4.2.2
+/// request stream は方向ごとに独立に閉じるため (draft-ietf-moq-transport-23 §6.4.2.2
 /// (Graceful Request Stream Closure))、自側が送信方向を reset しても peer の送信方向は
 /// 開いたままである。peer が GOAWAY / reset を観測する前に開いた fill fetch stream は
 /// 正当に届くため、session を `PROTOCOL_VIOLATION` で閉じてはならない。
@@ -1824,7 +1824,7 @@ fn subscriber_accepts_late_fill_fetch_header_after_peer_close() {
 
 /// fill fetch stream の Object は effective fill range の外側なら拒否されること
 ///
-/// draft-ietf-moq-transport-22 §3.4 (Fill Semantics) の fill range は
+/// draft-ietf-moq-transport-23 §3.4 (Fill Semantics) の fill range は
 /// FILL_PARAMETERS の LOCATION_FILTER と継承 filter から解決する。既定 (FILL なし) は
 /// Track 全体 (先頭から Largest Object まで) であり、Largest を超える Location は拒否する。
 #[test]

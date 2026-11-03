@@ -1,11 +1,11 @@
 ---
 name: shiguredo-moqt
-description: "時雨堂の Sans I/O MOQT ライブラリ shiguredo_moqt の機能・API リファレンス。draft-ietf-moq-transport-22 の制御メッセージ・セッション状態機械・data stream / datagram、LOC / MSF の codec、C4M (CAT / CWT) の認可トークン、音声の再生補助 (playout: 到着の揺らぎと実出力の先行量からの再生予算・鳴らす時刻・A/V 同期・共通の時間軸・時間圧縮/伸長・欠落の補間)、encode / decode やセッション駆動の実装に関する質問時に使用。"
+description: "時雨堂の Sans I/O MOQT ライブラリ shiguredo_moqt の機能・API リファレンス。draft-ietf-moq-transport-23 の制御メッセージ・セッション状態機械・data stream / datagram、LOC / MSF の codec、C4M (CAT / CWT) の認可トークン、音声の再生補助 (playout: 到着の揺らぎと実出力の先行量からの再生予算・鳴らす時刻・A/V 同期・共通の時間軸・時間圧縮/伸長・欠落の補間)、encode / decode やセッション駆動の実装に関する質問時に使用。"
 ---
 
 # shiguredo_moqt
 
-draft-ietf-moq-transport-22 に基づく Sans I/O / no_std な Media over QUIC Transport (MOQT) ライブラリ。
+draft-ietf-moq-transport-23 に基づく Sans I/O / no_std な Media over QUIC Transport (MOQT) ライブラリ。
 
 ## 特徴
 
@@ -15,7 +15,7 @@ draft-ietf-moq-transport-22 に基づく Sans I/O / no_std な Media over QUIC T
 - **Session 状態機械**: 1 本の Transport Session に閉じた endpoint-local な状態管理
 - **インクリメンタルデコード**: フレーム境界に依存せず受信バッファに蓄積しながらデコード
 - **音声の再生補助**: 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期の遅延制御、時間圧縮・伸長と欠落の補間 (no_std / Sans I/O)
-- **対応仕様**: MOQT `draft-22` / LOC `draft-04` / MSF `draft-01` / C4M `draft-01`
+- **対応仕様**: MOQT `draft-23` / LOC `draft-04` / MSF `draft-01` / C4M `draft-01`
 
 ## バージョン情報
 
@@ -324,12 +324,12 @@ End of Unknown Range (`0x10C`、§11.4.2 (End of Range)) を示したうえで�
 | `StopSendingRequestStream { request_id, error_code }` | request stream の受信方向に STOP_SENDING を送る |
 | `FinishRequestStream { request_id }` | request stream の送信方向を FIN で閉じる |
 
-bidi request stream は方向ごとに独立して閉じる (draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure))。
+bidi request stream は方向ごとに独立して閉じる (draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure))。
 `RequestTerminated { reason: PeerStreamFin }` は peer の FIN の到着と同時に発行されるとは限らず、
 自側が SUBSCRIBE / FETCH / TRACK_STATUS の responder、または PUBLISH を送った側 (publisher 役) で
 最終メッセージを未送信の場合は peer の FIN と自側が最終メッセージとともに送る FIN の両方が揃った時点で発行される。
 request stream 上の GOAWAY の timeout 満了で自側が終端した場合は
-`RequestTerminated { reason: GoawayTimeout }` が発行される (draft-ietf-moq-transport-22 §9.2 (GOAWAY) の
+`RequestTerminated { reason: GoawayTimeout }` が発行される (draft-ietf-moq-transport-23 §9.2 (GOAWAY) の
 "SHOULD reset the stream with GOING_AWAY" を送信方向のみで満たすため、PUBLISH_DONE は送れず保留分は破棄される)。
 reset するのは送信方向だけなので peer の送信方向は開いたままであり、終端済み request へ届く
 1 回目の peer FIN / RESET_STREAM は no-op で吸収される。peer が reset を観測する前に開いた
@@ -338,7 +338,7 @@ fill fetch stream は subscription への帰属を保ったまま受理する (�
 送った応答 (SUBSCRIBE_OK / REQUEST_OK / REQUEST_ERROR / FETCH_OK / PUBLISH_DONE) と
 REQUEST_UPDATE / PUBLISH_STATE_NOTIFY は、各ハンドラがそのメッセージに該当する仕様の検証
 (送信者・種別・自側の役割・パラメータスコープ・PAUSED・Track Alias・Request ID・
-MAX_REQUEST_UPDATES・auth token・End Location) を行ったうえで、状態遷移せず受理する
+MAX_REQUEST_UPDATES・auth token・応答範囲 (LARGEST_OBJECT と要求 End)) を行ったうえで、状態遷移せず受理する
 (subscription の遅延 REQUEST_ERROR は呼び出し元の §9.4.2.1 REDIRECT 検証のみで受理する)。遅延した REQUEST_ERROR では `RequestErrorReceived`
 のみを通知する (他の応答は状態遷移もイベント発行もしない)。ローカル終端済みの REQUEST_UPDATE では
 Range Filter の内容検証を省略する (draft §3.3.2 の MUST は REQUEST_ERROR による拒否であり、
@@ -430,7 +430,7 @@ request stream 上の GOAWAY の timeout が満了した場合も request を終
 このとき publisher 役 fetch の open 中の outgoing FETCH data stream は Session が reset しないため、
 アプリが `send_fetch_data_stream_closed` で閉じること。
 `RequestStreamEnd::Reset` は cancel として即時に終端する
-(draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))。
+(draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))。
 `error_code` は `Option<u64>` であり、`None` は「アプリケーションエラーコード無し」を表す
 (draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams)。WebTransport over HTTP/3 経路で
 HTTP/3 のコードを MOQT のコードへ戻せない場合に `None` になる)。QUIC 直接接続と QMux は
@@ -578,7 +578,7 @@ TRACK_STATUS は単発要求であるため、この値で期限タイマーは�
 (受信側は受信値、送信側は送信値)、同じく期限タイマーは起動しない。
 
 `Session::forget_subscription` は、保留中の PUBLISH_DONE (`Subscription::pending_publish_done`) が
-ある間は呼ばないこと。呼ぶと PUBLISH_DONE が送信されず、draft-ietf-moq-transport-22 §9.5.1
+ある間は呼ばないこと。呼ぶと PUBLISH_DONE が送信されず、draft-ietf-moq-transport-23 §9.5.1
 (Updating Subscriptions) の MUST を果たせない。順序契約と受信側の追跡状態の扱いの全文は
 `Session::forget_subscription` の doc を参照すること。前提条件は API ごとに異なる
 (`forget_subscription` は `cleanup_ready`、`forget_fetch` / `forget_track_status` はそれぞれの終端
@@ -655,7 +655,7 @@ pub enum FetchPriorContext { First, NoPriorActualObject, HasPriorObject }
 型ごとのシグネチャは次のとおり (一般化しない。実際の `src/stream/` と一致させること)。
 
 ```rust,ignore
-// ヘッダ (draft-ietf-moq-transport-22 §11.3.1 / §11.4.1)
+// ヘッダ (draft-ietf-moq-transport-23 §11.3.1 / §11.4.1)
 fn SubgroupHeader::encode(&self) -> Vec<u8>
 fn SubgroupHeader::decode(buf: &[u8]) -> Result<(SubgroupHeader, usize), MessageError>
 fn FetchHeader::encode(&self) -> Vec<u8>
@@ -755,7 +755,7 @@ fn encode_end_of_timed_out_range(&mut self, group_id: u64, object_id: u64, buf: 
   どちらも Properties Length varint 込みの生バイト列であり、`LocProperties::decode` にそのまま渡せる。
   wire に現れた varint をそのまま保持するため、Properties Length = 0 は最小形なら `0x00` の 1 バイトになる
 - Properties フィールドの有無は Subgroup では SUBGROUP_HEADER の Type Flags の PROPERTIES ビット、
-  FETCH では Serialization Flags (draft-ietf-moq-transport-22 §11.4.1.1 Table 10) の bit `0x20` が示す。
+  FETCH では Serialization Flags (draft-ietf-moq-transport-23 §11.4.1.1 Table 10) の bit `0x20` が示す。
   どちらの経路も、無い場合は `None`、ある場合は `Some` になる
 - `FetchStreamEncoder` は前回オブジェクトとの差分 (デルタ圧縮) を内部状態で判断する
 - `FetchStreamEncoder::new` は Group Order を Ascending (0x01) に固定する。`new_with_group_order` は 0x01 (Ascending) と 0x02 (Descending) を受け付け、それ以外は `ProtocolViolation` を返す (`FetchStreamDecoder::new_with_group_order` と対称)
@@ -1500,8 +1500,8 @@ moqt-rs には vsync が無く、呼び出し側のループ周期 (example は 
 
 ## 準拠仕様
 
-- draft-ietf-moq-transport-22 - Media over QUIC Transport
-  - <https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-22>
+- draft-ietf-moq-transport-23 - Media over QUIC Transport
+  - <https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-23>
 - draft-ietf-moq-loc-04 - Media over QUIC - Low Overhead Container
   - <https://datatracker.ietf.org/doc/html/draft-ietf-moq-loc-04>
 - draft-ietf-moq-msf-01 - MOQT Streaming Format

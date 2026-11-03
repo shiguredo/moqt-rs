@@ -76,7 +76,7 @@ fn empty_buffer_has_zero_counters() {
 
 /// 既定値は 1 MiB / 16 MiB / 5 秒
 ///
-/// draft-ietf-moq-transport-22 §3.1.3.1 "buffer it briefly" の上限として決めた値であり、
+/// draft-ietf-moq-transport-23 §3.1.3.1 "buffer it briefly" の上限として決めた値であり、
 /// 変更するとメモリ使用量の見積もりが変わる。
 #[test]
 fn default_options_match_documented_limits() {
@@ -158,7 +158,7 @@ fn push_accumulates_chunks_in_order() {
 
 /// per-stream の上限を超えたら entry を破棄し、保持していたバイトも集計から外す
 ///
-/// draft-ietf-moq-transport-22 §3.1.3.1 の "buffer it briefly" の上限であり、
+/// draft-ietf-moq-transport-23 §3.1.3.1 の "buffer it briefly" の上限であり、
 /// 超過したチャンクを保持し続けると session の集計に残って他ストリームを巻き込む。
 #[test]
 fn per_stream_overflow_abandons_and_releases_bytes() {
@@ -553,7 +553,7 @@ fn subscriber_notified_entry_keeps_chunks_until_take() {
 
 /// 保持しないと決めた Object (`Discarded` / `FilteredOut` 相当) はバッファに残らない
 ///
-/// draft-ietf-moq-transport-22 §3.1.3 (Track Alias) / §3.1 (Subscriptions) により、
+/// draft-ietf-moq-transport-23 §3.1.3 (Track Alias) / §3.1 (Subscriptions) により、
 /// キャンセル済み subscription への遅延 Object とフィルタ不通過の Object は確実に不要で
 /// あるため、呼び出し側は entry を作らずに捨てる。作ってしまった場合も `remove` で
 /// 何も残らないことを固定する。

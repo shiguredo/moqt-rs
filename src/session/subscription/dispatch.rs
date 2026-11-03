@@ -1,5 +1,5 @@
 //! REQUEST_OK / REQUEST_ERROR の送受信とタイマー処理
-//! draft-ietf-moq-transport-22 §9.3-§9.4, §9.5.1 に対応。将来 draft 側で変更される可能性がある。
+//! draft-ietf-moq-transport-23 §9.3-§9.4, §9.5.1 に対応。将来 draft 側で変更される可能性がある。
 
 use crate::error::{
     PUBLISH_DONE_UPDATE_FAILED, SESSION_INVALID_PARAMETER, SESSION_PROTOCOL_VIOLATION,
@@ -81,7 +81,7 @@ impl Session {
                 "request_ok (subscription) can only be sent by responder-role or by the publisher-role of an established PUBLISH subscription",
             ));
         }
-        // draft §9.20.1 (Parameter Scope): Subscription context は state で
+        // draft §9.19.1 (Parameter Scope): Subscription context は state で
         // PUBLISH_OK / REQUEST_UPDATE_OK に分岐する。状態遷移の前にスコープ検証を
         // 行うため、状態遷移前の context を保存する。末尾の LARGEST_OBJECT 注入判定
         // (context が許可する場合のみ注入) にも使い回す。
@@ -97,7 +97,7 @@ impl Session {
             )),
             _ => None,
         };
-        // draft §9.20.1 (Parameter Scope): スコープ外パラメータを含む REQUEST_OK では
+        // draft §9.19.1 (Parameter Scope): スコープ外パラメータを含む REQUEST_OK では
         // 状態を一切変更せずエラーを返す。受信側はスコープ外パラメータで
         // INVALID_PARAMETER により接続を閉じる (MUST) ため、送信側でも
         // 状態遷移・パラメータ適用より前に検証して自側の状態整合性を保つ。
@@ -141,7 +141,7 @@ impl Session {
             // draft §9.3 (REQUEST_OK): PUBLISH_OK context → REQUEST_OK に統一。
             // Pending(Publisher) → Established 遷移
             SubscriptionState::Pending if pending_publisher => {
-                // draft-ietf-moq-transport-22 Appendix A.3 #1790 (Subscription parameters
+                // draft-ietf-moq-transport-23 Appendix A.4 #1790 (Subscription parameters
                 // appear in REQUEST_UPDATE, not PUBLISH_OK): PUBLISH_OK は EXPIRES のみを
                 // 運び、subscription 更新用パラメータは REQUEST_UPDATE (要求) に出現する。
                 // スコープ検証で EXPIRES 以外は既に弾かれているため、ここでは EXPIRES の
@@ -180,7 +180,7 @@ impl Session {
                     update_subscription_expires_if_present(subscription, &pending_params, now_ms);
                     if let Some(paused) = pending_params.paused() {
                         let new_paused = validate_paused(paused)?;
-                        // draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams):
+                        // draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams):
                         // STOP_SENDING 後の再オープンは、購読を再開する REQUEST_UPDATE
                         // (PAUSED が 1 から 0 へ変わる) が受理された場合のみ許可する。
                         // 現在値が unpaused であることでは解除しない
@@ -251,8 +251,8 @@ impl Session {
                 ));
             }
         }
-        // draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter): LARGEST_OBJECT は actual received 以上でなければならない
-        // draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) /
+        // draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter): LARGEST_OBJECT は actual received 以上でなければならない
+        // draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter) /
         // §3.1.4 (Largest Object): LARGEST_OBJECT は Track 単位の値である。
         // 自側 publisher 役では `publisher_track_largest` が返す Track 最大 (live な
         // subscription 群の最大値と、Track 単位で保持した自側 publish 済み最大の大きい方) を
@@ -275,7 +275,7 @@ impl Session {
             });
         if let Some(subscription) = self.subscriptions.get_mut(&request_id) {
             // LARGEST_OBJECT を許可する context (REQUEST_UPDATE_OK / TRACK_STATUS_OK 経路) でのみ
-            // max 合流を行う。PUBLISH_OK context では §9.20.17 (LARGEST OBJECT Parameter) が
+            // max 合流を行う。PUBLISH_OK context では §9.19.17 (LARGEST OBJECT Parameter) が
             // PUBLISH_OK を列挙していないため注入しない。
             let context_allows_largest_object = allowed_params_for_context
                 .is_some_and(|(allowed, _)| allowed.contains(&PARAM_LARGEST_OBJECT));
@@ -331,11 +331,11 @@ impl Session {
         let result = match subscription.state {
             SubscriptionState::Pending => {
                 subscription.state = SubscriptionState::Terminated;
-                // draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams):
+                // draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams):
                 // subscription の終了時は open 中の fill fetch stream を reset する (MUST)。
                 // SUBSCRIBE 処理直後に開いた fill stream が残っている場合が対象。
                 self.reset_open_fill_streams(request_id);
-                // draft-ietf-moq-transport-22 §9.8 (PUBLISH): 不要な PUBLISH を拒否したとき、
+                // draft-ietf-moq-transport-23 §9.8 (PUBLISH): 不要な PUBLISH を拒否したとき、
                 // 当該 subscription に属する open な受信 stream の読み取りを STOP_SENDING で
                 // abandon する。PUBLISH 受理時点で Track Alias を登録するため、応答前に
                 // publisher 起点 stream が開いていることがある。
@@ -362,7 +362,7 @@ impl Session {
                 // 未応答のグループをすべて破棄する (以後の REQUEST_UPDATE_OK は適用されない)
                 subscription.pending_update_params.clear();
                 subscription.state = SubscriptionState::Terminated;
-                // draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams):
+                // draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams):
                 // subscription の終了時は open 中の fill fetch stream を reset する (MUST)。
                 // PUBLISH_DONE push は send_request_error 側で行う (§9.9 の MUST NOT に
                 // 従い、open 中の stream がある場合は保留される。fill stream も
@@ -495,7 +495,7 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        // draft §9.20.1 (Parameter Scope): Subscription context の REQUEST_OK は
+        // draft §9.19.1 (Parameter Scope): Subscription context の REQUEST_OK は
         // subscription.state で PUBLISH_OK (Pending(Publisher)) と REQUEST_UPDATE_OK
         // (Established) に確定する。それぞれの許可パラメータ集合で検証し、許可外
         // パラメータは INVALID_PARAMETER でセッションをクローズする。Established 分岐は
@@ -521,7 +521,7 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        // draft §9.20.1 (Parameter Scope): ローカル終端済みの request は context を特定できない
+        // draft §9.19.1 (Parameter Scope): ローカル終端済みの request は context を特定できない
         // ため、どちらの context の許可集合にも含まれないパラメータだけを違反とする
         // (和集合の定数に依存させず、両集合の変更に追随させる)。自側 publisher で initiator の
         // 場合は PUBLISH_OK context でも LARGEST_OBJECT を許容する残差がある
@@ -549,7 +549,7 @@ impl Session {
             // draft §9.3 (REQUEST_OK): PUBLISH_OK context → REQUEST_OK に統一。
             // Pending(Publisher) → Established 遷移
             SubscriptionState::Pending if subscription.is_pending_publisher() => {
-                // draft-ietf-moq-transport-22 Appendix A.3 #1790 (Subscription parameters
+                // draft-ietf-moq-transport-23 Appendix A.4 #1790 (Subscription parameters
                 // appear in REQUEST_UPDATE, not PUBLISH_OK): PUBLISH_OK は EXPIRES のみを
                 // 運ぶ。スコープ検証で EXPIRES 以外は既に弾かれているため、ここでは
                 // EXPIRES の適用と Established 遷移のみ行う。filter / PAUSED 等の
@@ -571,7 +571,7 @@ impl Session {
             SubscriptionState::Established => {
                 // LARGEST_OBJECT の保存は自側が subscriber の場合に限る。
                 // publisher 側の保存は draft-20 で廃止された
-                // (draft-ietf-moq-transport-22 Appendix A.3 #1872)。
+                // (draft-ietf-moq-transport-23 Appendix A.4 #1872)。
                 // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
                 if subscription.my_role != TrackRole::Publisher
                     && let Some((group_id, object_id)) = parameters.largest_object()
@@ -615,7 +615,7 @@ impl Session {
 
     /// subscription 用 REQUEST_ERROR の受信時状態遷移
     ///
-    /// draft-ietf-moq-transport-22 §3.1.2 (Subscription State Management):
+    /// draft-ietf-moq-transport-23 §3.1.2 (Subscription State Management):
     /// "A subscriber keeps subscription state until it cancels the request
     /// (see Section 6.4.2.3), or until receipt of a PUBLISH_DONE or REQUEST_ERROR."
     /// REQUEST_ERROR の受信を subscription state を終える明示的な条件として列挙するため、
@@ -652,7 +652,7 @@ impl Session {
             match subscription.state {
                 SubscriptionState::Pending => {
                     subscription.state = SubscriptionState::Terminated;
-                    // draft-ietf-moq-transport-22 §3.1.2: REQUEST_ERROR → 即時破棄 (drain timer 不要)
+                    // draft-ietf-moq-transport-23 §3.1.2: REQUEST_ERROR → 即時破棄 (drain timer 不要)
                     subscription.publish_done = None;
                     // 自側が失敗応答を送る `send_err_for_subscription` と対称に、open 中の
                     // fill fetch stream を reset する (§3.4.1 の MUST)
@@ -662,9 +662,9 @@ impl Session {
                     // draft §3.1.2: REQUEST_ERROR の受信で subscription state を終える。
                     // REQUEST_UPDATE 失敗応答も同じく Terminated に遷移させ、再 REQUEST_UPDATE の窓を閉じる。
                     subscription.state = SubscriptionState::Terminated;
-                    // draft-ietf-moq-transport-22 §3.1.2: REQUEST_ERROR → 即時破棄 (drain timer 不要)
+                    // draft-ietf-moq-transport-23 §3.1.2: REQUEST_ERROR → 即時破棄 (drain timer 不要)
                     subscription.publish_done = None;
-                    // draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions):
+                    // draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions):
                     // "When a REQUEST_UPDATE is unsuccessful, the publisher MUST also
                     //  terminate the subscription by sending a PUBLISH_DONE with error
                     //  code UPDATE_FAILED."
@@ -679,7 +679,7 @@ impl Session {
                         publish_done_stream_count =
                             Some(subscription.stream_counts.published_count);
                     }
-                    // draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams):
+                    // draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams):
                     // subscription の終了時は open 中の fill fetch stream を reset する (MUST)。
                     // 自側が失敗応答を送る `send_err_for_subscription` と対称にする。片方だけ
                     // reset しないと、§9.9 (PUBLISH_DONE) の MUST NOT で保留した PUBLISH_DONE が
@@ -703,7 +703,7 @@ impl Session {
         // MAX_REQUEST_UPDATES のクレジットを解放する。以後の応答は返らない
         // (draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions))。
         self.release_request_update_state(request_id);
-        // draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE): "A sender MUST NOT send
+        // draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE): "A sender MUST NOT send
         // PUBLISH_DONE until it has closed all streams it will ever open, and has no
         // further datagrams to send, for a subscription." の MUST NOT と §9.5.1 の MUST を
         // 両立するため、open 中の outgoing data stream がある間は push を保留し
@@ -747,7 +747,7 @@ impl Session {
             }
         }
         // OBJECT_DELIVERY_TIMEOUT の判定
-        // draft-ietf-moq-transport-22 §5.2 (Delivery Timeouts and Data Reliability): object header の
+        // draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability): object header の
         // 最終バイト提供からの経過時間が OBJECT_DELIVERY_TIMEOUT を超過した場合、
         // DELIVERY_TIMEOUT で stream を reset する (MUST)
         // キーは (stream_id, object_id) の複合キー。同一 stream_id のいずれかの object が
@@ -815,7 +815,7 @@ impl Session {
             });
         }
         // SUBGROUP_DELIVERY_TIMEOUT の判定
-        // draft-ietf-moq-transport-22 §5.2 (Delivery Timeouts and Data Reliability): subgroup stream の FIN 受信から
+        // draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability): subgroup stream の FIN 受信から
         // SUBGROUP_DELIVERY_TIMEOUT を超過した場合、DELIVERY_TIMEOUT で stream を reset する (MUST)
         let subgroup_timed_out: Vec<DataStreamId> = self
             .timing

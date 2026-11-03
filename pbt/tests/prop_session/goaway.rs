@@ -158,7 +158,7 @@ fn goaway_timeout_expires_with_pending_subscription_blocker() -> noprop::TestRes
 // request stream 上の GOAWAY の deadline 満了で、reset と終端が request ごとに 1 回だけ発行され、
 // 期限到達後の tick で再発行されないこと
 //
-// draft-ietf-moq-transport-22 §9.2 (GOAWAY): "When sent on a request stream, the sender SHOULD
+// draft-ietf-moq-transport-23 §9.2 (GOAWAY): "When sent on a request stream, the sender SHOULD
 // reset the stream with GOING_AWAY after the indicated timeout." の reset と、それに伴う
 // `TerminationReason::GoawayTimeout` の終端は request ごとに 1 回だけであり、セッションは
 // 閉じない。時刻と timeout の任意の組合せで成立することを確認する。
@@ -254,7 +254,7 @@ fn request_stream_goaway_timeout_fires_exactly_once() -> noprop::TestResult {
 }
 
 // ============================================================
-// DATA_STREAM_TIMEOUT (draft-ietf-moq-transport-22 §12.2 (Session Termination Codes))
+// DATA_STREAM_TIMEOUT (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))
 // ============================================================
 //
 // §12.2 は open な subgroup stream で新しい object header を待って timeout した場合の措置を
@@ -292,7 +292,7 @@ fn subgroup_data_stream_timeout_emits_stop_sending_without_close() -> noprop::Te
         client.set_control_message_timeout_ms(None);
         client.set_data_stream_timeout_ms(Some(timeout));
         // stream type だけを受信した状態でも DATA_STREAM_TIMEOUT の監視対象になる
-        // 0x14 は SUBGROUP_HEADER の stream type (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))
+        // 0x14 は SUBGROUP_HEADER の stream type (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
         client
             .recv_data_stream_type(DataStreamId(1), 0x14)
             .expect("テストフィクスチャの前提条件を満たす");
@@ -367,7 +367,7 @@ fn subgroup_data_stream_timeout_emits_stop_sending_without_close() -> noprop::Te
 
 /// 期限到達した FETCH stream は 0x12 でセッションを閉じ、STOP_SENDING は指示しない
 ///
-/// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の MAY は open な subgroup stream を
+/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の MAY は open な subgroup stream を
 /// 対象にし、FETCH stream には代替措置を示していない。
 #[test]
 fn fetch_data_stream_timeout_closes_session() -> noprop::TestResult {

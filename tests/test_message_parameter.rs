@@ -172,7 +172,7 @@ mod error_cases {
     fn length_prefix_exceeding_remaining_is_key_value_formatting_error() {
         // count=1, type=PARAM_AUTHORIZATION_TOKEN (length-prefixed) で宣言長 10 だが
         // 残りは 3 バイトしかない。Type を理解したうえで Length/Value が直列化と一致しないため、
-        // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) の MUST により
+        // draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の MUST により
         // MALFORMED_KEY_VALUE になる。
         let mut buf = Vec::new();
         // count = 1
@@ -230,7 +230,7 @@ mod error_cases {
         // FILL_PARAMETERS の内側にも長さプレフィックス付きの値 (Range Filter) は載る。
         // 内側: Number of Parameters=1, delta=PARAM_SUBGROUP_FILTER、宣言長 10、データ 3 バイト。
         // 宣言長が残りバッファ全体を超えるため、内側の個数とは独立に
-        // MALFORMED_KEY_VALUE になる (draft-ietf-moq-transport-22 §8.3
+        // MALFORMED_KEY_VALUE になる (draft-ietf-moq-transport-23 §8.3
         // (Key-Value-Pair Structure))。
         let mut buf = Vec::new();
         varint::encode(1, &mut buf); // 外側の Number of Parameters
@@ -270,9 +270,9 @@ mod error_cases {
     }
 
     #[test]
-    fn location_filter_end_group_delta_overflow_is_protocol_violation() {
-        // StartGroup + EndGroupDelta が 2^64 - 1 を超えたら PROTOCOL_VIOLATION
-        // (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))
+    fn location_filter_end_group_delta_overflow_is_delta_encoding_overflow() {
+        // StartGroup + EndGroupDelta が 2^64 - 1 を超えたら DELTA_ENCODING_OVERFLOW
+        // (draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter))
         // Type 0x03 (Absolute Start, Group End) で [group=1, object=0, delta=u64::MAX] を
         // 与えると 1 + (2^64 - 1) がオーバーフローする。vi64 の u64::MAX は 9 バイト (0xFF x 9)。
         let buf = vec![
@@ -292,7 +292,7 @@ mod error_cases {
 
     #[test]
     fn unknown_location_filter_type_is_protocol_violation() {
-        // draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter):
+        // draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter):
         // "If an endpoint receives any other Location Filter Type, it MUST close the session with
         // INVALID_PARAMETER." (draft-ietf-moq-transport-23 §9.19.9)
         let buf = vec![
@@ -516,7 +516,7 @@ mod param_encoding_strictness {
 
 /// AUTHORIZATION_TOKEN の (Token Type, Token Value) 一意性検証を検証する。
 ///
-/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression):
+/// draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression):
 /// alias 解決後の (Token Type, Token Value) の組み合わせは一意でなければならない。
 /// encode は自側で重複を組み立てた時点で拒否する。decode は重複を検出せず (メッセージ単位の
 /// reject は Request ID を得たセッション層が行う)、
@@ -628,7 +628,7 @@ mod accessors {
 
     /// FILL_TIMEOUT (type 0x0A) のアクセサ
     ///
-    /// draft-ietf-moq-transport-22 §9.20.5 (FILL TIMEOUT Parameter)
+    /// draft-ietf-moq-transport-23 §9.19.5 (FILL TIMEOUT Parameter)
     #[test]
     fn fill_timeout_accessor() {
         let mut params = MessageParameters::new();
@@ -641,7 +641,7 @@ mod accessors {
 
     /// FILL_TIMEOUT は SUBSCRIBE では拒否される (FETCH のみ許可)
     ///
-    /// draft-ietf-moq-transport-22 §9.20.5 / §9.20.1 (Parameter Scope)
+    /// draft-ietf-moq-transport-23 §9.19.5 / §9.19.1 (Parameter Scope)
     /// FETCH 側の正常系は PBT の FETCH_PARAMS ラウンドトリップで担保する。
     #[test]
     fn fill_timeout_rejected_on_subscribe() {
@@ -673,7 +673,7 @@ mod accessors {
     #[test]
     fn expires_zero_means_no_expiration() {
         // EXPIRES=0 は「期限なし」と扱い、expires() は None を返す。
-        // draft-ietf-moq-transport-22 §9.20.16
+        // draft-ietf-moq-transport-23 §9.19.16
         let mut params = MessageParameters::new();
         params.push(MessageParameter {
             param_type: PARAM_EXPIRES,
@@ -686,7 +686,7 @@ mod accessors {
     #[test]
     fn expires_non_zero_returns_some() {
         // EXPIRES=n（n > 0）は有効な期限値として Some(n) を返す。
-        // draft-ietf-moq-transport-22 §9.20.16
+        // draft-ietf-moq-transport-23 §9.19.16
         let mut params = MessageParameters::new();
         params.push(MessageParameter {
             param_type: PARAM_EXPIRES,
@@ -727,7 +727,7 @@ mod accessors {
 
     /// INCLUDE_PROPERTIES (type 0x35) のアクセサと round-trip
     ///
-    /// draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
+    /// draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
     /// 0 (送らない) / 1 (送る)。不在時は default 1 として扱う。
     #[test]
     fn include_properties_accessor_and_round_trip() {
@@ -751,7 +751,7 @@ mod accessors {
 
     /// INCLUDE_PROPERTIES の範囲外値 (2+) は encode/decode 両経路で拒否される
     ///
-    /// draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
+    /// draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
     /// 範囲外受信時は MUST close the session with INVALID_PARAMETER。
     #[test]
     fn include_properties_out_of_range_rejected() {
@@ -857,7 +857,7 @@ mod accessors {
     }
 }
 
-/// draft-ietf-moq-transport-22 §3.3.1 (Location Filters): `location_filter_update` の 3 状態。
+/// draft-ietf-moq-transport-23 §3.3.1 (Location Filters): `location_filter_update` の 3 状態。
 mod location_filter_update {
     use super::*;
     use shiguredo_moqt::message_parameter::LocationFilterUpdate;
@@ -959,7 +959,7 @@ mod location_filter_update {
     }
 }
 
-/// draft-ietf-moq-transport-22 §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER Parameter):
+/// draft-ietf-moq-transport-23 §3.3.1 (Location Filters) / §9.19.9 (LOCATION FILTER Parameter):
 /// LocationFilter の符号化 (golden バイト列とエラー分類) と実効 Start / End Location の導出。
 mod location_filter_derivation {
     use super::*;
@@ -1047,7 +1047,7 @@ mod location_filter_derivation {
 
     #[test]
     fn absolute_start_zero_is_distinct_from_next_object() {
-        // draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter) は
+        // draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter) は
         // Type 0x02 (Absolute Start) と Type 0x05 (Next Object) を別の符号化として
         // 定義するため、AbsoluteStart {0, 0} は NextObject に正規化されない
         let filter = LocationFilter::AbsoluteStart { start: loc(0, 0) };
@@ -1071,7 +1071,7 @@ mod location_filter_derivation {
     #[test]
     fn location_filter_type_bytes_are_fixed() {
         // Type 0x00 / 0x05 はフィールドを持たず、Type 0x01〜0x04 は Type が定める数の
-        // vi64 フィールドを持つ (draft-ietf-moq-transport-22 §9.20.9)
+        // vi64 フィールドを持つ (draft-ietf-moq-transport-23 §9.19.9)
         //
         // 6 形式すべてについて golden バイト列との encode / decode 双方向の一致を固定する。
         // encode 側だけでは Type 0x01 の decode が StartGroup を読むことや消費バイト数を
@@ -1129,7 +1129,8 @@ mod location_filter_derivation {
 
     #[test]
     fn decode_rejects_unknown_location_filter_type() {
-        // Type 0x06 以上は PROTOCOL_VIOLATION (draft-ietf-moq-transport-22 §9.20.9)
+        // Type 0x06 以上は INVALID_PARAMETER
+        // (draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter))
         assert!(matches!(
             LocationFilter::decode(&[0x06]),
             Err(MessageError::InvalidParameter)
@@ -1177,7 +1178,7 @@ mod location_filter_derivation {
     fn end_group_delta_boundary_at_max_is_valid() {
         // StartGroup + EndGroupDelta == 2^64 - 1 は仕様上正当であり、拒否条件が
         // 「2^64 - 1 を超える」から「2^64 - 1 以上」へ退行していないことを固定する
-        // (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))
+        // (draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter))
         let filter = LocationFilter::AbsoluteRange {
             start: loc(1, 0),
             end_group_delta: u64::MAX - 1,
@@ -1400,7 +1401,7 @@ mod kvp_value_length_limit {
     }
 }
 
-/// draft-ietf-moq-transport-22 §3.3.2 (Range Filters): REQUEST_UPDATE での Range Filter マージ
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters): REQUEST_UPDATE での Range Filter マージ
 ///
 /// "In REQUEST_UPDATE, Length of 0 removes the filter; non-zero replaces it entirely."
 /// "If a filter parameter is omitted from REQUEST_UPDATE, it is unchanged."
@@ -1616,7 +1617,7 @@ mod merge_from_range_filter {
     }
 }
 
-/// draft-ietf-moq-transport-22 §3.3.2 (Range Filters): `validate_range_filters()` の単体テスト
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters): `validate_range_filters()` の単体テスト
 ///
 /// 正常系の受理は `pbt/tests/prop_message_parameter.rs` の
 /// `validate_range_filters_errs_exactly_on_duplicate_keys` に任せ、
@@ -1673,7 +1674,7 @@ mod validate_range_filters {
 
     /// PRIORITY_FILTER の Start 値が 255 を超える場合は拒否される
     ///
-    /// draft-ietf-moq-transport-22 §9.20.12
+    /// draft-ietf-moq-transport-23 §9.19.12
     #[test]
     fn priority_filter_value_over_255_is_rejected() {
         // SetID=0, Start=256 (> 255)
@@ -1694,7 +1695,7 @@ mod validate_range_filters {
 
     /// PRIORITY_FILTER の End 値が 255 を超える場合は拒否される
     ///
-    /// draft-ietf-moq-transport-22 §9.20.12
+    /// draft-ietf-moq-transport-23 §9.19.12
     #[test]
     fn priority_filter_end_over_255_is_rejected() {
         // SetID=0, Start=200, End_delta=100 → absolute End=300 (> 255)
@@ -1731,7 +1732,7 @@ mod validate_range_filters {
 
     /// OBJECT_PROPERTY_FILTER の奇数 Property Type は拒否される
     ///
-    /// draft-ietf-moq-transport-22 §9.20.13: Property Type MUST be even
+    /// draft-ietf-moq-transport-23 §9.19.13: Property Type MUST be even
     #[test]
     fn object_property_filter_odd_property_type_is_rejected() {
         // SetID=0, Property Type=0x03 (奇数), Start=1
@@ -1771,7 +1772,7 @@ mod validate_range_filters {
     }
 }
 
-/// draft-ietf-moq-transport-22 §3.3.2 (Range Filters): 同一 Parameter Type の複数出現
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters): 同一 Parameter Type の複数出現
 ///
 /// §3.3.2 は TRACK_PROPERTY_FILTER (0x29) を SUBSCRIBE_TRACKS / REQUEST_UPDATE で、
 /// その他 4 種 (0x25-0x28) を FETCH / SUBSCRIBE / SUBSCRIBE_TRACKS / PUBLISH_OK /
@@ -1779,7 +1780,7 @@ mod validate_range_filters {
 /// 規定する。1 インスタンスは 1 SetID しか持てず SetID ごとの結果は OR 結合されるため、
 /// 複数 SetID を表現するには複数出現が必須になる。
 ///
-/// 重複拒否の粒度は (Parameter Type, SetID, Property Type) であり、これは codec 層 (§9.20) では
+/// 重複拒否の粒度は (Parameter Type, SetID, Property Type) であり、これは codec 層 (§9.19) では
 /// なく `validate_range_filters()` (§3.3.2) の管轄になる。この 2 層の棲み分けを検証する。
 ///
 /// 複数出現の round-trip そのものは `pbt/tests/prop_message_parameter.rs` の
@@ -1802,7 +1803,7 @@ mod range_filter_multiple_appearance {
     /// Property Type を持つ Range Filter (0x28 / 0x29) の 1 Range 分のバイト列を作る
     ///
     /// ワイヤフォーマット: SetID (1 byte) | Property Type (vi64) | Start (vi64)。
-    /// Property Type は §9.20.13 / §9.20.14 により偶数でなければならない。
+    /// Property Type は §9.19.13 / §9.19.14 により偶数でなければならない。
     fn property_filter_bytes(set_id: u8, property_type: u64, start: u64) -> Vec<u8> {
         let mut bytes = vec![set_id];
         varint::encode(property_type, &mut bytes);
@@ -1869,7 +1870,7 @@ mod range_filter_multiple_appearance {
             params.push(filter_param(param_type, property_filter_bytes(1, 0x02, 3)));
             params.push(filter_param(param_type, property_filter_bytes(1, 0x02, 9)));
 
-            // codec 層 (§9.20) は複数出現を通す
+            // codec 層 (§9.19) は複数出現を通す
             let mut buf = Vec::new();
             assert!(
                 params.encode(&mut buf).is_ok(),
@@ -2385,8 +2386,8 @@ mod fill_parameters {
     }
 
     #[test]
-    fn unknown_inner_type_is_protocol_violation() {
-        // 内側でも未知のパラメータ型は PROTOCOL_VIOLATION になる。§9.19 (Control Message
+    fn unknown_inner_type_is_invalid_parameter() {
+        // 内側でも未知のパラメータ型は INVALID_PARAMETER になる。§9.19 (Control Message
         // Parameters) は未知のパラメータをスキップする手段を設けていない (MUST close)。
         // 内側: count=1, delta=0x01 (未定義), 値=0x00
         let wire = vec![0x01, 0x23, 0x01, 0x01, 0x00];
@@ -2401,7 +2402,7 @@ mod fill_parameters {
     #[test]
     fn duplicate_inner_param_type_rejected() {
         // 内側スコープでも、パラメータ定義が明示的に複数出現を許可していない型の繰り返しは
-        // §9.19 (Control Message Parameters) の送信側 MUST NOT であり、PROTOCOL_VIOLATION で
+        // §9.19 (Control Message Parameters) の送信側 MUST NOT であり、INVALID_PARAMETER で
         // 拒否する。delta == 0 が同一型の繰り返しにあたる。
         // 内側: count=2, FILL_TIMEOUT=1000 (2 バイト varint), delta=0x00 (FILL_TIMEOUT の繰り返し)
         let wire = vec![0x01, 0x23, 0x02, 0x0A, 0x83, 0xE8, 0x00];
@@ -2757,7 +2758,7 @@ mod resulting_publish_parameters {
     #[test]
     fn keeps_publish_subset_and_drops_auth_token() {
         // SUBSCRIBE_TRACKS 由来の PUBLISH には subset のみ載り、auth token は載らない
-        // (draft-ietf-moq-transport-22 §3.6.2 / §9.20.2)。
+        // (draft-ietf-moq-transport-23 §3.6.2 / §9.19.2)。
         // 集合一致で検証する (順序は実装の入力順保持であり仕様要求ではない)。
         let derived = sample_params_for_filter().resulting_publish_parameters();
         let mut types: Vec<u64> = derived.as_slice().iter().map(|p| p.param_type).collect();
@@ -2827,7 +2828,7 @@ mod resulting_publish_parameters {
     }
 }
 
-/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) / §9.1.4 (AUTHORIZATION
+/// draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression) / §9.1.4 (AUTHORIZATION
 /// TOKEN) のエラー経路。
 ///
 /// §8.9: "If the Token structure cannot be decoded, including an unknown Alias Type, the
@@ -2901,7 +2902,7 @@ mod authorization_token_errors {
 
     #[test]
     fn encode_rejects_token_value_over_65535_bytes() {
-        // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure):
+        // draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure):
         // 値長上限は 2^16-1 バイト。REGISTER の Token Value で上限を超えると拒否する
         let mut params = MessageParameters::new();
         params.push(MessageParameter {

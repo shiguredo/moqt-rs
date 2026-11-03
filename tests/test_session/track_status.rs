@@ -1,6 +1,6 @@
 //! TRACK_STATUS の送信側 (自側 subscriber) と受信側 (自側 publisher) のテスト群
 //!
-//! draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): 受信側は SUBSCRIBE と同様に扱うが、
+//! draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS): 受信側は SUBSCRIBE と同様に扱うが、
 //! subscription state も Track Alias も作らず Objects も送らない。応答 (TRACK_STATUS_OK /
 //! REQUEST_ERROR) の送信後に bidi stream を FIN で閉じる。
 //!
@@ -166,7 +166,7 @@ fn send_track_status_registers_pending_entry() {
 
 /// REQUEST_OK を受信すると entry が応答済みになり、RequestOkReceived が発行される
 ///
-/// draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): 受信側は SUBSCRIBE と同様に扱い、
+/// draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS): 受信側は SUBSCRIBE と同様に扱い、
 /// TRACK_STATUS_OK を返す。LARGEST_OBJECT は任意で載る。
 #[test]
 fn track_status_completes_on_request_ok() {
@@ -484,7 +484,7 @@ fn forget_track_status_is_idempotent_after_response() {
 
 /// peer から TRACK_STATUS を受信すると応答待ちの entry が登録され、セッションは閉じない
 ///
-/// draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): 受信側は SUBSCRIBE と同様に扱うが、
+/// draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS): 受信側は SUBSCRIBE と同様に扱うが、
 /// "it does not create downstream subscription state or send any Objects" である。
 #[test]
 fn recv_peer_track_status_registers_pending_entry() {
@@ -512,7 +512,7 @@ fn recv_peer_track_status_registers_pending_entry() {
         "自側が受けた要求は responder (Publisher) として登録されること"
     );
     assert!(entry.response.is_none(), "応答前は応答待ちであること");
-    // §9.13: subscription state を作らない
+    // §9.12: subscription state を作らない
     assert!(
         server.subscription(rid).is_none(),
         "TRACK_STATUS は subscription state を作らないこと"
@@ -525,7 +525,7 @@ fn recv_peer_track_status_registers_pending_entry() {
 
 /// TRACK_STATUS_OK を送信すると entry が応答済みになり、bidi stream が FIN で閉じる
 ///
-/// draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): "The bidi stream is closed with a FIN
+/// draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS): "The bidi stream is closed with a FIN
 /// after TRACK_STATUS_OK or TRACK_STATUS_ERROR are sent."
 #[test]
 fn track_status_ok_send_closes_stream_with_fin() {
@@ -581,7 +581,7 @@ fn track_status_ok_send_closes_stream_with_fin() {
 
 /// 受信した TRACK_STATUS は REQUEST_ERROR で拒否でき、bidi stream が FIN で閉じる
 ///
-/// draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): "A publisher responds to a failed
+/// draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS): "A publisher responds to a failed
 /// TRACK_STATUS with an appropriate TRACK_STATUS_ERROR message. The bidi stream is closed
 /// with a FIN after TRACK_STATUS_OK or TRACK_STATUS_ERROR are sent."
 #[test]
@@ -665,7 +665,7 @@ fn track_status_double_response_is_rejected() {
 
 /// requester の RESET_STREAM (cancel) 後は responder も応答できず、entry を破棄できる
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection): "Once a request
+/// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection): "Once a request
 /// stream has been opened, the request MAY be cancelled by either endpoint." cancel 後は
 /// 状態を破棄してよい。
 #[test]
@@ -708,7 +708,7 @@ fn responder_cannot_respond_after_requester_reset() {
 
 /// responder が peer から REQUEST_OK を受けると PROTOCOL_VIOLATION になる
 ///
-/// draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): TRACK_STATUS_OK を送るのは
+/// draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS): TRACK_STATUS_OK を送るのは
 /// TRACK_STATUS を受けた側であり、その逆方向に REQUEST_OK が届くのは peer の違反である。
 #[test]
 fn responder_receiving_request_ok_closes_session() {
@@ -763,7 +763,7 @@ fn responder_receiving_request_error_closes_session() {
 
 /// 予約名前空間と `.session` 名前空間の TRACK_STATUS は REQUEST_ERROR で拒否される
 ///
-/// draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces) / §6.5 (Session-Level Tracks and
+/// draft-ietf-moq-transport-23 §2.4.3 (Reserved Namespaces) / §6.5 (Session-Level Tracks and
 /// Namespaces): SUBSCRIBE と共通の受信前検証が適用される。
 #[test]
 fn recv_track_status_reserved_namespaces_are_rejected() {
@@ -851,7 +851,7 @@ fn recv_track_status_empty_track_name_closes_session() {
 
 /// INCLUDE_PROPERTIES=0 の TRACK_STATUS への応答では Track Properties が空になる
 ///
-/// draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter): "If
+/// draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter): "If
 /// INCLUDE_PROPERTIES is 0, the Track Properties are still present in the message, but they
 /// SHOULD be empty."
 #[test]
@@ -920,7 +920,7 @@ fn track_status_ok_with_include_properties_one_keeps_track_properties() {
 
 /// 応答前に requester の FIN を受けても responder は終端せず TRACK_STATUS_OK を送れる
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure) の FIN は
+/// draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure) の FIN は
 /// 方向ごとの終端であり cancel ではない。
 #[test]
 fn responder_sends_track_status_ok_after_requester_fin() {
@@ -1039,7 +1039,7 @@ fn send_track_status_rejects_reserved_namespace_and_invalid_parameters() {
 
     let (mut client, _server) = establish_pair();
 
-    // draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces): single period `.` は送信不可
+    // draft-ietf-moq-transport-23 §2.4.3 (Reserved Namespaces): single period `.` は送信不可
     let err = client
         .send_track_status(ns(&[b"."]), b"cam".to_vec(), MessageParameters::new())
         .expect_err("予約名前空間への TRACK_STATUS は拒否されること");
@@ -1048,7 +1048,7 @@ fn send_track_status_rejects_reserved_namespace_and_invalid_parameters() {
     };
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
 
-    // draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope): TRACK_STATUS で許可されない
+    // draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): TRACK_STATUS で許可されない
     // パラメータは送信前に拒否する
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
@@ -1295,7 +1295,7 @@ fn track_status_unsupported_clears_control_message_deadline() {
 
 /// 未対応結果でも FIN の交換と forget は応答受領済みの単発要求と同じに扱う
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure): responder の FIN を
+/// draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure): responder の FIN を
 /// 受けた requester は送信方向を FIN で閉じる。TRACK_STATUS_OK を受領済みの entry は
 /// `forget_track_status` で破棄できる。
 #[test]

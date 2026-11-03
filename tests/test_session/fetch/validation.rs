@@ -69,7 +69,7 @@ fn fetch_regular_namespace_empty_track_closes_session() {
 
 /// .session 名前空間の非空トラック名に対する FETCH は DOES_NOT_EXIST で拒否される
 ///
-/// draft-ietf-moq-transport-22 §6.5 (Session-Level Tracks and Namespaces): 未認識の
+/// draft-ietf-moq-transport-23 §6.5 (Session-Level Tracks and Namespaces): 未認識の
 /// session-level track へのリクエストは Application へ渡さず REQUEST_ERROR で拒否する。
 /// 本ライブラリは session-level track を登録しないため、非空トラック名も拒否対象になる。
 #[test]
@@ -96,7 +96,7 @@ fn fetch_session_namespace_non_empty_track_rejected() {
         }
         _ => panic!("DOES_NOT_EXIST の RequestError が期待される"),
     }
-    // draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection):
+    // draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection):
     // Application 処理を行わず拒否する場合は REQUEST_ERROR を送って stream を FIN する
     assert!(fin, "拒否応答は FIN で送信されること");
     // 拒否は REQUEST_ERROR のみで、セッションは閉じない
@@ -106,7 +106,7 @@ fn fetch_session_namespace_non_empty_track_rejected() {
 
 /// `.session` を先頭フィールドに持つ複数フィールド名前空間の FETCH も拒否される
 ///
-/// draft-ietf-moq-transport-22 §6.5 の予約は先頭フィールドが `.session` の場合に成立する。
+/// draft-ietf-moq-transport-23 §6.5 の予約は先頭フィールドが `.session` の場合に成立する。
 /// 先頭フィールド一致で判定していることを、複数フィールドの名前空間で確認する。
 #[test]
 fn fetch_session_namespace_multi_field_rejected() {
@@ -133,7 +133,7 @@ fn fetch_session_namespace_multi_field_rejected() {
 
 /// `.session` が先頭以外のフィールドにある FETCH は予約名前空間の対象外として受理される
 ///
-/// draft-ietf-moq-transport-22 §6.5 は `.session` が Track Namespace の first position に
+/// draft-ietf-moq-transport-23 §6.5 は `.session` が Track Namespace の first position に
 /// ある場合だけを予約する。2 番目以降の `.session` は通常の名前空間として扱う。
 #[test]
 fn fetch_namespace_non_first_field_session_accepted() {
@@ -155,7 +155,7 @@ fn fetch_namespace_non_first_field_session_accepted() {
 }
 
 /// single period `.` 予約名前空間の FETCH は track_name 非空でも DOES_NOT_EXIST で拒否される
-/// (draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces))
+/// (draft-ietf-moq-transport-23 §2.4.3 (Reserved Namespaces))
 #[test]
 fn fetch_single_period_namespace_rejected() {
     use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
@@ -182,7 +182,7 @@ fn fetch_single_period_namespace_rejected() {
 /// REQUEST_ERROR で拒否した FETCH のストリームクローズは no-op で吸収され、
 /// セッションが fail しないこと
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection):
+/// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection):
 /// "When an endpoint rejects a request without performing any application processing,
 /// it SHOULD send a REQUEST_ERROR and FIN the stream." FETCH 検証拒否
 /// (ここでは single-period 名前空間) も `request_streams` 未登録のまま拒否するため、
@@ -307,7 +307,7 @@ fn send_fetch_empty_track_name_rejected() {
 }
 
 /// send_fetch に single period `.` 予約名前空間を渡すと SESSION_PROTOCOL_VIOLATION が返る
-/// (draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces))
+/// (draft-ietf-moq-transport-23 §2.4.3 (Reserved Namespaces))
 #[test]
 fn send_fetch_single_period_namespace_rejected() {
     use shiguredo_moqt::message::common::Location;
@@ -380,7 +380,7 @@ fn drain_fetch_cancel_events(s: &mut Session, request_id: u64) -> Vec<&'static s
 /// アプリが先に cancel した fetch に遅れて未知 mandatory 付き FETCH_OK が届いても
 /// cancel を再発行しない
 ///
-/// draft-ietf-moq-transport-22 §3.7 (Mandatory to Understand Track Properties) の cancel は、新規に
+/// draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties) の cancel は、新規に
 /// `Terminated` へ遷移させる経路で 1 回だけ発行する。
 #[test]
 fn late_fetch_ok_with_unknown_mandatory_does_not_re_cancel() {
@@ -456,7 +456,7 @@ fn late_fetch_ok_with_unknown_mandatory_does_not_re_cancel() {
 
 /// FETCH への FETCH_OK で未知の必須 track property を受信すると
 /// fetch が Terminated に遷移し RequestTerminated イベントが発火する
-/// (draft-ietf-moq-transport-22 §3.7 (Mandatory to Understand Track Properties))
+/// (draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties))
 #[test]
 fn fetch_ok_with_unknown_mandatory_property_cancels_fetch() {
     use shiguredo_moqt::message::{RequestOk as WireRequestOk, common::Location};
@@ -527,7 +527,7 @@ fn fetch_ok_with_unknown_mandatory_property_cancels_fetch() {
 
 /// GREASE の track property を含む FETCH_OK は fetch をキャンセルしない
 ///
-/// draft-ietf-moq-transport-22 §16.8 (Properties) の Table 15 は GREASE の Property Type
+/// draft-ietf-moq-transport-23 §16.8 (Properties) の Table 15 は GREASE の Property Type
 /// (`0x7f * N + 0x9D`) を Scope Any として予約しており、N = 128 の 0x401D から N = 256 の
 /// 0x7F9D までは §3.7 (Mandatory to Understand Track Properties) の 0x4000-0x7FFF に入る。GREASE 値は
 /// IANA 登録された Property ではないため §3.7 の対象外とし、§8.4 (Track and Object Properties)
@@ -601,7 +601,7 @@ fn fetch_ok_with_grease_property_in_mandatory_range_does_not_cancel() {
 }
 
 /// 必須範囲外の track property のみを含む FETCH_OK は通常どおり Established に遷移する
-/// (draft-ietf-moq-transport-22 §3.7 (Mandatory to Understand Track Properties) の非回帰)
+/// (draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties) の非回帰)
 #[test]
 fn fetch_ok_with_non_mandatory_property_establishes_fetch() {
     use shiguredo_moqt::message::{RequestOk as WireRequestOk, common::Location};
@@ -655,7 +655,7 @@ fn fetch_ok_with_non_mandatory_property_establishes_fetch() {
 }
 
 /// track property なしの FETCH_OK は通常どおり Established に遷移する
-/// (draft-ietf-moq-transport-22 §3.7 (Mandatory to Understand Track Properties) の非回帰)
+/// (draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties) の非回帰)
 #[test]
 fn fetch_ok_without_track_properties_establishes_fetch() {
     use shiguredo_moqt::message::common::Location;
@@ -703,9 +703,9 @@ fn fetch_ok_without_track_properties_establishes_fetch() {
     );
 }
 
-/// End Location < Start Location かつ未知の必須プロパティを含む FETCH_OK は
-/// mandatory チェックより先に End Location 検証が評価され SESSION_PROTOCOL_VIOLATION になる
-/// (draft-ietf-moq-transport-22 §9.12 (FETCH_OK) / §3.7 (Mandatory to Understand Track Properties) の評価順序)
+/// LARGEST_OBJECT が Start Location より小さい未知の必須プロパティ付き FETCH_OK は
+/// mandatory チェックより先に応答範囲の検証が評価され INVALID_FIELD (0x301) になる
+/// (draft-ietf-moq-transport-23 §3.2 (Fetch) / §3.7 (Mandatory to Understand Track Properties) の評価順序)
 #[test]
 fn fetch_ok_end_before_start_with_unknown_mandatory_closes_session() {
     use shiguredo_moqt::message::{RequestOk as WireRequestOk, common::Location};
@@ -755,11 +755,11 @@ fn fetch_ok_end_before_start_with_unknown_mandatory_closes_session() {
     assert_eq!(err.code, SESSION_INVALID_FIELD);
 }
 
-// ─── GROUP_ORDER 値域検証 (draft §9.20.8) ──────────────────────────────────
+// ─── GROUP_ORDER 値域検証 (draft §9.19.8) ──────────────────────────────────
 
 /// GROUP_ORDER 値域外の FETCH 受信は INVALID_PARAMETER でセッションを閉じる
 ///
-/// draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): 値域外の値は
+/// draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter): 値域外の値は
 /// "MUST close the session with INVALID_PARAMETER"。ワイヤデコード層は値域外を
 /// 弾くため、セッション層に到達するのはアプリが MessageParameters を直接構築して
 /// 渡した場合のみ。
@@ -797,7 +797,7 @@ fn fetch_with_invalid_group_order_closes_session() {
 
 /// 値域外 GROUP_ORDER を含む send_fetch はエラーを返し、セッションは閉じない
 ///
-/// draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): MUST クローズは
+/// draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter): MUST クローズは
 /// 受信側の義務であり、送信側の検証はエラーを返すだけ。検証失敗後も正常な送信が
 /// 継続できること (状態非汚染) を確認する。
 #[test]
@@ -864,7 +864,7 @@ fn send_fetch_with_invalid_group_order_returns_error_without_closing() {
 
 /// 予約名前空間の拒否は値域外パラメータの MUST close より優先される (FETCH)
 ///
-/// draft-ietf-moq-transport-22 は予約名前空間拒否 (§2.4.3 / §6.5) と値域 MUST (§9.20.8 / §9.20.21) の
+/// draft-ietf-moq-transport-23 は予約名前空間拒否 (§2.4.3 / §6.5) と値域 MUST (§9.19.8 / §9.19.22) の
 /// 優先順位を規定しない。宛先自体が存在しない予約名前空間の拒否を優先する意図した選択である。
 #[test]
 fn fetch_reserved_namespace_precedes_parameter_range() {
@@ -909,7 +909,7 @@ fn fetch_reserved_namespace_precedes_parameter_range() {
 
 /// `.` / `.session` の拒否は LOCATION_FILTER の値域 MUST 違反 (MUST close) より優先される (FETCH)
 ///
-/// draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter) は StartGroup + EndGroupDelta が
+/// draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter) は StartGroup + EndGroupDelta が
 /// 2^64 - 1 を超えたら PROTOCOL_VIOLATION でセッションを閉じることを MUST とする。同一メッセージが
 /// 予約名前空間にも該当する場合、draft は優先順位を規定しないが予約名前空間の拒否を優先する
 /// 意図した選択である (wire 経路では decode 層が先に拒否するため、この優先順位が観測されるのは

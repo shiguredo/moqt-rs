@@ -1,7 +1,7 @@
 //! publish 済みメディアの保持と FETCH への応答の判断
 //!
 //! この example が publish した映像 / 音声の Object を `--cache-duration` の時間窓だけ
-//! Group 単位で保持し、subscriber からの FETCH (draft-ietf-moq-transport-22 §3.2 (Fetch) /
+//! Group 単位で保持し、subscriber からの FETCH (draft-ietf-moq-transport-23 §3.2 (Fetch) /
 //! §9.11 (FETCH)) に配る Object と End of Unknown Range の位置を決める。
 //!
 //! 期限切れの判定は Object を保持した時刻 (publisher の壁時計、[`Instant`]) で行う。Group ID は
@@ -9,13 +9,13 @@
 //! (draft-ietf-moq-msf-01 §6.1 (Group numbering))、Group ID から経過時間は復元できない。
 //! 保持量の上限は時間窓だけで決める。Group 数やバイト数の上限を別に設けると、トラックごとに
 //! 実際に保持できる時間が変わり (音声は 1 Object = 1 Group で 20 ms 間隔)、
-//! draft-ietf-moq-transport-22 §10.3 (MAX CACHE DURATION) が示す「保持から配れる時間」と
+//! draft-ietf-moq-transport-23 §10.3 (MAX CACHE DURATION) が示す「保持から配れる時間」と
 //! 一致しなくなる。
 //!
 //! 保持するのは payload と LOC Properties の両方である。FETCH 応答の Object は Properties
 //! フィールドを持つため、Properties は Properties Length varint を含む生バイト列として保持する
 //! ([`LocProperties::encode`] の結果をそのまま持つ。空でも長さ 0 を含む。
-//! draft-ietf-moq-transport-22 §11.1.2 (Object Properties))。
+//! draft-ietf-moq-transport-23 §11.1.2 (Object Properties))。
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -28,7 +28,7 @@ use shiguredo_moqt::message::common::TrackNamespace;
 
 use crate::error::Result;
 
-/// FETCH の GROUP_ORDER が Descending である値 (draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter))
+/// FETCH の GROUP_ORDER が Descending である値 (draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter))
 const GROUP_ORDER_DESCENDING: u8 = 0x02;
 
 /// 保持している 1 件の Object
@@ -57,20 +57,20 @@ pub enum FetchPlan<'a> {
     UnknownTrack,
     /// PUBLISH しているが、まだ 1 件も Object を publish していない
     ///
-    /// 呼び出し側が `REQUEST_INVALID_RANGE` で拒否する (draft-ietf-moq-transport-22 §3.2 は
+    /// 呼び出し側が `REQUEST_INVALID_RANGE` で拒否する (draft-ietf-moq-transport-23 §3.2 は
     /// 「Object が publish されていない」場合に INVALID_RANGE を返す MUST を課す)。
     /// Session が自側 subscription の Largest Object を観測していれば Session が先に拒否する
     /// ため、通常この分岐には到達しない (防御)。
     NoPublishedObjects,
     /// 要求された GROUP_ORDER では応答しない
     ///
-    /// 呼び出し側が `REQUEST_NOT_SUPPORTED` で拒否する。draft-ietf-moq-transport-22 §3.2.1 は
+    /// 呼び出し側が `REQUEST_NOT_SUPPORTED` で拒否する。draft-ietf-moq-transport-23 §3.2.1 は
     /// 要求された group order で送る MUST を課すため、昇順の保持範囲を返さない。
     UnsupportedGroupOrder,
     /// 要求 range の Object を 1 つも保持しておらず、その範囲が evict 済みである
     ///
     /// End of Unknown Range を 1 件だけ書く。evict 済みは
-    /// 「存在しない」ではなく「不明」である (draft-ietf-moq-transport-22 §2.1.2 (Object States) / §10.3)。
+    /// 「存在しない」ではなく「不明」である (draft-ietf-moq-transport-23 §2.1.2 (Object States) / §10.3)。
     AllUnknown {
         /// End of Unknown Range の Location
         end_location: Location,
@@ -78,7 +78,7 @@ pub enum FetchPlan<'a> {
     /// 要求 range に、一度も publish していない範囲しか無い
     ///
     /// Object が 1 つも存在しないため、FETCH_OK を返して「FETCH_HEADER だけの stream」を
-    /// FIN で閉じる (draft-ietf-moq-transport-22 §3.2.1 (Fetch Object Delivery))。
+    /// FIN で閉じる (draft-ietf-moq-transport-23 §3.2.1 (Fetch Object Delivery))。
     /// 「不明」ではないため End of Range を書かない (§3.2.2 は未マークのギャップを
     /// 「存在しない」ものとして扱うと定める)。
     EmptyRange,
@@ -93,8 +93,8 @@ pub enum FetchPlan<'a> {
         leading_non_existent: Option<Location>,
         /// 最初の Object より前に置く End of Unknown Range
         ///
-        /// 要求 Start 側が evict 済みのときだけ `Some` になる。draft-ietf-moq-transport-22
-        /// §11.4.1.2 (End of Range) の End of Unknown Range は「直前に書いた entry の Location
+        /// 要求 Start 側が evict 済みのときだけ `Some` になる。draft-ietf-moq-transport-23
+        /// §11.4.2 (End of Range) の End of Unknown Range は「直前に書いた entry の Location
         /// から自分の Location までの区間」を表す位置依存の表記であり、最初の entry に置くと
         /// 要求 range の先頭から自分の Location までが不明であることを表す。
         leading_unknown: Option<Location>,
@@ -143,7 +143,7 @@ struct TrackCache {
 ///
 /// 1 本の uni stream に書く順序そのものである。End of Range は「直前に書いた entry の
 /// Location から自分の Location までの区間」を表す位置依存の表記であるため
-/// (draft-ietf-moq-transport-22 §11.4.1.2)、順序を純関数として固定する。
+/// (draft-ietf-moq-transport-23 §11.4.2)、順序を純関数として固定する。
 #[derive(Debug)]
 pub enum FetchResponseEntry<'a> {
     /// End of Non-Existent Range (存在しない範囲)
@@ -312,7 +312,7 @@ impl MediaCache {
         if !published {
             return FetchPlan::UnknownTrack;
         }
-        // draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter) / §3.2.1 (Fetch):
+        // draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter) / §3.2.1 (Fetch):
         // 要求された group order で送る MUST があるため、Descending の要求に昇順の
         // 保持範囲を返さない
         if group_order == Some(GROUP_ORDER_DESCENDING) {
@@ -328,7 +328,7 @@ impl MediaCache {
         };
 
         // 一度も publish していない範囲は「存在しない」ため、End of Range を書かずに
-        // FETCH_HEADER だけの stream を返す (draft-ietf-moq-transport-22 §3.2.1)
+        // FETCH_HEADER だけの stream を返す (draft-ietf-moq-transport-23 §3.2.1)
         let Some(first_published) = track.first_published else {
             return FetchPlan::NoPublishedObjects;
         };
@@ -541,7 +541,7 @@ mod tests {
 
     /// GROUP_ORDER が Descending の要求は応答しないこと
     ///
-    /// draft-ietf-moq-transport-22 §3.2.1 (Fetch) は要求された group order で送る MUST を
+    /// draft-ietf-moq-transport-23 §3.2.1 (Fetch) は要求された group order で送る MUST を
     /// 課すため、昇順の保持範囲を返さず `REQUEST_NOT_SUPPORTED` の判断にする。
     #[test]
     fn plan_rejects_a_descending_group_order() {
@@ -580,7 +580,7 @@ mod tests {
     /// 保持より前の範囲には evict が無ければ End of Unknown Range を置かないこと
     ///
     /// 要求 Start が最初に返す Object より前でも、その範囲の Object を保持したことが無ければ
-    /// 「不明」ではなく既定の「存在しない」として扱う (draft-ietf-moq-transport-22 §3.2.2)。
+    /// 「不明」ではなく既定の「存在しない」として扱う (draft-ietf-moq-transport-23 §3.2.2)。
     #[test]
     fn plan_omits_end_of_unknown_range_without_an_evicted_object() {
         let mut cache = MediaCache::new(60_000);
@@ -601,7 +601,7 @@ mod tests {
 
     /// 要求 Start 側が evict 済みなら、最初の Object の前に End of Unknown Range を置くこと
     ///
-    /// draft-ietf-moq-transport-22 §11.4.1.2 (End of Range) の End of Unknown Range は
+    /// draft-ietf-moq-transport-23 §11.4.2 (End of Range) の End of Unknown Range は
     /// 「直前に書いた entry の Location から自分の Location までの区間」を表す。最初の entry に
     /// 置く場合は要求 range の先頭から自分の Location までが不明であることを表すため、
     /// Location は要求 range 内で最後に evict した Location にする。
@@ -653,7 +653,7 @@ mod tests {
 
     /// 一度も publish していない範囲だけを要求された場合は空の応答にすること
     ///
-    /// 存在しない Object に End of Unknown Range を書かない (draft-ietf-moq-transport-22
+    /// 存在しない Object に End of Unknown Range を書かない (draft-ietf-moq-transport-23
     /// §3.2.1 は「要求 range に Object が無い」場合に FETCH_HEADER だけの stream を返すと定める)。
     #[test]
     fn plan_reports_a_range_before_the_first_object_as_empty() {
@@ -671,7 +671,7 @@ mod tests {
     /// 未 publish の範囲と evict 済みの範囲が混在する場合は境界を分けて示すこと
     ///
     /// End of Non-Existent Range は「存在しない範囲と不明な範囲に分割する」用途に限って
-    /// 使ってよい (draft-ietf-moq-transport-22 §3.2.2)。分割しないと、存在しない範囲まで
+    /// 使ってよい (draft-ietf-moq-transport-23 §3.2.2)。分割しないと、存在しない範囲まで
     /// 「不明」と主張してしまう。
     #[test]
     fn plan_splits_non_existent_and_evicted_ranges() {
@@ -697,7 +697,7 @@ mod tests {
 
     /// 要求 range 全体が evict 済みである場合は不明として示すこと
     ///
-    /// evict 済みは「存在しない」ではなく「不明」である (draft-ietf-moq-transport-22 §2.1.2 /
+    /// evict 済みは「存在しない」ではなく「不明」である (draft-ietf-moq-transport-23 §2.1.2 /
     /// §10.3)。End of Unknown Range の Location は応答範囲の終端にする。
     #[test]
     fn plan_reports_an_evicted_range_as_unknown() {
@@ -717,7 +717,7 @@ mod tests {
     /// 応答に書く entry の並びを固定すること
     ///
     /// End of Range は「直前に書いた entry の Location から自分の Location までの区間」を
-    /// 表す位置依存の表記であるため (draft-ietf-moq-transport-22 §11.4.1.2)、並びそのものを
+    /// 表す位置依存の表記であるため (draft-ietf-moq-transport-23 §11.4.2)、並びそのものを
     /// 固定する。存在しない範囲 → 不明な範囲 → Object の順になる。
     #[test]
     fn plan_entries_are_written_in_order() {
@@ -800,7 +800,7 @@ mod tests {
         let mut cache = MediaCache::new(60_000);
         insert(&mut cache, loc(1, 0), b"a");
 
-        // 同じ prop_id を 2 度積むと encode がエラーになる (draft-ietf-moq-transport-22 §11.1.2)
+        // 同じ prop_id を 2 度積むと encode がエラーになる (draft-ietf-moq-transport-23 §11.1.2)
         let mut props = LocProperties::new();
         props.push(LocProperty {
             prop_id: PROP_TIMESTAMP,
@@ -881,7 +881,7 @@ mod tests {
     /// 保持する Properties が Properties Length varint を含む生バイト列であること
     ///
     /// FETCH 応答の Object は Properties フィールドを持つため、Properties Length varint を
-    /// 含む完全なブロックとして保持する (draft-ietf-moq-transport-22 §11.1.2 (Object
+    /// 含む完全なブロックとして保持する (draft-ietf-moq-transport-23 §11.1.2 (Object
     /// Properties))。保持したバイト列をそのままデコードできることで、長さの前置が 1 回だけ
     /// であることを固定する。
     #[test]

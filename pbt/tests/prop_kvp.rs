@@ -1,6 +1,6 @@
 //! `src/kvp.rs` の delta-key 骨格 (encode_delta_key / decode_delta_key) を検証する PBT
 //!
-//! draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure)
+//! draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure)
 //!
 //! `kvp` のヘルパーは `pub(crate)` で外部公開していないため、delta-key を素直に経由する公開型
 //! `LocProperties` の encode/decode をドライバとして用いる (偶数キー = varint 値で値形式が最も単純なため)。

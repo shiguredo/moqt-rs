@@ -9,11 +9,11 @@
 //! `transport.rs` の enum と `moqt_client.rs` からは腕で参照する。qmux-rs の API が
 //! 変わったときに追随する範囲を局所にするためである。
 //!
-//! 経路の位置づけ: draft-ietf-moq-transport-22 §6.2 は「TCP など他のトランスポート上で
+//! 経路の位置づけ: draft-ietf-moq-transport-23 §6.2 は「TCP など他のトランスポート上で
 //! 直接動かす方法は定義しない」と明記しており、QMux 上の MOQT を扱うのは
 //! `refs/moq/draft-nandakumar-moq-qmux-moqt-00.txt` (individual draft) である。同 draft は
 //! MOQT draft-16 を前提としており、control stream を QMux の双方向 stream 0 とする点
-//! (Section 4.2) は draft-ietf-moq-transport-22 §6.4.1 (control stream は単方向ストリーム)
+//! (Section 4.2) は draft-ietf-moq-transport-23 §6.4.1 (control stream は単方向ストリーム)
 //! と矛盾する。本実装は QMux が QUIC version 1 のストリームを多重化する性質に従い、
 //! ストリームを 1 対 1 に対応させる (individual draft Section 4.2 は採らない)。
 
@@ -41,7 +41,7 @@ use crate::transport::{RecvStream, SendStream};
 /// 一方 draft-ietf-quic-qmux-02 Section 8.1 は「QMux へのマッピングの識別子は同一
 /// プロトコルの QUIC マッピングと異なるものでなければならない (SVCB との互換のため)」と
 /// MUST で定めるため、この選択は同節から外れる。MOQT 側に QMux 用の登録が無く
-/// (draft-ietf-moq-transport-22 §16 の ALPN registry は未整備)、SVCB 互換レコードを
+/// (draft-ietf-moq-transport-23 §16 の ALPN registry は未整備)、SVCB 互換レコードを
 /// 定義する draft も未整備である (同 §6.1.2 の TODO) ことから interop を優先する。
 /// 両 draft が決着したら見直すこと。
 const ALPN: &[u8] = crate::MOQT_PROTOCOL.as_bytes();

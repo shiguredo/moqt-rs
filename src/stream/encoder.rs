@@ -29,7 +29,7 @@ pub struct FetchObjectInput {
     /// 絶対 Subgroup ID
     ///
     /// `is_datagram_origin` が true のときは wire に載らず 0 として扱われる
-    /// (draft-ietf-moq-transport-22 §11.4.1.1 (Flags): Datagram 起源の Object は Subgroup ID を持たない)。
+    /// (draft-ietf-moq-transport-23 §11.4.1.1 (Flags): Datagram 起源の Object は Subgroup ID を持たない)。
     pub subgroup_id: u64,
     /// 絶対 Object ID
     pub object_id: u64,
@@ -113,7 +113,7 @@ pub struct FetchStreamEncoder {
     track_ended: bool,
     /// Subgroup ごとの最後の Publisher Priority
     ///
-    /// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 1:
+    /// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 1:
     /// "An Object with a particular Subgroup ID is received, but its Publisher
     ///  Priority is different from that of the previous Object with the same
     ///  Subgroup ID."
@@ -124,9 +124,9 @@ pub struct FetchStreamEncoder {
     subgroup_priorities: HashMap<(u64, u64), u8>,
 }
 
-/// FETCH response の Group Order: Ascending (draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter))
+/// FETCH response の Group Order: Ascending (draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter))
 const FETCH_GROUP_ORDER_ASCENDING: u8 = 0x01;
-/// FETCH response の Group Order: Descending (draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter))
+/// FETCH response の Group Order: Descending (draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter))
 const FETCH_GROUP_ORDER_DESCENDING: u8 = 0x02;
 
 impl FetchStreamEncoder {
@@ -138,7 +138,7 @@ impl FetchStreamEncoder {
     /// Group Order を指定して新しいエンコーダーを作成する
     ///
     /// `group_order` は Ascending (0x01) または Descending (0x02) のいずれか
-    /// (draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter))。
+    /// (draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter))。
     /// それ以外の値は `ProtocolViolation` を返す。
     /// `FetchStreamDecoder::new_with_group_order` と対称の公開 API である。
     pub fn new_with_group_order(request_id: u64, group_order: u8) -> Result<Self, MessageError> {
@@ -165,13 +165,13 @@ impl FetchStreamEncoder {
         header.encode()
     }
 
-    /// オブジェクトをエンコードする (draft-ietf-moq-transport-22 §11.4.1.1 (Flags): delta encoding)
+    /// オブジェクトをエンコードする (draft-ietf-moq-transport-23 §11.4.1.1 (Flags): delta encoding)
     ///
     /// 絶対値の group_id / subgroup_id / object_id から
     /// デルタ圧縮を判断し、FetchStreamObject をエンコードする。
     ///
     /// `properties_data` は Properties Length varint を含む生バイト列である
-    /// (draft-ietf-moq-transport-22 §11.1.2 (Object Properties))。
+    /// (draft-ietf-moq-transport-23 §11.1.2 (Object Properties))。
     /// `input.has_properties` が true の場合に渡し、プロパティが空でも
     /// Properties Length = 0 を含むデータ (`&[0x00]` など) を渡す。
     /// 空スライス (`Some(&[])`) は Properties Length varint を含まない契約違反入力である。
@@ -183,7 +183,7 @@ impl FetchStreamEncoder {
     /// - Group Order (Ascending / Descending) と逆方向に Group ID が変化し、
     ///   Group ID Delta がアンダーフローする: `ProtocolViolation`
     /// - 直前と同じ (Group ID, Subgroup ID) で Publisher Priority が変化した: `ProtocolViolation`
-    ///   (draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 1)
+    ///   (draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 1)
     /// - その他 [`FetchStreamObject::encode`] が返す `ProtocolViolation`
     ///   (Datagram 起源なのに Subgroup ID を持つ、`has_properties` と `properties_data` の
     ///   組み合わせ不正、Properties Length varint 不正・長さ不一致、prior 参照不正)
@@ -204,7 +204,7 @@ impl FetchStreamEncoder {
                 "object must not follow end of track",
             ));
         }
-        // draft-ietf-moq-transport-22 §11.4.1.1 (Flags): Datagram 起源 (0x40) の Object は
+        // draft-ietf-moq-transport-23 §11.4.1.1 (Flags): Datagram 起源 (0x40) の Object は
         // Subgroup ID を運ばず、デコーダも下位 2 bit を無視して 0 に解決する。
         // エンコード側も入力値ではなく 0 を正として扱い、prior 状態にも 0 を保存する。
         let effective_subgroup_id = if input.is_datagram_origin {
@@ -367,7 +367,7 @@ impl FetchStreamEncoder {
         let entry = FetchStreamEntry::Object(fetch_obj);
         entry.encode(properties_data, self.prior_context, buf)?;
 
-        // draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 1:
+        // draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 1:
         // 同一 Subgroup 内で Publisher Priority が変わってはならない。判定は
         // (group_id, subgroup_id) ごとの最後の Priority との比較で行い、間に別 Subgroup や
         // datagram 起源 Object が挟まっても検出する (decoder と対称)。

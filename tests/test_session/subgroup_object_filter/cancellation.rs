@@ -50,7 +50,7 @@ fn cancelled_subscription_object_returns_discarded() {
 
 /// 合格がキャンセル済み候補のみの Object が Discarded として返ること
 ///
-/// draft-ietf-moq-transport-22 §3.1.3 (Track Alias):
+/// draft-ietf-moq-transport-23 §3.1.3 (Track Alias):
 /// "Subscribers SHOULD retain sufficient state to quickly discard these unwanted Objects"
 /// 候補ループは datagram の `recv_object_datagram` と同じ規則で、キャンセル由来候補を
 /// 帰属対象から除外しつつフィルタ評価だけは実行する。
@@ -435,7 +435,7 @@ fn report_mid_object_fin_absorbs_stream_without_attribution() {
 }
 
 /// Object の帰属実績がある stream では `report_mid_object_fin` が破棄対象として
-/// 吸収されず、draft §11.3 の SHOULD どおりセッションを `PROTOCOL_VIOLATION` で
+/// 吸収されず、draft §11.3 の SHOULD どおりセッションを `TRUNCATED_OBJECT` で
 /// 閉じること
 ///
 /// 帰属実績がある stream は帰属先 subscription にとって生きた stream であり、

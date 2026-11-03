@@ -1,5 +1,5 @@
 //! PUBLISH の subscription パラメータのテスト
-//! (draft-ietf-moq-transport-22 §9.8 (PUBLISH))
+//! (draft-ietf-moq-transport-23 §9.8 (PUBLISH))
 //!
 //! PUBLISH への subscription パラメータ出現と、受信時の初期状態への反映を扱う。
 //! 本ファイルでは送受信の往復と状態反映に焦点を当てる。
@@ -17,7 +17,7 @@ use shiguredo_moqt::track_properties::{
 };
 
 /// PUBLISH の subscription パラメータが送受信できる
-/// (draft-ietf-moq-transport-22 §9.8 (PUBLISH))
+/// (draft-ietf-moq-transport-23 §9.8 (PUBLISH))
 #[test]
 fn publish_with_subscription_parameters_round_trip() {
     let (mut client, mut server) = establish_pair();
@@ -111,7 +111,7 @@ fn publish_with_subscription_parameters_round_trip() {
 
 /// PUBLISH の delivery timeout パラメータは Track Properties の値を用い、
 /// Parameters の値は状態に保持しない
-/// (draft-ietf-moq-transport-22 §5.2: publisher は Track Property で伝える)
+/// (draft-ietf-moq-transport-23 §5.2: publisher は Track Property で伝える)
 #[test]
 fn publish_timeout_parameters_not_retained() {
     let (mut client, mut server) = establish_pair();
@@ -166,7 +166,7 @@ fn publish_timeout_parameters_not_retained() {
 }
 
 /// PUBLISH 受信で初期 subscription パラメータが状態に反映される
-/// (draft-ietf-moq-transport-22 §9.8 (PUBLISH))
+/// (draft-ietf-moq-transport-23 §9.8 (PUBLISH))
 #[test]
 fn publish_recv_reflects_initial_parameters() {
     let (mut client, mut server) = establish_pair();
@@ -255,7 +255,7 @@ fn publish_recv_reflects_initial_parameters() {
 }
 
 /// 値域外 GROUP_ORDER の PUBLISH 受信は PROTOCOL_VIOLATION でセッションを閉じる
-/// (draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter))
+/// (draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter))
 #[test]
 fn publish_recv_with_invalid_group_order_closes_session() {
     let (mut _client, mut server) = establish_pair();
@@ -290,7 +290,7 @@ fn publish_recv_with_invalid_group_order_closes_session() {
 }
 
 /// EndGroupDelta がオーバーフローする filter の PUBLISH 受信は PROTOCOL_VIOLATION で
-/// セッションを閉じる (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))
+/// セッションを閉じる (draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter))
 #[test]
 fn publish_recv_with_filter_end_group_overflow_closes_session() {
     let (mut _client, mut server) = establish_pair();
@@ -331,7 +331,7 @@ fn publish_recv_with_filter_end_group_overflow_closes_session() {
 }
 
 /// EndGroupDelta がオーバーフローする filter の PUBLISH 送信は送信前に拒否し
-/// 副作用を残さない (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))
+/// 副作用を残さない (draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter))
 #[test]
 fn send_publish_with_filter_end_group_overflow_rejected_without_side_effects() {
     let (mut client, _server) = establish_pair();
@@ -428,9 +428,9 @@ fn publish_objects_on_publisher_subscription(server: &mut Session, client: &mut 
 
 /// 既に Object を publish した Track を PUBLISH で再告知する場合、LARGEST_OBJECT を補完する
 ///
-/// draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) は LARGEST_OBJECT を
-/// PUBLISH に出現可能なパラメータとして列挙し、"If Objects have been published on this
-/// Track the Publisher MUST include this parameter." と規定する。
+/// draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter) は LARGEST_OBJECT を
+/// PUBLISH に出現可能なパラメータとして列挙し、"If the sending endpoint has published or
+/// received any Objects in the Track, it MUST include this parameter" と規定する。
 #[test]
 fn send_publish_includes_largest_object_of_published_objects() {
     let (mut client, mut server) = establish_pair();
@@ -458,8 +458,8 @@ fn send_publish_includes_largest_object_of_published_objects() {
 
 /// Object の観測値が無い Track への PUBLISH には LARGEST_OBJECT を付与しない
 ///
-/// draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) の MUST は
-/// "If Objects have been published on this Track" の場合に限られる。
+/// draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter) の MUST は
+/// "If the sending endpoint has published or received any Objects in the Track" の場合に限られる。
 #[test]
 fn send_publish_omits_largest_object_without_published_objects() {
     let (_client, mut server) = establish_pair();
@@ -523,7 +523,7 @@ fn send_publish_keeps_larger_explicit_largest_object() {
 
 /// 観測値より小さいアプリ指定の LARGEST_OBJECT は観測値まで引き上げられる
 ///
-/// draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) は LARGEST_OBJECT が
+/// draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter) は LARGEST_OBJECT が
 /// 実際に publish 済みの最大 Location 以上であることを求めるため、指定値が小さい場合は
 /// `update_largest_object_in_parameters` の max 合流で観測値に揃える。
 #[test]
@@ -563,7 +563,7 @@ fn send_publish_raises_smaller_explicit_largest_object() {
 /// PUBLISH を UNINTERESTED で拒否したとき、open な publisher 起点 data stream に
 /// STOP_SENDING 指示が発行され、以後の DATA_STREAM_TIMEOUT で二重発行されないこと
 ///
-/// draft-ietf-moq-transport-22 §9.8 (PUBLISH): "A subscriber receiving a PUBLISH for a Track
+/// draft-ietf-moq-transport-23 §9.8 (PUBLISH): "A subscriber receiving a PUBLISH for a Track
 /// it does not wish to receive SHOULD send PUBLISH_ERROR with error code UNINTERESTED, and
 /// abandon reading any publisher initiated streams associated with that subscription using a
 /// STOP_SENDING frame."

@@ -121,7 +121,7 @@ fn recv_control_stream_type_setup_stream_type_accepted() {
 /// (subgroup stream では STOP_SENDING の指示だけを発行する)。優先順位の検証には FETCH stream を使う。
 #[test]
 fn timeout_priority_control_over_data_over_goaway() {
-    // draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) はエラーコードを定義する
+    // draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) はエラーコードを定義する
     // のみで、複数 timeout の優先順位を規定していないため、実装で
     // control → data_stream → goaway の順に固定する。
     let (mut client, mut server, _data_rid) = establish_subscribe_track(1);
@@ -339,12 +339,12 @@ fn control_message_timeout_tick_emits_close_session() {
 
 // ─── recv_padding_datagram ─────────────────────────
 //
-// draft-ietf-moq-transport-22 §11.5 (Padding): PADDING datagram の受信側 API。
+// draft-ietf-moq-transport-23 §11.5 (Padding): PADDING datagram の受信側 API。
 // Established 状態では受理し、未 Established では PROTOCOL_VIOLATION を返す。
 
 /// Established 状態で recv_padding_datagram は Ok(()) を返す
 ///
-/// draft-ietf-moq-transport-22 §11.5 (Padding): Established セッションは
+/// draft-ietf-moq-transport-23 §11.5 (Padding): Established セッションは
 /// PADDING datagram を受理できなければならない。
 #[test]
 fn recv_padding_datagram_accepts_in_established() {
@@ -357,7 +357,7 @@ fn recv_padding_datagram_accepts_in_established() {
 
 /// 未 Established 状態で recv_padding_datagram は PROTOCOL_VIOLATION を返す
 ///
-/// draft-ietf-moq-transport-22 §11.5 (Padding): セッション確立前の PADDING 受信は
+/// draft-ietf-moq-transport-23 §11.5 (Padding): セッション確立前の PADDING 受信は
 /// PROTOCOL_VIOLATION として拒否される。
 #[test]
 fn recv_padding_datagram_before_established_returns_protocol_violation() {
@@ -373,7 +373,7 @@ fn recv_padding_datagram_before_established_returns_protocol_violation() {
 
 // ─── data stream activity: object 受信による timestamp 更新 ─────────────────────────
 //
-// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes): DATA_STREAM_TIMEOUT は
+// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes): DATA_STREAM_TIMEOUT は
 // "an object header within a data stream" も activity に含む。
 // Object 受信中のストリームは timeout で閉じられてはならない。
 
@@ -442,7 +442,7 @@ fn subgroup_object_recv_resets_data_stream_timeout() {
     );
 
     // object 受信から 50ms 以上経過 (tick 40 + 50 = 90) すると DATA_STREAM_TIMEOUT の期限に達する。
-    // draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) は open な subgroup stream の
+    // draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) は open な subgroup stream の
     // timeout の措置として STOP_SENDING を挙げるため、セッションは閉じず指示だけを発行する。
     client.tick(91);
     let mut got = false;
@@ -478,7 +478,7 @@ fn subgroup_object_recv_resets_data_stream_timeout() {
 
 /// ヘッダ受信後に object が来ない subgroup stream は STOP_SENDING の指示を受ける
 ///
-/// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) は open な subgroup stream で
+/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) は open な subgroup stream で
 /// 新しい object header を待って timeout した場合の措置として "it MAY send a STOP_SENDING on
 /// that stream or terminate the subscription" を挙げる。セッションは閉じず、購読は生かしたまま
 /// timeout した stream だけを止める。
@@ -546,7 +546,7 @@ fn subgroup_header_without_object_emits_stop_sending() {
 
 /// timeout した subgroup stream に遅延して届く Object / FIN / RESET は no-op で吸収される
 ///
-/// draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams) の STOP_SENDING に対して peer が
+/// draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams) の STOP_SENDING に対して peer が
 /// reset を返すまで、in-flight の Object や FIN が届くことがある。破棄対象として登録した stream への
 /// 受信でセッションを閉じない。
 #[test]
@@ -633,7 +633,7 @@ fn timed_out_subgroup_stream_absorbs_late_object_and_close() {
 
 /// timeout した subgroup stream があっても購読は生きており、次の Group の stream は受理される
 ///
-/// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の STOP_SENDING は
+/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の STOP_SENDING は
 /// "Resets and STOP_SENDING on SUBSCRIBE data streams have no impact on other Subgroups in the
 /// Group or the subscription" (§11.3.2 (Closing Subgroup Streams)) とされる。
 #[test]
@@ -687,7 +687,7 @@ fn subscription_continues_after_subgroup_stream_timeout() {
 
 /// FETCH stream の DATA_STREAM_TIMEOUT は現行どおり 0x12 でセッションを閉じる
 ///
-/// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の MAY は open な subgroup stream を
+/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の MAY は open な subgroup stream を
 /// 対象にし、FETCH stream には代替措置を示していない。
 #[test]
 fn fetch_stream_timeout_still_closes_session() {
@@ -742,7 +742,7 @@ fn fetch_stream_timeout_still_closes_session() {
 
 /// stream type だけ受信した subgroup stream の timeout も STOP_SENDING の指示になる
 ///
-/// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の DATA_STREAM_TIMEOUT は
+/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の DATA_STREAM_TIMEOUT は
 /// "fields of a stream header" も対象にする。SUBGROUP_HEADER を受信していない状態でも
 /// セッションを閉じず、遅延して届く SUBGROUP_HEADER は破棄対象として吸収する。
 #[test]
@@ -805,7 +805,7 @@ fn subgroup_stream_without_header_emits_stop_sending() {
 
 /// stream type だけ受信した FETCH stream の timeout は 0x12 でセッションを閉じる
 ///
-/// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の MAY は open な subgroup stream を
+/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の MAY は open な subgroup stream を
 /// 対象にする。stream header の受信待ちであっても FETCH stream には代替措置が無い。
 #[test]
 fn fetch_stream_without_header_times_out_and_closes_session() {
@@ -902,7 +902,7 @@ fn timed_out_subgroup_stream_is_excluded_from_monitoring() {
 
 /// 同一 tick で subgroup stream と FETCH stream が期限到達した場合は 0x12 で閉じる
 ///
-/// FETCH stream には draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の代替措置が
+/// FETCH stream には draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の代替措置が
 /// 無いため、subgroup stream の STOP_SENDING より先にセッションクローズが決まる。
 #[test]
 fn fetch_stream_timeout_wins_over_subgroup_stream_in_same_tick() {
@@ -982,7 +982,7 @@ fn fetch_stream_timeout_wins_over_subgroup_stream_in_same_tick() {
 
 /// padding stream は DATA_STREAM_TIMEOUT を誘発しない
 ///
-/// draft-ietf-moq-transport-22 §11.5.1 (Padding Streams): padding stream は
+/// draft-ietf-moq-transport-23 §11.5.1 (Padding Streams): padding stream は
 /// 後続データを持たないため、DATA_STREAM_TIMEOUT の監視対象外である。
 /// peer が padding stream を開いたままにしても session は閉じられない。
 #[test]
@@ -1294,7 +1294,7 @@ fn stopped_malformed_fetch_stream_is_excluded_from_data_stream_timeout() {
 
 /// 期限到達の判定は `経過 >= timeout` である (境界値)
 ///
-/// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の DATA_STREAM_TIMEOUT は
+/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の DATA_STREAM_TIMEOUT は
 /// 期限そのものの時刻で到達する (`>=`)。`>` との取り違えを境界値で固定する。
 #[test]
 fn data_stream_timeout_fires_exactly_at_deadline() {

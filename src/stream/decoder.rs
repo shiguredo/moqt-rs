@@ -20,7 +20,7 @@ use hashbrown::HashMap;
 ///
 /// 手組みの値を作って `Session::recv_subgroup_object` に渡す場合、`status` が `Some` のとき
 /// `payload_length` は 0、`status` が `None` のときは 1 以上でなければならない
-/// (draft-ietf-moq-transport-22 §11.1.1 (Object Status): status 付き Object は payload を持たない)。
+/// (draft-ietf-moq-transport-23 §11.1.1 (Object Status): status 付き Object は payload を持たない)。
 /// wire 経路では `SubgroupObject::decode` がこの不変条件を強制する。
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedSubgroupObject {
@@ -32,10 +32,10 @@ pub struct DecodedSubgroupObject {
     pub status: Option<u64>,
     /// Properties の生バイト (Properties Length varint + Properties データ)
     ///
-    /// Properties フィールドが無い場合 (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header) の
+    /// Properties フィールドが無い場合 (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header) の
     /// Type Flags の PROPERTIES ビット (0x01) が 0) は `None`、
     /// ある場合は wire に現れた Properties Length varint と Properties データをそのまま保持した `Some` になる。
-    /// draft-ietf-moq-transport-22 §8.1 (Variable-Length Integers) は非最小形の varint も許すため、
+    /// draft-ietf-moq-transport-23 §8.1 (Variable-Length Integers) は非最小形の varint も許すため、
     /// 保持される生バイトは最小形とは限らない (Properties Length = 0 は最小形なら `0x00` の 1 バイト)。
     /// `LocProperties::decode` にそのまま渡せる。
     pub properties_bytes: Option<Vec<u8>>,
@@ -181,7 +181,7 @@ impl SubgroupStreamDecoder {
                 self.buf.drain(..consumed);
 
                 // object_id_delta → 絶対 object_id の変換
-                // draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header): 初回 Object の Object ID は
+                // draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header): 初回 Object の Object ID は
                 //           Object ID Delta フィールド値そのもの (絶対値)。以降は prev + delta + 1
                 let object_id = match self.prev_object_id {
                     None => obj.object_id_delta,
@@ -200,7 +200,7 @@ impl SubgroupStreamDecoder {
                 }
 
                 // 不変条件: status.is_some() ⇔ payload_length == 0
-                // 根拠: draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header)
+                // 根拠: draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header)
                 // "The Object Status field is only sent if the Object Payload Length is zero"
                 // および §11.1.1 (Object Status)
                 // "An Object MUST have an empty payload unless its Object Status value is
@@ -296,7 +296,7 @@ impl SubgroupStreamDecoder {
     /// 残っている場合は `UnexpectedEof` を返す。
     ///
     /// ヘッダーのみ + FIN（オブジェクト 0 個）は正規の空 Subgroup として成功を返す。
-    /// draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams) 冒頭の
+    /// draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams) 冒頭の
     /// "If a sender has delivered all objects in a Subgroup to the QUIC stream, except any
     /// Objects with Locations smaller than the subscription's Start Location, it MUST close
     /// the stream with a FIN." により、Subgroup の全オブジェクトが配達対象外の場合に
@@ -429,7 +429,7 @@ pub struct DecodedFetchObject {
     /// Object Properties の生バイト列 (Properties Length varint + Properties データ)
     ///
     /// Subgroup 経路 (`DecodedSubgroupObject::properties_bytes`) と同じ表現であり、
-    /// `LocProperties::decode` にそのまま渡せる。Flags (draft-ietf-moq-transport-22
+    /// `LocProperties::decode` にそのまま渡せる。Flags (draft-ietf-moq-transport-23
     /// §11.4.1.1 Table 10) の bit `0x20` が 0 のときは `None`、1 のときは `Some` になる。
     /// §8.1 (Variable-Length Integers) は非最小形の varint も許すため、保持される生バイトは
     /// 最小形とは限らない (Properties Length = 0 は最小形なら `0x00` の 1 バイト)。
@@ -534,7 +534,7 @@ const FETCH_GROUP_ORDER_DESCENDING: u8 = 0x02;
 pub struct FetchStreamDecoder {
     buf: Vec<u8>,
     state: FetchDecoderState,
-    /// FETCH response の Group 順序 (draft-ietf-moq-transport-22 §3.2.1 (Fetch Object Delivery) / §9.20.8 (GROUP ORDER Parameter))
+    /// FETCH response の Group 順序 (draft-ietf-moq-transport-23 §3.2.1 (Fetch Object Delivery) / §9.19.8 (GROUP ORDER Parameter))
     group_order: u8,
     /// FetchPriorContext の現在の状態
     prior_context: FetchPriorContext,
@@ -603,8 +603,8 @@ impl FetchStreamDecoder {
 
     /// group 境界での prune: 過去 group の per-group 検証状態をクリアする
     ///
-    /// draft-ietf-moq-transport-22 §3.2.1 (Fetch Object Delivery):
-    /// "A publisher MUST send fetched groups in the requested group order (see Section 9.20.8)."
+    /// draft-ietf-moq-transport-23 §3.2.1 (Fetch Object Delivery):
+    /// "A publisher MUST send fetched groups in the requested group order (see Section 9.19.8)."
     /// group は要求順で送られるため過去 group が再出現することはなく、
     /// per-group エントリを安全に削除できる。
     fn prune_past_group_state(&mut self, ascending: bool, current_group: u64) {
@@ -1086,8 +1086,8 @@ impl FetchStreamDecoder {
             }
 
             // group が前進したら過去 group の per-group エントリを prune する
-            // draft-ietf-moq-transport-22 §3.2.1 (Fetch Object Delivery):
-            // "A publisher MUST send fetched groups in the requested group order (see Section 9.20.8)."
+            // draft-ietf-moq-transport-23 §3.2.1 (Fetch Object Delivery):
+            // "A publisher MUST send fetched groups in the requested group order (see Section 9.19.8)."
             // group は要求順 (ascending または descending) で送られるため、
             // 過去 group が再出現することはない。
             if obj.group_id != previous.group_id {
@@ -1191,7 +1191,7 @@ impl FetchStreamDecoder {
     /// 残っている場合は `UnexpectedEof` を返す。
     ///
     /// ヘッダーのみ + FIN（エントリ 0 個）は正規の空 FETCH 応答として成功を返す。
-    /// draft-ietf-moq-transport-22 §3.2.1 (Fetch Object Delivery): "If no Objects exist in the
+    /// draft-ietf-moq-transport-23 §3.2.1 (Fetch Object Delivery): "If no Objects exist in the
     /// requested range, the publisher opens the unidirectional stream, sends the
     /// FETCH_HEADER (see Section 11.4.1) and closes the stream with a FIN."
     /// （要求範囲にオブジェクトが 1 つも存在しない場合、publisher は unidirectional ストリームを

@@ -1,6 +1,6 @@
 //! REQUEST_UPDATE における Range Filter 内容検証とスコープ検証の順序テスト
 //!
-//! draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope) は、許可されない context に
+//! draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope) は、許可されない context に
 //! 現れたパラメータに対して PROTOCOL_VIOLATION でのセッションクローズを MUST とする。
 //! §3.3.2 (Range Filters) の内容検証を先に走らせると INVALID_FILTER の REQUEST_ERROR で
 //! 継続してしまい MUST に到達しないため、スコープ検証が先であることを固定する。

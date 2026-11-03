@@ -1,6 +1,6 @@
 //! SUBSCRIBE / PUBLISH / REQUEST_UPDATE / PUBLISH_DONE / STOP_SENDING 関連
 //!
-//! draft-ietf-moq-transport-22 §3.1 (Subscriptions), §3.1.2 (Subscription State Management),
+//! draft-ietf-moq-transport-23 §3.1 (Subscriptions), §3.1.2 (Subscription State Management),
 //! §9.6 (SUBSCRIBE)-§9.9 (PUBLISH_DONE) に対応する。
 //! `impl Session` の送受信メソッドをサブモジュールに分割。将来 draft 側で変更される可能性がある。
 
@@ -111,7 +111,7 @@ impl Session {
     /// 本関数は `subscriptions` から entry を除去して `pending_publish_done` を破棄するため、
     /// 呼ぶと全 outgoing stream を閉じても `Session::maybe_flush_pending_publish_done` は
     /// (entry が無いため) PUBLISH_DONE を送信しない。
-    /// draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions) は REQUEST_UPDATE が失敗した場合に
+    /// draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions) は REQUEST_UPDATE が失敗した場合に
     /// publisher が PUBLISH_DONE を送ることを MUST とし、§9.9 (PUBLISH_DONE) は
     /// "A sender MUST NOT destroy subscription state until it sends PUBLISH_DONE" と定める。
     /// 同節の "A sender MUST NOT send PUBLISH_DONE until it has closed all streams it will ever open,
@@ -140,7 +140,7 @@ impl Session {
         let mut subscription = self.subscriptions.remove(&request_id)?;
         // REQUEST_UPDATE 失敗応答で保留された PUBLISH_DONE (UPDATE_FAILED) は、
         // stream を閉じないまま破棄する場合は push されずに破棄される
-        // (draft-ietf-moq-transport-22 §9.9 の MUST NOT により stream が閉じるまで送れず、
+        // (draft-ietf-moq-transport-23 §9.9 の MUST NOT により stream が閉じるまで送れず、
         // §9.5.1 の MUST が果たせない場合の帰結。remove でセッションからは除去済みだが、
         // 返り値の subscription が「破棄済み」であることを明示する)
         subscription.pending_publish_done = None;
@@ -189,7 +189,7 @@ impl Session {
         self.remove_outgoing_data_plane_for_request(request_id);
         self.remove_request_update_credit_entries(request_id);
         // REQUEST_UPDATE 起因の fill fetch stream の Request ID 対応も破棄する
-        // (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))
+        // (draft-ietf-moq-transport-23 §3.4 (Fill Semantics))
         self.remove_fill_request_subscriptions(request_id);
         // STOP_SENDING による再オープン禁止エントリも破棄する
         self.stopped_outgoing_subgroups.remove(&request_id);
@@ -204,7 +204,7 @@ impl Session {
     /// `Pending(Subscriber)` 状態の既存 subscription を `PUBLISH` 受信に伴い
     /// Terminated に遷移させる
     ///
-    /// draft-ietf-moq-transport-22 §3.1 (Subscriptions): subscriber が自ら送った
+    /// draft-ietf-moq-transport-23 §3.1 (Subscriptions): subscriber が自ら送った
     /// SUBSCRIBE が応答待ち (Pending(Subscriber)) の最中に、同一 Track の PUBLISH を
     /// 受信した場合、既存を Terminated に遷移させてから PUBLISH_OK を送る。
     /// 本メソッドは呼び出し側 (handle_peer_publish) が新 PUBLISH を登録する直前に

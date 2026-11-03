@@ -7,7 +7,7 @@ QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux の接続確�
 ## 提供する範囲
 
 - URL の解釈と接続パラメータの解決
-  - `parse_url`：`moqt://` URI を `ServerUrl` にパースする。fragment は draft-ietf-moq-transport-22 §6.1.1 の構文で検証し、`msf` fragment は MSF fragment (`track-identifier [ "&" parameter-list ]`) として検証する
+  - `parse_url`：`moqt://` URI を `ServerUrl` にパースする。fragment は draft-ietf-moq-transport-23 §6.1.1 の構文で検証し、`msf` fragment は MSF fragment (`track-identifier [ "&" parameter-list ]`) として検証する
   - `resolve_transport`：`--transport` の指定と `msf` fragment の `connection` から `Transport` を解決する
   - `resolve_namespace`：`--namespace` の指定と `msf` fragment の track-identifier から Track Namespace を解決する
   - `ServerUrl`：authority / path / fragment / MSF fragment の解釈結果 / C4M 認可トークン (`c4m_tokens`) を保持する
@@ -25,7 +25,7 @@ QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux の接続確�
 - `moqt://host[:port]/path`：接続経路は `--transport` で選ぶ (`--transport` を省略した場合は `--url` の `msf` fragment の `connection` を使う)
 - `moqt://host[:port]/path#msf:<track-identifier>`：`--namespace` を省略した場合の Track Namespace を track-identifier の namespace から取る
 
-`port` を省略すると 443 を使う (draft-ietf-moq-transport-22 §6.1.2)。`host` は IP リテラル (例：`127.0.0.1` / `[2001:db8::1]`) と DNS 名の両方を受け付け、DNS 名は接続時に名前解決する。解決した接続先アドレスはログに出力される。
+`port` を省略すると 443 を使う (draft-ietf-moq-transport-23 §6.1.2)。`host` は IP リテラル (例：`127.0.0.1` / `[2001:db8::1]`) と DNS 名の両方を受け付け、DNS 名は接続時に名前解決する。解決した接続先アドレスはログに出力される。
 
 RFC 3986 §3.2.2 の host に一致しない authority は名前解決の前に拒否する。`[` `]` の中身は IPv6 アドレスに限るため `[example.com]` や IPvFuture (`[v1.fe80::]`)、zone id 付き IPv6 リテラル (`[fe80::1%25en0]`) はエラーになる。ポート 0 と userinfo (`user@host`) もエラーになる。エラーメッセージには拒否理由と入力した authority が含まれる。
 
@@ -33,7 +33,7 @@ DNS 名が複数のアドレスに解決される場合は、解決順に接続�
 
 query (`?key=value`) は SETUP の PATH option と WebTransport の `:path` にそのまま引き継がれる。
 
-fragment (`#type:value`) は draft-ietf-moq-transport-22 §6.1.1 に従いサーバーへ送信せず、SETUP の PATH option と WebTransport の `:path` には含めない。§6.2.1 が WebTransport の https:// URI を moqt URI の scheme 置換と定め、§16.2 が application/moqt の fragment identifier を同節に従わせるため、WebTransport 経路でも同じ規則で扱う。
+fragment (`#type:value`) は draft-ietf-moq-transport-23 §6.1.1 に従いサーバーへ送信せず、SETUP の PATH option と WebTransport の `:path` には含めない。§6.2.1 が WebTransport の https:// URI を moqt URI の scheme 置換と定め、§16.2 が application/moqt の fragment identifier を同節に従わせるため、WebTransport 経路でも同じ規則で扱う。
 `type` は ASCII 小文字 / 数字 / ハイフンに限り、`:` を含まない fragment、空または規則に一致しない `type`、fragment 内の 2 個目の `#` (RFC 3986 §3.5 により `%23` が必要) はエラーになる。
 
 `parse_url` は `type` が `msf` のときだけ値を MSF fragment (`track-identifier [ "&" parameter-list ]`) として検証し、`resolve_namespace` が track-identifier の示す namespace を `--namespace` 省略時の Track Namespace として使う。予約パラメータ `c4m` の認可トークンは `ServerUrl::c4m_tokens` に取り出す ([C4M 認可トークン](#c4m-認可トークン) を参照)。

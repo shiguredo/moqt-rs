@@ -121,7 +121,7 @@ const VIDEO_TRACK_ALIAS: u64 = 1;
 const AUDIO_TRACK_ALIAS: u64 = 2;
 /// デフォルトの Publisher Priority
 const DEFAULT_PUBLISHER_PRIORITY: u8 = 128;
-/// PUBLISH_DONE の Status Code: GOING_AWAY (draft-ietf-moq-transport-22 §16.11.3 (PUBLISH_DONE Codes))
+/// PUBLISH_DONE の Status Code: GOING_AWAY (draft-ietf-moq-transport-23 §16.12.3 (PUBLISH_DONE Codes))
 /// シャットダウン時は GOAWAY 送出に先立ち各 subscription を GOING_AWAY で終了する。
 const PUBLISH_DONE_GOING_AWAY: u64 = 0x4;
 /// 音声サンプリングレート (Hz)
@@ -154,14 +154,14 @@ const AUDIO_STATS_INTERVAL_MS: u64 = 10_000;
 
 /// 制御メッセージの応答を待つ上限 (ミリ秒)
 ///
-/// draft-ietf-moq-transport-22 §9 (Control Messages): PUBLISH などの制御メッセージを送った
+/// draft-ietf-moq-transport-23 §9 (Control Messages): PUBLISH などの制御メッセージを送った
 /// 後、peer の応答をこの時間待つ。応答を返さない peer に移行処理が引きずられないよう、
 /// 移行先の session にも同じ値を設定する。
 const CONTROL_MESSAGE_TIMEOUT_MS: u64 = 30_000;
 
 /// data stream の進捗を待つ上限 (ミリ秒)
 ///
-/// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の DATA_STREAM_TIMEOUT に
+/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の DATA_STREAM_TIMEOUT に
 /// 対応する。subgroup stream の書き込みが止まったままにならないよう設定する。
 const DATA_STREAM_TIMEOUT_MS: u64 = 30_000;
 
@@ -258,7 +258,7 @@ async fn reset_open_subgroup_stream(
 
 /// `MAX_CACHE_DURATION` を告知する Track Properties を作る
 ///
-/// draft-ietf-moq-transport-22 §10.3 (MAX CACHE DURATION): 保持した Object を配れる時間を
+/// draft-ietf-moq-transport-23 §10.3 (MAX CACHE DURATION): 保持した Object を配れる時間を
 /// ミリ秒で示す。この example は `--cache-duration` の時間窓だけ保持するため、同じ値を
 /// 告知する。告知しないと購読者と relay が「いつまで FETCH で配れるか」を知れない。
 fn cache_duration_properties(cache_duration_ms: u64) -> TrackProperties {
@@ -272,8 +272,8 @@ fn cache_duration_properties(cache_duration_ms: u64) -> TrackProperties {
 
 /// 映像トラックに載せる Track Properties
 ///
-/// draft-ietf-moq-transport-22 §10.6 (DYNAMIC_GROUPS) の `DYNAMIC_GROUPS=1` を告知し、
-/// 購読者からの `NEW_GROUP_REQUEST` (§9.20.19) に応じて Group を動的に開始できることを
+/// draft-ietf-moq-transport-23 §10.6 (DYNAMIC_GROUPS) の `DYNAMIC_GROUPS=1` を告知し、
+/// 購読者からの `NEW_GROUP_REQUEST` (§9.19.19) に応じて Group を動的に開始できることを
 /// 示す。購読者は `DYNAMIC_GROUPS=1` を知らないと REQUEST_UPDATE で `NEW_GROUP_REQUEST` を
 /// 送れないため、PUBLISH と SUBSCRIBE_OK の両方で告知する (§3.5.1)。音声とカタログの
 /// トラックには載せない。
@@ -304,8 +304,8 @@ fn video_publish_properties(mp4_passthrough: bool, cache_duration_ms: u64) -> Tr
 /// SUBSCRIBE_OK に載せる Track Properties
 ///
 /// 映像トラックには PUBLISH と同じ `DYNAMIC_GROUPS=1` を載せる。購読者はこの値で publisher が
-/// 動的 Group に対応しているかを知り (draft-ietf-moq-transport-22 §3.5.1)、REQUEST_UPDATE で
-/// `NEW_GROUP_REQUEST` を送れるようになる (§9.20.19 の MUST NOT)。音声トラックには
+/// 動的 Group に対応しているかを知り (draft-ietf-moq-transport-23 §3.5.1)、REQUEST_UPDATE で
+/// `NEW_GROUP_REQUEST` を送れるようになる (§9.19.19 の MUST NOT)。音声トラックには
 /// `MAX_CACHE_DURATION` だけを載せ、カタログには何も載せない。
 fn subscribe_ok_properties(
     track_alias: u64,
@@ -326,7 +326,7 @@ fn subscribe_ok_properties(
 /// `can_force_keyframe` は要求を映像のキーフレーム要求として扱えるかどうかである。映像
 /// トラック宛てであっても、キーフレームを強制できない経路 (MP4 パススルー) では扱わない。
 /// 値が 0 (購読者が Group の情報を持たない) か、現在の Group より大きいときだけ受け付ける
-/// (draft-ietf-moq-transport-22 §9.20.19)。受け付けない要求は debug ログに残す。
+/// (draft-ietf-moq-transport-23 §9.19.19)。受け付けない要求は debug ログに残す。
 /// 呼び出し側は購読が成立した後に [`gop::GopTracker::request_new_group`] を呼ぶ。
 fn accepted_new_group_request(
     can_force_keyframe: bool,
@@ -642,7 +642,7 @@ async fn close_session_after_failed_publish(client: &mut MoqtClient) {
 
 /// 移行の PUBLISH 失敗を新しい接続で再試行するか
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY) の移行では、新しい session の PUBLISH が一時的な
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY) の移行では、新しい session の PUBLISH が一時的な
 /// 理由 (relay の切替直後、接続断、REQUEST_ERROR による拒否) で失敗しうる。新しい session を
 /// 作り直せば解消しうるため再試行する。プロトコル違反とメッセージの encode / decode 失敗は
 /// 同じコードで繰り返しても再発するため再試行しない。draft 由来の規則であり将来の draft
@@ -671,7 +671,7 @@ fn migration_retry_delay(attempt: u32, remaining: Duration) -> Option<Duration> 
 
 /// 移行期限付きで接続し、映像 / 音声 / catalog の PUBLISH を張る
 ///
-/// draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration) / §9.2 (GOAWAY):
+/// draft-ietf-moq-transport-23 §6.6.1 (Graceful Session Migration) / §9.2 (GOAWAY):
 /// GOAWAY の Timeout を移行期限として扱う。接続は [`connect_with_retry`] が期限まで再試行し、
 /// PUBLISH が失敗した場合は確立済みの session を閉じて接続からやり直す (期限が残っている間
 /// のみ。待ち時間は [`migration_retry_delay`])。PUBLISH の応答待ちにも残り時間を上限として
@@ -1112,7 +1112,7 @@ pub async fn run(
     // 映像 / 音声の Group ID も 0 に固定しない (draft-ietf-moq-msf-01 §6.1 (Group numbering))。
     // 再起動時に以前の Group ID を下回らないよう、カタログと同じ規則で払い出す。
     let mut video_group_id: u64 = group_id::allocate_initial_group_id()?;
-    // 直前に開始した映像 Group の ID。NEW_GROUP_REQUEST (§9.20.19) の値が未来の Group を
+    // 直前に開始した映像 Group の ID。NEW_GROUP_REQUEST (§9.19.19) の値が未来の Group を
     // 指しているかを判定するために使う
     let mut started_video_group_id: Option<u64> = None;
     let mut audio_group_id: u64 = group_id::allocate_initial_group_id()?;
@@ -1152,7 +1152,7 @@ pub async fn run(
     // 直近に音声の配信の遅れの内訳を出した時刻 (開始からのミリ秒)
     let mut audio_stats_logged_ms: u64 = 0;
     // publish したメディアの保持。subscriber の FETCH に配る Object と End of Unknown Range を
-    // 決めるために使う (draft-ietf-moq-transport-22 §3.2 (Fetch))。GOAWAY で session を移行しても
+    // 決めるために使う (draft-ietf-moq-transport-23 §3.2 (Fetch))。GOAWAY で session を移行しても
     // 保持は続ける (移行先の購読者も直近の Object を FETCH で取得できる)
     let mut media_cache = cache::MediaCache::new(config.cache_duration_ms);
     let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(100));
@@ -1279,7 +1279,7 @@ pub async fn run(
                                 .await?;
                             }
                             // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
-                            // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))
+                            // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
                             // 映像ストリームには毎フレーム LOC プロパティを付与するため true を渡す
                             current_video_writer = Some(
                                 SubgroupWriter::new(
@@ -1626,7 +1626,7 @@ pub async fn run(
                             }
                         } else {
                             // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
-                            // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))
+                            // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
                             // 音声ストリームには毎フレーム LOC プロパティを付与するため true を渡す
                             let audio_request_id =
                                 audio_request_id.expect("audio request_id enabled");
@@ -1728,7 +1728,7 @@ pub async fn run(
                                 Ok(Some(target)) => {
                                     match goaway_action(target.scope, new_session_uri.is_empty()) {
                                         GoawayAction::RepublishRequest(request_id) => {
-                                            // draft-ietf-moq-transport-22 §9.2 (GOAWAY): 空の
+                                            // draft-ietf-moq-transport-23 §9.2 (GOAWAY): 空の
                                             // New Session URI は「現在の session で当該 request を
                                             // 再発行する」ことを意味する。session は維持する
                                             //
@@ -1829,8 +1829,8 @@ pub async fn run(
                                                 );
                                                 return Ok(true);
                                             }
-                                            // draft-ietf-moq-transport-22 §6.6.1 (Graceful Session
-                                            // Migration) / §9.2 (GOAWAY) / §7.6.1 (Graceful Publisher
+                                            // draft-ietf-moq-transport-23 §6.6.1 (Graceful Session
+                                            // Migration) / §9.2 (GOAWAY) / §7.7.1 (Graceful Publisher
                                             // Relay Switchover): 新しい session の確立と PUBLISH の
                                             // 再発行はバックグラウンドのタスクで行い、その間も旧 session
                                             // で Object を送り続ける。結果は oneshot で受け取る。
@@ -1854,7 +1854,7 @@ pub async fn run(
                                             migration_task = Some(task);
                                             migration_rx = Some(receiver);
                                             // 新 session の PUBLISH が成立するまで旧 session の配信を
-                                            // 止めない (§7.6.1)
+                                            // 止めない (§7.7.1)
                                             Ok(false)
                                         }
                                     }
@@ -1886,7 +1886,7 @@ pub async fn run(
                             // I/O 層 (この example) が当該 uni data stream を RESET_STREAM で閉じ、
                             // その後に Session へ終端を通知する。通知が保留 PUBLISH_DONE の
                             // flush 条件 (全 outgoing stream の終端) を満たす
-                            // (draft-ietf-moq-transport-22 §5.2 (Delivery Timeouts and Data Reliability))。
+                            // (draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability))。
                             reset_open_subgroup_stream(
                                 &mut current_video_writer,
                                 stream_id,
@@ -1916,7 +1916,7 @@ pub async fn run(
                             start,
                             end,
                         })) => {
-                            // draft-ietf-moq-transport-22 §3.4 (Fill Semantics) / §3.4.1:
+                            // draft-ietf-moq-transport-23 §3.4 (Fill Semantics) / §3.4.1:
                             // FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE を受けた publisher は
                             // uni stream を開き、起因メッセージの Request ID を載せた FETCH_HEADER に
                             // 続けて fill range の Object を送り、FIN で閉じる (FETCH_OK は送らない)。
@@ -1976,7 +1976,7 @@ pub async fn run(
                             Ok(false)
                         }
                         Some(ClientEvent::RequestUpdate(update)) => {
-                            // draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE):
+                            // draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE):
                             // 受信側は必ず 1 通の REQUEST_OK / REQUEST_ERROR で応答する MUST。
                             // PAUSED / LOCATION_FILTER / Range Filters の検証と購読状態への
                             // 反映は session 層が受信時に済ませているため、ここでは受理する。
@@ -1984,7 +1984,7 @@ pub async fn run(
                                 "Received REQUEST_UPDATE: request_id={}",
                                 update.request_id
                             );
-                            // NEW_GROUP_REQUEST (§9.20.19) は新しい Group の開始
+                            // NEW_GROUP_REQUEST (§9.19.19) は新しい Group の開始
                             // (ランダムアクセス点) を要求する。映像の購読に限るのは、他の
                             // トラックの要求で映像のキーフレームを強制しないためである
                             // (`parameters` は購読の累積パラメータであり、複数の更新が合体すると
@@ -2055,7 +2055,7 @@ pub async fn run(
                 match migration_outcome {
                     Some(Ok(migrated)) => {
                         // 移行完了: 旧 session から新 session へ参照先をここでまとめて差し替える。
-                        // draft-ietf-moq-transport-22 §7.6.1 (Graceful Publisher Relay Switchover):
+                        // draft-ietf-moq-transport-23 §7.7.1 (Graceful Publisher Relay Switchover):
                         // 新 session で PUBLISH が成立するまで旧 session の配信を止めない。
                         // ここに来た時点で PUBLISH は成立している
                         async {
@@ -2327,7 +2327,7 @@ pub async fn run(
         // なお `finish` が失敗した経路では [`DataPlaneHandle::send_data_stream_closed`] が
         // 呼ばれないため Session の outgoing stream 追跡が残り、直後の映像の PUBLISH_DONE は
         // publish_done requires all outgoing streams closed で拒否される
-        // (draft-ietf-moq-transport-22 §9.9 の MUST NOT)。セッション終了を観測していない経路
+        // (draft-ietf-moq-transport-23 §9.9 の MUST NOT)。セッション終了を観測していない経路
         // (peer の cancel 後に Ctrl+C / 入力終了でループを抜けた場合) では warn になる。
         // 追跡の終端は cancel の観測と終端通知の到着順に依存するため、本 example では扱わない
         if let Err(e) = writer
@@ -2392,7 +2392,7 @@ pub async fn run(
 
 /// GOAWAY ごとに publisher が取る動作
 ///
-/// draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration) / §9.2 (GOAWAY) の
+/// draft-ietf-moq-transport-23 §6.6.1 (Graceful Session Migration) / §9.2 (GOAWAY) の
 /// 適用範囲と New Session URI から決まる。draft 由来の規則であり将来の draft 改版で
 /// 変わる可能性がある。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2410,7 +2410,7 @@ enum GoawayAction {
 
 /// GOAWAY の適用範囲と New Session URI から publisher の動作を決める
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY): "Upon receiving a GOAWAY on a request stream,
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY): "Upon receiving a GOAWAY on a request stream,
 /// the endpoint SHOULD re-issue that specific request on a session at the specified URI (or
 /// the current session if no URI is provided), and close the old request stream using the
 /// appropriate mechanism"。URI が空なら現在の session で再発行し、非空なら別 session が要る。
@@ -2479,7 +2479,7 @@ type MigrationTaskResult = std::result::Result<MigratedSession, String>;
 
 /// バックグラウンドで publisher session を移行する
 ///
-/// draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration) / §7.6.1 (Graceful
+/// draft-ietf-moq-transport-23 §6.6.1 (Graceful Session Migration) / §7.7.1 (Graceful
 /// Publisher Relay Switchover): 新しい session の確立と PUBLISH の再発行はバックグラウンドで
 /// 行い、その間も呼び出し側は旧 session で Object を送り続ける。期限 (GOAWAY の Timeout) を
 /// 過ぎたら移行を打ち切る。draft 由来の規則であり将来の draft 改版で変わる可能性がある。
@@ -2519,7 +2519,7 @@ async fn migrate_publisher_session(
 /// 移行タスクを起動し、JoinHandle と結果を受け取る oneshot を返す
 ///
 /// 移行タスクは新しい session を確立して PUBLISH を張り、結果を oneshot で main ループへ返す。
-/// main ループは結果を受け取るまで旧 session で配信を続ける (§7.6.1)。
+/// main ループは結果を受け取るまで旧 session で配信を続ける (§7.7.1)。
 /// JoinHandle は run の終了時に打ち切るために呼び出し側が保持する
 /// ([`std::mem::drop`] すると detach され、移行先 session が close されないまま残る)。
 fn spawn_migration_task(
@@ -2549,7 +2549,7 @@ fn spawn_migration_task(
 /// 移行後の旧 session を終了するタスクを起動する
 ///
 /// 旧 session の PUBLISH に PUBLISH_DONE を送り、NO_ERROR で閉じる
-/// (draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration) / §9.9 (PUBLISH_DONE))。
+/// (draft-ietf-moq-transport-23 §6.6.1 (Graceful Session Migration) / §9.9 (PUBLISH_DONE))。
 /// GOAWAY の Timeout は待たない。待つと main ループを塞ぐためである。戻り値の JoinHandle は
 /// run の終了時に打ち切るために呼び出し側が保持する (detach すると run 終了後も旧 session の
 /// close が残る)。
@@ -2573,7 +2573,7 @@ fn spawn_old_session_close(
 
 /// 移行後の旧 session を終了する
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY) / §6.6.1 (Graceful Session Migration):
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY) / §6.6.1 (Graceful Session Migration):
 /// 旧 session の PUBLISH に PUBLISH_DONE を送り、open 中の outgoing stream が無い状態で
 /// NO_ERROR で閉じる。呼び出し側はこの関数を呼ぶ前に映像の subgroup stream を終端している。
 /// GOAWAY の Timeout 分は待たない (移行に要した時間は GOAWAY の期限 (絶対時刻) から既に
@@ -2603,7 +2603,7 @@ async fn shutdown_old_session(
             );
         }
     }
-    // draft-ietf-moq-transport-22 §6.6.1: 新しい session へ移行したため旧 session は
+    // draft-ietf-moq-transport-23 §6.6.1: 新しい session へ移行したため旧 session は
     // NO_ERROR で閉じる。GOAWAY を送った peer もこの close で drain を終えられる
     if let Err(e) = client.close(0, "").await {
         tracing::debug!("Failed to close the old session after migration: {e}");
@@ -2710,7 +2710,7 @@ async fn republish_catalog_at_next_group(
 
 /// 旧 request を PUBLISH_DONE で終端する (失敗はログのみ)
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY): request stream の GOAWAY を受けたら当該 request を
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY): request stream の GOAWAY を受けたら当該 request を
 /// 再発行し、旧 request stream を "FIN, stream reset, or PUBLISH_DONE" のいずれかで閉じる。
 /// GOAWAY を送った peer は timeout 後に当該 stream を reset するため、ここでの失敗は致命では
 /// ない。draft 由来の規則であり将来の draft 改版で変わる可能性がある。
@@ -2731,7 +2731,7 @@ async fn send_publish_done_best_effort(
 
 /// request stream の GOAWAY で当該 PUBLISH を現在の session で再発行する
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY): request stream の GOAWAY は、指定 URI (空なら
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY): request stream の GOAWAY は、指定 URI (空なら
 /// 現在の session) で当該 request を再発行することを求める。ここでは空 URI の場合だけを扱い、
 /// request id を新しい PUBLISH のものへ差し替える。Track Alias は track ごとに固定であり、
 /// 同じ track の再 PUBLISH では同じ alias を使い続ける (§3.1.3 (Track Alias))。旧 request は
@@ -2763,7 +2763,7 @@ async fn republish_request_on_current_session(
     match track {
         PublishTrack::Video => {
             // 新しい PUBLISH の確立を待ってから旧 request を終端する。その間も旧 request の
-            // 購読には届き続ける (§7.6.1 の publisher switchover)
+            // 購読には届き続ける (§7.7.1 の publisher switchover)
             let new_request_id = publish_video_track(client, config, namespace).await?;
             // 旧 request の subgroup stream を先に閉じる。open 中の stream が残っていると
             // PUBLISH_DONE が拒否される (§9.9)
@@ -2845,7 +2845,7 @@ fn is_transport_session_end(error: &Error) -> bool {
 ///
 /// s2n-quic は peer の STOP_SENDING を受信したストリームの送信 API を `StreamReset` で
 /// 失敗させる。これは該当ストリームだけの終端でありセッションは継続するため
-/// (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))、
+/// (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))、
 /// pipeline は致命エラーにしない。
 ///
 /// WebTransport over HTTP/2 も driver が受領した `WT_STOP_SENDING` のエラーコードを
@@ -2863,7 +2863,7 @@ fn is_peer_stream_reset(error: &Error) -> bool {
 /// (`session_ended`) どの失敗も期待される。観測していなくても transport によるセッション終了
 /// (`Error::ConnectionClosed`) と peer による該当ストリームの cancel (`Error::StreamReset`) は
 /// 期待される失敗である。cancel は peer の STOP_SENDING を観測した場合に限られるため
-/// `StreamReset` だけが対象になる (draft-ietf-moq-transport-22 §6.4.2.3)。
+/// `StreamReset` だけが対象になる (draft-ietf-moq-transport-23 §6.4.2.3)。
 /// ループ内は想定外のエラーを致命エラーにして `run` を終わらせるが、後始末はそれらを warn に
 /// 落として続ける点が異なる。
 ///
@@ -2920,7 +2920,7 @@ async fn close_on_message_error(client: &mut MoqtClient, error: &Error) {
 
 /// fill fetch stream を開いて FETCH_HEADER の直後で reset する
 ///
-/// draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams): fill fetch
+/// draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams): fill fetch
 /// stream には REQUEST_ERROR が無く、publisher は fill の失敗を reset で伝える。無応答にすると
 /// peer が fill を待ち続けるため、応答できない場合も stream を開いて reset する。
 async fn reject_fill_fetch(client: &mut MoqtClient, request_id: u64) {
@@ -2944,15 +2944,15 @@ struct CatalogState<'a> {
 /// MOQT relay が転送してきた要求 (SUBSCRIBE / FETCH) に応答する
 ///
 /// relay は subscriber の SUBSCRIBE / FETCH を publisher 側 session の新しい
-/// request stream として転送する (draft-ietf-moq-transport-22 §6.3 (Session initialization))。
+/// request stream として転送する (draft-ietf-moq-transport-23 §6.3 (Session initialization))。
 /// 本 publisher は video / audio / catalog の SUBSCRIBE に SUBSCRIBE_OK を返し
 /// (以後の Object は継続して送信中の subgroup stream で届く)、catalog とメディア (映像 /
 /// 音声) の FETCH には要求された range を判定したうえで FETCH_OK と FETCH 応答ストリームを返す。
 /// 未知の track と未対応の要求種別は REQUEST_ERROR で拒否する
-/// (draft-ietf-moq-transport-22 §9.4 (REQUEST_ERROR))。
+/// (draft-ietf-moq-transport-23 §9.4 (REQUEST_ERROR))。
 ///
 /// `gop_tracker` と `started_video_group_id` は、SUBSCRIBE に載った `NEW_GROUP_REQUEST`
-/// (draft-ietf-moq-transport-22 §9.20.19) を映像のキーフレーム要求へ配線するために使う。
+/// (draft-ietf-moq-transport-23 §9.19.19) を映像のキーフレーム要求へ配線するために使う。
 /// `media_cache` は publish 済みメディアの保持であり、メディアの FETCH に配る Object と
 /// End of Unknown Range を決めるために使う。
 async fn serve_peer_request(
@@ -2975,7 +2975,7 @@ async fn serve_peer_request(
             } else if track == MSF_CATALOG_TRACK_NAME {
                 // カタログの購読を受理する。SUBSCRIBE_OK の LARGEST_OBJECT は session 層が
                 // この track の publish 済み Object から補完する
-                // (draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter))
+                // (draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter))
                 Some(CATALOG_TRACK_ALIAS)
             } else {
                 None
@@ -2983,7 +2983,7 @@ async fn serve_peer_request(
             match track_alias {
                 Some(track_alias) => {
                     // 購読者は DYNAMIC_GROUPS を知らずに SUBSCRIBE へ NEW_GROUP_REQUEST を
-                    // 載せられる (§9.20.19)。Group の途中で参加した購読者が新しい Group を
+                    // 載せられる (§9.19.19)。Group の途中で参加した購読者が新しい Group を
                     // 要求する経路であり、映像トラックのときだけ受け付ける。MP4 パススルーは
                     // キーフレームを要求できないため受け付けない
                     let new_group_request = accepted_new_group_request(
@@ -2993,8 +2993,8 @@ async fn serve_peer_request(
                     );
                     // 映像トラックの SUBSCRIBE_OK にも PUBLISH と同じ DYNAMIC_GROUPS を載せる。
                     // 購読者はこの値で publisher が動的 Group に対応しているかを知り
-                    // (draft-ietf-moq-transport-22 §3.5.1)、REQUEST_UPDATE で
-                    // NEW_GROUP_REQUEST を送れるようになる (§9.20.19 の MUST NOT)
+                    // (draft-ietf-moq-transport-23 §3.5.1)、REQUEST_UPDATE で
+                    // NEW_GROUP_REQUEST を送れるようになる (§9.19.19 の MUST NOT)
                     let subscribe_properties = subscribe_ok_properties(
                         track_alias,
                         config.input_mp4.is_some(),
@@ -3034,8 +3034,8 @@ async fn serve_peer_request(
         ControlMessage::Fetch(fetch) => {
             if fetch.track_name == MSF_CATALOG_TRACK_NAME {
                 // 要求された Location Filter から range を解決し、範囲外の Object を
-                // 送らないようにする (draft-ietf-moq-transport-22 §3.2 (Fetch) /
-                // §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER Parameter))。
+                // 送らないようにする (draft-ietf-moq-transport-23 §3.2 (Fetch) /
+                // §3.3.1 (Location Filters) / §9.19.9 (LOCATION FILTER Parameter))。
                 // wire 経路では decode 層が不正な符号化を弾くため、ここでの失敗は
                 // アプリが手組みしたメッセージだけが到達する
                 let filter = fetch.parameters.location_filter_typed().map_err(|e| {
@@ -3179,7 +3179,7 @@ fn fetch_request_range(
 ///
 /// 配る Object と End of Unknown Range は [`cache::MediaCache::plan`] が決める。ここでは要求
 /// range の解決と、FETCH_OK と 1 本の FETCH 応答ストリームの書き出しを行う
-/// (draft-ietf-moq-transport-22 §3.2 (Fetch) / §11.4 (Fetch Streams))。
+/// (draft-ietf-moq-transport-23 §3.2 (Fetch) / §11.4 (Fetch Streams))。
 /// 応答は「End of Unknown Range (必要なら) → Object → (全滅なら End of Unknown Range)」を
 /// 順に書き、FIN で閉じる。
 async fn serve_media_fetch(
@@ -3190,7 +3190,7 @@ async fn serve_media_fetch(
     media_cache: &mut cache::MediaCache,
 ) -> Result<()> {
     let track_name = fetch.track_name.as_slice();
-    // draft-ietf-moq-transport-22 §3.3.3 (Range Filters) は publisher に「すべてのフィルタを
+    // draft-ietf-moq-transport-23 §3.3.3 (Combining Filters) は publisher に「すべてのフィルタを
     // 通過した Object だけを送る」MUST を課す。この example はメディアの保持にフィルタ評価を
     // 持たないため、フィルタ付きの FETCH は昇順の保持範囲を返さず拒否する (§1.6 の
     // 「未対応のメッセージには NOT_SUPPORTED で応答する」に従う)
@@ -3246,7 +3246,7 @@ async fn serve_media_fetch(
     let entries = plan.entries();
     match &plan {
         cache::FetchPlan::NoPublishedObjects => {
-            // draft-ietf-moq-transport-22 §3.2 は「Object が publish されていない track への
+            // draft-ietf-moq-transport-23 §3.2 は「Object が publish されていない track への
             // FETCH」に INVALID_RANGE を返す MUST を課す
             tracing::warn!(
                 "Rejecting FETCH for a track without published objects: {}",
@@ -3288,7 +3288,7 @@ async fn serve_media_fetch(
                 .await?;
         }
         cache::FetchPlan::UnsupportedGroupOrder => {
-            // draft-ietf-moq-transport-22 §3.2.1 (Fetch) は要求された group order で送る MUST を
+            // draft-ietf-moq-transport-23 §3.2.1 (Fetch) は要求された group order で送る MUST を
             // 課す。降順で返す実装を持たないため、昇順で返さず拒否する
             tracing::warn!(
                 "Rejecting FETCH with a descending group order (request_id={request_id}, track={})",
@@ -3367,7 +3367,7 @@ async fn serve_fetch_entries(
             }
             cache::FetchResponseEntry::Object(object) => {
                 // Publisher Priority は元の配送と同じ固定値にする。FETCH 応答では同じ Subgroup の
-                // Priority を変えられない (draft-ietf-moq-transport-22 §12.1 (Malformed Tracks))。
+                // Priority を変えられない (draft-ietf-moq-transport-23 §12.1 (Malformed Tracks))。
                 // 元の配送が datagram でも、応答は 1 本の stream に載せるため Subgroup ID 0 の
                 // Object として書く
                 let input = FetchObjectInput {
@@ -3966,7 +3966,7 @@ mod tests {
 
         /// request stream の GOAWAY は当該 request だけの移行対象として返すこと
         ///
-        /// draft-ietf-moq-transport-22 §6.6.1 は request stream の GOAWAY を
+        /// draft-ietf-moq-transport-23 §6.6.1 は request stream の GOAWAY を
         /// 「その request だけを移し、残りの session はそのままにする」と定める。
         /// 移行するかどうかは呼び出し側が決める。
         #[test]
@@ -3986,7 +3986,7 @@ mod tests {
 
         /// New Session URI が空のときは現在の URL を再利用すること
         ///
-        /// draft-ietf-moq-transport-22 §9.2 (GOAWAY) は「URI が 0 バイトなら現在の URI を
+        /// draft-ietf-moq-transport-23 §9.2 (GOAWAY) は「URI が 0 バイトなら現在の URI を
         /// 再利用する」と定める。
         #[test]
         fn empty_uri_reuses_the_current_url() {
@@ -4086,7 +4086,7 @@ mod tests {
 
     /// GOAWAY の適用範囲と New Session URI から publisher の動作を決める判断を固定する
     ///
-    /// draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration) / §9.2 (GOAWAY)。
+    /// draft-ietf-moq-transport-23 §6.6.1 (Graceful Session Migration) / §9.2 (GOAWAY)。
     mod goaway_action_tests {
         use super::*;
 
@@ -4110,7 +4110,7 @@ mod tests {
 
         /// request stream の GOAWAY で URI が空なら現在の session で再発行すること
         ///
-        /// draft-ietf-moq-transport-22 §9.2 (GOAWAY) は、URI が無い場合は「現在の session」で
+        /// draft-ietf-moq-transport-23 §9.2 (GOAWAY) は、URI が無い場合は「現在の session」で
         /// 当該 request を再発行することを求める。
         #[test]
         fn request_stream_goaway_without_a_uri_republishes_the_request() {
@@ -4329,7 +4329,7 @@ mod tests {
 
     /// 移行の PUBLISH 失敗時に接続からやり直す判断と待ち時間を固定する
     ///
-    /// draft-ietf-moq-transport-22 §9.2 (GOAWAY) の移行は期限 (Timeout) までに完了させる
+    /// draft-ietf-moq-transport-23 §9.2 (GOAWAY) の移行は期限 (Timeout) までに完了させる
     /// 必要がある。待ち時間は期限で cap し、期限が無ければ再試行しない。
     mod migration_retry_tests {
         use super::*;
@@ -4531,7 +4531,7 @@ mod tests {
     /// MP4 パススルーでは DYNAMIC_GROUPS を告知しないこと
     ///
     /// パススルーはエンコーダを使わずキーフレームを要求できないため、購読者に
-    /// `NEW_GROUP_REQUEST` を送れると告知しない (draft-ietf-moq-transport-22 §10.6)。
+    /// `NEW_GROUP_REQUEST` を送れると告知しない (draft-ietf-moq-transport-23 §10.6)。
     /// `MAX_CACHE_DURATION` は保持するため、パススルーでも告知する。
     #[test]
     fn video_publish_properties_skip_dynamic_groups_for_mp4_passthrough() {
@@ -4558,7 +4558,7 @@ mod tests {
 
     /// 告知する `MAX_CACHE_DURATION` が `--cache-duration` と同じ値であること
     ///
-    /// draft-ietf-moq-transport-22 §10.3 (MAX CACHE DURATION): 保持した Object を配れる時間を
+    /// draft-ietf-moq-transport-23 §10.3 (MAX CACHE DURATION): 保持した Object を配れる時間を
     /// ミリ秒で示す。告知値と実際の保持が食い違うと、購読者と relay が配れる期間を誤解する。
     /// 映像 / 音声の PUBLISH と SUBSCRIBE_OK のどの経路でも同じ値を載せる。
     #[test]
@@ -4598,7 +4598,7 @@ mod tests {
 
     /// FETCH の要求 range が Location Filter と Largest Object から決まること
     ///
-    /// draft-ietf-moq-transport-22 §3.2 (Fetch) / §3.3.1 (Location Filters) / §9.20.9
+    /// draft-ietf-moq-transport-23 §3.2 (Fetch) / §3.3.1 (Location Filters) / §9.19.9
     /// (LOCATION FILTER Parameter): 省略時は Start = `{0, 0}` / End = Largest Object である。
     /// 要求が Largest Object より先を指しても配れるのは Largest Object までなので、End は
     /// Largest Object でクランプする。
@@ -4740,7 +4740,7 @@ mod tests {
     /// SUBSCRIBE_OK の Track Properties が映像トラックだけ DYNAMIC_GROUPS を告知すること
     ///
     /// 購読者は SUBSCRIBE_OK の値で publisher の対応を知る
-    /// (draft-ietf-moq-transport-22 §3.5.1)。音声とカタログには載せない。
+    /// (draft-ietf-moq-transport-23 §3.5.1)。音声とカタログには載せない。
     #[test]
     fn subscribe_ok_properties_announce_dynamic_groups_for_the_video_track() {
         assert_eq!(
@@ -4773,7 +4773,7 @@ mod tests {
     /// キーフレームを強制できる要求だけを受け付けること
     ///
     /// 値が 0 か現在の Group より大きいときだけ受け付ける
-    /// (draft-ietf-moq-transport-22 §9.20.19)。音声やカタログのトラック宛ての要求、および
+    /// (draft-ietf-moq-transport-23 §9.19.19)。音声やカタログのトラック宛ての要求、および
     /// キーフレームを強制できない経路 (MP4 パススルー) の要求では映像のキーフレームを
     /// 強制しない。
     #[test]
@@ -4823,7 +4823,7 @@ mod tests {
     /// 映像トラックの PUBLISH に DYNAMIC_GROUPS=1 を載せること
     ///
     /// 購読者は DYNAMIC_GROUPS=1 を知らないと REQUEST_UPDATE で NEW_GROUP_REQUEST を
-    /// 送れない (draft-ietf-moq-transport-22 §9.20.19)。音声とカタログのトラックには
+    /// 送れない (draft-ietf-moq-transport-23 §9.19.19)。音声とカタログのトラックには
     /// 載せないため、空の Track Properties では告知されないことも確かめる。
     #[test]
     fn video_track_properties_announce_dynamic_groups() {

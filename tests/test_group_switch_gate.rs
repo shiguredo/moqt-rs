@@ -1,7 +1,7 @@
 //! Group の切り替えで次の Group の Object を保留する規則のテスト
 //!
 //! [`GroupSwitchGate`] の公開 API の契約を確認する。映像は Group ごとに別の Subgroup
-//! ストリームで届くため (draft-ietf-moq-transport-22 §2.2 (Subgroups))、前の Group の stream
+//! ストリームで届くため (draft-ietf-moq-transport-23 §2.2 (Subgroups))、前の Group の stream
 //! が終わる前に次の Group のキーフレームが届くことがある。次の Group のキーフレームを先に
 //! 復号すると、遅れて届いた前の Group の末尾が古い Group として捨てられ、表示が途切れる。
 //!

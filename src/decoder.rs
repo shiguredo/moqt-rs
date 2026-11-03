@@ -127,7 +127,7 @@ impl MessageDecoder {
     /// バッファから varint のデコードを試みる
     ///
     /// ストリームタイプの読み取りに使用する。
-    /// draft-ietf-moq-transport-22 §6.4.1 (Unidirectional Streams):
+    /// draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams):
     /// 全ての MOQT 単方向ストリームは先頭にストリームタイプ varint を持つ。
     ///
     /// - `Ok(Some(val))` — デコード成功、バッファから消費済み

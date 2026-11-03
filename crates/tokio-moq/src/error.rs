@@ -78,7 +78,7 @@ pub enum TransportError {
     /// s2n-quic は peer の STOP_SENDING を受信したストリームの送信 API (send / finish /
     /// reset) を `StreamError::StreamReset` で失敗させ、tokio-qmux は同じ条件で
     /// `Error::Stopped` を返す。これは該当ストリームだけの終端でありセッションは継続するため
-    /// (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))、
+    /// (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))、
     /// アプリはセッション終了と区別して扱う必要がある。
     /// `error_code` は transport 依存の wire コードであり、QUIC 直接接続と QMux は QUIC の
     /// code space、WebTransport over HTTP/3 は HTTP/3 の code space になる (MOQT のコードへ
@@ -128,7 +128,7 @@ impl TransportError {
     /// peer が STOP_SENDING で送信方向を閉じた場合、s2n-quic は送信 API を
     /// `StreamError::StreamReset` で失敗させる。セッションは継続し、該当ストリームだけが
     /// 終端するため、アプリがセッション終了と切り分けられるよう [`Self::StreamReset`] にする
-    /// (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))。
+    /// (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))。
     /// `fallback` は `StreamReset` 以外のエラーを畳む先であり、経路ごとの既存の表示
     /// (QUIC 直接接続は [`Self::Quic`]、WebTransport は [`Self::Transport`]) を保つために渡す。
     pub(crate) fn from_send_error(
@@ -147,7 +147,7 @@ impl TransportError {
     ///
     /// peer が STOP_SENDING を送った後の送信 API は `Error::Stopped` を返す。s2n-quic の
     /// `StreamError::StreamReset` と同じく該当ストリームだけの終端でありセッションは継続する
-    /// ため、[`Self::StreamReset`] にして切断と区別する (draft-ietf-moq-transport-22
+    /// ため、[`Self::StreamReset`] にして切断と区別する (draft-ietf-moq-transport-23
     /// §6.4.2.3 (Request Cancellation and Rejection))。
     pub(crate) fn from_qmux(e: tokio_qmux::Error) -> Self {
         match e {

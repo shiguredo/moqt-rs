@@ -287,9 +287,9 @@ impl DisplayJson for MsfBuffers {
     }
 }
 
-/// メディアタイムラインテンプレート (draft-ietf-moq-msf-01 §5.2.15 (Template) / §7.4.1 (Template Format))
+/// メディアタイムラインテンプレート (draft-ietf-moq-msf-01 §5.2.15 (Template) / §7.5.1 (Template Format))
 ///
-/// 6 要素は必須であり指定順に現れる。計算式は §7.4.1 に従う。
+/// 6 要素は必須であり指定順に現れる。計算式は §7.5.1 に従う。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MsfTemplate {
     /// 先頭エントリのメディア PTS ms
@@ -332,7 +332,7 @@ impl DisplayJson for MsfTemplate {
 impl MsfTemplate {
     /// n 番目 (0 始まり) のエントリを求める
     ///
-    /// draft-ietf-moq-msf-01 §7.4.1 の計算式に従う。4 系列のいずれかが overflow した場合は
+    /// draft-ietf-moq-msf-01 §7.5.1 の計算式に従う。4 系列のいずれかが overflow した場合は
     /// 全体を `None` とする (仕様式に overflow 定義がないための防御的扱い)。
     pub fn resolve_entry(&self, n: u64) -> Option<MsfMediaTimelineEntry> {
         let media_time = self
@@ -3117,7 +3117,7 @@ fn decode_accessibility(
     Ok(descs)
 }
 
-/// template 配列をデコードする (draft-ietf-moq-msf-01 §7.4.1 (Template Format))
+/// template 配列をデコードする (draft-ietf-moq-msf-01 §7.5.1 (Template Format))
 ///
 /// 6 要素は必須であり指定順に現れる。入れ子の location 配列は要素数 2 とする。
 /// 要素数・順序・型のいずれかに違反した場合は `InvalidCatalog` を返す。

@@ -195,7 +195,7 @@ mod error_cases {
 
     #[test]
     fn empty_encode_produces_zero_length() {
-        // draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header): 空のプロパティ列は Properties Length = 0
+        // draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header): 空のプロパティ列は Properties Length = 0
         let props = LocProperties::new();
         let encoded = props
             .encode()
@@ -277,7 +277,7 @@ mod error_cases {
 
     #[test]
     fn decode_zero_length_returns_empty() {
-        // draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header): 空のプロパティ列は Properties Length = 0
+        // draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header): 空のプロパティ列は Properties Length = 0
         let (props, consumed) =
             LocProperties::decode(&[0x00]).expect("テストフィクスチャの前提条件を満たす");
         assert!(props.is_empty());

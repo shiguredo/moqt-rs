@@ -8,7 +8,7 @@
 //! - 最新 Group の最初の Object より前の catalog update は無視する (MUST)
 //!
 //! 購読は Joining FETCH の代替として 2 経路でカタログを受信する
-//! (draft-ietf-moq-transport-22 §3.5.1 (Dynamically Starting New Groups))。
+//! (draft-ietf-moq-transport-23 §3.5.1 (Dynamically Starting New Groups))。
 //! 購読前に配られた分は FETCH 応答で、購読後に配られた分は SUBSCRIBE で届くため、
 //! 同じ Location の Object が両方に現れうる。適用時に Location の重複と逆戻りを
 //! 弾くことで、delta の二重適用を防ぐ。
@@ -54,7 +54,7 @@ pub(crate) enum CatalogApplyOutcome {
 /// 受信した catalog Object を順に適用する状態
 #[derive(Debug)]
 pub(crate) struct CatalogState {
-    /// catalog track の namespace (draft-ietf-moq-transport-22 §8.8 (Representing Namespace and
+    /// catalog track の namespace (draft-ietf-moq-transport-23 §8.8 (Representing Namespace and
     /// Track Names) の表現。draft-ietf-moq-msf-01 §11.1.2 (MSF Namespace-Name String Encoding) が
     /// URL fragment 用に同じ符号化を再掲する)
     ///

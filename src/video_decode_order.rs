@@ -1,7 +1,7 @@
 //! 受信した映像 Object を復号してよいかを Group の順序と欠落から決める状態機械
 //!
-//! draft-ietf-moq-transport-22 §2.1.2 (Object States): "Since Objects can be delivered out
-//! of order" であり、Group ごとに別の Subgroup ストリームで届くため、前の Group の末尾が
+//! draft-ietf-moq-transport-23 §2.2 (Subgroups): 1 つの Group は Subgroup ごとに別の stream で
+//! 届き、順序が保証されるのは stream 内だけである。そのため前の Group の末尾が
 //! 次の Group の先頭より後に届くことがある。次の Group のキーフレームを復号した後に前の
 //! Group の delta を復号すると、参照フレームが壊れて映像が崩れる。Group 内で Object が
 //! 欠けた後の delta も、参照するフレームが無いまま復号することになる。
@@ -22,7 +22,7 @@
 //! - 欠落の後でキーフレームを待っている間も、欠落を検出した Group を保持する。それより
 //!   古い Group の Object を古いとして捨てるためである
 //!
-//! 1 Group の Object を 1 本の Subgroup で送る publisher を前提とする (draft-ietf-moq-transport-22
+//! 1 Group の Object を 1 本の Subgroup で送る publisher を前提とする (draft-ietf-moq-transport-23
 //! §2.2 (Subgroups): "A subgroup is a sequence of one or more objects from the same group in
 //! ascending order by Object ID.")。1 Group を複数の Subgroup に分ける publisher の Object ID の
 //! 飛びも欠落として扱う。どの Object を参照しているかを受信側は判断できないため、崩れた映像
@@ -70,7 +70,7 @@ pub struct VideoObjectPosition {
     pub is_key_frame: bool,
     /// この Object の直前にあり、存在しない (今後も存在しない) Object の数
     ///
-    /// PRIOR_OBJECT_ID_GAP (draft-ietf-moq-transport-22 §10.9 (Prior Object ID Gap)) の値。
+    /// PRIOR_OBJECT_ID_GAP (draft-ietf-moq-transport-23 §10.9 (Prior Object ID Gap)) の値。
     /// Property が無い Object は 0 とする ([`prior_object_id_gap_of`] で読む)。
     pub prior_object_id_gap: u64,
 }
@@ -252,7 +252,7 @@ impl Default for VideoDecodeOrder {
 /// LOC の Public Properties は同じブロックに載るため (draft-ietf-moq-loc-04 §2.2 (MOQ Object
 /// Mapping))、LOC の Property を含むバイト列をそのまま渡してよい。
 ///
-/// draft-ietf-moq-transport-22 §10.9 (Prior Object ID Gap): Prior Object ID Gap は、この
+/// draft-ietf-moq-transport-23 §10.9 (Prior Object ID Gap): Prior Object ID Gap は、この
 /// Object の直前にあり、存在しない (今後も存在しない) Object の数を示す。Property が
 /// 無ければ受信側は直前の Object の存在について何も推論できない (§10.9 / §2.1.2) ため、
 /// 0 (非存在と示された Object が無い) として扱う。

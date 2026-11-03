@@ -31,7 +31,7 @@ use super::types::{
 ///
 /// subscriber 側は `Terminated`、publisher 側は `Terminated` またはデータストリーム
 /// 終端済み (`send_fetch_data_stream_closed` 呼び出し済み。`Established` のままでも破棄可能。
-/// draft-ietf-moq-transport-22 §3.2.4 の "It can remove all FETCH state after closing the
+/// draft-ietf-moq-transport-23 §3.2.4 の "It can remove all FETCH state after closing the
 /// data stream with a FIN." に基づく)。
 fn fetch_finished(fetch: &Fetch) -> bool {
     match fetch.my_role {
@@ -96,7 +96,7 @@ impl Session {
     /// 破棄可能な状態条件 (subscriber 側は `Terminated`、publisher 側は `Terminated`
     /// またはデータストリーム終端済み) を満たし、かつ open 中の受信データストリームが
     /// 無ければ `Some(true)` を返す。
-    /// draft-ietf-moq-transport-22 §3.2 (Fetch) により、データストリームの
+    /// draft-ietf-moq-transport-23 §3.2 (Fetch) により、データストリームの
     /// FIN 後に FETCH_OK / REQUEST_ERROR が届くことがあるため、応答未受領の
     /// `Terminated` fetch も存在しうる。subscriber 側の fetch では `response_received`
     /// (subscriber 側専用のフィールド) を確認してから `forget_fetch` を呼ぶこと。
@@ -116,7 +116,7 @@ impl Session {
     /// "outgoing fetch object sent before fetch header" / "outgoing fetch stream close received
     /// for unknown stream id")。終端通知を呼ばずに `forget_fetch` した場合も同様である。
     ///
-    /// publisher 側の終端済み fetch の破棄経路は draft-ietf-moq-transport-22 §3.2.4
+    /// publisher 側の終端済み fetch の破棄経路は draft-ietf-moq-transport-23 §3.2.4
     /// "It can remove all FETCH state after closing the data stream with a FIN." に基づく。
     /// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     pub fn fetch_cleanup_ready(&self, request_id: u64) -> Option<bool> {
@@ -139,7 +139,7 @@ impl Session {
     /// (subscriber 側は `Terminated`、publisher 側は `Terminated` または
     /// データストリーム終端済み)。`fetch_cleanup_ready` は open 中の受信データストリームが
     /// 無いことも要求するが、本関数は open 中の受信データストリームがあっても受理し、
-    /// 掃除を兼ねる (下記)。draft-ietf-moq-transport-22 §3.2 (Fetch)
+    /// 掃除を兼ねる (下記)。draft-ietf-moq-transport-23 §3.2 (Fetch)
     /// により、データストリームの FIN 後に FETCH_OK / REQUEST_ERROR が届くことがあるため、
     /// 応答未受領の `Terminated` fetch も存在しうる。subscriber 側の fetch では応答受領
     /// (`response_received`) を確認してから破棄すること (bidi request stream の終端を
@@ -159,7 +159,7 @@ impl Session {
     /// UNEXPECTED_MESSAGE で fail する
     /// (アプリは peer が request stream を閉じるまで `forget_fetch` を待つこと)
     /// (draft §9.5 の "An endpoint that receives a REQUEST_UPDATE other than in the two
-    /// cases above MUST close the session with a PROTOCOL_VIOLATION." に従い、セッション終了
+    /// cases above MUST close the session with UNEXPECTED_MESSAGE." に従い、セッション終了
     /// コードは draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の
     /// UNEXPECTED_MESSAGE / ROLE_VIOLATION に細分類する。
     /// 破棄済み request への REQUEST_UPDATE は「sender が同じ bidi stream に後から
@@ -201,7 +201,7 @@ impl Session {
 
     /// bidi request stream 終端時の FETCH 側の処理
     ///
-    /// draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection) に従い、bidi
+    /// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection) に従い、bidi
     /// request stream の終端で Fetch の state を `Terminated` に遷移させる。FETCH データ
     /// stream (uni) の終端とは別で、request 自体の打ち切り処理である。
     ///
@@ -236,7 +236,7 @@ impl Session {
 
     // ─── 送信 API ──────────────────────────────────────────
 
-    /// FETCH を送信する (draft-ietf-moq-transport-22 §9.11 (FETCH)、自側が subscriber)
+    /// FETCH を送信する (draft-ietf-moq-transport-23 §9.11 (FETCH)、自側が subscriber)
     ///
     /// range は LOCATION_FILTER パラメータで指定する (省略時は track 先頭から
     /// Largest Object まで)。draft-ietf-moq-transport-23 §3.2 (Fetch) により、相対
@@ -257,7 +257,7 @@ impl Session {
         self.check_peer_goaway()?;
         // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は送出しない
         Self::validate_outgoing_track_name(&track_name)?;
-        // draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces): single period `.` 予約名前空間への FETCH は送信不可
+        // draft-ietf-moq-transport-23 §2.4.3 (Reserved Namespaces): single period `.` 予約名前空間への FETCH は送信不可
         if track_namespace.is_single_period() {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
@@ -265,10 +265,10 @@ impl Session {
             )
             .into());
         }
-        // draft-ietf-moq-transport-22 §3.3.2 (Range Filters): peer が必ず INVALID_FILTER で
+        // draft-ietf-moq-transport-23 §3.3.2 (Range Filters): peer が必ず INVALID_FILTER で
         // 拒否するメッセージを無警告で送出しないよう、送信前に自側で弾く
         self.validate_outgoing_range_filters(&parameters)?;
-        // draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope): FETCH で許可されない
+        // draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): FETCH で許可されない
         // パラメータを含む送信は API 呼び出し時に拒否する。scope 検証に限っては
         // request_id 発行より前に置き、エラー時に欠番を作らない
         // (値域検証は発行後のまま。SUBSCRIBE 送信と同じ設計判断)。
@@ -358,7 +358,7 @@ impl Session {
         if let Some(order) = fetch.group_order {
             super::subscription::validation::validate_group_order(order)?;
         }
-        // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
+        // draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
         // 送信前に値域を検証し、不正値の送出と状態登録を防ぐ
         if let Some(v) = parameters.include_properties() {
             super::subscription::validation::validate_include_properties(v)?;
@@ -550,11 +550,11 @@ impl Session {
                 "request_update requires Established fetch",
             ));
         }
-        // draft-ietf-moq-transport-22 §9.20.7 (SUBSCRIBER PRIORITY Parameter): REQUEST_UPDATE に SUBSCRIBER_PRIORITY が含まれる場合は更新
+        // draft-ietf-moq-transport-23 §9.19.7 (SUBSCRIBER PRIORITY Parameter): REQUEST_UPDATE に SUBSCRIBER_PRIORITY が含まれる場合は更新
         if let Some(priority) = parameters.subscriber_priority() {
             fetch.subscriber_priority = Some(priority);
         }
-        // draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): GROUP_ORDER は確定後変更不可 (draft-ietf-moq-transport-22 §5.1.1 (Definitions)) のため更新しない
+        // draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter): GROUP_ORDER は確定後変更不可 (draft-ietf-moq-transport-23 §5.1.1 (Definitions)) のため更新しない
         Ok(())
     }
 
@@ -572,7 +572,7 @@ impl Session {
     /// stream id 系 (`recv_data_stream_closed`) で通知すること
     /// (fill 終端は subscription の state を変えず、Stream Count の open 数だけを戻す)。
     ///
-    /// draft-ietf-moq-transport-22 §3.2.4 (Fetch State Management): subscriber は FETCH_HEADER
+    /// draft-ietf-moq-transport-23 §3.2.4 (Fetch State Management): subscriber は FETCH_HEADER
     /// stream の FIN 受信、または publisher 側 RESET_STREAM 受信で FETCH state を
     /// 終える。state は `Terminated` に遷移する。
     ///
@@ -602,7 +602,7 @@ impl Session {
     /// draft §3.2.4 (Fetch State Management): subscriber が自ら cancel する経路。
     /// state は `Terminated` に遷移する。I/O 層が QUIC STOP_SENDING を送出
     /// したうえで本関数を呼ぶ (session 層は frame 送出しない)。
-    /// draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection):
+    /// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection):
     /// cancel は開いている方向を打ち切る。I/O 層は `ResetRequestStream` を受けて
     /// bidi request stream の送信方向を reset する。
     pub fn send_fetch_stop_sending(&mut self, request_id: u64) -> Result<(), SessionError> {
@@ -752,21 +752,21 @@ impl Session {
         }
         // draft §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
         self.apply_peer_message_auth_tokens(&fetch.parameters)?;
-        // draft-ietf-moq-transport-22 §3.3.2 (Range Filters): MAX_FILTER_RANGES 超過は INVALID_FILTER で拒否
+        // draft-ietf-moq-transport-23 §3.3.2 (Range Filters): MAX_FILTER_RANGES 超過は INVALID_FILTER で拒否
         if let Err(reason) = self.check_incoming_range_filters(&fetch.parameters) {
             self.emit_request_error(request_id, REQUEST_INVALID_FILTER, reason);
             return Ok(());
         }
         let track_ns = fetch.track_namespace;
         let track_name = fetch.track_name;
-        // draft-ietf-moq-transport-22 は値域 MUST (§9.20.9 (LOCATION FILTER Parameter) の
-        // StartGroup + EndGroupDelta オーバーフローや §9.20.8 (GROUP ORDER Parameter) 等) と
+        // draft-ietf-moq-transport-23 は値域 MUST (§9.19.9 (LOCATION FILTER Parameter) の
+        // StartGroup + EndGroupDelta オーバーフローや §9.19.8 (GROUP ORDER Parameter) 等) と
         // 予約名前空間拒否の優先順位を規定しない。宛先自体が仕様上存在しない予約名前空間の拒否を
         // LOCATION_FILTER の decode より先に行う意図した選択である (値域 MUST は wire 経路では
         // decode 層がハンドラ到達前に発火するため、優先順位が観測されるのは API 経路で値域外の
         // パラメータを手組みしたメッセージのみ。本ハンドラ自身は LOCATION_FILTER 以外の値を
         // 解釈しない)。
-        // draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces): single period `.` 予約名前空間の FETCH は拒否
+        // draft-ietf-moq-transport-23 §2.4.3 (Reserved Namespaces): single period `.` 予約名前空間の FETCH は拒否
         if track_ns.is_single_period() {
             self.emit_request_error(
                 request_id,
@@ -789,8 +789,8 @@ impl Session {
             );
             return Ok(());
         }
-        // draft-ietf-moq-transport-22 §9.11 (FETCH) / §3.3.1 (Location Filters) /
-        // §9.20.9 (LOCATION FILTER Parameter):
+        // draft-ietf-moq-transport-23 §9.11 (FETCH) / §3.3.1 (Location Filters) /
+        // §9.19.9 (LOCATION FILTER Parameter):
         // Fetch range は LOCATION_FILTER パラメータで指定する。省略時と Location Filter
         // Type 0x00 (None) は unfiltered (先頭から Largest Object まで) として扱う。
         // 不正エンコーディングは wire 経路ではデコード層が検証するため到達せず、API 経路で
@@ -828,7 +828,7 @@ impl Session {
             );
             return Ok(());
         }
-        // draft-ietf-moq-transport-22 §3.2 (Fetch): オブジェクトが公開されていない
+        // draft-ietf-moq-transport-23 §3.2 (Fetch): オブジェクトが公開されていない
         // トラックへの FETCH は INVALID_RANGE。対象 subscription があり、Largest が
         // 一度も観測されていない場合が該当する。subscription 自体が無いときは受理する。
         let key = (track_ns.clone(), track_name.clone(), TrackRole::Publisher);
@@ -882,7 +882,7 @@ impl Session {
             );
             return Ok(());
         }
-        // draft-ietf-moq-transport-22 §3.2 (Fetch): Start Location が Largest Object を
+        // draft-ietf-moq-transport-23 §3.2 (Fetch): Start Location が Largest Object を
         // 上回る範囲外要求は INVALID_RANGE (`start == largest` は範囲内として受理)。
         // Largest 未観測のときは検証をスキップして受理する。
         // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
@@ -906,13 +906,13 @@ impl Session {
             .and_then(LocationFilter::explicit_end_location);
         let group_order = fetch.parameters.group_order();
         if let Some(order) = group_order {
-            // draft §9.20.8 (GROUP ORDER Parameter): 値域外の受信はセッションを閉じる
+            // draft §9.19.8 (GROUP ORDER Parameter): 値域外の受信はセッションを閉じる
             if let Err(err) = super::subscription::validation::validate_group_order(order) {
                 self.fail(err.clone());
                 return Err(err);
             }
         }
-        // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
+        // draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
         // 値域外 (0 / 1 以外) の受信は MUST でセッションを INVALID_PARAMETER (0x305) により
         // 閉じる (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
         let include_properties = fetch.parameters.include_properties();
@@ -940,7 +940,7 @@ impl Session {
             peer_stop_sending_error_code: None,
             subscriber_priority: fetch.parameters.subscriber_priority(),
             group_order,
-            // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
+            // draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
             // peer が FETCH で指定した値を保持し、FETCH_OK 送信時に参照する
             include_properties,
             // publisher 役は応答を送る側であり、受信側の暗黙 gap 判定には使わない。
@@ -954,9 +954,9 @@ impl Session {
 
     /// REQUEST_UPDATE を受信できる FETCH かを検証する
     ///
-    /// draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE): "An endpoint that receives a
-    /// REQUEST_UPDATE other than in the two cases above MUST close the session with a
-    /// PROTOCOL_VIOLATION." の MUST を満たす。
+    /// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): "An endpoint that receives a
+    /// REQUEST_UPDATE other than in the two cases above MUST close the session with
+    /// UNEXPECTED_MESSAGE." の MUST を満たす。
     ///
     /// - 送信者: REQUEST_UPDATE を送れるのは元 FETCH の送信者だけであり、自側は publisher
     ///   であること (§9.5 の 2 ケースの 1 つ目に FETCH が含まれる)
@@ -1023,11 +1023,11 @@ impl Session {
         if locally_terminated {
             return Ok(());
         }
-        // draft-ietf-moq-transport-22 §9.20.7 (SUBSCRIBER PRIORITY Parameter): REQUEST_UPDATE に SUBSCRIBER_PRIORITY が含まれる場合は更新
+        // draft-ietf-moq-transport-23 §9.19.7 (SUBSCRIBER PRIORITY Parameter): REQUEST_UPDATE に SUBSCRIBER_PRIORITY が含まれる場合は更新
         if let Some(priority) = parameters.subscriber_priority() {
             fetch.subscriber_priority = Some(priority);
         }
-        // draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): GROUP_ORDER は確定後変更不可 (draft-ietf-moq-transport-22 §5.1.1 (Definitions)) のため更新しない
+        // draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter): GROUP_ORDER は確定後変更不可 (draft-ietf-moq-transport-23 §5.1.1 (Definitions)) のため更新しない
         self.events.push_back(SessionEvent::RequestUpdateReceived {
             request_id,
             parameters,
@@ -1165,7 +1165,7 @@ impl Session {
             // ローカルで fetch をキャンセルするため、request stream GOAWAY の reset deadline も
             // 解除する
             self.clear_request_stream_goaway_deadline(request_id);
-            // draft-ietf-moq-transport-22 §3.7 (Mandatory to Understand Track Properties) / §3.2.4 (Fetch
+            // draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties) / §3.2.4 (Fetch
             // State Management) / §6.4.2.3 (Request Cancellation and Rejection): cancel は
             // 開いている方向をストリーム終端で打ち切る。§3.2.4 は bidi request stream への
             // STOP_SENDING を MUST とする ("It MUST send STOP_SENDING for the bidi request
@@ -1235,8 +1235,9 @@ impl Session {
 
     /// FETCH の REQUEST_UPDATE に対する REQUEST_UPDATE_OK を検証する
     ///
-    /// draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) の "If Objects have
-    /// been published on this Track the Publisher MUST include this parameter." を満たすため、
+    /// draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter) の "If the sending
+    /// endpoint has published or received any Objects in the Track, it MUST include this
+    /// parameter in the above messages it sends." を満たすため、
     /// publisher が観測した Track 最大 Location を `update_largest_object_in_parameters` で
     /// 補完する (利用者指定値と観測最大の大きい方を載せ、指定値を下げない)。
     /// 観測値は publisher 役 subscription の送信記録 (`send_subgroup_object` /
@@ -1337,7 +1338,7 @@ impl Session {
 
     /// FETCH への REQUEST_ERROR 送信時の fetch 状態遷移
     ///
-    /// draft-ietf-moq-transport-22 §9.5.1: REQUEST_UPDATE 失敗時、publisher は
+    /// draft-ietf-moq-transport-23 §9.5.1: REQUEST_UPDATE 失敗時、publisher は
     /// FETCH データストリームをリセットしなければならない (MUST)。本関数は
     /// `Established` 分岐で fetch state を `Terminated` に遷移させ、対応する outgoing
     /// FETCH data stream を `outgoing_fetch` から除去する。実際の `ResetDataStream`
@@ -1353,7 +1354,7 @@ impl Session {
     ///   `Pending` 分岐 (FETCH_HEADER 未送信のため outgoing stream 無し)
     /// - `Err(_)`: `Terminated` からの送信 or 非 publisher role からの送信は不正
     ///
-    /// draft-ietf-moq-transport-22 §11 (Data Streams and Datagrams): 1 つの FETCH に対する
+    /// draft-ietf-moq-transport-23 §11 (Data Streams and Datagrams): 1 つの FETCH に対する
     /// 応答は 1 本の data stream で送る ("sends Objects matching a FETCH request on one Data Stream")。
     /// したがって `Established` の fetch に対応する outgoing_fetch エントリは 0 or 1 本のみ。
     ///
@@ -1443,7 +1444,7 @@ impl Session {
         if locally_terminated {
             return Ok(());
         }
-        // draft-ietf-moq-transport-22 §3.2 (Fetch): REQUEST_ERROR は
+        // draft-ietf-moq-transport-23 §3.2 (Fetch): REQUEST_ERROR は
         // FETCH データストリームの FIN 前後どちらでも届きうるため、state によらず受理する。
         // REQUEST_UPDATE 失敗応答としての REQUEST_ERROR (`Established` 分岐) と
         // FETCH への応答 (`Pending` 遷移 / `Terminated` 受理) は state ベースでは区別不能であり、
@@ -1481,7 +1482,7 @@ impl Session {
         }
         if tolerate_late_stream {
             // FETCH_ERROR 受信後に届く in-flight の FETCH data stream を破棄対象として
-            // 受理するための許容集合へ登録する (draft-ietf-moq-transport-22 §3.2.4)
+            // 受理するための許容集合へ登録する (draft-ietf-moq-transport-23 §3.2.4)
             self.record_fetch_error_late_stream(request_id);
         }
         // 失敗応答では応答範囲の終端 (LARGEST_OBJECT) が来ないため、保留中の gap 判定を

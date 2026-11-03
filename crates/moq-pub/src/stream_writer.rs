@@ -1,7 +1,7 @@
 //! Subgroup Stream ライター
 //!
 //! 1 つの Group に対応する一方向ストリームへオブジェクトを書き込む。
-//! draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header) / §11.3.2 (Closing Subgroup Streams) に準拠する。
+//! draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header) / §11.3.2 (Closing Subgroup Streams) に準拠する。
 
 use bytes::Bytes;
 
@@ -18,7 +18,7 @@ use tokio_moq::transport;
 
 /// Subgroup Stream の終端方法 (sans I/O)
 ///
-/// draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams) の MUST に対応する。
+/// draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams) の MUST に対応する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SubgroupTermination {
     /// 配送すべき Object をすべて配送したため FIN で閉じる
@@ -32,7 +32,7 @@ impl SubgroupTermination {
     ///
     /// 購読者側のフィルタ不通過・Start Location や End Group の更新による配送中止のいずれも
     /// 「送信側の都合で配送を中止した」ため CANCELLED を使う
-    /// (draft-ietf-moq-transport-22 §12.5 (Stream Reset Error Codes))。
+    /// (draft-ietf-moq-transport-23 §12.5 (Stream Reset Error Codes))。
     fn reset_error_code(self) -> Option<u64> {
         match self {
             SubgroupTermination::Fin => None,
@@ -43,7 +43,7 @@ impl SubgroupTermination {
 
 /// Subgroup の Object ID 追跡とヘッダ送信の状態 (sans I/O)
 ///
-/// draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header) / §2.2 (Subgroups): FIRST_OBJECT bit は
+/// draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header) / §2.2 (Subgroups): FIRST_OBJECT bit は
 /// 「その subgroup stream の最初の Object が original publisher により subgroup に公開された
 /// 最初の Object である」ことを示す。Object 0 がフィルタ不通過でスキップされた場合は false に
 /// する必要があるため、最初の Pass までヘッダ送信を遅延して確定させる。
@@ -92,7 +92,7 @@ impl SubgroupObjectState {
 
     /// 次に送信する Object の Object ID Delta を返す
     ///
-    /// draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header): 最初の Object は絶対 ID を送り、
+    /// draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header): 最初の Object は絶対 ID を送り、
     /// 以降は直前の Pass 済み Object ID との差から 1 を引いた Object ID Delta を送る
     /// (受信側は前の Object ID に delta + 1 を加算して絶対 ID を復元する)。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
@@ -179,7 +179,7 @@ impl SubgroupObjectState {
 /// Subgroup Stream ライター
 ///
 /// 1 つの Group (= GOP) に対応する一方向ストリームにオブジェクトを書き込む。
-/// draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header) / §11.3.2 (Closing Subgroup Streams)
+/// draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header) / §11.3.2 (Closing Subgroup Streams)
 pub struct SubgroupWriter {
     stream: transport::SendStream,
     data_plane: DataPlaneHandle,
@@ -200,7 +200,7 @@ impl SubgroupWriter {
     /// 新しい Subgroup Stream を開き、Session に登録する
     ///
     /// ワイヤへの SUBGROUP_HEADER 送信は最初の Pass まで遅延し、`first_object` は最初の Pass が
-    /// Object 0 かどうかで確定する (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header) / §2.2 (Subgroups))。
+    /// Object 0 かどうかで確定する (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header) / §2.2 (Subgroups))。
     /// Session 登録 (`send_subgroup_header`) は `send_subgroup_object` のフィルタ評価と
     /// `send_data_stream_closed` の前提になるため、`new` の時点で行う。
     ///
@@ -257,7 +257,7 @@ impl SubgroupWriter {
     ///
     /// LOC プロパティとペイロードを含むオブジェクトをストリームに書き込む。
     /// Session のフィルタ評価を先に行い、通過時のみワイヤへ出す
-    /// (draft-ietf-moq-transport-22 §3.3.3 (Combining Filters): "The publisher MUST forward
+    /// (draft-ietf-moq-transport-23 §3.3.3 (Combining Filters): "The publisher MUST forward
     /// only objects that pass all filters.")。フィルタ不通過
     /// (`SendRequestError::LocalFilterMismatch`) のオブジェクトはワイヤに出さず `Skip` を返す。
     /// オブジェクト ID だけ進める (ID ギャップは draft §11.3.1 (Subgroup Header) の
@@ -357,7 +357,7 @@ impl SubgroupWriter {
     /// ストリームを終了する
     ///
     /// 終端方法は `SubgroupObjectState::termination` が決める (sans I/O)。RESET 側の場合は
-    /// draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams) の MUST に従い reset で
+    /// draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams) の MUST に従い reset で
     /// 終端する。
     ///
     /// `current_start_location` には終端時点の購読の Start Location を渡す
@@ -532,7 +532,7 @@ mod tests {
 
     // Start Location より前の Object だけを省略した場合は FIN で終端する
     //
-    // draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams) の FIN 条件のとおり
+    // draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams) の FIN 条件のとおり
     #[test]
     fn termination_is_fin_when_only_objects_before_start_are_skipped() {
         let mut state = state_at(3);
@@ -601,7 +601,7 @@ mod tests {
 
     // Start Location が Subgroup 中に拡大した場合も、配送対象だった Object の省略は reset 側
     //
-    // draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams) は Start Location の拡大を
+    // draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams) は Start Location の拡大を
     // reset の例に挙げる。省略した時点では配送対象だったため、終端時点の Start Location が
     // その後ろにあっても reset 側に倒す (開始時点の snapshot の寄与)
     #[test]
@@ -649,7 +649,7 @@ mod tests {
     // Start Location が Subgroup 中に縮小した場合、縮小前に省略した Object が配送対象に戻るため
     // reset 側
     //
-    // draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions) は Start Location の縮小を
+    // draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions) は Start Location の縮小を
     // 想定する。FIN を送ると Subgroup が完備と誤認され、欠落分の FETCH が行われなくなる
     // (終端時点の現在値の寄与)
     #[test]

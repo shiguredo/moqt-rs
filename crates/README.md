@@ -1,7 +1,7 @@
 # MoQ サンプル
 
 Media over QUIC の publisher / subscriber クライアントのサンプルです。
-draft-ietf-moq-transport-22、draft-ietf-moq-loc-04、draft-ietf-moq-msf-01、draft-ietf-moq-c4m-01 に準拠しています。
+draft-ietf-moq-transport-23、draft-ietf-moq-loc-04、draft-ietf-moq-msf-01、draft-ietf-moq-c4m-01 に準拠しています。
 
 - [moq-pub](moq-pub/README.md)：catalog / audio / video track を PUBLISH する publisher
 - [moq-sub](moq-sub/README.md)：catalog と audio / video を SUBSCRIBE して再生する subscriber

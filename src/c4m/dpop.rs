@@ -46,7 +46,7 @@ pub struct DpopProofHeader {
 
 /// DPoP proof の Authorization Context (§4.2 / §5.1)
 ///
-/// `tns` / `tn` は draft-ietf-moq-transport-22 §8.8 の正規シリアライズ (`crate::name`) を使う。
+/// `tns` / `tn` は draft-ietf-moq-transport-23 §8.8 の正規シリアライズ (`crate::name`) を使う。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorizationContext {
     /// `type`。MOQT では "moqt"

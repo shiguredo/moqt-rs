@@ -329,15 +329,15 @@ fn publish_done_only_terminates_targeted_subscriptions() -> noprop::TestResult {
     Ok(())
 }
 
-// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE):
+// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE):
 // `send_publish_done` の `stream_count` 受理判定。
 //
-// 検証する不変条件 (draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE)):
+// 検証する不変条件 (draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE)):
 //   `published_stream_count == 0` のときは `stream_count == 0` のときだけ `Ok`。
 //   `published_stream_count > 0` のときは `stream_count == published_stream_count`
 //   または `stream_count == PUBLISH_DONE_STREAM_COUNT_UNKNOWN` のとき `Ok`。
 //   それ以外は `Err(SESSION_PROTOCOL_VIOLATION)` を返す。
-//   (draft-ietf-moq-transport-22 §9.9 の「stream を開かなかった場合は Stream Count を 0 にする」を送信側で強制する)
+//   (draft-ietf-moq-transport-23 §9.9 の「stream を開かなかった場合は Stream Count を 0 にする」を送信側で強制する)
 #[test]
 fn send_publish_done_stream_count_invariant() -> noprop::TestResult {
     // 受理 (Ok) と拒否 (PROTOCOL_VIOLATION) の両方の分岐の観測を

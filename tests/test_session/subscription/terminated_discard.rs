@@ -1,6 +1,6 @@
 //! キャンセル由来 `Terminated` subscription へのデータ受理のテスト
 //!
-//! draft-ietf-moq-transport-22 §3.1.3 (Track Alias):
+//! draft-ietf-moq-transport-23 §3.1.3 (Track Alias):
 //! "Objects can arrive after a subscription has been cancelled. Subscribers SHOULD retain
 //! sufficient state to quickly discard these unwanted Objects, rather than treating them as
 //! belonging to an unknown Track Alias."
@@ -370,7 +370,7 @@ fn cancelled_stream_reset_allows_subgroup_reopen() {
 /// Subgroup の正当な再オープンが session close せず受理されること
 ///
 /// 破棄分岐でも `SubgroupTracker` を `StoppedByPeer` にしないとエントリが `Open` の
-/// まま残り、draft §11.3.2 (Closing Subgroup Streams) / Appendix A.5
+/// まま残り、draft §11.3.2 (Closing Subgroup Streams)
 /// (REQUEST_UPDATE の PAUSED 1→0 による購読の再開) による再オープンが open 衝突として
 /// `PROTOCOL_VIOLATION` になる。
 #[test]
@@ -469,7 +469,7 @@ fn forget_subscription_absorbs_late_streams_until_retention_expiry() {
 /// PUBLISH_DONE 受信済み `Terminated` の drain 中の既存 stream への object が
 /// 従来どおり取り込まれること
 ///
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE): "A subscriber that receives PUBLISH_DONE
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE): "A subscriber that receives PUBLISH_DONE
 /// SHOULD set a timer ... in case some objects are still inbound due to prioritization or
 /// packet loss" の drain 期間中は、キャンセル由来とは異なり遅延データを受理する。
 #[test]
@@ -535,7 +535,7 @@ fn publish_done_drain_keeps_accepting_existing_stream_object() {
 /// PUBLISH_DONE 受信済み `Terminated` での malformed 再検出時は `RequestTerminated` を
 /// 二重発行せず、`ResetDataStream` のみ発行すること
 ///
-/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) の MUST cancel に従い、
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) の MUST cancel に従い、
 /// malformed 検出後のデータは破棄対象になる。drain モードは解除され (`publish_done` が
 /// `None` に戻る)、以後のデータはキャンセル由来と同様に破棄される。
 #[test]
@@ -817,7 +817,7 @@ fn shared_alias_all_candidates_filtered_out_keeps_filtered_out() {
 /// 共有 alias でキャンセル済み subscription に紐づいたデータが受理されず、
 /// 残った Established subscription への紐づけとデータ受理が壊れないこと
 ///
-/// draft-ietf-moq-transport-22 §3.1 (Subscriptions): 共有 alias の候補をフィルタ再適用で
+/// draft-ietf-moq-transport-23 §3.1 (Subscriptions): 共有 alias の候補をフィルタ再適用で
 /// 振り分ける。キャンセル由来 `Terminated` の候補は受理対象から除外され、データが
 /// `peer_subgroups` tracker 等を汚染しないことを検証する。
 #[test]

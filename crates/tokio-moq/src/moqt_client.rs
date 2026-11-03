@@ -5,7 +5,7 @@
 //!
 //! # 構造
 //!
-//! - control stream: uni 送信用 + uni 受信用の 1 ペア (draft-ietf-moq-transport-22 §6.3 (Session initialization))
+//! - control stream: uni 送信用 + uni 受信用の 1 ペア (draft-ietf-moq-transport-23 §6.3 (Session initialization))
 //! - bidi request stream: 自側が開く PUBLISH / SUBSCRIBE と peer 起点の request を `bidi_sends` に保持する
 //! - data stream: 各バイナリが [`DataPlaneHandle`] 経由で `Session` に通知する
 //! - 受信は `tokio::spawn` した task で行い、`mpsc` 経由でメインループに集約する
@@ -55,7 +55,7 @@ const DEFAULT_SUBSCRIBER_PRIORITY: u8 = 128;
 
 /// オブジェクト送信前のフィルタ評価の結果
 ///
-/// draft-ietf-moq-transport-22 §3.3.3 (Combining Filters): "The publisher MUST forward only
+/// draft-ietf-moq-transport-23 §3.3.3 (Combining Filters): "The publisher MUST forward only
 /// objects that pass all filters."。フィルタ不通過のオブジェクトはワイヤに出さずスキップする。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use = "Skip の場合はワイヤ送信を省略する必要がある"]
@@ -78,7 +78,7 @@ pub(crate) enum BidiMessage {
     Response(u64, Result<StreamRead<ControlMessage>>),
     /// peer が開始した request stream の先頭メッセージの読み出しに失敗した
     ///
-    /// decode 失敗 (draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) /
+    /// decode 失敗 (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) /
     /// §8.9 (Authorization Token Compression) が MUST とするセッション終了の対象) と
     /// transport エラーの両方を運ぶ。warn ログだけで破棄すると終了コード付きの
     /// セッション終了を果たせないため、エラーを保ったまま main ループへ伝える。
@@ -106,7 +106,7 @@ pub(crate) enum BidiMessage {
     /// を送信済みなら GOING_AWAY、`.` 単独または `.session` の Track Namespace Prefix なら
     /// DOES_NOT_EXIST) で拒否してセッションを維持する。SUBSCRIBE_TRACKS の Range Filter が
     /// §3.3.2 に違反する場合は INVALID_FILTER で拒否し、PUBLISH_NAMESPACE /
-    /// SUBSCRIBE_NAMESPACE が Range Filter を載せている場合は §9.20.1 (Parameter Scope) 違反で
+    /// SUBSCRIBE_NAMESPACE が Range Filter を載せている場合は §9.19.1 (Parameter Scope) 違反で
     /// セッションを閉じる。7 種類以外は
     /// `UNEXPECTED_MESSAGE` でセッションを閉じる。どちらの判定も `Session::recv_request` が
     /// 持つため、main ループはこの variant をそのまま `Session::recv_request` へ渡す。アプリへ
@@ -143,7 +143,7 @@ pub struct IncomingRequest {
 
 /// peer (MOQT relay) から届いた REQUEST_UPDATE
 ///
-/// draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE):
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE):
 /// 「The receiver of a REQUEST_UPDATE MUST respond with exactly one REQUEST_OK or
 ///  REQUEST_ERROR message indicating if the update was successful, unless it is
 ///  coalescing failed updates」
@@ -171,7 +171,7 @@ pub enum ClientEvent {
 
 /// bidi 受信タスクへの STOP_SENDING 指示
 pub(crate) struct StopSendingCommand {
-    /// Stream Reset Error Code (draft-ietf-moq-transport-22 §12.5 (Stream Reset Error Codes))
+    /// Stream Reset Error Code (draft-ietf-moq-transport-23 §12.5 (Stream Reset Error Codes))
     error_code: u64,
     /// 受信半への STOP_SENDING 送出結果の完了通知
     ack: oneshot::Sender<Result<()>>,
@@ -179,7 +179,7 @@ pub(crate) struct StopSendingCommand {
 
 /// 受信 data stream 1 本への STOP_SENDING 指示
 ///
-/// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の DATA_STREAM_TIMEOUT (0x12) は、
+/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の DATA_STREAM_TIMEOUT (0x12) は、
 /// open な subgroup stream で新しい object header を待って timeout した場合の措置として
 /// STOP_SENDING または購読終了を挙げる。Session はセッションを閉じずに本指示を発行し、
 /// 当該 stream を読んでいるタスクが [`DataPlaneHandle::wait_data_stream_stop_sending`] で
@@ -271,7 +271,7 @@ pub struct SubscribeResult {
     pub track_alias: u64,
     /// SUBSCRIBE_OK が広告した LARGEST_OBJECT (未広告なら `None`)
     ///
-    /// draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) /
+    /// draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter) /
     /// §3.1.4 (Largest Object)。購読の確立時点で track に publish 済みの最新 Location であり、
     /// 購読より前に配られた Object は FILL_PARAMETERS 付き購読の fill fetch stream
     /// (§3.4) で受け取る。LARGEST_OBJECT は fill range の上限を publisher が決めるために使う。
@@ -304,7 +304,7 @@ impl FetchResponseWriter {
     /// Object を 1 件書く
     ///
     /// `properties_data` は Properties Length varint を含む生バイト列である
-    /// (draft-ietf-moq-transport-22 §11.1.2 (Object Properties))。
+    /// (draft-ietf-moq-transport-23 §11.1.2 (Object Properties))。
     /// `input.has_properties` が true のときだけ渡す。
     ///
     /// # Errors
@@ -474,7 +474,7 @@ impl ControlStream {
         }
     }
 
-    /// ストリーム先頭のストリームタイプ varint を読む (draft-ietf-moq-transport-22 §6.4.1 (Unidirectional Streams))
+    /// ストリーム先頭のストリームタイプ varint を読む (draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams))
     pub async fn read_stream_type(&mut self) -> Result<StreamRead<u64>> {
         loop {
             if let Some(val) = self.decoder.try_decode_varint()? {
@@ -502,7 +502,7 @@ impl ControlStream {
 
     /// 受信方向へ STOP_SENDING を送出する
     ///
-    /// draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection): 受信方向の
+    /// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection): 受信方向の
     /// cancel は STOP_SENDING で行う。error code は §12.5 (Stream Reset Error Codes) から選ぶ。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     ///
@@ -716,7 +716,7 @@ impl DataPlaneHandle {
 
     /// Session が DATA_STREAM_TIMEOUT で指示した STOP_SENDING を待つ
     ///
-    /// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes): open な subgroup stream で
+    /// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes): open な subgroup stream で
     /// 新しい object header を待って timeout した場合、Session はセッションを閉じず
     /// [`SessionEvent::StopSendingDataStream`] を発行する。受信タスクは
     /// `stream.receive_chunk()` と併せて本 future を select し、完了したら
@@ -775,7 +775,7 @@ impl DataPlaneHandle {
     /// 呼び出し側はワイヤ送信をスキップする。その他のエラーは伝播する。
     ///
     /// `end_of_group` は Object Datagram の END_OF_GROUP bit に対応する
-    /// (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))。
+    /// (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram))。
     pub fn send_object_datagram(
         &self,
         request_id: u64,
@@ -816,7 +816,7 @@ impl DataPlaneHandle {
 
     /// FETCH 応答用 uni stream の open を Session に通知する (publisher 側)
     ///
-    /// draft-ietf-moq-transport-22 §11.4.1 (Fetch Header): FETCH_OK を返した publisher は
+    /// draft-ietf-moq-transport-23 §11.4.1 (Fetch Header): FETCH_OK を返した publisher は
     /// 要求の Request ID を載せた FETCH_HEADER で応答 stream を開く。
     pub fn send_fetch_header(&self, stream_id: DataStreamId, request_id: u64) -> Result<()> {
         let mut session = lock_session(&self.session);
@@ -827,7 +827,7 @@ impl DataPlaneHandle {
 
     /// fill fetch stream の open を Session に通知する (publisher 側)
     ///
-    /// draft-ietf-moq-transport-22 §3.4 (Fill Semantics) / §11.4.1 (Fetch Header):
+    /// draft-ietf-moq-transport-23 §3.4 (Fill Semantics) / §11.4.1 (Fetch Header):
     /// `SessionEvent::OpenFillFetchStream` を受けた publisher は uni stream を開き、起因
     /// メッセージの Request ID を載せた FETCH_HEADER を書く。`fill_request_id` には
     /// FETCH_HEADER に載せた値 (= `SessionEvent::OpenFillFetchStream::request_id`) を渡す。
@@ -844,7 +844,7 @@ impl DataPlaneHandle {
 
     /// FETCH 応答 stream 上の Object 送信を Session に通知する (publisher 側)
     ///
-    /// `location` は要求範囲の検証に使う (draft-ietf-moq-transport-22 §3.3.1)。
+    /// `location` は要求範囲の検証に使う (draft-ietf-moq-transport-23 §3.3.1)。
     /// 範囲外なら `LocalFilterMismatch` 由来のエラーになる。
     pub fn send_fetch_object(&self, stream_id: DataStreamId, location: &Location) -> Result<()> {
         let mut session = lock_session(&self.session);
@@ -1146,7 +1146,7 @@ impl DataPlaneHandle {
 
     /// 受信 datagram を Session に渡す (subscriber 側)
     ///
-    /// type 分岐は Session が行う。未知 type は draft-ietf-moq-transport-22 §11 (Data Streams and Datagrams) に従い
+    /// type 分岐は Session が行う。未知 type は draft-ietf-moq-transport-23 §11 (Data Streams and Datagrams) に従い
     /// セッションクローズになるため、I/O 層は decode せずそのまま渡す。
     pub fn recv_datagram(&self, raw: &[u8]) -> Result<DatagramAcceptance> {
         let mut session = lock_session(&self.session);
@@ -1218,7 +1218,8 @@ pub struct MoqtClient {
     /// peer が返した REQUEST_ERROR の理由 (request_id ごと)
     ///
     /// REQUEST_ERROR はセッションの状態としては Terminated にしか見えないため、拒否の
-    /// 理由をアプリへ伝えるために保持する (draft-ietf-moq-transport-22 §9.4.2)。
+    /// 理由をアプリへ伝えるために保持する (draft-ietf-moq-transport-23 §9.4.1 (REQUEST_ERROR
+    /// Message Format))。
     request_errors: HashMap<u64, (u64, String)>,
     /// drain_events が Session から取り出した notable イベント
     ///
@@ -1275,7 +1276,7 @@ fn is_notable_event(event: &SessionEvent) -> bool {
 /// 終端済み subscription を破棄してよいか
 ///
 /// `Session::forget_subscription` は保留中の PUBLISH_DONE も破棄するため、送出すべき
-/// PUBLISH_DONE が残っている間は呼んではならない。draft-ietf-moq-transport-22 §9.5.1
+/// PUBLISH_DONE が残っている間は呼んではならない。draft-ietf-moq-transport-23 §9.5.1
 /// (Updating Subscriptions) は REQUEST_UPDATE が失敗した場合に publisher が PUBLISH_DONE
 /// (UPDATE_FAILED) を送ることを MUST で要求するため、保留中の PUBLISH_DONE を失うと
 /// この MUST を果たせない。
@@ -1294,7 +1295,7 @@ fn should_forget_subscription(cleanup_ready: bool, pending_publish_done: Option<
 ///
 /// `drain_events` の送信は await をまたぐ。送信半を台帳から先に取り出すと、`next_event` の
 /// future が `tokio::select!` の敗北で破棄されたときに送信半が失われ、以後その request への
-/// 送信がすべて「送信方向を閉じた request」として捨てられる (draft-ietf-moq-transport-22
+/// 送信がすべて「送信方向を閉じた request」として捨てられる (draft-ietf-moq-transport-23
 /// §9.5.1 (Updating Subscriptions) の MUST を果たせない)。台帳から取り出すのは、送信と FIN が
 /// 成功したときだけにする。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1324,7 +1325,7 @@ fn plan_send_on_stream(send_present: bool, fin: bool) -> SendOnStreamStep {
 
 /// peer 起点の bidi request stream の終端を Session へ通知済みの記録
 ///
-/// peer の cancel (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and
+/// peer の cancel (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and
 /// Rejection)) では、RESET_STREAM (受信方向) と STOP_SENDING (送信方向) が対で届く。
 /// 同じ cancel で request の終端を 2 回 Session へ通知すると、subscription では未知 id
 /// としてセッションを閉じ、fetch / track_status では `RequestTerminated` が重複するため、
@@ -1431,7 +1432,7 @@ fn spawn_bidi_recv_task(
 /// peer (MOQT relay) が開始する bidi request stream を受け入れる task を起動する
 ///
 /// relay は subscriber の SUBSCRIBE / FETCH を publisher 側 session の新しい
-/// request stream として転送する (draft-ietf-moq-transport-22 §6.3 (Session initialization))。
+/// request stream として転送する (draft-ietf-moq-transport-23 §6.3 (Session initialization))。
 /// ストリームごとに reader task を起こし、decode できる先頭メッセージを
 /// [`BidiMessage::PeerRequest`] (本実装が扱う 4 種類) または [`BidiMessage::PeerRequestRejected`]
 /// (それ以外) としてメインループへ渡す。decode できない先頭メッセージは
@@ -1577,7 +1578,7 @@ async fn read_rejected_request_stream(
 
 /// 本実装が扱う request の開始メッセージから Request ID を取り出す
 ///
-/// draft-ietf-moq-transport-22 §6.3 (Session initialization) は bidi request stream の先頭
+/// draft-ietf-moq-transport-23 §6.3 (Session initialization) は bidi request stream の先頭
 /// メッセージを 7 種類 (SUBSCRIBE / PUBLISH / FETCH / PUBLISH_NAMESPACE /
 /// SUBSCRIBE_NAMESPACE / TRACK_STATUS / SUBSCRIBE_TRACKS) に限る。本実装がアプリへ渡すのは
 /// このうち SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS の 4 種類であり、それ以外は
@@ -1635,7 +1636,7 @@ fn authorization_parameter(token: &AuthorizationToken) -> MessageParameter {
 /// 複数のトークンを提示したときに relay がどう評価するかは一次資料に規定が無く実装依存で
 /// ある。draft-ietf-moq-c4m-01 §7.1.1 (CAT Token Type) は relay にトークン検証を課し、
 /// 検証に失敗した場合はアクションの拒否を MUST とするため、track に紐づかないトークンを
-/// 載せると制御メッセージが拒否されうる。あわせて draft-ietf-moq-transport-22 §8.9
+/// 載せると制御メッセージが拒否されうる。あわせて draft-ietf-moq-transport-23 §8.9
 /// (Authorization Token Compression) の MUST (整形だが内容が不正なトークンを含むメッセージは
 /// MALFORMED_AUTH_TOKEN で拒否) の対象にもなりうる。付与漏れ
 /// (draft-ietf-moq-msf-01 §11.4.3 の MUST) を避ける側に倒す。
@@ -1675,7 +1676,7 @@ struct HandshakeIo {
 
 impl MoqtClient {
     /// QUIC 直接接続で MOQT client を確立する
-    /// (draft-ietf-moq-transport-22 §6.2 (Session establishment) / §6.3 (Session initialization))
+    /// (draft-ietf-moq-transport-23 §6.2 (Session establishment) / §6.3 (Session initialization))
     ///
     /// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
     /// SETUP の AUTHORIZATION_TOKEN として送り、同じトークンを PUBLISH / SUBSCRIBE /
@@ -1753,10 +1754,10 @@ impl MoqtClient {
     ///
     /// QMux は QUIC version 1 のストリームを順序保証された 1 本のバイトストリームへ多重化する
     /// ため、ストリームの種類は QUIC 直接接続と同じになる。制御ストリームは単方向
-    /// (draft-ietf-moq-transport-22 §6.4.1、stream type 0x2F00)、request stream は双方向である
+    /// (draft-ietf-moq-transport-23 §6.4.1、stream type 0x2F00)、request stream は双方向である
     /// (§6.4.2)。
     ///
-    /// draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) は AUTHORITY / PATH を
+    /// draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) は AUTHORITY / PATH を
     /// native QUIC に限る。QMux は WebTransport ではないため、QUIC 直接接続と同じく
     /// PATH / AUTHORITY を送る (この扱いは同節の範囲外である)。
     ///
@@ -1830,7 +1831,7 @@ impl MoqtClient {
 
     /// WebTransport over HTTP/3 接続で MOQT client を確立する
     ///
-    /// draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) により
+    /// draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) により
     /// WebTransport 使用時は PATH (0x01) と AUTHORITY (0x05) を送信してはならない。
     ///
     /// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
@@ -1927,7 +1928,7 @@ impl MoqtClient {
 
     /// WebTransport over HTTP/2 接続で MOQT client を確立する
     ///
-    /// draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) により
+    /// draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) により
     /// WebTransport 使用時は PATH (0x01) と AUTHORITY (0x05) を送信してはならない。
     ///
     /// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
@@ -2159,7 +2160,7 @@ impl MoqtClient {
     /// PUBLISH を発行し、REQUEST_OK または REQUEST_ERROR が返るまで待つ (publisher 側)
     ///
     /// `track_properties` は PUBLISH に載せる Track Properties である
-    /// (draft-ietf-moq-transport-22 §9.8 (PUBLISH) / §8.4 (Track and Object Properties))。
+    /// (draft-ietf-moq-transport-23 §9.8 (PUBLISH) / §8.4 (Track and Object Properties))。
     /// 不要な場合は空を渡す。
     pub async fn publish_track(
         &mut self,
@@ -2191,7 +2192,7 @@ impl MoqtClient {
     }
 
     /// PUBLISH_DONE を送信する (publisher 側)
-    /// (draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE))
+    /// (draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE))
     pub async fn send_publish_done(
         &mut self,
         request_id: u64,
@@ -2225,7 +2226,7 @@ impl MoqtClient {
     /// トラックを SUBSCRIBE する (subscriber 側)
     ///
     /// Location Filter を指定しないため、購読の確立後に配られる Object と、relay が
-    /// 保持している Object の双方が届きうる (draft-ietf-moq-transport-22 §3.3.1 (Location Filters))。
+    /// 保持している Object の双方が届きうる (draft-ietf-moq-transport-23 §3.3.1 (Location Filters))。
     pub async fn subscribe_track(
         &mut self,
         namespace: TrackNamespace,
@@ -2237,7 +2238,7 @@ impl MoqtClient {
 
     /// メッセージパラメータを指定してトラックを SUBSCRIBE する (subscriber 側)
     ///
-    /// LOCATION_FILTER や FILL_PARAMETERS (draft-ietf-moq-transport-22 §9.20.15) のように
+    /// LOCATION_FILTER や FILL_PARAMETERS (draft-ietf-moq-transport-23 §9.19.15) のように
     /// 呼び出し側が組み立てたパラメータをそのまま渡す。`MoqtClient` は C4M の
     /// AUTHORIZATION_TOKEN と既定の SUBSCRIBER_PRIORITY を追加する。
     pub async fn subscribe_track_with_parameters(
@@ -2254,7 +2255,7 @@ impl MoqtClient {
     ///
     /// `SessionEvent::OpenFillFetchStream` は track 名を持たないため、その
     /// `subscription_request_id` (fill 対象 subscription の Request ID) を渡して
-    /// FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE (§9.20.15) が対象とする track を引く。
+    /// FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE (§9.19.15) が対象とする track を引く。
     /// 回収済みの request では `None` を返す (`Subscription` は `Pending` でも存在する)。
     pub fn subscription_track_name(&self, subscription_request_id: u64) -> Option<Vec<u8>> {
         lock_session(&self.session)
@@ -2270,7 +2271,7 @@ impl MoqtClient {
         mut parameters: MessageParameters,
     ) -> Result<SubscribeResult> {
         // C4M の AUTHORIZATION_TOKEN を追加する。呼び出し側が渡した LOCATION_FILTER などは
-        // そのまま残す (draft-ietf-moq-transport-22 §9.20.2 (AUTHORIZATION TOKEN Parameter))
+        // そのまま残す (draft-ietf-moq-transport-23 §9.19.2 (AUTHORIZATION TOKEN Parameter))
         parameters = with_auth_parameters(parameters, &self.auth_tokens);
         parameters.push(MessageParameter {
             param_type: PARAM_SUBSCRIBER_PRIORITY,
@@ -2320,7 +2321,7 @@ impl MoqtClient {
     /// # Errors
     ///
     /// Session が確立していない場合、peer の GOAWAY を受信済みの場合、パラメータが
-    /// §9.11 / §9.20 の規則に反する場合に [`TransportError`] になる。
+    /// §9.11 / §9.19 の規則に反する場合に [`TransportError`] になる。
     pub async fn fetch(
         &mut self,
         namespace: TrackNamespace,
@@ -2433,7 +2434,7 @@ impl MoqtClient {
 
     /// peer から届いた要求に SUBSCRIBE_OK で応答する (publisher 側)
     ///
-    /// draft-ietf-moq-transport-22 §9.3 (REQUEST_OK): SUBSCRIBE_OK は REQUEST_OK の別名であり、
+    /// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): SUBSCRIBE_OK は REQUEST_OK の別名であり、
     /// 応答は要求と同じ bidi request stream に載る。
     pub async fn send_subscribe_ok(
         &mut self,
@@ -2478,7 +2479,7 @@ impl MoqtClient {
 
     /// peer から届いた REQUEST_UPDATE に REQUEST_OK で応答する
     ///
-    /// draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE): 受信側は必ず 1 通の
+    /// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): 受信側は必ず 1 通の
     /// REQUEST_OK または REQUEST_ERROR を返す。REQUEST_UPDATE_OK に載せる
     /// パラメータは無いため空で送る (LARGEST_OBJECT / EXPIRES は publisher が
     /// 状態を通知したい場合に載せるもので、本 example は購読状態を session 層に
@@ -2513,7 +2514,7 @@ impl MoqtClient {
 
     /// FETCH 応答ストリームを開き、Object を 1 件書いて FIN する (publisher 側)
     ///
-    /// draft-ietf-moq-transport-22 §11.4.1 (Fetch Header): FETCH 応答は uni stream を開き、
+    /// draft-ietf-moq-transport-23 §11.4.1 (Fetch Header): FETCH 応答は uni stream を開き、
     /// FETCH_HEADER (要求の Request ID) に続けて FETCH_STREAM_OBJECT を書く。
     /// 位置は最初の Object のため Group ID / Object ID を絶対値で載せる。
     pub async fn send_fetch_response(
@@ -2540,7 +2541,7 @@ impl MoqtClient {
             subgroup_id: FetchSubgroupIdMode::Zero,
             object_id: Some(object_id),
             // 最初の Object は prior Object を持たないため Publisher Priority を明示する
-            // (draft-ietf-moq-transport-22 §11.4.1.1 (Flags))
+            // (draft-ietf-moq-transport-23 §11.4.1.1 (Flags))
             publisher_priority: Some(128),
             has_properties: properties_data.is_some(),
             is_datagram_origin: false,
@@ -2566,7 +2567,7 @@ impl MoqtClient {
 
     /// FETCH 応答ストリームを開き、FETCH_HEADER を書く (publisher 側)
     ///
-    /// draft-ietf-moq-transport-22 §11.4.1 (Fetch Header): FETCH 応答は uni stream を開き、
+    /// draft-ietf-moq-transport-23 §11.4.1 (Fetch Header): FETCH 応答は uni stream を開き、
     /// FETCH_HEADER (要求の Request ID) に続けて Object と End of Range を書く。
     /// [`send_fetch_response`](Self::send_fetch_response) が「Object 1 件で FIN」するのに対し、
     /// こちらは保持している複数の Object と End of Range を 1 本の stream に並べて書く。
@@ -2594,7 +2595,7 @@ impl MoqtClient {
 
     /// fill fetch stream を開いてカタログ Object を 1 つ送る (publisher 側)
     ///
-    /// draft-ietf-moq-transport-22 §3.4 (Fill Semantics) / §3.4.1 (Opening and Closing Fill Fetch
+    /// draft-ietf-moq-transport-23 §3.4 (Fill Semantics) / §3.4.1 (Opening and Closing Fill Fetch
     /// Streams): `SessionEvent::OpenFillFetchStream` を受けた publisher は uni stream を開き、
     /// 起因メッセージの Request ID を載せた FETCH_HEADER に続けて fill range の Object を送り、
     /// FIN で閉じる。通常の FETCH 応答と異なり FETCH_OK は送らない。
@@ -2657,7 +2658,7 @@ impl MoqtClient {
 
     /// 応答できない fill fetch stream を開き、FETCH_HEADER の直後で reset する (publisher 側)
     ///
-    /// draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams): fill fetch
+    /// draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams): fill fetch
     /// stream には REQUEST_ERROR が無いため、publisher は fill の失敗を reset で伝える。
     /// 「必要なら fill fetch stream を開き、FETCH_HEADER の直後で reset する」MUST があるため、
     /// 応答できない場合も stream を開いて reset する (無応答にすると peer が待ち続ける)。
@@ -2690,9 +2691,10 @@ impl MoqtClient {
 
     /// Object を 1 つも含まない FETCH 応答ストリームを開く (publisher 側)
     ///
-    /// draft-ietf-moq-transport-22 §3.2.1 (Fetch Object Delivery): 要求 range に Object が
+    /// draft-ietf-moq-transport-23 §3.2.1 (Fetch Object Delivery): 要求 range に Object が
     /// 1 つも無い場合、publisher は uni stream を開いて FETCH_HEADER だけを送り、FIN で閉じる。
-    /// FETCH_OK はこの stream を開く前に別途送る (§9.12 (FETCH_OK))。
+    /// FETCH_OK はこの stream を開く前に別途送る (§9.3 (REQUEST_OK)。FETCH_OK は FETCH への
+    /// REQUEST_OK の別名である (§1.5))。
     pub async fn send_empty_fetch_response(&mut self, request_id: u64) -> Result<()> {
         let data_plane = self.data_plane();
         let mut stream = self.handle.open_send_stream().await?;
@@ -2732,7 +2734,7 @@ impl MoqtClient {
 
     /// bidi 受信タスクへ STOP_SENDING を指示する (失敗は warn のみ)
     ///
-    /// draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection):
+    /// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection):
     /// 受信方向の cancel は STOP_SENDING で行う。
     async fn request_stop_sending(&mut self, request_id: u64, error_code: u64) {
         let Some(stop_tx) = self.bidi_stop_txs.remove(&request_id) else {
@@ -2792,10 +2794,10 @@ impl MoqtClient {
         }
         self.drain_events().await?;
         // 購読停止は subscriber 主導の cancel のため CANCELLED を使う
-        // (draft-ietf-moq-transport-22 §12.5 (Stream Reset Error Codes))
+        // (draft-ietf-moq-transport-23 §12.5 (Stream Reset Error Codes))
         let error_code = DataStreamResetReason::Cancelled.error_code();
         // 送信方向が開いたままなら RESET_STREAM で打ち切る
-        // (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection): 送信方向は
+        // (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection): 送信方向は
         // RESET_STREAM、受信方向は STOP_SENDING)
         if let Some(mut send) = self.bidi_sends.remove(&request_id)
             && let Err(e) = send.reset(error_code).await
@@ -2833,7 +2835,7 @@ impl MoqtClient {
         Ok(())
     }
 
-    /// GOAWAY を送信する (draft-ietf-moq-transport-22 §9.2 (GOAWAY))
+    /// GOAWAY を送信する (draft-ietf-moq-transport-23 §9.2 (GOAWAY))
     ///
     /// graceful shutdown の開始を peer に通知する。
     pub async fn send_goaway(&mut self, new_session_uri: Vec<u8>, timeout_ms: u64) -> Result<()> {
@@ -2865,7 +2867,7 @@ impl MoqtClient {
     /// 解決済みの Location Filter の Start Location を返す。Location Filter が無い (unfiltered)
     /// 場合と該当 subscription が無い場合はどちらも `None` を返す。
     /// この値は REQUEST_UPDATE で更新されうるため、Subgroup の終端方法を決める側
-    /// (draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams)) が時点を決めて読む。
+    /// (draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams)) が時点を決めて読む。
     pub fn subscription_filter_start(&self, request_id: u64) -> Option<Location> {
         let session = lock_session(&self.session);
         session.subscription(request_id)?.filter_start
@@ -3144,7 +3146,7 @@ impl MoqtClient {
     /// peer から受信した STOP_SENDING を該当する送信ストリームの終端として扱う
     ///
     /// peer の cancel は該当ストリームだけを終端させ、セッションと他のストリームの配信は
-    /// 継続する (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection) は
+    /// 継続する (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection) は
     /// cancel の手段を定め、§6.6 (Termination) は request 単位のエラーをセッションエラーとして
     /// 扱うかは端点の判断に委ねている。本 example は扱わない)。
     /// 検知はフレーム観測で行い、送信 API の失敗からは推測しない (FIN ack 済みの
@@ -3229,7 +3231,7 @@ impl MoqtClient {
     /// 自側が送信方向を FIN した request は `bidi_sends` から外れているため引き当たらない
     /// (STOP_SENDING は該当ストリームの終端として吸収される)。仕様適合な cancel は
     /// 相手の送信方向を RESET_STREAM / FIN で閉じるため、request の終端はその close 通知で
-    /// 確定する (draft-ietf-moq-transport-22 §6.4.2.3)。
+    /// 確定する (draft-ietf-moq-transport-23 §6.4.2.3)。
     fn request_id_for_outgoing_stream(&self, stream_id: u64) -> Option<u64> {
         self.bidi_sends
             .iter()
@@ -3284,7 +3286,7 @@ impl MoqtClient {
         }
         // 回収対象 (`closed_request_streams`) への登録は bidi request stream の close 通知
         // (`pump_once` の Closed 分岐) に委ねる。仕様適合な cancel は相手の送信方向を
-        // RESET_STREAM または FIN で閉じるため (draft-ietf-moq-transport-22 §6.4.2.3)、
+        // RESET_STREAM または FIN で閉じるため (draft-ietf-moq-transport-23 §6.4.2.3)、
         // その close 通知で登録される。ここで登録すると、保留中の PUBLISH_DONE を
         // 持つ subscription を回収条件だけで破棄する経路を増やしてしまう。
         self.drain_events().await?;
@@ -3314,7 +3316,7 @@ impl MoqtClient {
     /// それを再送できず (Session は再発行しない)、送信半も台帳に登録されないため、以後の
     /// 応答や PUBLISH_DONE は警告のみで捨てられる。確立済み request のメッセージの送信中に
     /// 破棄された場合は、そのメッセージを送れず、送信の MUST
-    /// (draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions) など) を果たせない。
+    /// (draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions) など) を果たせない。
     async fn drain_events(&mut self) -> Result<()> {
         loop {
             let (event, forgotten, peer_max_control_message_size) = {
@@ -3406,7 +3408,7 @@ impl MoqtClient {
                             .await?;
                             if fin {
                                 // FIN は必須メッセージを送り終えてから送る
-                                // (draft-ietf-moq-transport-22 §6.4.2.2)
+                                // (draft-ietf-moq-transport-23 §6.4.2.2)
                                 // 台帳から取り出すのは FIN が成功したときだけにする。FIN の完了を
                                 // 待つ間 (`wt-h2` は driver の reply を待つ) に `next_event` の future が
                                 // `tokio::select!` の敗北で破棄されても送信半を失わないためである
@@ -3433,7 +3435,7 @@ impl MoqtClient {
                     }
                 }
                 SessionEvent::FinishRequestStream { request_id } => {
-                    // draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure):
+                    // draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure):
                     // responder の FIN で request が完了したため、requester である自側も
                     // 送信方向を FIN で閉じる (SHOULD)。既に FIN 済みなら送信半は台帳に無い。
                     // 台帳から取り出すのは FIN が成功したときだけにする (future の破棄で送信半を
@@ -3469,7 +3471,7 @@ impl MoqtClient {
                 } => {
                     // Session が Malformed Track 検出 (§12.1) または未知の Mandatory Track
                     // Property を含む SUBSCRIBE_OK / FETCH_OK の受信 (§3.7) で発行する受信方向の
-                    // cancel (draft-ietf-moq-transport-22 §6.4.2.3)。bidi 受信タスクへ
+                    // cancel (draft-ietf-moq-transport-23 §6.4.2.3)。bidi 受信タスクへ
                     // STOP_SENDING を指示する。
                     // 受信タスク終了後は peer の close を検知できないため、回収対象として登録する
                     self.closed_request_streams.insert(request_id);
@@ -3520,7 +3522,7 @@ impl MoqtClient {
                     request_id,
                     parameters,
                 } => {
-                    // draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE):
+                    // draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE):
                     // 受信側は必ず 1 通の REQUEST_OK または REQUEST_ERROR で応答する MUST。
                     // 黙殺すると peer の control message 応答待ち (CONTROL_MESSAGE_TIMEOUT)
                     // を招くため、応答の判断をアプリへ引き渡す。
@@ -3577,7 +3579,7 @@ impl MoqtClient {
                     );
                     // PublishStateNotifyReceived は peer publisher の通知であり、
                     // 本 example では特別な処理を行わない
-                    // (draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY))。
+                    // (draft-ietf-moq-transport-23 §9.10 (PUBLISH_STATE_NOTIFY))。
                     // SendPaddingStream / SendPaddingDatagram は padding を要求していないため
                     // 到達しない。
                     // その他の Received 系 / Established / RequestTerminated は本 example では特別な処理を行わない。
@@ -3589,7 +3591,7 @@ impl MoqtClient {
                     ..
                 } => {
                     // 拒否の理由を保持し、request の失敗をアプリへ伝えるときに添える
-                    // (draft-ietf-moq-transport-22 §9.4.2 (REQUEST_ERROR Message Format))。
+                    // (draft-ietf-moq-transport-23 §9.4.1 (REQUEST_ERROR Message Format))。
                     self.request_errors
                         .insert(request_id, (error_code, reason.as_str().to_string()));
                 }
@@ -3721,7 +3723,7 @@ async fn send_control_stream_setup(
 /// session が `CloseSession` を積んでいれば (session 層の検証失敗) そのコードと理由を使い、
 /// 積んでいなければ (decode 失敗) 呼び出し側が渡したコードと理由を使う。終了コードを wire に
 /// 載せるのは [`StreamHandle::close`] であり、QUIC では CONNECTION_CLOSE になる
-/// (draft-ietf-moq-transport-22 §6.6 (Termination))。制御ストリームへメッセージを書くのでは
+/// (draft-ietf-moq-transport-23 §6.6 (Termination))。制御ストリームへメッセージを書くのでは
 /// ない。
 async fn close_handshake_session(
     session: &mut Session,
@@ -4150,7 +4152,7 @@ mod tests {
     /// 終端通知済みの記録は request_id 単位で独立している
     ///
     /// peer の cancel では RESET_STREAM (受信方向) と STOP_SENDING (送信方向) が対で届く
-    /// (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))。
+    /// (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))。
     /// 2 回目の通知でセッションを閉じさせないため、記録済みの request だけを
     /// 通知済みとして扱うことを固定する。記録は通知に成功したときだけ行う。
     #[test]

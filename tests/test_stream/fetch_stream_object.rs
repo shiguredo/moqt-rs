@@ -61,7 +61,7 @@ fn datagram_origin_ignores_lsb() {
     }
 }
 
-/// draft-ietf-moq-transport-22 §11.4.1 (Fetch Header) Table 8:
+/// draft-ietf-moq-transport-23 §11.4.1 (Fetch Header) Table 8:
 /// End of Timed-Out Range (0x20C) のラウンドトリップ
 #[test]
 fn end_of_timed_out_range() {
@@ -130,7 +130,7 @@ fn mixed_end_of_range_kinds_decode_in_order() {
 
 #[test]
 fn properties_zero_length_is_valid() {
-    // draft-ietf-moq-transport-22 §11.4.1 (Fetch Header): Fetch object でも Properties Length = 0 は合法
+    // draft-ietf-moq-transport-23 §11.4.1 (Fetch Header): Fetch object でも Properties Length = 0 は合法
     // flags = 0x2C (PROPERTIES 0x20 + OBJECT_ID 0x04 + GROUP_ID 0x08)
     let mut buf = Vec::new();
     shiguredo_moqt::varint::encode(0x2C, &mut buf); // flags

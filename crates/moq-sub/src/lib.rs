@@ -9,7 +9,7 @@
 //! 再生側の終了通知を用意して [`pipeline::run`] を起動する。再生を行わない呼び出し側は
 //! 受け取ったフレームを破棄すればよい (SDL プレイヤーは lib に含まれない)。
 //!
-//! draft-ietf-moq-transport-22、draft-ietf-moq-loc-04、draft-ietf-moq-msf-01 に準拠。
+//! draft-ietf-moq-transport-23、draft-ietf-moq-loc-04、draft-ietf-moq-msf-01 に準拠。
 
 // 呼び出し側が設定を組み立て、デコード済みフレームを受け取るために公開する
 pub mod cli;

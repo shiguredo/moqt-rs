@@ -1,4 +1,4 @@
-//! OBJECT_DATAGRAM (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram)) のラウンドトリップ PBT
+//! OBJECT_DATAGRAM (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram)) のラウンドトリップ PBT
 //!
 //! `ObjectDatagram::encode` はヘッダのみを返し、ペイロードは含まない。`decode` は
 //! datagram 全体 (ヘッダ + ペイロード) を受け取り、ヘッダ部分の消費バイト数を返す。
@@ -13,7 +13,7 @@ use pbt::common::sample_varint;
 
 /// OBJECT_DATAGRAM (status オブジェクト・ properties なし・ペイロードなし) のラウンドトリップ。
 /// status と END_OF_GROUP は同時指定不可のため end_of_group = false に固定する。
-/// status 値域は Normal(0x0) / EndOfGroup(0x3) / EndOfTrack(0x4) (draft-ietf-moq-transport-22 §11.1.1 (Object Status))。
+/// status 値域は Normal(0x0) / EndOfGroup(0x3) / EndOfTrack(0x4) (draft-ietf-moq-transport-23 §11.1.1 (Object Status))。
 #[test]
 fn object_datagram_roundtrip_status_object() -> noprop::TestResult {
     let mut runner = test_runner()?;
@@ -51,8 +51,8 @@ fn object_datagram_roundtrip_status_object() -> noprop::TestResult {
 
 /// OBJECT_DATAGRAM (Normal status オブジェクト・ properties あり・ペイロードなし) の
 /// ラウンドトリップ。properties は Normal(0x0) status にのみ付けられる
-/// (draft-ietf-moq-transport-22 §11.1.2 (Object Properties))。`properties_data` は
-/// Properties Length varint を含む生バイト列で渡す (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))。
+/// (draft-ietf-moq-transport-23 §11.1.2 (Object Properties))。`properties_data` は
+/// Properties Length varint を含む生バイト列で渡す (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram))。
 #[test]
 fn object_datagram_roundtrip_normal_status_with_properties() -> noprop::TestResult {
     let mut runner = test_runner()?;
@@ -93,7 +93,7 @@ fn object_datagram_roundtrip_normal_status_with_properties() -> noprop::TestResu
 
 /// OBJECT_DATAGRAM (通常オブジェクト・ペイロードあり) のラウンドトリップ。
 /// status = None のときペイロードが必須 (zero-length は Normal status の明示が必要,
-/// draft-ietf-moq-transport-22 §11.1.1 (Object Status))。decode の消費バイト数はヘッダ長と一致し、残りがペイロード。
+/// draft-ietf-moq-transport-23 §11.1.1 (Object Status))。decode の消費バイト数はヘッダ長と一致し、残りがペイロード。
 #[test]
 fn object_datagram_roundtrip_with_payload() -> noprop::TestResult {
     let mut runner = test_runner()?;
@@ -136,7 +136,7 @@ fn object_datagram_roundtrip_with_payload() -> noprop::TestResult {
 
 /// OBJECT_DATAGRAM (properties あり・ペイロードあり) のラウンドトリップ。
 /// `properties_data` は Properties Length varint を含む生バイト列で渡す
-/// (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))。
+/// (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram))。
 #[test]
 fn object_datagram_roundtrip_with_properties() -> noprop::TestResult {
     let mut runner = test_runner()?;

@@ -1,6 +1,6 @@
 //! Track Alias 未確立の Subgroup ストリームを短時間保持するバッファ
 //!
-//! draft-ietf-moq-transport-22 §3.1.3.1 (Unknown Track Alias):
+//! draft-ietf-moq-transport-23 §3.1.3.1 (Unknown Track Alias):
 //!
 //! > When an endpoint receives a datagram or a new stream with a Track Alias that is not yet
 //! > associated with an Established subscription, it MAY drop the data or buffer it briefly to
@@ -85,7 +85,7 @@ pub struct PendingSubgroupBufferOptions {
 ///
 /// - `per_stream_max_bytes`: 1 MiB
 /// - `per_session_max_bytes`: 16 MiB
-/// - `timeout_us`: 5 秒 (draft-ietf-moq-transport-22 §3.1.3.1 "buffer it briefly")
+/// - `timeout_us`: 5 秒 (draft-ietf-moq-transport-23 §3.1.3.1 "buffer it briefly")
 pub const DEFAULT_PENDING_SUBGROUP_BUFFER_OPTIONS: PendingSubgroupBufferOptions =
     PendingSubgroupBufferOptions {
         per_stream_max_bytes: 1 << 20,

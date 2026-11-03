@@ -1,6 +1,6 @@
 //! AUTHORIZATION_TOKEN のメッセージ単位 reject のテスト
 //!
-//! draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): "The receiver of a
+//! draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression): "The receiver of a
 //! message containing a well-formed Token structure that is otherwise invalid MUST reject
 //! that message with an MALFORMED_AUTH_TOKEN error."
 //!
@@ -182,7 +182,7 @@ fn publish_with_duplicate_tokens_is_rejected_with_malformed_auth_token() {
 
 /// TRACK_STATUS の不正トークンは REQUEST_ERROR (MALFORMED_AUTH_TOKEN) で拒否する
 ///
-/// draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): 受信側は SUBSCRIBE と同一に扱うため、
+/// draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS): 受信側は SUBSCRIBE と同一に扱うため、
 /// 拒否経路も `accept_incoming_track_request` を共有する。
 #[test]
 fn track_status_with_duplicate_tokens_is_rejected_with_malformed_auth_token() {
@@ -214,7 +214,7 @@ fn track_status_with_duplicate_tokens_is_rejected_with_malformed_auth_token() {
 /// REQUEST_UPDATE の不正トークンは REQUEST_ERROR (MALFORMED_AUTH_TOKEN) で拒否する
 ///
 /// REQUEST_UPDATE は既存の request stream 上を流れるため、拒否してもセッションは閉じない。
-/// 自側 publisher の Established subscription では draft-ietf-moq-transport-22 §9.5.1
+/// 自側 publisher の Established subscription では draft-ietf-moq-transport-23 §9.5.1
 /// (Updating Subscriptions) が「REQUEST_UPDATE が失敗したら PUBLISH_DONE(UPDATE_FAILED) で
 /// subscription を終端する」ことを MUST とするため、拒否後は subscription が Terminated に
 /// なる (ワイヤ順序は REQUEST_ERROR → PUBLISH_DONE)。
@@ -287,7 +287,7 @@ fn request_update_with_duplicate_tokens_is_rejected_with_malformed_auth_token() 
 
 /// FETCH の REQUEST_UPDATE を不正トークンで拒否したとき §9.5.1 の MUST を満たすこと
 ///
-/// draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions): "When a REQUEST_UPDATE
+/// draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions): "When a REQUEST_UPDATE
 /// fails for a FETCH, the publisher MUST reset the FETCH data stream."
 /// 自側 publisher の FETCH では `send_request_error` 経由で fetch を Terminated に遷移させ、
 /// open 中の FETCH data stream を reset する。
@@ -365,7 +365,7 @@ fn fetch_request_update_with_duplicate_tokens_resets_fetch_data_stream() {
 
 /// GOAWAY 送信後でも不正トークンの reject は GOING_AWAY より優先されること
 ///
-/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) のメッセージ拒否は
+/// draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression) のメッセージ拒否は
 /// MUST、§9.2 (GOAWAY) の新規 request 拒否は MAY のため、両方が成立する場合は
 /// MALFORMED_AUTH_TOKEN を返す (`Session::accept_peer_request` の doc 参照)。
 #[test]
@@ -461,7 +461,7 @@ fn wire_subscribe_with_duplicate_tokens_is_rejected_by_session() {
 
 /// Terminated な FETCH への REQUEST_UPDATE は不正トークンより前にセッション終了になること
 ///
-/// draft-ietf-moq-transport-22 §3.2.4 (Fetch State Management) は fetch 状態の保持期間と
+/// draft-ietf-moq-transport-23 §3.2.4 (Fetch State Management) は fetch 状態の保持期間と
 /// 終端手順を定めるが、"Established" という状態は §3.1 (Subscriptions) の購読にしか
 /// 定義されていない。本実装は Terminated の fetch への REQUEST_UPDATE を状態機械の違反として
 /// UNEXPECTED_MESSAGE で閉じる
@@ -532,7 +532,7 @@ fn request_update_for_terminated_fetch_with_duplicate_tokens_closes_session() {
 
 /// subscriber 起点 subscription への publisher からの REQUEST_UPDATE は §9.5 の MUST close になること
 ///
-/// draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE) が REQUEST_UPDATE を送れる側として
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE) が REQUEST_UPDATE を送れる側として
 /// 挙げるのは元 request の initiator と PUBLISH 起点 subscription の subscriber であり、
 /// 自側が SUBSCRIBE を送った subscription へ peer publisher が送るのは該当しない
 /// (MUST close)。重複トークンを含んでいてもメッセージ単位の reject にはならない。
@@ -568,11 +568,11 @@ fn request_update_from_publisher_with_duplicate_tokens_closes_session() {
 /// 送信方向を reset 済みの request では拒否応答 (REQUEST_ERROR) を送れないため
 /// メッセージは吸収するが、送信者・自側の役割の検証は応答の有無に依存しない。
 /// 自側が SUBSCRIBE を送った subscription へ peer publisher が REQUEST_UPDATE を送るのは
-/// draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE) の 2 ケース外であり、重複トークンを
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE) の 2 ケース外であり、重複トークンを
 /// 含んでいてもセッションを ROLE_VIOLATION で閉じる。
 ///
 /// ローカル終端は request stream 上の GOAWAY ではなく、malformed track の検出
-/// (draft-ietf-moq-transport-22 §12.1 (Malformed Tracks)) で発生させる。GOAWAY を
+/// (draft-ietf-moq-transport-23 §12.1 (Malformed Tracks)) で発生させる。GOAWAY を
 /// request stream 上で送れるのは request の receiver だけであり (draft-ietf-moq-transport-23
 /// §9.2 (GOAWAY))、SUBSCRIBE の sender である subscriber は送れない。
 #[test]
@@ -829,7 +829,7 @@ fn subscribe_request_id(message: &ControlMessage) -> u64 {
 
 /// 同一 alias を 2 回参照する SUBSCRIBE は alias 解決後の重複として拒否されること
 ///
-/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): "An Authorization
+/// draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression): "An Authorization
 /// Token MAY be repeated within a message as long as the combination of Token Type and
 /// Token Value are unique after resolving any aliases." に反する。
 #[test]
@@ -1028,7 +1028,7 @@ fn subscribe_with_unique_use_aliases_is_accepted() {
 /// 異なる alias が同じ (Token Type, Token Value) に解決する場合も重複として拒否されること
 ///
 /// alias が異なれば同じ (Token Type, Token Value) を登録できる。解決結果が一致する 2 つの
-/// USE_ALIAS は draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) の
+/// USE_ALIAS は draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression) の
 /// "unique after resolving any aliases" に反する。
 #[test]
 fn subscribe_with_different_aliases_resolving_to_same_value_is_rejected() {

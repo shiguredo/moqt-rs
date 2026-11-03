@@ -1,22 +1,22 @@
-//! Namespace / Track Name のシリアライズ表現とパース (draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names))
+//! Namespace / Track Name のシリアライズ表現とパース (draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names))
 //!
 //! binary な namespace タプルと track name を、ファイル名・ URL セーフな文字列へ変換する
-//! (draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names)、RECOMMENDED) ユーティリティ。ログ・ファイル名・一部の認可検証で使う想定で、protocol
+//! (draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names)、RECOMMENDED) ユーティリティ。ログ・ファイル名・一部の認可検証で使う想定で、protocol
 //! state machine の動作には影響しない。
 //!
-//! # シリアライズ (draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names))
+//! # シリアライズ (draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names))
 //!
 //! - 各 namespace タプルをハイフン (`-`) 区切りで並べ、最後の namespace と track name の間は二重
 //!   ハイフン (`--`) で区切る。
 //! - `a-z` / `A-Z` / `0-9` / `_` (0x5f) はそのまま、それ以外のバイトはピリオド (`.`) + 小文字 hex 2 桁。
 //!
-//! # パース (draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names)、MUST)
+//! # パース (draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names)、MUST)
 //!
 //! - ピリオド後の hex は小文字必須 (大文字は invalid)。
 //! - リテラル表現可能バイトの hex 化 (例 `.61`) は冗長として拒否。
 //! - ピリオド直後は必ず hex 2 桁 (末尾ピリオド・ 1 桁・非 hex は invalid)。
 //!
-//! これにより encoding は bijective (draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names))。なお `-` (0x2d) / `.` (0x2e) はリテラル範囲外
+//! これにより encoding は bijective (draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names))。なお `-` (0x2d) / `.` (0x2e) はリテラル範囲外
 //! なので必ず `.2d` / `.2e` にエンコードされ、シリアライズ文字列中の裸の `-` は区切りとしてしか現れない。
 //! 本ライブラリの `TrackNamespace` は空フィールドを表現できないため、bijective 性は `TrackNamespace::new`
 //! を通せる binary 値に限定して成立する。
@@ -27,21 +27,21 @@
 //! (`UppercaseHex` / `RedundantEncoding`) を適用しない。同じ値に複数の表現 (`a` と `%61`、
 //! `a/b` と `a.2fb`) を受理するため単射ではなく、`serialize_name` の出力が正規形である。
 //!
-//! この節番号・規則は draft-ietf-moq-transport-22 由来であり、将来の draft 改版で変わる可能性がある。
+//! この節番号・規則は draft-ietf-moq-transport-23 由来であり、将来の draft 改版で変わる可能性がある。
 
 use crate::message::{common::MAX_TRACK_NAME_LENGTH, common::TrackNamespace};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// `parse_name` のエラー (draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names))
+/// `parse_name` のエラー (draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names))
 ///
-/// draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names) のパース失敗は application-defined であり protocol violation ではない。呼び出し側が
+/// draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names) のパース失敗は application-defined であり protocol violation ではない。呼び出し側が
 /// セッションを閉じるかどうかを判断する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NameParseError {
-    /// ピリオド後の hex が大文字 (draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names): 小文字必須)
+    /// ピリオド後の hex が大文字 (draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names): 小文字必須)
     UppercaseHex,
-    /// リテラル表現可能バイトの hex 化 (例 `.61`、draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names): 冗長エンコード禁止)
+    /// リテラル表現可能バイトの hex 化 (例 `.61`、draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names): 冗長エンコード禁止)
     RedundantEncoding,
     /// 末尾ピリオド / hex 1 桁 / 非 hex 文字、想定外のバイト (裸の `-` 等)、
     /// または `%` の後が hex 2 桁でない (`parse_name_with_percent_encoding` のみ。
@@ -53,9 +53,9 @@ pub enum NameParseError {
     MissingSeparator,
     /// 境界 `--` が 2 回以上、またはハイフンの連続ラン長が 3 以上
     MultipleSeparators,
-    /// namespace + track name の合計が 4096 バイトを超える (draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure))
+    /// namespace + track name の合計が 4096 バイトを超える (draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure))
     FullNameTooLong,
-    /// `TrackNamespace::new` のフィールド数 (32 超) 制約違反 (draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure))
+    /// `TrackNamespace::new` のフィールド数 (32 超) 制約違反 (draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure))
     InvalidNamespace,
 }
 
@@ -111,7 +111,7 @@ fn decode_hex(b: u8) -> Result<u8, NameParseError> {
     }
 }
 
-/// 単一フィールド (namespace フィールド 1 つ、または track name) を draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names) 表現で `out` に追記する
+/// 単一フィールド (namespace フィールド 1 つ、または track name) を draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names) 表現で `out` に追記する
 fn serialize_field(bytes: &[u8], out: &mut String) {
     for &b in bytes {
         if is_literal(b) {
@@ -124,7 +124,7 @@ fn serialize_field(bytes: &[u8], out: &mut String) {
     }
 }
 
-/// namespace タプルを draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names) の表現へ変換する
+/// namespace タプルを draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names) の表現へ変換する
 ///
 /// 各フィールドをハイフン (`-`) で連結する。`serialize_name` の namespace 部分と
 /// 同じ表現であり、DPoP の Authorization Context の `tns` (§5.1.3) に使う。
@@ -140,7 +140,7 @@ pub fn serialize_namespace(namespace: &TrackNamespace) -> String {
     out
 }
 
-/// track name を draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names) の表現へ変換する
+/// track name を draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names) の表現へ変換する
 ///
 /// DPoP の Authorization Context の `tn` (§5.1.3) に使う。単体の track name を
 /// 表すための関数であり、Full Track Name の長さ制約 (§8.7) は適用しない。
@@ -150,7 +150,7 @@ pub fn serialize_track_name(track_name: &[u8]) -> String {
     out
 }
 
-/// draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names) の track name 表現をバイト列へパースする
+/// draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names) の track name 表現をバイト列へパースする
 ///
 /// `serialize_track_name` の逆変換であり、§8.8 (Representing Namespace and Track Names) の MUST を
 /// 適用する。単体の track name を表すための関数であり、Full Track Name の長さ制約
@@ -159,7 +159,7 @@ pub fn parse_track_name(s: &str) -> Result<Vec<u8>, NameParseError> {
     decode_field(s.as_bytes(), PercentEncoding::Forbidden)
 }
 
-/// namespace タプル + track name を draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names) のシリアライズ文字列へ変換する
+/// namespace タプル + track name を draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names) のシリアライズ文字列へ変換する
 ///
 /// 0 フィールドの namespace は先頭が `--` の文字列になる。任意のバイト列を表現できるため infallible。
 /// `TrackNamespace` は構築時に `new` で検証済みのため、ここでは再検証しない。
@@ -172,7 +172,7 @@ pub fn serialize_name(namespace: &TrackNamespace, track_name: &[u8]) -> String {
     out
 }
 
-/// draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names) の namespace 表現をタプルへパースする
+/// draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names) の namespace 表現をタプルへパースする
 ///
 /// `serialize_namespace` の逆変換であり、§8.8 (Representing Namespace and Track Names) の MUST を
 /// 適用する。空文字列は 0 フィールドの namespace になる。
@@ -242,7 +242,7 @@ fn decode_hex_any_case(b: u8) -> Option<u8> {
     hex_nibble(b)
 }
 
-/// draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names) 表現の単一フィールドを binary バイト列へデコードする (同節の MUST を厳格に適用)
+/// draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names) 表現の単一フィールドを binary バイト列へデコードする (同節の MUST を厳格に適用)
 ///
 /// `percent` が [`PercentEncoding::Allowed`] のときは、URI 層の `%XX` を 1 パスで
 /// データバイトとして取り出す。`.` + hex と `%XX` は別の層の表現であり、`%XX` の octet は
@@ -293,7 +293,7 @@ fn decode_field(bytes: &[u8], percent: PercentEncoding) -> Result<Vec<u8>, NameP
     Ok(out)
 }
 
-/// draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names) の MUST を厳格に適用してシリアライズ文字列を namespace タプル + track name へパースする
+/// draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names) の MUST を厳格に適用してシリアライズ文字列を namespace タプル + track name へパースする
 pub fn parse_name(s: &str) -> Result<(TrackNamespace, Vec<u8>), NameParseError> {
     parse_name_inner(s, PercentEncoding::Forbidden)
 }
@@ -324,7 +324,7 @@ fn parse_name_inner(
     let bytes = s.as_bytes();
 
     // 境界 `--` (ハイフンの極大連続ラン長 2) を一意に特定する。
-    // ラン長 1 = namespace 区切り、ラン長 2 = 境界、ラン長 3 以上 = 不正 (draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names) 不変条件)。
+    // ラン長 1 = namespace 区切り、ラン長 2 = 境界、ラン長 3 以上 = 不正 (draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names) 不変条件)。
     let mut boundary: Option<usize> = None;
     let mut i = 0;
     while i < bytes.len() {
@@ -367,7 +367,7 @@ fn parse_name_inner(
         }
     }
 
-    // draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure): Full Track Name (namespace + track name) の合計は
+    // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name (namespace + track name) の合計は
     // 4096 バイト以下。
     // parse_name は `TrackNamespace` を返すため (型不変条件で namespace 単独の 4096 / 32 フィールド制約は
     // 必ず満たす)、Full Track Name 制約の範囲内で動作する。合計長は `TrackNamespace::new` が見ない
@@ -379,8 +379,9 @@ fn parse_name_inner(
     }
 
     // フィールド数 (<=32) を TrackNamespace::new で検証する。空フィールドと合計長は上で検証済みのため、
-    // ここで返り得るエラーはフィールド数超過のみ。draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure) の wire 制約 (PROTOCOL_VIOLATION) の意味は
-    // 持ち込まず NameParseError::InvalidNamespace へ写像する。
+    // ここで返り得るエラーはフィールド数超過のみ。draft-ietf-moq-transport-23 §8.7 (Track
+    // Namespace Structure) の wire 制約 (INVALID_TRACK_NAMESPACE) の意味は持ち込まず
+    // NameParseError::InvalidNamespace へ写像する。
     let namespace = TrackNamespace::new(fields).map_err(|_| NameParseError::InvalidNamespace)?;
 
     Ok((namespace, track_name))

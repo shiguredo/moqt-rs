@@ -584,7 +584,7 @@ async fn publish_and_subscribe_audio_datagram_roundtrip() {
                 // 音声の Timestamp は LOC の Timestamp から求めるため、到着順に進む。
                 // 購読より前に publish された Group の音声は、moq-sub が SUBSCRIBE_OK の
                 // Largest Object を境界に落とす。ここで巻き戻るのは、境界より後の live の
-                // Object が並び替わって届いた場合である (draft-ietf-moq-transport-22 §2.1.2 /
+                // Object が並び替わって届いた場合である (draft-ietf-moq-transport-23 §2.2 /
                 // §2.3.1)。同じ TIMESTAMP の重複は等値を許すためこの検査では検出しない
                 if let Some(previous) = last_pts {
                     assert!(

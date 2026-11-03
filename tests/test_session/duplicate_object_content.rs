@@ -1,8 +1,8 @@
 //! 重複 Object の内容 (payload / immutable properties) 不一致の検出テスト
 //!
-//! draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 6: "The same Object is
+//! draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 6: "The same Object is
 //! received more than once with different Payload or other immutable properties." と、
-//! draft-ietf-moq-transport-22 §10.7 (Immutable Properties) の比較範囲を検証する。
+//! draft-ietf-moq-transport-23 §10.7 (Immutable Properties) の比較範囲を検証する。
 
 use super::*;
 use shiguredo_moqt::track_properties::PROP_IMMUTABLE_PROPERTIES;
@@ -12,12 +12,12 @@ use shiguredo_moqt::track_properties::PROP_IMMUTABLE_PROPERTIES;
 ///
 /// 内側の値は「入れ子の Key-Value-Pair 列」で、`ObjectProperties::encode` の出力
 /// (`Properties Length | Key-Value-Pairs`) から先頭の Properties Length varint を除いたものである。
-/// 副作用のない GREASE 値 (draft-ietf-moq-transport-22 §13 (Grease)) を使うことで、
+/// 副作用のない GREASE 値 (draft-ietf-moq-transport-23 §13 (Grease)) を使うことで、
 /// PRIOR_GROUP_ID_GAP 等の他条件と干渉させずに「immutable properties の生バイト列」だけを
 /// 変化させられる。
 fn properties_with_immutable_grease(value: u64) -> Vec<u8> {
     // GREASE の Property Type は `0x7f * N + 0x9D`。N = 129 の偶数型が 0x409C
-    // (draft-ietf-moq-transport-22 §16.8 (Properties) Table 15)
+    // (draft-ietf-moq-transport-23 §16.8 (Properties) Table 15)
     const GREASE_TYPE: u64 = 0x409C;
     assert!(
         shiguredo_moqt::grease::is_grease(GREASE_TYPE),
@@ -46,7 +46,7 @@ fn properties_with_immutable_grease(value: u64) -> Vec<u8> {
 /// Object Properties のバイト列を作る
 ///
 /// immutables の内側は `immutable_value`、mutable 側は `mutable_value` で変化させる。
-/// どちらも副作用のない GREASE 値 (draft-ietf-moq-transport-22 §13 (Grease)) である。
+/// どちらも副作用のない GREASE 値 (draft-ietf-moq-transport-23 §13 (Grease)) である。
 fn properties_with_immutable_and_mutable_grease(
     immutable_value: u64,
     mutable_value: u64,
@@ -85,7 +85,7 @@ fn properties_with_immutable_and_mutable_grease(
 /// 同一 (Group ID, Object ID) の重複 Object で mutable な Object Property だけが異なっても
 /// Malformed にならない (subgroup 経路)
 ///
-/// draft-ietf-moq-transport-22 §7.1 (Caching Relays): "Object Properties can be added, removed or
+/// draft-ietf-moq-transport-23 §7.1 (Caching Relays): "Object Properties can be added, removed or
 /// updated, subject to the constraints of the specific property." 比較対象は §12.1 (Malformed
 /// Tracks) 条件 6 の "different Payload or other immutable properties" に限られるため、mutable な
 /// Object Property の更新は Malformed ではない。
@@ -179,7 +179,7 @@ fn duplicate_object_with_different_mutable_properties_is_not_malformed_on_datagr
 
 /// 同一 (Group ID, Object ID) の重複 Object で payload 長が異なると Malformed Track (条件 6)
 ///
-/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 6 の "different Payload" の検出。
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 6 の "different Payload" の検出。
 /// Session は payload のバイト列を保持しないため、payload 長の差異で検出する。
 #[test]
 fn condition6_subgroup_duplicate_with_different_payload_length_terminates_subscription() {
@@ -264,7 +264,7 @@ fn condition6_subgroup_duplicate_with_different_payload_length_terminates_subscr
 
 /// 同一 (Group ID, Object ID) の重複 Object で IMMUTABLE_PROPERTIES が異なると Malformed Track (条件 6)
 ///
-/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 6:
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 6:
 /// "The same Object is received more than once with different Payload or other immutable
 /// properties." の "other immutable properties" の差異を検出する。draft §10.7 (Immutable
 /// Properties) は "This Property MUST NOT be modified or removed and the serialization (e.g.
@@ -348,7 +348,7 @@ fn condition6_subgroup_duplicate_with_different_immutable_properties_terminates_
 
 /// 同一 (Group ID, Object ID) の重複 datagram で status が異なると Malformed Track (条件 6)
 ///
-/// draft-ietf-moq-transport-22 §11.1.1 (Object Status): status 付き Object は payload を持たない
+/// draft-ietf-moq-transport-23 §11.1.1 (Object Status): status 付き Object は payload を持たない
 /// ("0x0 := Normal object. This status is implicit for any non-zero length object.") ため、
 /// status の差異は §12.1 条件 6 の Payload の差異にあたる。
 ///
@@ -499,7 +499,7 @@ fn condition6_datagram_duplicate_with_different_immutable_properties_terminates_
 
 /// 同一内容の重複 Object は Malformed にならない (正当な再送)
 ///
-/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 6 は Payload や immutable
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 6 は Payload や immutable
 /// properties が「異なる」場合だけを Malformed とする。relay の再送などで同一内容が
 /// 再受信されることは正当である。
 #[test]
@@ -550,7 +550,7 @@ fn condition6_duplicate_object_with_same_content_is_not_malformed() {
 
 /// malformed track でローカル終端した subscription への遅延 SUBSCRIBE_OK は吸収する
 ///
-/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) の検出で自側が購読を終端しても、
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) の検出で自側が購読を終端しても、
 /// publisher が cancel を観測する前に送った SUBSCRIBE_OK は正当に届く。終端済み request への
 /// 応答は MUST 検証だけを行い、状態遷移とイベント発行をしない
 /// (`Session::is_locally_terminated_request` の吸収経路)。

@@ -1,7 +1,7 @@
 //! FETCH データストリームの FIN / RESET_STREAM 後に FETCH_OK / REQUEST_ERROR / REQUEST_OK が
 //! 届くケースのテスト
 //!
-//! draft-ietf-moq-transport-22 §3.2 (Fetch) は応答の到着タイミングを
+//! draft-ietf-moq-transport-23 §3.2 (Fetch) は応答の到着タイミングを
 //! オブジェクト配信に対して制約しないため、データストリームの終端後に
 //! FETCH_OK / REQUEST_ERROR / REQUEST_OK が届いても (二重応答でなければ) セッションを
 //! fail させず、終端情報の保存やイベント発行だけを行う (unknown mandatory によるキャンセル
@@ -73,7 +73,7 @@ fn establish_fetch_and_send_request_update() -> (Session, Session, u64) {
 /// データストリームの FIN 後に FETCH_OK が届いても fail せず、state が `Terminated` のまま
 /// 終端情報が保存され、応答受領フラグが立つこと
 ///
-/// draft-ietf-moq-transport-22 §3.2 (Fetch): "The FETCH_OK or FETCH_ERROR can
+/// draft-ietf-moq-transport-23 §3.2 (Fetch): "The FETCH_OK or FETCH_ERROR can
 /// come at any time relative to object delivery." FETCH データストリーム (uni) と
 /// FETCH_OK (bidi request stream) は別々の QUIC ストリームに流れるため、どちらの順序も
 /// 起こりうる。
@@ -155,7 +155,8 @@ fn fetch_ok_after_fin_keeps_terminated_and_saves_end_info() {
 
 /// データストリームの FIN 前に FETCH_OK が届くと `FetchOkReceived` が push されること
 ///
-/// draft-ietf-moq-transport-22 §9.12 (FETCH_OK): 通常フロー (FIN 前到着) でも
+/// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): 要求の応答は FETCH_OK として 1 通だけ届く。
+/// 通常フロー (FIN 前到着) でも
 /// 終端情報つきの能動通知が行われ、アプリはポーリングなしに再生終了を確定できる。
 #[test]
 fn fetch_ok_before_fin_emits_fetch_ok_received() {
@@ -529,8 +530,8 @@ fn fetch_ok_after_reset_stream_accepted() {
     );
 }
 
-/// `Terminated` 状態での FETCH_OK でも End Location < Start Location は ProtocolViolation で
-/// fail すること (draft-ietf-moq-transport-22 §9.12 (FETCH_OK))
+/// `Terminated` 状態での FETCH_OK でも LARGEST_OBJECT が Start Location より小さければ
+/// INVALID_FIELD で fail すること (draft-ietf-moq-transport-23 §3.2 (Fetch))
 #[test]
 fn fetch_ok_end_before_start_after_fin_fails_session() {
     use shiguredo_moqt::message::{RequestOk as WireRequestOk, common::Location};
@@ -669,7 +670,7 @@ fn unknown_mandatory_fetch_ok_after_fin_terminates_fetch() {
 /// REQUEST_UPDATE 失敗応答の REQUEST_ERROR がデータストリームの FIN 後 (`Terminated`) に
 /// 届いても fail しないこと
 ///
-/// draft-ietf-moq-transport-22 §3.2 (Fetch): FETCH_OK / REQUEST_ERROR は
+/// draft-ietf-moq-transport-23 §3.2 (Fetch): FETCH_OK / REQUEST_ERROR は
 /// オブジェクト配信に対して任意のタイミングで届く。REQUEST_UPDATE 失敗応答も
 /// bidi request stream で送られるため、データストリームの終端と独立に到着しうる。
 #[test]
@@ -733,7 +734,7 @@ fn request_error_for_failed_update_after_fin_accepted() {
 ///
 /// REQUEST_OK は REQUEST_UPDATE への応答 (REQUEST_UPDATE_OK) のみであり、データストリームの
 /// 終端とは独立に bidi request stream で送られる (REQUEST_OK の FIN 後到着は bidi stream が
-/// データストリームと独立であることからの推論。draft-ietf-moq-transport-22 §3.2
+/// データストリームと独立であることからの推論。draft-ietf-moq-transport-23 §3.2
 /// (Fetch) の "can come at any time" は FETCH_OK / REQUEST_ERROR のタイミングのみを
 /// 述べたものである)。REQUEST_UPDATE は複数回送れるため二重応答フラグの対象外とする。
 #[test]
@@ -779,7 +780,7 @@ fn request_ok_after_fin_accepted() {
 /// 空の FETCH 応答 (FETCH_HEADER + FIN、エントリ 0 個) の後の FETCH_OK で fail せず、
 /// 終端情報が保存されること
 ///
-/// draft-ietf-moq-transport-22 §3.2.1 (Fetch Object Delivery): "If no Objects exist in the
+/// draft-ietf-moq-transport-23 §3.2.1 (Fetch Object Delivery): "If no Objects exist in the
 /// requested range, the publisher opens the unidirectional stream, sends the FETCH_HEADER
 /// (see Section 11.4.1) and closes the stream with a FIN."
 #[test]
@@ -874,7 +875,7 @@ fn initial_request_ok_in_pending_is_accepted_as_fetch_ok() {
 
 // ─── FETCH_ERROR 後の遅延 in-flight FETCH data stream ─────────────────
 //
-// draft-ietf-moq-transport-22 §3.2.4 (Fetch State Management): "A FETCH_ERROR indicates
+// draft-ietf-moq-transport-23 §3.2.4 (Fetch State Management): "A FETCH_ERROR indicates
 // that both endpoints can immediately remove state. Since a relay can start delivering
 // FETCH Objects from cache before determining the result of the request, some Objects
 // could be received even if the FETCH results in error."

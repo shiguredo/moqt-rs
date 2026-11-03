@@ -27,7 +27,7 @@ use super::common::{establish_pair, fetch_ok_params, take_send_on_stream, take_s
 
 /// FETCH の range 指定 (AbsoluteRangeWithEnd) を持つ MessageParameters を作る
 ///
-/// draft-ietf-moq-transport-22 §9.11 (FETCH): range は LOCATION_FILTER で指定する。
+/// draft-ietf-moq-transport-23 §9.11 (FETCH): range は LOCATION_FILTER で指定する。
 /// `end.group_id < start.group_id` の場合は delta が求まらないため panic する
 /// (テストフィクスチャの前提)。
 fn fetch_range_params(start: Location, end: Location) -> MessageParameters {
@@ -227,7 +227,7 @@ fn publisher_largest_location_never_saved_on_request_update_ok() -> noprop::Test
     Ok(())
 }
 
-/// draft-ietf-moq-transport-22 §3.2 (Fetch): FETCH は Start Location が対象トラックの観測
+/// draft-ietf-moq-transport-23 §3.2 (Fetch): FETCH は Start Location が対象トラックの観測
 /// Largest (effective_largest_object) を上回る (start > largest) ときに限り INVALID_RANGE で
 /// 拒否される。範囲内 (start <= largest) では受理される。比較は Location の (group, object) 辞書式。
 /// 確立経路 (SUBSCRIBE_OK / REQUEST_UPDATE_OK) の publisher 側保存は廃止されたため、

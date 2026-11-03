@@ -444,7 +444,7 @@ mod mandatory_properties {
 
     /// GREASE の Track Property は 0x4000-0x7FFF に入っていても unknown mandatory にしない
     ///
-    /// draft-ietf-moq-transport-22 §16.8 (Properties) の Table 15 は GREASE の Property Type
+    /// draft-ietf-moq-transport-23 §16.8 (Properties) の Table 15 は GREASE の Property Type
     /// (`0x7f * N + 0x9D`) を Scope Any として予約しており、N = 128 の 0x401D から N = 256 の
     /// 0x7F9D までは §3.7 (Mandatory to Understand Track Properties) の 0x4000-0x7FFF に入る。GREASE 値は
     /// IANA 登録された Property ではないため必須トラックプロパティとして扱わない
@@ -462,7 +462,7 @@ mod mandatory_properties {
             props.push(TrackProperty {
                 prop_type,
                 // 奇数型は長さ付きバイト列、偶数型は varint
-                // (draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure))
+                // (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure))
                 value: if prop_type % 2 == 0 {
                     TrackPropertyValue::VarInt(1)
                 } else {
@@ -518,7 +518,7 @@ mod mandatory_properties {
     /// GREASE の Track Property は encode / decode を通しても unknown mandatory にならない
     ///
     /// 奇数型 (長さ付きバイト列) と偶数型 (varint) の両方で wire 表現を往復させる
-    /// (draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) / §16.8 (Properties) の
+    /// (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) / §16.8 (Properties) の
     /// Table 15)。
     #[test]
     fn grease_property_roundtrip_keeps_unknown_mandatory_false() {
@@ -566,7 +566,7 @@ mod mandatory_properties {
     }
 }
 
-/// draft-ietf-moq-transport-22 §10.7 (Immutable Properties): IMMUTABLE_PROPERTIES (0x0B) の Track scope 対応。
+/// draft-ietf-moq-transport-23 §10.7 (Immutable Properties): IMMUTABLE_PROPERTIES (0x0B) の Track scope 対応。
 /// 入れ子禁止・内側 KVP 検証・統合検索 (MUST search both) を検証する。
 mod immutable_properties {
     use super::*;
@@ -700,7 +700,7 @@ mod immutable_properties {
 
     /// IMMUTABLE_PROPERTIES 内側の GREASE 値は unknown mandatory にしない
     ///
-    /// draft-ietf-moq-transport-22 §10.7 (Immutable Properties) の「MUST search both」で
+    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties) の「MUST search both」で
     /// 内側も探索するが、§16.8 (Properties) の Table 15 が GREASE の Property Type
     /// (`0x7f * N + 0x9D`) を Scope Any として予約しているため、内側でも unknown mandatory
     /// として扱わない。

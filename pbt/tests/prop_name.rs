@@ -1,4 +1,4 @@
-//! draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names): Namespace / Track Name のシリアライズ・パースの property-based test。
+//! draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names): Namespace / Track Name のシリアライズ・パースの property-based test。
 //! bijective 性 (binary <-> シリアライズ文字列) のラウンドトリップを検証する。
 
 use pbt::common::test_runner;

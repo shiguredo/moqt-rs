@@ -38,7 +38,7 @@ fn leading_ones_indicate_length() -> noprop::TestResult {
             4 => 3u32,
             5 => 4u32,
             6 => 5u32,
-            7 => 6u32, // 1111110x: draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1595 で追加
+            7 => 6u32, // 1111110x: draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1595 で追加
             8 => 6u32, // 11111110: leading_ones=7 だが 0xFE は first=0xFE で leading_ones()=7
             9 => 8u32,
             _ => unreachable!("vi64 encoded length is always 1..=9"),
@@ -97,7 +97,7 @@ fn encode_with_len(value: u64, len: usize) -> Vec<u8> {
 
 /// 非最小エンコーディングも decode できる
 ///
-/// draft-ietf-moq-transport-22 §8.1: "Variable-length integers do not need to be
+/// draft-ietf-moq-transport-23 §8.1: "Variable-length integers do not need to be
 /// encoded using the minimum number of bytes; any encoding length that can
 /// represent the value is valid."
 #[test]

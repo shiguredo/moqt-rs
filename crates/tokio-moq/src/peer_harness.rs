@@ -75,7 +75,7 @@ fn fetch_ok_parameters(largest_object: Option<Location>) -> MessageParameters {
 /// 初期イベントとして積まれた SETUP を取り出す
 ///
 /// `Session::new_server` は生成時に SETUP を `SessionEvent::SendControl` として積む
-/// (draft-ietf-moq-transport-22 §9.1 (SETUP))。
+/// (draft-ietf-moq-transport-23 §9.1 (SETUP))。
 fn pop_send_control(session: &mut Session) -> Result<ControlMessage> {
     match session.poll_event() {
         Some(SessionEvent::SendControl(message)) => Ok(message),
@@ -88,7 +88,7 @@ fn pop_send_control(session: &mut Session) -> Result<ControlMessage> {
 /// 新規制御ストリームの先頭に SETUP を書き出す
 ///
 /// 制御ストリームの先頭には stream type prefix が必要である
-/// (draft-ietf-moq-transport-22 §6.4.1 (Unidirectional Streams))。prefix を前置する
+/// (draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams))。prefix を前置する
 /// `encode_control_stream_setup` を使う。ストリームを開くのは呼び出し側である。
 async fn send_control_stream_setup(
     control_send: &mut SendStream,
@@ -105,7 +105,7 @@ async fn send_control_stream_setup(
 
 /// 先頭メッセージから request stream の Request ID を取り出す
 ///
-/// draft-ietf-moq-transport-22 §6.3 (Session initialization) は request stream の先頭に
+/// draft-ietf-moq-transport-23 §6.3 (Session initialization) は request stream の先頭に
 /// 7 種類のメッセージを許す。本 example が request として扱う 4 種類 (SUBSCRIBE / PUBLISH /
 /// FETCH / TRACK_STATUS) はそれぞれの構造体が Request ID を持ち、本実装が扱わない 3 種類は
 /// `ControlMessage::Unsupported` が持つ。応答専用の型は持たないため `None` になる。
@@ -342,7 +342,7 @@ impl QmuxTestPeerServer {
 ///
 /// 送信半と reader の両方を保持する。s2n-quic では送信半の drop で FIN、受信半の drop で
 /// STOP_SENDING が送られるため、保持しないと request の終端
-/// (draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure) /
+/// (draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure) /
 /// §6.4.2.3 (Request Cancellation and Rejection)) が peer に観測される。テストが終わるまで
 /// 保持する。
 struct AcceptedRequest {
@@ -513,7 +513,7 @@ impl TestPeer {
     /// peer 起点の request stream を開き、先頭メッセージとして `message` を送る
     ///
     /// request stream の先頭メッセージは stream type prefix を付けない
-    /// (draft-ietf-moq-transport-22 §6.3 (Session initialization))。メッセージの種類は問わない
+    /// (draft-ietf-moq-transport-23 §6.3 (Session initialization))。メッセージの種類は問わない
     /// (request 以外を送って example の種別判定を検証できる)。Request ID を含む request を
     /// 送る場合は、peer 役割の parity に合わせて [`Self::next_request_id`] で採番した値を
     /// 渡すこと。
@@ -715,7 +715,7 @@ impl TestPeer {
 
     /// 自側が開く uni stream を開き、送信ハンドルを返す
     ///
-    /// FETCH 応答 (draft-ietf-moq-transport-22 §11.4.1) のように、peer が自ら uni stream を
+    /// FETCH 応答 (draft-ietf-moq-transport-23 §11.4.1) のように、peer が自ら uni stream を
     /// 開いて書く経路をテストで再現するために使う。
     pub(crate) async fn open_uni_send_stream(&mut self) -> Result<crate::transport::SendStream> {
         self.handle.open_send_stream().await
@@ -723,7 +723,7 @@ impl TestPeer {
 
     /// 自側 control stream に GOAWAY を書く
     ///
-    /// draft-ietf-moq-transport-22 §9.2 (GOAWAY)。`new_session_uri` が空でない場合は、
+    /// draft-ietf-moq-transport-23 §9.2 (GOAWAY)。`new_session_uri` が空でない場合は、
     /// 受け取った client がその URI へ移行する (server 役だけが非空 URI を送れる)。
     /// `timeout_ms` は sender が閉じるまでの時間で、0 は期限なしを意味する。
     pub(crate) async fn send_goaway(
@@ -943,7 +943,7 @@ mod tests {
     use super::*;
     use crate::moqt_client::{ClientEvent, MoqtClient};
 
-    /// PUBLISH_NAMESPACE の制御メッセージ型 ID (draft-ietf-moq-transport-22 §9 Table 5)
+    /// PUBLISH_NAMESPACE の制御メッセージ型 ID (draft-ietf-moq-transport-23 §9 Table 5)
     const PUBLISH_NAMESPACE_TYPE_ID: u64 = 0x6;
 
     /// 基盤を使うテストの上限時間 (ハングを失敗として観測する)
@@ -1127,7 +1127,7 @@ mod tests {
 
     /// 確立後の request stream で Session が失敗したときも終了コードを送ること
     ///
-    /// draft-ietf-moq-transport-22 §9 Table 5 は "Messages marked \"First\" MUST be the first
+    /// draft-ietf-moq-transport-23 §9 Table 5 は "Messages marked \"First\" MUST be the first
     /// message on a new request stream." と定める。確立後の request stream に 2 通目の
     /// SUBSCRIBE が届くと Session は UNEXPECTED_MESSAGE で閉じる。`pump_once` は
     /// `recv_stream_message` の失敗で `CloseSession` を drain してから error を返す。
@@ -1257,7 +1257,7 @@ mod tests {
     /// PUBLISH に載せた Track Properties が peer へ届くこと
     ///
     /// moq-pub は映像トラックの PUBLISH で `DYNAMIC_GROUPS=1` を告知し、購読者からの
-    /// `NEW_GROUP_REQUEST` (draft-ietf-moq-transport-22 §9.20.19) に応じて新しい Group を
+    /// `NEW_GROUP_REQUEST` (draft-ietf-moq-transport-23 §9.19.19) に応じて新しい Group を
     /// 開始する。告知は PUBLISH の Track Properties (§8.4 / §10.6) で行う。
     #[tokio::test(flavor = "multi_thread")]
     async fn client_publish_track_properties_are_sent_to_peer() {
@@ -1348,7 +1348,7 @@ mod tests {
 
             // PUBLISH_NAMESPACE を先頭に送る。body は 3 種類の共通構造
             // (Request ID → Track Namespace Prefix → Number of Parameters) に従う
-            // (draft-ietf-moq-transport-22 §9.14 (PUBLISH_NAMESPACE) /
+            // (draft-ietf-moq-transport-23 §9.13 (PUBLISH_NAMESPACE) /
             // §8.7 (Track Namespace Structure))
             let request_id = peer.next_request_id().expect("Request ID を採番できること");
             let mut body = Vec::new();
@@ -1425,7 +1425,7 @@ mod tests {
     /// peer が parity 違反の request を先頭に送るとセッションが終了する
     ///
     /// 本実装が扱う 4 種類の request でも Session がエラーを返す場合は、終了コード付きで
-    /// セッションを閉じることを確かめる (draft-ietf-moq-transport-22 §6.4.2.1 (Request ID))。
+    /// セッションを閉じることを確かめる (draft-ietf-moq-transport-23 §6.4.2.1 (Request ID))。
     #[tokio::test(flavor = "multi_thread")]
     async fn request_start_message_with_invalid_parity_closes_session() {
         run_with_timeout(async {
@@ -1462,7 +1462,7 @@ mod tests {
     /// `ControlMessage::Setup` は `SetupOptions` の型付き API しか受け付けないため、型では
     /// 表現できない不正な Setup Options は `ControlMessage::Unsupported` で書き出す (encode は
     /// type varint + vi64 長 + body であり SETUP と同じ書式になる)。body は
-    /// draft-ietf-moq-transport-22 §9.1 (SETUP) の「カウントプレフィックスなしのデルタ
+    /// draft-ietf-moq-transport-23 §9.1 (SETUP) の「カウントプレフィックスなしのデルタ
     /// エンコードされた KVP」である。
     fn setup_head(body: Vec<u8>) -> Vec<u8> {
         let message = ControlMessage::Unsupported {
@@ -1548,7 +1548,7 @@ mod tests {
     /// 初回 SETUP の Setup Options で KVP の宣言長が残りを超えると
     /// MALFORMED_KEY_VALUE を送ること
     ///
-    /// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): "If a receiver understands a
+    /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): "If a receiver understands a
     /// Type, and the following Value or Length/Value does not match the serialization defined by
     /// that Type, the receiver MUST close the session with error code
     /// MALFORMED_KEY_VALUE." Type を理解している (option type 0x03) が、宣言長 10 に対して
@@ -1586,7 +1586,7 @@ mod tests {
 
     /// 初回 SETUP のトークン重複で MALFORMED_AUTH_TOKEN を送ること
     ///
-    /// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) は Authorization Token の
+    /// draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression) は Authorization Token の
     /// 繰り返しを "(Token Type, Token Value) が alias 解決後に一意である限り" 許し、整形式だが
     /// 不正な Token を "MUST reject that message with an MALFORMED_AUTH_TOKEN error" とする。
     /// SETUP は Request ID を持たずメッセージ単位の reject ができないため、§12.2
@@ -1639,7 +1639,7 @@ mod tests {
 
     /// server 役の SETUP が PATH を持つと INVALID_PATH を送ること
     ///
-    /// draft-ietf-moq-transport-22 §9.1.2 (PATH) は server が PATH を送ることを MUST NOT と
+    /// draft-ietf-moq-transport-23 §9.1.2 (PATH) は server が PATH を送ることを MUST NOT と
     /// する。session 層の検証失敗であるため、`Session` が積んだ終了コードを送る。
     #[tokio::test(flavor = "multi_thread")]
     async fn initial_setup_with_path_from_server_closes_with_invalid_path() {
@@ -1814,7 +1814,7 @@ mod tests {
 
     /// SETUP の前に control stream が終端すると CLOSED_CONTROL_STREAM を送ること
     ///
-    /// draft-ietf-moq-transport-22 §6.3 (Session initialization) は control stream を
+    /// draft-ietf-moq-transport-23 §6.3 (Session initialization) は control stream を
     /// セッション中に閉じることを禁じる。
     #[tokio::test(flavor = "multi_thread")]
     async fn control_stream_finished_before_setup_closes_with_closed_control_stream() {
@@ -2332,7 +2332,7 @@ mod tests {
                 .open_fetch_response(request_id)
                 .await
                 .expect("FETCH 応答 stream を開けること");
-            // Properties Length = 0 を含む生バイト列 (draft-ietf-moq-transport-22 §11.1.2)
+            // Properties Length = 0 を含む生バイト列 (draft-ietf-moq-transport-23 §11.1.2)
             let properties: Vec<u8> = vec![0x00];
             writer
                 .write_object(
@@ -2940,7 +2940,7 @@ mod tests {
 
     /// Session が INVALID_RANGE で拒否した FETCH はアプリへ渡らない
     ///
-    /// draft-ietf-moq-transport-22 §3.2 (Fetch) の MUST 2 条件 (Object が publish されていない /
+    /// draft-ietf-moq-transport-23 §3.2 (Fetch) の MUST 2 条件 (Object が publish されていない /
     /// Start Location が Largest Object より大きい) は Session が判定して REQUEST_ERROR を送る。
     /// アプリが重ねて応答すると `send_fetch_ok` が未登録の Request ID を拒否して致命終了するため、
     /// 拒否済みの FETCH を配送しないことを固定する。

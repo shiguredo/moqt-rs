@@ -1,6 +1,6 @@
 /// SubgroupTracker の単体テスト
 ///
-/// draft-ietf-moq-transport-22 §2.2 (Subgroups) / draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams) に基づく再オープン禁止検証の
+/// draft-ietf-moq-transport-23 §2.2 (Subgroups) / draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams) に基づく再オープン禁止検証の
 /// 境界条件・エラーパスを PBT とは別に厳密化する。
 use shiguredo_moqt::error::MessageError;
 use shiguredo_moqt::subgroup_tracker::{SubgroupStreamState, SubgroupTracker};
@@ -39,7 +39,7 @@ fn reopen_after_fin_violation() {
 
 #[test]
 fn reopen_after_reset_allowed() {
-    // draft-ietf-moq-transport-22 §2.2 (Subgroups): "unless one of the streams was reset
+    // draft-ietf-moq-transport-23 §2.2 (Subgroups): "unless one of the streams was reset
     // prematurely" — Reset からの再オープンは許可される
     let mut t = SubgroupTracker::new();
     t.open(1, 10, 0)
@@ -57,7 +57,7 @@ fn reopen_after_stop_sending_allowed() {
     t.open(1, 10, 0)
         .expect("テストフィクスチャの前提条件を満たす");
     t.mark_stop_sending(1, 10, 0);
-    // draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1583
+    // draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1583
     // (REQUEST_UPDATE forward 0→1): StoppedByPeer は can_reopen() → 再オープン可能
     t.open(1, 10, 0)
         .expect("テストフィクスチャの前提条件を満たす");
@@ -107,7 +107,7 @@ fn can_reopen_true_for_stopped_by_peer_and_reset() {
         }
         .can_reopen()
     );
-    // draft-ietf-moq-transport-22 §2.2: premature reset は再オープン可能
+    // draft-ietf-moq-transport-23 §2.2: premature reset は再オープン可能
     assert!(
         SubgroupStreamState::Reset {
             reliable_size: None

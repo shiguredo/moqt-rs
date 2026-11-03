@@ -1,13 +1,13 @@
 //! datagram の OBJECT_DELIVERY_TIMEOUT 判定と END_OF_GROUP のプロパティテスト
 //!
-//! draft-ietf-moq-transport-22 §5.2 (Delivery Timeouts and Data Reliability):
+//! draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability):
 //! "For datagrams, the implementation MUST drop the datagrams if the time elapsed
 //! exceeds OBJECT_DELIVERY_TIMEOUT." 起点は object header の最終バイト。
 //! object header 提供完了時刻は送信時に tick 済みなら直近の tick 時刻、tick 未到達なら最初の tick 時刻で
 //! 確定する (sans-I/O の制約による近似)。経過時間が timeout 以上になったら drop し、
 //! drop 後はエントリが保持されるため以後も drop され続ける。
 //!
-//! draft-ietf-moq-transport-22 §11.2.1 (Object Datagram): END_OF_GROUP bit は
+//! draft-ietf-moq-transport-23 §11.2.1 (Object Datagram): END_OF_GROUP bit は
 //! "no Object with the same Group ID and an Object ID greater than the Object ID in this datagram
 //! exists" を宣言し、受信側は宣言位置の 1 つ先を「存在しない最小の Object ID」として記録する。
 
@@ -112,7 +112,7 @@ fn datagram_delivery_timeout_judgment() -> noprop::TestResult {
 
 /// END_OF_GROUP bit 付き datagram は送信でき、受信側で Group 終端が記録される
 ///
-/// draft-ietf-moq-transport-22 §11.2.1 (Object Datagram): END_OF_GROUP bit は
+/// draft-ietf-moq-transport-23 §11.2.1 (Object Datagram): END_OF_GROUP bit は
 /// 「同じ Group ID で、この Object ID より大きい Object ID の Object は存在しない」ことを宣言する。
 /// 受信側は宣言位置の 1 つ先を「存在しない最小の Object ID」として記録する
 /// (`saturating_add` のため Object ID が `u64::MAX` のときは 1 つ先へ進められない)。

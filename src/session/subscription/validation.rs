@@ -1,6 +1,6 @@
 //! PAUSED / GROUP_ORDER / INCLUDE_PROPERTIES の検証と抽出
-//! (draft-ietf-moq-transport-23 §9.19.18 / draft-ietf-moq-transport-22 §9.20.8 /
-//! draft-ietf-moq-transport-22 §9.20.21)
+//! (draft-ietf-moq-transport-23 §9.19.18 / draft-ietf-moq-transport-23 §9.19.8 /
+//! draft-ietf-moq-transport-23 §9.19.22)
 //!
 //! 将来 draft 側で変更される可能性がある。
 
@@ -15,7 +15,7 @@ use crate::object_properties::ObjectProperties;
 
 use super::super::types::SessionError;
 
-/// GROUP_ORDER の値域を検証する (draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter))
+/// GROUP_ORDER の値域を検証する (draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter))
 ///
 /// 許容値は Ascending (0x1) または Descending (0x2) のみ。それ以外は INVALID_PARAMETER。
 /// ワイヤデコード層でも値域検証を行うが、API 経路 (MessageParameters を直接構築して
@@ -56,14 +56,14 @@ pub fn validate_paused(value: u8) -> Result<bool, SessionError> {
     Ok(value == 1)
 }
 
-/// INCLUDE_PROPERTIES の値を検証する (draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter))
+/// INCLUDE_PROPERTIES の値を検証する (draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter))
 ///
 /// 許容値は 0 (送らない) と 1 (送る) のみ。それ以外は INVALID_PARAMETER。
 /// デコード層 (`message_parameter.rs`) でもワイヤフォーマット上の検証を行うが、
 /// API 経路からの不正値投入を防ぐためセッション層でも検証する。
 ///
 /// SUBSCRIBE / FETCH / TRACK_STATUS 受信経路では、値域外の受信は
-/// draft §9.20.21 の MUST に従い呼び出し側が `self.fail()` を呼んでセッションを
+/// draft §9.19.22 の MUST に従い呼び出し側が `self.fail()` を呼んでセッションを
 /// INVALID_PARAMETER により閉じる (`?` 伝播のみではセッションが開いたまま残る)。
 pub fn validate_include_properties(value: u8) -> Result<(), SessionError> {
     if value > 1 {
@@ -89,7 +89,7 @@ pub fn extract_paused_state(parameters: &MessageParameters) -> bool {
 
 /// パラメータから Object 系 Range Filter を取り出して型付き状態にする
 ///
-/// draft-ietf-moq-transport-22 §3.3.2 (Range Filters): 0x25-0x28 が Object 判定に使われる。
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters): 0x25-0x28 が Object 判定に使われる。
 /// TRACK_PROPERTY_FILTER (0x29) は PUBLISH 選別用なので含めない。
 pub fn extract_range_filters(parameters: &MessageParameters) -> SubscriptionRangeFilters {
     SubscriptionRangeFilters {
@@ -142,7 +142,7 @@ pub fn apply_range_filter_update(
 
 /// Location Filter を解決して (Start Location, End Location) を返す
 ///
-/// draft-ietf-moq-transport-22 §3.3.1 (Location Filters): RelativeGroup / NextObject は
+/// draft-ietf-moq-transport-23 §3.3.1 (Location Filters): RelativeGroup / NextObject は
 /// 相対フィルタなので、確立時 / REQUEST_UPDATE 適用時の `largest` で 1 度だけ解決する。
 /// 送信のたびに再計算すると Start が前方にずれ続けるため、解決結果を状態として固定する。
 /// End フィールド省略時の扱いはコンテキストで異なり、subscription は open-ended (`None`)、
@@ -163,7 +163,7 @@ pub fn resolve_location_filter(
 
 /// Object の Pass 評価に必要な値
 ///
-/// draft-ietf-moq-transport-22 §3.3.2 (Range Filters) が対象とする
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters) が対象とする
 /// "Subgroup ID, Object ID, and Publisher Priority" と Object Properties に対応する。
 /// `subgroup_id` が `None` の場合は datagram (Delivery Mode = Datagram) で、
 /// §11.2.1 のワイヤ構造に Subgroup ID フィールドが存在しないため SUBGROUP_FILTER は
@@ -181,7 +181,7 @@ pub struct ObjectFilterInput<'a> {
 
 /// SetID ごとの AND / SetID 間の OR で Range Filter を評価する
 ///
-/// draft-ietf-moq-transport-22 §3.3.2 (Range Filters): "Filter parameters with the same SetID
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters): "Filter parameters with the same SetID
 /// are AND'd; distinct SetIDs are OR'd. The final result is SetID=0 OR SetID=1 OR ... SetID=255,
 /// where each SetID=i is the AND of all filter parameters carrying that SetID."
 fn range_filters_pass(
@@ -230,7 +230,7 @@ fn range_filters_pass(
 
 /// Location Filter を評価する
 ///
-/// draft-ietf-moq-transport-22 §3.3.1 (Location Filters): "Only objects with Locations
+/// draft-ietf-moq-transport-23 §3.3.1 (Location Filters): "Only objects with Locations
 /// within the inclusive range pass the filter"。End は Location 単位の比較で inclusive。
 pub(crate) fn location_filter_pass(
     start: Option<&Location>,
@@ -287,7 +287,7 @@ pub fn object_passes_filters(subscription: &Subscription, input: &ObjectFilterIn
 
 /// Subgroup header 受信時点で評価可能なフィルタだけで Pass 判定する
 ///
-/// draft-ietf-moq-transport-22 §3.1 (Subscriptions): "the subscriber re-applies each
+/// draft-ietf-moq-transport-23 §3.1 (Subscriptions): "the subscriber re-applies each
 /// subscription's filter to determine which subscription a received Object belongs to."
 ///
 /// header 時点では Object ID と Object Properties が未知のため、OBJECTID_FILTER と

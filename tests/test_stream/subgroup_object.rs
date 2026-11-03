@@ -30,7 +30,7 @@ fn status_forbidden_when_payload_nonzero() {
 
 #[test]
 fn properties_zero_length_is_valid() {
-    // draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header): Subgroup object では Properties Length = 0 は合法
+    // draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header): Subgroup object では Properties Length = 0 は合法
     let mut buf = Vec::new();
     shiguredo_moqt::varint::encode(0, &mut buf); // object_id_delta
     shiguredo_moqt::varint::encode(0, &mut buf); // prop_len = 0 (合法)
@@ -44,7 +44,7 @@ fn properties_zero_length_is_valid() {
 
 #[test]
 fn non_normal_status_with_properties_rejected() {
-    // draft-ietf-moq-transport-22 §11.1.2 (Object Properties): status != Normal で Properties がある場合は
+    // draft-ietf-moq-transport-23 §11.1.2 (Object Properties): status != Normal で Properties がある場合は
     // PROTOCOL_VIOLATION
     let mut buf = Vec::new();
     shiguredo_moqt::varint::encode(0, &mut buf); // object_id_delta
@@ -107,7 +107,7 @@ fn non_normal_status_with_properties_encode_rejected() {
 
 #[test]
 fn unknown_object_status_rejected() {
-    // draft-ietf-moq-transport-22 §11.1.1 (Object Status): 0x0, 0x3, 0x4 以外の status は不正
+    // draft-ietf-moq-transport-23 §11.1.1 (Object Status): 0x0, 0x3, 0x4 以外の status は不正
     let mut buf = Vec::new();
     shiguredo_moqt::varint::encode(0, &mut buf); // object_id_delta
     shiguredo_moqt::varint::encode(0, &mut buf); // payload_length = 0 (status あり)
@@ -133,7 +133,7 @@ fn valid_object_status_values() {
     }
 }
 
-// draft-ietf-moq-transport-22 §11.1.1 (Object Status): 未知 status は protocol error。
+// draft-ietf-moq-transport-23 §11.1.1 (Object Status): 未知 status は protocol error。
 // 検証を書き込み前に行い、失敗時に buf へ部分バイトを残さない
 #[test]
 fn invalid_status_does_not_partially_write() {
@@ -194,7 +194,7 @@ fn properties_length_zero_encoded() {
 }
 
 // 非 Normal status でも Properties Length = 0 を含むデータは正常にエンコードできる
-// (draft-ietf-moq-transport-22 §11.3.1: PROPERTIES bit が立ち非 Normal なら Length = 0 で表現する)
+// (draft-ietf-moq-transport-23 §11.3.1: PROPERTIES bit が立ち非 Normal なら Length = 0 で表現する)
 #[test]
 fn non_normal_status_with_zero_length_properties_encoded() {
     let obj = SubgroupObject {

@@ -15,7 +15,7 @@ pub(crate) const MAX_TRACK_NAME_LENGTH: usize = 4096;
 
 /// トラック名前空間 (0–32 フィールド、各フィールドは 1 バイト以上)
 ///
-/// draft-ietf-moq-transport-22 §2.4.1 (Track Naming):
+/// draft-ietf-moq-transport-23 §2.4.1 (Track Naming):
 /// "Track Namespace is an ordered set of between 0 and 32 Track Namespace Fields"
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TrackNamespace(Vec<Vec<u8>>);
@@ -23,7 +23,7 @@ pub struct TrackNamespace(Vec<Vec<u8>>);
 impl TrackNamespace {
     /// フィールドリストから TrackNamespace を作成する
     ///
-    /// フィールド数の下限は 0、上限は 32 (draft-ietf-moq-transport-22 §2.4.1 (Track Naming))。
+    /// フィールド数の下限は 0、上限は 32 (draft-ietf-moq-transport-23 §2.4.1 (Track Naming))。
     /// 各フィールドは 1 バイト以上であり、合計 4,096 バイト以下でなければならない
     /// (draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure))。
     ///
@@ -59,17 +59,17 @@ impl TrackNamespace {
         &self.0
     }
 
-    /// セッションレベルトラック用の予約名前空間 `.session` かを返す (draft-ietf-moq-transport-22 §6.5 (Session-Level Tracks and Namespaces))
+    /// セッションレベルトラック用の予約名前空間 `.session` かを返す (draft-ietf-moq-transport-23 §6.5 (Session-Level Tracks and Namespaces))
     ///
     /// 最初の名前空間フィールドが b".session" (8 バイト) と一致する場合に true
     pub fn is_session_level(&self) -> bool {
         self.0.first().is_some_and(|f| f == b".session")
     }
 
-    /// 予約名前空間の single period `.` かを返す (draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces))
+    /// 予約名前空間の single period `.` かを返す (draft-ietf-moq-transport-23 §2.4.3 (Reserved Namespaces))
     ///
     /// 最初の名前空間フィールドが b"." (1 バイトの single period, 0x2e) と一致する場合に true。
-    /// draft-ietf-moq-transport-22 §2.4.3: "A Track Namespace whose first field is exactly . [...] is reserved
+    /// draft-ietf-moq-transport-23 §2.4.3: "A Track Namespace whose first field is exactly . [...] is reserved
     /// and MUST NOT be used for any purpose"
     pub fn is_single_period(&self) -> bool {
         self.0.first().is_some_and(|f| f == b".")

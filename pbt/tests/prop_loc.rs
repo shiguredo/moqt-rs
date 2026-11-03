@@ -6,7 +6,7 @@ use shiguredo_moqt::loc::{
 
 /// 空を含む LOC プロパティコレクションを生成する
 ///
-/// draft-ietf-moq-transport-22 §11.1.2 (Object Properties) / §11.3.1 (Subgroup Header) に従い、空 (Properties Length = 0) も合法。
+/// draft-ietf-moq-transport-23 §11.1.2 (Object Properties) / §11.3.1 (Subgroup Header) に従い、空 (Properties Length = 0) も合法。
 /// draft-ietf-moq-loc-04 の既知プロパティを組み合わせる。同一 prop_id の重複は含まない。
 fn sample_loc_properties(ctx: &mut noprop::TestCaseContext) -> LocProperties {
     let has_vfm = noprop::sample_bool(ctx);
@@ -60,7 +60,7 @@ fn sample_loc_properties(ctx: &mut noprop::TestCaseContext) -> LocProperties {
 
 /// 空を含む encode → decode のラウンドトリップ検証
 ///
-/// draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header):
+/// draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header):
 /// "Objects with no properties or non-Normal status set Properties Length to 0."
 #[test]
 fn roundtrip_including_empty() -> noprop::TestResult {

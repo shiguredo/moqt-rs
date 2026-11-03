@@ -177,7 +177,7 @@ impl RecvStream {
 
     /// 受信方向へ STOP_SENDING を送出する
     ///
-    /// draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection): 受信方向の
+    /// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection): 受信方向の
     /// cancel は STOP_SENDING で行う。error code は §12.5 (Stream Reset Error Codes) から選ぶ。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub async fn stop_sending(&mut self, error_code: u64) -> Result<(), TransportError> {
@@ -350,7 +350,7 @@ impl StreamHandle {
 
     /// 新しい双方向ストリームを開く (リクエスト-レスポンス用)
     ///
-    /// draft-ietf-moq-transport-22 §6.3 (Session initialization): PUBLISH / SUBSCRIBE 等の
+    /// draft-ietf-moq-transport-23 §6.3 (Session initialization): PUBLISH / SUBSCRIBE 等の
     /// リクエストメッセージは双方向ストリームで送受信する。
     pub async fn open_bidi_stream(&self) -> Result<(SendStream, RecvStream), TransportError> {
         match self {
@@ -661,7 +661,7 @@ impl StreamAcceptor {
 /// peer が開始する双方向ストリーム (request stream) を受け入れるためのアクセプター
 ///
 /// MOQT relay は subscriber の SUBSCRIBE / FETCH を publisher 側 session の新しい
-/// request stream として転送する (draft-ietf-moq-transport-22 §6.3 (Session initialization))。
+/// request stream として転送する (draft-ietf-moq-transport-23 §6.3 (Session initialization))。
 /// publisher はこのストリームを受理しなければ要求に応答できない。
 pub enum BidiStreamAcceptor {
     Quic(s2n_quic::connection::BidirectionalStreamAcceptor),

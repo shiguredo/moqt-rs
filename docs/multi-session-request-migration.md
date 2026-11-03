@@ -10,11 +10,11 @@ crates 配下の `moq-pub` / `moq-sub` の単一 session 前提を複数 session
 
 ### 1.1 仕様
 
-draft-ietf-moq-transport-22 §9.2 (GOAWAY) は、request stream 上の GOAWAY を受けた endpoint に、
+draft-ietf-moq-transport-23 §9.2 (GOAWAY) は、request stream 上の GOAWAY を受けた endpoint に、
 "the endpoint SHOULD re-issue that specific request on a session at the specified URI (or the current session if
 no URI is provided), and close the old request stream using the appropriate mechanism (e.g. FIN, stream reset, or
 PUBLISH_DONE)" を SHOULD で要求する。§6.6.1 (Graceful Session Migration) は新しい session の確立と移行の
-期限を、§7.6.1 (Graceful Publisher Relay Switchover) は publisher 側の移行を定める。
+期限を、§7.7.1 (Graceful Publisher Relay Switchover) は publisher 側の移行を定める。
 
 ### 1.2 現在の crates の構造
 
@@ -174,7 +174,7 @@ Idle
 
 - 認可トークンは control GOAWAY 移行と同じ規則で引き継ぐ (同一 origin のときだけ引き継ぎ、別 origin では
   再取得する)。移行先 URL は `migration_target` で解決する。
-- FILL_PARAMETERS 内のパラメータは subscription 状態として保持しない (§9.20.15) ため、再発行時に
+- FILL_PARAMETERS 内のパラメータは subscription 状態として保持しない (§9.19.15) ため、再発行時に
   `RequestOwner` が保持する元の要求パラメータから再構成する。
 - 旧 session で移行対象 request を破棄するときは、forget_subscription 時の STOP_SENDING の既存挙動と
   二重に STOP_SENDING を発行しないよう、Session 側の終端通知の順序を確認する。

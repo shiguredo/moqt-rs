@@ -10,7 +10,7 @@ use super::*;
 
 /// publisher 側 send_subscribe_ok に LARGEST_OBJECT を含めても、
 /// subscription.largest_location には保存されない
-/// (draft-ietf-moq-transport-22 Appendix A.3 #1872)
+/// (draft-ietf-moq-transport-23 Appendix A.4 #1872)
 #[test]
 fn send_subscribe_ok_with_largest_object_does_not_save_largest_location() {
     use shiguredo_moqt::message_parameter::{
@@ -46,7 +46,7 @@ fn send_subscribe_ok_with_largest_object_does_not_save_largest_location() {
 }
 
 /// publisher 側 send_subscribe_ok に LARGEST_OBJECT を含まない場合、
-/// subscription.largest_location は None のまま (draft-ietf-moq-transport-22 §3.1 (Subscriptions))
+/// subscription.largest_location は None のまま (draft-ietf-moq-transport-23 §3.1 (Subscriptions))
 #[test]
 fn send_subscribe_ok_without_largest_object_leaves_largest_location_none() {
     let (mut client, mut server) = establish_pair();
@@ -71,7 +71,7 @@ fn send_subscribe_ok_without_largest_object_leaves_largest_location_none() {
 
 /// publisher 側 send_subscribe_ok が paused (PAUSED=1) で確立する場合、LARGEST_OBJECT が
 /// あっても largest_location には保存されない
-/// (draft-ietf-moq-transport-22 Appendix A.3 #1872: publisher MUST retain 削除)
+/// (draft-ietf-moq-transport-23 Appendix A.4 #1872: publisher MUST retain 削除)
 #[test]
 fn send_subscribe_ok_when_paused_does_not_save_largest_location() {
     use shiguredo_moqt::message_parameter::{
@@ -119,7 +119,7 @@ fn send_subscribe_ok_when_paused_does_not_save_largest_location() {
 }
 
 /// publisher 側 send_publish が unpaused で確立する場合でも、LARGEST_OBJECT は
-/// 保存されない (draft-ietf-moq-transport-22 Appendix A.3 #1872)
+/// 保存されない (draft-ietf-moq-transport-23 Appendix A.4 #1872)
 #[test]
 fn send_publish_unpaused_does_not_save_largest_location() {
     use shiguredo_moqt::message_parameter::{
@@ -162,7 +162,7 @@ fn send_publish_unpaused_does_not_save_largest_location() {
 
 /// publisher 側 send_publish が paused (PAUSED=1) で確立する場合、LARGEST_OBJECT があっても
 /// largest_location には保存されない
-/// (draft-ietf-moq-transport-22 Appendix A.3 #1872: publisher MUST retain 削除)
+/// (draft-ietf-moq-transport-23 Appendix A.4 #1872: publisher MUST retain 削除)
 #[test]
 fn send_publish_when_paused_does_not_save_largest_location() {
     use shiguredo_moqt::message_parameter::{
@@ -208,7 +208,7 @@ fn send_publish_when_paused_does_not_save_largest_location() {
 
 /// publisher 側 REQUEST_UPDATE_OK で購読が再開される (PAUSED 1→0) 場合でも、
 /// LARGEST_OBJECT は保存されない
-/// (draft-ietf-moq-transport-22 Appendix A.3 #1872: publisher MUST retain 削除)
+/// (draft-ietf-moq-transport-23 Appendix A.4 #1872: publisher MUST retain 削除)
 ///
 /// paused で確立した subscription が REQUEST_UPDATE_OK で再開されても
 /// 保存は行わないことを確認する。
@@ -296,7 +296,7 @@ fn send_ok_for_subscription_resume_does_not_save_largest_location() {
 
 /// publisher 側 REQUEST_UPDATE_OK で paused が変化しない (unpaused のまま) 場合、
 /// LARGEST_OBJECT は保存されない
-/// (draft-ietf-moq-transport-22 Appendix A.3 #1872: publisher MUST retain 削除)
+/// (draft-ietf-moq-transport-23 Appendix A.4 #1872: publisher MUST retain 削除)
 #[test]
 fn send_ok_for_subscription_unpaused_stays_does_not_save_largest_location() {
     use shiguredo_moqt::message_parameter::{
@@ -374,7 +374,7 @@ fn send_ok_for_subscription_unpaused_stays_does_not_save_largest_location() {
 
 /// publisher 側で largest_received_location が設定されている状態で REQUEST_UPDATE_OK が
 /// 購読を再開する (PAUSED 1→0) 場合でも、largest_location には保存されない
-/// (draft-ietf-moq-transport-22 Appendix A.3 #1872: publisher MUST retain 削除)。
+/// (draft-ietf-moq-transport-23 Appendix A.4 #1872: publisher MUST retain 削除)。
 /// 送出パラメータへの effective 値 (largest_received_location との max) の注入は維持する。
 #[test]
 fn send_ok_for_subscription_effective_largest_object_injected_without_saving() {
@@ -595,7 +595,7 @@ fn send_ok_for_subscription_subscriber_responder_saves_largest_location_uncondit
 }
 
 /// publisher initiator が REQUEST_UPDATE_OK の LARGEST_OBJECT を受信しても保存しない
-/// (draft-ietf-moq-transport-22 Appendix A.3 #1872: publisher MUST retain 削除)
+/// (draft-ietf-moq-transport-23 Appendix A.4 #1872: publisher MUST retain 削除)
 #[test]
 fn initiator_publisher_ignores_largest_object_in_request_update_ok() {
     use shiguredo_moqt::message_parameter::{
@@ -662,7 +662,7 @@ fn initiator_publisher_ignores_largest_object_in_request_update_ok() {
 ///
 /// 配信済み {0, 0} / {0, 1} がある track への新規 SUBSCRIBE (NextObject) は
 /// filter_start {0, 2} になる (先頭 {0, 0} ではなく履歴再送にならない)。
-/// draft-ietf-moq-transport-22 §3.3.1 (Location Filters): Largest Object は
+/// draft-ietf-moq-transport-23 §3.3.1 (Location Filters): Largest Object は
 /// publisher がメッセージを処理する視点で定義される。
 #[test]
 fn subscribe_establishment_resolves_relative_filter_with_publisher_largest() {

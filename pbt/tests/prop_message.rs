@@ -57,7 +57,7 @@ fn sample_parameter_from(ctx: &mut noprop::TestCaseContext, param_type: u64) -> 
         },
         // PAUSED は 0 (unpaused) または 1 (paused) のみ
         // (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter))
-        // INCLUDE_PROPERTIES も 0 または 1 のみ (draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter))
+        // INCLUDE_PROPERTIES も 0 または 1 のみ (draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter))
         PARAM_PAUSED | PARAM_INCLUDE_PROPERTIES => MessageParameter {
             param_type,
             value: MessageParameterValue::Uint8(noprop::sample_choice(ctx, &[0u8, 1u8])),
@@ -66,7 +66,7 @@ fn sample_parameter_from(ctx: &mut noprop::TestCaseContext, param_type: u64) -> 
             param_type,
             value: MessageParameterValue::Uint8(noprop::sample_u8(ctx)),
         },
-        // GROUP_ORDER は 1 または 2 のみ (draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter))
+        // GROUP_ORDER は 1 または 2 のみ (draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter))
         PARAM_GROUP_ORDER => MessageParameter {
             param_type,
             value: MessageParameterValue::Uint8(noprop::sample_choice(ctx, &[1u8, 2u8])),
@@ -110,7 +110,7 @@ fn sample_parameter_from(ctx: &mut noprop::TestCaseContext, param_type: u64) -> 
             param_type,
             value: MessageParameterValue::LocationFilter(sample_location_filter(ctx)),
         },
-        // draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter):
+        // draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter):
         // 内側は Table 7 の別スコープとして生成する (再帰なし)。
         // decode 時に typed variant に変換されるため、往復には typed variant を使う。
         PARAM_FILL_PARAMETERS => MessageParameter {
@@ -124,7 +124,7 @@ fn sample_parameter_from(ctx: &mut noprop::TestCaseContext, param_type: u64) -> 
             param_type,
             value: MessageParameterValue::TrackNamespacePrefix(sample_namespace_prefix(ctx)),
         },
-        // draft-ietf-moq-transport-22 §3.3.2 (Range Filters): length-prefixed バイト列
+        // draft-ietf-moq-transport-23 §3.3.2 (Range Filters): length-prefixed バイト列
         PARAM_SUBGROUP_FILTER
         | PARAM_OBJECTID_FILTER
         | PARAM_PRIORITY_FILTER
@@ -154,7 +154,7 @@ fn sample_scoped_parameters(
         params.push(sample_parameter_from(ctx, param_type));
     }
     params.sort_by_key(|p| p.param_type);
-    // draft-ietf-moq-transport-22 §3.3.2 (Range Filters): Range Filter (0x25-0x29) は
+    // draft-ietf-moq-transport-23 §3.3.2 (Range Filters): Range Filter (0x25-0x29) は
     // 同一 Parameter Type が同一メッセージ内で複数回出現できるため重複排除の対象外とする。
     // AUTHORIZATION_TOKEN も複数回出現できるが、(Token Type, Token Value) の一意性を
     // encode が検証するため、ここでは従来どおり 1 件に絞る。
@@ -198,7 +198,7 @@ fn sample_reason_phrase(ctx: &mut noprop::TestCaseContext) -> ReasonPhrase {
     }
 }
 
-/// REQUEST_ERROR の Redirect 構造 (draft-ietf-moq-transport-22 §9.4.1 (Redirect Structure)) を生成する
+/// REQUEST_ERROR の Redirect 構造 (draft-ietf-moq-transport-23 §9.4.2 (Error Details)) を生成する
 fn sample_redirect(ctx: &mut noprop::TestCaseContext) -> Redirect {
     Redirect {
         connect_uri: sample_bytes(ctx, 40),
@@ -240,7 +240,7 @@ fn sample_location_filter(ctx: &mut noprop::TestCaseContext) -> LocationFilter {
 
 /// Range Filter (0x25-0x29) のワイヤバイト列を生成する
 ///
-/// draft-ietf-moq-transport-22 §3.3.2: SetID (1 byte) | [Property Type (vi64)] | Range...
+/// draft-ietf-moq-transport-23 §3.3.2: SetID (1 byte) | [Property Type (vi64)] | Range...
 /// Length=0 は REQUEST_UPDATE での削除セマンティクス。
 /// PRIORITY_FILTER は 0..=255、Property Type は偶数のみ。
 /// ラウンドトリップ用なので、構造は最小の正当形 (0 または 1 Range) に留める。
@@ -290,7 +290,7 @@ fn sample_range_filter_bytes(ctx: &mut noprop::TestCaseContext, param_type: u64)
 //
 // 各定数は `src/message.rs` の対応する `*_ALLOWED_PARAMS` と一致させること。
 // Range Filters (0x25-0x29) は draft-19 §3.4 で追加された。
-// PUBLISH 系は draft-ietf-moq-transport-22 §9.20 の MAY appear 導出に従う。
+// PUBLISH 系は draft-ietf-moq-transport-23 §9.19 の MAY appear 導出に従う。
 
 const SUBSCRIBE_PARAMS: &[u64] = &[
     PARAM_AUTHORIZATION_TOKEN,
@@ -308,7 +308,7 @@ const SUBSCRIBE_PARAMS: &[u64] = &[
     PARAM_PRIORITY_FILTER,
     PARAM_OBJECT_PROPERTY_FILTER,
 ];
-// draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter) Table 7:
+// draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter) Table 7:
 // FILL_PARAMETERS 内側スコープ。`src/message_parameter.rs` の
 // `FILL_PARAMETERS_ALLOWED_PARAMS` と一致させること。
 const FILL_INNER_PARAMS: &[u64] = &[
@@ -322,10 +322,10 @@ const FILL_INNER_PARAMS: &[u64] = &[
     PARAM_OBJECT_PROPERTY_FILTER,
 ];
 const SUBSCRIBE_OK_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LARGEST_OBJECT];
-// draft-ietf-moq-transport-22 §9.3 (REQUEST_OK): 応答 context ごとの許可パラメータの和集合は
+// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): 応答 context ごとの許可パラメータの和集合は
 // EXPIRES と LARGEST_OBJECT の 2 型。`src/message.rs::REQUEST_OK_ALLOWED_PARAMS` と一致させる。
 const REQUEST_OK_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LARGEST_OBJECT];
-// draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): REQUEST_UPDATE では GROUP_ORDER は非許可。
+// draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter): REQUEST_UPDATE では GROUP_ORDER は非許可。
 // `src/message.rs::REQUEST_UPDATE_ALLOWED_PARAMS` と一致させる。
 const REQUEST_UPDATE_PARAMS: &[u64] = &[
     PARAM_AUTHORIZATION_TOKEN,
@@ -369,7 +369,7 @@ const FETCH_PARAMS: &[u64] = &[
 // draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): FETCH_OK は EXPIRES と
 // LARGEST_OBJECT を運べる。`src/message.rs::FETCH_OK_ALLOWED_PARAMS` と一致させること。
 const FETCH_OK_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LARGEST_OBJECT];
-// draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY) / §9.20.9 / §9.20.17 /
+// draft-ietf-moq-transport-23 §9.10 (PUBLISH_STATE_NOTIFY) / §9.19.9 / §9.19.17 /
 // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter):
 // `src/message.rs::PUBLISH_STATE_NOTIFY_ALLOWED_PARAMS` と一致させること。
 const PUBLISH_STATE_NOTIFY_PARAMS: &[u64] =
@@ -454,7 +454,7 @@ fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
             stream_count: sample_small_varint(ctx),
             reason: sample_reason_phrase(ctx),
         }),
-        // Fetch (draft-ietf-moq-transport-22 §9.11: 単一形式。range は LOCATION_FILTER で指定)
+        // Fetch (draft-ietf-moq-transport-23 §9.11: 単一形式。range は LOCATION_FILTER で指定)
         10 => ControlMessage::Fetch(Fetch {
             request_id: sample_request_id(ctx),
             track_namespace: sample_namespace_prefix(ctx),
@@ -477,7 +477,7 @@ fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
             track_name: sample_nonempty_bytes(ctx, 50),
             parameters: sample_scoped_parameters(ctx, TRACK_STATUS_PARAMS),
         }),
-        // PublishStateNotify (draft-ietf-moq-transport-22 §9.10)
+        // PublishStateNotify (draft-ietf-moq-transport-23 §9.10)
         13 => ControlMessage::PublishStateNotify(PublishStateNotify {
             parameters: sample_scoped_parameters(ctx, PUBLISH_STATE_NOTIFY_PARAMS),
         }),
@@ -542,7 +542,7 @@ fn roundtrip() -> noprop::TestResult {
 ///
 /// `roundtrip` は sampler が生成した値だけを往復させるため、sampler が特定の Location
 /// Filter Type を生成しないとその形式の往復が検証されない。重み付き抽選の結果に依存せず
-/// 6 形式すべてが現れることをここで固定する (draft-ietf-moq-transport-22 §9.20.9)。
+/// 6 形式すべてが現れることをここで固定する (draft-ietf-moq-transport-23 §9.19.9)。
 #[test]
 fn sample_location_filter_covers_all_types() -> noprop::TestResult {
     let seen = std::cell::Cell::new(0u8);
@@ -571,7 +571,7 @@ fn sample_location_filter_covers_all_types() -> noprop::TestResult {
 /// REQUEST_OK の sampler が和集合の 2 型 (EXPIRES / LARGEST_OBJECT) を生成すること
 ///
 /// `roundtrip` は sampler が生成した値だけを往復させるため、sampler が特定の型を生成しないと
-/// その型の往復が検証されない。draft-ietf-moq-transport-22 §9.3 (REQUEST_OK) の和集合は
+/// その型の往復が検証されない。draft-ietf-moq-transport-23 §9.3 (REQUEST_OK) の和集合は
 /// 2 型なので、両方が現れることをここで固定する。
 #[test]
 fn request_ok_params_cover_all_types() -> noprop::TestResult {
@@ -601,7 +601,7 @@ fn request_ok_params_cover_all_types() -> noprop::TestResult {
 ///
 /// `ControlMessage::decode` は Length プレフィックスが示す範囲だけを payload として
 /// 切り出し (`src/message.rs:628`)、フレーム末尾より後ろのバイトは消費しない。
-/// draft-ietf-moq-transport-22 §9 (Control Messages) の Length 区切り (フレーミング) 契約により、
+/// draft-ietf-moq-transport-23 §9 (Control Messages) の Length 区切り (フレーミング) 契約により、
 /// 後続バイトは別フレームとして呼び出し側 (`src/decoder.rs` のストリーミング・デコーダ) に委ねられる。
 /// この契約が将来 (例: 末尾余剰を誤ってエラー扱いする、Length を無視して buffer 末尾まで読む等)
 /// 破れる回帰を検出する。

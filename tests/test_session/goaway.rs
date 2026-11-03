@@ -20,7 +20,7 @@ mod role;
 /// GOAWAY の deadline 満了で request を終端させ、発行されたイベントを捨てる
 ///
 /// `Session::tick` の基準時刻を 1_000 に固定し、timeout 100 ms の request stream GOAWAY を送る。
-/// `uri` は Client では空、Server では非空を渡す (draft-ietf-moq-transport-22 §9.2 (GOAWAY))。
+/// `uri` は Client では空、Server では非空を渡す (draft-ietf-moq-transport-23 §9.2 (GOAWAY))。
 fn terminate_request_by_goaway_timeout(s: &mut Session, rid: u64, uri: Vec<u8>) {
     s.tick(1_000);
     s.send_goaway_on_request_stream(rid, uri, 100)
@@ -390,7 +390,7 @@ fn server_recv_request_stream_goaway_with_non_zero_uri_rejected() {
 
 /// L が control GOAWAY を送信した後、P からの新規 SUBSCRIBE は GOING_AWAY で拒否される
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY): control GOAWAY 送信側は GOAWAY 後に到着する新規 request を
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY): control GOAWAY 送信側は GOAWAY 後に到着する新規 request を
 /// GOING_AWAY で MAY 拒否。
 /// 注: peer GOAWAY 受信後は自側の send_subscribe も抑制されるため、
 /// ここでは recv_request に直接メッセージを渡して server 側の拒否動作を検証する。
@@ -433,7 +433,7 @@ fn local_goaway_rejects_peer_new_subscribe() {
 
 /// GOAWAY 送信後に拒否した request のストリームクローズはセッションを fail させない
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection): 拒否する側は
+/// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection): 拒否する側は
 /// REQUEST_ERROR を送信して自側の送信方向を FIN で閉じる (SHOULD)。bidi request stream は
 /// 各方向が独立に閉じるため (draft §6.4.2.2)、peer も自分の送信方向を FIN / RESET_STREAM で
 /// 閉じる。拒否済み request id のストリームクローズは no-op で吸収され、セッションは fail しない。
@@ -482,7 +482,7 @@ fn goaway_rejected_request_stream_close_does_not_fail_session() {
                 },
             ))
             .expect("テストフィクスチャの前提条件を満たす");
-        // L は GOING_AWAY で拒否 (draft §16.11.2 (REQUEST_ERROR Codes): GOING_AWAY = 0x6)
+        // L は GOING_AWAY で拒否 (draft §16.12.2 (REQUEST_ERROR Codes): GOING_AWAY = 0x6)
         let (rejected_rid, reject_msg) = take_send_on_stream(&mut server);
         assert_eq!(rejected_rid, rid);
         if let ControlMessage::RequestError(e) = &reject_msg {
@@ -558,7 +558,7 @@ fn goaway_rejected_request_double_close_fails_as_unknown_id() {
 
 /// GOAWAY 拒否済み request id の再送は INVALID_REQUEST_ID でセッションが閉じる
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.1 (Request ID): duplicate Request ID は
+/// draft-ietf-moq-transport-23 §6.4.2.1 (Request ID): duplicate Request ID は
 /// INVALID_REQUEST_ID でセッションを閉じる (MUST)。拒否済み id は
 /// `accept_peer_request` で `peer_tracker.accept` 済みのため、再送は重複として検出される。
 #[test]
@@ -597,7 +597,7 @@ fn goaway_rejected_request_id_resend_closes_with_invalid_request_id() {
 
 /// GOAWAY 送信後でも自側が subscriber として受ける PUBLISH は拒否しない
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY): "a publisher MAY reject new requests after
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY): "a publisher MAY reject new requests after
 /// sending a GOAWAY" — 拒否の MAY は publisher が応答する request 種別に限られる。
 /// PUBLISH は自側が subscriber として受けるため対象外である。
 #[test]
@@ -638,7 +638,7 @@ fn local_goaway_accepts_peer_publish() {
 
 /// GOAWAY 送信後は FETCH と TRACK_STATUS も publisher として拒否する
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY) の拒否 MAY は publisher が応答する request
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY) の拒否 MAY は publisher が応答する request
 /// 種別 (SUBSCRIBE / FETCH / TRACK_STATUS) に限られる。
 #[test]
 fn local_goaway_rejects_peer_fetch_and_track_status() {
@@ -1107,7 +1107,7 @@ fn peer_goaway_does_not_suppress_send_publish_done() {
 
 /// 自側 GOAWAY 送信後 (local_sent のみ、peer = None) は send_subscribe がエラーを返さない
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY): "Sending a GOAWAY does not prevent
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY): "Sending a GOAWAY does not prevent
 /// the sender from initiating new requests [...]."
 #[test]
 fn goaway_on_request_stream_does_not_suppress_send_subscribe() {
@@ -1146,14 +1146,14 @@ fn send_request_error_from_session_error() {
 
 // ─── GOAWAY deadline の自動 CloseSession ─────────────────────
 //
-// draft-ietf-moq-transport-22 §9.2 (GOAWAY): GOAWAY の timeout フィールドと
+// draft-ietf-moq-transport-23 §9.2 (GOAWAY): GOAWAY の timeout フィールドと
 // sans-I/O tick から導出される deadline で drain が終わらなければ
 // GOAWAY_TIMEOUT で自動的に閉じる。内部の deadline 値ではなく
 // CloseSession イベントの有無で検証する。
 
 /// GOAWAY 未送信時は tick を進めても GOAWAY_TIMEOUT で閉じない
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY): GOAWAY を送信していなければ
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY): GOAWAY を送信していなければ
 /// deadline は存在しない。
 #[test]
 fn no_goaway_timeout_close_without_goaway_sent() {
@@ -1173,7 +1173,7 @@ fn no_goaway_timeout_close_without_goaway_sent() {
 
 /// send_goaway(uri, 0) では timeout=0 のため自動で閉じない
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY): timeout==0 は specific timeout なし。
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY): timeout==0 は specific timeout なし。
 #[test]
 fn no_goaway_timeout_close_when_timeout_zero() {
     let (mut client, _server, _rid) = establish_subscribe_track(1);
@@ -1196,7 +1196,7 @@ fn no_goaway_timeout_close_when_timeout_zero() {
 
 /// tick 未実施で send_goaway(uri, T) を呼ぶと deadline は最初の tick 基準で確定する
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY): sans-I/O 制約のため、
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY): sans-I/O 制約のため、
 /// tick を受け取るまで deadline を確定できない。
 #[test]
 fn goaway_timeout_uses_first_tick_as_base() {
@@ -1240,7 +1240,7 @@ fn goaway_timeout_uses_first_tick_as_base() {
 
 /// tick 後に send_goaway(uri, T) を呼ぶと deadline はその時刻基準で確定する
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY): 基準時刻が既知の場合、
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY): 基準時刻が既知の場合、
 /// deadline は送信後の tick で確定する。
 #[test]
 fn goaway_timeout_uses_known_base_time() {
@@ -1283,7 +1283,7 @@ fn goaway_timeout_uses_known_base_time() {
 }
 
 /// 自側 GOAWAY 送信後に peer から届いた request に含まれる AUTHORIZATION_TOKEN REGISTER が
-/// `peer_token_cache` に反映されること (draft-ietf-moq-transport-22 §8.9 (Authorization Token
+/// `peer_token_cache` に反映されること (draft-ietf-moq-transport-23 §8.9 (Authorization Token
 /// Compression): "The receiver of a message carrying an Authorization Token with Alias
 /// Type REGISTER that does not result in a Session error MUST register the Token Alias in
 /// the token cache, even if the message fails for other reasons, including Unauthorized.")。
@@ -1345,7 +1345,7 @@ fn goaway_sent_side_registers_auth_token_from_going_away_rejected_subscribe() {
 
 /// GOAWAY 拒否経路で REGISTER が session error (AUTH_TOKEN_CACHE_OVERFLOW) になった場合、
 /// session error が REQUEST_GOING_AWAY より優先され、セッションが Closing に遷移すること
-/// (draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) の MUST は
+/// (draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression) の MUST は
 /// "does not result in a Session error" が前提)。
 ///
 /// MAX_AUTH_TOKEN_CACHE_SIZE=20 バイト (Token 1 個分 = 16 + Token Value 4 バイト) で
@@ -1403,7 +1403,7 @@ fn goaway_sent_side_register_overflow_takes_priority_over_going_away() {
 }
 
 /// GOAWAY 拒否経路では USE_ALIAS / DELETE / USE_VALUE を触らないこと
-/// (draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) の MUST は
+/// (draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression) の MUST は
 /// "with Alias Type REGISTER" 限定で、DELETE / USE_ALIAS / USE_VALUE は「失敗した request の
 /// パラメータ」として peer 側で not-applied 扱いされる可能性があるため触らない)。
 ///
@@ -1446,7 +1446,7 @@ fn goaway_sent_side_use_alias_after_goaway_does_not_kill_session() {
     );
 }
 
-// ─── request stream GOAWAY の timeout (draft-ietf-moq-transport-22 §9.2 (GOAWAY)) ─────
+// ─── request stream GOAWAY の timeout (draft-ietf-moq-transport-23 §9.2 (GOAWAY)) ─────
 
 /// request stream 上の GOAWAY は timeout 経過後に GOING_AWAY で当該 stream を reset する
 #[test]
@@ -1570,7 +1570,7 @@ fn request_stream_goaway_deadline_is_cleared_by_fin_exchange_on_responder() {
 
 /// responder が requester の FIN を受けても request stream GOAWAY の reset deadline は維持される
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure) により、requester の
+/// draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure) により、requester の
 /// FIN は responder の request を終端しない。応答を送るまで自側の送信方向は開いているため、
 /// GOAWAY の timeout で reset する余地を残す (§9.2 (GOAWAY): "When sent on a request stream,
 /// the sender SHOULD reset the stream with GOING_AWAY after the indicated timeout.")。
@@ -2025,7 +2025,7 @@ fn peer_goaway_returns_the_received_info() {
 
 /// 自側 GOAWAY の drain 完了を 1 回だけイベントで通知すること
 ///
-/// draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration): open request が
+/// draft-ietf-moq-transport-23 §6.6.1 (Graceful Session Migration): open request が
 /// 無くなった時点で NO_ERROR で閉じてよい。アプリが毎 tick ポーリングしなくて済むよう、
 /// 完了時に 1 回だけ `GoawayDrainReady` を発行する。
 #[test]

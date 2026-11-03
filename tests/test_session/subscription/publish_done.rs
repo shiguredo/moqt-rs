@@ -4,7 +4,7 @@ use super::*;
 
 /// PUBLISH 起点 subscription の subscriber は Established で PUBLISH_DONE を受けると FIN する
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure): responder の FIN は
+/// draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure): responder の FIN は
 /// request 完了の合図である。PUBLISH 起点では PUBLISH を受けた subscriber が responder であり、
 /// PUBLISH_DONE の受信で自側が送るべきメッセージが無くなる。
 #[test]
@@ -85,7 +85,7 @@ fn publish_origin_subscriber_finishes_on_publish_done() {
 
 /// Pending(Publisher) で PUBLISH_DONE を受けても FIN しない
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.2: "An endpoint MUST NOT send a FIN on a direction of a
+/// draft-ietf-moq-transport-23 §6.4.2.2: "An endpoint MUST NOT send a FIN on a direction of a
 /// request stream until it has sent all required messages on that direction for its request
 /// type." PUBLISH_OK 未送信の状態で FIN すると peer に request 失敗と扱われる。
 #[test]
@@ -367,7 +367,7 @@ fn publish_done_drain_waits_for_timeout_and_open_stream_close() {
     );
 
     // publisher 側で 1 本の subgroup stream を開閉し published_stream_count を 1 にする
-    // (draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE): announce する stream_count は publisher が実際に開いた本数と一致する必要がある)
+    // (draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE): announce する stream_count は publisher が実際に開いた本数と一致する必要がある)
     let publisher_stream = DataStreamId(100);
     server
         .send_subgroup_header(publisher_stream, rid, &header)
@@ -432,7 +432,7 @@ fn publish_done_drain_waits_for_timeout_and_open_stream_close() {
 /// PUBLISH_DONE 受信時点で stream_count を超過していれば、drain timer を待たずに
 /// open stream が全て閉じた瞬間に cleanup_ready になる
 ///
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE):
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE):
 /// "A subscriber MAY discard subscription state earlier, at the cost of potentially not
 /// delivering some late objects to the application." (早期破棄の MAY) /
 /// "If a subscriber receives more streams for a subscription than specified in Stream Count,
@@ -717,7 +717,7 @@ fn publish_done_tracks_stream_count_overrun() {
     let (mut client, mut server, rid) = establish_subscribe_track(10);
 
     // publisher 側で 1 本の subgroup stream を開閉し published_stream_count を 1 にする
-    // (draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE): announce する stream_count は publisher が実際に開いた本数と一致する必要がある)
+    // (draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE): announce する stream_count は publisher が実際に開いた本数と一致する必要がある)
     let publisher_stream = DataStreamId(100);
     let publisher_header = SubgroupHeader {
         track_alias: 10,
@@ -820,7 +820,7 @@ fn publish_done_tracks_stream_count_overrun() {
     );
 }
 
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE):
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE):
 /// subscriber が sentinel を受信した場合、後続で subgroup stream を多数受信しても
 /// `publish_done.stream_count_overrun` は `false` を維持する
 /// (sentinel = publisher が exact 数を表明していないため比較対象が存在しない)。
@@ -878,7 +878,7 @@ fn peer_publish_done_with_sentinel_does_not_set_overrun() {
     );
 }
 
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE):
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE):
 /// published_stream_count == 0 では sentinel を送れず PROTOCOL_VIOLATION になる
 #[test]
 fn send_publish_done_rejects_sentinel_without_streams() {
@@ -898,7 +898,7 @@ fn send_publish_done_rejects_sentinel_without_streams() {
     );
 }
 
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE):
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE):
 /// published_stream_count == 0 では stream_count == 0 が許可される
 #[test]
 fn send_publish_done_accepts_zero_without_streams() {
@@ -914,7 +914,7 @@ fn send_publish_done_accepts_zero_without_streams() {
         .expect("0 stream では 0 が許可されること");
 }
 
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE):
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE):
 /// published_stream_count > 0 では sentinel が許可される
 #[test]
 fn send_publish_done_accepts_sentinel_with_streams() {
@@ -949,18 +949,18 @@ fn send_publish_done_accepts_sentinel_with_streams() {
         .expect("stream を開いていれば sentinel が許可されること");
 }
 
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE):
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE):
 /// exact 数不明時の sentinel は `2^64 - 1` (`u64::MAX`) である。
 #[test]
 fn publish_done_stream_count_unknown_is_u64_max() {
     assert_eq!(
         PUBLISH_DONE_STREAM_COUNT_UNKNOWN,
         u64::MAX,
-        "sentinel は draft-ietf-moq-transport-22 §9.9 の 2^64 - 1 であること"
+        "sentinel は draft-ietf-moq-transport-23 §9.9 の 2^64 - 1 であること"
     );
 }
 
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE):
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE):
 /// `stream_count = u64::MAX` の PUBLISH_DONE を受信でき、subscriber 側で
 /// stream 数が `u64::MAX` として届き overrun は立たない。
 #[test]
@@ -1057,11 +1057,11 @@ fn stop_sending_terminates_subscription() {
             .state,
         SubscriptionState::Terminated
     );
-    // draft-ietf-moq-transport-22 §3.1.2: REQUEST_ERROR → 即時破棄可能
+    // draft-ietf-moq-transport-23 §3.1.2: REQUEST_ERROR → 即時破棄可能
     assert_eq!(client.subscription_cleanup_ready(rid), Some(true));
 }
 
-/// draft-ietf-moq-transport-22 §3.1 (Subscriptions): STOP_SENDING は Pending (Subscriber) or Established から。
+/// draft-ietf-moq-transport-23 §3.1 (Subscriptions): STOP_SENDING は Pending (Subscriber) or Established から。
 /// Pending(Publisher) (自側 my_role=Subscriber で peer initiated via PUBLISH) からは不可。
 #[test]
 fn stop_sending_in_pending_publisher_errors() {
@@ -1097,7 +1097,7 @@ fn stop_sending_in_pending_publisher_errors() {
     );
 }
 
-/// draft-ietf-moq-transport-22 §3.1 (Subscriptions): PUBLISH_DONE は Pending (Publisher) or Established から。
+/// draft-ietf-moq-transport-23 §3.1 (Subscriptions): PUBLISH_DONE は Pending (Publisher) or Established から。
 /// Pending(Subscriber) (peer が SUBSCRIBE の initiator で自側 my_role=Publisher responder)
 /// からは送信不可。
 #[test]
@@ -1219,7 +1219,7 @@ fn forget_subscription_allows_track_alias_reuse() {
     );
 }
 
-// ─── 受信 fill fetch stream の Stream Count 集計 (draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE)) ─────
+// ─── 受信 fill fetch stream の Stream Count 集計 (draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE)) ─────
 
 /// drain timer 40ms を持つ subscription を確立する
 ///
@@ -1303,7 +1303,7 @@ fn send_and_recv_publish_done(
 
 /// 受信 fill fetch stream は Stream Count 集計と cleanup_ready の open 判定に含まれる
 ///
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE): Stream Count は fill fetch stream を含み、
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE): Stream Count は fill fetch stream を含み、
 /// "destroys subscription state once all open streams for the subscription have closed" の
 /// open stream 判定にも fill を含む。
 #[test]
@@ -1368,7 +1368,7 @@ fn fill_fetch_streams_count_toward_stream_count_and_cleanup() {
 
 /// fill fetch stream を STOP_SENDING で cancel すると open 数が減り回収できる
 ///
-/// draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams):
+/// draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams):
 /// "A subscriber can cancel a fill fetch stream independently using STOP_SENDING."
 #[test]
 fn fill_fetch_stream_stop_sending_decrements_open_count() {
@@ -1446,7 +1446,7 @@ fn fill_fetch_stream_overrun_detected() {
 
 /// PUBLISH_DONE の後に遅延到着した fill fetch stream を受理し、overrun を検出する
 ///
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE): "Because PUBLISH_DONE is sent on a
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE): "Because PUBLISH_DONE is sent on a
 /// request stream, it is likely to arrive at the receiver before late-arriving objects,
 /// and often even late-opening streams."
 #[test]
@@ -1552,7 +1552,7 @@ fn fill_fetch_stream_overrun_counts_closed_and_late_streams() {
 /// requester の FIN 後に responder が拒否した場合も、保留 PUBLISH_DONE の送信で
 /// request が終端する
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure) は FIN を方向ごとの
+/// draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure) は FIN を方向ごとの
 /// 終端として定義し cancel と区別するため、requester の FIN では request を終端しない。
 /// §9.9 (PUBLISH_DONE) の MUST NOT により open 中の outgoing data stream がある間は
 /// PUBLISH_DONE を保留し、全 stream 終端後に送る。その送信が自側の送信方向を閉じるため、
@@ -1673,7 +1673,7 @@ fn pending_publish_done_flush_terminates_request_after_requester_fin() {
 /// PUBLISH_DONE(UPDATE_FAILED) と request の終端が失われない
 ///
 /// QUIC の FIN はその方向の最終データであるため (RFC 9000 §4.5)、peer から届く順序は
-/// 「REQUEST_ERROR → FIN」に限られる。draft-ietf-moq-transport-22 §9.5.1 (Updating
+/// 「REQUEST_ERROR → FIN」に限られる。draft-ietf-moq-transport-23 §9.5.1 (Updating
 /// Subscriptions): "When a REQUEST_UPDATE is unsuccessful, the publisher MUST also terminate
 /// the subscription by sending a PUBLISH_DONE with error code UPDATE_FAILED." この経路は
 /// `Session::handle_err_for_subscription` が PUBLISH_DONE を直接 push し、その送信で自側の

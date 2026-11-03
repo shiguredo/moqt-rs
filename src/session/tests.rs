@@ -15,7 +15,7 @@ use crate::{message::common::Location, message_parameter::LocationFilter};
 
 /// FETCH の range 指定 (AbsoluteRangeWithEnd) を持つ MessageParameters を作る
 ///
-/// draft-ietf-moq-transport-22 §9.11 (FETCH): range は LOCATION_FILTER
+/// draft-ietf-moq-transport-23 §9.11 (FETCH): range は LOCATION_FILTER
 /// パラメータで指定する。`end.group_id < start.group_id` の場合は delta が
 /// 求まらないため panic する (テストフィクスチャの前提)。
 fn fetch_range_params(start: Location, end: Location) -> MessageParameters {
@@ -145,7 +145,7 @@ fn paused_parameter_default_is_unpaused() {
 
 /// forget_subscription が datagram の object header 提供完了追跡エントリを掃除する
 ///
-/// draft-ietf-moq-transport-22 §5.2 (Delivery Timeouts and Data Reliability) は object header 提供完了
+/// draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability) は object header 提供完了
 /// 時刻の保持 (MUST) と timeout 超過での drop (MUST) を規定する。drop 時にエントリを
 /// 削除すると同じオブジェクトの再送が新しい object header 提供完了時刻として記録され判定がリセット
 /// されるため、本実装では subscription の forget まで保持し、forget 時に掃除する。
@@ -250,7 +250,7 @@ fn forget_subscription_cleans_datagram_header_complete_entries() {
 
 /// forget 系 API が REQUEST_UPDATE のクレジットカウントエントリを掃除する
 ///
-/// draft-ietf-moq-transport-22 §9.1.7 (MAX_REQUEST_UPDATES) のクレジット管理に使う
+/// draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES) のクレジット管理に使う
 /// `outgoing_request_updates` / `incoming_request_updates` は request の終端時に
 /// 掃除されずセッション寿命まで残る。送信側エントリは peer の SETUP の
 /// MAX_REQUEST_UPDATES > 0 宣言時のみ、受信側エントリは local の SETUP の
@@ -319,7 +319,7 @@ fn forget_subscription_cleans_request_update_credit_entries() {
     );
 
     // 受信側エントリ: REQUEST_UPDATE を受信する
-    // peer (server) が採番する Request ID は奇数であり (draft-ietf-moq-transport-22
+    // peer (server) が採番する Request ID は奇数であり (draft-ietf-moq-transport-23
     // §6.4.2.1 (Request ID))、購読の Request ID (自側 client の採番) とは別の値になる。
     // 同じ値を載せると重複 Request ID として INVALID_REQUEST_ID で閉じられる。
     client
@@ -542,7 +542,7 @@ fn forget_subscription_does_not_clean_credit_entries_when_not_cleanup_ready() {
     client
         .send_request_update(rid, update_params.clone())
         .expect("テストフィクスチャの前提条件を満たす");
-    // peer (server) が採番する Request ID は奇数であり (draft-ietf-moq-transport-22
+    // peer (server) が採番する Request ID は奇数であり (draft-ietf-moq-transport-23
     // §6.4.2.1 (Request ID))、購読の Request ID (自側 client の採番) とは別の値になる。
     client
         .recv_stream_message(
@@ -847,7 +847,7 @@ fn datagram_tracking_evicts_oldest_group_over_subscription_cap() {
 
 /// RequestIdTracker は未到達 Request ID の保持数に上限を設けない
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.1 (Request ID) が INVALID_REQUEST_ID でのセッション
+/// draft-ietf-moq-transport-23 §6.4.2.1 (Request ID) が INVALID_REQUEST_ID でのセッション
 /// 終了を MUST とするのは parity 違反と重複の 2 条件だけである。前縁より先の Request ID を
 /// 大量に受け取っても受理し、前縁が埋まったら吸収して重複判定を維持する。
 #[test]
@@ -1268,7 +1268,7 @@ fn establish_subscriber_subscription_for_data_tests(
 
 /// Malformed Track 検出時は同じ Track の全 subscription を終端すること
 ///
-/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 2 は FIN 済み Subgroup への
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 2 は FIN 済み Subgroup への
 /// 最終 Object ID 超過を Malformed とする。同一 Subgroup の再オープンは禁止されるため
 /// この条件は公開 API の通常手順では到達しない防御的検出であり、tracker に FIN 状態を
 /// 直接記録して帰属先の決定ロジックを検証する。帰属先の subscription だけでなく、
@@ -1463,7 +1463,7 @@ fn malformed_after_fin_takes_precedence_over_filtered_out() {
 
 /// FIN 時の `mark_fin` 失敗 (条件 3) で同じ Track の全 subscription が終端されること
 ///
-/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 3 は同一 Subgroup が複数
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 3 は同一 Subgroup が複数
 /// stream で FIN され最終 Object が異なる場合を Malformed とする。公開 API では
 /// 再オープン禁止により通常手順で到達しないため、tracker に 1 回目の FIN を直接記録して
 /// 検証する。終端対象は Object を受理した帰属先に加えて、同じ Track の stream 所有者も含む。
@@ -1928,7 +1928,7 @@ fn establish_self_publisher_subscription() -> (Session, u64) {
     (client, rid)
 }
 
-/// peer REQUEST_ERROR を注入する (§9.4.2 REQUEST_ERROR)
+/// peer REQUEST_ERROR を注入する (§9.4.1 (REQUEST_ERROR Message Format))
 fn inject_request_error(client: &mut Session, rid: u64) {
     use crate::error::REQUEST_INTERNAL_ERROR;
     use crate::message::{ControlMessage, ReasonPhrase, RequestError};
@@ -1948,7 +1948,7 @@ fn inject_request_error(client: &mut Session, rid: u64) {
 
 /// 自側 publisher の REQUEST_UPDATE 失敗応答で PUBLISH_DONE (UPDATE_FAILED) を送る
 ///
-/// draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions):
+/// draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions):
 /// "When a REQUEST_UPDATE is unsuccessful, the publisher MUST also terminate the
 ///  subscription by sending a PUBLISH_DONE with error code UPDATE_FAILED."
 #[test]
@@ -1986,7 +1986,7 @@ fn publisher_request_update_error_sends_publish_done_update_failed() {
 /// open 中の outgoing data stream がある間は PUBLISH_DONE を保留し、
 /// 全 stream 終端後に 1 回だけ送る
 ///
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE):
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE):
 /// "A sender MUST NOT send PUBLISH_DONE until it has closed all streams it will
 ///  ever open, and has no further datagrams to send, for a subscription."
 #[test]
@@ -2054,7 +2054,7 @@ fn publisher_request_update_error_defers_publish_done_until_streams_close() {
 
 /// `Session` は subscription の実効 group 順序を `ObjectFieldTracker` の生成時に渡す
 ///
-/// draft-ietf-moq-transport-22 §5.1.1: `GROUP_ORDER` parameter (§9.20.8) が優先され、
+/// draft-ietf-moq-transport-23 §5.1.1: `GROUP_ORDER` parameter (§9.19.8) が優先され、
 /// 指定が無ければ `DEFAULT_PUBLISHER_GROUP_ORDER` Track Property (§10.5)、どちらも無ければ
 /// Ascending (0x1)。順序は group の変化に応じた prune と、保持量の上限超過時の破棄方向に使う。
 #[test]
@@ -2068,7 +2068,7 @@ fn peer_object_fields_tracker_uses_subscription_group_order() {
         PROP_DEFAULT_PUBLISHER_GROUP_ORDER, TrackProperties, TrackProperty, TrackPropertyValue,
     };
 
-    // draft-ietf-moq-transport-22 §5.1.1: GROUP_ORDER parameter (§9.20.8) が優先され、
+    // draft-ietf-moq-transport-23 §5.1.1: GROUP_ORDER parameter (§9.19.8) が優先され、
     // 指定が無ければ DEFAULT_PUBLISHER_GROUP_ORDER Track Property (§10.5)、
     // どちらも無ければ Ascending (0x1) になる。0x2 は Descending。
     for (track_property, parameter, expected_ascending) in [
@@ -2159,7 +2159,7 @@ fn peer_object_fields_tracker_uses_subscription_group_order() {
 
 /// datagram 経路でも subscription の実効 group 順序が `ObjectFieldTracker` に渡る
 ///
-/// draft-ietf-moq-transport-22 §5.1.1: `GROUP_ORDER` parameter (§9.20.8) が `DEFAULT_PUBLISHER_GROUP_ORDER`
+/// draft-ietf-moq-transport-23 §5.1.1: `GROUP_ORDER` parameter (§9.19.8) が `DEFAULT_PUBLISHER_GROUP_ORDER`
 /// Track Property (§10.5) より優先されるため、datagram のみを受信する subscription でも同じ順序になる。
 #[test]
 fn peer_object_fields_tracker_uses_subscription_group_order_on_datagram_path() {

@@ -1,6 +1,6 @@
 //! delta-key 骨格の境界値テスト
 //!
-//! draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure)
+//! draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure)
 //!
 //! `encode_delta_key` / `decode_delta_key` は `pub(crate)` のため、delta-key を
 //! 素直に経由する公開型 `LocProperties` の encode/decode をドライバとして用いる

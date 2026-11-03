@@ -1,10 +1,10 @@
 //! 受信 datagram Object への Object 単位フィルタ再適用のテスト
 //!
-//! draft-ietf-moq-transport-22 §3.1 (Subscriptions):
+//! draft-ietf-moq-transport-23 §3.1 (Subscriptions):
 //! "Because subscriptions can share a Track Alias, the subscriber re-applies each
 //! subscription's filter to determine which subscription a received Object belongs to."
 //!
-//! §3.3.3 (Combining Filters): "Pass = Forward AND Location Filters AND Range Filters"。
+//! §3.3.3 (Combining Filters): "Pass = (NOT Paused) AND Location Filters AND Range Filters"。
 //! datagram は Subgroup ID を持たないため SUBGROUP_FILTER は評価対象外だが、Object Properties を
 //! 持てるため OBJECT_PROPERTY_FILTER は評価対象になる。本モジュールは
 //! `Session::recv_object_datagram` の振り分けと、フィルタ不通過 datagram が subscription
@@ -37,7 +37,7 @@ fn delivery_timeout_with_gap_properties(timeout: u64, gap: u64) -> Vec<u8> {
 /// 受信側へ注入する Object Datagram を作る
 ///
 /// `properties_data` は Properties Length varint 込みの生バイト列
-/// (draft-ietf-moq-transport-22 §11.1.2 (Object Properties))。
+/// (draft-ietf-moq-transport-23 §11.1.2 (Object Properties))。
 /// Object Datagram は Subgroup ID を持たないため、フィルタ評価に渡るのは
 /// Group ID / Object ID / Publisher Priority / Object Properties である。
 fn datagram(
@@ -94,7 +94,7 @@ fn object_property_filter_accepts_matching_datagram() {
 /// フィルタに一致しない datagram が FilteredOut になり subscription スコープの状態を
 /// 更新しないこと
 ///
-/// draft-ietf-moq-transport-22 §3.3.3 (Combining Filters): "The publisher MUST forward only
+/// draft-ietf-moq-transport-23 §3.3.3 (Combining Filters): "The publisher MUST forward only
 /// objects that pass all filters." 受信側の破棄は §3.1 (Subscriptions) のフィルタ再適用に
 /// よるものであり、セッションを閉じない。
 #[test]
@@ -174,7 +174,7 @@ fn object_property_filter_filters_out_unmatched_datagram_without_state_update() 
 
 /// 共有 alias で候補が複数ある場合に最初に通過した subscription に紐づくこと
 ///
-/// draft-ietf-moq-transport-22 §3.1 (Subscriptions):
+/// draft-ietf-moq-transport-23 §3.1 (Subscriptions):
 /// "the subscriber re-applies each subscription's filter to determine which subscription
 /// a received Object belongs to."
 /// 候補の評価順は登録順で、1 通目の datagram は 2 番目の候補だけが合格する。

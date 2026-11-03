@@ -58,7 +58,7 @@ fn subgroup_type_decode_error() {
 
 #[test]
 fn non_normal_status_with_properties_rejected() {
-    // draft-ietf-moq-transport-22 §11.1.2 (Object Properties): status != Normal で Properties がある場合は
+    // draft-ietf-moq-transport-23 §11.1.2 (Object Properties): status != Normal で Properties がある場合は
     // PROTOCOL_VIOLATION
     // type_byte = 0x21 (STATUS 0x20 + PROPERTIES 0x01)
     let mut buf = vec![0x21];
@@ -77,7 +77,7 @@ fn non_normal_status_with_properties_rejected() {
 
 #[test]
 fn unknown_object_status_rejected() {
-    // draft-ietf-moq-transport-22 §11.1.1 (Object Status): 0x0, 0x3, 0x4 以外の status は不正
+    // draft-ietf-moq-transport-23 §11.1.1 (Object Status): 0x0, 0x3, 0x4 以外の status は不正
     // type_byte = 0x20 (STATUS)
     let mut buf = vec![0x20];
     shiguredo_moqt::varint::encode(1, &mut buf); // track_alias
@@ -110,7 +110,7 @@ fn status_object_with_payload_rejected() {
     ));
 }
 
-// ─── Properties Length のデコード境界 (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram)) ────
+// ─── Properties Length のデコード境界 (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram)) ────
 
 /// PROPERTIES bit が立っているのに Properties Length = 0 のバイト列は MALFORMED_OBJECT。
 /// checked_len 化後もこの datagram 固有チェック (subgroup では 0 が合法) が保持されること。
@@ -138,7 +138,7 @@ fn properties_length_exceeds_buffer_unexpected_eof() {
     ));
 }
 
-// ─── properties_data の Length 込み規約 (draft-ietf-moq-transport-22 §11.1.2 (Object Properties)) ────
+// ─── properties_data の Length 込み規約 (draft-ietf-moq-transport-23 §11.1.2 (Object Properties)) ────
 
 /// encode は properties_data に Length を付け直さない (ワイヤ表現の固定)
 ///
@@ -235,7 +235,7 @@ fn encode_rejects_properties_length_mismatch() {
 #[test]
 fn undefined_bit_0x40_rejected() {
     // type に未定義 bit 0x40 が立つと PROTOCOL_VIOLATION
-    // (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))
+    // (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram))
     let buf = vec![0x40, 0x01, 0x01];
     assert!(matches!(
         ObjectDatagram::decode(&buf),
@@ -246,7 +246,7 @@ fn undefined_bit_0x40_rejected() {
 #[test]
 fn type_flags_mask_boundary_matrix() {
     // 定義済み bit のみの値は受理し、未定義 bit を含む値は拒否することを
-    // 境界値で固定する (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))。
+    // 境界値で固定する (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram))。
     // 旧 range 形式 (`0x00-0x0F` / `0x20-0x2F`) との等価性も兼ねる。
     // 受理: 定義済み bit のみ (0x2D は STATUS 付きだが END_OF_GROUP なしで正当)
     for valid in [0x00u64, 0x0F, 0x20, 0x2D] {

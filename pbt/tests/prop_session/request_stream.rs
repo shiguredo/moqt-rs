@@ -1,6 +1,6 @@
 //! bidi request stream 終端の役割分岐のプロパティテスト
 //!
-//! draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure) は FIN を方向ごとの
+//! draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure) は FIN を方向ごとの
 //! 終端として定義し、cancel (§6.4.2.3 (Request Cancellation and Rejection)) と区別する。
 //!
 //! - 自側が requester のとき peer FIN で request が終端する
@@ -428,7 +428,7 @@ fn publish_responder_terminates_on_peer_fin() -> TestResult {
 
 /// TRACK_STATUS の responder は peer FIN で終端せず、応答の FIN で終端する
 ///
-/// draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): "The bidi stream is closed with a FIN
+/// draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS): "The bidi stream is closed with a FIN
 /// after TRACK_STATUS_OK or TRACK_STATUS_ERROR are sent." また §6.4.2.2 (Graceful Request Stream
 /// Closure) の FIN は方向ごとの終端であり cancel ではないため、requester の FIN では
 /// responder の応答経路を塞がない。
@@ -450,7 +450,7 @@ fn track_status_responder_survives_requester_fin() -> TestResult {
         server
             .recv_request(msg)
             .expect("テストフィクスチャの前提条件を満たす");
-        // §9.13: subscription state を作らない
+        // §9.12: subscription state を作らない
         assert!(
             server.subscription(rid).is_none(),
             "TRACK_STATUS は subscription state を作らない"
@@ -557,7 +557,7 @@ fn track_status_requester_terminates_on_responder_end() -> TestResult {
 
 /// PUBLISH を送った側の peer FIN 遅延が state / 役割 / 最終メッセージ送信有無で決まる
 ///
-/// draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure) は "the publisher of an
+/// draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure) は "the publisher of an
 /// Established subscription MUST send PUBLISH_DONE, before sending a FIN" と定め、§9.9 (PUBLISH_DONE)
 /// の MUST NOT ("A sender MUST NOT send PUBLISH_DONE until it has closed all streams it will ever open,
 /// and has no further datagrams to send, for a subscription.") により open 中の stream がある間は

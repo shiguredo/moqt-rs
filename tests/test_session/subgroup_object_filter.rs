@@ -1,10 +1,10 @@
 //! 受信 subgroup Object への Object 単位フィルタ再適用のテスト
 //!
-//! draft-ietf-moq-transport-22 §3.1 (Subscriptions):
+//! draft-ietf-moq-transport-23 §3.1 (Subscriptions):
 //! "Because subscriptions can share a Track Alias, the subscriber re-applies each
 //! subscription's filter to determine which subscription a received Object belongs to."
 //!
-//! §3.3.3 (Combining Filters): "Pass = Forward AND Location Filters AND Range Filters"。
+//! §3.3.3 (Combining Filters): "Pass = (NOT Paused) AND Location Filters AND Range Filters"。
 //! header 受理時に評価できるフィルタだけでは Object の帰属先を確定できないため、
 //! Object 受信時に候補すべてへフィルタを再適用する。本モジュールはその振り分けと、
 //! フィルタ不通過 Object が subscription スコープの状態を更新しないことを検証する。

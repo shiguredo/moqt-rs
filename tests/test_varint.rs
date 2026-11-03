@@ -256,7 +256,7 @@ mod error_cases {
         );
     }
 
-    /// draft-ietf-moq-transport-22 §8.1 (Variable-Length Integers): 0xFC (11111100) は 7 バイトエンコーディングの先頭として有効
+    /// draft-ietf-moq-transport-23 §8.1 (Variable-Length Integers): 0xFC (11111100) は 7 バイトエンコーディングの先頭として有効
     #[test]
     fn valid_code_point_0xfc() {
         let (val, consumed) = varint::decode(&[0xFC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
@@ -266,7 +266,7 @@ mod error_cases {
     }
 }
 
-/// draft-ietf-moq-transport-22 §8.1 (Variable-Length Integers) Table 4 (Example Integer Encodings) の
+/// draft-ietf-moq-transport-23 §8.1 (Variable-Length Integers) Table 4 (Example Integer Encodings) の
 /// テストベクトル
 mod spec_test_vectors {
     use super::*;
@@ -435,7 +435,7 @@ mod non_minimal {
 
     #[test]
     fn two_byte_zero_is_accepted() {
-        // draft-ietf-moq-transport-22 §8.1: 最小バイト数でエンコードする必要はない。
+        // draft-ietf-moq-transport-23 §8.1: 最小バイト数でエンコードする必要はない。
         // 0 を 2 バイトで表した 0x8000 も有効である
         let buf = [0x80, 0x00];
         let (val, consumed) = varint::decode(&buf).expect("非最小形も受理される");

@@ -1,4 +1,4 @@
-//! draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names): Namespace / Track Name のシリアライズ表現とパースの単体テスト。
+//! draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names): Namespace / Track Name のシリアライズ表現とパースの単体テスト。
 //! PBT (pbt/tests/prop_name.rs) が網羅するラウンドトリップとは別に、PBT で生成しにくい
 //! 不正入力・境界・特異値と、`NameParseError` が `core::error::Error` を実装していることを検証する。
 
@@ -18,7 +18,7 @@ mod draft_example {
 
     #[test]
     fn example_serialize_and_parse() {
-        // draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names) の例
+        // draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names) の例
         // example.net の `.` (0x2e) はリテラル不可のため `.2e` になる (冗長エンコードではない)
         let namespace = ns(&[b"example.net", b"team2", b"project_x"]);
         let track = b"report";
@@ -219,7 +219,7 @@ fn name_parse_error_converts_into_boxed_error() {
     /// 不正な名前を `?` で伝播させる
     fn parse_invalid() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // ピリオド後の hex は小文字でなければならない
-        // (draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names))
+        // (draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names))
         let _ = parse_name("x--.2E")?;
         Ok(())
     }

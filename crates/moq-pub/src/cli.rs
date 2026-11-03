@@ -90,7 +90,7 @@ pub struct Config {
     /// MSF カタログの `maxGopDuration` / `maxGroupDuration` の基になる
     /// (draft-ietf-moq-msf-01 §5.2.24 / §5.2.25)。
     pub gop_duration_ms: u32,
-    /// Track Namespace (draft-ietf-moq-transport-22 §8.8 表現をパースしたもの)
+    /// Track Namespace (draft-ietf-moq-transport-23 §8.8 表現をパースしたもの)
     pub namespace: TrackNamespace,
     /// Track Name
     pub track_name: String,
@@ -135,8 +135,8 @@ pub struct Config {
     /// publish した Object を保持する時間窓 (ms)
     ///
     /// 保持した Object は subscriber の FETCH で配る
-    /// (draft-ietf-moq-transport-22 §3.2 (Fetch))。同じ値を Track Property の
-    /// `MAX_CACHE_DURATION` (draft-ietf-moq-transport-22 §10.3) として映像 / 音声の
+    /// (draft-ietf-moq-transport-23 §3.2 (Fetch))。同じ値を Track Property の
+    /// `MAX_CACHE_DURATION` (draft-ietf-moq-transport-23 §10.3) として映像 / 音声の
     /// PUBLISH と SUBSCRIBE_OK で告知する。
     pub cache_duration_ms: u64,
     /// MP4 ファイルの映像トラックをパススルー配信する入力パス
@@ -333,7 +333,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     // track-identifier が示す namespace を使う。どちらにも無い場合はエラーになる。
     let namespace_opt = noargs::opt("namespace")
         .ty("NS")
-        .doc("Track namespace (draft-ietf-moq-transport-22 §8.8 form; '-' separates namespace fields, e.g. moq-example). Defaults to the namespace of the MSF fragment in --url")
+        .doc("Track namespace (draft-ietf-moq-transport-23 §8.8 form; '-' separates namespace fields, e.g. moq-example). Defaults to the namespace of the MSF fragment in --url")
         // 省略可能だが、help モードで値が無いと namespace の解決に失敗するため、ヘルプ表示の
         // ための例を与える (通常の実行では、指定が無いときに例は使われない)
         .example("moq-example")
@@ -1131,7 +1131,7 @@ mod tests {
     ///
     /// 既定の 5000 ms は publish した Object を保持して FETCH で配る時間であり、Group 長の
     /// 既定 (2000 ms) より長い。同じ値を Track Property の `MAX_CACHE_DURATION` として告知する
-    /// (draft-ietf-moq-transport-22 §10.3)。0 は「保持しない」を意味するため受理する。
+    /// (draft-ietf-moq-transport-23 §10.3)。0 は「保持しない」を意味するため受理する。
     #[test]
     fn cache_duration_is_configurable() {
         let config = parse_args(BASE_ARGS)

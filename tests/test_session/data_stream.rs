@@ -98,7 +98,7 @@ fn subgroup_header_unknown_alias_can_be_retried_after_alias_established() {
 /// セッションを fail させずに受理される
 ///
 /// 受信側は FIN を「この Subgroup で受信すべき全オブジェクトを受信した」ことの
-/// 保証として扱う (draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams) の
+/// 保証として扱う (draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams) の
 /// "An MOQT implementation that processes a stream FIN is assured it has received all
 /// objects in a subgroup from the start of the subscription.")。送信側がオブジェクトを
 /// 1 つも送らない場合の終了方法は、同節後半が RESET_STREAM_AT を MAY で規定するが、
@@ -172,7 +172,7 @@ fn empty_first_object_id_subgroup_fin_does_not_fail_session() {
 /// END_OF_GROUP 空 Subgroup（オブジェクト 0 個）+ FIN で Group 終端が記録され、
 /// 後から届くオブジェクトが Malformed Track として拒否される
 ///
-/// draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header) の END_OF_GROUP bit
+/// draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header) の END_OF_GROUP bit
 /// ("indicates that this subgroup contains the largest Object in the Group") を
 /// オブジェクト 0 個に適用すると、この Group には配達すべきオブジェクトが存在しない
 /// ことを宣言したことになる。Group 終端は「存在しない最小の Object ID = 0」として
@@ -300,7 +300,7 @@ fn object_datagram_unknown_alias_is_reported_without_closing() {
 
 /// PRIOR_OBJECT_ID_GAP の二重インスタンスを Session 経由で受信すると malformed 終端する
 ///
-/// draft-ietf-moq-transport-22 §10.9 (Prior Object ID Gap): "An Object MUST NOT contain more
+/// draft-ietf-moq-transport-23 §10.9 (Prior Object ID Gap): "An Object MUST NOT contain more
 /// than one instance of this property." §12.1 (Malformed Tracks) の列挙は網羅ではないため、
 /// この条件も malformed に含まれ、該当 subscription を cancel する (セッションは閉じない)。
 #[test]
@@ -363,7 +363,7 @@ fn duplicate_prior_object_id_gap_terminates_subscription() {
 
 /// GREASE の Property Type が Mandatory Track Property 範囲でも malformed にならない
 ///
-/// draft-ietf-moq-transport-22 §16.8 (Properties) の Table 15 は GREASE の Property Type
+/// draft-ietf-moq-transport-23 §16.8 (Properties) の Table 15 は GREASE の Property Type
 /// (`0x7f * N + 0x9D`) を Scope Any として予約しており、N = 128 の 0x401D から N = 256 の
 /// 0x7F9D までは §3.7 (Mandatory to Understand Track Properties) の 0x4000-0x7FFF に入る。GREASE 値は
 /// IANA 登録された Property ではないため malformed とせず、購読を打ち切らない
@@ -436,7 +436,7 @@ fn grease_object_property_in_mandatory_range_keeps_subscription() {
 ///
 /// publisher 役の subscription と別 Track の request は対象外である。
 ///
-/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks): "When a subscriber detects a
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks): "When a subscriber detects a
 /// Malformed Track, it MUST cancel any corresponding subscription or fetches for that Track
 /// from that publisher (see Section 6.4.2.3), and SHOULD deliver an error to the application."
 #[test]
@@ -645,7 +645,7 @@ fn stop_sending_on_subgroup_stream_allows_reopen() {
         .send_data_stream_stop_sending(DataStreamId(20))
         .expect("テストフィクスチャの前提条件を満たす");
 
-    // draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams): STOP_SENDING 後の
+    // draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams): STOP_SENDING 後の
     // 再オープンは購読を再開する REQUEST_UPDATE (PAUSED 1→0) の受理後であることが
     // sender 側の SHOULD 条件。
     // 受信側は peer の SHOULD NOT 違反をセッションエラーにせず受理する (本挙動は変更しない)
@@ -1040,7 +1040,7 @@ fn send_object_datagram_failure_does_not_update_location() {
 
 /// Properties Length = 0 と宣言長不一致の properties も送信前に拒否される
 ///
-/// draft-ietf-moq-transport-22 §11.2.1 (Object Datagram): Datagram では Properties Length = 0 は
+/// draft-ietf-moq-transport-23 §11.2.1 (Object Datagram): Datagram では Properties Length = 0 は
 /// プロトコル違反。公開 API から不正なワイヤを生成しないよう Session 段でも早期に拒否する。
 #[test]
 fn send_object_datagram_rejects_invalid_properties_length() {
@@ -1220,7 +1220,7 @@ fn send_object_datagram_updates_location_with_non_empty_properties() {
 
 /// END_OF_GROUP bit を立てた datagram の送信が受理され、最大位置も更新される
 ///
-/// draft-ietf-moq-transport-22 §11.2.1 (Object Datagram): END_OF_GROUP bit は
+/// draft-ietf-moq-transport-23 §11.2.1 (Object Datagram): END_OF_GROUP bit は
 /// 「同じ Group ID で、この Object ID より大きい Object ID の Object は存在しない」ことを宣言する。
 /// 送信 API では `end_of_group` 引数で指定する。
 #[test]
@@ -1242,7 +1242,7 @@ fn send_object_datagram_with_end_of_group_is_accepted() {
 
 /// STATUS と END_OF_GROUP の同時指定は送信前に拒否され、最大位置は更新されない
 ///
-/// draft-ietf-moq-transport-22 §11.2.1 (Object Datagram) は STATUS (0x20) と END_OF_GROUP (0x02) の
+/// draft-ietf-moq-transport-23 §11.2.1 (Object Datagram) は STATUS (0x20) と END_OF_GROUP (0x02) の
 /// 両方が立った Type 値を無効とし、受信側は INVALID_STREAM_HEADER でセッションを閉じる。
 /// wire を生成しないよう送信 API でも同じ条件で拒否する。
 #[test]
@@ -1276,7 +1276,7 @@ fn send_object_datagram_rejected_for_status_with_end_of_group() {
 
 /// 受信した END_OF_GROUP bit 付き datagram で Group の終端が記録され、宣言位置より後ろは拒否される
 ///
-/// draft-ietf-moq-transport-22 §11.2.1 (Object Datagram) の END_OF_GROUP bit は
+/// draft-ietf-moq-transport-23 §11.2.1 (Object Datagram) の END_OF_GROUP bit は
 /// §12.1 (Malformed Tracks) 条件 4 の "the final Object in the Group" を宣言する。
 /// 受信側は宣言位置の 1 つ先を「存在しない最小の Object ID」として記録し、
 /// 宣言位置自身は存在するものとして扱う。
@@ -1400,7 +1400,7 @@ fn send_object_datagram_reflected_in_request_update_ok() {
     assert_eq!(request_ok.parameters.largest_object(), Some((3, 1)));
 }
 
-/// draft-ietf-moq-transport-22 §10.1 / §10.2: per-subgroup delivery timeout オーバーライド
+/// draft-ietf-moq-transport-23 §10.1 / §10.2: per-subgroup delivery timeout オーバーライド
 mod per_subgroup_delivery_timeout_override {
     use super::*;
     use shiguredo_moqt::track_properties::{
@@ -1653,9 +1653,9 @@ mod per_subgroup_delivery_timeout_override {
     }
 }
 
-// ─── recv_datagram の type 分岐 (draft-ietf-moq-transport-22 §11) ────────────
+// ─── recv_datagram の type 分岐 (draft-ietf-moq-transport-23 §11) ────────────
 
-/// Padding Datagram (draft-ietf-moq-transport-22 §11.5.2 (Padding Datagrams)) の raw バイト列
+/// Padding Datagram (draft-ietf-moq-transport-23 §11.5.2 (Padding Datagrams)) の raw バイト列
 ///
 /// 先頭に type varint、続けて `length` バイトの 0x00 を並べる。
 fn padding_datagram_bytes(length: usize) -> Vec<u8> {
@@ -1667,8 +1667,8 @@ fn padding_datagram_bytes(length: usize) -> Vec<u8> {
 
 /// 未知の datagram type を受信するとセッションを閉じる
 ///
-/// draft-ietf-moq-transport-22 §11: "An endpoint that receives an unknown datagram type
-/// MUST close the session."
+/// draft-ietf-moq-transport-23 §11: "An endpoint that receives an unknown datagram type
+/// MUST close the session with INVALID_STREAM_HEADER."
 ///
 /// `0x10` は bit4 が立っており §11.2.1 の `0b00X0XXXX` の形に合わない。
 /// draft-ietf-moq-transport-23 §11.2.1 は無効 Type 値に対して INVALID_STREAM_HEADER を規定する。
@@ -1692,7 +1692,7 @@ fn recv_datagram_unknown_type_closes_session() {
 
 /// STATUS と END_OF_GROUP を同時指定した type もセッションを閉じる
 ///
-/// draft-ietf-moq-transport-22 §11.2.1: "Values with both the STATUS bit (0x20) and
+/// draft-ietf-moq-transport-23 §11.2.1: "Values with both the STATUS bit (0x20) and
 /// END_OF_GROUP bit (0x02) set." 具体値 (0x22、0x23、0x26、0x27、0x2A、0x2B、0x2E、0x2F) は上記からの導出。
 #[test]
 fn recv_datagram_status_with_end_of_group_closes_session() {
@@ -1718,7 +1718,7 @@ fn recv_datagram_status_with_end_of_group_closes_session() {
 
 /// Padding Datagram は既知 type として破棄される
 ///
-/// draft-ietf-moq-transport-22 §11.5.2: "The receiver MUST discard all data received in a
+/// draft-ietf-moq-transport-23 §11.5.2: "The receiver MUST discard all data received in a
 /// padding datagram."
 #[test]
 fn recv_datagram_padding_is_discarded() {
@@ -1766,7 +1766,7 @@ fn recv_datagram_object_delegates_to_object_path() {
 /// datagram_writer と同じ組み立て (LocProperties::encode() → ObjectDatagram → encode →
 /// recv_datagram) で受信が受理され、Malformed Track にならないこと
 ///
-/// draft-ietf-moq-transport-22 §11.1.2 (Object Properties): Properties は
+/// draft-ietf-moq-transport-23 §11.1.2 (Object Properties): Properties は
 /// Properties Length + Key-Value-Pairs。`LocProperties::encode()` の Length 込み出力を
 /// そのまま ObjectDatagram に渡す。
 #[test]
@@ -1860,7 +1860,7 @@ fn recv_datagram_empty_closes_session() {
     assert_eq!(err.reason, "datagram type varint could not be decoded");
 }
 
-// ─── mid-object FIN (draft-ietf-moq-transport-22 §11.3 (Subgroup Streams)) ────────────
+// ─── mid-object FIN (draft-ietf-moq-transport-23 §11.3 (Subgroup Streams)) ────────────
 
 /// subgroup stream の raw バイト列を組み立てる
 ///
@@ -1939,9 +1939,9 @@ fn object_boundary_fin_is_accepted() {
 
 /// payload 途中での graceful FIN は TRUNCATED_OBJECT でセッションを閉じる
 ///
-/// draft-ietf-moq-transport-22 §11.3: "If a stream ends gracefully (i.e., the stream
-/// terminates with a FIN) in the middle of a serialized Object, the session SHOULD be
-/// receiver SHOULD close the session with TRUNCATED_OBJECT."
+/// draft-ietf-moq-transport-23 §11.3: "If a stream ends gracefully (i.e., the stream
+/// terminates with a FIN) in the middle of a serialized Object, the receiver SHOULD
+/// close the session with TRUNCATED_OBJECT."
 #[test]
 fn mid_payload_fin_closes_session() {
     let alias = 821;
@@ -2058,7 +2058,7 @@ fn report_mid_object_fin_after_stream_closed_still_closes_session() {
 
 /// header 未受信 (AwaitingHeader) での FIN は mid-object ではないので受理される
 ///
-/// draft-ietf-moq-transport-22 §11.3 の mid-object は「シリアライズ途中の Object」であり、
+/// draft-ietf-moq-transport-23 §11.3 の mid-object は「シリアライズ途中の Object」であり、
 /// ヘッダを 1 バイトも受け取らずに終わった stream は該当しない。境界条件の確認。
 #[test]
 fn awaiting_header_fin_is_accepted() {
@@ -2077,7 +2077,7 @@ fn awaiting_header_fin_is_accepted() {
 
 /// Malformed Track を検出しても別 Track の subscription は生き残る
 ///
-/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) は「該当 Track の subscription /
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) は「該当 Track の subscription /
 /// fetch を cancel する」ことだけを要求しており、セッションや別 Track の request には影響しない。
 #[test]
 fn malformed_track_keeps_other_track_subscriptions_alive() {
@@ -2170,7 +2170,7 @@ fn malformed_track_keeps_other_track_subscriptions_alive() {
 
 /// 同一 Track への subscription を subscriber 役 (client) として確立して request_id を返す
 ///
-/// fill fetch stream の遅延到着を検証するため、draft-ietf-moq-transport-22 §3.4.1
+/// fill fetch stream の遅延到着を検証するため、draft-ietf-moq-transport-23 §3.4.1
 /// (Opening and Closing Fill Fetch Streams) が前提とする FILL_PARAMETERS を購読に載せる。
 fn establish_subscription_as_subscriber(
     client: &mut Session,
@@ -2322,7 +2322,7 @@ fn establish_fetch_as_publisher(
 
 /// Malformed Track 条件 1 (Publisher Priority 不一致) を公開 API で起こす
 ///
-/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 1 は、同一 Subgroup ID の
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 1 は、同一 Subgroup ID の
 /// 直前 Object と Publisher Priority が異なる場合を Malformed とする。1 本目の stream を
 /// RESET で終端して再オープンを許可し、2 本目の header で Priority を変える。
 fn trigger_malformed_priority_mismatch(
@@ -2385,9 +2385,9 @@ fn trigger_malformed_priority_mismatch(
 
 /// Malformed Track 検出時に同じ Track の全 subscription を cancel する
 ///
-/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) は "cancel any corresponding
-/// subscription or fetches for that Track" を MUST とする。draft-22 は同一 Track への
-/// 複数同時 subscription を許可するため、検出した request だけでは足りない。
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) は "cancel any corresponding
+/// subscription or fetches for that Track" を MUST とする。draft-23 §3.1 (Subscriptions) も
+/// 同一 Track への複数同時 subscription を許可するため、検出した request だけでは足りない。
 /// subscription の登録順で最初の候補 (rid1) が header を受理するため、rid1 が検出対象になる。
 #[test]
 fn malformed_track_cancels_all_subscriptions_on_same_track() {
@@ -2482,7 +2482,7 @@ fn malformed_track_cancels_same_track_fetch() {
 
 /// malformed track でローカル終端した pending FETCH への遅延 FETCH_OK は吸収する
 ///
-/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) の検出で同じ Track の FETCH も
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) の検出で同じ Track の FETCH も
 /// 終端されるが、publisher が cancel を観測する前に送った FETCH_OK は正当に届く。
 /// 終端済み request への応答は MUST 検証だけを行い、状態遷移とイベント発行をしない
 /// (`Session::is_locally_terminated_request` の吸収経路)。
@@ -2814,7 +2814,7 @@ fn malformed_track_clears_draining_sibling_without_duplicate_termination() {
 
 /// drain 解除した sibling は request stream close 後も遅延 fill stream を受理する
 ///
-/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE): PUBLISH_DONE は late-opening stream より
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE): PUBLISH_DONE は late-opening stream より
 /// 先に届きうる。request stream の close が先に届いても、同じ subscription の遅延 fill fetch
 /// stream は引き続き受理し、アプリが subscription を破棄した後の終端通知も no-op で吸収する。
 #[test]
@@ -3049,12 +3049,12 @@ fn open_incoming_subgroup(
 
 /// End of Group を宣言した位置より後ろの同 Group Object は拒否される
 ///
-/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 4: "An Object is received in a Group
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 4: "An Object is received in a Group
 /// whose Object ID is larger than the final Object in the Group. The final Object in a Group is the
 /// Object with Status END_OF_GROUP, ..." であるため、終端を宣言した Object 自身 (同一位置) は
 /// Malformed にせず、条件 6 の内容比較に委ねる (§11.1.1 の "greater than or equal to" は、宣言後に
-/// 存在しない Object を述べたものと解釈する。§2.1.2 (Object States) も、存在しないと記録した後に Object が届くことは
-/// protocol error ではないと定める)。
+/// 存在しない Object を述べたものと解釈する。§2.1.2 (Object States) は Gone / Unknown と記録した
+/// Object の受信を誤りとしないが、不存在と確定した Object の受信は §12.1 の条件 10 が malformed とする)。
 #[test]
 fn object_after_end_of_group_status_is_rejected() {
     let alias = 700;
@@ -3100,7 +3100,7 @@ fn object_after_end_of_group_status_is_rejected() {
 
 /// End of Group を宣言した Object 自身を同一内容で再受信しても Malformed にしない
 ///
-/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 4 は "larger than the final Object" だけを
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 4 は "larger than the final Object" だけを
 /// Malformed とするため、final Object 自身の重複は条件 6 の内容比較 (同一内容なら受理) に委ねる。
 #[test]
 fn duplicate_object_at_end_of_group_position_is_accepted() {
@@ -3135,7 +3135,7 @@ fn duplicate_object_at_end_of_group_position_is_accepted() {
 /// End of Group を宣言した位置で内容が異なる重複は Malformed Track になる (条件 6)
 ///
 /// 別 Subgroup から同じ位置へ届いた同一 Object は `ObjectFieldTracker` が Subgroup ID の差異を
-/// 検出する (draft-ietf-moq-transport-22 §7.1 (Caching Relays))。
+/// 検出する (draft-ietf-moq-transport-23 §7.1 (Caching Relays))。
 #[test]
 fn duplicate_object_at_end_of_group_position_from_different_subgroup_is_rejected() {
     let alias = 705;
@@ -3223,7 +3223,7 @@ fn end_of_group_status_then_data_object_at_same_position_is_rejected() {
 
 /// End of Track を宣言した Object 自身を同一内容で再受信しても Malformed にしない
 ///
-/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 5 も "larger than the final Object" である。
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 5 も "larger than the final Object" である。
 #[test]
 fn duplicate_object_at_end_of_track_position_is_accepted() {
     let alias = 707;
@@ -3270,7 +3270,7 @@ fn object_before_end_of_group_is_accepted() {
 
 /// End of Track を宣言した位置より後ろの Object は拒否される
 ///
-/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 5: "An Object is received whose Group
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 5: "An Object is received whose Group
 /// and Object ID are larger than the final Object in the Track. The final Object in a Track is the
 /// Object with Status END_OF_TRACK ..." であるため、終端を宣言した Object 自身 (同一位置) は
 /// Malformed にしない (同じ位置の重複は条件 6 の内容比較に委ねる)。
@@ -3326,7 +3326,7 @@ fn object_before_end_of_track_is_accepted() {
 
 /// SUBGROUP_HEADER の END_OF_GROUP bit + FIN で Group 終端が確定する
 ///
-/// draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header): "indicates that this subgroup contains
+/// draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header): "indicates that this subgroup contains
 /// the largest Object in the Group. When set to 1, the subscriber can infer the final Object in
 /// the Group when the data stream is terminated by a FIN."
 #[test]
@@ -3401,7 +3401,7 @@ fn end_of_group_header_bit_with_reset_does_not_set_group_end() {
 
 /// datagram の END_OF_GROUP bit が状態に反映される
 ///
-/// draft-ietf-moq-transport-22 §11.2.1 (Object Datagram): "no Object with the same Group ID and
+/// draft-ietf-moq-transport-23 §11.2.1 (Object Datagram): "no Object with the same Group ID and
 /// an Object ID greater than the Object ID in this datagram exists."
 #[test]
 fn datagram_end_of_group_bit_sets_group_end() {
@@ -3504,7 +3504,7 @@ fn open_outgoing_subgroup(
 
 /// アプリ起点の cancel は `STREAM_CANCELLED` (0x1) で reset される
 ///
-/// draft-ietf-moq-transport-22 §12.5 (Stream Reset Error Codes): "CANCELLED (0x1): The stream
+/// draft-ietf-moq-transport-23 §12.5 (Stream Reset Error Codes): "CANCELLED (0x1): The stream
 /// was cancelled by either endpoint."
 #[test]
 fn cancel_uses_stream_cancelled_code() {
@@ -3544,7 +3544,7 @@ fn cancel_uses_stream_cancelled_code() {
 
 /// RESET_STREAM_AT の reliable_size はイベントに反映され、追跡状態も終端する
 ///
-/// draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams)
+/// draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams)
 #[test]
 fn reset_at_propagates_reliable_size_to_event_and_tracker() {
     let alias = 802;
@@ -3610,7 +3610,7 @@ fn reset_at_propagates_reliable_size_to_event_and_tracker() {
 /// reset だけでは subscription 状態が壊れない
 ///
 /// uni stream の早期終了は MOQT application state に影響しない
-/// (draft-ietf-moq-transport-22 §6.4.1 (Unidirectional Streams)。旧 draft-20 の
+/// (draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams)。旧 draft-20 の
 /// Stream Cancellation 節は draft-21 で削除された)
 #[test]
 fn reset_does_not_affect_subscription_state() {
@@ -3677,7 +3677,7 @@ fn reset_unknown_stream_is_rejected() {
 
 /// 同一 Subgroup キーの 2 本目の stream で Publisher Priority を変えると Malformed Track
 ///
-/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 1:
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 1:
 /// "An Object with a particular Subgroup ID is received, but its Publisher Priority is
 /// different from that of the previous Object with the same Subgroup ID."
 #[test]
@@ -3788,7 +3788,7 @@ fn condition1_priority_mismatch_terminates_subscription() {
 /// 同一 (Group ID, Object ID) を subgroup stream と datagram の両方で受信すると
 /// Delivery Mode 不一致で Malformed Track (条件 7)
 ///
-/// draft-ietf-moq-transport-22 §7.1 (Caching Relays):
+/// draft-ietf-moq-transport-23 §7.1 (Caching Relays):
 /// "An endpoint that receives a duplicate Object with a different Delivery Mode,
 /// Subgroup ID, Priority or Payload MUST treat the track as Malformed."
 #[test]
@@ -3869,10 +3869,10 @@ fn condition7_delivery_mode_mismatch_terminates_subscription() {
 
 /// 同一 Track / 同一 Group 内で別々の Object を subgroup と datagram に分けても Malformed にならない
 ///
-/// draft-ietf-moq-transport-22 §2.1.1 (Object Fields):
+/// draft-ietf-moq-transport-23 §2.1.1 (Object Fields):
 /// "The Original Publisher establishes an Object's Delivery Mode by how it first transmits
 /// the Object."
-/// draft-ietf-moq-transport-22 §2.1 (Objects):
+/// draft-ietf-moq-transport-23 §2.1 (Objects):
 /// "An Original Publisher MAY use both Subgroups and Datagrams within a Group or Track."
 #[test]
 fn different_objects_mixed_subgroup_and_datagram_is_not_malformed() {
@@ -4072,7 +4072,7 @@ fn duplicate_object_with_same_fields_is_not_malformed() {
 /// フレーミングは正しいが KVP が不正な Object Properties のバイト列を作る
 ///
 /// 必須トラックプロパティ (0x4000-0x7FFF) を Object Property として載せる
-/// (draft-ietf-moq-transport-22 §3.7 (Mandatory to Understand Track Properties): "An Object received with a
+/// (draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties): "An Object received with a
 /// Mandatory Track Property as an Object Property is malformed")。この範囲を Object scope に
 /// 載せた直列化は `ObjectProperties::encode` がローカル入力の検証として拒否するため、wire
 /// 表現を手組みする。Properties Length は実データと一致させ、入口のフレーミング検証は通過
@@ -4165,8 +4165,8 @@ fn subgroup_object_with_malformed_properties_kvp_terminates_subscription() {
 /// Object Properties の宣言長より後ろに余分なバイトがあると Malformed Track として
 /// subscription が終端される
 ///
-/// draft-ietf-moq-transport-22 §11.1.2 (Object Properties): "Object Properties are serialized as
-/// a length in bytes followed by Key-Value-Pairs (see Figure 3)." のとおり、Properties Length は
+/// draft-ietf-moq-transport-23 §11.1.2 (Object Properties): "Object Properties are serialized as
+/// a length in bytes followed by Key-Value-Pairs (see Figure 4)." のとおり、Properties Length は
 /// 実データ長と一致しなければならない。subgroup 受信 API は datagram 経路のような入口検証を
 /// 持たないため、この拒否は `ObjectProperties::decode_exact` が担う。
 #[test]
@@ -4330,7 +4330,7 @@ fn establish_with_track_delivery_timeout(alias: u64) -> (Session, Session, u64) 
 
 /// tick 前に送信した datagram が最初の tick 後の再送で誤 drop されない
 ///
-/// draft-ietf-moq-transport-22 §5.2 (Delivery Timeouts and Data Reliability): "the MOQT
+/// draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability): "the MOQT
 /// implementation MUST retain the time at which the last header byte of every object
 /// has been either received from the upstream subscription, or provided by the original
 /// publisher application."
@@ -4364,7 +4364,7 @@ fn datagram_sent_before_first_tick_is_not_dropped_after_tick() {
 
 /// tick 後に送信した datagram は timeout 超過で drop され、drop 後の再送も再度 drop される
 ///
-/// draft-ietf-moq-transport-22 §5.2 (Delivery Timeouts and Data Reliability): "For datagrams,
+/// draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability): "For datagrams,
 /// the implementation MUST drop the datagrams if the time elapsed
 /// exceeds OBJECT_DELIVERY_TIMEOUT." 起点は object header の最終バイト。
 /// drop 時はエントリを削除しないため、同じオブジェクトの
@@ -4403,12 +4403,12 @@ fn datagram_sent_after_tick_is_dropped_after_timeout() {
     assert_eq!(server.state(), SessionState::Established);
 }
 
-// ─── Subgroup 単位 priority と重複 Object 検証 (draft-ietf-moq-transport-22 §12.1 条件 1 / §7.1 (Caching Relays)) ─────
+// ─── Subgroup 単位 priority と重複 Object 検証 (draft-ietf-moq-transport-23 §12.1 条件 1 / §7.1 (Caching Relays)) ─────
 
 /// FirstObjectId の先頭 Object 解決時、Subgroup 単位で記録された priority と同じ priority で
 /// subgroup を再オープンしても Malformed にならない
 ///
-/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 1 は Subgroup 単位の
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 1 は Subgroup 単位の
 /// Publisher Priority の一致を求める。購読単位の直近値は並行 Subgroup の header で上書きされる。
 #[test]
 fn first_object_id_subgroup_reopen_with_same_priority_is_not_malformed() {
@@ -4738,7 +4738,7 @@ fn duplicate_object_with_different_subgroup_id_terminates_subscription() {
 ///
 /// 購読単位の直近値 (stream T の 99) を重複 Object 検証に使うと、stream S の同一 Object を
 /// 再受信したときに 10 と 99 の不一致で Malformed を誤検出する
-/// (draft-ietf-moq-transport-22 §7.1 (Caching Relays))。
+/// (draft-ietf-moq-transport-23 §7.1 (Caching Relays))。
 #[test]
 fn duplicate_object_priority_check_uses_stream_subgroup_priority() {
     let alias = 833u64;
@@ -4813,7 +4813,7 @@ fn duplicate_object_priority_check_uses_stream_subgroup_priority() {
     );
 }
 
-// ─── STOP_SENDING 後の Subgroup 再オープン (draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams)) ─────
+// ─── STOP_SENDING 後の Subgroup 再オープン (draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams)) ─────
 
 /// PAUSED=1 の SUBSCRIBE を確立し `(client, server, rid)` を返す
 ///
@@ -4850,7 +4850,7 @@ fn establish_paused_subscription(alias: u64) -> (Session, Session, u64) {
 ///
 /// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): PAUSED=0 は unpaused。
 /// STOP_SENDING 後の再オープンは、購読を再開する REQUEST_UPDATE (PAUSED 1→0) が
-/// 受理された場合のみ許可される (draft-ietf-moq-transport-22 §11.3.2)。
+/// 受理された場合のみ許可される (draft-ietf-moq-transport-23 §11.3.2)。
 fn resume_subscription(client: &mut Session, server: &mut Session, rid: u64) {
     use shiguredo_moqt::message_parameter::{
         MessageParameter, MessageParameterValue, PARAM_PAUSED,
@@ -5481,7 +5481,7 @@ fn forget_subscription_discards_stopped_subgroups() {
 
 /// FIN で閉じた subgroup stream に後から届く RESET_STREAM を無視する
 ///
-/// draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams): "A sender might send all
+/// draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams): "A sender might send all
 /// objects in a Subgroup and the FIN on a QUIC stream, and then reset the stream. In this
 /// case, the receiving application would receive the FIN if and only if all objects were
 /// received. If the application receives all data on the stream and the FIN, it can ignore
@@ -5586,9 +5586,9 @@ fn second_close_after_reset_is_still_protocol_violation() {
 
 /// 既知でない status (0x5) は wire 生成前に拒否され、最大位置も更新されない
 ///
-/// draft-ietf-moq-transport-22 §11.1.1 (Object Status):
-/// "Any other value SHOULD be treated as a protocol error and the session SHOULD be
-///  closed with INVALID_OBJECT_STATUS (Section 12.2)."
+/// draft-ietf-moq-transport-23 §11.1.1 (Object Status):
+/// "If an endpoint receives any other value, it SHOULD close the session with
+/// INVALID_OBJECT_STATUS (Section 12.2)."
 #[test]
 fn send_object_datagram_rejected_for_unknown_status() {
     let (_, mut server, rid) = establish_subscribe_track(512);
@@ -5625,7 +5625,7 @@ fn send_object_datagram_accepts_known_status_values() {
 }
 
 // ============================================================================
-// recv_object_datagram の入口検証 (draft-ietf-moq-transport-22 §11.1.1 / §11.1.2 / §11.2.1)
+// recv_object_datagram の入口検証 (draft-ietf-moq-transport-23 §11.1.1 / §11.1.2 / §11.2.1)
 // ============================================================================
 //
 // wire 経路 (`recv_datagram` → `ObjectDatagram::decode`) が行う検証を、decode 済みまたは

@@ -1,6 +1,6 @@
 //! MOQT セッション状態機械 (sans-I/O)
 //!
-//! draft-ietf-moq-transport-22 の §6 (Sessions), §3 (Publishing and Receiving Tracks), §9 (Control Messages) に基づく。draft 由来の
+//! draft-ietf-moq-transport-23 の §6 (Sessions), §3 (Publishing and Receiving Tracks), §9 (Control Messages) に基づく。draft 由来の
 //! 実装のため、将来のバージョンで変更される可能性がある。
 //!
 //! # 位置づけ

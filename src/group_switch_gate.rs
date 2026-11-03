@@ -1,7 +1,7 @@
 //! 前の Group の stream が開いている間、次の Group の映像 Object を保留する状態機械
 //!
-//! draft-ietf-moq-transport-22 §2.1.2 (Object States): "Since Objects can be delivered out
-//! of order" であり、Group ごとに別の Subgroup ストリームで届くため、前の Group の stream が
+//! draft-ietf-moq-transport-23 §2.2 (Subgroups): 1 つの Group は Subgroup ごとに別の stream で
+//! 届き、順序が保証されるのは stream 内だけである。そのため前の Group の stream が
 //! 終わる前に次の Group のキーフレームが届くことがある。次の Group のキーフレームを先に
 //! 復号してしまうと、遅れて届いた前の Group の末尾は [`crate::video_decode_order`] の
 //! `VideoObjectAdmission::Skip` (`Stale`) になり、表示されない。GOP の末尾が 1〜数枚欠け、
@@ -63,7 +63,7 @@ pub struct GroupSwitchGate {
     delivered_group_id: Option<u64>,
     /// 開いている live の Subgroup stream。`(group_id, stream_id)` の組で追跡する
     ///
-    /// 1 Group が複数の Subgroup stream で届き得るため (draft-ietf-moq-transport-22
+    /// 1 Group が複数の Subgroup stream で届き得るため (draft-ietf-moq-transport-23
     /// §2.2 (Subgroups))、Group ではなく stream で持つ。
     open_streams: BTreeSet<(u64, u64)>,
     /// 保留している Group ごとの解除時刻。同じ Group の保留中は期限を延ばさない

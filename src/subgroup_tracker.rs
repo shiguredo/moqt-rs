@@ -1,7 +1,7 @@
-//! Subgroup 再オープン禁止の追跡 (draft-ietf-moq-transport-22 §2.2 (Subgroups) / draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams))
+//! Subgroup 再オープン禁止の追跡 (draft-ietf-moq-transport-23 §2.2 (Subgroups) / draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams))
 //!
 //! Subgroup ストリームは一度終端したら同一 `(track_alias, group_id, subgroup_id)` を
-//! 別ストリームで再オープンしてはならない。ただし draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1583 により、
+//! 別ストリームで再オープンしてはならない。ただし draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1583 により、
 //! STOP_SENDING で停止されたサブグループは、REQUEST_UPDATE で購読が再開された
 //! (PAUSED が 1→0 に変わった) 場合に再オープン可能。本モジュールは session 内でのストリーム
 //! ライフサイクルを追跡し、違反時に `PROTOCOL_VIOLATION` として通知するユーティリティ
@@ -9,15 +9,15 @@
 //!
 //! # 根拠資料
 //!
-//! - draft-ietf-moq-transport-22 §2.2 (Subgroups) `from the same Subgroup MUST NOT be sent on different
+//! - draft-ietf-moq-transport-23 §2.2 (Subgroups) `from the same Subgroup MUST NOT be sent on different
 //!   streams, unless one of the streams was reset prematurely, or upstream conditions
 //!   have forced objects from a Subgroup to be sent out of Object ID order.`
-//! - draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams) `A publisher that receives a STOP_SENDING on a
+//! - draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams) `A publisher that receives a STOP_SENDING on a
 //!   Subgroup stream SHOULD NOT attempt to open a new stream to deliver additional
 //!   Objects in that Subgroup.`
-//! - draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams): STOP_SENDING 単独では publisher は新 stream を開くべきではない。
+//! - draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams): STOP_SENDING 単独では publisher は新 stream を開くべきではない。
 //!   REQUEST_UPDATE で購読が再開された (PAUSED が 1→0) 場合のみ再オープン MAY
-//!   (draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1583)
+//!   (draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1583)
 //!
 //! # 注意
 //!
@@ -35,7 +35,7 @@ pub enum SubgroupStreamState {
     Open,
     /// FIN で正常終端した
     ///
-    /// `last_object_id` は FIN 前に受信した最終 Object の ID (draft-ietf-moq-transport-22
+    /// `last_object_id` は FIN 前に受信した最終 Object の ID (draft-ietf-moq-transport-23
     /// §12.1 (Malformed Tracks) 条件 2/3 の検出に使う)。Object を 1 つも受信せずに
     /// FIN した場合は `None`。
     ClosedFin {
@@ -44,7 +44,7 @@ pub enum SubgroupStreamState {
     },
     /// RESET_STREAM / RESET_STREAM_AT で終端した
     ///
-    /// draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams): RESET_STREAM_AT では
+    /// draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams): RESET_STREAM_AT では
     /// `reliable_size` が指定される。古い RESET_STREAM では `None`。
     Reset {
         /// RESET_STREAM_AT の reliable サイズ (古い RESET_STREAM では `None`)
@@ -52,8 +52,8 @@ pub enum SubgroupStreamState {
     },
     /// Subscriber 側から STOP_SENDING を受けて終端した
     ///
-    /// draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams) /
-    /// Appendix A.5 (Since draft-ietf-moq-transport-17) #1583:
+    /// draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams) /
+    /// Appendix A.6 (Since draft-ietf-moq-transport-17) #1583:
     /// REQUEST_UPDATE で購読が再開された (PAUSED が 1→0) 場合に再オープン可能
     StoppedByPeer,
 }
@@ -66,13 +66,13 @@ impl SubgroupStreamState {
     /// (PAUSED が 1→0 に変わる) が受理されるまで送信 API
     /// (`send_subgroup_header` / `send_subgroup_object`) が拒否する。
     ///
-    /// - draft-ietf-moq-transport-22 §2.2 (Subgroups): premature reset からの再オープン
-    /// - draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams): "A publisher that
+    /// - draft-ietf-moq-transport-23 §2.2 (Subgroups): premature reset からの再オープン
+    /// - draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams): "A publisher that
     ///   receives a STOP_SENDING on a Subgroup stream SHOULD NOT attempt to open a new stream
     ///   to deliver additional Objects in that Subgroup. However, if the publisher subsequently
     ///   receives a REQUEST_UPDATE that resumes the subscription, it MAY open a
     ///   new stream ..." STOP_SENDING 後の再オープンは購読の再開 (PAUSED 1→0) の場合のみ
-    /// - draft-ietf-moq-transport-22 §5.2 (Delivery Timeouts and Data Reliability):
+    /// - draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability):
     ///   DELIVERY_TIMEOUT 起因の reset 後の再送は SHOULD NOT。本判定は終端種別のみを見るため
     ///   この条件は区別せず、reason (`DataStreamResetReason::DeliveryTimeout`) に応じて
     ///   再送を控えるのはアプリの責務とする
@@ -96,16 +96,16 @@ type SubgroupKey = (u64, u64, u64);
 
 /// Subgroup ストリームのライフサイクル追跡
 ///
-/// draft-ietf-moq-transport-22 §2.2 (Subgroups) / draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams) に基づき、同一キーの再オープン / 並行 2 本ストリームを拒否する。
+/// draft-ietf-moq-transport-23 §2.2 (Subgroups) / draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams) に基づき、同一キーの再オープン / 並行 2 本ストリームを拒否する。
 ///
-/// また draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) の条件 1 (Publisher Priority
+/// また draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) の条件 1 (Publisher Priority
 /// 不一致) / 条件 2 (FIN 済み Subgroup への最終 Object 超過) / 条件 3 (複数 FIN の最終
 /// Object 不一致) の検出に必要な状態を保持する。
 #[derive(Debug, Default, Clone)]
 pub struct SubgroupTracker {
     entries: HashMap<SubgroupKey, SubgroupStreamState>,
     /// Subgroup キーごとに初回オープン時の Publisher Priority を保持する
-    /// (draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 1 の検出用)
+    /// (draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 1 の検出用)
     priorities: HashMap<SubgroupKey, u8>,
     /// FIN 済み Subgroup の最終 Object ID を保持する (条件 2/3 の検出用)
     ///
@@ -123,7 +123,7 @@ impl SubgroupTracker {
     /// 新しい Subgroup ストリームのオープンを記録する
     ///
     /// すでに同一キーのエントリが Open 中の場合は `PROTOCOL_VIOLATION` を返す。
-    /// 終端済みの場合は draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1583
+    /// 終端済みの場合は draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1583
     /// (REQUEST_UPDATE で購読再開 (PAUSED 1→0)) に基づき、`can_reopen()` が true なら
     /// 再オープンを許可する。それ以外の終端状態は `PROTOCOL_VIOLATION` を返す。
     pub fn open(
@@ -142,7 +142,7 @@ impl SubgroupTracker {
                 "concurrent Subgroup stream open for the same (track_alias, group_id, subgroup_id)",
             )),
             Some(_) => Err(MessageError::ProtocolViolation(
-                "reopening a terminated Subgroup stream is prohibited (draft-ietf-moq-transport-22 §2.2 (Subgroups) / draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams))",
+                "reopening a terminated Subgroup stream is prohibited (draft-ietf-moq-transport-23 §2.2 (Subgroups) / draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams))",
             )),
             None => {
                 self.entries.insert(key, SubgroupStreamState::Open);
@@ -154,7 +154,7 @@ impl SubgroupTracker {
     /// FIN での正常終端を記録する (未知キーに対しては無視)
     ///
     /// `last_object_id` は FIN 前に受信した最終 Object の ID。Object を 1 つも受信せずに
-    /// FIN した場合は `None`。draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 2/3
+    /// FIN した場合は `None`。draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 2/3
     /// の検出に使う。
     ///
     /// 条件 3: 同一 Subgroup キーが 2 回目の FIN を迎えたとき、記録済みの最終 Object ID と
@@ -230,7 +230,7 @@ impl SubgroupTracker {
 
     /// Subgroup の Publisher Priority を記録し、既存記録と不一致なら条件 1 として検出する
     ///
-    /// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 1:
+    /// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 1:
     /// "An Object with a particular Subgroup ID is received, but its Publisher Priority is
     /// different from that of the previous Object with the same Subgroup ID."
     ///
@@ -257,7 +257,7 @@ impl SubgroupTracker {
 
     /// FIN 済み Subgroup に対して最終 Object ID より大きい Object ID が到着したか検査する
     ///
-    /// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 2:
+    /// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 2:
     /// "An Object is received whose Object ID is larger than the final Object in the Subgroup.
     /// The final Object in a Subgroup is the last Object received on a Subgroup stream before
     /// a FIN."

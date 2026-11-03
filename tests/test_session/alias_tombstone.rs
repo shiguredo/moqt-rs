@@ -1,6 +1,6 @@
 //! キャンセル後の Track Alias 保持 (discard 用 tombstone) テスト
 //!
-//! draft-ietf-moq-transport-22 §3.1.3 (Track Alias):
+//! draft-ietf-moq-transport-23 §3.1.3 (Track Alias):
 //! "Objects can arrive after a subscription has been cancelled. Subscribers SHOULD retain
 //! sufficient state to quickly discard these unwanted Objects, rather than treating them as
 //! belonging to an unknown Track Alias."
@@ -155,7 +155,7 @@ fn never_subscribed_alias_is_unknown() {
 
 /// tombstone 状態の alias に新しい SUBSCRIBE_OK が来たら上書きして受理する
 ///
-/// draft-ietf-moq-transport-22 §3.1.3 の DUPLICATE_TRACK_ALIAS は "with an Established
+/// draft-ietf-moq-transport-23 §3.1.3 の DUPLICATE_TRACK_ALIAS は "with an Established
 /// subscription" が条件なので、tombstone は衝突扱いにならない。
 #[test]
 fn tombstoned_alias_can_be_reused_by_new_subscription() {

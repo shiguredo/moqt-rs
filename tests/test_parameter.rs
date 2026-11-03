@@ -442,7 +442,7 @@ mod accessors {
 
 /// MAX_REQUEST_UPDATES (type 0x08) のアクセサ
 ///
-/// draft-ietf-moq-transport-22 §9.1.7 (MAX_REQUEST_UPDATES)
+/// draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES)
 #[test]
 fn max_request_updates() {
     let mut options = SetupOptions::new();
@@ -455,7 +455,7 @@ fn max_request_updates() {
 
 /// MAX_FILTER_RANGES (type 0x06) のアクセサ
 ///
-/// draft-ietf-moq-transport-22 §9.1.6 / §3.3.2 (Range Filters)
+/// draft-ietf-moq-transport-23 §9.1.6 / §3.3.2 (Range Filters)
 #[test]
 fn max_filter_ranges() {
     let mut options = SetupOptions::new();
@@ -669,7 +669,7 @@ mod authorization_token_encoding_strictness {
     }
 }
 
-/// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): Setup Option 値の 2^16-1 バイト上限
+/// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): Setup Option 値の 2^16-1 バイト上限
 mod setup_option_value_length_limit {
     use super::*;
     use shiguredo_moqt::parameter::{SETUP_OPTION_AUTHORIZATION_TOKEN, SETUP_OPTION_PATH};
@@ -751,7 +751,7 @@ mod setup_option_value_length_limit {
     }
 }
 
-/// draft-ietf-moq-transport-22 §9.1.4 (AUTHORIZATION TOKEN): SETUP で DELETE /
+/// draft-ietf-moq-transport-23 §9.1.4 (AUTHORIZATION TOKEN): SETUP で DELETE /
 /// USE_ALIAS を受信した場合は PROTOCOL_VIOLATION で閉じる (MUST)。
 mod setup_authorization_token_scope {
     use super::*;

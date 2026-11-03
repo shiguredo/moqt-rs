@@ -1,11 +1,11 @@
-//! FETCH のテスト (draft-ietf-moq-transport-22 §9.11)
+//! FETCH のテスト (draft-ietf-moq-transport-23 §9.11)
 //!
 //! FETCH のフルサイクル、ストリーム終端遷移、役割違反、
 //! End Location 検証、LOCATION_FILTER 範囲検証を扱う。
 
 use super::*;
 
-/// draft-ietf-moq-transport-22 §3.2.4 (Fetch State Management): subscriber 側で FETCH データストリームの FIN を受信すると
+/// draft-ietf-moq-transport-23 §3.2.4 (Fetch State Management): subscriber 側で FETCH データストリームの FIN を受信すると
 /// `recv_fetch_data_stream_closed(Fin)` 経由で state が Terminated に遷移する。
 #[test]
 fn fetch_stream_finished_transitions_to_terminated() {
@@ -382,8 +382,8 @@ fn fetch_stream_reset_in_pending_transitions_to_terminated() {
     );
 }
 
-/// FETCH の FETCH_OK で End Location < Start Location なら PROTOCOL_VIOLATION
-/// (draft-ietf-moq-transport-22 §9.12 (FETCH_OK))
+/// FETCH の FETCH_OK で LARGEST_OBJECT が Start Location より小さければ INVALID_FIELD
+/// (draft-ietf-moq-transport-23 §3.2 (Fetch) / §16.12.1 (Session Termination Error Codes))
 #[test]
 fn fetch_ok_end_before_start_closes_session() {
     use shiguredo_moqt::message::{RequestOk as WireRequestOk, common::Location};
@@ -449,7 +449,7 @@ fn fetch_ok_end_equals_start_accepted() {
 
 /// FETCH で Start Location が対象トラックの観測 Largest (effective_largest_object、
 /// 本テストでは公開 Object 由来の largest_received_location) を上回るとき
-/// INVALID_RANGE で拒否される (draft-ietf-moq-transport-22 §3.2 (Fetch))。
+/// INVALID_RANGE で拒否される (draft-ietf-moq-transport-23 §3.2 (Fetch))。
 #[test]
 fn fetch_start_exceeds_largest_rejected_with_invalid_range() {
     use shiguredo_moqt::message::common::Location;
@@ -509,7 +509,7 @@ fn fetch_start_exceeds_largest_rejected_with_invalid_range() {
 }
 
 /// FETCH で Start == 観測 Largest のとき (greater than ではない) 範囲内として受理され、
-/// FETCH_OK が返る (draft-ietf-moq-transport-22 §3.2 (Fetch): "greater than" のみ拒否、等値は受理)。
+/// FETCH_OK が返る (draft-ietf-moq-transport-23 §3.2 (Fetch): "greater than" のみ拒否、等値は受理)。
 #[test]
 fn fetch_start_equals_largest_accepted() {
     use shiguredo_moqt::message::common::Location;
@@ -583,7 +583,7 @@ fn fetch_start_equals_largest_accepted() {
 
 /// FETCH の観測 Largest は effective_largest_object (largest_received_location との max) を
 /// 使う。largest_location が None でも公開済み object の largest_received_location を上回る Start は
-/// INVALID_RANGE で拒否される (draft-ietf-moq-transport-22 §3.2 (Fetch) / draft-ietf-moq-transport-22 §3.3.1 (Location Filters))。
+/// INVALID_RANGE で拒否される (draft-ietf-moq-transport-23 §3.2 (Fetch) / draft-ietf-moq-transport-23 §3.3.1 (Location Filters))。
 #[test]
 fn fetch_start_exceeds_received_largest_rejected() {
     use shiguredo_moqt::message::common::Location;
@@ -644,7 +644,7 @@ fn fetch_start_exceeds_received_largest_rejected() {
 
 /// FETCH で対象トラックの subscription に object が一切公開されていない (largest_location /
 /// largest_received_location が共に None) とき、Start>Largest 検証の前段の no-objects 判定で
-/// INVALID_RANGE になる (draft-ietf-moq-transport-22 §3.2 (Fetch))。
+/// INVALID_RANGE になる (draft-ietf-moq-transport-23 §3.2 (Fetch))。
 #[test]
 fn fetch_no_published_objects_rejected_with_invalid_range() {
     use shiguredo_moqt::message::common::Location;
@@ -678,7 +678,7 @@ fn fetch_no_published_objects_rejected_with_invalid_range() {
     );
 }
 
-// ─── FETCH data stream の Object 送受信 (draft §11.4.1 / §11.4.1.2) ─────────
+// ─── FETCH data stream の Object 送受信 (draft §11.4.1 / §11.4.2) ─────────
 
 /// FETCH を publisher / subscriber 両側で Established にする
 ///
@@ -965,7 +965,7 @@ fn fetch_entry_on_subgroup_stream_is_rejected() {
 /// STOP_SENDING 受信後 (draft §3.2.4 の MUST reset 実行後) にアプリが終端通知 API を呼ぶと
 /// outgoing FETCH stream エントリが除去されること
 ///
-/// draft-ietf-moq-transport-22 §3.2.4: "The Publisher can remove fetch state as soon as it has
+/// draft-ietf-moq-transport-23 §3.2.4: "The Publisher can remove fetch state as soon as it has
 /// received a STOP_SENDING. It MUST reset the bidi request stream and unidirectional data
 /// stream associated with the FETCH."
 #[test]
@@ -1141,7 +1141,7 @@ fn forget_fetch_does_not_clean_other_fetch_entries() {
 
 /// publisher 側で正常完了 (FIN 送信) した fetch を `forget_fetch` で破棄できること
 ///
-/// draft-ietf-moq-transport-22 §3.2.4 (Fetch State Management):
+/// draft-ietf-moq-transport-23 §3.2.4 (Fetch State Management):
 /// "It can remove all FETCH state after closing the data stream with a FIN." に従い、
 /// データストリーム終端済みの publisher 側 fetch は `Established` のままでも破棄可能。
 #[test]
@@ -1206,8 +1206,8 @@ fn forget_finished_fetch_absorbs_late_bidi_close() {
 /// 破棄済み fetch に後から届く REQUEST_UPDATE が unknown request id で fail すること
 ///
 /// doc で明言している挙動の検証 (draft §9.5 の "An endpoint that receives a
-/// REQUEST_UPDATE other than in the two cases above MUST close the session with a
-/// PROTOCOL_VIOLATION.")。破棄後に bidi request stream 上の制御メッセージが届いた場合は
+/// REQUEST_UPDATE other than in the two cases above MUST close the session with
+/// UNEXPECTED_MESSAGE.")。破棄後に bidi request stream 上の制御メッセージが届いた場合は
 /// 従来どおりセッションが fail する (bidi close のみ `rejected_request_ids` で吸収する)。
 #[test]
 fn forgotten_fetch_rejects_late_request_update() {
@@ -1243,7 +1243,7 @@ fn forgotten_fetch_rejects_late_request_update() {
 }
 
 /// 空 range (Start > End) の LOCATION_FILTER を持つ FETCH 送信は送信前に拒否する
-/// (draft-ietf-moq-transport-22 §3.2 (Fetch)。peer が必ず INVALID_RANGE で拒否するため)
+/// (draft-ietf-moq-transport-23 §3.2 (Fetch)。peer が必ず INVALID_RANGE で拒否するため)
 #[test]
 fn send_fetch_with_empty_filter_range_rejected() {
     use shiguredo_moqt::message::common::Location;
@@ -1285,7 +1285,7 @@ fn send_fetch_with_empty_filter_range_rejected() {
 }
 
 /// 空 range (Start > End) の FETCH 受信は INVALID_RANGE で拒否する
-/// (draft-ietf-moq-transport-22 §3.2 (Fetch) / §3.3.1 (Location Filters))
+/// (draft-ietf-moq-transport-23 §3.2 (Fetch) / §3.3.1 (Location Filters))
 #[test]
 fn fetch_with_empty_filter_range_rejected_with_invalid_range() {
     use shiguredo_moqt::message::Fetch as WireFetch;
@@ -1716,7 +1716,7 @@ fn send_fetch_with_relative_location_filter_rejected_without_consuming_request_i
 }
 
 /// FETCH で許可されないパラメータの送信は送信前に拒否し副作用を残さない
-/// (draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope))
+/// (draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope))
 #[test]
 fn send_fetch_with_disallowed_parameter_rejected_without_side_effects() {
     use shiguredo_moqt::message_parameter::{
@@ -1769,7 +1769,7 @@ fn send_fetch_with_disallowed_parameter_rejected_without_side_effects() {
 }
 
 /// LOCATION_FILTER 省略の FETCH は unfiltered として受理される
-/// (draft-ietf-moq-transport-22 §9.11 (FETCH) / §9.20.9)
+/// (draft-ietf-moq-transport-23 §9.11 (FETCH) / §9.19.9)
 #[test]
 fn fetch_without_location_filter_accepted_as_unfiltered() {
     use shiguredo_moqt::message::Fetch as WireFetch;
@@ -1828,7 +1828,7 @@ fn fetch_without_location_filter_accepted_as_unfiltered() {
 }
 
 /// Location Filter Type 0x00 (None) の LOCATION_FILTER を持つ FETCH は unfiltered として受理される
-/// (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter): Type 0x00 は no filter)
+/// (draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter): Type 0x00 は no filter)
 #[test]
 fn fetch_with_no_filter_location_filter_accepted_as_unfiltered() {
     use shiguredo_moqt::message::Fetch as WireFetch;
@@ -2037,7 +2037,7 @@ fn assert_fetch_accepted(
 /// 先頭の publisher 役 subscription が未観測でも、他の subscription が観測済みなら
 /// FETCH が INVALID_RANGE にならない (Largest は Track 単位)
 ///
-/// draft-ietf-moq-transport-22 §9.11 (FETCH) / §3.1.4: Largest Object は Track 単位の値。
+/// draft-ietf-moq-transport-23 §9.11 (FETCH) / §3.1.4: Largest Object は Track 単位の値。
 #[test]
 fn fetch_accepts_start_within_largest_of_other_publisher_subscription() {
     use shiguredo_moqt::message::common::Location;
@@ -2097,7 +2097,7 @@ fn fetch_accepts_start_within_largest_of_other_publisher_subscription() {
 /// 最大の Largest を持つ subscription が先頭でも、他方の Largest を上回る start が
 /// Track 最大以内なら受理される
 ///
-/// draft-ietf-moq-transport-22 §9.11 (FETCH) / §3.1.4: Largest Object は Track 単位の値。
+/// draft-ietf-moq-transport-23 §9.11 (FETCH) / §3.1.4: Largest Object は Track 単位の値。
 /// 先頭が未観測で他方が観測済みのケースは
 /// `fetch_accepts_start_within_largest_of_other_publisher_subscription` が担う。
 #[test]
@@ -2142,7 +2142,7 @@ fn fetch_uses_max_largest_across_publisher_subscriptions() {
 /// 大きい場合でも最大値が使われる
 ///
 /// 「最初に観測済みの 1 件だけを使う」実装 (`find_map` 相当) を検出する。
-/// draft-ietf-moq-transport-22 §9.11 (FETCH) / §3.1.4: Largest Object は Track 単位の値。
+/// draft-ietf-moq-transport-23 §9.11 (FETCH) / §3.1.4: Largest Object は Track 単位の値。
 #[test]
 fn fetch_uses_larger_largest_observed_after_smaller_one() {
     use shiguredo_moqt::message::common::Location;
@@ -2170,7 +2170,7 @@ fn fetch_uses_larger_largest_observed_after_smaller_one() {
 
 /// 要求範囲外の Location で FETCH Object を送ると `LocalFilterMismatch` で拒否されること
 ///
-/// draft-ietf-moq-transport-22 §3.3.1 (Location Filters):
+/// draft-ietf-moq-transport-23 §3.3.1 (Location Filters):
 /// "A publisher MUST NOT send objects from outside the requested range."
 #[test]
 fn fetch_object_outside_requested_range_is_rejected() {
