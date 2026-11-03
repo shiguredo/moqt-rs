@@ -3,7 +3,7 @@
 - Created: 2026-11-03
 - Completed: {YYYY-MM-DD}
 - Branch: feature/change-wt-h3-draft-17-reset-reliable-application-offset
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-11-03
 
 ## 目的
 
@@ -19,14 +19,19 @@
 
 0094 で実際の RESET_STREAM_AT と transport parameter の対応が可能になった後、アプリケーションの data offset に、その stream で実際に送った WebTransport header 長を加えた Reliable Size を設定する。
 単に header 長以上という旧条件に留めない。
-u64 overflow と header 長の可変性を検証し、MOQT 側の offset が WT header を含むかを API 契約で明確にする。
+`SessionEvent::ResetDataStream::reliable_size` の `Some(n)` は、MOQT stream の先頭からのバイト数とし、MOQT header を含み WebTransport header を含まない。WT 層だけが実際に送った WT header 長を 1 回加算する。
+`None` はアプリ offset の指定なしを表し、WT では offset 0 として WT header 分を Reliable Size に含める。他 transport の既存の `None` の意味は変えない。
+加算時の u64 overflow、QUIC varint の上限 (`2^62 - 1`)、Reliable Size が Final Size を超えないこと、および header 長の可変性を検証する。
+`crates/moq-pub/src/pipeline.rs` の `ResetDataStream` 処理 / `reset_open_subgroup_stream`、`crates/moq-pub/src/stream_writer.rs` の `SubgroupWriter::reset_by_session` から `transport::SendStream::reset` / `WtSendStream::reset` / `reset_with` まで offset を失わず渡し、Session へ返す終端通知でも同じ MOQT 基準の値を保持する。
+明示された `Some(n)` を扱えない transport は送出前にエラーを返す。
 0094 の基礎 transport 対応を重複実装する課題にはしない。
 
 ## 完了条件
 
 - アプリ offset 0 / 非 0、uni / bidi、長さの異なる session ID ヘッダで wire の Reliable Size が一致すること。
 - header 分を二重加算せず、範囲外 offset を送出前に拒否すること。
-- 未対応 transport で指定 offset を無視して成功扱いにせず、0094 の制約と整合すること。
+- `ResetDataStream` から pipeline / writer / transport まで `Some(n)` が保持され、WT の `None` は header 分を保護すること。
+- 未対応 transport で明示された `Some(n)` を無視して成功扱いにせず、0094 の制約と整合すること。
 
 ## 依存・関連
 
