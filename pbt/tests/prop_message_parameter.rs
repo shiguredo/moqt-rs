@@ -862,11 +862,11 @@ fn fill_parameters_count_framing_roundtrip() -> noprop::TestResult {
             .expect("encode したパラメータ群は decode できなければならない");
         assert_eq!(consumed, buf.len(), "生成したバイト列をすべて消費すること");
 
-        let expected_types: Vec<u64> = params.as_slice().iter().map(|p| p.param_type).collect();
-        let actual_types: Vec<u64> = decoded.as_slice().iter().map(|p| p.param_type).collect();
+        // 外側は型の並びだけでなく値まで含めて一致することを確認する。型が同じでも
+        // 値が壊れていれば検出できる
         assert_eq!(
-            actual_types, expected_types,
-            "外側のパラメータ型の並びが保たれること (後続が内側へ巻き込まれないこと)"
+            decoded, params,
+            "外側の型・値と内側のパラメータ群がすべて保たれること"
         );
         assert_eq!(
             decoded.fill_parameters(),

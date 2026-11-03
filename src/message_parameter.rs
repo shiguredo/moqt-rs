@@ -928,8 +928,9 @@ impl MessageParameters {
     /// スコープの終端を定める (draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter))。
     /// 本メソッドは内側の個数ぶんだけを読み進めるため、続く外側パラメータを内側へ巻き込まない。
     /// 内側の個数が実際の内側パラメータ数より大きいワイヤは送信側の違反であり、受信側には
-    /// 内側の境界が無いため、外側パラメータを内側として読んだうえで外側の個数不足として
-    /// `UnexpectedEof` などのフレーミング違反になる。
+    /// 内側の境界が無い。内側として読んだ先に別のフィールドが続く場合は、その先頭を内側の
+    /// パラメータとして読み進めて decode が成立し得るため、外側の個数・内側の個数の不一致を
+    /// 受信側だけで常に検出できるわけではない。呼び出し側は内側の内容を信頼してはならない。
     ///
     /// 呼び出し側はパラメータブロックの終端までのスライスを渡すこと。Track Properties が後続する
     /// メッセージ (REQUEST_OK / SUBSCRIBE_OK / PUBLISH / FETCH_OK) は payload の残り全体を渡す
@@ -1370,12 +1371,13 @@ impl MessageParameters {
     /// FILL_PARAMETERS の内側パラメータのスコープを検証する
     ///
     /// draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter): 内側のパラメータは
-    /// `FILL_PARAMETERS_ALLOWED_PARAMS` に限られ、それ以外の受信は PROTOCOL_VIOLATION で
-    /// セッションを閉じる MUST。また同 §9.19 (Control Message Parameters) は、同じ
-    /// パラメータ型の繰り返しを送信側の MUST NOT、受信側の SHOULD 検証 (PROTOCOL_VIOLATION で
-    /// 閉じる) と定める。wire では内側スコープを `decode_fill_parameters` が、重複を
-    /// `decode_inner` の一般規則が検証する。decode 済みメッセージを直接受け取る session API
-    /// 経路でも同じ検証を行う。
+    /// `FILL_PARAMETERS_ALLOWED_PARAMS` に限られ、それ以外の受信は INVALID_PARAMETER で
+    /// セッションを閉じる MUST。本 codec は既存の写像に合わせて `ProtocolViolation` を返し、
+    /// セッション終了コードへの変換は session 層が担う。また同 §9.19 (Control Message
+    /// Parameters) は、同じパラメータ型の繰り返しを送信側の MUST NOT、受信側の SHOULD 検証
+    /// (INVALID_PARAMETER で閉じる) と定める。wire では内側スコープを
+    /// `decode_fill_parameters` が、重複を `decode_inner` の一般規則が検証する。
+    /// decode 済みメッセージを直接受け取る session API 経路でも同じ検証を行う。
     pub(crate) fn validate_fill_parameters_scope(&self) -> Result<(), MessageError> {
         let mut seen = false;
         for p in &self.0 {
@@ -1594,8 +1596,9 @@ fn validate_param_encoding(param: &MessageParameter) -> Result<(), MessageError>
         MessageParameterValue::VarInt(_) => matches!(expected, ValueEncoding::VarInt),
         MessageParameterValue::Location { .. } => matches!(expected, ValueEncoding::Location),
         MessageParameterValue::LengthPrefixed(_) => {
-            // LengthPrefixed を共有するのは 0x03 AUTHORIZATION_TOKEN だけで、そちらは
-            // 生バイト列ではなく AuthorizationToken variant のみを受理する
+            // LengthPrefixed を受ける型のうち、専用 variant を要求するのは
+            // 0x03 AUTHORIZATION_TOKEN だけである。0x25-0x29 の Range Filter は生バイト列を
+            // 受理するため、ここでは 0x03 だけを除外する
             matches!(expected, ValueEncoding::LengthPrefixed)
                 && param.param_type != PARAM_AUTHORIZATION_TOKEN
         }
@@ -1641,7 +1644,13 @@ fn validate_param_encoding(param: &MessageParameter) -> Result<(), MessageError>
     // 内側に FILL_PARAMETERS を含む入れ子も、ここで内側スコープ外として拒否されるため
     // エンコードが再帰しない。
     if let MessageParameterValue::FillParameters(inner) = &param.value {
-        inner.validate_scope(FILL_PARAMETERS_ALLOWED_PARAMS)?;
+        inner
+            .validate_scope(FILL_PARAMETERS_ALLOWED_PARAMS)
+            .map_err(|_| {
+                MessageError::ProtocolViolation(
+                    "FILL_PARAMETERS inner parameter not allowed in this context",
+                )
+            })?;
     }
 
     Ok(())
@@ -1669,12 +1678,20 @@ fn validate_param_encoding(param: &MessageParameter) -> Result<(), MessageError>
 ///   `ProtocolViolation` として検出する
 /// - 内側に FILL_PARAMETERS 自身は現れない (Table 7)。`decode_value` が内側を読む前に
 ///   `ProtocolViolation` として拒否するため、深い入れ子でも再帰しない
-/// - Table 7 外のパラメータがある場合は §9.19.15 の MUST に従い `ProtocolViolation` を返す
+/// - Table 7 外のパラメータがある場合は §9.19.15 の MUST に従って拒否する。本 codec は
+///   `validate_scope` の既存の写像に合わせて `ProtocolViolation` を返し、セッション終了
+///   コード (INVALID_PARAMETER) への変換は session 層が担う
 ///
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 fn decode_fill_parameters(bytes: &[u8]) -> Result<(MessageParameters, usize), MessageError> {
     let (inner, consumed) = MessageParameters::decode_inner(bytes, false)?;
-    inner.validate_scope(FILL_PARAMETERS_ALLOWED_PARAMS)?;
+    inner
+        .validate_scope(FILL_PARAMETERS_ALLOWED_PARAMS)
+        .map_err(|_| {
+            MessageError::ProtocolViolation(
+                "FILL_PARAMETERS inner parameter not allowed in this context",
+            )
+        })?;
     Ok((inner, consumed))
 }
 

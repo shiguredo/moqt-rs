@@ -962,8 +962,7 @@ mod error_cases {
     /// 値のデコードが scope 検証より先に走るため、内側の値が途中で切れている場合は
     /// scope 違反の PROTOCOL_VIOLATION ではなく値の形式違反の MALFORMED_MESSAGE を返す。
     /// 値が最後まで読めれば従来どおり scope 違反の PROTOCOL_VIOLATION になる。
-    /// どちらもセッションを閉じるが、報告される code が変わることを固定する
-    /// (CHANGES.md に記載した受信挙動の変更)。
+    /// どちらもセッションを閉じるが、報告される code が変わることを固定する。
     #[test]
     fn subscribe_ok_with_fill_parameters_reports_value_error_first() {
         // SUBSCRIBE_OK (0x04), Length = 6, Track Alias = 0,

@@ -163,7 +163,7 @@ mod error_cases {
 
         // FILL_PARAMETERS の内側にも長さプレフィックス付きの値 (Range Filter) は載る。
         // 内側: Number of Parameters=1, delta=PARAM_SUBGROUP_FILTER、宣言長 10、データ 3 バイト。
-        // 宣言長が残りバッファを超えるため、内側のスコープ境界 (個数) によらず
+        // 宣言長が残りバッファ全体を超えるため、内側の個数とは独立に
         // KEY_VALUE_FORMATTING_ERROR になる (draft-ietf-moq-transport-22 §8.3
         // (Key-Value-Pair Structure))。
         let mut buf = Vec::new();
@@ -2200,7 +2200,7 @@ mod fill_parameters {
         assert_eq!(
             MessageParameters::decode(&wire),
             Err(MessageError::ProtocolViolation(
-                "message parameter not allowed in this message type"
+                "FILL_PARAMETERS inner parameter not allowed in this context"
             )),
             "Table 7 外の内側パラメータは PROTOCOL_VIOLATION であること"
         );
@@ -2452,7 +2452,7 @@ mod fill_parameters {
         assert_eq!(
             params.encode(&mut buf),
             Err(MessageError::ProtocolViolation(
-                "message parameter not allowed in this message type"
+                "FILL_PARAMETERS inner parameter not allowed in this context"
             )),
             "内側の Table 7 外の型は encode で拒否されること"
         );
@@ -2474,7 +2474,7 @@ mod fill_parameters {
         assert_eq!(
             params.encode(&mut buf),
             Err(MessageError::ProtocolViolation(
-                "message parameter not allowed in this message type"
+                "FILL_PARAMETERS inner parameter not allowed in this context"
             )),
             "入れ子の FILL_PARAMETERS は encode で拒否されること"
         );
