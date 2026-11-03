@@ -3,7 +3,7 @@
 - Created: 2026-11-03
 - Completed: {YYYY-MM-DD}
 - Branch: feature/change-wt-h3-draft-17-settings-version-negotiation
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-11-03
 
 ## 目的
 
@@ -30,7 +30,9 @@ draft 17 の §9.2 は `0x20b8933b` を割り当てる。
 ## 差分の確認範囲
 
 - §3.2 の前接続 SETTINGS のキャッシュ破棄は 0408、§4.3 の WT_STREAM の位置と終了コードは 0409、§4.4 の Reliable Size は 0410 で追跡する。
-- §5.6.2 / §5.6.4 の初期値を基準にする厳密増加は、固定中の依存の WebTransport Session::process_capsule が初期値を remote_limits に設定したうえで <= を拒否しており対応済みである。
+- §5.6.2 / §5.6.4 の初期値を基準にする厳密増加は、固定中の依存の standalone な `webtransport::Session` では、フロー制御を有効にし、利用側が `initialize_remote_limits` を明示的に呼んだ後に `process_capsule` が `<=` を拒否する。
+  adapter はこの Session API を使わず、既定設定ではフロー制御を宣言しないため該当 capsule は依存の Connection 層で無視される。
+  本 issue の交渉更新でも既定のフロー制御無効を維持し、`ClientConfig::enable_webtransport` でフロー制御を広告する任意設定の受信経路まで対応済みとは扱わない。
 - §4.6 の応答前 stream / datagram の拒否・drop と再送の説明は確認済み。adapter は 2xx 応答を待ってから session を返すため、optimistic な送信や自動再送を追加しない。
 - §4.4 / §5 の intermediary のヘッダ長調整と上限転送は、この endpoint adapter の責務外である。
 - §2.2 の HTTPS URI、重複文の削除、§8 の flow control 無効時の同居 HTTP との deadlock の説明、参照・IANA の変更も確認済み。現行 adapter は接続を専用に使い、他の HTTP 要求と多重化しない。
