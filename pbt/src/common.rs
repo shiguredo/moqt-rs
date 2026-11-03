@@ -199,8 +199,8 @@ pub const SETUP_SAMPLING_SMALL: SetupSampling = SetupSampling {
 /// 偶数型は varint 値、奇数型はバイト列。
 /// PATH (0x01) / AUTHORITY (0x05) は encode 時に URI バリデーションがあるため、
 /// 生成側でも RFC 3986 の必要 subset を満たす値だけを作る。AUTHORIZATION_TOKEN (0x03) は
-/// Token 構造なので除外する。MAX_CONTROL_MESSAGE_SIZE (0x09) は奇数型だが値が varint であり
-/// 最小値 65535 を持つため、専用の分岐で生成する
+/// Token 構造なので除外する。MAX_CONTROL_MESSAGE_SIZE (0x09) は奇数型の Length 付き
+/// バイト列だが、その中身が varint であり最小値 65535 を持つため、専用の分岐で生成する
 /// (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE))。
 pub fn sample_setup_option_with(
     ctx: &mut noprop::TestCaseContext,

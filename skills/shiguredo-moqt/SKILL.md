@@ -251,6 +251,8 @@ fn peer_auth_token_cache(&self) -> &AuthTokenCache
 fn peer_max_auth_token_cache_size(&self) -> u64
 fn peer_alias_retention_ms(&self) -> u64
 fn set_peer_alias_retention_ms(&mut self, retention_ms: u64)
+fn local_max_control_message_size(&self) -> u64
+fn peer_control_message_size_limit(&self) -> PeerControlMessageSizeLimit
 ```
 
 ### 利用者が match / 引数で使う enum
@@ -270,6 +272,7 @@ pub enum RequestStreamEnd {
 pub enum FetchState { Pending, Established, Terminated }
 pub enum TrackDataAcceptance { Accepted, UnknownTrackAlias, Discarded, FilteredOut }
 pub enum DatagramAcceptance { Object(TrackDataAcceptance), Padding }
+pub enum PeerControlMessageSizeLimit { BeforeSetup, Omitted, Advertised(u64) }
 ```
 
 `DataStreamResetReason` は `fn error_code(self) -> u64` で対応する Stream Reset Error Code を取得できる。
@@ -735,6 +738,7 @@ fn max_auth_token_cache_size(&self) -> Option<u64>
 fn authority(&self) -> Option<&[u8]>
 fn max_request_updates(&self) -> Option<u64>
 fn max_filter_ranges(&self) -> Option<u64>
+fn max_control_message_size(&self) -> Option<u64>
 
 pub struct SetupOption {
     pub option_type: u64,
@@ -761,9 +765,12 @@ Setup Option 型定数:
 | `SETUP_OPTION_MAX_REQUEST_UPDATES` | `0x08` |
 | `SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE` | `0x09` |
 
-`MAX_CONTROL_MESSAGE_SIZE` (0x09) は奇数型だが値は varint である
-(draft-ietf-moq-transport-23 §9.1.8)。省略時の既定値と最小値は 65535 で、
+`MAX_CONTROL_MESSAGE_SIZE` (0x09) は奇数型のため §8.3 (Key-Value-Pair Structure) の
+Length 付きバイト列であり、その中身が varint である (draft-ietf-moq-transport-23 §9.1.8)。
+省略時の既定値と最小値は 65535 で、
 `DEFAULT_MAX_CONTROL_MESSAGE_SIZE` / `MIN_MAX_CONTROL_MESSAGE_SIZE` にある。
+受信上限は `MessageDecoder::new` と `ControlStream::new` に、送信上限は
+`Session::peer_control_message_size_limit()` から取得する。
 
 ## Message Parameters (`message_parameter`)
 

@@ -25,8 +25,9 @@ fn setup_option_type_constants_match_registry() {
 
 /// MAX_CONTROL_MESSAGE_SIZE (Option Type 0x09) のエンコード / デコード
 ///
-/// draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE): 型番号は奇数だが値は
-/// varint であり、最小値は 65535、省略時の既定値も 65535 である。
+/// draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE): 型番号 0x09 は奇数型の
+/// ため §8.3 (Key-Value-Pair Structure) の Length 付きバイト列であり、その中身が varint で
+/// ある。最小値は 65535、省略時の既定値も 65535 である。
 mod max_control_message_size {
     use super::*;
     use shiguredo_moqt::parameter::{
@@ -59,20 +60,22 @@ mod max_control_message_size {
         assert_eq!(SetupOptions::new().max_control_message_size(), None);
     }
 
-    /// 型番号 0x09 は長さ付きバイト列ではなく varint で書かれる
+    /// 型番号 0x09 は Length 付きの varint で書かれる
     ///
-    /// ワイヤは delta type (0x09) + varint 値の 4 バイトだけであり、長さプレフィックスを
-    /// 持たない。65535 は 3 バイトの vi64 (0xC0 0xFF 0xFF) で表される。
+    /// ワイヤは delta type (0x09) + Length + varint 値である
+    ///
+    /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): 奇数型は Length を持つ。
+    /// 65535 は 3 バイトの vi64 (0xC0 0xFF 0xFF) で表されるため、Length は 0x03 になる。
     #[test]
-    fn wire_format_is_varint_without_length() {
+    fn wire_format_is_length_prefixed_varint() {
         let mut buf = Vec::new();
         options_with(65_535)
             .encode(&mut buf)
             .expect("正当なテスト入力の encode は成功する");
         assert_eq!(
             buf,
-            vec![0x09, 0xC0, 0xFF, 0xFF],
-            "delta type + 3 バイト vi64 の値であること"
+            vec![0x09, 0x03, 0xC0, 0xFF, 0xFF],
+            "delta type + Length (3) + 3 バイト vi64 の値であること"
         );
 
         let (decoded, consumed) =
@@ -82,6 +85,63 @@ mod max_control_message_size {
             decoded.max_control_message_size(),
             Some(65_535),
             "decode した値を取得できること"
+        );
+    }
+
+    /// Length と varint のバイト数が一致しないワイヤは拒否される
+    ///
+    /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): Type を理解したうえで
+    /// Length/Value が直列化と一致しない場合は MALFORMED_KEY_VALUE である。
+    #[test]
+    fn decode_rejects_length_mismatch() {
+        // Length は 2 だが、中身の varint は 3 バイト (65535) を要求する
+        let wire = [0x09u8, 0x02, 0xC0, 0xFF, 0xFF];
+        let err = SetupOptions::decode(&wire).expect_err("Length と varint 長の不一致は拒否される");
+        assert!(
+            matches!(err, MessageError::KeyValueFormattingError(_)),
+            "KeyValueFormattingError を期待したが {err:?} になった"
+        );
+    }
+
+    /// Length が 0 のワイヤは拒否される
+    ///
+    /// 空のバイト列は varint として復号できないため MALFORMED_KEY_VALUE とする。
+    #[test]
+    fn decode_rejects_empty_value() {
+        let wire = [0x09u8, 0x00];
+        let err = SetupOptions::decode(&wire).expect_err("Length 0 の値は拒否される");
+        assert!(
+            matches!(err, MessageError::KeyValueFormattingError(_)),
+            "KeyValueFormattingError を期待したが {err:?} になった"
+        );
+    }
+
+    /// Length が残りバッファを超えるワイヤは拒否される
+    ///
+    /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の MUST により
+    /// MALFORMED_KEY_VALUE とする。
+    #[test]
+    fn decode_rejects_length_exceeding_buffer() {
+        // Length は 3 だが、中身は 2 バイトしかない
+        let wire = [0x09u8, 0x03, 0xC0, 0xFF];
+        let err = SetupOptions::decode(&wire).expect_err("Length 超過は拒否される");
+        assert!(
+            matches!(err, MessageError::KeyValueFormattingError(_)),
+            "KeyValueFormattingError を期待したが {err:?} になった"
+        );
+    }
+
+    /// Length の範囲に varint の後続バイトが余っているワイヤは拒否される
+    ///
+    /// 値は単一の varint であり、Length のバイト数をすべて消費しなければならない。
+    #[test]
+    fn decode_rejects_trailing_bytes_in_value() {
+        // Length は 3 だが、varint (65535) は 3 バイトで、さらに 0x00 が余る
+        let wire = [0x09u8, 0x04, 0xC0, 0xFF, 0xFF, 0x00];
+        let err = SetupOptions::decode(&wire).expect_err("値の余剰バイトは拒否される");
+        assert!(
+            matches!(err, MessageError::KeyValueFormattingError(_)),
+            "KeyValueFormattingError を期待したが {err:?} になった"
         );
     }
 
@@ -115,8 +175,8 @@ mod max_control_message_size {
             "InvalidField を期待したが {err:?} になった"
         );
         assert!(
-            buf.is_empty() || buf == [0x09],
-            "拒否した option 以降のバイトを書かないこと: {buf:?}"
+            buf.is_empty(),
+            "拒否した option のバイトを書かないこと: {buf:?}"
         );
     }
 
@@ -125,11 +185,10 @@ mod max_control_message_size {
     /// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の INVALID_FIELD (0x301)。
     #[test]
     fn decode_rejects_value_below_minimum() {
-        use shiguredo_moqt::varint;
-        let mut buf = Vec::new();
-        varint::encode(SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE, &mut buf);
-        varint::encode(65_534, &mut buf);
-        let err = SetupOptions::decode(&buf).expect_err("65535 未満の設定値は decode で拒否される");
+        // delta type 0x09 + Length 3 + 3 バイト vi64 (65534 = 0xC0 0xFF 0xFE)
+        let wire = [0x09u8, 0x03, 0xC0, 0xFF, 0xFE];
+        let err =
+            SetupOptions::decode(&wire).expect_err("65535 未満の設定値は decode で拒否される");
         assert!(
             matches!(err, MessageError::InvalidField(_)),
             "InvalidField を期待したが {err:?} になった"
@@ -138,7 +197,8 @@ mod max_control_message_size {
 
     /// 型番号 0x09 に Bytes 値を与えると InvalidParameter になる
     ///
-    /// 0x09 は奇数型だが値は varint であり、長さ付きバイト列は定義されていない。
+    /// 0x09 の値は varint として解釈するため、生のバイト列を保持する Bytes variant は
+    /// エンコードできない。
     #[test]
     fn encode_rejects_bytes_value() {
         let mut options = SetupOptions::new();
@@ -159,11 +219,11 @@ mod max_control_message_size {
     /// 非最小符号化された値もデコードできる
     ///
     /// draft-ietf-moq-transport-23 §8.1 (Variable-Length Integers): decode 側は非最小
-    /// エンコーディングをエラーにしない。
+    /// エンコーディングをエラーにしない。Length は実際に書かれたバイト数と一致していればよい。
     #[test]
     fn decode_accepts_non_minimal_value() {
-        // delta type 0x09 + 65535 を 4 バイト vi64 で表す (0xE0 0x00 0xFF 0xFF)
-        let wire = [0x09u8, 0xE0, 0x00, 0xFF, 0xFF];
+        // delta type 0x09 + Length 4 + 65535 を 4 バイト vi64 で表す (0xE0 0x00 0xFF 0xFF)
+        let wire = [0x09u8, 0x04, 0xE0, 0x00, 0xFF, 0xFF];
         let (decoded, consumed) =
             SetupOptions::decode(&wire).expect("非最小符号化の値は受理されること");
         assert_eq!(consumed, wire.len());
@@ -198,9 +258,9 @@ mod max_control_message_size {
         // decode: 同じ型を delta 0 で 2 つ並べる
         let mut wire = Vec::new();
         wire.push(0x09); // delta type = 0x09
-        wire.extend_from_slice(&[0xC0, 0xFF, 0xFF]); // 65535
+        wire.extend_from_slice(&[0x03, 0xC0, 0xFF, 0xFF]); // Length 3 + 65535
         wire.push(0x00); // delta = 0 (同じ型)
-        wire.extend_from_slice(&[0xC0, 0xFF, 0xFF]); // 65535
+        wire.extend_from_slice(&[0x03, 0xC0, 0xFF, 0xFF]); // Length 3 + 65535
         let err = SetupOptions::decode(&wire).expect_err("0x09 の重複は decode で拒否される");
         assert!(
             matches!(err, MessageError::ProtocolViolation(_)),
@@ -210,7 +270,8 @@ mod max_control_message_size {
 
     /// 未知の奇数型は従来どおり長さ付きバイト列として扱われる
     ///
-    /// 0x09 の例外を一般化しすぎていないことを固定する (他の奇数型は Length を持つ)。
+    /// 0x09 も Length を持つため、他の奇数型と KV の構造は共通である。0x09 だけ値の中身を
+    /// varint として解釈する。この区別を一般化しすぎていないことを固定する。
     #[test]
     fn other_odd_type_keeps_length_prefixed_form() {
         let mut options = SetupOptions::new();
@@ -231,7 +292,8 @@ mod max_control_message_size {
 
     /// PATH と 0x09 を併用しても互いの解釈に影響しない
     ///
-    /// 0x09 が varint 例外でも、既存の奇数型 (PATH) の長さ付きバイト列の解釈は変わらない。
+    /// 0x09 も Length 付き varint であり、既存の奇数型 (PATH) の長さ付きバイト列の解釈は
+    /// 変わらない。
     #[test]
     fn mixed_with_path_option() {
         let mut options = SetupOptions::new();

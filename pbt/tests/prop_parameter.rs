@@ -43,9 +43,9 @@ fn roundtrip() -> noprop::TestResult {
 
 /// sampler が MAX_CONTROL_MESSAGE_SIZE (0x09) を生成すること (roundtrip のカバレッジゲート)
 ///
-/// `roundtrip` は sampler が生成した値だけを往復させる。0x09 は奇数型だが値が varint という
-/// 例外であり、sampler が生成しないとこの経路の往復が検証されない
-/// (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE))。
+/// `roundtrip` は sampler が生成した値だけを往復させる。0x09 は奇数型の Length 付き
+/// バイト列の中身が varint という特殊な形式であり、sampler が生成しないとこの経路の
+/// 往復が検証されない (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE))。
 #[test]
 fn sample_covers_max_control_message_size() -> noprop::TestResult {
     let seen = std::cell::Cell::new(false);

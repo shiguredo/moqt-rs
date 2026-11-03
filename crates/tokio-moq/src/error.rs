@@ -106,8 +106,10 @@ pub enum TransportError {
     },
     /// MOQT メッセージの encode / decode 失敗
     ///
-    /// draft-ietf-moq-transport-22 §9 (Control Messages) と §9.20.1 (Parameter Scope) は
-    /// 不正なメッセージの受信を PROTOCOL_VIOLATION で閉じることを MUST で要求する。
+    /// draft-ietf-moq-transport-23 §9 (Control Messages) と §9.19.1 (Parameter Scope) は
+    /// 不正なメッセージの受信を終了コード付きで閉じることを MUST で要求する。終了コードは
+    /// 失敗の種類に応じて `MessageError` から選ぶ (本文長の不一致は MALFORMED_MESSAGE、
+    /// 宣言長の超過は FIELD_LENGTH_EXCEEDED、フィールド値の逸脱は INVALID_FIELD など)。
     /// どの終了コードで閉じるかは I/O 層 (アプリ) が決めるため、`MessageError` の
     /// variant を保って伝える。
     Moqt(shiguredo_moqt::error::MessageError),

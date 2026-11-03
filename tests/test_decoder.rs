@@ -244,6 +244,42 @@ fn test_declared_length_at_limit_waits_for_body() {
     );
 }
 
+/// 既定値より大きい受信上限を設定したデコーダーは、その上限まで本文を受理する
+///
+/// 受信上限が実際に判定へ使われることを、既定上限 (65535) では拒否される 70,000 バイトの
+/// 本文が、上限 1,000,000 のデコーダーでは受理されることで固定する。
+/// 大きな受信上限を許す場合は transport のフロー制御窓もメッセージ全体以上にする必要がある
+/// (draft-ietf-moq-transport-23 §15.5 (Resource Exhaustion))。
+#[test]
+fn test_non_default_receive_limit_accepts_larger_body() {
+    let message = ControlMessage::Unsupported {
+        type_id: 0x06,
+        request_id: None,
+        body: vec![0u8; 70_000],
+    };
+    let encoded = message
+        .encode(1_000_000)
+        .expect("受信上限 1,000,000 の encode は成功する");
+
+    let mut large = MessageDecoder::new(1_000_000);
+    large.push(&encoded);
+    let result = large
+        .try_decode_message()
+        .expect("上限内の本文はデコードできること");
+    assert!(
+        matches!(result, Some(ControlMessage::Unsupported { .. })),
+        "既定値より大きい上限では 70,000 バイトの本文を受理すること: {result:?}"
+    );
+
+    let mut default_limit = decoder();
+    default_limit.push(&encoded);
+    let result = default_limit.try_decode_message();
+    assert!(
+        matches!(result, Err(MessageError::FieldLengthExceeded(_))),
+        "既定上限では同じ宣言長を拒否すること: {result:?}"
+    );
+}
+
 /// 非最小符号化された Length も受理する
 ///
 /// draft-ietf-moq-transport-23 §8.1 (Variable-Length Integers): decode 側は非最小

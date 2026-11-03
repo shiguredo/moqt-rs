@@ -691,6 +691,38 @@ fn local_max_control_message_size_at_minimum_is_accepted() {
     assert_eq!(client.local_max_control_message_size(), 65_535);
 }
 
+/// 自側の MAX_CONTROL_MESSAGE_SIZE を Bytes 値で設定すると拒否される
+///
+/// 型番号 0x09 の値は varint として解釈するため、生のバイト列では広告として成立しない。
+/// 値の形式違反は INVALID_FIELD (§12.2) として扱う。
+#[test]
+fn local_max_control_message_size_with_bytes_value_is_rejected() {
+    let mut options = SetupOptions::new();
+    options.push(SetupOption {
+        option_type: shiguredo_moqt::parameter::SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE,
+        value: SetupOptionValue::Bytes(vec![0x01, 0x00, 0x00]),
+    });
+    let err = Session::new_client(Transport::WebTransport, options)
+        .expect_err("Bytes 値の 0x09 は拒否されること");
+    assert_eq!(err.code, SESSION_INVALID_FIELD);
+}
+
+/// 自側の MAX_CONTROL_MESSAGE_SIZE を重複して設定すると拒否される
+///
+/// draft-ietf-moq-transport-23 §9.1 (SETUP): "Senders MUST NOT repeat the same Option Type
+/// in a message unless the option definition explicitly allows multiple instances."
+#[test]
+fn local_max_control_message_size_duplicate_is_rejected() {
+    let mut options = options_with_max_control_message_size(65_535);
+    options.push(SetupOption {
+        option_type: shiguredo_moqt::parameter::SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE,
+        value: SetupOptionValue::VarInt(1_000_000),
+    });
+    let err = Session::new_client(Transport::WebTransport, options)
+        .expect_err("0x09 の重複は拒否されること");
+    assert_eq!(err.code, SESSION_INVALID_FIELD);
+}
+
 /// peer SETUP 受信前の送信上限は BeforeSetup で既定値 65535
 ///
 /// draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE): "Until an endpoint receives

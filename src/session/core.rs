@@ -36,8 +36,8 @@ use crate::message::{
 use crate::message_parameter::{AuthorizationToken, MessageParameters};
 use crate::object_properties::{ObjectFieldTracker, ObjectPropertyTracker};
 use crate::parameter::{
-    DEFAULT_MAX_CONTROL_MESSAGE_SIZE, MIN_MAX_CONTROL_MESSAGE_SIZE, SetupOptions,
-    SetupUriValidationError,
+    DEFAULT_MAX_CONTROL_MESSAGE_SIZE, MIN_MAX_CONTROL_MESSAGE_SIZE,
+    SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE, SetupOptionValue, SetupOptions, SetupUriValidationError,
 };
 use crate::subgroup_tracker::SubgroupTracker;
 use crate::track_properties::TrackProperties;
@@ -2983,20 +2983,42 @@ fn validate_setup_uri_format(options: &SetupOptions) -> Result<(), SessionError>
     })
 }
 
-/// MAX_CONTROL_MESSAGE_SIZE が仕様の最小値以上か検証する
+/// MAX_CONTROL_MESSAGE_SIZE が仕様の形式・最小値を満たすか検証する
 ///
 /// draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE): "The value ... MUST be at
 /// least 65535." 値が許容範囲外の制御メッセージフィールドに該当するため INVALID_FIELD で閉じる
 /// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
 /// 自側の SETUP に設定した値と peer の SETUP が広告した値の双方に適用する。
+/// 型番号 0x09 の値は varint であるため、Bytes 値や重複した設定は広告として解釈できない。
+/// こちらも同じく INVALID_FIELD で拒否する。
 fn validate_max_control_message_size(options: &SetupOptions) -> Result<(), SessionError> {
-    if let Some(value) = options.max_control_message_size()
-        && value < MIN_MAX_CONTROL_MESSAGE_SIZE
-    {
-        return Err(SessionError::new(
-            SESSION_INVALID_FIELD,
-            "MAX_CONTROL_MESSAGE_SIZE is less than 65535",
-        ));
+    let mut found = false;
+    for option in options.iter() {
+        if option.option_type != SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE {
+            continue;
+        }
+        if found {
+            return Err(SessionError::new(
+                SESSION_INVALID_FIELD,
+                "MAX_CONTROL_MESSAGE_SIZE is duplicated",
+            ));
+        }
+        found = true;
+        let value = match &option.value {
+            SetupOptionValue::VarInt(value) => *value,
+            _ => {
+                return Err(SessionError::new(
+                    SESSION_INVALID_FIELD,
+                    "MAX_CONTROL_MESSAGE_SIZE must be a variable-length integer",
+                ));
+            }
+        };
+        if value < MIN_MAX_CONTROL_MESSAGE_SIZE {
+            return Err(SessionError::new(
+                SESSION_INVALID_FIELD,
+                "MAX_CONTROL_MESSAGE_SIZE is less than 65535",
+            ));
+        }
     }
     Ok(())
 }

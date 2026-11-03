@@ -1686,9 +1686,10 @@ mod tests {
         run_with_timeout(async {
             let (mut peer, establish) = connect_handshake().await;
 
-            // delta type = 0x09、値 = 65534 (最小値の 1 バイト下)
+            // delta type = 0x09、Length = 3、値 = 65534 (最小値の 1 バイト下)
             let mut body =
                 vec![shiguredo_moqt::parameter::SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE as u8];
+            body.push(0x03); // 65534 の vi64 は 3 バイト
             shiguredo_moqt::varint::encode(65_534, &mut body);
             peer.send_control_stream_head(setup_head(body))
                 .await

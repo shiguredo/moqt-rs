@@ -2,8 +2,10 @@
 //!
 //! Setup Options は Key-Value-Pair 形式で、カウントプレフィックスなし。
 //! ペイロード末尾まで KVP を読む。
-//! 型番号 (type) が偶数の場合は値が varint、奇数の場合は長さ付きバイト列。
-//! 例外として MAX_CONTROL_MESSAGE_SIZE (0x09) は奇数型だが値が varint である
+//! 型番号 (type) が偶数の場合は値が varint、奇数の場合は長さ付きバイト列
+//! (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure))。
+//! MAX_CONTROL_MESSAGE_SIZE (0x09) は奇数型のため Length 付きバイト列であり、
+//! そのバイト列の中身が varint である
 //! (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE))。
 use crate::{
     error::MessageError,
@@ -426,6 +428,13 @@ impl SetupOptions {
         self.0.is_empty()
     }
 
+    /// 含まれる Setup Option を挿入順に返す
+    ///
+    /// ワイヤ上の順序は `encode` が型番号でソートするため、この順序と一致しない。
+    pub fn iter(&self) -> impl Iterator<Item = &SetupOption> {
+        self.0.iter()
+    }
+
     /// Setup Options をバッファにエンコードする (draft-ietf-moq-transport-22 §9.1 (SETUP))
     ///
     /// カウントプレフィックスなし。デルタエンコードされた KVP を直接書き出す。
@@ -472,6 +481,21 @@ impl SetupOptions {
             }
         }))?;
 
+        // MAX_CONTROL_MESSAGE_SIZE の値は書き込み前に検証する。書き込み途中でエラーを返すと
+        // 呼び出し側が受け取る buf に中途半端なバイト列が残るため
+        // (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE): "MUST be at least
+        // 65535")。
+        for option in &sorted {
+            if option.option_type == SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE
+                && let SetupOptionValue::VarInt(v) = &option.value
+                && *v < MIN_MAX_CONTROL_MESSAGE_SIZE
+            {
+                return Err(MessageError::InvalidField(
+                    "MAX_CONTROL_MESSAGE_SIZE is less than 65535",
+                ));
+            }
+        }
+
         let mut prev_type: u64 = 0;
         for option in &sorted {
             // draft-ietf-moq-transport-22 §9.1 (SETUP): 偶数型は varint、奇数型は長さ付きバイト列
@@ -481,7 +505,7 @@ impl SetupOptions {
             match (&option.value, option.option_type) {
                 (SetupOptionValue::VarInt(_), t) if t % 2 == 0 => {}
                 // draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE):
-                // 型番号 0x09 は奇数だが値は varint である
+                // 型番号 0x09 は奇数型のため KVP の Length を持つが、値の中身は varint である
                 (SetupOptionValue::VarInt(_), SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE) => {}
                 (SetupOptionValue::AuthorizationToken(_), SETUP_OPTION_AUTHORIZATION_TOKEN) => {}
                 (SetupOptionValue::Bytes(_), t)
@@ -493,16 +517,17 @@ impl SetupOptions {
             crate::kvp::encode_delta_key(prev_type, option.option_type, buf);
             match &option.value {
                 SetupOptionValue::VarInt(v) => {
-                    // draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE):
-                    // "The value ... MUST be at least 65535." 送信側でも最小値を守る
-                    if option.option_type == SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE
-                        && *v < MIN_MAX_CONTROL_MESSAGE_SIZE
-                    {
-                        return Err(MessageError::InvalidField(
-                            "MAX_CONTROL_MESSAGE_SIZE is less than 65535",
-                        ));
+                    if option.option_type == SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE {
+                        // draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE):
+                        // 型番号 0x09 は奇数型のため §8.3 (Key-Value-Pair Structure) の規則に
+                        // 従って Length を付け、その中身を varint として書く
+                        let mut value = Vec::new();
+                        varint::encode(*v, &mut value);
+                        varint::encode(value.len() as u64, buf);
+                        buf.extend_from_slice(&value);
+                    } else {
+                        varint::encode(*v, buf);
                     }
-                    varint::encode(*v, buf);
                 }
                 SetupOptionValue::Bytes(bytes) => {
                     // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): 値長上限は 2^16-1 バイト
@@ -553,6 +578,8 @@ impl SetupOptions {
     /// - AUTHORIZATION_TOKEN の (Token Type, Token Value) 重複: `MalformedAuthToken`
     /// - MAX_CONTROL_MESSAGE_SIZE が 65535 未満
     ///   (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE)): `InvalidField`
+    /// - MAX_CONTROL_MESSAGE_SIZE の Length と varint のバイト数が一致しない、または
+    ///   Length の中身が varint として復号できない (§8.3 の MUST): `KeyValueFormattingError`
     /// - AUTHORIZATION_TOKEN の Token 構造が不正な場合 (未知の Alias Type など):
     ///   `KeyValueFormattingError`
     /// - 奇数型の値で Length varint は読めるが宣言長が残りバッファを超える場合 (Type を理解した
@@ -570,9 +597,34 @@ impl SetupOptions {
 
             let value = if option_type == SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE {
                 // draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE):
-                // 型番号 0x09 は奇数だが、値は長さ付きバイト列ではなく varint である
-                let (v, n) = varint::decode(&buf[pos..])?;
+                // 型番号 0x09 は奇数型のため §8.3 (Key-Value-Pair Structure) の規則に従って
+                // Length 付きバイト列であり、そのバイト列の中身が varint である
+                let (len, n) = varint::decode(&buf[pos..])?;
                 pos += n;
+                if len > 65535 {
+                    return Err(MessageError::ProtocolViolation(
+                        "setup option value too long",
+                    ));
+                }
+                let len = varint::checked_len(len, buf[pos..].len()).map_err(|_| {
+                    MessageError::KeyValueFormattingError(
+                        "setup option value length exceeds remaining buffer",
+                    )
+                })?;
+                let value = &buf[pos..pos + len];
+                pos += len;
+                // Type を理解したうえで Length/Value が直列化と一致しない場合は
+                // KEY_VALUE_FORMATTING_ERROR (§8.3 の MUST)
+                let (v, consumed) = varint::decode(value).map_err(|_| {
+                    MessageError::KeyValueFormattingError(
+                        "MAX_CONTROL_MESSAGE_SIZE value is not a variable-length integer",
+                    )
+                })?;
+                if consumed != len {
+                    return Err(MessageError::KeyValueFormattingError(
+                        "MAX_CONTROL_MESSAGE_SIZE value length does not match the varint",
+                    ));
+                }
                 if v < MIN_MAX_CONTROL_MESSAGE_SIZE {
                     return Err(MessageError::InvalidField(
                         "MAX_CONTROL_MESSAGE_SIZE is less than 65535",

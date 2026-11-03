@@ -3179,10 +3179,11 @@ pub async fn run(
                         peer_ended = true;
                         break 'main;
                     }
-                    // MOQT メッセージの encode / decode 失敗。§9 (Control Messages) と
-                    // §9.20.1 (Parameter Scope) は不正なメッセージの受信を PROTOCOL_VIOLATION で
-                    // 閉じることを MUST で要求する。decode は codec 層で完結し Session はこの
-                    // 違反を観測できないため、I/O 層である main ループが終了コードを決めて閉じる
+                    // MOQT メッセージの encode / decode 失敗。draft-ietf-moq-transport-23 §9
+                    // (Control Messages) と §9.19.1 (Parameter Scope) は不正なメッセージの受信を
+                    // 終了コード付きで閉じることを MUST で要求する。decode は codec 層で完結し
+                    // Session はこの違反を観測できないため、I/O 層である main ループが終了コードを
+                    // 決めて閉じる
                     Err(Error::Moqt(e)) => {
                         let code = session_error_code(&e);
                         tracing::warn!("Closing session on MOQT message error: {code:#x} {e}");

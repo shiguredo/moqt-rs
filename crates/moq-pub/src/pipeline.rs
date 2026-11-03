@@ -2901,8 +2901,8 @@ fn log_failure(message: std::fmt::Arguments<'_>, expected: bool) {
 
 /// MOQT メッセージの encode / decode 失敗なら終了コード付きで閉じる
 ///
-/// draft-ietf-moq-transport-22 §9 (Control Messages) と §9.20.1 (Parameter Scope) は
-/// 不正なメッセージの受信を PROTOCOL_VIOLATION で閉じることを MUST で要求する。
+/// draft-ietf-moq-transport-23 §9 (Control Messages) と §9.19.1 (Parameter Scope) は
+/// 不正なメッセージの受信を終了コード付きで閉じることを MUST で要求する。
 /// decode 失敗は codec 層で完結するため Session はこの違反を観測できず、I/O 層である
 /// main ループが終了コードを決める。encode 失敗はローカル要因だが、いずれにせよ致命的な
 /// 経路のため同じ写像で閉じる。`Error::Moqt` 以外は何もしない (呼び出し側が `run` の
