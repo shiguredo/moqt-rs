@@ -109,11 +109,11 @@ impl ObjectDatagram {
     ///
     /// # Errors
     ///
-    /// - STATUS と END_OF_GROUP の同時指定: `ProtocolViolation`
+    /// - STATUS と END_OF_GROUP の同時指定: `InvalidStreamHeader`
     /// - `properties_data` が空スライス / Properties Length varint が途中で切れている /
-    ///   Properties Length = 0 / 宣言長と実データ長の不一致: `ProtocolViolation`
-    /// - 非 Normal status に Properties を付けた場合: `ProtocolViolation`
-    /// - 未知の Object Status: `ProtocolViolation`
+    ///   Properties Length = 0 / 宣言長と実データ長の不一致: `MalformedObject`
+    /// - 非 Normal status に Properties を付けた場合: `InvalidObjectStatus`
+    /// - 未知の Object Status: `InvalidObjectStatus`
     pub fn encode(&self) -> Result<Vec<u8>, MessageError> {
         // STATUS と END_OF_GROUP の同時指定は無効
         if self.status.is_some() && self.end_of_group {

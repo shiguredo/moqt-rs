@@ -8,10 +8,9 @@
 use super::*;
 use shiguredo_moqt::error::{
     SESSION_CLOSED_CONTROL_STREAM, SESSION_DELTA_ENCODING_OVERFLOW, SESSION_FIELD_LENGTH_EXCEEDED,
-    SESSION_INVALID_FIELD, SESSION_INVALID_OBJECT_STATUS, SESSION_INVALID_PARAMETER,
-    SESSION_INVALID_STREAM_HEADER, SESSION_INVALID_TRACK_NAMESPACE, SESSION_MALFORMED_KEY_VALUE,
-    SESSION_MALFORMED_OBJECT, SESSION_ROLE_VIOLATION, SESSION_TRUNCATED_OBJECT,
-    SESSION_UNEXPECTED_MESSAGE,
+    SESSION_INVALID_OBJECT_STATUS, SESSION_INVALID_PARAMETER, SESSION_INVALID_STREAM_HEADER,
+    SESSION_INVALID_TRACK_NAMESPACE, SESSION_MALFORMED_KEY_VALUE, SESSION_MALFORMED_OBJECT,
+    SESSION_ROLE_VIOLATION, SESSION_TRUNCATED_OBJECT, SESSION_UNEXPECTED_MESSAGE,
 };
 use shiguredo_moqt::message::{
     Goaway, RequestUpdate, Subscribe, SubscribeOk, common::TrackNamespace,
@@ -176,6 +175,51 @@ fn wire_control_message_length_exceeded_maps_to_field_length_exceeded() {
     );
 }
 
+/// 未知のメッセージ型でも宣言長の超過は FIELD_LENGTH_EXCEEDED が優先されること
+///
+/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes): "When more than one code
+/// applies, an endpoint uses DELTA_ENCODING_OVERFLOW or FIELD_LENGTH_EXCEEDED in preference to
+/// the other codes." 未知型 (UNEXPECTED_MESSAGE) と長さ超過が同時に該当する場合も長さ超過を選ぶ。
+#[test]
+fn wire_unknown_message_type_with_oversized_length_maps_to_field_length_exceeded() {
+    let mut wire = Vec::new();
+    shiguredo_moqt::varint::encode(0x7f, &mut wire); // 未知のメッセージ型
+    shiguredo_moqt::varint::encode(4, &mut wire); // 受信上限 3 に対して 4 を宣言
+    wire.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+    let mut decoder = shiguredo_moqt::decoder::MessageDecoder::new(3);
+    decoder.push(&wire);
+    let err = decoder
+        .try_decode_message()
+        .expect_err("受信上限を超える Length は decode に失敗すること");
+    assert_eq!(
+        err.session_termination_code(),
+        Some(SESSION_FIELD_LENGTH_EXCEEDED),
+        "未知型でも宣言長の超過が優先され FIELD_LENGTH_EXCEEDED (0x401) に写ること"
+    );
+}
+
+/// デルタ溢出は後続の長さ超過より優先して DELTA_ENCODING_OVERFLOW になること
+///
+/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の優先規則。1 件目で巨大な
+/// 型を確定させ、2 件目で delta を溢出させつつ 2^16-1 を超える Length を宣言する。
+#[test]
+fn wire_delta_overflow_takes_precedence_over_field_length_exceeded() {
+    use shiguredo_moqt::track_properties::TrackProperties;
+    let mut wire = Vec::new();
+    // 1 件目: 巨大な型 (delta = u64::MAX - 1、偶数型なので値は varint 0)
+    shiguredo_moqt::varint::encode(u64::MAX - 1, &mut wire);
+    wire.push(0x00);
+    // 2 件目: delta 5 で u64 を溢出し、さらに 65,536 の長さを宣言する
+    shiguredo_moqt::varint::encode(5, &mut wire);
+    shiguredo_moqt::varint::encode(65_536, &mut wire);
+    let err = TrackProperties::decode(&wire).expect_err("delta 溢出で decode に失敗すること");
+    assert_eq!(
+        err.session_termination_code(),
+        Some(SESSION_DELTA_ENCODING_OVERFLOW),
+        "delta 溢出が優先され DELTA_ENCODING_OVERFLOW (0x400) に写ること"
+    );
+}
+
 /// 未知の Object Status を持つ OBJECT_DATAGRAM の wire は INVALID_OBJECT_STATUS (0x202) になること
 ///
 /// draft-ietf-moq-transport-23 §11.1.1 (Object Status): 定義値以外の Status を受信したら
@@ -288,6 +332,29 @@ fn api_duplicate_response_maps_to_unexpected_message() {
     );
 }
 
+/// publisher 側の購読に SUBSCRIBE_OK を直接渡すと ROLE_VIOLATION (0x304) になること
+///
+/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes): 応答は要求の受信者だけが
+/// 送れる。PUBLISH の送信側 (publisher) に SUBSCRIBE_OK が届くのは role 違反であり、
+/// 重複応答 (UNEXPECTED_MESSAGE) と区別する。
+#[test]
+fn api_subscribe_ok_for_publisher_side_subscription_maps_to_role_violation() {
+    let (mut client, mut server) = establish_pair();
+    let rid = establish_publish_sender_as_established(&mut client, &mut server, 1);
+    let ok = ControlMessage::SubscribeOk(SubscribeOk {
+        track_alias: 2,
+        parameters: MessageParameters::new(),
+        track_properties: TrackProperties::new(),
+    });
+    let err = server
+        .recv_stream_message(rid, ok)
+        .expect_err("publisher 側の購読への SUBSCRIBE_OK は拒否されること");
+    assert_eq!(
+        err.code, SESSION_ROLE_VIOLATION,
+        "role 違反は ROLE_VIOLATION (0x304) であること"
+    );
+}
+
 /// publisher から REQUEST_UPDATE を直接渡すと ROLE_VIOLATION (0x304) になること
 ///
 /// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE) は REQUEST_UPDATE を subscriber が
@@ -326,12 +393,13 @@ fn api_closed_control_stream_maps_to_closed_control_stream() {
     );
 }
 
-/// client からの非空 New Session URI を持つ GOAWAY を直接渡すと INVALID_FIELD (0x301) になること
+/// client からの非空 New Session URI を持つ GOAWAY を直接渡すと ROLE_VIOLATION (0x304) になること
 ///
 /// draft-ietf-moq-transport-23 §9.2 (GOAWAY): "A client MUST send a zero-length New Session
-/// URI in any GOAWAY." フィールドの値が許されないため INVALID_FIELD で閉じる。
+/// URI in any GOAWAY." §12.2 (Session Termination Codes) の ROLE_VIOLATION が
+/// "a server receiving a non-empty New Session URI" を例示しているため ROLE_VIOLATION で閉じる。
 #[test]
-fn api_client_goaway_with_non_zero_uri_maps_to_invalid_field() {
+fn api_client_goaway_with_non_zero_uri_maps_to_role_violation() {
     let (_, mut server) = establish_pair();
     let goaway = ControlMessage::Goaway(Goaway {
         new_session_uri: b"https://relay.example/".to_vec(),
@@ -342,8 +410,8 @@ fn api_client_goaway_with_non_zero_uri_maps_to_invalid_field() {
         .recv_control(goaway)
         .expect_err("client からの非空 URI は拒否されること");
     assert_eq!(
-        err.code, SESSION_INVALID_FIELD,
-        "フィールド値の逸脱は INVALID_FIELD (0x301) であること"
+        err.code, SESSION_ROLE_VIOLATION,
+        "role 違反は ROLE_VIOLATION (0x304) であること"
     );
 }
 

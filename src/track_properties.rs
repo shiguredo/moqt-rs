@@ -360,30 +360,34 @@ impl TrackProperties {
     }
 }
 
-/// 既知 Track Property の値域を検証する (draft-ietf-moq-transport-22 §10.4 (DEFAULT PUBLISHER PRIORITY) / draft-ietf-moq-transport-22 §10.5 (DEFAULT PUBLISHER GROUP ORDER) / draft-ietf-moq-transport-22 §10.6 (DYNAMIC GROUPS))
+/// 既知 Track Property の値域を検証する
+/// (draft-ietf-moq-transport-23 §10.4 (DEFAULT PUBLISHER PRIORITY) /
+/// §10.5 (DEFAULT PUBLISHER GROUP ORDER) / §10.6 (DYNAMIC GROUPS))
 ///
 /// encode と decode の両方から呼び、mutable リストと IMMUTABLE_PROPERTIES の内側に同一の
-/// 値域検証を適用する。
+/// 値域検証を適用する。値域外の受信は同節の MUST により MALFORMED_KEY_VALUE で閉じる。
 fn validate_track_property_value_range(
     prop_type: u64,
     value: &TrackPropertyValue,
 ) -> Result<(), MessageError> {
     match (prop_type, value) {
-        // draft-ietf-moq-transport-22 §10.4 (DEFAULT PUBLISHER PRIORITY): DEFAULT_PUBLISHER_PRIORITY は 0-255 のみ
+        // draft-ietf-moq-transport-23 §10.4 (DEFAULT PUBLISHER PRIORITY):
+        // DEFAULT_PUBLISHER_PRIORITY は 0-255 のみ
         (PROP_DEFAULT_PUBLISHER_PRIORITY, TrackPropertyValue::VarInt(v)) if *v > 255 => Err(
-            MessageError::ProtocolViolation("DEFAULT_PUBLISHER_PRIORITY must be 0..255"),
+            MessageError::MalformedKeyValue("DEFAULT_PUBLISHER_PRIORITY must be 0..255"),
         ),
-        // draft-ietf-moq-transport-22 §10.5 (DEFAULT PUBLISHER GROUP ORDER): DEFAULT_PUBLISHER_GROUP_ORDER は 1 (Ascending) または 2 (Descending) のみ
+        // draft-ietf-moq-transport-23 §10.5 (DEFAULT PUBLISHER GROUP ORDER):
+        // DEFAULT_PUBLISHER_GROUP_ORDER は 1 (Ascending) または 2 (Descending) のみ
         (PROP_DEFAULT_PUBLISHER_GROUP_ORDER, TrackPropertyValue::VarInt(v))
             if *v != 1 && *v != 2 =>
         {
-            Err(MessageError::ProtocolViolation(
+            Err(MessageError::MalformedKeyValue(
                 "DEFAULT_PUBLISHER_GROUP_ORDER must be 1 (Ascending) or 2 (Descending)",
             ))
         }
-        // draft-ietf-moq-transport-22 §10.6 (DYNAMIC GROUPS): DYNAMIC_GROUPS は 0 または 1 のみ
+        // draft-ietf-moq-transport-23 §10.6 (DYNAMIC GROUPS): DYNAMIC_GROUPS は 0 または 1 のみ
         (PROP_DYNAMIC_GROUPS, TrackPropertyValue::VarInt(v)) if *v > 1 => Err(
-            MessageError::ProtocolViolation("DYNAMIC_GROUPS must be 0 or 1"),
+            MessageError::MalformedKeyValue("DYNAMIC_GROUPS must be 0 or 1"),
         ),
         _ => Ok(()),
     }

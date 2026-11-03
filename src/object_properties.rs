@@ -595,8 +595,10 @@ fn decode_kv_pairs(
         } else {
             let (len, n) = varint::decode(&inner[inner_pos..])?;
             inner_pos += n;
+            // draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): 値長上限 2^16-1 を
+            // 超える Length は FIELD_LENGTH_EXCEEDED で閉じる
             if len > 65535 {
-                return Err(MessageError::ProtocolViolation(
+                return Err(MessageError::FieldLengthExceeded(
                     "object property value length exceeds 65535",
                 ));
             }

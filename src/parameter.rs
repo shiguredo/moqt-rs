@@ -584,7 +584,7 @@ impl SetupOptions {
     /// - MAX_CONTROL_MESSAGE_SIZE の Length と varint のバイト数が一致しない、または
     ///   Length の中身が varint として復号できない (§8.3 の MUST): `MalformedKeyValue`
     /// - AUTHORIZATION_TOKEN の Token 構造が不正な場合 (未知の Alias Type など):
-    ///   `MalformedKeyValue`
+    ///   `MalformedAuthToken`
     /// - 奇数型の値で Length varint は読めるが宣言長が残りバッファを超える場合 (Type を理解した
     ///   うえで Length/Value が直列化と一致しないため §8.3 の MUST): `MalformedKeyValue`
     /// - delta key / Type / Length / 偶数型の値の varint が途中で切れている場合: `UnexpectedEof`

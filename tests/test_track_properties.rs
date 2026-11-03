@@ -618,11 +618,12 @@ mod immutable_properties {
 
     #[test]
     fn inner_value_range_violation_rejected_on_decode() {
-        // 内側に DYNAMIC_GROUPS (0x30) = 2 (>1) を含む生バイト列
+        // 内側に DYNAMIC_GROUPS (0x30) = 2 (>1) を含む生バイト列。
+        // 値域外の受信は draft-ietf-moq-transport-23 §10.6 の MUST により MALFORMED_KEY_VALUE
         let buf = vec![0x0B, 0x02, 0x30, 0x02];
         assert!(matches!(
             TrackProperties::decode(&buf),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::MalformedKeyValue(_))
         ));
     }
 
@@ -787,7 +788,7 @@ mod immutable_properties {
     #[test]
     fn encode_rejects_known_type_range_violation() {
         use shiguredo_moqt::track_properties::PROP_DYNAMIC_GROUPS;
-        // encode は既知 Type の値域も検証し、違反は ProtocolViolation になる
+        // encode は既知 Type の値域も検証し、違反は MALFORMED_KEY_VALUE の分類になる
         let mut props = TrackProperties::new();
         props.push(TrackProperty {
             prop_type: PROP_DYNAMIC_GROUPS,
@@ -796,7 +797,7 @@ mod immutable_properties {
         let mut buf = Vec::new();
         assert!(matches!(
             props.encode(&mut buf),
-            Err(MessageError::ProtocolViolation(
+            Err(MessageError::MalformedKeyValue(
                 "DYNAMIC_GROUPS must be 0 or 1"
             ))
         ));

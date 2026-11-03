@@ -314,12 +314,12 @@ impl LocProperties {
                 // 奇数 ID: Length (varint) + bytes
                 let (len, n) = varint::decode(&inner[inner_pos..])?;
                 inner_pos += n;
-                // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure):
-                // "The maximum length of a value is 2^16-1 bytes.
-                //  If an endpoint receives a length larger than the maximum,
-                //  it MUST close the session with a PROTOCOL_VIOLATION."
+                // draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure):
+                // "The maximum length of a value is 2^16-1 bytes.  If an endpoint receives a
+                // length larger than the maximum, it MUST close the session with
+                // FIELD_LENGTH_EXCEEDED."
                 if len > 65535 {
-                    return Err(MessageError::ProtocolViolation(
+                    return Err(MessageError::FieldLengthExceeded(
                         "odd type key-value-pair length exceeds 65535",
                     ));
                 }

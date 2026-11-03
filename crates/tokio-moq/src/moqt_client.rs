@@ -3258,9 +3258,9 @@ async fn send_control_stream_setup(
 
 /// SETUP 交換中に失敗した session を終了コード付きで閉じる
 ///
-/// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) は書式違反の受信を
+/// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) は書式違反の受信を
 /// MALFORMED_KEY_VALUE で、§8.9 (Authorization Token Compression) は Token 構造を
-/// decode できない場合を MALFORMED_KEY_VALUE で、それぞれセッションを閉じることを
+/// decode できない場合を MALFORMED_AUTH_TOKEN で、それぞれセッションを閉じることを
 /// MUST で要求する (§8.9 の整形式だが不正な Token はメッセージ単位の reject を要求するが、
 /// SETUP は Request ID を持たず reject できないため、同じくセッションを閉じる)。
 /// 確立前の失敗では `MoqtClient` がまだ存在しないため、この関数が Session と送信ハンドルを

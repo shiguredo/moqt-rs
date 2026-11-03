@@ -344,10 +344,10 @@ fn goaway_on_request_stream_before_established_closes_session() {
     assert_eq!(client.state(), SessionState::Closing);
 }
 
-/// Server が control stream で非空 new_session_uri の GOAWAY を受信したら INVALID_FIELD
+/// Server が control stream で非空 new_session_uri の GOAWAY を受信したら ROLE_VIOLATION
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY): Server (受信側) は Client (peer) からの
-/// non-zero new_session_uri を拒否する。送信側検証
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY) / §12.2 (Session Termination Codes): peer の
+/// role では送れないフィールドとして ROLE_VIOLATION (0x304) で閉じる。送信側検証
 /// (`client_send_request_stream_goaway_with_non_zero_uri_rejected`) は正常な Client が
 /// 送れないことの確認に留まり、Server 受信側の分岐 (`handle_peer_goaway`) は未カバーだった。
 #[test]
@@ -359,14 +359,15 @@ fn server_recv_control_goaway_with_non_zero_uri_rejected() {
             timeout: 10000,
         }))
         .unwrap_err();
-    assert_eq!(err.code, SESSION_INVALID_FIELD);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert_eq!(server.state(), SessionState::Closing);
 }
 
-/// Server が request stream で非空 new_session_uri の GOAWAY を受信したら INVALID_FIELD
+/// Server が request stream で非空 new_session_uri の GOAWAY を受信したら ROLE_VIOLATION
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY): request stream 上の GOAWAY でも Server (受信側) は Client からの
-/// non-zero new_session_uri を拒否する (`handle_peer_goaway_on_request_stream`)。control stream 版と対をなす。
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY) / §12.2 (Session Termination Codes): request
+/// stream 上の GOAWAY でも peer の role では送れないフィールドとして ROLE_VIOLATION
+/// (0x304) で閉じる (`handle_peer_goaway_on_request_stream`)。control stream 版と対をなす。
 #[test]
 fn server_recv_request_stream_goaway_with_non_zero_uri_rejected() {
     let (_client, mut server, rid) = establish_subscribe_track(1);
@@ -379,7 +380,7 @@ fn server_recv_request_stream_goaway_with_non_zero_uri_rejected() {
             }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_INVALID_FIELD);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert_eq!(server.state(), SessionState::Closing);
 }
 

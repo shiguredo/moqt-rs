@@ -149,7 +149,7 @@ pub(crate) fn validate_object_status(status: u64) -> Result<(), MessageError> {
 /// draft-ietf-moq-transport-22 §11.1.2 (Object Properties): Properties は
 /// Properties Length (vi64) + Properties の構造で、Length は後続バイト数を表す。
 /// 空スライス、Properties Length varint が途中で切れた blob、長さの一致しない blob は
-/// `ProtocolViolation` とする。
+/// `MalformedObject` とする。
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 fn validate_properties_blob(data: &[u8]) -> Result<u64, MessageError> {
     // draft-ietf-moq-transport-23 §11.1.2 (Object Properties) / §12.2

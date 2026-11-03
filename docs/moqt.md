@@ -235,10 +235,10 @@ draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) / §16.12.1
 | `0x202` | `SESSION_INVALID_OBJECT_STATUS` | 未知の Object Status、非 Normal Status への Properties (§11.1.1 / §11.1.2) |
 | `0x203` | `SESSION_TRUNCATED_OBJECT` | シリアライズ途中の Object での FIN (§11.3) |
 | `0x300` | `SESSION_MALFORMED_MESSAGE` | 制御メッセージを解析できない、本文長が Length と一致しない (§9) |
-| `0x301` | `SESSION_INVALID_FIELD` | 制御メッセージは解析できたがフィールド値が許容範囲外 (§9.3 / §9.2) |
+| `0x301` | `SESSION_INVALID_FIELD` | 制御メッセージは解析できたがフィールド値が許容範囲外 (§9.3) |
 | `0x302` | `SESSION_INVALID_TRACK_NAMESPACE` | 空の Track Namespace Field、32 超のフィールド (§8.7) |
 | `0x303` | `SESSION_UNEXPECTED_MESSAGE` | 未知のメッセージ型、誤ったストリーム、順序違反、重複応答 (§6.3 / §9) |
-| `0x304` | `SESSION_ROLE_VIOLATION` | peer の role では送れないメッセージ / フィールド (§9.1.4 / §9.4.2.1) |
+| `0x304` | `SESSION_ROLE_VIOLATION` | peer の role では送れないメッセージ / フィールド (§9.1.4 / §9.2 / §9.4.2.1) |
 | `0x305` | `SESSION_INVALID_PARAMETER` | Message Parameter の未知・重複・不許可・値域外 (§9.19) |
 | `0x306` | `SESSION_CLOSED_CONTROL_STREAM` | 制御ストリームの閉鎖 (§6.3) |
 | `0x400` | `SESSION_DELTA_ENCODING_OVERFLOW` | デルタエンコーディングの復号結果が u64 の範囲外 (§8.3 / §9.19 / §11) |

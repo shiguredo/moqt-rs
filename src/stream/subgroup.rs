@@ -208,11 +208,13 @@ impl SubgroupObject {
     ///
     /// # Errors
     ///
-    /// - status と payload_length の組み合わせが不正、または status が未知の値: `ProtocolViolation`
+    /// - status と payload_length の組み合わせが不正: `ProtocolViolation`
+    /// - status が未知の値: `InvalidObjectStatus`
     /// - `has_properties` と `properties_data` の組み合わせが不正 (true なのに `None` / 空スライス、
     ///   または false なのに `Some`): `ProtocolViolation`
-    /// - Properties Length varint が不正、Properties Length と実データ長が一致しない、
-    ///   または非 Normal status に Properties Length > 0 の properties が付いている: `ProtocolViolation`
+    /// - Properties Length varint が不正、または Properties Length と実データ長が一致しない:
+    ///   `MalformedObject`
+    /// - 非 Normal status に Properties Length > 0 の properties が付いている: `InvalidObjectStatus`
     pub fn encode(
         &self,
         has_properties: bool,

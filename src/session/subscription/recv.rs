@@ -583,9 +583,18 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         };
-        if subscription.my_role != TrackRole::Subscriber
-            || !(subscription.is_pending_subscriber() || locally_terminated)
-        {
+        // peer の role 違反 (publisher 側の購読への SUBSCRIBE_OK) と、role は正しいが
+        // 状態が不正 (重複応答など) を分ける。前者は draft-ietf-moq-transport-23 §12.2 の
+        // ROLE_VIOLATION、後者は UNEXPECTED_MESSAGE で閉じる
+        if subscription.my_role != TrackRole::Subscriber {
+            let err = SessionError::new(
+                SESSION_ROLE_VIOLATION,
+                "SUBSCRIBE_OK received for a publisher-side subscription",
+            );
+            self.fail(err.clone());
+            return Err(err);
+        }
+        if !(subscription.is_pending_subscriber() || locally_terminated) {
             let err = SessionError::new(
                 SESSION_UNEXPECTED_MESSAGE,
                 "SUBSCRIBE_OK in unexpected subscription state",

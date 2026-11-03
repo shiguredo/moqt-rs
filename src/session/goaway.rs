@@ -7,7 +7,7 @@
 
 use crate::error::{
     SESSION_CONTROL_MESSAGE_TIMEOUT, SESSION_DATA_STREAM_TIMEOUT, SESSION_FIELD_LENGTH_EXCEEDED,
-    SESSION_GOAWAY_TIMEOUT, SESSION_INVALID_FIELD, SESSION_PROTOCOL_VIOLATION,
+    SESSION_GOAWAY_TIMEOUT, SESSION_PROTOCOL_VIOLATION, SESSION_ROLE_VIOLATION,
     SESSION_UNEXPECTED_MESSAGE, STREAM_GOING_AWAY,
 };
 use crate::message::{ControlMessage, Goaway};
@@ -53,11 +53,11 @@ fn validate_incoming_goaway_uri(role: Role, uri: &[u8]) -> Result<(), SessionErr
         ));
     }
     // draft-ietf-moq-transport-23 §9.2 (GOAWAY): "A client MUST send a zero-length New Session
-    // URI". server (自側) は client (peer) からの non-zero URI を、フィールド値の逸脱として
-    // INVALID_FIELD (0x301) で拒否する。
+    // URI". §12.2 (Session Termination Codes) の ROLE_VIOLATION は "a server receiving a
+    // non-empty New Session URI" を例示しており、role 違反として ROLE_VIOLATION (0x304) で閉じる。
     if role == Role::Server && !uri.is_empty() {
         return Err(SessionError::new(
-            SESSION_INVALID_FIELD,
+            SESSION_ROLE_VIOLATION,
             "client sent non-zero new_session_uri",
         ));
     }

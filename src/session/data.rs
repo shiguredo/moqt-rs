@@ -2641,7 +2641,8 @@ impl Session {
     ///
     /// 手組みの `ObjectDatagram` を渡した場合でも、wire 経路 (`ObjectDatagram::decode`) と同じ
     /// protocol 検証 (draft §11.1.1 Object Status / §11.1.2 Object Properties / §11.2.1 Object
-    /// Datagram) を行い、違反時は `SESSION_PROTOCOL_VIOLATION` でセッションを閉じる。
+    /// Datagram) を行い、違反時は原因に応じて `SESSION_INVALID_OBJECT_STATUS` /
+    /// `SESSION_MALFORMED_OBJECT` / `SESSION_INVALID_STREAM_HEADER` でセッションを閉じる。
     ///
     /// Object Payload 長の規則 (status がある場合は payload を保持しない、status がなく
     /// zero-length payload を禁止する) は `ObjectDatagram` が payload を保持しないため本 API では
