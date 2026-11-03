@@ -3,7 +3,7 @@
 - Created: 2026-11-03
 - Completed: {YYYY-MM-DD}
 - Branch: feature/change-wt-h2-draft-16-settings-codepoint
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-11-03
 
 ## 目的
 
@@ -25,7 +25,8 @@ draft 16 は `0x2b67` に変更しており、現状では対応を認識でき�
 ## 完了条件
 
 - `0x2b67=1` と ENABLE_CONNECT_PROTOCOL の組で CONNECT を開始できること。
-- `0x2b60` だけの相手や新 ID の値が 0 / 不正値の相手を、正しく非対応または設定エラーとして扱うこと。
+- `0x2b60` だけの相手、および `0x2b67=0` または新 ID を省略した相手は非対応として CONNECT を開始しないこと。
+- `0x2b67` の値が 1 を超える場合は、§3.1 に従って HTTP/2 connection error の `PROTOCOL_ERROR` とすること。
 - `crates/tokio-moq/Cargo.toml` / `Cargo.lock`、コメント、H2 の交渉テストが同じ版を示すこと。
 
 ## 差分の確認範囲
