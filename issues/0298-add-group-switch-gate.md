@@ -1,8 +1,8 @@
 # 前の Group の stream が開いている間、次の Group の映像 Object を保留する
 
 - Created: 2026-10-17
-- Completed: {YYYY-MM-DD}
-- Branch: feature/add-group-switch-gate
+- Completed: 2026-11-03
+- Branch: develop
 - Polished: 2026-11-02
 
 ## 目的
@@ -202,3 +202,90 @@ pending にした理由だった「前の Group の末尾の欠落を取るか�
 使い、`crates/moq-sub/src/main.rs` の `timeline.set_target_latency_ms` で反映している。50 ms の
 保留はこの 200 ms の範囲に収まるため、moqt-js の `GROUP_SWITCH_HOLD_MS` と同じ保留を採用する。
 採用の判断と根拠は本文の設計方針に反映した。
+
+## 解決方法
+
+### 実装した内容
+
+- ライブラリに `src/group_switch_gate.rs` (`pub mod group_switch_gate`) を追加した。sans-I/O の
+  状態機械 [`GroupSwitchGate`] で、配信済みの最大 Group、開いている stream の集合
+  (`(group_id, stream_id)`)、保留している Group ごとの期限を持つ。`alloc` だけで動作し、
+  時刻は `i64` マイクロ秒で受け取る。
+  - `begin_stream` — live の Subgroup stream を開いているものとして登録する
+  - `end_stream` — 終端したものとして登録を外す
+  - `admit` — Object を配送してよいかを判定する。配信済みの最大 Group 以上で、判定する
+    Group より小さい Group の stream が開いていれば `Hold { release_at_us }` を返し、期限は
+    最初に保留した時刻 + `GROUP_SWITCH_HOLD_US` (50 ms) にする。同じ Group の保留中は期限を
+    延ばさない。`Deliver` を返したら、その Group より前の stream は以後の判定に使わない
+  - `reset(generation)` — 状態を初期化し、世代を更新する
+- 購読の世代 (`u64`) で旧い呼び出しを無視する。session 移行で stream task を止めきれない
+  場合があるため、`GroupSwitchHandle` (example 側) が stream task の生成時に世代を固定し、
+  `begin_stream` / `end_stream` / `admit` へ渡す。`reset` のあとに旧世代の task が呼んでも
+  新しい購読の判定を変えない。
+- example の `crates/moq-sub/src/group_switch.rs` に、stream task 間で共有する
+  `SharedGroupSwitchGate` (状態機械 + `Notify` + 世代) と `GroupSwitchHandle` を追加した。
+  保留の解除は `end_stream` の通知か期限のどちらか早い方で起き、待機の登録 (`Notified::enable`)
+  を `admit` より前に行って取りこぼしを防ぐ。時計は単調な `tokio::time::Instant` に統一した。
+- `crates/moq-sub/src/pipeline.rs` に配線した。
+  - `handle_stream_body` の映像 arm で、decoder を作った後 (再生する場合だけ) に
+    `begin_stream`、`decode_video_stream` の戻りで `end_stream` を呼ぶ (全 return 経路を
+    1 箇所で吸収する)
+  - `decode_video_stream` は Object ごとに `wait_until_video_deliverable` を通し、保留中は
+    payload を持ったまま待ち、解除後に同じ decoder で復号する。FETCH 応答経路は gate を
+    通さない
+  - 保留した Object は「最後に受信した位置」に記録しない (解除後に記録する)。移行で保留を
+    捨てたときに、新しい購読の Location Filter がその位置から取り直せるようにするためである
+  - session 移行の `video_decode_order.reset()` と同じ箇所で `group_switch.reset()` を呼ぶ
+- `crates/moq-sub/README.md` の再生と遅延の節に、Group の切り替えで最大 50 ms の復号保留を
+  行うこと、FIN の遅延が 50 ms を超える場合は末尾の欠落が残ることを書いた。
+  `skills/shiguredo-moqt/SKILL.md` のモジュール一覧に `group_switch_gate` を追加した。
+
+### 判断
+
+- 前の Group の末尾の欠落 (30 fps で 1〜3 枚、33〜100 ms の停止) を避けるため、Group の
+  切り替えごとに最大 50 ms の復号保留を許容する (moqt-js の `GROUP_SWITCH_HOLD_MS` と
+  同じ判断)。moq-sub は catalog の `targetLatency` (既定 200 ms) を表示の遅れの下限に
+  するため、50 ms の保留はその範囲に収まる。FIN の遅延が 50 ms を超える場合は保留で覆えず、
+  末尾の欠落が残る。
+- 保留した Object の所有者は、その Object を読んだ live の stream task にする。decoder は
+  stream ごとに作られ、1 stream = 1 Group であるため、別の task の decoder で復号すると
+  参照フレームが無い。ライブラリの gate は payload を保持しない。
+
+### テスト
+
+- `tests/test_group_switch_gate.rs` — 完了条件の 8 項目を固定した。前の Group の stream が
+  開いている間の保留と `end_stream` による解除、先に終わっていれば保留しないこと、期限
+  (50 ms) と期限の非延長、同じ Group と配信済みより前の Group の非保留、配信済みより前の
+  Group の stream を以後の判定に使わないこと、1 Group に複数の stream がある場合、Group ID が
+  飛んでいる場合、`reset` による状態の初期化と世代分離 (旧世代の `begin_stream` /
+  `end_stream` / `admit` が新しい世代の判定を変えないこと)。
+- `pbt/tests/prop_group_switch_gate.rs` — stream の開閉・世代の更新・配送の観測から独立に
+  期待値を数え、4 つの不変条件 (期限前の `Deliver` が無いこと、期限が最初の Hold + 50 ms を
+  超えないこと、同じ Group の期限が変わらないこと、配信済みの最大以下の `admit` が `Hold` に
+  ならないこと) を固定した。判定の分岐ごとの到達数も確かめる。
+- `crates/moq-sub/src/group_switch.rs` のユニットテスト — 前の Group の `end_stream` による
+  解除、期限による解除、`admit` 直後の `end_stream` を取りこぼさないこと、複数の待機が 1 回の
+  通知で解除されること、`reset` が旧世代の待機を解除すること、`reset` 後に旧世代の
+  `begin_stream` / `end_stream` が新しい世代の判定へ影響しないこと。
+- `crates/moq-sub/src/pipeline.rs` の `group_switch_tests` — 実 VP8 エンコーダで作った
+  キーフレームと inter frame を使い、解除後にキーフレーム → inter frame の順で `frame_tx` へ
+  1 枚ずつ送出されること、保留した Object を解除まで「最後に受信した位置」に記録しないこと。
+- テストの検出力は変異テストで確認した。世代チェックを削除した実装、`GroupSwitchHandle` が
+  常に世代 0 を返す実装、保留の解除を待たずに記録する実装のいずれも、テストが失敗する。
+- `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo test --workspace` / `cargo test -p pbt` / `cargo build -p shiguredo_moqt --target
+  thumbv7em-none-eabihf` / `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt
+  -p moq-sub` が通ることを確認した。
+- 実 relay での E2E (`publish_and_subscribe_roundtrip` / 音声 2 種) を実行し、3 件とも通る
+  ことを確認した。映像の再生経路 (gate の配線を含む) はこの E2E で通る。
+
+### 既知の限界
+
+- 前の Group の stream が `begin_stream` で登録される前に次の Group の Object が `admit`
+  されると、その Group が配信済みの最大になり、待つ対象が無いため保留しない。stream の到着
+  順が逆転した場合と、semaphore / `pending_subgroup_buffer` / decoder 構築の待ちで
+  `begin_stream` が遅れた場合に起きうる。library の doc に記載した。
+- FIN の遅延が 50 ms を超える場合は保留で覆えず、前の Group の末尾の欠落が残る。
+- `docs/moqt.md` のモジュール表には `group_switch_gate` を追加していない。同表には
+  `video_decode_order` / `pending_subgroup_buffer` / `audio_clock` も未掲載であり、表の
+  整備は本 issue の範囲外とした (公開 API の一覧は `skills/shiguredo-moqt/SKILL.md` を更新済み)。
