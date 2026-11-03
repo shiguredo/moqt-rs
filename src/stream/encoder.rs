@@ -3,6 +3,10 @@
 //! 呼び出し側が絶対値の group_id / subgroup_id / object_id を渡し、
 //! エンコーダが内部でデルタ圧縮の判断と FetchPriorContext の状態遷移を行う。
 //!
+//! End of Range (draft-ietf-moq-transport-23 §11.4.2 (End of Range)) も絶対 Location を
+//! 受け取り、内部で Group ID Delta / Object ID Delta に変換する (§11.4.2.1 (ID Decoding))。
+//! 低水準 codec が wire の生値を扱うのに対し、このモジュールは常に絶対 Location を扱う。
+//!
 //! このモジュールは I/O を持たず、バイト列生成とプロトコル状態管理のみを提供する。
 //! ペイロードの書き込みは呼び出し側が行う。
 use super::fetch::{
@@ -37,17 +41,30 @@ pub struct FetchObjectInput {
     pub payload_length: u64,
 }
 
-/// エンコード時の前回のオブジェクト情報
+/// エンコード時の直前の actual Object のフィールド
 ///
-/// `subgroup_id` はデコーダが解決する値と揃える。Datagram 起源の Object は
-/// Subgroup ID を運ばずデコーダでも 0 に解決されるため、ここでも 0 を保持する。
+/// End of Range は Group ID / Object ID だけを更新し、この値を保持する
+/// (draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields))。
+/// Datagram 起源の Object は Subgroup ID を運ばずデコーダでも 0 に解決されるため、
+/// ここでも 0 を保持する。
+#[derive(Debug, Clone, Copy)]
+struct PriorActualObject {
+    subgroup_id: u64,
+    publisher_priority: u8,
+    is_datagram_origin: bool,
+}
+
+/// エンコード時の直前状態
+///
+/// `group_id` / `object_id` は直前の Object または End of Range の Location であり、
+/// デルタ圧縮の基準になる。`actual_object` は直前の actual Object のフィールドであり、
+/// End of Range では更新しない。End of Range だけが先頭に現れた場合 `None` のままになり、
+/// その状態で prior Subgroup ID / Priority を参照する Object は低水準 codec が拒否する。
 #[derive(Debug, Clone, Copy)]
 struct PriorEncodeState {
     group_id: u64,
-    subgroup_id: u64,
     object_id: u64,
-    publisher_priority: u8,
-    is_datagram_origin: bool,
+    actual_object: Option<PriorActualObject>,
 }
 
 /// Fetch レスポンスストリーム用エンコーダー (sans I/O)
@@ -206,15 +223,17 @@ impl FetchStreamEncoder {
                     }
                 }
 
+                let prior_actual = prior.actual_object;
                 let can_use_subgroup_prior =
                     matches!(self.prior_context, FetchPriorContext::HasPriorObject);
                 let can_use_priority_prior =
                     matches!(self.prior_context, FetchPriorContext::HasPriorObject);
 
                 let group_changed = input.group_id != prior.group_id;
-                let subgroup_changed = group_changed || effective_subgroup_id != prior.subgroup_id;
+                let subgroup_changed = group_changed
+                    || prior_actual.map(|actual| actual.subgroup_id) != Some(effective_subgroup_id);
 
-                // group_id: 変更時にデルタ値を計算 (draft-ietf-moq-transport-22 §11.4.1.1 (Flags))
+                // group_id: 変更時にデルタ値を計算 (draft-ietf-moq-transport-23 §11.4.1.1 (Flags))
                 let group_id = if group_changed {
                     let delta = match self.group_order {
                         FETCH_GROUP_ORDER_ASCENDING => input
@@ -236,7 +255,7 @@ impl FetchStreamEncoder {
                                 )
                             })?,
                         _ => unreachable!(
-                            "group_order is ASCENDING or DESCENDING (draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter))"
+                            "group_order is ASCENDING or DESCENDING (draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter))"
                         ),
                     };
                     Some(delta)
@@ -246,8 +265,8 @@ impl FetchStreamEncoder {
 
                 let subgroup_id = if input.is_datagram_origin {
                     FetchSubgroupIdMode::Zero
-                } else if prior.is_datagram_origin {
-                    // draft-ietf-moq-transport-22 §11.4.1.1 (Flags): Datagram 起源の prior Object には
+                } else if prior_actual.is_some_and(|actual| actual.is_datagram_origin) {
+                    // draft-ietf-moq-transport-23 §11.4.1.1 (Flags): Datagram 起源の prior Object には
                     // Subgroup ID が無いため、Table 9 の "prior Object's Subgroup ID" を参照できない。
                     // prior 参照を避けて送る (0 は Zero、それ以外は Explicit)
                     if effective_subgroup_id == 0 {
@@ -261,28 +280,28 @@ impl FetchStreamEncoder {
                     FetchSubgroupIdMode::Explicit(effective_subgroup_id)
                 };
 
-                // object_id: Group 変更時は絶対値、同 Group ならデルタ値 (draft-ietf-moq-transport-22 §11.4.1.1 (Flags))
+                // object_id: Group 変更時は絶対値、同 Group ならデルタ値 (draft-ietf-moq-transport-23 §11.4.1.1 (Flags))
                 // subgroup 変更時は Group ID Delta が absent のため delta 解釈になる。
-                // 絶対値を乗せると decoder 側で delta として誤解釈される (draft-ietf-moq-transport-22 §11.4.1.1:
+                // 絶対値を乗せると decoder 側で delta として誤解釈される (draft-ietf-moq-transport-23 §11.4.1.1:
                 // "When the Group ID Delta field is not present, the Object ID is the prior
                 // Object's ID plus the Object ID Delta if present")。
-                // 注: Subgroup (§11.3.1) と異なり Fetch の Object ID Delta に +1/-1 は付かない
                 let object_id = if group_changed {
                     Some(input.object_id)
                 } else if prior.object_id.checked_add(1) != Some(input.object_id) {
-                    // delta = object_id - prior (Subgroup と異なり -1 しない)
+                    // delta = object_id - prior
                     let delta = input.object_id.checked_sub(prior.object_id).ok_or({
                         MessageError::ProtocolViolation("fetch object ID delta underflow")
                     })?;
                     Some(delta)
                 } else {
-                    // prior + 1 は absent で表現 (draft-ietf-moq-transport-22 §11.4.1.1: "If Object ID Delta
+                    // prior + 1 は absent で表現 (draft-ietf-moq-transport-23 §11.4.1.1: "If Object ID Delta
                     // is not present, the Object ID is the prior Object's ID plus one")
                     None
                 };
 
                 let publisher_priority = if !can_use_priority_prior
-                    || input.publisher_priority != prior.publisher_priority
+                    || prior_actual.map(|actual| actual.publisher_priority)
+                        != Some(input.publisher_priority)
                 {
                     Some(input.publisher_priority)
                 } else {
@@ -328,70 +347,115 @@ impl FetchStreamEncoder {
         self.prior_context = FetchPriorContext::HasPriorObject;
         self.prior_state = Some(PriorEncodeState {
             group_id: input.group_id,
-            // Datagram 起源は wire 上で Subgroup ID を運ばずデコーダも 0 に解決するため、
-            // 実装状態としてもデコーダの解決値 (0) を保持して両者の意味を揃える
-            subgroup_id: effective_subgroup_id,
             object_id: input.object_id,
-            publisher_priority: input.publisher_priority,
-            is_datagram_origin: input.is_datagram_origin,
+            actual_object: Some(PriorActualObject {
+                // Datagram 起源は wire 上で Subgroup ID を運ばずデコーダも 0 に解決するため、
+                // 実装状態としてもデコーダの解決値 (0) を保持して両者の意味を揃える
+                subgroup_id: effective_subgroup_id,
+                publisher_priority: input.publisher_priority,
+                is_datagram_origin: input.is_datagram_origin,
+            }),
         });
 
         Ok(())
     }
 
     /// End of Non-Existent Range をエンコードする
+    ///
+    /// `group_id` / `object_id` は絶対 Location であり、直前の Location とのデルタへの
+    /// 変換は内部で行う (draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding))。
+    ///
+    /// # Errors
+    ///
+    /// - Group Order と逆方向の Group ID を指定した (デルタが負になる): `ProtocolViolation`
+    /// - 同一 Group で直前の Location 以前の Object ID を指定した: `ProtocolViolation`
     pub fn encode_end_of_non_existent_range(
         &mut self,
         group_id: u64,
         object_id: u64,
         buf: &mut Vec<u8>,
     ) -> Result<(), MessageError> {
-        let entry = FetchStreamEntry::EndOfNonExistentRange {
+        self.encode_end_of_range(
             group_id,
             object_id,
-        };
-        entry.encode(None, self.prior_context, buf)?;
-
-        self.update_prior_for_end_of_range(group_id, object_id);
-        if matches!(self.prior_context, FetchPriorContext::First) {
-            self.prior_context = FetchPriorContext::NoPriorActualObject;
-        }
-
-        Ok(())
+            |group_id_delta, object_id_delta| FetchStreamEntry::EndOfNonExistentRange {
+                group_id_delta,
+                object_id_delta,
+            },
+            buf,
+        )
     }
 
     /// End of Unknown Range をエンコードする
+    ///
+    /// `group_id` / `object_id` は絶対 Location であり、直前の Location とのデルタへの
+    /// 変換は内部で行う (draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding))。
+    ///
+    /// # Errors
+    ///
+    /// [`FetchStreamEncoder::encode_end_of_non_existent_range`] と同じ条件で
+    /// `ProtocolViolation` を返す。
     pub fn encode_end_of_unknown_range(
         &mut self,
         group_id: u64,
         object_id: u64,
         buf: &mut Vec<u8>,
     ) -> Result<(), MessageError> {
-        let entry = FetchStreamEntry::EndOfUnknownRange {
+        self.encode_end_of_range(
             group_id,
             object_id,
-        };
-        entry.encode(None, self.prior_context, buf)?;
-
-        self.update_prior_for_end_of_range(group_id, object_id);
-        if matches!(self.prior_context, FetchPriorContext::First) {
-            self.prior_context = FetchPriorContext::NoPriorActualObject;
-        }
-
-        Ok(())
+            |group_id_delta, object_id_delta| FetchStreamEntry::EndOfUnknownRange {
+                group_id_delta,
+                object_id_delta,
+            },
+            buf,
+        )
     }
 
-    /// End of Timed-Out Range をエンコードする (draft-ietf-moq-transport-22 §11.4.1 Table 8)
+    /// End of Timed-Out Range をエンコードする (draft-ietf-moq-transport-23 §11.4.1 Table 8)
+    ///
+    /// `group_id` / `object_id` は絶対 Location であり、直前の Location とのデルタへの
+    /// 変換は内部で行う (draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding))。
+    ///
+    /// # Errors
+    ///
+    /// [`FetchStreamEncoder::encode_end_of_non_existent_range`] と同じ条件で
+    /// `ProtocolViolation` を返す。
     pub fn encode_end_of_timed_out_range(
         &mut self,
         group_id: u64,
         object_id: u64,
         buf: &mut Vec<u8>,
     ) -> Result<(), MessageError> {
-        let entry = FetchStreamEntry::EndOfTimedOutRange {
+        self.encode_end_of_range(
             group_id,
             object_id,
-        };
+            |group_id_delta, object_id_delta| FetchStreamEntry::EndOfTimedOutRange {
+                group_id_delta,
+                object_id_delta,
+            },
+            buf,
+        )
+    }
+
+    /// End of Range の絶対 Location をエンコードする
+    ///
+    /// `build_entry` は生の Group ID Delta / Object ID Delta を受け取って variant を組み立てる。
+    /// 3 種の End of Range はフィールドの構造が同じで variant だけが異なるため、
+    /// デルタ計算・状態更新・prior 文脈の遷移を共通化する。
+    ///
+    /// # Errors
+    ///
+    /// 直前の Location との差分が表現できない場合に `ProtocolViolation` を返す。
+    fn encode_end_of_range(
+        &mut self,
+        group_id: u64,
+        object_id: u64,
+        build_entry: fn(u64, u64) -> FetchStreamEntry,
+        buf: &mut Vec<u8>,
+    ) -> Result<(), MessageError> {
+        let (group_id_delta, object_id_delta) = self.end_of_range_deltas(group_id, object_id)?;
+        let entry = build_entry(group_id_delta, object_id_delta);
         entry.encode(None, self.prior_context, buf)?;
 
         self.update_prior_for_end_of_range(group_id, object_id);
@@ -402,12 +466,69 @@ impl FetchStreamEncoder {
         Ok(())
     }
 
+    /// End of Range の絶対 Location を生のデルタに変換する
+    ///
+    /// draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding):
+    /// - FETCH_HEADER 直後の最初の entry は両フィールドが絶対 ID
+    /// - それ以外は Group ID を昇順なら加算、降順なら減算する
+    /// - Group ID Delta が 0 なら Object ID は prior + delta + 1
+    /// - Group ID Delta が 0 でなければ Object ID は絶対値
+    ///
+    /// Object (Table 10 の 0x04 / 0x08) の Group ID Delta には +1 が付くが、
+    /// End of Range の Group ID Delta には付かない (§11.4.2.1)。この差を混同しない。
+    fn end_of_range_deltas(
+        &self,
+        group_id: u64,
+        object_id: u64,
+    ) -> Result<(u64, u64), MessageError> {
+        let Some(prior) = self.prior_state else {
+            // 最初の entry は絶対 ID
+            return Ok((group_id, object_id));
+        };
+
+        let group_id_delta = match self.group_order {
+            FETCH_GROUP_ORDER_ASCENDING => {
+                group_id
+                    .checked_sub(prior.group_id)
+                    .ok_or(MessageError::ProtocolViolation(
+                        "fetch end of range group ID must not decrease in ascending order",
+                    ))?
+            }
+            FETCH_GROUP_ORDER_DESCENDING => {
+                prior
+                    .group_id
+                    .checked_sub(group_id)
+                    .ok_or(MessageError::ProtocolViolation(
+                        "fetch end of range group ID must not increase in descending order",
+                    ))?
+            }
+            _ => unreachable!(
+                "group_order is ASCENDING or DESCENDING (draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER PARAMETER))"
+            ),
+        };
+
+        let object_id_delta = if group_id_delta == 0 {
+            // 同一 Group では prior + delta + 1 で表現するため、delta 0 は prior + 1 になる。
+            // 直前の Location と同じかそれ以前の Object ID は表現できない。
+            object_id
+                .checked_sub(prior.object_id)
+                .and_then(|v| v.checked_sub(1))
+                .ok_or(MessageError::ProtocolViolation(
+                    "fetch end of range object ID must be after the prior location within the same group",
+                ))?
+        } else {
+            // Group が変わる場合、Object ID Delta は新しい Group の絶対 Object ID
+            object_id
+        };
+
+        Ok((group_id_delta, object_id_delta))
+    }
+
     /// End of Range エントリ後に prior_state を更新する
     ///
-    /// draft-ietf-moq-transport-22 §11.4.1.2 (End of Range): prior Group ID / Object ID は
-    /// End of Range の値に更新するが、Prior Subgroup ID / Priority は EOR 前の最後の
-    /// actual Object の値を維持する。`is_datagram_origin` も同様に維持し、EOR 後の
-    /// Object が Datagram 起源の prior を参照しないようにする。
+    /// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields): prior Group ID /
+    /// Object ID は End of Range の Location に更新するが、prior Subgroup ID / Priority は
+    /// End of Range より前の最後の actual Object の値を保持する。
     fn update_prior_for_end_of_range(&mut self, group_id: u64, object_id: u64) {
         match &mut self.prior_state {
             Some(prior) => {
@@ -417,10 +538,8 @@ impl FetchStreamEncoder {
             None => {
                 self.prior_state = Some(PriorEncodeState {
                     group_id,
-                    subgroup_id: 0,
                     object_id,
-                    publisher_priority: 0,
-                    is_datagram_origin: false,
+                    actual_object: None,
                 });
             }
         }
@@ -429,7 +548,7 @@ impl FetchStreamEncoder {
 
 /// FETCH response の Group Order が Ascending (0x01) または Descending (0x02) か検証する
 ///
-/// draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter):
+/// draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter):
 /// 値域外は `ProtocolViolation` とする。
 fn validate_fetch_group_order(group_order: u8) -> Result<(), MessageError> {
     match group_order {

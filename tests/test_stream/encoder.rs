@@ -74,7 +74,7 @@ fn test_single_object() {
 
 /// 先頭 Object が Datagram 起源でもエンコードでき、Subgroup ID は 0 に解決される
 ///
-/// draft-ietf-moq-transport-22 §11.4.1.1 (Flags): bit 0x40 が立つ Datagram 起源では
+/// draft-ietf-moq-transport-23 §11.4.1.1 (Flags): bit 0x40 が立つ Datagram 起源では
 /// 下位 2 bit を無視するため、Subgroup ID は wire に載らず 0 に解決される。
 #[test]
 fn test_first_object_datagram_origin() {
@@ -165,7 +165,7 @@ fn test_datagram_origin_then_same_subgroup_id() {
 /// Datagram 起源の直後に subgroup_id = 0 の通常起源 Object が続く場合は
 /// PreviousSame (prior 参照) ではなく Subgroup ID zero (0x00) を選ぶ
 ///
-/// draft-ietf-moq-transport-22 §11.4.1.1 (Flags): Datagram 起源の Object には Subgroup ID が
+/// draft-ietf-moq-transport-23 §11.4.1.1 (Flags): Datagram 起源の Object には Subgroup ID が
 /// 無いため、Table 9 の "prior Object's Subgroup ID" を参照させず、Zero または Explicit を選ぶ。
 /// ラウンドトリップでは直前の Datagram 起源 Object の解決済み Subgroup ID (0) に
 /// Zero / Explicit(0) / PreviousSame のいずれも一致してしまいモードを区別できないため、
@@ -478,7 +478,7 @@ fn test_encode_header() {
 }
 
 // 同一 group 内で subgroup だけ変更された場合、Object ID Delta フィールドは
-// delta としてエンコードされなければならない (draft-ietf-moq-transport-22 §11.4.1.1:
+// delta としてエンコードされなければならない (draft-ietf-moq-transport-23 §11.4.1.1:
 // "When the Group ID Delta field is not present, the Object ID is the prior Object's ID
 // plus the Object ID Delta if present")。
 // 修正前は subgroup_changed が true のとき絶対値を乗せていたため、decoder 側で
@@ -529,7 +529,7 @@ fn test_subgroup_change_with_object_id_delta() {
     }
 }
 
-/// draft-ietf-moq-transport-22 §11.4.1.2 (End of Range):
+/// draft-ietf-moq-transport-23 §11.4.2 (End of Range):
 /// encode_end_of_unknown_range で生成したバイト列がデコーダで
 /// DecodedFetchEntry::EndOfUnknownRange に復号され、後続 Object も
 /// 正しくラウンドトリップすること
@@ -841,7 +841,7 @@ fn test_descending_group_order_skips_multiple_groups() {
 
 /// Descending (0x02) で Group が変わるとき Object ID が絶対値で符号化されること
 ///
-/// draft-ietf-moq-transport-22 §11.4.1.1 (Flags): Group ID Delta が present なら Object ID は
+/// draft-ietf-moq-transport-23 §11.4.1.1 (Flags): Group ID Delta が present なら Object ID は
 /// Object ID Delta の値 (absent なら prior + 1)、not present なら prior Object ID + Object ID Delta
 /// (absent なら prior + 1) になる。Group 変化で Object ID が大きく減る入力 (5001 → 1) を使い、
 /// デルタ解釈では復元できない値であることを固定する。
@@ -868,7 +868,7 @@ fn test_descending_group_change_uses_absolute_object_id() {
 
 /// Descending (0x02) で End of Range (0x8C / 0x10C / 0x20C) と Object を混在できること
 ///
-/// draft-ietf-moq-transport-22 §11.4.1.2 (End of Range): End of Range の Group ID /
+/// draft-ietf-moq-transport-23 §11.4.2 (End of Range): End of Range の Group ID /
 /// Object ID は絶対値で、以後の prior 参照文脈はその値を使う。3 種すべての End of Range で
 /// Group を直前 Object の Group と変えることで、エンコーダが End of Range の値を prior として
 /// デルタを計算していることを検証する。エントリ境界で終端したストリームを `finish` が

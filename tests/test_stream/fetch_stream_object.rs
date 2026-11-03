@@ -66,8 +66,8 @@ fn datagram_origin_ignores_lsb() {
 #[test]
 fn end_of_timed_out_range() {
     let entry = FetchStreamEntry::EndOfTimedOutRange {
-        group_id: 4,
-        object_id: 9,
+        group_id_delta: 4,
+        object_id_delta: 9,
     };
     let mut buf = Vec::new();
     entry
@@ -79,8 +79,8 @@ fn end_of_timed_out_range() {
     assert_eq!(
         decoded,
         FetchStreamEntry::EndOfTimedOutRange {
-            group_id: 4,
-            object_id: 9,
+            group_id_delta: 4,
+            object_id_delta: 9,
         }
     );
 }
@@ -94,16 +94,16 @@ fn end_of_timed_out_range() {
 fn mixed_end_of_range_kinds_decode_in_order() {
     let entries = [
         FetchStreamEntry::EndOfNonExistentRange {
-            group_id: 1,
-            object_id: 2,
+            group_id_delta: 1,
+            object_id_delta: 2,
         },
         FetchStreamEntry::EndOfUnknownRange {
-            group_id: 3,
-            object_id: 4,
+            group_id_delta: 3,
+            object_id_delta: 4,
         },
         FetchStreamEntry::EndOfTimedOutRange {
-            group_id: 5,
-            object_id: 6,
+            group_id_delta: 5,
+            object_id_delta: 6,
         },
     ];
     let mut buf = Vec::new();
@@ -508,22 +508,22 @@ fn encode_properties_length_u64_max_rejected() {
 
 // End of Range の 3 variant は Properties フィールドを持たないため、
 // properties_data に Some を渡したら書き込み前に拒否する
-// (draft-ietf-moq-transport-22 §11.4.1.2 (End of Range):
+// (draft-ietf-moq-transport-23 §11.4.2 (End of Range):
 // "Subgroup ID, Priority and Properties are not present")
 #[test]
 fn encode_end_of_range_with_properties_rejected() {
     let entries = [
         FetchStreamEntry::EndOfNonExistentRange {
-            group_id: 1,
-            object_id: 2,
+            group_id_delta: 1,
+            object_id_delta: 2,
         },
         FetchStreamEntry::EndOfUnknownRange {
-            group_id: 3,
-            object_id: 4,
+            group_id_delta: 3,
+            object_id_delta: 4,
         },
         FetchStreamEntry::EndOfTimedOutRange {
-            group_id: 5,
-            object_id: 6,
+            group_id_delta: 5,
+            object_id_delta: 6,
         },
     ];
     for entry in &entries {
@@ -549,16 +549,16 @@ fn encode_end_of_range_with_properties_rejected() {
 fn encode_end_of_range_without_properties_succeeds() {
     let entries = [
         FetchStreamEntry::EndOfNonExistentRange {
-            group_id: 1,
-            object_id: 2,
+            group_id_delta: 1,
+            object_id_delta: 2,
         },
         FetchStreamEntry::EndOfUnknownRange {
-            group_id: 3,
-            object_id: 4,
+            group_id_delta: 3,
+            object_id_delta: 4,
         },
         FetchStreamEntry::EndOfTimedOutRange {
-            group_id: 5,
-            object_id: 6,
+            group_id_delta: 5,
+            object_id_delta: 6,
         },
     ];
     for entry in &entries {
@@ -571,5 +571,51 @@ fn encode_end_of_range_without_properties_succeeds() {
             .expect("エンコード結果をデコードできること");
         assert_eq!(consumed, buf.len());
         assert_eq!(&decoded, entry);
+    }
+}
+
+/// End of Range の生フィールドは prior 文脈によらず wire の値としてそのまま扱われること
+///
+/// draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding): 低水準 codec が扱う
+/// Group ID Delta / Object ID Delta は wire の生値であり、最初の entry かどうかで
+/// 「絶対 ID」と「直前 Location からのデルタ」の解釈が変わるだけである。
+/// 解釈と加減算の overflow 検証は絶対 Location を扱う高水準の
+/// エンコーダ / デコーダの責務であり、ここでは値をそのまま往復できることを固定する。
+#[test]
+fn end_of_range_raw_fields_do_not_depend_on_prior_context() {
+    let entry = FetchStreamEntry::EndOfNonExistentRange {
+        group_id_delta: 3,
+        object_id_delta: 9,
+    };
+    let mut first = Vec::new();
+    entry
+        .encode(None, FetchPriorContext::First, &mut first)
+        .expect("End of Range の raw 値は prior 文脈によらずエンコードできる");
+    let mut has_prior = Vec::new();
+    entry
+        .encode(None, FetchPriorContext::HasPriorObject, &mut has_prior)
+        .expect("End of Range の raw 値は prior 文脈によらずエンコードできる");
+    assert_eq!(
+        first, has_prior,
+        "raw 値の書き出しが prior 文脈に依存しないこと"
+    );
+    assert_eq!(
+        first,
+        vec![0x80, 0x8C, 0x03, 0x09],
+        "flags 0x8C と 2 つの raw 値がそのまま並ぶこと"
+    );
+
+    for context in [
+        FetchPriorContext::First,
+        FetchPriorContext::NoPriorActualObject,
+        FetchPriorContext::HasPriorObject,
+    ] {
+        let (decoded, consumed) = FetchStreamEntry::decode(&first, context)
+            .expect("End of Range の raw 値は prior 文脈によらずデコードできる");
+        assert_eq!(consumed, first.len());
+        assert_eq!(
+            decoded, entry,
+            "raw 値の読み出しが prior 文脈に依存しないこと: {context:?}"
+        );
     }
 }

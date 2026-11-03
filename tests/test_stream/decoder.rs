@@ -747,8 +747,8 @@ fn test_fetch_end_of_range_transitions() {
     let header = FetchHeader { request_id: 1 };
     // EndOfNonExistentRange → Object の順
     let end_entry = FetchStreamEntry::EndOfNonExistentRange {
-        group_id: 5,
-        object_id: 10,
+        group_id_delta: 5,
+        object_id_delta: 10,
     };
     // End of Range 後の Object は NoPriorActualObject 文脈
     // group_id / object_id は prior から参照可能だが、subgroup_id / priority は明示必須
@@ -1202,58 +1202,62 @@ fn test_fetch_descending_group_order_resolves_absolute_values() {
         .expect("エントリ境界で終端したストリームは finish で受容される");
 }
 
-/// Descending (0x02) で End of Range (0x8C / 0x10C / 0x20C) が絶対位置として解決されること
+/// Descending (0x02) で End of Range が直前 Location のデルタから解決されること
 ///
-/// draft-ietf-moq-transport-22 §11.4.1.2 (End of Range): End of Range の Group ID /
-/// Object ID は絶対値であり、以後の prior 参照文脈はその値を使う。3 種すべての End of Range で
-/// Group を直前 Object の Group と変え、直後の Object で End of Non-Existent Range /
-/// End of Unknown Range は Object ID Delta を省略し、End of Timed-Out Range は同 Group 内の
-/// デルタを使うことで、各 variant が prior を更新していること自体を検証する。
+/// draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding): FETCH_HEADER 直後以外の
+/// End of Range は Group ID を昇順なら加算・降順なら減算し、Group ID Delta が 0 なら
+/// Object ID は prior + delta + 1、Group が変わるなら Object ID Delta が絶対値になる。
+/// 3 種すべての End of Range で Group を直前 Location の Group と変え、
+/// 直後の Object では直前 Location +1 の省略形を使うことで、各 variant が
+/// prior Location を更新していること自体を検証する。
 /// エントリ境界で終端したストリームを `finish` が受容することも合わせて確認する。
 #[test]
-fn test_fetch_descending_end_of_range_entries_are_absolute() {
+fn test_fetch_descending_end_of_range_entries_are_resolved_from_previous_location() {
     let header = FetchHeader { request_id: 1 };
     let data = encode_fetch_stream(
         &header,
         &[
             (descending_fetch_object(Some(10), Some(2)), None, Some(b"a")),
-            // 直前 Object の Group 10 とは異なる Group 9 を指す End of Range
+            // 直前 Object の Location (10, 2) から Group 9 を指す End of Range。
+            // 降順の Group ID Delta は 10 - 9 = 1、Group が変わるので Object ID は絶対値 5
             (
                 FetchStreamEntry::EndOfNonExistentRange {
-                    group_id: 9,
-                    object_id: 5,
+                    group_id_delta: 1,
+                    object_id_delta: 5,
                 },
                 None,
                 None,
             ),
-            // End of Range の prior (9, 5) を基準に Group のデルタ: 9 - (3 + 1) = 5
-            // Object ID Delta 省略は prior (End of Range の 5) + 1 = 6
-            (descending_fetch_object(Some(3), None), None, Some(b"b")),
-            // 同 Group (5) 内のデルタ: 6 + 2 = 8
-            (descending_fetch_object(None, Some(2)), None, Some(b"c")),
-            // 直前 Object の Group 5 とは異なる Group 4 を指す End of Range
+            // End of Range の prior Location (9, 5) を基準に Group のデルタ: 9 - (3 + 1) = 5。
+            // Group ID Delta が present なので Object ID は絶対値 7
+            (descending_fetch_object(Some(3), Some(7)), None, Some(b"b")),
+            // 同 Group (5) 内の省略形: prior Object ID 7 + 1 = 8
+            (descending_fetch_object(None, None), None, Some(b"c")),
+            // 直前 Object の Location (5, 8) から Group 4 を指す End of Range。
+            // 降順の Group ID Delta は 5 - 4 = 1、Object ID は絶対値 9
             (
                 FetchStreamEntry::EndOfUnknownRange {
-                    group_id: 4,
-                    object_id: 9,
+                    group_id_delta: 1,
+                    object_id_delta: 9,
                 },
                 None,
                 None,
             ),
-            // End of Range の prior (4, 9) を基準に Group のデルタ: 4 - (1 + 1) = 2
-            // Object ID Delta 省略は prior (End of Range の 9) + 1 = 10
-            (descending_fetch_object(Some(1), None), None, Some(b"d")),
-            // 直前 Object の Group 2 とは異なる Group 1 を指す End of Range
+            // End of Range の prior Location (4, 9) を基準に Group のデルタ: 4 - (1 + 1) = 2。
+            // Group ID Delta が present なので Object ID は絶対値 10
+            (descending_fetch_object(Some(1), Some(10)), None, Some(b"d")),
+            // 直前 Object の Location (2, 10) から Group 1 を指す End of Range。
+            // 降順の Group ID Delta は 2 - 1 = 1、Object ID は絶対値 11
             (
                 FetchStreamEntry::EndOfTimedOutRange {
-                    group_id: 1,
-                    object_id: 11,
+                    group_id_delta: 1,
+                    object_id_delta: 11,
                 },
                 None,
                 None,
             ),
-            // 同 Group (1) 内のデルタ: 11 + 5 = 16
-            (descending_fetch_object(None, Some(5)), None, Some(b"e")),
+            // 同 Group (1) 内の省略形: prior Object ID 11 + 1 = 12
+            (descending_fetch_object(None, None), None, Some(b"e")),
         ],
     );
 
@@ -1286,7 +1290,7 @@ fn test_fetch_descending_end_of_range_entries_are_absolute() {
                 group_id: 9,
                 object_id: 5
             },
-            decoded_fetch_object(5, 6),
+            decoded_fetch_object(5, 7),
             decoded_fetch_object(5, 8),
             DecodedFetchEntry::EndOfUnknownRange {
                 group_id: 4,
@@ -1297,9 +1301,9 @@ fn test_fetch_descending_end_of_range_entries_are_absolute() {
                 group_id: 1,
                 object_id: 11
             },
-            decoded_fetch_object(1, 16),
+            decoded_fetch_object(1, 12),
         ],
-        "End of Range が prior を更新し、絶対位置が解決されること"
+        "End of Range が prior Location を更新し、絶対位置が解決されること"
     );
     decoder
         .finish()
@@ -1623,8 +1627,8 @@ fn test_fetch_finish_at_entry_boundary_ok() {
 fn test_fetch_finish_after_end_of_range_ok() {
     let header = FetchHeader { request_id: 1 };
     let entry = FetchStreamEntry::EndOfNonExistentRange {
-        group_id: 10,
-        object_id: 5,
+        group_id_delta: 10,
+        object_id_delta: 5,
     };
     let data = encode_fetch_stream(&header, &[(entry, None, None)]);
 
@@ -1840,27 +1844,31 @@ fn test_fetch_object_with_empty_properties_keeps_length_varint() {
 
 /// End of Range の 3 種類のエントリが Properties を運ばない variant として連続復号できること
 ///
-/// draft-ietf-moq-transport-22 §11.4.1.2 (End of Range) は "Subgroup ID, Priority and Properties
+/// draft-ietf-moq-transport-23 §11.4.2 (End of Range) は "Subgroup ID, Priority and Properties
 /// are not present." と定めるため、`DecodedFetchEntry` の End of Range の variant は Properties を
 /// 持たない。本テストは 3 種類を連続して復号し、それぞれの variant として返ることと、
 /// ペイロード消費なしで `finish()` が成功することを固定する。
+/// 先頭の End of Range は絶対 ID、以降は直前の Location からのデルタであり、
+/// 各 variant が prior Location を更新することも併せて検証する (§11.4.2.1 (ID Decoding))。
 /// wire 上で End of Range に Properties を渡すと拒否されることは
 /// `tests/test_stream/fetch_stream_object.rs` の `encode_end_of_range_with_properties_rejected` が固定する。
 #[test]
 fn test_fetch_end_of_range_entries_carry_no_properties() {
     let header = FetchHeader { request_id: 1 };
+    // 先頭は絶対 ID (1, 2)。以降は現在の Location からのデルタで、
+    // Group が変わるため Object ID は絶対値になる。
     let entries = [
         FetchStreamEntry::EndOfNonExistentRange {
-            group_id: 1,
-            object_id: 2,
+            group_id_delta: 1,
+            object_id_delta: 2,
         },
         FetchStreamEntry::EndOfUnknownRange {
-            group_id: 3,
-            object_id: 4,
+            group_id_delta: 2,
+            object_id_delta: 4,
         },
         FetchStreamEntry::EndOfTimedOutRange {
-            group_id: 5,
-            object_id: 6,
+            group_id_delta: 2,
+            object_id_delta: 6,
         },
     ];
     let data = encode_fetch_stream(

@@ -24,7 +24,7 @@ fn sample_fetch_subgroup_id_mode(ctx: &mut noprop::TestCaseContext) -> FetchSubg
 }
 
 /// prior 参照を持たない (First / NoPriorActualObject) 文脈で許される subgroup mode の生成。
-/// prior-relative な PreviousSame / PreviousPlusOne は禁止 (draft-ietf-moq-transport-22 §11.4.1.1 (Flags) / §11.4.1.2 (End of Range))。
+/// prior-relative な PreviousSame / PreviousPlusOne は禁止 (draft-ietf-moq-transport-23 §11.4.1.1 (Flags) / §11.4.2.2 (Prior Object Fields))。
 fn sample_fetch_non_prior_subgroup_id_mode(
     ctx: &mut noprop::TestCaseContext,
 ) -> FetchSubgroupIdMode {
@@ -49,7 +49,7 @@ fn sample_fetch_properties(ctx: &mut noprop::TestCaseContext) -> Option<Vec<u8>>
 
 /// HasPriorObject 文脈で妥当な `FetchStreamObject` と、それに対応する properties 生バイト列を
 /// 生成する。HasPriorObject では prior 参照に制約がないため全フィールドを任意に取れるが、
-/// Datagram 起源のオブジェクトは Subgroup ID を持てない制約だけ満たす (draft-ietf-moq-transport-22 §11.4.1.1 (Flags))。
+/// Datagram 起源のオブジェクトは Subgroup ID を持てない制約だけ満たす (draft-ietf-moq-transport-23 §11.4.1.1 (Flags))。
 fn sample_fetch_object_has_prior(
     ctx: &mut noprop::TestCaseContext,
 ) -> (FetchStreamObject, Option<Vec<u8>>) {
@@ -93,7 +93,7 @@ fn sample_fetch_object_has_prior(
 
 /// NoPriorActualObject 文脈で妥当な `FetchStreamObject` と properties 生バイト列を生成する。
 /// この文脈では Publisher Priority が明示必須で prior-relative subgroup mode は禁止だが、
-/// Group ID / Object ID は prior 参照 (None) が許される (draft-ietf-moq-transport-22 §11.4.1.2 (End of Range))。
+/// Group ID / Object ID は prior 参照 (None) が許される (draft-ietf-moq-transport-23 §11.4.2 (End of Range))。
 /// First 文脈との差分 (Group/Object を None にできる点) を検証する。
 fn sample_fetch_object_no_prior_actual(
     ctx: &mut noprop::TestCaseContext,
@@ -174,7 +174,7 @@ fn fetch_stream_object_roundtrip_has_prior() -> noprop::TestResult {
 
 /// NoPriorActualObject 文脈での FETCH_STREAM_OBJECT ラウンドトリップ。
 /// Group ID / Object ID は prior 参照 (None) が許されるが、Publisher Priority は必須で
-/// prior-relative subgroup mode は禁止される (draft-ietf-moq-transport-22 §11.4.1.2 (End of Range))。
+/// prior-relative subgroup mode は禁止される (draft-ietf-moq-transport-23 §11.4.2 (End of Range))。
 #[test]
 fn fetch_stream_object_roundtrip_no_prior_actual() -> noprop::TestResult {
     let mut runner = test_runner()?;
@@ -199,7 +199,7 @@ fn fetch_stream_object_roundtrip_no_prior_actual() -> noprop::TestResult {
 
 /// First 文脈での FETCH_STREAM_OBJECT ラウンドトリップ。
 /// First では group_id / object_id / publisher_priority が明示必須で、prior-relative な
-/// subgroup mode (PreviousSame / PreviousPlusOne) は禁止される (draft-ietf-moq-transport-22 §11.4.1.1 (Flags))。
+/// subgroup mode (PreviousSame / PreviousPlusOne) は禁止される (draft-ietf-moq-transport-23 §11.4.1.1 (Flags))。
 #[test]
 fn fetch_stream_object_roundtrip_first() -> noprop::TestResult {
     let mut runner = test_runner()?;
@@ -231,8 +231,11 @@ fn fetch_stream_object_roundtrip_first() -> noprop::TestResult {
 }
 
 /// End of Range エントリ (EndOfNonExistentRange / EndOfUnknownRange / EndOfTimedOutRange) のラウンドトリップ。
-/// これらは特殊な Serialization Flags で識別され、prior 参照文脈に依存せずデコードできる
-/// (draft-ietf-moq-transport-22 §11.4.1.2 (End of Range) / draft-ietf-moq-transport-22 §11.4.1 Table 8)。複数の文脈で同じ結果になることも合わせて確認する。
+/// これらは特殊な Serialization Flags で識別され、低水準 codec は Group ID Delta /
+/// Object ID Delta を生値のまま扱う (draft-ietf-moq-transport-23 §11.4.2 (End of Range) /
+/// §11.4.1 Table 8)。生値の意味は prior 参照文脈で変わる (最初の entry は絶対 ID、
+/// それ以外は直前 Location からのデルタ) が、低水準 codec の往復はその解釈に依存しない
+/// ことを複数の文脈で確認する (§11.4.2.1 (ID Decoding))。
 #[test]
 fn fetch_stream_entry_end_of_range_roundtrip() -> noprop::TestResult {
     let mut runner = test_runner()?;
@@ -243,17 +246,17 @@ fn fetch_stream_entry_end_of_range_roundtrip() -> noprop::TestResult {
         let ctx_idx = noprop::sample_usize_in(ctx, 0..3);
         let entry = match kind {
             0 => FetchStreamEntry::EndOfNonExistentRange {
-                group_id,
-                object_id,
+                group_id_delta: group_id,
+                object_id_delta: object_id,
             },
             1 => FetchStreamEntry::EndOfUnknownRange {
-                group_id,
-                object_id,
+                group_id_delta: group_id,
+                object_id_delta: object_id,
             },
             // kind は 0..3 のため 2 のみがここに到達する
             _ => FetchStreamEntry::EndOfTimedOutRange {
-                group_id,
-                object_id,
+                group_id_delta: group_id,
+                object_id_delta: object_id,
             },
         };
         let ctx = match ctx_idx {
@@ -274,15 +277,15 @@ fn fetch_stream_entry_end_of_range_roundtrip() -> noprop::TestResult {
     Ok(())
 }
 
-/// End of Range 直後の prior 参照 Object は PROTOCOL_VIOLATION で拒否される
+/// prior actual Object が無い文脈で prior 参照を持つ Object は MALFORMED_OBJECT で拒否される
 ///
-/// draft-ietf-moq-transport-22 §11.4.1.2 (End of Range): prior Subgroup ID / Priority の
+/// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields): prior Subgroup ID / Priority の
 /// 参照は先行する実 Object がない文脈 (First / NoPriorActualObject) では禁止。
 /// HasPriorObject 文脈で正当にエンコードしたバイト列を prior なし文脈でデコードし、
-/// 拒否されることを検証する。ダミー値 (`update_prior_for_end_of_range` の subgroup_id=0 等)
-/// が悪用されないことの回帰防御になる。
+/// MALFORMED_OBJECT で拒否されることを検証する。End of Range だけが先行する文脈でも
+/// prior Subgroup ID / Priority が存在しないものとして扱われることの回帰防御になる。
 #[test]
-fn object_with_prior_ref_rejected_without_prior_object() -> noprop::TestResult {
+fn prior_reference_object_rejected_without_prior_actual_object() -> noprop::TestResult {
     use shiguredo_moqt::error::MessageError;
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {

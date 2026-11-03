@@ -13,7 +13,7 @@
 
 use pbt::common::{sample_varint, test_runner};
 use shiguredo_moqt::object_properties::{ObjectProperties, ObjectProperty, ObjectPropertyValue};
-use shiguredo_moqt::stream::decoder::DecodedFetchEntry;
+use shiguredo_moqt::stream::decoder::{DecodedFetchEntry, DecodedFetchObject};
 use shiguredo_moqt::stream::encoder::{FetchObjectInput, FetchStreamEncoder};
 use shiguredo_moqt::track_properties::{
     PROP_OBJECT_DELIVERY_TIMEOUT, PROP_SUBGROUP_DELIVERY_TIMEOUT,
@@ -227,6 +227,159 @@ fn encoder_decoder_roundtrip() -> noprop::TestResult {
     assert!(
         descending_group_change_seen.get(),
         "降順で Group が変化するケースが生成されなかった\n{runner}"
+    );
+    Ok(())
+}
+
+/// End of Range を混ぜた操作列のエンコード → デコード往復
+///
+/// draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding): End of Range は先頭 entry だけが
+/// 絶対 ID で、それ以外は直前の Object または End of Range の Location からのデルタに
+/// なる。Group ID Delta は昇順で加算、降順で減算し、Group ID Delta が 0 なら
+/// Object ID は prior + delta + 1、Group が変わるなら絶対 Object ID になる。
+/// エンコーダが絶対 Location をこの規則でデルタに変換し、デコーダが同じ規則で
+/// 絶対 Location に戻せることを、連続する End of Range と Object の交互配置を含めて検証する。
+///
+/// 生成する Location は Group Order の向きに狭義単調で、同一 Group 内の Object ID は
+/// 狭義増加にする。Subgroup ID と Publisher Priority は固定し、同じ Subgroup の
+/// Priority 不変条件には触れない (その検証は既存の PBT が担う)。
+#[test]
+fn encoder_decoder_roundtrip_with_end_of_range() -> noprop::TestResult {
+    let end_of_range_seen = std::cell::Cell::new(false);
+    let first_end_of_range_seen = std::cell::Cell::new(false);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let request_id = sample_varint(ctx);
+        let group_order = if noprop::sample_bool(ctx) { 0x01 } else { 0x02 };
+        let mut encoder = FetchStreamEncoder::new_with_group_order(request_id, group_order)
+            .expect("0x01 / 0x02 は有効な Group Order");
+        let mut bytes = encoder.encode_header();
+        let mut expected_entries = Vec::new();
+        let mut expected_payloads = Vec::new();
+
+        // 降順は減算で underflow しないよう十分大きい初期値から始める
+        let mut group_id = if group_order == 0x02 {
+            noprop::sample_u64_in(ctx, 5_000..=1_000_000)
+        } else {
+            noprop::sample_u64_in(ctx, 0..=1_000_000)
+        };
+        let mut object_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
+        let count = noprop::sample_usize_in(ctx, 1..=4);
+        // 先頭 entry が End of Range になるケースを混ぜ、絶対 ID の経路を通す
+        let first_is_end_of_range = noprop::sample_bool(ctx);
+
+        for index in 0..count {
+            let is_end_of_range =
+                (index == 0 && first_is_end_of_range) || (index > 0 && noprop::sample_bool(ctx));
+            if index > 0 {
+                if noprop::sample_bool(ctx) {
+                    // Group を Group Order の向きに動かす (最大 4 回 x 1001 で underflow しない)
+                    let delta = 1 + noprop::sample_u64_in(ctx, 0..=1000);
+                    if group_order == 0x02 {
+                        group_id -= delta;
+                    } else {
+                        group_id += delta;
+                    }
+                    object_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
+                } else {
+                    // 同一 Group 内で Object ID を狭義増加させる
+                    object_id += 1 + noprop::sample_u64_in(ctx, 0..=1000);
+                }
+            }
+
+            if is_end_of_range {
+                let kind = noprop::sample_usize_in(ctx, 0..3);
+                match kind {
+                    0 => encoder
+                        .encode_end_of_non_existent_range(group_id, object_id, &mut bytes)
+                        .expect("絶対 Location はエンコードできる"),
+                    1 => encoder
+                        .encode_end_of_unknown_range(group_id, object_id, &mut bytes)
+                        .expect("絶対 Location はエンコードできる"),
+                    // kind は 0..3 のため 2 のみがここに到達する
+                    _ => encoder
+                        .encode_end_of_timed_out_range(group_id, object_id, &mut bytes)
+                        .expect("絶対 Location はエンコードできる"),
+                }
+                expected_entries.push(match kind {
+                    0 => DecodedFetchEntry::EndOfNonExistentRange {
+                        group_id,
+                        object_id,
+                    },
+                    1 => DecodedFetchEntry::EndOfUnknownRange {
+                        group_id,
+                        object_id,
+                    },
+                    _ => DecodedFetchEntry::EndOfTimedOutRange {
+                        group_id,
+                        object_id,
+                    },
+                });
+                expected_payloads.push(Vec::new());
+                end_of_range_seen.set(true);
+                if index == 0 {
+                    first_end_of_range_seen.set(true);
+                }
+            } else {
+                let payload_length = noprop::sample_u64_in(ctx, 0..=16);
+                let payload = noprop::sample_bytes_vec(ctx, payload_length as usize);
+                encoder
+                    .encode_object(
+                        &FetchObjectInput {
+                            group_id,
+                            subgroup_id: 0,
+                            object_id,
+                            publisher_priority: 128,
+                            has_properties: false,
+                            is_datagram_origin: false,
+                            payload_length,
+                        },
+                        None,
+                        &mut bytes,
+                    )
+                    .expect("狭義単調な Location はエンコードできる");
+                bytes.extend_from_slice(&payload);
+                expected_entries.push(DecodedFetchEntry::Object(DecodedFetchObject {
+                    group_id,
+                    subgroup_id: 0,
+                    object_id,
+                    publisher_priority: 128,
+                    is_datagram_origin: false,
+                    payload_length,
+                    properties_bytes: None,
+                }));
+                expected_payloads.push(payload);
+            }
+        }
+
+        let decoded = drive_fetch_with_group_order(&[&bytes], group_order)
+            .expect("エンコーダ出力はデコードできる");
+        // End of Range を含むストリームも、任意の 1 分割で push した結果が一括 push と一致する
+        let at = noprop::sample_usize_in(ctx, 0..=bytes.len());
+        let split = drive_fetch_with_group_order(&[&bytes[..at], &bytes[at..]], group_order)
+            .expect("分割したエンコーダ出力もデコードできる");
+        assert_eq!(
+            split, decoded,
+            "End of Range の分割受信でデコード結果が変わらないこと"
+        );
+        let decoded_entries: Vec<DecodedFetchEntry> =
+            decoded.iter().map(|(entry, _)| entry.clone()).collect();
+        let decoded_payloads: Vec<Vec<u8>> =
+            decoded.iter().map(|(_, payload)| payload.clone()).collect();
+        assert_eq!(
+            decoded_entries, expected_entries,
+            "End of Range を含む絶対 Location が往復すること"
+        );
+        assert_eq!(decoded_payloads, expected_payloads);
+        Ok(())
+    })?;
+    assert!(
+        end_of_range_seen.get(),
+        "End of Range を含むケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        first_end_of_range_seen.get(),
+        "先頭が End of Range のケースが生成されなかった\n{runner}"
     );
     Ok(())
 }

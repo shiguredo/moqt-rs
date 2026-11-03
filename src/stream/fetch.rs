@@ -1,4 +1,4 @@
-//! FETCH_HEADER / FETCH_STREAM_OBJECT (draft-ietf-moq-transport-22 §11.4.1 (Fetch Header))
+//! FETCH_HEADER / FETCH_STREAM_OBJECT (draft-ietf-moq-transport-23 §11.4.1 (Fetch Header))
 //!
 //! FETCH_HEADER の型 ID は 0x05。
 //! FETCH_STREAM_OBJECT の Serialization Flags は以下の通り:
@@ -9,6 +9,12 @@
 //! - [Properties (..)]          — bit5 が立っている場合
 //! - Object Payload Length (vi64)
 //! - [Object Payload (..)]
+//!
+//! End of Range 指示 (0x8C / 0x10C / 0x20C) は
+//! draft-ietf-moq-transport-23 §11.4.2 (End of Range) に従い Group ID Delta と
+//! Object ID Delta を運ぶ。FETCH_HEADER 直後の最初の entry だけが絶対 ID で、
+//! それ以外は直前の Object または End of Range の Location からのデルタである
+//! (§11.4.2.1 (ID Decoding))。
 use super::{FETCH_HEADER_TYPE, validate_properties_blob};
 use crate::{error::MessageError, varint};
 use alloc::vec::Vec;
@@ -51,21 +57,25 @@ impl FetchHeader {
 pub(crate) const FETCH_END_OF_NON_EXISTENT_RANGE: u64 = 0x8C;
 /// Serialization Flags の特殊値: End of Unknown Range
 pub(crate) const FETCH_END_OF_UNKNOWN_RANGE: u64 = 0x10C;
-/// Serialization Flags の特殊値: End of Timed-Out Range (draft-ietf-moq-transport-22 §11.4.1 (Fetch Header) Table 8)
+/// Serialization Flags の特殊値: End of Timed-Out Range (draft-ietf-moq-transport-23 §11.4.1 (Fetch Header) Table 8)
 pub(crate) const FETCH_END_OF_TIMED_OUT_RANGE: u64 = 0x20C;
 
-/// Fetch ストリームの prior 参照文脈 (draft-ietf-moq-transport-22 §11.4.1.1 (Flags) / §11.4.1.2 (End of Range))
+/// Fetch ストリームの prior 参照文脈 (draft-ietf-moq-transport-23 §11.4.1.1 (Flags) / §11.4.2.1 (ID Decoding))
 ///
-/// encode/decode 時に、prior object を参照するフラグの妥当性を検証するために使用する。
+/// encode/decode 時に、prior object を参照するフラグの妥当性を検証し、
+/// End of Range の 2 フィールドが絶対 ID かデルタかを決めるために使用する。
 /// 呼び出し側がストリーム内のオブジェクト出現状況に応じて適切な値を渡す。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FetchPriorContext {
     /// ストリームの最初のオブジェクト: すべての prior 参照が禁止
-    /// (draft-ietf-moq-transport-22 §11.4.1.1 (Flags))
+    /// (draft-ietf-moq-transport-23 §11.4.1.1 (Flags))
+    ///
+    /// End of Range では Group ID Delta / Object ID Delta が絶対 ID を表す
+    /// (draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding))。
     First,
     /// End of Range の後で actual object が未出現:
     /// prior Subgroup ID / Priority の参照が禁止
-    /// (draft-ietf-moq-transport-22 §11.4.1.2 (End of Range): prior Group ID / Object ID は End of Range の値を使う)
+    /// (draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields): prior Group ID / Object ID は End of Range の値を使う)
     NoPriorActualObject,
     /// prior 参照がすべて有効
     HasPriorObject,
@@ -84,34 +94,62 @@ pub enum FetchSubgroupIdMode {
     Explicit(u64),
 }
 
-/// Fetch ストリーム内のオブジェクトの種別
+/// Fetch ストリーム内の Object または範囲指示
+///
+/// `Object` 以外の variant は End of Range 指示であり、
+/// draft-ietf-moq-transport-23 §11.4.2 (End of Range) に従って Group ID Delta と
+/// Object ID Delta を運ぶ。Subgroup ID / Priority / Properties は持たない。
+///
+/// End of Range の 2 フィールドは wire に現れた生値であり、絶対 Location ではない。
+/// [`FetchPriorContext::First`] (FETCH_HEADER 直後の最初の entry) では両フィールドが
+/// 絶対 ID を表し、それ以外では直前の Object または End of Range の解決済み Location を
+/// 基準にしたデルタを表す (§11.4.2.1 (ID Decoding))。絶対 Location への解決は
+/// 高水準の `FetchStreamDecoder` / `FetchStreamEncoder` が担う。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FetchStreamEntry {
     /// 通常のオブジェクト
     Object(FetchStreamObject),
     /// End of Non-Existent Range (0x8C)
-    /// draft-ietf-moq-transport-22 §11.4.1.2 (End of Range): Group ID と Object ID が必須
+    ///
+    /// draft-ietf-moq-transport-23 §11.4.2 (End of Range): Group ID Delta と
+    /// Object ID Delta が必須で、Subgroup ID / Priority / Properties は存在しない。
     EndOfNonExistentRange {
-        /// Group ID
-        group_id: u64,
-        /// Object ID
-        object_id: u64,
+        /// Group ID Delta (vi64)
+        ///
+        /// [`FetchPriorContext::First`] では絶対 Group ID になる。
+        group_id_delta: u64,
+        /// Object ID Delta (vi64)
+        ///
+        /// [`FetchPriorContext::First`] では絶対 Object ID になる。
+        object_id_delta: u64,
     },
     /// End of Unknown Range (0x10C)
-    /// draft-ietf-moq-transport-22 §11.4.1.2 (End of Range): Group ID と Object ID が必須
+    ///
+    /// draft-ietf-moq-transport-23 §11.4.2 (End of Range): Group ID Delta と
+    /// Object ID Delta が必須で、Subgroup ID / Priority / Properties は存在しない。
     EndOfUnknownRange {
-        /// Group ID
-        group_id: u64,
-        /// Object ID
-        object_id: u64,
+        /// Group ID Delta (vi64)
+        ///
+        /// [`FetchPriorContext::First`] では絶対 Group ID になる。
+        group_id_delta: u64,
+        /// Object ID Delta (vi64)
+        ///
+        /// [`FetchPriorContext::First`] では絶対 Object ID になる。
+        object_id_delta: u64,
     },
     /// End of Timed-Out Range (0x20C)
-    /// draft-ietf-moq-transport-22 §11.4.1.2 (End of Range): Group ID と Object ID が必須
+    ///
+    /// draft-ietf-moq-transport-23 §11.4.2 (End of Range): Group ID Delta と
+    /// Object ID Delta が必須で、Subgroup ID / Priority / Properties は存在しない。
     EndOfTimedOutRange {
-        /// Group ID
-        group_id: u64,
-        /// Object ID
-        object_id: u64,
+        /// Group ID Delta (vi64)
+        ///
+        /// [`FetchPriorContext::First`] では絶対 Group ID になる。
+        group_id_delta: u64,
+        /// Object ID Delta (vi64)
+        ///
+        /// [`FetchPriorContext::First`] では絶対 Object ID になる。
+        object_id_delta: u64,
     },
 }
 
@@ -156,7 +194,8 @@ impl FetchStreamEntry {
     /// Properties Length = 0 を含むデータ (`&[0x00]` など) を渡す。
     /// 空スライス (`Some(&[])`) は Properties Length varint を含まない契約違反入力である。
     /// オブジェクト以外の variant (`EndOfNonExistentRange` など) には `None` を渡す
-    /// (§11.4.1.2 (End of Range): "Subgroup ID, Priority and Properties are not present")。
+    /// (draft-ietf-moq-transport-23 §11.4.2 (End of Range):
+    /// "Subgroup ID, Priority and Properties are not present")。
     ///
     /// # Errors
     ///
@@ -171,6 +210,12 @@ impl FetchStreamEntry {
     ///
     /// オブジェクト以外の variant では、`properties_data` に `Some(...)` を渡すと
     /// `ProtocolViolation` を返す (書き込みは行わない)。`None` なら常に `Ok(())` を返す。
+    ///
+    /// End of Range の variant が持つ 2 フィールドは生値であり、`prior_context` によって
+    /// 意味が変わる。[`FetchPriorContext::First`] では絶対 ID、それ以外では直前の Location からの
+    /// デルタを表す (§11.4.2.1 (ID Decoding))。この関数は与えられた生値をそのまま書き出すだけで、
+    /// デルタの計算や加減算の overflow 検証は行わない。それは絶対 Location を扱う高水準の
+    /// `FetchStreamEncoder` の責務である。
     pub fn encode(
         &self,
         properties_data: Option<&[u8]>,
@@ -179,33 +224,33 @@ impl FetchStreamEntry {
     ) -> Result<(), MessageError> {
         match self {
             Self::EndOfNonExistentRange {
-                group_id,
-                object_id,
+                group_id_delta,
+                object_id_delta,
             } => {
                 reject_end_of_range_properties(properties_data)?;
                 varint::encode(FETCH_END_OF_NON_EXISTENT_RANGE, buf);
-                varint::encode(*group_id, buf);
-                varint::encode(*object_id, buf);
+                varint::encode(*group_id_delta, buf);
+                varint::encode(*object_id_delta, buf);
                 Ok(())
             }
             Self::EndOfUnknownRange {
-                group_id,
-                object_id,
+                group_id_delta,
+                object_id_delta,
             } => {
                 reject_end_of_range_properties(properties_data)?;
                 varint::encode(FETCH_END_OF_UNKNOWN_RANGE, buf);
-                varint::encode(*group_id, buf);
-                varint::encode(*object_id, buf);
+                varint::encode(*group_id_delta, buf);
+                varint::encode(*object_id_delta, buf);
                 Ok(())
             }
             Self::EndOfTimedOutRange {
-                group_id,
-                object_id,
+                group_id_delta,
+                object_id_delta,
             } => {
                 reject_end_of_range_properties(properties_data)?;
                 varint::encode(FETCH_END_OF_TIMED_OUT_RANGE, buf);
-                varint::encode(*group_id, buf);
-                varint::encode(*object_id, buf);
+                varint::encode(*group_id_delta, buf);
+                varint::encode(*object_id_delta, buf);
                 Ok(())
             }
             Self::Object(obj) => obj.encode(properties_data, prior_context, buf),
@@ -215,9 +260,14 @@ impl FetchStreamEntry {
     /// バッファ先頭からエントリをデコードし `(entry, 消費バイト数)` を返す
     ///
     /// `prior_context` で prior object 参照の妥当性を検証する。
-    /// - `First`: すべての prior 参照を禁止 (draft-ietf-moq-transport-22 §11.4.1.1 (Flags))
-    /// - `NoPriorActualObject`: prior Subgroup ID / Priority を禁止 (draft-ietf-moq-transport-22 §11.4.1.2 (End of Range))
+    /// - `First`: すべての prior 参照を禁止 (draft-ietf-moq-transport-23 §11.4.1.1 (Flags))
+    /// - `NoPriorActualObject`: prior Subgroup ID / Priority を禁止 (draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields))
     /// - `HasPriorObject`: すべての prior 参照を許可
+    ///
+    /// End of Range の variant は wire の生値をそのまま返し、`prior_context` によって
+    /// その意味が変わる。`First` では絶対 ID、それ以外では直前の Location からのデルタである
+    /// (§11.4.2.1 (ID Decoding))。絶対 Location への解決と overflow 検証は
+    /// 高水準の `FetchStreamDecoder` が行う。
     pub fn decode(
         buf: &[u8],
         prior_context: FetchPriorContext,
@@ -236,45 +286,49 @@ impl FetchStreamEntry {
 
         match flags {
             FETCH_END_OF_NON_EXISTENT_RANGE => {
-                // draft-ietf-moq-transport-22 §11.4.1.2 (End of Range): Group ID と Object ID が必須
-                let (group_id, n) = varint::decode(&buf[pos..])?;
+                // draft-ietf-moq-transport-23 §11.4.2 (End of Range): Group ID Delta と
+                // Object ID Delta が常に存在する。先頭 entry かどうかで意味が変わるため、
+                // ここでは生値のまま返す (§11.4.2.1 (ID Decoding))。
+                let (group_id_delta, n) = varint::decode(&buf[pos..])?;
                 pos += n;
-                let (object_id, n) = varint::decode(&buf[pos..])?;
+                let (object_id_delta, n) = varint::decode(&buf[pos..])?;
                 pos += n;
                 Ok((
                     Self::EndOfNonExistentRange {
-                        group_id,
-                        object_id,
+                        group_id_delta,
+                        object_id_delta,
                     },
                     None,
                     pos,
                 ))
             }
             FETCH_END_OF_UNKNOWN_RANGE => {
-                // draft-ietf-moq-transport-22 §11.4.1.2 (End of Range): Group ID と Object ID が必須
-                let (group_id, n) = varint::decode(&buf[pos..])?;
+                // draft-ietf-moq-transport-23 §11.4.2 (End of Range): Group ID Delta と
+                // Object ID Delta が常に存在する。
+                let (group_id_delta, n) = varint::decode(&buf[pos..])?;
                 pos += n;
-                let (object_id, n) = varint::decode(&buf[pos..])?;
+                let (object_id_delta, n) = varint::decode(&buf[pos..])?;
                 pos += n;
                 Ok((
                     Self::EndOfUnknownRange {
-                        group_id,
-                        object_id,
+                        group_id_delta,
+                        object_id_delta,
                     },
                     None,
                     pos,
                 ))
             }
             FETCH_END_OF_TIMED_OUT_RANGE => {
-                // draft-ietf-moq-transport-22 §11.4.1.2 (End of Range): Group ID と Object ID が必須
-                let (group_id, n) = varint::decode(&buf[pos..])?;
+                // draft-ietf-moq-transport-23 §11.4.2 (End of Range): Group ID Delta と
+                // Object ID Delta が常に存在する。
+                let (group_id_delta, n) = varint::decode(&buf[pos..])?;
                 pos += n;
-                let (object_id, n) = varint::decode(&buf[pos..])?;
+                let (object_id_delta, n) = varint::decode(&buf[pos..])?;
                 pos += n;
                 Ok((
                     Self::EndOfTimedOutRange {
-                        group_id,
-                        object_id,
+                        group_id_delta,
+                        object_id_delta,
                     },
                     None,
                     pos,
@@ -284,7 +338,7 @@ impl FetchStreamEntry {
                 // Table 8 の 3 値以外の 128 以上は未知値として先に拒否する。
                 // prior 文脈違反より未知 flags 自体を優先して報告するのは
                 // 実装の診断選択である (いずれもセッション終了であり、
-                // draft-ietf-moq-transport-22 §11.4.1 (Fetch Header) は
+                // draft-ietf-moq-transport-23 §11.4.1 (Fetch Header) は
                 // 優先順位を規定しない)。
                 if flags >= 128 {
                     // draft-ietf-moq-transport-23 §11.4.1 (Fetch Header): Table 8 に無い
@@ -627,7 +681,7 @@ impl FetchStreamObject {
 
 /// End of Range のエントリに `properties_data` を渡していないことを検証する
 ///
-/// draft-ietf-moq-transport-22 §11.4.1.2 (End of Range):
+/// draft-ietf-moq-transport-23 §11.4.2 (End of Range):
 /// "Subgroup ID, Priority and Properties are not present"。
 /// End of Range のエントリに Properties フィールドは存在しないため、
 /// `Some(...)` は呼び出し側の渡し間違いとして `ProtocolViolation` にする。

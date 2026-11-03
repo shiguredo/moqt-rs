@@ -55,6 +55,9 @@ mod subgroup_object;
 #[path = "test_stream/fetch_stream_object.rs"]
 mod fetch_stream_object;
 
+#[path = "test_stream/fetch_end_of_range.rs"]
+mod fetch_end_of_range;
+
 #[path = "test_stream/object_datagram.rs"]
 mod object_datagram;
 

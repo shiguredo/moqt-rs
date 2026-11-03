@@ -339,6 +339,9 @@ impl Default for SubgroupStreamDecoder {
 /// デコード済み Fetch エントリの情報
 ///
 /// `FetchStreamEntry` の生のデルタ値ではなく、絶対値に解決済みの情報を提供する。
+/// End of Range の Group ID / Object ID は、
+/// draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding) に従って直前の Object または
+/// End of Range の Location から解決した絶対 Location である。
 /// ペイロードは含まない。呼び出し側が `payload_length` バイト分を消費する。
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecodedFetchEntry {
@@ -346,23 +349,23 @@ pub enum DecodedFetchEntry {
     Object(DecodedFetchObject),
     /// End of Non-Existent Range (0x8C)
     EndOfNonExistentRange {
-        /// 終端 Group ID
+        /// 終端 Group ID (絶対値)
         group_id: u64,
-        /// 終端 Object ID
+        /// 終端 Object ID (絶対値)
         object_id: u64,
     },
     /// End of Unknown Range (0x10C)
     EndOfUnknownRange {
-        /// 終端 Group ID
+        /// 終端 Group ID (絶対値)
         group_id: u64,
-        /// 終端 Object ID
+        /// 終端 Object ID (絶対値)
         object_id: u64,
     },
-    /// End of Timed-Out Range (0x20C, draft-ietf-moq-transport-22 §11.4.1 Table 8)
+    /// End of Timed-Out Range (0x20C, draft-ietf-moq-transport-23 §11.4.1 Table 8)
     EndOfTimedOutRange {
-        /// 終端 Group ID
+        /// 終端 Group ID (絶対値)
         group_id: u64,
-        /// 終端 Object ID
+        /// 終端 Object ID (絶対値)
         object_id: u64,
     },
 }
@@ -403,13 +406,21 @@ enum FetchDecoderState {
     ConsumingPayload { remaining: u64 },
 }
 
-/// 前回のオブジェクト情報（デルタ解決用）
+/// prior 参照を解決するための直前状態
+///
+/// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields): prior Group ID / Object ID は
+/// 直前の Object または End of Range の解決済み Location であり、prior Subgroup ID /
+/// Priority は End of Range を挟んでも直前の actual Object の値である。
+/// actual Object がまだ出現していない場合、Subgroup ID / Priority は `None` になり、
+/// それらを参照する Object は MALFORMED_OBJECT になる。
 #[derive(Debug, Clone, Copy)]
 struct FetchPriorState {
     group_id: u64,
-    subgroup_id: u64,
     object_id: u64,
-    publisher_priority: u8,
+    /// 直前の actual Object の Subgroup ID (actual Object 未出現なら `None`)
+    subgroup_id: Option<u64>,
+    /// 直前の actual Object の Publisher Priority (actual Object 未出現なら `None`)
+    publisher_priority: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -434,6 +445,9 @@ const FETCH_GROUP_ORDER_DESCENDING: u8 = 0x02;
 ///
 /// `FetchPriorContext` の状態遷移を内部で自動管理し、
 /// デルタ圧縮された group_id / subgroup_id / object_id を絶対値に解決する。
+/// End of Range の Group ID Delta / Object ID Delta も絶対 Location に解決する
+/// (draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding))。低水準 codec は wire の生値を
+/// 扱うのに対し、このモジュールは常に絶対 Location を扱う。
 ///
 /// ペイロードはデコーダの責務外。`try_decode_entry` が返す `payload_length` バイト分を
 /// 呼び出し側がバッファから消費した後、`consume_payload` を呼んで次のエントリに進む。
@@ -636,9 +650,9 @@ impl FetchStreamDecoder {
                 // prior_state を更新する
                 self.prior_state = Some(FetchPriorState {
                     group_id: resolved.group_id,
-                    subgroup_id: resolved.subgroup_id,
                     object_id: resolved.object_id,
-                    publisher_priority: resolved.publisher_priority,
+                    subgroup_id: Some(resolved.subgroup_id),
+                    publisher_priority: Some(resolved.publisher_priority),
                 });
 
                 // FetchPriorContext を遷移する: Object → HasPriorObject
@@ -653,49 +667,33 @@ impl FetchStreamDecoder {
                 Ok(DecodedFetchEntry::Object(resolved))
             }
             FetchStreamEntry::EndOfNonExistentRange {
-                group_id,
-                object_id,
+                group_id_delta,
+                object_id_delta,
             } => {
-                // End of Range エントリ: group_id / object_id を prior_state に反映する
-                // (draft-ietf-moq-transport-22 §11.4.1.2 (End of Range): prior Group ID / Object ID は End of Range の値を使う)
-                self.update_prior_for_end_of_range(group_id, object_id);
-
-                // FetchPriorContext を遷移する:
-                // First → NoPriorActualObject, それ以外は変更なし
-                if matches!(self.prior_context, FetchPriorContext::First) {
-                    self.prior_context = FetchPriorContext::NoPriorActualObject;
-                }
-
+                let (group_id, object_id) =
+                    self.resolve_end_of_range(group_id_delta, object_id_delta)?;
                 Ok(DecodedFetchEntry::EndOfNonExistentRange {
                     group_id,
                     object_id,
                 })
             }
             FetchStreamEntry::EndOfUnknownRange {
-                group_id,
-                object_id,
+                group_id_delta,
+                object_id_delta,
             } => {
-                self.update_prior_for_end_of_range(group_id, object_id);
-
-                if matches!(self.prior_context, FetchPriorContext::First) {
-                    self.prior_context = FetchPriorContext::NoPriorActualObject;
-                }
-
+                let (group_id, object_id) =
+                    self.resolve_end_of_range(group_id_delta, object_id_delta)?;
                 Ok(DecodedFetchEntry::EndOfUnknownRange {
                     group_id,
                     object_id,
                 })
             }
             FetchStreamEntry::EndOfTimedOutRange {
-                group_id,
-                object_id,
+                group_id_delta,
+                object_id_delta,
             } => {
-                self.update_prior_for_end_of_range(group_id, object_id);
-
-                if matches!(self.prior_context, FetchPriorContext::First) {
-                    self.prior_context = FetchPriorContext::NoPriorActualObject;
-                }
-
+                let (group_id, object_id) =
+                    self.resolve_end_of_range(group_id_delta, object_id_delta)?;
                 Ok(DecodedFetchEntry::EndOfTimedOutRange {
                     group_id,
                     object_id,
@@ -704,10 +702,85 @@ impl FetchStreamDecoder {
         }
     }
 
-    /// FetchStreamObject のデルタフィールドを絶対値に解決する (draft-ietf-moq-transport-22 §11.4.1.1 (Flags))
+    /// End of Range の生値を絶対 Location に解決し、prior 状態を更新する
+    ///
+    /// draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding):
+    /// - FETCH_HEADER 直後の最初の entry は両フィールドが絶対 ID
+    /// - それ以外は直前の Object または End of Range の Location が基準で、
+    ///   Group ID は昇順なら加算、降順なら減算する
+    /// - Group ID Delta が 0 なら Object ID は prior Object ID + Object ID Delta + 1
+    /// - Group ID Delta が 0 でなければ Object ID Delta が新しい Group の絶対 Object ID
+    /// - 解決結果が u64 の範囲を外れる場合は DELTA_ENCODING_OVERFLOW (0x400)
+    ///
+    /// prior Subgroup ID / Priority は End of Range では更新しない
+    /// (同 §11.4.2.2 (Prior Object Fields): 直前の actual Object の値を保持する)。
+    fn resolve_end_of_range(
+        &mut self,
+        group_id_delta: u64,
+        object_id_delta: u64,
+    ) -> Result<(u64, u64), MessageError> {
+        let location = match self.prior_state {
+            // 最初の entry は絶対 ID
+            None => (group_id_delta, object_id_delta),
+            Some(prior) => {
+                let group_id = match self.group_order {
+                    FETCH_GROUP_ORDER_ASCENDING => {
+                        prior.group_id.checked_add(group_id_delta).ok_or({
+                            MessageError::DeltaEncodingOverflow(
+                                "fetch end of range group ID delta overflow in ascending order",
+                            )
+                        })?
+                    }
+                    FETCH_GROUP_ORDER_DESCENDING => {
+                        prior.group_id.checked_sub(group_id_delta).ok_or({
+                            MessageError::DeltaEncodingOverflow(
+                                "fetch end of range group ID delta underflow in descending order",
+                            )
+                        })?
+                    }
+                    _ => unreachable!(
+                        "group_order is validated to ASCENDING or DESCENDING by validate_fetch_group_order"
+                    ),
+                };
+                // Group ID Delta が 0 のときだけ Object ID が prior からの相対値になり、
+                // 非 0 のときは Object ID Delta 自体が新しい Group の絶対 Object ID になる。
+                let object_id = if group_id_delta == 0 {
+                    prior
+                        .object_id
+                        .checked_add(object_id_delta)
+                        .and_then(|v| v.checked_add(1))
+                        .ok_or(MessageError::DeltaEncodingOverflow(
+                            "fetch end of range object ID delta overflow",
+                        ))?
+                } else {
+                    object_id_delta
+                };
+                (group_id, object_id)
+            }
+        };
+
+        self.update_prior_for_end_of_range(location.0, location.1);
+
+        // FetchPriorContext を遷移する:
+        // First → NoPriorActualObject, それ以外は変更なし
+        if matches!(self.prior_context, FetchPriorContext::First) {
+            self.prior_context = FetchPriorContext::NoPriorActualObject;
+        }
+
+        Ok(location)
+    }
+
+    /// FetchStreamObject のデルタフィールドを絶対値に解決する (draft-ietf-moq-transport-23 §11.4.1.1 (Flags))
     ///
     /// `properties_bytes` は `FetchStreamEntry::decode_with_properties` が返した
     /// Properties Length varint 込みの生バイト列であり、そのまま保持する。
+    ///
+    /// prior Subgroup ID / Priority は直前の actual Object の値を参照する
+    /// (draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields))。そのため
+    /// actual Object が未出現のままそれらを参照すると MALFORMED_OBJECT になる。
+    /// 同じ規則は低水準 codec も `FetchPriorContext::NoPriorActualObject` で検証しており、
+    /// 通常はそちらが先に拒否する。ここでは直前状態を直接見ることで、prior 状態の
+    /// 不整合によって不正な参照が 0 などの代替値に化けて素通りすることを防ぐ。
     fn resolve_object(
         &self,
         obj: &FetchStreamObject,
@@ -715,7 +788,7 @@ impl FetchStreamDecoder {
     ) -> Result<DecodedFetchObject, MessageError> {
         let prior = self.prior_state;
 
-        // 最初のオブジェクト: group_id / object_id は絶対値 (draft-ietf-moq-transport-22 §11.4.1.1 (Flags))
+        // 最初のオブジェクト: group_id / object_id は絶対値 (draft-ietf-moq-transport-23 §11.4.1.1 (Flags))
         let group_id = if let Some(id) = obj.group_id {
             if prior.is_none() {
                 id
@@ -749,22 +822,27 @@ impl FetchStreamDecoder {
 
         let subgroup_id = match &obj.subgroup_id {
             FetchSubgroupIdMode::Zero => 0,
-            FetchSubgroupIdMode::PreviousSame => prior.map_or(0, |p| p.subgroup_id),
-            FetchSubgroupIdMode::PreviousPlusOne => prior.map_or(Ok(1), |p| {
-                p.subgroup_id
-                    .checked_add(1)
-                    .ok_or(MessageError::DeltaEncodingOverflow(
-                        "fetch subgroup ID delta overflow",
-                    ))
-            })?,
+            FetchSubgroupIdMode::PreviousSame => prior
+                .and_then(|p| p.subgroup_id)
+                .ok_or(MessageError::MalformedObject(
+                    "fetch object must not reference a prior subgroup ID without a prior actual object",
+                ))?,
+            FetchSubgroupIdMode::PreviousPlusOne => prior
+                .and_then(|p| p.subgroup_id)
+                .ok_or(MessageError::MalformedObject(
+                    "fetch object must not reference a prior subgroup ID without a prior actual object",
+                ))?
+                .checked_add(1)
+                .ok_or(MessageError::DeltaEncodingOverflow(
+                    "fetch subgroup ID delta overflow",
+                ))?,
             FetchSubgroupIdMode::Explicit(id) => *id,
         };
 
         // 最初のオブジェクト: object_id は絶対値
         // Group 変更時: Object ID Delta present → 絶対値、absent → prior + 1
         // 同 Group: Object ID Delta present → prior + delta、absent → prior + 1
-        // (draft-ietf-moq-transport-22 §11.4.1.1 (Flags))
-        // 注: Subgroup (§11.3.1) と異なり Fetch の Object ID Delta に +1 は付かない
+        // (draft-ietf-moq-transport-23 §11.4.1.1 (Flags))
         let object_id =
             if prior.is_none() {
                 obj.object_id.unwrap_or(0)
@@ -780,7 +858,7 @@ impl FetchStreamDecoder {
                         )?,
                     }
                 } else if let Some(delta) = obj.object_id {
-                    // 同 Group: Object ID = prior + delta (Subgroup と異なり +1 しない)
+                    // 同 Group: Object ID = prior + delta
                     prev_object
                         .checked_add(delta)
                         .ok_or(MessageError::DeltaEncodingOverflow(
@@ -796,9 +874,14 @@ impl FetchStreamDecoder {
                 }
             };
 
-        let publisher_priority = obj
-            .publisher_priority
-            .unwrap_or_else(|| prior.map_or(0, |p| p.publisher_priority));
+        let publisher_priority = match obj.publisher_priority {
+            Some(priority) => priority,
+            None => prior.and_then(|p| p.publisher_priority).ok_or(
+                MessageError::MalformedObject(
+                    "fetch object must not reference a prior publisher priority without a prior actual object",
+                ),
+            )?,
+        };
 
         Ok(DecodedFetchObject {
             group_id,
@@ -811,7 +894,14 @@ impl FetchStreamDecoder {
         })
     }
 
-    /// End of Range エントリ後に prior_state の group_id / object_id を更新する
+    /// End of Range 後の prior 状態を更新する
+    ///
+    /// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields): prior Group ID /
+    /// Object ID は End of Range の解決済み Location に更新するが、prior Subgroup ID /
+    /// Priority は End of Range より前の最後の actual Object の値を保持する。
+    /// actual Object が未出現のまま End of Range だけが現れた場合は、
+    /// Subgroup ID / Priority を `None` のまま残し、後続 Object からの参照を
+    /// MALFORMED_OBJECT にする。
     fn update_prior_for_end_of_range(&mut self, group_id: u64, object_id: u64) {
         match &mut self.prior_state {
             Some(prior) => {
@@ -819,14 +909,11 @@ impl FetchStreamDecoder {
                 prior.object_id = object_id;
             }
             None => {
-                // prior_state が無い場合は部分的な状態を作る
-                // subgroup_id と publisher_priority は不明だが、
-                // NoPriorActualObject 状態ではこれらの prior 参照は禁止されるため安全
                 self.prior_state = Some(FetchPriorState {
                     group_id,
-                    subgroup_id: 0,
                     object_id,
-                    publisher_priority: 0,
+                    subgroup_id: None,
+                    publisher_priority: None,
                 });
             }
         }
