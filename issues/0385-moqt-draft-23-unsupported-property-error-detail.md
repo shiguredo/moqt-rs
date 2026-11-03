@@ -3,7 +3,7 @@
 - Created: 2026-11-03
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-moqt-draft-23-unsupported-property-error-detail
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-11-03
 
 ## 目的
 
