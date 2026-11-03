@@ -2359,6 +2359,7 @@ fn fetch_ok_largest_object_within_range_truncates_end() {
         if let SessionEvent::FetchOkReceived {
             request_id,
             end_location,
+            ..
         } = ev
         {
             assert_eq!(request_id, rid);

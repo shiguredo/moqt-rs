@@ -252,9 +252,10 @@ impl Session {
             ));
         }
         entry.response = Some(TrackStatusResponse::Ok {
-            // 自側が送る応答では Largest Location を保持しない (送信側の entry だけが
-            // peer から受信した値を保持する)
+            // 自側が送る応答では Largest Location と EXPIRES を保持しない (送信側の entry
+            // だけが peer から受信した値を保持する)
             largest_location: None,
+            expires_ms: None,
         });
         // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter): 空化の判断は
         // entry の借用を解放してから行う
@@ -348,6 +349,11 @@ impl Session {
     /// draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): TRACK_STATUS_OK を送るのは publisher
     /// (responder) であり、自側は subscriber (requester) である。
     ///
+    /// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): TRACK_STATUS_OK は EXPIRES と
+    /// LARGEST_OBJECT を運べる。EXPIRES は同じ Track に対して SUBSCRIBE_OK を返すなら
+    /// 提示した値であり (§9.19.16 (EXPIRES Parameter))、TRACK_STATUS 要求自体の期限では
+    /// ないため、応答の成功確定時は値だけを保持し、期限タイマーは起動しない。
+    ///
     /// draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties): 0x4000-0x7FFF
     /// の Mandatory Track Property のうち意味を理解しない型を含む TRACK_STATUS_OK を受信した
     /// endpoint は、その Track を処理してはならない (MUST)。本ライブラリはリレーではないため
@@ -438,7 +444,16 @@ impl Session {
                 group_id,
                 object_id,
             });
-        entry.response = Some(TrackStatusResponse::Ok { largest_location });
+        // draft-ietf-moq-transport-23 §9.19.16 (EXPIRES Parameter): TRACK_STATUS_OK の
+        // EXPIRES は、同じ Track に対して SUBSCRIBE_OK を返すなら提示した値である。
+        // TRACK_STATUS は 1 回の応答で完結する単発要求であるため、この値で期限タイマーを
+        // 起動せず、要求を再び生かすこともしない。利用側が仮の購読期限として参照できる
+        // ように値だけを保持する (FIN と破棄の条件は `response` の有無だけで決まる)。
+        let expires_ms = parameters.expires();
+        entry.response = Some(TrackStatusResponse::Ok {
+            largest_location,
+            expires_ms,
+        });
         // application へ REQUEST_OK 受信を通知する
         self.events.push_back(SessionEvent::RequestOkReceived {
             request_id,

@@ -137,7 +137,7 @@ fn decode(buf: &[u8]) -> Result<(ControlMessage, usize), MessageError>
 | `Publish` / `PublishDone` | PUBLISH |
 | `PublishStateNotify` | 状態通知 |
 | `RequestUpdate` | 更新要求 |
-| `Fetch` / `FetchOk` | FETCH |
+| `Fetch` | FETCH (成功応答は `RequestOk` = FETCH_OK) |
 | `TrackStatus` | TRACK_STATUS (送信側と受信側の両方) |
 | `Unsupported` | 定義済みだが本ライブラリが扱わない型 (本体は生バイト列のまま保持) |
 
@@ -307,9 +307,9 @@ End of Unknown Range (`0x10C`、§11.4.2 (End of Range)) を示したうえで�
 | `CloseSession(SessionError)` | 接続を閉じる |
 | `RequestUpdateReceived { request_id, parameters }` | REQUEST_UPDATE 受信 |
 | `PublishStateNotifyReceived { request_id, parameters }` | PUBLISH_STATE_NOTIFY 受信 |
-| `RequestOkReceived { request_id, request_kind, parameters }` | REQUEST_OK 受信 (TRACK_STATUS_OK が未知の Mandatory Track Property を含む場合は発行せず `TrackStatusUnsupported` を発行する) |
+| `RequestOkReceived { request_id, request_kind, parameters }` | REQUEST_OK 受信 (TRACK_STATUS_OK が未知の Mandatory Track Property を含む場合は発行せず `TrackStatusUnsupported` を発行する)。TRACK_STATUS_OK の EXPIRES は `parameters.expires()` と `TrackStatusEntry::expires_ms()` の双方で参照できる |
 | `TrackStatusUnsupported { request_id, unsupported_property_types }` | TRACK_STATUS_OK が未知の Mandatory Track Property を含む (draft-ietf-moq-transport-23 §3.7)。`unsupported_property_types` は昇順・重複なしの Property Type 一覧。entry は `TrackStatusResponse::Unsupported` になり、応答タイマーは解除される |
-| `FetchOkReceived { request_id, end_location, end_of_track }` | FETCH_OK 受信 |
+| `FetchOkReceived { request_id, end_location, expires_ms }` | FETCH_OK 受信。`expires_ms` は FETCH_OK の EXPIRES (不在と 0 は `None`) であり、`Session::fetch(request_id)` の `Fetch::expires_ms` とも同じ値になる |
 | `PublishDoneReceived { request_id, status_code, stream_count, reason }` | PUBLISH_DONE 受信 |
 | `RequestErrorReceived { request_id, error_code, retry_interval, reason, error_details }` | REQUEST_ERROR 受信 (`error_details.redirect()` で REDIRECT、`error_details.unsupported_properties()` で未対応 Property Type の一覧を取得) |
 | `RequestTerminated { request_id, kind, reason }` | request が Terminated に遷移 |
@@ -488,8 +488,6 @@ fn send_fetch(
 fn send_fetch_ok(
     &mut self,
     request_id: u64,
-    end_of_track: u8,
-    end_location: Location,
     parameters: MessageParameters,
     track_properties: TrackProperties,
 ) -> Result<(), SessionError>
@@ -571,6 +569,13 @@ fn forget_subscription(&mut self, request_id: u64) -> Option<Subscription>
 fn forget_fetch(&mut self, request_id: u64) -> Option<Fetch>
 fn forget_track_status(&mut self, request_id: u64) -> Option<TrackStatusEntry>
 ```
+
+`TrackStatusEntry::expires_ms()` は TRACK_STATUS_OK が提示した EXPIRES (ミリ秒) を返す。
+draft-ietf-moq-transport-23 §9.19.16 (EXPIRES Parameter) により、値は同じ Track の
+SUBSCRIBE_OK で提示される見込みの購読期限であり、TRACK_STATUS 要求自体の期限ではない。
+TRACK_STATUS は単発要求であるため、この値で期限タイマーは起動せず、FIN と `forget_track_status` の
+条件も EXPIRES の有無で変わらない。FETCH_OK の EXPIRES は `Fetch::expires_ms` に保持され
+(受信側は受信値、送信側は送信値)、同じく期限タイマーは起動しない。
 
 `Session::forget_subscription` は、保留中の PUBLISH_DONE (`Subscription::pending_publish_done`) が
 ある間は呼ばないこと。呼ぶと PUBLISH_DONE が送信されず、draft-ietf-moq-transport-22 §9.5.1

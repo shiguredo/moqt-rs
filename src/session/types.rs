@@ -316,12 +316,17 @@ pub enum SessionEvent {
     /// (Gaps in a Fetch Stream))。Track の終端は FETCH_OK では運ばず、FETCH 応答
     /// ストリームの End of Group (0x80) / End of Track (0x81) で受け取る (§11.4.2.2
     /// (Prior Object Fields))。
+    ///
+    /// `expires_ms` は FETCH_OK の EXPIRES であり (§9.19.16 (EXPIRES Parameter))、不在と
+    /// 0 はどちらも `None` に正規化する。期限タイマーは起動しない (利用側が期限を判断する)。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     FetchOkReceived {
         /// 対象 request の Request ID
         request_id: u64,
         /// 応答範囲の終端 Location
         end_location: Location,
+        /// FETCH_OK が提示した EXPIRES (ミリ秒)。不在と 0 は `None`
+        expires_ms: Option<u64>,
     },
     /// peer からの PUBLISH_DONE を受信した (subscription は Terminated に遷移済み)
     PublishDoneReceived {
@@ -1969,6 +1974,18 @@ pub struct Fetch {
     /// Track の終端はこの値では表さない (FETCH 応答ストリームの End of Group /
     /// End of Track で受け取る。§11.4.2.2 (Prior Object Fields))。
     pub end_location: Option<Location>,
+    /// 初回応答 (FETCH_OK) が提示した EXPIRES (ミリ秒)
+    ///
+    /// draft-ietf-moq-transport-23 §9.19.16 (EXPIRES Parameter): sender が request を
+    /// 終了するまでの時間であり、値は advisory である (sender は期限の前後で終了しうる)。
+    /// subscriber 側は受信した FETCH_OK の値、publisher 側は送信した FETCH_OK の値を保持する。
+    /// EXPIRES=0 (期限なし) と不在はどちらも `None` に正規化する。
+    ///
+    /// 本実装は FETCH の期限タイマーを起動しない (FETCH の終了はデータストリームの終端で
+    /// 判定する) ため、この値は利用側が期限を判断するための情報に留まる。
+    /// 同じ値は [`SessionEvent::FetchOkReceived`] の `expires_ms` でも通知する。
+    /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+    pub expires_ms: Option<u64>,
     /// FETCH への初回応答 (REQUEST_OK / FETCH への応答の REQUEST_ERROR) を受信済みか
     ///
     /// subscriber 側の受信経路のみで更新され、publisher 側は常に false のまま
@@ -2038,17 +2055,28 @@ pub struct Fetch {
     pub has_range_filters: bool,
 }
 
-/// TRACK_STATUS (draft §9.13 (TRACK_STATUS)) の応答
+/// TRACK_STATUS (draft §9.12 (TRACK_STATUS)) の応答
 ///
 /// `TrackStatusEntry.response` が `None` なら応答待ち、`Some(_)` なら応答済み。
 /// `Ok` / `Unsupported` / `Error` で結果を区別する。`error_code` 等の詳細や未対応の
 /// Property Type は `SessionEvent` 経由で application へ通知済みなので本構造体には含めない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackStatusResponse {
-    /// REQUEST_OK 受信 / 送信済み (LARGEST_OBJECT parameter があれば保持する)
+    /// REQUEST_OK 受信 / 送信済み (LARGEST_OBJECT / EXPIRES parameter があれば保持する)
     Ok {
         /// 確定した Largest Location
         largest_location: Option<Location>,
+        /// peer の TRACK_STATUS_OK が提示した EXPIRES (ミリ秒)
+        ///
+        /// draft-ietf-moq-transport-23 §9.19.16 (EXPIRES Parameter): "EXPIRES in
+        /// TRACK_STATUS_OK indicates the value the sender would have included in a
+        /// SUBSCRIBE_OK for the same Track." したがってこの値は TRACK_STATUS 要求自体の
+        /// 期限ではなく、同じ Track を SUBSCRIBE した場合に提示されると見込まれる購読期限で
+        /// ある。TRACK_STATUS は単発要求であり、本実装はこの値で期限タイマーを起動せず、
+        /// FIN の交換や破棄の条件にも影響させない ([`TrackStatusEntry::expires_ms`] で参照する)。
+        /// EXPIRES=0 (期限なし) と不在はどちらも `None` に正規化する。
+        /// 自側が送信した応答では `None` (peer から受信した値だけを保持する)。
+        expires_ms: Option<u64>,
     },
     /// REQUEST_OK 受信済みだが、未知の Mandatory Track Property を含むため Track を利用しない
     ///
@@ -2105,6 +2133,30 @@ pub struct TrackStatusEntry {
     /// entry は `response` が `Some` か `terminated` が `true` なら破棄できる
     /// (`Session::forget_track_status` の受理条件)。
     pub terminated: bool,
+}
+
+impl TrackStatusEntry {
+    /// TRACK_STATUS_OK が提示した EXPIRES (ミリ秒) を返す
+    ///
+    /// draft-ietf-moq-transport-23 §9.19.16 (EXPIRES Parameter): "EXPIRES in
+    /// TRACK_STATUS_OK indicates the value the sender would have included in a
+    /// SUBSCRIBE_OK for the same Track." 返す値は TRACK_STATUS 要求自体の期限ではなく、
+    /// 同じ Track を SUBSCRIBE した場合に提示されると見込まれる購読期限である。
+    /// 利用側はこの値を仮の購読期限として使える。
+    ///
+    /// TRACK_STATUS は 1 回の応答で完結する単発要求であり、本実装はこの値で期限タイマーを
+    /// 起動しない。したがって期限を過ぎても要求は終端せず、FIN の交換と
+    /// [`Session::forget_track_status`](crate::session::core::Session::forget_track_status) の
+    /// 受理条件は EXPIRES の有無で変化しない。
+    ///
+    /// 応答が `Ok` でない場合 (応答待ち・`Error`・`Unsupported`) と EXPIRES が不在または
+    /// 0 の場合は `None` を返す。
+    pub fn expires_ms(&self) -> Option<u64> {
+        match self.response {
+            Some(TrackStatusResponse::Ok { expires_ms, .. }) => expires_ms,
+            _ => None,
+        }
+    }
 }
 
 // ─── GOAWAY / Migration ────────────────────────────────────

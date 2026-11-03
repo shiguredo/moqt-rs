@@ -343,6 +343,8 @@ impl Session {
             request_end,
             state: FetchState::Pending,
             end_location: None,
+            // 初回応答 (受信側) または FETCH_OK 送信時に設定する
+            expires_ms: None,
             response_received: false,
             data_stream_finished: false,
             local_cancel_sent: false,
@@ -394,7 +396,8 @@ impl Session {
     /// `parameters` の LARGEST_OBJECT は Session が観測した Track の最大 Location との
     /// 大きい方に正規化し、要求範囲内なら必ず載せ、範囲外なら取り除く。応答範囲と矛盾する
     /// LARGEST_OBJECT を載せると、§3.2.2 が End Location を LARGEST_OBJECT と定めるために
-    /// 受信側の範囲解釈がぶれるためである。
+    /// 受信側の範囲解釈がぶれるためである。EXPIRES はそのまま載せ、送信した値を
+    /// [`Fetch::expires_ms`] に保持する (§9.19.16 (EXPIRES Parameter))。
     ///
     /// 戻り値が `Err` のときは fetch の状態を変更しない (エンコードは sans-I/O のため
     /// I/O 層で行われ、状態遷移後の失敗は peer に応答が届かない孤児状態を残す)。
@@ -502,6 +505,10 @@ impl Session {
             .expect("fetch existence checked above");
         fetch.state = FetchState::Established;
         fetch.end_location = Some(end_location);
+        // draft-ietf-moq-transport-23 §9.19.16 (EXPIRES Parameter): FETCH_OK の EXPIRES は
+        // sender が request を終了するまでの時間である。送信した値を状態から参照できる
+        // ように保持する (本実装は FETCH の期限タイマーを起動しない)。
+        fetch.expires_ms = parameters.expires();
         // draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
         // peer が FETCH で INCLUDE_PROPERTIES=0 を指定したとき、FETCH_OK の
         // Track Properties は存在するが空にする (SHOULD)。
@@ -925,6 +932,8 @@ impl Session {
             request_end,
             state: FetchState::Pending,
             end_location: None,
+            // 初回応答 (受信側) または FETCH_OK 送信時に設定する
+            expires_ms: None,
             response_received: false,
             data_stream_finished: false,
             local_cancel_sent: false,
@@ -1029,11 +1038,14 @@ impl Session {
     /// FETCH の初回成功応答 (REQUEST_OK、別名 FETCH_OK) を受信する (subscriber 側)
     ///
     /// draft-ietf-moq-transport-23 §3.2 (Fetch) / §3.2.2 (Gaps in a Fetch Stream) /
-    /// §9.3 (REQUEST_OK) / §9.19.17 (LARGEST OBJECT Parameter):
+    /// §9.3 (REQUEST_OK) / §9.19.16 (EXPIRES Parameter) / §9.19.17 (LARGEST OBJECT
+    /// Parameter):
     ///
     /// - 応答範囲の終端は LARGEST_OBJECT が要求範囲内ならその値、そうでなければ要求で
     ///   明示した End Location になる。要求が End を省略している場合の End は
     ///   Largest Object であるため、LARGEST_OBJECT が無ければ終端を確定できない
+    /// - EXPIRES は sender が request を終了するまでの時間であり、値は advisory である。
+    ///   期限タイマーは起動せず、[`Fetch::expires_ms`] に値を保持する
     /// - Track Properties を運べるのは初回応答だけであり、REQUEST_UPDATE_OK では
     ///   空でなければならない (§9.3)。そのため本関数は初回応答だけを扱う
     /// - Track の終端は FETCH_OK では運ばない。FETCH 応答ストリームの
@@ -1202,11 +1214,17 @@ impl Session {
         }
         fetch.response_received = true;
         fetch.end_location = Some(end_location);
+        // draft-ietf-moq-transport-23 §9.19.16 (EXPIRES Parameter): FETCH_OK の EXPIRES は
+        // sender が request を終了するまでの時間である。期限タイマーは起動せず、利用側が
+        // 期限を判断できるように値だけを保持する。0 (期限なし) と不在は `None` に正規化する。
+        fetch.expires_ms = ok.parameters.expires();
         // FETCH_OK 受信をアプリへ能動通知する (FIN 前後どちらの到着もここに至る)。
-        // 応答範囲の終端は `fetch()` ポーリングでも参照できるが、イベント駆動のために載せる。
+        // 応答範囲の終端と EXPIRES は `fetch()` ポーリングでも参照できるが、
+        // イベント駆動のために載せる。
         self.events.push_back(SessionEvent::FetchOkReceived {
             request_id,
             end_location,
+            expires_ms: fetch.expires_ms,
         });
         // 応答より先にデータや FIN が届いていた場合、終端が確定したので保留していた
         // 境界依存の gap 判定を行う (draft-ietf-moq-transport-23 §3.2.2

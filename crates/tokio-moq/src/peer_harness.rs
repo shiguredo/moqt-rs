@@ -2854,6 +2854,7 @@ mod tests {
                 Some(ClientEvent::Session(SessionEvent::FetchOkReceived {
                     request_id: rid,
                     end_location: location,
+                    ..
                 })) => {
                     assert_eq!(rid, request_id, "FETCH_OK の Request ID");
                     assert_eq!(

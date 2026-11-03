@@ -2157,6 +2157,10 @@ mod request_ok {
 
     /// 和集合内の 2 型 (EXPIRES / LARGEST_OBJECT) は codec 層で受理される
     ///
+    /// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK) は PUBLISH_OK: EXPIRES、
+    /// FETCH_OK / REQUEST_UPDATE_OK / TRACK_STATUS_OK: EXPIRES と LARGEST_OBJECT を列挙する。
+    /// codec 層は応答 context を区別できないため和集合で検証するが、TRACK_STATUS_OK と
+    /// FETCH_OK の EXPIRES がワイヤ上で受理されることはこのテストが固定する。
     /// 拒否側だけを固定すると、許可集合をさらに狭める退行 (正当なパラメータを拒否する) を
     /// 検出できないため、encode の成功も確認する。往復の網羅は PBT が担う。
     #[test]

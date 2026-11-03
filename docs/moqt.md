@@ -18,6 +18,8 @@
   - 単一形式のみ (range は LOCATION_FILTER で指定、Standalone / Joining の種別とメッセージ内 Start / End Location は廃止済み)
   - Group Order が Descending (0x02) のときは `FetchStreamDecoder::new_with_group_order` に 0x02 を渡す必要があり、ギャップの意味解釈 (非存在 / 不明の区別、末尾ギャップの FIN 判定) はアプリ責務
 - TRACK_STATUS (subscriber 側の送信と応答受信、publisher 側の受信と応答送信の両方。受信側は subscription state も Track Alias も作らない)
+  - TRACK_STATUS_OK の EXPIRES は同じ Track の SUBSCRIBE_OK で提示される見込みの購読期限であり、要求自体の期限ではない。
+    単発要求のため期限タイマーは起動せず、`TrackStatusEntry::expires_ms` で参照する (FIN と破棄の条件は EXPIRES の有無で変わらない)
 
 ## Data stream / Datagram
 
@@ -50,7 +52,8 @@
 - Authorization Token
 - Object Delivery Timeout (起点は last header byte)
 - Subgroup Delivery Timeout
-- Expires
+- Expires (すべての OK 応答で受理する。TRACK_STATUS_OK の値は仮の購読期限であり期限タイマーを起動しない。
+  FETCH_OK の値は `Fetch::expires_ms` と `FetchOkReceived.expires_ms`、TRACK_STATUS_OK は受信した値を `TrackStatusEntry::expires_ms` で参照できる)
 - Fill Timeout
 - Fill Parameters (fill fetch stream 対応)
 - Forward

@@ -11,7 +11,8 @@ use super::*;
 use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
 use shiguredo_moqt::message::{ReasonPhrase, RequestError};
 use shiguredo_moqt::message_parameter::{
-    MessageParameter, MessageParameterValue, PARAM_INCLUDE_PROPERTIES,
+    AuthorizationToken, MessageParameter, MessageParameterValue, PARAM_AUTHORIZATION_TOKEN,
+    PARAM_INCLUDE_PROPERTIES,
 };
 use shiguredo_moqt::session::types::{
     RequestKind, RequestStreamEnd, TrackRole, TrackStatusResponse,
@@ -96,6 +97,22 @@ fn track_status_ok_wire(track_properties: &[u8]) -> Vec<u8> {
     wire
 }
 
+/// TRACK_STATUS_OK で許可されない AUTHORIZATION_TOKEN を 1 つ持つパラメータ列
+///
+/// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): TRACK_STATUS_OK が運べるのは EXPIRES と
+/// LARGEST_OBJECT だけである。
+fn authorization_token_params() -> MessageParameters {
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_AUTHORIZATION_TOKEN,
+        value: MessageParameterValue::AuthorizationToken(AuthorizationToken::UseValue {
+            token_type: 1,
+            token_value: vec![0x01],
+        }),
+    });
+    parameters
+}
+
 /// TRACK_STATUS を送信し、server に受信させて request id を返す
 fn send_track_status_to_server(client: &mut Session, server: &mut Session) -> u64 {
     let rid = client
@@ -174,7 +191,8 @@ fn track_status_completes_on_request_ok() {
     assert_eq!(
         entry.response,
         Some(TrackStatusResponse::Ok {
-            largest_location: None
+            largest_location: None,
+            expires_ms: None,
         }),
         "REQUEST_OK で応答済みになること"
     );
@@ -189,7 +207,216 @@ fn track_status_completes_on_request_ok() {
     assert!(saw_ok, "RequestOkReceived が発行されること");
 }
 
-/// REQUEST_ERROR を受信すると entry が失敗応答になり、RequestErrorReceived が発行される
+/// TRACK_STATUS_OK の EXPIRES を仮の購読期限として保持し、参照できる
+///
+/// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): "TRACK_STATUS_OK: EXPIRES,
+/// LARGEST_OBJECT"。§9.19.16 (EXPIRES Parameter): "EXPIRES in TRACK_STATUS_OK indicates
+/// the value the sender would have included in a SUBSCRIBE_OK for the same Track."
+/// TRACK_STATUS は subscription state を作らない単発要求であるため (§9.12
+/// (TRACK_STATUS))、値だけを保持し、要求を再び生かすこともしない。
+#[test]
+fn track_status_ok_with_expires_records_tentative_subscription_expiry() {
+    let (mut client, mut server) = establish_pair();
+    let rid = send_track_status_to_server(&mut client, &mut server);
+
+    server
+        .send_request_ok(rid, expires_params(30_000), TrackProperties::new())
+        .expect("TRACK_STATUS_OK の EXPIRES は送信できること");
+    let (send_rid, ok_msg, fin) = take_send_on_stream_with_fin(&mut server);
+    assert_eq!(send_rid, rid);
+    assert!(
+        matches!(
+            &ok_msg,
+            ControlMessage::RequestOk(ok) if ok.parameters.expires() == Some(30_000)
+        ),
+        "EXPIRES が TRACK_STATUS_OK のワイヤ表現に載ること"
+    );
+    assert!(fin, "TRACK_STATUS_OK の送信後に bidi stream を閉じること");
+
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("TRACK_STATUS_OK の EXPIRES は受信できること");
+
+    let entry = client
+        .track_status_request(rid)
+        .expect("entry が存在すること");
+    assert_eq!(
+        entry.response,
+        Some(TrackStatusResponse::Ok {
+            largest_location: None,
+            expires_ms: Some(30_000),
+        }),
+        "受信した EXPIRES を応答に保持すること"
+    );
+    assert_eq!(
+        entry.expires_ms(),
+        Some(30_000),
+        "仮の購読期限として参照できること"
+    );
+    // TRACK_STATUS は subscription state も fetch state も作らない (§9.12)
+    assert!(client.subscription(rid).is_none());
+    assert!(client.fetch(rid).is_none());
+    assert_eq!(client.state(), SessionState::Established);
+
+    let mut saw_ok = false;
+    while let Some(e) = client.poll_event() {
+        if let SessionEvent::RequestOkReceived {
+            request_id,
+            parameters,
+            ..
+        } = e
+        {
+            assert_eq!(request_id, rid);
+            assert_eq!(
+                parameters.expires(),
+                Some(30_000),
+                "受信イベントからも EXPIRES を参照できること"
+            );
+            saw_ok = true;
+        }
+    }
+    assert!(saw_ok, "RequestOkReceived が発行されること");
+}
+
+/// TRACK_STATUS_OK の EXPIRES は期限タイマーを起動せず、FIN と破棄条件にも影響しない
+///
+/// §9.19.16 (EXPIRES Parameter) の値は同じ Track の SUBSCRIBE_OK で提示される見込みの
+/// 購読期限であり、TRACK_STATUS 要求自体の期限ではない。期限を大きく過ぎても要求は
+/// 終端せず、応答受領済みの entry は従来どおり FIN の交換後に破棄できる。
+#[test]
+fn track_status_ok_expires_does_not_start_deadline_timer() {
+    let (mut client, mut server) = establish_pair();
+    client.tick(0);
+    let rid = send_track_status_to_server(&mut client, &mut server);
+
+    server
+        .send_request_ok(rid, expires_params(10), TrackProperties::new())
+        .expect("TRACK_STATUS_OK の EXPIRES は送信できること");
+    let (_, ok_msg, _) = take_send_on_stream_with_fin(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("TRACK_STATUS_OK の EXPIRES は受信できること");
+    while client.poll_event().is_some() {}
+
+    // EXPIRES (10ms) を大きく超えて進めても、期限切れによる終端や切断を起こさない
+    client.tick(10_000);
+    while let Some(e) = client.poll_event() {
+        assert!(
+            !matches!(
+                e,
+                SessionEvent::CloseSession(_) | SessionEvent::RequestTerminated { .. }
+            ),
+            "EXPIRES で期限タイマーを起動しないこと: {e:?}"
+        );
+    }
+    assert_eq!(client.state(), SessionState::Established);
+    assert_eq!(
+        client
+            .track_status_request(rid)
+            .expect("entry が存在すること")
+            .expires_ms(),
+        Some(10),
+        "期限を過ぎても保持した値を参照できること"
+    );
+
+    // 応答受領済みの単発要求は FIN の交換後に破棄できる (EXPIRES の有無で変えない)
+    client
+        .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+        .expect("responder の FIN を受理すること");
+    let mut saw_finish = false;
+    while let Some(e) = client.poll_event() {
+        if let SessionEvent::FinishRequestStream { request_id } = e {
+            assert_eq!(request_id, rid);
+            saw_finish = true;
+        }
+    }
+    assert!(
+        saw_finish,
+        "requester は responder の FIN で送信方向を閉じること"
+    );
+    assert!(
+        client.forget_track_status(rid).is_some(),
+        "応答受領済みの entry は EXPIRES があっても破棄できること"
+    );
+}
+
+/// TRACK_STATUS_OK の EXPIRES=0 は「期限なし」として None に正規化する
+///
+/// §9.19.16 (EXPIRES Parameter): "If the EXPIRES parameter is 0 or is not present in a
+/// message, the request does not expire or expires at an unknown time." パラメータ自体は
+/// 存在するため、不在と 0 を区別できることを固定する。
+#[test]
+fn track_status_ok_with_zero_expires_has_no_expiry() {
+    let (mut client, mut server) = establish_pair();
+    let rid = send_track_status_to_server(&mut client, &mut server);
+
+    server
+        .send_request_ok(rid, expires_params(0), TrackProperties::new())
+        .expect("TRACK_STATUS_OK の EXPIRES=0 は送信できること");
+    let (_, ok_msg, _) = take_send_on_stream_with_fin(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("TRACK_STATUS_OK の EXPIRES=0 は受信できること");
+
+    assert_eq!(
+        client
+            .track_status_request(rid)
+            .expect("entry が存在すること")
+            .expires_ms(),
+        None,
+        "EXPIRES=0 は期限なし (None) として扱うこと"
+    );
+    let mut saw_ok = false;
+    while let Some(e) = client.poll_event() {
+        if let SessionEvent::RequestOkReceived { parameters, .. } = e {
+            assert!(
+                parameters.has_expires(),
+                "EXPIRES=0 もパラメータとしては存在すること"
+            );
+            assert_eq!(parameters.expires(), None);
+            saw_ok = true;
+        }
+    }
+    assert!(saw_ok, "RequestOkReceived が発行されること");
+}
+
+/// TRACK_STATUS_OK の許可集合は EXPIRES と LARGEST_OBJECT に限られる
+///
+/// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): TRACK_STATUS_OK が運べるのは EXPIRES と
+/// LARGEST_OBJECT だけである。許可集合を広げすぎていないことを送受信の双方で固定する。
+#[test]
+fn track_status_ok_disallowed_parameter_is_rejected() {
+    let (mut client, mut server) = establish_pair();
+    let rid = send_track_status_to_server(&mut client, &mut server);
+
+    // 送信側: 許可外のパラメータを含む応答は状態を変えずに拒否する
+    let err = server
+        .send_request_ok(rid, authorization_token_params(), TrackProperties::new())
+        .unwrap_err();
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert!(
+        server
+            .track_status_request(rid)
+            .expect("entry が存在すること")
+            .response
+            .is_none(),
+        "拒否した応答で entry を応答済みにしないこと"
+    );
+
+    // 受信側: decode 済みメッセージを直接渡す API 経路でも同じ許可集合で検証する
+    let err = client
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestOk(shiguredo_moqt::message::RequestOk {
+                parameters: authorization_token_params(),
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(err.code, SESSION_INVALID_PARAMETER);
+    assert_eq!(client.state(), SessionState::Closing);
+}
+
 #[test]
 fn track_status_completes_on_request_error() {
     let (mut client, _server) = establish_pair();
@@ -330,7 +557,8 @@ fn track_status_ok_send_closes_stream_with_fin() {
             .expect("entry が存在すること")
             .response,
         Some(TrackStatusResponse::Ok {
-            largest_location: None
+            largest_location: None,
+            expires_ms: None,
         }),
         "応答済みとして記録されること"
     );
@@ -345,7 +573,8 @@ fn track_status_ok_send_closes_stream_with_fin() {
             .expect("entry が存在すること")
             .response,
         Some(TrackStatusResponse::Ok {
-            largest_location: None
+            largest_location: None,
+            expires_ms: None,
         })
     );
 }
@@ -961,7 +1190,8 @@ fn track_status_ok_with_grease_property_is_success() {
             .expect("entry が存在すること")
             .response,
         Some(TrackStatusResponse::Ok {
-            largest_location: None
+            largest_location: None,
+            expires_ms: None,
         }),
         "GREASE 値を未対応と誤認せず成功として扱うこと"
     );

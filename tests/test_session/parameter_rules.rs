@@ -2678,9 +2678,9 @@ fn send_request_ok_for_fetch_with_object_delivery_timeout_rejected() {
 /// スコープ外パラメータを含む FETCH_OK は送信が拒否され、fetch が Pending のまま・
 /// SendOnStream イベントが積まれないこと
 ///
-/// draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope): FETCH_OK はパラメータを運べない
-/// (FETCH_OK_ALLOWED_PARAMS は空集合。§9.12 (FETCH_OK) の Parameters フィールドに
-/// 許可されるパラメータは 0 個)。受信側はワイヤ層で検証済みのため、ここは送信側の
+/// draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): FETCH_OK が運べるのは
+/// EXPIRES と LARGEST_OBJECT だけである (§9.3 (REQUEST_OK) の "FETCH_OK: EXPIRES,
+/// LARGEST_OBJECT")。受信側はワイヤ層で検証済みのため、ここは送信側の
 /// 状態整合性のための検証。スコープ検証は状態遷移より前に実行されるため、
 /// fetch は Pending のまま維持される (検証が遷移後に走ると、fetch が Established に
 /// 遷移済みのまま後段のエンコード失敗で peer に FETCH_OK が送られない孤児状態が残る)。
@@ -2768,6 +2768,110 @@ fn fetch_ok_with_out_of_scope_parameter_keeps_fetch_pending() {
     assert!(
         matches!(ok_msg, ControlMessage::RequestOk(_)),
         "再送信の FETCH_OK が SendOnStream として積まれること"
+    );
+}
+
+/// FETCH_OK の EXPIRES は送受信の双方で受理され、送信値と受信値を参照できる
+///
+/// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): "FETCH_OK: EXPIRES, LARGEST_OBJECT"。
+/// §9.19.16 (EXPIRES Parameter): sender が request を終了するまでの時間であり、
+/// 値は advisory である。本実装は FETCH の期限タイマーを起動せず、値を状態に保持する。
+#[test]
+fn fetch_ok_with_expires_is_accepted_and_stored() {
+    use shiguredo_moqt::message::common::Location;
+    use shiguredo_moqt::session::types::FetchState;
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_fetch(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            fetch_range_params(
+                Location {
+                    group_id: 0,
+                    object_id: 0,
+                },
+                Location {
+                    group_id: 5,
+                    object_id: 0,
+                },
+            ),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, fetch_msg) = take_send_request(&mut client);
+    server
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let end = Location {
+        group_id: 5,
+        object_id: 0,
+    };
+    server
+        .send_fetch_ok(
+            rid,
+            fetch_ok_params_with(Some(end), expires_params(30_000)),
+            TrackProperties::new(),
+        )
+        .expect("FETCH_OK の EXPIRES は送信できること");
+    let (stream_rid, ok_msg) = take_send_on_stream(&mut server);
+    assert_eq!(stream_rid, rid);
+    assert!(
+        matches!(
+            &ok_msg,
+            ControlMessage::RequestOk(ok)
+                if ok.parameters.expires() == Some(30_000)
+                    && ok.parameters.largest_object() == Some((5, 0))
+        ),
+        "EXPIRES と LARGEST_OBJECT がワイヤ表現に載ること"
+    );
+    assert_eq!(
+        server.fetch(rid).expect("fetch が存在する").expires_ms,
+        Some(30_000),
+        "publisher 側は送信した EXPIRES を保持すること"
+    );
+    assert_eq!(
+        server.fetch(rid).expect("fetch が存在する").state,
+        FetchState::Established
+    );
+
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("FETCH_OK の EXPIRES は受信できること");
+    let fetch = client.fetch(rid).expect("fetch が存在する");
+    assert_eq!(
+        fetch.expires_ms,
+        Some(30_000),
+        "subscriber 側は受信した EXPIRES を保持すること"
+    );
+    assert_eq!(fetch.end_location, Some(end));
+    assert_eq!(client.state(), SessionState::Established);
+
+    // 受信イベントからも EXPIRES を参照できること
+    let mut saw_ok = false;
+    while let Some(e) = client.poll_event() {
+        if let SessionEvent::FetchOkReceived {
+            request_id,
+            expires_ms,
+            ..
+        } = e
+        {
+            assert_eq!(request_id, rid);
+            assert_eq!(
+                expires_ms,
+                Some(30_000),
+                "FetchOkReceived から EXPIRES を参照できること"
+            );
+            saw_ok = true;
+        }
+    }
+    assert!(saw_ok, "FetchOkReceived が発行されること");
+
+    // EXPIRES は期限タイマーではないため、時間を進めても fetch を終端しない
+    client.tick(1_000_000);
+    assert_eq!(
+        client.fetch(rid).expect("fetch が存在する").state,
+        FetchState::Established,
+        "EXPIRES の経過で fetch を終端しないこと"
     );
 }
 
@@ -3250,11 +3354,11 @@ fn request_ok_publish_with_location_filter_keeps_subscription_pending_on_recv() 
 
 /// PUBLISH_OK 応答に LARGEST_OBJECT を載せると受信側で PROTOCOL_VIOLATION
 ///
-/// draft-ietf-moq-transport-22 §9.3 (REQUEST_OK): PUBLISH_OK が許可するのは EXPIRES のみで、
-/// LARGEST_OBJECT は REQUEST_UPDATE_OK と TRACK_STATUS_OK の許可パラメータである。
-/// codec 層の許可集合は 3 context の和集合 (EXPIRES / LARGEST_OBJECT) のため codec は受理し、
-/// context 違反の検出はセッション層が行う。和集合内でも context 外になる組み合わせの 1 つであり
-/// (TRACK_STATUS_OK への EXPIRES も同じ)、wire からも到達しうる。
+/// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): PUBLISH_OK が許可するのは EXPIRES のみで、
+/// LARGEST_OBJECT は REQUEST_UPDATE_OK / TRACK_STATUS_OK / FETCH_OK の許可パラメータである。
+/// codec 層の許可集合は応答 context の和集合 (EXPIRES / LARGEST_OBJECT) のため codec は受理し、
+/// context 違反の検出はセッション層が行う。和集合内でも context 外になる組み合わせの 1 つであり、
+/// wire からも到達しうる。
 #[test]
 fn request_ok_publish_with_largest_object_closes_session_on_recv() {
     use shiguredo_moqt::message::RequestOk;

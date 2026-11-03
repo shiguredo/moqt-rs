@@ -132,6 +132,7 @@ fn fetch_ok_after_fin_keeps_terminated_and_saves_end_info() {
         if let SessionEvent::FetchOkReceived {
             request_id,
             end_location,
+            ..
         } = ev
         {
             assert_eq!(request_id, rid);
@@ -187,6 +188,7 @@ fn fetch_ok_before_fin_emits_fetch_ok_received() {
         if let SessionEvent::FetchOkReceived {
             request_id,
             end_location,
+            ..
         } = ev
         {
             assert_eq!(request_id, rid);
@@ -318,6 +320,7 @@ fn initial_request_ok_after_fin_is_accepted_as_fetch_ok() {
         if let SessionEvent::FetchOkReceived {
             request_id,
             end_location,
+            ..
         } = ev
         {
             assert_eq!(request_id, rid);

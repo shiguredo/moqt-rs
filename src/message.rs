@@ -97,9 +97,10 @@ pub(crate) const SUBSCRIBE_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LA
 ///
 /// これは codec 層が REQUEST_OK のワイヤ妥当性検証に用いる許可集合である。
 /// §9.3 は応答 context ごとの許可パラメータを列挙し、その和集合は `EXPIRES` と
-/// `LARGEST_OBJECT` の 2 型になる。本ライブラリが実装する PUBLISH_OK / REQUEST_UPDATE_OK /
-/// TRACK_STATUS_OK では EXPIRES と LARGEST_OBJECT の 2 型で和集合が尽きる (実装しない
-/// SUBSCRIBE_NAMESPACE_OK / SUBSCRIBE_TRACKS_OK / PUBLISH_NAMESPACE_OK も EXPIRES のみ)。
+/// `LARGEST_OBJECT` の 2 型になる。本ライブラリが実装する PUBLISH_OK / FETCH_OK /
+/// REQUEST_UPDATE_OK / TRACK_STATUS_OK では EXPIRES と LARGEST_OBJECT の 2 型で和集合が
+/// 尽きる (実装しない SUBSCRIBE_NAMESPACE_OK / SUBSCRIBE_TRACKS_OK /
+/// PUBLISH_NAMESPACE_OK も EXPIRES のみ)。
 ///
 /// 和集合外のパラメータの受信は §9.19.1 (Parameter Scope) の MUST により
 /// INVALID_PARAMETER で閉じる。decode 側はこの MUST に対応する検証であり、encode 側の
@@ -128,8 +129,13 @@ pub(crate) const PUBLISH_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES];
 /// draft-ietf-moq-transport-22 §9.20.16 (EXPIRES Parameter) / draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) のみ許可。
 pub(crate) const REQUEST_UPDATE_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LARGEST_OBJECT];
 
-/// TRACK_STATUS_OK context で許可されるパラメータ型 (draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) LARGEST_OBJECT のみ)
-pub(crate) const TRACK_STATUS_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_LARGEST_OBJECT];
+/// TRACK_STATUS_OK context で許可されるパラメータ型
+///
+/// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): "TRACK_STATUS_OK: EXPIRES,
+/// LARGEST_OBJECT"。EXPIRES は同じ Track に対して SUBSCRIBE_OK を返すなら提示した値であり
+/// (draft-ietf-moq-transport-23 §9.19.16 (EXPIRES Parameter))、TRACK_STATUS 自身の期限を
+/// 表すものではない。将来 draft 改版で許可集合が変わりうる。
+pub(crate) const TRACK_STATUS_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LARGEST_OBJECT];
 
 // ─── REQUEST_UPDATE の context 別許可パラメータ集合 ─────────────────
 //
