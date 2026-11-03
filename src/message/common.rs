@@ -160,6 +160,30 @@ pub(crate) fn validate_full_track_name(
     Ok(())
 }
 
+/// Track を名指す要求の Track Name が 1 バイト以上であることを検証する
+///
+/// draft-ietf-moq-transport-23 §2.4.1 (Track Naming): "Each Track Name MUST contain at least
+/// one byte. If an endpoint receives a Track Name with a length of 0, it MUST close the session
+/// with a PROTOCOL_VIOLATION."
+///
+/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の INVALID_FIELD (0x301) は
+/// 「制御メッセージとしては解析できたがフィールド値が許されない」を表すため空の Track Name
+/// にも当てはまるが、§2.4.1 が長さ 0 の Track Name に対して PROTOCOL_VIOLATION を明示して
+/// いるため、明示された方の分類に従う。
+///
+/// namespace-scoped request (SUBSCRIBE_NAMESPACE / PUBLISH_NAMESPACE / SUBSCRIBE_TRACKS) の
+/// Redirect target は Track Name が空でなければならない (draft-ietf-moq-transport-23 §9.4.2.1
+/// (REDIRECT))。length-prefixed な Track Name を読むだけの [`decode_track_name`] は文脈を
+/// 持たないため、空の拒否は本関数を呼ぶ文脈側で行う。
+pub(crate) fn validate_track_name(track_name: &[u8]) -> Result<(), MessageError> {
+    if track_name.is_empty() {
+        return Err(MessageError::ProtocolViolation(
+            "track name must contain at least one byte",
+        ));
+    }
+    Ok(())
+}
+
 /// length-prefixed な Track Name (vi64 length + bytes) をバッファにエンコードする
 ///
 /// Track Name は Track Namespace の後に Length (vi64) + バイト列として現れる

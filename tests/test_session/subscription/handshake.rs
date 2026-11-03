@@ -605,6 +605,122 @@ fn send_publish_rejects_invalid_paused_value() {
     );
 }
 
+/// 空の Track Name を持つ SUBSCRIBE は PROTOCOL_VIOLATION でセッションを閉じる
+///
+/// draft-ietf-moq-transport-23 §2.4.1 (Track Naming): "Each Track Name MUST contain at least
+/// one byte. If an endpoint receives a Track Name with a length of 0, it MUST close the session
+/// with a PROTOCOL_VIOLATION." decode 済みのメッセージを直接受け取る Session API の経路を
+/// 検証する (wire 経路の検証は tests/test_message.rs)。
+#[test]
+fn subscribe_empty_track_name_closes_session() {
+    use shiguredo_moqt::message::Subscribe;
+    let (_, mut server) = establish_pair();
+    let err = server
+        .recv_request(ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: Vec::new(),
+            parameters: MessageParameters::new(),
+        }))
+        .expect_err("空の Track Name は PROTOCOL_VIOLATION になる");
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+    assert_eq!(server.state(), SessionState::Closing);
+    // 状態登録も REQUEST_ERROR の送信もしない
+    assert!(server.subscription(0).is_none());
+    while let Some(e) = server.poll_event() {
+        assert!(
+            !matches!(e, SessionEvent::SendOnStream { .. }),
+            "空の Track Name で REQUEST_ERROR を送ってはならない"
+        );
+    }
+}
+
+/// `.session` 名前空間の空の Track Name を持つ SUBSCRIBE も PROTOCOL_VIOLATION になる
+///
+/// draft-ietf-moq-transport-23 §2.4.1 (Track Naming) の MUST は名前空間を問わず適用される。
+/// draft §6.5 (Session-Level Tracks and Namespaces) の DOES_NOT_EXIST は Track Name の
+/// 長さ検証より後に適用する。
+#[test]
+fn subscribe_session_namespace_empty_track_name_closes_session() {
+    use shiguredo_moqt::message::Subscribe;
+    let (_, mut server) = establish_pair();
+    let err = server
+        .recv_request(ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            track_namespace: ns(&[b".session"]),
+            track_name: Vec::new(),
+            parameters: MessageParameters::new(),
+        }))
+        .expect_err("空の Track Name は PROTOCOL_VIOLATION になる");
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+    assert_eq!(server.state(), SessionState::Closing);
+    assert!(server.subscription(0).is_none());
+}
+
+/// 空の Track Name を持つ PUBLISH は PROTOCOL_VIOLATION でセッションを閉じる
+///
+/// draft-ietf-moq-transport-23 §2.4.1 (Track Naming) の MUST を PUBLISH 受信経路でも満たす。
+#[test]
+fn publish_empty_track_name_closes_session() {
+    use shiguredo_moqt::message::Publish;
+    let (_, mut server) = establish_pair();
+    let err = server
+        .recv_request(ControlMessage::Publish(Publish {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: Vec::new(),
+            track_alias: 100,
+            parameters: MessageParameters::new(),
+            track_properties: TrackProperties::new(),
+        }))
+        .expect_err("空の Track Name は PROTOCOL_VIOLATION になる");
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+    assert_eq!(server.state(), SessionState::Closing);
+    assert!(server.subscription(0).is_none());
+}
+
+/// 空の Track Name を持つ PUBLISH を `.session` 名前空間で受けても PROTOCOL_VIOLATION になる
+///
+/// draft-ietf-moq-transport-23 §2.4.1 (Track Naming) の MUST は名前空間を問わず適用される。
+#[test]
+fn publish_session_namespace_empty_track_name_closes_session() {
+    use shiguredo_moqt::message::Publish;
+    let (_, mut server) = establish_pair();
+    let err = server
+        .recv_request(ControlMessage::Publish(Publish {
+            request_id: 0,
+            track_namespace: ns(&[b".session"]),
+            track_name: Vec::new(),
+            track_alias: 100,
+            parameters: MessageParameters::new(),
+            track_properties: TrackProperties::new(),
+        }))
+        .expect_err("空の Track Name は PROTOCOL_VIOLATION になる");
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+    assert_eq!(server.state(), SessionState::Closing);
+    assert!(server.subscription(0).is_none());
+}
+
 /// single period `.` 予約名前空間の SUBSCRIBE は DOES_NOT_EXIST で拒否され、subscription は作成されない
 /// (draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces))
 #[test]
@@ -773,6 +889,101 @@ fn send_publish_single_period_namespace_rejected() {
             .code,
         SESSION_PROTOCOL_VIOLATION
     );
+}
+
+/// send_subscribe に空の Track Name を渡すと SESSION_PROTOCOL_VIOLATION が返る
+///
+/// draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は peer が
+/// PROTOCOL_VIOLATION でセッションを閉じる MUST の対象であり、送出してはならない。
+/// 送信 API は状態登録と request_id 採番より前に拒否し、request_id を消費しない。
+#[test]
+fn send_subscribe_empty_track_name_rejected() {
+    let (mut client, _server) = establish_pair();
+    let err = client
+        .send_subscribe(ns(&[b"live"]), Vec::new(), MessageParameters::new())
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+    assert_no_tracked_requests(&client);
+    // 拒否後に送信できる最初の SUBSCRIBE が request id 0 を使うこと
+    // (拒否が request_id を消費していれば 2 になる)
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("拒否後も正常な SUBSCRIBE を送信できること");
+    assert_eq!(rid, 0);
+}
+
+/// send_publish に空の Track Name を渡すと SESSION_PROTOCOL_VIOLATION が返る
+///
+/// draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は送出してはならない。
+#[test]
+fn send_publish_empty_track_name_rejected() {
+    let (mut client, _server) = establish_pair();
+    let err = client
+        .send_publish(
+            ns(&[b"live"]),
+            Vec::new(),
+            100,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+    assert_no_tracked_requests(&client);
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            100,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("拒否後も正常な PUBLISH を送信できること");
+    assert_eq!(rid, 0);
+}
+
+/// 1 バイトの Track Name と 0 フィールドの Track Namespace を持つ SUBSCRIBE は送受信できる
+///
+/// draft-ietf-moq-transport-23 §2.4.1 (Track Naming): Track Namespace は 0 フィールドでもよく、
+/// Track Name は 1 バイト以上であればよい。両方の境界を同時に満たす要求が encode / decode と
+/// Session の状態登録を通ることを確認する。
+#[test]
+fn subscribe_with_one_byte_track_name_and_empty_namespace_accepted() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(ns(&[]), b"c".to_vec(), MessageParameters::new())
+        .expect("1 バイトの Track Name と空の Track Namespace は送信できる");
+    let (sent_rid, msg) = take_send_request(&mut client);
+    assert_eq!(sent_rid, rid);
+    let ControlMessage::Subscribe(subscribe) = &msg else {
+        panic!("SUBSCRIBE が期待された");
+    };
+    assert!(
+        subscribe.track_namespace.fields().is_empty(),
+        "0 フィールドの Track Namespace が保持されること"
+    );
+    assert_eq!(subscribe.track_name, b"c".to_vec());
+    // wire の encode / decode を通しても同じメッセージになる
+    let wire = msg
+        .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+        .expect("encode できること");
+    let (decoded, consumed) = ControlMessage::decode(&wire).expect("decode できること");
+    assert_eq!(consumed, wire.len());
+    assert_eq!(decoded, msg);
+    // Session の受信経路も通常名前空間として受理する
+    server
+        .recv_request(decoded)
+        .expect("通常名前空間として受理されること");
+    assert!(server.subscription(rid).is_some());
 }
 
 /// SUBSCRIBE 受信の PAUSED 値域外 (0 / 1 以外) で、`Err(RecvRequestError::Session(...))` と

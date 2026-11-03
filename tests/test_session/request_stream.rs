@@ -3380,11 +3380,11 @@ fn server_receives_inapplicable_redirect_detail_accepted() {
     assert!(saw, "RequestErrorReceived イベントが発行されること");
 }
 
-/// SUBSCRIBE (track-scoped) への REQUEST_ERROR で REDIRECT の Track Name が non-empty でもセッションは閉じない
+/// SUBSCRIBE (track-scoped) への REQUEST_ERROR で REDIRECT の Track Name が non-empty なら受理される
 ///
-/// Track Name の空制約は namespace-scoped request のみに適用される
-/// (draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT))。
-/// SUBSCRIBE は track-scoped であるため、non-empty Track Name は許容される。
+/// draft-ietf-moq-transport-23 §2.4.1 (Track Naming): Redirect target はリダイレクト先の
+/// 要求が使う Full Track Name であり、track-scoped request では Track Name が 1 バイト以上で
+/// なければならない。non-empty はこの条件を満たす。
 #[test]
 fn redirect_nonempty_track_name_for_subscribe_accepted() {
     let (mut client, mut server) = establish_pair();
@@ -3395,7 +3395,6 @@ fn redirect_nonempty_track_name_for_subscribe_accepted() {
     server
         .recv_request(msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // track-scoped request には Track Name 制約がないため通常処理される
     let result = client.recv_stream_message(
         rid,
         ControlMessage::RequestError(RequestError {
@@ -3410,14 +3409,16 @@ fn redirect_nonempty_track_name_for_subscribe_accepted() {
     assert_eq!(client.state(), SessionState::Established);
 }
 
-/// namespace-scoped request 向けの空 Track Name を持つ REDIRECT も受理される
+/// track-scoped request への REDIRECT で Track Name が空なら PROTOCOL_VIOLATION で閉じる
 ///
-/// draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT): namespace-scoped request
-/// (SUBSCRIBE_NAMESPACE / PUBLISH_NAMESPACE / SUBSCRIBE_TRACKS) の Track Name は空でなければ
-/// ならない (MUST)。本クレートは namespace-scoped request を実装しないが、REDIRECT の値として
-/// 空の Track Name を表現でき、track-scoped request でも空のまま受理される。
+/// draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT) は namespace-scoped request
+/// (SUBSCRIBE_NAMESPACE / PUBLISH_NAMESPACE / SUBSCRIBE_TRACKS) 向けの Redirect target に
+/// 空の Track Name を MUST で要求する。本ライブラリが送る request は track-scoped 4 種だけなので、
+/// 空の Track Name は §2.4.1 (Track Naming) に反し PROTOCOL_VIOLATION でセッションを閉じる。
+/// メッセージの decode は応答先の種別を知らないため空を受理し、request の種別を知っている
+/// Session 層が拒否する。
 #[test]
-fn redirect_empty_track_name_accepted() {
+fn redirect_empty_track_name_for_subscribe_closes_session() {
     let (mut client, mut server) = establish_pair();
     let rid = client
         .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
@@ -3426,23 +3427,63 @@ fn redirect_empty_track_name_accepted() {
     server
         .recv_request(msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    let result = client.recv_stream_message(
-        rid,
-        ControlMessage::RequestError(RequestError {
-            error_code: shiguredo_moqt::error::REQUEST_REDIRECT,
-            retry_interval: 0,
-            reason: shiguredo_moqt::message::ReasonPhrase::new("redirect")
-                .expect("正当な reason phrase である"),
-            error_details: redirect_details(&[], &[]),
-        }),
-    );
-    assert!(result.is_ok());
-    assert_eq!(client.state(), SessionState::Established);
+    let err = client
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestError(RequestError {
+                error_code: shiguredo_moqt::error::REQUEST_REDIRECT,
+                retry_interval: 0,
+                reason: shiguredo_moqt::message::ReasonPhrase::new("redirect")
+                    .expect("正当な reason phrase である"),
+                error_details: redirect_details(&[], &[]),
+            }),
+        )
+        .expect_err("空の Track Name の Redirect target は拒否されること");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(client.state(), SessionState::Closing);
 }
 
-/// FETCH (track-scoped) への REQUEST_ERROR で REDIRECT の Track Name が non-empty でもセッションは閉じない
+/// REQUEST_ERROR で空の Track Name の Redirect target を送ろうとすると状態遷移前に拒否される
 ///
-/// Track Name の空制約は namespace-scoped request のみに適用される。
+/// draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 本ライブラリが応答する request は
+/// track-scoped 4 種だけであり、Redirect target の Track Name は 1 バイト以上でなければ
+/// ならない。送信 API は subscription の終端 (状態遷移) より前に拒否し、自側の状態だけが
+/// 進んで peer が PROTOCOL_VIOLATION で閉じる事故を防ぐ。
+#[test]
+fn send_request_error_redirect_empty_track_name_rejected() {
+    let (_client, mut server, rid) = establish_subscribe_track(700);
+    let err = server
+        .send_request_error(
+            rid,
+            shiguredo_moqt::error::REQUEST_REDIRECT,
+            0,
+            shiguredo_moqt::message::ReasonPhrase::new("redirect")
+                .expect("正当な reason phrase である"),
+            redirect_details(&[], &[]),
+        )
+        .expect_err("空の Track Name の Redirect target は送信前に拒否されること");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(server.state(), SessionState::Established);
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("subscription が存在すること")
+            .state,
+        SubscriptionState::Established,
+        "拒否時は subscription の状態遷移 (Terminated への遷移) を行わないこと"
+    );
+    while let Some(e) = server.poll_event() {
+        assert!(
+            !matches!(e, SessionEvent::SendOnStream { .. }),
+            "拒否時は REQUEST_ERROR を送信しないこと"
+        );
+    }
+}
+
+/// FETCH (track-scoped) への REQUEST_ERROR で REDIRECT の Track Name が non-empty なら受理される
+///
+/// Track Name の長さ制約は track-scoped request と namespace-scoped request で向きが異なる
+/// (draft-ietf-moq-transport-23 §2.4.1 (Track Naming) / §9.4.2.1 (REDIRECT))。
 /// FETCH は track-scoped であるため、non-empty Track Name は許容される。
 #[test]
 fn redirect_nonempty_track_name_for_fetch_accepted() {

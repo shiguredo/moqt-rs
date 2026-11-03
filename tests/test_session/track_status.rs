@@ -501,6 +501,43 @@ fn recv_track_status_reserved_namespaces_are_rejected() {
     }
 }
 
+/// 空の Track Name を持つ TRACK_STATUS は PROTOCOL_VIOLATION でセッションを閉じる
+///
+/// draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 長さ 0 の Track Name を受信した
+/// endpoint は PROTOCOL_VIOLATION でセッションを閉じる (MUST)。TRACK_STATUS は SUBSCRIBE と
+/// 同じ受信前検証を通るため、通常名前空間と `.session` 名前空間の両方で同じ分類になる。
+#[test]
+fn recv_track_status_empty_track_name_closes_session() {
+    use shiguredo_moqt::message::TrackStatus as WireTrackStatus;
+
+    for namespace in [ns(&[b"live"]), ns(&[b".session"])] {
+        let (_client, mut server) = establish_pair();
+        let err = server
+            .recv_request(ControlMessage::TrackStatus(WireTrackStatus {
+                request_id: 0,
+                track_namespace: namespace,
+                track_name: Vec::new(),
+                parameters: MessageParameters::new(),
+            }))
+            .expect_err("空の Track Name は PROTOCOL_VIOLATION になる");
+        assert_eq!(
+            err.as_session_error()
+                .expect("Session エラーであること")
+                .code,
+            SESSION_PROTOCOL_VIOLATION
+        );
+        assert_eq!(server.state(), SessionState::Closing);
+        // entry を作らず REQUEST_ERROR も送らない
+        assert!(server.track_status_request(0).is_none());
+        while let Some(e) = server.poll_event() {
+            assert!(
+                !matches!(e, SessionEvent::SendOnStream { .. }),
+                "空の Track Name で REQUEST_ERROR を送ってはならない"
+            );
+        }
+    }
+}
+
 /// INCLUDE_PROPERTIES=0 の TRACK_STATUS への応答では Track Properties が空になる
 ///
 /// draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter): "If
@@ -714,4 +751,29 @@ fn send_track_status_rejects_reserved_namespace_and_invalid_parameters() {
         panic!("SendRequestError::Session が期待されたが {err:?}");
     };
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+}
+
+/// send_track_status に空の Track Name を渡すと SESSION_PROTOCOL_VIOLATION が返る
+///
+/// draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は peer が
+/// PROTOCOL_VIOLATION でセッションを閉じる MUST の対象であり、送出してはならない。
+/// 送信 API は状態登録と request_id 採番より前に拒否し、request_id を消費しない。
+#[test]
+fn send_track_status_empty_track_name_rejected() {
+    use shiguredo_moqt::session::types::SendRequestError;
+
+    let (mut client, _server) = establish_pair();
+    let err = client
+        .send_track_status(ns(&[b"live"]), Vec::new(), MessageParameters::new())
+        .expect_err("空の Track Name の TRACK_STATUS は拒否されること");
+    let SendRequestError::Session(err) = err else {
+        panic!("SendRequestError::Session が期待されたが {err:?}");
+    };
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_no_tracked_requests(&client);
+    // 拒否後に送信できる最初の TRACK_STATUS が request id 0 を使うこと
+    let rid = client
+        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("拒否後も正常な TRACK_STATUS を送信できること");
+    assert_eq!(rid, 0);
 }

@@ -1,34 +1,70 @@
 //! FETCH のバリデーションテスト
 //!
-//! 名前空間検証 (.session / single period `.`)、FETCH_OK の未知必須プロパティチェック、
-//! 必須プロパティ非含有時の非回帰、GROUP_ORDER 値域検証を扱う。
+//! 名前空間検証 (.session / single period `.`)、Track Name の長さ検証、
+//! FETCH_OK の未知必須プロパティチェック、必須プロパティ非含有時の非回帰、
+//! GROUP_ORDER 値域検証を扱う。
 
 use super::*;
 
-/// .session 名前空間の空トラック名に対する FETCH は DOES_NOT_EXIST で拒否される
-/// (draft-ietf-moq-transport-22 §6.5 (Session-Level Tracks and Namespaces))
+/// .session 名前空間の空トラック名に対する FETCH は PROTOCOL_VIOLATION でセッションを閉じる
+///
+/// draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 長さ 0 の Track Name を受信した
+/// endpoint は PROTOCOL_VIOLATION でセッションを閉じる (MUST)。Track Name の長さ検証は
+/// 名前空間の予約 (§6.5 (Session-Level Tracks and Namespaces)) より先に適用し、
+/// DOES_NOT_EXIST の RequestError は送らない。
 #[test]
-fn fetch_session_namespace_empty_track_rejected() {
-    use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
+fn fetch_session_namespace_empty_track_closes_session() {
     use shiguredo_moqt::message::Fetch as WireFetch;
     let (_, mut server) = establish_pair();
-    server
+    let err = server
         .recv_request(ControlMessage::Fetch(WireFetch {
             request_id: 0,
             track_namespace: ns(&[b".session"]),
             track_name: vec![],
             parameters: MessageParameters::new(),
         }))
-        .expect("テストフィクスチャの前提条件を満たす");
+        .expect_err("空の Track Name は PROTOCOL_VIOLATION になる");
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+    assert_eq!(server.state(), SessionState::Closing);
+    // 状態登録も REQUEST_ERROR の送信もしない
     assert!(server.fetch(0).is_none());
-    let (_, err_msg) = take_send_on_stream(&mut server);
-    match err_msg {
-        ControlMessage::RequestError(e) => {
-            assert_eq!(e.error_code, REQUEST_DOES_NOT_EXIST);
-            assert_eq!(e.reason.as_str(), "empty track name in .session namespace");
-        }
-        _ => panic!("DOES_NOT_EXIST の RequestError が期待される"),
+    while let Some(e) = server.poll_event() {
+        assert!(
+            !matches!(e, SessionEvent::SendOnStream { .. }),
+            "空の Track Name で REQUEST_ERROR を送ってはならない"
+        );
     }
+}
+
+/// 通常名前空間の空トラック名に対する FETCH は PROTOCOL_VIOLATION でセッションを閉じる
+///
+/// draft-ietf-moq-transport-23 §2.4.1 (Track Naming) の MUST は名前空間を問わず適用される。
+/// decode 済みのメッセージを直接受け取る Session API の経路で検証する。
+#[test]
+fn fetch_regular_namespace_empty_track_closes_session() {
+    use shiguredo_moqt::message::Fetch as WireFetch;
+    let (_, mut server) = establish_pair();
+    let err = server
+        .recv_request(ControlMessage::Fetch(WireFetch {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: vec![],
+            parameters: MessageParameters::new(),
+        }))
+        .expect_err("空の Track Name は PROTOCOL_VIOLATION になる");
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+    assert_eq!(server.state(), SessionState::Closing);
+    assert!(server.fetch(0).is_none());
 }
 
 /// .session 名前空間の非空トラック名に対する FETCH は DOES_NOT_EXIST で拒否される
@@ -215,6 +251,59 @@ fn rejected_fetch_stream_close_does_not_fail_session() {
         .unwrap_err();
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
     assert_eq!(server.state(), SessionState::Closing);
+}
+
+/// send_fetch に空の Track Name を渡すと SESSION_PROTOCOL_VIOLATION が返り、
+/// request_id も状態も消費されない
+///
+/// draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は peer が
+/// PROTOCOL_VIOLATION でセッションを閉じる MUST の対象であり、送出してはならない。
+/// 送信 API は状態登録と request_id 採番より前に拒否する。
+#[test]
+fn send_fetch_empty_track_name_rejected() {
+    use shiguredo_moqt::message::common::Location;
+    let (mut client, _server) = establish_pair();
+    let err = client
+        .send_fetch(
+            ns(&[b"live"]),
+            Vec::new(),
+            fetch_range_params(
+                Location {
+                    group_id: 0,
+                    object_id: 0,
+                },
+                Location {
+                    group_id: 1,
+                    object_id: 0,
+                },
+            ),
+        )
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+    // 拒否後に送信できる最初の FETCH が request id 0 を使うこと
+    // (拒否が request_id を消費していれば 2 になる)
+    let rid = client
+        .send_fetch(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            fetch_range_params(
+                Location {
+                    group_id: 0,
+                    object_id: 0,
+                },
+                Location {
+                    group_id: 1,
+                    object_id: 0,
+                },
+            ),
+        )
+        .expect("拒否後も正常な FETCH を送信できること");
+    assert_eq!(rid, 0);
 }
 
 /// send_fetch に single period `.` 予約名前空間を渡すと SESSION_PROTOCOL_VIOLATION が返る

@@ -225,6 +225,8 @@ impl Session {
     ) -> Result<u64, SendRequestError> {
         self.require_established()?;
         self.check_peer_goaway()?;
+        // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は送出しない
+        Self::validate_outgoing_track_name(&track_name)?;
         // draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces): single period `.` 予約名前空間への FETCH は送信不可
         if track_namespace.is_single_period() {
             return Err(SessionError::new(
@@ -625,6 +627,9 @@ impl Session {
 
     pub(super) fn handle_peer_fetch(&mut self, fetch: WireFetch) -> Result<(), SessionError> {
         let request_id = fetch.request_id;
+        // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は
+        // PROTOCOL_VIOLATION でセッションを閉じる (MUST)。request 単位の拒否より先に検証する。
+        self.validate_peer_track_name(&fetch.track_name)?;
         // FETCH は自側が publisher として応答する request である
         if !self.accept_peer_request(
             request_id,
@@ -661,17 +666,17 @@ impl Session {
             return Ok(());
         }
         // draft §6.5 (Session-Level Tracks and Namespaces): .session 名前空間のリクエストは
-        // Application へ渡さず DOES_NOT_EXIST で拒否する。空トラック名は仕様上存在しないものと
-        // 定義され、非空トラック名も未認識のセッションレベルトラックとして拒否する
-        // (本ライブラリはセッションレベルトラックを登録しないため、非空トラック名はすべて未認識になる)
+        // Application へ渡さず DOES_NOT_EXIST で拒否する。本ライブラリはセッションレベル
+        // トラックを登録しないため、非空トラック名はすべて未認識のセッションレベルトラック
+        // になる (空の Track Name は上の §2.4.1 (Track Naming) の検証でセッションを閉じるため
+        // ここには到達しない)。
         // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある
         if track_ns.is_session_level() {
-            let reason = if track_name.is_empty() {
-                "empty track name in .session namespace"
-            } else {
-                "session-level track does not exist"
-            };
-            self.emit_request_error(request_id, REQUEST_DOES_NOT_EXIST, reason);
+            self.emit_request_error(
+                request_id,
+                REQUEST_DOES_NOT_EXIST,
+                "session-level track does not exist",
+            );
             return Ok(());
         }
         // draft-ietf-moq-transport-22 §9.11 (FETCH) / §3.3.1 (Location Filters) /

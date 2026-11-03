@@ -104,6 +104,10 @@ impl Session {
         allowed_params: &[u64],
         scope_error_reason: &'static str,
     ) -> Result<bool, SessionError> {
+        // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は
+        // PROTOCOL_VIOLATION でセッションを閉じる (MUST)。request 単位の拒否ではないため、
+        // 以下の request ID 検証・メッセージ単位の拒否より先に検証する。
+        self.validate_peer_track_name(track_name)?;
         // SUBSCRIBE と TRACK_STATUS は自側が publisher として応答する request である
         if !self.accept_peer_request(
             request_id,
@@ -136,14 +140,14 @@ impl Session {
             return Ok(false);
         }
         // draft §6.5 (Session-Level Tracks and Namespaces): .session 名前空間は内部処理
-        // 未知のセッションレベルトラック/空トラック名は DOES_NOT_EXIST で拒否
+        // 未知のセッションレベルトラックは DOES_NOT_EXIST で拒否する (空の Track Name は
+        // 上の §2.4.1 (Track Naming) の検証でセッションを閉じるため、ここには到達しない)
         if track_namespace.is_session_level() {
-            let reason = if track_name.is_empty() {
-                "empty track name in .session namespace"
-            } else {
-                "session-level track does not exist"
-            };
-            self.emit_request_error(request_id, REQUEST_DOES_NOT_EXIST, reason);
+            self.emit_request_error(
+                request_id,
+                REQUEST_DOES_NOT_EXIST,
+                "session-level track does not exist",
+            );
             return Ok(false);
         }
         Ok(true)
@@ -325,6 +329,9 @@ impl Session {
     /// 返す subscriber が誤って fill を送出することはない。
     pub(crate) fn handle_peer_publish(&mut self, publish: Publish) -> Result<(), SessionError> {
         let request_id = publish.request_id;
+        // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は
+        // PROTOCOL_VIOLATION でセッションを閉じる (MUST)。request 単位の拒否より先に検証する。
+        self.validate_peer_track_name(&publish.track_name)?;
         // PUBLISH は自側が subscriber として受ける request であり、§9.2 の publisher 限定の
         // 拒否 MAY の対象外である
         if !self.accept_peer_request(

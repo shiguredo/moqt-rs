@@ -1080,6 +1080,43 @@ impl Session {
         Ok(())
     }
 
+    /// peer から受信した Track を名指す要求の Track Name を検証する
+    ///
+    /// draft-ietf-moq-transport-23 §2.4.1 (Track Naming): "Each Track Name MUST contain at
+    /// least one byte. If an endpoint receives a Track Name with a length of 0, it MUST close
+    /// the session with a PROTOCOL_VIOLATION."
+    ///
+    /// wire 経路ではメッセージの decode が同じ検証を行うため、本関数へ到達するのは decode
+    /// 済みのメッセージを直接受け取る Session API の経路だけである。request 単位の拒否
+    /// (REQUEST_ERROR) ではなく session 終了を MUST とする検証のため、各受信ハンドラは
+    /// request ID の parity 検証やメッセージ単位の拒否より前に本関数を呼ぶ。
+    pub(super) fn validate_peer_track_name(
+        &mut self,
+        track_name: &[u8],
+    ) -> Result<(), SessionError> {
+        match crate::message::common::validate_track_name(track_name) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                let err = session_error_from_message(&err, SESSION_PROTOCOL_VIOLATION);
+                self.fail(err.clone());
+                Err(err)
+            }
+        }
+    }
+
+    /// 自側が送る Track を名指す要求の Track Name を検証する
+    ///
+    /// draft-ietf-moq-transport-23 §2.4.1 (Track Naming) により、長さ 0 の Track Name を
+    /// 受信した peer は PROTOCOL_VIOLATION でセッションを閉じる (MUST)。送信 API は
+    /// request_id の採番と状態登録より前に本関数で拒否し、アプリが送信成功と誤認したまま
+    /// peer のセッションだけが閉じる状態を防ぐ。encode 層でも同じ検証を行う。
+    pub(super) fn validate_outgoing_track_name(track_name: &[u8]) -> Result<(), SessionError> {
+        match crate::message::common::validate_track_name(track_name) {
+            Ok(()) => Ok(()),
+            Err(err) => Err(SessionError::new(SESSION_PROTOCOL_VIOLATION, err.reason())),
+        }
+    }
+
     /// peer からの request stream の先頭メッセージを受けたときの検証を行う
     ///
     /// - `validate_peer_request_id` で parity と重複を検証 (draft §6.4.2.1 (Request ID))
@@ -1832,6 +1869,20 @@ impl Session {
             self.fail(e.clone());
             return Err(e);
         }
+        // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): Redirect target はリダイレクト
+        // 先の要求が使う Full Track Name であり、Track Name は 1 バイト以上でなければならない。
+        // 本ライブラリが送る request は SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS の
+        // track-scoped 4 種だけである。namespace-scoped request 向けに空の Track Name を
+        // 要求する規則 (§9.4.2.1 (REDIRECT)) は、本ライブラリが namespace-scoped request を
+        // 送らないため、正当な応答としては観測されない。よって空の Track Name は
+        // PROTOCOL_VIOLATION で閉じる。
+        if let Some(redirect) = err.error_details.redirect()
+            && let Err(e) = crate::message::common::validate_track_name(&redirect.track_name)
+        {
+            let e = session_error_from_message(&e, SESSION_PROTOCOL_VIOLATION);
+            self.fail(e.clone());
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -2164,6 +2215,17 @@ impl Session {
         } else {
             error_code
         };
+        // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): Redirect target の Track Name は
+        // リダイレクト先の要求が使う Full Track Name の一部であり、1 バイト以上でなければ
+        // ならない。本ライブラリが応答する request は track-scoped 4 種だけなので、空の
+        // Track Name を送ると peer は PROTOCOL_VIOLATION でセッションを閉じる (§9.4.2.1
+        // (REDIRECT) が空を MUST とする namespace-scoped request は本ライブラリが送らない)。
+        // 状態遷移 (購読の終端・fetch の reset) より前に拒否し、自身の状態だけが進むのを防ぐ。
+        if error_code == REQUEST_REDIRECT
+            && let Some(redirect) = error_details.redirect()
+        {
+            Self::validate_outgoing_track_name(&redirect.track_name)?;
+        }
         // subscription の Established 分岐で PUBLISH_DONE(UPDATE_FAILED) 自動送信、
         // fetch の Established 分岐で FETCH data stream の RESET_STREAM 自動発火が
         // 必要になるため、それぞれのスナップショットを受け取る

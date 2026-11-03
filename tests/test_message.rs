@@ -1194,6 +1194,179 @@ mod redirect_full_track_name {
     }
 }
 
+mod track_name_length {
+    use super::*;
+    use shiguredo_moqt::message::{ErrorDetail, ErrorDetails, Publish, Subscribe, TrackStatus};
+
+    /// Track を名指す要求のメッセージ型 ID (draft-ietf-moq-transport-23 §9 Table 5)
+    const MSG_SUBSCRIBE: u64 = 0x03;
+    const MSG_TRACK_STATUS: u64 = 0x0D;
+    const MSG_FETCH: u64 = 0x16;
+    const MSG_PUBLISH: u64 = 0x1D;
+
+    /// 0 フィールドの Track Namespace を作る
+    ///
+    /// draft-ietf-moq-transport-23 §2.4.1 (Track Naming) は Track Namespace を
+    /// "an ordered set of between 0 and 32 Track Namespace Fields" と定義する。
+    fn empty_namespace() -> TrackNamespace {
+        TrackNamespace::new(Vec::new()).expect("0 フィールドの Track Namespace は正当である")
+    }
+
+    /// Track Namespace が空で、指定した Track Name を持つ 4 種の request を組み立てる
+    fn track_named_requests(track_name: &[u8]) -> [(&'static str, ControlMessage); 4] {
+        [
+            (
+                "SUBSCRIBE",
+                ControlMessage::Subscribe(Subscribe {
+                    request_id: 0,
+                    track_namespace: empty_namespace(),
+                    track_name: track_name.to_vec(),
+                    parameters: MessageParameters::new(),
+                }),
+            ),
+            (
+                "PUBLISH",
+                ControlMessage::Publish(Publish {
+                    request_id: 0,
+                    track_namespace: empty_namespace(),
+                    track_name: track_name.to_vec(),
+                    track_alias: 0,
+                    parameters: MessageParameters::new(),
+                    track_properties: TrackProperties::new(),
+                }),
+            ),
+            (
+                "FETCH",
+                ControlMessage::Fetch(Fetch {
+                    request_id: 0,
+                    track_namespace: empty_namespace(),
+                    track_name: track_name.to_vec(),
+                    parameters: MessageParameters::new(),
+                }),
+            ),
+            (
+                "TRACK_STATUS",
+                ControlMessage::TrackStatus(TrackStatus {
+                    request_id: 0,
+                    track_namespace: empty_namespace(),
+                    track_name: track_name.to_vec(),
+                    parameters: MessageParameters::new(),
+                }),
+            ),
+        ]
+    }
+
+    /// 指定した Track Namespace と空の Track Name を持つ request の本文を組み立てる
+    fn empty_track_name_payload(type_id: u64, namespace: &TrackNamespace) -> Vec<u8> {
+        let mut payload = Vec::new();
+        varint::encode(0, &mut payload); // Request ID
+        varint::encode(namespace.fields().len() as u64, &mut payload);
+        for field in namespace.fields() {
+            varint::encode(field.len() as u64, &mut payload);
+            payload.extend_from_slice(field);
+        }
+        varint::encode(0, &mut payload); // Track Name Length = 0
+        if type_id == MSG_PUBLISH {
+            varint::encode(0, &mut payload); // Track Alias
+        }
+        varint::encode(0, &mut payload); // Number of Parameters
+        // PUBLISH の Track Properties は空のためバイトを追加しない
+        payload
+    }
+
+    /// 4 種の request は空の Track Name を encode できない
+    ///
+    /// draft-ietf-moq-transport-23 §2.4.1 (Track Naming): "Each Track Name MUST contain at
+    /// least one byte." 送信側は長さ 0 の Track Name を生成しない。
+    #[test]
+    fn request_messages_with_empty_track_name_are_rejected_on_encode() {
+        for (label, msg) in track_named_requests(&[]) {
+            let err = msg
+                .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+                .expect_err("空の Track Name の encode は拒否されること");
+            assert!(
+                matches!(err, MessageError::ProtocolViolation(_)),
+                "{label}: ProtocolViolation が期待されたが {err:?}"
+            );
+        }
+    }
+
+    /// 4 種の request は wire の空の Track Name を decode できない
+    ///
+    /// draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 長さ 0 の Track Name を受信した
+    /// endpoint は PROTOCOL_VIOLATION でセッションを閉じる (MUST)。通常名前空間と `.session`
+    /// 名前空間のどちらでも同じ分類になる (`.session` は §6.5 の予約だが、Track Name の
+    /// 長さ検証が先に成立する)。
+    #[test]
+    fn request_messages_with_empty_track_name_are_rejected_on_decode() {
+        let namespaces = [
+            ("normal", empty_namespace()),
+            (
+                ".session",
+                TrackNamespace::new(vec![b".session".to_vec()])
+                    .expect("正当な Track Namespace である"),
+            ),
+        ];
+        for type_id in [MSG_SUBSCRIBE, MSG_PUBLISH, MSG_FETCH, MSG_TRACK_STATUS] {
+            for (label, namespace) in &namespaces {
+                let payload = empty_track_name_payload(type_id, namespace);
+                let err = ControlMessage::decode(&frame(type_id, &payload))
+                    .expect_err("空の Track Name は decode で拒否されること");
+                assert!(
+                    matches!(err, MessageError::ProtocolViolation(_)),
+                    "type {type_id:#x} ({label}): ProtocolViolation が期待されたが {err:?}"
+                );
+            }
+        }
+    }
+
+    /// 1 バイトの Track Name と 0 フィールドの Track Namespace は 4 種とも往復する
+    ///
+    /// draft-ietf-moq-transport-23 §2.4.1 (Track Naming) の下限 (Track Name 1 バイト、
+    /// Track Namespace 0 フィールド) を同時に満たす要求が encode / decode を通ること。
+    #[test]
+    fn one_byte_track_name_with_empty_namespace_round_trips() {
+        for (label, msg) in track_named_requests(b"c") {
+            let encoded = msg
+                .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+                .expect("1 バイトの Track Name は encode できること");
+            let (decoded, consumed) = ControlMessage::decode(&encoded).expect("decode できること");
+            assert_eq!(consumed, encoded.len());
+            assert_eq!(decoded, msg, "{label}");
+        }
+    }
+
+    /// namespace-scoped request 向けの空の Track Name は codec を通る
+    ///
+    /// draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT): namespace-scoped request
+    /// (SUBSCRIBE_NAMESPACE / PUBLISH_NAMESPACE / SUBSCRIBE_TRACKS) の Redirect target は
+    /// Track Name が空でなければならない (MUST)。REQUEST_ERROR の decode は応答先の request の
+    /// 種別を知らないため、共有の Track Name デコードで一律に空を禁止せず、種別を知っている
+    /// Session 層が検証する。ここでは codec が空の Track Name を保持したまま往復できることを
+    /// 固定する。
+    #[test]
+    fn redirect_with_empty_track_name_round_trips() {
+        let mut details = ErrorDetails::new();
+        details.push(ErrorDetail::Redirect(Redirect {
+            connect_uri: Vec::new(),
+            track_namespace: empty_namespace(),
+            track_name: Vec::new(),
+        }));
+        let msg = ControlMessage::RequestError(RequestError {
+            error_code: shiguredo_moqt::error::REQUEST_REDIRECT,
+            retry_interval: 0,
+            reason: ReasonPhrase::new("redirect").expect("正当な Reason Phrase である"),
+            error_details: details,
+        });
+        let encoded = msg
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+            .expect("namespace-scoped request 向けの Redirect は encode できること");
+        let (decoded, consumed) = ControlMessage::decode(&encoded).expect("decode できること");
+        assert_eq!(consumed, encoded.len());
+        assert_eq!(decoded, msg, "空の Track Name が decode 後も保持されること");
+    }
+}
+
 mod error_cases {
     use super::*;
 

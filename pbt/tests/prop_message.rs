@@ -42,7 +42,8 @@ use shiguredo_moqt::{
 
 use pbt::common::{
     SETUP_SAMPLING_SMALL, is_range_filter_type, sample_bytes, sample_namespace_prefix,
-    sample_setup_options_with, sample_small_varint, sample_track_properties, test_runner,
+    sample_nonempty_bytes, sample_setup_options_with, sample_small_varint, sample_track_properties,
+    test_runner,
 };
 /// 指定されたパラメータ型に対応する 1 つの MessageParameter を生成する
 fn sample_parameter_from(ctx: &mut noprop::TestCaseContext, param_type: u64) -> MessageParameter {
@@ -419,10 +420,11 @@ fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
             })
         }
         // Subscribe
+        // (draft-ietf-moq-transport-23 §2.4.1 (Track Naming): Track Name は 1 バイト以上)
         5 => ControlMessage::Subscribe(Subscribe {
             request_id: sample_request_id(ctx),
             track_namespace: sample_namespace_prefix(ctx),
-            track_name: sample_bytes(ctx, 50),
+            track_name: sample_nonempty_bytes(ctx, 50),
             parameters: sample_scoped_parameters(ctx, SUBSCRIBE_PARAMS),
         }),
         // SubscribeOk
@@ -440,7 +442,7 @@ fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
         8 => ControlMessage::Publish(Publish {
             request_id: sample_request_id(ctx),
             track_namespace: sample_namespace_prefix(ctx),
-            track_name: sample_bytes(ctx, 50),
+            track_name: sample_nonempty_bytes(ctx, 50),
             track_alias: sample_small_varint(ctx),
             parameters: sample_scoped_parameters(ctx, PUBLISH_PARAMS),
             track_properties: sample_track_properties(ctx),
@@ -455,7 +457,7 @@ fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
         10 => ControlMessage::Fetch(Fetch {
             request_id: sample_request_id(ctx),
             track_namespace: sample_namespace_prefix(ctx),
-            track_name: sample_bytes(ctx, 50),
+            track_name: sample_nonempty_bytes(ctx, 50),
             parameters: sample_scoped_parameters(ctx, FETCH_PARAMS),
         }),
         // FetchOk
@@ -470,7 +472,7 @@ fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
         12 => ControlMessage::TrackStatus(TrackStatus {
             request_id: sample_request_id(ctx),
             track_namespace: sample_namespace_prefix(ctx),
-            track_name: sample_bytes(ctx, 50),
+            track_name: sample_nonempty_bytes(ctx, 50),
             parameters: sample_scoped_parameters(ctx, TRACK_STATUS_PARAMS),
         }),
         // PublishStateNotify (draft-ietf-moq-transport-22 §9.10)

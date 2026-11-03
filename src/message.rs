@@ -10,6 +10,7 @@ pub mod common;
 
 use common::{
     Location, TrackNamespace, decode_track_name, encode_track_name, validate_full_track_name,
+    validate_track_name,
 };
 
 use crate::{
@@ -566,9 +567,18 @@ const MAX_ERROR_DETAIL_LENGTH: u64 = 65_535;
 ///
 /// Error Code = REDIRECT の REQUEST_ERROR に付加される REDIRECT Error Detail の値である。
 /// Connect URI 長が 0 なら現在のセッションの URI を使うことが推奨される (SHOULD)。
-/// Track Name は namespace-scoped リクエスト (SUBSCRIBE_NAMESPACE / PUBLISH_NAMESPACE /
-/// SUBSCRIBE_TRACKS) では意味を持たず空でなければならない (MUST)。track-scoped リクエスト
-/// (SUBSCRIBE / FETCH / PUBLISH / TRACK_STATUS / REQUEST_UPDATE) では空でもよい。
+/// Track Namespace と Track Name はまとめて Redirect target と呼ばれ、リダイレクト先の
+/// 要求が使う Full Track Name になる。そのため track-scoped request 向けの Redirect target の
+/// Track Name は 1 バイト以上でなければならない (draft-ietf-moq-transport-23 §2.4.1
+/// (Track Naming))。一方 namespace-scoped リクエスト (SUBSCRIBE_NAMESPACE /
+/// PUBLISH_NAMESPACE / SUBSCRIBE_TRACKS) 向けでは Track Name は意味を持たず、空でなければ
+/// ならない (MUST)。非空なら INVALID_FIELD でセッションを閉じる。
+///
+/// この型自体は空の Track Name を表現できる。ワイヤの decode は REQUEST_ERROR の応答先が
+/// track-scoped か namespace-scoped かを知らないため、空の可否を一律には判定できない。
+/// 応答先の request を知っている Session 層が検証する。本ライブラリが送信する request は
+/// track-scoped 4 種 (SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS) だけなので、Session 層は
+/// track-scoped の規則 (1 バイト以上) を適用する。
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Redirect {
@@ -587,6 +597,8 @@ impl Redirect {
         // (MUST)。§9.4.2.1 (REDIRECT) は Track Namespace と Track Name をまとめて
         // "Redirect target" と呼び、§2.4.1 (Track Naming) のとおりこれは Full Track Name
         // そのものであるため、同じ上限を適用する。
+        // Track Name の空の可否は応答先の request の種別で変わる (§9.4.2.1) ため、
+        // 文脈を持たないここでは検証しない。
         validate_full_track_name(&self.track_namespace, &self.track_name)?;
         varint::encode(self.connect_uri.len() as u64, buf);
         buf.extend_from_slice(&self.connect_uri);
@@ -599,9 +611,10 @@ impl Redirect {
         // server 受信時の非ゼロ Connect URI 長の拒否はここでは行わない。decode 時点では
         // 自 role が不明なため、Session 層の `handle_peer_request_error`
         // (draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT)) で検証する。
-        // namespace-scoped 要求の Track Name が空であることの検証もここでは行わない。
-        // 本ライブラリは namespace-scoped 要求を実装せず、track-scoped 要求には Track Name の
-        // 制約がないためである。
+        // Redirect target の Track Name は、応答先が track-scoped なら 1 バイト以上
+        // (§2.4.1 (Track Naming))、namespace-scoped なら空 (§9.4.2.1) でなければならない。
+        // REQUEST_ERROR の decode だけでは応答先の種別を特定できないため、ここでは空の可否を
+        // 判定せず、request の種別を知っている Session 層が検証する。
         let (uri_len, n) = varint::decode(&buf[*pos..])?;
         *pos += n;
         let uri_len = varint::checked_len(uri_len, buf[*pos..].len())?;
@@ -1054,6 +1067,8 @@ impl Subscribe {
     pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
         // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&self.track_namespace, &self.track_name)?;
+        // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は送出しない
+        validate_track_name(&self.track_name)?;
         self.parameters.validate_scope(SUBSCRIBE_ALLOWED_PARAMS)?;
         encode_request_id_and_namespace(self.request_id, &self.track_namespace, buf)?;
         encode_track_name(&self.track_name, buf);
@@ -1068,6 +1083,8 @@ impl Subscribe {
         let track_name = decode_track_name(payload, &mut pos)?;
         // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&track_namespace, &track_name)?;
+        // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は PROTOCOL_VIOLATION
+        validate_track_name(&track_name)?;
         let (parameters, n) = MessageParameters::decode(&payload[pos..])?;
         pos += n;
         parameters.validate_scope(SUBSCRIBE_ALLOWED_PARAMS)?;
@@ -1188,6 +1205,8 @@ impl Publish {
     pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
         // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&self.track_namespace, &self.track_name)?;
+        // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は送出しない
+        validate_track_name(&self.track_name)?;
         self.parameters.validate_scope(PUBLISH_ALLOWED_PARAMS)?;
         encode_request_id_and_namespace(self.request_id, &self.track_namespace, buf)?;
         encode_track_name(&self.track_name, buf);
@@ -1207,6 +1226,8 @@ impl Publish {
         let track_name = decode_track_name(payload, &mut pos)?;
         // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&track_namespace, &track_name)?;
+        // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は PROTOCOL_VIOLATION
+        validate_track_name(&track_name)?;
         let (track_alias, n) = varint::decode(&payload[pos..])?;
         pos += n;
         let (parameters, n) = MessageParameters::decode(&payload[pos..])?;
@@ -1317,6 +1338,8 @@ impl Fetch {
         varint::encode(self.request_id, buf);
         // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&self.track_namespace, &self.track_name)?;
+        // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は送出しない
+        validate_track_name(&self.track_name)?;
         self.track_namespace.encode_to(buf)?;
         encode_track_name(&self.track_name, buf);
         self.parameters.encode(buf)?;
@@ -1331,6 +1354,8 @@ impl Fetch {
         let track_namespace = TrackNamespace::decode_from(payload, &mut pos)?;
         let track_name = decode_track_name(payload, &mut pos)?;
         validate_full_track_name(&track_namespace, &track_name)?;
+        // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は PROTOCOL_VIOLATION
+        validate_track_name(&track_name)?;
         let (parameters, n) = MessageParameters::decode(&payload[pos..])?;
         pos += n;
         parameters.validate_scope(FETCH_ALLOWED_PARAMS)?;
@@ -1428,6 +1453,8 @@ impl TrackStatus {
     pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
         // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&self.track_namespace, &self.track_name)?;
+        // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は送出しない
+        validate_track_name(&self.track_name)?;
         self.parameters
             .validate_scope(TRACK_STATUS_ALLOWED_PARAMS)?;
         encode_request_id_and_namespace(self.request_id, &self.track_namespace, buf)?;
@@ -1443,6 +1470,8 @@ impl TrackStatus {
         let track_name = decode_track_name(payload, &mut pos)?;
         // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&track_namespace, &track_name)?;
+        // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は PROTOCOL_VIOLATION
+        validate_track_name(&track_name)?;
         let (parameters, n) = MessageParameters::decode(&payload[pos..])?;
         pos += n;
         parameters.validate_scope(TRACK_STATUS_ALLOWED_PARAMS)?;

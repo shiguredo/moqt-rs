@@ -111,6 +111,8 @@ impl Session {
     ) -> Result<u64, SendRequestError> {
         self.require_established()?;
         self.check_peer_goaway()?;
+        // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は送出しない
+        Self::validate_outgoing_track_name(&track_name)?;
         // draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces): single period `.` 予約名前空間への SUBSCRIBE は送信不可
         if track_namespace.is_single_period() {
             return Err(SessionError::new(
@@ -288,6 +290,8 @@ impl Session {
     ) -> Result<u64, SendRequestError> {
         self.require_established()?;
         self.check_peer_goaway()?;
+        // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は送出しない
+        Self::validate_outgoing_track_name(&track_name)?;
         // draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces): single period `.` 予約名前空間への PUBLISH は送信不可
         if track_namespace.is_single_period() {
             return Err(SessionError::new(
