@@ -750,9 +750,10 @@ fn test_fetch_end_of_range_transitions() {
         group_id_delta: 5,
         object_id_delta: 10,
     };
+    // Object (NoPriorActualObject 文脈)
     // End of Range 後の Object は NoPriorActualObject 文脈
     // group_id / object_id は prior から参照可能だが、subgroup_id / priority は明示必須
-    // draft-ietf-moq-transport-22 §11.4.1.1 (Flags): Object ID Delta absent → prior + 1
+    // draft-ietf-moq-transport-23 §11.4.1.1 (Flags): Object ID Delta absent → prior + 1
     // prior (End of Range) の object_id=10 のとき解決値は 11
     let obj = FetchStreamEntry::Object(FetchStreamObject {
         group_id: None,                                // prior (End of Range の 5) を継承
@@ -947,7 +948,8 @@ fn test_fetch_rejects_object_id_delta_overflow() {
         is_datagram_origin: false,
         payload_length: 1,
     });
-    // draft-ietf-moq-transport-22 §11.4.1.1 (Flags): 同 Group の object_id はデルタ (prev_object + delta + 1)
+    // draft-ietf-moq-transport-23 §11.4.1.1 (Flags): 同 Group の object_id は
+    // デルタ (prev_object + delta + 2)
     // delta = u64::MAX でオーバーフローを起こさせる
     let second = FetchStreamEntry::Object(FetchStreamObject {
         group_id: None, // prior を継承 → 同 Group (10)
@@ -1130,7 +1132,8 @@ fn test_fetch_rejects_ascending_group_in_descending_mode() {
 /// Descending (0x02) テスト用の FetchStreamObject エントリを作る
 ///
 /// `group_id` は Group ID Delta (None は prior と同じ Group)、`object_id` は Group が
-/// 変化した場合の絶対値 / 同 Group 内のデルタ (None は prior + 1) である。
+/// 変化した場合の絶対値 / 同 Group 内のデルタ (prior Object ID + delta + 2、None は prior + 1)
+/// である。
 fn descending_fetch_object(group_id: Option<u64>, object_id: Option<u64>) -> FetchStreamEntry {
     FetchStreamEntry::Object(FetchStreamObject {
         group_id,
@@ -1145,10 +1148,10 @@ fn descending_fetch_object(group_id: Option<u64>, object_id: Option<u64>) -> Fet
 
 /// Descending (0x02) で複数 Group をスキップしても絶対値が解決されること
 ///
-/// draft-ietf-moq-transport-22 §11.4.1.1 (Flags): Group ID Delta が present なら Object ID は
-/// Object ID Delta の値 (absent なら prior + 1)、not present なら prior Object ID + Object ID Delta
-/// (absent なら prior + 1) になる。Group 変化時の Object ID がデルタ解釈では復元できない値
-/// (5001 → 1) を使い、絶対値として解決されることを固定する。
+/// draft-ietf-moq-transport-23 §11.4.1.1 (Flags): Group ID Delta が present なら Object ID は
+/// Object ID Delta の値 (absent なら prior + 1)、not present なら prior Object ID + Object ID
+/// Delta + 2 (absent なら prior + 1) になる。Group 変化時の Object ID がデルタ解釈では復元
+/// できない値 (5_003 → 1) を使い、絶対値として解決されることを固定する。
 #[test]
 fn test_fetch_descending_group_order_resolves_absolute_values() {
     let header = FetchHeader { request_id: 1 };
@@ -1161,11 +1164,11 @@ fn test_fetch_descending_group_order_resolves_absolute_values() {
                 None,
                 Some(b"a"),
             ),
-            // 同 Group 内のデルタ: 5_000 + 1 = 5_001
+            // 同 Group 内のデルタ: 5_000 + 1 + 2 = 5_003
             (descending_fetch_object(None, Some(1)), None, Some(b"b")),
             // Group のデルタ: 10 - (6 + 1) = 3、Group ID Delta が present なので Object ID は絶対値 1
             (descending_fetch_object(Some(6), Some(1)), None, Some(b"c")),
-            // 同 Group 内のデルタ: 1 + 4 = 5
+            // 同 Group 内のデルタ: 1 + 4 + 2 = 7
             (descending_fetch_object(None, Some(4)), None, Some(b"d")),
         ],
     );
@@ -1194,7 +1197,7 @@ fn test_fetch_descending_group_order_resolves_absolute_values() {
     }
     assert_eq!(
         locations,
-        vec![(10, 5_000), (10, 5_001), (3, 1), (3, 5)],
+        vec![(10, 5_000), (10, 5_003), (3, 1), (3, 7)],
         "Group 降順と同 Group 内の Object ID 昇順が解決されること"
     );
     decoder

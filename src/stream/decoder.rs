@@ -781,6 +781,10 @@ impl FetchStreamDecoder {
     /// 同じ規則は低水準 codec も `FetchPriorContext::NoPriorActualObject` で検証しており、
     /// 通常はそちらが先に拒否する。ここでは直前状態を直接見ることで、prior 状態の
     /// 不整合によって不正な参照が 0 などの代替値に化けて素通りすることを防ぐ。
+    ///
+    /// 同一 Group の Object ID Delta は prior Object ID + delta + 2 として解決する
+    /// (draft-ietf-moq-transport-23 §11.4.1.1 (Flags))。End of Range の同一 Group の
+    /// +1 (§11.4.2.1 (ID Decoding)) とは別規則であり、共通化しない。
     fn resolve_object(
         &self,
         obj: &FetchStreamObject,
@@ -840,17 +844,20 @@ impl FetchStreamDecoder {
         };
 
         // 最初のオブジェクト: object_id は絶対値
-        // Group 変更時: Object ID Delta present → 絶対値、absent → prior + 1
-        // 同 Group: Object ID Delta present → prior + delta、absent → prior + 1
+        // Group ID Delta が present のとき: Object ID Delta present → 絶対値、absent → prior + 1
+        // Group ID Delta が absent のとき: Object ID Delta present → prior + delta + 2、absent → prior + 1
         // (draft-ietf-moq-transport-23 §11.4.1.1 (Flags))
+        //
+        // 同一 Group の +2 は End of Range の同一 Group の +1 (§11.4.2.1 (ID Decoding)) とは
+        // 別規則である。判定は解決後の Group ID の比較ではなく Group ID Delta フィールドの
+        // 有無で行う (仕様の条件そのものであり、解決結果に依存しない)。
         let object_id =
             if prior.is_none() {
                 obj.object_id.unwrap_or(0)
             } else {
-                let prev_group = prior.map_or(0, |p| p.group_id);
                 let prev_object = prior.map_or(0, |p| p.object_id);
-                if group_id != prev_group {
-                    // Group 変更時: Object ID Delta は絶対値、absent なら prior + 1
+                if obj.group_id.is_some() {
+                    // Group 変更時: Object ID Delta は新しい Group の絶対 Object ID、absent なら prior + 1
                     match obj.object_id {
                         Some(absolute_id) => absolute_id,
                         None => prev_object.checked_add(1).ok_or(
@@ -858,9 +865,10 @@ impl FetchStreamDecoder {
                         )?,
                     }
                 } else if let Some(delta) = obj.object_id {
-                    // 同 Group: Object ID = prior + delta
+                    // 同 Group: Object ID = prior + delta + 2
                     prev_object
                         .checked_add(delta)
+                        .and_then(|v| v.checked_add(2))
                         .ok_or(MessageError::DeltaEncodingOverflow(
                             "fetch object ID delta overflow",
                         ))?

@@ -1,7 +1,7 @@
 //! `FetchStreamEncoder` のデルタ圧縮エンコード → `FetchStreamDecoder` デコードの往復 PBT
 //!
 //! エンコーダは前回オブジェクトとの差分 (Group ID / Object ID / Subgroup ID / Priority) を
-//! 内部状態で判断する (draft-ietf-moq-transport-22 §11.4.1.1 (Flags))。昇順 (0x01) と
+//! 内部状態で判断する (draft-ietf-moq-transport-23 §11.4.1.1 (Flags))。昇順 (0x01) と
 //! 降順 (0x02) の両方のオブジェクト列をエンコードしてデコードし直したとき、絶対値の
 //! group_id / subgroup_id / object_id / publisher_priority / payload_length が
 //! 保存されることを検証する。
@@ -10,11 +10,16 @@
 //! Properties 付きの Object も混ぜ、delta 圧縮と Properties の組み合わせで
 //! 回帰が起きないこと、および Properties の生バイト列 (Properties Length varint 込み) が
 //! そのまま復元されることを検証する。
+//!
+//! 高水準の往復だけではエンコーダとデコーダが同じ誤りを共有していても検出できないため、
+//! エンコーダの出力を低水準 codec で読み直し、Object ID Delta の生値が仕様の規則に
+//! 一致することを独立に検証する。
 
 use pbt::common::{sample_varint, test_runner};
 use shiguredo_moqt::object_properties::{ObjectProperties, ObjectProperty, ObjectPropertyValue};
 use shiguredo_moqt::stream::decoder::{DecodedFetchEntry, DecodedFetchObject};
 use shiguredo_moqt::stream::encoder::{FetchObjectInput, FetchStreamEncoder};
+use shiguredo_moqt::stream::fetch::{FetchHeader, FetchPriorContext, FetchStreamEntry};
 use shiguredo_moqt::track_properties::{
     PROP_OBJECT_DELIVERY_TIMEOUT, PROP_SUBGROUP_DELIVERY_TIMEOUT,
 };
@@ -381,5 +386,114 @@ fn encoder_decoder_roundtrip_with_end_of_range() -> noprop::TestResult {
         first_end_of_range_seen.get(),
         "先頭が End of Range のケースが生成されなかった\n{runner}"
     );
+    Ok(())
+}
+
+/// エンコーダが書き出す Object ID Delta の生値が仕様の規則に一致すること
+///
+/// draft-ietf-moq-transport-23 §11.4.1.1 (Flags):
+/// - 最初の Object は Group ID Delta / Object ID Delta が絶対値
+/// - Group ID Delta が present のときは Object ID Delta が新しい Group の絶対 Object ID
+/// - Group ID Delta が absent のときは prior Object ID + delta + 2、absent なら prior + 1
+///
+/// 高水準デコーダを経由した往復はエンコーダとデコーダが同じ誤りを持っていても成立する。
+/// 低水準 codec (`FetchStreamEntry::decode`) で wire の生値を読み、絶対 Location との対応を
+/// 独立に検証する。End of Range の +1 規則 (§11.4.2.1 (ID Decoding)) と混同していないことも
+/// ここで固定する (この生成列に End of Range は含まれない)。
+#[test]
+fn object_id_delta_matches_draft_23_rule() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let group_order = if noprop::sample_bool(ctx) { 0x01 } else { 0x02 };
+        let objects = sample_objects(ctx, group_order);
+        let mut encoder =
+            FetchStreamEncoder::new_with_group_order(sample_varint(ctx), group_order)
+                .expect("0x01 / 0x02 は有効な Group Order");
+        let mut bytes = encoder.encode_header();
+        for (input, payload, properties_data) in &objects {
+            let properties = if input.has_properties {
+                Some(properties_data.as_slice())
+            } else {
+                None
+            };
+            encoder
+                .encode_object(input, properties, &mut bytes)
+                .expect("エンコーダの制約を満たす入力列はエンコードできる");
+            bytes.extend_from_slice(payload);
+        }
+
+        let (_, header_len) = FetchHeader::decode(&bytes).expect("FETCH_HEADER をデコードできる");
+        let mut pos = header_len;
+        let mut prior: Option<(u64, u64)> = None;
+        for (index, (input, payload, _)) in objects.iter().enumerate() {
+            let prior_context = if index == 0 {
+                FetchPriorContext::First
+            } else {
+                FetchPriorContext::HasPriorObject
+            };
+            let (entry, consumed) = FetchStreamEntry::decode(&bytes[pos..], prior_context)
+                .expect("エンコーダ出力は低水準 codec でデコードできる");
+            pos += consumed + payload.len();
+            let FetchStreamEntry::Object(raw) = entry else {
+                panic!("通常の Object エントリが返ること: {entry:?}");
+            };
+            match prior {
+                // 最初の Object は両フィールドが絶対値である
+                None => {
+                    assert_eq!(
+                        raw.group_id,
+                        Some(input.group_id),
+                        "最初の Object の Group ID Delta は絶対 Group ID であること"
+                    );
+                    assert_eq!(
+                        raw.object_id,
+                        Some(input.object_id),
+                        "最初の Object の Object ID Delta は絶対 Object ID であること"
+                    );
+                }
+                Some((prior_group, prior_object)) => {
+                    if input.group_id == prior_group {
+                        // 同一 Group は Group ID Delta absent、Object ID Delta は +2 された差
+                        assert_eq!(
+                            raw.group_id, None,
+                            "同一 Group では Group ID Delta を省略すること"
+                        );
+                        if input.object_id == prior_object + 1 {
+                            assert_eq!(
+                                raw.object_id, None,
+                                "prior + 1 は Object ID Delta を省略すること"
+                            );
+                        } else {
+                            assert_eq!(
+                                raw.object_id,
+                                Some(input.object_id - prior_object - 2),
+                                "同一 Group の Object ID Delta は実際の差から 2 を引いた値であること"
+                            );
+                        }
+                    } else {
+                        // Group 変更は Group ID Delta present、Object ID は絶対値
+                        let expected_group_delta = if group_order == 0x02 {
+                            prior_group - input.group_id - 1
+                        } else {
+                            input.group_id - prior_group - 1
+                        };
+                        assert_eq!(
+                            raw.group_id,
+                            Some(expected_group_delta),
+                            "Group 変更時の Group ID Delta が Group Order の向きに一致すること"
+                        );
+                        assert_eq!(
+                            raw.object_id,
+                            Some(input.object_id),
+                            "Group ID Delta が present のときは Object ID が絶対値であること"
+                        );
+                    }
+                }
+            }
+            prior = Some((input.group_id, input.object_id));
+        }
+        assert_eq!(pos, bytes.len(), "全エントリとペイロードを読み切ること");
+        Ok(())
+    })?;
     Ok(())
 }

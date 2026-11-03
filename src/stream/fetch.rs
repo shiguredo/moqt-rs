@@ -15,6 +15,11 @@
 //! Object ID Delta を運ぶ。FETCH_HEADER 直後の最初の entry だけが絶対 ID で、
 //! それ以外は直前の Object または End of Range の Location からのデルタである
 //! (§11.4.2.1 (ID Decoding))。
+//!
+//! Object の Object ID Delta は、Group ID Delta が absent のとき
+//! prior Object ID + delta + 2 を表し、present のときは新しい Group の絶対 Object ID を
+//! 表す (§11.4.1.1 (Flags))。End of Range の同一 Group の +1 (§11.4.2.1 (ID Decoding))
+//! とは別規則である。
 use super::{FETCH_HEADER_TYPE, validate_properties_blob};
 use crate::{error::MessageError, varint};
 use alloc::vec::Vec;
@@ -161,15 +166,19 @@ pub enum FetchStreamEntry {
 pub struct FetchStreamObject {
     /// Group ID Delta (None の場合は前のオブジェクトの Group ID を継承)
     ///
-    /// draft-ietf-moq-transport-22 §11.4.1.1 (Flags): 値はデルタエンコードされる。
-    /// 最初のオブジェクトでは絶対値として解釈される。
+    /// draft-ietf-moq-transport-23 §11.4.1.1 (Flags): 値はデルタエンコードされ、
+    /// Ascending では prior Group ID + delta + 1、Descending では prior Group ID - (delta + 1)
+    /// になる。最初のオブジェクトでは絶対値として解釈される。
     pub group_id: Option<u64>,
     /// Subgroup ID のエンコードモード (変更なし)
     pub subgroup_id: FetchSubgroupIdMode,
-    /// Object ID (None の場合は前の Object ID + 1)
+    /// Object ID Delta (None の場合は前の Object ID + 1)
     ///
-    /// draft-ietf-moq-transport-22 §11.4.1.1 (Flags): Group が変更された場合は絶対値、
-    /// 同じ Group 内ではデルタエンコードされる。
+    /// draft-ietf-moq-transport-23 §11.4.1.1 (Flags): Group ID Delta が absent のときは
+    /// prior Object ID + delta + 2 を表し、present のときは新しい Group の絶対 Object ID を
+    /// 表す。最初のオブジェクトでは常に絶対値である。この解決は絶対 Location を扱う
+    /// [`crate::stream::decoder::FetchStreamDecoder`] /
+    /// [`crate::stream::encoder::FetchStreamEncoder`] が担う。
     pub object_id: Option<u64>,
     /// Publisher Priority (None の場合は前のオブジェクトの Priority を継承)
     pub publisher_priority: Option<u8>,

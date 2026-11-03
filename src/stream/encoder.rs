@@ -280,23 +280,33 @@ impl FetchStreamEncoder {
                     FetchSubgroupIdMode::Explicit(effective_subgroup_id)
                 };
 
-                // object_id: Group 変更時は絶対値、同 Group ならデルタ値 (draft-ietf-moq-transport-23 §11.4.1.1 (Flags))
-                // subgroup 変更時は Group ID Delta が absent のため delta 解釈になる。
-                // 絶対値を乗せると decoder 側で delta として誤解釈される (draft-ietf-moq-transport-23 §11.4.1.1:
-                // "When the Group ID Delta field is not present, the Object ID is the prior
-                // Object's ID plus the Object ID Delta if present")。
+                // object_id: Group 変更時は Group ID Delta が present になるため絶対値、
+                // 同一 Group では Group ID Delta が absent になるため
+                // prior Object ID + delta + 2 の関係で送る
+                // (draft-ietf-moq-transport-23 §11.4.1.1 (Flags):
+                //  "When the Group ID Delta field is not present, the Object ID is the prior
+                //   Object's ID plus the Object ID Delta + 2 if present.")
+                // Subgroup を変更しても Group ID Delta は absent のままなので、同じ +2 の
+                // 規則でデルタ値を送る。絶対値を乗せると decoder 側でデルタとして誤解釈される。
+                // 連続する +1 は Object ID Delta の省略で表現する
+                // (同節: "If Object ID Delta is not present, the Object ID is the prior
+                //  Object's ID plus one, regardless of which group it belongs to.")。
+                // End of Range の同一 Group の +1 (§11.4.2.1 (ID Decoding)) とは別規則である。
                 let object_id = if group_changed {
                     Some(input.object_id)
-                } else if prior.object_id.checked_add(1) != Some(input.object_id) {
-                    // delta = object_id - prior
-                    let delta = input.object_id.checked_sub(prior.object_id).ok_or({
-                        MessageError::ProtocolViolation("fetch object ID delta underflow")
-                    })?;
-                    Some(delta)
-                } else {
-                    // prior + 1 は absent で表現 (draft-ietf-moq-transport-23 §11.4.1.1: "If Object ID Delta
-                    // is not present, the Object ID is the prior Object's ID plus one")
+                } else if prior.object_id.checked_add(1) == Some(input.object_id) {
+                    // prior + 1 は Object ID Delta の省略で表現する
                     None
+                } else {
+                    // 同一 Group の Object ID Delta は実際の差から 2 を引いた値である
+                    let delta = input
+                        .object_id
+                        .checked_sub(prior.object_id)
+                        .and_then(|v| v.checked_sub(2))
+                        .ok_or(MessageError::ProtocolViolation(
+                            "fetch object ID delta underflow",
+                        ))?;
+                    Some(delta)
                 };
 
                 let publisher_priority = if !can_use_priority_prior

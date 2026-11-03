@@ -365,7 +365,7 @@ fn test_priority_change_in_same_subgroup_is_rejected() {
 
 #[test]
 fn test_non_sequential_object_id() {
-    // object_id が +1 でない場合は明示される
+    // prior との差が 1 でない場合は実際の差から 2 を引いた delta が明示される
     let entries = encode_and_decode(
         1,
         &[
@@ -385,7 +385,7 @@ fn test_non_sequential_object_id() {
                 FetchObjectInput {
                     group_id: 0,
                     subgroup_id: 0,
-                    object_id: 5, // +1 ではない → 明示
+                    object_id: 5, // prior(0) + 1 ではない → delta = 5 - 0 - 2 = 3
                     publisher_priority: 128,
                     has_properties: false,
                     is_datagram_origin: false,
@@ -477,17 +477,16 @@ fn test_encode_header() {
     assert_eq!(header.request_id, 42);
 }
 
-// 同一 group 内で subgroup だけ変更された場合、Object ID Delta フィールドは
-// delta としてエンコードされなければならない (draft-ietf-moq-transport-23 §11.4.1.1:
-// "When the Group ID Delta field is not present, the Object ID is the prior Object's ID
-// plus the Object ID Delta if present")。
-// 修正前は subgroup_changed が true のとき絶対値を乗せていたため、decoder 側で
-// delta として誤解釈されラウンドトリップが壊れていた。
+// 同一 group 内で subgroup だけ変更された場合も Group ID Delta は absent のままなので、
+// Object ID Delta フィールドはデルタとしてエンコードされなければならない
+// (draft-ietf-moq-transport-23 §11.4.1.1: "When the Group ID Delta field is not present,
+// the Object ID is the prior Object's ID plus the Object ID Delta + 2 if present")。
+// 絶対値を乗せると decoder 側でデルタとして誤解釈されラウンドトリップが壊れる。
 
 #[test]
 fn test_subgroup_change_with_object_id_delta() {
     // 同一 group, subgroup 変更, object_id が prior+1 ではない → delta 計算経路
-    // 修正前: encoder が絶対値 10 を書き込み、decoder は 5 + 10 + 1 = 16 と誤解釈した
+    // 絶対値 10 を書き込むと decoder は 5 + 10 + 2 = 17 と誤解釈する
     let entries = encode_and_decode(
         1,
         &[
@@ -507,7 +506,7 @@ fn test_subgroup_change_with_object_id_delta() {
                 FetchObjectInput {
                     group_id: 0,
                     subgroup_id: 1, // subgroup 変更
-                    object_id: 10,  // prior(5) + 1 ではない → delta = 10 - 5 - 1 = 4
+                    object_id: 10,  // prior(5) + 1 ではない → delta = 10 - 5 - 2 = 3
                     publisher_priority: 128,
                     has_properties: false,
                     is_datagram_origin: false,
@@ -597,7 +596,7 @@ fn end_of_unknown_range_then_object() {
 #[test]
 fn test_subgroup_change_with_object_id_absent() {
     // 同一 group, subgroup 変更, object_id == prior+1 → Object ID Delta absent 経路
-    // 修正前: encoder が絶対値 6 を書き込み、decoder は 5 + 6 + 1 = 12 と誤解釈した
+    // 絶対値 6 を書き込むと decoder は 5 + 6 + 2 = 13 と誤解釈する
     let entries = encode_and_decode(
         1,
         &[
@@ -842,9 +841,9 @@ fn test_descending_group_order_skips_multiple_groups() {
 /// Descending (0x02) で Group が変わるとき Object ID が絶対値で符号化されること
 ///
 /// draft-ietf-moq-transport-23 §11.4.1.1 (Flags): Group ID Delta が present なら Object ID は
-/// Object ID Delta の値 (absent なら prior + 1)、not present なら prior Object ID + Object ID Delta
-/// (absent なら prior + 1) になる。Group 変化で Object ID が大きく減る入力 (5001 → 1) を使い、
-/// デルタ解釈では復元できない値であることを固定する。
+/// Object ID Delta の値 (absent なら prior + 1)、not present なら prior Object ID + Object ID
+/// Delta + 2 (absent なら prior + 1) になる。Group 変化で Object ID が大きく減る入力
+/// (5001 → 1) を使い、デルタ解釈では復元できない値であることを固定する。
 #[test]
 fn test_descending_group_change_uses_absolute_object_id() {
     let mut encoder =
