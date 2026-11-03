@@ -239,6 +239,7 @@ pub(crate) fn drive_fetch_with_group_order(
                         DecodedFetchEntry::EndOfNonExistentRange { .. }
                         | DecodedFetchEntry::EndOfUnknownRange { .. }
                         | DecodedFetchEntry::EndOfTimedOutRange { .. }
+                        | DecodedFetchEntry::EndOfGoneRange { .. }
                         | DecodedFetchEntry::EndOfGroup { .. }
                         | DecodedFetchEntry::EndOfTrack { .. } => 0,
                     };

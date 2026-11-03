@@ -16,6 +16,11 @@ struct ObjectInput {
     is_datagram_origin: bool,
     payload_length: u64,
     properties: Vec<u8>,
+    /// Object の後に End of Gone Range を書くか
+    ///
+    /// draft-ietf-moq-transport-23 §11.4.2 (End of Range): Group ID Delta と Object ID Delta を
+    /// 運び、直前の Location からその Location までが Gone であることを示す。
+    end_of_gone_range: bool,
     /// Object の後に End of Group を書くか
     ///
     /// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields) の marker は直前の
@@ -50,6 +55,16 @@ fuzz_target!(|input: Input| {
             payload_length: object.payload_length,
         };
         let _ = encoder.encode_object(&object_input, properties, &mut buf);
+        // End of Gone Range の終端は直前の Object の次の Object ID にする。Group Order と
+        // 逆方向になる入力や overflow する入力はエンコーダが拒否するため、
+        // ここでは panic しないことだけを確認する。
+        if object.end_of_gone_range {
+            let _ = encoder.encode_end_of_gone_range(
+                object.group_id,
+                object.object_id.wrapping_add(1),
+                &mut buf,
+            );
+        }
         // End of Track は End of Group も意味するため、両方を書く入力もそのまま通す。
         // marker を書いた後の Object は前後関係の検証で拒否されることがあるが、
         // エンコーダが panic しないことだけを確認する。

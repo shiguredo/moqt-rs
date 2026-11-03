@@ -2583,6 +2583,176 @@ mod tests {
         .await;
     }
 
+    /// peer から届いた FETCH に、Object と End of Gone Range を 1 本の応答で返す
+    ///
+    /// publisher 側の writer が End of Gone Range (draft-ietf-moq-transport-23 §11.4.1
+    /// Table 8 の 0x40C) を送出できることと、peer 側の [`FetchStreamDecoder`] が Gone を
+    /// 通常の Object と同じストリームで読めることを、実際の uni stream で固定する。
+    /// Gone は存在しないと確定した Non-Existent とは別の状態であるため
+    /// (同 §2.1.2 (Object States))、復号結果が
+    /// [`DecodedFetchEntry::EndOfGoneRange`] になることを確認する。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fetch_response_writer_writes_end_of_gone_range() {
+        use shiguredo_moqt::message::Fetch;
+        use shiguredo_moqt::message::common::Location;
+        use shiguredo_moqt::message_parameter::MessageParameters;
+        use shiguredo_moqt::stream::decoder::{DecodedFetchEntry, FetchStreamDecoder};
+        use shiguredo_moqt::stream::encoder::FetchObjectInput;
+
+        run_with_timeout(async {
+            let (mut peer, mut client) = connect_pair().await;
+
+            // peer (relay) が publisher へ FETCH を送る
+            let request_id = peer.next_request_id().expect("Request ID を採番できること");
+            let namespace =
+                TrackNamespace::new(vec![b"live".to_vec()]).expect("名前空間を作れること");
+            peer.send_request_start(ControlMessage::Fetch(Fetch {
+                request_id,
+                track_namespace: namespace,
+                track_name: b"video".to_vec(),
+                parameters: MessageParameters::new(),
+            }))
+            .await
+            .expect("FETCH を送れること");
+
+            // client が request として受理する
+            match client.next_event().await.expect("イベントを取得できること") {
+                Some(ClientEvent::Request(request)) => assert!(
+                    matches!(request.message, ControlMessage::Fetch(_)),
+                    "FETCH として受理されること"
+                ),
+                other => panic!("FETCH がアプリへ届くこと: {other:?}"),
+            }
+
+            client
+                .send_fetch_ok(
+                    request_id,
+                    0,
+                    Location {
+                        group_id: 3,
+                        object_id: 6,
+                    },
+                    MessageParameters::new(),
+                    TrackProperties::new(),
+                )
+                .await
+                .expect("FETCH_OK を返せること");
+            let mut writer = client
+                .open_fetch_response(request_id)
+                .await
+                .expect("FETCH 応答 stream を開けること");
+            let properties: Vec<u8> = vec![0x00];
+            writer
+                .write_object(
+                    &FetchObjectInput {
+                        group_id: 1,
+                        subgroup_id: 0,
+                        object_id: 0,
+                        publisher_priority: 128,
+                        has_properties: true,
+                        is_datagram_origin: false,
+                        payload_length: 2,
+                    },
+                    b"ab",
+                    Some(&properties),
+                )
+                .await
+                .expect("1 件目の Object を書けること");
+            // 元の publisher が再配送できない範囲を End of Gone Range で示す
+            writer
+                .write_end_of_gone_range(Location {
+                    group_id: 3,
+                    object_id: 5,
+                })
+                .await
+                .expect("End of Gone Range を書けること");
+            writer
+                .write_object(
+                    &FetchObjectInput {
+                        group_id: 3,
+                        subgroup_id: 0,
+                        object_id: 6,
+                        publisher_priority: 128,
+                        has_properties: true,
+                        is_datagram_origin: false,
+                        payload_length: 2,
+                    },
+                    b"cd",
+                    Some(&properties),
+                )
+                .await
+                .expect("2 件目の Object を書けること");
+            writer.finish().await.expect("応答を FIN で閉じられること");
+
+            // peer が応答 stream を読み、FETCH_HEADER と entry を decode する
+            let bytes = peer
+                .recv_uni_data_stream()
+                .await
+                .expect("FETCH 応答 stream を読めること");
+            // End of Gone Range の Serialization Flags (0x40C) が wire に載ること
+            assert!(
+                bytes.windows(2).any(|window| window == [0x84, 0x0C]),
+                "End of Gone Range の Serialization Flags (0x40C) が送出されること: {bytes:?}"
+            );
+            let mut decoder = FetchStreamDecoder::new();
+            decoder.push(&bytes);
+            let header = decoder
+                .try_decode_header()
+                .expect("FETCH_HEADER を decode できること")
+                .expect("FETCH_HEADER があること");
+            assert_eq!(header.request_id, request_id, "FETCH_HEADER の Request ID");
+
+            let mut decoded = Vec::new();
+            while let Some(entry) = decoder
+                .try_decode_entry()
+                .expect("entry を decode できること")
+            {
+                let payload = match &entry {
+                    DecodedFetchEntry::Object(object) if object.payload_length > 0 => {
+                        decoder.try_read_payload().expect("payload を読めること")
+                    }
+                    _ => Vec::new(),
+                };
+                decoded.push((entry, payload));
+            }
+            assert_eq!(
+                decoded.len(),
+                3,
+                "Object / End of Gone Range / Object の 3 件"
+            );
+            match (&decoded[0].0, &decoded[0].1) {
+                (DecodedFetchEntry::Object(object), payload) => {
+                    assert_eq!(object.group_id, 1);
+                    assert_eq!(object.object_id, 0);
+                    assert_eq!(payload.as_slice(), b"ab", "1 件目の payload");
+                }
+                other => panic!("1 件目が Object であること: {other:?}"),
+            }
+            match &decoded[1].0 {
+                DecodedFetchEntry::EndOfGoneRange {
+                    group_id,
+                    object_id,
+                } => {
+                    assert_eq!(*group_id, 3, "Gone の終端 Group が解決されること");
+                    assert_eq!(*object_id, 5, "Gone の終端 Object が解決されること");
+                }
+                other => panic!("2 件目が End of Gone Range であること: {other:?}"),
+            }
+            match (&decoded[2].0, &decoded[2].1) {
+                (DecodedFetchEntry::Object(object), payload) => {
+                    assert_eq!(object.group_id, 3);
+                    assert_eq!(object.object_id, 6, "Gone の直後の Object が受理されること");
+                    assert_eq!(payload.as_slice(), b"cd", "2 件目の payload");
+                }
+                other => panic!("3 件目が Object であること: {other:?}"),
+            }
+            decoder
+                .finish()
+                .expect("entry 境界で終端した応答は finish で受容されること");
+        })
+        .await;
+    }
+
     /// client が FETCH を発行し、FETCH_OK と応答 stream の Object / End of Range を受け取る
     ///
     /// subscriber 側の取得経路を固定する。`MoqtClient::fetch` → `FetchOkReceived` の配送 →

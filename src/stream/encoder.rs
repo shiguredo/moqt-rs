@@ -480,6 +480,40 @@ impl FetchStreamEncoder {
         )
     }
 
+    /// End of Gone Range をエンコードする (draft-ietf-moq-transport-23 §11.4.1 Table 8)
+    ///
+    /// `group_id` / `object_id` は絶対 Location であり、直前の Location とのデルタへの
+    /// 変換は内部で行う (draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding))。
+    ///
+    /// 直前の Location から `group_id` / `object_id` までの区間の Object が Gone であることを
+    /// 示す。Gone は「元の publisher が再配送できないが、存在するか否かは知らない」状態であり
+    /// (draft-ietf-moq-transport-23 §2.1.2 (Object States))、存在しないと確定した
+    /// [`FetchStreamEncoder::encode_end_of_non_existent_range`] とは使い分ける。
+    /// 元の publisher が再起動で state を失った場合や、保持期間を過ぎて Object を
+    /// 再配送できない場合は、その過去を Non-Existent と断定せずこの指示で Gone として通知する
+    /// (同 §2.1.2 / §3.2.2 (Gaps in a Fetch Stream))。
+    ///
+    /// # Errors
+    ///
+    /// [`FetchStreamEncoder::encode_end_of_non_existent_range`] と同じ条件で
+    /// `ProtocolViolation` を返す。
+    pub fn encode_end_of_gone_range(
+        &mut self,
+        group_id: u64,
+        object_id: u64,
+        buf: &mut Vec<u8>,
+    ) -> Result<(), MessageError> {
+        self.encode_end_of_range(
+            group_id,
+            object_id,
+            |group_id_delta, object_id_delta| FetchStreamEntry::EndOfGoneRange {
+                group_id_delta,
+                object_id_delta,
+            },
+            buf,
+        )
+    }
+
     /// End of Group をエンコードする (draft-ietf-moq-transport-23 §11.4.1 Table 8)
     ///
     /// 直前に書いた Object がその Group の最終 Object であることを示す。marker は ID
@@ -550,7 +584,7 @@ impl FetchStreamEncoder {
     /// End of Range の絶対 Location をエンコードする
     ///
     /// `build_entry` は生の Group ID Delta / Object ID Delta を受け取って variant を組み立てる。
-    /// 3 種の End of Range はフィールドの構造が同じで variant だけが異なるため、
+    /// 4 種の End of Range はフィールドの構造が同じで variant だけが異なるため、
     /// デルタ計算・状態更新・prior 文脈の遷移を共通化する。
     ///
     /// # Errors

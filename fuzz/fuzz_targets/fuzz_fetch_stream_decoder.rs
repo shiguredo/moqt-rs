@@ -55,6 +55,7 @@ fuzz_target!(|input: Input| {
                     DecodedFetchEntry::EndOfNonExistentRange { .. }
                     | DecodedFetchEntry::EndOfUnknownRange { .. }
                     | DecodedFetchEntry::EndOfTimedOutRange { .. }
+                    | DecodedFetchEntry::EndOfGoneRange { .. }
                     | DecodedFetchEntry::EndOfGroup { .. }
                     | DecodedFetchEntry::EndOfTrack { .. } => {}
                 },

@@ -14,7 +14,7 @@
 //! draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields) に従い、他のフィールドを
 //! 持たない 1 個の vi64 だけで直前の Object が Group / Track の最終 Object であることを示す。
 //!
-//! End of Range 指示 (0x8C / 0x10C / 0x20C) は
+//! End of Range 指示 (0x8C / 0x10C / 0x20C / 0x40C) は
 //! draft-ietf-moq-transport-23 §11.4.2 (End of Range) に従い Group ID Delta と
 //! Object ID Delta を運ぶ。FETCH_HEADER 直後の最初の entry だけが絶対 ID で、
 //! それ以外は直前の Object または End of Range の Location からのデルタである
@@ -68,6 +68,8 @@ pub(crate) const FETCH_END_OF_NON_EXISTENT_RANGE: u64 = 0x8C;
 pub(crate) const FETCH_END_OF_UNKNOWN_RANGE: u64 = 0x10C;
 /// Serialization Flags の特殊値: End of Timed-Out Range (draft-ietf-moq-transport-23 §11.4.1 (Fetch Header) Table 8)
 pub(crate) const FETCH_END_OF_TIMED_OUT_RANGE: u64 = 0x20C;
+/// Serialization Flags の特殊値: End of Gone Range (draft-ietf-moq-transport-23 §11.4.1 (Fetch Header) Table 8)
+pub(crate) const FETCH_END_OF_GONE_RANGE: u64 = 0x40C;
 /// Serialization Flags の特殊値: End of Group (draft-ietf-moq-transport-23 §11.4.1 (Fetch Header) Table 8)
 ///
 /// 0x80 は 128 以上であり、通常のフラグ (128 未満) ではなく特殊値として扱う
@@ -113,13 +115,22 @@ pub enum FetchSubgroupIdMode {
 /// Fetch ストリーム内の Object または範囲指示
 ///
 /// `Object` 以外の variant は、直前の Object が Group / Track の最終 Object であることを
-/// 示す marker (`EndOfGroup` / `EndOfTrack`) と、Object が存在しない / 不明 / 期限切れで
-/// ある範囲を示す End of Range 指示 (`EndOfNonExistentRange` など) である。
+/// 示す marker (`EndOfGroup` / `EndOfTrack`) と、Object が存在しない / 不明 / 期限切れ /
+/// Gone である範囲を示す End of Range 指示 (`EndOfNonExistentRange` など) である。
 ///
 /// End of Range は draft-ietf-moq-transport-23 §11.4.2 (End of Range) に従って
 /// Group ID Delta と Object ID Delta を運ぶ。Subgroup ID / Priority / Properties は持たない。
 /// marker は同 §11.4.2.2 (Prior Object Fields) に従って他のフィールドを持たず、
 /// 後続 ID フィールドが存在しない。
+///
+/// [`FetchStreamEntry::EndOfGoneRange`] は 4 種の End of Range の中で唯一
+/// 「Object が存在しないと断定しない」指示である。指す範囲の Object は、元の publisher が
+/// 再配送できないだけで存在自体は否定されていない (draft-ietf-moq-transport-23 §2.1.2
+/// (Object States) の "The original publisher cannot deliver the Object and will not be able
+/// to, but does not know whether it exists.")。Non-Existent は「存在しないと確定」であり、
+/// 恒久的で権威的である (同節 "This state is permanent. All signals that an Object does not
+/// exist are authoritative.")。元の publisher が state を失った過去 (再起動や保持期間の
+/// 経過) を Non-Existent と断定してはならず、Gone として通知する (同節)。
 ///
 /// End of Range の 2 フィールドは wire に現れた生値であり、絶対 Location ではない。
 /// [`FetchPriorContext::First`] (FETCH_HEADER 直後の最初の entry) では両フィールドが
@@ -163,6 +174,36 @@ pub enum FetchStreamEntry {
     /// draft-ietf-moq-transport-23 §11.4.2 (End of Range): Group ID Delta と
     /// Object ID Delta が必須で、Subgroup ID / Priority / Properties は存在しない。
     EndOfTimedOutRange {
+        /// Group ID Delta (vi64)
+        ///
+        /// [`FetchPriorContext::First`] では絶対 Group ID になる。
+        group_id_delta: u64,
+        /// Object ID Delta (vi64)
+        ///
+        /// [`FetchPriorContext::First`] では絶対 Object ID になる。
+        object_id_delta: u64,
+    },
+    /// End of Gone Range (0x40C)
+    ///
+    /// draft-ietf-moq-transport-23 §11.4.2 (End of Range): Group ID Delta と
+    /// Object ID Delta が必須で、Subgroup ID / Priority / Properties は存在しない。
+    ///
+    /// 直前に直列化した Object から、この指示が指す Location までの区間の Object が
+    /// Gone であることを示す。Gone は「元の publisher が再配送できないが、存在するか否かは
+    /// 知らない」状態であり (draft-ietf-moq-transport-23 §2.1.2 (Object States))、
+    /// 存在しないと確定した Non-Existent (`EndOfNonExistentRange`) とは区別する。
+    /// 別の情報源が Gone の Object を保持していることがあるため、Gone として記録した
+    /// Location の Object を後から受け取っても矛盾ではない (同節 "Because another source can
+    /// still hold a Gone Object, receiving an Object that was recorded as Gone or Unknown is
+    /// not an error.")。Gone を Non-Existent と同一視すると、この後から届く Object を
+    /// §12.1 (Malformed Tracks) 条件 10 の「存在しないと記録した後の Object」として
+    /// 誤って拒否してしまう。
+    ///
+    /// 元の publisher が再起動で state を失った場合や保持期間を過ぎた Object は、
+    /// この指示で Gone として通知する (同 §2.1.2 / §3.2.2 (Gaps in a Fetch Stream))。
+    /// 上流から Gone の通知を受けていない中継者が Gone を通知してはならない
+    /// (§3.2.3 (Relay Fetch Handling) の MUST NOT) が、中継機能は本実装の対象外である。
+    EndOfGoneRange {
         /// Group ID Delta (vi64)
         ///
         /// [`FetchPriorContext::First`] では絶対 Group ID になる。
@@ -294,6 +335,16 @@ impl FetchStreamEntry {
                 varint::encode(*object_id_delta, buf);
                 Ok(())
             }
+            Self::EndOfGoneRange {
+                group_id_delta,
+                object_id_delta,
+            } => {
+                reject_marker_properties(properties_data)?;
+                varint::encode(FETCH_END_OF_GONE_RANGE, buf);
+                varint::encode(*group_id_delta, buf);
+                varint::encode(*object_id_delta, buf);
+                Ok(())
+            }
             // draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields):
             // "no other fields are present"。marker の vi64 だけを書き出す。
             Self::EndOfGroup => {
@@ -385,6 +436,22 @@ impl FetchStreamEntry {
                 pos += n;
                 Ok((
                     Self::EndOfTimedOutRange {
+                        group_id_delta,
+                        object_id_delta,
+                    },
+                    None,
+                    pos,
+                ))
+            }
+            FETCH_END_OF_GONE_RANGE => {
+                // draft-ietf-moq-transport-23 §11.4.2 (End of Range): Group ID Delta と
+                // Object ID Delta が常に存在する。
+                let (group_id_delta, n) = varint::decode(&buf[pos..])?;
+                pos += n;
+                let (object_id_delta, n) = varint::decode(&buf[pos..])?;
+                pos += n;
+                Ok((
+                    Self::EndOfGoneRange {
                         group_id_delta,
                         object_id_delta,
                     },
@@ -636,7 +703,7 @@ impl FetchStreamObject {
     /// draft-ietf-moq-transport-23 §11.4.1 (Fetch Header) Table 8 / §11.4.1.1 (Flags):
     /// 128 未満の全 bit は定義済み (Table 9 の 0x03 / Table 10 の
     /// 0x04 / 0x08 / 0x10 / 0x20 / 0x40) のため mask 検証は no-op であり、
-    /// Table 8 の特殊値 (0x80 / 0x81 / 0x8C / 0x10C / 0x20C) 以外の 128 以上は
+    /// Table 8 の特殊値 (0x80 / 0x81 / 0x8C / 0x10C / 0x20C / 0x40C) 以外の 128 以上は
     /// MALFORMED_OBJECT とする ("If an endpoint receives any other value greater than 127,
     /// it MUST close the session with MALFORMED_OBJECT.")。
     /// 128 以上の検査は呼び出し側 (`decode_with_properties`) でも行う二重検査で

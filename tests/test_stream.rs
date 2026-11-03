@@ -58,6 +58,9 @@ mod fetch_stream_object;
 #[path = "test_stream/fetch_end_of_range.rs"]
 mod fetch_end_of_range;
 
+#[path = "test_stream/fetch_gone_range.rs"]
+mod fetch_gone_range;
+
 #[path = "test_stream/fetch_object_id_delta.rs"]
 mod fetch_object_id_delta;
 

@@ -660,7 +660,8 @@ fn encode_fetch_stream(header: &FetchHeader, entries: &[FetchEntryTuple<'_>]) ->
             }
             FetchStreamEntry::EndOfNonExistentRange { .. }
             | FetchStreamEntry::EndOfUnknownRange { .. }
-            | FetchStreamEntry::EndOfTimedOutRange { .. } => {
+            | FetchStreamEntry::EndOfTimedOutRange { .. }
+            | FetchStreamEntry::EndOfGoneRange { .. } => {
                 if matches!(prior, FetchPriorContext::First) {
                     prior = FetchPriorContext::NoPriorActualObject;
                 }
@@ -1285,6 +1286,7 @@ fn test_fetch_descending_end_of_range_entries_are_resolved_from_previous_locatio
             DecodedFetchEntry::EndOfNonExistentRange { .. }
             | DecodedFetchEntry::EndOfUnknownRange { .. }
             | DecodedFetchEntry::EndOfTimedOutRange { .. }
+            | DecodedFetchEntry::EndOfGoneRange { .. }
             | DecodedFetchEntry::EndOfGroup { .. }
             | DecodedFetchEntry::EndOfTrack { .. } => {}
         }
@@ -1850,12 +1852,14 @@ fn test_fetch_object_with_empty_properties_keeps_length_varint() {
     );
 }
 
-/// End of Range の 3 種類のエントリが Properties を運ばない variant として連続復号できること
+/// End of Range の 4 種類のエントリが Properties を運ばない variant として連続復号できること
 ///
 /// draft-ietf-moq-transport-23 §11.4.2 (End of Range) は "Subgroup ID, Priority and Properties
 /// are not present." と定めるため、`DecodedFetchEntry` の End of Range の variant は Properties を
-/// 持たない。本テストは 3 種類を連続して復号し、それぞれの variant として返ることと、
+/// 持たない。本テストは 4 種類を連続して復号し、それぞれの variant として返ることと、
 /// ペイロード消費なしで `finish()` が成功することを固定する。
+/// End of Gone Range も他の 3 種と同じフィールド構造であり、Non-Existent とは別の variant に
+/// なることを併せて確認する。
 /// 先頭の End of Range は絶対 ID、以降は直前の Location からのデルタであり、
 /// 各 variant が prior Location を更新することも併せて検証する (§11.4.2.1 (ID Decoding))。
 /// wire 上で End of Range に Properties を渡すと拒否されることは
@@ -1878,6 +1882,10 @@ fn test_fetch_end_of_range_entries_carry_no_properties() {
             group_id_delta: 2,
             object_id_delta: 6,
         },
+        FetchStreamEntry::EndOfGoneRange {
+            group_id_delta: 2,
+            object_id_delta: 8,
+        },
     ];
     let data = encode_fetch_stream(
         &header,
@@ -1885,6 +1893,7 @@ fn test_fetch_end_of_range_entries_carry_no_properties() {
             (entries[0], None, None),
             (entries[1], None, None),
             (entries[2], None, None),
+            (entries[3], None, None),
         ],
     );
 
@@ -1896,7 +1905,7 @@ fn test_fetch_end_of_range_entries_carry_no_properties() {
         .expect("テストフィクスチャに期待される内部値が入っている");
 
     let mut decoded = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..4 {
         decoded.push(
             decoder
                 .try_decode_entry()
@@ -1919,8 +1928,12 @@ fn test_fetch_end_of_range_entries_carry_no_properties() {
                 group_id: 5,
                 object_id: 6
             },
+            DecodedFetchEntry::EndOfGoneRange {
+                group_id: 7,
+                object_id: 8
+            },
         ],
-        "End of Range の 3 エントリは Properties を持たない variant として返ること"
+        "End of Range の 4 エントリは Properties を持たない variant として返ること"
     );
     assert_eq!(decoder.finish(), Ok(()));
 }

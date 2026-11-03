@@ -865,10 +865,10 @@ fn test_descending_group_change_uses_absolute_object_id() {
     );
 }
 
-/// Descending (0x02) で End of Range (0x8C / 0x10C / 0x20C) と Object を混在できること
+/// Descending (0x02) で End of Range (0x8C / 0x10C / 0x20C / 0x40C) と Object を混在できること
 ///
 /// draft-ietf-moq-transport-23 §11.4.2 (End of Range): End of Range の Group ID /
-/// Object ID は絶対値で、以後の prior 参照文脈はその値を使う。3 種すべての End of Range で
+/// Object ID は絶対値で、以後の prior 参照文脈はその値を使う。4 種すべての End of Range で
 /// Group を直前 Object の Group と変えることで、エンコーダが End of Range の値を prior として
 /// デルタを計算していることを検証する。エントリ境界で終端したストリームを `finish` が
 /// 受容することも合わせて確認する。
@@ -880,6 +880,7 @@ fn test_descending_end_of_range_mixed_with_objects() {
 
     // 10/2 Object → 9/5 End of Non-Existent Range → 5/0 Object → 5/3 Object
     // → 4/9 End of Unknown Range → 2/0 Object → 1/11 End of Timed-Out Range → 1/12 Object
+    // → 0/3 End of Gone Range
     encoder
         .encode_object(&descending_input(10, 2, 1), None, &mut stream)
         .expect("テストフィクスチャの前提条件を満たす");
@@ -909,6 +910,9 @@ fn test_descending_end_of_range_mixed_with_objects() {
         .encode_object(&descending_input(1, 12, 1), None, &mut stream)
         .expect("テストフィクスチャの前提条件を満たす");
     stream.extend_from_slice(b"e");
+    encoder
+        .encode_end_of_gone_range(0, 3, &mut stream)
+        .expect("テストフィクスチャの前提条件を満たす");
 
     let mut decoder =
         FetchStreamDecoder::new_with_group_order(0x02).expect("Descending は有効な Group Order");
@@ -928,6 +932,7 @@ fn test_descending_end_of_range_mixed_with_objects() {
             DecodedFetchEntry::EndOfNonExistentRange { .. }
             | DecodedFetchEntry::EndOfUnknownRange { .. }
             | DecodedFetchEntry::EndOfTimedOutRange { .. }
+            | DecodedFetchEntry::EndOfGoneRange { .. }
             | DecodedFetchEntry::EndOfGroup { .. }
             | DecodedFetchEntry::EndOfTrack { .. } => {}
         }
@@ -953,9 +958,85 @@ fn test_descending_end_of_range_mixed_with_objects() {
                 object_id: 11
             },
             decoded_fetch_object(1, 12),
+            DecodedFetchEntry::EndOfGoneRange {
+                group_id: 0,
+                object_id: 3
+            },
         ],
         "End of Range を混在させても絶対位置が解決されること"
     );
+    decoder
+        .finish()
+        .expect("エントリ境界で終端したストリームは finish で受容される");
+}
+
+/// End of Gone Range の後に Object が正しくラウンドトリップすること
+///
+/// Gone は元の publisher が再配送できないだけで存在を否定しない状態であるため
+/// (draft-ietf-moq-transport-23 §2.1.2 (Object States))、Gone の直後に置いた Object は
+/// 通常どおり直列化・復号できなければならない。End of Range は Group ID / Object ID だけを
+/// 更新し prior Subgroup ID / Priority は保持するため (§11.4.2.2 (Prior Object Fields))、
+/// Gone の直後の Object は prior 参照をそのまま使える (NoPriorActualObject 文脈)。
+#[test]
+fn end_of_gone_range_then_object() {
+    let mut encoder = FetchStreamEncoder::new(1);
+    let mut stream = encoder.encode_header();
+
+    // End of Gone Range (Group 5 / Object 10)
+    encoder
+        .encode_end_of_gone_range(5, 10, &mut stream)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // Object (NoPriorActualObject 文脈): Group 5 / Object 10 + 1 = 11
+    let input = FetchObjectInput {
+        group_id: 5,
+        subgroup_id: 0,
+        object_id: 11,
+        publisher_priority: 64,
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 1,
+    };
+    encoder
+        .encode_object(&input, None, &mut stream)
+        .expect("Gone の直後の Object はエンコードできる");
+    stream.extend_from_slice(b"x");
+
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&stream);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+
+    // Gone として復号されること (Non-Existent ではない)
+    let entry = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(
+        entry,
+        DecodedFetchEntry::EndOfGoneRange {
+            group_id: 5,
+            object_id: 10
+        },
+        "Gone が Non-Existent と取り違えられずに復号されること"
+    );
+
+    // 後続 Object も Gone の Location を基準に復号されること
+    let entry = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    match entry {
+        DecodedFetchEntry::Object(obj) => {
+            assert_eq!(obj.group_id, 5);
+            assert_eq!(obj.object_id, 11);
+            assert_eq!(obj.publisher_priority, 64);
+        }
+        other => panic!("Object が期待された: {other:?}"),
+    }
+    drain_fetch_payload(&mut decoder, 1);
     decoder
         .finish()
         .expect("エントリ境界で終端したストリームは finish で受容される");

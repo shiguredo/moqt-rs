@@ -24,7 +24,8 @@
 - Subgroup Header (Subgroup ID mode 含む)
 - Fetch Header
 - Subgroup Object / Fetch Stream Object
-- Fetch の End of Non-Existent Range / End of Unknown Range / End of Timed-Out Range マーカー (Group Order が Descending (0x02) のときは Group 降順 / 同 Group 内 Object ID 昇順でデルタを解決し、End of Range (0x8C / 0x10C / 0x20C) の Group ID / Object ID は絶対値)
+- Fetch の End of Non-Existent Range / End of Unknown Range / End of Timed-Out Range / End of Gone Range マーカー (Group Order が Descending (0x02) のときは Group 降順 / 同 Group 内 Object ID 昇順でデルタを解決し、End of Range (0x8C / 0x10C / 0x20C / 0x40C) の Group ID / Object ID は絶対値)
+  - Gone は元の publisher が再配送できないが存在自体は否定しない状態であり (draft-ietf-moq-transport-23 §2.1.2)、Non-Existent (存在しないと確定した状態) とは区別する
 - Object Datagram
 - Object の Delivery Mode (Subgroup / Datagram) を Object 単位で追跡し、重複 Object の Malformed 検出 (§12.1 の条件 7) に使う。送信側の強制は行わない
 - Object Status (Normal / End of Group / End of Track)

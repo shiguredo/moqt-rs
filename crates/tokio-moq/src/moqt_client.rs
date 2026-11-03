@@ -369,6 +369,30 @@ impl FetchResponseWriter {
         Ok(())
     }
 
+    /// End of Gone Range を書く
+    ///
+    /// 直前までに書いた entry の Location から `location` までの区間の Object が「Gone」で
+    /// あることを示す (draft-ietf-moq-transport-23 §11.4.2 (End of Range) / §11.4.1 Table 8)。
+    /// Gone は元の publisher が再配送できないが存在自体を否定しない状態である
+    /// (同 §2.1.2 (Object States))。元の publisher が再起動で state を失った過去や、
+    /// 保持期間を過ぎて再配送できない過去は、存在しないと断定せずこの指示で通知する。
+    /// 存在しないと確定した範囲には [`FetchResponseWriter::write_end_of_non_existent_range`] を
+    /// 使う。Gone の範囲に含まれる Location の Object を後から受け取っても矛盾ではないため
+    /// (同 §2.1.2)、書き手は両者を混同しないこと。
+    ///
+    /// # Errors
+    ///
+    /// エンコードの規則 (直前の Location との順序など) に反する場合は [`TransportError`] になる。
+    pub async fn write_end_of_gone_range(&mut self, location: Location) -> Result<()> {
+        self.data_plane.send_fetch_end_of_range(self.stream_id)?;
+        let mut buf = Vec::new();
+        self.encoder
+            .encode_end_of_gone_range(location.group_id, location.object_id, &mut buf)
+            .map_err(|e| TransportError::Internal(format!("fetch end of range encode: {e}")))?;
+        self.stream.send(Bytes::from(buf)).await?;
+        Ok(())
+    }
+
     /// End of Group を書く
     ///
     /// 直前までに書いた Object がその Group の最終 Object であることを示す

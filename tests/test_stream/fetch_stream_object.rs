@@ -85,11 +85,12 @@ fn end_of_timed_out_range() {
     );
 }
 
-/// 0x8C / 0x10C / 0x20C の混在ストリームが順に decode できる
+/// 0x8C / 0x10C / 0x20C / 0x40C の混在ストリームが順に decode できる
 ///
-/// draft-ietf-moq-transport-22 §11.4.1 (Fetch Header) Table 8:
-/// 3 種の End of Range はいずれも既知値として受理される
-/// (128 以上の未知値拒否の一般則は別途扱う)。
+/// draft-ietf-moq-transport-23 §11.4.1 (Fetch Header) Table 8:
+/// 4 種の End of Range はいずれも既知値として受理される
+/// (128 以上の未知値拒否の一般則は別途扱う)。Gone が Non-Existent に取り違えられず、
+/// それぞれの variant として読めることを固定する。
 #[test]
 fn mixed_end_of_range_kinds_decode_in_order() {
     let entries = [
@@ -104,6 +105,10 @@ fn mixed_end_of_range_kinds_decode_in_order() {
         FetchStreamEntry::EndOfTimedOutRange {
             group_id_delta: 5,
             object_id_delta: 6,
+        },
+        FetchStreamEntry::EndOfGoneRange {
+            group_id_delta: 7,
+            object_id_delta: 8,
         },
     ];
     let mut buf = Vec::new();
@@ -351,7 +356,7 @@ fn decode_no_prior_actual_object_without_priority_rejected() {
 
 #[test]
 fn unknown_flags_at_or_above_128_rejected() {
-    // Table 8 の 3 値 (0x8C / 0x10C / 0x20C) 以外の 128 以上は MALFORMED_OBJECT
+    // Table 8 の 4 値 (0x8C / 0x10C / 0x20C / 0x40C) 以外の 128 以上は MALFORMED_OBJECT
     // (draft-ietf-moq-transport-23 §11.4.1 (Fetch Header): "If an endpoint receives any other
     // value greater than 127, it MUST close the session with MALFORMED_OBJECT.")
     // 0x8D は 128 以上かつ特殊値ではない。First 文脈で decode し、prior 文脈違反
@@ -506,7 +511,7 @@ fn encode_properties_length_u64_max_rejected() {
     assert_eq!(buf, vec![0xAA], "失敗時に buf が変化しないこと");
 }
 
-// End of Range の 3 variant は Properties フィールドを持たないため、
+// End of Range の 4 variant は Properties フィールドを持たないため、
 // properties_data に Some を渡したら書き込み前に拒否する
 // (draft-ietf-moq-transport-23 §11.4.2 (End of Range):
 // "Subgroup ID, Priority and Properties are not present")
@@ -524,6 +529,10 @@ fn encode_end_of_range_with_properties_rejected() {
         FetchStreamEntry::EndOfTimedOutRange {
             group_id_delta: 5,
             object_id_delta: 6,
+        },
+        FetchStreamEntry::EndOfGoneRange {
+            group_id_delta: 7,
+            object_id_delta: 8,
         },
     ];
     for entry in &entries {
@@ -544,7 +553,7 @@ fn encode_end_of_range_with_properties_rejected() {
     }
 }
 
-// End of Range の 3 variant は properties_data = None なら従来どおり成功する
+// End of Range の 4 variant は properties_data = None なら従来どおり成功する
 #[test]
 fn encode_end_of_range_without_properties_succeeds() {
     let entries = [
@@ -559,6 +568,10 @@ fn encode_end_of_range_without_properties_succeeds() {
         FetchStreamEntry::EndOfTimedOutRange {
             group_id_delta: 5,
             object_id_delta: 6,
+        },
+        FetchStreamEntry::EndOfGoneRange {
+            group_id_delta: 7,
+            object_id_delta: 8,
         },
     ];
     for entry in &entries {

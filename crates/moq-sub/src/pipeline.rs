@@ -6490,10 +6490,12 @@ async fn read_fetch_entry(
 
 /// FETCH 応答の Object 以外の entry をログに残す
 ///
-/// Object 以外の entry は配送しない。End of Range の 3 種は取得できなかった理由が異なる
-/// (存在しない / 不明 / 期限切れ) ため、それぞれ別のメッセージで残す
+/// Object 以外の entry は配送しない。End of Range の 4 種は取得できなかった理由が異なる
+/// (存在しない / 不明 / 期限切れ / Gone) ため、それぞれ別のメッセージで残す
 /// (draft-ietf-moq-transport-23 §3.2.2 (Gaps in a Fetch Stream) /
-/// §11.4.2 (End of Range))。
+/// §11.4.2 (End of Range))。Gone は元の publisher が再配送できないだけで存在自体は
+/// 否定されていない状態であり (同 §2.1.2 (Object States))、存在しないと確定した
+/// non-existent と混同しないよう別の理由として扱う。
 /// End of Group / End of Track は直前の Object が Group / Track の最終 Object であることを
 /// 示す marker であり (同 §11.4.2.2 (Prior Object Fields))、応答の終端としてログに残すだけで
 /// 配送しない。Object の entry では何もしない。
@@ -6512,6 +6514,10 @@ fn log_fetch_boundary(stream_num: u64, entry: &DecodedFetchEntry) {
             group_id,
             object_id,
         } => ("timed-out", *group_id, *object_id),
+        DecodedFetchEntry::EndOfGoneRange {
+            group_id,
+            object_id,
+        } => ("gone", *group_id, *object_id),
         DecodedFetchEntry::EndOfGroup { group_id } => {
             tracing::info!("Stream #{stream_num}: FETCH group ended: group={group_id}");
             return;

@@ -370,6 +370,23 @@ pub enum DecodedFetchEntry {
         /// 終端 Object ID (絶対値)
         object_id: u64,
     },
+    /// End of Gone Range (0x40C, draft-ietf-moq-transport-23 §11.4.1 Table 8)
+    ///
+    /// 範囲内の Object は、元の publisher が再配送できないが存在するか否かは分かっていない
+    /// (draft-ietf-moq-transport-23 §2.1.2 (Object States))。存在しないと確定した
+    /// [`DecodedFetchEntry::EndOfNonExistentRange`] とは区別しなければならない。
+    /// Gone の範囲に含まれる Location の Object を後から別経路で受け取っても、
+    /// 不存在の記録と矛盾するわけではない (同節 "Because another source can still hold a
+    /// Gone Object, receiving an Object that was recorded as Gone or Unknown is not an
+    /// error.")。アプリはこの 2 つを混同せず、Non-Existent だけを恒久的な不存在として
+    /// 扱うこと (§12.1 (Malformed Tracks) 条件 10 は「存在しないと記録した後の Object」を
+    /// malformed とするが、Gone はその記録に当たらない)。
+    EndOfGoneRange {
+        /// 終端 Group ID (絶対値)
+        group_id: u64,
+        /// 終端 Object ID (絶対値)
+        object_id: u64,
+    },
     /// End of Group (0x80)
     ///
     /// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields): 直前の Object が
@@ -761,6 +778,17 @@ impl FetchStreamDecoder {
                 let (group_id, object_id) =
                     self.resolve_end_of_range(group_id_delta, object_id_delta)?;
                 Ok(DecodedFetchEntry::EndOfTimedOutRange {
+                    group_id,
+                    object_id,
+                })
+            }
+            FetchStreamEntry::EndOfGoneRange {
+                group_id_delta,
+                object_id_delta,
+            } => {
+                let (group_id, object_id) =
+                    self.resolve_end_of_range(group_id_delta, object_id_delta)?;
+                Ok(DecodedFetchEntry::EndOfGoneRange {
                     group_id,
                     object_id,
                 })

@@ -251,6 +251,7 @@ fn encoder_decoder_roundtrip() -> noprop::TestResult {
 #[test]
 fn encoder_decoder_roundtrip_with_end_of_range() -> noprop::TestResult {
     let end_of_range_seen = std::cell::Cell::new(false);
+    let gone_range_seen = std::cell::Cell::new(false);
     let first_end_of_range_seen = std::cell::Cell::new(false);
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
@@ -293,7 +294,9 @@ fn encoder_decoder_roundtrip_with_end_of_range() -> noprop::TestResult {
             }
 
             if is_end_of_range {
-                let kind = noprop::sample_usize_in(ctx, 0..3);
+                // 4 種の End of Range は同じフィールド構造で variant だけが異なるため、
+                // どの種別も同じデルタ規則と prior 状態の更新に従う。
+                let kind = noprop::sample_usize_in(ctx, 0..4);
                 match kind {
                     0 => encoder
                         .encode_end_of_non_existent_range(group_id, object_id, &mut bytes)
@@ -301,9 +304,12 @@ fn encoder_decoder_roundtrip_with_end_of_range() -> noprop::TestResult {
                     1 => encoder
                         .encode_end_of_unknown_range(group_id, object_id, &mut bytes)
                         .expect("絶対 Location はエンコードできる"),
-                    // kind は 0..3 のため 2 のみがここに到達する
-                    _ => encoder
+                    2 => encoder
                         .encode_end_of_timed_out_range(group_id, object_id, &mut bytes)
+                        .expect("絶対 Location はエンコードできる"),
+                    // kind は 0..4 のため 3 のみがここに到達する
+                    _ => encoder
+                        .encode_end_of_gone_range(group_id, object_id, &mut bytes)
                         .expect("絶対 Location はエンコードできる"),
                 }
                 expected_entries.push(match kind {
@@ -315,13 +321,20 @@ fn encoder_decoder_roundtrip_with_end_of_range() -> noprop::TestResult {
                         group_id,
                         object_id,
                     },
-                    _ => DecodedFetchEntry::EndOfTimedOutRange {
+                    2 => DecodedFetchEntry::EndOfTimedOutRange {
+                        group_id,
+                        object_id,
+                    },
+                    _ => DecodedFetchEntry::EndOfGoneRange {
                         group_id,
                         object_id,
                     },
                 });
                 expected_payloads.push(Vec::new());
                 end_of_range_seen.set(true);
+                if kind == 3 {
+                    gone_range_seen.set(true);
+                }
                 if index == 0 {
                     first_end_of_range_seen.set(true);
                 }
@@ -381,6 +394,10 @@ fn encoder_decoder_roundtrip_with_end_of_range() -> noprop::TestResult {
     assert!(
         end_of_range_seen.get(),
         "End of Range を含むケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        gone_range_seen.get(),
+        "End of Gone Range を含むケースが生成されなかった\n{runner}"
     );
     assert!(
         first_end_of_range_seen.get(),

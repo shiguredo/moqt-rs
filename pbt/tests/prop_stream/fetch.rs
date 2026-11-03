@@ -230,17 +230,20 @@ fn fetch_stream_object_roundtrip_first() -> noprop::TestResult {
     Ok(())
 }
 
-/// End of Range エントリ (EndOfNonExistentRange / EndOfUnknownRange / EndOfTimedOutRange) のラウンドトリップ。
+/// End of Range エントリ (EndOfNonExistentRange / EndOfUnknownRange / EndOfTimedOutRange /
+/// EndOfGoneRange) のラウンドトリップ。
 /// これらは特殊な Serialization Flags で識別され、低水準 codec は Group ID Delta /
 /// Object ID Delta を生値のまま扱う (draft-ietf-moq-transport-23 §11.4.2 (End of Range) /
 /// §11.4.1 Table 8)。生値の意味は prior 参照文脈で変わる (最初の entry は絶対 ID、
 /// それ以外は直前 Location からのデルタ) が、低水準 codec の往復はその解釈に依存しない
 /// ことを複数の文脈で確認する (§11.4.2.1 (ID Decoding))。
+/// 4 種はフィールド構造が同じで Serialization Flags だけが異なるため、種別ごとに
+/// 正しい flags で往復することが Gone と Non-Existent の取り違えを防ぐ。
 #[test]
 fn fetch_stream_entry_end_of_range_roundtrip() -> noprop::TestResult {
     let mut runner = test_runner()?;
-    runner.run(256, |ctx| {
-        let kind = noprop::sample_usize_in(ctx, 0..3);
+    runner.run(512, |ctx| {
+        let kind = noprop::sample_usize_in(ctx, 0..4);
         let group_id = sample_varint(ctx);
         let object_id = sample_varint(ctx);
         let ctx_idx = noprop::sample_usize_in(ctx, 0..3);
@@ -253,8 +256,12 @@ fn fetch_stream_entry_end_of_range_roundtrip() -> noprop::TestResult {
                 group_id_delta: group_id,
                 object_id_delta: object_id,
             },
-            // kind は 0..3 のため 2 のみがここに到達する
-            _ => FetchStreamEntry::EndOfTimedOutRange {
+            2 => FetchStreamEntry::EndOfTimedOutRange {
+                group_id_delta: group_id,
+                object_id_delta: object_id,
+            },
+            // kind は 0..4 のため 3 のみがここに到達する
+            _ => FetchStreamEntry::EndOfGoneRange {
                 group_id_delta: group_id,
                 object_id_delta: object_id,
             },
