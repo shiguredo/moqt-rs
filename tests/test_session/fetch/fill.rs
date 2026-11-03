@@ -2270,7 +2270,7 @@ fn subscriber_receives_publish_with_fill_and_opens_nothing() {
         FetchHeaderAcceptance::Accepted
     );
     client
-        .recv_fetch_entry(stream_id)
+        .recv_fetch_entry(stream_id, &fetch_object_entry(0, 0))
         .expect("受理した fill stream の Object 通知が通ること");
     client
         .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
@@ -2337,7 +2337,7 @@ fn fetch_header_is_accepted_after_publish_arrives() {
         FetchHeaderAcceptance::Accepted
     );
     client
-        .recv_fetch_entry(stream_id)
+        .recv_fetch_entry(stream_id, &fetch_object_entry(0, 0))
         .expect("受理した fill stream の Object 通知が通ること");
     client
         .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)

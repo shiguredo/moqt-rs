@@ -2888,7 +2888,11 @@ fn malformed_track_does_not_cancel_data_stream_finished_fetch() {
     publish_one_object_on_track(&mut server, subscription_rid, alias, DataStreamId(53));
     let fetch_rid = establish_fetch_as_subscriber(&mut client, &mut server, b"cam");
 
-    // FETCH 応答の data stream を開いて FIN で終端し、fetch を Terminated にする
+    // FETCH 応答の data stream を開いて LARGEST_OBJECT の位置まで Object を送り、FIN で
+    // 終端して fetch を Terminated にする。空の応答で FIN すると、要求範囲全体が
+    // 不存在と確定し (draft-ietf-moq-transport-23 §3.2.2 (Gaps in a Fetch Stream))、
+    // 後続の同一 Track の Object 受信が Malformed Track 条件 10 と衝突するため、
+    // 応答範囲の終端に実在する Object を 1 つ含める。
     server
         .send_fetch_header(DataStreamId(54), fetch_rid)
         .expect("テストフィクスチャの前提条件を満たす");
@@ -2902,6 +2906,18 @@ fn malformed_track_does_not_cancel_data_stream_finished_fetch() {
                 request_id: fetch_rid,
             },
         )
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_fetch_object(
+            DataStreamId(54),
+            &Location {
+                group_id: 1,
+                object_id: 0,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_fetch_entry(DataStreamId(54), &fetch_object_entry(1, 0))
         .expect("テストフィクスチャの前提条件を満たす");
     server
         .send_fetch_data_stream_closed(DataStreamId(54))

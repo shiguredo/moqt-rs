@@ -19,7 +19,7 @@ use crate::stream::{
     DataStreamType, OBJECT_STATUS_END_OF_GROUP, OBJECT_STATUS_END_OF_TRACK, OBJECT_STATUS_NORMAL,
     PADDING_DATAGRAM_TYPE, classify_data_stream_type,
     datagram::{ObjectDatagram, validate_datagram_properties_blob, validate_object_datagram_type},
-    decoder::DecodedSubgroupObject,
+    decoder::{DecodedFetchEntry, DecodedSubgroupObject},
     fetch::FetchHeader,
     subgroup::{SubgroupHeader, SubgroupIdMode},
 };
@@ -32,6 +32,11 @@ use super::core::{
 };
 use super::subscription::validation::{
     ObjectFilterInput, header_passes_filters, object_passes_filters,
+};
+use super::track_history::{
+    FetchGapContext, MissingRange, PendingFetchTail, empty_stream_gap, end_marker_location,
+    end_of_range_region, first_end_of_range_missing, gap_between_entries, leading_gap,
+    trailing_gap,
 };
 use super::types::{
     DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING, DataStreamId, DataStreamResetReason,
@@ -88,9 +93,7 @@ pub(super) enum IncomingDataStream {
     /// であり、`request_id` は subscription の Request ID を指す。この識別規則は
     /// `recv_fetch_header` / `recv_data_stream_closed` / `send_data_stream_stop_sending` が
     /// 依拠する。
-    Fetch {
-        request_id: u64,
-    },
+    Fetch(IncomingFetchStream),
     /// 破棄対象の受信 data stream
     ///
     /// キャンセル由来 `Terminated`（`publish_done` が `None`）の subscription に属する
@@ -182,6 +185,45 @@ impl IncomingDataStream {
         match self {
             IncomingDataStream::Subgroup(stream) => Some(stream),
             _ => None,
+        }
+    }
+}
+
+/// 受信中の FETCH data stream の状態 ([`IncomingDataStream::Fetch`])
+///
+/// 通常の FETCH 応答と fill fetch stream の両方で使い、暗黙 gap の判定
+/// (draft-ietf-moq-transport-23 §3.2.2 (Gaps in a Fetch Stream)) に必要な直前 entry と
+/// 境界情報を保持する。`End of Range` の意味判定は Session が行い、本構造体は
+/// デコード済み entry をそのまま受け取るための位置情報だけを持つ。
+#[derive(Debug, Clone, Copy)]
+pub(super) struct IncomingFetchStream {
+    /// 紐づく request の Request ID
+    pub(super) request_id: u64,
+    /// 要求・応答の境界と実効 Range Filters
+    pub(super) gap: FetchGapContext,
+    /// 応答の先頭 entry の Location
+    pub(super) first_entry: Option<Location>,
+    /// 先頭 entry が Object か (End of Range の marker なら false)
+    pub(super) first_entry_is_object: bool,
+    /// 直前の entry の Location
+    pub(super) prior_entry: Option<Location>,
+    /// 応答終端の確定待ちの先頭 Object (leading gap の判定待ち)
+    pub(super) pending_leading_object: Option<Location>,
+    /// 応答終端の確定待ちの先頭 End of Non-Existent Range
+    pub(super) pending_leading_marker: Option<Location>,
+}
+
+impl IncomingFetchStream {
+    /// 新しい受信 FETCH stream の状態を作る
+    pub(super) fn new(request_id: u64, gap: FetchGapContext) -> Self {
+        Self {
+            request_id,
+            gap,
+            first_entry: None,
+            first_entry_is_object: false,
+            prior_entry: None,
+            pending_leading_object: None,
+            pending_leading_marker: None,
         }
     }
 }
@@ -1135,7 +1177,7 @@ impl Session {
                     ));
                 }
             }
-            Some(IncomingDataStream::Fetch { .. }) => {
+            Some(IncomingDataStream::Fetch(_)) => {
                 return Err(SessionError::new(
                     SESSION_INVALID_STREAM_HEADER,
                     "subgroup header received after fetch header",
@@ -1242,6 +1284,7 @@ impl Session {
                 .expect("subscription presence already checked by note_incoming_stream_opened");
             subscription.resolve_header_publisher_priority(header.publisher_priority)
         };
+        let inserted_request_id = request_id;
         self.data_streams.incoming.insert(
             stream_id,
             IncomingDataStream::Subgroup(IncomingSubgroupStream {
@@ -1258,6 +1301,7 @@ impl Session {
                 timeout_override_request_id: None,
             }),
         );
+        self.acquire_peer_track_history_stream(stream_id, inserted_request_id);
         // draft §12.1 (Malformed Tracks) 条件 1: 同一 Subgroup ID の直前 Object と
         // Publisher Priority が異なる場合を検出する。subgroup_id が確定している場合のみ
         // 記録できる (FirstObjectId モードは recv_subgroup_object で解決後に記録する)。
@@ -1402,7 +1446,7 @@ impl Session {
                     "subgroup object received before subgroup header",
                 ));
             }
-            Some(IncomingDataStream::Fetch { .. }) => {
+            Some(IncomingDataStream::Fetch(_)) => {
                 return Err(SessionError::new(
                     SESSION_INVALID_STREAM_HEADER,
                     "subgroup object received on fetch stream",
@@ -1657,20 +1701,16 @@ impl Session {
         }
         // draft §11.1.1 (Object Status): End of Group / End of Track を状態として記録する
         self.record_object_status_end(object_request_id, group_id, object.object_id, object.status);
-        if let Err(msg_err) = self
-            .peer_object_properties
-            .entry(object_request_id)
-            .or_default()
-            .observe_decoded_object(group_id, object.object_id, decoded_properties.as_ref())
-        {
-            // draft §12.1 (Malformed Tracks) 条件 3/4/5: `ObjectPropertyTracker::observe_decoded_object`
-            // は PRIOR_GROUP_ID_GAP / PRIOR_OBJECT_ID_GAP の一貫性違反 (gap 内に後続 Object を受信する等)
-            // を Malformed Track として検出する。Malformed Track はセッション全体ではなく
-            // 同じ Track の subscription / FETCH を cancel する。
-            let err = session_error_from_data_message(msg_err);
-            self.terminate_malformed_track(object_request_id, Some(stream_id), err.reason);
-            return Err(err);
-        }
+        // draft §12.1 (Malformed Tracks) 条件 3/4/5 / 条件 10: Object の存在と
+        // PRIOR_GROUP_ID_GAP / PRIOR_OBJECT_ID_GAP の一貫性を Track 単位の履歴へ記録する。
+        // 不存在区間内の Object や既出 Object を覆う Gap は Malformed Track として
+        // 同じ Track の subscription / FETCH を cancel する。
+        self.observe_peer_object(
+            object_request_id,
+            Some(stream_id),
+            received_location,
+            decoded_properties.as_ref(),
+        )?;
         // draft §12.1 (Malformed Tracks) 条件 6/7, §7.1 (Caching Relays):
         // 重複 Object の Delivery Mode / Subgroup ID / Priority と、条件 6 の
         // Payload / immutable properties の一貫性を検証する。
@@ -2052,11 +2092,20 @@ impl Session {
         }
     }
 
-    /// 受信した FETCH stream の entry を Session に取り込む (draft §11.4.1 (Fetch Header))
+    /// 受信した FETCH stream のデコード済み entry を Session に取り込む
+    /// (draft §11.4.1 (Fetch Header))
     ///
-    /// entry の内容自体は検証しない (codec 側で検証済みのため)。Session は次を行う。
+    /// codec (`FetchStreamDecoder`) はデルタ解決済みの絶対 Location を提供し、本 API は
+    /// その意味判定を行う。
     /// - FETCH_HEADER 受信済みの fetch stream であることの検証
     /// - DATA_STREAM_TIMEOUT 用の activity 記録の更新
+    /// - Object の存在を Track 単位の履歴へ記録し、不存在区間との矛盾を検出する
+    ///   (draft-ietf-moq-transport-23 §2.1.2 (Object States) / §12.1 (Malformed Tracks) 条件 10)
+    /// - End of Non-Existent Range と、Range Filters を持たない FETCH 応答の暗黙 gap を
+    ///   不存在として記録する (§3.2.2 (Gaps in a Fetch Stream) / §11.4.2 (End of Range))
+    ///
+    /// 応答の終端 (FETCH_OK の LARGEST_OBJECT) が未確定のままデータや FIN が届いた場合、
+    /// 終端に依存する判定は FETCH_OK の受信まで保留する。
     ///
     /// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) の条件 4 は
     /// "If the end of a Group is implicitly determined via a gap in a FETCH response, the final
@@ -2064,41 +2113,373 @@ impl Session {
     /// 推論することはしない (`Subscription::ended_groups` (EndOfGroup / EndOfTrack 用の
     /// group 終端追跡) には登録しない)。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
-    pub fn recv_fetch_entry(&mut self, stream_id: DataStreamId) -> Result<(), SessionError> {
+    ///
+    /// # Errors
+    ///
+    /// - FETCH_HEADER 未受信の stream、subgroup stream など、種別が一致しない場合
+    /// - Malformed Track を検出した場合 (同じ Track の subscription / FETCH を cancel する)
+    pub fn recv_fetch_entry(
+        &mut self,
+        stream_id: DataStreamId,
+        entry: &DecodedFetchEntry,
+    ) -> Result<(), SessionError> {
         self.require_established()?;
         // 破棄対象の保持集合に含まれる stream id (forget_fetch 後の遅延 fetch stream) は
         // no-op で吸収する
         if self.data_streams.discarded.contains_key(&stream_id) {
             return Ok(());
         }
-        match self.data_streams.incoming.get_mut(&stream_id) {
-            Some(IncomingDataStream::Fetch { .. }) => {
-                // draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の
-                // DATA_STREAM_TIMEOUT (0x12) は "fields of a stream header or an object
-                // header within a data stream" も activity に含む。
-                // fetch entry (Object / EndOfRange いずれも) 受信ごとに timestamp を更新する。
-                if let Some(now_ms) = self.timing.last_tick_ms {
-                    self.timing
-                        .data_stream_last_activity_ms
-                        .insert(stream_id, now_ms);
-                }
-                Ok(())
+        let mut stream = match self.data_streams.incoming.get(&stream_id) {
+            Some(IncomingDataStream::Fetch(stream)) => *stream,
+            Some(IncomingDataStream::AwaitingHeader { .. }) => {
+                return Err(SessionError::new(
+                    SESSION_MALFORMED_OBJECT,
+                    "fetch entry received before fetch header",
+                ));
             }
-            Some(IncomingDataStream::AwaitingHeader { .. }) => Err(SessionError::new(
-                SESSION_MALFORMED_OBJECT,
-                "fetch entry received before fetch header",
-            )),
-            Some(IncomingDataStream::Subgroup(_)) => Err(SessionError::new(
-                SESSION_INVALID_STREAM_HEADER,
-                "fetch entry received on subgroup stream",
-            )),
+            Some(IncomingDataStream::Subgroup(_)) => {
+                return Err(SessionError::new(
+                    SESSION_INVALID_STREAM_HEADER,
+                    "fetch entry received on subgroup stream",
+                ));
+            }
             // 破棄対象 stream への entry は no-op で吸収する (遅延 in-flight stream の
             // Object / End of Range)
-            Some(IncomingDataStream::Discarded { .. }) => Ok(()),
-            None => Err(SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
-                "fetch entry received for unknown stream id",
-            )),
+            Some(IncomingDataStream::Discarded { .. }) => return Ok(()),
+            None => {
+                return Err(SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "fetch entry received for unknown stream id",
+                ));
+            }
+        };
+        // draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の
+        // DATA_STREAM_TIMEOUT (0x12) は "fields of a stream header or an object
+        // header within a data stream" も activity に含む。
+        // fetch entry (Object / EndOfRange いずれも) 受信ごとに timestamp を更新する。
+        if let Some(now_ms) = self.timing.last_tick_ms {
+            self.timing
+                .data_stream_last_activity_ms
+                .insert(stream_id, now_ms);
+        }
+        let result = self.apply_fetch_entry(stream_id, &mut stream, entry);
+        // malformed 検出でも stream 自体は終端通知まで残るため、更新した判定状態を書き戻す
+        if let Some(IncomingDataStream::Fetch(current)) =
+            self.data_streams.incoming.get_mut(&stream_id)
+        {
+            *current = stream;
+        }
+        result
+    }
+
+    /// デコード済み FETCH entry を判定状態へ反映する
+    fn apply_fetch_entry(
+        &mut self,
+        stream_id: DataStreamId,
+        stream: &mut IncomingFetchStream,
+        entry: &DecodedFetchEntry,
+    ) -> Result<(), SessionError> {
+        let request_id = stream.request_id;
+        // 通常の FETCH 応答は FETCH 状態が応答終端を保持する。fill fetch stream は
+        // FETCH_HEADER 受理時に確定した context をそのまま使う。
+        if self.fetches.contains_key(&request_id) {
+            stream.gap = self.fetch_gap_context(request_id);
+        }
+        let context = stream.gap;
+        match entry {
+            DecodedFetchEntry::Object(object) => {
+                let properties = match decode_object_properties(object.properties_bytes.as_deref())
+                {
+                    Ok(properties) => properties,
+                    Err(err) => {
+                        let reason = err.reason();
+                        self.terminate_malformed_track(request_id, Some(stream_id), reason);
+                        return Err(SessionError::new(SESSION_PROTOCOL_VIOLATION, reason));
+                    }
+                };
+                let location = Location {
+                    group_id: object.group_id,
+                    object_id: object.object_id,
+                };
+                self.observe_peer_object(
+                    request_id,
+                    Some(stream_id),
+                    location,
+                    properties.as_ref(),
+                )?;
+                if context.implicit_enabled() {
+                    if let Some(prior) = stream.prior_entry {
+                        // 応答内の連続しない entry の間は、Range Filters が無ければ
+                        // 不存在、あれば Unknown である (§3.2.2 (Gaps in a Fetch Stream))
+                        if !context.has_range_filters {
+                            let ranges = gap_between_entries(prior, location);
+                            self.record_fetch_gap_ranges(request_id, stream_id, &context, ranges)?;
+                        }
+                    } else if let Some(anchor) = context.leading_anchor() {
+                        if !context.has_range_filters {
+                            let ranges = leading_gap(anchor, location);
+                            self.record_fetch_gap_ranges(request_id, stream_id, &context, ranges)?;
+                        }
+                    } else {
+                        // 降順で応答終端が未確定のため、先頭 gap の基準点が決まらない。
+                        // FETCH_OK の受信まで保留する。
+                        stream.pending_leading_object = Some(location);
+                    }
+                }
+                if stream.first_entry.is_none() {
+                    stream.first_entry = Some(location);
+                    stream.first_entry_is_object = true;
+                }
+                stream.prior_entry = Some(location);
+            }
+            DecodedFetchEntry::EndOfNonExistentRange {
+                group_id,
+                object_id,
+            } => {
+                let marker = Location {
+                    group_id: *group_id,
+                    object_id: *object_id,
+                };
+                // draft-ietf-moq-transport-23 §11.4.2 (End of Range): 直前の Object (または
+                // End of Range 指示) とこの指示の間の全 Location が不存在である。
+                let ranges = if let Some(prior) = stream.prior_entry {
+                    end_of_range_region(prior, marker)
+                } else if let Some(anchor) = context.leading_anchor() {
+                    first_end_of_range_missing(anchor, marker)
+                } else if context.boundary_pending() {
+                    stream.pending_leading_marker = Some(marker);
+                    Vec::new()
+                } else {
+                    // 基準点が無く解決できない。誤拒否を避けるため記録しない。
+                    Vec::new()
+                };
+                self.record_fetch_gap_ranges(request_id, stream_id, &context, ranges)?;
+                if stream.first_entry.is_none() {
+                    stream.first_entry = Some(marker);
+                }
+                stream.prior_entry = Some(marker);
+            }
+            DecodedFetchEntry::EndOfUnknownRange {
+                group_id,
+                object_id,
+            }
+            | DecodedFetchEntry::EndOfTimedOutRange {
+                group_id,
+                object_id,
+            }
+            | DecodedFetchEntry::EndOfGoneRange {
+                group_id,
+                object_id,
+            } => {
+                // Gone / Unknown / Timed-Out は存在を否定しない (§2.1.2 (Object States))。
+                // 不存在として記録すると、後から届く正当な Object を誤拒否する。
+                let marker = Location {
+                    group_id: *group_id,
+                    object_id: *object_id,
+                };
+                if stream.first_entry.is_none() {
+                    stream.first_entry = Some(marker);
+                }
+                stream.prior_entry = Some(marker);
+            }
+            DecodedFetchEntry::EndOfGroup { group_id }
+            | DecodedFetchEntry::EndOfTrack { group_id } => {
+                // marker は ID を運ばず、先行 Object の Object ID が 2^64-1 になる
+                // (§11.4.2.2 (Prior Object Fields))。後続 entry の gap 計算ではこの
+                // sentinel をそのまま使う。
+                let marker = end_marker_location(*group_id);
+                if stream.first_entry.is_none() {
+                    stream.first_entry = Some(marker);
+                }
+                stream.prior_entry = Some(marker);
+            }
+        }
+        Ok(())
+    }
+
+    /// FETCH 応答の暗黙 gap を Track 履歴へ記録する
+    ///
+    /// 応答終端が未確定の降順応答では、要求範囲への切り詰めに終端が必要なため、
+    /// FETCH_OK の受信まで範囲を保留する。
+    fn record_fetch_gap_ranges(
+        &mut self,
+        request_id: u64,
+        stream_id: DataStreamId,
+        context: &FetchGapContext,
+        ranges: Vec<MissingRange>,
+    ) -> Result<(), SessionError> {
+        if ranges.is_empty() {
+            return Ok(());
+        }
+        if context.boundary_pending() {
+            self.pending_fetch_tails
+                .entry(request_id)
+                .or_default()
+                .pending_ranges
+                .extend(ranges);
+            return Ok(());
+        }
+        let ranges = context.clamp(ranges);
+        self.observe_peer_missing(request_id, Some(stream_id), &ranges)
+    }
+
+    /// FETCH 応答の FIN 時点で末尾 gap を確定する
+    ///
+    /// 応答終端が未確定なら、FETCH_OK の受信まで判定を保留する。
+    /// RESET_STREAM では受信していない Location を確定できないため、末尾 gap を記録しない。
+    pub(super) fn finish_fetch_gap_stream(
+        &mut self,
+        stream_id: DataStreamId,
+        stream: &IncomingFetchStream,
+        end: RequestStreamEnd,
+    ) -> Result<(), SessionError> {
+        self.release_peer_track_history_stream(stream_id);
+        let request_id = stream.request_id;
+        if !matches!(end, RequestStreamEnd::Fin) {
+            self.pending_fetch_tails.remove(&request_id);
+            return Ok(());
+        }
+        let context = stream.gap;
+        let mut pending = self
+            .pending_fetch_tails
+            .remove(&request_id)
+            .unwrap_or_default();
+        pending.finished = true;
+        pending.last_entry = stream.prior_entry;
+        if pending.leading_object.is_none() {
+            pending.leading_object = stream.pending_leading_object;
+        }
+        if pending.leading_marker.is_none() {
+            pending.leading_marker = stream.pending_leading_marker;
+        }
+        // 応答終端が未確定の間は、末尾 gap と応答順 (降順) の範囲の切り詰めを確定できない。
+        // FETCH_OK の受信まで保留する (fill は FETCH_OK を持たないため、境界が確定して
+        // いない限り暗黙 gap の判定自体を行わない)。
+        let needs_end = context.end.is_none();
+        let has_work = pending.leading_object.is_some()
+            || pending.leading_marker.is_some()
+            || !pending.pending_ranges.is_empty()
+            || context.implicit_enabled();
+        if needs_end && has_work {
+            self.pending_fetch_tails.insert(request_id, pending);
+            return Ok(());
+        }
+        self.resolve_pending_fetch_gap_set(request_id, Some(stream_id), &context, pending)
+    }
+
+    /// 保留していた FETCH 応答の gap 判定を FETCH_OK 受信後に解決する
+    ///
+    /// 応答より先にデータが届いていた場合、先頭 gap と応答順の範囲をここで確定させる。
+    /// stream がまだ open なら stream の context を更新して解決し、FIN 済みなら
+    /// [`PendingFetchTail`] を解決する。
+    pub(super) fn resolve_pending_fetch_gaps(
+        &mut self,
+        request_id: u64,
+    ) -> Result<(), SessionError> {
+        let context = self.fetch_gap_context(request_id);
+        if let Some(pending) = self.pending_fetch_tails.remove(&request_id) {
+            self.resolve_pending_fetch_gap_set(request_id, None, &context, pending)?;
+        }
+        let stream_ids: Vec<DataStreamId> = self
+            .data_streams
+            .incoming
+            .iter()
+            .filter_map(|(&stream_id, stream)| match stream {
+                IncomingDataStream::Fetch(stream) if stream.request_id == request_id => {
+                    Some(stream_id)
+                }
+                _ => None,
+            })
+            .collect();
+        for stream_id in stream_ids {
+            let Some(IncomingDataStream::Fetch(stream)) =
+                self.data_streams.incoming.get(&stream_id)
+            else {
+                continue;
+            };
+            let mut stream = *stream;
+            stream.gap = context;
+            let leading_object = stream.pending_leading_object.take();
+            let leading_marker = stream.pending_leading_marker.take();
+            if let Some(IncomingDataStream::Fetch(current)) =
+                self.data_streams.incoming.get_mut(&stream_id)
+            {
+                *current = stream;
+            }
+            if let Some(object) = leading_object
+                && let Some(anchor) = context.leading_anchor()
+            {
+                let ranges = context.clamp(leading_gap(anchor, object));
+                self.observe_peer_missing(request_id, Some(stream_id), &ranges)?;
+            }
+            if let Some(marker) = leading_marker
+                && let Some(anchor) = context.leading_anchor()
+            {
+                let ranges = context.clamp(first_end_of_range_missing(anchor, marker));
+                self.observe_peer_missing(request_id, Some(stream_id), &ranges)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 保留状態を確定した context で解決する
+    fn resolve_pending_fetch_gap_set(
+        &mut self,
+        request_id: u64,
+        stream_id: Option<DataStreamId>,
+        context: &FetchGapContext,
+        pending: PendingFetchTail,
+    ) -> Result<(), SessionError> {
+        if let Some(object) = pending.leading_object
+            && let Some(anchor) = context.leading_anchor()
+        {
+            let ranges = context.clamp(leading_gap(anchor, object));
+            self.observe_peer_missing(request_id, stream_id, &ranges)?;
+        }
+        if let Some(marker) = pending.leading_marker
+            && let Some(anchor) = context.leading_anchor()
+        {
+            let ranges = context.clamp(first_end_of_range_missing(anchor, marker));
+            self.observe_peer_missing(request_id, stream_id, &ranges)?;
+        }
+        if !pending.pending_ranges.is_empty() {
+            let ranges = context.clamp(pending.pending_ranges);
+            self.observe_peer_missing(request_id, stream_id, &ranges)?;
+        }
+        if pending.finished && context.implicit_enabled() {
+            // draft-ietf-moq-transport-23 §3.2.2: "Gaps at the end of a stream are only
+            // detectable when the stream is terminated by a FIN." 応答範囲の終端までが
+            // 暗黙の gap になる。
+            if let Some(trailing_anchor) = context.trailing_anchor() {
+                let ranges = match pending.last_entry {
+                    Some(last) => trailing_gap(last, trailing_anchor),
+                    None => match context.leading_anchor() {
+                        Some(leading_anchor) => empty_stream_gap(leading_anchor, trailing_anchor),
+                        None => Vec::new(),
+                    },
+                };
+                let ranges = context.clamp(ranges);
+                self.observe_peer_missing(request_id, stream_id, &ranges)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Fetch 状態から暗黙 gap 判定用の境界情報を求める
+    fn fetch_gap_context(&self, request_id: u64) -> FetchGapContext {
+        let Some(fetch) = self.fetches.get(&request_id) else {
+            return FetchGapContext::default();
+        };
+        if fetch.my_role != TrackRole::Subscriber {
+            return FetchGapContext::default();
+        }
+        FetchGapContext {
+            // draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter): FETCH で省略時は
+            // Ascending (0x1) を使う。
+            group_order: fetch.group_order.unwrap_or(1),
+            has_range_filters: fetch.has_range_filters,
+            start: fetch.fetch_start,
+            end: fetch.end_location,
         }
     }
 
@@ -2160,7 +2541,7 @@ impl Session {
                     "fetch header received on subgroup stream",
                 ));
             }
-            Some(IncomingDataStream::Fetch { .. }) => {
+            Some(IncomingDataStream::Fetch(_)) => {
                 return Err(SessionError::new(
                     SESSION_UNEXPECTED_MESSAGE,
                     "fetch header already received for stream id",
@@ -2352,12 +2733,21 @@ impl Session {
                 return Err(err);
             }
         }
+        let is_fill_stream = !self.fetches.contains_key(&stream_request_id);
+        let gap = if is_fill_stream {
+            self.fill_gap_context(header.request_id).unwrap_or_default()
+        } else {
+            self.fetch_gap_context(stream_request_id)
+        };
+        if is_fill_stream {
+            // fill の実効フィルタは 1 本の fill fetch stream にだけ使う
+            self.fill_contexts.remove(&header.request_id);
+        }
         self.data_streams.incoming.insert(
             stream_id,
-            IncomingDataStream::Fetch {
-                request_id: stream_request_id,
-            },
+            IncomingDataStream::Fetch(IncomingFetchStream::new(stream_request_id, gap)),
         );
+        self.acquire_peer_track_history_stream(stream_id, stream_request_id);
         if let Some(now_ms) = self.timing.last_tick_ms {
             self.timing
                 .data_stream_last_activity_ms
@@ -2810,22 +3200,17 @@ impl Session {
                 return Err(err);
             }
         };
-        if let Err(msg_err) = self
-            .peer_object_properties
-            .entry(request_id)
-            .or_default()
-            .observe_decoded_object(
-                datagram.group_id,
-                datagram.object_id,
-                decoded_properties.as_ref(),
-            )
-        {
-            // draft §12.1 (Malformed Tracks): datagram 経路も同じ扱い。datagram は stream を
-            // 持たないので reset 対象の stream_id は無い。
-            let err = session_error_from_data_message(msg_err);
-            self.terminate_malformed_track(request_id, None, err.reason);
-            return Err(err);
-        }
+        // draft §12.1 (Malformed Tracks) 条件 3/4/5 / 条件 10: datagram 経路も Track 単位の
+        // 履歴へ記録する。datagram は stream を持たないので reset 対象の stream_id は無い。
+        self.observe_peer_object(
+            request_id,
+            None,
+            Location {
+                group_id: datagram.group_id,
+                object_id: datagram.object_id,
+            },
+            decoded_properties.as_ref(),
+        )?;
         // draft §12.1 (Malformed Tracks) 条件 6/7, §7.1 (Caching Relays):
         // 重複 Object の Delivery Mode / Subgroup ID / Priority と、条件 6 の
         // Payload / immutable properties の一貫性を検証する。
@@ -2921,12 +3306,11 @@ impl Session {
 
     /// Object Status から End of Group / End of Track を状態へ記録する
     ///
-    /// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 4/5 は「final Object より
+    /// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 4/5 は「final Object より
     /// **larger than**」な Object だけを Malformed とし、final Object は終端を宣言した Object
-    /// 自身である。§11.1.1 (Object Status) の "greater than or equal to" は宣言後に存在しない
-    /// Object を述べたものと解釈し、§2.1.2 (Object States) ("an endpoint can receive an Object after it has already
-    /// recorded that the Object does not exist ... This is not a protocol error and the Track is
-    /// not malformed.") と整合させる。宣言した Object 自身は存在するものとして記録する。
+    /// 自身である。宣言した位置を不存在として記録すると、同じ Object の再受信が条件 10 と
+    /// 誤判定されるため、「存在しない最小の Object ID」を記録して宣言した Object 自身は存在する
+    /// ものとして扱う。同じ位置の重複は条件 6 の内容比較に委ねる。
     ///
     /// - 0x3 (End of Group): `ended_groups` に「存在しない最小の Object ID」として宣言位置の
     ///   1 つ先 (`object_id + 1`) を記録する。同一位置の重複は §12.1 条件 6 の内容比較に委ねる
@@ -2945,13 +3329,11 @@ impl Session {
         };
         match status {
             OBJECT_STATUS_END_OF_GROUP => {
-                // draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 4 は終端を宣言した
+                // draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 4 は終端を宣言した
                 // Object 自身を "the final Object in the Group" として扱い、"larger than" な
                 // Object だけを Malformed とする。`ended_groups` は「存在しない最小の Object ID」
                 // を保持するため、宣言した Object 自身を存在するものとして 1 つ先を記録する
-                // (§11.1.1 の "greater than or equal to" は、宣言後に存在しない Object を
-                // 述べたものと解釈する。§2.1.2 (Object States) も、存在しないと記録した後に Object が届くことは
-                // protocol error ではないと定める)。
+                // (宣言位置を不存在にすると、同じ Object の再受信が条件 10 と衝突する)。
                 // `u64::MAX` では境界を 1 つ先へ進められず、宣言した Object 自身の再受信も
                 // Malformed のままになる既知の限界がある (`Subscription::ended_groups` の doc)。
                 let end = object_id.saturating_add(1);
@@ -3370,6 +3752,7 @@ impl Session {
         // (アプリが decoder を回して mid-object FIN を検出した場合でも、
         // 破棄対象 stream でセッションを fail させない)
         let removed = self.data_streams.incoming.remove(&stream_id);
+        self.release_peer_track_history_stream(stream_id);
         self.timing.data_stream_last_activity_ms.remove(&stream_id);
         // 破棄対象: Discarded variant、またはキャンセル由来 Terminated に属し
         // 現在も生きた Object の帰属先が無い Subgroup variant。保持集合に含まれる id も対象。
@@ -3468,6 +3851,9 @@ impl Session {
                 "data stream close received for unknown stream id",
             ));
         };
+        // 受理済み stream の Track 履歴参照を解放する。request が先に破棄されていても、
+        // stream の終端まで履歴を保持するための参照である。
+        self.release_peer_track_history_stream(stream_id);
         self.timing.data_stream_last_activity_ms.remove(&stream_id);
         // FIN で閉じた id を保持し、以後の終端通知 (RESET_STREAM) を no-op で吸収する。
         // QUIC の stream id は再利用されないため、保持中に同一 id の正当なイベントが
@@ -3626,7 +4012,8 @@ impl Session {
                 self.retain_discarded_stream_id(stream_id);
                 Ok(())
             }
-            IncomingDataStream::Fetch { request_id, .. } => {
+            IncomingDataStream::Fetch(stream) => {
+                let request_id = stream.request_id;
                 let result = match self.fetches.get(&request_id).map(|fetch| fetch.state) {
                     // fill fetch stream は `fetches` に entry を持たない。Stream Count の
                     // open 数を戻す (通常の FETCH 応答 stream は集計対象外のため減算しない)
@@ -3636,6 +4023,9 @@ impl Session {
                 };
                 // 遅延 fetch stream の終端を観測したため、同じ request ID の許容を解除する
                 self.forget_fetch_error_late_stream(request_id, Some(stream_id));
+                // draft-ietf-moq-transport-23 §3.2.2 (Gaps in a Fetch Stream): 末尾の gap は
+                // FIN でしか検出できない。応答終端が未確定なら FETCH_OK の受信まで保留する。
+                self.finish_fetch_gap_stream(stream_id, &stream, end)?;
                 result
             }
         }
@@ -3669,6 +4059,7 @@ impl Session {
                 "STOP_SENDING sent for unknown data stream id",
             ));
         };
+        self.release_peer_track_history_stream(stream_id);
         self.timing.data_stream_last_activity_ms.remove(&stream_id);
         match stream {
             IncomingDataStream::AwaitingHeader { .. } => Ok(()),
@@ -3718,7 +4109,8 @@ impl Session {
                 self.retain_discarded_stream_id(stream_id);
                 Ok(())
             }
-            IncomingDataStream::Fetch { request_id, .. } => {
+            IncomingDataStream::Fetch(stream) => {
+                let request_id = stream.request_id;
                 let result = match self.fetches.get(&request_id).map(|fetch| fetch.state) {
                     // fill fetch stream は `fetches` に entry を持たない。Stream Count の
                     // open 数を戻す (通常の FETCH 応答 stream は集計対象外のため減算しない)
@@ -3847,11 +4239,8 @@ impl Session {
                     }
                 }
                 IncomingDataStream::Discarded { request_id: None } => true,
-                IncomingDataStream::Fetch {
-                    request_id: stream_request_id,
-                    ..
-                } => {
-                    if *stream_request_id == request_id {
+                IncomingDataStream::Fetch(stream) => {
+                    if stream.request_id == request_id {
                         removed_fetch_ids.push(*stream_id);
                         false
                     } else {
@@ -3868,6 +4257,7 @@ impl Session {
             }
         }
         for id in removed_fetch_ids {
+            self.release_peer_track_history_stream(id);
             self.timing.data_stream_last_activity_ms.remove(&id);
             // fetch stream は通常は破棄対象の保持集合へ移さない
             // (fetch は 1 request 1 stream で共有 alias がなく、Terminated 後の終端は
@@ -3883,6 +4273,7 @@ impl Session {
             }
         }
         for id in removed_ids {
+            self.release_peer_track_history_stream(id);
             self.timing.data_stream_last_activity_ms.remove(&id);
             // アプリは open 中 stream が残ったまま `forget_subscription` を呼びうる
             // (キャンセル由来 `Terminated` は `cleanup_ready()` が即 true)。
@@ -3900,7 +4291,6 @@ impl Session {
                 subgroup_id,
             );
         }
-        self.peer_object_properties.remove(&request_id);
         self.peer_object_fields.remove(&request_id);
     }
 
@@ -4194,6 +4584,7 @@ impl Session {
             self.cleanup_discarded_subgroup_stream(subgroup);
         }
         self.data_streams.incoming.remove(&stream_id);
+        self.release_peer_track_history_stream(stream_id);
         self.retain_discarded_stream_id(stream_id);
     }
 
@@ -4242,6 +4633,7 @@ impl Session {
                 );
             }
             self.data_streams.incoming.remove(&stream_id);
+            self.release_peer_track_history_stream(stream_id);
             // 以後の FIN / RESET_STREAM / 遅延 header は破棄対象として no-op で吸収する
             self.retain_discarded_stream_id(stream_id);
             self.events.push_back(SessionEvent::StopSendingDataStream {
@@ -4483,10 +4875,7 @@ impl Session {
             .any(|(existing_id, stream)| {
                 *existing_id != stream_id
                     && match stream {
-                        IncomingDataStream::Fetch {
-                            request_id: existing_request_id,
-                            ..
-                        } => *existing_request_id == request_id,
+                        IncomingDataStream::Fetch(stream) => stream.request_id == request_id,
                         // peer の REQUEST_ERROR で終端した fetch の遅延 stream は
                         // Discarded として保持する。同じ request ID の 2 本目を
                         // 単一 stream 制約 (§3.2.1 Fetch Object Delivery) で拒否するため

@@ -127,10 +127,7 @@ impl Session {
         let has_open_data_stream = self.data_streams.incoming.values().any(|stream| {
             matches!(
                 stream,
-                IncomingDataStream::Fetch {
-                    request_id: stream_request_id,
-                    ..
-                } if *stream_request_id == request_id
+                IncomingDataStream::Fetch(stream) if stream.request_id == request_id
             )
         });
         Some(!has_open_data_stream)
@@ -191,6 +188,8 @@ impl Session {
         self.local_fin_sent.remove(&request_id);
         self.clear_request_stream_goaway_deadline(request_id);
         self.remove_incoming_data_streams_for_request(request_id);
+        self.release_peer_track_history(request_id);
+        self.pending_fetch_tails.remove(&request_id);
         // outgoing_fetch には timing エントリが紐付かないため、エントリの除去のみでよい
         // (prior_location はエントリ内に保持され、タイムアウト追跡は存在しない)
         self.data_streams
@@ -223,6 +222,9 @@ impl Session {
             ));
         };
         fetch.state = FetchState::Terminated;
+        // 応答 (FETCH_OK) が来ないまま request が終端したため、応答終端を待つ gap 判定を
+        // 破棄する。
+        self.pending_fetch_tails.remove(&request_id);
         // cancel (§6.4.2.3 (Request Cancellation and Rejection)) または requester 側の
         // 完了通知 (§6.4.2.2 (Graceful Request Stream Closure)) で request が終端したため、
         // REQUEST_UPDATE のクレジット会計を解放する。FETCH の REQUEST_UPDATE は
@@ -349,6 +351,7 @@ impl Session {
             group_order: parameters.group_order(),
             // 自側は subscriber のため FETCH_OK を送らず、INCLUDE_PROPERTIES の保持は不要
             include_properties: None,
+            has_range_filters: parameters.has_range_filters(),
         };
         if let Some(order) = fetch.group_order {
             super::subscription::validation::validate_group_order(order)?;
@@ -358,6 +361,7 @@ impl Session {
         if let Some(v) = parameters.include_properties() {
             super::subscription::validation::validate_include_properties(v)?;
         }
+        self.acquire_peer_track_history(request_id, &track_namespace, &track_name);
         self.fetches.insert(request_id, fetch);
         self.request_streams.insert(request_id, RequestKind::Fetch);
         self.start_control_message_deadline(request_id);
@@ -717,6 +721,7 @@ impl Session {
             }
             fetch.state = FetchState::Terminated;
         }
+        self.pending_fetch_tails.remove(&request_id);
         self.remove_incoming_data_streams_for_request(request_id);
         Ok(())
     }
@@ -929,6 +934,9 @@ impl Session {
             // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
             // peer が FETCH で指定した値を保持し、FETCH_OK 送信時に参照する
             include_properties,
+            // publisher 役は応答を送る側であり、受信側の暗黙 gap 判定には使わない。
+            // 要求内容の対称性のため保持する。
+            has_range_filters: fetch.parameters.has_range_filters(),
         };
         self.fetches.insert(request_id, entry);
         self.request_streams.insert(request_id, RequestKind::Fetch);
@@ -1200,6 +1208,10 @@ impl Session {
             request_id,
             end_location,
         });
+        // 応答より先にデータや FIN が届いていた場合、終端が確定したので保留していた
+        // 境界依存の gap 判定を行う (draft-ietf-moq-transport-23 §3.2.2
+        // (Gaps in a Fetch Stream))。
+        self.resolve_pending_fetch_gaps(request_id)?;
         Ok(())
     }
 
@@ -1454,6 +1466,9 @@ impl Session {
             // 受理するための許容集合へ登録する (draft-ietf-moq-transport-22 §3.2.4)
             self.record_fetch_error_late_stream(request_id);
         }
+        // 失敗応答では応答範囲の終端 (LARGEST_OBJECT) が来ないため、保留中の gap 判定を
+        // 破棄する。
+        self.pending_fetch_tails.remove(&request_id);
         // 失敗応答の受信で fetch が終端したため、REQUEST_UPDATE のクレジット会計を解放する
         // (draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions): 失敗応答を受けた
         // fetch は Terminated になり、以後の応答は返らない)。

@@ -420,17 +420,24 @@ impl ObjectProperties {
     }
 }
 
+/// 数値の閉区間集合
+///
+/// 追加時に隣接する区間を併合するため、連続した範囲を 1 区間で保持する。
+/// 不存在区間と既出 Object 位置の照合 (draft-ietf-moq-transport-23 §2.1.2 (Object States)) に
+/// `Session` の Track 履歴からも使う。
 #[derive(Debug, Clone, Default)]
-struct RangeSet(Vec<(u64, u64)>);
+pub(crate) struct RangeSet(Vec<(u64, u64)>);
 
 impl RangeSet {
-    fn contains(&self, value: u64) -> bool {
+    /// 指定値が区間に含まれるか
+    pub(crate) fn contains(&self, value: u64) -> bool {
         self.0
             .iter()
             .any(|&(start, end)| start <= value && value <= end)
     }
 
-    fn overlaps(&self, start: u64, end: u64) -> bool {
+    /// 指定区間と重なる区間があるか
+    pub(crate) fn overlaps(&self, start: u64, end: u64) -> bool {
         if start > end {
             return false;
         }
@@ -439,11 +446,13 @@ impl RangeSet {
             .any(|&(existing_start, existing_end)| !(end < existing_start || existing_end < start))
     }
 
-    fn insert_point(&mut self, value: u64) {
+    /// 単一値を区間として追加する
+    pub(crate) fn insert_point(&mut self, value: u64) {
         self.insert(value, value);
     }
 
-    fn insert(&mut self, mut start: u64, mut end: u64) {
+    /// 閉区間を追加し、隣接・重複する区間を併合する
+    pub(crate) fn insert(&mut self, mut start: u64, mut end: u64) {
         if start > end {
             return;
         }
@@ -604,9 +613,13 @@ impl ObjectPropertyTracker {
 
     /// group 境界 prune: 指定 group より過去の per-group エントリを削除する
     ///
-    /// FETCH decoder で group が前進した時に呼ぶ。
+    /// group 単位の寿命を呼び出し側が管理する場合に使う。
     /// - ascending: current_group 未満の group を prune
     /// - descending: current_group 超過の group を prune
+    ///
+    /// 単一 stream の Group 前進を根拠に prune すると、同じ Track の別 request が参照している
+    /// 既出 Object / 不存在区間の照合情報を失う。Track 単位で履歴を共有する `Session` は
+    /// このメソッドを呼ばず、Session の生存期間にわたって保持する。
     ///
     /// cross-group な `seen_groups` / `prior_group_gaps` は
     /// 将来 object の PRIOR_GROUP_ID_GAP 検証に必要なため残置する。

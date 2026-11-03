@@ -38,12 +38,48 @@ use shiguredo_moqt::session::{
 use shiguredo_moqt::stream::{FETCH_HEADER_TYPE, subgroup::SubgroupIdMode};
 use shiguredo_moqt::track_properties::{PROP_OBJECT_DELIVERY_TIMEOUT, TrackProperties};
 use shiguredo_moqt::{
-    message::common::Location, session::core::Session, session::types::DataStreamId,
-    session::types::PeerControlMessageSizeLimit, session::types::RequestStreamEnd,
-    session::types::SessionEvent, session::types::SessionState, session::types::Transport,
-    stream::datagram::ObjectDatagram, stream::decoder::DecodedSubgroupObject,
-    stream::fetch::FetchHeader, stream::subgroup::SubgroupHeader,
+    message::common::Location,
+    session::core::Session,
+    session::types::DataStreamId,
+    session::types::PeerControlMessageSizeLimit,
+    session::types::RequestStreamEnd,
+    session::types::SessionEvent,
+    session::types::SessionState,
+    session::types::Transport,
+    stream::datagram::ObjectDatagram,
+    stream::decoder::{DecodedFetchEntry, DecodedFetchObject, DecodedSubgroupObject},
+    stream::fetch::FetchHeader,
+    stream::subgroup::SubgroupHeader,
 };
+
+/// FETCH 応答の Object entry を作るテストヘルパー
+fn fetch_object_entry(group_id: u64, object_id: u64) -> DecodedFetchEntry {
+    DecodedFetchEntry::Object(DecodedFetchObject {
+        group_id,
+        subgroup_id: 0,
+        object_id,
+        publisher_priority: 128,
+        is_datagram_origin: false,
+        payload_length: 0,
+        properties_bytes: None,
+    })
+}
+
+/// End of Unknown Range の entry を作るテストヘルパー
+fn fetch_end_of_unknown_range_entry(group_id: u64, object_id: u64) -> DecodedFetchEntry {
+    DecodedFetchEntry::EndOfUnknownRange {
+        group_id,
+        object_id,
+    }
+}
+
+/// End of Non-Existent Range の entry を作るテストヘルパー
+fn fetch_end_of_non_existent_range_entry(group_id: u64, object_id: u64) -> DecodedFetchEntry {
+    DecodedFetchEntry::EndOfNonExistentRange {
+        group_id,
+        object_id,
+    }
+}
 
 /// 発行されたイベント列から最初の SendControl を取り出す
 fn take_send_control(s: &mut Session) -> ControlMessage {

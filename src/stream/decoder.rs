@@ -9,7 +9,7 @@ use super::fetch::{
     FetchHeader, FetchPriorContext, FetchStreamEntry, FetchStreamObject, FetchSubgroupIdMode,
 };
 use super::subgroup::{SubgroupHeader, SubgroupIdMode, SubgroupObject};
-use crate::{error::MessageError, object_properties::ObjectPropertyTracker};
+use crate::{error::MessageError, object_properties::ObjectProperties};
 use alloc::vec::Vec;
 use hashbrown::HashMap;
 
@@ -483,7 +483,6 @@ struct FetchValidationState {
     subgroup_priorities: HashMap<(u64, u64), u8>,
     subgroup_max_objects: HashMap<(u64, u64), u64>,
     subgroup_final_objects: HashMap<(u64, u64), u64>,
-    object_properties: ObjectPropertyTracker,
 }
 
 const FETCH_GROUP_ORDER_ASCENDING: u8 = 0x01;
@@ -631,9 +630,6 @@ impl FetchStreamDecoder {
                 .subgroup_final_objects
                 .retain(|&(g, _), _| g <= current_group);
         }
-        self.validation
-            .object_properties
-            .prune_past_groups(ascending, current_group);
     }
 
     /// バッファにデータを追加する
@@ -1063,9 +1059,9 @@ impl FetchStreamDecoder {
 
     /// Fetch オブジェクト列の整合性を検証し、検証用の状態を更新する
     ///
-    /// Properties は `obj.properties_bytes` から読む。
-    /// group の前進時には過去 group の per-group 記録を破棄し、Object Property の
-    /// malformed 判定 (`ObjectPropertyTracker`) にも同じ Properties を渡す。
+    /// Properties は `obj.properties_bytes` から読み、書式と Property の意味検証だけを
+    /// ここで行う。Prior Gap と不存在区間の判定は Track 単位の履歴を持つ `Session` が担う
+    /// (単一 stream の Group 前進で他の request と共有する照合情報を消さないため)。
     fn validate_fetch_object(&mut self, obj: &DecodedFetchObject) -> Result<(), MessageError> {
         if let Some(previous) = self.validation.last_object {
             if obj.group_id == previous.group_id && obj.object_id <= previous.object_id {
@@ -1123,11 +1119,14 @@ impl FetchStreamDecoder {
                 .insert(key, obj.object_id);
         }
 
-        self.validation.object_properties.observe_object(
-            obj.group_id,
-            obj.object_id,
-            obj.properties_bytes.as_deref(),
-        )?;
+        // Properties の書式 (長さと KVP 構造) と Property のスコープ・多重可否は
+        // 受信 Track の malformed 判定として codec でも検証する
+        // (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1
+        // (Malformed Tracks) 条件 8 / 9)。Prior Gap と不存在区間の Track 単位の判定は
+        // Session が行う。
+        if let Some(properties_bytes) = obj.properties_bytes.as_deref() {
+            ObjectProperties::decode_exact(properties_bytes)?;
+        }
         self.validation.last_object = Some(FetchActualObjectState {
             group_id: obj.group_id,
             object_id: obj.object_id,

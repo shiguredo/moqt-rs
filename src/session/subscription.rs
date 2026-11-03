@@ -44,6 +44,15 @@ impl Session {
             subscription.track_name.clone(),
             subscription.my_role,
         );
+        // peer publisher から受信する Subscription 役だけが Track 履歴を参照する。
+        // publisher 役は自側が送る側であり、受信 Object の履歴を持たない。
+        if subscription.my_role == TrackRole::Subscriber {
+            self.acquire_peer_track_history(
+                request_id,
+                &subscription.track_namespace,
+                &subscription.track_name,
+            );
+        }
         self.subscriptions.insert(request_id, subscription);
         self.aliases
             .subscriptions_by_track
@@ -119,9 +128,10 @@ impl Session {
     /// 保留の有無は `Session::subscription` が返す `Subscription::pending_publish_done` で確認できる。
     /// なお `cleanup_ready` は保留の有無を見ないため、cleanup 可能でも保留中なら本関数を呼ばないこと。
     ///
-    /// また本関数は受信側の追跡状態 (`ObjectFieldTracker` / `ObjectPropertyTracker`) を除去し、
+    /// また本関数は受信側の追跡状態 (`ObjectFieldTracker`) と Track 履歴の参照を除去し、
     /// 受信 stream の帰属も除去する (共有 Track Alias で帰属先の生きた subscription が他にある場合は
-    /// その subscription へ移管する)。同じ Track を再購読する場合は記録が無い前提で扱うこと。
+    /// その subscription へ移管する)。Track 履歴は同じ Track の他の request や受理済み data
+    /// stream が参照している間は保持する。
     pub fn forget_subscription(&mut self, request_id: u64) -> Option<Subscription> {
         let entry = self.subscriptions.get(&request_id)?;
         if !entry.cleanup_ready() {
@@ -172,6 +182,10 @@ impl Session {
             }
         }
         self.remove_incoming_data_streams_for_request(request_id);
+        // Track 履歴の参照を解放する。同じ Track の他の request や受理済み data stream が
+        // 参照している間は履歴を保持する。
+        self.release_peer_track_history(request_id);
+        self.pending_fetch_tails.remove(&request_id);
         self.remove_outgoing_data_plane_for_request(request_id);
         self.remove_request_update_credit_entries(request_id);
         // REQUEST_UPDATE 起因の fill fetch stream の Request ID 対応も破棄する

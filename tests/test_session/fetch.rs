@@ -11,6 +11,8 @@ use super::*;
 mod after_fin;
 #[path = "fetch/fill.rs"]
 mod fill;
+#[path = "fetch/nonexistence.rs"]
+mod nonexistence;
 #[path = "fetch/request_update.rs"]
 mod request_update;
 #[path = "fetch/unified.rs"]

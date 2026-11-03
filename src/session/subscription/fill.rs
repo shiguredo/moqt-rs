@@ -14,6 +14,7 @@ use crate::message_parameter::{
     FILL_PARAMETERS_ALLOWED_PARAMS, LocationFilter, LocationFilterContext, LocationFilterUpdate,
     MessageParameters,
 };
+use alloc::vec::Vec;
 
 /// 送信前の FILL_PARAMETERS 事前検証 (Table 7 スコープ + 内側 LOCATION_FILTER)
 /// (draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter))
@@ -255,7 +256,21 @@ impl Session {
     /// subscription の破棄時に呼ぶ。残すと破棄済み subscription への対応が
     /// セッション生存中に蓄積する。
     pub(super) fn remove_fill_request_subscriptions(&mut self, subscription_request_id: u64) {
+        let mut removed = Vec::new();
         self.fill_request_subscriptions
-            .retain(|_, subscription| *subscription != subscription_request_id);
+            .retain(|&fill_request_id, subscription| {
+                if *subscription == subscription_request_id {
+                    removed.push(fill_request_id);
+                    false
+                } else {
+                    true
+                }
+            });
+        for fill_request_id in removed {
+            self.forget_fill_context(fill_request_id);
+            self.pending_fetch_tails.remove(&fill_request_id);
+        }
+        self.forget_fill_context(subscription_request_id);
+        self.pending_fetch_tails.remove(&subscription_request_id);
     }
 }

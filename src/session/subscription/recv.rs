@@ -604,6 +604,10 @@ impl Session {
         self.register_subscription(request_id, subscription);
         self.request_streams
             .insert(request_id, RequestKind::Publish);
+        // draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams): publisher は
+        // PUBLISH を送るときに初回 fill の fill fetch stream を開く。受信側は PUBLISH が運んだ
+        // FILL_PARAMETERS を、その fill stream の暗黙 gap 判定に使う。
+        self.remember_fill_context(request_id, publish.parameters.fill_parameters());
         self.register_peer_alias(publish.track_alias, request_id);
         // draft §3.1 (Subscriptions) / §9.20.17 (LARGEST OBJECT Parameter):
         // PUBLISH の parameters に LARGEST_OBJECT があれば広告値として保存する

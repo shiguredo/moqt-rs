@@ -904,10 +904,10 @@ fn assert_late_fetch_stream_is_discarded(client: &mut Session, rid: u64, stream_
         .recv_fetch_header(stream_id, &FetchHeader { request_id: rid })
         .expect("遅延 FETCH_HEADER は受理されること");
     client
-        .recv_fetch_entry(stream_id)
+        .recv_fetch_entry(stream_id, &fetch_object_entry(0, 0))
         .expect("破棄対象 stream の Object は no-op で受理されること");
     client
-        .recv_fetch_entry(stream_id)
+        .recv_fetch_entry(stream_id, &fetch_end_of_non_existent_range_entry(0, 1))
         .expect("破棄対象 stream の End of Range は no-op で受理されること");
     client
         .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)

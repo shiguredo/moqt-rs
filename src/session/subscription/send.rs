@@ -245,6 +245,10 @@ impl Session {
             end_of_track: None,
             pending_update_params: VecDeque::new(),
         };
+        // draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter): FILL_PARAMETERS は
+        // 購読状態として保持されないため、publisher が開く fill fetch stream の暗黙 gap 判定に
+        // 使う実効フィルタを Request ID ごとに覚えておく。
+        self.remember_fill_context(request_id, parameters.fill_parameters());
         self.register_subscription(request_id, subscription);
         self.request_streams
             .insert(request_id, RequestKind::Subscribe);
@@ -845,6 +849,7 @@ impl Session {
         // fill fetch stream を開きうるのは FILL_PARAMETERS を持つ REQUEST_UPDATE だけ。
         if parameters.fill_parameters().is_some() {
             self.register_fill_request_subscription(update_request_id, request_id);
+            self.remember_fill_context(update_request_id, parameters.fill_parameters());
         }
         let msg = ControlMessage::RequestUpdate(RequestUpdate {
             request_id: update_request_id,

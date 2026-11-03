@@ -37,7 +37,7 @@ use crate::message::{
     unsupported_request_allowed_params,
 };
 use crate::message_parameter::{AuthorizationToken, MessageParameters};
-use crate::object_properties::{ObjectFieldTracker, ObjectPropertyTracker};
+use crate::object_properties::ObjectFieldTracker;
 use crate::parameter::{
     DEFAULT_MAX_CONTROL_MESSAGE_SIZE, MIN_MAX_CONTROL_MESSAGE_SIZE,
     SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE, SetupOptionValue, SetupOptions, SetupUriValidationError,
@@ -452,20 +452,27 @@ pub struct Session {
             crate::message::common::Location,
         )>,
     >,
-    /// FIN で閉じた受信 data stream id の保持集合
+    /// peer publisher の Track 単位の既出 Object 位置と不存在区間 (Full Track Name ごと)
     ///
-    /// draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams): "A sender might send
-    /// all objects in a Subgroup and the FIN on a QUIC stream, and then reset the stream.
-    /// ... If the application receives all data on the stream and the FIN, it can ignore any
-    /// subsequent reset."
+    /// draft-ietf-moq-transport-23 §2.1.2 (Object States) / §3.2.2 (Gaps in a Fetch Stream) /
+    /// §11.4.2 (End of Range) / §12.1 (Malformed Tracks) 条件 10 の判定を、subscription /
+    /// FETCH / fill fetch stream をまたいで共有する。参照している request と受理済み受信
+    /// data stream が残る間は保持し、最後の参照が外れた時点で破棄する。
+    /// 詳細は [`super::track_history`] を参照する。
+    pub(super) peer_track_history:
+        HashMap<super::track_history::TrackKey, super::track_history::PeerTrackHistory>,
+    /// Track 履歴を参照している request id → Track キー
+    pub(super) track_history_requests: HashMap<u64, super::track_history::TrackKey>,
+    /// Track 履歴を参照している受理済み受信 data stream id → Track キー
+    pub(super) track_history_streams: HashMap<DataStreamId, super::track_history::TrackKey>,
+    /// 受信した fill fetch stream の実効フィルタ (fill の Request ID → フィルタ)
     ///
-    /// QUIC では FIN 送信後も RESET_STREAM を送れるため、FIN で閉じた id を登録時点から
-    /// `peer_alias_retention_ms` の期間だけ保持し、同じ id の終端通知を no-op で吸収する。
-    /// [`Self::discarded`] と分けているのは、破棄対象 stream の受信を広く吸収する
-    /// `discarded` に対し、本集合は終端通知の重複吸収だけを目的とするためである
-    /// (直列化途中の FIN を検出する `report_mid_object_fin` の判定を弱めない)。
-    /// peer publisher 由来 track ごとの object property 検証状態 (request_id → tracker)
-    pub(super) peer_object_properties: HashMap<u64, ObjectPropertyTracker>,
+    /// draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter): FILL_PARAMETERS は
+    /// 購読状態として保持されないため、fill fetch stream を受信する側が送信時の値を覚えて
+    /// おく。暗黙 gap の判定に使う。
+    pub(super) fill_contexts: HashMap<u64, super::track_history::FillContext>,
+    /// 応答終端の確定を待つ FETCH stream の gap 判定状態 (request ID → 状態)
+    pub(super) pending_fetch_tails: HashMap<u64, super::track_history::PendingFetchTail>,
     /// peer publisher 由来 track ごとの重複 Object フィールド一貫性追跡 (request_id → tracker)
     /// (draft §12.1 条件 6/7, §7.1)
     pub(super) peer_object_fields: HashMap<u64, ObjectFieldTracker>,
@@ -734,7 +741,11 @@ impl Session {
             fetch_error_late_streams: HashMap::new(),
             fetch_error_late_stream_ids: HashMap::new(),
             pending_fill_ranges: HashMap::new(),
-            peer_object_properties: HashMap::new(),
+            peer_track_history: HashMap::new(),
+            track_history_requests: HashMap::new(),
+            track_history_streams: HashMap::new(),
+            fill_contexts: HashMap::new(),
+            pending_fetch_tails: HashMap::new(),
             peer_object_fields: HashMap::new(),
             peer_subgroups: SubgroupTracker::new(),
             my_subgroups: SubgroupTracker::new(),

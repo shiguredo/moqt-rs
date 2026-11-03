@@ -2028,6 +2028,14 @@ pub struct Fetch {
     /// peer が FETCH で指定した値。`Some(0)` のとき FETCH_OK の Track Properties を
     /// 空にする。`None` (省略時) は default 1 として扱い従来どおり含める。
     pub include_properties: Option<u8>,
+    /// FETCH に Range Filter (0x25-0x29) が含まれていたか
+    ///
+    /// draft-ietf-moq-transport-23 §3.2.2 (Gaps in a Fetch Stream): "Unless the request
+    /// included Range Filters (see Section 3.3.2), any gaps in the Group and Object IDs in
+    /// the response stream that are not otherwise marked indicate objects that do not exist."
+    /// Range Filters がある場合、暗黙の gap は Unknown であり不存在ではないため、
+    /// Track 履歴への記録可否をこの値で分ける。
+    pub has_range_filters: bool,
 }
 
 /// TRACK_STATUS (draft §9.13 (TRACK_STATUS)) の応答

@@ -808,7 +808,7 @@ fn subscriber_receives_fetch_object_via_session() {
         .expect("FETCH_HEADER の受信に成功すること");
 
     client
-        .recv_fetch_entry(stream_id)
+        .recv_fetch_entry(stream_id, &fetch_object_entry(0, 0))
         .expect("FETCH Object の取り込みに成功すること");
 }
 
@@ -828,8 +828,12 @@ fn subscriber_receives_end_of_range_markers() {
         client
             .recv_fetch_header(stream_id, &FetchHeader { request_id: rid })
             .expect("FETCH_HEADER の受信に成功すること");
+        let entry = match label {
+            "End of Non-Existent Range" => fetch_end_of_non_existent_range_entry(0, 0),
+            _ => fetch_end_of_unknown_range_entry(0, 0),
+        };
         client
-            .recv_fetch_entry(stream_id)
+            .recv_fetch_entry(stream_id, &entry)
             .unwrap_or_else(|e| panic!("{label}: 取り込みに成功すること: {e:?}"));
         // 取り込み成功自体が検証
     }
@@ -884,8 +888,12 @@ fn fetch_continues_known_objects_after_end_of_unknown_range() {
         .recv_fetch_header(stream_id, &FetchHeader { request_id: rid })
         .expect("FETCH_HEADER の受信に成功すること");
     for label in ["End of Unknown Range", "後続の既知 Object"] {
+        let entry = match label {
+            "End of Non-Existent Range" => fetch_end_of_non_existent_range_entry(0, 0),
+            _ => fetch_end_of_unknown_range_entry(0, 0),
+        };
         client
-            .recv_fetch_entry(stream_id)
+            .recv_fetch_entry(stream_id, &entry)
             .unwrap_or_else(|e| panic!("{label}: 取り込みに成功すること: {e:?}"));
     }
     // subscriber 側にも reset / STOP_SENDING の指示が積まれていないこと
@@ -920,7 +928,7 @@ fn fetch_entry_before_header_is_rejected() {
         .recv_data_stream_type(stream_id, FETCH_HEADER_TYPE)
         .expect("stream type の通知に成功すること");
     let err = client
-        .recv_fetch_entry(stream_id)
+        .recv_fetch_entry(stream_id, &fetch_object_entry(0, 0))
         .expect_err("FETCH_HEADER 未受信では拒否される");
     assert_eq!(err.code, SESSION_MALFORMED_OBJECT);
     assert_eq!(err.reason, "fetch entry received before fetch header");
@@ -949,7 +957,7 @@ fn fetch_entry_on_subgroup_stream_is_rejected() {
         .expect("subgroup header の通知に成功すること");
 
     let err = client
-        .recv_fetch_entry(stream_id)
+        .recv_fetch_entry(stream_id, &fetch_object_entry(0, 0))
         .expect_err("subgroup stream では拒否される");
     assert_eq!(err.reason, "fetch entry received on subgroup stream");
 }

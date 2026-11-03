@@ -4341,7 +4341,7 @@ async fn read_catalog_fetch_objects(
                 RegisteredStreamData::StoppedBySession => break,
             },
         };
-        data_plane.recv_fetch_entry(stream_id)?;
+        data_plane.recv_fetch_entry(stream_id, &entry)?;
         let payload = match &entry {
             DecodedFetchEntry::Object(obj) if obj.payload_length > 0 => loop {
                 if let Some(p) = decoder.try_read_payload() {
@@ -6500,7 +6500,7 @@ async fn read_fetch_entry(
         // marker のどれも DATA_STREAM_TIMEOUT の activity に含まれる
         // (draft-ietf-moq-transport-22 §12.2 (Session Termination Codes))。
         // 失敗は読み取りを打ち切る (この stream の会計が進まない)
-        data_plane.recv_fetch_entry(stream_id)?;
+        data_plane.recv_fetch_entry(stream_id, &entry)?;
         let payload = match &entry {
             // payload_length == 0 の Object (Object Status のみ) は payload を持たない
             DecodedFetchEntry::Object(obj) if obj.payload_length > 0 => loop {

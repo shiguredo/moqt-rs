@@ -20,8 +20,11 @@ use shiguredo_moqt::session::{
 };
 use shiguredo_moqt::track_properties::TrackProperties;
 use shiguredo_moqt::{
-    session::types::DataStreamId, session::types::RequestStreamEnd,
-    stream::subgroup::SubgroupHeader, stream::subgroup::SubgroupIdMode,
+    session::types::DataStreamId,
+    session::types::RequestStreamEnd,
+    stream::decoder::{DecodedFetchEntry, DecodedFetchObject},
+    stream::subgroup::SubgroupHeader,
+    stream::subgroup::SubgroupIdMode,
 };
 
 use super::common::{establish_pair, take_send_on_stream, take_send_request};
@@ -992,7 +995,18 @@ fn publish_initial_fill_is_accepted_in_either_arrival_order() -> noprop::TestRes
             );
         }
         client
-            .recv_fetch_entry(stream_id)
+            .recv_fetch_entry(
+                stream_id,
+                &DecodedFetchEntry::Object(DecodedFetchObject {
+                    group_id: 0,
+                    subgroup_id: 0,
+                    object_id: 0,
+                    publisher_priority: 128,
+                    is_datagram_origin: false,
+                    payload_length: 0,
+                    properties_bytes: None,
+                }),
+            )
             .expect("受理した fill stream の Object 通知が通ること");
         client
             .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)

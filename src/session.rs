@@ -74,6 +74,7 @@
 //!   STOP_SENDING 関連
 //! - `fetch`: FETCH 関連
 //! - `track_status`: TRACK_STATUS 関連
+//! - `track_history`: peer publisher から観測した Track 単位の Object 存在・不存在履歴
 //! - `goaway`: GOAWAY / tick 関連
 
 pub mod auth_token_cache;
@@ -83,6 +84,7 @@ pub mod fetch;
 pub mod goaway;
 pub mod request_id;
 pub mod subscription;
+pub(crate) mod track_history;
 pub mod track_status;
 pub mod types;
 

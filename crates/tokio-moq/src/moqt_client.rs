@@ -22,6 +22,7 @@ use shiguredo_moqt::session::types::{
     DatagramAcceptance, FetchHeaderAcceptance, FetchState, RecvDataStreamError, RecvRequestError,
     SendRequestError, SubscriptionState, TrackDataAcceptance,
 };
+use shiguredo_moqt::stream::decoder::DecodedFetchEntry;
 use shiguredo_moqt::stream::encode_control_stream_setup;
 use shiguredo_moqt::{
     error::SESSION_PROTOCOL_VIOLATION, message::ControlMessage, message::ErrorDetails,
@@ -1083,13 +1084,18 @@ impl DataPlaneHandle {
 
     /// fetch entry を Session に通知する (subscriber 側)
     ///
-    /// entry 到着の通知であり、内容の検証はデコード時に済んでいる。data stream の
-    /// activity 更新 (DATA_STREAM_TIMEOUT の対象) は tick 実行後のみ行われ、
+    /// `entry` は `FetchStreamDecoder::try_decode_entry` が返したデコード済みの値である。
+    /// Location の解決はデコード時に行われ、Session が Gap と不存在区間の意味判定を行う。
+    /// data stream の activity 更新 (DATA_STREAM_TIMEOUT の対象) は tick 実行後のみ行われ、
     /// 最初の tick 前 (受信開始直後) に呼んでも更新されない (時刻の起点が無いため)。
-    pub fn recv_fetch_entry(&self, stream_id: DataStreamId) -> Result<()> {
+    pub fn recv_fetch_entry(
+        &self,
+        stream_id: DataStreamId,
+        entry: &DecodedFetchEntry,
+    ) -> Result<()> {
         let mut session = lock_session(&self.session);
         session
-            .recv_fetch_entry(stream_id)
+            .recv_fetch_entry(stream_id, entry)
             .map_err(|e| TransportError::Internal(format!("recv_fetch_entry: {e}")))
     }
 
@@ -4251,6 +4257,21 @@ mod tests {
     }
 
     /// 保留集合と Session を共有するデータプレーンハンドルを作る
+    /// テスト用の最小の FETCH Object entry を作る
+    fn test_fetch_entry() -> DecodedFetchEntry {
+        use shiguredo_moqt::stream::decoder::DecodedFetchObject;
+
+        DecodedFetchEntry::Object(DecodedFetchObject {
+            group_id: 0,
+            subgroup_id: 0,
+            object_id: 0,
+            publisher_priority: 128,
+            is_datagram_origin: false,
+            payload_length: 0,
+            properties_bytes: None,
+        })
+    }
+
     fn test_data_plane() -> (DataPlaneHandle, Arc<StdMutex<PendingFillHeaders>>) {
         let session = established_client_session();
         let pending = Arc::new(StdMutex::new(PendingFillHeaders::default()));
@@ -4323,7 +4344,7 @@ mod tests {
             "受理した保留は残らないこと"
         );
         handle
-            .recv_fetch_entry(stream_id)
+            .recv_fetch_entry(stream_id, &test_fetch_entry())
             .expect("受理した stream の entry 通知が通ること");
         handle
             .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
