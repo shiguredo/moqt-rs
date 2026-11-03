@@ -49,7 +49,9 @@ library の tests / PBT / fuzz は厚いが、example の pipeline 統合経路 
   - `run` を `--input-mp4` で起動し、映像の全 Object に `PROP_TIMESCALE` が付き、PTS 間隔が入力トラックの timescale と一致すること (0332 の実装後)。MP4 fixture は `shiguredo_mp4` の muxer でテスト内に生成する。
 - moq-sub の統合テスト:
   - `receive_catalog` が fill fetch stream と subgroup stream の両方から catalog を適用し、delta を適用し、期限切れ・request_id 不一致・不正 Object をエラーにすること。
-  - `resubscribe_tracks` が GOAWAY 移行先で catalog / video / audio を FILL_PARAMETERS 付きで購読し、video に REQUEST_UPDATE を送り、直近 Group の FETCH を発行すること。
+  - `resubscribe_tracks` が GOAWAY 移行先で catalog を FILL_PARAMETERS 付きで購読し、video に REQUEST_UPDATE を送り、映像にだけ直近 Group の FETCH を発行すること (video / audio の購読に FILL_PARAMETERS は載せない。音声の明示 FETCH は発行しない)。
+  - GOAWAY による session 移行の前後で音声が欠落しないこと。旧 session が最後に配送した位置から、新しい session の live の音声までの TIMESTAMP が連続することを確認する。音声の明示 FETCH を発行しないため、この連続性は relay が GOAWAY の Timeout まで購読を維持して配送を続けること (draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration)) に依存する。relay が Timeout 前に購読を止める実装では、移行中に publish された音声が欠落しうる。
+  - request stream 単位の再発行の前後で音声が欠落しないこと。旧 request stream を `STOP_SENDING` で閉じてから再購読するまでの音声が連続することを確認する。
   - `run` が catalog 取得から購読確立、shutdown までを完了すること。音声 1 Object の受信経路は、既存のテスト用 Opus データを使って検証する。
 - GOAWAY 移行と PUBLISH_DONE の track 単位処理は peer_harness で検証する。
   - 2 つの `TestPeerServer` を立て、移行元から `send_goaway` で移行先を指定する。移行先で再購読と FETCH が行われることを確認する。
