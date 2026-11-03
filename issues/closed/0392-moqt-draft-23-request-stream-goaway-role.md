@@ -38,12 +38,15 @@ request stream 上の GOAWAY の送信者を protocol role で制限した。
 - `src/session/core.rs` に `Session::is_request_receiver` を追加した。request の initiator は SUBSCRIBE / FETCH / TRACK_STATUS が subscriber (§9.6 / §9.11 / §9.12)、PUBLISH が publisher (§9.8) である。
 - receiver の判定には `Subscription::initiator` と `my_role`、`Fetch::my_role`、`TrackStatusEntry::my_role` を使う。client / server の `Role` とも publisher / subscriber の `TrackRole` 単独とも一致しないため、request 種別ごとの組で判定している。
 - `Session::send_goaway_on_request_stream` は event と deadline を積む前に receiver 判定を行い、sender 側からの送信と、自側 state に無い request への送信を `PROTOCOL_VIOLATION` で拒否する。拒否時に session の状態は変更しない。
-- `Session::handle_peer_goaway_on_request_stream` は URI 検証の後に receiver 判定を追加した。自側が sender (peer が receiver) の場合だけ受理し、自側が receiver の場合と request を特定できない場合は §9.2 の MUST に従って `PROTOCOL_VIOLATION` でセッションを閉じる。
+- `Session::handle_peer_goaway_on_request_stream` は URI 検証の後に receiver 判定を追加した。自側が sender (peer が receiver) の場合と request を特定できない場合は受理し、自側が receiver の場合は §9.2 の MUST に従って `PROTOCOL_VIOLATION` でセッションを閉じる。request を特定できない状態は同節の MUST の条件 (receiver が受け取った場合) が成立しないため、判定不能を理由に閉じない。
 - 移行処理には触れておらず、protocol role 検証のみを追加している。
 
 テストは `tests/test_session/goaway/role.rs` を追加し、4 種類それぞれの送信拒否・受信時クローズ・正当な receiver からの GOAWAY の受理を検証した。
 既存テストのうち request の sender 側から GOAWAY を送っていたものは、receiver 側から送る形へ書き換えた (PUBLISH 起点は subscriber、SUBSCRIBE / FETCH / TRACK_STATUS 起点は publisher)。
 sender 側からの GOAWAY を前提にしていた遅延応答の吸収テストは、新仕様では発生しない組み合わせのため削除し、同じ吸収経路を malformed track 終端からの遅延 SUBSCRIBE_OK / FETCH_OK と、PUBLISH_DONE / PUBLISH_STATE_NOTIFY の遅延受信で検証する形に置き換えた。
+ただし遅延 FETCH data stream の吸収だけは削除したテストでしか通っていなかったため、malformed track 終端で同じ Track の FETCH を終端した後に
+遅延 FETCH data stream が届く経路 (`Session::tolerates_late_data_stream` の `rejected_request_ids` 判定) を
+`tests/test_session/data_stream.rs` の `malformed_track_absorbs_late_fetch_data_stream_on_terminated_fetch` で検証する。
 
 ## 完了条件の検証
 
