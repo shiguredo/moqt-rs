@@ -1284,6 +1284,365 @@ fn fetch_with_empty_filter_range_rejected_with_invalid_range() {
     assert_invalid_range_request_error(&mut server);
 }
 
+// ─── 相対 Location Filter の拒否 (draft §3.2) ──────────────────────────────
+
+/// publisher (server) 側で `{group_id, object_id}` を公開し、観測 Largest Object を確定させる
+///
+/// SUBSCRIBE / SUBSCRIBE_OK を 1 往復してから Object を公開する。返り値は
+/// (subscriber, publisher, subscription の Request ID)。
+fn establish_track_with_published_object(group_id: u64, object_id: u64) -> (Session, Session, u64) {
+    let (mut client, mut server) = establish_pair();
+    let sub_rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(sub_rid, 1, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(sub_rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    publish_subgroup_object(
+        &mut server,
+        sub_rid,
+        1,
+        DataStreamId(1),
+        group_id,
+        object_id,
+    );
+    (client, server, sub_rid)
+}
+
+/// 相対フィルタ拒否の REQUEST_ERROR が INVALID_RANGE と固有の理由を持つことを検証する
+///
+/// 同じ INVALID_RANGE でも範囲判定による拒否 (空 range / Largest 超過 / 未公開 track) と
+/// 区別できるよう、理由句まで確認する。
+fn assert_relative_filter_rejected(server: &mut Session) {
+    use shiguredo_moqt::error::REQUEST_INVALID_RANGE;
+    let (_, err_msg, fin) = take_send_on_stream_with_fin(server);
+    assert!(fin, "拒否応答は FIN で送信されること");
+    match err_msg {
+        ControlMessage::RequestError(e) => {
+            assert_eq!(e.error_code, REQUEST_INVALID_RANGE);
+            assert_eq!(
+                e.reason.as_str(),
+                "relative location filter is not allowed in FETCH",
+                "範囲判定ではなく相対フィルタの形式を理由に拒否すること"
+            );
+        }
+        other => panic!("INVALID_RANGE の RequestError が期待されたが {other:?}"),
+    }
+}
+
+/// 相対 Start (Type 0x01) の単独 FETCH は INVALID_RANGE で拒否される
+///
+/// draft-ietf-moq-transport-23 §3.2 (Fetch): "If the Location filter is relative
+/// (see Section 9.19.9), the publisher MUST return REQUEST_ERROR with error code
+/// INVALID_RANGE." 判定は解決後の Location ではなくフィルタの形式で行うため、
+/// StartGroup=1 が Largest Group {10, 5} に対して範囲内の {10, 0} に解決される場合でも
+/// 拒否される。Fetch state を作らず、セッションは維持する。
+#[test]
+fn fetch_with_relative_start_filter_rejected_with_invalid_range() {
+    use shiguredo_moqt::message::Fetch as WireFetch;
+    use shiguredo_moqt::message_parameter::{
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
+    };
+    use shiguredo_moqt::session::types::FetchState;
+    let (mut client, mut server, _sub_rid) = establish_track_with_published_object(10, 5);
+    // StartGroup=1 は {Largest Group, 0} = {10, 0} を指し、範囲としては内側になる
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_LOCATION_FILTER,
+        value: MessageParameterValue::LocationFilter(LocationFilter::RelativeGroup {
+            start_group: 1,
+        }),
+    });
+    // 送信 API は相対フィルタを送らないため、受信経路を直接検証する。
+    // Request ID は client が使用済みの 0 と続けて使う 2 を避けて 4 にする。
+    server
+        .recv_request(ControlMessage::Fetch(WireFetch {
+            request_id: 4,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            parameters: params,
+        }))
+        .expect("拒否は Ok で返り、セッションは維持される");
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "相対フィルタの拒否でセッションを閉じないこと"
+    );
+    // Fetch state と request state は作られない
+    assert!(server.fetch(4).is_none(), "Fetch state を作らないこと");
+    assert_relative_filter_rejected(&mut server);
+    // 拒否済み id のストリームクローズが no-op で吸収される = request state が残っていない
+    server
+        .recv_request_stream_closed(4, RequestStreamEnd::Fin)
+        .expect("拒否済み request id のストリームクローズは no-op であること");
+    // data state が残っていない = 拒否した FETCH では data stream を開けない
+    let err = server
+        .send_fetch_header(DataStreamId(9), 4)
+        .expect_err("拒否した FETCH で data stream は開けないこと");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    // 状態非汚染: 続く絶対範囲の FETCH は従来どおり受理される
+    let rid = client
+        .send_fetch(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            fetch_range_params(
+                Location {
+                    group_id: 0,
+                    object_id: 0,
+                },
+                Location {
+                    group_id: 10,
+                    object_id: 5,
+                },
+            ),
+        )
+        .expect("相対フィルタの拒否後も絶対範囲の FETCH を送信できること");
+    let (_, fetch_msg) = take_send_request(&mut client);
+    server
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        server.fetch(rid).expect("受理されること").state,
+        FetchState::Pending,
+        "絶対範囲の FETCH は従来どおり受理されること"
+    );
+}
+
+/// Next Object (Type 0x05) の単独 FETCH は Largest Object が未観測でも INVALID_RANGE で拒否される
+///
+/// draft-ietf-moq-transport-23 §3.2 (Fetch) の相対フィルタ禁止は Largest Object の
+/// 観測有無と独立した MUST である。subscription を作らず Largest Object が未観測の場合、
+/// Next Object は解決値としては `{0, 0}` になり範囲判定では受理される条件なので、
+/// フィルタの形式で拒否していることをこの条件で確認できる。
+#[test]
+fn fetch_with_next_object_filter_rejected_without_published_objects() {
+    use shiguredo_moqt::message::Fetch as WireFetch;
+    use shiguredo_moqt::message_parameter::{
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
+    };
+    let (_client, mut server) = establish_pair();
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_LOCATION_FILTER,
+        value: MessageParameterValue::LocationFilter(LocationFilter::NextObject),
+    });
+    server
+        .recv_request(ControlMessage::Fetch(WireFetch {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            parameters: params,
+        }))
+        .expect("拒否は Ok で返り、セッションは維持される");
+    assert_eq!(server.state(), SessionState::Established);
+    assert!(server.fetch(0).is_none(), "Fetch state を作らないこと");
+    assert_relative_filter_rejected(&mut server);
+}
+
+/// 絶対値で範囲が定まる Location Filter と省略は従来どおり範囲判定を受ける
+///
+/// draft-ietf-moq-transport-23 §3.2 (Fetch) の相対フィルタ禁止はフィルタの形式が相対の
+/// 場合だけ適用される。Type 0x00 (None) / Type 0x02 / 0x03 / 0x04 と省略は絶対値で範囲が
+/// 定まるため、従来どおり受理 / INVALID_RANGE の範囲判定だけを受ける。
+#[test]
+fn fetch_with_non_relative_location_filter_keeps_range_judgement() {
+    use shiguredo_moqt::message::Fetch as WireFetch;
+    use shiguredo_moqt::message_parameter::{
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
+    };
+    use shiguredo_moqt::session::types::FetchState;
+    let (_client, mut server, _sub_rid) = establish_track_with_published_object(10, 5);
+    // (表示名, filter (None は省略), 受理されるか)
+    let cases: [(&str, Option<LocationFilter>, bool); 8] = [
+        ("省略 (unfiltered)", None, true),
+        ("Type 0x00 (None)", Some(LocationFilter::NoFilter), true),
+        (
+            "Type 0x02 (Absolute Start)",
+            Some(LocationFilter::AbsoluteStart {
+                start: Location {
+                    group_id: 5,
+                    object_id: 0,
+                },
+            }),
+            true,
+        ),
+        (
+            "Type 0x03 (Absolute Start, Group End)",
+            Some(LocationFilter::AbsoluteRange {
+                start: Location {
+                    group_id: 5,
+                    object_id: 0,
+                },
+                end_group_delta: 0,
+            }),
+            true,
+        ),
+        (
+            "Type 0x04 (Absolute Range)",
+            Some(LocationFilter::AbsoluteRangeWithEnd {
+                start: Location {
+                    group_id: 5,
+                    object_id: 0,
+                },
+                end_group_delta: 0,
+                end_object: 100,
+            }),
+            true,
+        ),
+        (
+            "Type 0x02 (Absolute Start, Largest より後)",
+            Some(LocationFilter::AbsoluteStart {
+                start: Location {
+                    group_id: 11,
+                    object_id: 0,
+                },
+            }),
+            false,
+        ),
+        (
+            "Type 0x04 (Absolute Range, Largest より後の開始)",
+            Some(LocationFilter::AbsoluteRangeWithEnd {
+                start: Location {
+                    group_id: 11,
+                    object_id: 0,
+                },
+                end_group_delta: 0,
+                end_object: 100,
+            }),
+            false,
+        ),
+        (
+            "Type 0x04 (Absolute Range, 空 range)",
+            Some(LocationFilter::AbsoluteRangeWithEnd {
+                start: Location {
+                    group_id: 5,
+                    object_id: 100,
+                },
+                end_group_delta: 0,
+                end_object: 3,
+            }),
+            false,
+        ),
+    ];
+    for (index, (label, filter, accepted)) in cases.into_iter().enumerate() {
+        // 各ケースで重複しない even の Request ID を使う
+        // (client が SUBSCRIBE で使用済みの 0 と重ならないよう 2 から始める)
+        let request_id = (index as u64 + 1) * 2;
+        let mut params = MessageParameters::new();
+        if let Some(filter) = filter {
+            params.push(MessageParameter {
+                param_type: PARAM_LOCATION_FILTER,
+                value: MessageParameterValue::LocationFilter(filter),
+            });
+        }
+        server
+            .recv_request(ControlMessage::Fetch(WireFetch {
+                request_id,
+                track_namespace: ns(&[b"live"]),
+                track_name: b"cam".to_vec(),
+                parameters: params,
+            }))
+            .expect("テストフィクスチャの前提条件を満たす");
+        if accepted {
+            let fetch = server.fetch(request_id);
+            assert!(fetch.is_some(), "{label}: 受理されること");
+            assert_eq!(
+                fetch.expect("直前に存在を確認した").state,
+                FetchState::Pending,
+                "{label}: Pending になること"
+            );
+        } else {
+            assert!(
+                server.fetch(request_id).is_none(),
+                "{label}: INVALID_RANGE で拒否され Fetch state を作らないこと"
+            );
+            assert_invalid_range_request_error(&mut server);
+        }
+    }
+}
+
+/// 相対 Location Filter の単独 FETCH は送信 API が拒否し、Request ID を消費しない
+///
+/// draft-ietf-moq-transport-23 §3.2 (Fetch) により peer が必ず INVALID_RANGE で拒否する
+/// メッセージを無警告で送出しないよう、送信前に自側で弾く。request_id 発行前に拒否する
+/// ため欠番を作らず、セッションも閉じない。
+#[test]
+fn send_fetch_with_relative_location_filter_rejected_without_consuming_request_id() {
+    use shiguredo_moqt::message_parameter::{
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
+    };
+    use shiguredo_moqt::session::types::SendRequestError;
+    let (mut client, _server) = establish_pair();
+    for filter in [
+        LocationFilter::RelativeGroup { start_group: 0 },
+        LocationFilter::RelativeGroup { start_group: 3 },
+        LocationFilter::NextObject,
+    ] {
+        let mut params = MessageParameters::new();
+        params.push(MessageParameter {
+            param_type: PARAM_LOCATION_FILTER,
+            value: MessageParameterValue::LocationFilter(filter),
+        });
+        let err = client
+            .send_fetch(ns(&[b"live"]), b"cam".to_vec(), params)
+            .expect_err("相対 Location Filter の単独 FETCH は送信できないこと");
+        let SendRequestError::Session(err) = err else {
+            panic!("SendRequestError::Session が期待されたが {err:?}");
+        };
+        assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+        assert_eq!(
+            err.reason, "relative location filter is not allowed in FETCH",
+            "拒否理由が相対フィルタであることを示すこと"
+        );
+    }
+    // 拒否した送信で SendRequest / CloseSession は発行されない
+    while let Some(e) = client.poll_event() {
+        assert!(
+            !matches!(
+                e,
+                SessionEvent::SendRequest { .. } | SessionEvent::CloseSession(_)
+            ),
+            "拒否した送信で SendRequest / CloseSession は発行されないこと"
+        );
+    }
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "送信側の検証エラーでセッションを閉じないこと"
+    );
+    // Request ID を消費していない: 最初の送信は 0 のまま
+    let rid = client
+        .send_fetch(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            fetch_range_params(
+                Location {
+                    group_id: 0,
+                    object_id: 0,
+                },
+                Location {
+                    group_id: 1,
+                    object_id: 0,
+                },
+            ),
+        )
+        .expect("拒否後も絶対範囲の FETCH を送信できること");
+    assert_eq!(
+        rid, 0,
+        "拒否した送信は Request ID を消費しないこと (欠番を作らない)"
+    );
+    let (sent_rid, _) = take_send_request(&mut client);
+    assert_eq!(sent_rid, rid);
+}
+
 /// FETCH で許可されないパラメータの送信は送信前に拒否し副作用を残さない
 /// (draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope))
 #[test]

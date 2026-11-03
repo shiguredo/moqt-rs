@@ -1,7 +1,9 @@
 //! FETCH 関連
 //!
 //! draft-ietf-moq-transport-22 §3.2.4 (Fetch State Management) / §9.11 (FETCH) / §9.12 (FETCH_OK) に対応する
-//! `impl Session` の送受信メソッドをまとめる。将来 draft 側で変更される可能性がある。
+//! `impl Session` の送受信メソッドをまとめる。単独 FETCH の相対 Location Filter は
+//! draft-ietf-moq-transport-23 §3.2 (Fetch) に基づき REQUEST_ERROR (INVALID_RANGE) で拒否する。
+//! 将来 draft 側で変更される可能性がある。
 
 use crate::error::{
     REQUEST_DOES_NOT_EXIST, REQUEST_INVALID_FILTER, REQUEST_INVALID_RANGE,
@@ -12,7 +14,7 @@ use crate::message::{
     FetchOk as WireFetchOk,
     common::{Location, TrackNamespace},
 };
-use crate::message_parameter::{LocationFilterContext, LocationFilterUpdate, MessageParameters};
+use crate::message_parameter::{LocationFilter, LocationFilterContext, MessageParameters};
 use crate::track_properties::TrackProperties;
 use alloc::vec::Vec;
 
@@ -198,12 +200,14 @@ impl Session {
     /// FETCH を送信する (draft-ietf-moq-transport-22 §9.11 (FETCH)、自側が subscriber)
     ///
     /// range は LOCATION_FILTER パラメータで指定する (省略時は track 先頭から
-    /// Largest Object まで)。この節番号・規則は draft 由来であり将来の draft 改版で
-    /// 変わる可能性がある。
+    /// Largest Object まで)。draft-ietf-moq-transport-23 §3.2 (Fetch) により、相対
+    /// Location Filter (Type 0x01 / 0x05) を持つ単独 FETCH は peer が必ず
+    /// REQUEST_ERROR (INVALID_RANGE) で拒否するため、送信前にエラーで拒否する。
+    /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     ///
     /// 失敗条件はすべて `SendRequestError::Session` (`SESSION_PROTOCOL_VIOLATION` 起因)
-    /// で返し、セッションは閉じない。scope ・空 range の検証のみ request_id 発行より
-    /// 前に行い (欠番を作らない)、値域検証は発行後のままである。
+    /// で返し、セッションは閉じない。scope ・相対フィルタ・空 range の検証のみ request_id
+    /// 発行より前に行い (欠番を作らない)、値域検証は発行後のままである。
     pub fn send_fetch(
         &mut self,
         track_namespace: TrackNamespace,
@@ -234,22 +238,8 @@ impl Session {
             )
             .into());
         }
-        // 要求 range の解決と空 range の事前検証。Largest は送信時点では未知のため
-        // `None` で解決する (absolute 指定は正確に、相対指定は先頭寄りに解決される)。
-        // 空 range (Start > End) の FETCH は送らない (受信側は INVALID_RANGE で
-        // 拒否するのが本実装の選択であり、peer も同様と期待する)。
-        let (fetch_start, fetch_end) = match parameters.location_filter_update() {
-            Ok(LocationFilterUpdate::Set(filter)) => (
-                filter.effective_start_location(None),
-                filter.effective_end_location(None, LocationFilterContext::Fetch),
-            ),
-            Ok(_) => (
-                Some(Location {
-                    group_id: 0,
-                    object_id: 0,
-                }),
-                None,
-            ),
+        let filter = match parameters.location_filter_typed() {
+            Ok(filter) => filter,
             Err(_) => {
                 return Err(SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
@@ -257,6 +247,36 @@ impl Session {
                 )
                 .into());
             }
+        };
+        // draft-ietf-moq-transport-23 §3.2 (Fetch): 相対 Location Filter を持つ単独 FETCH は
+        // peer が必ず REQUEST_ERROR (INVALID_RANGE) で拒否する。判定は解決後の Location では
+        // なくフィルタの形式で行う (Largest Object 未観測の相対フィルタは `{0, 0}` に解決され、
+        // 絶対指定と区別できないため)。request_id 発行前に置き、エラー時に欠番を作らない。
+        // FILL_PARAMETERS の内側の相対フィルタは fill range の解決規則が別
+        // (draft-ietf-moq-transport-23 §3.4 (Fill Semantics)) であり、この禁止の対象外である。
+        if filter.is_some_and(LocationFilter::is_relative) {
+            return Err(SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "relative location filter is not allowed in FETCH",
+            )
+            .into());
+        }
+        // 要求 range の解決と空 range の事前検証。Largest は送信時点では未知のため
+        // `None` で解決する (絶対値で範囲が定まる形式のみがここに到達する)。
+        // 空 range (Start > End) の FETCH は送らない (受信側は INVALID_RANGE で
+        // 拒否するのが本実装の選択であり、peer も同様と期待する)。
+        let (fetch_start, fetch_end) = match filter.as_ref() {
+            Some(filter) => (
+                filter.effective_start_location(None),
+                filter.effective_end_location(None, LocationFilterContext::Fetch),
+            ),
+            None => (
+                Some(Location {
+                    group_id: 0,
+                    object_id: 0,
+                }),
+                None,
+            ),
         };
         if let (Some(start), Some(end)) = (fetch_start.as_ref(), fetch_end.as_ref())
             && start > end
@@ -656,6 +676,24 @@ impl Session {
                 return Err(err);
             }
         };
+        // draft-ietf-moq-transport-23 §3.2 (Fetch): "If the Location filter is relative
+        // (see Section 9.19.9), the publisher MUST return REQUEST_ERROR with error code
+        // INVALID_RANGE." 相対フィルタは解決後の Location ではなくフィルタの形式で判別する
+        // (Largest Object 未観測の相対フィルタは `{0, 0}` に解決され、絶対指定と区別できない
+        // ため)。Largest Object の観測有無や範囲の空・超過とは独立した MUST であり、
+        // 範囲判定より前に拒否する。Fetch state を作らず REQUEST_ERROR だけを返し、
+        // セッションは維持する (§6.4.2.3 (Request Cancellation and Rejection) の拒否経路)。
+        // FILL_PARAMETERS の内側の相対フィルタは fill range の解決規則が別
+        // (draft-ietf-moq-transport-23 §3.4 (Fill Semantics)) であり、この禁止の対象外である。
+        // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+        if filter.is_some_and(LocationFilter::is_relative) {
+            self.emit_request_error(
+                request_id,
+                REQUEST_INVALID_RANGE,
+                "relative location filter is not allowed in FETCH",
+            );
+            return Ok(());
+        }
         // draft-ietf-moq-transport-22 §3.2 (Fetch): オブジェクトが公開されていない
         // トラックへの FETCH は INVALID_RANGE。対象 subscription があり、Largest が
         // 一度も観測されていない場合が該当する。subscription 自体が無いときは受理する。
@@ -679,6 +717,9 @@ impl Session {
             return Ok(());
         }
         // Fetch range の解決と検証。Fetch 規則では End 省略時は End = Largest Object。
+        // 相対フィルタは上で拒否済みのため、ここに到達するのは絶対値で範囲が定まる形式
+        // (省略 / Type 0x00 / 0x02 / 0x03 / 0x04) だけであり、`observed_largest` は
+        // End の既定値と範囲判定にのみ使う。
         // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
         let (start, end) = match filter.as_ref() {
             None => (

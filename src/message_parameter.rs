@@ -388,8 +388,11 @@ const LOCATION_FILTER_TYPE_NEXT_OBJECT: u64 = 0x05;
 pub enum LocationFilterContext {
     /// Subscription (SUBSCRIBE 由来の subscription / REQUEST_UPDATE)
     Subscription,
-    /// Fetch (FETCH 要求。FILL_PARAMETERS 内の fill 要求を含む。現状の呼び出しは
-    /// subscription のみだが、FETCH 要求処理で End 既定を区別するために必要)
+    /// Fetch (FETCH 要求、および FILL_PARAMETERS 内の fill range の解決)
+    ///
+    /// 単独 FETCH の相対フィルタは draft-ietf-moq-transport-23 §3.2 (Fetch) により
+    /// REQUEST_ERROR (INVALID_RANGE) で拒否されるため、FETCH 要求の解決でこの
+    /// コンテキストが使われるのは絶対値で範囲が定まる形式だけである。
     Fetch,
 }
 
@@ -676,8 +679,8 @@ impl LocationFilter {
     ///
     /// End フィールド省略時の扱いはコンテキストで異なる。subscription は open-ended
     /// (終端なし) のため `None`、Fetch は End = Largest Object のため `largest` を返す。
-    /// 未配信 (`None`) の Fetch は終端未定のため `None` を返し、呼び出し側
-    /// (FETCH 要求処理) が INVALID_RANGE 等で扱う。
+    /// 未配信 (`None`) の Fetch は終端未定のため `None` を返す (単独 FETCH では絶対形式の
+    /// 範囲判定に委ね、fill では Largest Object が不明なため開設しない)。
     /// NoFilter も open-ended として同じ扱いになる。
     ///
     /// AbsoluteRange (EndObject 省略) は End Group の全 Object を含むため
@@ -717,6 +720,25 @@ impl LocationFilter {
                 object_id: *end_object,
             }),
         }
+    }
+
+    /// Largest Object を基準に範囲が定まる相対フィルタか返す
+    ///
+    /// draft-ietf-moq-transport-23 §3.3.1 (Location Filters) は Location Filter の一部が
+    /// Largest Object を基準に定義されるとし、§9.19.9 (LOCATION FILTER Parameter) の
+    /// Table 6 は Type 0x01 (Relative Start) の Start Location を
+    /// `{Largest Object.Group + 1 - StartGroup, 0}`、Type 0x05 (Next Object) の Start を
+    /// Next Object と定める。この 2 形式だけが Largest Object を参照する相対フィルタであり、
+    /// 残りの形式 (Type 0x00 / 0x02 / 0x03 / 0x04) は絶対値だけで範囲が定まる。
+    ///
+    /// draft-ietf-moq-transport-23 §3.2 (Fetch): "If the Location filter is relative
+    /// (see Section 9.19.9), the publisher MUST return REQUEST_ERROR with error code
+    /// INVALID_RANGE." の判定は解決後の Location ではなくフィルタの形式で行う。
+    /// 解決値で判定すると、Largest Object が未観測の相対フィルタが `{0, 0}` に解決され、
+    /// 絶対指定のフィルタと区別できなくなる。
+    /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+    pub fn is_relative(self) -> bool {
+        matches!(self, Self::RelativeGroup { .. } | Self::NextObject)
     }
 }
 

@@ -1208,6 +1208,50 @@ mod location_filter_derivation {
             Some(loc(u64::MAX, u64::MAX))
         );
     }
+
+    #[test]
+    fn is_relative_matches_the_relative_filter_forms() {
+        // draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter) Table 6:
+        // Largest Object を基準に開始位置が定まるのは Type 0x01 (Relative Start) と
+        // Type 0x05 (Next Object) だけであり、残りの形式は絶対値で範囲が定まる
+        let largest = loc(7, 3);
+        let cases: [(LocationFilter, bool); 6] = [
+            (LocationFilter::NoFilter, false),
+            (LocationFilter::RelativeGroup { start_group: 2 }, true),
+            (LocationFilter::AbsoluteStart { start: loc(2, 3) }, false),
+            (
+                LocationFilter::AbsoluteRange {
+                    start: loc(2, 3),
+                    end_group_delta: 1,
+                },
+                false,
+            ),
+            (
+                LocationFilter::AbsoluteRangeWithEnd {
+                    start: loc(2, 3),
+                    end_group_delta: 1,
+                    end_object: 4,
+                },
+                false,
+            ),
+            (LocationFilter::NextObject, true),
+        ];
+        for (filter, relative) in cases {
+            assert_eq!(
+                filter.is_relative(),
+                relative,
+                "{filter:?} の相対判定が形式と一致すること"
+            );
+            // 絶対値で範囲が定まる形式は Largest Object を変えても開始位置が変わらない
+            if !relative {
+                assert_eq!(
+                    filter.effective_start_location(None),
+                    filter.effective_start_location(Some(&largest)),
+                    "{filter:?} の開始位置は Largest Object に依存しないこと"
+                );
+            }
+        }
+    }
 }
 
 mod kvp_value_length_limit {
