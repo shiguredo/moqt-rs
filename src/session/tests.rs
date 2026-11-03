@@ -2234,7 +2234,7 @@ fn request_termination_releases_pending_updates_and_credit() {
     ///
     /// PUBLISH を送って REQUEST_OK を受けるため、受信した REQUEST_UPDATE は peer
     /// subscriber からの更新になる (draft §9.5 の第 2 のケース)。
-    fn established_publish_client(max: u64) -> (Session, u64, u64, u64) {
+    fn established_publish_client(max: u64) -> (Session, u64, u64) {
         let mut local_opts = SetupOptions::new();
         local_opts.push(SetupOption {
             option_type: crate::parameter::SETUP_OPTION_MAX_REQUEST_UPDATES,
@@ -2271,7 +2271,7 @@ fn request_termination_releases_pending_updates_and_credit() {
                 .expect("PUBLISH_OK の受信に成功すること");
             rids.push(rid);
         }
-        (client, rids[0], rids[1], 0)
+        (client, rids[0], rids[1])
     }
 
     /// PAUSED 1 個を持つ REQUEST_UPDATE を作る
@@ -2303,7 +2303,7 @@ fn request_termination_releases_pending_updates_and_credit() {
         })
     }
 
-    let (mut client, cancel_rid, complete_rid, _) = established_publish_client(2);
+    let (mut client, cancel_rid, complete_rid) = established_publish_client(2);
 
     // 2 本の subscription それぞれに REQUEST_UPDATE を 2 通ずつ受信させる
     for (rid, ids) in [(cancel_rid, [1_u64, 3_u64]), (complete_rid, [5, 7])] {
