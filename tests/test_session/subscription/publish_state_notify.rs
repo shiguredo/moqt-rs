@@ -8,19 +8,21 @@ use super::*;
 use shiguredo_moqt::error::SESSION_TOO_MANY_REQUEST_UPDATES;
 use shiguredo_moqt::message::PublishStateNotify;
 use shiguredo_moqt::message_parameter::{
-    MessageParameter, MessageParameterValue, PARAM_EXPIRES, PARAM_FORWARD, PARAM_LARGEST_OBJECT,
-    PARAM_LOCATION_FILTER,
+    MessageParameter, MessageParameterValue, PARAM_EXPIRES, PARAM_LARGEST_OBJECT,
+    PARAM_LOCATION_FILTER, PARAM_PAUSED,
 };
 use shiguredo_moqt::{
     message::common::Location, message_parameter::LocationFilter, stream::subgroup::SubgroupHeader,
     stream::subgroup::SubgroupIdMode,
 };
 
-/// FORWARD 1 件を持つパラメータ群を作る
-fn forward_params(value: u8) -> MessageParameters {
+/// PAUSED 1 件を持つパラメータ群を作る
+///
+/// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): 0 は unpaused、1 は paused。
+fn paused_params(value: u8) -> MessageParameters {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
+        param_type: PARAM_PAUSED,
         value: MessageParameterValue::Uint8(value),
     });
     params
@@ -83,36 +85,31 @@ fn take_notify(session: &mut Session) -> (u64, MessageParameters) {
     panic!("PublishStateNotifyReceived イベントが期待されたが発行されなかった");
 }
 
-/// FORWARD 通知の往復で subscriber 側 forward_state が更新される
-/// (draft-ietf-moq-transport-22 §9.10)
+/// PAUSED 通知の往復で subscriber 側 paused が更新される
+/// (draft-ietf-moq-transport-22 §9.10 / draft-ietf-moq-transport-23 §9.19.18)
 #[test]
-fn notify_forward_round_trip_updates_forward_state() {
+fn notify_paused_round_trip_updates_paused_state() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object(0, 0);
     server
-        .send_publish_state_notify(sub_rid, forward_params(0))
+        .send_publish_state_notify(sub_rid, paused_params(1))
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, msg) = take_send_on_stream(&mut server);
     client
         .recv_stream_message(sub_rid, msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(
+    assert!(
         client
             .subscription(sub_rid)
             .expect("テストフィクスチャの前提条件を満たす")
-            .forward_state,
-        0,
-        "通知された FORWARD が subscriber 側に反映されること"
+            .paused,
+        "通知された PAUSED が subscriber 側に反映されること"
     );
     let (rid, params) = take_notify(&mut client);
     assert_eq!(
         rid, sub_rid,
         "通知は同一 subscription の Request ID で届くこと"
     );
-    assert_eq!(
-        params.forward(),
-        Some(0),
-        "通知パラメータがアプリに渡ること"
-    );
+    assert_eq!(params.paused(), Some(1), "通知パラメータがアプリに渡ること");
 }
 
 /// LOCATION_FILTER と LARGEST_OBJECT が subscriber 側状態に反映される
@@ -168,7 +165,7 @@ fn notify_filter_and_largest_reflected() {
 fn notify_injects_largest_object_when_observed() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object(2, 0);
     server
-        .send_publish_state_notify(sub_rid, forward_params(1))
+        .send_publish_state_notify(sub_rid, paused_params(0))
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, msg) = take_send_on_stream(&mut server);
     let params = match msg {
@@ -217,7 +214,7 @@ fn notify_without_largest_stays_omitted_when_nothing_published() {
         .expect("テストフィクスチャの前提条件を満たす");
     let _ = take_send_on_stream(&mut server);
     server
-        .send_publish_state_notify(sub_rid, forward_params(1))
+        .send_publish_state_notify(sub_rid, paused_params(0))
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, msg) = take_send_on_stream(&mut server);
     match msg {
@@ -273,13 +270,13 @@ fn notify_with_disallowed_parameter_rejected_without_side_effects() {
         .send_publish_state_notify(sub_rid, params)
         .expect_err("許可外パラメータの通知は送信前に拒否されること");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
-    // forward_state は変わらず、イベントも発行されない
-    assert_eq!(
-        server
+    // paused は変わらず、イベントも発行されない
+    assert!(
+        !server
             .subscription(sub_rid)
             .expect("テストフィクスチャの前提条件を満たす")
-            .forward_state,
-        1
+            .paused,
+        "拒否された通知で paused が変わらないこと"
     );
     while let Some(e) = server.poll_event() {
         assert!(
@@ -298,7 +295,7 @@ fn notify_send_requires_publisher_established() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object(0, 0);
     // subscriber 役からは送れない
     let err = client
-        .send_publish_state_notify(sub_rid, forward_params(0))
+        .send_publish_state_notify(sub_rid, paused_params(1))
         .expect_err("subscriber 役は通知を送れないこと");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
     // Pending の subscription からは送れない
@@ -310,12 +307,12 @@ fn notify_send_requires_publisher_established() {
         .recv_request(pending_msg)
         .expect("テストフィクスチャの前提条件を満たす");
     let err = server
-        .send_publish_state_notify(pending_rid, forward_params(0))
+        .send_publish_state_notify(pending_rid, paused_params(1))
         .expect_err("Pending の subscription からは送れないこと");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
     // 未知 ID からは送れない
     let err = server
-        .send_publish_state_notify(999, forward_params(0))
+        .send_publish_state_notify(999, paused_params(1))
         .expect_err("未知 ID からは送れないこと");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
     // Terminated からは送れない (setup 用 subgroup stream を先に終端する)
@@ -332,7 +329,7 @@ fn notify_send_requires_publisher_established() {
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let err = server
-        .send_publish_state_notify(sub_rid, forward_params(0))
+        .send_publish_state_notify(sub_rid, paused_params(1))
         .expect_err("Terminated からは送れないこと");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
 }
@@ -361,7 +358,7 @@ fn notify_received_on_publisher_side_closes_session() {
         .recv_stream_message(
             pub_rid,
             ControlMessage::PublishStateNotify(PublishStateNotify {
-                parameters: forward_params(0),
+                parameters: paused_params(1),
             }),
         )
         .unwrap_err();
@@ -386,7 +383,7 @@ fn notify_for_non_subscription_closes_session() {
         .recv_stream_message(
             fetch_rid,
             ControlMessage::PublishStateNotify(PublishStateNotify {
-                parameters: forward_params(0),
+                parameters: paused_params(1),
             }),
         )
         .unwrap_err();
@@ -411,7 +408,7 @@ fn notify_to_pending_subscriber_state_closes_session() {
         .recv_stream_message(
             sub_rid,
             ControlMessage::PublishStateNotify(PublishStateNotify {
-                parameters: forward_params(0),
+                parameters: paused_params(1),
             }),
         )
         .unwrap_err();
@@ -435,7 +432,7 @@ fn notify_to_pending_publisher_responder_closes_session() {
         .recv_stream_message(
             sub_rid,
             ControlMessage::PublishStateNotify(PublishStateNotify {
-                parameters: forward_params(0),
+                parameters: paused_params(1),
             }),
         )
         .unwrap_err();
@@ -443,15 +440,15 @@ fn notify_to_pending_publisher_responder_closes_session() {
     assert_eq!(server.state(), SessionState::Closing);
 }
 
-/// 値域外 FORWARD の通知受信は PROTOCOL_VIOLATION でセッションを閉じる
-/// (draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter))
+/// 値域外 PAUSED の通知受信は PROTOCOL_VIOLATION でセッションを閉じる
+/// (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter))
 #[test]
-fn notify_with_invalid_forward_closes_session() {
+fn notify_with_invalid_paused_closes_session() {
     let (mut _client, mut server, sub_rid) = establish_sub_with_object(0, 0);
     // decode 層を迂回して不正値を直接受信させる (decode 層も値域検証するため)
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
+        param_type: PARAM_PAUSED,
         value: MessageParameterValue::Uint8(2),
     });
     let err = server
@@ -568,9 +565,9 @@ fn notify_omitted_fields_stay_unchanged() {
     client
         .recv_stream_message(sub_rid, ok_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // FORWARD のみの通知では filter 系 3 フィールドが維持される
+    // PAUSED のみの通知では filter 系 3 フィールドが維持される
     server
-        .send_publish_state_notify(sub_rid, forward_params(0))
+        .send_publish_state_notify(sub_rid, paused_params(1))
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, msg) = take_send_on_stream(&mut server);
     client
@@ -579,13 +576,13 @@ fn notify_omitted_fields_stay_unchanged() {
     let sub = client
         .subscription(sub_rid)
         .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(sub.forward_state, 0);
+    assert!(sub.paused);
     assert!(sub.filter.is_some(), "省略された filter は維持されること");
     assert!(
         sub.filter_start.is_some() && sub.filter_end.is_some(),
         "省略された解決済み値も維持されること"
     );
-    // filter のみの通知では forward_state が維持される
+    // filter のみの通知では paused が維持される
     let mut filter_only = MessageParameters::new();
     filter_only.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
@@ -604,13 +601,12 @@ fn notify_omitted_fields_stay_unchanged() {
     client
         .recv_stream_message(sub_rid, msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(
+    assert!(
         client
             .subscription(sub_rid)
             .expect("テストフィクスチャの前提条件を満たす")
-            .forward_state,
-        0,
-        "省略された FORWARD は維持されること"
+            .paused,
+        "省略された PAUSED は維持されること"
     );
 }
 
@@ -656,7 +652,7 @@ fn notify_does_not_consume_request_update_credit() {
         .expect("テストフィクスチャの前提条件を満たす");
     // 1 件目の REQUEST_UPDATE で outgoing クレジットを使い切る
     server
-        .send_request_update(pub_rid, forward_params(1))
+        .send_request_update(pub_rid, paused_params(0))
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, upd_msg) = take_send_on_stream(&mut server);
     client
@@ -664,7 +660,7 @@ fn notify_does_not_consume_request_update_credit() {
         .expect("テストフィクスチャの前提条件を満たす");
     // 通知の送信はクレジット制限を受けない
     server
-        .send_publish_state_notify(pub_rid, forward_params(1))
+        .send_publish_state_notify(pub_rid, paused_params(0))
         .expect("通知送信はクレジット制限を受けないこと");
     let (_, notify_msg) = take_send_on_stream(&mut server);
     client
@@ -672,27 +668,27 @@ fn notify_does_not_consume_request_update_credit() {
         .expect("通知受信はクレジット制限を受けないこと");
     // 2 件目の REQUEST_UPDATE は上限超過で拒否される (通知が回復させていない証拠)
     let err = server
-        .send_request_update(pub_rid, forward_params(1))
+        .send_request_update(pub_rid, paused_params(0))
         .expect_err("上限超過の REQUEST_UPDATE は拒否されること");
     assert_eq!(err.code, SESSION_TOO_MANY_REQUEST_UPDATES);
 }
 
-/// 値域外 FORWARD の通知送信は送信前に拒否し副作用を残さない
-/// (draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter))
+/// 値域外 PAUSED の通知送信は送信前に拒否し副作用を残さない
+/// (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter))
 #[test]
-fn notify_send_with_invalid_forward_rejected_without_side_effects() {
+fn notify_send_with_invalid_paused_rejected_without_side_effects() {
     let (_client, mut server, sub_rid) = establish_sub_with_object(0, 0);
     let err = server
-        .send_publish_state_notify(sub_rid, forward_params(2))
-        .expect_err("値域外 FORWARD の通知は送信前に拒否されること");
+        .send_publish_state_notify(sub_rid, paused_params(2))
+        .expect_err("値域外 PAUSED の通知は送信前に拒否されること");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
-    // forward_state は変わらず、イベントも発行されない
-    assert_eq!(
-        server
+    // paused は変わらず、イベントも発行されない
+    assert!(
+        !server
             .subscription(sub_rid)
             .expect("テストフィクスチャの前提条件を満たす")
-            .forward_state,
-        1
+            .paused,
+        "拒否された通知で paused が変わらないこと"
     );
     while let Some(e) = server.poll_event() {
         assert!(

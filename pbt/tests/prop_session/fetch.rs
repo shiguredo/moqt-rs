@@ -114,28 +114,28 @@ fn multiple_fetches_all_establish() -> noprop::TestResult {
 /// LARGEST_OBJECT でも保存されない (自側の観測値は `largest_received_location` で追跡する)。
 /// 確立経路 (SUBSCRIBE_OK / PUBLISH) の非保存は単体テストで担保する。
 ///
-/// (初期 forward, REQUEST_UPDATE での forward) の組を生成し、0→1 遷移時も含めて
-/// 保存されないことを検証する。
+/// (初期 PAUSED, REQUEST_UPDATE での PAUSED) の組を生成し、購読の再開 (PAUSED 1→0)
+/// を含めても保存されないことを検証する。
 #[test]
 fn publisher_largest_location_never_saved_on_request_update_ok() -> noprop::TestResult {
-    // 0→1 遷移時とそれ以外の両方の分岐の観測をカバレッジゲートで検証する
+    // 再開 (PAUSED 1→0) とそれ以外の両方の分岐の観測をカバレッジゲートで検証する
     let transition_seen = std::cell::Cell::new(false);
     let other_seen = std::cell::Cell::new(false);
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
         use shiguredo_moqt::message_parameter::{
-            MessageParameter, MessageParameterValue, PARAM_FORWARD, PARAM_LARGEST_OBJECT,
+            MessageParameter, MessageParameterValue, PARAM_LARGEST_OBJECT, PARAM_PAUSED,
         };
-        let initial_forward = noprop::sample_choice(ctx, &[0u8, 1u8]);
-        let update_forward = noprop::sample_choice(ctx, &[0u8, 1u8]);
+        let initial_paused = noprop::sample_choice(ctx, &[0u8, 1u8]);
+        let update_paused = noprop::sample_choice(ctx, &[0u8, 1u8]);
         let g = noprop::sample_u64_in(ctx, 0..1000);
         let o = noprop::sample_u64_in(ctx, 0..1000);
         let (mut client, mut server) = establish_pair();
-        // initial_forward で SUBSCRIBE → publisher (server) が forward=initial_forward で確立する
+        // initial_paused で SUBSCRIBE → publisher (server) が同じ PAUSED で確立する
         let mut sub_params = MessageParameters::new();
         sub_params.push(MessageParameter {
-            param_type: PARAM_FORWARD,
-            value: MessageParameterValue::Uint8(initial_forward),
+            param_type: PARAM_PAUSED,
+            value: MessageParameterValue::Uint8(initial_paused),
         });
         let rid = client
             .send_subscribe(
@@ -165,11 +165,11 @@ fn publisher_largest_location_never_saved_on_request_update_ok() -> noprop::Test
                 .largest_location
                 .is_none()
         );
-        // REQUEST_UPDATE で FORWARD=update_forward を送る
+        // REQUEST_UPDATE で PAUSED=update_paused を送る
         let mut upd_params = MessageParameters::new();
         upd_params.push(MessageParameter {
-            param_type: PARAM_FORWARD,
-            value: MessageParameterValue::Uint8(update_forward),
+            param_type: PARAM_PAUSED,
+            value: MessageParameterValue::Uint8(update_paused),
         });
         client
             .send_request_update(rid, upd_params)
@@ -190,8 +190,8 @@ fn publisher_largest_location_never_saved_on_request_update_ok() -> noprop::Test
         server
             .send_request_ok(rid, req_ok_params, TrackProperties::default())
             .expect("テストフィクスチャの前提条件を満たす");
-        // publisher 側は 0→1 遷移時も含めて largest_location を保存しない
-        if initial_forward == 0 && update_forward == 1 {
+        // publisher 側は再開 (PAUSED 1→0) を含めても largest_location を保存しない
+        if initial_paused == 1 && update_paused == 0 {
             transition_seen.set(true);
         } else {
             other_seen.set(true);
@@ -200,8 +200,9 @@ fn publisher_largest_location_never_saved_on_request_update_ok() -> noprop::Test
             server
                 .subscription(rid)
                 .expect("テストフィクスチャの前提条件を満たす")
-                .forward_state,
-            update_forward
+                .paused,
+            update_paused == 1,
+            "REQUEST_UPDATE の PAUSED が publisher 側の状態へ反映されること"
         );
         assert!(
             server
@@ -215,11 +216,11 @@ fn publisher_largest_location_never_saved_on_request_update_ok() -> noprop::Test
     })?;
     assert!(
         transition_seen.get(),
-        "Forward State 0→1 のケースが 1 つも観測されなかった\n{runner}"
+        "購読の再開 (PAUSED 1→0) のケースが 1 つも観測されなかった\n{runner}"
     );
     assert!(
         other_seen.get(),
-        "Forward State が 0→1 以外のケースが 1 つも観測されなかった\n{runner}"
+        "購読の再開以外のケースが 1 つも観測されなかった\n{runner}"
     );
     Ok(())
 }

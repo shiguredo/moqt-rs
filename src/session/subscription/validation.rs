@@ -1,4 +1,6 @@
-//! FORWARD / GROUP_ORDER / INCLUDE_PROPERTIES の検証と抽出 (draft-ietf-moq-transport-22 §9.20.18, §9.20.8 / draft-ietf-moq-transport-22 §9.20.21)
+//! PAUSED / GROUP_ORDER / INCLUDE_PROPERTIES の検証と抽出
+//! (draft-ietf-moq-transport-23 §9.19.18 / draft-ietf-moq-transport-22 §9.20.8 /
+//! draft-ietf-moq-transport-22 §9.20.21)
 //!
 //! 将来 draft 側で変更される可能性がある。
 
@@ -31,25 +33,27 @@ pub fn validate_group_order(order: u8) -> Result<(), SessionError> {
     Ok(())
 }
 
-/// FORWARD の値を検証する (draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter))
+/// PAUSED の値を検証し、paused 状態へ変換する
+/// (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter))
 ///
-/// 許容値は 0 (送らない) と 1 (送る) のみ。それ以外は PROTOCOL_VIOLATION。
+/// 許容値は 0 (unpaused) と 1 (paused) のみ。それ以外は PROTOCOL_VIOLATION。
+/// 値域内なら `1` を `true` (paused)、`0` を `false` (unpaused) として返す。
 /// デコード層 (`message_parameter.rs`) でもワイヤフォーマット上の検証を行うが、
 /// API 経路からの不正値投入を防ぐためセッション層でも検証する。
 ///
-/// SUBSCRIBE / PUBLISH / REQUEST_OK (PUBLISH_OK) / REQUEST_UPDATE 受信経路
-/// (`handle_peer_subscribe` / `handle_peer_publish` /
-/// `handle_ok_for_subscription` / `handle_update_for_subscription`) では、値域外の受信は
-/// draft §9.20.18 の MUST に従い呼び出し側が `self.fail()` を呼んでセッションを
-/// PROTOCOL_VIOLATION により閉じる (`?` 伝播のみではセッションが開いたまま残る)。
-pub fn validate_forward(value: u8) -> Result<u8, SessionError> {
+/// SUBSCRIBE / PUBLISH / REQUEST_UPDATE / PUBLISH_STATE_NOTIFY の受信経路
+/// (`handle_peer_subscribe` / `handle_peer_publish` / `handle_peer_request_update` /
+/// `handle_peer_publish_state_notify`) では、値域外の受信は同節の MUST に従い
+/// 呼び出し側が `self.fail()` を呼んでセッションを PROTOCOL_VIOLATION により閉じる
+/// (`?` 伝播のみではセッションが開いたまま残る)。
+pub fn validate_paused(value: u8) -> Result<bool, SessionError> {
     if value > 1 {
         return Err(SessionError::new(
             SESSION_PROTOCOL_VIOLATION,
-            "invalid forward value",
+            "invalid paused value",
         ));
     }
-    Ok(value)
+    Ok(value == 1)
 }
 
 /// INCLUDE_PROPERTIES の値を検証する (draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter))
@@ -71,18 +75,16 @@ pub fn validate_include_properties(value: u8) -> Result<(), SessionError> {
     Ok(())
 }
 
-/// FORWARD Parameter (draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter)) から Forward State を抽出する
+/// PAUSED パラメータから初期 paused 状態を抽出する
+/// (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter))
 ///
-/// 省略時・ 1 → 1 (送る)、0 → 0 (送らない)、それ以外は 1 (default)。
+/// 1 → `true` (paused)、0 → `false` (unpaused)、省略 → `false` (既定値 0)。
 /// 本関数は送信 API (`send_subscribe` / `send_publish`) 専用であり、送信経路では前段で
-/// `validate_forward` が実行済みのためフォールバックは実質発火しない。受信経路は
-/// `handle_peer_subscribe` / `handle_peer_publish` が
-/// 値域検証込みで直接解釈する (本関数は使わない)。
-pub fn extract_forward_state(parameters: &MessageParameters) -> u8 {
-    match parameters.forward() {
-        Some(0) => 0,
-        _ => 1,
-    }
+/// `validate_paused` が実行済みのため 2 以上の値は到達しない。受信経路は
+/// `handle_peer_subscribe` / `handle_peer_publish` が値域検証込みで直接解釈する
+/// (本関数は使わない)。
+pub fn extract_paused_state(parameters: &MessageParameters) -> bool {
+    matches!(parameters.paused(), Some(1))
 }
 
 /// パラメータから Object 系 Range Filter を取り出して型付き状態にする
@@ -208,19 +210,19 @@ pub(crate) fn location_filter_pass(
     true
 }
 
-/// draft-ietf-moq-transport-22 §3.3.3 (Combining Filters) の Pass 評価
+/// draft-ietf-moq-transport-23 §3.3.3 (Combining Filters) の Pass 評価
 ///
-/// > Pass = Forward AND Location Filters AND Range Filters
+/// > Pass = (NOT Paused) AND Location Filters AND Range Filters
 ///
 /// §3.3.3 は "which can be evaluated in any order" なので評価順は結果に影響しない。
-/// `true` を返した Object だけを publisher は forward してよい。
+/// `true` を返した Object だけを publisher は送信してよい。
 ///
 /// Object Properties のデコードに失敗した場合は OBJECT_PROPERTY_FILTER を満たせないものとして
 /// 扱う (フィルタが設定されていなければ影響しない)。
 pub fn object_passes_filters(subscription: &Subscription, input: &ObjectFilterInput<'_>) -> bool {
-    // draft §3.1.1 (Pausing Subscriptions):
+    // draft-ietf-moq-transport-23 §3.1.1 (Pausing Subscriptions):
     // "The publisher does not send Objects on a paused subscription"
-    if subscription.forward_state == 0 {
+    if subscription.paused {
         return false;
     }
     if !location_filter_pass(
@@ -260,9 +262,9 @@ pub fn header_passes_filters(
     subgroup_id: Option<u64>,
     publisher_priority: u8,
 ) -> bool {
-    // draft §3.1.1 (Pausing Subscriptions):
+    // draft-ietf-moq-transport-23 §3.1.1 (Pausing Subscriptions):
     // "The publisher does not send Objects on a paused subscription"
-    if subscription.forward_state == 0 {
+    if subscription.paused {
         return false;
     }
     // Location Filter の Group 部分のみ評価する (Object 部分は header 時点では未知)

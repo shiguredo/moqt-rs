@@ -234,7 +234,7 @@ pub enum SessionEvent {
     /// (draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY))
     ///
     /// 応答は不要であり、MAX_REQUEST_UPDATES のクレジットも消費しない。
-    /// FORWARD / LOCATION_FILTER / LARGEST_OBJECT は session 層で
+    /// PAUSED / LOCATION_FILTER / LARGEST_OBJECT は session 層で
     /// `Subscription` の状態に反映済み。仕様上は informative
     /// (no action required) だが、本実装は受信側の状態追跡のため反映する。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
@@ -258,9 +258,9 @@ pub enum SessionEvent {
     /// 現状は EXPIRES (§9.20.16) と LARGEST_OBJECT (§9.20.17) の 2 種で、
     /// REQUEST_OK にその他の型が載ると codec / session 層が PROTOCOL_VIOLATION で閉じる。
     ///
-    /// FORWARD (§9.20.18) は REQUEST_OK には出現しない。購読の Forward State は
-    /// REQUEST_UPDATE の送信時に楽観的に `Subscription::forward_state` へ反映され、
-    /// 応答のパラメータから読み取る値ではない。
+    /// PAUSED (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter)) は REQUEST_OK には
+    /// 出現しない。購読の paused 状態は REQUEST_UPDATE の送信時に楽観的に
+    /// `Subscription::paused` へ反映され、応答のパラメータから読み取る値ではない。
     RequestOkReceived {
         /// 対象 request の Request ID
         request_id: u64,
@@ -437,7 +437,7 @@ pub enum SessionEvent {
     },
     /// fill fetch stream を開く (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))
     ///
-    /// publisher が FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE を Forward State 1 で
+    /// publisher が FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE を unpaused で
     /// 処理し、fill range が空でなく Largest Object より後に始まらない場合に発火する。
     /// I/O 層は uni stream を開き、先頭に `request_id` を載せた FETCH_HEADER を書いて
     /// fill range の Object 送出を開始し、送り終わったら FIN で閉じる
@@ -1028,7 +1028,7 @@ mod tests {
             track_name: b"cam".to_vec(),
             track_alias: Some(1),
             state: SubscriptionState::Terminated,
-            forward_state: 0,
+            paused: false,
             largest_location: None,
             largest_received_location: None,
             delivery_timeouts: DeliveryTimeoutState {
@@ -1280,8 +1280,14 @@ pub struct Subscription {
     pub track_alias: Option<u64>,
     /// 現在の状態
     pub state: SubscriptionState,
-    /// Forward State (draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter), 0 = 送らない / 1 = 送る)
-    pub forward_state: u8,
+    /// PAUSED により停止中か (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter))
+    ///
+    /// `true` の間、publisher はこの subscription で Object を送らない
+    /// (draft-ietf-moq-transport-23 §3.1.1 (Pausing Subscriptions))。初期値は
+    /// SUBSCRIBE / PUBLISH の PAUSED パラメータで定まり、省略時は unpaused (`false`)。
+    /// REQUEST_UPDATE / PUBLISH_STATE_NOTIFY で PAUSED を省略した場合は現在値を維持する。
+    /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+    pub paused: bool,
     /// 広告された Largest Object (draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter))
     ///
     /// peer が SUBSCRIBE_OK / PUBLISH / REQUEST_UPDATE_OK / PUBLISH_STATE_NOTIFY の

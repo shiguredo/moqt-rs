@@ -39,8 +39,13 @@ pub const PARAM_SUBGROUP_DELIVERY_TIMEOUT: u64 = 0x06;
 pub const PARAM_EXPIRES: u64 = 0x08;
 /// LARGEST_OBJECT (Location)
 pub const PARAM_LARGEST_OBJECT: u64 = 0x09;
-/// FORWARD (uint8)
-pub const PARAM_FORWARD: u64 = 0x10;
+/// PAUSED (uint8, draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter))
+///
+/// 0 (unpaused) または 1 (paused)。既定値は 0。
+/// REQUEST_UPDATE / PUBLISH_STATE_NOTIFY で省略された場合は現在値を維持し、
+/// それ以外のメッセージで省略された場合は 0 として扱う。
+/// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+pub const PARAM_PAUSED: u64 = 0x11;
 /// RENDEZVOUS_TIMEOUT (varint, draft-ietf-moq-transport-22 §9.20.6 (RENDEZVOUS TIMEOUT Parameter))
 ///
 /// 本ライブラリは relay を実装しないため値を解釈しないが、§16.7 (Message Parameters) の
@@ -138,7 +143,7 @@ fn value_encoding(param_type: u64) -> Result<ValueEncoding, MessageError> {
         PARAM_SUBGROUP_DELIVERY_TIMEOUT => Ok(ValueEncoding::VarInt),
         PARAM_EXPIRES => Ok(ValueEncoding::VarInt),
         PARAM_LARGEST_OBJECT => Ok(ValueEncoding::Location),
-        PARAM_FORWARD => Ok(ValueEncoding::Uint8),
+        PARAM_PAUSED => Ok(ValueEncoding::Uint8),
         PARAM_SUBSCRIBER_PRIORITY => Ok(ValueEncoding::Uint8),
         PARAM_LOCATION_FILTER => Ok(ValueEncoding::LocationFilter),
         PARAM_GROUP_ORDER => Ok(ValueEncoding::Uint8),
@@ -866,7 +871,7 @@ impl MessageParameters {
     /// # Errors
     ///
     /// - 同一 Parameter Type の重複、型と値形式の不整合: `InvalidParameter`
-    /// - 未知の Parameter Type、uint8 値域違反 (FORWARD / GROUP_ORDER / INCLUDE_PROPERTIES)、
+    /// - 未知の Parameter Type、uint8 値域違反 (PAUSED / GROUP_ORDER / INCLUDE_PROPERTIES)、
     ///   FILL_PARAMETERS の内側スコープ違反
     ///   (draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter))、
     ///   LOCATION_FILTER の StartGroup + EndGroupDelta オーバーフロー
@@ -942,7 +947,7 @@ impl MessageParameters {
     /// # Errors
     ///
     /// - 未知の Parameter Type、同一 Parameter Type の重複、FILL_PARAMETERS の入れ子、Table 7 外の
-    ///   内側パラメータ、uint8 値域違反 (FORWARD / GROUP_ORDER / INCLUDE_PROPERTIES)、
+    ///   内側パラメータ、uint8 値域違反 (PAUSED / GROUP_ORDER / INCLUDE_PROPERTIES)、
     ///   LOCATION_FILTER の未知の Location Filter Type と StartGroup + EndGroupDelta
     ///   オーバーフロー (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))、
     ///   Track Namespace のデコード失敗
@@ -1017,7 +1022,7 @@ impl MessageParameters {
                 value = MessageParameterValue::AuthorizationToken(token);
             }
 
-            // draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter) / §9.20.8 (GROUP ORDER Parameter) /
+            // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter) / draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter) /
             // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
             // encode 側と同じ値域検証を行う
             if let MessageParameterValue::Uint8(v) = &value {
@@ -1132,9 +1137,15 @@ impl MessageParameters {
         None
     }
 
-    /// FORWARD (type 0x10) の値を返す
-    pub fn forward(&self) -> Option<u8> {
-        self.find_uint8(PARAM_FORWARD)
+    /// PAUSED (type 0x11) の値を返す
+    ///
+    /// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): 0 は unpaused、
+    /// 1 は paused。省略時は `None` を返し、呼び出し側がメッセージ種別に応じた
+    /// 既定値を決める (REQUEST_UPDATE / PUBLISH_STATE_NOTIFY は現在値の維持、
+    /// それ以外は 0 = unpaused)。
+    /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+    pub fn paused(&self) -> Option<u8> {
+        self.find_uint8(PARAM_PAUSED)
     }
 
     /// INCLUDE_PROPERTIES (type 0x35) の値を返す
@@ -1277,7 +1288,7 @@ impl MessageParameters {
     /// PUBLISH に出現可能な subset (`PUBLISH_ALLOWED_PARAMS`) のみ残し、
     /// AUTHORIZATION TOKEN は除外する (送信者義務。draft-ietf-moq-transport-22
     /// §9.20.2 (AUTHORIZATION TOKEN Parameter) の MUST NOT copy)。
-    /// 本メソッドは濾過のみ行い、TRACK_SUBSCRIPTION 側の FORWARD 蓄積状態は見ない。
+    /// 本メソッドは濾過のみ行い、subscription 側の PAUSED 状態は見ない。
     /// 蓄積値と明示値が競合した場合は、呼び出し側で明示値を優先して解決すること。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub fn resulting_publish_parameters(&self) -> MessageParameters {
@@ -1558,15 +1569,16 @@ impl MessageParameters {
 
 /// uint8 値パラメータの値域を検証する
 ///
-/// - FORWARD (0x10): 0 または 1 のみ (draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter))
+/// - PAUSED (0x11): 0 (unpaused) または 1 (paused) のみ
+///   (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter))
 /// - GROUP_ORDER (0x22): 1 (Ascending) または 2 (Descending) のみ (draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter))
 /// - INCLUDE_PROPERTIES (0x35): 0 または 1 のみ (draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter))
 ///
 /// encode と decode の両経路で同一の検証を行い、検証の非対称を防ぐ。
 fn validate_uint8_param_value(param_type: u64, value: u8) -> Result<(), MessageError> {
     match param_type {
-        PARAM_FORWARD if value > 1 => Err(MessageError::ProtocolViolation(
-            "FORWARD parameter value must be 0 or 1",
+        PARAM_PAUSED if value > 1 => Err(MessageError::ProtocolViolation(
+            "PAUSED parameter value must be 0 (unpaused) or 1 (paused)",
         )),
         PARAM_GROUP_ORDER if value != 1 && value != 2 => Err(MessageError::ProtocolViolation(
             "GROUP_ORDER parameter value must be 1 (Ascending) or 2 (Descending)",
@@ -1622,7 +1634,7 @@ fn validate_param_encoding(param: &MessageParameter) -> Result<(), MessageError>
         return Err(MessageError::InvalidParameter);
     }
 
-    // draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter) / §9.20.8 (GROUP ORDER Parameter) /
+    // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter) / draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter) /
     // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
     // decode 側と同じ値域検証を行う
     if let MessageParameterValue::Uint8(v) = &param.value {

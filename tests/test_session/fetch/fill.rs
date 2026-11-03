@@ -1,6 +1,6 @@
 //! fill fetch stream のテスト (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))
 //!
-//! FILL_PARAMETERS の送受信、fill fetch stream の開設条件 (Forward State /
+//! FILL_PARAMETERS の送受信、fill fetch stream の開設条件 (PAUSED /
 //! fill range / Largest Object)、複数 stream の同時存在、FETCH_HEADER の
 //! Request ID、subscription キャンセル時の reset を扱う。
 
@@ -8,7 +8,7 @@ use super::*;
 use shiguredo_moqt::error::STREAM_CANCELLED;
 use shiguredo_moqt::message::ReasonPhrase;
 use shiguredo_moqt::message_parameter::{
-    MessageParameterValue, PARAM_FILL_PARAMETERS, PARAM_FORWARD, PARAM_LOCATION_FILTER,
+    MessageParameterValue, PARAM_FILL_PARAMETERS, PARAM_LOCATION_FILTER, PARAM_PAUSED,
 };
 use shiguredo_moqt::{message_parameter::LocationFilter, stream::subgroup::SubgroupHeader};
 
@@ -194,16 +194,17 @@ fn subscribe_with_fill_but_no_largest_object_opens_nothing() {
     );
 }
 
-/// FORWARD=0 の SUBSCRIBE に FILL_PARAMETERS が付いても fill stream は開かない
-/// (draft-ietf-moq-transport-22 §3.4.1。Largest 確定済みでも Forward が優先する)
+/// PAUSED=1 の SUBSCRIBE に FILL_PARAMETERS が付いても fill stream は開かない
+/// (draft-ietf-moq-transport-22 §3.4.1 / draft-ietf-moq-transport-23 §3.1.1。
+/// Largest 確定済みでも paused が優先する)
 #[test]
-fn subscribe_with_fill_and_forward_zero_opens_nothing() {
+fn subscribe_with_fill_and_paused_opens_nothing() {
     let (mut client, mut server, _sub_rid) = establish_sub_with_object();
-    // 同一 track への 2 本目の SUBSCRIBE (FORWARD=0 + FILL)。Largest {0, 0} は確定済み。
+    // 同一 track への 2 本目の SUBSCRIBE (PAUSED=1 + FILL)。Largest {0, 0} は確定済み。
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     params.push(MessageParameter {
         param_type: PARAM_FILL_PARAMETERS,
@@ -220,16 +221,17 @@ fn subscribe_with_fill_and_forward_zero_opens_nothing() {
     assert_eq!(
         drain_open_fill_events(&mut server),
         Vec::<u64>::new(),
-        "Forward State 0 では fill stream を開いてはならない"
+        "paused (PAUSED=1) では fill stream を開いてはならない"
     );
 }
 
-/// Forward State 1 の FILL_PARAMETERS 付き SUBSCRIBE 処理で fill stream が開く
+/// unpaused (PAUSED=0) の FILL_PARAMETERS 付き SUBSCRIBE 処理で fill stream が開く
 /// (draft-ietf-moq-transport-22 §3.4.1。SUBSCRIBE 経路の positive)
 #[test]
 fn subscribe_with_fill_opens_fill_stream() {
     let (mut client, mut server, _sub_rid) = establish_sub_with_object();
-    // 同一 track への 2 本目の SUBSCRIBE (FORWARD=1 + FILL)。Largest {0, 0} は確定済み。
+    // 同一 track への 2 本目の SUBSCRIBE (PAUSED 省略 = unpaused + FILL)。
+    // Largest {0, 0} は確定済み。
     let sub_rid = client
         .send_subscribe(
             ns(&[b"live"]),
@@ -306,7 +308,7 @@ fn fill_stream_event_carries_the_resolved_range() {
     assert!(end >= start, "fill range が空でないこと: {end:?}");
 }
 
-/// Forward State 1 で FILL_PARAMETERS 付き REQUEST_UPDATE を処理すると fill stream が開く
+/// unpaused (PAUSED=0) で FILL_PARAMETERS 付き REQUEST_UPDATE を処理すると fill stream が開く
 /// (draft-ietf-moq-transport-22 §3.4.1)
 #[test]
 fn request_update_with_fill_opens_fill_stream() {
@@ -398,8 +400,8 @@ fn request_update_without_fill_opens_nothing() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(1),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(0),
     });
     send_update_to_server(&mut client, &mut server, sub_rid, params);
     assert_eq!(
@@ -493,8 +495,8 @@ fn fill_not_retained_in_pending_update_params() {
     // FILL なしの UPDATE を送る
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(1),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(0),
     });
     send_update_to_server(&mut client, &mut server, sub_rid, params);
     let merged = take_request_update_params(&mut server);
@@ -1135,12 +1137,12 @@ fn request_update_with_non_location_filter_inner_opens_nothing() {
 /// (draft-ietf-moq-transport-22 §9.20.15)
 #[test]
 fn send_with_out_of_scope_inner_fill_rejected_without_side_effects() {
-    use shiguredo_moqt::message_parameter::PARAM_FORWARD as INNER_FORWARD;
+    use shiguredo_moqt::message_parameter::PARAM_PAUSED as INNER_PAUSED;
 
-    // 内側に FORWARD (Table 7 外) を持つ FILL を作る
+    // 内側に PAUSED (Table 7 外) を持つ FILL を作る
     let mut inner = MessageParameters::new();
     inner.push(MessageParameter {
-        param_type: INNER_FORWARD,
+        param_type: INNER_PAUSED,
         value: MessageParameterValue::Uint8(1),
     });
     let params = fill_params(inner);
@@ -1177,13 +1179,12 @@ fn send_with_out_of_scope_inner_fill_rejected_without_side_effects() {
         .send_request_update(sub_rid, params)
         .expect_err("Table 7 外の内側パラメータは送信前に拒否されること");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
-    assert_eq!(
-        client
+    assert!(
+        !client
             .subscription(sub_rid)
             .expect("テストフィクスチャの前提条件を満たす")
-            .forward_state,
-        1,
-        "拒否した UPDATE で forward_state は変わらないこと"
+            .paused,
+        "拒否した UPDATE で paused は変わらないこと"
     );
     while let Some(e) = client.poll_event() {
         assert!(

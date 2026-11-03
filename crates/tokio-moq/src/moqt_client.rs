@@ -147,7 +147,7 @@ pub struct IncomingRequest {
 ///  REQUEST_ERROR message indicating if the update was successful, unless it is
 ///  coalescing failed updates」
 /// 応答は [`MoqtClient::send_request_ok`] / [`MoqtClient::send_request_error`] で行う。
-/// パラメータの検証 (scope / Range Filter / FORWARD 値域) は session 層が受信時に
+/// パラメータの検証 (scope / Range Filter / PAUSED 値域) は session 層が受信時に
 /// 済ませており、ここに来た更新は購読状態へ反映済みである。
 #[derive(Debug)]
 pub struct IncomingRequestUpdate {

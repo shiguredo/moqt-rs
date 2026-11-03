@@ -20,11 +20,11 @@ fn request_update_full_cycle() {
     let (_, ok_msg) = take_send_on_stream(&mut server);
     recv_response_helper(&mut client, rid, ok_msg);
 
-    // Client から REQUEST_UPDATE で FORWARD=0
+    // Client から REQUEST_UPDATE で PAUSED=1 (paused)
     let mut params = MessageParameters::new();
     params.push(shiguredo_moqt::message_parameter::MessageParameter {
-        param_type: shiguredo_moqt::message_parameter::PARAM_FORWARD,
-        value: shiguredo_moqt::message_parameter::MessageParameterValue::Uint8(0),
+        param_type: shiguredo_moqt::message_parameter::PARAM_PAUSED,
+        value: shiguredo_moqt::message_parameter::MessageParameterValue::Uint8(1),
     });
     client
         .send_request_update(rid, params)
@@ -34,7 +34,7 @@ fn request_update_full_cycle() {
         .recv_stream_message(rid, upd_msg)
         .expect("テストフィクスチャの前提条件を満たす");
     // draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1540: REQUEST_UPDATE のパラメータは即座に適用されず、
-    // pending_update_params に蓄積される。REQUEST_OK 応答後に forward_state が反映される。
+    // pending_update_params に蓄積される。REQUEST_OK 応答後に paused が反映される。
     assert!(
         server
             .subscription(rid)
@@ -58,12 +58,12 @@ fn request_update_full_cycle() {
             .state,
         SubscriptionState::Established
     );
-    assert_eq!(
+    assert!(
         server
             .subscription(rid)
             .expect("テストフィクスチャの前提条件を満たす")
-            .forward_state,
-        0
+            .paused,
+        "REQUEST_OK 応答後に PAUSED=1 が publisher 側へ反映されること"
     );
 }
 
@@ -2269,7 +2269,7 @@ fn peer_request_update_in_pending_publisher_closes_session() {
 #[test]
 fn send_request_update_by_subscriber_on_publish_established_subscription() {
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        MessageParameter, MessageParameterValue, PARAM_PAUSED,
     };
     let (mut client, mut server) = establish_pair();
     // client=publisher が PUBLISH を送信、server=subscriber が REQUEST_OK (publish context) を返す
@@ -2311,8 +2311,8 @@ fn send_request_update_by_subscriber_on_publish_established_subscription() {
     // server (subscriber, non-initiator) から REQUEST_UPDATE を送る
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     server
         .send_request_update(rid, params)
@@ -2332,16 +2332,15 @@ fn send_request_update_by_subscriber_on_publish_established_subscription() {
     assert_eq!(
         pending
             .expect("テストフィクスチャの前提条件を満たす")
-            .forward(),
-        Some(0)
+            .paused(),
+        Some(1)
     );
-    // forward_state は REQUEST_OK 応答まで更新されない
-    assert_eq!(
-        client
+    // paused は REQUEST_OK 応答まで更新されない
+    assert!(
+        !client
             .subscription(rid)
             .expect("テストフィクスチャの前提条件を満たす")
-            .forward_state,
-        1
+            .paused
     );
 }
 
@@ -2387,7 +2386,7 @@ fn send_request_ok_by_publisher_on_subscribe_established_subscription_succeeds()
 #[test]
 fn multiple_request_updates_are_coalesced() {
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD, PARAM_SUBSCRIBER_PRIORITY,
+        MessageParameter, MessageParameterValue, PARAM_PAUSED, PARAM_SUBSCRIBER_PRIORITY,
     };
     let (mut client, mut server) = establish_pair();
     let rid = client
@@ -2403,11 +2402,11 @@ fn multiple_request_updates_are_coalesced() {
     let (_, ok_msg) = take_send_on_stream(&mut server);
     recv_response_helper(&mut client, rid, ok_msg);
 
-    // 1 回目の REQUEST_UPDATE: FORWARD=0
+    // 1 回目の REQUEST_UPDATE: PAUSED=1 (paused)
     let mut params1 = MessageParameters::new();
     params1.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     client
         .send_request_update(rid, params1)
@@ -2417,7 +2416,7 @@ fn multiple_request_updates_are_coalesced() {
         .recv_stream_message(rid, upd1)
         .expect("テストフィクスチャの前提条件を満たす");
 
-    // pending_update_params に FORWARD=0 が蓄積されている
+    // pending_update_params に PAUSED=1 が蓄積されている
     let pending = server
         .subscription(rid)
         .expect("テストフィクスチャの前提条件を満たす")
@@ -2427,19 +2426,18 @@ fn multiple_request_updates_are_coalesced() {
     assert_eq!(
         pending
             .expect("テストフィクスチャの前提条件を満たす")
-            .forward(),
-        Some(0)
+            .paused(),
+        Some(1)
     );
-    // まだ forward_state は変更されていない
-    assert_eq!(
-        server
+    // まだ paused は変更されていない
+    assert!(
+        !server
             .subscription(rid)
             .expect("テストフィクスチャの前提条件を満たす")
-            .forward_state,
-        1
+            .paused
     );
 
-    // 2 回目の REQUEST_UPDATE: SUBSCRIBER_PRIORITY=100 (FORWARD を含まない)
+    // 2 回目の REQUEST_UPDATE: SUBSCRIBER_PRIORITY=100 (PAUSED を含まない)
     let mut params2 = MessageParameters::new();
     params2.push(MessageParameter {
         param_type: PARAM_SUBSCRIBER_PRIORITY,
@@ -2453,7 +2451,7 @@ fn multiple_request_updates_are_coalesced() {
         .recv_stream_message(rid, upd2)
         .expect("テストフィクスチャの前提条件を満たす");
 
-    // 合体後: FORWARD=0 は保持され、SUBSCRIBER_PRIORITY=100 が追加されている
+    // 合体後: PAUSED=1 は保持され、SUBSCRIBER_PRIORITY=100 が追加されている
     let pending = server
         .subscription(rid)
         .expect("テストフィクスチャの前提条件を満たす")
@@ -2463,8 +2461,8 @@ fn multiple_request_updates_are_coalesced() {
     assert_eq!(
         pending
             .expect("テストフィクスチャの前提条件を満たす")
-            .forward(),
-        Some(0)
+            .paused(),
+        Some(1)
     );
     assert_eq!(
         pending
@@ -2473,11 +2471,11 @@ fn multiple_request_updates_are_coalesced() {
         Some(100)
     );
 
-    // 3 回目の REQUEST_UPDATE: FORWARD=1 (前の FORWARD=0 を上書き)
+    // 3 回目の REQUEST_UPDATE: PAUSED=0 (前の PAUSED=1 を上書き)
     let mut params3 = MessageParameters::new();
     params3.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(1),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(0),
     });
     client
         .send_request_update(rid, params3)
@@ -2487,7 +2485,7 @@ fn multiple_request_updates_are_coalesced() {
         .recv_stream_message(rid, upd3)
         .expect("テストフィクスチャの前提条件を満たす");
 
-    // 合体後: FORWARD=1 に上書き、SUBSCRIBER_PRIORITY=100 は保持
+    // 合体後: PAUSED=0 に上書き、SUBSCRIBER_PRIORITY=100 は保持
     let pending = server
         .subscription(rid)
         .expect("テストフィクスチャの前提条件を満たす")
@@ -2497,8 +2495,8 @@ fn multiple_request_updates_are_coalesced() {
     assert_eq!(
         pending
             .expect("テストフィクスチャの前提条件を満たす")
-            .forward(),
-        Some(1)
+            .paused(),
+        Some(0)
     );
     assert_eq!(
         pending
@@ -2519,7 +2517,7 @@ fn multiple_request_updates_are_coalesced() {
     let sub = server
         .subscription(rid)
         .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(sub.forward_state, 1);
+    assert!(!sub.paused, "合体後の PAUSED=0 で購読が再開されること");
     assert_eq!(sub.subscriber_priority, Some(100));
     // pending_update_params はクリアされている
     assert!(sub.pending_update_params.is_none());
@@ -2530,7 +2528,7 @@ fn multiple_request_updates_are_coalesced() {
 #[test]
 fn request_error_discards_coalesced_pending_params() {
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        MessageParameter, MessageParameterValue, PARAM_PAUSED,
     };
     let (mut client, mut server) = establish_pair();
     let rid = client
@@ -2546,11 +2544,11 @@ fn request_error_discards_coalesced_pending_params() {
     let (_, ok_msg) = take_send_on_stream(&mut server);
     recv_response_helper(&mut client, rid, ok_msg);
 
-    // REQUEST_UPDATE で FORWARD=0 を送信
+    // REQUEST_UPDATE で PAUSED=1 を送信
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     client
         .send_request_update(rid, params)
@@ -2585,29 +2583,29 @@ fn request_error_discards_coalesced_pending_params() {
             .pending_update_params
             .is_none()
     );
-    // forward_state は元のまま
-    assert_eq!(
-        server
+    // paused は元のまま
+    assert!(
+        !server
             .subscription(rid)
             .expect("テストフィクスチャの前提条件を満たす")
-            .forward_state,
-        1
+            .paused
     );
 }
 
-/// draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1583: REQUEST_UPDATE で forward 0→1 に変更後、
-/// STOP_SENDING で停止されたサブグループを publisher が再オープンできる
+/// draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1583:
+/// REQUEST_UPDATE で購読が再開された (PAUSED 1→0) 後、STOP_SENDING で停止された
+/// サブグループを publisher が再オープンできる
 #[test]
-fn forward_0_to_1_allows_reopen_of_stopped_by_peer_subgroup() {
+fn resume_allows_reopen_of_stopped_by_peer_subgroup() {
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        MessageParameter, MessageParameterValue, PARAM_PAUSED,
     };
     let (mut client, mut server) = establish_pair();
-    // SUBSCRIBE に FORWARD=0 を指定して購読を確立
+    // SUBSCRIBE に PAUSED=1 を指定して paused で購読を確立
     let mut sub_params = MessageParameters::new();
     sub_params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     let rid = client
         .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), sub_params)
@@ -2623,12 +2621,11 @@ fn forward_0_to_1_allows_reopen_of_stopped_by_peer_subgroup() {
     client
         .recv_stream_message(rid, ok_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(
+    assert!(
         server
             .subscription(rid)
             .expect("テストフィクスチャの前提条件を満たす")
-            .forward_state,
-        0
+            .paused
     );
 
     // publisher (server) がサブグループを開く
@@ -2652,11 +2649,11 @@ fn forward_0_to_1_allows_reopen_of_stopped_by_peer_subgroup() {
         .recv_data_stream_stop_sending(stream_id, None)
         .expect("テストフィクスチャの前提条件を満たす");
 
-    // client が REQUEST_UPDATE で forward=1 に変更
+    // client が REQUEST_UPDATE で PAUSED=0 に変更して購読を再開する
     let mut upd_params = MessageParameters::new();
     upd_params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(1),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(0),
     });
     client
         .send_request_update(rid, upd_params)
@@ -2666,7 +2663,7 @@ fn forward_0_to_1_allows_reopen_of_stopped_by_peer_subgroup() {
         .recv_stream_message(rid, upd_msg)
         .expect("テストフィクスチャの前提条件を満たす");
 
-    // server が REQUEST_OK で合体パラメータを適用 → forward_state が 0→1 になる
+    // server が REQUEST_OK で合体パラメータを適用 → 購読が再開される (PAUSED 1→0)
     server
         .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
         .expect("テストフィクスチャの前提条件を満たす");
@@ -2674,12 +2671,11 @@ fn forward_0_to_1_allows_reopen_of_stopped_by_peer_subgroup() {
     client
         .recv_stream_message(rid, reqok)
         .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(
-        server
+    assert!(
+        !server
             .subscription(rid)
             .expect("テストフィクスチャの前提条件を満たす")
-            .forward_state,
-        1
+            .paused
     );
 
     // publisher (server) が同じサブグループを再オープンできる (draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1583)
@@ -2726,12 +2722,12 @@ fn peer_request_update_from_publisher_on_subscribe_closes_session() {
     assert_eq!(client.state(), SessionState::Closing);
 }
 
-/// send_request_update に FORWARD=2 を渡すと SESSION_PROTOCOL_VIOLATION が返り、
+/// send_request_update に PAUSED=2 を渡すと SESSION_PROTOCOL_VIOLATION が返り、
 /// 値の検証失敗時に delivery timeout が適用されないこと
 #[test]
-fn send_request_update_rejects_invalid_forward_value() {
+fn send_request_update_rejects_invalid_paused_value() {
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        MessageParameter, MessageParameterValue, PARAM_PAUSED,
     };
     let (mut client, mut server) = establish_pair();
     let rid = client
@@ -2748,11 +2744,11 @@ fn send_request_update_rejects_invalid_forward_value() {
     client
         .recv_stream_message(rid, ok_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // delivery timeout と値域違反の FORWARD=2 を混在させる
-    // (修正前は delivery timeout が先に適用され、FORWARD 検証失敗後に残留していた)
+    // delivery timeout と値域違反の PAUSED=2 を混在させる
+    // (修正前は delivery timeout が先に適用され、PAUSED 検証失敗後に残留していた)
     let mut params = delivery_timeout_params(100);
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
+        param_type: PARAM_PAUSED,
         value: MessageParameterValue::Uint8(2),
     });
     let err = client.send_request_update(rid, params).unwrap_err();
@@ -2765,9 +2761,9 @@ fn send_request_update_rejects_invalid_forward_value() {
         sub.delivery_timeouts.effective_object_ms, None,
         "値の検証失敗時に delivery timeout が適用されないこと"
     );
-    assert_eq!(
-        sub.forward_state, 1,
-        "値の検証失敗時に forward_state が更新されないこと (SUBSCRIBE 時のデフォルト 1 のまま)"
+    assert!(
+        !sub.paused,
+        "値の検証失敗時に paused が更新されないこと (SUBSCRIBE 時の既定 unpaused のまま)"
     );
     // REQUEST_UPDATE が送信イベントとして積まれないこと
     while let Some(e) = client.poll_event() {
@@ -2778,7 +2774,7 @@ fn send_request_update_rejects_invalid_forward_value() {
 }
 
 /// send_request_update に不正な Location Filter を渡すと SESSION_PROTOCOL_VIOLATION が返り、
-/// 値の検証失敗時に delivery timeout と forward_state が適用されないこと
+/// 値の検証失敗時に delivery timeout と paused が適用されないこと
 ///
 /// draft-ietf-moq-transport-22 §3.3.1 (Location Filters): 定義された serialization と
 /// 一致しない LOCATION_FILTER は受信側の MUST で session close になるが、ローカル API の
@@ -2786,8 +2782,8 @@ fn send_request_update_rejects_invalid_forward_value() {
 #[test]
 fn send_request_update_rejects_invalid_location_filter() {
     use shiguredo_moqt::message_parameter::{
-        LocationFilter, MessageParameter, MessageParameterValue, PARAM_FORWARD,
-        PARAM_LOCATION_FILTER,
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
+        PARAM_PAUSED,
     };
     let (mut client, mut server) = establish_pair();
     let rid = client
@@ -2804,14 +2800,14 @@ fn send_request_update_rejects_invalid_location_filter() {
     client
         .recv_stream_message(rid, ok_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // delivery timeout + FORWARD=0 (正常値) + EndGroupDelta がオーバーフローする不正な LOCATION_FILTER を混在させる
-    // (修正前は delivery timeout と forward_state=0 が先に適用され、
-    // Location Filter 検証失敗後に両方が残留していた。forward_state は SUBSCRIBE 時点で
-    // デフォルト 1 のため、適用されなければ 1 のまま残ることで判別できる)
+    // delivery timeout + PAUSED=1 (正常値) + EndGroupDelta がオーバーフローする不正な
+    // LOCATION_FILTER を混在させる (修正前は delivery timeout と paused が先に適用され、
+    // Location Filter 検証失敗後に両方が残留していた。paused は SUBSCRIBE 時点で
+    // 既定 unpaused のため、適用されなければ unpaused のまま残ることで判別できる)
     let mut params = delivery_timeout_params(100);
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
@@ -2825,8 +2821,8 @@ fn send_request_update_rejects_invalid_location_filter() {
     });
     let err = client.send_request_update(rid, params).unwrap_err();
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
-    // 検証エラー時に delivery timeout と forward_state の両方が適用されていないこと
-    // (forward_state は SUBSCRIBE 時のデフォルト 1 のまま更新されない)
+    // 検証エラー時に delivery timeout と paused の両方が適用されていないこと
+    // (paused は SUBSCRIBE 時の既定 unpaused のまま更新されない)
     let sub = client
         .subscription(rid)
         .expect("テストフィクスチャの前提条件を満たす");
@@ -2834,10 +2830,7 @@ fn send_request_update_rejects_invalid_location_filter() {
         sub.delivery_timeouts.effective_object_ms, None,
         "値の検証失敗時に delivery timeout が適用されないこと"
     );
-    assert_eq!(
-        sub.forward_state, 1,
-        "値の検証失敗時に forward_state が更新されないこと"
-    );
+    assert!(!sub.paused, "値の検証失敗時に paused が更新されないこと");
     // REQUEST_UPDATE が送信イベントとして積まれないこと
     while let Some(e) = client.poll_event() {
         if matches!(e, SessionEvent::SendOnStream { .. }) {
@@ -2857,13 +2850,12 @@ fn send_request_update_rejects_invalid_location_filter() {
         Some(200),
         "正当な REQUEST_UPDATE で delivery timeout が適用されること"
     );
-    assert_eq!(
-        client
+    assert!(
+        !client
             .subscription(rid)
             .expect("テストフィクスチャの前提条件を満たす")
-            .forward_state,
-        1,
-        "正当な REQUEST_UPDATE でも forward_state は更新されないこと (FORWARD 未指定)"
+            .paused,
+        "正当な REQUEST_UPDATE でも paused は更新されないこと (PAUSED 未指定)"
     );
 }
 
@@ -2871,8 +2863,8 @@ fn send_request_update_rejects_invalid_location_filter() {
 #[test]
 fn send_request_update_applies_valid_location_filter() {
     use shiguredo_moqt::message_parameter::{
-        LocationFilter, MessageParameter, MessageParameterValue, PARAM_FORWARD,
-        PARAM_LOCATION_FILTER,
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
+        PARAM_PAUSED,
     };
     let (mut client, mut server) = establish_pair();
     let rid = client
@@ -2889,11 +2881,11 @@ fn send_request_update_applies_valid_location_filter() {
     client
         .recv_stream_message(rid, ok_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // delivery timeout + FORWARD=0 + NextObject (Type 0x05) の正常 filter を混在させる
+    // delivery timeout + PAUSED=1 + NextObject (Type 0x05) の正常 filter を混在させる
     let mut params = delivery_timeout_params(100);
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
@@ -2910,9 +2902,9 @@ fn send_request_update_applies_valid_location_filter() {
         Some(100),
         "正常な REQUEST_UPDATE で delivery timeout が適用されること"
     );
-    assert_eq!(
-        sub.forward_state, 0,
-        "正常な REQUEST_UPDATE で FORWARD=0 が適用されること"
+    assert!(
+        sub.paused,
+        "正常な REQUEST_UPDATE で PAUSED=1 が適用されること"
     );
     assert_eq!(
         sub.filter,
@@ -2929,8 +2921,8 @@ fn send_request_update_applies_valid_location_filter() {
 #[test]
 fn send_request_update_no_filter_location_filter_removes_filter() {
     use shiguredo_moqt::message_parameter::{
-        LocationFilter, MessageParameter, MessageParameterValue, PARAM_FORWARD,
-        PARAM_LOCATION_FILTER,
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
+        PARAM_PAUSED,
     };
     let (mut client, mut server) = establish_pair();
     let rid = client
@@ -2982,8 +2974,8 @@ fn send_request_update_no_filter_location_filter_removes_filter() {
     // フィルタなしの更新では既存フィルタが維持される (unchanged)
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(1),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(0),
     });
     client
         .send_request_update(rid, params)
@@ -3215,13 +3207,13 @@ fn recv_request_update_set_after_removed_wins() {
     );
 }
 
-/// FORWARD と Location Filter の両方が不正な場合は、検証順序 (forward → filter) に従って
-/// forward 検証が先に失敗すること
+/// PAUSED と Location Filter の両方が不正な場合は、検証順序 (PAUSED → filter) に従って
+/// PAUSED 検証が先に失敗すること
 #[test]
-fn send_request_update_rejects_invalid_forward_before_invalid_filter() {
+fn send_request_update_rejects_invalid_paused_before_invalid_filter() {
     use shiguredo_moqt::message_parameter::{
-        LocationFilter, MessageParameter, MessageParameterValue, PARAM_FORWARD,
-        PARAM_LOCATION_FILTER,
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
+        PARAM_PAUSED,
     };
     let (mut client, mut server) = establish_pair();
     let rid = client
@@ -3238,10 +3230,10 @@ fn send_request_update_rejects_invalid_forward_before_invalid_filter() {
     client
         .recv_stream_message(rid, ok_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // FORWARD=2 (値域外) + EndGroupDelta がオーバーフローする不正な LOCATION_FILTER の両方を混在させる
+    // PAUSED=2 (値域外) + EndGroupDelta がオーバーフローする不正な LOCATION_FILTER の両方を混在させる
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
+        param_type: PARAM_PAUSED,
         value: MessageParameterValue::Uint8(2),
     });
     params.push(MessageParameter {
@@ -3256,10 +3248,10 @@ fn send_request_update_rejects_invalid_forward_before_invalid_filter() {
     });
     let err = client.send_request_update(rid, params).unwrap_err();
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
-    // forward 検証が先に失敗するため、filter 検証のエラーメッセージにはならないこと
+    // PAUSED 検証が先に失敗するため、filter 検証のエラーメッセージにはならないこと
     assert_eq!(
-        err.reason, "invalid forward value",
-        "検証順序 (forward → filter) が維持されること"
+        err.reason, "invalid paused value",
+        "検証順序 (PAUSED → filter) が維持されること"
     );
 }
 
@@ -3581,17 +3573,17 @@ fn subscribe_request_update_with_subgroup_filter_accepted() {
         .expect("SUBGROUP_FILTER は SUBSCRIBE の REQUEST_UPDATE で許可される");
 }
 
-/// FORWARD 値域外 (2) を含む REQUEST_UPDATE の受信で、`Err` と
+/// PAUSED 値域外 (2) を含む REQUEST_UPDATE の受信で、`Err` と
 /// `CloseSession(PROTOCOL_VIOLATION)` の両方が発生し、`pending_update_params` に保存されず
 /// `RequestUpdateReceived` も発火しないこと
 ///
-/// draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter): "If an endpoint receives a
-/// value outside this range, it MUST close the session with PROTOCOL_VIOLATION."
+/// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): "If an endpoint receives a
+/// value outside this range, it MUST close the session with INVALID_PARAMETER."
 /// 受信時に値域検証するため、`pending_update_params` への保存 (遅延検証化) が行われない。
 #[test]
-fn peer_request_update_with_invalid_forward_closes_session() {
+fn peer_request_update_with_invalid_paused_closes_session() {
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        MessageParameter, MessageParameterValue, PARAM_PAUSED,
     };
     let (mut client, mut server) = establish_pair();
     // client=publisher が PUBLISH を送信、server=subscriber が REQUEST_OK を返して Established
@@ -3615,10 +3607,10 @@ fn peer_request_update_with_invalid_forward_closes_session() {
     client
         .recv_stream_message(rid, ok_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // FORWARD=2 (値域外) を含む REQUEST_UPDATE を client (publisher 役) に直接流し込む
+    // PAUSED=2 (値域外) を含む REQUEST_UPDATE を client (publisher 役) に直接流し込む
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
+        param_type: PARAM_PAUSED,
         value: MessageParameterValue::Uint8(2),
     });
     let err = client
@@ -3629,7 +3621,7 @@ fn peer_request_update_with_invalid_forward_closes_session() {
                 parameters: params,
             }),
         )
-        .expect_err("値域外 FORWARD は PROTOCOL_VIOLATION になる");
+        .expect_err("値域外 PAUSED は PROTOCOL_VIOLATION になる");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
     // pending_update_params に保存されないこと (状態非汚染)
     assert!(
@@ -3934,20 +3926,20 @@ fn publish_originated_request_update_ok_round_trip_emits_publish_kind() {
     );
 }
 
-/// PUBLISH 起点で publisher (initiator) が Forward State を 0→1 へ変更する REQUEST_UPDATE に
-/// REQUEST_OK を返すと、STOP_SENDING で記録した再オープン禁止が解除される
+/// PUBLISH 起点で publisher (initiator) が購読を再開する (PAUSED 1→0)
+/// REQUEST_UPDATE に REQUEST_OK を返すと、STOP_SENDING で記録した再オープン禁止が解除される
 /// (draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE), §11.3.2 (Closing Subgroup Streams))。
 #[test]
-fn publish_originated_forward_0_to_1_allows_reopen_of_stopped_by_peer_subgroup() {
+fn publish_originated_resume_allows_reopen_of_stopped_by_peer_subgroup() {
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        MessageParameter, MessageParameterValue, PARAM_PAUSED,
     };
     let (mut client, mut server) = establish_pair();
-    // client=publisher が FORWARD=0 の PUBLISH を送信し、server=subscriber が PUBLISH_OK を返す
+    // client=publisher が PAUSED=1 の PUBLISH を送信し、server=subscriber が PUBLISH_OK を返す
     let mut pub_params = MessageParameters::new();
     pub_params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     let rid = client
         .send_publish(
@@ -3969,12 +3961,11 @@ fn publish_originated_forward_0_to_1_allows_reopen_of_stopped_by_peer_subgroup()
     client
         .recv_stream_message(rid, pubok_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(
+    assert!(
         client
             .subscription(rid)
             .expect("テストフィクスチャの前提条件を満たす")
-            .forward_state,
-        0
+            .paused
     );
 
     // publisher (client) がサブグループを開く
@@ -4007,11 +3998,11 @@ fn publish_originated_forward_0_to_1_allows_reopen_of_stopped_by_peer_subgroup()
     );
     assert_eq!(client.state(), SessionState::Established);
 
-    // subscriber (responder) が REQUEST_UPDATE で forward=1 に変更する
+    // subscriber (responder) が REQUEST_UPDATE で PAUSED=0 に変更し購読を再開する
     let mut upd_params = MessageParameters::new();
     upd_params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(1),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(0),
     });
     server
         .send_request_update(rid, upd_params)
@@ -4021,7 +4012,7 @@ fn publish_originated_forward_0_to_1_allows_reopen_of_stopped_by_peer_subgroup()
         .recv_stream_message(rid, upd_msg)
         .expect("テストフィクスチャの前提条件を満たす");
 
-    // publisher (initiator) が REQUEST_OK で合体パラメータを適用 → forward_state が 0→1 になる
+    // publisher (initiator) が REQUEST_OK で合体パラメータを適用 → 購読が再開される
     client
         .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
         .expect("PUBLISH 起点の publisher は REQUEST_UPDATE_OK を送信できること");
@@ -4029,20 +4020,19 @@ fn publish_originated_forward_0_to_1_allows_reopen_of_stopped_by_peer_subgroup()
     server
         .recv_stream_message(rid, reqok_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(
-        client
+    assert!(
+        !client
             .subscription(rid)
             .expect("テストフィクスチャの前提条件を満たす")
-            .forward_state,
-        1,
-        "受理した REQUEST_UPDATE の FORWARD が適用されること"
+            .paused,
+        "受理した REQUEST_UPDATE の PAUSED が適用されること"
     );
 
     // publisher (client) が同じサブグループを再オープンできる
     // (再オープン成功自体が再オープン禁止の解除の裏付けになる)
     client
         .send_subgroup_header(stream_id2, rid, &header)
-        .expect("Forward 0→1 の受理後は同じサブグループを再オープンできること");
+        .expect("購読の再開の受理後は同じサブグループを再オープンできること");
     client
         .send_subgroup_object(stream_id2, 0, None)
         .expect("再オープンした stream ではオブジェクト送信できること");

@@ -11,8 +11,8 @@ use shiguredo_moqt::error::{
     PUBLISH_DONE_UPDATE_FAILED, REQUEST_INVALID_FILTER, SESSION_TOO_MANY_REQUEST_UPDATES,
 };
 use shiguredo_moqt::message_parameter::{
-    MessageParameter, MessageParameterValue, PARAM_FILL_PARAMETERS, PARAM_FORWARD,
-    PARAM_OBJECT_PROPERTY_FILTER, PARAM_OBJECTID_FILTER, PARAM_SUBGROUP_FILTER,
+    MessageParameter, MessageParameterValue, PARAM_FILL_PARAMETERS, PARAM_OBJECT_PROPERTY_FILTER,
+    PARAM_OBJECTID_FILTER, PARAM_PAUSED, PARAM_SUBGROUP_FILTER,
 };
 use shiguredo_moqt::session::types::SendRequestError;
 
@@ -414,54 +414,52 @@ fn failed_request_update_send_does_not_consume_credit() {
     );
 }
 
-/// outstanding 満杯時の TOO_MANY_REQUEST_UPDATES 拒否で `forward_state` が変更されないこと
+/// outstanding 満杯時の TOO_MANY_REQUEST_UPDATES 拒否で `paused` が変更されないこと
 ///
-/// `send_update_for_subscription` は FORWARD パラメータで `forward_state` を楽観的に更新する
+/// `send_update_for_subscription` は PAUSED パラメータで `paused` を楽観的に更新する
 /// (draft §9.5)。上限チェックが検証の後方にあると、Err を返す前に state が更新済みになる
 /// 不整合が生じるため、チェックは検証の前に残している。その回帰防御。
 #[test]
-fn too_many_request_updates_does_not_mutate_forward_state() {
+fn too_many_request_updates_does_not_mutate_paused_state() {
     let (mut client, mut server, rid) =
         establish_subscribe_with(SetupOptions::new(), opts_with(0x08, 1));
 
-    // 1 通目: FORWARD=0 で成功し、楽観的に forward_state が 0 になる
+    // 1 通目: PAUSED=1 で成功し、楽観的に paused になる
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     client
         .send_request_update(rid, params.clone())
         .expect("1 通目は peer MAX 以内");
     let (_, upd) = take_send_on_stream(&mut client);
     assert!(matches!(upd, ControlMessage::RequestUpdate(_)));
-    assert_eq!(
+    assert!(
         client
             .subscription(rid)
             .expect("subscription が存在する")
-            .forward_state,
-        0,
-        "1 通目の FORWARD=0 で forward_state が 0 に更新されること"
+            .paused,
+        "1 通目の PAUSED=1 で paused に更新されること"
     );
 
-    // 2 通目: FORWARD=1 で TOO_MANY_REQUEST_UPDATES → forward_state は 0 のまま
+    // 2 通目: PAUSED=0 で TOO_MANY_REQUEST_UPDATES → paused のまま
     let mut params2 = MessageParameters::new();
     params2.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(1),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(0),
     });
     let err = client
         .send_request_update(rid, params2)
         .expect_err("2 通目は peer MAX_REQUEST_UPDATES 超過");
     assert_eq!(err.code, SESSION_TOO_MANY_REQUEST_UPDATES);
     assert_no_send_on_stream(&mut client);
-    assert_eq!(
+    assert!(
         client
             .subscription(rid)
             .expect("subscription が存在する")
-            .forward_state,
-        0,
-        "TOO_MANY_REQUEST_UPDATES 拒否では forward_state が変更されないこと"
+            .paused,
+        "TOO_MANY_REQUEST_UPDATES 拒否では paused が変更されないこと"
     );
 
     // 拒否時にクレジットが加算されていないことの間接検証:

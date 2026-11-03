@@ -91,11 +91,11 @@ fn fetch_context_range_filter_closes_session() {
     assert_scope_violation_closes_session(&mut server, rid);
 }
 
-/// FORWARD 値域外と Range Filter 違反が同一 REQUEST_UPDATE にある場合は
-/// FORWARD の MUST close (§9.20.18) が優先され、INVALID_FILTER の REQUEST_ERROR に
-/// 格下げされない
+/// PAUSED 値域外と Range Filter 違反が同一 REQUEST_UPDATE にある場合は
+/// PAUSED の MUST close (draft-ietf-moq-transport-23 §9.19.18) が優先され、
+/// INVALID_FILTER の REQUEST_ERROR に格下げされない
 #[test]
-fn invalid_forward_takes_precedence_over_range_filter_rejection() {
+fn invalid_paused_takes_precedence_over_range_filter_rejection() {
     let (mut client, mut server) = establish_pair();
     let rid = client
         .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
@@ -110,16 +110,16 @@ fn invalid_forward_takes_precedence_over_range_filter_rejection() {
     let (_, ok_msg) = take_send_on_stream(&mut server);
     recv_response_helper(&mut client, rid, ok_msg);
 
-    // FORWARD=2 (値域外) と Range Filter を同時に載せた REQUEST_UPDATE を注入する
+    // PAUSED=2 (値域外) と Range Filter を同時に載せた REQUEST_UPDATE を注入する
     let mut params = one_range_subgroup_filter();
     params.push(shiguredo_moqt::message_parameter::MessageParameter {
-        param_type: shiguredo_moqt::message_parameter::PARAM_FORWARD,
+        param_type: shiguredo_moqt::message_parameter::PARAM_PAUSED,
         value: shiguredo_moqt::message_parameter::MessageParameterValue::Uint8(2),
     });
 
     let err = server
         .recv_stream_message(rid, inject_request_update(rid + 2, params))
-        .expect_err("FORWARD 値域外は PROTOCOL_VIOLATION になる");
+        .expect_err("PAUSED 値域外は PROTOCOL_VIOLATION になる");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
 
     let mut saw_close = false;
@@ -130,7 +130,7 @@ fn invalid_forward_takes_precedence_over_range_filter_rejection() {
                 ..
             } => {
                 panic!(
-                    "FORWARD 値域外を REQUEST_ERROR に格下げしてはいけない: error_code={:#x}",
+                    "PAUSED 値域外を REQUEST_ERROR に格下げしてはいけない: error_code={:#x}",
                     err.error_code
                 );
             }

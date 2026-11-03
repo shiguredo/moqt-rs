@@ -371,7 +371,7 @@ fn cancelled_stream_reset_allows_subgroup_reopen() {
 ///
 /// 破棄分岐でも `SubgroupTracker` を `StoppedByPeer` にしないとエントリが `Open` の
 /// まま残り、draft §11.3.2 (Closing Subgroup Streams) / Appendix A.5
-/// (REQUEST_UPDATE の Forward State 0→1) による再オープンが open 衝突として
+/// (REQUEST_UPDATE の PAUSED 1→0 による購読の再開) による再オープンが open 衝突として
 /// `PROTOCOL_VIOLATION` になる。
 #[test]
 fn cancelled_stream_stop_sending_allows_subgroup_reopen() {

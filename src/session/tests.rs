@@ -1,7 +1,7 @@
 use super::auth_token_cache::AuthTokenCache;
 use super::core::Session;
 use super::request_id::{RequestIdGenerator, RequestIdTracker};
-use super::subscription::validation::extract_forward_state;
+use super::subscription::validation::extract_paused_state;
 use super::types::*;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -121,10 +121,14 @@ fn peer_request_tracker_rejects_duplicate() {
     assert_eq!(err.code, SESSION_INVALID_REQUEST_ID);
 }
 
+/// PAUSED パラメータを省略した SUBSCRIBE / PUBLISH は unpaused で始まる
+///
+/// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): 省略時の既定値は 0
+/// (unpaused)。REQUEST_UPDATE / PUBLISH_STATE_NOTIFY の省略だけが現在値の維持である。
 #[test]
-fn forward_parameter_default_is_one() {
+fn paused_parameter_default_is_unpaused() {
     let params = MessageParameters::new();
-    assert_eq!(extract_forward_state(&params), 1);
+    assert!(!extract_paused_state(&params));
 }
 
 /// forget_subscription が datagram の object header 提供完了追跡エントリを掃除する
@@ -244,7 +248,7 @@ fn forget_subscription_cleans_datagram_header_complete_entries() {
 fn forget_subscription_cleans_request_update_credit_entries() {
     use crate::error::REQUEST_INTERNAL_ERROR;
     use crate::message::{ControlMessage, ReasonPhrase, RequestOk, RequestUpdate, Setup};
-    use crate::message_parameter::{MessageParameter, MessageParameterValue, PARAM_FORWARD};
+    use crate::message_parameter::{MessageParameter, MessageParameterValue, PARAM_PAUSED};
     use crate::parameter::{SetupOption, SetupOptionValue, SetupOptions};
     use crate::session::types::SessionState;
     use crate::track_properties::TrackProperties;
@@ -288,10 +292,10 @@ fn forget_subscription_cleans_request_update_credit_entries() {
         )
         .expect("テストフィクスチャの前提条件を満たす");
 
-    // 送信側エントリ: REQUEST_UPDATE を送信する (subscription で許可される FORWARD を載せる)
+    // 送信側エントリ: REQUEST_UPDATE を送信する (subscription で許可される PAUSED を載せる)
     let mut update_params = MessageParameters::new();
     update_params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
+        param_type: PARAM_PAUSED,
         value: MessageParameterValue::Uint8(1),
     });
     client
@@ -475,7 +479,7 @@ fn forget_fetch_cleans_request_update_credit_entries() {
 #[test]
 fn forget_subscription_does_not_clean_credit_entries_when_not_cleanup_ready() {
     use crate::message::{ControlMessage, RequestOk, RequestUpdate, Setup};
-    use crate::message_parameter::{MessageParameter, MessageParameterValue, PARAM_FORWARD};
+    use crate::message_parameter::{MessageParameter, MessageParameterValue, PARAM_PAUSED};
     use crate::parameter::{SetupOption, SetupOptionValue, SetupOptions};
     use crate::session::types::SessionState;
     use crate::track_properties::TrackProperties;
@@ -522,7 +526,7 @@ fn forget_subscription_does_not_clean_credit_entries_when_not_cleanup_ready() {
     // エントリを生成する (送信側: REQUEST_UPDATE 送信、受信側: REQUEST_UPDATE 受信)
     let mut update_params = MessageParameters::new();
     update_params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
+        param_type: PARAM_PAUSED,
         value: MessageParameterValue::Uint8(1),
     });
     client

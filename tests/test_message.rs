@@ -1064,11 +1064,11 @@ mod publish_state_notify {
     use shiguredo_moqt::message::PublishStateNotify;
     use shiguredo_moqt::message_parameter::LocationFilter;
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_EXPIRES, PARAM_FORWARD,
-        PARAM_LARGEST_OBJECT, PARAM_LOCATION_FILTER,
+        MessageParameter, MessageParameterValue, PARAM_EXPIRES, PARAM_LARGEST_OBJECT,
+        PARAM_LOCATION_FILTER, PARAM_PAUSED,
     };
 
-    /// 許可パラメータ群 (FORWARD / LOCATION_FILTER / LARGEST_OBJECT) を作る
+    /// 許可パラメータ群 (PAUSED / LOCATION_FILTER / LARGEST_OBJECT) を作る
     /// (encode 時に型昇順へソートされるため、昇順で積む)
     fn sample_params() -> MessageParameters {
         let mut params = MessageParameters::new();
@@ -1080,8 +1080,8 @@ mod publish_state_notify {
             },
         });
         params.push(MessageParameter {
-            param_type: PARAM_FORWARD,
-            value: MessageParameterValue::Uint8(0),
+            param_type: PARAM_PAUSED,
+            value: MessageParameterValue::Uint8(1),
         });
         params.push(MessageParameter {
             param_type: PARAM_LOCATION_FILTER,
@@ -1138,11 +1138,10 @@ mod request_ok {
     use shiguredo_moqt::message::RequestOk;
     use shiguredo_moqt::message_parameter::LocationFilter;
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_EXPIRES, PARAM_FORWARD,
-        PARAM_LARGEST_OBJECT, PARAM_LOCATION_FILTER, PARAM_NEW_GROUP_REQUEST,
-        PARAM_OBJECT_DELIVERY_TIMEOUT, PARAM_OBJECT_PROPERTY_FILTER, PARAM_OBJECTID_FILTER,
-        PARAM_PRIORITY_FILTER, PARAM_SUBGROUP_DELIVERY_TIMEOUT, PARAM_SUBGROUP_FILTER,
-        PARAM_SUBSCRIBER_PRIORITY,
+        MessageParameter, MessageParameterValue, PARAM_EXPIRES, PARAM_LARGEST_OBJECT,
+        PARAM_LOCATION_FILTER, PARAM_NEW_GROUP_REQUEST, PARAM_OBJECT_DELIVERY_TIMEOUT,
+        PARAM_OBJECT_PROPERTY_FILTER, PARAM_OBJECTID_FILTER, PARAM_PAUSED, PARAM_PRIORITY_FILTER,
+        PARAM_SUBGROUP_DELIVERY_TIMEOUT, PARAM_SUBGROUP_FILTER, PARAM_SUBSCRIBER_PRIORITY,
     };
 
     /// 和集合外のパラメータを含む REQUEST_OK は codec 層で PROTOCOL_VIOLATION になる
@@ -1165,7 +1164,7 @@ mod request_ok {
                 MessageParameterValue::VarInt(1),
                 &[0x01],
             ),
-            (PARAM_FORWARD, MessageParameterValue::Uint8(1), &[0x01]),
+            (PARAM_PAUSED, MessageParameterValue::Uint8(1), &[0x01]),
             (
                 PARAM_SUBSCRIBER_PRIORITY,
                 MessageParameterValue::Uint8(1),

@@ -2,7 +2,7 @@
 //!
 //! Joining FETCH の廃止に伴い、SUBSCRIBE / REQUEST_UPDATE の FILL_PARAMETERS
 //! パラメータ (Type 0x23) が fill fetch stream を要求する。publisher は
-//! Forward State 1 で FILL_PARAMETERS 付きメッセージを処理したときに
+//! unpaused (PAUSED=0) で FILL_PARAMETERS 付きメッセージを処理したときに
 //! fill fetch stream を開く (§3.4.1 (Opening and Closing Fill Fetch Streams))。
 //! 将来 draft 側で変更される可能性がある。
 
@@ -125,10 +125,11 @@ fn should_open_fill_stream(
 impl Session {
     /// FILL_PARAMETERS 付きメッセージ処理時の fill fetch stream 開設判定と通知
     ///
-    /// draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams):
-    /// Forward State 1 で FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE を処理し、
+    /// draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams) /
+    /// draft-ietf-moq-transport-23 §3.1.1 (Pausing Subscriptions):
+    /// unpaused (PAUSED=0) で FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE を処理し、
     /// fill range が空でなく Largest Object より後に始まらない場合に
-    /// `SessionEvent::OpenFillFetchStream` を発火する。Forward State 0 での運搬や
+    /// `SessionEvent::OpenFillFetchStream` を発火する。paused (PAUSED=1) での運搬や
     /// FILL なし REQUEST_UPDATE では発火しない。
     /// `fill_request_id` は fill fetch stream の FETCH_HEADER に載せる起因メッセージの
     /// Request ID である (SUBSCRIBE / PUBLISH 起因なら subscription の Request ID、
@@ -143,9 +144,12 @@ impl Session {
         subscription_request_id: u64,
         parameters: &MessageParameters,
         filter_view: Option<LocationFilter>,
-        forward_state: u8,
+        paused: bool,
     ) {
-        if forward_state != 1 {
+        // draft-ietf-moq-transport-23 §3.1.1 (Pausing Subscriptions): paused な
+        // subscription では publisher が Object を送らないため、fill fetch stream も
+        // 開かない (ライブ配送と同じ PAUSED の意味で判定する)
+        if paused {
             return;
         }
         let Some(fill) = parameters.fill_parameters() else {

@@ -319,7 +319,7 @@ FETCH 応答の遅延 data stream は破棄対象 stream として吸収し、
 fill fetch stream は subscription への帰属を保ったまま受理する (破棄後の終端通知は no-op)。peer が GOAWAY / reset を観測する前に
 送った応答 (SUBSCRIBE_OK / REQUEST_OK / REQUEST_ERROR / FETCH_OK / PUBLISH_DONE) と
 REQUEST_UPDATE / PUBLISH_STATE_NOTIFY は、各ハンドラがそのメッセージに該当する仕様の検証
-(送信者・種別・自側の役割・パラメータスコープ・FORWARD・Track Alias・Request ID・
+(送信者・種別・自側の役割・パラメータスコープ・PAUSED・Track Alias・Request ID・
 MAX_REQUEST_UPDATES・auth token・End Location) を行ったうえで、状態遷移せず受理する
 (subscription の遅延 REQUEST_ERROR は呼び出し元の §9.4.1 Redirect 検証のみで受理する)。遅延した REQUEST_ERROR では `RequestErrorReceived`
 のみを通知する (他の応答は状態遷移もイベント発行もしない)。ローカル終端済みの REQUEST_UPDATE では
@@ -815,7 +815,7 @@ fn subgroup_delivery_timeout(&self) -> Option<u64>          // 0x06
 fn expires(&self) -> Option<u64>                            // 0x08
 fn largest_object(&self) -> Option<(u64, u64)>              // 0x09
 fn fill_timeout(&self) -> Option<u64>                       // 0x0A
-fn forward(&self) -> Option<u8>                             // 0x10
+fn paused(&self) -> Option<u8>                              // 0x11
 fn subscriber_priority(&self) -> Option<u8>                 // 0x20
 fn location_filter_typed(&self) -> Result<Option<LocationFilter>, MessageError>  // 0x21
 fn location_filter_update(&self) -> Result<LocationFilterUpdate, MessageError>  // 0x21
@@ -836,7 +836,7 @@ fn include_properties(&self) -> Option<u8>                  // 0x35
 | `PARAM_EXPIRES` | `0x08` |
 | `PARAM_LARGEST_OBJECT` | `0x09` |
 | `PARAM_FILL_TIMEOUT` | `0x0A` |
-| `PARAM_FORWARD` | `0x10` |
+| `PARAM_PAUSED` | `0x11` |
 | `PARAM_SUBSCRIBER_PRIORITY` | `0x20` |
 | `PARAM_LOCATION_FILTER` | `0x21` |
 | `PARAM_GROUP_ORDER` | `0x22` |

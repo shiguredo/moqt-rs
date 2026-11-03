@@ -335,8 +335,8 @@ impl Session {
     ///
     /// publisher 側 subscription が確立済みであること、`track_alias` が subscription と
     /// 一致すること、同一 subgroup を再オープンしていないことを検証する。STOP_SENDING を
-    /// 受けた Subgroup (draft-ietf-moq-transport-22 §11.3.2) は Forward State 0→1 の
-    /// REQUEST_UPDATE が受理されるまで再オープンを拒否する。未解決 FirstObjectId の停止
+    /// 受けた Subgroup (draft-ietf-moq-transport-22 §11.3.2) は購読を再開する
+    /// REQUEST_UPDATE (PAUSED が 1 から 0 へ変わる) が受理されるまで再オープンを拒否する。未解決 FirstObjectId の停止
     /// (`None`) は subgroup_id を同定できないため Explicit / Zero の新規 open とは照合せず、
     /// FirstObjectId の解決経路 (`send_subgroup_object`) のみを拒否する。stream は
     /// open 直後に `published_stream_count` へ反映される。
@@ -390,7 +390,8 @@ impl Session {
         };
         if let Some(subgroup_id) = subgroup_id {
             // draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams): STOP_SENDING を
-            // 受けた Subgroup の再オープンは Forward State 0→1 の REQUEST_UPDATE 受理後のみ
+            // 受けた Subgroup の再オープンは、購読を再開する REQUEST_UPDATE
+            // (PAUSED が 1 から 0 へ変わる) の受理後のみ
             if self.outgoing_subgroup_reopen_blocked(
                 track_alias,
                 header.group_id,
@@ -398,7 +399,7 @@ impl Session {
             ) {
                 return Err(SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
-                    "outgoing subgroup stream was stopped by peer; Forward State change 0 to 1 is required",
+                    "outgoing subgroup stream was stopped by peer; a REQUEST_UPDATE that resumes the subscription (PAUSED 1 to 0) is required",
                 ));
             }
             // 自側 publisher の送信経路であり §12.1 (Malformed Tracks) の受信側検出では
@@ -503,7 +504,8 @@ impl Session {
             .into());
         }
         // draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams): STOP_SENDING を
-        // 受けた Subgroup の再オープンは Forward State 0→1 の REQUEST_UPDATE 受理後のみ。
+        // 受けた Subgroup の再オープンは、購読を再開する REQUEST_UPDATE
+        // (PAUSED が 1 から 0 へ変わる) の受理後のみ。
         // FirstObjectId の subgroup_id 解決経路は filter 評価より前に拒否し、拒否される
         // 呼び出しで内部状態を汚染しない。未解決の停止 (`None`) と解決先 ID の停止
         // (`Some(object_id)`) の両方を確認する
@@ -516,11 +518,12 @@ impl Session {
             // §11.3.2 が禁じる対象ではないため gating しない (Explicit と同様)
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
-                "outgoing subgroup stream was stopped by peer; Forward State change 0 to 1 is required",
+                "outgoing subgroup stream was stopped by peer; a REQUEST_UPDATE that resumes the subscription (PAUSED 1 to 0) is required",
             )
             .into());
         }
-        // draft §3.3.3 (Combining Filters): Pass = Forward AND Location Filters AND Range Filters。
+        // draft-ietf-moq-transport-23 §3.3.3 (Combining Filters):
+        // Pass = (NOT Paused) AND Location Filters AND Range Filters。
         // 通らない Object は送信を拒否する (§3.3.3 の "The publisher MUST forward only objects
         // that pass all filters.")。filter 評価は FirstObjectId 解決より前に実行し、拒否される
         // 呼び出しで内部状態 (`my_subgroups.open` / `stream.subgroup_id` 代入) を汚染しない。
@@ -914,8 +917,8 @@ impl Session {
     ///
     /// subgroup stream に対する `STOP_SENDING` は reopen prohibition 用 tracker に
     /// 反映し、あわせて Session の再オープン禁止エントリ (`stopped_outgoing_subgroups`) に
-    /// 記録する (draft-ietf-moq-transport-22 §11.3.2)。Forward State 0→1 の
-    /// REQUEST_UPDATE が受理されるまで送信 API が再オープンを拒否する。
+    /// 記録する (draft-ietf-moq-transport-22 §11.3.2)。購読を再開する REQUEST_UPDATE
+    /// (PAUSED が 1 から 0 へ変わる) が受理されるまで送信 API が再オープンを拒否する。
     /// 既に `send_data_stream_closed` で終端済みの stream への `STOP_SENDING` は
     /// unknown outgoing stream として拒否され、禁止エントリも記録されない
     /// (I/O 層は STOP_SENDING の受信を終端通知より先に渡す契約)。
@@ -965,8 +968,9 @@ impl Session {
         };
         // draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams): STOP_SENDING を
         // 受けた Subgroup は再オープン禁止として request_id 単位で記録する。終端状態
-        // (`StoppedByPeer` / `Reset`) とは独立に保持し、Forward State 0→1 の
-        // REQUEST_UPDATE 受理まで解除しない。FirstObjectId の未解決 subgroup は `None` で記録する。
+        // (`StoppedByPeer` / `Reset`) とは独立に保持し、購読を再開する REQUEST_UPDATE
+        // (PAUSED が 1 から 0 へ変わる) の受理まで解除しない。
+        // FirstObjectId の未解決 subgroup は `None` で記録する。
         // peer が載せたエラーコードも同時に保持し、cancel の理由を参照できるようにする。
         self.stopped_outgoing_subgroups
             .entry(request_id)
@@ -989,7 +993,7 @@ impl Session {
     /// エントリだけを返す。再オープン禁止の判定 (`outgoing_subgroup_reopen_blocked`) は
     /// alias を共有する別 request のエントリも照合するため、本 API が `None` を返しても
     /// 再オープンが禁止されている場合がある。
-    /// エントリは Forward State 0→1 の REQUEST_UPDATE 受理または
+    /// エントリは購読を再開する REQUEST_UPDATE の受理または
     /// `Session::forget_subscription` で破棄される。
     pub fn stopped_outgoing_subgroup_error_code(
         &self,
@@ -1007,11 +1011,11 @@ impl Session {
     /// outgoing Subgroup が STOP_SENDING による再オープン禁止中か判定する
     ///
     /// draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams): STOP_SENDING を
-    /// 受けた Subgroup の再オープンは、Forward State が 0 から 1 へ変わった
-    /// REQUEST_UPDATE が受理された場合のみ許可する。Subgroup の同一性は
+    /// 受けた Subgroup の再オープンは、購読を再開する REQUEST_UPDATE
+    /// (PAUSED が 1 から 0 へ変わる) が受理された場合のみ許可する。Subgroup の同一性は
     /// `(track_alias, group_id, subgroup_id)` (alias 単位) であるため、alias を共有する
     /// 別 subscription の request_id からも再オープンできないよう全エントリを照合する
-    /// (解除は停止ストリームを所有する request の Forward 0→1 のみ)。
+    /// (解除は停止ストリームを所有する request の PAUSED 1→0 のみ)。
     /// `subgroup_id` の `None` は FirstObjectId モードの未解決 subgroup を表す。
     fn outgoing_subgroup_reopen_blocked(
         &self,
@@ -2416,7 +2420,8 @@ impl Session {
             )
             .into());
         }
-        // draft §3.3.3 (Combining Filters): Pass = Forward AND Location Filters AND Range Filters。
+        // draft-ietf-moq-transport-23 §3.3.3 (Combining Filters):
+        // Pass = (NOT Paused) AND Location Filters AND Range Filters。
         // datagram は §11.2.1 のワイヤ構造に Subgroup ID フィールドを持たないので
         // SUBGROUP_FILTER は評価対象外 (`subgroup_id: None`)。Publisher Priority は
         // 送信する datagram が常に DEFAULT_PRIORITY bit を立てる (§11.2.1) ため header 明示値が
@@ -3241,7 +3246,7 @@ impl Session {
     /// このときも `peer_subgroups` には wire 構造の終端状態 (FIN / RESET) だけを記録する。
     /// track 単位の事実記録であり破棄対象 subscription のデータを受理する意味ではない。
     /// エントリを `Open` のまま残すと、同じ `(track_alias, group_id, subgroup_id)` の
-    /// 正当な再オープン (RESET 後 / STOP_SENDING 後の Forward State 0→1) が open 衝突で
+    /// 正当な再オープン (RESET 後 / STOP_SENDING 後の PAUSED 1→0 による再開) が open 衝突で
     /// session close になるためである (draft §2.2 / §11.3.2)。
     ///
     /// 本 API は Object 境界での終端を前提とする。シリアライズ途中の Object で FIN した
@@ -3313,7 +3318,7 @@ impl Session {
                         // track 単位の wire 事実を記録するものである。記録しないと
                         // エントリが `Open` のまま残り、同じ
                         // `(track_alias, group_id, subgroup_id)` の正当な再オープン
-                        // (RESET 後 / STOP_SENDING 後の Forward State 0→1、
+                        // (RESET 後 / STOP_SENDING 後の PAUSED 1→0 による再開、
                         // draft §2.2 / §11.3.2) が open 衝突で session close になる。
                         match end {
                             RequestStreamEnd::Fin => {
@@ -3468,8 +3473,8 @@ impl Session {
     /// 破棄対象として no-op で吸収し、生きた帰属先がある stream は通常どおり tracker と
     /// 会計を処理する (所有者のキャンセルだけでは帰属先への受信を止めない)。
     /// draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams) /
-    /// draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1583: REQUEST_UPDATE で Forward State が
-    /// 0→1 に変わった場合のみ再オープン MAY。
+    /// draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1583:
+    /// REQUEST_UPDATE で購読が再開された (PAUSED が 1→0 に変わった) 場合のみ再オープン MAY。
     pub fn send_data_stream_stop_sending(
         &mut self,
         stream_id: DataStreamId,
@@ -3501,7 +3506,7 @@ impl Session {
                         // 破棄分岐でも wire 構造の終端 (STOP_SENDING 受信) を tracker に
                         // 記録する。track 単位の事実記録であり破棄対象 subscription の
                         // データを受理する意味ではない。記録しないとエントリが `Open` の
-                        // まま残り、Forward State 0→1 後の正当な再オープン
+                        // まま残り、PAUSED 1→0 による再開後の正当な再オープン
                         // (draft §11.3.2 / Appendix A.5) が open 衝突で session close になる。
                         self.peer_subgroups.mark_stop_sending(
                             stream.track_alias,

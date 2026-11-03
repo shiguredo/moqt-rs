@@ -13,7 +13,7 @@
 use super::*;
 use shiguredo_moqt::message::PublishStateNotify;
 use shiguredo_moqt::message_parameter::{
-    MessageParameter, MessageParameterValue, PARAM_FORWARD, PARAM_LARGEST_OBJECT,
+    MessageParameter, MessageParameterValue, PARAM_LARGEST_OBJECT, PARAM_PAUSED,
 };
 use shiguredo_moqt::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
 
@@ -410,8 +410,8 @@ fn request_update_ok_uses_track_wide_largest_object() {
     // client (subscriber) が 2 本目の subscription へ REQUEST_UPDATE を送る
     let mut update_params = MessageParameters::new();
     update_params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(1),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(0),
     });
     client
         .send_request_update(second_rid, update_params)
@@ -446,8 +446,8 @@ fn publish_state_notify_uses_track_wide_largest_object() {
 
     let mut notify_params = MessageParameters::new();
     notify_params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(1),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(0),
     });
     server
         .send_publish_state_notify(second_rid, notify_params)

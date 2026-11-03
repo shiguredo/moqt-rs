@@ -1345,7 +1345,7 @@ pub async fn run(
                     Err(e) if is_peer_stream_reset(&e) => {
                         // peer が subgroup stream を cancel した (§11.3.2)。該当ストリームの
                         // writer を捨て、次の group id へ進める。STOP_SENDING を受けた
-                        // Subgroup の再オープンは Forward State 0→1 の REQUEST_UPDATE 受理まで
+                        // Subgroup の再オープンは購読を再開する REQUEST_UPDATE (PAUSED 1→0) の受理まで
                         // 禁止されるため、同じ group id (この example は subgroup id 0 固定) を
                         // 使うと `send_subgroup_header` が拒否される
                         current_video_writer = None;
@@ -1978,7 +1978,7 @@ pub async fn run(
                         Some(ClientEvent::RequestUpdate(update)) => {
                             // draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE):
                             // 受信側は必ず 1 通の REQUEST_OK / REQUEST_ERROR で応答する MUST。
-                            // FORWARD / LOCATION_FILTER / Range Filters の検証と購読状態への
+                            // PAUSED / LOCATION_FILTER / Range Filters の検証と購読状態への
                             // 反映は session 層が受信時に済ませているため、ここでは受理する。
                             tracing::info!(
                                 "Received REQUEST_UPDATE: request_id={}",
@@ -2701,7 +2701,7 @@ async fn republish_catalog_at_next_group(
         };
         tracing::debug!("Republished the MSF catalog at group {next_group_id}");
     } else {
-        // どの購読にも届かなかった (Forward State 0 など)。Object は送られていないため、
+        // どの購読にも届かなかった (PAUSED=1 など)。Object は送られていないため、
         // FETCH 応答と LARGEST_OBJECT が指す Location は前回のままにする
         tracing::debug!("Catalog republish at group {next_group_id} was filtered out");
     }

@@ -36,16 +36,16 @@ fn subscribe_handshake_client_to_server() {
     assert_eq!(s_sub.my_role, TrackRole::Publisher);
 }
 
-/// PUBLISH_OK に FORWARD を含めると送信側で拒否される
+/// PUBLISH_OK に PAUSED を含めると送信側で拒否される
 ///
 /// draft-ietf-moq-transport-22 Appendix A.3 #1790 (Subscription parameters appear in
 /// REQUEST_UPDATE, not PUBLISH_OK): subscription 更新用パラメータは REQUEST_UPDATE
-/// (要求) に出現し、PUBLISH_OK は EXPIRES のみとなる。FORWARD の更新は
+/// (要求) に出現し、PUBLISH_OK は EXPIRES のみとなる。PAUSED の更新は
 /// REQUEST_UPDATE 経路で行う。
 #[test]
-fn publish_ok_with_forward_is_rejected() {
+fn publish_ok_with_paused_is_rejected() {
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        MessageParameter, MessageParameterValue, PARAM_PAUSED,
     };
     let (mut client, mut server) = establish_pair();
     let rid = client
@@ -63,12 +63,12 @@ fn publish_ok_with_forward_is_rejected() {
         .expect("テストフィクスチャの前提条件を満たす");
     let mut ok_params = MessageParameters::new();
     ok_params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     let err = server
         .send_request_ok(rid, ok_params, TrackProperties::default())
-        .expect_err("PUBLISH_OK の FORWARD はスコープ外で拒否される");
+        .expect_err("PUBLISH_OK の PAUSED はスコープ外で拒否される");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
     // 拒否後も subscription は Pending のままであり、状態は汚染されない
     assert!(
@@ -79,21 +79,21 @@ fn publish_ok_with_forward_is_rejected() {
     );
 }
 
-/// PUBLISH_OK で FORWARD を省略しても forward_state は PUBLISH 時の値のまま維持される
+/// PUBLISH_OK で PAUSED を省略しても paused は PUBLISH 時の値のまま維持される
 ///
 /// draft-ietf-moq-transport-22 Appendix A.3 #1790: PUBLISH_OK は EXPIRES のみを運び、
-/// forward_state の更新は REQUEST_UPDATE (要求) 経路に委譲する。
+/// paused の更新は REQUEST_UPDATE (要求) 経路に委譲する。
 #[test]
-fn publish_ok_without_forward_keeps_publish_forward_state() {
+fn publish_ok_without_paused_keeps_publish_paused_state() {
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        MessageParameter, MessageParameterValue, PARAM_PAUSED,
     };
     let (mut client, mut server) = establish_pair();
-    // PUBLISH 送信時に FORWARD=0 を指定しておく
+    // PUBLISH 送信時に PAUSED=1 (paused) を指定しておく
     let mut pub_params = MessageParameters::new();
     pub_params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     let rid = client
         .send_publish(
@@ -104,18 +104,17 @@ fn publish_ok_without_forward_keeps_publish_forward_state() {
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(
+    assert!(
         client
             .subscription(rid)
             .expect("テストフィクスチャの前提条件を満たす")
-            .forward_state,
-        0
+            .paused
     );
     let (_, pub_msg) = take_send_request(&mut client);
     server
         .recv_request(pub_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // PUBLISH_OK (空パラメータ) では forward_state は PUBLISH 時の 0 のまま維持される
+    // PUBLISH_OK (空パラメータ) では paused は PUBLISH 時のまま維持される
     server
         .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
         .expect("テストフィクスチャの前提条件を満たす");
@@ -123,13 +122,12 @@ fn publish_ok_without_forward_keeps_publish_forward_state() {
     client
         .recv_stream_message(rid, ok_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(
+    assert!(
         client
             .subscription(rid)
             .expect("テストフィクスチャの前提条件を満たす")
-            .forward_state,
-        0,
-        "PUBLISH_OK では forward_state が上書きされないこと"
+            .paused,
+        "PUBLISH_OK では paused が上書きされないこと"
     );
 }
 
@@ -554,17 +552,17 @@ fn subscribe_ok_with_grease_property_in_mandatory_range_keeps_subscription() {
     assert_eq!(client.state(), SessionState::Established);
 }
 
-/// send_subscribe に FORWARD=2 を渡すと SESSION_PROTOCOL_VIOLATION が返る
-/// (draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter): 許容値は 0/1 のみ)
+/// send_subscribe に PAUSED=2 を渡すと SESSION_PROTOCOL_VIOLATION が返る
+/// (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): 許容値は 0/1 のみ)
 #[test]
-fn send_subscribe_rejects_invalid_forward_value() {
+fn send_subscribe_rejects_invalid_paused_value() {
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        MessageParameter, MessageParameterValue, PARAM_PAUSED,
     };
     let (mut client, _server) = establish_pair();
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
+        param_type: PARAM_PAUSED,
         value: MessageParameterValue::Uint8(2),
     });
     let err = client
@@ -578,16 +576,16 @@ fn send_subscribe_rejects_invalid_forward_value() {
     );
 }
 
-/// send_publish に FORWARD=2 を渡すと SESSION_PROTOCOL_VIOLATION が返る
+/// send_publish に PAUSED=2 を渡すと SESSION_PROTOCOL_VIOLATION が返る
 #[test]
-fn send_publish_rejects_invalid_forward_value() {
+fn send_publish_rejects_invalid_paused_value() {
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        MessageParameter, MessageParameterValue, PARAM_PAUSED,
     };
     let (mut client, _server) = establish_pair();
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
+        param_type: PARAM_PAUSED,
         value: MessageParameterValue::Uint8(2),
     });
     let err = client
@@ -777,24 +775,25 @@ fn send_publish_single_period_namespace_rejected() {
     );
 }
 
-/// SUBSCRIBE 受信の FORWARD 値域外 (0 / 1 以外) で、`Err(RecvRequestError::Session(...))` と
+/// SUBSCRIBE 受信の PAUSED 値域外 (0 / 1 以外) で、`Err(RecvRequestError::Session(...))` と
 /// `CloseSession(PROTOCOL_VIOLATION)` の両方が発生し、セッションが閉じること
 ///
-/// draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter): "If an endpoint receives a
-/// value outside this range, it MUST close the session with PROTOCOL_VIOLATION."
+/// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): "If an endpoint receives a
+/// value outside this range, it MUST close the session with INVALID_PARAMETER."
+/// 本実装は codec / session 層の既存の写像に合わせて PROTOCOL_VIOLATION で閉じる。
 /// `?` 伝播のみだと `RecvRequestError::Session` の契約 (session state は Closing に遷移済み) が
 /// 破れ、セッションが開いたまま残る。GROUP_ORDER の値域検証と同じパターンで
 /// `self.fail()` に接続した。
 #[test]
-fn subscribe_with_invalid_forward_closes_session() {
+fn subscribe_with_invalid_paused_closes_session() {
     use shiguredo_moqt::message::Subscribe;
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        MessageParameter, MessageParameterValue, PARAM_PAUSED,
     };
     let (_client, mut server) = establish_pair();
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
+        param_type: PARAM_PAUSED,
         value: MessageParameterValue::Uint8(2), // 値域外 (0 / 1)
     });
     let err = server
@@ -804,7 +803,7 @@ fn subscribe_with_invalid_forward_closes_session() {
             track_name: b"cam".to_vec(),
             parameters: params,
         }))
-        .expect_err("値域外 FORWARD は PROTOCOL_VIOLATION になる");
+        .expect_err("値域外 PAUSED は PROTOCOL_VIOLATION になる");
     assert_eq!(
         err.as_session_error()
             .expect("Session エラーであること")
@@ -822,21 +821,21 @@ fn subscribe_with_invalid_forward_closes_session() {
     }
 }
 
-/// PUBLISH 受信の FORWARD 値域外 (0 / 1 以外) で、`Err(RecvRequestError::Session(...))` と
+/// PUBLISH 受信の PAUSED 値域外 (0 / 1 以外) で、`Err(RecvRequestError::Session(...))` と
 /// `CloseSession(PROTOCOL_VIOLATION)` の両方が発生し、セッションが閉じること
 ///
-/// draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter): "If an endpoint receives a
-/// value outside this range, it MUST close the session with PROTOCOL_VIOLATION."
+/// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): "If an endpoint receives a
+/// value outside this range, it MUST close the session with INVALID_PARAMETER."
 #[test]
-fn publish_with_invalid_forward_closes_session() {
+fn publish_with_invalid_paused_closes_session() {
     use shiguredo_moqt::message::Publish;
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        MessageParameter, MessageParameterValue, PARAM_PAUSED,
     };
     let (_client, mut server) = establish_pair();
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
+        param_type: PARAM_PAUSED,
         value: MessageParameterValue::Uint8(2), // 値域外 (0 / 1)
     });
     let err = server
@@ -848,7 +847,7 @@ fn publish_with_invalid_forward_closes_session() {
             parameters: params,
             track_properties: TrackProperties::new(),
         }))
-        .expect_err("値域外 FORWARD は PROTOCOL_VIOLATION になる");
+        .expect_err("値域外 PAUSED は PROTOCOL_VIOLATION になる");
     assert_eq!(
         err.as_session_error()
             .expect("Session エラーであること")
@@ -866,28 +865,28 @@ fn publish_with_invalid_forward_closes_session() {
     }
 }
 
-/// FORWARD=0 / 1 を含む SUBSCRIBE の受信で `forward_state` が設定されること
+/// PAUSED=0 / 1 を含む SUBSCRIBE の受信で `paused` が設定されること
 ///
-/// 検証の `Ok` 値が `forward_state` の設定に使われる (検証と設定の分離)。
-/// FORWARD 不在 (デフォルト 1) のケースも含める。
+/// 検証の `Ok` 値が `paused` の設定に使われる (検証と設定の分離)。
+/// PAUSED 不在 (既定値 0 = unpaused) のケースも含める。
 #[test]
-fn subscribe_with_forward_sets_forward_state() {
+fn subscribe_with_paused_sets_paused_state() {
     use shiguredo_moqt::message::Subscribe;
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        MessageParameter, MessageParameterValue, PARAM_PAUSED,
     };
-    let cases: [(Option<u8>, u8); 3] = [
-        (None, 1), // FORWARD 不在 → デフォルト 1
-        (Some(0), 0),
-        (Some(1), 1),
+    let cases: [(Option<u8>, bool); 3] = [
+        (None, false), // PAUSED 不在 → 既定値 0 = unpaused
+        (Some(0), false),
+        (Some(1), true),
     ];
-    for (idx, (forward, expected)) in cases.iter().enumerate() {
+    for (idx, (paused, expected)) in cases.iter().enumerate() {
         let (_client, mut server) = establish_pair();
         let mut params = MessageParameters::new();
-        if let Some(f) = forward {
+        if let Some(value) = paused {
             params.push(MessageParameter {
-                param_type: PARAM_FORWARD,
-                value: MessageParameterValue::Uint8(*f),
+                param_type: PARAM_PAUSED,
+                value: MessageParameterValue::Uint8(*value),
             });
         }
         // request id は Client 役の偶数採番 (0, 2, 4) を使う (奇数は parity 不正で fail する)
@@ -899,41 +898,41 @@ fn subscribe_with_forward_sets_forward_state() {
                 track_name: format!("cam{idx}").into_bytes(),
                 parameters: params,
             }))
-            .expect("正当な FORWARD の SUBSCRIBE は受理されること");
-        // forward_state が設定されること
+            .expect("正当な PAUSED の SUBSCRIBE は受理されること");
+        // paused が設定されること
         assert_eq!(
             server
                 .subscription(rid)
                 .expect("subscription が存在する")
-                .forward_state,
+                .paused,
             *expected,
-            "FORWARD={forward:?} で forward_state が {expected} になること"
+            "PAUSED={paused:?} で paused が {expected} になること"
         );
     }
 }
 
-/// FORWARD=0 / 1 を含む PUBLISH の受信で `forward_state` が設定されること
+/// PAUSED=0 / 1 を含む PUBLISH の受信で `paused` が設定されること
 ///
-/// 検証の `Ok` 値が `forward_state` の設定に使われる (検証と設定の分離)。
-/// FORWARD 不在 (デフォルト 1) のケースも含める。
+/// 検証の `Ok` 値が `paused` の設定に使われる (検証と設定の分離)。
+/// PAUSED 不在 (既定値 0 = unpaused) のケースも含める。
 #[test]
-fn publish_with_forward_sets_forward_state() {
+fn publish_with_paused_sets_paused_state() {
     use shiguredo_moqt::message::Publish;
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        MessageParameter, MessageParameterValue, PARAM_PAUSED,
     };
-    let cases: [(Option<u8>, u8); 3] = [
-        (None, 1), // FORWARD 不在 → デフォルト 1
-        (Some(0), 0),
-        (Some(1), 1),
+    let cases: [(Option<u8>, bool); 3] = [
+        (None, false), // PAUSED 不在 → 既定値 0 = unpaused
+        (Some(0), false),
+        (Some(1), true),
     ];
-    for (idx, (forward, expected)) in cases.iter().enumerate() {
+    for (idx, (paused, expected)) in cases.iter().enumerate() {
         let (_client, mut server) = establish_pair();
         let mut params = MessageParameters::new();
-        if let Some(f) = forward {
+        if let Some(value) = paused {
             params.push(MessageParameter {
-                param_type: PARAM_FORWARD,
-                value: MessageParameterValue::Uint8(*f),
+                param_type: PARAM_PAUSED,
+                value: MessageParameterValue::Uint8(*value),
             });
         }
         // request id は Client 役の偶数採番 (0, 2, 4) を使う (奇数は parity 不正で fail する)
@@ -947,15 +946,15 @@ fn publish_with_forward_sets_forward_state() {
                 parameters: params,
                 track_properties: TrackProperties::new(),
             }))
-            .expect("正当な FORWARD の PUBLISH は受理されること");
-        // forward_state が設定されること
+            .expect("正当な PAUSED の PUBLISH は受理されること");
+        // paused が設定されること
         assert_eq!(
             server
                 .subscription(rid)
                 .expect("subscription が存在する")
-                .forward_state,
+                .paused,
             *expected,
-            "FORWARD={forward:?} で forward_state が {expected} になること"
+            "PAUSED={paused:?} で paused が {expected} になること"
         );
     }
 }
@@ -963,7 +962,8 @@ fn publish_with_forward_sets_forward_state() {
 /// 予約名前空間の拒否は値域外パラメータの MUST close より優先される (SUBSCRIBE)
 ///
 /// draft-ietf-moq-transport-22 は §2.4.3 / §6.5 の予約名前空間拒否と §9.20.8 (GROUP ORDER Parameter) /
-/// §9.20.18 (FORWARD Parameter) / §9.20.21 (INCLUDE_PROPERTIES Parameter) の値域 MUST、
+/// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter) /
+/// draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter) の値域 MUST、
 /// §9.20.9 (LOCATION FILTER Parameter) の StartGroup + EndGroupDelta オーバーフロー (値域 MUST) の
 /// 優先順位を規定しない。宛先自体が存在しない予約名前空間の拒否を優先する意図した選択であり、
 /// API 経路で手組みしたメッセージで観測できる。
@@ -972,8 +972,8 @@ fn subscribe_reserved_namespace_precedes_parameter_range() {
     use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
     use shiguredo_moqt::message::Subscribe;
     use shiguredo_moqt::message_parameter::{
-        LocationFilter, MessageParameter, MessageParameterValue, PARAM_FORWARD, PARAM_GROUP_ORDER,
-        PARAM_INCLUDE_PROPERTIES, PARAM_LOCATION_FILTER,
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_GROUP_ORDER,
+        PARAM_INCLUDE_PROPERTIES, PARAM_LOCATION_FILTER, PARAM_PAUSED,
     };
     for reserved in [ns(&[b"."]), ns(&[b".session"])] {
         let (_, mut server) = establish_pair();
@@ -987,7 +987,7 @@ fn subscribe_reserved_namespace_precedes_parameter_range() {
             value: MessageParameterValue::Uint8(2), // 値域外 (0 / 1 以外)
         });
         params.push(MessageParameter {
-            param_type: PARAM_FORWARD,
+            param_type: PARAM_PAUSED,
             value: MessageParameterValue::Uint8(2), // 値域外 (0 / 1 以外)
         });
         params.push(MessageParameter {
@@ -1026,7 +1026,8 @@ fn subscribe_reserved_namespace_precedes_parameter_range() {
 /// 予約名前空間の拒否は値域外パラメータの MUST close より優先される (PUBLISH)
 ///
 /// draft-ietf-moq-transport-22 は §2.4.3 / §6.5 の予約名前空間拒否と §9.20.8 (GROUP ORDER Parameter) /
-/// §9.20.18 (FORWARD Parameter) の値域 MUST、§9.20.9 (LOCATION FILTER Parameter) の
+/// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter) の値域 MUST、
+/// draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter) の
 /// StartGroup + EndGroupDelta オーバーフロー (値域 MUST) の優先順位を規定しない。宛先自体が存在しない
 /// 予約名前空間の拒否を優先する意図した選択である。
 #[test]
@@ -1034,8 +1035,8 @@ fn publish_reserved_namespace_precedes_parameter_range() {
     use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
     use shiguredo_moqt::message::Publish;
     use shiguredo_moqt::message_parameter::{
-        LocationFilter, MessageParameter, MessageParameterValue, PARAM_FORWARD, PARAM_GROUP_ORDER,
-        PARAM_LOCATION_FILTER,
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_GROUP_ORDER,
+        PARAM_LOCATION_FILTER, PARAM_PAUSED,
     };
     for (reserved, reason) in [
         (ns(&[b"."]), "reserved single-period namespace"),
@@ -1048,7 +1049,7 @@ fn publish_reserved_namespace_precedes_parameter_range() {
             value: MessageParameterValue::Uint8(3), // 値域外
         });
         params.push(MessageParameter {
-            param_type: PARAM_FORWARD,
+            param_type: PARAM_PAUSED,
             value: MessageParameterValue::Uint8(2), // 値域外
         });
         params.push(MessageParameter {

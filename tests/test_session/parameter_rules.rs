@@ -192,12 +192,12 @@ fn request_update_with_new_group_request_dynamic_groups_one_accepted() {
 #[test]
 fn request_update_with_new_group_request_send_side_rejected_without_dynamic_groups() {
     use shiguredo_moqt::message_parameter::{
-        LocationFilter, MessageParameter, MessageParameterValue, PARAM_FORWARD,
-        PARAM_LOCATION_FILTER, PARAM_NEW_GROUP_REQUEST, PARAM_OBJECT_DELIVERY_TIMEOUT,
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
+        PARAM_NEW_GROUP_REQUEST, PARAM_OBJECT_DELIVERY_TIMEOUT, PARAM_PAUSED,
         PARAM_SUBSCRIBER_PRIORITY,
     };
     let (mut client, _server, rid) = establish_subscribe_track(1);
-    // NEW_GROUP_REQUEST と他パラメータ (FORWARD / LOCATION_FILTER /
+    // NEW_GROUP_REQUEST と他パラメータ (PAUSED / LOCATION_FILTER /
     // SUBSCRIBER_PRIORITY / OBJECT_DELIVERY_TIMEOUT) を併載する
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
@@ -205,8 +205,8 @@ fn request_update_with_new_group_request_send_side_rejected_without_dynamic_grou
         value: MessageParameterValue::VarInt(2),
     });
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     params.push(MessageParameter {
         param_type: PARAM_SUBSCRIBER_PRIORITY,
@@ -231,7 +231,7 @@ fn request_update_with_new_group_request_send_side_rejected_without_dynamic_grou
         .send_request_update(rid, params)
         .expect_err("NEW_GROUP_REQUEST は送信側で拒否される");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
-    // 同じコードを返す他の送信前検証 (FORWARD / filter / fill 等) と区別する
+    // 同じコードを返す他の送信前検証 (PAUSED / filter / fill 等) と区別する
     assert_eq!(
         err.reason, "NEW_GROUP_REQUEST in REQUEST_UPDATE without DYNAMIC_GROUPS=1 track",
         "NEW_GROUP_REQUEST の検証で拒否されなければならない"
@@ -248,7 +248,7 @@ fn request_update_with_new_group_request_send_side_rejected_without_dynamic_grou
     let sub = client
         .subscription(rid)
         .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(sub.forward_state, 1, "FORWARD=0 が適用されないこと");
+    assert!(!sub.paused, "PAUSED=1 が適用されないこと");
     assert_eq!(
         sub.subscriber_priority, None,
         "SUBSCRIBER_PRIORITY が適用されないこと"
@@ -605,7 +605,7 @@ fn publish_with_grease_property_in_mandatory_range_accepted() {
 // codec 層は全 context の和集合 (REQUEST_OK_ALLOWED_PARAMS = EXPIRES と
 // LARGEST_OBJECT の 2 型) でしか検証しないため、和集合内でも context ごとに
 // 許可されないパラメータ (PUBLISH_OK への LARGEST_OBJECT) は受信側 (セッション層) で
-// PROTOCOL_VIOLATION として弾く必要がある。和集合外のパラメータ (FORWARD など) は
+// PROTOCOL_VIOLATION として弾く必要がある。和集合外のパラメータ (PAUSED など) は
 // codec 層が decode 時点で先に拒否するため wire からは到達せず、API 経由で手組みした
 // メッセージでのみセッション層の検証に到達する。以下は意図的エラーパス
 // (PBT では表現できない) のための単体テスト。
@@ -1009,25 +1009,25 @@ fn publish_invalid_group_order_does_not_start_control_deadline() {
     );
 }
 
-/// FORWARD=0 を含む PUBLISH の送信が許可され、アプリが渡した値と同一の FORWARD が
+/// PAUSED=1 を含む PUBLISH の送信が許可され、アプリが渡した値と同一の PAUSED が
 /// 送信メッセージに含まれ、ワイヤエンコードできること
 ///
 /// draft-ietf-moq-transport-22 §3.6.2 (Parameters on SUBSCRIBE_TRACKS): "Any Parameter that can be
 /// specified on a Subscription (ie: in SUBSCRIBE) is valid in SUBSCRIBE_TRACKS, unless otherwise
-/// specified." FORWARD は §9.20.18 (FORWARD Parameter) に定義される。
-/// SUBSCRIBE_TRACKS 由来の PUBLISH に FORWARD を載せる伝播を実現するため、
-/// `PUBLISH_ALLOWED_PARAMS` に FORWARD が含まれており、`send_publish` は FORWARD=0 を
+/// specified." PAUSED は draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter) に定義される。
+/// SUBSCRIBE_TRACKS 由来の PUBLISH に PAUSED を載せる伝播を実現するため、
+/// `PUBLISH_ALLOWED_PARAMS` に PAUSED が含まれており、`send_publish` は PAUSED=1 を
 /// 受容する。
 #[test]
-fn publish_with_forward_encodes_and_keeps_value() {
+fn publish_with_paused_encodes_and_keeps_value() {
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        MessageParameter, MessageParameterValue, PARAM_PAUSED,
     };
     let (mut client, _server) = establish_pair();
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     let rid = client
         .send_publish(
@@ -1040,13 +1040,13 @@ fn publish_with_forward_encodes_and_keeps_value() {
         .expect("テストフィクスチャの前提条件を満たす");
     let (sent_rid, pub_msg) = take_send_request(&mut client);
     assert_eq!(sent_rid, rid);
-    // アプリが渡した値と同一の FORWARD が送信メッセージに含まれること
+    // アプリが渡した値と同一の PAUSED が送信メッセージに含まれること
     match &pub_msg {
         ControlMessage::Publish(p) => {
             assert_eq!(
-                p.parameters.forward(),
-                Some(0),
-                "アプリが渡した FORWARD が送信メッセージに含まれること"
+                p.parameters.paused(),
+                Some(1),
+                "アプリが渡した PAUSED が送信メッセージに含まれること"
             );
         }
         other => panic!("Publish が期待されたが {other:?} を受け取った"),
@@ -1054,24 +1054,24 @@ fn publish_with_forward_encodes_and_keeps_value() {
     // ワイヤエンコードが成功すること
     pub_msg
         .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
-        .expect("FORWARD=0 を含む PUBLISH はエンコードできること");
+        .expect("PAUSED を含む PUBLISH はエンコードできること");
 }
 
-/// FORWARD を含む PUBLISH の受信がデコード層で拒否されないこと (roundtrip)
+/// PAUSED を含む PUBLISH の受信がデコード層で拒否されないこと (roundtrip)
 ///
-/// 受信側の `Publish::decode_message_body` の `validate_scope` が、FORWARD を載せた
+/// 受信側の `Publish::decode_message_body` の `validate_scope` が、PAUSED を載せた
 /// peer の PUBLISH を拒否しないことを確認する。encode → decode の roundtrip で検証する
 /// (recv_request への直接渡しではデコード層が走らないため判別力がない)。
 #[test]
-fn publish_with_forward_roundtrips() {
+fn publish_with_paused_roundtrips() {
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        MessageParameter, MessageParameterValue, PARAM_PAUSED,
     };
     let (mut client, _server) = establish_pair();
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     let rid = client
         .send_publish(
@@ -1086,28 +1086,29 @@ fn publish_with_forward_roundtrips() {
     assert_eq!(sent_rid, rid);
     let encoded = pub_msg
         .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
-        .expect("FORWARD を含む PUBLISH はエンコードできること");
+        .expect("PAUSED を含む PUBLISH はエンコードできること");
     let (decoded, _) =
-        ControlMessage::decode(&encoded).expect("FORWARD を含む PUBLISH はデコードできること");
+        ControlMessage::decode(&encoded).expect("PAUSED を含む PUBLISH はデコードできること");
     match &decoded {
         ControlMessage::Publish(p) => {
             assert_eq!(
-                p.parameters.forward(),
-                Some(0),
-                "roundtrip で FORWARD が保持されること"
+                p.parameters.paused(),
+                Some(1),
+                "roundtrip で PAUSED が保持されること"
             );
         }
         other => panic!("Publish が期待されたが {other:?} を受け取った"),
     }
 }
 
-/// FORWARD 未指定の PUBLISH にライブラリが FORWARD を自動注入しないこと
+/// PAUSED 未指定の PUBLISH にライブラリが PAUSED を自動注入しないこと
 ///
 /// 伝播はアプリの責務であり、ライブラリは暗黙の注入を行わない
-/// (アプリの明示的なパラメータ指定を尊重する API 哲学)。FORWARD=1 は省略で示してよい
-/// (draft §3.6.2) ため、自動注入の必要性はない。将来の自動注入機能追加への回帰ガード。
+/// (アプリの明示的なパラメータ指定を尊重する API 哲学)。PAUSED=0 (unpaused) は既定値
+/// であり省略で示してよい (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter)) ため、
+/// 自動注入の必要性はない。将来の自動注入機能追加への回帰ガード。
 #[test]
-fn publish_without_forward_no_auto_inject() {
+fn publish_without_paused_no_auto_inject() {
     let (mut client, _server) = establish_pair();
     let rid = client
         .send_publish(
@@ -1123,9 +1124,9 @@ fn publish_without_forward_no_auto_inject() {
     match &pub_msg {
         ControlMessage::Publish(p) => {
             assert_eq!(
-                p.parameters.forward(),
+                p.parameters.paused(),
                 None,
-                "FORWARD 未指定の PUBLISH に自動注入されないこと"
+                "PAUSED 未指定の PUBLISH に自動注入されないこと"
             );
         }
         other => panic!("Publish が期待されたが {other:?} を受け取った"),
@@ -1358,16 +1359,18 @@ fn publish_ok_with_out_of_scope_parameter_keeps_subscription_pending() {
     }
 }
 
-/// FORWARD を含む REQUEST_OK (Pending(Publisher) 分岐) で、subscription の状態が
+/// PAUSED を含む REQUEST_OK (Pending(Publisher) 分岐) で、subscription の状態が
 /// 遷移せず・パラメータも適用されないこと
 ///
-/// draft-ietf-moq-transport-22 Appendix A.3 #1790: FORWARD は PUBLISH_OK に出現しない
-/// ため、スコープ検証で拒否される (値検証には到達しない)。スコープ検証は状態遷移・
-/// パラメータ適用より前に実行されるため、subscription は Pending のまま維持される。
+/// draft-ietf-moq-transport-22 Appendix A.3 #1790: subscription パラメータは
+/// PUBLISH_OK に出現しない (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter) の
+/// MAY appear 列挙にも PUBLISH_OK は無い) ため、スコープ検証で拒否される
+/// (値検証には到達しない)。スコープ検証は状態遷移・パラメータ適用より前に実行されるため、
+/// subscription は Pending のまま維持される。
 #[test]
-fn request_ok_publish_with_forward_keeps_subscription_pending() {
+fn request_ok_publish_with_paused_keeps_subscription_pending() {
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD, PARAM_SUBSCRIBER_PRIORITY,
+        MessageParameter, MessageParameterValue, PARAM_PAUSED, PARAM_SUBSCRIBER_PRIORITY,
     };
     let (mut client, mut server) = establish_pair();
     let rid = client
@@ -1383,12 +1386,12 @@ fn request_ok_publish_with_forward_keeps_subscription_pending() {
     server
         .recv_request(pub_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // FORWARD=2 と SUBSCRIBER_PRIORITY を混在させる。draft-20 ではいずれも
+    // PAUSED=1 と SUBSCRIBER_PRIORITY を混在させる。いずれも
     // PUBLISH_OK スコープ外のため、スコープ検証で拒否される
     let mut ok_params = MessageParameters::new();
     ok_params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(2),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     ok_params.push(MessageParameter {
         param_type: PARAM_SUBSCRIBER_PRIORITY,
@@ -2326,18 +2329,20 @@ fn publish_advertised_largest_preserved_after_publish_ok() {
     );
 }
 
-/// FORWARD を含む REQUEST_OK (Pending(Publisher) 分岐) の受信で、subscription が
+/// PAUSED を含む REQUEST_OK (Pending(Publisher) 分岐) の受信で、subscription が
 /// Established に遷移せず・パラメータも適用されないこと
 ///
-/// draft-ietf-moq-transport-22 Appendix A.3 #1790: FORWARD は PUBLISH_OK に出現しない
-/// ため、スコープ検証で PROTOCOL_VIOLATION により閉じる。スコープ検証は状態遷移・
-/// パラメータ適用より前に実行されるため、部分適用は残留しない。
-/// セッションを PROTOCOL_VIOLATION で閉じる (MUST) ため、CloseSession の発生も検証する。
+/// draft-ietf-moq-transport-22 Appendix A.3 #1790: subscription パラメータは
+/// PUBLISH_OK に出現しない (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter) の
+/// MAY appear 列挙にも PUBLISH_OK は無い) ため、スコープ検証で PROTOCOL_VIOLATION により
+/// 閉じる。スコープ検証は状態遷移・パラメータ適用より前に実行されるため、部分適用は
+/// 残留しない。セッションを PROTOCOL_VIOLATION で閉じる (MUST) ため、CloseSession の
+/// 発生も検証する。
 #[test]
-fn request_ok_publish_with_forward_keeps_subscription_pending_on_recv() {
+fn request_ok_publish_with_paused_keeps_subscription_pending_on_recv() {
     use shiguredo_moqt::message::RequestOk;
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD, PARAM_OBJECT_DELIVERY_TIMEOUT,
+        MessageParameter, MessageParameterValue, PARAM_OBJECT_DELIVERY_TIMEOUT, PARAM_PAUSED,
     };
     let (mut client, mut server) = establish_pair();
     // client=publisher が PUBLISH を送信し、Pending(Publisher) を作る
@@ -2354,13 +2359,13 @@ fn request_ok_publish_with_forward_keeps_subscription_pending_on_recv() {
     server
         .recv_request(pub_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // 有効値の FORWARD=0 と OBJECT_DELIVERY_TIMEOUT を混在させる。
+    // 有効値の PAUSED=1 と OBJECT_DELIVERY_TIMEOUT を混在させる。
     // いずれも PUBLISH_OK スコープ外のため、スコープ検証で拒否される
     // (delivery timeout の未適用が判別力を持つ)
     let mut ok_params = MessageParameters::new();
     ok_params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     ok_params.push(MessageParameter {
         param_type: PARAM_OBJECT_DELIVERY_TIMEOUT,
@@ -2374,7 +2379,7 @@ fn request_ok_publish_with_forward_keeps_subscription_pending_on_recv() {
                 track_properties: TrackProperties::new(),
             }),
         )
-        .expect_err("値域外 FORWARD は PROTOCOL_VIOLATION になる");
+        .expect_err("スコープ外の PAUSED は PROTOCOL_VIOLATION になる");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
     // subscription は Pending(Publisher) のまま (状態不変)
     let sub = client
@@ -2387,7 +2392,7 @@ fn request_ok_publish_with_forward_keeps_subscription_pending_on_recv() {
         sub.delivery_timeouts.subscriber_object_ms, None,
         "検証エラー時に OBJECT_DELIVERY_TIMEOUT は適用されないこと"
     );
-    // セッションが PROTOCOL_VIOLATION で閉じること (FORWARD 値域違反の MUST)
+    // セッションが PROTOCOL_VIOLATION で閉じること (パラメータスコープ違反の MUST)
     match drain_until_close(&mut client) {
         SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
         other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),
@@ -2679,8 +2684,8 @@ fn recv_request_with_allowed_parameters_is_accepted() {
         Fetch as WireFetch, Publish as WirePublish, Subscribe, TrackStatus,
     };
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_EXPIRES, PARAM_FORWARD,
-        PARAM_INCLUDE_PROPERTIES, PARAM_SUBSCRIBER_PRIORITY,
+        MessageParameter, MessageParameterValue, PARAM_EXPIRES, PARAM_INCLUDE_PROPERTIES,
+        PARAM_PAUSED, PARAM_SUBSCRIBER_PRIORITY,
     };
     let param = |param_type: u64, value: MessageParameterValue| {
         let mut parameters = MessageParameters::new();
@@ -2692,8 +2697,8 @@ fn recv_request_with_allowed_parameters_is_accepted() {
             request_id: 0,
             track_namespace: ns(&[b"live"]),
             track_name: b"cam".to_vec(),
-            // FORWARD は SUBSCRIBE で許可される
-            parameters: param(PARAM_FORWARD, MessageParameterValue::Uint8(1)),
+            // PAUSED は SUBSCRIBE で許可される
+            parameters: param(PARAM_PAUSED, MessageParameterValue::Uint8(1)),
         }),
         ControlMessage::Publish(WirePublish {
             request_id: 0,

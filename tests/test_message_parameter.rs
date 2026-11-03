@@ -14,7 +14,7 @@ use shiguredo_moqt::{
     message_parameter::PARAM_TRACK_PROPERTY_FILTER,
     message_parameter::{
         PARAM_EXPIRES, PARAM_INCLUDE_PROPERTIES, PARAM_LOCATION_FILTER,
-        PARAM_OBJECT_DELIVERY_TIMEOUT, PARAM_OBJECTID_FILTER,
+        PARAM_OBJECT_DELIVERY_TIMEOUT, PARAM_OBJECTID_FILTER, PARAM_PAUSED,
     },
 };
 
@@ -88,6 +88,77 @@ mod error_cases {
             MessageParameters::decode(&buf),
             Err(MessageError::ProtocolViolation(_))
         ));
+    }
+
+    #[test]
+    fn former_forward_type_is_unknown_on_decode() {
+        // 0x10 は FORWARD を廃止した draft-ietf-moq-transport-23 では未定義である。
+        // 旧 FORWARD のワイヤ値 (0x10) を新しい PAUSED の意味で受け入れてはならない。
+        // count=1, delta=0x10 (旧 FORWARD), 値=0x01
+        let buf = vec![0x01, 0x10, 0x01];
+
+        assert!(
+            matches!(
+                MessageParameters::decode(&buf),
+                Err(MessageError::ProtocolViolation(_))
+            ),
+            "旧 FORWARD (0x10) は未知のパラメータ型として PROTOCOL_VIOLATION になること"
+        );
+    }
+
+    #[test]
+    fn former_forward_type_is_unknown_on_encode() {
+        // 送信側でも旧 FORWARD の Type を新しい意味で組み立てたパラメータを拒否する
+        let mut params = MessageParameters::new();
+        params.push(MessageParameter {
+            param_type: 0x10,
+            value: MessageParameterValue::Uint8(1),
+        });
+        let mut buf = Vec::new();
+
+        assert_eq!(
+            params.encode(&mut buf),
+            Err(MessageError::ProtocolViolation(
+                "unknown message parameter type"
+            )),
+            "旧 FORWARD (0x10) の Type は encode でも未知として拒否されること"
+        );
+    }
+
+    #[test]
+    fn paused_out_of_range_rejected_on_encode() {
+        // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): 許容値は 0 / 1 のみ。
+        // 2 は値域外であり、encode 側でも PROTOCOL_VIOLATION として拒否する
+        for value in [2u8, u8::MAX] {
+            let mut params = MessageParameters::new();
+            params.push(MessageParameter {
+                param_type: PARAM_PAUSED,
+                value: MessageParameterValue::Uint8(value),
+            });
+            let mut buf = Vec::new();
+            assert!(
+                matches!(
+                    params.encode(&mut buf),
+                    Err(MessageError::ProtocolViolation(_))
+                ),
+                "PAUSED={value} は encode で拒否されること"
+            );
+        }
+    }
+
+    #[test]
+    fn paused_out_of_range_rejected_on_decode() {
+        // count=1, delta=0x10 ではなく 0x11 (PAUSED), 値=0x02 (値域外)
+        for value in [2u8, u8::MAX] {
+            let buf = vec![0x01, PARAM_PAUSED as u8, value];
+            assert!(
+                matches!(
+                    MessageParameters::decode(&buf),
+                    Err(MessageError::ProtocolViolation(_))
+                ),
+                "PAUSED={value} は decode で拒否されること"
+            );
+        }
     }
 
     #[test]
@@ -550,7 +621,7 @@ mod accessors {
         assert!(!params.has_expires());
         assert_eq!(params.expires(), None);
         assert_eq!(params.largest_object(), None);
-        assert_eq!(params.forward(), None);
+        assert_eq!(params.paused(), None);
         assert_eq!(params.subscriber_priority(), None);
         assert_eq!(params.location_filter_typed(), Ok(None));
         assert_eq!(params.group_order(), None);
@@ -2516,8 +2587,8 @@ mod fill_parameters {
 mod resulting_publish_parameters {
     use super::*;
     use shiguredo_moqt::message_parameter::{
-        PARAM_AUTHORIZATION_TOKEN, PARAM_FILL_PARAMETERS, PARAM_FORWARD, PARAM_GROUP_ORDER,
-        PARAM_LARGEST_OBJECT, PARAM_SUBGROUP_DELIVERY_TIMEOUT, PARAM_SUBSCRIBER_PRIORITY,
+        PARAM_AUTHORIZATION_TOKEN, PARAM_FILL_PARAMETERS, PARAM_GROUP_ORDER, PARAM_LARGEST_OBJECT,
+        PARAM_PAUSED, PARAM_SUBGROUP_DELIVERY_TIMEOUT, PARAM_SUBSCRIBER_PRIORITY,
     };
 
     /// 各エンコーディング種別の代表値を積んだパラメータ群を作る
@@ -2537,8 +2608,8 @@ mod resulting_publish_parameters {
             ),
         });
         params.push(MessageParameter {
-            param_type: PARAM_FORWARD,
-            value: MessageParameterValue::Uint8(0),
+            param_type: PARAM_PAUSED,
+            value: MessageParameterValue::Uint8(1),
         });
         params.push(MessageParameter {
             param_type: PARAM_GROUP_ORDER,
@@ -2602,7 +2673,7 @@ mod resulting_publish_parameters {
                 PARAM_SUBGROUP_DELIVERY_TIMEOUT,
                 PARAM_EXPIRES,
                 PARAM_LARGEST_OBJECT,
-                PARAM_FORWARD,
+                PARAM_PAUSED,
                 PARAM_SUBSCRIBER_PRIORITY,
                 PARAM_LOCATION_FILTER,
                 PARAM_GROUP_ORDER,
@@ -2610,7 +2681,7 @@ mod resulting_publish_parameters {
             "PUBLISH 出現可能な 8 種だけが残ること"
         );
         // 値は複写される
-        assert_eq!(derived.forward(), Some(0));
+        assert_eq!(derived.paused(), Some(1));
         assert_eq!(derived.group_order(), Some(1));
         assert_eq!(derived.subscriber_priority(), Some(64));
         assert_eq!(derived.object_delivery_timeout(), Some(100));

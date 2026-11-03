@@ -36,8 +36,8 @@ use super::delivery::{
     update_subscription_subscriber_delivery_timeouts_if_present,
 };
 use super::validation::{
-    extract_forward_state, extract_range_filters, resolve_location_filter, validate_forward,
-    validate_group_order, validate_include_properties,
+    extract_paused_state, extract_range_filters, resolve_location_filter, validate_group_order,
+    validate_include_properties, validate_paused,
 };
 
 impl Session {
@@ -139,10 +139,12 @@ impl Session {
         let default_publisher_priority = None;
         let default_publisher_group_order = None;
         let request_id = self.request_ids.local_generator.next_id();
-        if let Some(f) = parameters.forward() {
-            validate_forward(f)?;
+        // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): 送信前に値域を検証し、
+        // 不正値の送出と状態登録を防ぐ
+        if let Some(value) = parameters.paused() {
+            validate_paused(value)?;
         }
-        let forward_state = extract_forward_state(&parameters);
+        let paused = extract_paused_state(&parameters);
         let subscriber_object_delivery_timeout_ms = parameters.object_delivery_timeout();
         let subscriber_subgroup_delivery_timeout_ms = parameters.subgroup_delivery_timeout();
         let filter = match parameters.location_filter_update() {
@@ -184,7 +186,7 @@ impl Session {
             track_name: track_name.clone(),
             track_alias: None,
             state: SubscriptionState::Pending,
-            forward_state,
+            paused,
             largest_location: None,
             largest_received_location: None,
             delivery_timeouts: DeliveryTimeoutState {
@@ -353,10 +355,12 @@ impl Session {
             update_largest_object_in_parameters(&mut parameters, &largest);
         }
         let request_id = self.request_ids.local_generator.next_id();
-        if let Some(f) = parameters.forward() {
-            validate_forward(f)?;
+        // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): 送信前に値域を検証し、
+        // 不正値の送出と状態登録を防ぐ
+        if let Some(value) = parameters.paused() {
+            validate_paused(value)?;
         }
-        let forward_state = extract_forward_state(&parameters);
+        let paused = extract_paused_state(&parameters);
         let publisher_object_delivery_timeout_ms = track_properties.object_delivery_timeout();
         let publisher_subgroup_delivery_timeout_ms = track_properties.subgroup_delivery_timeout();
         let expires = parameters
@@ -391,7 +395,7 @@ impl Session {
             track_name: track_name.clone(),
             track_alias: Some(track_alias),
             state: SubscriptionState::Pending,
-            forward_state,
+            paused,
             largest_location: None,
             largest_received_location: None,
             delivery_timeouts: DeliveryTimeoutState {
@@ -618,11 +622,11 @@ impl Session {
         });
         // draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1540:
         // 後続処理の前に pending REQUEST_UPDATE を適用する (coalescing)。
-        // forward_state 変更が pending にあれば先に反映する。
+        // paused 変更が pending にあれば先に反映する。
         if let Some(pending_params) = subscription.pending_update_params.take()
-            && let Some(f) = pending_params.forward()
+            && let Some(value) = pending_params.paused()
         {
-            subscription.forward_state = validate_forward(f)?;
+            subscription.paused = validate_paused(value)?;
         }
         Ok(())
     }
@@ -631,8 +635,8 @@ impl Session {
     ///
     /// draft §9.5 (REQUEST_UPDATE): request の sender は同じ bidi request stream に
     /// REQUEST_UPDATE を書ける。Session は `request_id` の種別ごとに送信可否を
-    /// 検証する。subscription のみ、FORWARD parameter が含まれていれば
-    /// `forward_state` を楽観的に更新する。
+    /// 検証する。subscription のみ、PAUSED parameter が含まれていれば
+    /// `paused` を楽観的に更新する。
     ///
     /// draft-ietf-moq-transport-22 §9.20.19 (NEW GROUP REQUEST Parameter):
     /// `DYNAMIC_GROUPS` が `1` でない Track の subscription に `NEW_GROUP_REQUEST` を
@@ -662,7 +666,7 @@ impl Session {
         // MAX_REQUEST_UPDATES を超える outstanding REQUEST_UPDATE の送信を禁止する。
         // デフォルト値 0 は無制限を意味する。
         // 上限チェックは楽観的に state を更新する検証 (`send_update_for_*` 内、
-        // 例: subscription の `forward_state`) の前に残す: 検証の後方に移動すると
+        // 例: subscription の `paused`) の前に残す: 検証の後方に移動すると
         // `TOO_MANY_REQUEST_UPDATES` の Err なのに state が更新済みになる不整合が生じる。
         // 帰結として、outstanding 満杯時は `TOO_MANY_REQUEST_UPDATES` が
         // `send_update_for_*` 内の `SESSION_PROTOCOL_VIOLATION` より優先される
@@ -808,8 +812,10 @@ impl Session {
         }
         // 値の検証をパラメータの適用より前に実行する。検証エラー時は `Err` のみを返し、
         // 適用済みパラメータを残留させない (ローカルと peer の subscription パラメータの
-        // 乖離を防ぐ)。検証の順序 (forward → filter) と適用順序は旧実装から変えない。
-        let new_forward = parameters.forward().map(validate_forward).transpose()?;
+        // 乖離を防ぐ)。検証の順序 (PAUSED → filter) と適用順序は旧実装から変えない。
+        // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): 1 は paused、
+        // 0 は unpaused、省略は現在値の維持である。
+        let new_paused = parameters.paused().map(validate_paused).transpose()?;
         // `location_filter_update()` は `Result<LocationFilterUpdate, MessageError>` を
         // 返し、`MessageError` から `SessionError` への `From` 実装はないため
         // `?` では伝播できない。エラーメッセージ・エラーコードは既存挙動から変えない
@@ -839,8 +845,8 @@ impl Session {
             ));
         }
         update_subscription_subscriber_delivery_timeouts_if_present(subscription, parameters);
-        if let Some(new_forward) = new_forward {
-            subscription.forward_state = new_forward;
+        if let Some(new_paused) = new_paused {
+            subscription.paused = new_paused;
         }
         // draft-ietf-moq-transport-22 §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER Parameter):
         // REQUEST_UPDATE に LOCATION_FILTER が含まれる場合は更新し、Type 0x00 (None) なら削除する。
@@ -882,9 +888,9 @@ impl Session {
     /// クレジットも消費しない。LARGEST_OBJECT は観測済みなら必須
     /// (未公開なら省略可) のため、観測値がある場合は送出パラメータに自動で補う
     /// (補完値は wire のみで `largest_location` には保存しない)。
-    /// FORWARD / LOCATION_FILTER は自側の subscription 状態にも反映する。
+    /// PAUSED / LOCATION_FILTER は自側の subscription 状態にも反映する。
     ///
-    /// 未応答の REQUEST_UPDATE と競合する FORWARD / filter 変更はアプリ側で
+    /// 未応答の REQUEST_UPDATE と競合する PAUSED / filter 変更はアプリ側で
     /// 直列化すること。応答待ち UPDATE の累積パラメータは REQUEST_OK 応答時に
     /// 適用されるため、NOTIFY 送信後に OK を返すと両端の状態が乖離しうる。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
@@ -937,7 +943,9 @@ impl Session {
                 "PUBLISH_STATE_NOTIFY parameter not allowed in this context",
             ));
         }
-        let new_forward = parameters.forward().map(validate_forward).transpose()?;
+        // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): 1 は paused、
+        // 0 は unpaused、省略は現在値の維持である。
+        let new_paused = parameters.paused().map(validate_paused).transpose()?;
         // `location_filter_update()` は `Result<LocationFilterUpdate, MessageError>` を
         // 返し、`MessageError` から `SessionError` への `From` 実装はないため
         // `?` では伝播できない。
@@ -954,8 +962,8 @@ impl Session {
             .subscriptions
             .get_mut(&request_id)
             .expect("subscription presence already checked above");
-        if let Some(new_forward) = new_forward {
-            subscription.forward_state = new_forward;
+        if let Some(new_paused) = new_paused {
+            subscription.paused = new_paused;
         }
         // draft-ietf-moq-transport-22 §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER Parameter):
         // LOCATION_FILTER が含まれる場合は更新し、Type 0x00 (None) なら削除する。

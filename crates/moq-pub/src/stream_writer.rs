@@ -105,7 +105,7 @@ impl SubgroupObjectState {
 
     /// フィルタ不通過の Object を記録して次の ID へ進める
     ///
-    /// 省略の理由 (Forward State 0 / Location Filter / Range Filter) は区別しない。
+    /// 省略の理由 (PAUSED=1 / Location Filter / Range Filter) は区別しない。
     /// 呼び出し側は Object ID の昇順で呼ぶため、保持するのは最後の Location だけでよい。
     fn on_skip(&mut self) {
         self.max_skipped_location = Some(Location {
@@ -568,7 +568,7 @@ mod tests {
 
     // 配送を開始した後に Start Location 以降の Object を省略した場合は reset で終端する
     //
-    // Forward State 0 への更新や Range Filter の不通過で配送されなくなった Object がこれにあたる
+    // PAUSED=1 への更新や Range Filter の不通過で配送されなくなった Object がこれにあたる
     // (この層は省略の理由を区別せず Location だけで判定する)
     #[test]
     fn termination_is_reset_when_object_after_start_is_skipped() {

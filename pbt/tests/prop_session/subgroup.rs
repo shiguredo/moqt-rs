@@ -429,8 +429,8 @@ struct SubscriptionStateSnapshot {
     incoming_subgroup_count: u64,
     /// open 中の受信 data stream 数
     open_incoming_subgroup_count: u64,
-    /// Forward State
-    forward_state: u8,
+    /// PAUSED により停止中か
+    paused: bool,
     /// Terminated か
     terminated: bool,
 }
@@ -466,7 +466,7 @@ fn snapshot_subscription(client: &Session, request_id: u64) -> SubscriptionState
         subgroup_overrides,
         incoming_subgroup_count: subscription.stream_counts.incoming_subgroup_count,
         open_incoming_subgroup_count: subscription.stream_counts.open_incoming_subgroup_count,
-        forward_state: subscription.forward_state,
+        paused: subscription.paused,
         terminated: subscription.state == SubscriptionState::Terminated,
     }
 }

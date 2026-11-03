@@ -2,8 +2,8 @@
 //!
 //! Subgroup ストリームは一度終端したら同一 `(track_alias, group_id, subgroup_id)` を
 //! 別ストリームで再オープンしてはならない。ただし draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1583 により、
-//! STOP_SENDING で停止されたサブグループは REQUEST_UPDATE で Forward State が
-//! 0→1 に変更された場合に再オープン可能。本モジュールは session 内でのストリーム
+//! STOP_SENDING で停止されたサブグループは、REQUEST_UPDATE で購読が再開された
+//! (PAUSED が 1→0 に変わった) 場合に再オープン可能。本モジュールは session 内でのストリーム
 //! ライフサイクルを追跡し、違反時に `PROTOCOL_VIOLATION` として通知するユーティリティ
 //! を提供する。
 //!
@@ -16,7 +16,7 @@
 //!   Subgroup stream SHOULD NOT attempt to open a new stream to deliver additional
 //!   Objects in that Subgroup.`
 //! - draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams): STOP_SENDING 単独では publisher は新 stream を開くべきではない。
-//!   REQUEST_UPDATE で Forward State が 0→1 に変わった場合のみ再オープン MAY
+//!   REQUEST_UPDATE で購読が再開された (PAUSED が 1→0) 場合のみ再オープン MAY
 //!   (draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1583)
 //!
 //! # 注意
@@ -54,7 +54,7 @@ pub enum SubgroupStreamState {
     ///
     /// draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams) /
     /// Appendix A.5 (Since draft-ietf-moq-transport-17) #1583:
-    /// REQUEST_UPDATE で Forward State が 0→1 に変わった場合に再オープン可能
+    /// REQUEST_UPDATE で購読が再開された (PAUSED が 1→0) 場合に再オープン可能
     StoppedByPeer,
 }
 
@@ -62,15 +62,16 @@ impl SubgroupStreamState {
     /// 再オープン可能かどうか
     ///
     /// この判定は終端状態の種別のみを見る。STOP_SENDING 起因の再オープン禁止は
-    /// `Session` が request 単位で別途保持し、Forward State 0→1 の REQUEST_UPDATE が
-    /// 受理されるまで送信 API (`send_subgroup_header` / `send_subgroup_object`) が拒否する。
+    /// `Session` が request 単位で別途保持し、購読を再開する REQUEST_UPDATE
+    /// (PAUSED が 1→0 に変わる) が受理されるまで送信 API
+    /// (`send_subgroup_header` / `send_subgroup_object`) が拒否する。
     ///
     /// - draft-ietf-moq-transport-22 §2.2 (Subgroups): premature reset からの再オープン
     /// - draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams): "A publisher that
     ///   receives a STOP_SENDING on a Subgroup stream SHOULD NOT attempt to open a new stream
     ///   to deliver additional Objects in that Subgroup. However, if the publisher subsequently
     ///   receives a REQUEST_UPDATE that resumes the subscription, it MAY open a
-    ///   new stream ..." STOP_SENDING 後の再オープンは Forward 0→1 の場合のみ
+    ///   new stream ..." STOP_SENDING 後の再オープンは購読の再開 (PAUSED 1→0) の場合のみ
     /// - draft-ietf-moq-transport-22 §5.2 (Delivery Timeouts and Data Reliability):
     ///   DELIVERY_TIMEOUT 起因の reset 後の再送は SHOULD NOT。本判定は終端種別のみを見るため
     ///   この条件は区別せず、reason (`DataStreamResetReason::DeliveryTimeout`) に応じて
@@ -82,8 +83,8 @@ impl SubgroupStreamState {
     /// the Subgroup stream and open a new one to forward it"
     ///
     /// 本判定では StoppedByPeer (STOP_SENDING) と Reset (STOP_SENDING 後の reset や
-    /// 送信側 reset) の両方で再オープンを許可し、Forward 条件の判定は Session に委ねる
-    /// (STOP_SENDING を受けていない reset は Forward 条件なしで再オープンできる)。
+    /// 送信側 reset) の両方で再オープンを許可し、PAUSED による再開条件の判定は Session に
+    /// 委ねる (STOP_SENDING を受けていない reset は PAUSED 条件なしで再オープンできる)。
     /// ClosedFin (正常終了) からの再オープンは引き続き禁止する。
     pub fn can_reopen(&self) -> bool {
         matches!(self, Self::StoppedByPeer | Self::Reset { .. })
@@ -123,7 +124,7 @@ impl SubgroupTracker {
     ///
     /// すでに同一キーのエントリが Open 中の場合は `PROTOCOL_VIOLATION` を返す。
     /// 終端済みの場合は draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1583
-    /// (REQUEST_UPDATE forward 0→1) に基づき、`can_reopen()` が true なら
+    /// (REQUEST_UPDATE で購読再開 (PAUSED 1→0)) に基づき、`can_reopen()` が true なら
     /// 再オープンを許可する。それ以外の終端状態は `PROTOCOL_VIOLATION` を返す。
     pub fn open(
         &mut self,

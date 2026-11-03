@@ -4,13 +4,14 @@ use shiguredo_moqt::{
     message_parameter::MessageParameter, message_parameter::MessageParameterValue,
     message_parameter::MessageParameters, message_parameter::PARAM_AUTHORIZATION_TOKEN,
     message_parameter::PARAM_EXPIRES, message_parameter::PARAM_FILL_PARAMETERS,
-    message_parameter::PARAM_FILL_TIMEOUT, message_parameter::PARAM_FORWARD,
-    message_parameter::PARAM_GROUP_ORDER, message_parameter::PARAM_INCLUDE_PROPERTIES,
-    message_parameter::PARAM_LARGEST_OBJECT, message_parameter::PARAM_LOCATION_FILTER,
-    message_parameter::PARAM_NEW_GROUP_REQUEST, message_parameter::PARAM_OBJECT_DELIVERY_TIMEOUT,
+    message_parameter::PARAM_FILL_TIMEOUT, message_parameter::PARAM_GROUP_ORDER,
+    message_parameter::PARAM_INCLUDE_PROPERTIES, message_parameter::PARAM_LARGEST_OBJECT,
+    message_parameter::PARAM_LOCATION_FILTER, message_parameter::PARAM_NEW_GROUP_REQUEST,
+    message_parameter::PARAM_OBJECT_DELIVERY_TIMEOUT,
     message_parameter::PARAM_OBJECT_PROPERTY_FILTER, message_parameter::PARAM_OBJECTID_FILTER,
-    message_parameter::PARAM_PRIORITY_FILTER, message_parameter::PARAM_SUBGROUP_DELIVERY_TIMEOUT,
-    message_parameter::PARAM_SUBGROUP_FILTER, message_parameter::PARAM_SUBSCRIBER_PRIORITY, varint,
+    message_parameter::PARAM_PAUSED, message_parameter::PARAM_PRIORITY_FILTER,
+    message_parameter::PARAM_SUBGROUP_DELIVERY_TIMEOUT, message_parameter::PARAM_SUBGROUP_FILTER,
+    message_parameter::PARAM_SUBSCRIBER_PRIORITY, varint,
 };
 
 use pbt::common::{RANGE_FILTER_TYPES, has_property_type_field, sample_small_varint, test_runner};
@@ -665,7 +666,7 @@ const OUTER_LOWER_TYPES: &[u64] = &[
     PARAM_EXPIRES,
     PARAM_LARGEST_OBJECT,
     PARAM_FILL_TIMEOUT,
-    PARAM_FORWARD,
+    PARAM_PAUSED,
     PARAM_SUBSCRIBER_PRIORITY,
     PARAM_LOCATION_FILTER,
     PARAM_GROUP_ORDER,
@@ -790,7 +791,7 @@ fn sample_outer_parameters(ctx: &mut noprop::TestCaseContext, types: &[u64]) -> 
                 group: sample_small_varint(ctx),
                 object: sample_small_varint(ctx),
             },
-            PARAM_FORWARD | PARAM_INCLUDE_PROPERTIES => {
+            PARAM_PAUSED | PARAM_INCLUDE_PROPERTIES => {
                 MessageParameterValue::Uint8(noprop::sample_choice(ctx, &[0u8, 1u8]))
             }
             PARAM_SUBSCRIBER_PRIORITY => MessageParameterValue::Uint8(noprop::sample_u8(ctx)),
@@ -886,6 +887,86 @@ fn fill_parameters_count_framing_roundtrip() -> noprop::TestResult {
     assert!(
         following_seen.get(),
         "FILL_PARAMETERS の後続する外側パラメータが 1 つも観測されなかった\n{runner}"
+    );
+    Ok(())
+}
+
+/// PAUSED (0x11) の省略・0・1 が encode → decode で区別されたまま保たれること
+///
+/// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): PAUSED は uint8 で
+/// 0 は unpaused、1 は paused、省略時の既定値は 0 である。省略と 0 の明示は
+/// REQUEST_UPDATE / PUBLISH_STATE_NOTIFY で意味が異なる (前者は現在値の維持、
+/// 後者は unpaused への変更) ため、codec は両者を区別して保持しなければならない。
+///
+/// 3 状態 (省略 / 0 / 1) を等しく生成し、`paused()` が `None` / `Some(0)` / `Some(1)` を
+/// そのまま返すこと、およびワイヤ上の型が 0x11 で値が 1 バイトであることを検証する。
+/// 旧 FORWARD (0x10) のワイヤ値が使われていないことも、このバイト列の固定で検出できる。
+#[test]
+fn paused_parameter_roundtrip_preserves_absence_and_values() -> noprop::TestResult {
+    // 3 状態すべてが観測されたことをカバレッジゲートで検証する
+    let absent_seen = std::cell::Cell::new(false);
+    let unpaused_seen = std::cell::Cell::new(false);
+    let paused_seen = std::cell::Cell::new(false);
+    let mut runner = test_runner()?;
+    runner.run(64, |ctx| {
+        // 0: 省略、1: 0 (unpaused) の明示、2: 1 (paused) の明示
+        let (sampled, expected) = match noprop::sample_usize_in(ctx, 0..=2) {
+            0 => {
+                absent_seen.set(true);
+                (None, None)
+            }
+            1 => {
+                unpaused_seen.set(true);
+                (Some(0u8), Some(0u8))
+            }
+            _ => {
+                paused_seen.set(true);
+                (Some(1u8), Some(1u8))
+            }
+        };
+        let mut params = MessageParameters::new();
+        if let Some(value) = sampled {
+            params.push(MessageParameter {
+                param_type: PARAM_PAUSED,
+                value: MessageParameterValue::Uint8(value),
+            });
+        }
+
+        let mut buf = Vec::new();
+        params
+            .encode(&mut buf)
+            .expect("正当な PAUSED の値は encode できなければならない");
+        // ワイヤは count (vi64) + delta 0x11 + 値 1 バイト。省略時は count 0 の 1 バイトのみ
+        let expected_wire: Vec<u8> = match sampled {
+            None => vec![0x00],
+            Some(value) => vec![0x01, PARAM_PAUSED as u8, value],
+        };
+        assert_eq!(
+            buf, expected_wire,
+            "PAUSED のワイヤは count + 型 0x11 + uint8 値であること"
+        );
+
+        let (decoded, consumed) = MessageParameters::decode(&buf)
+            .expect("encode した PAUSED は decode できなければならない");
+        assert_eq!(consumed, buf.len(), "生成したバイト列をすべて消費すること");
+        assert_eq!(
+            decoded.paused(),
+            expected,
+            "省略・0・1 がそのまま保たれること"
+        );
+        Ok(())
+    })?;
+    assert!(
+        absent_seen.get(),
+        "PAUSED を省略したケースが 1 つも観測されなかった\n{runner}"
+    );
+    assert!(
+        unpaused_seen.get(),
+        "PAUSED=0 (unpaused) のケースが 1 つも観測されなかった\n{runner}"
+    );
+    assert!(
+        paused_seen.get(),
+        "PAUSED=1 (paused) のケースが 1 つも観測されなかった\n{runner}"
     );
     Ok(())
 }

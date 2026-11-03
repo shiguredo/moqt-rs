@@ -364,7 +364,7 @@ mod tests {
             track_name: Vec::new(),
             track_alias: None,
             state: SubscriptionState::Pending,
-            forward_state: 0,
+            paused: false,
             largest_location: None,
             largest_received_location: None,
             delivery_timeouts: DeliveryTimeoutState {

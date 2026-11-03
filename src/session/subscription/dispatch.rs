@@ -23,7 +23,7 @@ use super::delivery::{
     update_subscription_expires_if_present,
     update_subscription_subscriber_delivery_timeouts_if_present,
 };
-use super::validation::{extract_range_filters, resolve_location_filter, validate_forward};
+use super::validation::{extract_range_filters, resolve_location_filter, validate_paused};
 
 impl Session {
     pub(crate) fn send_ok_for_subscription(
@@ -96,7 +96,7 @@ impl Session {
                 // 運び、subscription 更新用パラメータは REQUEST_UPDATE (要求) に出現する。
                 // スコープ検証で EXPIRES 以外は既に弾かれているため、ここでは EXPIRES の
                 // 適用のみ行う。filter / delivery timeout / priority / Range Filter は
-                // 既定値のままであり、forward_state は PUBLISH 送受信時の値のまま維持する。
+                // 既定値のままであり、paused は PUBLISH 送受信時の値のまま維持する。
                 // 更新は REQUEST_UPDATE (要求) 経路に委譲する。
                 self.clear_control_message_deadline(request_id);
                 let subscription = self
@@ -123,16 +123,17 @@ impl Session {
                         &pending_params,
                     );
                     update_subscription_expires_if_present(subscription, &pending_params, now_ms);
-                    if let Some(f) = pending_params.forward() {
-                        let new_forward = validate_forward(f)?;
+                    if let Some(paused) = pending_params.paused() {
+                        let new_paused = validate_paused(paused)?;
                         // draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams):
-                        // STOP_SENDING 後の再オープンは Forward State が 0 から 1 へ変わった
-                        // REQUEST_UPDATE が受理された場合のみ許可する。現在値が 1 である
-                        // ことでは解除しない (PUBLISH_STATE_NOTIFY などの他経路でも解除しない)
-                        if subscription.forward_state == 0 && new_forward == 1 {
+                        // STOP_SENDING 後の再オープンは、購読を再開する REQUEST_UPDATE
+                        // (PAUSED が 1 から 0 へ変わる) が受理された場合のみ許可する。
+                        // 現在値が unpaused であることでは解除しない
+                        // (PUBLISH_STATE_NOTIFY などの他経路でも解除しない)
+                        if subscription.paused && !new_paused {
                             self.stopped_outgoing_subgroups.remove(&request_id);
                         }
-                        subscription.forward_state = new_forward;
+                        subscription.paused = new_paused;
                     }
                     match pending_params.location_filter_update() {
                         // 省略時は値 unchanged、Location Filter Type 0x00 (None) はフィルタ削除
@@ -412,7 +413,7 @@ impl Session {
                 // draft-ietf-moq-transport-22 Appendix A.3 #1790 (Subscription parameters
                 // appear in REQUEST_UPDATE, not PUBLISH_OK): PUBLISH_OK は EXPIRES のみを
                 // 運ぶ。スコープ検証で EXPIRES 以外は既に弾かれているため、ここでは
-                // EXPIRES の適用と Established 遷移のみ行う。filter / forward 等の
+                // EXPIRES の適用と Established 遷移のみ行う。filter / PAUSED 等の
                 // 更新は REQUEST_UPDATE (要求) 経路に委譲する。
                 self.clear_control_message_deadline(request_id);
                 let subscription = self

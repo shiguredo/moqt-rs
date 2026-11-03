@@ -581,7 +581,7 @@ pub struct Session {
     /// new stream ..." の再オープン禁止状態を保持する。値のタプル
     /// `(track_alias, group_id, subgroup_id)` の 3 番目の `Option<u64>` は FirstObjectId
     /// モードの未解決 subgroup_id (`None`) を表す。終端状態 (`StoppedByPeer` / `Reset`) の
-    /// 上書きに影響されず、Forward State 0→1 の REQUEST_UPDATE が受理された時点または
+    /// 上書きに影響されず、購読を再開する REQUEST_UPDATE (PAUSED 1→0) が受理された時点または
     /// `forget_subscription` で破棄する (共有 alias の兄弟 subscription が残っていても
     /// 所有者の破棄でエントリは消えるため、STOP_SENDING による再オープン禁止は適用されなく
     /// なる。FIN で正常終了した Subgroup は tracker 側で引き続き再オープン不可)。なお
@@ -589,7 +589,7 @@ pub struct Session {
     /// 解除対象になる (順序の近似)。
     ///
     /// PUBLISH 起点 (自側 publisher) の subscription でも、peer subscriber の
-    /// REQUEST_UPDATE に REQUEST_OK で応答できるため、Forward 0→1 の受理で解除される
+    /// REQUEST_UPDATE に REQUEST_OK で応答できるため、PAUSED 1→0 の受理で解除される
     /// (SUBSCRIBE 起点と同じ)。値の意味は [`StoppedOutgoingSubgroups`] を参照する。
     pub(super) stopped_outgoing_subgroups: StoppedOutgoingSubgroups,
     pub(super) events: VecDeque<SessionEvent>,

@@ -1,8 +1,8 @@
-//! Pass 評価 (Forward AND Location Filters AND Range Filters) のテスト
+//! Pass 評価 ((NOT Paused) AND Location Filters AND Range Filters) のテスト
 //!
-//! draft-ietf-moq-transport-22 §3.3.3 (Combining Filters):
+//! draft-ietf-moq-transport-23 §3.3.3 (Combining Filters):
 //! "The publisher MUST forward only objects that pass all filters.
-//!  Pass = Forward AND Location Filters AND Range Filters"
+//!  Pass = (NOT Paused) AND Location Filters AND Range Filters"
 //!
 //! フィルタは subscriber が SUBSCRIBE / PUBLISH_OK / REQUEST_UPDATE で指定し、publisher 側の
 //! subscription 状態に保持される。したがって本テストは client(subscriber) → server(publisher)
@@ -12,7 +12,7 @@
 
 use super::*;
 use shiguredo_moqt::message_parameter::{
-    LocationFilter, PARAM_FORWARD, PARAM_LOCATION_FILTER, PARAM_OBJECTID_FILTER,
+    LocationFilter, PARAM_LOCATION_FILTER, PARAM_OBJECTID_FILTER, PARAM_PAUSED,
     PARAM_PRIORITY_FILTER, PARAM_SUBGROUP_FILTER,
 };
 use shiguredo_moqt::session::types::SendRequestError;
@@ -80,18 +80,18 @@ fn assert_filter_mismatch(err: SendRequestError, label: &str) {
     );
 }
 
-// ─── Forward ────────────────────────────────────────────────────
+// ─── Paused ─────────────────────────────────────────────────────
 
-/// forward_state == 0 では subgroup object を送れない
+/// paused (PAUSED=1) では subgroup object を送れない
 ///
-/// draft-ietf-moq-transport-22 §3.1.1 (Pausing Subscriptions):
+/// draft-ietf-moq-transport-23 §3.1.1 (Pausing Subscriptions):
 /// "The publisher does not send Objects on a paused subscription"
 #[test]
-fn forward_zero_rejects_subgroup_object() {
+fn paused_rejects_subgroup_object() {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     let (_client, mut server, rid) = establish_with_filters(params);
     let stream_id = DataStreamId(60);
@@ -99,56 +99,56 @@ fn forward_zero_rejects_subgroup_object() {
 
     let err = server
         .send_subgroup_object(stream_id, 0, None)
-        .expect_err("forward=0 では送信できない");
-    assert_filter_mismatch(err, "forward=0 の subgroup 経路");
+        .expect_err("paused (PAUSED=1) では送信できない");
+    assert_filter_mismatch(err, "paused の subgroup 経路");
 }
 
-/// forward_state == 0 では datagram も送れない
+/// paused (PAUSED=1) では datagram も送れない
 #[test]
-fn forward_zero_rejects_datagram() {
+fn paused_rejects_datagram() {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     let (_client, mut server, rid) = establish_with_filters(params);
 
     let err = server
         .send_object_datagram(rid, 3, 0, None, None, false)
-        .expect_err("forward=0 では送信できない");
-    assert_filter_mismatch(err, "forward=0 の datagram 経路");
+        .expect_err("paused (PAUSED=1) では送信できない");
+    assert_filter_mismatch(err, "paused の datagram 経路");
 }
 
 /// END_OF_GROUP bit を立ててもフィルタ評価は迂回できない
 ///
-/// draft-ietf-moq-transport-22 §3.3.3 (Combining Filters): "The publisher MUST forward only objects
+/// draft-ietf-moq-transport-23 §3.3.3 (Combining Filters): "The publisher MUST forward only objects
 /// that pass all filters." END_OF_GROUP bit は Object の Location を変えないため、
-/// forward=0 の subscription では END_OF_GROUP 付き datagram も送れない。
+/// paused (PAUSED=1) の subscription では END_OF_GROUP 付き datagram も送れない。
 #[test]
-fn forward_zero_rejects_end_of_group_datagram() {
+fn paused_rejects_end_of_group_datagram() {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     let (_client, mut server, rid) = establish_with_filters(params);
 
     let err = server
         .send_object_datagram(rid, 3, 0, None, None, true)
-        .expect_err("forward=0 では END_OF_GROUP 付き datagram も送信できない");
-    assert_filter_mismatch(err, "forward=0 の END_OF_GROUP datagram 経路");
+        .expect_err("paused (PAUSED=1) では END_OF_GROUP 付き datagram も送信できない");
+    assert_filter_mismatch(err, "paused の END_OF_GROUP datagram 経路");
 }
 
-/// 制御メッセージ (PUBLISH_DONE) は Forward State に影響されない
+/// 制御メッセージ (PUBLISH_DONE) は paused に影響されない
 ///
-/// draft-ietf-moq-transport-22 §3.1.1 (Pausing Subscriptions): "Control messages, such as PUBLISH_DONE
-/// (Section 9.9), are sent regardless of whether the subscription is paused."
+/// draft-ietf-moq-transport-23 §3.1.1 (Pausing Subscriptions): "Control messages, such as
+/// PUBLISH_DONE (Section 9.9), are sent regardless of whether the subscription is paused."
 #[test]
-fn forward_zero_still_allows_publish_done() {
+fn paused_still_allows_publish_done() {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     let (_client, mut server, rid) = establish_with_filters(params);
 
@@ -159,7 +159,7 @@ fn forward_zero_still_allows_publish_done() {
             0,
             shiguredo_moqt::message::ReasonPhrase::new("done").expect("有効な reason"),
         )
-        .expect("PUBLISH_DONE は forward state に関係なく送れる");
+        .expect("PUBLISH_DONE は paused に関係なく送れる");
 }
 
 // ─── Location Filter ────────────────────────────────────────────
@@ -504,14 +504,14 @@ fn unfiltered_subscription_sends_everything() {
 fn filter_mismatch_does_not_close_session() {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     let (_client, mut server, rid) = establish_with_filters(params);
 
     let _ = server
         .send_object_datagram(rid, 3, 0, None, None, false)
-        .expect_err("forward=0 では送信できない");
+        .expect_err("paused (PAUSED=1) では送信できない");
     assert_eq!(
         server.state(),
         SessionState::Established,
@@ -528,7 +528,7 @@ fn filter_mismatch_does_not_close_session() {
 /// FirstObjectId モードの stream で SUBGROUP_FILTER に通らない最初のオブジェクトが拒否
 /// され、内部状態を汚染しないこと
 ///
-/// draft-ietf-moq-transport-22 §3.3.3 (Combining Filters): "The publisher MUST forward only
+/// draft-ietf-moq-transport-23 §3.3.3 (Combining Filters): "The publisher MUST forward only
 /// objects that pass all filters." filter 評価が FirstObjectId 解決 (`my_subgroups.open` /
 /// `stream.subgroup_id` 代入) より後に実行されると、拒否されたオブジェクトの ID で
 /// 解決され、publisher 側の subgroup id (拒否された ID) と subscriber 側の認識 (最初に

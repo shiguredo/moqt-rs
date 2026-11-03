@@ -34,8 +34,8 @@ use super::delivery::{
     set_subscription_publisher_subgroup_delivery_timeout,
 };
 use super::validation::{
-    extract_range_filters, resolve_location_filter, validate_forward, validate_group_order,
-    validate_include_properties,
+    extract_range_filters, resolve_location_filter, validate_group_order,
+    validate_include_properties, validate_paused,
 };
 
 impl Session {
@@ -158,21 +158,21 @@ impl Session {
         }
         // draft-ietf-moq-transport-22 §3.1 (Subscriptions): 同一 Track への複数同時 subscription が許可されたため、
         // DUPLICATE_SUBSCRIPTION による拒否は行わない。
-        // draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter): FORWARD パラメータの
-        // 抽出 (不在時はデフォルト 1)。値域外 (0 / 1 以外) の受信は MUST でセッションを
-        // PROTOCOL_VIOLATION により閉じる (GROUP_ORDER の値域検証と同じパターン。`?`
-        // 伝播のみだとセッションが開いたまま残る)。検証の `Ok` 値を `forward_state` の
-        // 設定に使い、`forward()` の検索結果を検証に再利用する (検証を呼び出しと分離し、
-        // 同じパラメータを 2 回解釈しない)。
-        let forward_state = match subscribe.parameters.forward() {
-            Some(f) => match validate_forward(f) {
+        // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): PAUSED パラメータの
+        // 抽出 (不在時は既定型 0 = unpaused)。値域外 (0 / 1 以外) の受信は MUST で
+        // セッションを PROTOCOL_VIOLATION により閉じる (GROUP_ORDER の値域検証と
+        // 同じパターン。`?` 伝播のみだとセッションが開いたまま残る)。検証の `Ok` 値を
+        // `paused` の設定に使い、`paused()` の検索結果を検証に再利用する
+        // (検証を呼び出しと分離し、同じパラメータを 2 回解釈しない)。
+        let paused = match subscribe.parameters.paused() {
+            Some(value) => match validate_paused(value) {
                 Ok(validated) => validated,
                 Err(err) => {
                     self.fail(err.clone());
                     return Err(err);
                 }
             },
-            None => 1,
+            None => false,
         };
         let subscriber_object_delivery_timeout_ms = subscribe.parameters.object_delivery_timeout();
         let subscriber_subgroup_delivery_timeout_ms =
@@ -240,7 +240,7 @@ impl Session {
             track_name: subscribe.track_name,
             track_alias: None,
             state: SubscriptionState::Pending,
-            forward_state,
+            paused,
             largest_location: None,
             largest_received_location: None,
             delivery_timeouts: DeliveryTimeoutState {
@@ -288,7 +288,7 @@ impl Session {
         self.request_streams
             .insert(request_id, RequestKind::Subscribe);
         // draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams):
-        // FILL_PARAMETERS 付き SUBSCRIBE を Forward State 1 で処理したら
+        // FILL_PARAMETERS 付き SUBSCRIBE を unpaused (PAUSED=0) で処理したら
         // fill fetch stream を開く。fill range が empty または Largest Object より
         // 後に始まる場合・ Largest Object 未知の場合は開設しない。
         self.maybe_open_fill_stream(
@@ -296,7 +296,7 @@ impl Session {
             request_id,
             &subscribe.parameters,
             filter,
-            forward_state,
+            paused,
         );
         Ok(())
     }
@@ -396,21 +396,21 @@ impl Session {
                 }
             }
         }
-        // draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter): FORWARD パラメータの
-        // 抽出 (不在時はデフォルト 1)。値域外 (0 / 1 以外) の受信は MUST でセッションを
-        // PROTOCOL_VIOLATION により閉じる (GROUP_ORDER の値域検証と同じパターン。`?`
-        // 伝播のみだとセッションが開いたまま残る)。検証の `Ok` 値を `forward_state` の
-        // 設定に使い、`forward()` の検索結果を検証に再利用する (検証を呼び出しと分離し、
-        // 同じパラメータを 2 回解釈しない)。
-        let forward_state = match publish.parameters.forward() {
-            Some(f) => match validate_forward(f) {
+        // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): PAUSED パラメータの
+        // 抽出 (不在時は既定型 0 = unpaused)。値域外 (0 / 1 以外) の受信は MUST で
+        // セッションを PROTOCOL_VIOLATION により閉じる (GROUP_ORDER の値域検証と
+        // 同じパターン。`?` 伝播のみだとセッションが開いたまま残る)。検証の `Ok` 値を
+        // `paused` の設定に使い、`paused()` の検索結果を検証に再利用する
+        // (検証を呼び出しと分離し、同じパラメータを 2 回解釈しない)。
+        let paused = match publish.parameters.paused() {
+            Some(value) => match validate_paused(value) {
                 Ok(validated) => validated,
                 Err(err) => {
                     self.fail(err.clone());
                     return Err(err);
                 }
             },
-            None => 1,
+            None => false,
         };
         // draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): 値域外の受信は
         // MUST でセッションを PROTOCOL_VIOLATION により閉じる。
@@ -483,7 +483,7 @@ impl Session {
             track_name: publish.track_name,
             track_alias: Some(publish.track_alias),
             state: SubscriptionState::Pending,
-            forward_state,
+            paused,
             largest_location: None,
             largest_received_location: None,
             delivery_timeouts: DeliveryTimeoutState {
@@ -784,13 +784,13 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        // draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter):
-        // FORWARD は 0 / 1 のみが有効であり、値域外を受信した endpoint は
-        // PROTOCOL_VIOLATION でセッションを閉じる MUST。Range Filter の拒否
-        // (INVALID_FILTER の REQUEST_ERROR) より先に検証し、MUST close が
+        // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter):
+        // PAUSED は 0 (unpaused) / 1 (paused) のみが有効であり、値域外を受信した
+        // endpoint は PROTOCOL_VIOLATION でセッションを閉じる MUST。Range Filter の
+        // 拒否 (INVALID_FILTER の REQUEST_ERROR) より先に検証し、MUST close が
         // REQUEST_ERROR に隠れないようにする。
-        if let Some(forward) = update.parameters.forward()
-            && let Err(err) = validate_forward(forward)
+        if let Some(value) = update.parameters.paused()
+            && let Err(err) = validate_paused(value)
         {
             self.fail(err.clone());
             return Err(err);
@@ -809,7 +809,7 @@ impl Session {
         // キャッシュで alias を解決するだけで実キャッシュを変更せず、解決できない alias も
         // 判定対象から外すため、未登録 alias の扱いは適用経路のまま変わらない。
         // セッション終了の検証 (§9.20.1 の context スコープ / §9.5 と §3.1・§3.2 の
-        // state・role / §9.20.18 の FORWARD 値域) は上で済ませてある。§9.20.19
+        // state・role / §9.19.18 の PAUSED 値域) は上で済ませてある。§9.20.19
         // (NEW_GROUP_REQUEST) だけは対象 subscription のトラックプロパティを要するため
         // dispatch 側に残る (メッセージ単位の reject が先行し得る。受信側の close は
         // 実装判断であり MUST ではない)。
@@ -843,7 +843,7 @@ impl Session {
         // ローカル終端済みの request は送信方向を reset 済みで拒否応答 (REQUEST_ERROR) を
         // 送れないため、拒否せず dispatch へ進む。Range Filter の内容検証自体は省略され
         // (draft §3.3.2 の MUST は REQUEST_ERROR による拒否であり、応答を送れない以上
-        // 満たせない)、NEW_GROUP_REQUEST・FORWARD の MUST 検証は各ハンドラで行い、
+        // 満たせない)、NEW_GROUP_REQUEST・PAUSED の MUST 検証は各ハンドラで行い、
         // 状態遷移はしない
         if let Err(reason) = self.check_incoming_range_filters(&update.parameters)
             && !locally_terminated
@@ -1026,7 +1026,7 @@ impl Session {
         // malformed 終端) は送信方向を reset 済みだが、peer が reset を観測する前に送った
         // REQUEST_UPDATE は正当に届く。その場合は本関数の残りの検証 (NEW_GROUP_REQUEST)
         // だけを行い、状態遷移とイベント発行はしない (Request ID / MAX_REQUEST_UPDATES /
-        // state・role / auth token / パラメータスコープ / FORWARD 値域の検証は呼び出し元
+        // state・role / auth token / パラメータスコープ / PAUSED 値域の検証は呼び出し元
         // `handle_peer_request_update` で済んでいる)。
         // なお state テーブルから破棄済み (`forget_*` 後) の request への REQUEST_UPDATE は、
         // 送信者を特定できないため従来どおり PROTOCOL_VIOLATION になる。
@@ -1049,7 +1049,7 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        // draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter) の値域検証は
+        // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter) の値域検証は
         // 呼び出し元 `handle_peer_request_update` が dispatch 前に済ませている
         // (同一の `MessageParameters` を渡すため、ここで再検証しても到達しない)。
         // ローカル終端済みの request はここまでの MUST 検証だけを行い、状態遷移と
@@ -1108,8 +1108,12 @@ impl Session {
         subscription.pending_update_params = Some(pending);
         // draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams):
         // FILL_PARAMETERS 付き REQUEST_UPDATE を処理したら fill fetch stream の
-        // 開設を判定する。処理後観点の forward と filter で評価する。
-        let post_forward = merged.forward().unwrap_or(subscription.forward_state);
+        // 開設を判定する。処理後観点の paused と filter で評価する
+        // (PAUSED を省略した REQUEST_UPDATE は現在値の維持なので、現状値へフォールバックする)。
+        let post_paused = match merged.paused() {
+            Some(value) => validate_paused(value)?,
+            None => subscription.paused,
+        };
         let post_filter: Option<LocationFilter> = match merged.location_filter_update() {
             Ok(LocationFilterUpdate::Set(filter)) => Some(filter),
             // Type 0x00 (None) はフィルタ削除、省略時は現 filter を使う
@@ -1128,7 +1132,7 @@ impl Session {
             request_id,
             &parameters,
             post_filter,
-            post_forward,
+            post_paused,
         );
         Ok(())
     }
@@ -1139,7 +1143,7 @@ impl Session {
     /// publisher のみが subscription の bidi stream 上で送る一方向通知であり、
     /// 応答は不要、MAX_REQUEST_UPDATES のクレジットも消費しない。
     /// subscription 以外への受信・ subscriber からの受信は MUST でセッションを
-    /// PROTOCOL_VIOLATION により閉じる。FORWARD / LOCATION_FILTER /
+    /// PROTOCOL_VIOLATION により閉じる。PAUSED / LOCATION_FILTER /
     /// LARGEST_OBJECT は subscription 状態に即時反映する。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub(crate) fn handle_peer_publish_state_notify(
@@ -1169,7 +1173,7 @@ impl Session {
         // draft §3.1 (Subscriptions): REQUEST_UPDATE と同様、確立済みの
         // subscription に対する通知のみ受理する。ローカル終端済みの request
         // (`rejected_request_ids` に記録) では、peer が reset を観測する前に送った通知が
-        // 正当に届くため、残りの検証 (FORWARD / LOCATION_FILTER) だけを行い状態遷移はしない。
+        // 正当に届くため、残りの検証 (PAUSED / LOCATION_FILTER) だけを行い状態遷移はしない。
         // 破棄済み (`forget_*` 後) の request への通知は送信者を特定できないため
         // 従来どおり PROTOCOL_VIOLATION になる。
         let locally_terminated = self.is_locally_terminated_request(request_id);
@@ -1181,10 +1185,10 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        // draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter): 値域外 (0 / 1 以外) の
-        // 受信は MUST でセッションを PROTOCOL_VIOLATION により閉じる。
-        if let Some(f) = notify.parameters.forward()
-            && let Err(err) = validate_forward(f)
+        // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): 値域外
+        // (0 / 1 以外) の受信は MUST でセッションを PROTOCOL_VIOLATION により閉じる。
+        if let Some(value) = notify.parameters.paused()
+            && let Err(err) = validate_paused(value)
         {
             self.fail(err.clone());
             return Err(err);
@@ -1213,8 +1217,11 @@ impl Session {
             .subscriptions
             .get_mut(&request_id)
             .expect("subscription presence already checked above");
-        if let Some(f) = notify.parameters.forward() {
-            subscription.forward_state = f;
+        // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): PUBLISH_STATE_NOTIFY で
+        // PAUSED を省略した場合は現在値を維持する。通知は publisher が「購読が paused か
+        // どうか」を報告するものであり、ここでは受信側の追跡状態へそのまま反映する。
+        if let Some(value) = notify.parameters.paused() {
+            subscription.paused = validate_paused(value)?;
         }
         // draft-ietf-moq-transport-22 §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER Parameter):
         // Location Filter Type 0x00 (None) はフィルタ削除、省略時は値 unchanged。解決済み値もフィルタに追随させる。

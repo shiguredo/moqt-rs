@@ -8,8 +8,8 @@ use super::*;
 use shiguredo_moqt::message::Publish;
 use shiguredo_moqt::message::common::Location;
 use shiguredo_moqt::message_parameter::{
-    LocationFilter, MessageParameter, MessageParameterValue, PARAM_EXPIRES, PARAM_FORWARD,
-    PARAM_GROUP_ORDER, PARAM_LARGEST_OBJECT, PARAM_LOCATION_FILTER, PARAM_OBJECT_DELIVERY_TIMEOUT,
+    LocationFilter, MessageParameter, MessageParameterValue, PARAM_EXPIRES, PARAM_GROUP_ORDER,
+    PARAM_LARGEST_OBJECT, PARAM_LOCATION_FILTER, PARAM_OBJECT_DELIVERY_TIMEOUT, PARAM_PAUSED,
     PARAM_SUBGROUP_DELIVERY_TIMEOUT, PARAM_SUBSCRIBER_PRIORITY,
 };
 use shiguredo_moqt::track_properties::{
@@ -172,8 +172,8 @@ fn publish_recv_reflects_initial_parameters() {
     let (mut client, mut server) = establish_pair();
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
-        value: MessageParameterValue::Uint8(0),
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     params.push(MessageParameter {
         param_type: PARAM_GROUP_ORDER,
@@ -219,7 +219,7 @@ fn publish_recv_reflects_initial_parameters() {
     let sub = client
         .subscription(pub_rid)
         .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(sub.forward_state, 0, "PUBLISH の FORWARD が反映されること");
+    assert!(sub.paused, "PUBLISH の PAUSED が反映されること");
     assert_eq!(sub.group_order, Some(2), "GROUP_ORDER が反映されること");
     assert_eq!(
         sub.subscriber_priority,
@@ -228,7 +228,7 @@ fn publish_recv_reflects_initial_parameters() {
     );
     assert!(sub.filter.is_some(), "LOCATION_FILTER が反映されること");
     assert!(sub.expires.is_some(), "PUBLISH の EXPIRES が反映されること");
-    // 送信側は forward=0 の確立では広告値を保存しない (受信側と非対称。
+    // 送信側は paused での確立では広告値を保存しない (受信側と非対称。
     // publisher 側の保存は廃止され、観測値は largest_received_location で追跡する)
     assert!(
         server
@@ -236,7 +236,7 @@ fn publish_recv_reflects_initial_parameters() {
             .expect("テストフィクスチャの前提条件を満たす")
             .largest_location
             .is_none(),
-        "forward=0 確立では送信側 largest_location は保存されないこと"
+        "paused での確立では送信側 largest_location は保存されないこと"
     );
     assert_eq!(
         sub.filter_start,
