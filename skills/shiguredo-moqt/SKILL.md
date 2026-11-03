@@ -60,6 +60,7 @@ use shiguredo_moqt::stream::SubgroupHeader;
 | `name` | Namespace / Track Name の文字列表現 |
 | `grease` | GREASE 値の生成・判定 |
 | `subgroup_tracker` | Subgroup 再オープン禁止の検証 |
+| `group_switch_gate` | 前の Group の stream が開いている間、次の Group の映像 Object を保留する判定 |
 | `playout` | 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期、共通の時間軸、時間圧縮・伸長と欠落の補間 |
 | `error` | エラー型とエラーコード定数 |
 

@@ -37,6 +37,7 @@ pub mod decoder;
 /// エラー型と終了コード定義 (draft-ietf-moq-transport-22 §16.11 (Error Codes))
 pub mod error;
 pub mod grease;
+pub mod group_switch_gate;
 /// KVP (Key-Value-Pair) の delta-key 骨格を集約する内部モジュール (外部公開しない)
 pub(crate) mod kvp;
 pub mod loc;

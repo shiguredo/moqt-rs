@@ -14,6 +14,7 @@
 // 呼び出し側が設定を組み立て、デコード済みフレームを受け取るために公開する
 pub mod cli;
 pub mod error;
+pub(crate) mod group_switch;
 pub mod pipeline;
 
 // 呼び出し側がチャネルの型として必要とするため、クレート直下へ再公開する

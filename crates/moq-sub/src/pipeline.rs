@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use crate::group_switch::{GroupSwitchHandle, SharedGroupSwitchGate};
 use bytes::Bytes;
 use shiguredo_moqt::error::MessageError;
 use shiguredo_moqt::loc::{
@@ -963,6 +964,7 @@ fn spawn_stream_task(
     display_backlog: &std::sync::Arc<std::sync::atomic::AtomicI64>,
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
     video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
+    group_switch: &std::sync::Arc<SharedGroupSwitchGate>,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     audio_catch_up: &std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
@@ -984,6 +986,9 @@ fn spawn_stream_task(
     let backlog = std::sync::Arc::clone(display_backlog);
     let video_decode_order = std::sync::Arc::clone(video_decode_order);
     let video_delivery_order = std::sync::Arc::clone(video_delivery_order);
+    // 世代は stream task を作った時点で固定する。session 移行で世代を進めた後に旧い task が
+    // 呼んでも、新しい世代の判定に影響しないようにするためである
+    let group_switch = GroupSwitchHandle::new(std::sync::Arc::clone(group_switch));
     let audio_decoder = audio_decoder.cloned();
     let audio_config_handled = std::sync::Arc::clone(audio_config_handled);
     let audio_catch_up = std::sync::Arc::clone(audio_catch_up);
@@ -1008,6 +1013,7 @@ fn spawn_stream_task(
             backlog,
             &video_decode_order,
             &video_delivery_order,
+            &group_switch,
             audio_decoder.as_ref(),
             &audio_config_handled,
             &audio_catch_up,
@@ -2160,6 +2166,9 @@ pub async fn run(
     // 判定できない。映像のトラックを切り替えて decoder を作り直す経路を足すときは、
     // この状態を reset してから次のキーフレームで復号を始め直すこと。
     let video_decode_order = std::sync::Arc::new(tokio::sync::Mutex::new(VideoDecodeOrder::new()));
+    // Group の切り替えで次の Group の映像 Object を保留する gate は購読で 1 つ持つ。
+    // stream task 間で共有し、session 移行の直前に世代を進めて状態を捨てる
+    let group_switch = std::sync::Arc::new(SharedGroupSwitchGate::new());
 
     if subscribe_video {
         let v = video_info.as_ref().expect("video_info is Some");
@@ -2715,6 +2724,7 @@ pub async fn run(
                 &display_backlog,
                 &video_decode_order,
                 &video_delivery_order,
+                &group_switch,
                 audio_decoder.as_ref(),
                 &audio_config_handled,
                 &audio_catch_up,
@@ -3238,6 +3248,11 @@ pub async fn run(
                         // 旧 session の復号順と追いつきの状態を捨てる。新 session の live を
                         // 古い Group として誤って拒否しないためである
                         video_decode_order.lock().await.reset();
+                        // Group の切り替え gate も初期化する。旧 session の stream task は
+                        // abort しても await 点でしか止まらず、drain の打ち切り後も動き得る
+                        // ため、世代を進めて旧い task の begin_stream / end_stream /
+                        // admit を無視する
+                        group_switch.reset();
                         audio_catch_up
                             .lock()
                             .expect("audio catch up lock is not poisoned")
@@ -4544,6 +4559,7 @@ async fn handle_incoming_stream(
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
     video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
+    group_switch: &GroupSwitchHandle,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     audio_catch_up: &std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
@@ -4574,6 +4590,7 @@ async fn handle_incoming_stream(
         display_backlog,
         video_decode_order,
         video_delivery_order,
+        group_switch,
         audio_decoder,
         audio_config_handled,
         audio_catch_up,
@@ -4646,6 +4663,7 @@ async fn handle_stream_body(
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
     video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
+    group_switch: &GroupSwitchHandle,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     audio_catch_up: &std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
@@ -4943,6 +4961,12 @@ async fn handle_stream_body(
                             return;
                         }
                     };
+                    // gate を通すのは再生する (decoder を持つ) stream だけである。録画のみの
+                    // 場合は復号しないため、保留する理由が無い
+                    let gate_enabled = decoder.is_some();
+                    if gate_enabled {
+                        group_switch.begin_stream(header.group_id, stream_id.0);
+                    }
                     let frames = decode_video_stream(
                         stream,
                         data_plane,
@@ -4951,6 +4975,7 @@ async fn handle_stream_body(
                         &mut sg_decoder,
                         video_decode_order,
                         video_delivery_order,
+                        group_switch,
                         decoder.as_mut(),
                         &FrameSink {
                             frame_tx,
@@ -4961,6 +4986,12 @@ async fn handle_stream_body(
                         termination_tx,
                     )
                     .await;
+                    // decode_video_stream の return 経路 (FIN / RESET_STREAM / STOP_SENDING /
+                    // 読み取りエラー / 配送の打ち切り) はすべてここで吸収し、begin と end を
+                    // 1 対 1 にする
+                    if gate_enabled {
+                        group_switch.end_stream(header.group_id, stream_id.0);
+                    }
                     tracing::debug!(
                         "Stream #{stream_num}: video group {} complete ({frames} frames)",
                         header.group_id,
@@ -5334,6 +5365,10 @@ fn monotonic_now_us() -> i64 {
 /// Object だけを decoder へ渡す。
 /// `video_delivery_order` は購読で共有する購読境界の判定である。復号の後、`frame_tx` への
 /// 送出前に通す。
+/// `group_switch` は購読で共有する Group の切り替え gate である。前の Group の stream が
+/// 開いている間は、この Object を payload ごと保持したまま待ち、解除後に同じ decoder で
+/// 復号する。保留中は「最後に受信した位置」を記録しない (移行で保留を捨てたときに、新しい
+/// 購読の Location Filter がその位置から取り直せるようにするため)。
 #[expect(clippy::too_many_arguments)]
 async fn decode_video_stream(
     stream: &mut transport::RecvStream,
@@ -5343,6 +5378,7 @@ async fn decode_video_stream(
     sg_decoder: &mut SubgroupStreamDecoder,
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
     video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
+    group_switch: &GroupSwitchHandle,
     mut video_decoder: Option<&mut decoder::VideoDecoder>,
     sink: &FrameSink<'_>,
     last_received_locations: &std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
@@ -5440,15 +5476,27 @@ async fn decode_video_stream(
             continue;
         }
         // 移行後の再購読で使う「最後に受信した位置」を記録する。配送しない Object や
-        // payload を持たない Object は再開位置として意味が無いため記録しない
-        record_last_location(
-            last_received_locations,
-            TrackKind::Video,
-            Location {
+        // payload を持たない Object は再開位置として意味が無いため記録しない。再生する
+        // 場合は保留の解除を待ってから記録する (保留を捨てた移行で、新しい購読の
+        // Location Filter がその位置から取り直せるようにするため)
+        if video_decoder.is_some() {
+            wait_until_video_deliverable(
+                group_switch,
                 group_id,
-                object_id: obj.object_id,
-            },
-        );
+                obj.object_id,
+                last_received_locations,
+            )
+            .await;
+        } else {
+            record_last_location(
+                last_received_locations,
+                TrackKind::Video,
+                Location {
+                    group_id,
+                    object_id: obj.object_id,
+                },
+            );
+        }
         // 配送は live の Subgroup stream と FETCH 応答 stream で同じ関数を通す
         match deliver_video_object(
             group_id,
@@ -5468,6 +5516,32 @@ async fn decode_video_stream(
             VideoDelivery::Terminated => return frames,
         }
     }
+}
+
+/// Group の切り替えの保留が解除されるのを待ち、解除されたら「最後に受信した位置」を記録する
+///
+/// 前の Group の stream が開いている間は、次の Group の Object を保留する。保留中は、その
+/// Object を読んだ stream task が payload を持ったまま待ち、解除後に同じ decoder で復号する
+/// (decoder は stream ごとに作られ、1 stream = 1 Group であるため、別の task の decoder で
+/// 復号すると参照フレームが無い)。
+///
+/// 記録は解除の後に行う。保留したまま記録すると、session 移行で保留を捨てたときに、新しい
+/// 購読の Location Filter がその位置から取り直せない。
+async fn wait_until_video_deliverable(
+    group_switch: &GroupSwitchHandle,
+    group_id: u64,
+    object_id: u64,
+    last_received_locations: &std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
+) {
+    group_switch.wait_until_deliver(group_id).await;
+    record_last_location(
+        last_received_locations,
+        TrackKind::Video,
+        Location {
+            group_id,
+            object_id,
+        },
+    );
 }
 
 /// 映像 Object 1 つを配送経路へ流した結果
@@ -10037,7 +10111,7 @@ mod tests {
         /// 実デコーダで復号できる本物のフレームを使う。libvpx の Windows ビルドは動作しない
         /// ため、呼び出し側を Windows 以外に限定する。
         #[cfg(not(target_os = "windows"))]
-        fn encode_vp8_frames() -> (Vec<u8>, Vec<u8>) {
+        pub(super) fn encode_vp8_frames() -> (Vec<u8>, Vec<u8>) {
             use std::num::NonZeroUsize;
 
             use shiguredo_libvpx::{
@@ -10142,7 +10216,7 @@ mod tests {
         /// 変えて呼べるようにまとめる。再生するテストでは実デコーダを渡し、録画だけの
         /// テストでは `None` を渡す。
         #[expect(clippy::too_many_arguments)]
-        async fn deliver_video_at(
+        pub(super) async fn deliver_video_at(
             delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
             decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
             decoder: Option<&mut decoder::VideoDecoder>,
@@ -10739,6 +10813,179 @@ mod tests {
             );
 
             std::fs::remove_file(&path).ok();
+        }
+    }
+
+    /// Group の切り替え gate の配線のテスト
+    ///
+    /// stream task 間の結線 (`begin_stream` / `end_stream` の呼び出し) は
+    /// `crate::group_switch` の協調テストと、`decode_video_stream` の戻りで `end_stream` を
+    /// 呼ぶことのコード確認で担保する。ここでは、保留が解除されるまで配送せず、解除後に
+    /// キーフレーム → inter frame の順で `frame_tx` へ送出することを固定する。
+    mod group_switch_tests {
+        use super::super::*;
+        use super::loc;
+        use super::video_delivery_boundary_tests::{deliver_video_at, encode_vp8_frames};
+
+        /// 保留中は配送せず、解除後にキーフレームから順に配送すること
+        ///
+        /// 実エンコーダで作ったキーフレームと inter frame を、live と同じ `deliver_video_at`
+        /// 経由で `frame_tx` へ流す。保留中は `frame_tx` に何も届かず、解除後にキーフレーム、
+        /// inter frame の順で 1 枚ずつ届くことを確かめる。
+        #[cfg(not(target_os = "windows"))]
+        #[tokio::test(flavor = "multi_thread")]
+        async fn held_video_object_is_delivered_in_order_after_release() {
+            let (keyframe, inter_frame) = encode_vp8_frames();
+            let gate = std::sync::Arc::new(SharedGroupSwitchGate::new());
+            // stream task と同じく、購読の世代を固定したハンドルで操作する
+            let handle = GroupSwitchHandle::new(std::sync::Arc::clone(&gate));
+            let (frame_tx, frame_rx) = std::sync::mpsc::channel();
+            let display_backlog = std::sync::atomic::AtomicI64::new(0);
+            let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
+            let decode_order =
+                std::sync::Arc::new(tokio::sync::Mutex::new(VideoDecodeOrder::new()));
+            let delivery_order =
+                std::sync::Arc::new(std::sync::Mutex::new(VideoDeliveryOrder::new(None)));
+            let sink = FrameSink {
+                frame_tx: &frame_tx,
+                display_backlog: &display_backlog,
+            };
+
+            // 前の Group 10 の Object を配送して復号を始め、その stream を開いたままにする
+            handle.begin_stream(10, 100);
+            handle.wait_until_deliver(10).await;
+            let mut decoder =
+                decoder::build_video_decoder("vp8").expect("VP8 デコーダを生成できること");
+
+            // 次の Group 11 の stream を開き、キーフレームを保留する。保留中は、この
+            // キーフレームを読んだ stream task が復号せずに待つ
+            handle.begin_stream(11, 110);
+            let waiter = {
+                let handle = handle.clone();
+                tokio::spawn(async move { handle.wait_until_deliver(11).await })
+            };
+            // 前の Group の stream が終端したら解除し、キーフレーム → inter frame の順に
+            // live と同じ配送経路へ流す。保留中の待機は、時計を止めた
+            // held_video_object_is_not_recorded_before_release で固定する
+            handle.end_stream(10, 100);
+            tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+                .await
+                .expect("前の Group の stream が終端したら保留を解除すること")
+                .expect("待機 task が panic しないこと");
+            let key_result = deliver_video_at(
+                &delivery_order,
+                &decode_order,
+                Some(&mut decoder),
+                None,
+                &sink,
+                &termination_tx,
+                loc(11, 0),
+                960,
+                48_000,
+                None,
+                true,
+                &keyframe,
+            )
+            .await;
+            assert!(
+                matches!(key_result, VideoDelivery::Delivered(1)),
+                "解除後にキーフレームを 1 枚送出すること"
+            );
+            let inter_result = deliver_video_at(
+                &delivery_order,
+                &decode_order,
+                Some(&mut decoder),
+                None,
+                &sink,
+                &termination_tx,
+                loc(11, 1),
+                1_000,
+                48_000,
+                None,
+                false,
+                &inter_frame,
+            )
+            .await;
+            assert!(
+                matches!(inter_result, VideoDelivery::Delivered(1)),
+                "キーフレームの後に inter frame を 1 枚送出すること"
+            );
+
+            // 送出順を固定する。キーフレームを復号していなければ inter frame は復号できない
+            let first = frame_rx.try_recv().expect("キーフレームが送出されること");
+            let second = frame_rx.try_recv().expect("inter frame が送出されること");
+            assert!(
+                frame_rx.try_recv().is_err(),
+                "送出するのは 2 枚だけであること"
+            );
+            assert!(
+                first.timestamp_us < second.timestamp_us,
+                "キーフレーム → inter frame の順に送出すること: first={:?} second={:?}",
+                first.timestamp_us,
+                second.timestamp_us
+            );
+            assert!(
+                termination_rx.try_recv().is_err(),
+                "書式違反が無いためセッション終了は依頼されないこと"
+            );
+            assert_eq!(
+                display_backlog.load(Ordering::Relaxed),
+                2,
+                "表示待ちへ 2 枚積むこと"
+            );
+        }
+
+        /// 保留した Object の位置を、解除されるまで「最後に受信した位置」に記録しないこと
+        ///
+        /// 記録が解除より前だと、session 移行で保留を捨てたときに新しい購読の Location
+        /// Filter がその位置から取り直せない。
+        #[tokio::test(flavor = "current_thread", start_paused = true)]
+        async fn held_video_object_is_not_recorded_before_release() {
+            let gate = std::sync::Arc::new(SharedGroupSwitchGate::new());
+            let handle = GroupSwitchHandle::new(std::sync::Arc::clone(&gate));
+            let last_received_locations =
+                std::sync::Arc::new(std::sync::Mutex::new(LastReceivedLocations::default()));
+
+            // 前の Group 10 の Object を配送して復号を始め、その stream を開いたままにする
+            handle.begin_stream(10, 100);
+            handle.wait_until_deliver(10).await;
+            handle.begin_stream(11, 110);
+
+            let mut waiter = {
+                let handle = handle.clone();
+                let last_received_locations = std::sync::Arc::clone(&last_received_locations);
+                tokio::spawn(async move {
+                    wait_until_video_deliverable(&handle, 11, 0, &last_received_locations).await
+                })
+            };
+            let still_waiting =
+                tokio::time::timeout(std::time::Duration::from_millis(1), &mut waiter).await;
+            assert!(still_waiting.is_err(), "保留中は記録しないこと");
+            assert_eq!(
+                last_received_locations
+                    .lock()
+                    .expect("last locations lock is not poisoned")
+                    .video,
+                None,
+                "保留中の Object を「最後に受信した位置」に記録しないこと"
+            );
+
+            handle.end_stream(10, 100);
+            tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+                .await
+                .expect("前の Group の stream が終端したら保留を解除すること")
+                .expect("待機 task が panic しないこと");
+            assert_eq!(
+                last_received_locations
+                    .lock()
+                    .expect("last locations lock is not poisoned")
+                    .video,
+                Some(Location {
+                    group_id: 11,
+                    object_id: 0,
+                }),
+                "解除後に「最後に受信した位置」を記録すること"
+            );
         }
     }
 }

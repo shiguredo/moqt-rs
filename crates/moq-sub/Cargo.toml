@@ -46,6 +46,11 @@ tracing = "0.1"
 # ログのフィルタリングと購読
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[dev-dependencies]
+# テストで tokio の時計を止める (start_paused / advance) ため test-util を有効にする。
+# full は通常依存で有効なため、ここでは足りない feature だけを足す
+tokio = { version = "1.54", features = ["test-util"] }
+
 # libvpx の Windows ビルド (MSVC) は動作しないため、Windows 以外に限って依存させる
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 # VP8 / VP9 デコーダ (libvpx)
