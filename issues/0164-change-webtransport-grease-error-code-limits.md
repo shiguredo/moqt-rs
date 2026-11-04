@@ -5,7 +5,6 @@
 - Branch: feature/change-webtransport-grease-error-code-limits
 - Polished: 2026-09-28
 - Refreshed: 2026-11-04
-- Updated: 2026-10-10
 
 ## 目的
 
