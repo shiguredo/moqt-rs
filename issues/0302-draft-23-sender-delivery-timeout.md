@@ -4,10 +4,11 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-sender-delivery-timeout
 - Polished: 2026-10-19
+- Refreshed: 2026-11-04
 
 ## 目的
 
-draft-ietf-moq-transport-22 §5.2 (Delivery Timeouts and Data Reliability) は、publisher の値について「先頭 Object の
+draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability) は、publisher の値について「先頭 Object の
 Object Property があればそれ、なければ Track Property」とし、subgroup では transport に渡す前に経過時間を検査して超過時に `DELIVERY_TIMEOUT` で
 stream を reset することを MUST とする。datagram では同じ検査で超過時に datagram を drop することを MUST とする。§5.2 の Object Property
 override は subgroup の先頭 Object に限られ、datagram には適用されない。また §5.2 は、transport が許す場合に再送前の timeout 検査を SHOULD とする。
