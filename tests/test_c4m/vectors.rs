@@ -12,6 +12,20 @@
 //! Table 1 の action 番号と不整合である。action 0 は既知 action の検証から分離して扱い、
 //! ベクタ全体の追随は別途行う。
 
+/// draft-ietf-moq-c4m-02 §4.2.1 の DPoP proof 用 ES256 公開鍵の COSE Key Thumbprint
+pub const CKT_DRAFT_C4M_DOPP_PROOF_HEX: &str =
+    "750ca40795ab23e51a75dc76fa12c052f6f6c57ba8a732337b91f096592b6ef6";
+
+/// draft-ietf-moq-c4m-02 付録 A.4 の ES256 公開鍵の JWK サムプリント
+///
+/// 付録 A.1 の ES256 鍵 (CAT のベクタと同じ鍵) の `jkt` である。
+pub const JKT_DRAFT_C4M_ES256_HEX: &str =
+    "0cebf1bc9880748a95588905b79843b42ba75cb174055e3e246bf87fe00b4a6d";
+
+/// RFC 8032 §7.1 のテストベクタ 1 の Ed25519 公開鍵
+pub const ED25519_PUBLIC_KEY_HEX: &str =
+    "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+
 /// 付録 A.1 の HMAC-SHA256 鍵
 ///
 /// 署名 / 検証のテスト (aws-lc-rs feature) でのみ使う。
@@ -19,8 +33,8 @@
 pub const HMAC_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 /// 付録 A.1 の ES256 秘密鍵 (スカラー)
 ///
-/// 署名 / 検証のテスト (aws-lc-rs feature) でのみ使う。
-#[cfg_attr(not(feature = "aws-lc-rs"), expect(dead_code))]
+/// 署名 / 検証のテスト (aws-lc-rs feature) と、JWK 変換テスト
+/// (`tests/test_c4m/jwk.rs`) で使う。
 pub const ES256_PRIVATE_KEY_HEX: &str =
     "c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721";
 /// 付録 A.1 の ES256 公開鍵の x 座標

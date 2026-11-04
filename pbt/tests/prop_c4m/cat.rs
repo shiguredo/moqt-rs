@@ -51,6 +51,12 @@ fn sample_claims(ctx: &mut noprop::TestCaseContext) -> CatClaims {
             } else {
                 None
             },
+            cose_key_thumbprint: if noprop::sample_bool(ctx) {
+                // ckt は SHA-256 のサムプリント長 (32 バイト) でなければデコードできない
+                Some(noprop::sample_bytes_vec(ctx, 32))
+            } else {
+                None
+            },
             c4m_draft_jwk_thumbprint: if noprop::sample_bool(ctx) {
                 Some(sample_bytes(ctx, 32))
             } else {

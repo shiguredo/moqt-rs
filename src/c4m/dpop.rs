@@ -10,9 +10,10 @@
 //! `alg` / `typ` / `kccs` を持ち、ペイロードの CWT Claims Set に `cti` / `iat` /
 //! `actx` / `ath` を持つ。この形式は [`CwtDpopProofCodec`] が扱う。`actx` と `ath`
 //! の claim label はドラフトで `TBD_ACTX` / `TBD_ATH` のままなので、呼び出し側が
-//! 明示する。`CwtDpopProofCodec` は proof 単独のデコードと署名検証までを提供し、
-//! CAT トークンとの束縛・scope・鮮度・replay の受理判定は行わない (旧 JWT 形式側は
-//! [`DpopProof`] の検証 API が受理判定の一部を行う)。
+//! 明示する。`CwtDpopProofCodec` は proof 単独のデコードと署名検証までを提供する。
+//! デコードした proof の `kccs` 公開鍵と CAT トークンの `cnf` の照合は
+//! [`CwtDpopProof::verify_key_binding`] が行うが、`actx` / `ath` / 鮮度 / replay の
+//! 受理判定は行わない (旧 JWT 形式側は [`DpopProof`] の検証 API が受理判定の一部を行う)。
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -337,7 +338,7 @@ impl DpopProof {
     /// proof の JWK がトークンの `cnf` の JWK サムプリントと一致するか検証する
     ///
     /// `cnf` の confirmation key 323 (IANA 登録の `jkt`) を優先し、323 が無い場合だけ
-    /// 3 (ドラフトのベクタが使う値。IANA では `kid`) と比較する。
+    /// 3 (draft-ietf-moq-c4m-01 のベクタが使う値。IANA では `kid`) と比較する。
     pub fn verify_key_binding<C: CoseCrypto>(
         &self,
         crypto: &C,
@@ -776,8 +777,9 @@ pub struct CwtDpopProofHeader {
 /// CWT 形式の DPoP proof
 ///
 /// デコードで得られる型であり、署名の検証は
-/// [`CwtDpopProof::verify_signature`] が行う。CAT トークンとの束縛、scope、鮮度、
-/// replay の検証は行わない。
+/// [`CwtDpopProof::verify_signature`]、`kccs` 公開鍵と CAT トークンの `cnf` の照合は
+/// [`CwtDpopProof::verify_key_binding`] が行う。`actx` / `ath` / 鮮度 / replay の
+/// 検証は行わない。
 #[derive(Debug, Clone, PartialEq)]
 pub struct CwtDpopProof {
     header: CwtDpopProofHeader,
@@ -809,8 +811,9 @@ impl CwtDpopProof {
 
     /// proof の署名を `kccs` の公開鍵で検証する
     ///
-    /// 検証するのは proof 単独の署名だけであり、`cnf` の `ckt` / `jkt` との一致、
-    /// `ath` の照合、`iat` の鮮度、`cti` の replay 保護は行わない。
+    /// 検証するのは proof 単独の署名だけであり、`cnf` の `ckt` / `jkt` との一致
+    /// ([`CwtDpopProof::verify_key_binding`])、`ath` の照合、`iat` の鮮度、`cti` の
+    /// replay 保護は行わない。
     pub fn verify_signature<C: CoseCrypto>(&self, crypto: &C) -> Result<(), DpopError> {
         crypto.verify(
             self.header.algorithm,
@@ -818,6 +821,58 @@ impl CwtDpopProof {
             &self.signing_input,
             &self.signature,
         )?;
+        Ok(())
+    }
+
+    /// proof の `kccs` 公開鍵がトークンの `cnf` に束縛されているか検証する
+    ///
+    /// draft-ietf-moq-c4m-02 §4.3 の 4 番目の条件を、proof のヘッダにある COSE_Key と
+    /// `cnf` の各 confirmation method について検証する。
+    ///
+    /// - `ckt` (5): 公開鍵の COSE Key Thumbprint (RFC 9679 §3、SHA-256) が値と一致すること
+    /// - `jkt` (323): 公開鍵から作った等価な JWK の JWK サムプリント (RFC 7638、SHA-256)
+    ///   が値と一致すること
+    ///
+    /// `ckt` と `jkt` が併存する場合は、同じ proof 公開鍵に対して両方の一致を要求する。
+    /// 片方だけの一致では受理せず、`ckt` の不一致を `jkt` への fallback で救済しない。
+    /// RFC 8747 §3.1 は `cnf` が単一の proof-of-possession 鍵だけを表すことを要求する
+    /// ため、併存する method は同じ鍵を指さなければならない。
+    ///
+    /// `cnf` に `ckt` も `jkt` も無い場合は [`DpopError::MissingThumbprint`] を返す。
+    /// この API が解釈しない method (COSE_Key (1) と未知の method) は RFC 8747 §3.1 に
+    /// 従って無視し、認可の根拠には使わない。draft-ietf-moq-c4m-01 のベクタが `jkt` に
+    /// 使う key 3 は IANA のレジストリでは `kid` であり、この API では解釈しない。
+    ///
+    /// proof の署名検証 ([`CwtDpopProof::verify_signature`]) は行わない。呼び出し側が
+    /// 両方を検証すること。
+    pub fn verify_key_binding<C: CoseCrypto>(
+        &self,
+        crypto: &C,
+        confirmation: &Confirmation,
+    ) -> Result<(), DpopError> {
+        let expected_ckt = confirmation.ckt();
+        let expected_jkt = confirmation.jwk_thumbprint.as_deref();
+        // 既知の confirmation method が無い cnf は、どの鍵とも照合できないため拒否する
+        if expected_ckt.is_none() && expected_jkt.is_none() {
+            return Err(DpopError::MissingThumbprint);
+        }
+        let key = &self.header.confirmation_key;
+        if let Some(expected) = expected_ckt {
+            let actual = key.cose_key_thumbprint_sha256(crypto)?;
+            if actual.as_slice() != expected {
+                return Err(DpopError::KeyBindingMismatch);
+            }
+        }
+        // ckt と jkt が併存する場合は ckt の照合後も jkt を照合する。ここで ckt だけを
+        // 見て成功を返すと、同じ proof 公開鍵について jkt が一致していなくても受理して
+        // しまうため、両方を必ず照合する
+        if let Some(expected) = expected_jkt {
+            let jwk = Jwk::from_cose_key(key)?;
+            let actual = jwk.thumbprint_sha256(crypto)?;
+            if actual.as_slice() != expected {
+                return Err(DpopError::KeyBindingMismatch);
+            }
+        }
         Ok(())
     }
 }
@@ -1270,9 +1325,9 @@ pub enum DpopError {
     MissingKccsConfirmation,
     /// `kccs` の `cnf` に確認用の COSE_Key が無い
     MissingConfirmationKey,
-    /// `cnf` に JWK サムプリントが無い
+    /// `cnf` に `ckt` / `jkt` のサムプリントが無い
     MissingThumbprint,
-    /// JWK サムプリントが一致しない
+    /// サムプリントが `cnf` の値と一致しない
     KeyBindingMismatch,
     /// 署名鍵と埋め込む JWK が一致しない
     KeyMismatch,
@@ -1328,8 +1383,8 @@ impl fmt::Display for DpopError {
             Self::MissingConfirmation => write!(f, "token has no cnf claim"),
             Self::MissingKccsConfirmation => write!(f, "kccs has no cnf claim"),
             Self::MissingConfirmationKey => write!(f, "kccs cnf has no COSE_Key"),
-            Self::MissingThumbprint => write!(f, "cnf has no JWK thumbprint"),
-            Self::KeyBindingMismatch => write!(f, "JWK thumbprint does not match cnf"),
+            Self::MissingThumbprint => write!(f, "cnf has no usable thumbprint"),
+            Self::KeyBindingMismatch => write!(f, "key thumbprint does not match cnf"),
             Self::KeyMismatch => write!(f, "signing key does not match the embedded JWK"),
             Self::ContextTypeMismatch => write!(f, "actx.type does not match"),
             Self::ActionMismatch => write!(f, "actx.action does not match"),

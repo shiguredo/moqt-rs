@@ -117,11 +117,27 @@ pub const CONFIRMATION_JWK_THUMBPRINT: i64 = 323;
 /// `kccs` の `cnf` にこの confirmation method でクライアントの公開鍵を入れる。
 pub const CONFIRMATION_COSE_KEY: i64 = 1;
 
+/// `cnf` の `ckt` (COSE Key Thumbprint) の confirmation key
+///
+/// RFC 8747 §7.2 が確立した IANA の CWT Confirmation Methods レジストリに RFC 9679
+/// §8 が登録した値 (5)。RFC 9679 §5.6 は `ckt` の使い方を説明する。draft-ietf-moq-c4m-02
+/// §4.1 は、DPoP proof が COSE_Key で鍵を運ぶため、`cnf` にこの confirmation method で
+/// クライアントの公開鍵の COSE Key Thumbprint を入れることを推奨している。
+pub const CONFIRMATION_COSE_KEY_THUMBPRINT: i64 = 5;
+
+/// `ckt` の SHA-256 サムプリントの長さ (バイト)
+///
+/// RFC 9679 §8 の登録内容が COSE Key SHA-256 Thumbprint であり、RFC 9679 §3 は
+/// SHA-256 のサポートを MUST とする。draft-ietf-moq-c4m-02 §4.2.1 の例も 32 バイトで
+/// ある。
+const COSE_KEY_THUMBPRINT_SHA256_LENGTH: usize = 32;
+
 /// draft-ietf-moq-c4m-01 のベクタが `jkt` に使う confirmation key
 ///
 /// 付録 A.4 のベクタは 3 を使うが、IANA の CWT Confirmation Methods レジストリでは
-/// 3 は `kid` (RFC 8747 §3.4) である。検証では両方を受け、発行は
-/// [`CONFIRMATION_JWK_THUMBPRINT`] を既定とする。
+/// 3 は `kid` (RFC 8747 §3.4) である。この値を解釈するのは旧 JWT 形式の検証だけで
+/// あり、CWT 形式の鍵束縛は 323 だけを扱う (3 は曖昧な fallback を避けるため使わない)。
+/// 発行は [`CONFIRMATION_JWK_THUMBPRINT`] を既定とする。
 pub const CONFIRMATION_C4M_DRAFT_JWK_THUMBPRINT: i64 = 3;
 
 /// MOQT の Auth Token Type (CAT) (draft-ietf-moq-c4m-01 §7.1)
@@ -144,11 +160,18 @@ pub enum TokenFormat {
     CoseMac0,
 }
 
-/// `cnf` (confirmation) クレーム (RFC 8747 / CTA-5007-B)
+/// `cnf` (confirmation) クレーム (RFC 8747 / RFC 9679 / CTA-5007-B)
+///
+/// `ckt` (RFC 9679 の COSE Key Thumbprint) と `jkt` (RFC 7638 の JWK サムプリント) を
+/// 型付きで保持する。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Confirmation {
     /// IANA 登録の `jkt` (confirmation key 323) の値
     pub jwk_thumbprint: Option<Vec<u8>>,
+    /// IANA 登録の `ckt` (confirmation key 5) の値
+    ///
+    /// RFC 9679 §3 の COSE Key Thumbprint を SHA-256 で計算した 32 バイトである。
+    pub cose_key_thumbprint: Option<Vec<u8>>,
     /// draft-ietf-moq-c4m-01 のベクタが使う `jkt` (confirmation key 3) の値
     ///
     /// IANA のレジストリでは 3 は `kid` であり、値の意味が確定していないため
@@ -160,6 +183,9 @@ pub struct Confirmation {
 
 impl Confirmation {
     /// `cnf` をデコードする
+    ///
+    /// `ckt` (5) は bstr で、SHA-256 のサムプリント長 (32 バイト) でなければ拒否する。
+    /// それ以外の長さは [`CatError::InvalidCoseKeyThumbprintLength`] を返す。
     pub fn decode(value: &Value) -> Result<Self, CatError> {
         let entries = value.as_map().ok_or(CatError::UnexpectedType("cnf"))?;
         let mut confirmation = Self::default();
@@ -172,6 +198,16 @@ impl Confirmation {
                             .ok_or(CatError::UnexpectedType("jkt"))?
                             .to_vec(),
                     );
+                }
+                Some(CONFIRMATION_COSE_KEY_THUMBPRINT) => {
+                    let thumbprint = entry.as_bytes().ok_or(CatError::UnexpectedType("ckt"))?;
+                    // ハッシュ関数は値から判別できないため、この実装が扱う SHA-256 の
+                    // 長さだけを受理する。他のハッシュ長を解釈しないことで、長さの
+                    // 取り違えを比較の失敗ではなく入力の拒否として扱う
+                    if thumbprint.len() != COSE_KEY_THUMBPRINT_SHA256_LENGTH {
+                        return Err(CatError::InvalidCoseKeyThumbprintLength(thumbprint.len()));
+                    }
+                    confirmation.cose_key_thumbprint = Some(thumbprint.to_vec());
                 }
                 Some(CONFIRMATION_C4M_DRAFT_JWK_THUMBPRINT) => {
                     confirmation.c4m_draft_jwk_thumbprint = Some(
@@ -188,12 +224,27 @@ impl Confirmation {
     }
 
     /// `cnf` をエンコードする
-    pub fn encode(&self) -> Value {
+    ///
+    /// `ckt` は RFC 9679 §3 の SHA-256 サムプリントとして 32 バイトでなければならない
+    /// (§8 の登録は COSE Key SHA-256 Thumbprint)。不正な長さの値を持つ `Confirmation`
+    /// はエラーを返す。
+    pub fn encode(&self) -> Result<Value, CatError> {
+        if let Some(ckt) = &self.cose_key_thumbprint
+            && ckt.len() != COSE_KEY_THUMBPRINT_SHA256_LENGTH
+        {
+            return Err(CatError::InvalidCoseKeyThumbprintLength(ckt.len()));
+        }
         let mut entries = Vec::new();
         if let Some(jkt) = &self.jwk_thumbprint {
             entries.push((
                 Value::integer(CONFIRMATION_JWK_THUMBPRINT),
                 Value::ByteString(jkt.clone()),
+            ));
+        }
+        if let Some(ckt) = &self.cose_key_thumbprint {
+            entries.push((
+                Value::integer(CONFIRMATION_COSE_KEY_THUMBPRINT),
+                Value::ByteString(ckt.clone()),
             ));
         }
         if let Some(jkt) = &self.c4m_draft_jwk_thumbprint {
@@ -202,17 +253,38 @@ impl Confirmation {
                 Value::ByteString(jkt.clone()),
             ));
         }
+        for (key, value) in &self.raw {
+            if key.as_int() == Some(CONFIRMATION_COSE_KEY_THUMBPRINT) {
+                let length = value
+                    .as_bytes()
+                    .ok_or(CatError::UnexpectedType("ckt"))?
+                    .len();
+                if length != COSE_KEY_THUMBPRINT_SHA256_LENGTH {
+                    return Err(CatError::InvalidCoseKeyThumbprintLength(length));
+                }
+            }
+        }
         entries.extend(self.raw.iter().cloned());
-        Value::Map(entries)
+        Ok(Value::Map(entries))
     }
 
-    /// JWK サムプリントを返す
+    /// 旧 JWT 形式の検証で使う JWK サムプリントを返す
     ///
-    /// IANA 登録の 323 を優先し、無ければドラフトのベクタが使う 3 を返す。
+    /// IANA 登録の 323 を優先し、無ければ draft-ietf-moq-c4m-01 のベクタが使う 3 を返す。
+    /// 3 は IANA では `kid` であり意味が確定していないため、CWT 形式の鍵束縛には
+    /// この accessor を使わず、[`Confirmation::jwk_thumbprint`] (323) だけを扱うこと。
     pub fn jkt(&self) -> Option<&[u8]> {
         self.jwk_thumbprint
             .as_deref()
             .or(self.c4m_draft_jwk_thumbprint.as_deref())
+    }
+
+    /// COSE Key Thumbprint (`ckt`、confirmation key 5) を返す
+    ///
+    /// `jkt` は返さない。`ckt` と `jkt` が併存する場合に両方を照合するかどうかは
+    /// 検証 API 側が定める。
+    pub fn ckt(&self) -> Option<&[u8]> {
+        self.cose_key_thumbprint.as_deref()
     }
 }
 
@@ -505,7 +577,7 @@ impl CatClaims {
             ));
         }
         if let Some(confirmation) = &self.confirmation {
-            entries.push((Value::integer(CLAIM_CONFIRMATION), confirmation.encode()));
+            entries.push((Value::integer(CLAIM_CONFIRMATION), confirmation.encode()?));
         }
         if let Some(moqt) = &self.moqt {
             entries.push((Value::integer(CLAIM_MOQT), moqt.encode()?));
@@ -1343,6 +1415,18 @@ impl CatTokenBuilder {
         self
     }
 
+    /// `cnf` の `ckt` を IANA 登録の confirmation key 5 で設定する
+    ///
+    /// 値は RFC 9679 §3 の COSE Key Thumbprint を SHA-256 で計算した 32 バイトである。
+    pub fn cose_key_thumbprint(mut self, thumbprint: impl Into<Vec<u8>>) -> Self {
+        let confirmation = self
+            .claims
+            .confirmation
+            .get_or_insert_with(Default::default);
+        confirmation.cose_key_thumbprint = Some(thumbprint.into());
+        self
+    }
+
     /// `cnf` の `jkt` を draft-ietf-moq-c4m-01 のベクタが使う key 3 で設定する
     pub fn c4m_draft_jwk_thumbprint(mut self, thumbprint: impl Into<Vec<u8>>) -> Self {
         let confirmation = self
@@ -1544,6 +1628,8 @@ pub enum CatError {
     InvalidCatReplayValue(u64),
     /// `catreplay` が 1 なのに必須のクレームが無い
     CatReplayRequiresClaim(&'static str),
+    /// `ckt` の長さが SHA-256 のサムプリント長 (32 バイト) と異なる
+    InvalidCoseKeyThumbprintLength(usize),
     /// `catreplay` が実装定義 (2) のため本実装では未対応である
     UnsupportedCatReplay(CatReplay),
     /// bearer 検証で `cnf` 付きトークンを受けた
@@ -1583,6 +1669,10 @@ impl fmt::Display for CatError {
             Self::CatReplayRequiresClaim(name) => {
                 write!(f, "catreplay 1 requires the {name} claim")
             }
+            Self::InvalidCoseKeyThumbprintLength(length) => write!(
+                f,
+                "ckt must be a {COSE_KEY_THUMBPRINT_SHA256_LENGTH}-byte SHA-256 thumbprint, got {length} bytes"
+            ),
             Self::UnsupportedCatReplay(replay) => {
                 write!(f, "catreplay value {} is not supported", replay.key())
             }

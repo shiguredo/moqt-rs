@@ -782,7 +782,7 @@ fn key_binding_prefers_the_iana_thumbprint() {
             &Confirmation {
                 jwk_thumbprint: Some(thumbprint.clone()),
                 c4m_draft_jwk_thumbprint: Some(vec![0xab; 32]),
-                raw: Vec::new(),
+                ..Confirmation::default()
             },
         )
         .expect("323 が一致すれば検証できる");
@@ -794,7 +794,7 @@ fn key_binding_prefers_the_iana_thumbprint() {
             &Confirmation {
                 jwk_thumbprint: Some(vec![0xab; 32]),
                 c4m_draft_jwk_thumbprint: Some(thumbprint),
-                raw: Vec::new(),
+                ..Confirmation::default()
             }
         ),
         Err(DpopError::KeyBindingMismatch)

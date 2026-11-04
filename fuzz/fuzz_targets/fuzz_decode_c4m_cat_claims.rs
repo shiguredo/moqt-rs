@@ -18,8 +18,10 @@ fuzz_target!(|data: &[u8]| {
         let _ = shiguredo_moqt::c4m::cbor::encode(&encoded);
     }
     // 個別のクレーム型。同じ Value をそれぞれの型として解釈させる
-    if let Ok(confirmation) = shiguredo_moqt::c4m::cat::Confirmation::decode(&value) {
-        let _ = shiguredo_moqt::c4m::cbor::encode(&confirmation.encode());
+    if let Ok(confirmation) = shiguredo_moqt::c4m::cat::Confirmation::decode(&value)
+        && let Ok(encoded) = confirmation.encode()
+    {
+        let _ = shiguredo_moqt::c4m::cbor::encode(&encoded);
     }
     if let Ok(moqt) = shiguredo_moqt::c4m::MoqtClaim::decode(&value)
         && let Ok(encoded) = moqt.encode()

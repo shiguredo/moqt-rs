@@ -6,12 +6,13 @@
 //! Sans I/O の方針に合わせて、このモジュールは乱数も時計も持たない。署名に必要な
 //! 乱数は実装側 (aws-lc-rs) が内部で取得する。
 //!
-//! COSE_Key (RFC 9052 §7) の CBOR マップと [`CoseKey`] の相互変換も扱う。
+//! COSE_Key (RFC 9052 §7) の CBOR マップと [`CoseKey`] の相互変換、および
+//! RFC 9679 の COSE Key Thumbprint (SHA-256) の計算も扱う。
 
 use alloc::vec::Vec;
 use core::fmt;
 
-use super::cbor::Value;
+use super::cbor::{self, Value};
 use super::cose::{Algorithm, CoseError};
 
 /// COSE_Key の key type (`kty`、ラベル 1、RFC 9052 §7.1)
@@ -49,9 +50,6 @@ pub const COSE_KEY_TYPE_EC2: i64 = 2;
 
 /// COSE Key Types の Symmetric (RFC 9053 §7 Table 17)
 pub const COSE_KEY_TYPE_SYMMETRIC: i64 = 4;
-
-/// Ed25519 の公開鍵 / 秘密鍵のバイト長 (RFC 8032 §5.1.5)
-const ED25519_KEY_LENGTH: usize = 32;
 
 /// 楕円曲線 (RFC 9053 §7 の COSE Elliptic Curves)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -108,6 +106,15 @@ impl OkpCurve {
     pub const fn identifier(self) -> i64 {
         match self {
             Self::Ed25519 => 6,
+        }
+    }
+
+    /// 公開鍵 / 秘密鍵のバイト長を返す
+    ///
+    /// Ed25519 は RFC 8032 §5.1.5 の 32 バイトである。
+    pub const fn key_length(self) -> usize {
+        match self {
+            Self::Ed25519 => 32,
         }
     }
 
@@ -243,7 +250,7 @@ impl CoseKey {
             Self::Okp {
                 curve, public_key, ..
             } => {
-                if public_key.len() != ED25519_KEY_LENGTH {
+                if public_key.len() != curve.key_length() {
                     return Err(CoseError::InvalidKeyLength("x"));
                 }
                 Ok(Value::Map(alloc::vec![
@@ -350,7 +357,7 @@ impl CoseKey {
             COSE_KEY_TYPE_OKP => {
                 let curve = okp_curve_value(key_parameter(entries, COSE_KEY_CURVE, "crv")?)?;
                 let public_key = key_byte_parameter(entries, COSE_KEY_X, "x")?;
-                if public_key.len() != ED25519_KEY_LENGTH {
+                if public_key.len() != curve.key_length() {
                     return Err(CoseError::InvalidKeyLength("x"));
                 }
                 match curve {
@@ -360,6 +367,36 @@ impl CoseKey {
             COSE_KEY_TYPE_SYMMETRIC => Err(CoseError::SymmetricKeyNotAllowed),
             other => Err(CoseError::UnsupportedKeyType(other)),
         }
+    }
+
+    /// RFC 9679 §3 の COSE Key Thumbprint を SHA-256 で計算する
+    ///
+    /// 必須パラメータだけを含む COSE_Key を決定論的 CBOR (RFC 8949 §4.2.1) に
+    /// エンコードし、そのバイト列の SHA-256 を返す。必須パラメータは EC2 が
+    /// OKP が `kty` / `crv` / `x` (RFC 9679 §4.1)、EC2 が `kty` / `crv` / `x` / `y`
+    /// (RFC 9679 §4.2) である。
+    ///
+    /// `kid` / `alg` / `key_ops` などの任意パラメータと秘密鍵は、必須パラメータだけを
+    /// 対象とするためハッシュ対象に含まれない (RFC 9679 §5.1)。EC2 の `x` / `y` は非圧縮点の座標として扱う
+    /// (RFC 9679 §4.2)。そのため、秘密鍵付きの [`CoseKey`] を渡しても公開鍵の
+    /// サムプリントを返す。
+    ///
+    /// 本実装が扱うのは DPoP proof の公開鍵 (EC2 / OKP) だけである。RFC 9679 自体は
+    /// §4.4 で対称鍵のサムプリントも定義するが、proof の鍵束縛には公開鍵だけを使うため、
+    /// 対称鍵は [`CryptoError::UnsupportedThumbprintKey`] で拒否する。座標 / 公開鍵の
+    /// 長さが曲線と一致しない場合は [`CryptoError::InvalidKey`] を返す。
+    pub fn cose_key_thumbprint_sha256<C: CoseCrypto>(
+        &self,
+        crypto: &C,
+    ) -> Result<Vec<u8>, CryptoError> {
+        let parameters = self.to_cose_key_map().map_err(|error| match error {
+            CoseError::SymmetricKeyNotAllowed => CryptoError::UnsupportedThumbprintKey,
+            _ => CryptoError::InvalidKey,
+        })?;
+        // 必須パラメータだけからなる浅いマップなので CBOR のエンコードは実質的に
+        // 失敗しない。失敗した場合は鍵の表現が不正として扱う
+        let encoded = cbor::encode(&parameters).map_err(|_| CryptoError::InvalidKey)?;
+        crypto.digest(DigestAlgorithm::Sha256, &encoded)
     }
 }
 
@@ -596,12 +633,17 @@ pub enum CryptoError {
     SigningFailed,
     /// 署名の長さがアルゴリズムと一致しない
     InvalidSignatureLength,
+    /// COSE Key Thumbprint の計算に対応していない鍵である (対称鍵)
+    UnsupportedThumbprintKey,
 }
 
 impl fmt::Display for CryptoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnsupportedKey => write!(f, "key type does not match the algorithm"),
+            Self::UnsupportedThumbprintKey => {
+                write!(f, "COSE Key type is not supported for thumbprint")
+            }
             Self::MissingPrivateKey => write!(f, "private key is required for signing"),
             Self::InvalidKey => write!(f, "invalid key"),
             Self::SignatureVerificationFailed => write!(f, "signature verification failed"),

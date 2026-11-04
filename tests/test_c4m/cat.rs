@@ -1,9 +1,10 @@
 //! CAT (CTA-5007-B / draft-ietf-moq-c4m-01 / draft-ietf-moq-c4m-02) のテスト
 
 use shiguredo_moqt::c4m::cat::{
-    CAT_CONTENT_TYPE, CLAIM_CAT_REPLAY, CLAIM_CAT_VERSION, CLAIM_CONFIRMATION, CatClaims, CatError,
-    CatReplay, CatToken, ClaimValidationError, ClaimValidationOptions, Confirmation,
-    MOQT_AUTH_TOKEN_TYPE_CAT, TokenFormat,
+    CAT_CONTENT_TYPE, CLAIM_CAT_REPLAY, CLAIM_CAT_VERSION, CLAIM_CONFIRMATION,
+    CONFIRMATION_COSE_KEY_THUMBPRINT, CatClaims, CatError, CatReplay, CatToken,
+    ClaimValidationError, ClaimValidationOptions, Confirmation, MOQT_AUTH_TOKEN_TYPE_CAT,
+    TokenFormat,
 };
 use shiguredo_moqt::c4m::cbor::Value;
 use shiguredo_moqt::c4m::{
@@ -576,10 +577,10 @@ fn confirmation_jkt_prefers_iana_key() {
     let confirmation = Confirmation {
         jwk_thumbprint: Some(vec![1; 32]),
         c4m_draft_jwk_thumbprint: Some(vec![2; 32]),
-        raw: Vec::new(),
+        ..Confirmation::default()
     };
     assert_eq!(confirmation.jkt(), Some(&[1u8; 32][..]));
-    let value = confirmation.encode();
+    let value = confirmation.encode().expect("cnf をエンコードできる");
     assert_eq!(
         CatClaims {
             confirmation: Some(Confirmation::default()),
@@ -593,6 +594,106 @@ fn confirmation_jkt_prefers_iana_key() {
     );
     let decoded = Confirmation::decode(&value).expect("デコードできる");
     assert_eq!(decoded, confirmation);
+}
+
+#[test]
+fn confirmation_ckt_round_trip() {
+    let thumbprint = vec![0x5a; 32];
+    let unknown = (
+        Value::integer(999),
+        Value::TextString(String::from("extension")),
+    );
+    let value = Value::Map(vec![
+        (
+            Value::integer(CONFIRMATION_COSE_KEY_THUMBPRINT),
+            Value::ByteString(thumbprint.clone()),
+        ),
+        unknown.clone(),
+    ]);
+    let confirmation = Confirmation::decode(&value).expect("cnf をデコードできる");
+    assert_eq!(confirmation.cose_key_thumbprint, Some(thumbprint.clone()));
+    assert_eq!(confirmation.ckt(), Some(thumbprint.as_slice()));
+    // ckt は jkt ではない。`jkt()` は ckt を返さない
+    assert_eq!(confirmation.jkt(), None);
+    // 未知の confirmation method は raw に保持する
+    assert_eq!(confirmation.raw, vec![unknown]);
+
+    // encode は ckt を bstr で書き出し、raw の未知の method も保持する
+    let encoded = confirmation.encode().expect("cnf をエンコードできる");
+    assert_eq!(
+        encoded.map_get(&Value::integer(CONFIRMATION_COSE_KEY_THUMBPRINT)),
+        Some(&Value::ByteString(thumbprint))
+    );
+    assert_eq!(
+        Confirmation::decode(&encoded).expect("再デコードできる"),
+        confirmation
+    );
+
+    // ckt と jkt が併存してもそれぞれのフィールドに分けて保持する
+    let both = Confirmation {
+        jwk_thumbprint: Some(vec![0x11; 32]),
+        cose_key_thumbprint: Some(vec![0x22; 32]),
+        ..Confirmation::default()
+    };
+    let decoded = Confirmation::decode(&both.encode().expect("cnf をエンコードできる"))
+        .expect("再デコードできる");
+    assert_eq!(decoded, both);
+    assert_eq!(decoded.ckt(), Some(&[0x22u8; 32][..]));
+    assert_eq!(decoded.jkt(), Some(&[0x11u8; 32][..]));
+}
+
+#[test]
+fn confirmation_ckt_rejects_invalid_type_and_length() {
+    // ckt はバイト文字列でなければ拒否する
+    for invalid in [
+        Value::TextString(String::from("thumbprint")),
+        Value::integer(1),
+        Value::Array(Vec::new()),
+        Value::Null,
+    ] {
+        let value = Value::Map(vec![(
+            Value::integer(CONFIRMATION_COSE_KEY_THUMBPRINT),
+            invalid,
+        )]);
+        assert_eq!(
+            Confirmation::decode(&value),
+            Err(CatError::UnexpectedType("ckt")),
+            "ckt の型違反が受理された"
+        );
+    }
+    // ckt は SHA-256 のサムプリント長 (32 バイト) でなければ拒否する
+    for length in [0, 1, 31, 33] {
+        let value = Value::Map(vec![(
+            Value::integer(CONFIRMATION_COSE_KEY_THUMBPRINT),
+            Value::ByteString(vec![0xab; length]),
+        )]);
+        assert_eq!(
+            Confirmation::decode(&value),
+            Err(CatError::InvalidCoseKeyThumbprintLength(length)),
+            "長さ {length} バイトの ckt が受理された"
+        );
+    }
+    // encode も 32 バイト以外の ckt を拒否する
+    let confirmation = Confirmation {
+        cose_key_thumbprint: Some(vec![0x11; 31]),
+        ..Confirmation::default()
+    };
+    assert_eq!(
+        confirmation.encode(),
+        Err(CatError::InvalidCoseKeyThumbprintLength(31))
+    );
+    // 32 バイトちょうどは受理する
+    let value = Value::Map(vec![(
+        Value::integer(CONFIRMATION_COSE_KEY_THUMBPRINT),
+        Value::ByteString(vec![0xab; 32]),
+    )]);
+    assert_eq!(
+        Confirmation::decode(&value).expect("32 バイトの ckt は受理する"),
+        Confirmation {
+            cose_key_thumbprint: Some(vec![0xab; 32]),
+            ..Confirmation::default()
+        }
+    );
 }
 
 #[test]
@@ -1098,6 +1199,7 @@ fn cat_claim_keys_match_the_iana_registry() {
     assert_eq!(CLAIM_CAT_DPOP, 321);
     assert_eq!(CLAIM_CAT_IF, 322);
     assert_eq!(CLAIM_CAT_RENEWAL, 323);
+    assert_eq!(CONFIRMATION_COSE_KEY_THUMBPRINT, 5);
     assert_eq!(CLAIM_ISSUER, 1);
     assert_eq!(CLAIM_SUBJECT, 2);
     assert_eq!(CLAIM_AUDIENCE, 3);
@@ -1123,6 +1225,7 @@ fn builder_setters_are_covered() {
         .issued_at(1700000000.0)
         .cwt_id(b"id-1".to_vec())
         .c4m_draft_jwk_thumbprint(vec![0x01; 32])
+        .cose_key_thumbprint(vec![0x02; 32])
         .typ("CAT")
         .key_id(KeyId::Text(String::from("key-1")))
         .claim(

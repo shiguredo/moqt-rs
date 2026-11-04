@@ -3,6 +3,9 @@
 //! DPoP proof (draft-nandakumar-moq-generic-dpop-proof) の JWT ヘッダに埋め込まれる
 //! 公開鍵を扱う。JWK サムプリントは RFC 7638 §3.2 の正規化 JSON (必須メンバーを
 //! 辞書順に並べ、空白を入れない) に対する SHA-256 である。
+//!
+//! CAT トークンの `cnf` の `jkt` と照合するため、CWT 形式の DPoP proof が kccs で
+//! 運ぶ公開 [`CoseKey`] から等価な JWK を作る [`Jwk::from_cose_key`] も提供する。
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -12,7 +15,7 @@ use core::fmt;
 use nojson::{DisplayJson, JsonFormatter, RawJson, RawJsonValue};
 
 use super::base64url;
-use super::crypto::{CoseCrypto, CoseKey, CryptoError, DigestAlgorithm, EcCurve};
+use super::crypto::{CoseCrypto, CoseKey, CryptoError, DigestAlgorithm, EcCurve, OkpCurve};
 
 /// JWK (RFC 7517 §4)
 ///
@@ -103,6 +106,52 @@ impl Jwk {
                 Ok(CoseKey::ed25519(decode_base64url(x)?))
             }
             Self::Rsa { .. } => Err(JwkError::UnsupportedOperation),
+        }
+    }
+
+    /// 公開鍵を等価な JWK へ変換する
+    ///
+    /// `cnf` の `jkt` (RFC 7638 の JWK サムプリント) を計算するために使う。EC2 は
+    /// `crv` / `x` / `y`、OKP は `crv` / `x` を持つ JWK にし、値はパディング無しの
+    /// base64url に正規化する。秘密鍵は JWK に含めない。
+    ///
+    /// 対称鍵は等価な JWK の公開鍵表現を作れないため
+    /// [`JwkError::UnsupportedCoseKey`] を返す。RSA は [`CoseKey`] が表現しない。
+    /// 座標 / 公開鍵の長さが曲線と一致しない場合は [`JwkError::InvalidKeyLength`] を
+    /// 返す。
+    pub fn from_cose_key(key: &CoseKey) -> Result<Self, JwkError> {
+        match key {
+            CoseKey::Ec2 { curve, x, y, .. } => {
+                if x.len() != curve.coordinate_length() {
+                    return Err(JwkError::InvalidKeyLength("x"));
+                }
+                if y.len() != curve.coordinate_length() {
+                    return Err(JwkError::InvalidKeyLength("y"));
+                }
+                Ok(Self::Ec {
+                    curve: String::from(match curve {
+                        EcCurve::P256 => "P-256",
+                        EcCurve::P384 => "P-384",
+                        EcCurve::P521 => "P-521",
+                    }),
+                    x: base64url::encode(x),
+                    y: base64url::encode(y),
+                })
+            }
+            CoseKey::Okp {
+                curve, public_key, ..
+            } => {
+                if public_key.len() != curve.key_length() {
+                    return Err(JwkError::InvalidKeyLength("x"));
+                }
+                Ok(Self::Okp {
+                    curve: String::from(match curve {
+                        OkpCurve::Ed25519 => "Ed25519",
+                    }),
+                    x: base64url::encode(public_key),
+                })
+            }
+            CoseKey::Symmetric { .. } => Err(JwkError::UnsupportedCoseKey),
         }
     }
 
@@ -225,6 +274,10 @@ pub enum JwkError {
     UnsupportedCurve(String),
     /// この鍵では実行できない操作である (RSA の COSE 変換など)
     UnsupportedOperation,
+    /// JWK へ変換できない [`CoseKey`] である (対称鍵)
+    UnsupportedCoseKey,
+    /// 鍵のパラメータの長さが曲線と一致しない
+    InvalidKeyLength(&'static str),
     /// base64url のデコードに失敗した
     InvalidBase64,
     /// ハッシュの計算に失敗した
@@ -244,6 +297,10 @@ impl fmt::Display for JwkError {
             }
             Self::UnsupportedCurve(curve) => write!(f, "unsupported JWK curve: {curve}"),
             Self::UnsupportedOperation => write!(f, "operation is not supported for this JWK"),
+            Self::UnsupportedCoseKey => {
+                write!(f, "COSE Key type is not supported for JWK conversion")
+            }
+            Self::InvalidKeyLength(name) => write!(f, "invalid key parameter length: {name}"),
             Self::InvalidBase64 => write!(f, "invalid base64url in JWK"),
             Self::Crypto(error) => write!(f, "crypto error: {error}"),
         }

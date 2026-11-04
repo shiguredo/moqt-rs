@@ -383,12 +383,14 @@ fn claims_encode_rejects_raw_duplicates() {
 
 #[cfg(feature = "aws-lc-rs")]
 use super::super::vectors::{
-    ES256_PRIVATE_KEY_HEX, ES256_PUBLIC_KEY_X_HEX, ES256_PUBLIC_KEY_Y_HEX,
+    ES256_PRIVATE_KEY_HEX, ES256_PUBLIC_KEY_X_HEX, ES256_PUBLIC_KEY_Y_HEX, HMAC_KEY_HEX,
 };
 #[cfg(feature = "aws-lc-rs")]
 use shiguredo_moqt::c4m::MoqtAction;
 #[cfg(feature = "aws-lc-rs")]
-use shiguredo_moqt::c4m::cat::{CLAIM_CONFIRMATION, CONFIRMATION_COSE_KEY};
+use shiguredo_moqt::c4m::cat::{
+    CLAIM_CONFIRMATION, CONFIRMATION_COSE_KEY, CatToken, CatTokenBuilder, Confirmation,
+};
 #[cfg(feature = "aws-lc-rs")]
 use shiguredo_moqt::c4m::cose::{
     Algorithm, CoseEncodingOptions, CoseError, CoseMessage, CoseSign1, HEADER_ALGORITHM,
@@ -399,7 +401,9 @@ use shiguredo_moqt::c4m::crypto::aws_lc_rs::AwsLcRsCrypto;
 #[cfg(feature = "aws-lc-rs")]
 use shiguredo_moqt::c4m::crypto::{CoseCrypto, CoseKey, CryptoError, EcCurve, OkpCurve};
 #[cfg(feature = "aws-lc-rs")]
-use shiguredo_moqt::c4m::dpop::DPOP_PROOF_CWT_TYPE;
+use shiguredo_moqt::c4m::dpop::{CwtDpopProof, DPOP_PROOF_CWT_TYPE};
+#[cfg(feature = "aws-lc-rs")]
+use shiguredo_moqt::c4m::jwk::Jwk;
 
 /// 付録 A.1 の ES256 秘密鍵
 #[cfg(feature = "aws-lc-rs")]
@@ -1271,5 +1275,394 @@ fn accepts_verify_operation_and_ignores_other_confirmation_methods() {
     assert_eq!(
         codec.decode_claims(&Value::Map(entries)),
         Err(DpopError::UnexpectedType("claim key"))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// cnf の ckt / jkt による鍵束縛 (draft-ietf-moq-c4m-02 §4.1 / §4.3)
+// ---------------------------------------------------------------------------
+
+/// 実 ES256 鍵で発行した CWT 形式の proof と、その公開鍵の ckt / jkt を返す
+#[cfg(feature = "aws-lc-rs")]
+fn es256_proof_with_thumbprints() -> (CwtDpopProof, Vec<u8>, Vec<u8>) {
+    let crypto = AwsLcRsCrypto::new();
+    let codec = codec();
+    let bytes = codec
+        .build(&crypto, &es256_private_key(), &claims())
+        .expect("CWT 形式の proof を発行できる");
+    let proof = codec.decode(&bytes).expect("発行した proof を解析できる");
+    let public_key = proof.header().confirmation_key.clone();
+    let ckt = public_key
+        .cose_key_thumbprint_sha256(&crypto)
+        .expect("ckt を計算できる");
+    let jkt = Jwk::from_cose_key(&public_key)
+        .expect("公開鍵を等価な JWK へ変換できる")
+        .thumbprint_sha256(&crypto)
+        .expect("jkt を計算できる");
+    (proof, ckt, jkt)
+}
+
+/// ckt だけ / jkt だけ / 両方の各組み合わせで束縛を検証すること
+///
+/// `ckt` と `jkt` が両方存在する場合は両方の一致を要求し、片方だけの一致では受理
+/// しない。key 3 と未知の method は認可の根拠にしない。
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn cnf_binding_requires_every_present_thumbprint_to_match() {
+    let crypto = AwsLcRsCrypto::new();
+    let (proof, ckt, jkt) = es256_proof_with_thumbprints();
+    let mismatched = vec![0x5c; 32];
+
+    // ckt のみ一致
+    let confirmation = Confirmation {
+        cose_key_thumbprint: Some(ckt.clone()),
+        ..Confirmation::default()
+    };
+    proof
+        .verify_key_binding(&crypto, &confirmation)
+        .expect("ckt のみ一致すれば受理する");
+
+    // jkt のみ一致
+    let confirmation = Confirmation {
+        jwk_thumbprint: Some(jkt.clone()),
+        ..Confirmation::default()
+    };
+    proof
+        .verify_key_binding(&crypto, &confirmation)
+        .expect("jkt のみ一致すれば受理する");
+
+    // 両方一致
+    let confirmation = Confirmation {
+        jwk_thumbprint: Some(jkt.clone()),
+        cose_key_thumbprint: Some(ckt.clone()),
+        c4m_draft_jwk_thumbprint: None,
+        raw: Vec::new(),
+    };
+    proof
+        .verify_key_binding(&crypto, &confirmation)
+        .expect("ckt と jkt の両方が一致すれば受理する");
+
+    // ckt 一致 + jkt 不一致
+    let confirmation = Confirmation {
+        jwk_thumbprint: Some(mismatched.clone()),
+        cose_key_thumbprint: Some(ckt.clone()),
+        ..Confirmation::default()
+    };
+    assert_eq!(
+        proof.verify_key_binding(&crypto, &confirmation),
+        Err(DpopError::KeyBindingMismatch),
+        "jkt が不一致なのに ckt の一致だけで受理した"
+    );
+
+    // ckt 不一致 + jkt 一致
+    let confirmation = Confirmation {
+        jwk_thumbprint: Some(jkt.clone()),
+        cose_key_thumbprint: Some(mismatched.clone()),
+        ..Confirmation::default()
+    };
+    assert_eq!(
+        proof.verify_key_binding(&crypto, &confirmation),
+        Err(DpopError::KeyBindingMismatch),
+        "ckt が不一致なのに jkt の一致だけで受理した"
+    );
+
+    // ckt のみ不一致
+    let confirmation = Confirmation {
+        cose_key_thumbprint: Some(mismatched.clone()),
+        ..Confirmation::default()
+    };
+    assert_eq!(
+        proof.verify_key_binding(&crypto, &confirmation),
+        Err(DpopError::KeyBindingMismatch)
+    );
+
+    // jkt のみ不一致
+    let confirmation = Confirmation {
+        jwk_thumbprint: Some(mismatched),
+        ..Confirmation::default()
+    };
+    assert_eq!(
+        proof.verify_key_binding(&crypto, &confirmation),
+        Err(DpopError::KeyBindingMismatch)
+    );
+
+    // どちらも無い
+    assert_eq!(
+        proof.verify_key_binding(&crypto, &Confirmation::default()),
+        Err(DpopError::MissingThumbprint)
+    );
+}
+
+/// 未知の confirmation method を認可の根拠にしないこと
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn cnf_binding_rejects_unknown_confirmation_methods() {
+    let crypto = AwsLcRsCrypto::new();
+    let (proof, ckt, jkt) = es256_proof_with_thumbprints();
+    // IANA のレジストリに無い confirmation method のラベル
+    let unknown = |value: Vec<u8>| (Value::integer(999), Value::ByteString(value));
+
+    // 未知の method だけの cnf は拒否する
+    let confirmation = Confirmation {
+        raw: vec![unknown(ckt.clone())],
+        ..Confirmation::default()
+    };
+    assert_eq!(
+        proof.verify_key_binding(&crypto, &confirmation),
+        Err(DpopError::MissingThumbprint),
+        "未知の confirmation method だけで受理した"
+    );
+
+    // 空の cnf も拒否する
+    assert_eq!(
+        proof.verify_key_binding(&crypto, &Confirmation::default()),
+        Err(DpopError::MissingThumbprint)
+    );
+
+    // 既知の method と未知の method が併存する場合、未知の method は raw に保持され、
+    // 認可の根拠にはならない。既知の ckt が一致すれば受理する
+    let confirmation = Confirmation {
+        cose_key_thumbprint: Some(ckt.clone()),
+        raw: vec![unknown(jkt.clone())],
+        ..Confirmation::default()
+    };
+    proof
+        .verify_key_binding(&crypto, &confirmation)
+        .expect("既知の ckt が一致すれば未知の method が併存しても受理する");
+
+    // 既知の ckt が不一致なら、未知の method が一致していても拒否する
+    let confirmation = Confirmation {
+        cose_key_thumbprint: Some(vec![0x7f; 32]),
+        raw: vec![unknown(ckt)],
+        ..Confirmation::default()
+    };
+    assert_eq!(
+        proof.verify_key_binding(&crypto, &confirmation),
+        Err(DpopError::KeyBindingMismatch),
+        "未知の method の一致で ckt の不一致を救済した"
+    );
+
+    // ドラフトのベクタが jkt に使う key 3 は、この API の認可の根拠にしない
+    let confirmation = Confirmation {
+        c4m_draft_jwk_thumbprint: Some(jkt),
+        ..Confirmation::default()
+    };
+    assert_eq!(
+        proof.verify_key_binding(&crypto, &confirmation),
+        Err(DpopError::MissingThumbprint),
+        "key 3 だけの cnf で受理した"
+    );
+}
+
+/// 実 ES256 の proof と実 cnf で束縛の成功と失敗を確認すること
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn es256_proof_binds_to_a_real_cnf_claim() {
+    let crypto = AwsLcRsCrypto::new();
+    let (proof, ckt, _) = es256_proof_with_thumbprints();
+    proof
+        .verify_signature(&crypto)
+        .expect("proof の署名を検証できる");
+
+    // ckt を実際の CAT トークンの cnf に載せ、デコードした cnf で束縛を検証する
+    let token_text = CatTokenBuilder::new()
+        .issuer("https://auth.example.com")
+        .cose_key_thumbprint(ckt)
+        .build_compact(&crypto, &CoseKey::symmetric(decode_hex(HMAC_KEY_HEX)))
+        .expect("CAT トークンを発行できる");
+    let token = CatToken::decode(token_text.as_bytes()).expect("CAT トークンをデコードできる");
+    let confirmation = token
+        .claims()
+        .confirmation
+        .as_ref()
+        .expect("発行したトークンに cnf がある");
+    proof
+        .verify_key_binding(&crypto, confirmation)
+        .expect("実 cnf の ckt に束縛できる");
+
+    // 別の鍵 (ES384) で発行した proof は ckt が一致しないため拒否する
+    let (es384_private, _) = es384_keys();
+    let bytes = codec()
+        .build(&crypto, &es384_private, &claims())
+        .expect("ES384 の CWT 形式の proof を発行できる");
+    let other_proof = codec()
+        .decode(&bytes)
+        .expect("発行した ES384 の proof を解析できる");
+    other_proof
+        .verify_signature(&crypto)
+        .expect("ES384 の proof の署名を検証できる");
+    assert_eq!(
+        other_proof.verify_key_binding(&crypto, confirmation),
+        Err(DpopError::KeyBindingMismatch),
+        "異なる鍵の proof が ckt に束縛された"
+    );
+}
+
+/// ES384 / EdDSA の proof でも cnf の ckt に束縛できること
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn es384_and_eddsa_proofs_bind_to_a_cnf_claim() {
+    let crypto = AwsLcRsCrypto::new();
+    let codec = codec();
+    let (es384_private, _) = es384_keys();
+    let (ed25519_private, _) = ed25519_keys();
+    for (private_key, algorithm) in [
+        (es384_private, Algorithm::Es384),
+        (ed25519_private, Algorithm::EdDsa),
+    ] {
+        let bytes = codec
+            .build(&crypto, &private_key, &claims())
+            .expect("CWT 形式の proof を発行できる");
+        let proof = codec.decode(&bytes).expect("proof を解析できる");
+        let ckt = proof
+            .header()
+            .confirmation_key
+            .cose_key_thumbprint_sha256(&crypto)
+            .expect("ckt を計算できる");
+        let confirmation = Confirmation {
+            cose_key_thumbprint: Some(ckt),
+            ..Confirmation::default()
+        };
+        proof
+            .verify_key_binding(&crypto, &confirmation)
+            .unwrap_or_else(|error| {
+                panic!("algorithm={algorithm:?} の束縛検証に失敗した: {error}")
+            });
+        // 別の鍵の thumbprint では拒否する
+        let other = Confirmation {
+            cose_key_thumbprint: Some(vec![0x5c; 32]),
+            ..Confirmation::default()
+        };
+        assert_eq!(
+            proof.verify_key_binding(&crypto, &other),
+            Err(DpopError::KeyBindingMismatch),
+            "algorithm={algorithm:?} の不一致を受理した"
+        );
+    }
+}
+
+/// draft §4.2.1 と付録 A.4 の固定値で、実 ES256 proof が cnf に束縛されること
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn known_vector_cnf_binds_to_es256_proof() {
+    let (ckt_hex, jkt_hex) = (
+        super::super::vectors::CKT_DRAFT_C4M_DOPP_PROOF_HEX,
+        super::super::vectors::JKT_DRAFT_C4M_ES256_HEX,
+    );
+    let crypto = AwsLcRsCrypto::new();
+    let codec = codec();
+    let bytes = codec
+        .build(&crypto, &es256_private_key(), &claims())
+        .expect("CWT 形式の proof を発行できる");
+    let proof = codec.decode(&bytes).expect("proof を解析できる");
+
+    // ckt (draft §4.2.1 の連携鍵のサムプリント)
+    let confirmation = Confirmation {
+        cose_key_thumbprint: Some(decode_hex(ckt_hex)),
+        ..Confirmation::default()
+    };
+    proof
+        .verify_key_binding(&crypto, &confirmation)
+        .expect("固定ベクタの ckt と一致する");
+
+    // jkt (付録 A.4 の JWK サムプリント)
+    let confirmation = Confirmation {
+        jwk_thumbprint: Some(decode_hex(jkt_hex)),
+        ..Confirmation::default()
+    };
+    proof
+        .verify_key_binding(&crypto, &confirmation)
+        .expect("固定ベクタの jkt と一致する");
+
+    // 両方を載せても同じ鍵として受理する
+    let confirmation = Confirmation {
+        cose_key_thumbprint: Some(decode_hex(ckt_hex)),
+        jwk_thumbprint: Some(decode_hex(jkt_hex)),
+        ..Confirmation::default()
+    };
+    proof
+        .verify_key_binding(&crypto, &confirmation)
+        .expect("固定ベクタの ckt と jkt が併存しても受理する");
+
+    // 1 バイトでも違えば拒否する
+    let mut mismatched = decode_hex(ckt_hex);
+    mismatched[0] ^= 0xff;
+    let confirmation = Confirmation {
+        cose_key_thumbprint: Some(mismatched),
+        ..Confirmation::default()
+    };
+    assert_eq!(
+        proof.verify_key_binding(&crypto, &confirmation),
+        Err(DpopError::KeyBindingMismatch)
+    );
+}
+
+/// EdDSA proof でも jkt に束縛できること
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn eddsa_proof_binds_with_jkt() {
+    let crypto = AwsLcRsCrypto::new();
+    let codec = codec();
+    let (ed25519_private, _) = ed25519_keys();
+    let bytes = codec
+        .build(&crypto, &ed25519_private, &claims())
+        .expect("EdDSA の proof を発行できる");
+    let proof = codec.decode(&bytes).expect("proof を解析できる");
+    let jkt = Jwk::from_cose_key(&proof.header().confirmation_key)
+        .expect("公開鍵を等価な JWK へ変換できる")
+        .thumbprint_sha256(&crypto)
+        .expect("jkt を計算できる");
+    let confirmation = Confirmation {
+        jwk_thumbprint: Some(jkt),
+        ..Confirmation::default()
+    };
+    proof
+        .verify_key_binding(&crypto, &confirmation)
+        .expect("EdDSA proof が jkt に束縛される");
+    let mismatched = Confirmation {
+        jwk_thumbprint: Some(vec![0x5c; 32]),
+        ..Confirmation::default()
+    };
+    assert_eq!(
+        proof.verify_key_binding(&crypto, &mismatched),
+        Err(DpopError::KeyBindingMismatch)
+    );
+}
+
+/// 解釈しない confirmation method (COSE_Key) は認可の根拠にしないこと
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn cnf_binding_ignores_uninterpreted_confirmation_methods() {
+    let crypto = AwsLcRsCrypto::new();
+    let (proof, ckt, _) = es256_proof_with_thumbprints();
+    // ckt は一致するが、別の鍵を指す COSE_Key (1) は解釈しないため無視する
+    let other_key = CoseKey::ec2(EcCurve::P256, vec![0x11; 32], vec![0x22; 32]);
+    let confirmation = Confirmation {
+        cose_key_thumbprint: Some(ckt),
+        raw: vec![(
+            Value::integer(1),
+            other_key
+                .to_cose_key_map()
+                .expect("別の COSE_Key を組み立てられる"),
+        )],
+        ..Confirmation::default()
+    };
+    proof
+        .verify_key_binding(&crypto, &confirmation)
+        .expect("解釈しない method は束縛の判定に使わない");
+
+    // COSE_Key だけの cnf は解釈しないため拒否する
+    let confirmation = Confirmation {
+        raw: vec![(
+            Value::integer(1),
+            other_key
+                .to_cose_key_map()
+                .expect("別の COSE_Key を組み立てられる"),
+        )],
+        ..Confirmation::default()
+    };
+    assert_eq!(
+        proof.verify_key_binding(&crypto, &confirmation),
+        Err(DpopError::MissingThumbprint)
     );
 }

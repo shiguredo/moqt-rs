@@ -8,9 +8,11 @@
 //! - CWT 形式の DPoP proof のクレームと COSE_Key のラウンドトリップ
 //! - JWS compact のヘッダとトークンのデコード
 //! - JWK のデコード / 正規化 JSON / 鍵変換
+//! - COSE Key Thumbprint (RFC 9679) の決定性と任意パラメータの非影響
 //!
 //! 署名 / 検証 (aws-lc-rs feature) を使う property はここには置かず、
-//! `tests/test_c4m/` のテストで固定する。
+//! `tests/test_c4m/` のテストで固定する。COSE Key Thumbprint の property だけは
+//! SHA-256 の計算に aws-lc-rs を使う。
 
 mod cat;
 mod cbor;

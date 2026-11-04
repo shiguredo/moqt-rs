@@ -1,10 +1,12 @@
 //! JWK (RFC 7517) と JWK サムプリント (RFC 7638) のテスト
+//!
+//! COSE_Key から等価な JWK への変換 (`Jwk::from_cose_key`) も含む。
 
 use shiguredo_moqt::c4m::crypto::{CoseKey, EcCurve};
 use shiguredo_moqt::c4m::jwk::{Jwk, JwkError};
 
 use super::helpers::{decode_hex, encode_hex};
-use super::vectors::{ES256_PUBLIC_KEY_X_HEX, ES256_PUBLIC_KEY_Y_HEX};
+use super::vectors::{ES256_PRIVATE_KEY_HEX, ES256_PUBLIC_KEY_X_HEX, ES256_PUBLIC_KEY_Y_HEX};
 
 #[cfg(feature = "aws-lc-rs")]
 use super::vectors::DPOP_VECTORS;
@@ -195,4 +197,76 @@ fn duplicate_members_are_rejected() {
         Jwk::decode(r#"{"kty":"EC","kty":"EC","crv":"P-256","x":"AQ","y":"AQ"}"#),
         Err(JwkError::DuplicateMember(String::from("kty")))
     );
+}
+
+#[test]
+fn from_cose_key_builds_the_equivalent_public_jwk() {
+    let x = decode_hex(ES256_PUBLIC_KEY_X_HEX);
+    let y = decode_hex(ES256_PUBLIC_KEY_Y_HEX);
+    let public_key = CoseKey::ec2(EcCurve::P256, x.clone(), y.clone());
+    let expected = Jwk::Ec {
+        curve: String::from("P-256"),
+        x: base64url(&x),
+        y: base64url(&y),
+    };
+    assert_eq!(
+        Jwk::from_cose_key(&public_key).expect("EC2 公開鍵を JWK へ変換できる"),
+        expected
+    );
+    // 秘密鍵は JWK に含めないため、秘密鍵付きでも同じ公開鍵の JWK になる
+    let private_key =
+        CoseKey::ec2_with_private_key(EcCurve::P256, x, y, decode_hex(ES256_PRIVATE_KEY_HEX));
+    assert_eq!(
+        Jwk::from_cose_key(&private_key).expect("秘密鍵付きの鍵も JWK へ変換できる"),
+        expected
+    );
+
+    // Ed25519 (OKP) は crv と x だけを持つ JWK になる
+    let ed25519 = CoseKey::ed25519(decode_hex(
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    ));
+    assert_eq!(
+        Jwk::from_cose_key(&ed25519).expect("OKP 公開鍵を JWK へ変換できる"),
+        Jwk::Okp {
+            curve: String::from("Ed25519"),
+            x: String::from("11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"),
+        }
+    );
+
+    // 対称鍵は公開鍵の JWK として表現できない
+    assert_eq!(
+        Jwk::from_cose_key(&CoseKey::symmetric(vec![0x11; 32])),
+        Err(JwkError::UnsupportedCoseKey)
+    );
+    // 長さが曲線と一致しない鍵は JWK にしない
+    assert_eq!(
+        Jwk::from_cose_key(&CoseKey::ec2(EcCurve::P256, vec![0x01; 31], vec![0x02; 32])),
+        Err(JwkError::InvalidKeyLength("x"))
+    );
+    assert_eq!(
+        Jwk::from_cose_key(&CoseKey::ec2(EcCurve::P256, vec![0x01; 32], vec![0x02; 31])),
+        Err(JwkError::InvalidKeyLength("y"))
+    );
+    assert_eq!(
+        Jwk::from_cose_key(&CoseKey::ed25519(vec![0x01; 31])),
+        Err(JwkError::InvalidKeyLength("x"))
+    );
+}
+
+/// `Jwk::from_cose_key` が P-384 / P-521 の曲線名を正しく変換すること
+#[test]
+fn from_cose_key_converts_all_ec_curves() {
+    for (curve, name, length) in [(EcCurve::P384, "P-384", 48), (EcCurve::P521, "P-521", 66)] {
+        let key = CoseKey::ec2(curve, vec![0x01; length], vec![0x02; length]);
+        let jwk = Jwk::from_cose_key(&key).expect("EC2 公開鍵を JWK へ変換できる");
+        assert_eq!(
+            jwk,
+            Jwk::Ec {
+                curve: String::from(name),
+                x: base64url(&vec![0x01; length]),
+                y: base64url(&vec![0x02; length]),
+            }
+        );
+        assert_eq!(jwk.to_cose_key().expect("JWK から COSE_Key へ戻せる"), key);
+    }
 }

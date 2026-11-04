@@ -1,4 +1,4 @@
-//! COSE (RFC 9052 / RFC 9053) のテスト
+//! COSE (RFC 9052 / RFC 9053) と COSE Key Thumbprint (RFC 9679) のテスト
 
 use shiguredo_moqt::c4m::cbor::{self, Value};
 use shiguredo_moqt::c4m::cose::{
@@ -10,6 +10,9 @@ use shiguredo_moqt::c4m::crypto::{
     COSE_KEY_TYPE, COSE_KEY_TYPE_EC2, COSE_KEY_TYPE_OKP, COSE_KEY_TYPE_SYMMETRIC, COSE_KEY_X,
     COSE_KEY_Y, CoseKey, EcCurve,
 };
+
+#[cfg(feature = "aws-lc-rs")]
+use shiguredo_moqt::c4m::crypto::{CryptoError, aws_lc_rs::AwsLcRsCrypto};
 
 use super::helpers::{decode_hex, encode_hex};
 
@@ -915,5 +918,172 @@ fn cose_key_rejects_compressed_point_representation() {
     assert_eq!(
         CoseKey::from_cose_key_map(&value, None),
         Err(CoseError::UnexpectedType("y"))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// COSE Key Thumbprint (RFC 9679)
+// ---------------------------------------------------------------------------
+
+/// RFC 9679 §6 の例の EC2 公開鍵の x 座標
+#[cfg(feature = "aws-lc-rs")]
+const RFC9679_X_HEX: &str = "65eda5a12577c2bae829437fe338701a10aaa375e1bb5b5de108de439c08551d";
+
+/// RFC 9679 §6 の例の EC2 公開鍵の y 座標
+#[cfg(feature = "aws-lc-rs")]
+const RFC9679_Y_HEX: &str = "1e52ed75701163f7f9e40ddf9f341b3dc9ba860af7e0ca7ca7e9eecd0084d19c";
+
+/// RFC 9679 §6 の例の COSE_Key からサムプリントを計算する
+///
+/// RFC に記載された決定論的 CBOR のバイト列と SHA-256 の値の両方を固定値として
+/// 確認する。この例の COSE_Key は `kid` を含むが、サムプリントの入力には含まれない。
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn cose_key_thumbprint_matches_rfc9679_example() {
+    let crypto = AwsLcRsCrypto::new();
+    let value = cose_key_map(vec![
+        (COSE_KEY_TYPE, Value::integer(COSE_KEY_TYPE_EC2)),
+        (COSE_KEY_CURVE, Value::integer(1)),
+        (COSE_KEY_X, Value::ByteString(decode_hex(RFC9679_X_HEX))),
+        (COSE_KEY_Y, Value::ByteString(decode_hex(RFC9679_Y_HEX))),
+        // RFC 9679 §6 の例は kid を持つが、サムプリントには使わない
+        (
+            COSE_KEY_KID,
+            Value::ByteString(decode_hex(
+                "496bd8afadf307e5b08c64b0421bf9dc01528a344a43bda88fadd1669da253ec",
+            )),
+        ),
+    ]);
+    let key = CoseKey::from_cose_key_map(&value, None).expect("COSE_Key から公開鍵を復元できる");
+    let required = key.to_cose_key_map().expect("COSE_Key へ変換できる");
+    assert_eq!(
+        encode_hex(&cbor::encode(&required).expect("決定論的 CBOR をエンコードできる")),
+        concat!(
+            "a40102200121582065eda5a12577c2bae829437fe338701a10aaa375e1bb5b5de108de439c08551d",
+            "2258201e52ed75701163f7f9e40ddf9f341b3dc9ba860af7e0ca7ca7e9eecd0084d19c"
+        )
+    );
+    assert_eq!(
+        encode_hex(
+            &key.cose_key_thumbprint_sha256(&crypto)
+                .expect("サムプリントを計算できる")
+        ),
+        "496bd8afadf307e5b08c64b0421bf9dc01528a344a43bda88fadd1669da253ec"
+    );
+}
+
+/// 任意の COSE_Key パラメータの有無で COSE Key Thumbprint が変わらないこと
+///
+/// RFC 9679 §5.1 のとおり、`kid` / `alg` / `key_ops` などの任意パラメータはハッシュ
+/// 対象に含めない。PBT でも同じ性質を検証するが、固定の RFC 9679 §6 の鍵で統合経路を
+/// 確認する。
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn cose_key_thumbprint_ignores_optional_parameters() {
+    let crypto = AwsLcRsCrypto::new();
+    let required = cose_key_map(vec![
+        (COSE_KEY_TYPE, Value::integer(COSE_KEY_TYPE_EC2)),
+        (COSE_KEY_CURVE, Value::integer(1)),
+        (COSE_KEY_X, Value::ByteString(decode_hex(RFC9679_X_HEX))),
+        (COSE_KEY_Y, Value::ByteString(decode_hex(RFC9679_Y_HEX))),
+    ]);
+    let decorated = cose_key_map(vec![
+        (COSE_KEY_TYPE, Value::integer(COSE_KEY_TYPE_EC2)),
+        (COSE_KEY_CURVE, Value::integer(1)),
+        (COSE_KEY_X, Value::ByteString(decode_hex(RFC9679_X_HEX))),
+        (COSE_KEY_Y, Value::ByteString(decode_hex(RFC9679_Y_HEX))),
+        (COSE_KEY_KID, Value::ByteString(b"key-1".to_vec())),
+        (COSE_KEY_ALG, Value::integer(-7)),
+        (
+            COSE_KEY_OPS,
+            Value::Array(vec![Value::TextString(String::from("verify"))]),
+        ),
+        (99, Value::TextString(String::from("application specific"))),
+    ]);
+    let plain = CoseKey::from_cose_key_map(&required, None).expect("COSE_Key から復元できる");
+    let with_optional = CoseKey::from_cose_key_map(&decorated, Some(Algorithm::Es256))
+        .expect("任意パラメータ付きの COSE_Key から復元できる");
+    assert_eq!(plain, with_optional, "任意パラメータで公開鍵が変わった");
+    assert_eq!(
+        plain
+            .cose_key_thumbprint_sha256(&crypto)
+            .expect("サムプリントを計算できる"),
+        with_optional
+            .cose_key_thumbprint_sha256(&crypto)
+            .expect("サムプリントを計算できる"),
+        "任意パラメータの有無でサムプリントが変わった"
+    );
+}
+
+/// RFC 9679 に OKP の例が無いため、独立に計算した固定値で確認する
+///
+/// RFC 8032 §7.1 のテストベクタ 1 の Ed25519 公開鍵について、RFC 9679 §3 / §4.1 の
+/// 手順で計算した。CBOR は `{1: 1, -1: 6, -2: h'...'}` の決定論的エンコード
+/// `a301012006215820d75a...` で、その SHA-256 が `866eefbd...` である。CBOR の
+/// 固定値もテスト内で assert しているため、同じ手順で再計算できる。
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn cose_key_thumbprint_matches_independent_okp_vector() {
+    let crypto = AwsLcRsCrypto::new();
+    let key = CoseKey::ed25519(decode_hex(super::vectors::ED25519_PUBLIC_KEY_HEX));
+    let required = key.to_cose_key_map().expect("COSE_Key へ変換できる");
+    assert_eq!(
+        encode_hex(&cbor::encode(&required).expect("決定論的 CBOR をエンコードできる")),
+        "a301012006215820d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+    );
+    assert_eq!(
+        encode_hex(
+            &key.cose_key_thumbprint_sha256(&crypto)
+                .expect("サムプリントを計算できる")
+        ),
+        "866eefbd6718c8846cd7ddfe43fc74ab1daac4538ff8514ea2ec2d410a415743"
+    );
+}
+
+/// draft-ietf-moq-c4m-02 §4.2.1 の例の ckt と一致すること
+///
+/// ドラフトの ckt は付録 A の ES256 公開鍵の COSE Key Thumbprint である。
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn cose_key_thumbprint_matches_c4m_example() {
+    let crypto = AwsLcRsCrypto::new();
+    let key = CoseKey::ec2(
+        EcCurve::P256,
+        decode_hex(super::vectors::ES256_PUBLIC_KEY_X_HEX),
+        decode_hex(super::vectors::ES256_PUBLIC_KEY_Y_HEX),
+    );
+    assert_eq!(
+        encode_hex(
+            &key.cose_key_thumbprint_sha256(&crypto)
+                .expect("サムプリントを計算できる")
+        ),
+        super::vectors::CKT_DRAFT_C4M_DOPP_PROOF_HEX
+    );
+}
+
+/// COSE Key Thumbprint を計算できない鍵を拒否すること
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn cose_key_thumbprint_rejects_unusable_keys() {
+    let crypto = AwsLcRsCrypto::new();
+    // 対称鍵は公開鍵の COSE_Key として表現しない
+    assert_eq!(
+        CoseKey::symmetric(vec![0x11; 32]).cose_key_thumbprint_sha256(&crypto),
+        Err(CryptoError::UnsupportedThumbprintKey)
+    );
+    // 座標 / 公開鍵の長さが曲線と一致しない鍵はハッシュしない
+    assert_eq!(
+        CoseKey::ec2(EcCurve::P256, vec![0x01; 31], vec![0x02; 32])
+            .cose_key_thumbprint_sha256(&crypto),
+        Err(CryptoError::InvalidKey)
+    );
+    assert_eq!(
+        CoseKey::ec2(EcCurve::P256, vec![0x01; 32], vec![0x02; 33])
+            .cose_key_thumbprint_sha256(&crypto),
+        Err(CryptoError::InvalidKey)
+    );
+    assert_eq!(
+        CoseKey::ed25519(vec![0x01; 31]).cose_key_thumbprint_sha256(&crypto),
+        Err(CryptoError::InvalidKey)
     );
 }
