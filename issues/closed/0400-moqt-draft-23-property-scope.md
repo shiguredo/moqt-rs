@@ -36,7 +36,7 @@ Object 側は `ObjectProperties::decode_exact` が `MalformedTrack` を `Protoco
 
 ## 依存・関連
 
-- 関連: [0311](0311-draft-22-error-classification-consistency.md)
+- 関連: [0311](0311-draft-23-error-classification-consistency.md)
 - 関連: [0401](0401-moqt-draft-23-property-duplicates.md)
 
 ## 解決方法
