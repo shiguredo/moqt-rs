@@ -4,10 +4,11 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-object-immutable-properties-search
 - Polished: 2026-10-19
+- Refreshed: 2026-11-04
 
 ## 目的
 
-draft-ietf-moq-transport-22 §10.7 (Immutable Properties) は "When looking for the value of a property, processors MUST search both the mutable properties and the contents of Immutable Properties." と MUST を課す。
+draft-ietf-moq-transport-23 §10.7 (Immutable Properties) は "When looking for the value of a property, processors MUST search both the mutable properties and the contents of Immutable Properties." と MUST を課す。
 
 draft-ietf-moq-loc-04 §3.1.2 (Immutable Properties) も、relay に visible なまま immutable にすべき LOC Properties を Immutable Properties として符号化することを SHOULD としている。
 
@@ -25,7 +26,7 @@ draft-ietf-moq-loc-04 §3.1.2 (Immutable Properties) も、relay に visible な
 ## 設計方針
 
 - `LocProperties` に IMMUTABLE_PROPERTIES (0x0B) の内側探索を実装する。`ObjectProperties` / `TrackProperties` の getter と同じ規則で、最上位リストを先に探し、無ければ IMMUTABLE_PROPERTIES の内側を探す。IMMUTABLE_PROPERTIES の Property Type は `crate::track_properties::PROP_IMMUTABLE_PROPERTIES` を参照する。
-- IMMUTABLE_PROPERTIES は奇数型の `LocPropertyValue::Bytes` として届き、そのバイト列は外側の `Properties Length` を伴わない delta-key KVP 列である (draft-ietf-moq-transport-22 §10.7 / §8.3 (Key-Value-Pair Structure))。`LocProperties::decode` は 0x0B を `Bytes` として保持しているため、そのバイト列を KVP として走査する。
+- IMMUTABLE_PROPERTIES は奇数型の `LocPropertyValue::Bytes` として届き、そのバイト列は外側の `Properties Length` を伴わない delta-key KVP 列である (draft-ietf-moq-transport-23 §10.7 / §8.3 (Key-Value-Pair Structure))。`LocProperties::decode` は 0x0B を `Bytes` として保持しているため、そのバイト列を KVP として走査する。
 - public な `find_varint(&self, prop_id: u64) -> Option<u64>` と `find_bytes(&self, prop_id: u64) -> Option<&[u8]>` を追加する。`find_bytes` は `self` 内のバイト列への参照を返し、内側の値を `Vec` にコピーしない。既存の accessor の戻り値型は変えない。
 - 既存の `timestamp` / `timescale` / `video_config` / `audio_config` / `video_frame_marking` / `audio_level` は `find_varint` / `find_bytes` を使う。
 - `iter()` は最上位リストのイテレータのままとする (mutable リストの表現)。Immutable Properties の内側を見たい呼び出し側は `find_varint` / `find_bytes` または既知 accessor を使う。
