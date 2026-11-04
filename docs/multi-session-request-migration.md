@@ -10,10 +10,12 @@ crates 配下の `moq-pub` / `moq-sub` の単一 session 前提を複数 session
 
 ### 1.1 仕様
 
-draft-ietf-moq-transport-23 §9.2 (GOAWAY) は、request stream 上の GOAWAY を受けた endpoint に、
-"the endpoint SHOULD re-issue that specific request on a session at the specified URI (or the current session if
-no URI is provided), and close the old request stream using the appropriate mechanism (e.g. FIN, stream reset, or
-PUBLISH_DONE)" を SHOULD で要求する。§6.6.1 (Graceful Session Migration) は新しい session の確立と移行の
+draft-ietf-moq-transport-23 §9.2 (GOAWAY) は、request stream 上に GOAWAY を送れるのは request の
+receiver だけで ("Only the receiver of a request can send GOAWAY on its request stream.")、request stream 上の
+GOAWAY を受けた request の sender に "the sender of the request SHOULD re-issue that specific request on a
+session at the specified URI (or the current session if no URI is provided), and close the old request stream
+using the appropriate mechanism (e.g. FIN, stream reset, or PUBLISH_DONE)" を SHOULD で要求する。
+§6.6.1 (Graceful Session Migration) は新しい session の確立と移行の
 期限を、§7.7.1 (Graceful Publisher Relay Switchover) は publisher 側の移行を定める。
 
 ### 1.2 現在の crates の構造
