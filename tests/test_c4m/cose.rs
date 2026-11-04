@@ -5,6 +5,11 @@ use shiguredo_moqt::c4m::cose::{
     Algorithm, AlgorithmClass, C4M_DRAFT_HMAC_SHA256_ALGORITHM_ID, CoseEncodingOptions, CoseError,
     CoseMac0, CoseMessage, CoseSign1, Header, KeyId, TAG_COSE_MAC0, TAG_COSE_SIGN1, TAG_CWT,
 };
+use shiguredo_moqt::c4m::crypto::{
+    COSE_KEY_ALG, COSE_KEY_BASE_IV, COSE_KEY_CURVE, COSE_KEY_KID, COSE_KEY_OPS, COSE_KEY_PRIVATE,
+    COSE_KEY_TYPE, COSE_KEY_TYPE_EC2, COSE_KEY_TYPE_OKP, COSE_KEY_TYPE_SYMMETRIC, COSE_KEY_X,
+    COSE_KEY_Y, CoseKey, EcCurve,
+};
 
 use super::helpers::{decode_hex, encode_hex};
 
@@ -321,6 +326,7 @@ fn header_round_trips_unknown_parameters() {
         key_id: Some(KeyId::Bytes(vec![1, 2, 3])),
         typ: Some(Value::TextString(String::from("CAT"))),
         content_type: Some(Value::Unsigned(0)),
+        kccs: None,
         critical: Vec::new(),
         raw: vec![(Value::Unsigned(99), Value::TextString(String::from("x")))],
     };
@@ -576,6 +582,7 @@ fn header_encode_checks_critical_labels() {
         key_id: None,
         typ: None,
         content_type: None,
+        kccs: None,
         critical: vec![Value::Unsigned(16)],
         raw: Vec::new(),
     };
@@ -590,6 +597,7 @@ fn header_encode_accepts_present_and_understood_critical_labels() {
         key_id: None,
         typ: Some(Value::TextString(String::from("CAT"))),
         content_type: None,
+        kccs: None,
         critical: vec![Value::Unsigned(1), Value::Unsigned(16)],
         raw: Vec::new(),
     };
@@ -626,4 +634,286 @@ fn message_accessors_are_exposed() {
     assert_eq!(message.signature(), &[0x01, 0x02]);
     assert_eq!(message.payload(), Some(&b"p"[..]));
     assert!(message.signing_input().is_ok());
+}
+
+/// COSE_Key の CBOR マップを組み立てる
+fn cose_key_map(entries: Vec<(i64, Value)>) -> Value {
+    Value::Map(
+        entries
+            .into_iter()
+            .map(|(label, value)| (Value::integer(label), value))
+            .collect(),
+    )
+}
+
+/// 公開鍵の COSE_Key が EC2 / OKP でラウンドトリップする
+#[test]
+fn cose_key_round_trips_ec2_and_okp() {
+    // EC2 の秘密鍵付きの鍵は、公開鍵だけの COSE_Key へ変換する
+    let key = CoseKey::ec2_with_private_key(
+        EcCurve::P256,
+        vec![0x01; 32],
+        vec![0x02; 32],
+        vec![0x03; 32],
+    );
+    let value = key.to_cose_key_map().expect("COSE_Key へ変換できる");
+    let Value::Map(entries) = &value else {
+        panic!("COSE_Key はマップ");
+    };
+    assert!(
+        !entries
+            .iter()
+            .any(|(label, _)| label.as_int() == Some(COSE_KEY_PRIVATE)),
+        "秘密鍵パラメータを出力した"
+    );
+    assert_eq!(
+        CoseKey::from_cose_key_map(&value, None).expect("COSE_Key から復元できる"),
+        CoseKey::ec2(EcCurve::P256, vec![0x01; 32], vec![0x02; 32])
+    );
+
+    // OKP (Ed25519) もラウンドトリップする
+    let key = CoseKey::ed25519_with_private_key(vec![0x04; 32], vec![0x05; 32]);
+    let value = key.to_cose_key_map().expect("COSE_Key へ変換できる");
+    assert_eq!(
+        CoseKey::from_cose_key_map(&value, None).expect("COSE_Key から復元できる"),
+        CoseKey::ed25519(vec![0x04; 32])
+    );
+
+    // P-384 / P-521 は曲線識別子を保ってラウンドトリップする
+    for curve in [EcCurve::P384, EcCurve::P521] {
+        let length = curve.coordinate_length();
+        let key = CoseKey::ec2(curve, vec![0x11; length], vec![0x22; length]);
+        let value = key.to_cose_key_map().expect("COSE_Key へ変換できる");
+        assert_eq!(
+            CoseKey::from_cose_key_map(&value, None).expect("COSE_Key から復元できる"),
+            key
+        );
+    }
+}
+
+/// COSE_Key の秘密鍵・未知パラメータ・対称鍵を拒否する
+#[test]
+fn cose_key_rejects_private_unknown_and_symmetric_parameters() {
+    // 秘密鍵パラメータ (d = -4) を含む COSE_Key
+    let value = cose_key_map(vec![
+        (COSE_KEY_TYPE, Value::integer(COSE_KEY_TYPE_EC2)),
+        (COSE_KEY_CURVE, Value::integer(1)),
+        (COSE_KEY_X, Value::ByteString(vec![0x01; 32])),
+        (COSE_KEY_Y, Value::ByteString(vec![0x02; 32])),
+        (COSE_KEY_PRIVATE, Value::ByteString(vec![0x03; 32])),
+    ]);
+    assert_eq!(
+        CoseKey::from_cose_key_map(&value, None),
+        Err(CoseError::PrivateKeyParameter(COSE_KEY_PRIVATE))
+    );
+
+    // kid (2) / Base IV (5) / 未知ラベルは公開鍵の復元に不要なため無視する
+    let value = cose_key_map(vec![
+        (COSE_KEY_TYPE, Value::integer(COSE_KEY_TYPE_EC2)),
+        (COSE_KEY_CURVE, Value::integer(1)),
+        (COSE_KEY_X, Value::ByteString(vec![0x01; 32])),
+        (COSE_KEY_Y, Value::ByteString(vec![0x02; 32])),
+        (COSE_KEY_KID, Value::ByteString(b"key-1".to_vec())),
+        (COSE_KEY_BASE_IV, Value::ByteString(vec![0x03; 16])),
+        (99, Value::TextString(String::from("ignored"))),
+    ]);
+    assert_eq!(
+        CoseKey::from_cose_key_map(&value, None).expect("任意属性を無視して復元できる"),
+        CoseKey::ec2(EcCurve::P256, vec![0x01; 32], vec![0x02; 32])
+    );
+
+    // alg (3) が期待と一致しない COSE_Key は拒否する
+    let value = cose_key_map(vec![
+        (COSE_KEY_TYPE, Value::integer(COSE_KEY_TYPE_EC2)),
+        (COSE_KEY_CURVE, Value::integer(1)),
+        (COSE_KEY_X, Value::ByteString(vec![0x01; 32])),
+        (COSE_KEY_Y, Value::ByteString(vec![0x02; 32])),
+        (COSE_KEY_ALG, Value::integer(-35)),
+    ]);
+    assert_eq!(
+        CoseKey::from_cose_key_map(&value, Some(Algorithm::Es256)),
+        Err(CoseError::KeyAlgorithmMismatch {
+            key: Algorithm::Es384,
+            expected: Algorithm::Es256,
+        })
+    );
+
+    // key_ops (4) に verify が無い COSE_Key は拒否する
+    let value = cose_key_map(vec![
+        (COSE_KEY_TYPE, Value::integer(COSE_KEY_TYPE_EC2)),
+        (COSE_KEY_CURVE, Value::integer(1)),
+        (COSE_KEY_X, Value::ByteString(vec![0x01; 32])),
+        (COSE_KEY_Y, Value::ByteString(vec![0x02; 32])),
+        (
+            COSE_KEY_OPS,
+            Value::Array(vec![Value::TextString(String::from("sign"))]),
+        ),
+    ]);
+    assert_eq!(
+        CoseKey::from_cose_key_map(&value, None),
+        Err(CoseError::KeyOperationNotAllowed("verify"))
+    );
+
+    // 対称鍵 (kty = 4)
+    let value = cose_key_map(vec![
+        (COSE_KEY_TYPE, Value::integer(COSE_KEY_TYPE_SYMMETRIC)),
+        (-1, Value::ByteString(vec![0x11; 32])),
+    ]);
+    assert_eq!(
+        CoseKey::from_cose_key_map(&value, None),
+        Err(CoseError::SymmetricKeyNotAllowed)
+    );
+
+    // 対応していない kty
+    let value = cose_key_map(vec![(COSE_KEY_TYPE, Value::integer(3))]);
+    assert_eq!(
+        CoseKey::from_cose_key_map(&value, None),
+        Err(CoseError::UnsupportedKeyType(3))
+    );
+
+    // 対応していない crv
+    let value = cose_key_map(vec![
+        (COSE_KEY_TYPE, Value::integer(COSE_KEY_TYPE_OKP)),
+        (COSE_KEY_CURVE, Value::integer(1)),
+        (COSE_KEY_X, Value::ByteString(vec![0x01; 32])),
+    ]);
+    assert_eq!(
+        CoseKey::from_cose_key_map(&value, None),
+        Err(CoseError::UnsupportedCurve(1))
+    );
+
+    // 必須パラメータの欠落
+    let value = cose_key_map(vec![(COSE_KEY_TYPE, Value::integer(COSE_KEY_TYPE_EC2))]);
+    assert_eq!(
+        CoseKey::from_cose_key_map(&value, None),
+        Err(CoseError::MissingKeyParameter("crv"))
+    );
+
+    // 座標の長さ違反
+    let value = cose_key_map(vec![
+        (COSE_KEY_TYPE, Value::integer(COSE_KEY_TYPE_EC2)),
+        (COSE_KEY_CURVE, Value::integer(1)),
+        (COSE_KEY_X, Value::ByteString(vec![0x01; 3])),
+        (COSE_KEY_Y, Value::ByteString(vec![0x02; 32])),
+    ]);
+    assert_eq!(
+        CoseKey::from_cose_key_map(&value, None),
+        Err(CoseError::InvalidKeyLength("x"))
+    );
+
+    // 重複したパラメータ
+    let value = cose_key_map(vec![
+        (COSE_KEY_TYPE, Value::integer(COSE_KEY_TYPE_EC2)),
+        (COSE_KEY_TYPE, Value::integer(COSE_KEY_TYPE_EC2)),
+        (COSE_KEY_CURVE, Value::integer(1)),
+        (COSE_KEY_X, Value::ByteString(vec![0x01; 32])),
+        (COSE_KEY_Y, Value::ByteString(vec![0x02; 32])),
+    ]);
+    assert_eq!(
+        CoseKey::from_cose_key_map(&value, None),
+        Err(CoseError::DuplicateKeyParameter(COSE_KEY_TYPE))
+    );
+
+    // 対称鍵は COSE_Key へ変換しない
+    assert_eq!(
+        CoseKey::symmetric(vec![0x11; 32]).to_cose_key_map(),
+        Err(CoseError::SymmetricKeyNotAllowed)
+    );
+}
+
+/// COSE_Key の tstr / int の両方の値表現を受理すること
+#[test]
+fn cose_key_accepts_registry_names_and_integer_operations() {
+    // kty / crv / alg をレジストリ名で書いても受理する (RFC 9052 §7)
+    let value = cose_key_map(vec![
+        (COSE_KEY_TYPE, Value::TextString(String::from("EC2"))),
+        (COSE_KEY_CURVE, Value::TextString(String::from("P-256"))),
+        (COSE_KEY_X, Value::ByteString(vec![0x01; 32])),
+        (COSE_KEY_Y, Value::ByteString(vec![0x02; 32])),
+        (COSE_KEY_ALG, Value::TextString(String::from("ES256"))),
+        (COSE_KEY_OPS, Value::Array(vec![Value::integer(2)])),
+    ]);
+    assert_eq!(
+        CoseKey::from_cose_key_map(&value, Some(Algorithm::Es256))
+            .expect("レジストリ名の COSE_Key を復元できる"),
+        CoseKey::ec2(EcCurve::P256, vec![0x01; 32], vec![0x02; 32])
+    );
+
+    // OKP もレジストリ名で受理する
+    let value = cose_key_map(vec![
+        (COSE_KEY_TYPE, Value::TextString(String::from("OKP"))),
+        (COSE_KEY_CURVE, Value::TextString(String::from("Ed25519"))),
+        (COSE_KEY_X, Value::ByteString(vec![0x04; 32])),
+    ]);
+    assert_eq!(
+        CoseKey::from_cose_key_map(&value, None).expect("OKP を復元できる"),
+        CoseKey::ed25519(vec![0x04; 32])
+    );
+
+    // key_ops の整数 2 (verify) は署名検証を許可する
+    let value = cose_key_map(vec![
+        (COSE_KEY_TYPE, Value::integer(COSE_KEY_TYPE_EC2)),
+        (COSE_KEY_CURVE, Value::integer(1)),
+        (COSE_KEY_X, Value::ByteString(vec![0x01; 32])),
+        (COSE_KEY_Y, Value::ByteString(vec![0x02; 32])),
+        (COSE_KEY_OPS, Value::Array(vec![Value::integer(2)])),
+    ]);
+    assert!(
+        CoseKey::from_cose_key_map(&value, None).is_ok(),
+        "key_ops の整数 2 を拒否した"
+    );
+
+    // 未知の kty / crv / alg 名は拒否する。既定エントリと label が重複しないよう、
+    // 対象の label だけを名前で置き換える
+    let ec2_key = |key_type: Value, curve: Value| {
+        cose_key_map(vec![
+            (COSE_KEY_TYPE, key_type),
+            (COSE_KEY_CURVE, curve),
+            (COSE_KEY_X, Value::ByteString(vec![0x01; 32])),
+            (COSE_KEY_Y, Value::ByteString(vec![0x02; 32])),
+        ])
+    };
+    assert_eq!(
+        CoseKey::from_cose_key_map(
+            &ec2_key(Value::TextString(String::from("RSA")), Value::integer(1),),
+            None,
+        ),
+        Err(CoseError::UnexpectedType("kty"))
+    );
+    assert_eq!(
+        CoseKey::from_cose_key_map(
+            &ec2_key(
+                Value::integer(COSE_KEY_TYPE_EC2),
+                Value::TextString(String::from("P-999")),
+            ),
+            None,
+        ),
+        Err(CoseError::UnexpectedType("crv"))
+    );
+    let entries = vec![
+        (COSE_KEY_TYPE, Value::integer(COSE_KEY_TYPE_EC2)),
+        (COSE_KEY_CURVE, Value::integer(1)),
+        (COSE_KEY_X, Value::ByteString(vec![0x01; 32])),
+        (COSE_KEY_Y, Value::ByteString(vec![0x02; 32])),
+        (COSE_KEY_ALG, Value::TextString(String::from("unknown"))),
+    ];
+    assert_eq!(
+        CoseKey::from_cose_key_map(&cose_key_map(entries), None),
+        Err(CoseError::UnexpectedType("alg"))
+    );
+}
+
+/// 圧縮点表現 (`y` が bool) の COSE_Key を拒否すること
+#[test]
+fn cose_key_rejects_compressed_point_representation() {
+    let value = cose_key_map(vec![
+        (COSE_KEY_TYPE, Value::integer(COSE_KEY_TYPE_EC2)),
+        (COSE_KEY_CURVE, Value::integer(1)),
+        (COSE_KEY_X, Value::ByteString(vec![0x01; 32])),
+        (COSE_KEY_Y, Value::Bool(true)),
+    ]);
+    assert_eq!(
+        CoseKey::from_cose_key_map(&value, None),
+        Err(CoseError::UnexpectedType("y"))
+    );
 }

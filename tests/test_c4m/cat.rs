@@ -709,9 +709,9 @@ fn round_trip_for_all_algorithms() {
         (
             Algorithm::Es384,
             EcCurve::P384,
-            "ce7de2ef769603fc91f4682efeedc9e415b221a79067153a31d8f2f62d14044e18be87058146596041b2148233ed4073",
-            "8a69f5b6b5bdb0200d39bf760420a3da5bf091b8e81557f5cb4d37f7ce36f7a07fb1119a736e2385d75e4c3f5ca604e7",
-            "e3129db6c869a183e6ed6abc233723f7339b94e38c38bdde7c19d4674c5c2730eca7680ac6afa8d660810a8adead31e2",
+            super::helpers::ES384_PUBLIC_KEY_X_HEX,
+            super::helpers::ES384_PUBLIC_KEY_Y_HEX,
+            super::helpers::ES384_PRIVATE_KEY_HEX,
         ),
         (
             Algorithm::Es512,

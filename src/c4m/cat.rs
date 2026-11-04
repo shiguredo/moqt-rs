@@ -111,6 +111,12 @@ pub const CLAIM_CAT_RENEWAL: i64 = 323;
 /// IANA の CWT Confirmation Methods レジストリに CTA が登録した値 (323)。
 pub const CONFIRMATION_JWK_THUMBPRINT: i64 = 323;
 
+/// `cnf` の `COSE_Key` (確認用の公開鍵) の confirmation key
+///
+/// RFC 8747 §3.1 Table 1 / §3.2 の値 (1)。draft-ietf-moq-c4m-02 §4.2 の DPoP proof は
+/// `kccs` の `cnf` にこの confirmation method でクライアントの公開鍵を入れる。
+pub const CONFIRMATION_COSE_KEY: i64 = 1;
+
 /// draft-ietf-moq-c4m-01 のベクタが `jkt` に使う confirmation key
 ///
 /// 付録 A.4 のベクタは 3 を使うが、IANA の CWT Confirmation Methods レジストリでは

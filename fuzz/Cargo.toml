@@ -182,6 +182,11 @@ path = "fuzz_targets/fuzz_decode_c4m_dpop_proof.rs"
 
 [[bin]]
 doc = false
+name = "fuzz_decode_c4m_cwt_dpop_proof"
+path = "fuzz_targets/fuzz_decode_c4m_cwt_dpop_proof.rs"
+
+[[bin]]
+doc = false
 name = "fuzz_verify_c4m_dpop_context"
 path = "fuzz_targets/fuzz_verify_c4m_dpop_context.rs"
 

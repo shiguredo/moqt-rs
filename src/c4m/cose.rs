@@ -6,6 +6,9 @@
 //!
 //! 署名 / 検証の実行は [`crate::c4m::crypto`] の trait に分離しており、このモジュール
 //! は構造のエンコード / デコードと署名対象バイト列の組み立てだけを行う (Sans I/O)。
+//!
+//! CWT 形式の DPoP proof が使う `kccs` (ラベル 14) も protected ヘッダの
+//! [`Header::kccs`] として保持する。
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -38,6 +41,13 @@ pub const HEADER_KEY_ID: i64 = 4;
 
 /// ヘッダパラメータ `typ` (RFC 9596 §2)
 pub const HEADER_TYPE: i64 = 16;
+
+/// ヘッダパラメータ `kccs` (RFC 9528 §3.5.3.1)
+///
+/// 鍵確認用の CWT Claims Set を protected ヘッダに置く。draft-ietf-moq-c4m-02 §4.2
+/// は DPoP proof の protected ヘッダに kccs を置き、その `cnf` (8) に確認用の
+/// COSE_Key (1) を入れる。
+pub const HEADER_KCCS: i64 = 14;
 
 /// ドラフトのテストベクタが HMAC-SHA256 に使うアルゴリズム ID
 ///
@@ -219,6 +229,11 @@ pub struct Header {
     pub typ: Option<Value>,
     /// ペイロードのコンテンツタイプ (`content type`、ラベル 3)
     pub content_type: Option<Value>,
+    /// 鍵確認用の CWT Claims Set (`kccs`、ラベル 14、RFC 9528 §3.5.3.1)
+    ///
+    /// protected ヘッダにだけ置ける。このフィールドは CBOR のマップをそのまま保持し、
+    /// `cnf` や COSE_Key の解釈は利用側が行う。
+    pub kccs: Option<Value>,
     /// 必ず理解しなければならないヘッダパラメータ (`crit`)
     pub critical: Vec<Value>,
     /// 解釈しなかったヘッダパラメータ
@@ -250,8 +265,9 @@ impl Header {
     /// unprotected ヘッダのマップからデコードする
     ///
     /// RFC 9052 §3.1 は `crit` を protected ヘッダに置くことを MUST、RFC 9596 §2 は
-    /// `typ` (ラベル 16) を unprotected ヘッダに置かないことを MUST とするため、
-    /// どちらもエラーにする。
+    /// `typ` (ラベル 16) を unprotected ヘッダに置かないことを MUST とする。
+    /// draft-ietf-moq-c4m-02 §4.2 の `kccs` (ラベル 14) も protected ヘッダに置く
+    /// ため、これらを unprotected ヘッダで見つけた場合はエラーにする。
     pub fn decode_unprotected(value: &Value) -> Result<Self, CoseError> {
         let entries = value
             .as_map()
@@ -293,23 +309,22 @@ impl Header {
                     }
                     header.typ = Some(entry.clone());
                 }
+                Some(HEADER_KCCS) => {
+                    // kccs は鍵確認用のクレームであり、改ざんされると検証に使う鍵が
+                    // 変わるため protected ヘッダに必須とする (draft-ietf-moq-c4m-02
+                    // §4.2 は protected ヘッダに置く)
+                    if bucket == HeaderBucket::Unprotected {
+                        return Err(CoseError::UnprotectedKccsHeader);
+                    }
+                    header.kccs = Some(entry.clone());
+                }
                 Some(HEADER_CONTENT_TYPE) => header.content_type = Some(entry.clone()),
                 _ => header.raw.push((key.clone(), entry.clone())),
             }
         }
         // `crit` のラベルは protected ヘッダに実在し、理解できる必要がある
         for label in &header.critical {
-            let understood = matches!(
-                label.as_int(),
-                Some(
-                    HEADER_ALGORITHM
-                        | HEADER_CRITICAL
-                        | HEADER_CONTENT_TYPE
-                        | HEADER_KEY_ID
-                        | HEADER_TYPE
-                )
-            );
-            if !understood {
+            if !is_understood_critical_label(label) {
                 // counter signature (ラベル 7) は RFC 9052 §3.1 が新実装の理解を求めるが、
                 // 本実装は検証しないため fail-closed として拒否する
                 return Err(CoseError::UnsupportedCriticalHeader);
@@ -341,22 +356,15 @@ impl Header {
         if let Some(content_type) = &self.content_type {
             entries.push((Value::integer(HEADER_CONTENT_TYPE), content_type.clone()));
         }
+        if let Some(kccs) = &self.kccs {
+            entries.push((Value::integer(HEADER_KCCS), kccs.clone()));
+        }
         entries.extend(self.raw.iter().cloned());
         if !self.critical.is_empty() {
             // デコード側と同じ規則: crit のラベルは理解でき、保護されるマップに実在
             // すること (RFC 9052 §3.1)
             for label in &self.critical {
-                let understood = matches!(
-                    label.as_int(),
-                    Some(
-                        HEADER_ALGORITHM
-                            | HEADER_CRITICAL
-                            | HEADER_CONTENT_TYPE
-                            | HEADER_KEY_ID
-                            | HEADER_TYPE
-                    )
-                );
-                if !understood {
+                if !is_understood_critical_label(label) {
                     return Err(CoseError::UnsupportedCriticalHeader);
                 }
                 // crit 自身 (ラベル 2) はこの直後に追加される
@@ -373,6 +381,24 @@ impl Header {
         }
         Ok(Value::Map(entries))
     }
+}
+
+/// `crit` に列挙できる (本実装が理解している) ヘッダパラメータかどうかを返す
+///
+/// counter signature (ラベル 7) は RFC 9052 §3.1 が新実装の理解を求めるが、本実装は
+/// 検証しないため含めない。
+fn is_understood_critical_label(label: &Value) -> bool {
+    matches!(
+        label.as_int(),
+        Some(
+            HEADER_ALGORITHM
+                | HEADER_CRITICAL
+                | HEADER_CONTENT_TYPE
+                | HEADER_KEY_ID
+                | HEADER_KCCS
+                | HEADER_TYPE
+        )
+    )
 }
 
 /// COSE_Sign1 (RFC 9052 §4.2)
@@ -601,7 +627,7 @@ impl Default for CoseEncodingOptions {
     }
 }
 
-/// COSE の構造のエンコード / デコードエラー
+/// COSE の構造と COSE_Key のエンコード / デコード / 検証エラー
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoseError {
     /// CBOR のデコードに失敗した
@@ -624,6 +650,8 @@ pub enum CoseError {
     UnprotectedCriticalHeader,
     /// `typ` が unprotected ヘッダにある (RFC 9596 §2)
     UnprotectedTypeHeader,
+    /// `kccs` (ラベル 14) が unprotected ヘッダにある (draft-ietf-moq-c4m-02 §4.2)
+    UnprotectedKccsHeader,
     /// `alg` が unprotected ヘッダにしかない (RFC 9052 §3.1)
     UnprotectedAlgorithm,
     /// 同じヘッダパラメータが protected と unprotected の両方にある
@@ -632,6 +660,29 @@ pub enum CoseError {
     AlgorithmClassMismatch,
     /// detached payload は扱わない
     DetachedPayloadUnsupported,
+    /// COSE_Key の `kty` が対応していない (RFC 9053 §7)
+    UnsupportedKeyType(i64),
+    /// COSE_Key の `crv` が対応していない (RFC 9053 §7)
+    UnsupportedCurve(i64),
+    /// COSE_Key が対称鍵である (DPoP proof の検証には使えない)
+    SymmetricKeyNotAllowed,
+    /// COSE_Key に秘密鍵パラメータが含まれている (RFC 9053 §7)
+    PrivateKeyParameter(i64),
+    /// COSE_Key の `alg` が proof の `alg` と一致しない (RFC 9052 §7.1)
+    KeyAlgorithmMismatch {
+        /// COSE_Key のアルゴリズム
+        key: Algorithm,
+        /// 期待したアルゴリズム
+        expected: Algorithm,
+    },
+    /// COSE_Key の `key_ops` が必要な操作を許可していない (RFC 9052 §7.1)
+    KeyOperationNotAllowed(&'static str),
+    /// COSE_Key に必須のパラメータが無い
+    MissingKeyParameter(&'static str),
+    /// COSE_Key のパラメータの長さが曲線と一致しない
+    InvalidKeyLength(&'static str),
+    /// 同じ COSE_Key のパラメータが重複している
+    DuplicateKeyParameter(i64),
 }
 
 impl fmt::Display for CoseError {
@@ -663,6 +714,12 @@ impl fmt::Display for CoseError {
             Self::UnprotectedTypeHeader => {
                 write!(f, "typ must not be in the unprotected header (RFC 9596 §2)")
             }
+            Self::UnprotectedKccsHeader => {
+                write!(
+                    f,
+                    "kccs must be in the protected header (draft-ietf-moq-c4m-02 §4.2)"
+                )
+            }
             Self::UnprotectedAlgorithm => {
                 write!(f, "alg must be in the protected header (RFC 9052 §3.1)")
             }
@@ -673,6 +730,39 @@ impl fmt::Display for CoseError {
                 write!(f, "COSE tag and algorithm class do not match")
             }
             Self::DetachedPayloadUnsupported => write!(f, "detached payload is not supported"),
+            Self::UnsupportedKeyType(key_type) => {
+                write!(f, "unsupported COSE_Key kty: {key_type}")
+            }
+            Self::UnsupportedCurve(curve) => {
+                write!(f, "unsupported COSE_Key crv: {curve}")
+            }
+            Self::SymmetricKeyNotAllowed => {
+                write!(f, "COSE_Key must be an asymmetric key")
+            }
+            Self::PrivateKeyParameter(label) => {
+                write!(
+                    f,
+                    "COSE_Key must not contain a private key parameter: {label}"
+                )
+            }
+            Self::KeyAlgorithmMismatch { key, expected } => {
+                write!(
+                    f,
+                    "COSE_Key algorithm {key:?} does not match expected {expected:?}"
+                )
+            }
+            Self::KeyOperationNotAllowed(operation) => {
+                write!(f, "COSE_Key does not allow {operation}")
+            }
+            Self::MissingKeyParameter(name) => {
+                write!(f, "COSE_Key parameter is missing: {name}")
+            }
+            Self::InvalidKeyLength(name) => {
+                write!(f, "COSE_Key parameter has an invalid length: {name}")
+            }
+            Self::DuplicateKeyParameter(label) => {
+                write!(f, "duplicate COSE_Key parameter: {label}")
+            }
         }
     }
 }

@@ -824,3 +824,6 @@ fn builder_nonce_and_proof_accessors() {
     assert!(!proof.signing_input().is_empty());
     assert_eq!(proof.signature().len(), 64);
 }
+
+#[path = "dpop/cwt.rs"]
+mod cwt;

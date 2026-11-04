@@ -5,11 +5,18 @@
 //! 一致 (鍵バインディング)、`catdpop` のウィンドウによる鮮度、jti によるリプレイ
 //! 保護、Authorization Context (actx) の検証を行う。
 //!
-//! CWT 形式の DPoP proof (`dpop-proof+cwt`) は actx の claim label が TBD のため
-//! 扱わない (draft-ietf-moq-c4m-01 §3.1.2 も JWT 形式を参照している)。
+//! draft-ietf-moq-c4m-02 §4.2 は MOQT 用の CWT 形式の DPoP proof
+//! (`dpop-proof+cwt`) を定義する。proof は COSE_Sign1 で、protected ヘッダに
+//! `alg` / `typ` / `kccs` を持ち、ペイロードの CWT Claims Set に `cti` / `iat` /
+//! `actx` / `ath` を持つ。この形式は [`CwtDpopProofCodec`] が扱う。`actx` と `ath`
+//! の claim label はドラフトで `TBD_ACTX` / `TBD_ATH` のままなので、呼び出し側が
+//! 明示する。`CwtDpopProofCodec` は proof 単独のデコードと署名検証までを提供し、
+//! CAT トークンとの束縛・scope・鮮度・replay の受理判定は行わない (旧 JWT 形式側は
+//! [`DpopProof`] の検証 API が受理判定の一部を行う)。
 
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -17,8 +24,12 @@ use nojson::{RawJson, RawJsonValue};
 
 use super::MoqtAction;
 use super::base64url;
-use super::cat::{CatClaims, Confirmation};
-use super::cose::Algorithm;
+use super::cat::{
+    CLAIM_CONFIRMATION, CLAIM_CWT_ID, CLAIM_ISSUED_AT, CONFIRMATION_COSE_KEY, CatClaims,
+    Confirmation,
+};
+use super::cbor::{self, CborError, Value};
+use super::cose::{Algorithm, CoseEncodingOptions, CoseError, CoseMessage, CoseSign1, Header};
 use super::crypto::{CoseCrypto, CoseKey, CryptoError, DigestAlgorithm, default_signing_algorithm};
 use super::jwk::{Jwk, JwkError};
 use super::jwt::{JwsCompact, JwtError};
@@ -28,8 +39,23 @@ use crate::name;
 /// DPoP proof の JWT の `typ` (draft-nandakumar-moq-generic-dpop-proof-00 §4.3.1)
 pub const DPOP_PROOF_JWT_TYPE: &str = "dpop-proof+jwt";
 
+/// CWT 形式の DPoP proof の `typ` (draft-ietf-moq-c4m-02 §4.2)
+pub const DPOP_PROOF_CWT_TYPE: &str = "dpop-proof+cwt";
+
 /// MOQT の Authorization Context の `type` (draft-nandakumar-moq-generic-dpop-proof-00 §5.1)
 pub const MOQT_AUTHORIZATION_CONTEXT_TYPE: &str = "moqt";
+
+/// CWT 形式の actx の `type` のメンバーキー (draft-ietf-moq-c4m-02 §4.2)
+const ACTX_TYPE: i64 = 0;
+
+/// CWT 形式の actx の `action` のメンバーキー (draft-ietf-moq-c4m-02 §4.2)
+const ACTX_ACTION: i64 = 1;
+
+/// CWT 形式の actx の `namespace` のメンバーキー (draft-ietf-moq-c4m-02 §4.2)
+const ACTX_NAMESPACE: i64 = 2;
+
+/// CWT 形式の actx の `track` のメンバーキー (draft-ietf-moq-c4m-02 §4.2)
+const ACTX_TRACK_NAME: i64 = 3;
 
 /// DPoP proof の JWT ヘッダ (§4.3.1)
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -695,6 +721,518 @@ impl DpopProofBuilder {
     }
 }
 
+/// CWT 形式の DPoP proof の Authorization Context (draft-ietf-moq-c4m-02 §4.2)
+///
+/// `namespace` と `track_name` は MOQT のメッセージが運ぶバイト列をそのまま保持し、
+/// シリアライズも正規化もしない。`action` は draft-ietf-moq-c4m-02 §2.1 Table 1 の
+/// 整数コードをそのまま保持するため、未知の整数も表現できる。既知のアクションへの
+/// 解決と要求されたアクションとの一致判定は、受理判定を行う利用側が行う。
+///
+/// `context_type` が "moqt" であることの検証は、発行時は [`CwtDpopProofCodec::build`]
+/// が、受信時は受理判定を行う利用側が行う。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CwtAuthorizationContext {
+    /// `type`。MOQT では "moqt"
+    pub context_type: String,
+    /// `action`。整数のアクションコード
+    pub action: i64,
+    /// `namespace`。Track Namespace のフィールド列
+    pub namespace: Option<Vec<Vec<u8>>>,
+    /// `track`。Track Name
+    pub track_name: Option<Vec<u8>>,
+    /// 解釈しなかった actx のメンバー
+    pub raw: Vec<(Value, Value)>,
+}
+
+/// CWT 形式の DPoP proof のクレーム (draft-ietf-moq-c4m-02 §4.2)
+///
+/// `cti` / `iat` / `actx` / `ath` は必須である。型付きで解釈しないクレームは
+/// [`CwtDpopProofClaims::raw`] にそのまま保持する。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CwtDpopProofClaims {
+    /// `cti` (7)。proof の一意な識別子
+    pub cti: Vec<u8>,
+    /// `iat` (6)。作成時刻 (UNIX 秒)
+    pub issued_at: i64,
+    /// `actx`。MOQT のアクション
+    pub authorization_context: CwtAuthorizationContext,
+    /// `ath`。CAT トークンの SHA-256
+    pub access_token_hash: Vec<u8>,
+    /// 解釈しなかったクレーム
+    pub raw: Vec<(Value, Value)>,
+}
+
+/// CWT 形式の DPoP proof のヘッダ
+#[derive(Debug, Clone, PartialEq)]
+pub struct CwtDpopProofHeader {
+    /// `alg`。非対称署名アルゴリズム
+    pub algorithm: Algorithm,
+    /// `typ`。"dpop-proof+cwt"
+    pub typ: String,
+    /// `kccs` の `cnf` から取り出した公開鍵
+    pub confirmation_key: CoseKey,
+}
+
+/// CWT 形式の DPoP proof
+///
+/// デコードで得られる型であり、署名の検証は
+/// [`CwtDpopProof::verify_signature`] が行う。CAT トークンとの束縛、scope、鮮度、
+/// replay の検証は行わない。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CwtDpopProof {
+    header: CwtDpopProofHeader,
+    claims: CwtDpopProofClaims,
+    signing_input: Vec<u8>,
+    signature: Vec<u8>,
+}
+
+impl CwtDpopProof {
+    /// ヘッダを返す
+    pub fn header(&self) -> &CwtDpopProofHeader {
+        &self.header
+    }
+
+    /// クレームを返す
+    pub fn claims(&self) -> &CwtDpopProofClaims {
+        &self.claims
+    }
+
+    /// 署名対象のバイト列 (RFC 9052 §4.4 の `Sig_structure`) を返す
+    pub fn signing_input(&self) -> &[u8] {
+        &self.signing_input
+    }
+
+    /// 署名を返す
+    pub fn signature(&self) -> &[u8] {
+        &self.signature
+    }
+
+    /// proof の署名を `kccs` の公開鍵で検証する
+    ///
+    /// 検証するのは proof 単独の署名だけであり、`cnf` の `ckt` / `jkt` との一致、
+    /// `ath` の照合、`iat` の鮮度、`cti` の replay 保護は行わない。
+    pub fn verify_signature<C: CoseCrypto>(&self, crypto: &C) -> Result<(), DpopError> {
+        crypto.verify(
+            self.header.algorithm,
+            &self.header.confirmation_key,
+            &self.signing_input,
+            &self.signature,
+        )?;
+        Ok(())
+    }
+}
+
+/// CWT 形式の DPoP proof のコーデック
+///
+/// draft-ietf-moq-c4m-02 §4.2 の `actx` と `ath` の claim label は `TBD_ACTX` /
+/// `TBD_ATH` のままであり、IANA の割当も未確定である。正式な label を捏造しない
+/// ため、発行・解析・検証のすべてで同じ label 設定を呼び出し側から受け取る。
+///
+/// `actx` と `ath` が同じ値、またはいずれかが CWT の登録済み claim key (1〜8) と
+/// 衝突する設定は [`CwtDpopProofCodec::new`] が拒否する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CwtDpopProofCodec {
+    actx_label: i64,
+    ath_label: i64,
+}
+
+impl CwtDpopProofCodec {
+    /// claim label を指定してコーデックを作る
+    ///
+    /// `actx_label` と `ath_label` が同じ場合、またはいずれかが CWT の登録済み claim
+    /// key (1〜8) と衝突する場合はエラーを返す。
+    pub fn new(actx_label: i64, ath_label: i64) -> Result<Self, DpopError> {
+        if actx_label == ath_label {
+            return Err(DpopError::ClaimLabelConflict);
+        }
+        if (1..=8).contains(&actx_label) {
+            return Err(DpopError::ReservedClaimLabel("actx"));
+        }
+        if (1..=8).contains(&ath_label) {
+            return Err(DpopError::ReservedClaimLabel("ath"));
+        }
+        Ok(Self {
+            actx_label,
+            ath_label,
+        })
+    }
+
+    /// `actx` の claim label を返す
+    pub fn actx_label(&self) -> i64 {
+        self.actx_label
+    }
+
+    /// `ath` の claim label を返す
+    pub fn ath_label(&self) -> i64 {
+        self.ath_label
+    }
+
+    /// CWT 形式の DPoP proof を発行する
+    ///
+    /// 保護ヘッダに `alg` / `typ` / `kccs` を置き、`kccs` の `cnf` に `key` の公開鍵
+    /// だけを入れて署名する。`key` は秘密鍵を含まなければならない
+    /// ([`CryptoError::MissingPrivateKey`] は [`DpopError::Crypto`] で返る)。
+    ///
+    /// 対称鍵 (HMAC) では発行しない ([`DpopError::UnsupportedAlgorithm`])。
+    /// `actx.type` が "moqt" でない claims も発行しない
+    /// ([`DpopError::ContextTypeMismatch`])。CWT タグ (61) は付けず、COSE_Sign1 タグ
+    /// (18) だけを付ける。
+    pub fn build<C: CoseCrypto>(
+        &self,
+        crypto: &C,
+        key: &CoseKey,
+        claims: &CwtDpopProofClaims,
+    ) -> Result<Vec<u8>, DpopError> {
+        let algorithm = default_signing_algorithm(key);
+        if algorithm.is_mac() {
+            return Err(DpopError::UnsupportedAlgorithm);
+        }
+        // actx の型は閉じた CDDL の固定値である。受理判定を行う利用側を待たず、
+        // 発行側で MOQT 以外の type の proof を作らない
+        if claims.authorization_context.context_type != MOQT_AUTHORIZATION_CONTEXT_TYPE {
+            return Err(DpopError::ContextTypeMismatch);
+        }
+        let kccs = Value::Map(vec![(
+            Value::integer(CLAIM_CONFIRMATION),
+            Value::Map(vec![(
+                Value::integer(CONFIRMATION_COSE_KEY),
+                key.to_cose_key_map()?,
+            )]),
+        )]);
+        let header = Header {
+            algorithm: Some(algorithm),
+            algorithm_identifier: Some(algorithm.identifier()),
+            typ: Some(Value::TextString(String::from(DPOP_PROOF_CWT_TYPE))),
+            kccs: Some(kccs),
+            ..Header::default()
+        };
+        let protected = cbor::encode(&header.encode()?)?;
+        let payload = cbor::encode(&self.encode_claims(claims)?)?;
+        let mut message = CoseSign1 {
+            protected,
+            unprotected: Vec::new(),
+            payload: Some(payload),
+            signature: Vec::new(),
+            cose_tagged: true,
+            cwt_tagged: false,
+        };
+        let signing_input = CoseMessage::Sign1(message.clone()).signing_input()?;
+        message.signature = crypto.sign(algorithm, key, &signing_input)?;
+        Ok(CoseMessage::Sign1(message).encode(&CoseEncodingOptions {
+            cose_tag: true,
+            cwt_tag: false,
+        })?)
+    }
+
+    /// CWT 形式の DPoP proof をデコードする
+    ///
+    /// 次の条件を満たさない proof は拒否する。
+    ///
+    /// - COSE_Sign1 であること
+    /// - protected ヘッダに `alg` (非対称) / `typ` = "dpop-proof+cwt" / `kccs` があること
+    /// - `kccs` の `cnf` に公開の COSE_Key があること
+    /// - ペイロードが `cti` / `iat` / `actx` / `ath` を持つこと
+    ///
+    /// 署名の検証も、`actx.type` / action / namespace / track と要求の整合も行わない。
+    /// これらは proof を受理するかの判定で確認する。COSE タグ 18 の付かない
+    /// COSE_Sign1 も受理する。
+    ///
+    /// `crit` に `kccs` (14) を含む protected ヘッダは、[`Header`] が label 14 を
+    /// 理解済みとして受理する。理解していない critical label は
+    /// [`CoseError::UnsupportedCriticalHeader`] で拒否する。
+    pub fn decode(&self, bytes: &[u8]) -> Result<CwtDpopProof, DpopError> {
+        let message = CoseMessage::decode(bytes)?;
+        let CoseMessage::Sign1(sign1) = &message else {
+            return Err(DpopError::NotCoseSign1);
+        };
+        let header = message.header()?;
+        let algorithm = header.algorithm.ok_or(DpopError::MissingHeader("alg"))?;
+        let typ = match &header.typ {
+            Some(Value::TextString(typ)) => typ.clone(),
+            Some(_) => return Err(DpopError::UnexpectedType("typ")),
+            None => return Err(DpopError::MissingHeader("typ")),
+        };
+        if typ != DPOP_PROOF_CWT_TYPE {
+            return Err(DpopError::InvalidType(typ));
+        }
+        let kccs = header
+            .kccs
+            .as_ref()
+            .ok_or(DpopError::MissingHeader("kccs"))?;
+        let confirmation_key = decode_kccs_confirmation_key(kccs, algorithm)?;
+        let payload = sign1
+            .payload
+            .as_deref()
+            .ok_or(DpopError::Cose(CoseError::DetachedPayloadUnsupported))?;
+        let claims = self.decode_claims(&cbor::decode(payload)?)?;
+        let signing_input = message.signing_input()?;
+        Ok(CwtDpopProof {
+            header: CwtDpopProofHeader {
+                algorithm,
+                typ,
+                confirmation_key,
+            },
+            claims,
+            signing_input,
+            signature: sign1.signature.clone(),
+        })
+    }
+
+    /// クレームを CBOR のマップへエンコードする
+    ///
+    /// `raw` に必須クレームの label を置いた場合は [`DpopError::DuplicateClaim`] を
+    /// 返す。`raw` 同士の重複ラベルは、CBOR へのエンコード時に
+    /// [`CborError::DuplicateMapKey`] として拒否される。
+    pub fn encode_claims(&self, claims: &CwtDpopProofClaims) -> Result<Value, DpopError> {
+        let mut entries = vec![
+            (
+                Value::integer(CLAIM_ISSUED_AT),
+                Value::integer(claims.issued_at),
+            ),
+            (
+                Value::integer(CLAIM_CWT_ID),
+                Value::ByteString(claims.cti.clone()),
+            ),
+            (
+                Value::integer(self.actx_label),
+                encode_cwt_authorization_context(&claims.authorization_context),
+            ),
+            (
+                Value::integer(self.ath_label),
+                Value::ByteString(claims.access_token_hash.clone()),
+            ),
+        ];
+        for (key, _) in &claims.authorization_context.raw {
+            if let Some(label) = key.as_int()
+                && (ACTX_TYPE..=ACTX_TRACK_NAME).contains(&label)
+            {
+                return Err(DpopError::DuplicateClaim(label));
+            }
+        }
+        for (key, value) in &claims.raw {
+            // RFC 8392 §3: Claim Key は整数またはテキスト文字列である
+            if key.as_int().is_none() && !matches!(key, Value::TextString(_)) {
+                return Err(DpopError::UnexpectedType("claim key"));
+            }
+            if let Some(label) = key.as_int()
+                && (label == CLAIM_ISSUED_AT
+                    || label == CLAIM_CWT_ID
+                    || label == self.actx_label
+                    || label == self.ath_label)
+            {
+                return Err(DpopError::DuplicateClaim(label));
+            }
+            entries.push((key.clone(), value.clone()));
+        }
+        Ok(Value::Map(entries))
+    }
+
+    /// CBOR のマップからクレームをデコードする
+    ///
+    /// `cti` / `iat` / `actx` / `ath` を必須とし、型違反と重複を拒否する。これら
+    /// 以外のクレームは値の型を問わず `raw` に保持する (RFC 8392 §3)。
+    /// 必須クレームの代替にはしない。整数でもテキストでもない claim key は
+    /// [`DpopError::UnexpectedType`] で拒否する。
+    pub fn decode_claims(&self, value: &Value) -> Result<CwtDpopProofClaims, DpopError> {
+        let entries = value.as_map().ok_or(DpopError::UnexpectedType("claims"))?;
+        // claim key の重複は、決定論的な CBOR 表現に直してソートしてから隣接比較する。
+        // wire 入力は `decode` が先に CBOR デコーダで重複を拒否するため、ここは公開 API に
+        // `Value` を直接渡された場合の防御である。
+        let mut encoded_keys = Vec::new();
+        for (key, _) in entries {
+            encoded_keys.push(cbor::encode(key)?);
+        }
+        let mut sorted_keys = encoded_keys.clone();
+        sorted_keys.sort();
+        for pair in sorted_keys.windows(2) {
+            if pair[0] != pair[1] {
+                continue;
+            }
+            let key = cbor::decode(&pair[0])?;
+            return Err(match key {
+                Value::TextString(name) => DpopError::DuplicateMember(name),
+                key => match key.as_int() {
+                    Some(label) => DpopError::DuplicateClaim(label),
+                    None => DpopError::UnexpectedType("claim key"),
+                },
+            });
+        }
+        let mut cti = None;
+        let mut issued_at = None;
+        let mut authorization_context = None;
+        let mut access_token_hash = None;
+        let mut raw = Vec::new();
+        for (key, entry) in entries {
+            let Some(label) = key.as_int() else {
+                if let Value::TextString(_) = key {
+                    raw.push((key.clone(), entry.clone()));
+                    continue;
+                }
+                return Err(DpopError::UnexpectedType("claim key"));
+            };
+            match label {
+                CLAIM_CWT_ID => {
+                    cti = Some(
+                        entry
+                            .as_bytes()
+                            .ok_or(DpopError::UnexpectedType("cti"))?
+                            .to_vec(),
+                    );
+                }
+                CLAIM_ISSUED_AT => {
+                    issued_at = Some(entry.as_int().ok_or(DpopError::UnexpectedType("iat"))?);
+                }
+                label if label == self.actx_label => {
+                    authorization_context = Some(decode_cwt_authorization_context(entry)?);
+                }
+                label if label == self.ath_label => {
+                    access_token_hash = Some(
+                        entry
+                            .as_bytes()
+                            .ok_or(DpopError::UnexpectedType("ath"))?
+                            .to_vec(),
+                    );
+                }
+                _ => raw.push((key.clone(), entry.clone())),
+            }
+        }
+        Ok(CwtDpopProofClaims {
+            cti: cti.ok_or(DpopError::MissingClaim("cti"))?,
+            issued_at: issued_at.ok_or(DpopError::MissingClaim("iat"))?,
+            authorization_context: authorization_context.ok_or(DpopError::MissingClaim("actx"))?,
+            access_token_hash: access_token_hash.ok_or(DpopError::MissingClaim("ath"))?,
+            raw,
+        })
+    }
+}
+
+/// CWT 形式の actx をデコードする
+///
+/// `type` と `action` を必須とし、`namespace` と `track` を任意とする。解釈しない
+/// メンバーは raw に保持する。
+fn decode_cwt_authorization_context(value: &Value) -> Result<CwtAuthorizationContext, DpopError> {
+    let entries = value.as_map().ok_or(DpopError::UnexpectedType("actx"))?;
+    let mut context_type = None;
+    let mut action = None;
+    let mut namespace = None;
+    let mut track_name = None;
+    let mut raw = Vec::new();
+    // actx の整数ラベルは数が少ないが、手組みの map でも二次関数的にならないよう
+    // ソートして隣接比較する
+    let mut labels: Vec<i64> = entries.iter().filter_map(|(key, _)| key.as_int()).collect();
+    labels.sort();
+    if let Some(pair) = labels.windows(2).find(|pair| pair[0] == pair[1]) {
+        return Err(DpopError::DuplicateClaim(pair[0]));
+    }
+    for (key, entry) in entries {
+        let Some(label) = key.as_int() else {
+            raw.push((key.clone(), entry.clone()));
+            continue;
+        };
+        match label {
+            ACTX_TYPE => {
+                context_type = Some(String::from(
+                    entry
+                        .as_text()
+                        .ok_or(DpopError::UnexpectedType("actx.type"))?,
+                ));
+            }
+            ACTX_ACTION => {
+                action = Some(
+                    entry
+                        .as_int()
+                        .ok_or(DpopError::UnexpectedType("actx.action"))?,
+                );
+            }
+            ACTX_NAMESPACE => {
+                let fields = entry
+                    .as_array()
+                    .ok_or(DpopError::UnexpectedType("actx.namespace"))?;
+                let mut values = Vec::new();
+                for field in fields {
+                    values.push(
+                        field
+                            .as_bytes()
+                            .ok_or(DpopError::UnexpectedType("actx.namespace"))?
+                            .to_vec(),
+                    );
+                }
+                namespace = Some(values);
+            }
+            ACTX_TRACK_NAME => {
+                track_name = Some(
+                    entry
+                        .as_bytes()
+                        .ok_or(DpopError::UnexpectedType("actx.track"))?
+                        .to_vec(),
+                );
+            }
+            _ => raw.push((key.clone(), entry.clone())),
+        }
+    }
+    Ok(CwtAuthorizationContext {
+        context_type: context_type.ok_or(DpopError::MissingClaim("actx.type"))?,
+        action: action.ok_or(DpopError::MissingClaim("actx.action"))?,
+        namespace,
+        track_name,
+        raw,
+    })
+}
+
+/// CWT 形式の actx をエンコードする
+fn encode_cwt_authorization_context(context: &CwtAuthorizationContext) -> Value {
+    let mut entries = vec![
+        (
+            Value::integer(ACTX_TYPE),
+            Value::TextString(context.context_type.clone()),
+        ),
+        (Value::integer(ACTX_ACTION), Value::integer(context.action)),
+    ];
+    if let Some(namespace) = &context.namespace {
+        entries.push((
+            Value::integer(ACTX_NAMESPACE),
+            Value::Array(
+                namespace
+                    .iter()
+                    .map(|field| Value::ByteString(field.clone()))
+                    .collect(),
+            ),
+        ));
+    }
+    if let Some(track_name) = &context.track_name {
+        entries.push((
+            Value::integer(ACTX_TRACK_NAME),
+            Value::ByteString(track_name.clone()),
+        ));
+    }
+    entries.extend(context.raw.iter().cloned());
+    Value::Map(entries)
+}
+
+/// `kccs` の `cnf` から確認用の公開鍵を取り出す
+///
+/// `kccs` は CWT Claims Set であるため、`cnf` 以外のクレームは無視する。`cnf` の
+/// 中で `COSE_Key` (1) 以外の confirmation method も、RFC 8747 §3.1 の「理解しない
+/// confirmation method は無視する」に従って無視する。
+fn decode_kccs_confirmation_key(
+    kccs: &Value,
+    expected_algorithm: Algorithm,
+) -> Result<CoseKey, DpopError> {
+    let entries = kccs.as_map().ok_or(DpopError::UnexpectedType("kccs"))?;
+    let cnf = entries
+        .iter()
+        .find(|(key, _)| key.as_int() == Some(CLAIM_CONFIRMATION))
+        .map(|(_, value)| value)
+        .ok_or(DpopError::MissingKccsConfirmation)?;
+    let cnf_entries = cnf.as_map().ok_or(DpopError::UnexpectedType("cnf"))?;
+    let key = cnf_entries
+        .iter()
+        .find(|(key, _)| key.as_int() == Some(CONFIRMATION_COSE_KEY))
+        .map(|(_, value)| value)
+        .ok_or(DpopError::MissingConfirmationKey)?;
+    Ok(CoseKey::from_cose_key_map(key, Some(expected_algorithm))?)
+}
+
 /// DPoP proof のエラー
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DpopError {
@@ -704,22 +1242,34 @@ pub enum DpopError {
     Jwk(JwkError),
     /// 署名 / 検証のエラー
     Crypto(CryptoError),
+    /// COSE の構造のエラー
+    Cose(CoseError),
     /// JSON のパースに失敗した
     Json(String),
     /// ヘッダに必須のメンバーが無い
     MissingHeader(&'static str),
+    /// CWT 形式の proof に必須のクレームが無い
+    MissingClaim(&'static str),
     /// メンバーの型が期待と異なる
     UnexpectedType(&'static str),
     /// メンバー名が重複している
     DuplicateMember(String),
+    /// CWT 形式の proof のクレームラベルが重複している
+    DuplicateClaim(i64),
     /// 数値が有限でない (NaN / 無限大)
     NonFiniteNumber(&'static str),
-    /// `typ` が "dpop-proof+jwt" ではない
+    /// `typ` が "dpop-proof+jwt" / "dpop-proof+cwt" ではない
     InvalidType(String),
     /// 対称鍵アルゴリズムは使えない
     UnsupportedAlgorithm,
+    /// CWT 形式の proof が COSE_Sign1 ではない
+    NotCoseSign1,
     /// トークンに `cnf` が無い
     MissingConfirmation,
+    /// `kccs` に `cnf` が無い
+    MissingKccsConfirmation,
+    /// `kccs` の `cnf` に確認用の COSE_Key が無い
+    MissingConfirmationKey,
     /// `cnf` に JWK サムプリントが無い
     MissingThumbprint,
     /// JWK サムプリントが一致しない
@@ -750,6 +1300,10 @@ pub enum DpopError {
     Replayed,
     /// jti の検証が必要だがリプレイキャッシュが渡されていない
     ReplayCacheRequired,
+    /// `actx` と `ath` の claim label が同じ
+    ClaimLabelConflict,
+    /// `actx` / `ath` に登録済みの CWT claim key (1〜8) を指定した
+    ReservedClaimLabel(&'static str),
 }
 
 impl fmt::Display for DpopError {
@@ -758,16 +1312,22 @@ impl fmt::Display for DpopError {
             Self::Jwt(error) => write!(f, "JWT error: {error}"),
             Self::Jwk(error) => write!(f, "JWK error: {error}"),
             Self::Crypto(error) => write!(f, "crypto error: {error}"),
+            Self::Cose(error) => write!(f, "COSE error: {error}"),
             Self::Json(message) => write!(f, "invalid DPoP JSON: {message}"),
             Self::MissingHeader(name) => write!(f, "DPoP header member is missing: {name}"),
+            Self::MissingClaim(name) => write!(f, "DPoP proof claim is missing: {name}"),
             Self::UnexpectedType(name) => write!(f, "unexpected DPoP member type: {name}"),
             Self::DuplicateMember(name) => write!(f, "duplicate DPoP member: {name}"),
+            Self::DuplicateClaim(label) => write!(f, "duplicate DPoP claim label: {label}"),
             Self::NonFiniteNumber(name) => write!(f, "{name} must be finite"),
             Self::InvalidType(typ) => write!(f, "invalid DPoP typ: {typ}"),
             Self::UnsupportedAlgorithm => {
                 write!(f, "DPoP proof must use an asymmetric algorithm")
             }
+            Self::NotCoseSign1 => write!(f, "DPoP proof must be a COSE_Sign1"),
             Self::MissingConfirmation => write!(f, "token has no cnf claim"),
+            Self::MissingKccsConfirmation => write!(f, "kccs has no cnf claim"),
+            Self::MissingConfirmationKey => write!(f, "kccs cnf has no COSE_Key"),
             Self::MissingThumbprint => write!(f, "cnf has no JWK thumbprint"),
             Self::KeyBindingMismatch => write!(f, "JWK thumbprint does not match cnf"),
             Self::KeyMismatch => write!(f, "signing key does not match the embedded JWK"),
@@ -794,6 +1354,15 @@ impl fmt::Display for DpopError {
             Self::ReplayCacheRequired => {
                 write!(f, "catdpop requires jti replay protection")
             }
+            Self::ClaimLabelConflict => {
+                write!(f, "actx and ath claim labels must differ")
+            }
+            Self::ReservedClaimLabel(name) => {
+                write!(
+                    f,
+                    "{name} claim label must not be a registered CWT claim key"
+                )
+            }
         }
     }
 }
@@ -815,6 +1384,18 @@ impl From<JwkError> for DpopError {
 impl From<CryptoError> for DpopError {
     fn from(error: CryptoError) -> Self {
         Self::Crypto(error)
+    }
+}
+
+impl From<CoseError> for DpopError {
+    fn from(error: CoseError) -> Self {
+        Self::Cose(error)
+    }
+}
+
+impl From<CborError> for DpopError {
+    fn from(error: CborError) -> Self {
+        Self::Cose(CoseError::Cbor(error))
     }
 }
 

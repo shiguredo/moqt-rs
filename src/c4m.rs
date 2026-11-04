@@ -11,7 +11,8 @@
 //! - [`cat`](crate::c4m::cat): CAT のクレームとトークンの発行 / 検証
 //! - [`jwk`](crate::c4m::jwk): JWK (RFC 7517) と JWK サムプリント (RFC 7638)
 //! - [`jwt`](crate::c4m::jwt): JWS compact (RFC 7515) の JWT
-//! - [`dpop`](crate::c4m::dpop): DPoP proof の検証と発行 (draft-nandakumar-moq-generic-dpop-proof)
+//! - [`dpop`](crate::c4m::dpop): DPoP proof の検証と発行。旧 JWT 形式と、draft-02 §4.2 の
+//!   CWT 形式 (`dpop-proof+cwt`) の codec
 //!
 //! 本モジュールは draft-ietf-moq-c4m-02 へ段階的に追随している。draft は将来改訂
 //! される可能性がある。

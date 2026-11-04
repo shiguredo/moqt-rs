@@ -9,10 +9,13 @@
 
 use pbt::common::{sample_bytes, sample_nonempty_bytes, test_runner};
 use shiguredo_moqt::c4m::MoqtAction;
+use shiguredo_moqt::c4m::cbor;
+use shiguredo_moqt::c4m::cbor::Value;
 use shiguredo_moqt::c4m::cose::Algorithm;
 use shiguredo_moqt::c4m::dpop::{
-    AuthorizationContext, DPOP_PROOF_JWT_TYPE, DpopError, DpopProof, DpopProofClaims,
-    DpopReplayCache, MOQT_AUTHORIZATION_CONTEXT_TYPE,
+    AuthorizationContext, CwtAuthorizationContext, CwtDpopProofClaims, CwtDpopProofCodec,
+    DPOP_PROOF_JWT_TYPE, DpopError, DpopProof, DpopProofClaims, DpopReplayCache,
+    MOQT_AUTHORIZATION_CONTEXT_TYPE,
 };
 use shiguredo_moqt::c4m::jwt::JwtError;
 use shiguredo_moqt::message::common::TrackNamespace;
@@ -1022,6 +1025,162 @@ fn replay_cache_matches_model() -> noprop::TestResult {
     assert!(
         pruned_seen.get() > 0,
         "ウィンドウ外の記録が破棄されるケースが生成されなかった\n{runner}"
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// CWT 形式の DPoP proof (draft-ietf-moq-c4m-02 §4.2)
+// ---------------------------------------------------------------------------
+
+/// CWT 形式の proof の actx を生成する
+///
+/// 名前空間とトラック名には任意のバイト列 (UTF-8 でない値を含む) を生成する。
+fn sample_cwt_actx(ctx: &mut noprop::TestCaseContext) -> CwtAuthorizationContext {
+    let context_type = if noprop::sample_ratio(ctx, noprop::Ratio::new(3, 4)) {
+        String::from(MOQT_AUTHORIZATION_CONTEXT_TYPE)
+    } else {
+        sample_safe_text(ctx, 6)
+    };
+    let action = noprop::sample_with_boundaries(
+        ctx,
+        &[0, 1, 4, 9, i64::MAX, i64::MIN],
+        noprop::Ratio::one_nth(4),
+        |ctx| noprop::sample_u64(ctx) as i64,
+    );
+    let namespace = noprop::sample_bool(ctx).then(|| {
+        (0..noprop::sample_usize_in(ctx, 0..=4))
+            .map(|_| sample_bytes(ctx, 4))
+            .collect::<Vec<Vec<u8>>>()
+    });
+    let track_name = noprop::sample_bool(ctx).then(|| sample_bytes(ctx, 8));
+    // 未知のメンバーはキーの昇順に生成する (エンコード後の順序と一致させるため)
+    let raw = (0..noprop::sample_usize_in(ctx, 0..=2))
+        .map(|index| {
+            (
+                Value::integer(9 + index as i64),
+                Value::ByteString(sample_bytes(ctx, 4)),
+            )
+        })
+        .collect();
+    CwtAuthorizationContext {
+        context_type,
+        action,
+        namespace,
+        track_name,
+        raw,
+    }
+}
+
+/// CWT 形式の proof のクレームを生成する
+fn sample_cwt_claims(ctx: &mut noprop::TestCaseContext) -> CwtDpopProofClaims {
+    let issued_at = noprop::sample_with_boundaries(
+        ctx,
+        &[0, 1, -1, 1_700_000_000, i64::MAX, i64::MIN],
+        noprop::Ratio::one_nth(4),
+        |ctx| noprop::sample_u64(ctx) as i64,
+    );
+    // 未知のクレームはキーの昇順に生成する (エンコード後の順序と一致させるため)
+    let raw = (0..noprop::sample_usize_in(ctx, 0..=2))
+        .map(|index| {
+            (
+                Value::integer(200 + index as i64),
+                match noprop::sample_usize_in(ctx, 0..3) {
+                    0 => Value::Unsigned(noprop::sample_u64(ctx)),
+                    1 => Value::ByteString(sample_bytes(ctx, 6)),
+                    _ => Value::TextString(sample_safe_text(ctx, 6)),
+                },
+            )
+        })
+        .collect();
+    CwtDpopProofClaims {
+        cti: sample_bytes(ctx, 8),
+        issued_at,
+        authorization_context: sample_cwt_actx(ctx),
+        access_token_hash: sample_bytes(ctx, 32),
+        raw,
+    }
+}
+
+/// CWT 形式の proof のクレームが CBOR を経由してラウンドトリップする
+#[test]
+fn cwt_claims_roundtrip() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let codec = CwtDpopProofCodec::new(-65539, -65540).expect("label 設定を作れる");
+        let claims = sample_cwt_claims(ctx);
+        let value = codec
+            .encode_claims(&claims)
+            .expect("クレームをエンコードできる");
+        let bytes = cbor::encode(&value).expect("CBOR にエンコードできる");
+        let value = cbor::decode(&bytes).expect("CBOR にデコードできる");
+        let decoded = codec
+            .decode_claims(&value)
+            .expect("クレームをデコードできる");
+        assert_eq!(decoded, claims, "クレームのラウンドトリップで値が変わる");
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// claim label の設定の受理 / 拒否が仕様のモデルと一致する
+#[test]
+fn cwt_codec_label_validation_matches_model() -> noprop::TestResult {
+    const LABELS: &[i64] = &[6, 7, 100, 101, -65539];
+    let ok_seen = std::cell::Cell::new(0usize);
+    let conflict_seen = std::cell::Cell::new(0usize);
+    let reserved_seen = std::cell::Cell::new(0usize);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let actx_label = noprop::sample_choice(ctx, LABELS);
+        let ath_label = noprop::sample_choice(ctx, LABELS);
+        // 同じ label の衝突を先に判定し、次に iat (6) / cti (7) との衝突を判定する
+        let expected = if actx_label == ath_label {
+            Some(DpopError::ClaimLabelConflict)
+        } else if actx_label == 6 || actx_label == 7 {
+            Some(DpopError::ReservedClaimLabel("actx"))
+        } else if ath_label == 6 || ath_label == 7 {
+            Some(DpopError::ReservedClaimLabel("ath"))
+        } else {
+            None
+        };
+        match CwtDpopProofCodec::new(actx_label, ath_label) {
+            Ok(codec) => {
+                assert_eq!(expected, None, "衝突する label 設定が受理された");
+                assert_eq!(codec.actx_label(), actx_label);
+                assert_eq!(codec.ath_label(), ath_label);
+                ok_seen.set(ok_seen.get() + 1);
+            }
+            Err(error) => {
+                assert_eq!(
+                    Some(error.clone()),
+                    expected,
+                    "label 設定のエラーがモデルと一致しない: actx={actx_label} ath={ath_label}"
+                );
+                match error {
+                    DpopError::ClaimLabelConflict => {
+                        conflict_seen.set(conflict_seen.get() + 1);
+                    }
+                    DpopError::ReservedClaimLabel(_) => {
+                        reserved_seen.set(reserved_seen.get() + 1);
+                    }
+                    other => panic!("想定していないエラー: {other}"),
+                }
+            }
+        }
+        Ok(())
+    })?;
+    assert!(
+        ok_seen.get() > 0,
+        "受理される label 設定が生成されなかった\n{runner}"
+    );
+    assert!(
+        conflict_seen.get() > 0,
+        "actx と ath が同じ label のケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        reserved_seen.get() > 0,
+        "iat / cti と衝突する label のケースが生成されなかった\n{runner}"
     );
     Ok(())
 }
