@@ -4,10 +4,11 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-subscription-cancel-late-response
 - Polished: 2026-10-19
+- Refreshed: 2026-11-04
 
 ## 目的
 
-draft-ietf-moq-transport-22 §3.1 (Subscriptions) は "The subscriber terminates a subscription in the Pending (Subscriber) or Established states by sending STOP_SENDING." と定める。
+draft-ietf-moq-transport-23 §3.1 (Subscriptions) は "The subscriber terminates a subscription in the Pending (Subscriber) or Established states by sending STOP_SENDING." と定める。
 購読者が Pending(Subscriber) で cancel した直後に、peer が STOP_SENDING を観測する前に送った SUBSCRIBE_OK / REQUEST_ERROR が届くのは正当な競合である。現状はこれを不正状態として `PROTOCOL_VIOLATION` でセッション全体を閉じる誤動作になっている。
 
 本 issue は `stop_sending` と `supersede_pending_subscriber` による cancel を主対象とする。
@@ -32,7 +33,7 @@ draft-ietf-moq-transport-22 §3.1 (Subscriptions) は "The subscriber terminates
 - `handle_err_for_subscription` は `is_locally_terminated_request` に加えて `is_cancelled_terminated_subscription` を早期 return の条件にする。`handle_peer_request_error` の Redirect 検証は `handle_err_for_subscription` より前にあるため残る。
 - `handle_peer_request_error` は `handle_err_for_subscription` が `Ok` を返した場合に `RequestErrorReceived` を発行する既存契約を維持する。遅延 REQUEST_ERROR は状態遷移と `RequestTerminated` を発行しないが、`RequestErrorReceived` は通知する。遅延 SUBSCRIBE_OK の吸収はイベントを発行しない。
 - `stop_sending` で `Session::clear_control_message_deadline` を呼び、応答待ち deadline を解除する (`supersede_pending_subscriber` は既に解除している)。解除しないと、遅延応答を吸収しても `Session::tick` の `CONTROL_MESSAGE_TIMEOUT` でセッションが閉じる。
-- `is_cancelled_terminated` は、REQUEST_ERROR 受信・peer FIN・GOAWAY timeout などの経路で `Terminated` かつ `publish_done` 未設定になった場合にも true になる。いずれも以後の応答を待たない状態であり、遅延応答を吸収する対象として扱う。二重応答の検出は draft §3.1 の SHOULD close であり、終端済みの購読を優先して受理する。
+- `is_cancelled_terminated` は、REQUEST_ERROR 受信・peer FIN・GOAWAY timeout などの経路で `Terminated` かつ `publish_done` 未設定になった場合にも true になる。いずれも以後の応答を待たない状態であり、遅延応答を吸収する対象として扱う。二重応答の検出は draft-ietf-moq-transport-23 §3.1 の SHOULD close (UNEXPECTED_MESSAGE) であり、終端済みの購読を優先して受理する。
 - cancel と応答の到着順を入れ替えたテストを追加する。遅延応答は `forget_subscription` の前、subscription が `Terminated` で残っている間に注入する。
 
 ## 完了条件
@@ -43,5 +44,5 @@ draft-ietf-moq-transport-22 §3.1 (Subscriptions) は "The subscriber terminates
 - `send_subscribe` の前に `tick(0)` と control message timeout を設定し、`stop_sending` した後に `tick` しても、deadline が解除されて `CONTROL_MESSAGE_TIMEOUT` で閉じないこと。
 - 遅延 REQUEST_ERROR では `RequestErrorReceived` が 1 回発行され、`RequestTerminated` は追加発行されないこと。
 - 遅延 SUBSCRIBE_OK で Track Alias が異なる Track の Established subscription と衝突する場合は、従来どおり `DUPLICATE_TRACK_ALIAS` で閉じること。
-- 遅延 REQUEST_ERROR が非ゼロ Connect URI の Redirect を伴う場合は、server 側で従来どおり `PROTOCOL_VIOLATION` により閉じること。
+- 遅延 REQUEST_ERROR が非ゼロ Connect URI の Redirect を伴う場合は、server 側で draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT) の `ROLE_VIOLATION` により閉じること。
 - 上記を `tests/test_session` で固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
