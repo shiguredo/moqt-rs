@@ -37,14 +37,27 @@ use cbor::{CborError, Value};
 
 /// `moqt` クレームの claim key
 ///
-/// draft-ietf-moq-c4m-01 付録 A.5 のテストベクタが使う値 (327) を採用する。本文の
-/// IANA Considerations は TBD_MOQT のままであり、確定したら追従する。
-pub const CLAIM_MOQT: i64 = 327;
+/// draft-ietf-moq-c4m-02 §8 Table 2 は Key を `TBD_MOQT (1+2)` とし、IANA の割当は
+/// 未確定である。そのため付録 A 冒頭のとおり §A.5 のベクタは Private Use の範囲
+/// (RFC 8392 §9.1.1) の -65537 をプレースホルダとして使う。本ライブラリもこの
+/// 暫定値を使う。
+///
+/// 旧 draft-01 のベクタが使う 327 は、この label の alias として解釈しない。327 を
+/// キーに持つ claim は未知の claim として [`cat::CatClaims::raw`] に保持し、型付き
+/// フィールドへは写さない。この暫定値は IANA の割当が確定した時点で置き換える。
+pub const CLAIM_MOQT: i64 = -65537;
 
 /// `moqt-reval` クレームの claim key
 ///
-/// draft-ietf-moq-c4m-01 付録 A.5 のテストベクタが使う値 (328) を採用する。
-pub const CLAIM_MOQT_REVAL: i64 = 328;
+/// draft-ietf-moq-c4m-02 §8 Table 2 は Key を `TBD_MOQT (1+2)` とし、§2.2 は
+/// `TBD_MOQT_REVAL` とする。いずれにせよ IANA の割当は未確定である。そのため
+/// 付録 A 冒頭のとおり §A.5 のベクタは Private Use の範囲 (RFC 8392 §9.1.1) の
+/// -65538 をプレースホルダとして使い、本ライブラリもこの暫定値を使う。
+///
+/// 旧 draft-01 のベクタが使う 328 は、この label の alias として解釈しない。328 を
+/// キーに持つ claim は未知の claim として [`cat::CatClaims::raw`] に保持し、型付き
+/// フィールドへは写さない。この暫定値は IANA の割当が確定した時点で置き換える。
+pub const CLAIM_MOQT_REVAL: i64 = -65538;
 
 /// `bin-match` の prefix マッチを表す match-type (draft-ietf-moq-c4m-01 §2.1)
 pub const MATCH_TYPE_PREFIX: i64 = 1;

@@ -6,12 +6,12 @@ use shiguredo_moqt::c4m::cat::{
     TokenFormat,
 };
 use shiguredo_moqt::c4m::cbor::Value;
-use shiguredo_moqt::c4m::{CatDpop, MoqtAction};
+use shiguredo_moqt::c4m::{
+    CLAIM_MOQT, CLAIM_MOQT_REVAL, CatDpop, MoqtAction, MoqtClaim, MoqtScope,
+};
 
 #[cfg(feature = "aws-lc-rs")]
 use shiguredo_moqt::c4m::crypto::{CoseKey, EcCurve};
-#[cfg(feature = "aws-lc-rs")]
-use shiguredo_moqt::c4m::{MoqtClaim, MoqtScope};
 
 use super::helpers::{decode_hex, encode_hex};
 use super::vectors::*;
@@ -738,8 +738,10 @@ fn round_trip_for_all_algorithms() {
 ///
 /// A.3 以外 (A.4 / A.5 / A.6) のトークンの署名も固定し、ベクタのドリフトを検出する。
 /// このテストは署名とデコード可否だけを検証し、claims の内容を draft-02 の公式値と
-/// 比較しない。そのため、HMAC ベクタの alg=-4、claim label=327、`moqt-reval` の
-/// draft-01 表現などのドリフトは検出しない。
+/// 比較しない。そのため compact の protected header の alg が -4 のままであることなどの
+/// ドリフトはこのテストでは検出しない。claims の内容は
+/// `tests/test_c4m/moqt.rs` の `token_with_provisional_claim_labels_has_typed_claims` と
+/// `scope_vectors_authorize_from_tokens` が検証する。
 #[cfg(feature = "aws-lc-rs")]
 #[test]
 fn all_vector_tokens_verify_signatures() {
@@ -867,6 +869,158 @@ fn typed_claim_keys_are_rejected_in_raw_even_when_unset() {
             shiguredo_moqt::c4m::cat::CLAIM_EXPIRATION
         ))
     );
+}
+
+#[test]
+fn provisional_moqt_claim_labels_are_rejected_in_raw() {
+    // 暫定 label の moqt を型付きフィールドと raw の両方に置くと、デコード時の解釈が
+    // 曖昧になるためエンコードを拒否する
+    let claims = CatClaims {
+        moqt: Some(MoqtClaim::new().scope(MoqtScope::new([MoqtAction::Publish]))),
+        raw: vec![(Value::integer(CLAIM_MOQT), Value::Null)],
+        ..CatClaims::default()
+    };
+    assert_eq!(claims.encode(), Err(CatError::DuplicateClaim(CLAIM_MOQT)));
+
+    // moqt-reval も同じく重複を拒否する
+    let claims = CatClaims {
+        moqt_reval: Some(300.0),
+        raw: vec![(Value::integer(CLAIM_MOQT_REVAL), Value::Null)],
+        ..CatClaims::default()
+    };
+    assert_eq!(
+        claims.encode(),
+        Err(CatError::DuplicateClaim(CLAIM_MOQT_REVAL))
+    );
+
+    // 型付きフィールドが未設定でも raw に置けば拒否する
+    let claims = CatClaims {
+        raw: vec![(Value::integer(CLAIM_MOQT), Value::Null)],
+        ..CatClaims::default()
+    };
+    assert_eq!(claims.encode(), Err(CatError::DuplicateClaim(CLAIM_MOQT)));
+
+    let claims = CatClaims {
+        raw: vec![(Value::integer(CLAIM_MOQT_REVAL), Value::Float(300.0))],
+        ..CatClaims::default()
+    };
+    assert_eq!(
+        claims.encode(),
+        Err(CatError::DuplicateClaim(CLAIM_MOQT_REVAL))
+    );
+}
+
+#[test]
+fn legacy_moqt_claim_labels_are_kept_in_raw() {
+    // draft-01 のベクタが使っていた 327 / 328 を、暫定 label の alias にしないことを
+    // 固定する。327 の値は draft-02 §2.1 の map 形式、328 の値は数値である
+    let moqt_value = MoqtClaim::new()
+        .scope(MoqtScope::new([MoqtAction::Publish]))
+        .encode()
+        .expect("moqt クレームをエンコードできる");
+    let value = Value::Map(vec![
+        (Value::integer(327), moqt_value.clone()),
+        (Value::integer(328), Value::Float(300.0)),
+    ]);
+    let claims = CatClaims::decode(&value).expect("claims をデコードできる");
+
+    // 旧 label は型付きフィールドへ写さない
+    assert!(claims.moqt.is_none());
+    assert!(claims.moqt_reval.is_none());
+
+    // 未知のクレームとして raw に保持し、get で取り出せる
+    assert_eq!(claims.get(327), Some(&moqt_value));
+    assert_eq!(claims.get(328), Some(&Value::Float(300.0)));
+    assert_eq!(claims.raw.len(), 2);
+    assert!(
+        claims
+            .raw
+            .iter()
+            .all(|(key, _)| { matches!(key.as_int(), Some(327) | Some(328)) })
+    );
+
+    // 再エンコードしても旧 label のまま保持される
+    assert_eq!(claims.encode().expect("エンコードできる"), value);
+}
+
+/// 旧 draft-01 の claim label を持つ token を発行すると、decode 後も raw に保持され
+/// 型付きフィールドへ写らないこと
+///
+/// builder は claim key をそのまま扱うため旧 label を明示的に発行できる。decode 自体は
+/// 成功するが `moqt` は None のままであり、認可には使えない (fail-closed)。
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn legacy_moqt_claim_labels_survive_token_round_trip_as_raw() {
+    let crypto = AwsLcRsCrypto::new();
+    let token_bytes = CatTokenBuilder::new()
+        .issuer("https://auth.example.com")
+        .expiration(1700086400.0)
+        .claim(
+            327,
+            MoqtClaim::new()
+                .scope(MoqtScope::new([MoqtAction::Publish]))
+                .encode()
+                .expect("moqt クレームをエンコードできる"),
+        )
+        .claim(328, Value::Float(300.0))
+        .build_cose(&crypto, &hmac_key())
+        .expect("旧 label を持つ token を発行できる");
+    let token = CatToken::decode(&token_bytes).expect("旧 label を持つ token をデコードできる");
+    assert!(token.claims().moqt.is_none(), "旧 label は alias にしない");
+    assert!(
+        token.claims().moqt_reval.is_none(),
+        "旧 label は alias にしない"
+    );
+    assert!(
+        token.claims().get(327).is_some(),
+        "旧 label は raw に保持する"
+    );
+    assert!(
+        token.claims().get(328).is_some(),
+        "旧 label は raw に保持する"
+    );
+}
+
+#[test]
+fn provisional_moqt_claims_round_trip() {
+    // 暫定 label の moqt / moqt-reval が encode → decode で型付きのまま保持されること
+    let claims = CatClaims {
+        issuer: Some(String::from("https://auth.example.com")),
+        moqt: Some(MoqtClaim::new().scope(MoqtScope::new([MoqtAction::Publish]))),
+        moqt_reval: Some(300.0),
+        ..CatClaims::default()
+    };
+    let encoded = claims.encode().expect("エンコードできる");
+
+    // draft-02 §A.5 の Private Use の暫定 label でエンコードされること
+    let entries = encoded.as_map().expect("claims は map である");
+    assert!(
+        entries
+            .iter()
+            .any(|(key, _)| key.as_int() == Some(CLAIM_MOQT))
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|(key, _)| key.as_int() == Some(CLAIM_MOQT_REVAL))
+    );
+    // moqt-reval は数値型として正規化され、300.0 は整数 300 として書き出される
+    // (draft-02 §A.5 のベクタも整数 300 を使う)
+    assert_eq!(
+        entries
+            .iter()
+            .find(|(key, _)| key.as_int() == Some(CLAIM_MOQT_REVAL))
+            .map(|(_, value)| value),
+        Some(&Value::Unsigned(300))
+    );
+
+    // decode で型付きフィールドへ戻り、認可に使えること
+    let decoded = CatClaims::decode(&encoded).expect("claims をデコードできる");
+    assert_eq!(decoded, claims);
+    assert_eq!(decoded.moqt_reval, Some(300.0));
+    assert!(decoded.authorize(MoqtAction::Publish, &[&b"example"[..]], b"video"));
+    assert!(!decoded.authorize(MoqtAction::Subscribe, &[&b"example"[..]], b"video"));
+    assert!(decoded.raw.is_empty());
 }
 
 #[test]

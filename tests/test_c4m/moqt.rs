@@ -126,6 +126,39 @@ fn scope_vectors_have_expected_moqt_reval() {
 }
 
 #[test]
+fn token_with_provisional_claim_labels_has_typed_claims() {
+    // draft-02 §A.5 の Private Use の暫定 label (-65537 / -65538) を使うベクタ
+    let vector = SCOPE_VECTORS
+        .iter()
+        .find(|vector| vector.id == "moqt_multi_scope")
+        .expect("ベクタがある");
+    let token = CatToken::decode(vector.token.as_bytes()).expect("デコードできる");
+    let claims = token.claims();
+
+    // 暫定 label の moqt / moqt-reval が型付きフィールドへ取り込まれること
+    assert!(claims.moqt.is_some(), "moqt が型付きでデコードされること");
+    assert_eq!(
+        claims.moqt_reval,
+        Some(300.0),
+        "moqt-reval が型付きでデコードされること"
+    );
+    // 型付きで解釈したため raw には残らないこと
+    assert!(claims.raw.is_empty());
+
+    // 新 label の token で scope 認可が機能すること
+    assert!(claims.authorize(
+        MoqtAction::Publish,
+        &[b"live.example".as_slice(), b"studio-a".as_slice()],
+        b"cam1",
+    ));
+    assert!(!claims.authorize(
+        MoqtAction::Publish,
+        &[b"live.example".as_slice(), b"studio-b".as_slice()],
+        b"cam1",
+    ));
+}
+
+#[test]
 fn publisher_scope_rebuild_matches_vector_payload() {
     let vector = SCOPE_VECTORS
         .iter()

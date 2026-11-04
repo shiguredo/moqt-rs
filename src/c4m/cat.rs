@@ -1,8 +1,7 @@
 //! CAT (Common Access Token) のクレームとトークン
 //!
 //! CTA-5007-B の CAT を CWT (RFC 8392) のクレームとして扱い、draft-ietf-moq-c4m-02 の
-//! `moqt` クレーム (map 形式) と draft-01 の `moqt-reval` などを加えたトークンの発行と
-//! 検証を提供する。
+//! `moqt` / `moqt-reval` クレームなどを加えたトークンの発行と検証を提供する。
 //!
 //! 直列化は 2 種類を扱う。
 //!
@@ -211,6 +210,7 @@ impl Confirmation {
 /// 型付きで解釈しないクレームは [`CatClaims::raw`] にそのまま保持する。CAT の
 /// クレームは IANA の登録と draft-ietf-moq-c4m-01 のベクタで値型が一致しないもの
 /// (catv / catu など) があるため、意味論を定める C4M のクレームだけを型付きにする。
+///
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CatClaims {
     /// `iss`
@@ -233,7 +233,7 @@ pub struct CatClaims {
     ///
     /// キー 0 以外のキーを含む claim は [`MoqtClaim::decode`] が拒否する (§2.1.1)。
     pub moqt: Option<MoqtClaim>,
-    /// `moqt-reval` (draft-ietf-moq-c4m-01 §2.2) の再検証間隔 (秒)
+    /// `moqt-reval` (draft-ietf-moq-c4m-02 §2.2) の再検証間隔 (秒)
     ///
     /// §2.2 は「再検証できない受信者は `moqt-reval` 付きトークンを拒否する MUST」
     /// 「再検証間隔が自身の能力を下回る場合も拒否する MUST」を定める。本ライブラリは
@@ -242,10 +242,16 @@ pub struct CatClaims {
     /// `catdpop` (draft-ietf-moq-c4m-01 §3.1.1)
     pub catdpop: Option<CatDpop>,
     /// 型付きで解釈しなかったクレーム
+    ///
+    /// 旧 draft-01 のベクタが使う `moqt` / `moqt-reval` の label (327 / 328) は
+    /// 暫定 label の alias にせず、ここに保持する。
     pub raw: Vec<(Value, Value)>,
 }
 
 /// 型付きフィールドを持つ claim key かどうかを返す
+///
+/// `moqt` / `moqt-reval` は暫定 label ([`CLAIM_MOQT`] / [`CLAIM_MOQT_REVAL`]) を
+/// 使い、旧 draft-01 のベクタの 327 / 328 は alias にしない。
 fn is_typed_claim_key(key: i64) -> bool {
     matches!(
         key,
@@ -284,6 +290,10 @@ fn finite_claim_number(entry: &Value, name: &'static str) -> Result<f64, CatErro
 
 impl CatClaims {
     /// クレームセットをデコードする
+    ///
+    /// `moqt` / `moqt-reval` は draft-ietf-moq-c4m-02 §A.5 の暫定 label
+    /// (-65537 / -65538) だけを型付きで解釈する。旧 draft-01 のベクタの 327 / 328 は
+    /// 未知のクレームとして raw に保持し、型付きフィールドへは写さない。
     pub fn decode(value: &Value) -> Result<Self, CatError> {
         let entries = value.as_map().ok_or(CatError::UnexpectedType("claims"))?;
         let mut claims = Self::default();
@@ -1173,4 +1183,27 @@ fn base64url_encode(bytes: &[u8]) -> String {
 /// パディング無しの base64url をデコードする (RFC 4648 §5)
 fn base64url_decode(text: &str) -> Result<Vec<u8>, CatError> {
     super::base64url::decode(text).map_err(|_| CatError::InvalidBase64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_typed_claim_key;
+    use crate::c4m::{CLAIM_MOQT, CLAIM_MOQT_REVAL};
+
+    #[test]
+    fn typed_claim_keys_include_provisional_moqt_labels() {
+        // draft-ietf-moq-c4m-02 §A.5 の Private Use の暫定 label を採用する
+        assert_eq!(CLAIM_MOQT, -65537);
+        assert_eq!(CLAIM_MOQT_REVAL, -65538);
+        // 暫定 label は型付きで解釈する
+        assert!(is_typed_claim_key(CLAIM_MOQT));
+        assert!(is_typed_claim_key(CLAIM_MOQT_REVAL));
+        // 旧 draft-01 のベクタの 327 / 328 は暫定 label の alias にしない
+        assert!(!is_typed_claim_key(327));
+        assert!(!is_typed_claim_key(328));
+        // 負の label でも暫定 label 以外は型付きにしない (-65536 は Specification Required、
+        // -65536 未満が Private Use。RFC 8392 §9.1.1)
+        assert!(!is_typed_claim_key(-65536));
+        assert!(!is_typed_claim_key(-65539));
+    }
 }

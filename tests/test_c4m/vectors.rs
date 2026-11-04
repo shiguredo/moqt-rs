@@ -1,12 +1,12 @@
-//! C4M のテストベクタ (draft-01 付録 A 由来、`moqt` claim 値は draft-02 §A.5 と一致)
+//! C4M のテストベクタ (draft-01 付録 A 由来、`moqt` claim と `moqt-reval` は draft-02 §A.5 と一致)
 //!
 //! `tests/test_c4m.rs` のサブモジュールから共有する。値は draft-01 付録 A の JSON を
-//! 定数化したものである。`moqt` claim の値だけは draft-02 §2.1 の map 形式 (キー 0 に
-//! scopes 配列) へ移しており、これは draft-02 §A.5 の公式ベクタの payload_cbor_hex に
-//! 含まれる `moqt` claim 値とバイト単位で一致する。claim label は暫定値 (327)、
-//! `moqt-reval` は draft-01 の表現、HMAC の compact トークンの protected header の alg は
-//! -4 (draft-02 §A.5 の COSE_Mac0 は 5) のままであり、action 番号は後続 issue で追随する。
-//! compact トークンと HMAC 署名は draft-02 の claim 値に合わせて再計算した暫定値である。
+//! 定数化したものである。`moqt` claim は draft-02 §2.1 の map 形式 (キー 0 に scopes 配列)
+//! とし、`moqt` claim の値と `moqt-reval` の値は draft-02 §A.5 の公式ベクタとバイト単位で
+//! 一致する。claim label は同 §A.5 が使う Private Use の暫定値 (-65537 / -65538)。
+//! HMAC の compact トークンの protected header の alg は -4 (draft-02 §A.5 の COSE_Mac0 は
+//! 5) のままであり、action 番号は後続 issue で追随する。compact トークンと HMAC 署名は
+//! 新しい claim label と値に合わせて再計算した暫定値である。
 
 /// 付録 A.1 の HMAC-SHA256 鍵
 ///
@@ -211,7 +211,10 @@ pub struct AuthorizationTest {
     pub expected: bool,
 }
 
-/// スコープのベクタ (claim 値は draft-02 §A.5 と一致、claim label は暫定、moqt-reval は draft-01 の表現)
+/// スコープのベクタ
+///
+/// `moqt` claim の値と `moqt-reval` の値は draft-02 §A.5 とバイト単位で一致する。claim
+/// label は同 §A.5 の Private Use の暫定値 (-65537 / -65538) を使う。
 pub struct ScopeVector {
     /// ベクタの識別子
     pub id: &'static str,
@@ -229,8 +232,8 @@ pub struct ScopeVector {
 pub const SCOPE_VECTORS: &[ScopeVector] = &[
     ScopeVector {
         id: "moqt_publisher_exact",
-        payload_hex: "a301781868747470733a2f2f617574682e6578616d706c652e636f6d041a65554280190147a1008183820206824b6578616d706c652e636f6d45616c696365820146766964656f2d",
-        token: "ogEjEGNDQVQ.owF4GGh0dHBzOi8vYXV0aC5leGFtcGxlLmNvbQQaZVVCgBkBR6EAgYOCAgaCS2V4YW1wbGUuY29tRWFsaWNlggFGdmlkZW8t.iKiLBzmHT01-3LTS7LE6VPfCqRX8XzB3Adtq-dw0xbE",
+        payload_hex: "a301781868747470733a2f2f617574682e6578616d706c652e636f6d041a655542803a00010000a1008183820206824b6578616d706c652e636f6d45616c696365820146766964656f2d",
+        token: "ogEjEGNDQVQ.owF4GGh0dHBzOi8vYXV0aC5leGFtcGxlLmNvbQQaZVVCgDoAAQAAoQCBg4ICBoJLZXhhbXBsZS5jb21FYWxpY2WCAUZ2aWRlby0.y5djGT2ZlD8BDYDsat7LSmYR2a67MVpth4VS0sGuoIQ",
         moqt_reval: None,
         tests: &[
             AuthorizationTest {
@@ -267,8 +270,8 @@ pub const SCOPE_VECTORS: &[ScopeVector] = &[
     },
     ScopeVector {
         id: "moqt_subscriber_prefix",
-        payload_hex: "a301781868747470733a2f2f617574682e6578616d706c652e636f6d041a65554280190147a10081828303040781820152636f6e666572656e63652e6578616d706c65",
-        token: "ogEjEGNDQVQ.owF4GGh0dHBzOi8vYXV0aC5leGFtcGxlLmNvbQQaZVVCgBkBR6EAgYKDAwQHgYIBUmNvbmZlcmVuY2UuZXhhbXBsZQ.GUCeQ8GMJVqO2O9LGb8fnLI9yvK5m4fFR3Et_4hfzys",
+        payload_hex: "a301781868747470733a2f2f617574682e6578616d706c652e636f6d041a655542803a00010000a10081828303040781820152636f6e666572656e63652e6578616d706c65",
+        token: "ogEjEGNDQVQ.owF4GGh0dHBzOi8vYXV0aC5leGFtcGxlLmNvbQQaZVVCgDoAAQAAoQCBgoMDBAeBggFSY29uZmVyZW5jZS5leGFtcGxl._zp3m8PNUfNe-uER1O4gpag9NkgA9DKLmekQmgkyYZw",
         moqt_reval: None,
         tests: &[
             AuthorizationTest {
@@ -299,8 +302,8 @@ pub const SCOPE_VECTORS: &[ScopeVector] = &[
     },
     ScopeVector {
         id: "moqt_multi_scope",
-        payload_hex: "a401781868747470733a2f2f617574682e6578616d706c652e636f6d041a65554280190147a1008282820206824c6c6976652e6578616d706c654873747564696f2d61828204078182014c6c6976652e6578616d706c65190148f95cb0",
-        token: "ogEjEGNDQVQ.pAF4GGh0dHBzOi8vYXV0aC5leGFtcGxlLmNvbQQaZVVCgBkBR6EAgoKCAgaCTGxpdmUuZXhhbXBsZUhzdHVkaW8tYYKCBAeBggFMbGl2ZS5leGFtcGxlGQFI-Vyw.F18L2-VFXQEYjc-o2NsGVGn45gCUmOMyOUnuIwNPVNU",
+        payload_hex: "a401781868747470733a2f2f617574682e6578616d706c652e636f6d041a655542803a00010000a1008282820206824c6c6976652e6578616d706c654873747564696f2d61828204078182014c6c6976652e6578616d706c653a0001000119012c",
+        token: "ogEjEGNDQVQ.pAF4GGh0dHBzOi8vYXV0aC5leGFtcGxlLmNvbQQaZVVCgDoAAQAAoQCCgoICBoJMbGl2ZS5leGFtcGxlSHN0dWRpby1hgoIEB4GCAUxsaXZlLmV4YW1wbGU6AAEAARkBLA.buC-lf7x5Ql03N4lcpbb-F3dyk2KZuhOLU_2iKqtvyc",
         moqt_reval: Some(300.0),
         tests: &[
             AuthorizationTest {
@@ -331,8 +334,8 @@ pub const SCOPE_VECTORS: &[ScopeVector] = &[
     },
     ScopeVector {
         id: "moqt_admin_wildcard",
-        payload_hex: "a301781868747470733a2f2f617574682e6578616d706c652e636f6d041a65554280190147a100818189000102030405060708",
-        token: "ogEjEGNDQVQ.owF4GGh0dHBzOi8vYXV0aC5leGFtcGxlLmNvbQQaZVVCgBkBR6EAgYGJAAECAwQFBgcI.7tnlW2x2BhbpJAm5ynw7JMXVm9VdDpstjO5jbjBIRHc",
+        payload_hex: "a301781868747470733a2f2f617574682e6578616d706c652e636f6d041a655542803a00010000a100818189000102030405060708",
+        token: "ogEjEGNDQVQ.owF4GGh0dHBzOi8vYXV0aC5leGFtcGxlLmNvbQQaZVVCgDoAAQAAoQCBgYkAAQIDBAUGBwg.TXJtHY9nQ39DAvkAUaXUkudeoAWVbO7UcC6yELXdVUU",
         moqt_reval: None,
         tests: &[
             AuthorizationTest {
@@ -357,8 +360,8 @@ pub const SCOPE_VECTORS: &[ScopeVector] = &[
     },
     ScopeVector {
         id: "moqt_suffix_match",
-        payload_hex: "a301781868747470733a2f2f617574682e6578616d706c652e636f6d041a65554280190147a100818381048182024c2e6578616d706c652e636f6d8202462d617564696f",
-        token: "ogEjEGNDQVQ.owF4GGh0dHBzOi8vYXV0aC5leGFtcGxlLmNvbQQaZVVCgBkBR6EAgYOBBIGCAkwuZXhhbXBsZS5jb22CAkYtYXVkaW8.f1sx8ZDjjI3-9c0_qD9ZnASKRaWpRMyeinX4qiz0bps",
+        payload_hex: "a301781868747470733a2f2f617574682e6578616d706c652e636f6d041a655542803a00010000a100818381048182024c2e6578616d706c652e636f6d8202462d617564696f",
+        token: "ogEjEGNDQVQ.owF4GGh0dHBzOi8vYXV0aC5leGFtcGxlLmNvbQQaZVVCgDoAAQAAoQCBg4EEgYICTC5leGFtcGxlLmNvbYICRi1hdWRpbw.bOGO_ybrDM7myWL4p0E47piLhrsf4IV5NHD7b3bzVDY",
         moqt_reval: None,
         tests: &[
             AuthorizationTest {
