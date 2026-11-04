@@ -115,11 +115,19 @@ pub fn sample_model_scope(
     namespace: &[Vec<u8>],
     track: &[u8],
 ) -> ModelScope {
-    // アクションは対象を含むか、含まない別のアクションにする
+    // アクションは対象を含むか、含まない別の既知アクションにする。未知の整数を
+    // 生成すると `to_scope` がアクションを落として空のスコープになり、エンコード
+    // できなくなるため、必ず `MoqtAction::ALL` から選ぶ
     let actions = if noprop::sample_ratio(ctx, noprop::Ratio::one_nth(2)) {
         vec![action.key()]
     } else {
-        vec![(action.key() + 1) % 9]
+        let others: Vec<MoqtAction> = MoqtAction::ALL
+            .iter()
+            .copied()
+            .filter(|candidate| *candidate != action)
+            .collect();
+        let index = noprop::sample_usize_in(ctx, 0..others.len());
+        vec![others[index].key()]
     };
 
     // 名前空間マッチは対象の先頭から切り出すか、対象より 1 つ長くする

@@ -1,12 +1,16 @@
 //! C4M のテストベクタ (draft-01 付録 A 由来、`moqt` claim と `moqt-reval` は draft-02 §A.5 と一致)
 //!
-//! `tests/test_c4m.rs` のサブモジュールから共有する。値は draft-01 付録 A の JSON を
-//! 定数化したものである。`moqt` claim は draft-02 §2.1 の map 形式 (キー 0 に scopes 配列)
-//! とし、`moqt` claim の値と `moqt-reval` の値は draft-02 §A.5 の公式ベクタとバイト単位で
-//! 一致する。claim label は同 §A.5 が使う Private Use の暫定値 (-65537 / -65538)。
-//! HMAC の compact トークンの protected header の alg は -4 (draft-02 §A.5 の COSE_Mac0 は
-//! 5) のままであり、action 番号は後続 issue で追随する。compact トークンと HMAC 署名は
-//! 新しい claim label と値に合わせて再計算した暫定値である。
+//! `tests/test_c4m.rs` のサブモジュールから共有する。他のベクタは draft-01 付録 A の
+//! JSON を定数化したものである。`SCOPE_VECTORS` の `moqt` claim は draft-02 §2.1 の
+//! map 形式 (キー 0 に scopes 配列) とし、`moqt` claim の値と `moqt-reval` の値は
+//! draft-02 §A.5 の公式ベクタとバイト単位で一致する。claim label は同 §A.5 が使う
+//! Private Use の暫定値 (-65537 / -65538)。HMAC の compact トークンの protected header
+//! の alg は -4 (draft-02 §A.5 の COSE_Mac0 は 5) のままであり、compact トークンと
+//! HMAC 署名は新しい claim label と値に合わせて再計算した暫定値である。
+//!
+//! `moqt_admin_wildcard` の actions は draft-02 §A.5 のままで 0 〜 8 であるため、§2.1
+//! Table 1 の action 番号と不整合である。action 0 は既知 action の検証から分離して扱い、
+//! ベクタ全体の追随は別途行う。
 
 /// 付録 A.1 の HMAC-SHA256 鍵
 ///
@@ -229,6 +233,10 @@ pub struct ScopeVector {
 }
 
 /// スコープのベクタ一覧
+///
+/// `moqt_admin_wildcard` の `tests` には action 0 の公式期待値 (認可 true) を含めない。
+/// action 0 は draft-02 §2.1 Table 1 に無く、既知 action として検証できないため、
+/// 公式ベクタの期待値の復元は別途行う。
 pub const SCOPE_VECTORS: &[ScopeVector] = &[
     ScopeVector {
         id: "moqt_publisher_exact",
@@ -338,12 +346,6 @@ pub const SCOPE_VECTORS: &[ScopeVector] = &[
         token: "ogEjEGNDQVQ.owF4GGh0dHBzOi8vYXV0aC5leGFtcGxlLmNvbQQaZVVCgDoAAQAAoQCBgYkAAQIDBAUGBwg.TXJtHY9nQ39DAvkAUaXUkudeoAWVbO7UcC6yELXdVUU",
         moqt_reval: None,
         tests: &[
-            AuthorizationTest {
-                action: 0,
-                namespace: &["any.namespace"],
-                track: "any-track",
-                expected: true,
-            },
             AuthorizationTest {
                 action: 6,
                 namespace: &["any.namespace"],

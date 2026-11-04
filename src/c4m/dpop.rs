@@ -51,7 +51,10 @@ pub struct DpopProofHeader {
 pub struct AuthorizationContext {
     /// `type`。MOQT では "moqt"
     pub context_type: String,
-    /// `action`。C4M Table 2 のアクション識別子
+    /// `action`。旧 JWT 形式の DPoP proof のアクション識別子 (文字列)
+    ///
+    /// draft-02 §4.2 の CWT 形式の actx は整数の action コードを使うため、この文字列は
+    /// 旧形式の proof にだけ現れる。
     pub action: String,
     /// `tns` (namespace のシリアライズ文字列)
     pub track_namespace: String,
@@ -94,9 +97,14 @@ impl AuthorizationContext {
         Ok(())
     }
 
-    /// `action` がアクションと一致するかどうかを検証する (C4M Table 2)
+    /// 旧 JWT 形式の `action` がアクションと一致するかどうかを検証する
+    ///
+    /// 旧 JWT 形式の DPoP proof の `action` は文字列であり、
+    /// [`MoqtAction::authorization_context`] が `Some` を返すアクションだけが一致し得る。
+    /// `None` を返すアクション (SUBSCRIBE_TRACKS) は旧形式に対応する識別子が無いため、
+    /// 常に [`DpopError::ActionMismatch`] を返して拒否する。
     pub fn verify_action(&self, action: MoqtAction) -> Result<(), DpopError> {
-        if self.action != action.authorization_context() {
+        if !action.matches_authorization_context(&self.action) {
             return Err(DpopError::ActionMismatch);
         }
         Ok(())
@@ -382,8 +390,13 @@ impl DpopProof {
 
     /// Authorization Context (actx) を検証する
     ///
-    /// `type` が "moqt"、`action` が一致し、`tns` / `tn` が対象と一致し、`resource`
-    /// が与えられている場合は `tns` / `tn` と整合することを確認する。
+    /// `type` が "moqt"、`action` が一致し、`resource` が与えられている場合は
+    /// `tns` / `tn` と整合し、`tns` / `tn` が対象と一致することを確認する。
+    ///
+    /// 検証は type → action → resource → target の順に行う。旧 JWT 形式の actx を
+    /// 対象とするため、type が正しい場合、旧形式に対応する文字列を持たない
+    /// SUBSCRIBE_TRACKS は [`DpopError::ActionMismatch`] で拒否する。本 API は旧 JWT
+    /// 形式だけを対象とし、CWT 形式の proof は未対応である。
     pub fn verify_authorization_context(
         &self,
         action: MoqtAction,

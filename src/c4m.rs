@@ -65,13 +65,18 @@ pub const MATCH_TYPE_PREFIX: i64 = 1;
 /// `bin-match` の suffix マッチを表す match-type (draft-ietf-moq-c4m-01 §2.1)
 pub const MATCH_TYPE_SUFFIX: i64 = 2;
 
-/// MOQT のアクション (draft-ietf-moq-c4m-01 §2.1 Table 1)
+/// MOQT のアクション (draft-ietf-moq-c4m-02 §2.1 Table 1)
+///
+/// `moqt` クレームの action は整数であり、SETUP=1 から SUBSCRIBE_TRACKS=9 までの
+/// 9 種類が定義されている。旧 draft の CLIENT_SETUP=0 / SERVER_SETUP=1 という 2 つの
+/// action は draft-02 で SETUP=1 に統合された。
+///
+/// draft-02 §4.2 の CWT 形式の DPoP proof の actx も、整数の action コードとして
+/// 同じ値を使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MoqtAction {
-    /// CLIENT_SETUP (0)
-    ClientSetup,
-    /// SERVER_SETUP (1)
-    ServerSetup,
+    /// SETUP (1)
+    Setup,
     /// PUBLISH_NAMESPACE (2)
     PublishNamespace,
     /// SUBSCRIBE_NAMESPACE (3)
@@ -86,13 +91,17 @@ pub enum MoqtAction {
     Fetch,
     /// TRACK_STATUS (8)
     TrackStatus,
+    /// SUBSCRIBE_TRACKS (9)
+    SubscribeTracks,
 }
 
 impl MoqtAction {
-    /// すべてのアクション
+    /// すべてのアクション (draft-02 §2.1 Table 1 の key 1 〜 9 の順)
+    ///
+    /// 先頭の index は 0 だが、各要素の key は 1 から始まる。index を key として
+    /// 使わず、key から action を引く場合は [`MoqtAction::from_key`] を使う。
     pub const ALL: [Self; 9] = [
-        Self::ClientSetup,
-        Self::ServerSetup,
+        Self::Setup,
         Self::PublishNamespace,
         Self::SubscribeNamespace,
         Self::Subscribe,
@@ -100,13 +109,13 @@ impl MoqtAction {
         Self::Publish,
         Self::Fetch,
         Self::TrackStatus,
+        Self::SubscribeTracks,
     ];
 
-    /// `moqt` クレームのアクション整数を返す (Table 1)
+    /// `moqt` クレームのアクション整数を返す (draft-02 §2.1 Table 1)
     pub const fn key(self) -> i64 {
         match self {
-            Self::ClientSetup => 0,
-            Self::ServerSetup => 1,
+            Self::Setup => 1,
             Self::PublishNamespace => 2,
             Self::SubscribeNamespace => 3,
             Self::Subscribe => 4,
@@ -114,14 +123,17 @@ impl MoqtAction {
             Self::Publish => 6,
             Self::Fetch => 7,
             Self::TrackStatus => 8,
+            Self::SubscribeTracks => 9,
         }
     }
 
-    /// アクション整数からアクションを返す
+    /// アクション整数からアクションを返す (draft-02 §2.1 Table 1)
+    ///
+    /// Table 1 に無い整数は `None` を返す。旧 draft の CLIENT_SETUP=0 は既知の
+    /// アクションの alias にせず、未知の整数と同じく `None` を返す。
     pub const fn from_key(key: i64) -> Option<Self> {
         match key {
-            0 => Some(Self::ClientSetup),
-            1 => Some(Self::ServerSetup),
+            1 => Some(Self::Setup),
             2 => Some(Self::PublishNamespace),
             3 => Some(Self::SubscribeNamespace),
             4 => Some(Self::Subscribe),
@@ -129,6 +141,7 @@ impl MoqtAction {
             6 => Some(Self::Publish),
             7 => Some(Self::Fetch),
             8 => Some(Self::TrackStatus),
+            9 => Some(Self::SubscribeTracks),
             _ => None,
         }
     }
@@ -136,8 +149,7 @@ impl MoqtAction {
     /// MOQT のメッセージ名を返す (ログとデバッグ用)
     pub const fn name(self) -> &'static str {
         match self {
-            Self::ClientSetup => "CLIENT_SETUP",
-            Self::ServerSetup => "SERVER_SETUP",
+            Self::Setup => "SETUP",
             Self::PublishNamespace => "PUBLISH_NAMESPACE",
             Self::SubscribeNamespace => "SUBSCRIBE_NAMESPACE",
             Self::Subscribe => "SUBSCRIBE",
@@ -145,28 +157,38 @@ impl MoqtAction {
             Self::Publish => "PUBLISH",
             Self::Fetch => "FETCH",
             Self::TrackStatus => "TRACK_STATUS",
+            Self::SubscribeTracks => "SUBSCRIBE_TRACKS",
         }
     }
 
-    /// DPoP の Authorization Context で使うアクション識別子を返す (Table 2)
-    pub const fn authorization_context(self) -> &'static str {
-        match self {
-            Self::ClientSetup | Self::ServerSetup => "SETUP",
-            Self::PublishNamespace => "PUB_NS",
-            Self::SubscribeNamespace => "SUB_NS",
-            Self::Subscribe => "SUBSCRIBE",
-            Self::RequestUpdate => "REQ_UPDATE",
-            Self::Publish => "PUBLISH",
-            Self::Fetch => "FETCH",
-            Self::TrackStatus => "TRK_STATUS",
-        }
-    }
-
-    /// DPoP の Authorization Context のアクション識別子と一致するかどうかを返す
+    /// 旧 JWT 形式の DPoP proof の Authorization Context で使うアクション識別子を返す
     ///
-    /// CLIENT_SETUP と SERVER_SETUP はどちらも `"SETUP"` を使う (Table 2)。
+    /// draft-02 §4.2 の DPoP proof は actx に整数の action コード (§2.1 Table 1) を
+    /// 入れるため、この文字列の対応表は使わない。ここでは旧形式の JWT proof との
+    /// 互換のために文字列を返す。
+    ///
+    /// 旧形式に対応する文字列が無い SUBSCRIBE_TRACKS は `None` を返す。利用側は
+    /// `None` を「一致しない」として拒否すること。
+    pub const fn authorization_context(self) -> Option<&'static str> {
+        match self {
+            Self::Setup => Some("SETUP"),
+            Self::PublishNamespace => Some("PUB_NS"),
+            Self::SubscribeNamespace => Some("SUB_NS"),
+            Self::Subscribe => Some("SUBSCRIBE"),
+            Self::RequestUpdate => Some("REQ_UPDATE"),
+            Self::Publish => Some("PUBLISH"),
+            Self::Fetch => Some("FETCH"),
+            Self::TrackStatus => Some("TRK_STATUS"),
+            Self::SubscribeTracks => None,
+        }
+    }
+
+    /// 旧 JWT 形式の Authorization Context のアクション識別子と一致するかどうかを返す
+    ///
+    /// [`MoqtAction::authorization_context`] が `None` を返すアクション
+    /// (SUBSCRIBE_TRACKS) は常に `false` を返す。
     pub fn matches_authorization_context(self, value: &str) -> bool {
-        self.authorization_context() == value
+        self.authorization_context() == Some(value)
     }
 }
 
@@ -249,7 +271,12 @@ pub enum NamespaceMatch {
 /// アクションの配列と、省略可能な名前空間マッチの配列 / トラック名マッチを持つ。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MoqtScope {
-    /// 認可するアクションの整数値 (Table 1)
+    /// 認可するアクションの整数値 (draft-02 §2.1 Table 1)
+    ///
+    /// CDDL の `moqt-action = int` に合わせて整数のまま保持し、i64 で表せる未知の
+    /// 整数もデコードで失わない。認可時は [`MoqtAction::key`] とだけ照合するため、
+    /// 未知の整数が既知 action の許可として働くことはない。i64 で表せない整数は
+    /// 解釈できない action として拒否する。
     pub actions: Vec<i64>,
     /// 名前空間フィールドのマッチ。空の場合はすべての名前空間にマッチする
     pub namespace: Vec<NamespaceMatch>,

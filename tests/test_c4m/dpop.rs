@@ -380,6 +380,24 @@ fn authorization_context_errors() {
         context.verify_action(MoqtAction::Subscribe),
         Err(DpopError::ActionMismatch)
     );
+    // 旧 JWT 形式に対応する文字列を持たない SUBSCRIBE_TRACKS は、この actx の
+    // action 値 (PUB_NS) に対して拒否する
+    assert_eq!(
+        context.verify_action(MoqtAction::SubscribeTracks),
+        Err(DpopError::ActionMismatch)
+    );
+    // SETUP の旧文字列 "SETUP" は Setup に対して受理する
+    let setup = AuthorizationContext {
+        action: String::from("SETUP"),
+        ..authorization_context()
+    };
+    setup
+        .verify_action(MoqtAction::Setup)
+        .expect("SETUP は Setup と一致する");
+    assert_eq!(
+        setup.verify_action(MoqtAction::SubscribeTracks),
+        Err(DpopError::ActionMismatch)
+    );
     context
         .verify_target(&namespace(), b"live")
         .expect("tns / tn が一致する");

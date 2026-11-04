@@ -181,3 +181,67 @@ fn unknown_claim_key_is_always_rejected() -> noprop::TestResult {
     })?;
     Ok(())
 }
+
+/// 未知の action 整数を scope に保持したときの property
+///
+/// Table 1 に無い整数はデコードで失われず、どの `MoqtAction` の認可にも一致しない
+/// (未知の値を既知 action の許可として扱わない fail-closed)。
+#[test]
+fn unknown_action_keys_are_kept_and_never_authorize() -> noprop::TestResult {
+    // 0 / 負値 / 9 超の未知 action がそれぞれ生成されたことを確認するカウンタ
+    let zero_seen = std::cell::Cell::new(false);
+    let negative_seen = std::cell::Cell::new(false);
+    let above_nine_seen = std::cell::Cell::new(false);
+    let mut runner = test_runner()?;
+    runner.run(128, |ctx| {
+        // Table 1 の 1〜9 以外の整数を作る。i64 の範囲全体から生成すると境界が
+        // 広すぎるため、0 と負値、9 より大きい値から選ぶ
+        let key = match noprop::sample_ratio(ctx, noprop::Ratio::one_nth(3)) {
+            true => 0,
+            false => {
+                let magnitude = noprop::sample_u64_in(ctx, 1..=1000) as i64;
+                if noprop::sample_ratio(ctx, noprop::Ratio::one_nth(2)) {
+                    -magnitude
+                } else {
+                    9 + magnitude
+                }
+            }
+        };
+        match key {
+            0 => zero_seen.set(true),
+            key if key < 0 => negative_seen.set(true),
+            _ => above_nine_seen.set(true),
+        }
+        let claim = MoqtClaim {
+            scopes: vec![MoqtScope {
+                actions: vec![key],
+                namespace: Vec::new(),
+                track: None,
+            }],
+        };
+
+        // CBOR の wire を経由しても未知の整数が保持されること
+        let encoded = claim
+            .encode()
+            .expect("未知の action 整数をエンコードできる");
+        let wire = cbor::encode(&encoded).expect("claim を CBOR へエンコードできる");
+        let decoded = MoqtClaim::decode(&cbor::decode(&wire).expect("CBOR をデコードできる"))
+            .expect("未知の action 整数をデコードできる");
+        assert_eq!(decoded.scopes[0].actions, vec![key]);
+        assert_eq!(decoded, claim);
+
+        // 既知 action のどれも認可しない
+        for action in MoqtAction::ALL {
+            assert!(
+                !decoded.authorize(action, &[&b"example"[..]], b"video"),
+                "未知の action {key} が {action:?} を認可してはならない"
+            );
+        }
+        Ok(())
+    })?;
+    assert!(
+        zero_seen.get() && negative_seen.get() && above_nine_seen.get(),
+        "未知 action の 3 カテゴリがすべて生成されること\n{runner}"
+    );
+    Ok(())
+}

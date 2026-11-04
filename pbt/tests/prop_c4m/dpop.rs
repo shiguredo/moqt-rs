@@ -104,10 +104,13 @@ fn sample_authorization_context(
     } else {
         sample_safe_text(ctx, 6)
     };
-    let action_value = if noprop::sample_ratio(ctx, noprop::Ratio::new(3, 4)) {
-        String::from(action.authorization_context())
-    } else {
-        sample_safe_text(ctx, 6)
+    // 旧 JWT 形式の文字列を持つアクションは 3/4 の確率で一致させる。
+    // SUBSCRIBE_TRACKS は旧形式に対応する文字列が無いため、必ず不一致になる値を選ぶ
+    let action_value = match action.authorization_context() {
+        Some(context) if noprop::sample_ratio(ctx, noprop::Ratio::new(3, 4)) => {
+            String::from(context)
+        }
+        _ => sample_safe_text(ctx, 6),
     };
     let tns_value = if noprop::sample_ratio(ctx, noprop::Ratio::new(3, 4)) {
         String::from(serialized_tns)
@@ -175,7 +178,7 @@ fn expected_authorization_context_error(
     if context.context_type != MOQT_AUTHORIZATION_CONTEXT_TYPE {
         return Some(DpopError::ContextTypeMismatch);
     }
-    if context.action_value != action.authorization_context() {
+    if Some(context.action_value.as_str()) != action.authorization_context() {
         return Some(DpopError::ActionMismatch);
     }
     if !resource_consistent(&context.resource, &context.tns_value, &context.tn_value) {
@@ -308,11 +311,12 @@ fn authorization_context_matches_model() -> noprop::TestResult {
             "type の検証がモデルと一致しない: generated={generated:?}"
         );
 
-        let expected_action = if generated.action_value == action.authorization_context() {
-            Ok(())
-        } else {
-            Err(DpopError::ActionMismatch)
-        };
+        let expected_action =
+            if Some(generated.action_value.as_str()) == action.authorization_context() {
+                Ok(())
+            } else {
+                Err(DpopError::ActionMismatch)
+            };
         assert_eq!(
             context.verify_action(action),
             expected_action,

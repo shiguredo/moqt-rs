@@ -112,6 +112,19 @@ fn scope_vectors_have_expected_scopes() {
     assert_eq!(moqt.scopes[0].actions, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
     assert!(moqt.scopes[0].namespace.is_empty());
     assert_eq!(moqt.scopes[0].track, None);
+    // A.5 の admin ベクタは §2.1 Table 1 と不整合な旧 action 番号のままである。
+    // 1 は SETUP の key なので SETUP を認可するが、9 (SUBSCRIBE_TRACKS) を含まない
+    // ため SUBSCRIBE_TRACKS は認可しない
+    assert!(claims.authorize(
+        MoqtAction::Setup,
+        &namespace_bytes(&["any.namespace"]),
+        b"any-track"
+    ));
+    assert!(!claims.authorize(
+        MoqtAction::SubscribeTracks,
+        &namespace_bytes(&["any.namespace"]),
+        b"any-track"
+    ));
 }
 
 #[test]
@@ -739,18 +752,191 @@ fn scope_encode_omits_empty_optional_parts() {
 
 #[test]
 fn action_mapping() {
+    // draft-02 §2.1 Table 1 の key 1 〜 9 と ALL の並びが一致する
     for (index, action) in MoqtAction::ALL.iter().enumerate() {
-        assert_eq!(action.key(), index as i64);
-        assert_eq!(MoqtAction::from_key(index as i64), Some(*action));
+        let key = index as i64 + 1;
+        assert_eq!(action.key(), key);
+        assert_eq!(MoqtAction::from_key(key), Some(*action));
         assert!(!action.name().is_empty());
-        assert!(!action.authorization_context().is_empty());
-        assert!(action.matches_authorization_context(action.authorization_context()));
+        // 旧 JWT 形式の文字列を持つアクションだけが自身の文字列と一致する
+        match action.authorization_context() {
+            Some(context) => {
+                assert!(!context.is_empty());
+                assert!(action.matches_authorization_context(context));
+            }
+            None => assert!(!action.matches_authorization_context("SETUP")),
+        }
     }
-    assert_eq!(MoqtAction::from_key(9), None);
-    assert_eq!(MoqtAction::ClientSetup.name(), "CLIENT_SETUP");
-    assert_eq!(MoqtAction::ClientSetup.authorization_context(), "SETUP");
-    assert_eq!(MoqtAction::ServerSetup.authorization_context(), "SETUP");
-    assert!(!MoqtAction::ClientSetup.matches_authorization_context("PUB_NS"));
+    assert_eq!(MoqtAction::Setup.key(), 1);
+    assert_eq!(MoqtAction::Setup.name(), "SETUP");
+    assert_eq!(MoqtAction::Setup.authorization_context(), Some("SETUP"));
+    assert_eq!(MoqtAction::SubscribeTracks.key(), 9);
+    assert_eq!(MoqtAction::SubscribeTracks.name(), "SUBSCRIBE_TRACKS");
+    assert_eq!(MoqtAction::SubscribeTracks.authorization_context(), None);
+    // 旧 ClientSetup=0 は既知アクションの alias にしない
+    assert_eq!(MoqtAction::from_key(0), None);
+    assert!(!MoqtAction::Setup.matches_authorization_context("PUB_NS"));
+}
+
+#[test]
+fn setup_and_subscribe_tracks_known_bytes_round_trip() {
+    // draft-02 §2.1 Table 1 の SETUP=1 と SUBSCRIBE_TRACKS=9 だけを持つ claim である
+    // {0: [[[1]]]} と {0: [[[9]]]} の決定論的 CBOR バイト列で、decode / encode /
+    // authorize が一致することを固定する
+    for (hex, action) in [
+        ("a10081818101", MoqtAction::Setup),
+        ("a10081818109", MoqtAction::SubscribeTracks),
+    ] {
+        let bytes = decode_hex(hex);
+        let claim = MoqtClaim::decode(&cbor::decode(&bytes).expect("CBOR をデコードできる"))
+            .expect("claim をデコードできる");
+        assert_eq!(claim.scopes.len(), 1, "{hex}");
+        assert_eq!(claim.scopes[0].actions, [action.key()], "{hex}");
+
+        // encode は入力と同じ決定論的バイト列に戻る
+        assert_eq!(
+            encode_hex(
+                &cbor::encode(&claim.encode().expect("エンコードできる"))
+                    .expect("エンコードできる")
+            ),
+            hex
+        );
+
+        // 名前空間 / トラックの制限が無いスコープなので、任意の Full Track Name を認可する
+        assert!(claim.authorize(action, &namespace_bytes(&["example", "com"]), b"video"));
+
+        // 自分のアクションだけを認可し、もう一方のアクションは認可しない
+        let other = if action == MoqtAction::Setup {
+            MoqtAction::SubscribeTracks
+        } else {
+            MoqtAction::Setup
+        };
+        assert!(!claim.authorize(other, &namespace_bytes(&["example", "com"]), b"video"));
+    }
+}
+
+#[test]
+fn scope_without_requested_action_is_rejected() {
+    // Publish だけを認可する scope は SETUP も SUBSCRIBE_TRACKS も認可しない
+    let namespace = namespace_bytes(&["example", "com"]);
+    let claim = MoqtClaim::new().scope(MoqtScope::new([MoqtAction::Publish]));
+    assert!(!claim.authorize(MoqtAction::Setup, &namespace, b"video"));
+    assert!(!claim.authorize(MoqtAction::SubscribeTracks, &namespace, b"video"));
+    assert!(claim.authorize(MoqtAction::Publish, &namespace, b"video"));
+
+    // 複数スコープのいずれかが要求アクションを含めば認可する
+    let claim = MoqtClaim::new()
+        .scope(MoqtScope::new([MoqtAction::Publish]))
+        .scope(MoqtScope::new([MoqtAction::SubscribeTracks]));
+    assert!(claim.authorize(MoqtAction::SubscribeTracks, &namespace, b"video"));
+    assert!(!claim.authorize(MoqtAction::Setup, &namespace, b"video"));
+}
+
+#[test]
+fn unknown_action_keys_are_not_mapped() {
+    // §2.1 Table 1 に無い整数と、旧 CLIENT_SETUP の 0 は既知のアクションに変換しない
+    for key in [0, 10, -1, i64::MIN, i64::MAX] {
+        assert_eq!(MoqtAction::from_key(key), None, "key={key}");
+    }
+}
+
+#[test]
+fn action_integer_out_of_i64_range_is_rejected() {
+    // CBOR の整数は i64 の範囲を超え得るが、action は i64 として解釈できないため
+    // 型エラーで claim 全体を拒否する (fail-closed)。符号なし / 負の両方の表現を含む
+    for out_of_range in [Value::Unsigned(u64::MAX), Value::Negative(u64::MAX)] {
+        let value = Value::Map(vec![(
+            Value::integer(MOQT_SCOPES_KEY),
+            Value::Array(vec![Value::Array(vec![Value::Array(vec![out_of_range])])]),
+        )]);
+        assert_eq!(
+            MoqtClaim::decode(&value),
+            Err(C4mError::UnexpectedType("moqt-action"))
+        );
+    }
+
+    // i64 の端にある未知の action は保持され、wire 往復でも失われない
+    for key in [i64::MIN, i64::MAX] {
+        let claim = MoqtClaim {
+            scopes: vec![MoqtScope {
+                actions: vec![key],
+                namespace: Vec::new(),
+                track: None,
+            }],
+        };
+        let wire =
+            cbor::encode(&claim.encode().expect("エンコードできる")).expect("CBOR へ変換できる");
+        let decoded = MoqtClaim::decode(&cbor::decode(&wire).expect("CBOR をデコードできる"))
+            .expect("デコードできる");
+        assert_eq!(decoded, claim, "key={key}");
+    }
+}
+
+#[test]
+fn unknown_action_key_in_scope_is_kept_and_does_not_authorize_setup() {
+    // 旧 CLIENT_SETUP=0 だけを持つ claim である {0: [[[0]]]}。0 は既知のアクションでは
+    // ないため MoqtAction には変換できないが、scope の action 整数としては保持される
+    let bytes = decode_hex("a10081818100");
+    let claim = MoqtClaim::decode(&cbor::decode(&bytes).expect("CBOR をデコードできる"))
+        .expect("未知の action 整数を含む claim もデコードできる");
+    assert_eq!(claim.scopes[0].actions, [0]);
+    // 0 を SETUP (1) の alias にしないため、SETUP は認可されない
+    assert!(!claim.authorize(
+        MoqtAction::Setup,
+        &namespace_bytes(&["example", "com"]),
+        b"video"
+    ));
+    // 再エンコードしても未知の整数 0 はそのまま残る
+    assert_eq!(
+        encode_hex(
+            &cbor::encode(&claim.encode().expect("エンコードできる")).expect("エンコードできる")
+        ),
+        "a10081818100"
+    );
+}
+
+#[test]
+fn legacy_authorization_context_table() {
+    // 旧 JWT 形式の DPoP proof の action 文字列を厳密に固定する。draft-02 §4.2 の
+    // CWT 形式は整数の action コードを使うため、この表は旧形式との互換のためだけに残す
+    let table: [(MoqtAction, Option<&str>); 9] = [
+        (MoqtAction::Setup, Some("SETUP")),
+        (MoqtAction::PublishNamespace, Some("PUB_NS")),
+        (MoqtAction::SubscribeNamespace, Some("SUB_NS")),
+        (MoqtAction::Subscribe, Some("SUBSCRIBE")),
+        (MoqtAction::RequestUpdate, Some("REQ_UPDATE")),
+        (MoqtAction::Publish, Some("PUBLISH")),
+        (MoqtAction::Fetch, Some("FETCH")),
+        (MoqtAction::TrackStatus, Some("TRK_STATUS")),
+        (MoqtAction::SubscribeTracks, None),
+    ];
+    for action in MoqtAction::ALL {
+        let (_, expected) = table
+            .iter()
+            .find(|(candidate, _)| *candidate == action)
+            .expect("表に全アクションがある");
+        assert_eq!(action.authorization_context(), *expected, "{action:?}");
+        // 表の全文字列について、一致するのはそのアクションだけである
+        for (other, value) in table {
+            let expected_match = other == action && value == *expected;
+            match value {
+                Some(value) => assert_eq!(
+                    action.matches_authorization_context(value),
+                    expected_match,
+                    "{action:?} / {value}"
+                ),
+                None => assert!(
+                    !action.matches_authorization_context("SUBSCRIBE_TRACKS"),
+                    "{action:?} は旧形式の文字列を持たない"
+                ),
+            }
+        }
+    }
+    // 旧 CLIENT_SETUP / SERVER_SETUP という文字列はどのアクションの識別子でもない
+    for action in MoqtAction::ALL {
+        assert!(!action.matches_authorization_context("CLIENT_SETUP"));
+        assert!(!action.matches_authorization_context("SERVER_SETUP"));
+    }
 }
 
 #[test]
