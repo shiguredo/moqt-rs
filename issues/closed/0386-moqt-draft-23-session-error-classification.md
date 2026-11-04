@@ -33,7 +33,7 @@ INVALID_PARAMETER / CLOSED_CONTROL_STREAM、DELTA_ENCODING_OVERFLOW / FIELD_LENG
 
 ## 依存・関連
 
-- 関連: [0311](0311-draft-22-error-classification-consistency.md)
+- 関連: [0311](0311-draft-23-error-classification-consistency.md)
 
 ## 解決方法
 
