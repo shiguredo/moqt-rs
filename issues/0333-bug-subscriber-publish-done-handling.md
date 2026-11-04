@@ -4,10 +4,11 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-subscriber-publish-done-handling
 - Polished: 2026-10-20
+- Refreshed: 2026-11-04
 
 ## 目的
 
-draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE) と §12.4 (Publish Done Codes) は、PUBLISH_DONE がその subscription の終端であり、status code ごとに意味が異なることを定める。moq-sub は PUBLISH_DONE を 1 通受けると status code も track も問わずパイプライン全体を停止するため、ある track の購読だけが終了しても他の track の受信・再生が止まる。購読単位の終了と status code 別の扱いを実装する。
+draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE) と §12.4 (Publish Done Codes) は、PUBLISH_DONE がその subscription の終端であり、status code ごとに意味が異なることを定める。moq-sub は PUBLISH_DONE を 1 通受けると status code も track も問わずパイプライン全体を停止するため、ある track の購読だけが終了しても他の track の受信・再生が止まる。購読単位の終了と status code 別の扱いを実装する。
 
 ## 現状
 
@@ -45,8 +46,9 @@ draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE) と §12.4 (Publish Done Codes)
   - `TRACK_ENDED` (0x2): 正常終了。該当 track を恒久的に終了する。移行先では購読しない。
   - `GOING_AWAY` (0x4): 該当 track を終了待ちにし、cleanup 後に「移行待ち」として保持する。セッション移行の判断は既存の `SessionEvent::GoawayReceived` 経路が担う。PUBLISH_DONE(GOING_AWAY) を移行のトリガーにしない。移行が成立した場合は移行先で購読を張り直して track を再開する。全 media track が恒久的に終了し、移行待ちも無い場合は移行せず終了してよい。
   - その他の status code はエラーとして warn ログを出し、該当 track を恒久的に終了する。移行先では購読しない。セッション全体は閉じない。自動再購読はしない。
-    - 対象: `INTERNAL_ERROR` 0x0 / `UNAUTHORIZED` 0x1 / `TOO_FAR_BEHIND` 0x5 / `EXPIRED` 0x6 / `UPDATE_FAILED` 0x8 / `EXCESSIVE_LOAD` 0x9 / `MALFORMED_TRACK` 0x12、および未知の code。
+    - 対象: `INTERNAL_ERROR` 0x0 / `UNAUTHORIZED` 0x1 / `TOO_FAR_BEHIND` 0x5 / `EXPIRED` 0x6 / `EXPIRED_AUTH_TOKEN` 0x7 / `UPDATE_FAILED` 0x8 / `EXCESSIVE_LOAD` 0x9 / `MALFORMED_TRACK` 0x12、および未知の code。
     - `UPDATE_FAILED` は example が video に送る `REQUEST_UPDATE` の失敗応答であり、その旨をログに残す。
+    - `EXPIRED_AUTH_TOKEN` は draft-ietf-moq-transport-23 §12.4 (Publish Done Codes) が「購読を認可した認可トークンの有効期限が切れた」と定め、§9.9 は期限切れの認可トークンで購読を終える publisher にこの status code を送る SHOULD を課す。認可トークンの更新・再取得は本 issue の範囲外であるため、受信側は他のエラー status code と同じく該当 track を恒久的に終了し、自動再購読はしない。
 - track の終了処理:
   - 終了待ちの subscription を `HashMap<u64, (TrackKind, PublishDoneDisposition)>` で保持し、現在の購読の request_id を `active_requests` に保持する。`PublishDoneDisposition` は `TrackEnded` / `GoingAway` / `Error` を表す。
   - 起動時は購読した catalog / video / audio の request_id で `active_requests` を、購読した media track で `active_media_tracks` を初期化する。
