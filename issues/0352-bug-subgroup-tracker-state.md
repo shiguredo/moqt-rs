@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-subgroup-tracker-state
 - Polished: 2026-10-21
+- Refreshed: 2026-11-04
 
 ## 目的
 
@@ -17,10 +18,10 @@
   したがって Session の wire 終端経路では `mark_reset` / `mark_stop_sending` が `ClosedFin` を上書きする状態には到達しない。
   ただし `mark_fin` 条件 3 失敗後の破棄分岐は別途 recovery が必要である (設計方針参照)。
   公開 `SubgroupTracker` API の利用者や将来の経路では到達し得る。
-- `mark_fin` は doc で「未知キーに対しては無視」としながら、`entries` にキーが無くても `fin_last_object_ids` に挿入する。これは draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 2 の検出に必要な記録であり、実装の意図は「状態エントリは作らないが、最終 Object ID は記録する」である。doc と `tests/test_subgroup_tracker.rs` の `mark_without_open_is_noop` のコメントがこの意図と一致していない。
+- `mark_fin` は doc で「未知キーに対しては無視」としながら、`entries` にキーが無くても `fin_last_object_ids` に挿入する。これは draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 2 の検出に必要な記録であり、実装の意図は「状態エントリは作らないが、最終 Object ID は記録する」である。doc と `tests/test_subgroup_tracker.rs` の `mark_without_open_is_noop` のコメントがこの意図と一致していない。
 - `ClosedFin` を持つキーでは、`ClosedFin.last_object_id` と `fin_last_object_ids` が同じ値を二重に保持している。`fin_last_object_ids` は未知キーの FIN も記録するため、`ClosedFin` より広い範囲を保持する。
 - 影響: FIN 済み Subgroup の再オープンを許し、同じ Object ID の重複受信や状態不整合を招く。たとえば `open(key)` → `mark_fin(key, Some(5))` → `mark_reset(key, None)` → `open(key)` の順で呼ぶと、最後の `open(key)` が成功する。`check_object_after_fin` は `object_id > 5` のみを Malformed とするため、Object ID 5 以下の Object が再度受理され得る。
-- 根拠: `refs/moq/draft-ietf-moq-transport-22.txt` §2.2 (Subgroups) は
+- 根拠: `refs/moq/draft-ietf-moq-transport-23.txt` §2.2 (Subgroups) は
   「Objects from the same Subgroup MUST NOT be sent on different streams, unless one of the streams was reset prematurely」とし、
   §11.3.2 (Closing Subgroup Streams) は
   「A sender might send all objects in a Subgroup and the FIN on a QUIC stream, and then reset the stream. ...
@@ -30,7 +31,7 @@
 ## 設計方針
 
 - 終端理由は FIN / RESET_STREAM / STOP_SENDING の 3 種があり得る。公開 `SubgroupStreamState` は単一の代表状態を返すため、FIN を最優先の終端理由として扱う。`ClosedFin` を記録済みのキーでは `mark_reset` / `mark_stop_sending` を no-op にし、状態を `ClosedFin` のまま維持する。`can_reopen` は `ClosedFin` に対して false のままとする。
-- `Reset` と `StoppedByPeer` の相互上書きは従来どおり後勝ちでよい。どちらも `can_reopen` は true で、STOP_SENDING 後の Forward State 0→1 条件は `Session` が `stopped_outgoing_subgroups` で別途管理している。
+- `Reset` と `StoppedByPeer` の相互上書きは従来どおり後勝ちでよい。どちらも `can_reopen` は true で、STOP_SENDING の後に購読を再開する REQUEST_UPDATE (PAUSED 1→0) を受けた場合の再オープン許可は `Session` が `stopped_outgoing_subgroups` で別途管理している (draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams))。
 - `mark_fin` が条件 3 (最終 Object ID 不一致) で `Err` を返した場合は状態も `fin_last_object_ids` も更新しない。このとき `entries` は直前の状態のまま (`Open` / `ClosedFin` / `Reset` / `StoppedByPeer` のいずれか、またはエントリなし) である。
 - `Session::recv_data_stream_closed` の破棄分岐は、`mark_fin` が `Err` を返した場合に `mark_reset` で `Reset` にして再オープンを許す既存挙動
   (`discarded_fin_marks_tracker_terminal_and_allows_reopen`) を持つ。
