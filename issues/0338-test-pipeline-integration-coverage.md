@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/test-pipeline-integration-coverage
 - Polished: 2026-10-20
+- Refreshed: 2026-11-04
 
 ## 目的
 
@@ -21,7 +22,7 @@ library の tests / PBT / fuzz は厚いが、example の pipeline 統合経路 
   キーフレームを強制する (`crates/moq-pub/src/gop.rs` の `MIN_GROUP_DURATION_US`)。そのため FETCH が
   壊れていても、購読開始から約 300 ms 後には live のキーフレームで最初のフレームが届き得る。
   ATTEMPT_TIMEOUT を GOP より短くするだけでは FETCH 経路を分離できない。
-- `fuzz/fuzz_targets/fuzz_session.rs` は `RecvFetchHeader` と `SendFetch` を持つが、FETCH entry の受信と FETCH_OK + 応答 stream の成功経路を踏まない。
+- `fuzz/fuzz_targets/fuzz_session.rs` は `RecvFetchHeader` と `SendFetch` を持つが、FETCH entry の受信と REQUEST_OK (FETCH_OK) + 応答 stream の成功経路を踏まない。
 - `peer_harness` は `crates/tokio-moq/src/lib.rs` の `#[cfg(test)] mod peer_harness;` であり、`crates/moq-pub` / `crates/moq-sub` / `e2e-tests` から参照できない。`TestPeer` などの型とメソッドも `pub(crate)` である。
 - 影響: 0339 / 0340 の example 改修 (pipeline 分割、decoder 共通化) を安全に進められない。
 - 依存: 0330 (受信 SUBSCRIBE の Object / PUBLISH_DONE)、0332 (MP4 の PROP_TIMESCALE)、0333 (PUBLISH_DONE の track 単位処理)、0335 (GOAWAY 移行後の Audio Config リセット) の実装後に着手する。これらの挙動を固定するテストは、各 issue の実装後に追加する。
@@ -42,7 +43,7 @@ library の tests / PBT / fuzz は厚いが、example の pipeline 統合経路 
 - moq-pub の統合テスト:
   - `serve_peer_request` 経由で video / audio / catalog の SUBSCRIBE が SUBSCRIBE_OK になり、未知の track が REQUEST_ERROR(REQUEST_DOES_NOT_EXIST) になること。
   - `NEW_GROUP_REQUEST` が live capture の映像だけで受理され、MP4 パススルーでは受理されないこと (`accepted_new_group_request` の呼び出し経路)。
-  - フィルタ付き / Forward 0 の SUBSCRIBE は、0330 の実装に従って Object をフィルタするか REQUEST_NOT_SUPPORTED で拒否すること。
+  - フィルタ付き / PAUSED 1 (旧 FORWARD 0) の SUBSCRIBE は、0330 の実装に従って Object をフィルタするか REQUEST_NOT_SUPPORTED で拒否すること。
   - catalog の FETCH が Object / Empty / InvalidRange の各応答になること。
   - media の FETCH が unknown track / no published objects / empty range / descending group order / range filter の各応答になること。
   - `serve_fetch_entries` が End of Non-Existent Range / End of Unknown Range / Object を正しい順序で書き、FIN で閉じること。
@@ -50,8 +51,11 @@ library の tests / PBT / fuzz は厚いが、example の pipeline 統合経路 
 - moq-sub の統合テスト:
   - `receive_catalog` が fill fetch stream と subgroup stream の両方から catalog を適用し、delta を適用し、期限切れ・request_id 不一致・不正 Object をエラーにすること。
   - `resubscribe_tracks` が GOAWAY 移行先で catalog を FILL_PARAMETERS 付きで購読し、video に REQUEST_UPDATE を送り、映像にだけ直近 Group の FETCH を発行すること (video / audio の購読に FILL_PARAMETERS は載せない。音声の明示 FETCH は発行しない)。
-  - GOAWAY による session 移行の前後で音声が欠落しないこと。旧 session が最後に配送した位置から、新しい session の live の音声までの TIMESTAMP が連続することを確認する。音声の明示 FETCH を発行しないため、この連続性は relay が GOAWAY の Timeout まで購読を維持して配送を続けること (draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration)) に依存する。relay が Timeout 前に購読を止める実装では、移行中に publish された音声が欠落しうる。
-  - request stream 単位の再発行の前後で音声が欠落しないこと。旧 request stream を `STOP_SENDING` で閉じてから再購読するまでの音声が連続することを確認する。
+  - GOAWAY による session 移行の前後で音声が欠落しないこと。旧 session が最後に配送した位置から、新しい session の live の音声までの TIMESTAMP が連続することを確認する。音声の明示 FETCH を発行しないため、この連続性は relay が GOAWAY の Timeout まで購読を維持して配送を続けること (draft-ietf-moq-transport-23 §6.6.1 (Graceful Session Migration)) に依存する。relay が Timeout 前に購読を止める実装では、移行中に publish された音声が欠落しうる。
+  - request stream 単位の再発行の前後で音声が欠落しないこと。request stream 上の GOAWAY を送れるのは request の receiver (relay) だけで、
+    再発行するのは request の sender (moq-sub) である (draft-ietf-moq-transport-23 §9.2 (GOAWAY) の
+    "Only the receiver of a request can send GOAWAY on its request stream.")。旧 subscription を `STOP_SENDING` で終了させ、
+    旧 request stream を `RESET_STREAM` で閉じてから再購読するまでの音声が連続することを確認する。
   - `run` が catalog 取得から購読確立、shutdown までを完了すること。音声 1 Object の受信経路は、既存のテスト用 Opus データを使って検証する。
 - GOAWAY 移行と PUBLISH_DONE の track 単位処理は peer_harness で検証する。
   - 2 つの `TestPeerServer` を立て、移行元から `send_goaway` で移行先を指定する。移行先で再購読と FETCH が行われることを確認する。
