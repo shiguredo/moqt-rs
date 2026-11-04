@@ -4,10 +4,11 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-forget-subscription-stop-sending
 - Polished: 2026-10-20
+- Refreshed: 2026-11-04
 
 ## 目的
 
-draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE) は "The subscriber SHOULD send STOP_SENDING on all streams related to the subscription when it deletes subscription state." と SHOULD を課す。`Session::forget_subscription` は購読状態を削除するが、open な受信 data stream への STOP_SENDING を指示せず、doc にもアプリ責務の記載が無い。
+draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE) は "The subscriber SHOULD send STOP_SENDING on all streams related to the subscription when it deletes subscription state." と SHOULD を課す。`Session::forget_subscription` は購読状態を削除するが、open な受信 data stream への STOP_SENDING を指示せず、doc にもアプリ責務の記載が無い。
 SHOULD からの説明なき逸脱になっている。
 
 本 issue は subscriber 役の受信 data stream を対象とする。publisher 役の open な送信 stream の reset は 0308 の範囲であり、本 issue では扱わない。
