@@ -22,7 +22,18 @@
 //! §8.4 の "MUST allow multiple instances of the Property" と §16.8 (Properties) の
 //! "Endpoints MUST ignore unknown Property types" に従って複数インスタンスを保持する。多重
 //! 可否の表は `crate::property_scope` に集約する。
+//!
+//! # IMMUTABLE_PROPERTIES の内側探索
+//!
+//! draft-ietf-moq-loc-05 §3.1.2 (Immutable Properties) は、relay から見える不変の LOC
+//! Properties を IMMUTABLE_PROPERTIES (0x0B) として符号化することを SHOULD とする。
+//! draft-ietf-moq-transport-23 §10.7 (Immutable Properties) は、値の取得時に mutable
+//! プロパティ列と IMMUTABLE_PROPERTIES の内側の両方を探索することを MUST とする。
+//! [`LocProperties::find_varint`] / [`LocProperties::find_bytes`] と既知プロパティの
+//! accessor は最上位リストを優先し、無ければ IMMUTABLE_PROPERTIES の内側を探索する。
+//! [`LocProperties::iter`] は最上位リストだけを返す。
 
+use crate::track_properties::PROP_IMMUTABLE_PROPERTIES;
 use crate::{error::MessageError, varint};
 use alloc::vec::Vec;
 
@@ -190,17 +201,26 @@ impl LocProperties {
         self.0.push(prop);
     }
 
-    /// コレクションが空かどうかを返す
+    /// 最上位 (mutable) リストが空かどうかを返す
+    ///
+    /// IMMUTABLE_PROPERTIES (0x0B) の内側は対象にしない ([`LocProperties::len`] と同じ範囲)。
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    /// プロパティの数を返す
+    /// 最上位 (mutable) リストのプロパティ数を返す
+    ///
+    /// IMMUTABLE_PROPERTIES (0x0B) の内側のプロパティは数えない。
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
-    /// 全プロパティエントリのイテレータを返す
+    /// 最上位 (mutable) リストのプロパティエントリのイテレータを返す
+    ///
+    /// IMMUTABLE_PROPERTIES (0x0B) の内側は列挙しない。内側の値が必要な場合は
+    /// [`LocProperties::find_varint`] / [`LocProperties::find_bytes`] または既知プロパティの
+    /// accessor を使う (draft-ietf-moq-transport-23 §10.7 (Immutable Properties) の
+    /// "MUST search both")。
     pub fn iter(&self) -> impl Iterator<Item = &LocProperty> {
         self.0.iter()
     }
@@ -212,6 +232,10 @@ impl LocProperties {
     /// 未知 ID は複数インスタンスを保持したまま書き出す (draft-ietf-moq-transport-23 §8.4
     /// (Track and Object Properties) の "MUST allow multiple instances of the Property")。
     /// 同一 ID の並び順はソートが安定であるため入力順を保つ。
+    ///
+    /// IMMUTABLE_PROPERTIES (0x0B) の値はバイト列としてそのまま書き出し、内側の KVP 列は
+    /// 解釈も検証もしない (値の取得時に [`LocProperties::find_varint`] /
+    /// [`LocProperties::find_bytes`] が検証する)。
     ///
     /// # Errors
     ///
@@ -289,12 +313,23 @@ impl LocProperties {
     /// 未知 ID の複数インスタンスは正当として保持する (draft-ietf-moq-transport-23 §8.4
     /// (Track and Object Properties) の "MUST allow multiple instances of the Property")。
     ///
+    /// IMMUTABLE_PROPERTIES (0x0B) の内側は構造として保持するだけで、この関数では検証しない。
+    /// 内側の検証 (重複 ID・既知プロパティの値域と長さ) は [`LocProperties::find_varint`] /
+    /// [`LocProperties::find_bytes`] の探索時に、この関数と共通の KVP パーサーで行う。内側が
+    /// 破損している場合は探索結果を `None` とし、この関数の戻り値とエラー分類は変えない。
+    ///
     /// # Errors
     ///
-    /// - delta-key のオーバーフロー: `ProtocolViolation`
+    /// - delta-key のオーバーフロー: `DeltaEncodingOverflow`
+    ///   (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の
+    ///   DELTA_ENCODING_OVERFLOW)
     /// - 単一に限られる既知 ID の重複: `MalformedTrack`
     ///   (draft-ietf-moq-transport-23 §8.4 / §12.1 (Malformed Tracks) 条件 9。呼び出し側は
-    ///   セッション終了ではなく、同じ Track の購読・fetch の取消へ渡す)
+    ///   セッション終了ではなく、同じ Track の購読・fetch の取消へ渡す)。本関数が検出するのは
+    ///   最上位 (mutable) リスト内の重複だけであり、最上位と IMMUTABLE_PROPERTIES の内側に
+    ///   同じ既知 ID が現れる場合は検出しない (§10.7 は複数の値を許すプロパティに限り両方への
+    ///   出現を許す。単一値プロパティが両方に現れると §8.4 / §12.1 条件 9 の malformed になるが、
+    ///   その判定は本モジュールの範囲外)
     /// - 奇数 ID の宣言長が 65535 バイトを超える: `FieldLengthExceeded`
     /// - Audio Level が 255 を超える: `MalformedKeyValue`
     /// - Video Frame Marking の宣言長が 1-4 バイトでない: `MalformedKeyValue`
@@ -316,67 +351,31 @@ impl LocProperties {
         let inner = &buf[pos..pos + prop_len];
         pos += prop_len;
 
-        let mut properties = Vec::new();
-        let mut inner_pos = 0;
-        let mut prev_id: u64 = 0;
-
-        while inner_pos < inner.len() {
-            let (prop_id, _delta) = crate::kvp::decode_delta_key(prev_id, inner, &mut inner_pos)?;
-
-            prev_id = prop_id;
-
-            let value = if prop_id % 2 == 0 {
-                // 偶数 ID: varint 値
-                let (v, n) = varint::decode(&inner[inner_pos..])?;
-                inner_pos += n;
-                validate_known_property(prop_id, v)?;
-                LocPropertyValue::VarInt(v)
-            } else {
-                // 奇数 ID: Length (varint) + bytes
-                let (len, n) = varint::decode(&inner[inner_pos..])?;
-                inner_pos += n;
-                // draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure):
-                // "The maximum length of a value is 2^16-1 bytes.  If an endpoint receives a
-                // length larger than the maximum, it MUST close the session with
-                // FIELD_LENGTH_EXCEEDED."
-                if len > 65535 {
-                    return Err(MessageError::FieldLengthExceeded(
-                        "odd type key-value-pair length exceeds 65535",
-                    ));
-                }
-                // 既知プロパティ (Video Frame Marking) の宣言長を切り詰め検査より先に検証する
-                validate_known_property_len(prop_id, len)?;
-                let len = varint::checked_len(len, inner[inner_pos..].len())?;
-                let bytes = inner[inner_pos..inner_pos + len].to_vec();
-                inner_pos += len;
-                LocPropertyValue::Bytes(bytes)
-            };
-
-            properties.push(LocProperty { prop_id, value });
-        }
-
-        // 単一に限られる既知 ID の重複を malformed Track として報告する
-        // (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1
-        // (Malformed Tracks) 条件 9)。未知 ID の重複は §8.4 の "MUST allow multiple
-        // instances of the Property" により正当である。
-        if crate::property_scope::has_duplicate_single_property(
-            properties.iter().map(|p| p.prop_id),
-        ) {
-            return Err(MessageError::MalformedTrack(DUPLICATE_LOC_PROPERTY));
-        }
+        // 最上位リストの走査は IMMUTABLE_PROPERTIES の内側探索と共通の walk_kv_pairs に置く。
+        // この経路では 0x0B を通常の奇数 ID プロパティとして保持するため、入れ子の 0x0B も
+        // 従来どおり受理する (decode の戻り値とエラー分類を変えない)。
+        let properties = walk_kv_pairs(inner, true)?
+            .into_iter()
+            .map(LocPropertyRef::to_owned_property)
+            .collect();
 
         Ok((Self(properties), pos))
     }
 
     // ─── 既知プロパティアクセサ ──────────────────────────────────────
+    //
+    // 各 accessor は最上位リストを優先し、無ければ IMMUTABLE_PROPERTIES (0x0B) の内側も
+    // 探索する (draft-ietf-moq-transport-23 §10.7 (Immutable Properties) の "MUST search
+    // both")。探索規則の詳細は find_varint / find_bytes を参照。
 
     /// Timestamp (ID=0x10): エンコードされたメディアフレームのタイムスタンプ
     ///
     /// draft-ietf-moq-loc-04 §2.3.1.1
     /// Timescale プロパティが存在しない場合は Unix エポック以降のマイクロ秒。
     /// Timescale プロパティが存在する場合は Timescale で定義された単位のメディア時刻。
+    /// 最上位リストに無ければ IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。
     pub fn timestamp(&self) -> Option<u64> {
-        self.varint_by_id(PROP_TIMESTAMP)
+        self.find_varint(PROP_TIMESTAMP)
     }
 
     /// Timescale (ID=0x08): Timestamp の単位を定義する (1 秒あたりのユニット数)
@@ -385,31 +384,35 @@ impl LocProperties {
     /// 値域は u64 全域のため、Timestamp と同様に上限検証は不要。
     /// 一般的な値: 1000000 (マイクロ秒), 48000 (48kHz オーディオ), 90000 (90kHz ビデオ)
     /// このプロパティが存在しない場合、Timestamp は Unix エポック以降のマイクロ秒にデフォルトする。
+    /// 最上位リストに無ければ IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。
     pub fn timescale(&self) -> Option<u64> {
-        self.varint_by_id(PROP_TIMESCALE)
+        self.find_varint(PROP_TIMESCALE)
     }
 
     /// Video Frame Marking (ID=0x09): RFC 9626 に基づくビデオフレームフラグ
     ///
     /// draft-ietf-moq-loc-04 §2.3.2.2 (奇数 ID のバイト列、長さ 1-4 bytes)
     /// フラグの内容は解釈せず、バイト列としてそのまま返す。
+    /// 最上位リストに無ければ IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。
     pub fn video_frame_marking(&self) -> Option<&[u8]> {
-        self.bytes_by_id(PROP_VIDEO_FRAME_MARKING)
+        self.find_bytes(PROP_VIDEO_FRAME_MARKING)
     }
 
     /// Audio Level (ID=0x0C): RFC 6464 に基づく音声レベルと音声アクティビティ (下位 8 bit)
     ///
     /// draft-ietf-moq-loc-04 §2.3.3.2 (偶数 ID の varint 値、0x00-0xFF)
+    /// 最上位リストに無ければ IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。
     pub fn audio_level(&self) -> Option<u64> {
-        self.varint_by_id(PROP_AUDIO_LEVEL)
+        self.find_varint(PROP_AUDIO_LEVEL)
     }
 
     /// Video Config (ID=0x0D): ビデオコーデック設定 (extradata)
     ///
     /// draft-ietf-moq-loc-04 §2.3.2.1
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+    /// 最上位リストに無ければ IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。
     pub fn video_config(&self) -> Option<&[u8]> {
-        self.bytes_by_id(PROP_VIDEO_CONFIG)
+        self.find_bytes(PROP_VIDEO_CONFIG)
     }
 
     /// Audio Config (ID=0x0F): 音声コーデックの configuration bytes
@@ -417,33 +420,287 @@ impl LocProperties {
     /// draft-ietf-moq-loc-04 §2.3.3.1
     /// WebCodecs の AudioDecoderConfig description プロパティに対応する。
     /// LOC 層はコーデックの内容を解釈せず、opaque bytes として返す。
+    /// 最上位リストに無ければ IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。
     pub fn audio_config(&self) -> Option<&[u8]> {
-        self.bytes_by_id(PROP_AUDIO_CONFIG)
+        self.find_bytes(PROP_AUDIO_CONFIG)
     }
 
-    /// 指定 ID の varint 値を検索する内部ヘルパー
-    fn varint_by_id(&self, id: u64) -> Option<u64> {
-        self.0.iter().find_map(|p| {
-            if p.prop_id == id
-                && let LocPropertyValue::VarInt(v) = p.value
-            {
-                return Some(v);
-            }
-            None
-        })
+    /// 指定 ID の varint 値を取得する
+    ///
+    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties) の "When looking for the
+    /// value of a property, processors MUST search both the mutable properties and the
+    /// contents of Immutable Properties." に従い、最上位リストを先に探索し、無ければ
+    /// IMMUTABLE_PROPERTIES (0x0B) の内側を delta-key KVP 列として探索する。
+    ///
+    /// draft-ietf-moq-loc-05 §3.1.2 (Immutable Properties) は、relay から見える不変の LOC
+    /// Properties を IMMUTABLE_PROPERTIES として符号化することを SHOULD とする。どの
+    /// プロパティを immutable にするかは publisher の判断であり、本実装は値の取得時に
+    /// transport 側の MUST に従って内側も探索する。
+    ///
+    /// ID と値形式 (偶数 ID は varint) の両方が一致する最初のインスタンスを返す。最上位と
+    /// 内側の両方に同じ ID がある場合は最上位を優先する (既存の `ObjectProperties` /
+    /// `TrackProperties` の getter と同じ規則)。
+    ///
+    /// 最上位リストの多重検証は行わず、最初の一致を返す。IMMUTABLE_PROPERTIES の内側を探索
+    /// する場合は内側の KVP 列の検証 (値域・長さ・既知 ID の重複を含む) を行い、内側が破損
+    /// している場合・入れ子の IMMUTABLE_PROPERTIES (0x0B) を検出した場合・内側に単一に
+    /// 限られる既知 ID の重複がある場合は `None` を返す。内側は 1 回の走査で全体を検証する
+    /// ため、要求 ID の一致より後ろに構造エラーがある場合も `None` になる。
+    ///
+    /// 内側だけにある LOC 固有の値域・長さ違反 (Audio Level の 8 bit 超過や Video Frame
+    /// Marking の長さ違反など) も探索時に検出して `None` に写す。この扱いは既存の
+    /// `ObjectProperties` / `TrackProperties` の getter と同じであり、LOC 固有規則を知る
+    /// 層 (本モジュールまたはその呼び出し側) で `MalformedKeyValue` を返すかは別課題である。
+    ///
+    /// この探索規則は draft 由来であり、将来の draft 改版で変わる可能性がある。
+    pub fn find_varint(&self, prop_id: u64) -> Option<u64> {
+        match self.find_property(prop_id, FindValue::VarInt)? {
+            LocPropertyValueRef::VarInt(v) => Some(v),
+            // find_property が FindValue::VarInt で濾過しているため実際には到達しない。
+            // 値形式の取り違えを型で示すため、網羅性のために残す。
+            LocPropertyValueRef::Bytes(_) => None,
+        }
     }
 
-    /// 指定 ID のバイト列値を検索する内部ヘルパー
-    fn bytes_by_id(&self, id: u64) -> Option<&[u8]> {
-        self.0.iter().find_map(|p| {
-            if p.prop_id == id
-                && let LocPropertyValue::Bytes(b) = &p.value
-            {
-                return Some(b.as_slice());
-            }
-            None
-        })
+    /// 指定 ID の生バイト列を取得する
+    ///
+    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties) の "MUST search both" に
+    /// 従い、最上位リストを先に探索し、無ければ IMMUTABLE_PROPERTIES (0x0B) の内側を
+    /// delta-key KVP 列として探索する。
+    ///
+    /// draft-ietf-moq-loc-05 §3.1.2 (Immutable Properties) は、relay から見える不変の LOC
+    /// Properties を IMMUTABLE_PROPERTIES として符号化することを SHOULD とする。
+    /// draft-ietf-moq-loc-05 §6.1 (MOQ Properties Registry) の Table 1 は 0x0D
+    /// (VIDEO_CONFIG) / 0x0F (AUDIO_CONFIG) の Scope を "Track, Object" と定める。どの
+    /// プロパティを immutable にするかは publisher の判断であり、本実装は値の取得時に
+    /// transport 側の MUST に従って内側も探索する。
+    ///
+    /// 内側から取得する場合も外側の `Bytes` を借用したまま返し、値のバイト列を `Vec` に
+    /// コピーしない。ID と値形式 (奇数 ID はバイト列) の両方が一致する最初のインスタンスを
+    /// 返し、最上位と内側の両方に同じ ID がある場合は最上位を優先する。
+    ///
+    /// 内側のデコードと検証の失敗、入れ子の IMMUTABLE_PROPERTIES、既知 ID の重複に対する
+    /// 扱いは [`LocProperties::find_varint`] と同じである。
+    ///
+    /// この探索規則と LOC の節番号は draft 由来であり、将来の draft 改版で変わる可能性がある。
+    pub fn find_bytes(&self, prop_id: u64) -> Option<&[u8]> {
+        match self.find_property(prop_id, FindValue::Bytes)? {
+            // find_property が FindValue::Bytes で濾過しているため実際には到達しない。
+            // 値形式の取り違えを型で示すため、網羅性のために残す。
+            LocPropertyValueRef::VarInt(_) => None,
+            LocPropertyValueRef::Bytes(b) => Some(b),
+        }
     }
+
+    /// 最上位リストと IMMUTABLE_PROPERTIES の内側から、ID と値形式が一致する最初の
+    /// インスタンスを探す
+    ///
+    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties) の "MUST search both" の
+    /// 共通探索であり、[`LocProperties::find_varint`] / [`LocProperties::find_bytes`] は
+    /// `wanted` を変えて呼ぶだけである。最上位リストを優先し、ID が一致しても値形式が
+    /// 一致しないインスタンスは読み飛ばす。最上位リストは多重検証しないが、内側は
+    /// [`walk_kv_pairs`] が値域・長さ・重複を検証し、失敗を `None` に写す。詳細は公開
+    /// メソッド側の doc を参照。
+    fn find_property(&self, prop_id: u64, wanted: FindValue) -> Option<LocPropertyValueRef<'_>> {
+        // 最上位リストを先に探索する (最上位優先)
+        for p in &self.0 {
+            if p.prop_id == prop_id {
+                let value = match &p.value {
+                    LocPropertyValue::VarInt(v) => LocPropertyValueRef::VarInt(*v),
+                    LocPropertyValue::Bytes(b) => LocPropertyValueRef::Bytes(b.as_slice()),
+                };
+                if value.matches(wanted) {
+                    return Some(value);
+                }
+            }
+        }
+        // IMMUTABLE_PROPERTIES の内側を探索する。内側の値は外側の Bytes への借用のまま返す。
+        let inner = self.immutable_properties()?;
+        let props = walk_kv_pairs(inner, false).ok()?;
+        props
+            .into_iter()
+            .find(|p| p.prop_id == prop_id && p.value.matches(wanted))
+            .map(|p| p.value)
+    }
+
+    /// IMMUTABLE_PROPERTIES (0x0B) の内側の生バイト列を返す
+    ///
+    /// 中身は入れ子の delta-key KVP 列であり、外側の Properties Length を伴わない
+    /// (draft-ietf-moq-transport-23 §10.7 (Immutable Properties) / §8.3
+    /// (Key-Value-Pair Structure))。[`LocProperties::find_bytes`] はこのバイト列を借用した
+    /// まま内側の値のスライスを返す。
+    ///
+    /// 最初の IMMUTABLE_PROPERTIES (0x0B) のみを対象とする。0x0B は単一に限られるため、
+    /// `decode` は複数インスタンスを `MalformedTrack` で、`encode` は `ProtocolViolation` で
+    /// 拒否する。`push` だけで組み立てた入力は検証されないため、その前提が破れた場合の防御
+    /// として、先頭の 0x0B がバイト列でない場合も後続の 0x0B を探索せず `None` を返す。
+    ///
+    /// draft-ietf-moq-loc-05 §3.1.2 (Immutable Properties) は、relay から見える不変の LOC
+    /// Properties をこの形で符号化することを SHOULD とする。
+    fn immutable_properties(&self) -> Option<&[u8]> {
+        for p in &self.0 {
+            if p.prop_id == PROP_IMMUTABLE_PROPERTIES {
+                // 0x0B は単一に限られる。先頭の 0x0B がバイト列でない場合は前提が破れた
+                // 入力であるため、後続の 0x0B を探索せず打ち切る。
+                return match &p.value {
+                    LocPropertyValue::Bytes(b) => Some(b.as_slice()),
+                    LocPropertyValue::VarInt(_) => None,
+                };
+            }
+        }
+        None
+    }
+}
+
+/// [`LocProperties::find_property`] が探す値の形式
+///
+/// LOC プロパティは偶数 ID が varint 値、奇数 ID が長さ付きバイト列であるため、ID と値形式の
+/// 両方が一致するインスタンスだけを探索結果として扱う。手で組み立てた in-memory 入力では
+/// ID が一致しても値形式が異なる場合は読み飛ばす。
+#[derive(Debug, Clone, Copy)]
+enum FindValue {
+    /// 偶数 ID の varint 値
+    VarInt,
+    /// 奇数 ID の長さ付きバイト列
+    Bytes,
+}
+
+/// 借用した LOC プロパティ値
+///
+/// KVP 列の走査結果を保持する内部表現であり、奇数 ID の値は元のバッファへの借用のまま持つ。
+/// [`LocProperties::find_bytes`] が IMMUTABLE_PROPERTIES (0x0B) の内側の値を `Vec` へ
+/// コピーせず返せるようにするために使う。
+#[derive(Debug, Clone, Copy)]
+enum LocPropertyValueRef<'a> {
+    /// 偶数 ID の値 (varint)
+    VarInt(u64),
+    /// 奇数 ID の値 (借用したバイト列)
+    Bytes(&'a [u8]),
+}
+
+impl LocPropertyValueRef<'_> {
+    /// 値の形式が `wanted` と一致するかを返す
+    fn matches(self, wanted: FindValue) -> bool {
+        matches!(
+            (self, wanted),
+            (Self::VarInt(_), FindValue::VarInt) | (Self::Bytes(_), FindValue::Bytes)
+        )
+    }
+}
+
+/// 借用した LOC プロパティ
+///
+/// [`walk_kv_pairs`] の走査結果を保持する内部表現であり、奇数 ID の値のバイト列をコピーせず
+/// 元のバッファへの借用のまま持つ。
+#[derive(Debug, Clone, Copy)]
+struct LocPropertyRef<'a> {
+    /// プロパティ ID
+    prop_id: u64,
+    /// プロパティ値
+    value: LocPropertyValueRef<'a>,
+}
+
+impl LocPropertyRef<'_> {
+    /// 所有権を持つ [`LocProperty`] へ変換する
+    ///
+    /// [`LocProperties::decode`] がワイヤ形式から所有権を持つコレクションを組み立てるために
+    /// 使う。バイト列の複製が起きるのはこの変換の 1 回だけである。
+    fn to_owned_property(self) -> LocProperty {
+        LocProperty {
+            prop_id: self.prop_id,
+            value: match self.value {
+                LocPropertyValueRef::VarInt(v) => LocPropertyValue::VarInt(v),
+                LocPropertyValueRef::Bytes(b) => LocPropertyValue::Bytes(b.to_vec()),
+            },
+        }
+    }
+}
+
+/// LOC プロパティの Key-Value-Pair 列をバッファ全体から借用して走査する
+///
+/// カウントプレフィックスなしで `inner` 末尾まで読む。`LocProperties::decode` の本体と、
+/// IMMUTABLE_PROPERTIES (0x0B) の内側探索 ([`LocProperties::find_varint`] /
+/// [`LocProperties::find_bytes`]) が共有する唯一のパーサーである。奇数 ID の値は `Vec` へ
+/// コピーせず `inner` への借用のまま返す。
+///
+/// 検証は `LocProperties::decode` と同一である。
+///
+/// - delta-key のオーバーフローを `DeltaEncodingOverflow` で拒否する
+///   (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure))
+/// - 偶数 ID の値域 (Audio Level が 0-255) を `MalformedKeyValue` で拒否する
+/// - 奇数 ID の宣言長が 65535 を超える場合を `FieldLengthExceeded` で拒否する
+/// - 奇数 ID の既知プロパティの宣言長 (Video Frame Marking が 1-4 バイト) を
+///   `MalformedKeyValue` で拒否する
+/// - 単一に限られる既知 ID の重複を `MalformedTrack` で拒否する
+///   (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1
+///   (Malformed Tracks) 条件 9)。未知 ID の重複は §8.4 の "MUST allow multiple
+///   instances of the Property" により正当である
+///
+/// `allow_immutable` が false の場合、IMMUTABLE_PROPERTIES (0x0B) の出現を拒否する。入れ子の
+/// IMMUTABLE_PROPERTIES は draft-ietf-moq-transport-23 §10.7 (Immutable Properties) により
+/// malformed Track である。`LocProperties::decode` はこの関数を true で呼ぶため、従来どおり
+/// 入れ子の 0x0B も構造として保持する (decode の戻り値とエラー分類を変えない)。
+fn walk_kv_pairs<'a>(
+    inner: &'a [u8],
+    allow_immutable: bool,
+) -> Result<Vec<LocPropertyRef<'a>>, MessageError> {
+    let mut properties = Vec::new();
+    let mut inner_pos = 0;
+    let mut prev_id: u64 = 0;
+
+    while inner_pos < inner.len() {
+        let (prop_id, _delta) = crate::kvp::decode_delta_key(prev_id, inner, &mut inner_pos)?;
+
+        // draft-ietf-moq-transport-23 §10.7 (Immutable Properties): 入れ子の
+        // IMMUTABLE_PROPERTIES を検出したら探索を打ち切る。find_varint / find_bytes は
+        // このエラーを None に写す。
+        if !allow_immutable && prop_id == PROP_IMMUTABLE_PROPERTIES {
+            return Err(MessageError::ProtocolViolation(
+                "nested IMMUTABLE_PROPERTIES is not allowed (draft-ietf-moq-transport-23 §10.7 (Immutable Properties))",
+            ));
+        }
+
+        prev_id = prop_id;
+
+        let value = if prop_id % 2 == 0 {
+            // 偶数 ID: varint 値
+            let (v, n) = varint::decode(&inner[inner_pos..])?;
+            inner_pos += n;
+            validate_known_property(prop_id, v)?;
+            LocPropertyValueRef::VarInt(v)
+        } else {
+            // 奇数 ID: Length (varint) + bytes
+            let (len, n) = varint::decode(&inner[inner_pos..])?;
+            inner_pos += n;
+            // draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure):
+            // "The maximum length of a value is 2^16-1 bytes.  If an endpoint receives a
+            // length larger than the maximum, it MUST close the session with
+            // FIELD_LENGTH_EXCEEDED."
+            if len > 65535 {
+                return Err(MessageError::FieldLengthExceeded(
+                    "odd type key-value-pair length exceeds 65535",
+                ));
+            }
+            // 既知プロパティ (Video Frame Marking) の宣言長を切り詰め検査より先に検証する
+            validate_known_property_len(prop_id, len)?;
+            let len = varint::checked_len(len, inner[inner_pos..].len())?;
+            let bytes = &inner[inner_pos..inner_pos + len];
+            inner_pos += len;
+            LocPropertyValueRef::Bytes(bytes)
+        };
+
+        properties.push(LocPropertyRef { prop_id, value });
+    }
+
+    // 単一に限られる既知 ID の重複を malformed Track として報告する
+    // (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1
+    // (Malformed Tracks) 条件 9)。未知 ID の重複は §8.4 の "MUST allow multiple
+    // instances of the Property" により正当である。
+    if crate::property_scope::has_duplicate_single_property(properties.iter().map(|p| p.prop_id)) {
+        return Err(MessageError::MalformedTrack(DUPLICATE_LOC_PROPERTY));
+    }
+
+    Ok(properties)
 }
 
 #[cfg(test)]

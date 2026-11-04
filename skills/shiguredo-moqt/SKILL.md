@@ -932,6 +932,8 @@ pub struct LocProperty {
 
 fn new() -> LocProperties
 fn push(&mut self, prop: LocProperty)
+fn len(&self) -> usize
+fn is_empty(&self) -> bool
 fn iter(&self) -> impl Iterator<Item = &LocProperty>
 fn encode(&self) -> Result<Vec<u8>, MessageError>
 fn decode(buf: &[u8]) -> Result<(LocProperties, usize), MessageError>
@@ -943,7 +945,14 @@ fn video_frame_marking(&self) -> Option<&[u8]>
 fn audio_level(&self) -> Option<u64>
 fn video_config(&self) -> Option<&[u8]>
 fn audio_config(&self) -> Option<&[u8]>
+fn find_varint(&self, prop_id: u64) -> Option<u64>
+fn find_bytes(&self, prop_id: u64) -> Option<&[u8]>
 ```
+
+`find_varint` は偶数 ID、`find_bytes` は奇数 ID の値を返す。どちらも最上位 (mutable) リストを
+先に、次に `IMMUTABLE_PROPERTIES` (0x0B) の内側を探索する (draft-ietf-moq-transport-23 §10.7
+(Immutable Properties) の "MUST search both")。既知プロパティの accessor も同じ探索を行う。
+`iter` / `len` / `is_empty` は最上位リストだけを対象にし、`IMMUTABLE_PROPERTIES` の内側は含まない。
 
 | 定数 | 値 |
 | --- | --- |

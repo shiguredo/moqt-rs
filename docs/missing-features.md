@@ -32,8 +32,9 @@ MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUB
 3. **アプリ機能として欠けているもの**: request stream GOAWAY の非空 URI による個別 request
    移行 (2 session の併走が必要)、REQUEST_ERROR の REDIRECT 追随、トラック選択と切替、
    シーク / 巻き戻し、ライブ中の track 追加への追随、配信終了のシグナリング、統計表示。
-4. **MUST 未達・仕様違反になりうる箇所**: Object 側 `IMMUTABLE_PROPERTIES` の探索 (§10.7)、
-   `isLive=false` の `targetLatency` (MSF §5.2.8)、catalog 更新をまたいだ
+4. **MUST 未達・仕様違反になりうる箇所**: Object 側 `IMMUTABLE_PROPERTIES` 内側の LOC 固有値の
+   `MALFORMED_KEY_VALUE` によるセッション終了が未対応 (§8.3)、`isLive=false` の `targetLatency` (MSF §5.2.8)、
+   catalog 更新をまたいだ
    `isLive` の False → True (MSF §5.2.7)、`connectionUri` の検証と新規接続 (MSF §5.2.36)、
    range パラメータの union (MSF §11.1.1)、`initDataList` の配置 (§5.1.7)、
    STOP_SENDING 受信時の open stream の reset (§3.1.2 / §3.2.4)。
@@ -86,17 +87,37 @@ MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUB
 
 ## 4. MUST 未達・仕様違反になりうる箇所
 
-### 4.1 Object 側 `IMMUTABLE_PROPERTIES` を探索しない (§10.7、ライブラリ)
+### 4.1 Object 側 `IMMUTABLE_PROPERTIES` 内側の LOC 固有検証エラーを通知しない (§10.7 / §8.3、ライブラリ)
 
 draft-23 §10.7 は「When looking for the value of a property, processors MUST search both the
 mutable properties and the contents of Immutable Properties.」と定める。
-MOQT の `ObjectProperties` 側は探索する実装がある (`src/object_properties.rs:266-300`) が、
-LOC 側の `LocProperties` はトップレベルの KVP しか走査しない (`src/loc.rs`)。
-moq-sub は 4 箇所で `LocProperties::decode` を呼んで Video Config / Timestamp を取り出すため、
-`IMMUTABLE_PROPERTIES` の中に Video Config を入れる publisher の Object は
-構成情報を取得できず、デコーダを初期化できないまま破棄される。
+`ObjectProperties` は内側も探索し、LOC 側の `LocProperties` も `find_varint` / `find_bytes` と
+既知 accessor が最上位リストと `IMMUTABLE_PROPERTIES` の内側を探索する。moq-sub の 4 つの
+抽出関数も accessor 経由で内側の Video Config / Timestamp / Timescale / Audio Config /
+Video Frame Marking を取得できる。
+
+残るギャップは次のとおりである。
+
+1. `IMMUTABLE_PROPERTIES` の内側だけにある LOC 固有の値域・長さ違反 (Audio Level の 8 bit
+   超過、Video Frame Marking の長さ 1-4 バイト違反) は、Session の `ObjectProperties` が
+   LOC 固有の値域・長さ規則を解釈しないため検出されず、`LocProperties` の getter が `None`
+   に写す (検証自体は `walk_kv_pairs` が行うが、エラーを通知しない)。その結果 moq-sub の
+   抽出関数は「プロパティ無し」として `Ok(None)` を返す。§8.3 (Key-Value-Pair Structure) が
+   要求する MALFORMED_KEY_VALUE によるセッション終了が残る MUST 未達であり、
+   Video Frame Marking 欠落時はキーフレーム判定が Video Config の有無で代用される
+   (`crates/moq-sub/src/pipeline.rs` の `is_video_keyframe`)。
+2. `LocProperties` 単体では、最上位と `IMMUTABLE_PROPERTIES` の内側に同じ単一値の既知 ID が
+   現れる多重違反を検出しない (§8.4 / §12.1 条件 9)。Session の受信経路では
+   `ObjectProperties::validate` が mutable と内側を合わせて検出し、購読の cancel へ渡す。
+3. 内側の構造破損 (delta-key のオーバーフロー・宣言長超過・切り詰め・入れ子 0x0B) は
+   `LocProperties::decode` では検出しないが、Session の受信経路では `ObjectProperties` の
+   decode / validate が先に拒否し、`terminate_malformed_track` による購読の cancel へ渡す
+   (I/O 層の decode 経路ではセッション終了になる場合がある)。`LocProperties::encode` も
+   0x0B の内側を検証しないため、ライブラリ単体では malformed な Track を生成し得る
+   (`ObjectProperties::encode` / `TrackProperties::encode` は内側を検証する)。
+
 Track スコープ側は PUBLISH / SUBSCRIBE_OK で受信した場合に
-`Subscription::peer_track_properties` で公開済みであり、Object スコープ側の探索が残る。
+`Subscription::peer_track_properties` で公開済みであり、最上位と内側の両方を探索できる。
 FETCH_OK / TRACK_STATUS_OK の Track Properties は公開していない。
 
 ### 4.2 `isLive=false` の `targetLatency` を使う (MSF §5.2.8、moq-sub)
@@ -542,7 +563,8 @@ moqt-js (HEAD `6da25d10`) の playout のうち、次の 2 つは移植してい
 6. Object Status と PUBLISH_DONE の未解釈 (6.11) — トラック終端を正しく検知できない
 7. 配送タイムアウトの未設定 (5.3) — ライブ遅延が伸びる
 8. トラック選択 (6.2) と `isLive=false` の扱い (4.2 / 4.3) — 意図しないトラックを選ぶ
-9. Object 側 `IMMUTABLE_PROPERTIES` の探索 (4.1) — §10.7 MUST 未達の疑い
+9. Object 側 `IMMUTABLE_PROPERTIES` 内側の LOC 固有値の `MALFORMED_KEY_VALUE` による
+   セッション終了が未対応 (4.1) — 探索は実装済み、エラー分類が残る
 10. `END_OF_GROUP` (3 章) / Track Properties / `EXPIRES` (5.2〜5.5) — リレーと購読者への情報不足
 11. Range Filters の有効化 (5.6 / 6.10)、TRACK_STATUS (5.7 / 6.8)、REDIRECT (6.7)、pause (6.9)
 12. STOP_SENDING 時の open stream の reset (4.7) — アプリが閉じ忘れると cleanup が進まない
@@ -551,8 +573,11 @@ moqt-js (HEAD `6da25d10`) の playout のうち、次の 2 つは移植してい
 
 ## 10. 要確認
 
-- Object 側 `IMMUTABLE_PROPERTIES` の探索 (4.1) は `issues/0309` の射程とする
-  (Track 側は `Subscription::peer_track_properties` で公開済み)
+- Object 側 `IMMUTABLE_PROPERTIES` の探索 (4.1) は実装済み。Session の受信経路で残るのは、
+  内側だけの LOC 固有値域・長さ違反を `MALFORMED_KEY_VALUE` によるセッション終了として
+  扱うことだけである。
+  ライブラリ単体では、cross-list の単一値 ID 重複の検出と `decode` / `encode` の内側構造検証も
+  残る (Track 側は `Subscription::peer_track_properties` で公開済み)
 - LOC §2.2 (Private Properties) の実害 (`src/loc.rs:12-13` は application 責務としている)
 - `issues/pending/0010` (WebTransport の datagram 受信) が現行コードで再現するか
 - Video Frame Marking の D / B / T / S ビットを使う予定があるか

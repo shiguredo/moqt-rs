@@ -19,8 +19,12 @@ use std::time::Instant;
 use crate::group_switch::{GroupSwitchHandle, SharedGroupSwitchGate};
 use bytes::Bytes;
 use shiguredo_moqt::error::{MessageError, STREAM_CANCELLED};
+use shiguredo_moqt::loc::LocProperties;
+// 抽出関数は LocProperties の accessor 経由で値を読むため、pipeline 本体ではプロパティ ID と
+// 値型を使わない。テストのフィクスチャ構築だけで使う。
+#[cfg(test)]
 use shiguredo_moqt::loc::{
-    LocProperties, LocPropertyValue, PROP_AUDIO_CONFIG, PROP_TIMESCALE, PROP_TIMESTAMP,
+    LocPropertyValue, PROP_AUDIO_CONFIG, PROP_AUDIO_LEVEL, PROP_TIMESCALE, PROP_TIMESTAMP,
     PROP_VIDEO_CONFIG, PROP_VIDEO_FRAME_MARKING,
 };
 use shiguredo_moqt::pending_subgroup_buffer::{
@@ -5925,6 +5929,14 @@ fn send_decoded_frames(
 ///
 /// example の `Result` は `crate::error::Result` (エラー型固定) であるため、
 /// 抽出関数は `MessageError` を返す `std::result::Result` を使う。
+///
+/// IMMUTABLE_PROPERTIES (0x0B) の内側だけにある LOC 固有の値域・長さ違反 (Audio Level の
+/// 8 bit 超過や Video Frame Marking の長さ違反など) は、`LocProperties` の getter が `None`
+/// に写すため、抽出関数は `Ok(None)` を返す。最上位リストの構造破損は
+/// `LocProperties::decode` が `Err` にし、内側の構造破損は `LocProperties::decode` では
+/// 検出せず getter が `None` に写す (Session 経路では `ObjectProperties::decode` が先に
+/// 拒否する)。内側だけの LOC 固有検証で `MalformedKeyValue` を返すのは別課題である
+/// (docs/missing-features.md §4.1)。
 type ExtractResult<T> = std::result::Result<T, MessageError>;
 
 /// object の properties バイト列から PROP_VIDEO_CONFIG を取り出す
@@ -5937,19 +5949,17 @@ type ExtractResult<T> = std::result::Result<T, MessageError>;
 /// Properties) の "MUST allow multiple instances of the Property" により正当であり、
 /// `LocProperties::decode` は受理する。単一に限られる既知 ID の重複は §12.1 (Malformed
 /// Tracks) 条件 9 の malformed Track である。
+///
+/// draft-ietf-moq-loc-05 §3.1.2 (Immutable Properties) に従い IMMUTABLE_PROPERTIES (0x0B)
+/// の内側だけに Video Config を持つ Object もあるため、`LocProperties::video_config`
+/// (最上位と内側を探索する) で構成情報を取得する。この節番号は draft 由来であり、将来の
+/// draft 改版で変わる可能性がある。
 fn extract_video_config(properties_bytes: Option<&[u8]>) -> ExtractResult<Option<Vec<u8>>> {
     let Some(bytes) = properties_bytes else {
         return Ok(None);
     };
     let (props, _) = LocProperties::decode(bytes)?;
-    for p in props.iter() {
-        if p.prop_id == PROP_VIDEO_CONFIG
-            && let LocPropertyValue::Bytes(ref b) = p.value
-        {
-            return Ok(Some(b.clone()));
-        }
-    }
-    Ok(None)
+    Ok(props.video_config().map(<[u8]>::to_vec))
 }
 
 /// object の properties バイト列から PROP_TIMESTAMP / PROP_TIMESCALE を取り出す
@@ -5962,6 +5972,11 @@ fn extract_video_config(properties_bytes: Option<&[u8]>) -> ExtractResult<Option
 /// Properties) の "MUST allow multiple instances of the Property" により正当であり、
 /// `LocProperties::decode` は受理する。単一に限られる既知 ID の重複は §12.1 (Malformed
 /// Tracks) 条件 9 の malformed Track である。
+///
+/// draft-ietf-moq-loc-05 §3.1.2 (Immutable Properties) に従い IMMUTABLE_PROPERTIES (0x0B)
+/// の内側だけに Timestamp / Timescale を持つ Object もあるため、`LocProperties::timestamp` /
+/// `LocProperties::timescale` (最上位と内側を探索する) で表示時刻を取得する。この節番号は
+/// draft 由来であり、将来の draft 改版で変わる可能性がある。
 fn extract_timestamp_timescale(
     properties_bytes: Option<&[u8]>,
 ) -> ExtractResult<(Option<u64>, Option<u64>)> {
@@ -5969,24 +5984,7 @@ fn extract_timestamp_timescale(
         return Ok((None, None));
     };
     let (props, _) = LocProperties::decode(bytes)?;
-    let mut ts = None;
-    let mut tscale = None;
-    for p in props.iter() {
-        match p.prop_id {
-            PROP_TIMESTAMP => {
-                if let LocPropertyValue::VarInt(v) = p.value {
-                    ts = Some(v);
-                }
-            }
-            PROP_TIMESCALE => {
-                if let LocPropertyValue::VarInt(v) = p.value {
-                    tscale = Some(v);
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok((ts, tscale))
+    Ok((props.timestamp(), props.timescale()))
 }
 
 /// object の properties バイト列から PROP_VIDEO_FRAME_MARKING の I ビットを取り出す
@@ -5995,19 +5993,19 @@ fn extract_timestamp_timescale(
 /// RFC 9626 §3.2 (Short Extension for Non-Scalable Streams) の 1 octet 形式は
 /// `|S|E|I|D|0 0 0 0|` であり、I ビット (0x20) が独立フレーム (キーフレーム) を表す。
 /// この節番号・ビット割当は RFC 由来であり将来変更される可能性がある。
+///
+/// draft-ietf-moq-loc-05 §3.1.2 (Immutable Properties) に従い IMMUTABLE_PROPERTIES (0x0B)
+/// の内側だけに Video Frame Marking を持つ Object もあるため、
+/// `LocProperties::video_frame_marking` (最上位と内側を探索する) で I ビットを判定する。
+/// この節番号は draft 由来であり、将来の draft 改版で変わる可能性がある。
 fn extract_video_keyframe(properties_bytes: Option<&[u8]>) -> ExtractResult<Option<bool>> {
     let Some(bytes) = properties_bytes else {
         return Ok(None);
     };
     let (props, _) = LocProperties::decode(bytes)?;
-    for p in props.iter() {
-        if p.prop_id == PROP_VIDEO_FRAME_MARKING
-            && let LocPropertyValue::Bytes(ref b) = p.value
-        {
-            return Ok(Some(b.first().is_some_and(|v| v & 0x20 != 0)));
-        }
-    }
-    Ok(None)
+    Ok(props
+        .video_frame_marking()
+        .map(|b| b.first().is_some_and(|v| v & 0x20 != 0)))
 }
 
 /// video object がキーフレームかどうかを判定する
@@ -6181,19 +6179,17 @@ fn parse_opus_head(bytes: &[u8]) -> Option<mp4::OpusHeadConfig> {
 /// Properties) の "MUST allow multiple instances of the Property" により正当であり、
 /// `LocProperties::decode` は受理する。単一に限られる既知 ID の重複は §12.1 (Malformed
 /// Tracks) 条件 9 の malformed Track である。
+///
+/// draft-ietf-moq-loc-05 §3.1.2 (Immutable Properties) に従い IMMUTABLE_PROPERTIES (0x0B)
+/// の内側だけに Audio Config を持つ Object もあるため、`LocProperties::audio_config`
+/// (最上位と内側を探索する) で構成情報を取得する。この節番号は draft 由来であり、将来の
+/// draft 改版で変わる可能性がある。
 fn extract_audio_config(properties_bytes: Option<&[u8]>) -> ExtractResult<Option<Vec<u8>>> {
     let Some(bytes) = properties_bytes else {
         return Ok(None);
     };
     let (props, _) = LocProperties::decode(bytes)?;
-    for p in props.iter() {
-        if p.prop_id == PROP_AUDIO_CONFIG
-            && let LocPropertyValue::Bytes(b) = &p.value
-        {
-            return Ok(Some(b.clone()));
-        }
-    }
-    Ok(None)
+    Ok(props.audio_config().map(<[u8]>::to_vec))
 }
 
 /// OpusHead と catalog の整合を検証し、不一致の警告メッセージを返す (デコードは停止しない)
@@ -8105,6 +8101,29 @@ mod tests {
         );
     }
 
+    /// Timestamp / Timescale の抽出: 最上位リストに値がある場合
+    ///
+    /// accessor への置き換えで、最上位リストの値と戻り値の順序 (Timestamp, Timescale) の
+    /// 配線が壊れていないことを固定する。
+    #[test]
+    fn extract_timestamp_timescale_reads_top_level() {
+        let mut props = LocProperties::new();
+        props.push(LocProperty {
+            prop_id: PROP_TIMESTAMP,
+            value: LocPropertyValue::VarInt(7_200_000),
+        });
+        props.push(LocProperty {
+            prop_id: PROP_TIMESCALE,
+            value: LocPropertyValue::VarInt(90_000),
+        });
+        let encoded = props.encode().expect("encode に成功すること");
+        assert_eq!(
+            extract_timestamp_timescale(Some(&encoded)),
+            Ok((Some(7_200_000), Some(90_000))),
+            "最上位リストの Timestamp / Timescale を取得できること"
+        );
+    }
+
     /// Timestamp / Timescale の抽出: 無ければ Ok((None, None))
     #[test]
     fn extract_timestamp_timescale_returns_none_when_absent() {
@@ -8119,6 +8138,198 @@ mod tests {
             extract_timestamp_timescale(None),
             Ok((None, None)),
             "properties 自体が無ければ Ok((None, None)) であること"
+        );
+    }
+
+    /// テスト用: IMMUTABLE_PROPERTIES (0x0B) の内側だけに値を持つ properties バイト列を
+    /// 組み立てる
+    ///
+    /// IMMUTABLE_PROPERTIES の値は外側の Properties Length を伴わない delta-key KVP 列で
+    /// ある (draft-ietf-moq-transport-23 §10.7 (Immutable Properties) / §8.3
+    /// (Key-Value-Pair Structure))。内側のプロパティ列は `LocProperties::encode` で正規の
+    /// KVP 表現を作り、先頭の Properties Length だけを読み飛ばして 0x0B の値に格納する。
+    /// 外側の mutable リストには 0x0B だけを置く。
+    fn immutable_only_properties_bytes(inner: &LocProperties) -> Vec<u8> {
+        use shiguredo_moqt::track_properties::PROP_IMMUTABLE_PROPERTIES;
+
+        let encoded_inner = inner
+            .encode()
+            .expect("テストフィクスチャの内側 KVP の encode は成功する");
+        let (_, length_field_len) = shiguredo_moqt::varint::decode(&encoded_inner)
+            .expect("Properties Length の varint を読めること");
+
+        let mut outer = LocProperties::new();
+        outer.push(LocProperty {
+            prop_id: PROP_IMMUTABLE_PROPERTIES,
+            value: LocPropertyValue::Bytes(encoded_inner[length_field_len..].to_vec()),
+        });
+        outer
+            .encode()
+            .expect("テストフィクスチャの外側 KVP の encode は成功する")
+    }
+
+    /// IMMUTABLE_PROPERTIES の内側だけにある Video Config を取り出せること
+    ///
+    /// IMMUTABLE_PROPERTIES (0x0B) の内側だけに値がある Object を固定する。
+    #[test]
+    fn extract_video_config_reads_immutable_properties() {
+        let config = vec![0x01, 0x64, 0x00, 0x1F];
+        let mut inner = LocProperties::new();
+        inner.push(LocProperty {
+            prop_id: PROP_VIDEO_CONFIG,
+            value: LocPropertyValue::Bytes(config.clone()),
+        });
+        let bytes = immutable_only_properties_bytes(&inner);
+        assert_eq!(
+            extract_video_config(Some(&bytes)),
+            Ok(Some(config)),
+            "IMMUTABLE_PROPERTIES の内側の Video Config を取り出せること"
+        );
+    }
+
+    /// IMMUTABLE_PROPERTIES の内側だけにある Timestamp / Timescale を取り出せること
+    ///
+    /// display time を内側だけに置く publisher の Object を固定する。
+    #[test]
+    fn extract_timestamp_timescale_reads_immutable_properties() {
+        let mut inner = LocProperties::new();
+        inner.push(LocProperty {
+            prop_id: PROP_TIMESTAMP,
+            value: LocPropertyValue::VarInt(7_200_000),
+        });
+        inner.push(LocProperty {
+            prop_id: PROP_TIMESCALE,
+            value: LocPropertyValue::VarInt(90_000),
+        });
+        let bytes = immutable_only_properties_bytes(&inner);
+        assert_eq!(
+            extract_timestamp_timescale(Some(&bytes)),
+            Ok((Some(7_200_000), Some(90_000))),
+            "IMMUTABLE_PROPERTIES の内側の Timestamp / Timescale を取り出せること"
+        );
+    }
+
+    /// IMMUTABLE_PROPERTIES の内側だけにある Audio Config を取り出せること
+    ///
+    /// Audio Config を内側だけに置く publisher の Object を固定する。
+    #[test]
+    fn extract_audio_config_reads_immutable_properties() {
+        let head = build_test_opus_head(48_000, 1);
+        let mut inner = LocProperties::new();
+        inner.push(LocProperty {
+            prop_id: PROP_AUDIO_CONFIG,
+            value: LocPropertyValue::Bytes(head.clone()),
+        });
+        let bytes = immutable_only_properties_bytes(&inner);
+        assert_eq!(
+            extract_audio_config(Some(&bytes)),
+            Ok(Some(head)),
+            "IMMUTABLE_PROPERTIES の内側の Audio Config を取り出せること"
+        );
+    }
+
+    /// IMMUTABLE_PROPERTIES の内側だけにある Video Frame Marking でキーフレーム判定できること
+    ///
+    /// Video Frame Marking を内側だけに置く publisher の Object を固定する。
+    #[test]
+    fn extract_video_keyframe_reads_immutable_properties() {
+        for (marking, expected) in [(0x20u8, true), (0xC0, false)] {
+            let mut inner = LocProperties::new();
+            inner.push(LocProperty {
+                prop_id: PROP_VIDEO_FRAME_MARKING,
+                value: LocPropertyValue::Bytes(vec![marking]),
+            });
+            let bytes = immutable_only_properties_bytes(&inner);
+            assert_eq!(
+                extract_video_keyframe(Some(&bytes)),
+                Ok(Some(expected)),
+                "IMMUTABLE_PROPERTIES の内側の Video Frame Marking (marking={marking:#04x}) から I ビットを判定できること"
+            );
+        }
+    }
+
+    /// IMMUTABLE_PROPERTIES の内側だけにある LOC 固有の値域違反は Ok(None) になる
+    ///
+    /// 内側だけにある LOC 固有の検証 (Audio Level の 8 bit 超過など) は `LocProperties` の
+    /// getter が `None` に写すため、抽出関数は「プロパティ無し」として `Ok(None)` を返す。
+    /// この既知の制約 (docs/missing-features.md §4.1) を固定し、将来のエラー分類対応で
+    /// 挙動が変わったときに気づけるようにする。
+    #[test]
+    fn malformed_inner_loc_property_is_reported_as_absent() {
+        let mut inner_bytes = Vec::new();
+        shiguredo_moqt::varint::encode(PROP_AUDIO_LEVEL, &mut inner_bytes);
+        shiguredo_moqt::varint::encode(256, &mut inner_bytes); // 0-255 の範囲外
+        let mut outer = LocProperties::new();
+        outer.push(LocProperty {
+            prop_id: shiguredo_moqt::track_properties::PROP_IMMUTABLE_PROPERTIES,
+            value: LocPropertyValue::Bytes(inner_bytes),
+        });
+        let bytes = outer
+            .encode()
+            .expect("テストフィクスチャの外側 KVP の encode は成功する");
+
+        // 内側の走査が値域違反で失敗するため、どの抽出関数も「値が無い」として扱う。
+        assert_eq!(
+            extract_timestamp_timescale(Some(&bytes)),
+            Ok((None, None)),
+            "内側の値域違反は Timestamp / Timescale 無しとして扱われること"
+        );
+        assert_eq!(
+            extract_video_config(Some(&bytes)),
+            Ok(None),
+            "内側の値域違反は Video Config 無しとして扱われること"
+        );
+        assert_eq!(
+            extract_video_keyframe(Some(&bytes)),
+            Ok(None),
+            "内側の値域違反は Video Frame Marking 無しとして扱われること"
+        );
+        assert_eq!(
+            extract_audio_config(Some(&bytes)),
+            Ok(None),
+            "内側の値域違反は Audio Config 無しとして扱われること"
+        );
+    }
+
+    /// 内側の Video Frame Marking 長さ違反はキーフレーム代用に落ちる
+    ///
+    /// 内側だけの Video Frame Marking が 1-4 バイトの長さ違反を持つ場合、getter が `None` に
+    /// 写すため `extract_video_keyframe` は `Ok(None)` を返し、`is_video_keyframe` は Video
+    /// Config の有無でキーフレームを代用する。この既知の制約 (docs/missing-features.md §4.1)
+    /// がアプリ可視の挙動に与える影響を固定する。
+    #[test]
+    fn malformed_inner_video_frame_marking_falls_back_to_video_config() {
+        let mut inner_bytes = Vec::new();
+        shiguredo_moqt::varint::encode(PROP_VIDEO_FRAME_MARKING, &mut inner_bytes);
+        shiguredo_moqt::varint::encode(5, &mut inner_bytes); // 1-4 バイトの範囲外
+        inner_bytes.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05]);
+
+        let mut outer = LocProperties::new();
+        outer.push(LocProperty {
+            prop_id: shiguredo_moqt::track_properties::PROP_IMMUTABLE_PROPERTIES,
+            value: LocPropertyValue::Bytes(inner_bytes),
+        });
+        // 最上位の Video Config は decode も取得もできる (内側の破損とは独立)。
+        outer.push(LocProperty {
+            prop_id: PROP_VIDEO_CONFIG,
+            value: LocPropertyValue::Bytes(vec![0xAA]),
+        });
+        let bytes = outer
+            .encode()
+            .expect("テストフィクスチャの外側 KVP の encode は成功する");
+
+        let video_config =
+            extract_video_config(Some(&bytes)).expect("Video Config は取得できること");
+        assert_eq!(video_config, Some(vec![0xAA]));
+        assert_eq!(
+            extract_video_keyframe(Some(&bytes)),
+            Ok(None),
+            "内側の Video Frame Marking 長さ違反は判定不能として扱われること"
+        );
+        assert!(
+            is_video_keyframe(Some(&bytes), video_config.as_deref())
+                .expect("Video Config があるため判定は成功すること"),
+            "Video Frame Marking を取得できない場合は Video Config の有無で代用されること"
         );
     }
 
