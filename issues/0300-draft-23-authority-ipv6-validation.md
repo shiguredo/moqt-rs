@@ -4,10 +4,11 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-authority-ipv6-validation
 - Polished: 2026-10-19
+- Refreshed: 2026-11-04
 
 ## 目的
 
-draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY) は AUTHORITY が RFC 3986 の URI formatting rules に従うことを要求し、"If an AUTHORITY option does not conform to these rules, the session MUST be closed with MALFORMED_AUTHORITY." と MUST を課す。現状の IPv6 リテラル検証は RFC 3986 §3.2.2 の `IPv6address`
+draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY) は AUTHORITY が RFC 3986 の URI formatting rules に従うことを要求し、"If an AUTHORITY option does not conform to these rules, the session MUST be closed with MALFORMED_AUTHORITY." と MUST を課す。現状の IPv6 リテラル検証は RFC 3986 §3.2.2 の `IPv6address`
 より緩く、かつ IPv4-mapped 表記の正当な値と IPv4 末尾が `::` の直後に来る正当な値を拒否するため、この MUST を満たしていない。
 
 ## 現状
