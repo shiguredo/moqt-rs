@@ -7,7 +7,7 @@
 
 ## 目的
 
-`issues/0375-draft-22-request-stream-goaway-migration.md` の request stream GOAWAY の非空 New Session URI 移行を
+`issues/0375-draft-23-request-stream-goaway-migration.md` の request stream GOAWAY の非空 New Session URI 移行を
 実装可能にするため、examples (`moq-pub` / `moq-sub`) の単一 session 前提アーキテクチャを複数 session 併走へ拡張する
 設計を `docs/` にまとめ、0375 を reopened にして実装タスクを明記する。本 issue は設計と 0375 の更新のみを対象とし、
 実装は 0375 で行う。
