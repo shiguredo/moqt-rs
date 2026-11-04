@@ -5,7 +5,6 @@
 - Branch: feature/add-track-scope-loc-properties
 - Polished: 2026-10-25
 - Refreshed: 2026-11-04
-- Updated: 2026-10-10
 
 ## 目的
 
