@@ -4,13 +4,14 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-outgoing-subgroup-reopen-blocked
 - Polished: 2026-10-25
+- Refreshed: 2026-11-04
 - Updated: 2026-10-10
 
 ## 目的
 
-draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams) は、STOP_SENDING を受けた Subgroup に対して
+draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams) は、STOP_SENDING を受けた Subgroup に対して
 publisher が新しい stream を開かないこと (SHOULD NOT) を求めつつ、その後に購読を再開する REQUEST_UPDATE を
-受けた場合は新しい stream を開いてよい (MAY) としている。Session はこれを Forward State 0→1 の
+受けた場合は新しい stream を開いてよい (MAY) としている。Session はこれを PAUSED 1→0 (購読の再開) の
 REQUEST_UPDATE の受理まで禁止する状態として保持し (draft は SHOULD NOT / MAY であり、Session の拒否は
 これを実装上の禁止として扱う)、`Session::send_subgroup_header` と `Session::send_subgroup_object`
 (FirstObjectId の初回 Object) が `SESSION_PROTOCOL_VIOLATION` を返して拒否する。一方でアプリが送信前に
@@ -26,7 +27,7 @@ REQUEST_UPDATE の受理まで禁止する状態として保持し (draft は SH
   `(request_id, track_alias, group_id, subgroup_id)` だけを返す。doc には「再オープン禁止の判定
   (`outgoing_subgroup_reopen_blocked`) は alias を共有する別 request のエントリも照合するため、本 API が
   `None` を返しても再オープンが禁止されている場合がある」と明記されている。
-- 禁止エントリは Forward State 0→1 の REQUEST_UPDATE 受理、または `Session::forget_subscription` で
+- 禁止エントリは PAUSED 1→0 の REQUEST_UPDATE 受理、または `Session::forget_subscription` で
   破棄される。
 - `crates/moq-pub/src/pipeline.rs` は映像の peer reset (`is_peer_stream_reset`) を観測すると
   `current_video_writer` を捨てて `video_group_id` を進め、音声は `audio_group_id` を進める。
@@ -41,7 +42,7 @@ REQUEST_UPDATE の受理まで禁止する状態として保持し (draft は SH
   doc に書く。alias を共有する場合の判定範囲が内部判定と一致することを明記する。
 - 利用者向け API 一覧 (`skills/shiguredo-moqt/SKILL.md`) にも新しい公開 API と使い分けを追記する。
 - example の自前管理を判定 API に置き換えるかは、同じ挙動を保てるかを確認してから決める。§11.3.2 は
-  購読を再開する REQUEST_UPDATE の受理後に新しい stream を開くことを許す (MAY) ため、Forward State 0→1 の
+  購読を再開する REQUEST_UPDATE の受理後に新しい stream を開くことを許す (MAY) ため、PAUSED 1→0 の
   受理後 (禁止解除後) の再開も判定できる必要がある。
 - 送信時の拒否 (`SESSION_PROTOCOL_VIOLATION`) は防御として残す。
 
