@@ -4,10 +4,14 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-track-status-largest-object
 - Polished: 2026-10-19
+- Refreshed: 2026-11-04
 
 ## 目的
 
-draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) は "If Objects have been published on this Track the Publisher MUST include this parameter." と MUST を課す。SUBSCRIBE_OK / PUBLISH / subscription の REQUEST_UPDATE_OK / PUBLISH_STATE_NOTIFY は publish 済み最大 Location を自動補完しているが、
+draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter) は、このパラメータを SUBSCRIBE_OK / PUBLISH / REQUEST_UPDATE_OK /
+TRACK_STATUS_OK / FETCH_OK / PUBLISH_STATE_NOTIFY に含められ、送信側が Track で Object を publish または受信していれば
+"it MUST include this parameter in the above messages it sends" と MUST を課す (FETCH_OK は Largest Object が要求範囲内の場合のみ)。
+SUBSCRIBE_OK / PUBLISH / subscription の REQUEST_UPDATE_OK / PUBLISH_STATE_NOTIFY は publish 済み最大 Location を自動補完しているが、
 TRACK_STATUS_OK だけが parameters への自動補完を行わない。また `send_ok_for_track_status` は `TrackStatusResponse::Ok.largest_location` を `None` のまま記録する。そのため、publish 済み Track でアプリが明示的に LARGEST_OBJECT を渡さない限り MUST 違反になる。
 
 ## 現状
