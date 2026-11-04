@@ -37,7 +37,7 @@ Gone / Unknown / Timed-Out は不存在にしない。
 - 先行: [0395](0395-moqt-draft-23-fetch-gone-range.md)
 - 先行: [0396](0396-moqt-draft-23-fetch-range-delta.md)
 - 先行: [0398](0398-moqt-draft-23-fetch-group-track-end.md)
-- 関連: [0309](0309-draft-22-object-immutable-properties-search.md)
+- 関連: [0309](0309-draft-23-object-immutable-properties-search.md)
 - 関連: [0352](0352-bug-subgroup-tracker-state.md)
 
 ## 解決方法
