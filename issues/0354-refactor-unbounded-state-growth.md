@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/refactor-unbounded-state-growth
 - Polished: 2026-10-21
+- Refreshed: 2026-11-04
 
 ## 目的
 
@@ -13,7 +14,7 @@
 
 - `src/subgroup_tracker.rs` の `SubgroupTracker` は次の 3 つの `HashMap` を保持する。
   - `entries`: `(track_alias, group_id, subgroup_id)` → `SubgroupStreamState` (再オープン禁止の判定用)
-  - `priorities`: 同じキー → Publisher Priority (draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 1 の検出用)
+  - `priorities`: 同じキー → Publisher Priority (draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 1 の検出用)
   - `fin_last_object_ids`: 同じキー → FIN 時の最終 Object ID (同条件 2/3 の検出用)
 - `open` は `entries` にキーを追加し、`mark_fin` / `mark_reset` / `mark_stop_sending` は終端状態を記録するだけでキーを削除しない。`mark_fin` は未知キーでも `fin_last_object_ids` に記録する。
 - `Session` は `peer_subgroups` と `my_subgroups` の 2 つの `SubgroupTracker` を保持する (`src/session/core.rs`)。
@@ -21,9 +22,10 @@
 - 影響: 長時間の配信で Group 数に比例して状態が増え続ける。1 Group あたりの Subgroup 数を S、Group 数を G とすると、`entries` / `priorities` / `fin_last_object_ids` のキー数は O(G * S) で増える。
 - なお `RequestIdTracker` と `FetchStreamDecoder` は本 issue の対象外とする。
   - `src/session/request_id.rs` の `RequestIdTracker` は、準拠 peer では前縁が埋まるたびに `above` から吸収され、
-    保持数は同時に未到達な request 数に比例する。非準拠 peer の増加は draft-ietf-moq-transport-22 §6.4.2.1 (Request ID) が
-    `INVALID_REQUEST_ID` でのセッション終了を MUST とする 2 条件 (parity 違反と重複) 以外での終了を許さないため許容する設計であり、
-    上限を設けると正当な peer を落とす (`RequestIdTracker` の doc と `src/session/tests.rs` の `peer_request_tracker_accepts_unbounded_out_of_order_ids`)。
+    保持数は同時に未到達な request 数に比例する。非準拠 peer の増加は draft-ietf-moq-transport-23 §6.4.2.1 (Request ID) が
+    "An endpoint MUST NOT reuse a Request ID within a session." と定め、`INVALID_REQUEST_ID` でのセッション終了を MUST とするのは
+    parity 違反と重複の 2 条件だけであるため許容する設計であり、上限を設けると正当な peer を落とす
+    (`RequestIdTracker` の doc と `src/session/tests.rs` の `peer_request_tracker_accepts_unbounded_out_of_order_ids`)。
     この設計は `issues/closed/0113-bug-remove-out-of-order-request-id-limit.md` で確定している。
   - `src/stream/decoder.rs` の `FetchStreamDecoder` は、`validate_fetch_object` が group の前進時に `prune_past_group_state` を呼び、per-group の `subgroup_priorities` / `subgroup_max_objects` / `subgroup_final_objects` を破棄する。`last_object_ids` という per-group フィールドは存在しない。
 
