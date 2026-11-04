@@ -1666,3 +1666,6 @@ fn cnf_binding_ignores_uninterpreted_confirmation_methods() {
         Err(DpopError::MissingThumbprint)
     );
 }
+
+#[path = "cwt/verification.rs"]
+mod verification;

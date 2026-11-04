@@ -10,11 +10,15 @@
 //! `alg` / `typ` / `kccs` を持ち、ペイロードの CWT Claims Set に `cti` / `iat` /
 //! `actx` / `ath` を持つ。この形式は [`CwtDpopProofCodec`] が扱う。`actx` と `ath`
 //! の claim label はドラフトで `TBD_ACTX` / `TBD_ATH` のままなので、呼び出し側が
-//! 明示する。`CwtDpopProofCodec` は proof 単独のデコードと署名検証までを提供する。
+//! 明示する。`CwtDpopProofCodec` は proof のデコードと発行を提供し、署名検証は
+//! [`CwtDpopProof::verify_signature`] が行う。
 //! デコードした proof の `kccs` 公開鍵と CAT トークンの `cnf` の照合は
 //! [`CwtDpopProof::verify_key_binding`] が行うが、`actx` / `ath` / 鮮度 / replay の
-//! 受理判定は行わない (旧 JWT 形式側は [`DpopProof`] の検証 API が受理判定の一部を行う)。
+//! 受理判定は行わない。受理判定は [`CwtDpopProof::verify_against_cat_token`] が
+//! [`CwtDpopVerification`] と [`CwtDpopReplayCache`] を受け取って一括して行う
+//! (旧 JWT 形式側は [`DpopProof`] の検証 API が受理判定の一部を行う)。
 
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -26,8 +30,8 @@ use nojson::{RawJson, RawJsonValue};
 use super::MoqtAction;
 use super::base64url;
 use super::cat::{
-    CLAIM_CONFIRMATION, CLAIM_CWT_ID, CLAIM_ISSUED_AT, CONFIRMATION_COSE_KEY, CatClaims,
-    Confirmation,
+    CLAIM_CONFIRMATION, CLAIM_CWT_ID, CLAIM_ISSUED_AT, CONFIRMATION_COSE_KEY, CatClaims, CatError,
+    CatReplay, CatToken, ClaimValidationOptions, Confirmation, VerifyOptions,
 };
 use super::cbor::{self, CborError, Value};
 use super::cose::{Algorithm, CoseEncodingOptions, CoseError, CoseMessage, CoseSign1, Header};
@@ -587,6 +591,9 @@ impl DpopReplayCache {
     }
 
     /// 記録が空かどうかを返す
+    ///
+    /// 期限切れの記録は次の [`CwtDpopReplayCache::check_and_record`] の成功経路で解放
+    /// されるまで残るため、期限切れの記録だけが残っている場合も `false` を返す。
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -727,10 +734,11 @@ impl DpopProofBuilder {
 /// `namespace` と `track_name` は MOQT のメッセージが運ぶバイト列をそのまま保持し、
 /// シリアライズも正規化もしない。`action` は draft-ietf-moq-c4m-02 §2.1 Table 1 の
 /// 整数コードをそのまま保持するため、未知の整数も表現できる。既知のアクションへの
-/// 解決と要求されたアクションとの一致判定は、受理判定を行う利用側が行う。
+/// 解決と要求されたアクション・target との一致判定は [`CwtAuthorizationContext::verify_request`]
+/// が行う。
 ///
 /// `context_type` が "moqt" であることの検証は、発行時は [`CwtDpopProofCodec::build`]
-/// が、受信時は受理判定を行う利用側が行う。
+/// が、受信時は [`CwtAuthorizationContext::verify_request`] が行う。
 #[derive(Debug, Clone, PartialEq)]
 pub struct CwtAuthorizationContext {
     /// `type`。MOQT では "moqt"
@@ -743,6 +751,98 @@ pub struct CwtAuthorizationContext {
     pub track_name: Option<Vec<u8>>,
     /// 解釈しなかった actx のメンバー
     pub raw: Vec<(Value, Value)>,
+}
+
+impl CwtAuthorizationContext {
+    /// `type` / `action` / `namespace` / `track` が要求と一致するか検証する
+    ///
+    /// draft-ietf-moq-c4m-02 §4.3 の 8 番目の条件に対応する。action ごとの target の
+    /// 規則は次のとおりである。
+    ///
+    /// - SETUP: namespace も track も持たない。要求側と proof 側のどちらかに target が
+    ///   あれば拒否する
+    /// - PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS: namespace を必須と
+    ///   し、track を持たない。track があれば拒否する
+    /// - SUBSCRIBE / REQUEST_UPDATE / PUBLISH / FETCH / TRACK_STATUS: namespace と
+    ///   track の両方を必須とする
+    ///
+    /// 欠落 (`None`) と空のバイト列 / 空の namespace 配列は区別する。存在する target は
+    /// MOQT メッセージが運ぶフィールド列とバイト列をそのまま比較し、シリアライズも
+    /// 正規化もしない (§4.2)。
+    pub fn verify_request(
+        &self,
+        action: MoqtAction,
+        namespace: Option<&[&[u8]]>,
+        track_name: Option<&[u8]>,
+    ) -> Result<(), DpopError> {
+        if self.context_type != MOQT_AUTHORIZATION_CONTEXT_TYPE {
+            return Err(DpopError::ContextTypeMismatch);
+        }
+        if self.action != action.key() {
+            return Err(DpopError::ActionMismatch);
+        }
+        let (requires_namespace, requires_track) = action_target_requirements(action);
+        if requires_namespace {
+            let expected = namespace.ok_or(DpopError::MissingRequestTarget("namespace"))?;
+            let actual = self
+                .namespace
+                .as_deref()
+                .ok_or(DpopError::MissingActxTarget("namespace"))?;
+            // フィールド数と各フィールドのバイト列をそのまま比較する
+            if expected.len() != actual.len()
+                || expected
+                    .iter()
+                    .zip(actual)
+                    .any(|(expected, actual)| *expected != actual.as_slice())
+            {
+                return Err(DpopError::TargetMismatch);
+            }
+        } else {
+            if namespace.is_some() {
+                return Err(DpopError::UnexpectedRequestTarget("namespace"));
+            }
+            if self.namespace.is_some() {
+                return Err(DpopError::UnexpectedActxTarget("namespace"));
+            }
+        }
+        if requires_track {
+            let expected = track_name.ok_or(DpopError::MissingRequestTarget("track"))?;
+            let actual = self
+                .track_name
+                .as_deref()
+                .ok_or(DpopError::MissingActxTarget("track"))?;
+            if expected != actual {
+                return Err(DpopError::TargetMismatch);
+            }
+        } else {
+            if track_name.is_some() {
+                return Err(DpopError::UnexpectedRequestTarget("track"));
+            }
+            if self.track_name.is_some() {
+                return Err(DpopError::UnexpectedActxTarget("track"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// action が namespace / track を必須とするかを返す
+///
+/// 戻り値は (namespace が必要か, track が必要か) である。draft-ietf-moq-c4m-02 §4.2 は
+/// 「Track Namespace (key 2) は namespace または track を対象とする action に現れ、
+/// Track Name (key 3) は track を対象とする action に現れる」と定める。
+fn action_target_requirements(action: MoqtAction) -> (bool, bool) {
+    match action {
+        MoqtAction::Setup => (false, false),
+        MoqtAction::PublishNamespace
+        | MoqtAction::SubscribeNamespace
+        | MoqtAction::SubscribeTracks => (true, false),
+        MoqtAction::Subscribe
+        | MoqtAction::RequestUpdate
+        | MoqtAction::Publish
+        | MoqtAction::Fetch
+        | MoqtAction::TrackStatus => (true, true),
+    }
 }
 
 /// CWT 形式の DPoP proof のクレーム (draft-ietf-moq-c4m-02 §4.2)
@@ -774,18 +874,195 @@ pub struct CwtDpopProofHeader {
     pub confirmation_key: CoseKey,
 }
 
+/// CWT 形式の DPoP proof を CAT トークンに束縛して受理するかの検証入力
+///
+/// [`CwtDpopProof::verify_against_cat_token`] だけが使う入力である。呼び出し側が CAT の
+/// 署名・クレーム・scope の検証を別々に済ませる必要はなく、この入力と proof を渡す
+/// 1 つの入口がすべての条件を判定する。
+#[derive(Debug, Clone, Copy)]
+pub struct CwtDpopVerification<'a> {
+    /// 提示された CAT トークン
+    ///
+    /// `ath` の照合には [`CatToken::raw_token`] が返す「提示されたままのバイト列」を
+    /// 使い、再エンコードや Base64 の正規化をした表現は使わない。
+    pub token: &'a CatToken,
+    /// CAT の署名 / MAC を検証する信頼済み鍵
+    pub token_key: &'a CoseKey,
+    /// CAT の署名検証オプション
+    pub token_verify_options: VerifyOptions<'a>,
+    /// CAT のクレーム検証オプション
+    ///
+    /// `reference_time_seconds` は proof の鮮度と replay の記録にも使う。
+    pub claim_options: ClaimValidationOptions<'a>,
+    /// 要求されたアクション
+    pub action: MoqtAction,
+    /// 要求された Track Namespace のフィールド列
+    ///
+    /// 欠落と空の配列は区別する。SETUP では `None`、namespace を対象とするアクション
+    /// では `Some` を渡す。
+    pub namespace: Option<&'a [&'a [u8]]>,
+    /// 要求された Track Name
+    ///
+    /// 欠落と空のバイト列は区別する。SETUP と namespace だけを対象とするアクションでは
+    /// `None`、track を対象とするアクションでは `Some` を渡す。
+    pub track_name: Option<&'a [u8]>,
+    /// proof をデコードした [`CwtDpopProofCodec`]
+    ///
+    /// `actx` / `ath` の claim label はドラフトで未確定のため、proof をデコードした設定と
+    /// 同じものを渡す。受理入口は proof のクレームがこの設定と矛盾しないことを確認する。
+    pub codec: CwtDpopProofCodec,
+    /// `catdpop` のウィンドウ (label 0) が無い場合に使う既定のウィンドウ (秒)
+    ///
+    /// 有限かつ 0 以上でなければならない。
+    pub default_window_seconds: f64,
+}
+
+/// CWT 形式の DPoP proof の `cti` によるリプレイキャッシュ
+///
+/// draft-ietf-moq-c4m-02 §4.3 の 7 番目の条件を満たすための受信者側の状態である。
+///
+/// - 1 つのキャッシュは、同じトークン / proof を受理する 1 つの検証主体 (1 つのリレー
+///   など) が所有し、その検証主体が受理する proof 群と全接続で共有する。接続ごとに
+///   作り直してはならない。作り直すと、記録が接続とともに消えて、別の接続で同じ
+///   `cti` を再利用できてしまう
+/// - `max_window_seconds` は構築時に固定し、有限かつ正でなければならない。proof の
+///   ウィンドウがこれを超える場合は [`DpopError::ReplayWindowTooLarge`] で拒否する
+///   (fail-closed)。より大きいウィンドウの proof を受け入れる検証主体は、その最大値を
+///   満たすキャッシュを作ること
+/// - 記録は `cti` から保持期限 (`iat` + `max_window_seconds`) への写像である。参照時刻が
+///   保持期限と等しい間は保持し、超えた後にだけ解放する。**現在の proof のウィンドウで
+///   古い記録を破棄しない**。そのため、小さいウィンドウの proof を処理した後でも、既に
+///   記録した `cti` が大きいウィンドウ内に残っていれば再送を [`DpopError::Replayed`] で
+///   拒否できる
+/// - 未失効の記録を追い出して別の `cti` を記録することはしない。記録数の上限は持たない
+///   ため、肥大化を防ぐ必要がある場合は受理する proof 数を制限すること
+/// - `cti` は proof のクレーム (RFC 8392 §3.1.7) のバイト列をそのままキーにする。`cti` は
+///   発行者をまたいで一意であることを前提とする。`cti` の長さに上限は設けないため、
+///   肥大化を防ぐ必要がある場合は `cti` 長と受理する proof 数を制限すること
+/// - [`CwtDpopReplayCache::check_and_record`] が成功するたびに全記録を走査するため、
+///   記録数に対して O(n) のコストがかかる
+/// - 参照時刻は単調増加を前提とする。時計が巻き戻ると、解放済みの `cti` が再び受理され
+///   得る
+///
+/// [`CatToken::verify_bearer`] が使う `BearerReplayCache` は bearer トークンの接続束縛
+/// (draft-ietf-moq-c4m-02 §3) 用であり、proof の `cti` 用に代用してはならない。逆に
+/// このキャッシュを bearer トークンの接続束縛に使ってもならない。両者はキーも保持期間も
+/// 意味も異なる。リレー・クラスタ間の共有は行わない。
+#[derive(Debug)]
+pub struct CwtDpopReplayCache {
+    /// 記録の保持期間の上限 (秒)。構築時に固定する
+    max_window_seconds: f64,
+    /// `cti` → 保持期限 (`iat` + `max_window_seconds`)
+    entries: BTreeMap<Vec<u8>, f64>,
+}
+
+impl CwtDpopReplayCache {
+    /// `cti` の記録に使う最大ウィンドウ (秒) を固定してキャッシュを作る
+    ///
+    /// `max_window_seconds` は有限かつ正でなければならない。不正な場合は
+    /// [`DpopError::InvalidReplayWindow`] を返す。
+    pub fn new(max_window_seconds: f64) -> Result<Self, DpopError> {
+        if !max_window_seconds.is_finite() || max_window_seconds <= 0.0 {
+            return Err(DpopError::InvalidReplayWindow);
+        }
+        Ok(Self {
+            max_window_seconds,
+            entries: BTreeMap::new(),
+        })
+    }
+
+    /// 構築時に固定した最大ウィンドウ (秒) を返す
+    pub fn max_window_seconds(&self) -> f64 {
+        self.max_window_seconds
+    }
+
+    /// `cti` を確認し、記録できれば記録する
+    ///
+    /// `window_seconds` は proof の鮮度に使ったウィンドウである。次の順に判定する。
+    ///
+    /// 1. `issued_at` / `reference_time_seconds` / `window_seconds` が有限で、
+    ///    `window_seconds` が 0 以上であること
+    /// 2. `window_seconds <= max_window_seconds` であること。超える場合は
+    ///    [`DpopError::ReplayWindowTooLarge`] を返す
+    /// 3. 参照時刻が保持期限 (`iat` + `max_window_seconds`) を超えた記録だけを解放する
+    ///    (等しい間は保持する)
+    /// 4. 同じ `cti` が残っていれば [`DpopError::Replayed`] を返す
+    /// 5. 記録する
+    ///
+    /// 1 / 2 / 4 で拒否した場合は新しい `cti` を記録せず、解放もしない。3 の解放は
+    /// 4 の判定より前に行うが、保持期限を超えた記録を残さないための処理であり、
+    /// 受理の可否には影響しない。
+    ///
+    /// [`CwtDpopProof::verify_against_cat_token`] は、`catdpop` が replay detection を
+    /// 要求している場合にだけこの関数を呼ぶ。要求していない proof は記録しない。
+    pub fn check_and_record(
+        &mut self,
+        cti: &[u8],
+        issued_at: f64,
+        reference_time_seconds: f64,
+        window_seconds: f64,
+    ) -> Result<(), DpopError> {
+        if !issued_at.is_finite() {
+            return Err(DpopError::NonFiniteNumber("iat"));
+        }
+        if !reference_time_seconds.is_finite() {
+            return Err(DpopError::NonFiniteNumber("reference time"));
+        }
+        if !window_seconds.is_finite() || window_seconds < 0.0 {
+            return Err(DpopError::InvalidFreshnessWindow);
+        }
+        if window_seconds > self.max_window_seconds {
+            return Err(DpopError::ReplayWindowTooLarge);
+        }
+        let retain_until = issued_at + self.max_window_seconds;
+        if !retain_until.is_finite() {
+            return Err(DpopError::NonFiniteNumber("replay retention"));
+        }
+        // 参照時刻が保持期限と等しい間は記録を保持し、超えた後だけ解放する。現在の
+        // proof のウィンドウではなく、キャッシュに固定した最大ウィンドウで判定する
+        self.entries
+            .retain(|_, retain_until| reference_time_seconds <= *retain_until);
+        if self.entries.contains_key(cti) {
+            return Err(DpopError::Replayed);
+        }
+        self.entries.insert(cti.to_vec(), retain_until);
+        Ok(())
+    }
+
+    /// 記録数を返す
+    ///
+    /// 保持期限を過ぎた記録は次の [`CwtDpopReplayCache::check_and_record`] まで残るため、
+    /// この数には期限切れの記録も含まれ得る。
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// 記録が空かどうかを返す
+    ///
+    /// 期限切れの記録は次の [`CwtDpopReplayCache::check_and_record`] の成功経路で解放
+    /// されるまで残るため、期限切れの記録だけが残っている場合も `false` を返す。
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 /// CWT 形式の DPoP proof
 ///
 /// デコードで得られる型であり、署名の検証は
 /// [`CwtDpopProof::verify_signature`]、`kccs` 公開鍵と CAT トークンの `cnf` の照合は
-/// [`CwtDpopProof::verify_key_binding`] が行う。`actx` / `ath` / 鮮度 / replay の
-/// 検証は行わない。
+/// [`CwtDpopProof::verify_key_binding`] が行う。CAT トークンとの束縛・`actx` / `ath` /
+/// 鮮度 / replay を含む受理判定は [`CwtDpopProof::verify_against_cat_token`] が一括して
+/// 行う。
 #[derive(Debug, Clone, PartialEq)]
 pub struct CwtDpopProof {
     header: CwtDpopProofHeader,
     claims: CwtDpopProofClaims,
     signing_input: Vec<u8>,
     signature: Vec<u8>,
+    /// デコードに使った `actx` の claim label
+    actx_label: i64,
+    /// デコードに使った `ath` の claim label
+    ath_label: i64,
 }
 
 impl CwtDpopProof {
@@ -872,6 +1149,207 @@ impl CwtDpopProof {
             if actual.as_slice() != expected {
                 return Err(DpopError::KeyBindingMismatch);
             }
+        }
+        Ok(())
+    }
+
+    /// `actx` の type / action / namespace / track が要求と一致するか検証する
+    ///
+    /// action ごとの target の規則は [`CwtAuthorizationContext::verify_request`] を
+    /// 参照。`namespace` / `track_name` は欠落を `None` で表し、空の値と区別する。
+    pub fn verify_authorization_context(
+        &self,
+        action: MoqtAction,
+        namespace: Option<&[&[u8]]>,
+        track_name: Option<&[u8]>,
+    ) -> Result<(), DpopError> {
+        self.claims
+            .authorization_context
+            .verify_request(action, namespace, track_name)
+    }
+
+    /// `iat` が参照時刻からウィンドウ内にあるか検証する
+    ///
+    /// 前方向と後方向に同じウィンドウを適用し、差の絶対値がウィンドウ以下なら受理する
+    /// (境界を含む)。CWT proof の `iat` は draft-ietf-moq-c4m-02 §4.2 の CDDL で
+    /// `int` と定められているため常に有限である。
+    /// 参照時刻とウィンドウは有限で、ウィンドウは 0 以上でなければならない。
+    pub fn verify_freshness(
+        &self,
+        reference_time_seconds: f64,
+        window_seconds: f64,
+    ) -> Result<(), DpopError> {
+        if !reference_time_seconds.is_finite() {
+            return Err(DpopError::NonFiniteNumber("reference time"));
+        }
+        if !window_seconds.is_finite() || window_seconds < 0.0 {
+            return Err(DpopError::InvalidFreshnessWindow);
+        }
+        let issued_at = self.claims.issued_at as f64;
+        let delta = reference_time_seconds - issued_at;
+        if delta > window_seconds {
+            return Err(DpopError::ProofExpired);
+        }
+        if -delta > window_seconds {
+            return Err(DpopError::ProofNotYetValid);
+        }
+        Ok(())
+    }
+
+    /// proof のクレームが指定された claim label 設定と矛盾しないか確認する
+    ///
+    /// `actx` / `ath` は label が未確定のため、proof は呼び出し側が選んだ label で
+    /// デコードされる。この proof をデコードした label 設定と、受理入口に渡された
+    /// 設定が違えば、同じ proof に対する解釈が 2 通りになるため拒否する。
+    fn verify_claim_labels(&self, codec: CwtDpopProofCodec) -> Result<(), DpopError> {
+        if self.actx_label != codec.actx_label() || self.ath_label != codec.ath_label() {
+            return Err(DpopError::ClaimLabelMismatch);
+        }
+        Ok(())
+    }
+
+    /// CWT 形式の DPoP proof を CAT トークンに束縛して受理できるか一括検証する
+    ///
+    /// draft-ietf-moq-c4m-02 §4.3 の条件を、CAT の検証を含めて 1 つの入口で判定する。
+    /// 呼び出し側が署名・クレーム・scope の検証を別々に済ませたと仮定する API ではない。
+    ///
+    /// 検証は draft-ietf-moq-c4m-02 §4.3 の条件を次の順に行う。すべて成功したときだけ
+    /// `cache` に replay 状態を記録し、途中で失敗した場合は記録しない。
+    ///
+    /// 1. [`CwtDpopVerification::default_window_seconds`] の値の検証
+    ///    (有限かつ 0 以上)
+    /// 2. CAT の署名 / MAC ([`CatToken::verify_with`])。信頼済み鍵と
+    ///    [`CwtDpopVerification::token_verify_options`] を使う
+    /// 3. CAT のクレーム (`exp` / `nbf` / `iss` / `aud`) ([`CatClaims::validate`])
+    /// 4. proof のクレームが [`CwtDpopVerification::codec`] の label 設定と一致すること
+    /// 5. proof の署名 ([`CwtDpopProof::verify_signature`])
+    /// 6. `kccs` の公開鍵と `cnf` の `ckt` / `jkt` の一致
+    ///    ([`CwtDpopProof::verify_key_binding`])
+    /// 7. `ath` と提示された CAT のバイト列の SHA-256 の一致
+    /// 8. `actx` の type / action / namespace / track と要求の一致
+    ///    ([`CwtDpopProof::verify_authorization_context`])
+    /// 9. `iat` の鮮度 ([`CwtDpopProof::verify_freshness`])。ウィンドウは `catdpop` の
+    ///    label 0 を使い、無い場合は [`CwtDpopVerification::default_window_seconds`] を
+    ///    使う
+    /// 10. `moqt` クレームによる scope 認可 ([`CatClaims::authorize`])
+    /// 11. `cnf` と `catreplay` が併存するトークンの拒否
+    /// 12. proof のウィンドウが cache の最大ウィンドウを超えないこと
+    /// 13. `catdpop` が replay detection を要求している場合 (`honor_jti`) の `cti` の
+    ///     確認と記録 ([`CwtDpopReplayCache::check_and_record`])
+    ///
+    /// `moqt-reval` の再検証と拒否はこの入口の対象外であり、利用側の責務である
+    /// ([`CatClaims::validate`] は `moqt-reval` を解釈しない)。
+    ///
+    /// `cnf` を持たないトークンは鍵束縛を確認できないため [`DpopError::MissingConfirmation`]
+    /// で拒否する。この入口は proof を必須とし、`cnf` を持つトークンのアクションを
+    /// proof なしで認可する API ではない。`cnf` の key 3 は IANA では `kid` であり、
+    /// 鍵束縛の根拠にしない ([`CwtDpopProof::verify_key_binding`])。
+    ///
+    /// scope 認可には要求の namespace / track をそのまま渡す。SETUP と namespace だけを
+    /// 対象とするアクションでは欠落している側に空の値を渡す。
+    ///
+    /// `cache` は同じトークン / proof を受理する検証主体が全接続で共有する
+    /// ([`CwtDpopReplayCache`])。replay detection を要求しない proof は記録しないが、
+    /// proof のウィンドウが cache の `max_window_seconds` を超えないことの判定には常に
+    /// 使うため、省略できない。`default_window_seconds` は `catdpop` に window が無い
+    /// 場合の鮮度ウィンドウであり、cache の `max_window_seconds` 以下であることが
+    /// 期待される。
+    ///
+    /// `self` は [`CwtDpopProofCodec::decode`] で解析済みの proof であること。§4.3 の
+    /// 条件 2 (COSE_Sign1 / `typ` = "dpop-proof+cwt" / 非対称 `alg`) は decode が
+    /// 検査するため、この入口では再検査しない。
+    pub fn verify_against_cat_token<C: CoseCrypto>(
+        &self,
+        crypto: &C,
+        request: &CwtDpopVerification<'_>,
+        cache: &mut CwtDpopReplayCache,
+    ) -> Result<(), DpopError> {
+        // `catdpop` に window が無い場合に使う既定値も入口で検証する
+        if !request.default_window_seconds.is_finite() || request.default_window_seconds < 0.0 {
+            return Err(DpopError::InvalidFreshnessWindow);
+        }
+        // 2. CAT 自体の署名 / MAC を、呼び出し側が指定した信頼済み鍵で検証する
+        request
+            .token
+            .verify_with(crypto, request.token_key, &request.token_verify_options)?;
+        // 3. CAT の時刻・issuer・audience を検証する
+        request
+            .token
+            .claims()
+            .validate(&request.claim_options)
+            .map_err(|error| DpopError::Cat(CatError::Claims(error)))?;
+        // 4. proof をデコードした label 設定との一致を確認する
+        self.verify_claim_labels(request.codec)?;
+        // 5. proof 単独の署名を kccs の公開鍵で検証する
+        self.verify_signature(crypto)?;
+        // 6. cnf による鍵束縛を検証する。cnf が無いトークンは DPoP の受理対象にしない
+        let confirmation = request
+            .token
+            .claims()
+            .confirmation
+            .as_ref()
+            .ok_or(DpopError::MissingConfirmation)?;
+        self.verify_key_binding(crypto, confirmation)?;
+        // 6. ath は「提示されたままの CAT のバイト列」の SHA-256 と比較する。
+        //    再エンコードや Base64 の正規化をした表現は使わない
+        let token_hash = crypto.digest(DigestAlgorithm::Sha256, request.token.raw_token())?;
+        if token_hash.as_slice() != self.claims.access_token_hash.as_slice() {
+            return Err(DpopError::AccessTokenHashMismatch);
+        }
+        // 7. actx の type / action / namespace / track を要求と比較する
+        self.verify_authorization_context(request.action, request.namespace, request.track_name)?;
+        // 8. iat の鮮度を、catdpop のウィンドウ (無ければ既定値) で検証する
+        let window_seconds = request
+            .token
+            .claims()
+            .catdpop
+            .as_ref()
+            .map_or(request.default_window_seconds, |catdpop| {
+                catdpop.window_seconds_or(request.default_window_seconds)
+            });
+        self.verify_freshness(request.claim_options.reference_time_seconds, window_seconds)?;
+        // 10. moqt クレームの scope で要求 action が認可されるか検証する
+        let namespace = request.namespace.unwrap_or(&[]);
+        let track_name = request.track_name.unwrap_or(&[]);
+        if !request
+            .token
+            .claims()
+            .authorize(request.action, namespace, track_name)
+        {
+            return Err(DpopError::Cat(CatError::ActionNotAuthorized(
+                request.action,
+            )));
+        }
+        // 11. `cnf` による鍵束縛と `catreplay` の接続束縛が併存するトークンは、
+        // この API では受理判定を行わない (bearer 用の接続束縛と proof 用の replay は
+        // 別の仕組みであり、併存時の意味を定義していない)
+        if request
+            .token
+            .claims()
+            .cat_replay
+            .is_some_and(|replay| replay != CatReplay::NotProtected)
+        {
+            return Err(DpopError::CatReplayWithConfirmation);
+        }
+        // 12. proof のウィンドウが cache の上限を超える場合は、replay detection の
+        // 有無にかかわらず拒否する (cache が保持できない期間の proof を受理しない)
+        if window_seconds > cache.max_window_seconds() {
+            return Err(DpopError::ReplayWindowTooLarge);
+        }
+        // 13. ここまでの検証がすべて成功したときだけ cti を確認して記録する
+        if request
+            .token
+            .claims()
+            .catdpop
+            .as_ref()
+            .is_some_and(super::CatDpop::honors_jti)
+        {
+            cache.check_and_record(
+                &self.claims.cti,
+                self.claims.issued_at as f64,
+                request.claim_options.reference_time_seconds,
+                window_seconds,
+            )?;
         }
         Ok(())
     }
@@ -1030,6 +1508,8 @@ impl CwtDpopProofCodec {
             claims,
             signing_input,
             signature: sign1.signature.clone(),
+            actx_label: self.actx_label,
+            ath_label: self.ath_label,
         })
     }
 
@@ -1335,7 +1815,7 @@ pub enum DpopError {
     ContextTypeMismatch,
     /// `actx.action` が一致しない
     ActionMismatch,
-    /// `actx.tns` / `actx.tn` が対象と一致しない
+    /// proof の target (JWT の `tns` / `tn`、CWT の namespace / track) が要求と一致しない
     TargetMismatch,
     /// `actx.tn` が無い
     MissingTrackName,
@@ -1351,7 +1831,7 @@ pub enum DpopError {
     ProofExpired,
     /// `iat` が未来すぎる
     ProofNotYetValid,
-    /// 同じ jti を再び受信した
+    /// 同じ proof 識別子 (`jti` / `cti`) を再び受信した
     Replayed,
     /// jti の検証が必要だがリプレイキャッシュが渡されていない
     ReplayCacheRequired,
@@ -1359,6 +1839,26 @@ pub enum DpopError {
     ClaimLabelConflict,
     /// `actx` / `ath` に登録済みの CWT claim key (1〜8) を指定した
     ReservedClaimLabel(&'static str),
+    /// CAT のエラー
+    Cat(CatError),
+    /// 要求 action に必要な target が要求に無い
+    MissingRequestTarget(&'static str),
+    /// 要求 action に存在しない target が要求にある
+    UnexpectedRequestTarget(&'static str),
+    /// `actx` に要求 action に必要な target が無い
+    MissingActxTarget(&'static str),
+    /// `actx` に要求 action に存在しない target がある
+    UnexpectedActxTarget(&'static str),
+    /// 鮮度ウィンドウが有限でない、または負である
+    InvalidFreshnessWindow,
+    /// リプレイキャッシュの最大ウィンドウが有限でない、または 0 以下である
+    InvalidReplayWindow,
+    /// proof の鮮度ウィンドウがリプレイキャッシュの最大ウィンドウを超えている
+    ReplayWindowTooLarge,
+    /// proof のクレームが指定された claim label 設定と矛盾する
+    ClaimLabelMismatch,
+    /// `cnf` による鍵束縛と `catreplay` の接続束縛が併存している
+    CatReplayWithConfirmation,
 }
 
 impl fmt::Display for DpopError {
@@ -1405,7 +1905,7 @@ impl fmt::Display for DpopError {
             }
             Self::ProofExpired => write!(f, "DPoP proof is too old"),
             Self::ProofNotYetValid => write!(f, "DPoP proof is issued in the future"),
-            Self::Replayed => write!(f, "DPoP proof jti was already used"),
+            Self::Replayed => write!(f, "DPoP proof identifier was already used"),
             Self::ReplayCacheRequired => {
                 write!(f, "catdpop requires jti replay protection")
             }
@@ -1416,6 +1916,35 @@ impl fmt::Display for DpopError {
                 write!(
                     f,
                     "{name} claim label must not be a registered CWT claim key"
+                )
+            }
+            Self::Cat(error) => write!(f, "CAT error: {error}"),
+            Self::MissingRequestTarget(name) => {
+                write!(f, "the request is missing the target: {name}")
+            }
+            Self::UnexpectedRequestTarget(name) => {
+                write!(f, "the request has an unexpected target: {name}")
+            }
+            Self::MissingActxTarget(name) => write!(f, "actx is missing the target: {name}"),
+            Self::UnexpectedActxTarget(name) => {
+                write!(f, "actx has an unexpected target: {name}")
+            }
+            Self::InvalidFreshnessWindow => {
+                write!(f, "freshness window must be finite and non-negative")
+            }
+            Self::InvalidReplayWindow => {
+                write!(f, "maximum replay window must be finite and positive")
+            }
+            Self::ReplayWindowTooLarge => {
+                write!(f, "freshness window exceeds the maximum replay window")
+            }
+            Self::ClaimLabelMismatch => {
+                write!(f, "proof claims do not match the configured claim labels")
+            }
+            Self::CatReplayWithConfirmation => {
+                write!(
+                    f,
+                    "catreplay is not supported together with a confirmation key"
                 )
             }
         }
@@ -1451,6 +1980,12 @@ impl From<CoseError> for DpopError {
 impl From<CborError> for DpopError {
     fn from(error: CborError) -> Self {
         Self::Cose(CoseError::Cbor(error))
+    }
+}
+
+impl From<CatError> for DpopError {
+    fn from(error: CatError) -> Self {
+        Self::Cat(error)
     }
 }
 

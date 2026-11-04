@@ -7,6 +7,8 @@
 //!
 //! 署名の検証は `CoseCrypto` を必要とするため `tests/test_c4m/` 側で固定する。
 
+use std::collections::BTreeMap;
+
 use pbt::common::{sample_bytes, sample_nonempty_bytes, test_runner};
 use shiguredo_moqt::c4m::MoqtAction;
 use shiguredo_moqt::c4m::cbor;
@@ -14,8 +16,8 @@ use shiguredo_moqt::c4m::cbor::Value;
 use shiguredo_moqt::c4m::cose::Algorithm;
 use shiguredo_moqt::c4m::dpop::{
     AuthorizationContext, CwtAuthorizationContext, CwtDpopProofClaims, CwtDpopProofCodec,
-    DPOP_PROOF_JWT_TYPE, DpopError, DpopProof, DpopProofClaims, DpopReplayCache,
-    MOQT_AUTHORIZATION_CONTEXT_TYPE,
+    CwtDpopReplayCache, DPOP_PROOF_JWT_TYPE, DpopError, DpopProof, DpopProofClaims,
+    DpopReplayCache, MOQT_AUTHORIZATION_CONTEXT_TYPE,
 };
 use shiguredo_moqt::c4m::jwt::JwtError;
 use shiguredo_moqt::message::common::TrackNamespace;
@@ -1181,6 +1183,470 @@ fn cwt_codec_label_validation_matches_model() -> noprop::TestResult {
     assert!(
         reserved_seen.get() > 0,
         "iat / cti と衝突する label のケースが生成されなかった\n{runner}"
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// CWT DPoP の受理判定 (draft-ietf-moq-c4m-02 §4.3)
+// ---------------------------------------------------------------------------
+
+/// action が namespace / track を必須とするかを返すモデル
+///
+/// draft-ietf-moq-c4m-02 §4.2 の actx の規則を、実装とは別に action ごとに列挙する。
+fn cwt_action_targets(action: MoqtAction) -> (bool, bool) {
+    match action {
+        MoqtAction::Setup => (false, false),
+        MoqtAction::PublishNamespace
+        | MoqtAction::SubscribeNamespace
+        | MoqtAction::SubscribeTracks => (true, false),
+        MoqtAction::Subscribe
+        | MoqtAction::RequestUpdate
+        | MoqtAction::Publish
+        | MoqtAction::Fetch
+        | MoqtAction::TrackStatus => (true, true),
+    }
+}
+
+/// actx の target 検証のモデル
+///
+/// `CwtAuthorizationContext::verify_request` と同じ順序で判定する。type → action →
+/// namespace (要求側の有無 → proof 側の有無 → 値) → track (同じ順) である。
+fn cwt_target_model(
+    context: &CwtAuthorizationContext,
+    request_action: MoqtAction,
+    request_namespace: Option<&[Vec<u8>]>,
+    request_track_name: Option<&[u8]>,
+) -> Option<DpopError> {
+    if context.context_type != MOQT_AUTHORIZATION_CONTEXT_TYPE {
+        return Some(DpopError::ContextTypeMismatch);
+    }
+    if context.action != request_action.key() {
+        return Some(DpopError::ActionMismatch);
+    }
+    let (requires_namespace, requires_track) = cwt_action_targets(request_action);
+    if requires_namespace {
+        let Some(request_namespace) = request_namespace else {
+            return Some(DpopError::MissingRequestTarget("namespace"));
+        };
+        let Some(proof_namespace) = context.namespace.as_deref() else {
+            return Some(DpopError::MissingActxTarget("namespace"));
+        };
+        if request_namespace.len() != proof_namespace.len()
+            || request_namespace
+                .iter()
+                .zip(proof_namespace)
+                .any(|(request, proof)| request.as_slice() != proof.as_slice())
+        {
+            return Some(DpopError::TargetMismatch);
+        }
+    } else {
+        if request_namespace.is_some() {
+            return Some(DpopError::UnexpectedRequestTarget("namespace"));
+        }
+        if context.namespace.is_some() {
+            return Some(DpopError::UnexpectedActxTarget("namespace"));
+        }
+    }
+    if requires_track {
+        let Some(request_track_name) = request_track_name else {
+            return Some(DpopError::MissingRequestTarget("track"));
+        };
+        let Some(proof_track_name) = context.track_name.as_deref() else {
+            return Some(DpopError::MissingActxTarget("track"));
+        };
+        if request_track_name != proof_track_name {
+            return Some(DpopError::TargetMismatch);
+        }
+    } else {
+        if request_track_name.is_some() {
+            return Some(DpopError::UnexpectedRequestTarget("track"));
+        }
+        if context.track_name.is_some() {
+            return Some(DpopError::UnexpectedActxTarget("track"));
+        }
+    }
+    None
+}
+
+/// 任意の namespace フィールド列を生成する (空のフィールドも生成する)
+fn sample_cwt_namespace(ctx: &mut noprop::TestCaseContext) -> Vec<Vec<u8>> {
+    (0..noprop::sample_usize_in(ctx, 0..=4))
+        .map(|_| sample_bytes(ctx, 4))
+        .collect()
+}
+
+/// namespace を「存在するが値が異なる」ものへ変える
+///
+/// 空の配列にはフィールドを 1 つ追加し、それ以外は先頭フィールドに 1 バイト追加する。
+/// どちらも元の値とは必ず異なる。
+fn different_cwt_namespace(fields: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let mut different = fields.to_vec();
+    if different.is_empty() {
+        different.push(Vec::new());
+    } else {
+        different[0].push(0x00);
+    }
+    different
+}
+
+/// track name を「存在するが値が異なる」ものへ変える
+fn different_cwt_track_name(track_name: &[u8]) -> Vec<u8> {
+    let mut different = track_name.to_vec();
+    different.push(0x00);
+    different
+}
+
+/// actx の target 整合の判定がモデルと一致する
+#[test]
+fn cwt_actx_target_matches_model() -> noprop::TestResult {
+    let ok_seen = std::cell::Cell::new(0usize);
+    let context_type_seen = std::cell::Cell::new(0usize);
+    let action_seen = std::cell::Cell::new(0usize);
+    let missing_seen = std::cell::Cell::new(0usize);
+    let unexpected_seen = std::cell::Cell::new(0usize);
+    let mismatch_seen = std::cell::Cell::new(0usize);
+    let mut runner = test_runner()?;
+    runner.run(512, |ctx| {
+        let action = noprop::sample_choice(ctx, &MoqtAction::ALL);
+        let (requires_namespace, requires_track) = cwt_action_targets(action);
+
+        // 要求側の target は 7/8 の確率で action の規則に従い、1/8 で違反する
+        let request_namespace = if noprop::sample_ratio(ctx, noprop::Ratio::new(7, 8)) {
+            requires_namespace.then(|| sample_cwt_namespace(ctx))
+        } else if requires_namespace {
+            None
+        } else {
+            Some(sample_cwt_namespace(ctx))
+        };
+        let request_track_name = if noprop::sample_ratio(ctx, noprop::Ratio::new(7, 8)) {
+            requires_track.then(|| sample_bytes(ctx, 8))
+        } else if requires_track {
+            None
+        } else {
+            Some(sample_bytes(ctx, 8))
+        };
+
+        // proof 側は要求と一致させるケースと、欠落・余分・値の不一致を作る
+        let proof_namespace = match noprop::sample_usize_in(ctx, 0..4) {
+            0 => request_namespace.clone(),
+            1 => request_namespace
+                .as_deref()
+                .map(different_cwt_namespace)
+                .or_else(|| Some(sample_cwt_namespace(ctx))),
+            2 => {
+                if request_namespace.is_some() {
+                    None
+                } else {
+                    Some(sample_cwt_namespace(ctx))
+                }
+            }
+            _ => {
+                if noprop::sample_bool(ctx) {
+                    Some(sample_cwt_namespace(ctx))
+                } else {
+                    None
+                }
+            }
+        };
+        let proof_track_name = match noprop::sample_usize_in(ctx, 0..4) {
+            0 => request_track_name.clone(),
+            1 => request_track_name
+                .as_deref()
+                .map(different_cwt_track_name)
+                .or_else(|| Some(sample_bytes(ctx, 8))),
+            2 => {
+                if request_track_name.is_some() {
+                    None
+                } else {
+                    Some(sample_bytes(ctx, 8))
+                }
+            }
+            _ => {
+                if noprop::sample_bool(ctx) {
+                    Some(sample_bytes(ctx, 8))
+                } else {
+                    None
+                }
+            }
+        };
+        let context_type = if noprop::sample_ratio(ctx, noprop::Ratio::new(3, 4)) {
+            String::from(MOQT_AUTHORIZATION_CONTEXT_TYPE)
+        } else {
+            sample_safe_text(ctx, 6)
+        };
+        let proof_action = if noprop::sample_ratio(ctx, noprop::Ratio::new(3, 4)) {
+            action.key()
+        } else {
+            noprop::sample_with_boundaries(
+                ctx,
+                &[0, 1, 9, i64::MAX, i64::MIN],
+                noprop::Ratio::one_nth(3),
+                |ctx| noprop::sample_u64(ctx) as i64,
+            )
+        };
+        let context = CwtAuthorizationContext {
+            context_type,
+            action: proof_action,
+            namespace: proof_namespace,
+            track_name: proof_track_name,
+            raw: Vec::new(),
+        };
+
+        let request_namespace_refs: Option<Vec<&[u8]>> = request_namespace
+            .as_ref()
+            .map(|fields| fields.iter().map(|field| field.as_slice()).collect());
+        let expected = cwt_target_model(
+            &context,
+            action,
+            request_namespace.as_deref(),
+            request_track_name.as_deref(),
+        );
+        let actual = context.verify_request(
+            action,
+            request_namespace_refs.as_deref(),
+            request_track_name.as_deref(),
+        );
+        assert_eq!(
+            actual,
+            expected.map_or(Ok(()), Err),
+            "actx の target 検証がモデルと一致しない: action={action:?} context={context:?} \
+             request_namespace={request_namespace:?} request_track_name={request_track_name:?}"
+        );
+        match actual {
+            Ok(()) => {
+                ok_seen.set(ok_seen.get() + 1);
+            }
+            Err(DpopError::ContextTypeMismatch) => {
+                context_type_seen.set(context_type_seen.get() + 1);
+            }
+            Err(DpopError::ActionMismatch) => {
+                action_seen.set(action_seen.get() + 1);
+            }
+            Err(
+                DpopError::MissingRequestTarget(_)
+                | DpopError::MissingActxTarget(_)
+                | DpopError::UnexpectedRequestTarget(_)
+                | DpopError::UnexpectedActxTarget(_),
+            ) => {
+                missing_seen.set(missing_seen.get() + 1);
+            }
+            Err(DpopError::TargetMismatch) => {
+                mismatch_seen.set(mismatch_seen.get() + 1);
+            }
+            Err(error) => panic!("想定していないエラー: {error}"),
+        }
+        // 余分な target の拒否も生成されていることを確認する
+        if matches!(
+            actual,
+            Err(DpopError::UnexpectedRequestTarget(_) | DpopError::UnexpectedActxTarget(_))
+        ) {
+            unexpected_seen.set(unexpected_seen.get() + 1);
+        }
+        Ok(())
+    })?;
+    assert!(
+        ok_seen.get() > 0,
+        "target が一致して受理されるケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        context_type_seen.get() > 0,
+        "actx.type が不正なケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        action_seen.get() > 0,
+        "actx.action が不一致なケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        missing_seen.get() > 0,
+        "target の欠落ケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        unexpected_seen.get() > 0,
+        "余分な target のケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        mismatch_seen.get() > 0,
+        "target の値が不一致なケースが生成されなかった\n{runner}"
+    );
+    Ok(())
+}
+
+/// CWT リプレイキャッシュのモデル
+///
+/// 保持期限は `iat` + 最大ウィンドウ、解放は参照時刻が保持期限を超えた後だけ、という
+/// 規則を実装とは別に書き下す。
+#[derive(Debug)]
+struct CwtReplayModel {
+    /// 構築時に固定した最大ウィンドウ (秒)
+    max_window_seconds: f64,
+    /// `cti` → 保持期限
+    entries: BTreeMap<Vec<u8>, f64>,
+}
+
+impl CwtReplayModel {
+    /// モデルを作る
+    fn new(max_window_seconds: f64) -> Self {
+        Self {
+            max_window_seconds,
+            entries: BTreeMap::new(),
+        }
+    }
+
+    /// 確認して記録する
+    fn check_and_record(
+        &mut self,
+        cti: &[u8],
+        issued_at: f64,
+        reference_time_seconds: f64,
+        window_seconds: f64,
+    ) -> Result<(), DpopError> {
+        if !issued_at.is_finite() {
+            return Err(DpopError::NonFiniteNumber("iat"));
+        }
+        if !reference_time_seconds.is_finite() {
+            return Err(DpopError::NonFiniteNumber("reference time"));
+        }
+        if !window_seconds.is_finite() || window_seconds < 0.0 {
+            return Err(DpopError::InvalidFreshnessWindow);
+        }
+        if window_seconds > self.max_window_seconds {
+            return Err(DpopError::ReplayWindowTooLarge);
+        }
+        let retain_until = issued_at + self.max_window_seconds;
+        if !retain_until.is_finite() {
+            return Err(DpopError::NonFiniteNumber("replay retention"));
+        }
+        self.entries
+            .retain(|_, retain_until| reference_time_seconds <= *retain_until);
+        if self.entries.contains_key(cti) {
+            return Err(DpopError::Replayed);
+        }
+        self.entries.insert(cti.to_vec(), retain_until);
+        Ok(())
+    }
+}
+
+/// CWT リプレイキャッシュの保持期間と window の境界がモデルと一致する
+#[test]
+fn cwt_replay_cache_matches_model() -> noprop::TestResult {
+    let recorded_seen = std::cell::Cell::new(0usize);
+    let replayed_seen = std::cell::Cell::new(0usize);
+    let too_large_seen = std::cell::Cell::new(0usize);
+    let invalid_window_seen = std::cell::Cell::new(0usize);
+    let non_finite_seen = std::cell::Cell::new(0usize);
+    let released_seen = std::cell::Cell::new(0usize);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let max_window_seconds = noprop::sample_choice(ctx, &[1.0, 10.0, 100.0, 300.0]);
+        let mut cache = CwtDpopReplayCache::new(max_window_seconds)
+            .expect("テストフィクスチャの最大ウィンドウは正");
+        let mut model = CwtReplayModel::new(max_window_seconds);
+        assert!(cache.is_empty(), "新しいキャッシュは空");
+        // cti の衝突を起こすため、少数のプールから選ぶ
+        let pool: Vec<Vec<u8>> = (0..3).map(|_| sample_nonempty_bytes(ctx, 4)).collect();
+        let mut reference = noprop::sample_f64_in(ctx, 0.0, 100.0);
+        let steps = noprop::sample_usize_in(ctx, 1..=12);
+        for _ in 0..steps {
+            let cti = if noprop::sample_ratio(ctx, noprop::Ratio::new(3, 4)) {
+                pool[noprop::sample_usize_in(ctx, 0..pool.len())].clone()
+            } else {
+                sample_nonempty_bytes(ctx, 4)
+            };
+            let issued_at = noprop::sample_with_boundaries(
+                ctx,
+                TIME_BOUNDARIES,
+                noprop::Ratio::one_nth(3),
+                |ctx| noprop::sample_f64_in(ctx, -100.0, 100.0),
+            );
+            // 最大ウィンドウと等しい値、超える値、負の値、非有限値を生成する
+            let window_seconds = noprop::sample_with_boundaries(
+                ctx,
+                &[
+                    0.0,
+                    1.0,
+                    max_window_seconds,
+                    max_window_seconds + 1.0,
+                    -1.0,
+                    f64::NAN,
+                    f64::INFINITY,
+                ],
+                noprop::Ratio::one_nth(4),
+                |ctx| noprop::sample_f64_in(ctx, 0.0, max_window_seconds),
+            );
+            reference += noprop::sample_f64_in(ctx, 0.0, 30.0);
+            let reference_now = if noprop::sample_ratio(ctx, noprop::Ratio::one_nth(8)) {
+                noprop::sample_choice(ctx, &[f64::NAN, f64::INFINITY, f64::NEG_INFINITY])
+            } else {
+                reference
+            };
+
+            let before = model.entries.len();
+            let expected = model.check_and_record(&cti, issued_at, reference_now, window_seconds);
+            let actual = cache.check_and_record(&cti, issued_at, reference_now, window_seconds);
+            assert_eq!(
+                actual, expected,
+                "判定がモデルと一致しない: cti={cti:?} iat={issued_at} \
+                 reference={reference_now} window={window_seconds} max={max_window_seconds}"
+            );
+            assert_eq!(
+                cache.len(),
+                model.entries.len(),
+                "記録数がモデルと一致しない: cti={cti:?} iat={issued_at} \
+                 reference={reference_now} window={window_seconds}"
+            );
+            assert_eq!(
+                cache.is_empty(),
+                model.entries.is_empty(),
+                "空判定が一致しない"
+            );
+            if model.entries.len() < before {
+                released_seen.set(released_seen.get() + 1);
+            }
+            match expected {
+                Ok(()) => {
+                    recorded_seen.set(recorded_seen.get() + 1);
+                }
+                Err(DpopError::Replayed) => {
+                    replayed_seen.set(replayed_seen.get() + 1);
+                }
+                Err(DpopError::ReplayWindowTooLarge) => {
+                    too_large_seen.set(too_large_seen.get() + 1);
+                }
+                Err(DpopError::InvalidFreshnessWindow) => {
+                    invalid_window_seen.set(invalid_window_seen.get() + 1);
+                }
+                Err(DpopError::NonFiniteNumber(_)) => {
+                    non_finite_seen.set(non_finite_seen.get() + 1);
+                }
+                Err(error) => panic!("想定していないエラー: {error}"),
+            }
+        }
+        Ok(())
+    })?;
+    assert!(
+        recorded_seen.get() > 0,
+        "記録されるケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        replayed_seen.get() > 0,
+        "リプレイと判定されるケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        too_large_seen.get() > 0,
+        "最大ウィンドウを超えるケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        invalid_window_seen.get() > 0,
+        "不正なウィンドウのケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        non_finite_seen.get() > 0,
+        "非有限値のケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        released_seen.get() > 0,
+        "保持期限を過ぎて解放されるケースが生成されなかった\n{runner}"
     );
     Ok(())
 }
