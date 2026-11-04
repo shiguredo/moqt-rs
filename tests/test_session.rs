@@ -852,6 +852,8 @@ mod object_filter_pass;
 mod outgoing_range_filter;
 #[path = "test_session/parameter_rules.rs"]
 mod parameter_rules;
+#[path = "test_session/peer_track_properties.rs"]
+mod peer_track_properties;
 #[path = "test_session/property_duplicates.rs"]
 mod property_duplicates;
 #[path = "test_session/property_scope.rs"]

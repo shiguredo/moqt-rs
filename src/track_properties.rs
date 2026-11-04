@@ -182,7 +182,11 @@ impl TrackProperties {
                 return Err(MessageError::ProtocolViolation(OBJECT_ONLY_IN_TRACK_SCOPE));
             }
             // draft-ietf-moq-transport-23 §10.4 (DEFAULT PUBLISHER PRIORITY) / draft-ietf-moq-transport-23 §10.5 (DEFAULT PUBLISHER GROUP ORDER) / draft-ietf-moq-transport-23 §10.6 (DYNAMIC GROUPS): 既知 Track Property の値域を検証する
-            validate_track_property_value_range(prop.prop_type, &prop.value)?;
+            let varint_value = match &prop.value {
+                TrackPropertyValue::VarInt(v) => Some(*v),
+                TrackPropertyValue::Bytes(_) => None,
+            };
+            validate_track_property_value_range(prop.prop_type, varint_value)?;
             crate::kvp::encode_delta_key(prev_type, prop.prop_type, buf);
             match &prop.value {
                 TrackPropertyValue::VarInt(v) => {
@@ -361,23 +365,87 @@ impl TrackProperties {
 
     /// 偶数型 Track Property から varint 値を取得する
     ///
-    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties)「MUST search both」に従い、mutable リストに無ければ
-    /// IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。mutable リストを優先する。
+    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties)「MUST search both」に従い、
+    /// mutable リストを先に、無ければ IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。
     ///
-    /// 同じ型が複数インスタンスある場合 (未知の型で許される重複) は最初のインスタンスを返す。
-    /// 単一に限られる既知の型の重複は [`TrackProperties::validate_multiplicity`] が
-    /// malformed Track として拒否するため、この経路へは到達しない。
+    /// prop_type と値形式の両方が一致する最初のインスタンスを返す。wire 経由の値は
+    /// [`TrackProperties::decode`] が偶数型を varint として読むため値形式は常に一致し、
+    /// 不一致が観測されるのは型と値を手で組み立てた in-memory 入力だけである。
+    ///
+    /// 本メソッド自体は多重検証を行わず、同じ型が複数インスタンスある場合は最初のものを返す。
+    /// 単一に限られる既知の型の重複は [`TrackProperties::validate_multiplicity`] が malformed
+    /// Track として拒否するが、それは `Session` の受信経路が `decode` の後に `validate` を
+    /// 呼ぶことによるものであり、本メソッドの前提ではない。
+    ///
+    /// この探索規則は draft 由来であり、将来の draft 改版で変わる可能性がある。
     pub fn find_varint(&self, prop_type: u64) -> Option<u64> {
-        // mutable リストを先に、続けて IMMUTABLE_PROPERTIES の内側を探索する (mutable 優先)
-        let inner = self.immutable_inner_properties();
-        for p in self.0.iter().chain(inner.iter()) {
-            if p.prop_type == prop_type
-                && let TrackPropertyValue::VarInt(v) = p.value
-            {
-                return Some(v);
+        match self.find_property(prop_type, FindValue::VarInt)? {
+            TrackPropertyValueRef::VarInt(v) => Some(v),
+            TrackPropertyValueRef::Bytes(_) => None,
+        }
+    }
+
+    /// 奇数型 Track Property から生バイト列を取得する
+    ///
+    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties)「MUST search both」に従い、
+    /// mutable リストを先に、無ければ IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。内側から
+    /// 取得する場合も外側の `Bytes` を借用したまま返すため、値のバイト列を `Vec` にコピーしない。
+    ///
+    /// draft-ietf-moq-loc-05 §6.1 (MOQ Properties Registry) Table 1 は 0x0D (VIDEO_CONFIG) /
+    /// 0x0F (AUDIO_CONFIG) の Scope を "Track, Object" と定める。draft-ietf-moq-loc-05
+    /// §3.1.2 (Immutable Properties) は、relay から見える不変の LOC プロパティを
+    /// IMMUTABLE_PROPERTIES として符号化することを SHOULD とする。そのため Track スコープの
+    /// これらの値は、最上位リストと IMMUTABLE_PROPERTIES の内側のどちらに置かれても本メソッドで
+    /// 取り出せなければならない。LOC に限らず任意の奇数型を扱う。
+    ///
+    /// prop_type と値形式の両方が一致する最初のインスタンスを返す。本メソッド自体は多重検証を
+    /// 行わない点は [`TrackProperties::find_varint`] と同じである。
+    ///
+    /// `push` で積んだ IMMUTABLE_PROPERTIES の内側が破損していてデコードできない場合は
+    /// `None` を返す ([`TrackProperties::find_varint`] と同じ制約)。wire 経由の値は
+    /// [`TrackProperties::decode`] が内側の書式を検証済みなので、この制約が観測されるのは
+    /// in-memory 構築の入力だけである。
+    ///
+    /// この探索規則と LOC の節番号は draft 由来であり、将来の draft 改版で変わる可能性がある。
+    pub fn find_bytes(&self, prop_type: u64) -> Option<&[u8]> {
+        match self.find_property(prop_type, FindValue::Bytes)? {
+            TrackPropertyValueRef::VarInt(_) => None,
+            TrackPropertyValueRef::Bytes(b) => Some(b),
+        }
+    }
+
+    /// mutable リストと IMMUTABLE_PROPERTIES の内側から、prop_type と値形式が一致する最初の
+    /// インスタンスを探す
+    ///
+    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties)「MUST search both」の
+    /// 共通探索であり、[`TrackProperties::find_varint`] / [`TrackProperties::find_bytes`] は
+    /// `wanted` を変えて呼ぶだけである。mutable リストを優先し、型が一致しても値形式が
+    /// 一致しないインスタンスは読み飛ばす。IMMUTABLE_PROPERTIES の内側が破損している場合と
+    /// 多重検証を行わない点の扱いは、公開メソッド側の doc を参照。
+    fn find_property(
+        &self,
+        prop_type: u64,
+        wanted: FindValue,
+    ) -> Option<TrackPropertyValueRef<'_>> {
+        // mutable リストを先に探索する (mutable 優先)
+        for p in &self.0 {
+            if p.prop_type == prop_type {
+                let value = match &p.value {
+                    TrackPropertyValue::VarInt(v) => TrackPropertyValueRef::VarInt(*v),
+                    TrackPropertyValue::Bytes(b) => TrackPropertyValueRef::Bytes(b.as_slice()),
+                };
+                if value.matches(wanted) {
+                    return Some(value);
+                }
             }
         }
-        None
+        // IMMUTABLE_PROPERTIES の内側を探索する。内側の値は外側の Bytes への借用のまま返す。
+        let inner = self.immutable_properties()?;
+        let props = walk_track_kv_pairs(inner, false).ok()?;
+        props
+            .into_iter()
+            .find(|p| p.prop_type == prop_type && p.value.matches(wanted))
+            .map(|p| p.value)
     }
 
     /// DYNAMIC_GROUPS (Property Type 0x30) の値を返す
@@ -495,26 +563,53 @@ impl TrackProperties {
             && !crate::grease::is_grease(prop_type)
     }
 
-    /// IMMUTABLE_PROPERTIES (0x0B) の内側 Track Property 列をデコードして返す
+    /// IMMUTABLE_PROPERTIES (0x0B) の内側の生バイト列を返す
     ///
-    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties)「MUST search both」の統合検索に使う。IMMUTABLE_PROPERTIES が無い場合や、
-    /// 内側が破損している (例: `push` で積んだ不正値) 場合は空 `Vec` を返す。getter は `Option` /
-    /// bool しか返せずエラーを表現できないため、破損時は探索を打ち切る (mutable で見つからなければ
-    /// `None` 相当)。decode 経由で構築された値の内側は decode 時に検証済みのため妥当である。
+    /// 中身は入れ子の KVP 列 (draft-ietf-moq-transport-23 §10.7 (Immutable Properties))。
+    /// [`TrackProperties::find_bytes`] はこのバイト列を借用したまま内側の値のスライスを返す。
     ///
     /// 最初の IMMUTABLE_PROPERTIES (0x0B) のみを対象とする。0x0B は単一に限られるため、
     /// `decode` が保持した重複や `push` で積んだ重複は [`TrackProperties::validate_multiplicity`]
-    /// が malformed Track として拒否する。2 つ目以降の内側を探索しないのは、その前提が破れた
-    /// 入力に対する防御である。
-    fn immutable_inner_properties(&self) -> Vec<TrackProperty> {
+    /// が malformed Track として拒否する。その前提が破れた入力に対する防御として、先頭の
+    /// 0x0B がバイト列でない場合も後続の 0x0B を探索せず `None` を返す。本メソッド自体は
+    /// 多重検証を行わない点に注意すること。
+    ///
+    /// `ObjectProperties::immutable_properties` と同名だが、本メソッドは private であり、
+    /// 外部に公開するのは型と値の解釈を持つ [`TrackProperties::find_varint`] /
+    /// [`TrackProperties::find_bytes`] に限る (`TrackProperties` の公開 API を増やさない)。
+    fn immutable_properties(&self) -> Option<&[u8]> {
         for p in &self.0 {
-            if p.prop_type == PROP_IMMUTABLE_PROPERTIES
-                && let TrackPropertyValue::Bytes(ref b) = p.value
-            {
-                return decode_track_kv_pairs(b, false).unwrap_or_default();
+            if p.prop_type == PROP_IMMUTABLE_PROPERTIES {
+                // 0x0B は単一に限られる。先頭の 0x0B がバイト列でない場合は前提が破れた入力で
+                // あるため、後続の 0x0B を探索せず打ち切る。
+                return match &p.value {
+                    TrackPropertyValue::Bytes(b) => Some(b.as_slice()),
+                    TrackPropertyValue::VarInt(_) => None,
+                };
             }
         }
-        Vec::new()
+        None
+    }
+
+    /// IMMUTABLE_PROPERTIES (0x0B) の内側 Track Property 列をデコードして返す
+    ///
+    /// スコープ検証 ([`TrackProperties::validate_scope`])・多重可否の検証
+    /// ([`TrackProperties::has_duplicate_single_property`])・未知の必須型の列挙
+    /// ([`TrackProperties::unknown_mandatory_types`]) のために、mutable リストと内側を
+    /// 合わせて列挙する。値の取得は借用走査の [`walk_track_kv_pairs`] を直接使う
+    /// ([`TrackProperties::find_property`]) ため、本メソッドは値のコピーを伴ってよい。
+    ///
+    /// IMMUTABLE_PROPERTIES が無い場合や、内側が破損している (例: `push` で積んだ不正値)
+    /// 場合は空 `Vec` を返す。decode 経由で構築された値の内側は decode 時に検証済みのため
+    /// 妥当である。
+    ///
+    /// 最初の IMMUTABLE_PROPERTIES (0x0B) のみを対象とする理由は
+    /// [`immutable_properties`](Self::immutable_properties) を参照。
+    fn immutable_inner_properties(&self) -> Vec<TrackProperty> {
+        let Some(bytes) = self.immutable_properties() else {
+            return Vec::new();
+        };
+        decode_track_kv_pairs(bytes, false).unwrap_or_default()
     }
 }
 
@@ -522,39 +617,114 @@ impl TrackProperties {
 /// (draft-ietf-moq-transport-23 §10.4 (DEFAULT PUBLISHER PRIORITY) /
 /// §10.5 (DEFAULT PUBLISHER GROUP ORDER) / §10.6 (DYNAMIC GROUPS))
 ///
-/// encode と decode の両方から呼び、mutable リストと IMMUTABLE_PROPERTIES の内側に同一の
-/// 値域検証を適用する。値域外の受信は同節の MUST により MALFORMED_KEY_VALUE で閉じる。
+/// `varint_value` は偶数型の varint 値であり、奇数型 (バイト列) の場合は `None` を渡す。
+/// 値域を持つ既知 Property はすべて偶数型であるため、`None` は検証対象外になる。
+///
+/// encode と decode (借用走査を含む) の両方から呼び、mutable リストと IMMUTABLE_PROPERTIES の
+/// 内側に同一の値域検証を適用する。値域外の受信は同節の MUST により MALFORMED_KEY_VALUE で
+/// 閉じる。
 fn validate_track_property_value_range(
     prop_type: u64,
-    value: &TrackPropertyValue,
+    varint_value: Option<u64>,
 ) -> Result<(), MessageError> {
-    match (prop_type, value) {
+    match (prop_type, varint_value) {
         // draft-ietf-moq-transport-23 §10.4 (DEFAULT PUBLISHER PRIORITY):
         // DEFAULT_PUBLISHER_PRIORITY は 0-255 のみ
-        (PROP_DEFAULT_PUBLISHER_PRIORITY, TrackPropertyValue::VarInt(v)) if *v > 255 => Err(
+        (PROP_DEFAULT_PUBLISHER_PRIORITY, Some(v)) if v > 255 => Err(
             MessageError::MalformedKeyValue("DEFAULT_PUBLISHER_PRIORITY must be 0..255"),
         ),
         // draft-ietf-moq-transport-23 §10.5 (DEFAULT PUBLISHER GROUP ORDER):
         // DEFAULT_PUBLISHER_GROUP_ORDER は 1 (Ascending) または 2 (Descending) のみ
-        (PROP_DEFAULT_PUBLISHER_GROUP_ORDER, TrackPropertyValue::VarInt(v))
-            if *v != 1 && *v != 2 =>
-        {
+        (PROP_DEFAULT_PUBLISHER_GROUP_ORDER, Some(v)) if v != 1 && v != 2 => {
             Err(MessageError::MalformedKeyValue(
                 "DEFAULT_PUBLISHER_GROUP_ORDER must be 1 (Ascending) or 2 (Descending)",
             ))
         }
         // draft-ietf-moq-transport-23 §10.6 (DYNAMIC GROUPS): DYNAMIC_GROUPS は 0 または 1 のみ
-        (PROP_DYNAMIC_GROUPS, TrackPropertyValue::VarInt(v)) if *v > 1 => Err(
-            MessageError::MalformedKeyValue("DYNAMIC_GROUPS must be 0 or 1"),
-        ),
+        (PROP_DYNAMIC_GROUPS, Some(v)) if v > 1 => Err(MessageError::MalformedKeyValue(
+            "DYNAMIC_GROUPS must be 0 or 1",
+        )),
         _ => Ok(()),
+    }
+}
+
+/// [`TrackProperties::find_property`] が探す値の形式
+///
+/// 偶数型は varint 値、奇数型は長さ付きバイト列という Property の値形式を表す。型と値形式の
+/// 両方が一致するインスタンスだけを探索結果として扱うために使う。
+#[derive(Debug, Clone, Copy)]
+enum FindValue {
+    /// 偶数型の varint 値
+    VarInt,
+    /// 奇数型の長さ付きバイト列
+    Bytes,
+}
+
+/// 借用した Track Property 値
+///
+/// KVP 列の走査結果を保持する内部表現であり、奇数型の値は元のバッファへの借用のまま持つ。
+/// [`TrackProperties::find_bytes`] が IMMUTABLE_PROPERTIES (0x0B) の内側の値を `Vec` へ
+/// コピーせず返せるようにするために使う。
+#[derive(Debug, Clone, Copy)]
+enum TrackPropertyValueRef<'a> {
+    /// 偶数型の値 (varint)
+    VarInt(u64),
+    /// 奇数型の値 (借用したバイト列)
+    Bytes(&'a [u8]),
+}
+
+impl TrackPropertyValueRef<'_> {
+    /// 偶数型の varint 値を返す
+    ///
+    /// 奇数型 (バイト列) の場合は `None`。借用走査中の値域検証
+    /// ([`validate_track_property_value_range`]) に渡す表現へ正規化するために使う。
+    fn as_varint(self) -> Option<u64> {
+        match self {
+            Self::VarInt(v) => Some(v),
+            Self::Bytes(_) => None,
+        }
+    }
+
+    /// 値の形式が `wanted` と一致するかを返す
+    fn matches(self, wanted: FindValue) -> bool {
+        matches!(
+            (self, wanted),
+            (Self::VarInt(_), FindValue::VarInt) | (Self::Bytes(_), FindValue::Bytes)
+        )
+    }
+}
+
+/// 借用した Track Property
+///
+/// [`walk_track_kv_pairs`] の走査結果を保持する内部表現であり、奇数型の値のバイト列を
+/// コピーせず元のバッファへの借用のまま持つ。
+#[derive(Debug, Clone, Copy)]
+struct TrackPropertyRef<'a> {
+    /// プロパティ型
+    prop_type: u64,
+    /// プロパティ値
+    value: TrackPropertyValueRef<'a>,
+}
+
+impl TrackPropertyRef<'_> {
+    /// 所有権を持つ [`TrackProperty`] へ変換する
+    fn to_owned_property(self) -> TrackProperty {
+        TrackProperty {
+            prop_type: self.prop_type,
+            value: match self.value {
+                TrackPropertyValueRef::VarInt(v) => TrackPropertyValue::VarInt(v),
+                TrackPropertyValueRef::Bytes(b) => TrackPropertyValue::Bytes(b.to_vec()),
+            },
+        }
     }
 }
 
 /// Track Property の Key-Value-Pair 列をバッファ全体からデコードする (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties))
 ///
 /// カウントプレフィックスなしで `buf` 末尾まで読む。`TrackProperties::decode` 本体、
-/// IMMUTABLE_PROPERTIES (0x0B) の内側検証 (encode / decode)、統合検索の内側展開の各所から呼ばれる。
+/// encode の IMMUTABLE_PROPERTIES (0x0B) 内側検証、統合検索
+/// (`immutable_inner_properties`) から呼ばれる。decode 時の IMMUTABLE_PROPERTIES 内側検証は
+/// 借用走査の [`walk_track_kv_pairs`] が行う。
 ///
 /// 奇数 Type の宣言長が 2^16-1 以下で残りバイトを超える場合は
 /// `MessageError::MalformedKeyValue` を返す。既知 Type は draft-ietf-moq-transport-23
@@ -582,6 +752,22 @@ fn decode_track_kv_pairs(
     buf: &[u8],
     allow_immutable: bool,
 ) -> Result<Vec<TrackProperty>, MessageError> {
+    Ok(walk_track_kv_pairs(buf, allow_immutable)?
+        .into_iter()
+        .map(TrackPropertyRef::to_owned_property)
+        .collect())
+}
+
+/// Track Property の Key-Value-Pair 列をバッファ全体から借用して走査する
+///
+/// [`decode_track_kv_pairs`] の走査本体であり、奇数型の値のバイト列を `Vec` へコピーせず元の
+/// バッファへの借用として返す。[`TrackProperties::find_bytes`] が IMMUTABLE_PROPERTIES (0x0B)
+/// の内側から生バイト列を借用したまま返すために使う。書式の検証とエラーの分類は
+/// [`decode_track_kv_pairs`] と同一であり、専用のパーサーを別に持たない。
+fn walk_track_kv_pairs<'a>(
+    buf: &'a [u8],
+    allow_immutable: bool,
+) -> Result<Vec<TrackPropertyRef<'a>>, MessageError> {
     let mut pos = 0;
     let mut props = Vec::new();
     let mut prev_type: u64 = 0;
@@ -600,7 +786,7 @@ fn decode_track_kv_pairs(
             // 偶数型: varint 値
             let (v, n) = varint::decode(&buf[pos..])?;
             pos += n;
-            TrackPropertyValue::VarInt(v)
+            TrackPropertyValueRef::VarInt(v)
         } else {
             // 奇数型: 長さ付きバイト列
             let (len, n) = varint::decode(&buf[pos..])?;
@@ -628,22 +814,22 @@ fn decode_track_kv_pairs(
                     "track property value length exceeds remaining buffer",
                 )
             })?;
-            let bytes = buf[pos..pos + len].to_vec();
+            let bytes = &buf[pos..pos + len];
             pos += len;
 
             // draft-ietf-moq-transport-23 §10.7 (Immutable Properties): IMMUTABLE_PROPERTIES 自体は許可するが、内側を Track Property KVP 列
             // として検証する (内側の入れ子 0x0B を拒否する)。空 (length=0) の内側は許容される。
             if prop_type == PROP_IMMUTABLE_PROPERTIES {
-                decode_track_kv_pairs(&bytes, false)?;
+                walk_track_kv_pairs(bytes, false)?;
             }
 
-            TrackPropertyValue::Bytes(bytes)
+            TrackPropertyValueRef::Bytes(bytes)
         };
 
         // draft-ietf-moq-transport-23 §10.4 (DEFAULT PUBLISHER PRIORITY) / draft-ietf-moq-transport-23 §10.5 (DEFAULT PUBLISHER GROUP ORDER) / draft-ietf-moq-transport-23 §10.6 (DYNAMIC GROUPS): 既知 Track Property の値域を検証する
-        validate_track_property_value_range(prop_type, &value)?;
+        validate_track_property_value_range(prop_type, value.as_varint())?;
 
-        props.push(TrackProperty { prop_type, value });
+        props.push(TrackPropertyRef { prop_type, value });
         prev_type = prop_type;
     }
 

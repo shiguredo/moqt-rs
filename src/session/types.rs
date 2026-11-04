@@ -1107,6 +1107,7 @@ mod tests {
         SubscriptionState, TrackNamespace, TrackRole,
     };
     use crate::message::ReasonPhrase;
+    use crate::track_properties::TrackProperties;
     use alloc::collections::VecDeque;
     use alloc::vec;
 
@@ -1141,6 +1142,7 @@ mod tests {
             dynamic_groups: DynamicGroupsSupport::Unknown,
             default_publisher_priority: None,
             default_publisher_group_order: None,
+            peer_track_properties: TrackProperties::new(),
             stream_counts: StreamCountState {
                 published_count: 0,
                 incoming_subgroup_count: 0,
@@ -1533,6 +1535,45 @@ pub struct Subscription {
     /// 宣言されていなければ `None` で、その場合の実効値は §10.5 のデフォルト Ascending (0x1)。
     /// 実効値の解決は [`effective_publisher_group_order`](Self::effective_publisher_group_order)。
     pub default_publisher_group_order: Option<u8>,
+    /// peer が送った Track Properties
+    ///
+    /// peer が PUBLISH / SUBSCRIBE_OK で送った Track Properties をデコードした結果を、加工せずに
+    /// そのまま保持する (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties): Track
+    /// Properties はメッセージの最終フィールド)。FETCH_OK / TRACK_STATUS_OK の Track Properties は
+    /// subscription に紐づかないため本フィールドには入らない。
+    ///
+    /// 本フィールドは PUBLISH / SUBSCRIBE_OK を受信した時点の peer のスナップショットである。
+    /// 状態機械の判断 (DYNAMIC_GROUPS の対応状況、delivery timeout、publisher の選好など) には
+    /// 個別の型付きフィールドを使うこと。raw を読むのは、LOC など型付きフィールドで表さない
+    /// 値を application が解釈する場合に限る。
+    ///
+    /// 値が入るのは、Session が peer の要求を受理した subscription である。PUBLISH は購読を
+    /// Pending として登録した時点で値が入り、自側が PUBLISH_OK を送る前でも参照できる。
+    /// SUBSCRIBE_OK は Established へ遷移した時点で値が入る。malformed Track の判定や未知の
+    /// Mandatory Track Property の検出などで受理前に終端した subscription は、
+    /// `Session::subscription` で参照できる間も空のままである。
+    ///
+    /// **自側が publisher として送った値は入らない。** `send_publish` / `send_subscribe_ok` で
+    /// 自側が発行した値は既知の MOQT 値として個別フィールドにのみ反映され、LOC などのその他の
+    /// 自側発行値は保持しない。同じ Track でも両端の値は一致するとは限らない。
+    ///
+    /// Track スコープの LOC プロパティ (0x08 TIMESCALE / 0x0D VIDEO_CONFIG / 0x0F AUDIO_CONFIG
+    /// など、draft-ietf-moq-loc-05 §6.1 (MOQ Properties Registry) Table 1) は
+    /// [`TrackProperties::find_varint`] / [`TrackProperties::find_bytes`] で取得する。両メソッドは
+    /// mutable リストを先に、次に IMMUTABLE_PROPERTIES (0x0B) の内側を探索する
+    /// (draft-ietf-moq-transport-23 §10.7 (Immutable Properties) の "MUST search both")。
+    ///
+    /// 次の場合は空の `TrackProperties` になり、本フィールドの値だけでは区別できない。
+    /// application は [`Subscription::include_properties`] が `Some(0)` かどうかで空化要求の
+    /// 有無を判断できる。空の場合は Object Properties 側に同じ値が載っているかを自身で判断する。
+    ///
+    /// - `send_subscribe` 直後で SUBSCRIBE_OK をまだ受信していない (Pending) 場合
+    /// - peer が Track Properties を送らない場合
+    /// - subscriber が INCLUDE_PROPERTIES=0 を指定して OK 応答の Track Properties が空化された
+    ///   場合 (draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter) の SHOULD)
+    ///
+    /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+    pub peer_track_properties: TrackProperties,
     /// stream count 関連の状態 (publisher 送信数、受信数、open 中の受信数)
     pub stream_counts: StreamCountState,
     /// peer から PUBLISH_DONE を受信した後の drain 状態

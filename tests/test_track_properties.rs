@@ -793,13 +793,20 @@ mod immutable_properties {
 
     #[test]
     fn find_bytes_returns_raw_immutable_bytes() {
-        // find_bytes(0x0B) は mutable リスト内の IMMUTABLE 生バイト列をそのまま返す (拡張しない)
+        // find_bytes(0x0B) は mutable リスト内の IMMUTABLE 生バイト列をそのまま返す
+        // (内側の KVP に置き換えない)。内側の 0x02 は偶数型の varint 値なので、
+        // find_bytes では取得できない。
         let inner = encode_inner(&[(0x02, TrackPropertyValue::VarInt(250))]);
         let props = with_immutable(inner.clone());
         assert!(props.as_slice().iter().any(|p| {
             p.prop_type == PROP_IMMUTABLE_PROPERTIES
                 && p.value == TrackPropertyValue::Bytes(inner.clone())
         }));
+        assert_eq!(
+            props.find_bytes(PROP_IMMUTABLE_PROPERTIES),
+            Some(inner.as_slice())
+        );
+        assert_eq!(props.find_bytes(0x02), None);
     }
 
     #[test]
@@ -876,6 +883,123 @@ mod immutable_properties {
         });
         assert_eq!(props.find_varint(0x02), None);
         assert!(!props.has_unknown_mandatory());
+    }
+
+    #[test]
+    fn find_bytes_searches_inside_immutable() {
+        // VIDEO_CONFIG (0x0D) を IMMUTABLE の内側だけに持つ場合でも、§10.7 の
+        // "MUST search both" により生バイト列を取り出せること。
+        let video_config = vec![0x01, 0x64, 0x00, 0x1F];
+        let inner = encode_inner(&[(0x0D, TrackPropertyValue::Bytes(video_config.clone()))]);
+        let props = with_immutable(inner);
+        assert_eq!(props.find_bytes(0x0D), Some(video_config.as_slice()));
+
+        // wire を経由しても同じ結果になること。
+        let mut buf = Vec::new();
+        props
+            .encode(&mut buf)
+            .expect("IMMUTABLE を含む TrackProperties は encode 可能");
+        let decoded = TrackProperties::decode(&buf).expect("encode した IMMUTABLE は decode 可能");
+        assert_eq!(decoded.find_bytes(0x0D), Some(video_config.as_slice()));
+    }
+
+    #[test]
+    fn find_bytes_prefers_mutable_over_immutable() {
+        // 同じ prop_type が mutable と IMMUTABLE の内側の両方にある場合、mutable を優先する
+        // (find_varint と同じ探索規則)。未知の型は複数インスタンスが許されるため、正当な
+        // Track のまま mutable 優先を検証できる (§8.4 の "MUST allow multiple instances of
+        // the Property")。既知の単一限定型で同じ配置を作ると malformed Track になる。
+        let unknown_type = 0x1001;
+        let inner = encode_inner(&[(unknown_type, TrackPropertyValue::Bytes(b"inner".to_vec()))]);
+        let mut props = with_immutable(inner);
+        props.push(TrackProperty {
+            prop_type: unknown_type,
+            value: TrackPropertyValue::Bytes(b"outer".to_vec()),
+        });
+        assert_eq!(props.find_bytes(unknown_type), Some(&b"outer"[..]));
+    }
+
+    #[test]
+    fn find_bytes_distinguishes_empty_value_from_missing() {
+        // 奇数型の空バイト列 (長さ 0) は欠落 (`None`) とは区別されること。
+        let unknown_type = 0x1001;
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: unknown_type,
+            value: TrackPropertyValue::Bytes(Vec::new()),
+        });
+        assert_eq!(props.find_bytes(unknown_type), Some(&[0u8; 0][..]));
+        assert_eq!(props.find_bytes(0x1003), None);
+
+        // wire を経由しても空の値は保持されること。
+        let mut buf = Vec::new();
+        props
+            .encode(&mut buf)
+            .expect("空バイト列の未知プロパティは encode 可能");
+        let decoded = TrackProperties::decode(&buf).expect("encode した値は decode 可能");
+        assert_eq!(decoded.find_bytes(unknown_type), Some(&[0u8; 0][..]));
+        assert_eq!(decoded.find_bytes(0x1003), None);
+    }
+
+    #[test]
+    fn find_varint_skips_mismatched_value_form() {
+        // 型が一致しても値形式が一致しないインスタンスは読み飛ばし、値形式が一致する
+        // インスタンスまで探す (ObjectProperties::find_varint と同じ規則)。wire 経由では
+        // 値形式は型の偶奇で決まるため、この入力は push で組み立てた場合だけ作れる。
+        let unknown_even_type = 0x1000;
+        let inner = encode_inner(&[(unknown_even_type, TrackPropertyValue::VarInt(7))]);
+        let mut props = with_immutable(inner);
+        // mutable リスト側は型が一致するが値形式が異なる (偶数型にバイト列) ため読み飛ばされ、
+        // IMMUTABLE の内側にある varint 値が返る。
+        props.push(TrackProperty {
+            prop_type: unknown_even_type,
+            value: TrackPropertyValue::Bytes(vec![0xFF]),
+        });
+        assert_eq!(props.find_varint(unknown_even_type), Some(7));
+        // find_bytes は反対に、値形式がバイト列のインスタンスを返す。
+        assert_eq!(props.find_bytes(unknown_even_type), Some(&[0xFF][..]));
+
+        // 値形式が一致するインスタンスが一つも無ければ None になる。
+        let only_varint_type = 0x1002;
+        props.push(TrackProperty {
+            prop_type: only_varint_type,
+            value: TrackPropertyValue::VarInt(9),
+        });
+        assert_eq!(props.find_bytes(only_varint_type), None);
+        assert_eq!(props.find_varint(only_varint_type), Some(9));
+    }
+
+    #[test]
+    fn find_bytes_returns_none_for_corrupt_pushed_immutable() {
+        // push で破損した IMMUTABLE バイト列を積んだ場合、find_bytes も panic せず None を
+        // 返す (内側デコード失敗時は探索を打ち切る)。内側の先頭には有効な 0x0D を置き、
+        // その後ろに途中終端の delta key (0x80) を足して、内側全体のデコードが失敗する
+        // 入力を作る。先頭の有効な値だけを返してしまう実装になっていないことを固定する。
+        let mut valid_inner = encode_inner(&[(0x0D, TrackPropertyValue::Bytes(vec![0x01]))]);
+        valid_inner.push(0x80);
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: TrackPropertyValue::Bytes(valid_inner),
+        });
+        assert_eq!(props.find_bytes(0x0D), None);
+    }
+
+    #[test]
+    fn immutable_inner_search_stops_at_first_immutable_variant_mismatch() {
+        // 先頭の 0x0B がバイト列でない (不正な) 入力を push で構築した場合、後続の 0x0B の
+        // 内側を探索せず None を返すこと (0x0B が単一である前提が破れた入力への防御)。
+        let inner = encode_inner(&[(0x0D, TrackPropertyValue::Bytes(vec![0x01]))]);
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: TrackPropertyValue::VarInt(1),
+        });
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: TrackPropertyValue::Bytes(inner),
+        });
+        assert_eq!(props.find_bytes(0x0D), None);
     }
 }
 

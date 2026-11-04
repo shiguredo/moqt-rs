@@ -53,6 +53,55 @@ fn max_cache_duration_roundtrip() -> noprop::TestResult {
     Ok(())
 }
 
+// ─── 未知の型に対する find_varint / find_bytes の探索規則 ─────────
+
+/// 未知の偶数型 (varint) と未知の奇数型 (バイト列) を持つ TrackProperties で、
+/// encode / decode を経由しても find_varint / find_bytes が同じ値を返し、存在しない型と
+/// 型の取り違えでは None を返すこと。
+///
+/// 未知の型は複数インスタンスが許される (draft-ietf-moq-transport-23 §8.4 (Track and
+/// Object Properties) の "MUST allow multiple instances of the Property") ため、
+/// 多重検証に抵触せずに探索規則だけを固定できる。既知型の値域検証を通らない型を選ぶ。
+#[test]
+fn unknown_property_getters_roundtrip() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(128, |ctx| {
+        let odd_type = 0x1001 + 2 * noprop::sample_u64_in(ctx, 0..=0x1FFF);
+        let odd_len = noprop::sample_usize_in(ctx, 0..=16);
+        let odd_value = noprop::sample_bytes_vec(ctx, odd_len);
+        let even_type = 0x1000 + 2 * noprop::sample_u64_in(ctx, 0..=0x1FFF);
+        let even_value = noprop::sample_u64(ctx);
+
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: odd_type,
+            value: TrackPropertyValue::Bytes(odd_value.clone()),
+        });
+        props.push(TrackProperty {
+            prop_type: even_type,
+            value: TrackPropertyValue::VarInt(even_value),
+        });
+
+        let mut buf = Vec::new();
+        props
+            .encode(&mut buf)
+            .expect("正当なテスト入力の encode は成功する");
+        let decoded = TrackProperties::decode(&buf).expect("テストフィクスチャの前提条件を満たす");
+
+        // 型と値の対応が保たれること
+        assert_eq!(decoded.find_bytes(odd_type), Some(odd_value.as_slice()));
+        assert_eq!(decoded.find_varint(even_type), Some(even_value));
+        // 型の取り違えでは値を返さないこと
+        assert_eq!(decoded.find_varint(odd_type), None);
+        assert_eq!(decoded.find_bytes(even_type), None);
+        // 存在しない型では None を返すこと
+        assert_eq!(decoded.find_bytes(odd_type + 2), None);
+        assert_eq!(decoded.find_varint(even_type + 2), None);
+        Ok(())
+    })?;
+    Ok(())
+}
+
 // ─── 未知の Mandatory Track Property の列挙 ────────────────────
 
 /// 既知の Track Property 型 (この PBT が値域の制約なしに生成できるもの)

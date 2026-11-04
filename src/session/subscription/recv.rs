@@ -20,6 +20,7 @@ use crate::message_parameter::{
     LocationFilter, LocationFilterContext, LocationFilterUpdate, MessageParameters,
     PARAM_FILL_PARAMETERS,
 };
+use crate::track_properties::TrackProperties;
 use alloc::collections::VecDeque;
 use hashbrown::HashMap;
 
@@ -279,6 +280,11 @@ impl Session {
             dynamic_groups: DynamicGroupsSupport::Unknown,
             default_publisher_priority,
             default_publisher_group_order,
+            // SUBSCRIBE は Track Properties を運ばない (draft-ietf-moq-transport-23 §9.6
+            // (SUBSCRIBE) のメッセージ形式に Track Properties フィールドが無い)。自側
+            // publisher が send_subscribe_ok で発行する値は自側の値であり、peer が送った値
+            // ではないため、peer の Track Properties は空のままにする。
+            peer_track_properties: TrackProperties::new(),
             stream_counts: StreamCountState {
                 published_count: 0,
                 incoming_subgroup_count: 0,
@@ -581,6 +587,10 @@ impl Session {
             dynamic_groups,
             default_publisher_priority,
             default_publisher_group_order,
+            // peer publisher が PUBLISH で送った Track Properties を加工せずに保持する
+            // (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties): Track
+            // Properties はメッセージの最終フィールド)。
+            peer_track_properties: publish.track_properties,
             stream_counts: StreamCountState {
                 published_count: 0,
                 incoming_subgroup_count: 0,
@@ -776,6 +786,10 @@ impl Session {
             ok.track_properties.subgroup_delivery_timeout(),
         );
         set_subscription_expires(subscription, ok.parameters.expires(), now_ms);
+        // peer publisher が SUBSCRIBE_OK で送った Track Properties を加工せずに保持する。
+        // INCLUDE_PROPERTIES=0 により wire 上で空化された場合は、空の TrackProperties が
+        // そのまま入る (draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter))。
+        subscription.peer_track_properties = ok.track_properties;
         // draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter): GROUP_ORDER は
         // SUBSCRIBE / PUBLISH / SUBSCRIBE_TRACKS / FETCH に含まれる。
         // SUBSCRIBE_OK には含まれないため、group_order は SUBSCRIBE 送信時の値のまま保持される。

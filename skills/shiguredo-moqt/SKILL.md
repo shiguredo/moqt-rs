@@ -1007,6 +1007,8 @@ fn object_delivery_timeout(&self) -> Option<u64>
 fn subgroup_delivery_timeout(&self) -> Option<u64>
 fn has_unknown_mandatory(&self) -> bool
 fn unknown_mandatory_types(&self) -> Vec<u64>
+fn find_varint(&self, prop_type: u64) -> Option<u64>
+fn find_bytes(&self, prop_type: u64) -> Option<&[u8]>
 ```
 
 | 定数 | 値 |
@@ -1020,6 +1022,15 @@ fn unknown_mandatory_types(&self) -> Vec<u64>
 | `PROP_DYNAMIC_GROUPS` | `0x30` |
 
 `TrackProperties::decode` はバッファ全体を読み、`(Self, usize)` ではなく `Self` を返す点に注意。
+
+`find_varint` は偶数型、`find_bytes` は奇数型の値を返す。どちらも mutable リストを先に、
+次に `IMMUTABLE_PROPERTIES` (0x0B) の内側を探索する (draft-ietf-moq-transport-23 §10.7
+(Immutable Properties) の "MUST search both")。LOC の Track スコープ値
+(0x08 TIMESCALE / 0x0D VIDEO_CONFIG / 0x0F AUDIO_CONFIG など) は、peer が
+PUBLISH / SUBSCRIBE_OK で送った Track Properties を保持する
+`Subscription::peer_track_properties` から取得する。`Subscription` は
+`Session::subscription(request_id)` で参照でき、FETCH_OK / TRACK_STATUS_OK の
+Track Properties はこのフィールドには入らない。
 
 ## MSF (`msf`)
 

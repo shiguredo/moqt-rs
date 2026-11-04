@@ -220,6 +220,10 @@ impl Session {
             dynamic_groups: DynamicGroupsSupport::Unknown,
             default_publisher_priority,
             default_publisher_group_order,
+            // SUBSCRIBE を送った直後は peer publisher の Track Properties をまだ受け取って
+            // いないため空で初期化する。SUBSCRIBE_OK の受信時に
+            // handle_peer_subscribe_ok が peer の値を格納する。
+            peer_track_properties: TrackProperties::new(),
             stream_counts: StreamCountState {
                 published_count: 0,
                 incoming_subgroup_count: 0,
@@ -476,6 +480,10 @@ impl Session {
             dynamic_groups,
             default_publisher_priority,
             default_publisher_group_order,
+            // 自側が publisher であり、peer が送った Track Properties は存在しない。
+            // 自側の既知 MOQT 値は個別フィールドに反映済みだが、LOC などのその他の自側発行値は
+            // このフィールドに保持しない。
+            peer_track_properties: TrackProperties::new(),
             stream_counts: StreamCountState {
                 published_count: 0,
                 incoming_subgroup_count: 0,

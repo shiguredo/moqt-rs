@@ -355,6 +355,7 @@ mod tests {
         DeliveryTimeoutState, DynamicGroupsSupport, StreamCountState, SubscriptionInitiator,
         SubscriptionRangeFilters, SubscriptionState, TrackRole,
     };
+    use crate::track_properties::TrackProperties;
 
     fn empty_subscription() -> Subscription {
         Subscription {
@@ -381,6 +382,7 @@ mod tests {
             dynamic_groups: DynamicGroupsSupport::Unknown,
             default_publisher_priority: None,
             default_publisher_group_order: None,
+            peer_track_properties: TrackProperties::new(),
             stream_counts: StreamCountState {
                 published_count: 0,
                 incoming_subgroup_count: 0,

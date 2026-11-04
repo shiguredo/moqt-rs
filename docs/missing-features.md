@@ -48,7 +48,7 @@ MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUB
 | MSF_COMPRESSION property による catalog 圧縮 | MSF §5.5 / §12.1 | 未実装。Track Property ID が TBD のため wire 実装しない | `issues/pending/0002-change-msf-compression-signaling.md` |
 | Log / Metrics track の payload | MSF §9 / §10 | 未実装。`packaging` の値は扱うが payload は未対応 | `issues/pending/0003-add-msf-log-metrics-payload.md` |
 | LOC の Video Payload Format | LOC §2.1 | 部分実装。`lengthSizeMinusOne` による length prefix のみで、§2.1.3 (length 1 = start code) と §2.1.4 (start code prefix) は未対応 | `issues/pending/0005-add-loc-video-payload-format.md` |
-| LOC の Track スコープ Property | LOC §6.1 Table 1 | 未実装。`TIMESCALE` / `VIDEO_CONFIG` / `AUDIO_CONFIG` は Track スコープでも定義されるが Object スコープでしか送らない | `issues/0125-add-track-scope-loc-properties.md` |
+| LOC の Track スコープ Property | LOC §6.1 Table 1 | PUBLISH / SUBSCRIBE_OK で受信した場合、受信側は `Subscription::peer_track_properties` から `TrackProperties::find_varint` / `find_bytes` で取得できる。publisher example からの送信は未対応 | 未起票 |
 | WebTransport over HTTP/3 の `RESET_STREAM_AT` | draft-ietf-webtrans-http3-16 §4.4 (MUST) | s2n-quic が送出できず `RESET_STREAM` にフォールバックする | `issues/pending/0094-bug-webtransport-reset-stream-at-unsupported.md` |
 | DPoP proof の送信 | C4M §3.2.2 | ライブラリに発行 API はあるが、example の URL 経路では送らない | 未起票 |
 | C4M の複合クレーム / RSA / CWT 形式 proof | C4M §2 | 未実装 (docs/c4m.md の「未対応」に記載) | docs/c4m.md |
@@ -91,11 +91,13 @@ MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUB
 draft-23 §10.7 は「When looking for the value of a property, processors MUST search both the
 mutable properties and the contents of Immutable Properties.」と定める。
 MOQT の `ObjectProperties` 側は探索する実装がある (`src/object_properties.rs:266-300`) が、
-LOC 側の `LocProperties` はトップレベルの KVP しか走査しない (`src/loc.rs:393-415`)。
+LOC 側の `LocProperties` はトップレベルの KVP しか走査しない (`src/loc.rs`)。
 moq-sub は 4 箇所で `LocProperties::decode` を呼んで Video Config / Timestamp を取り出すため、
 `IMMUTABLE_PROPERTIES` の中に Video Config を入れる publisher の Object は
 構成情報を取得できず、デコーダを初期化できないまま破棄される。
-`issues/0125` は Track スコープ側を扱うが、Object スコープ側は射程外の可能性がある。
+Track スコープ側は PUBLISH / SUBSCRIBE_OK で受信した場合に
+`Subscription::peer_track_properties` で公開済みであり、Object スコープ側の探索が残る。
+FETCH_OK / TRACK_STATUS_OK の Track Properties は公開していない。
 
 ### 4.2 `isLive=false` の `targetLatency` を使う (MSF §5.2.8、moq-sub)
 
@@ -549,7 +551,8 @@ moqt-js (HEAD `6da25d10`) の playout のうち、次の 2 つは移植してい
 
 ## 10. 要確認
 
-- Object 側 `IMMUTABLE_PROPERTIES` の探索 (4.1) を `issues/0125` の射程に含めるか
+- Object 側 `IMMUTABLE_PROPERTIES` の探索 (4.1) は `issues/0309` の射程とする
+  (Track 側は `Subscription::peer_track_properties` で公開済み)
 - LOC §2.2 (Private Properties) の実害 (`src/loc.rs:12-13` は application 責務としている)
 - `issues/pending/0010` (WebTransport の datagram 受信) が現行コードで再現するか
 - Video Frame Marking の D / B / T / S ビットを使う予定があるか
