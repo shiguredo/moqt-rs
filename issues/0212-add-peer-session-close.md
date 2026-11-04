@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-peer-session-close
 - Polished: 2026-10-25
+- Refreshed: 2026-11-04
 - Updated: 2026-10-10
 
 ## 目的
@@ -11,11 +12,11 @@
 peer が transport 層でセッションを終了したとき、その終了コードと、transport が取得できる場合は理由を
 アプリが観測できるようにする。
 
-draft-ietf-moq-transport-22 §6.6 (Termination) は、セッションの終了を transport 層で行い、native QUIC では
+draft-ietf-moq-transport-23 §6.6 (Termination) は、セッションの終了を transport 層で行い、native QUIC では
 CONNECTION_CLOSE、WebTransport では CLOSE_WEBTRANSPORT_SESSION カプセルで終了すると定める。
 終了コードは §12.2 (Session Termination Codes) の値である (例: CONTROL_MESSAGE_TIMEOUT (0x11))。
 現状の Session にはこの終了コードと理由を渡す口が無く、peer が理由付きで終了しても
-アプリには常に PROTOCOL_VIOLATION (0x3) + 固定文言 ("peer control stream reset" /
+アプリには常に CLOSED_CONTROL_STREAM (0x306) + 固定文言 ("peer control stream reset" /
 "peer control stream closed with FIN") として届く。peer が送ったコードと理由は失われる。
 
 区別したい状況は次の 2 つである。
@@ -27,8 +28,8 @@ CONNECTION_CLOSE、WebTransport では CLOSE_WEBTRANSPORT_SESSION カプセル�
 
 - `src/session/core.rs` の `Session::recv_control_stream_closed(RequestStreamEnd)` は理由 (reason phrase) を受け取る口を持たず、
   `RequestStreamEnd::Reset { error_code }` が運ぶ §12.5 の stream reset コードも `Reset { .. }` として捨てる。
-  `RequestStreamEnd::Fin` で `SESSION_PROTOCOL_VIOLATION` + "peer control stream closed with FIN"、
-  `RequestStreamEnd::Reset` で `SESSION_PROTOCOL_VIOLATION` + "peer control stream reset" を生成する。
+  `RequestStreamEnd::Fin` で `SESSION_CLOSED_CONTROL_STREAM` (0x306) + "peer control stream closed with FIN"、
+  `RequestStreamEnd::Reset` で `SESSION_CLOSED_CONTROL_STREAM` (0x306) + "peer control stream reset" を生成する。
 - Session のセッション制御系の入力 API は `recv_control` / `recv_control_stream_type` /
   `recv_control_stream_closed` / `recv_request` / `recv_request_stream_closed` / `recv_stream_message` のみで、
   peer 起点のセッション終了をコードと理由付きで渡す口が無い (data plane の `recv_*` は対象外)。
@@ -41,8 +42,9 @@ CONNECTION_CLOSE、WebTransport では CLOSE_WEBTRANSPORT_SESSION カプセル�
 - I/O 層の例: `crates/tokio-moq/src/moqt_client.rs` は control stream の終端を
   `StreamRead::Closed(end)` で受け取り `recv_control_stream_closed(end)` を呼ぶだけで、
   transport が運んだ終了コードと理由を Session へ渡していない。
-- moqt-py 経由の実測では、WT-H3 で server が CONTROL_MESSAGE_TIMEOUT (0x11) と理由付きで終了しても、
-  client の close イベントは (3, "peer control stream reset") になる。
+- moqt-py 経由の実測 (draft-22 時点) では、WT-H3 で server が CONTROL_MESSAGE_TIMEOUT (0x11) と理由付きで終了しても、
+  client の close イベントは (3, "peer control stream reset") になった。draft-23 対応後も固定文言のままで、
+  コードは `CLOSED_CONTROL_STREAM` (0x306) になる。
 
 ## 設計方針
 
