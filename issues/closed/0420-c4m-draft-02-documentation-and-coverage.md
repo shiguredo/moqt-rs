@@ -7,7 +7,7 @@
 
 ## 目的
 
-[draft-ietf-moq-c4m-02](../refs/moq/draft-ietf-moq-c4m-02.txt) の全文差分に沿って、
+[draft-ietf-moq-c4m-02](../../refs/moq/draft-ietf-moq-c4m-02.txt) の全文差分に沿って、
 公開する認可 API と利用上の責務を説明する。
 
 ## 現状
@@ -69,17 +69,17 @@ I/O、時計、接続識別子、replay state の所有者を明記する。
 
 ## 依存・関連
 
-- 先行: [0412](closed/0412-c4m-draft-02-moqt-claim-map.md)
-- 先行: [0413](closed/0413-c4m-draft-02-provisional-claim-labels.md)
-- 先行: [0414](closed/0414-c4m-draft-02-action-codes.md)
-- 先行: [0415](closed/0415-c4m-draft-02-connection-scoped-bearer-replay.md)
-- 先行: [0416](closed/0416-c4m-draft-02-cwt-dpop-proof-codec.md)
-- 先行: [0417](closed/0417-c4m-draft-02-cose-key-thumbprint-binding.md)
-- 先行: [0418](closed/0418-c4m-draft-02-cwt-dpop-validation.md)
-- 先行: [0419](closed/0419-c4m-draft-02-test-vectors.md)
-- 関連: [0345](0345-bug-c4m-moqt-reval.md)
-- 関連: [0346](0346-bug-c4m-dpop-validation.md)
-- 関連: [0356](0356-test-c4m-pbt-model-fuzz-gaps.md)
+- 先行: [0412](0412-c4m-draft-02-moqt-claim-map.md)
+- 先行: [0413](0413-c4m-draft-02-provisional-claim-labels.md)
+- 先行: [0414](0414-c4m-draft-02-action-codes.md)
+- 先行: [0415](0415-c4m-draft-02-connection-scoped-bearer-replay.md)
+- 先行: [0416](0416-c4m-draft-02-cwt-dpop-proof-codec.md)
+- 先行: [0417](0417-c4m-draft-02-cose-key-thumbprint-binding.md)
+- 先行: [0418](0418-c4m-draft-02-cwt-dpop-validation.md)
+- 先行: [0419](0419-c4m-draft-02-test-vectors.md)
+- 関連: [0345](../0345-bug-c4m-moqt-reval.md)
+- 関連: [0346](../0346-bug-c4m-dpop-validation.md)
+- 関連: [0356](../0356-test-c4m-pbt-model-fuzz-gaps.md)
 
 ## 差分の確認範囲
 
