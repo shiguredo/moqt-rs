@@ -1,13 +1,20 @@
 //! C4M (CAT / CWT / COSE / CBOR) のテスト
 //!
-//! C4M のテストベクタ (draft-01 付録 A 由来、moqt claim 値は draft-02 §A.5 と一致) と、
-//! トークン / DPoP proof の発行と検証のラウンドトリップを扱う。
+//! draft-02 付録 A の公式ベクタ (`tests/test_c4m/vectors_draft02.rs`) と、
+//! draft-01 由来の compact ベクタ (`tests/test_c4m/vectors.rs`) を分けて扱う。
+//! トークン / DPoP proof の発行と検証のラウンドトリップもここで検証する。
 
 #[path = "test_c4m/helpers.rs"]
 mod helpers;
 
 #[path = "test_c4m/vectors.rs"]
 mod vectors;
+
+#[path = "test_c4m/vectors_draft02.rs"]
+mod vectors_draft02;
+
+#[path = "test_c4m/draft02.rs"]
+mod draft02;
 
 #[path = "test_c4m/cbor.rs"]
 mod cbor;
