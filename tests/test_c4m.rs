@@ -1,7 +1,7 @@
 //! C4M (CAT / CWT / COSE / CBOR) のテスト
 //!
-//! draft-ietf-moq-c4m-01 付録 A のテストベクタと、トークン / DPoP proof の発行と
-//! 検証のラウンドトリップを扱う。
+//! C4M のテストベクタ (draft-01 付録 A 由来、moqt claim 値は draft-02 §A.5 と一致) と、
+//! トークン / DPoP proof の発行と検証のラウンドトリップを扱う。
 
 #[path = "test_c4m/helpers.rs"]
 mod helpers;

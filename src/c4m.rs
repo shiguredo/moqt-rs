@@ -1,8 +1,9 @@
 //! MOQT の認可トークン (C4M) のコーデック
 //!
-//! draft-ietf-moq-c4m-01 (Authorization scheme for MOQT using Common Access
-//! Tokens) の `moqt` / `moqt-reval` クレームと、その基盤となる CBOR (RFC 8949) /
-//! COSE (RFC 9052) / CAT (CTA-5007-B) のトークンを扱う。
+//! draft-ietf-moq-c4m-02 (Authorization scheme for MOQT using Common Access
+//! Tokens) の `moqt` クレーム (map 形式) と draft-01 の `moqt-reval` クレーム、
+//! その基盤となる CBOR (RFC 8949) / COSE (RFC 9052) / CAT (CTA-5007-B) の
+//! トークンを扱う。
 //!
 //! - [`cbor`](crate::c4m::cbor): CBOR のコーデック
 //! - [`cose`](crate::c4m::cose): COSE の構造とアルゴリズム定義
@@ -11,6 +12,9 @@
 //! - [`jwk`](crate::c4m::jwk): JWK (RFC 7517) と JWK サムプリント (RFC 7638)
 //! - [`jwt`](crate::c4m::jwt): JWS compact (RFC 7515) の JWT
 //! - [`dpop`](crate::c4m::dpop): DPoP proof の検証と発行 (draft-nandakumar-moq-generic-dpop-proof)
+//!
+//! 本モジュールは draft-ietf-moq-c4m-02 へ段階的に追随している。draft は将来改訂
+//! される可能性がある。
 //!
 //! このモジュールは I/O も時計も持たない。時刻は検証 API の引数で渡す。
 
@@ -415,10 +419,18 @@ impl MoqtScope {
     }
 }
 
-/// `moqt` クレーム (draft-ietf-moq-c4m-01 §2.1)
+/// `moqt` クレームの map の scopes キー (draft-ietf-moq-c4m-02 §2.1)
 ///
-/// アクションスコープの配列を持つ。いずれかのスコープが認可すれば許可となり、
-/// 評価順は問わない (§2.1.2)。
+/// キー 0 以外は将来の改訂のために予約されている (§2.1.1)。
+pub const MOQT_SCOPES_KEY: i64 = 0;
+
+/// `moqt` クレーム (draft-ietf-moq-c4m-02 §2.1)
+///
+/// claim value は CBOR map で、キー 0 にアクションスコープの配列を持つ。いずれかの
+/// スコープが認可すれば許可となり、評価順は問わない (§2.1.3)。
+///
+/// キー 0 以外のキーは将来の改訂のために予約されている (§2.1.1)。拒否の詳細は
+/// [`MoqtClaim::decode`] を参照。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MoqtClaim {
     /// 認可スコープ
@@ -439,7 +451,9 @@ impl MoqtClaim {
 
     /// アクションと Full Track Name が認可されるかどうかを返す
     ///
-    /// いずれかのスコープが認可すれば `true` を返す。
+    /// いずれかのスコープが認可すれば `true` を返す。これは claim 内の複数スコープの
+    /// OR であり、Composite の `or` クレームと他のクレームを連動させた claim set ごとの
+    /// 評価とは異なる (§2.1.3)。
     pub fn authorize(&self, action: MoqtAction, namespace: &[&[u8]], track_name: &[u8]) -> bool {
         self.scopes
             .iter()
@@ -447,10 +461,40 @@ impl MoqtClaim {
     }
 
     /// `moqt` クレームをデコードする
+    ///
+    /// CBOR map だけを受理する。キー 0 が無い場合、キー 0 の値が配列でない場合、
+    /// scopes が空の場合、キー 0 が重複する場合、i64 で表せないものを含め解釈できない
+    /// キーやキー 0 以外のキーを含む場合はエラーを返す。キー 0 以外のキーを無視すると
+    /// 認可範囲が広がるため、fail-closed で拒否する (§2.1.1)。旧 draft-01 の配列だけの
+    /// 値も map ではないため、型不一致のエラーになる。各スコープのデコードエラー
+    /// ([`MoqtScope::decode`] が返す空アクション・長さ不正・型不正など) もそのまま返す。
+    ///
+    /// キー 0 の重複は wire 由来の `Value` では CBOR デコーダが先に拒否するため、
+    /// [`C4mError::DuplicateScopesKey`] は公開 API に直接 `Value` を渡した場合の
+    /// 二重防御である。
     pub fn decode(value: &Value) -> Result<Self, C4mError> {
-        let items = value
-            .as_array()
+        let entries = value
+            .as_map()
             .ok_or(C4mError::UnexpectedType("moqt claim"))?;
+        let mut scopes_value = None;
+        for (key, entry) in entries {
+            let key = key
+                .as_int()
+                .ok_or(C4mError::UnexpectedType("moqt claim key"))?;
+            if key != MOQT_SCOPES_KEY {
+                return Err(C4mError::UnknownMoqtClaimKey(key));
+            }
+            // キー 0 の重複は map のキーの一意性 (RFC 8949 §5.6) に反する。wire 由来の
+            // Value では cbor::decode が DuplicateMapKey で先に拒否するため、この分岐は
+            // 公開 API に直接 Value を渡した場合の二重防御である
+            if scopes_value.replace(entry).is_some() {
+                return Err(C4mError::DuplicateScopesKey);
+            }
+        }
+        let scopes_value = scopes_value.ok_or(C4mError::MissingScopesKey)?;
+        let items = scopes_value
+            .as_array()
+            .ok_or(C4mError::UnexpectedType("moqt-scopes"))?;
         if items.is_empty() {
             return Err(C4mError::EmptyScopes);
         }
@@ -462,6 +506,9 @@ impl MoqtClaim {
     }
 
     /// `moqt` クレームをエンコードする
+    ///
+    /// キー 0 に scopes 配列を持つ CBOR map を返す (§2.1)。scopes が空の場合は
+    /// エラーを返す。キーは 0 のみである。
     pub fn encode(&self) -> Result<Value, C4mError> {
         if self.scopes.is_empty() {
             return Err(C4mError::EmptyScopes);
@@ -470,7 +517,10 @@ impl MoqtClaim {
         for scope in &self.scopes {
             items.push(scope.encode()?);
         }
-        Ok(Value::Array(items))
+        Ok(Value::Map(vec![(
+            Value::integer(MOQT_SCOPES_KEY),
+            Value::Array(items),
+        )]))
     }
 }
 
@@ -598,6 +648,12 @@ pub enum C4mError {
     EmptyActions,
     /// スコープの配列が空である
     EmptyScopes,
+    /// `moqt` クレームの map にキー 0 (scopes) が無い
+    MissingScopesKey,
+    /// `moqt` クレームの map にキー 0 (scopes) が重複している
+    DuplicateScopesKey,
+    /// `moqt` クレームの map に認識しないキーがある (draft-ietf-moq-c4m-02 §2.1.1)
+    UnknownMoqtClaimKey(i64),
     /// マッチの配列の要素数が 2 でない
     InvalidMatchArrayLength(usize),
     /// match-type が 1 (prefix) / 2 (suffix) のいずれでもない
@@ -621,6 +677,9 @@ impl fmt::Display for C4mError {
             Self::UnexpectedType(expected) => write!(f, "expected {expected}"),
             Self::EmptyActions => write!(f, "moqt-scope has no actions"),
             Self::EmptyScopes => write!(f, "moqt claim has no scopes"),
+            Self::MissingScopesKey => write!(f, "moqt claim has no scopes key (0)"),
+            Self::DuplicateScopesKey => write!(f, "moqt claim has duplicate scopes key (0)"),
+            Self::UnknownMoqtClaimKey(key) => write!(f, "unknown moqt claim key: {key}"),
             Self::InvalidMatchArrayLength(length) => {
                 write!(f, "bin-match array must have 2 elements, got {length}")
             }

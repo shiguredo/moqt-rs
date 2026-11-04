@@ -734,9 +734,12 @@ fn round_trip_for_all_algorithms() {
     }
 }
 
-/// 付録 A の全ベクタトークンの署名を検証する
+/// 全ベクタトークンの署名を検証する
 ///
 /// A.3 以外 (A.4 / A.5 / A.6) のトークンの署名も固定し、ベクタのドリフトを検出する。
+/// このテストは署名とデコード可否だけを検証し、claims の内容を draft-02 の公式値と
+/// 比較しない。そのため、HMAC ベクタの alg=-4、claim label=327、`moqt-reval` の
+/// draft-01 表現などのドリフトは検出しない。
 #[cfg(feature = "aws-lc-rs")]
 #[test]
 fn all_vector_tokens_verify_signatures() {

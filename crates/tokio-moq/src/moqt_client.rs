@@ -3953,7 +3953,7 @@ mod tests {
     ///
     /// draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization): track に紐づくトークンは
     /// AUTHORIZATION TOKEN パラメータを受け付ける制御メッセージへ MUST 付与する。
-    /// C4M の `moqt` クレーム (draft-ietf-moq-c4m-01 §2.1) がメッセージのアクションを
+    /// C4M の `moqt` クレーム (draft-ietf-moq-c4m-02 §2.1) がメッセージのアクションを
     /// 認可しないトークンでも、client 側で選別すると付与漏れになるため選別しない。
     /// 以前は FETCH の送信経路だけがクレームで選別しており、認可しないトークンが
     /// その経路から落ちていた (本 fixture のトークンは FETCH だけを認可する)。

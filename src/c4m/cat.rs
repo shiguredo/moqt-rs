@@ -1,7 +1,8 @@
 //! CAT (Common Access Token) のクレームとトークン
 //!
-//! CTA-5007-B の CAT を CWT (RFC 8392) のクレームとして扱い、draft-ietf-moq-c4m-01
-//! の `moqt` / `moqt-reval` を加えたトークンの発行と検証を提供する。
+//! CTA-5007-B の CAT を CWT (RFC 8392) のクレームとして扱い、draft-ietf-moq-c4m-02 の
+//! `moqt` クレーム (map 形式) と draft-01 の `moqt-reval` などを加えたトークンの発行と
+//! 検証を提供する。
 //!
 //! 直列化は 2 種類を扱う。
 //!
@@ -228,7 +229,9 @@ pub struct CatClaims {
     pub cwt_id: Option<Vec<u8>>,
     /// `cnf`
     pub confirmation: Option<Confirmation>,
-    /// `moqt` (draft-ietf-moq-c4m-01 §2.1)
+    /// `moqt` (draft-ietf-moq-c4m-02 §2.1)
+    ///
+    /// キー 0 以外のキーを含む claim は [`MoqtClaim::decode`] が拒否する (§2.1.1)。
     pub moqt: Option<MoqtClaim>,
     /// `moqt-reval` (draft-ietf-moq-c4m-01 §2.2) の再検証間隔 (秒)
     ///

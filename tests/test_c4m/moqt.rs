@@ -1,18 +1,50 @@
 //! C4M の `moqt` クレームと認可のテスト
 
-use shiguredo_moqt::c4m::cat::{CatClaims, CatToken};
+use shiguredo_moqt::c4m::cat::{CAT_CONTENT_TYPE, CLAIM_EXPIRATION, CatClaims, CatError, CatToken};
 use shiguredo_moqt::c4m::cbor::{self, Value};
+use shiguredo_moqt::c4m::cose::{
+    CoseEncodingOptions, CoseMac0, CoseMessage, HEADER_ALGORITHM, HEADER_TYPE,
+};
 use shiguredo_moqt::c4m::{
-    C4mError, CatDpop, MATCH_TYPE_PREFIX, MATCH_TYPE_SUFFIX, Match, MoqtAction, MoqtClaim,
-    MoqtScope, NamespaceMatch,
+    C4mError, CLAIM_MOQT, CatDpop, MATCH_TYPE_PREFIX, MATCH_TYPE_SUFFIX, MOQT_SCOPES_KEY, Match,
+    MoqtAction, MoqtClaim, MoqtScope, NamespaceMatch,
 };
 
 use super::helpers::{decode_hex, encode_hex};
 use super::vectors::SCOPE_VECTORS;
 
+/// draft-02 §2.1.2 の exact match の例の `moqt` クレーム値
+///
+/// EDN: `{0: [[[2, 3, 6, 7], ['example', 'com', nil], '/bob']]}` を決定論的
+/// CBOR に落としたもので、encode の期待値にもなる。
+const EXACT_MATCH_CLAIM_HEX: &str = "a1008183840203060783476578616d706c6543636f6df6442f626f62";
+
+/// draft-02 §2.1.2 の prefix match の例の `moqt` クレーム値
+///
+/// EDN: `{0: [[[2, 3, 6, 7], ['example', 'com', nil], [1, '/bob']]]}` を決定論的
+/// CBOR に落としたもので、encode の期待値にもなる。
+const PREFIX_MATCH_CLAIM_HEX: &str = "a1008183840203060783476578616d706c6543636f6df68201442f626f62";
+
 /// テスト用の namespace をバイト列の配列へ変換する
 fn namespace_bytes<'a>(namespace: &'a [&'a str]) -> Vec<&'a [u8]> {
     namespace.iter().map(|field| field.as_bytes()).collect()
+}
+
+/// 認可判定を 1 件検証する
+fn assert_authorization(
+    claim: &MoqtClaim,
+    action: i64,
+    namespace: &[&str],
+    track: &str,
+    expected: bool,
+) {
+    let action = MoqtAction::from_key(action).expect("既知のアクションである");
+    let namespace = namespace_bytes(namespace);
+    assert_eq!(
+        claim.authorize(action, &namespace, track.as_bytes()),
+        expected,
+        "認可判定が一致しない: action={action:?}, namespace={namespace:?}, track={track}"
+    );
 }
 
 #[test]
@@ -233,14 +265,6 @@ fn decode_errors_for_invalid_scopes() {
         ])),
         Err(C4mError::UnexpectedType("moqt-ns-match"))
     );
-    assert_eq!(
-        MoqtClaim::decode(&Value::Array(Vec::new())),
-        Err(C4mError::EmptyScopes)
-    );
-    assert_eq!(
-        MoqtClaim::decode(&Value::Unsigned(1)),
-        Err(C4mError::UnexpectedType("moqt claim"))
-    );
 }
 
 #[test]
@@ -251,6 +275,12 @@ fn encode_errors_and_round_trip() {
         track: None,
     };
     assert_eq!(empty_actions.encode(), Err(C4mError::EmptyActions));
+    // claim 経由でもスコープのエラーが伝播すること (fail-closed)
+    assert_eq!(
+        MoqtClaim::new().scope(empty_actions.clone()).encode(),
+        Err(C4mError::EmptyActions),
+        "claim の encode はスコープのエラーを握りつぶさないこと"
+    );
     let nil_not_last = MoqtScope {
         actions: vec![1],
         namespace: vec![
@@ -274,6 +304,381 @@ fn encode_errors_and_round_trip() {
         .scope(scope);
     let encoded = claim.encode().expect("エンコードできる");
     assert_eq!(MoqtClaim::decode(&encoded).expect("デコードできる"), claim);
+}
+
+#[test]
+fn draft_02_exact_match_example_round_trips_and_authorizes() {
+    // draft-02 §2.1.2 の exact match の例。EDN を CBOR に落とした既知のバイト列で
+    // decode / encode / authorize が一致することを固定する
+    let bytes = decode_hex(EXACT_MATCH_CLAIM_HEX);
+    let claim = MoqtClaim::decode(&cbor::decode(&bytes).expect("CBOR をデコードできる"))
+        .expect("map 形式の moqt クレームをデコードできる");
+    assert_eq!(claim.scopes.len(), 1);
+    assert_eq!(claim.scopes[0].actions, [2, 3, 6, 7]);
+    assert_eq!(
+        claim.scopes[0].namespace,
+        [
+            NamespaceMatch::Match(Match::Exact(b"example".to_vec())),
+            NamespaceMatch::Match(Match::Exact(b"com".to_vec())),
+            NamespaceMatch::End,
+        ]
+    );
+    assert_eq!(claim.scopes[0].track, Some(Match::Exact(b"/bob".to_vec())));
+
+    // encode は入力と同じ決定論的バイト列を返す
+    assert_eq!(
+        encode_hex(
+            &cbor::encode(&claim.encode().expect("エンコードできる")).expect("エンコードできる")
+        ),
+        EXACT_MATCH_CLAIM_HEX
+    );
+
+    // §2.1.2 の Permits (スコープの全アクションで同じ Full Track Name を認可する)
+    for action in [2, 3, 6, 7] {
+        assert_authorization(&claim, action, &["example", "com"], "/bob", true);
+    }
+    // §2.1.2 の Prohibits。アクション、名前空間の長さ、トラック名のいずれかの
+    // 違いで拒否される
+    assert_authorization(&claim, 4, &["example", "com"], "/bob", false);
+    for (namespace, track) in [
+        (&["example", "com"][..], ""),
+        (&["example", "com"][..], "/bob/123"),
+        (&["example", "com"][..], "/alice"),
+        (&["example", "com"][..], "/bob/logs"),
+        (&["alternate", "example", "com"][..], "/bob"),
+        (&["12345"][..], ""),
+        (&["example"][..], "com/bob"),
+        (&["example", "com", "/bob"][..], ""),
+        (&["example", "com", ""][..], "/bob"),
+    ] {
+        assert_authorization(&claim, 6, namespace, track, false);
+    }
+}
+
+#[test]
+fn draft_02_prefix_match_example_round_trips_and_authorizes() {
+    // draft-02 §2.1.2 の prefix match の例。exact match の例との差はトラック名の
+    // マッチだけであり、map 形式の CBOR バイト列もその差だけになる
+    let bytes = decode_hex(PREFIX_MATCH_CLAIM_HEX);
+    let claim = MoqtClaim::decode(&cbor::decode(&bytes).expect("CBOR をデコードできる"))
+        .expect("map 形式の moqt クレームをデコードできる");
+    assert_eq!(claim.scopes[0].track, Some(Match::Prefix(b"/bob".to_vec())));
+    assert_eq!(
+        encode_hex(
+            &cbor::encode(&claim.encode().expect("エンコードできる")).expect("エンコードできる")
+        ),
+        PREFIX_MATCH_CLAIM_HEX
+    );
+
+    // §2.1.2 の Permits (前方一致なのでトラック名の後続が自由になる)
+    for track in ["/bob", "/bob/123", "/bob/logs"] {
+        assert_authorization(&claim, 6, &["example", "com"], track, true);
+    }
+    // §2.1.2 の Prohibits
+    for (namespace, track) in [
+        (&["example", "com"][..], ""),
+        (&["example", "com"][..], "/alice"),
+        (&["alternate", "example", "com"][..], "/bob"),
+        (&["12345"][..], ""),
+        (&["example"][..], "com/bob"),
+    ] {
+        assert_authorization(&claim, 6, namespace, track, false);
+    }
+    // アクションの配列に無いアクションは、トラック名が一致しても拒否する
+    assert_authorization(&claim, 4, &["example", "com"], "/bob", false);
+}
+
+#[test]
+fn claim_encoding_is_deterministic_map_keyed_by_zero() {
+    let claim = MoqtClaim::new()
+        .scope(MoqtScope::new([MoqtAction::Publish]))
+        .scope(
+            MoqtScope::new([MoqtAction::Fetch])
+                .namespace_match(NamespaceMatch::Match(Match::Prefix(b"example".to_vec()))),
+        );
+    let encoded = claim.encode().expect("エンコードできる");
+    // claim value はキー 0 だけを持つ map であり、scopes 配列は既存の表現のまま
+    let Value::Map(entries) = &encoded else {
+        panic!("moqt クレームは map でなければならない: {encoded:?}");
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, Value::integer(MOQT_SCOPES_KEY));
+    assert_eq!(
+        entries[0].1.as_array().expect("scopes は配列である").len(),
+        2
+    );
+
+    // 決定論的バイト列は先頭がキー 0 の map (a1 00) になる
+    let first = cbor::encode(&encoded).expect("エンコードできる");
+    assert_eq!(&first[..2], &[0xa1, 0x00]);
+    // encode → decode のラウンドトリップ
+    assert_eq!(
+        MoqtClaim::decode(&cbor::decode(&first).expect("デコードできる")).expect("デコードできる"),
+        claim
+    );
+
+    // 単一スコープの最小の claim も期待どおりのバイト列になる
+    let simple = MoqtClaim::new().scope(MoqtScope::new([MoqtAction::Publish]));
+    assert_eq!(
+        encode_hex(
+            &cbor::encode(&simple.encode().expect("エンコードできる")).expect("エンコードできる")
+        ),
+        "a10081818106"
+    );
+}
+
+#[test]
+fn claim_decode_errors_follow_fail_closed_rules() {
+    let scope = || Value::Array(vec![Value::Array(vec![Value::integer(6)])]);
+
+    // 旧 draft-01 の配列だけの値は map ではないため型不一致のエラーになる。
+    // 空の scopes や新形式の claim として誤受理しない
+    let legacy = cbor::decode(&decode_hex(
+        "8183820206824b6578616d706c652e636f6d45616c696365820146766964656f2d",
+    ))
+    .expect("CBOR をデコードできる");
+    assert_eq!(
+        MoqtClaim::decode(&legacy),
+        Err(C4mError::UnexpectedType("moqt claim"))
+    );
+    // claims set 経由でも旧形式の claim は受理しない
+    assert_eq!(
+        CatClaims::decode(
+            &cbor::decode(&claims_cbor(legacy)).expect("claims set の CBOR をデコードできる")
+        ),
+        Err(CatError::C4m(C4mError::UnexpectedType("moqt claim")))
+    );
+
+    // キー 0 の値が配列でない
+    assert_eq!(
+        MoqtClaim::decode(&Value::Map(vec![(Value::integer(0), Value::Unsigned(1))])),
+        Err(C4mError::UnexpectedType("moqt-scopes"))
+    );
+    // scopes が空
+    assert_eq!(
+        MoqtClaim::decode(&Value::Map(vec![(
+            Value::integer(0),
+            Value::Array(Vec::new())
+        )])),
+        Err(C4mError::EmptyScopes)
+    );
+    // キー 0 の重複
+    assert_eq!(
+        MoqtClaim::decode(&Value::Map(vec![
+            (Value::integer(0), scope()),
+            (Value::integer(0), scope()),
+        ])),
+        Err(C4mError::DuplicateScopesKey)
+    );
+    // 整数でないキー
+    assert_eq!(
+        MoqtClaim::decode(&Value::Map(vec![(
+            Value::TextString(String::from("scopes")),
+            scope(),
+        )])),
+        Err(C4mError::UnexpectedType("moqt claim key"))
+    );
+    // キー 0 以外は将来の改訂のための予約であり、未知のキーは fail-closed で拒否する
+    assert_eq!(
+        MoqtClaim::decode(&Value::Map(vec![
+            (Value::integer(0), scope()),
+            (Value::integer(1), Value::Null),
+        ])),
+        Err(C4mError::UnknownMoqtClaimKey(1))
+    );
+    // キー 0 が無く未知のキーだけの場合も、空の scopes に読み替えない
+    assert_eq!(
+        MoqtClaim::decode(&Value::Map(vec![(Value::integer(2), Value::Null)])),
+        Err(C4mError::UnknownMoqtClaimKey(2))
+    );
+    // キー 0 の値のスコープ要素が不正な場合、MoqtScope::decode のエラーが
+    // そのまま伝播すること (空のスコープ配列は InvalidScopeLength)
+    let invalid_scope = Value::Map(vec![(
+        Value::integer(MOQT_SCOPES_KEY),
+        Value::Array(vec![Value::Array(Vec::new())]),
+    )]);
+    assert_eq!(
+        MoqtClaim::decode(&invalid_scope),
+        Err(C4mError::InvalidScopeLength(0)),
+        "スコープのデコードエラーをそのまま返すこと"
+    );
+
+    // i64 で表せない CBOR 整数キーは「解釈できないキー」として拒否すること
+    for key in [Value::Unsigned(u64::MAX), Value::Negative(u64::MAX)] {
+        assert_eq!(
+            MoqtClaim::decode(&Value::Map(vec![
+                (Value::integer(MOQT_SCOPES_KEY), Value::Array(vec![])),
+                (key, Value::integer(0)),
+            ])),
+            Err(C4mError::UnexpectedType("moqt claim key")),
+            "i64 で表せないキーは型エラーとして拒否すること"
+        );
+    }
+
+    // エラー優先順: 未知キーが先に見つかれば UnknownMoqtClaimKey、キー 0 も未知キーも
+    // 無い空 map だけが MissingScopesKey になること
+    assert_eq!(
+        MoqtClaim::decode(&Value::Map(vec![])),
+        Err(C4mError::MissingScopesKey)
+    );
+    assert_eq!(
+        MoqtClaim::decode(&Value::Map(vec![(Value::integer(1), Value::integer(0))])),
+        Err(C4mError::UnknownMoqtClaimKey(1))
+    );
+}
+
+#[test]
+fn claims_set_decodes_moqt_claim_map() {
+    // claims set の型付きクレーム経由でも map 形式がそのまま通ること
+    let claim = MoqtClaim::new().scope(
+        MoqtScope::new([MoqtAction::Subscribe])
+            .namespace_match(NamespaceMatch::Match(Match::Exact(b"example.com".to_vec()))),
+    );
+    let claims = CatClaims {
+        issuer: Some(String::from("https://auth.example.com")),
+        moqt: Some(claim),
+        ..CatClaims::default()
+    };
+    let payload =
+        cbor::encode(&claims.encode().expect("エンコードできる")).expect("エンコードできる");
+    let decoded = CatClaims::decode(&cbor::decode(&payload).expect("CBOR をデコードできる"))
+        .expect("claims をデコードできる");
+    assert_eq!(decoded, claims);
+    // claims set 経由の認可も map 形式の scopes を評価する
+    assert!(decoded.authorize(
+        MoqtAction::Subscribe,
+        &namespace_bytes(&["example.com"]),
+        b"video"
+    ));
+}
+
+/// `moqt` クレーム値を持つ claims set の CBOR を組み立てる
+fn claims_cbor(moqt: Value) -> Vec<u8> {
+    cbor::encode(&Value::Map(vec![
+        (Value::integer(CLAIM_MOQT), moqt),
+        (Value::integer(CLAIM_EXPIRATION), Value::integer(1700086400)),
+    ]))
+    .expect("エンコードできる")
+}
+
+/// claims set を COSE_Mac0 のトークンへ包む
+///
+/// 署名検証はしないため MAC は任意のバイト列でよい。
+fn cose_mac0_token(claims: Vec<u8>) -> Vec<u8> {
+    let protected = cbor::encode(&Value::Map(vec![
+        (Value::integer(HEADER_ALGORITHM), Value::integer(5)),
+        (
+            Value::integer(HEADER_TYPE),
+            Value::TextString(String::from(CAT_CONTENT_TYPE)),
+        ),
+    ]))
+    .expect("エンコードできる");
+    CoseMessage::Mac0(CoseMac0 {
+        protected,
+        unprotected: Vec::new(),
+        payload: Some(claims),
+        tag: vec![0; 32],
+        cose_tagged: true,
+        cwt_tagged: true,
+    })
+    .encode(&CoseEncodingOptions::default())
+    .expect("エンコードできる")
+}
+
+#[test]
+fn claims_set_with_unknown_moqt_claim_key_is_not_acceptable() {
+    // 未知のキーを含む moqt claim の claim set は受理不可 (§2.1.1)
+    let scope = Value::Array(vec![Value::Array(vec![Value::integer(
+        MoqtAction::Publish.key(),
+    )])]);
+    let moqt = Value::Map(vec![
+        (Value::integer(MOQT_SCOPES_KEY), Value::Array(vec![scope])),
+        (Value::integer(1), Value::integer(0)),
+    ]);
+    assert_eq!(
+        CatClaims::decode(&cbor::decode(&claims_cbor(moqt)).expect("CBOR をデコードできる")),
+        Err(CatError::C4m(C4mError::UnknownMoqtClaimKey(1)))
+    );
+}
+
+#[test]
+fn token_with_unknown_moqt_claim_key_is_rejected() {
+    // キー 1 を知らない制限として追加した token は claims のデコード時点で拒否され、
+    // 認可まで到達しない。キー 1 を除いた同じ token は PUBLISH を認可するため、
+    // 未知のキーを無視して認可すると制限が落ちるケースであることを固定する
+    let scope = Value::Array(vec![Value::Array(vec![Value::integer(
+        MoqtAction::Publish.key(),
+    )])]);
+    let known = claims_cbor(Value::Map(vec![(
+        Value::integer(MOQT_SCOPES_KEY),
+        Value::Array(vec![scope.clone()]),
+    )]));
+    let token =
+        CatToken::decode(&cose_mac0_token(known)).expect("既知のキーだけならデコードできる");
+    assert!(
+        token
+            .claims()
+            .authorize(MoqtAction::Publish, &namespace_bytes(&["ns"]), b"track")
+    );
+
+    let unknown = claims_cbor(Value::Map(vec![
+        (Value::integer(MOQT_SCOPES_KEY), Value::Array(vec![scope])),
+        (Value::integer(1), Value::integer(0)),
+    ]));
+    let err = CatToken::decode(&cose_mac0_token(unknown))
+        .expect_err("未知キーを含む token は拒否されること");
+    assert_eq!(err, CatError::C4m(C4mError::UnknownMoqtClaimKey(1)));
+}
+
+#[test]
+fn example_three_map_form_match_is_rejected_as_cddl_violation() {
+    // draft-02 §2.1.2 の 3 番目の例は namespace match / track match を `{ 0: bstr }`
+    // という map で書いているが、§2.1 の CDDL の bin-match は `bstr / [match-type,
+    // match-value]` であり map ではない (例 1 / 2 / 4 以降は CDDL と整合する)。
+    // 規範である CDDL を採り、例 3 の形は受け付けないことを固定する。
+    let ns_match_map = Value::Map(vec![(
+        Value::integer(0),
+        Value::ByteString(b"example".to_vec()),
+    )]);
+    let track_match_map = Value::Map(vec![(
+        Value::integer(0),
+        Value::ByteString(b"/bob".to_vec()),
+    )]);
+
+    // namespace match の位置に map を置いたスコープ
+    let ns_map_scope = Value::Array(vec![
+        Value::Array(vec![Value::integer(2)]),
+        Value::Array(vec![ns_match_map.clone()]),
+        Value::ByteString(b"/bob".to_vec()),
+    ]);
+    assert_eq!(
+        MoqtScope::decode(&ns_map_scope),
+        Err(C4mError::UnexpectedType("bin-match")),
+        "namespace match は map ではなく bin-match でなければならない"
+    );
+
+    // track match の位置に map を置いたスコープ
+    let track_map_scope = Value::Array(vec![
+        Value::Array(vec![Value::integer(2)]),
+        Value::Array(vec![Value::ByteString(b"example".to_vec())]),
+        track_match_map,
+    ]);
+    assert_eq!(
+        MoqtScope::decode(&track_map_scope),
+        Err(C4mError::UnexpectedType("bin-match")),
+        "track match は map ではなく bin-match でなければならない"
+    );
+
+    // claim 全体としても受理しない
+    let claim = Value::Map(vec![(
+        Value::integer(MOQT_SCOPES_KEY),
+        Value::Array(vec![ns_map_scope]),
+    )]);
+    assert_eq!(
+        MoqtClaim::decode(&claim),
+        Err(C4mError::UnexpectedType("bin-match")),
+        "§2.1.2 の 3 番目の例の形は claim として受理しない"
+    );
 }
 
 #[test]
