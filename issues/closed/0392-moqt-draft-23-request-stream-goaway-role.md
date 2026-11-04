@@ -29,7 +29,7 @@ client / server role や publisher / subscriber role を request initiator と�
 
 ## 依存・関連
 
-- 関連: [0375](0375-draft-22-request-stream-goaway-migration.md)
+- 関連: [0375](0375-draft-23-request-stream-goaway-migration.md)
 
 ## 解決方法
 
