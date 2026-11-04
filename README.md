@@ -41,13 +41,14 @@ MOQT のクライアントやサーバーを実装する場合に利用できま
   - 欠けた区間は、直前の音の周期補間と線形予測で埋めます
   - 映像は、表示時刻に合わせて表示待ちのキューからフレームを選びます
   - 音声と映像の表示時刻のずれを補正し、ライブ配信から遅れたら追いつきます
-- C4M の署名検証と発行
-  - オプション機能 `aws-lc-rs` で有効になります
+- C4M の認可トークン (CAT / CWT) の検証と発行
+  - `moqt` クレームの scope 認可、bearer トークンの接続束縛、CWT 形式の DPoP proof に対応します
+  - 同梱の暗号実装 (`AwsLcRsCrypto`) での署名検証と発行には、オプション機能 `aws-lc-rs` が必要です
 - 対応仕様
   - [Media over QUIC Transport](https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-23) `draft-23`
   - [Low Overhead Container](https://datatracker.ietf.org/doc/html/draft-ietf-moq-loc-05) `draft-05`
   - [MOQT Streaming Format](https://datatracker.ietf.org/doc/html/draft-ietf-moq-msf-01) `draft-01`
-  - [Authorization scheme for MOQT using Common Access Tokens](https://datatracker.ietf.org/doc/html/draft-ietf-moq-c4m-01) `draft-01`
+  - [Authorization scheme for MOQT using Common Access Tokens](https://datatracker.ietf.org/doc/html/draft-ietf-moq-c4m-02) `draft-02`
 
 ## 使い方
 
@@ -202,25 +203,65 @@ fn main() -> Result<(), MessageError> {
 ### C4M の認可トークンを扱う
 
 C4M は Common Access Token for MOQT の略で、MOQT で配信や購読を許可するための認可トークンです。
-このライブラリは、トークンのデコードと、署名の検証、トークンの発行に対応しています。署名の検証と発行には、オプション機能 `aws-lc-rs` を有効にする必要があります。
+このライブラリは CAT (CWT / COSE) のデコードと、署名の検証、クレームの検証、`moqt` クレームによる scope の認可、トークンの発行に対応しています。
+同梱の暗号実装 (`AwsLcRsCrypto`) で署名の検証と発行を行うには、オプション機能 `aws-lc-rs` が必要です。`CoseCrypto` を自前で実装する場合は必要ありません。
 
 ```rust,no_run
-use shiguredo_moqt::c4m::cat::{CatError, CatToken, MOQT_AUTH_TOKEN_TYPE_CAT};
+use shiguredo_moqt::c4m::cat::{
+    BearerReplayCache, BearerVerificationOptions, CatError, CatToken, VerifyOptions,
+    MOQT_AUTH_TOKEN_TYPE_CAT,
+};
+use shiguredo_moqt::c4m::crypto::{CoseCrypto, CoseKey};
+use shiguredo_moqt::c4m::MoqtAction;
 
-fn main() -> Result<(), CatError> {
+fn authorize_bearer<C: CoseCrypto>(
+    crypto: &C,
+    key: &CoseKey,
+    token_value: &[u8],
+    cache: &mut BearerReplayCache,
+    connection_id: &[u8],
+) -> Result<bool, CatError> {
     // SETUP や SUBSCRIBE の AUTHORIZATION_TOKEN に載る Type と値
-    let token_type = MOQT_AUTH_TOKEN_TYPE_CAT;
-    let token: &[u8] = b"";
+    let token = CatToken::decode_moqt_auth_token(MOQT_AUTH_TOKEN_TYPE_CAT, token_value)?;
 
-    // C4M トークンとしてデコードする
-    let decoded = CatToken::decode_moqt_auth_token(token_type, token)?;
+    // cnf 付きトークンは bearer 用ではない。DPoP proof と合わせて検証する
+    if token.claims().confirmation.is_some() {
+        return Ok(false);
+    }
 
-    // 発行者や有効期限などのクレームを確認できる
-    let claims = decoded.claims();
-    let _ = (&claims.issuer, claims.expiration);
-    Ok(())
+    // 非ゼロの moqt-reval は再検証できる場合だけ受理する。ここでは拒否する
+    if token.claims().moqt_reval.is_some_and(|value| value != 0.0) {
+        return Ok(false);
+    }
+
+    // 署名・クレーム・scope 認可・catreplay の接続束縛をまとめて検証する。
+    // 信頼済みの鍵、現在時刻、接続識別子は呼び出し側が用意する
+    let options = BearerVerificationOptions {
+        reference_time_seconds: 1_700_000_000.0,
+        expected_issuers: &["https://auth.example.com"],
+        expected_audiences: &["https://relay.example.com"],
+        verify_options: VerifyOptions {
+            expected_algorithm: None,
+            expected_type: None,
+        },
+        action: MoqtAction::Subscribe,
+        namespace: &[b"example.com"],
+        track_name: b"live",
+        connection_id,
+    };
+    match token.verify_bearer(crypto, key, &options, cache) {
+        Ok(()) => Ok(true),
+        Err(CatError::Claims(_)) | Err(CatError::ActionNotAuthorized(_)) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 ```
+
+`CatToken::decode` が成功しても、それはトークンをデコードできたというだけです。
+署名検証だけでも action は認可できません。認可には `moqt` クレームの scope の確認まで必要です。
+接続束縛 (`catreplay`) を含む bearer トークンは `CatToken::verify_bearer` を、`cnf` 付きトークンは DPoP proof と合わせて `CwtDpopProof::verify_against_cat_token` を使ってください。
+`catreplay` が 1 でない bearer トークンでも `verify_bearer` を使い、接続識別子と replay cache を渡してください。
+詳しい責務の分担は [docs/c4m.md](docs/c4m.md) に書いています。
 
 ### 音声と映像を再生する
 

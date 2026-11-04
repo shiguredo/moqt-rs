@@ -15,7 +15,7 @@ draft-ietf-moq-transport-23 に基づく Sans I/O / no_std な Media over QUIC T
 - **Session 状態機械**: 1 本の Transport Session に閉じた endpoint-local な状態管理
 - **インクリメンタルデコード**: フレーム境界に依存せず受信バッファに蓄積しながらデコード
 - **音声の再生補助**: 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期の遅延制御、時間圧縮・伸長と欠落の補間 (no_std / Sans I/O)
-- **対応仕様**: MOQT `draft-23` / LOC `draft-05` / MSF `draft-01` / C4M `draft-01`
+- **対応仕様**: MOQT `draft-23` / LOC `draft-05` / MSF `draft-01` / C4M `draft-02`
 
 ## バージョン情報
 
@@ -1126,12 +1126,16 @@ fn parse_msf_fragment(fragment: &str) -> Result<MsfFragment, MessageError>
 
 ## C4M (`c4m`)
 
-draft-ietf-moq-c4m-01 (CAT-4-MOQT) の認可トークンを扱う。CBOR (RFC 8949) / COSE (RFC 9052) / CWT (RFC 8392) / CAT (CTA-5007-B) を含む。
+draft-ietf-moq-c4m-02 (CAT-4-MOQT) の認可トークンを扱う。CBOR (RFC 8949) / COSE (RFC 9052) / CWT (RFC 8392) / CAT (CTA-5007-B) を含む。
+draft-02 の標準形式は COSE 形式の CAT と CWT 形式の DPoP proof である。compact 形式と旧 JWT 形式の proof は互換 API であり、新しい実装では使わない。
 
 ```rust,no_run
-# #[cfg(feature = "aws-lc-rs")]
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-use shiguredo_moqt::c4m::cat::{CatToken, CatTokenBuilder};
+// この例は aws-lc-rs feature が有効な場合のサンプルである
+#[cfg(feature = "aws-lc-rs")]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+use shiguredo_moqt::c4m::cat::{
+    CatToken, CatTokenBuilder, ClaimValidationOptions, VerifyOptions,
+};
 use shiguredo_moqt::c4m::crypto::aws_lc_rs::AwsLcRsCrypto;
 use shiguredo_moqt::c4m::crypto::CoseKey;
 use shiguredo_moqt::c4m::{MoqtAction, MoqtClaim, MoqtScope};
@@ -1139,66 +1143,290 @@ use shiguredo_moqt::c4m::{MoqtAction, MoqtClaim, MoqtScope};
 let crypto = AwsLcRsCrypto::new();
 let key = CoseKey::symmetric([0xab; 32]);
 
-// 発行 (認可サーバー側): compact 形式 / COSE 形式を選べる
-let token_text = CatTokenBuilder::new()
+// 発行 (認可サーバー側): 標準の COSE 形式
+let token_bytes = CatTokenBuilder::new()
     .issuer("https://auth.example.com")
     .audience("https://relay.example.com")
     .expiration(1_700_086_400.0)
+    .cwt_id(b"token-001".to_vec())
     .moqt(
         MoqtClaim::new().scope(
-            MoqtScope::new([MoqtAction::Publish, MoqtAction::Fetch])
+            MoqtScope::new([MoqtAction::Subscribe, MoqtAction::Fetch])
                 .namespace_match(shiguredo_moqt::c4m::NamespaceMatch::Match(
                     shiguredo_moqt::c4m::Match::Exact(b"example.com".to_vec()),
                 )),
         ),
     )
-    .jwk_thumbprint([0x01; 32])
-    .catdpop(300.0, true)
-    .build_compact(&crypto, &key)?;
+    .build_cose(&crypto, &key)?;
 
 // 検証 (MoQ リレー / endpoint 側)
-let token = CatToken::decode(token_text.as_bytes())?;
-token.verify(&crypto, &key)?;
-token.claims().validate(&shiguredo_moqt::c4m::cat::ClaimValidationOptions {
+let token = CatToken::decode(&token_bytes)?;
+token.verify_with(&crypto, &key, &VerifyOptions::default())?;
+token.claims().validate(&ClaimValidationOptions {
     reference_time_seconds: 1_700_000_000.0,
     expected_issuers: &["https://auth.example.com"],
     ..Default::default()
 })?;
+
+// 署名とクレームの検証だけではまだ認可できない。moqt クレームの scope を確認する
 assert!(token
     .claims()
-    .authorize(MoqtAction::Publish, &[b"example.com"], b"live"));
-# Ok(())
-# }
+    .authorize(MoqtAction::Subscribe, &[b"example.com"], b"live"));
+Ok(())
+}
 ```
+
+`moqt` クレームは CBOR map で、キー 0 にスコープの配列を持つ。キー 0 以外の未知のキーは fail-closed で拒否する。
+アクションは SETUP=1 から SUBSCRIBE_TRACKS=9 までで、旧 CLIENT_SETUP=0 は既知のアクションにしない。
+`moqt` / `moqt-reval` の claim label は IANA 未割当であり、ライブラリは Private Use の -65537 / -65538 を暫定値として使う (`CLAIM_MOQT` / `CLAIM_MOQT_REVAL`)。旧 327 / 328 は alias にしない。
+
+### 検証の責務
+
+- `CatToken::decode` は構文を解析するだけで、署名も時刻も認可も検証しない。デコードできても認可できるとは限らない
+- `CatToken::verify` は署名 / MAC だけを検証する。`CatToken::verify_with` は `VerifyOptions` を指定した場合に `alg` / `typ` も検証する。`CatClaims::validate` は `exp` / `nbf` / `iss` / `aud` を stateless に検証し、`CatClaims::authorize` は `moqt` クレームの scope だけを評価する。3 つを組み合わせても `catreplay` と DPoP は検証されない
+- `catreplay` を含む bearer トークンは `CatToken::verify_bearer` を使う。`cnf` 付きトークンは `verify_bearer` が拒否する
+- `cnf` 付きトークンは `CwtDpopProof::verify_against_cat_token` で proof とまとめて検証する。proof なしの `cnf` 付きトークンを認可してはいけない
+- `CwtDpopProof::verify_signature` / `verify_key_binding` / `verify_freshness` などの個別 API は、それぞれの条件だけを検証する。受理判定には使わない
+- 時計、I/O、接続識別子、再検証の実行、replay cache の所有は利用側の責務である
+- `BearerReplayCache` と `CwtDpopReplayCache` は検証主体が全接続で共有する。接続ごとに作り直さない。両者はキーも保持期間も意味も異なるため、互いに代用しない
+
+### bearer トークンの接続束縛
+
+`catreplay` 1 は「単一接続での再利用だけを許す」の意味である。`cti` と `exp` が必須で、接続が終了してからも `exp` + leeway まで束縛を保持する。
+
+```rust,no_run
+// この例は aws-lc-rs feature が有効な場合のサンプルである
+#[cfg(feature = "aws-lc-rs")]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+use shiguredo_moqt::c4m::cat::{
+    BearerReplayCache, BearerVerificationOptions, CatReplay, CatToken, CatTokenBuilder,
+    VerifyOptions,
+};
+use shiguredo_moqt::c4m::crypto::aws_lc_rs::AwsLcRsCrypto;
+use shiguredo_moqt::c4m::crypto::CoseKey;
+use shiguredo_moqt::c4m::{Match, MoqtAction, MoqtClaim, MoqtScope, NamespaceMatch};
+
+let crypto = AwsLcRsCrypto::new();
+let key = CoseKey::symmetric([0xab; 32]);
+let moqt_claim = MoqtClaim::new().scope(
+    MoqtScope::new([MoqtAction::Subscribe])
+        .namespace_match(NamespaceMatch::Match(Match::Exact(b"example.com".to_vec()))),
+);
+
+// catreplay 1 のトークンは cti と exp が必須
+let token_bytes = CatTokenBuilder::new()
+    .issuer("https://auth.example.com")
+    .expiration(1_700_086_400.0)
+    .cwt_id(b"token-001".to_vec())
+    .cat_replay(CatReplay::SingleConnection)
+    .moqt(moqt_claim)
+    .build_cose(&crypto, &key)?;
+let token = CatToken::decode(&token_bytes)?;
+
+// cache は検証主体で共有する。接続ごとに作らない
+let mut cache = BearerReplayCache::new(60.0)?;
+token.verify_bearer(&crypto, &key, &BearerVerificationOptions {
+    reference_time_seconds: 1_700_000_000.0,
+    expected_issuers: &["https://auth.example.com"],
+    expected_audiences: &[],
+    verify_options: VerifyOptions::default(),
+    action: MoqtAction::Subscribe,
+    namespace: &[b"example.com"],
+    track_name: b"live",
+    connection_id: connection_id,
+}, &mut cache)?;
+Ok(())
+}
+```
+
+`catreplay` 0 または省略は保護なし、2 は実装定義であり、本実装の bearer 検証は 2 を未対応として拒否する。
+
+### CWT 形式の DPoP proof
+
+draft-02 §4.2 の proof は COSE_Sign1 で、protected ヘッダに `alg` / `typ` / `kccs` を持つ。
+`actx` / `ath` の claim label は `TBD_ACTX` / `TBD_ATH` であり、IANA の割当も未確定である。
+`CwtDpopProofCodec::new(actx_label, ath_label)` に呼び出し側が決めた label を渡し、発行、デコード、検証で同じ設定を使う。
+ライブラリが独自の label を正式値として割り当てることはない。
+
+`kccs` の `cnf` にはクライアントの公開鍵を COSE_Key で入れ、トークンの `cnf` には `ckt` (5、RFC 9679) または `jkt` (323、RFC 7638) を入れる。
+`ckt` は `CoseKey::cose_key_thumbprint_sha256`、`jkt` は `Jwk::from_cose_key` と `Jwk::thumbprint_sha256` で計算できる。
+`ath` はリレーに提示された CAT のバイト列そのものの SHA-256 であり、`CatToken::raw_token()` を使う。
+
+```rust,no_run
+// この例は aws-lc-rs feature が有効な場合のサンプルである
+#[cfg(feature = "aws-lc-rs")]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+use shiguredo_moqt::c4m::cat::{
+    CatToken, ClaimValidationOptions, VerifyOptions, CAT_CONTENT_TYPE,
+};
+use shiguredo_moqt::c4m::cose::Algorithm;
+use shiguredo_moqt::c4m::crypto::aws_lc_rs::AwsLcRsCrypto;
+use shiguredo_moqt::c4m::crypto::{CoseCrypto, CoseKey, DigestAlgorithm};
+use shiguredo_moqt::c4m::dpop::{
+    CwtAuthorizationContext, CwtDpopProofClaims, CwtDpopProofCodec, CwtDpopReplayCache,
+    CwtDpopVerification, MOQT_AUTHORIZATION_CONTEXT_TYPE,
+};
+use shiguredo_moqt::c4m::MoqtAction;
+
+// 未定義の変数は利用側の文脈で用意する疑似コードである
+let crypto = AwsLcRsCrypto::new();
+
+// actx / ath の label は未確定。呼び出し側が決めた同じ値を発行、デコード、検証で使う。
+// ここでは例示用の値を使っている。仕様で label が確定したら置き換える
+let actx_label = -70001;
+let ath_label = -70002;
+let codec = CwtDpopProofCodec::new(actx_label, ath_label)?;
+
+// cnf の ckt は COSE_Key の SHA-256 サムプリント (RFC 9679)
+let expected_ckt = client_public_key.cose_key_thumbprint_sha256(&crypto)?;
+let token = CatToken::decode(&token_bytes)?;
+let token_confirmation = token.claims().confirmation.as_ref().expect("token has cnf");
+assert_eq!(token_confirmation.ckt(), Some(expected_ckt.as_slice()));
+
+// 発行
+let ath = crypto.digest(DigestAlgorithm::Sha256, token.raw_token())?;
+let proof_bytes = codec.build(&crypto, &client_key, &CwtDpopProofClaims {
+    cti: b"proof-001".to_vec(),
+    issued_at: unix_now as i64,
+    authorization_context: CwtAuthorizationContext {
+        context_type: String::from(MOQT_AUTHORIZATION_CONTEXT_TYPE),
+        action: MoqtAction::Subscribe.key(),
+        namespace: Some(vec![b"example.com".to_vec()]),
+        track_name: Some(b"live".to_vec()),
+        raw: Vec::new(),
+    },
+    access_token_hash: ath,
+    raw: Vec::new(),
+})?;
+
+// 一括検証。CAT の署名、クレーム、scope と proof の全条件を判定する
+let namespace: &[&[u8]] = &[b"example.com"];
+let proof = codec.decode(&proof_bytes)?;
+let mut replay_cache = CwtDpopReplayCache::new(300.0)?;
+proof.verify_against_cat_token(&crypto, &CwtDpopVerification {
+    token: &token,
+    token_key: &token_key,
+    token_verify_options: VerifyOptions {
+        expected_algorithm: Some(Algorithm::HmacSha256),
+        expected_type: Some(CAT_CONTENT_TYPE),
+    },
+    claim_options: ClaimValidationOptions {
+        reference_time_seconds: unix_now,
+        clock_tolerance_seconds: 60.0,
+        expected_issuers: &["https://auth.example.com"],
+        expected_audiences: &["https://relay.example.com"],
+    },
+    action: MoqtAction::Subscribe,
+    namespace: Some(namespace),
+    track_name: Some(b"live"),
+    codec,
+    default_window_seconds: 60.0,
+}, &mut replay_cache)?;
+Ok(())
+}
+```
+
+- 既存の発行者が JWK サムプリントを使う場合は `jkt` で束縛できる
+
+```rust,no_run
+// この例は aws-lc-rs feature が有効な場合のサンプルである
+#[cfg(feature = "aws-lc-rs")]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+use shiguredo_moqt::c4m::jwk::Jwk;
+
+// 既存の発行者が JWK サムプリント (RFC 7638) を使う場合は jkt で束縛する
+let jkt = Jwk::from_cose_key(&client_public_key)?.thumbprint_sha256(&crypto)?;
+let _ = jkt;
+Ok(())
+}
+```
+
+- `CwtDpopProofCodec::new` は `actx` と `ath` が同じ値になる設定、および CWT の登録済み claim key (1〜8) と衝突する設定を拒否する
+- `CwtDpopProof::verify_against_cat_token` は CAT の署名、クレーム、scope、proof の署名、`ckt` / `jkt` の鍵束縛、`ath`、`actx`、鮮度、`cti` の replay をまとめて検証する。`moqt-reval` の再検証はこの API の対象外である
+- `CwtDpopReplayCache` は proof の `cti` 用で、bearer の `BearerReplayCache` と代用し合わない
+- CWT 形式の proof を MOQT の AUTHORIZATION_TOKEN に載せる方法は仕様で未定義である。独自の envelope を決めない
+
+### 旧 JWT 形式 (互換 API)
+
+旧 draft-01 の JWT 形式の proof は `DpopProof` / `DpopProofBuilder` / `DpopReplayCache` で扱える。
+`DpopProof::verify_against_cat_token` は proof の署名、`ath`、`cnf` の JWK サムプリントとの一致、actx、鮮度、`jti` の replay を検証するが、CAT の署名、クレーム、scope は検証しない。呼び出し側が別途検証すること。
+旧形式の `cnf` は key 323 を優先し、無い場合は旧 draft-01 の key 3 を JWK サムプリントとして参照する。key 3 は IANA では `kid` である。
+旧形式の `DpopReplayCache` は現在の proof のウィンドウで古い記録を破棄するため、ウィンドウの異なるトークンで共有すると `jti` を再受理し得る。
+
+### 残る制約
+
+- Composite claims (`or` / `and` / `nor`) は評価しない。`CatClaims::raw` に保持するだけで、複合クレームの中の `moqt` は読めない
+- `catreplay` 2 は実装定義であり、bearer 検証では未対応として拒否する
+- 非ゼロの `moqt-reval` は既定の `CatClaims::validate` では拒否されない。再検証できない場合は拒否し、再検証できる場合はその間隔で再検証すること
+- `cnf` と `catreplay` 1 / 2 が併存するトークンは、意味が未定義のため一括検証 API では受理しない
+- RSA 署名は未対応
 
 主な API:
 
 ```rust
 // トークンの発行 / 検証
-use shiguredo_moqt::c4m::cat::{CatToken, CatTokenBuilder, VerifyOptions};
+use shiguredo_moqt::c4m::cat::{
+    BearerReplayCache, BearerVerificationOptions, CatClaims, CatReplay, CatToken,
+    CatTokenBuilder, ClaimValidationOptions, Confirmation, VerifyOptions,
+};
+use shiguredo_moqt::c4m::cose::CoseEncodingOptions;
 fn CatTokenBuilder::build_compact(&self, crypto: &C, key: &CoseKey) -> Result<String, CatError>
 fn CatTokenBuilder::build_cose(&self, crypto: &C, key: &CoseKey) -> Result<Vec<u8>, CatError>
+fn CatTokenBuilder::build_cose_with(&self, crypto: &C, key: &CoseKey, options: &CoseEncodingOptions) -> Result<Vec<u8>, CatError>
+fn CatTokenBuilder::cat_replay(self, cat_replay: CatReplay) -> CatTokenBuilder
+fn CatTokenBuilder::cose_key_thumbprint(self, thumbprint: impl Into<Vec<u8>>) -> CatTokenBuilder
+fn CatTokenBuilder::jwk_thumbprint(self, thumbprint: impl Into<Vec<u8>>) -> CatTokenBuilder
 fn CatToken::decode(input: &[u8]) -> Result<CatToken, CatError>
+fn CatToken::decode_moqt_auth_token(token_type: u64, value: &[u8]) -> Result<CatToken, CatError>
 fn CatToken::verify(&self, crypto: &C, key: &CoseKey) -> Result<(), CatError>
 fn CatToken::verify_with(&self, crypto: &C, key: &CoseKey, options: &VerifyOptions) -> Result<(), CatError>
-fn CatToken::decode_moqt_auth_token(token_type: u64, value: &[u8]) -> Result<CatToken, CatError>
+fn CatToken::verify_bearer(&self, crypto: &C, key: &CoseKey, options: &BearerVerificationOptions<'_>, cache: &mut BearerReplayCache) -> Result<(), CatError>
+fn CatClaims::validate(&self, options: &ClaimValidationOptions<'_>) -> Result<(), ClaimValidationError>
+fn CatClaims::authorize(&self, action: MoqtAction, namespace: &[&[u8]], track_name: &[u8]) -> bool
+fn CatClaims::get(&self, key: i64) -> Option<&Value>
 
-// moqt クレームの認可
+// moqt クレーム
 use shiguredo_moqt::c4m::{Match, MoqtAction, MoqtClaim, MoqtScope, NamespaceMatch};
 fn MoqtClaim::authorize(&self, action: MoqtAction, namespace: &[&[u8]], track_name: &[u8]) -> bool
 fn MoqtScope::allows(&self, action: MoqtAction, namespace: &[&[u8]], track_name: &[u8]) -> bool
+fn MoqtAction::from_key(key: i64) -> Option<MoqtAction>
+fn MoqtAction::authorization_context(self) -> Option<&'static str>
 
-// 暗号 trait (feature "aws-lc-rs" で実装を提供する)
-use shiguredo_moqt::c4m::crypto::{CoseCrypto, CoseKey, EcCurve, OkpCurve};
+// cnf と catreplay
+fn CatReplay::key(self) -> i64
+fn CatReplay::from_key(key: i64) -> Option<CatReplay>
+fn Confirmation::ckt(&self) -> Option<&[u8]>
+fn BearerReplayCache::new(leeway_seconds: f64) -> Result<BearerReplayCache, BearerReplayError>
+fn BearerReplayCache::check_and_bind(&mut self, cti: &[u8], connection_id: &[u8], retain_until: f64, reference_time_seconds: f64) -> Result<(), BearerReplayError>
 
-// DPoP proof
+// DPoP (旧 JWT 形式)
 use shiguredo_moqt::c4m::dpop::{DpopProof, DpopProofBuilder, DpopReplayCache, DpopVerification};
 fn DpopProof::decode(input: &str) -> Result<DpopProof, DpopError>
 fn DpopProof::verify_against_token(&self, crypto: &C, request: &DpopVerification<'_>, replay_cache: Option<&mut DpopReplayCache>) -> Result<(), DpopError>
 fn DpopProof::verify_against_cat_token(&self, crypto: &C, token: &CatToken, action: MoqtAction, namespace: &TrackNamespace, track_name: &[u8], reference_time_seconds: f64, default_window_seconds: f64, replay_cache: Option<&mut DpopReplayCache>) -> Result<(), DpopError>
+
+// DPoP (CWT 形式)
+use shiguredo_moqt::c4m::dpop::{
+    CwtAuthorizationContext, CwtDpopProof, CwtDpopProofClaims, CwtDpopProofCodec,
+    CwtDpopReplayCache, CwtDpopVerification,
+};
+fn CwtDpopProofCodec::new(actx_label: i64, ath_label: i64) -> Result<CwtDpopProofCodec, DpopError>
+fn CwtDpopProofCodec::build(&self, crypto: &C, key: &CoseKey, claims: &CwtDpopProofClaims) -> Result<Vec<u8>, DpopError>
+fn CwtDpopProofCodec::decode(&self, bytes: &[u8]) -> Result<CwtDpopProof, DpopError>
+fn CwtDpopProof::verify_signature(&self, crypto: &C) -> Result<(), DpopError>
+fn CwtDpopProof::verify_key_binding(&self, crypto: &C, confirmation: &Confirmation) -> Result<(), DpopError>
+fn CwtDpopProof::verify_against_cat_token(&self, crypto: &C, request: &CwtDpopVerification<'_>, cache: &mut CwtDpopReplayCache) -> Result<(), DpopError>
+fn CwtDpopReplayCache::new(max_window_seconds: f64) -> Result<CwtDpopReplayCache, DpopError>
+fn CwtDpopReplayCache::check_and_record(&mut self, cti: &[u8], issued_at: f64, reference_time_seconds: f64, window_seconds: f64) -> Result<(), DpopError>
+
+// 鍵のサムプリント
+use shiguredo_moqt::c4m::jwk::Jwk;
+fn CoseKey::cose_key_thumbprint_sha256(&self, crypto: &C) -> Result<Vec<u8>, CryptoError>
+fn Jwk::from_cose_key(key: &CoseKey) -> Result<Jwk, JwkError>
+fn Jwk::thumbprint_sha256(&self, crypto: &C) -> Result<Vec<u8>, JwkError>
 ```
 
-- 直列化は compact 形式 (draft 付録 A の `base64url(protected).base64url(claims).base64url(signature)`) と COSE 形式 (CWT タグ + COSE_Sign1 / COSE_Mac0) の両方を扱う
+- 直列化は COSE 形式 (COSE_Sign1 / COSE_Mac0、CWT タグは任意) と旧 compact 形式の両方をデコードできる。発行は `build_cose` を標準とする
 - 暗号実装は `aws-lc-rs` feature でのみ提供する。既定ビルドは no_std のままで、`CoseCrypto` trait と鍵表現だけを持つ
 - 対応アルゴリズムは HMAC 256/384/512・ES256/384/512・EdDSA (Ed25519)。RSA は未対応
 
@@ -1537,14 +1765,22 @@ moqt-rs には vsync が無く、呼び出し側のループ周期 (example は 
   - <https://datatracker.ietf.org/doc/html/draft-ietf-moq-loc-05>
 - draft-ietf-moq-msf-01 - MOQT Streaming Format
   - <https://datatracker.ietf.org/doc/html/draft-ietf-moq-msf-01>
-- draft-ietf-moq-c4m-01 - Authorization scheme for MOQT using Common Access Tokens
-  - <https://datatracker.ietf.org/doc/html/draft-ietf-moq-c4m-01>
+- draft-ietf-moq-c4m-02 - Authorization scheme for MOQT using Common Access Tokens
+  - <https://datatracker.ietf.org/doc/html/draft-ietf-moq-c4m-02>
+- draft-nandakumar-moq-generic-dpop-proof-00 - Application-Agnostic Demonstrating Proof-of-Possession (旧 JWT 形式の互換 API)
+  - <https://datatracker.ietf.org/doc/draft-nandakumar-moq-generic-dpop-proof/>
 - RFC 8949 - Concise Binary Object Representation (CBOR)
   - <https://www.rfc-editor.org/rfc/rfc8949>
 - RFC 9052 / RFC 9053 - CBOR Object Signing and Encryption (COSE)
   - <https://www.rfc-editor.org/rfc/rfc9052>
 - RFC 8392 - CBOR Web Token (CWT)
   - <https://www.rfc-editor.org/rfc/rfc8392>
+- RFC 8747 - Proof-of-Possession Key Semantics for CBOR Web Tokens (CWTs)
+  - <https://www.rfc-editor.org/rfc/rfc8747>
+- RFC 9528 - Ephemeral Diffie-Hellman Over COSE (EDHOC) (`kccs` ヘッダ)
+  - <https://www.rfc-editor.org/rfc/rfc9528>
+- RFC 9679 - CBOR Object Signing and Encryption (COSE) Key Thumbprint
+  - <https://www.rfc-editor.org/rfc/rfc9679>
 
 ## 注意事項
 
@@ -1553,6 +1789,10 @@ moqt-rs には vsync が無く、呼び出し側のループ周期 (example は 
 - `SendRequestError` のローカルエラー (`PeerGoawayReceived` / `LocalFilterMismatch` / `LocalDatagramTimeout`) は wire コードを持たない。wire コードとして公開 API に渡す必要はない (渡しても各レジストリの `*_INTERNAL_ERROR` に置換される)
 - `ControlMessage` と各メッセージ構造体は `Clone` だが `Copy` ではない
 - `MessageError` は `Clone` / `Copy` 不可
-- `c4m` の署名 / 検証には `aws-lc-rs` feature が必要。無効時は `CatToken::verify` / `DpopProof::verify_signature` などを呼べる実装が存在しない (trait と鍵表現だけがビルドされる)
-- `c4m` のトークン発行は HMAC-SHA256 に RFC 9053 の `5` を使う。draft-ietf-moq-c4m-01 付録 A のベクタが使う `-4` は検証でのみ HMAC-SHA256 として受理する
+- 同梱の暗号実装 (`AwsLcRsCrypto`) で `c4m` の署名 / 検証を行うには `aws-lc-rs` feature が必要である。無効時は `CatToken::verify` / `CwtDpopProof::verify_signature` / `DpopProof::verify_signature` などを呼べる実装が存在しない (`CoseCrypto` trait と鍵表現だけがビルドされる)。`CoseCrypto` を自前で実装する場合は feature は不要である
+- `c4m` のトークン発行は HMAC-SHA256 に RFC 9053 の `5` を使う。draft-02 のベクタも `5` を使う。旧 draft-01 の compact ベクタが使う `-4` は検証でのみ HMAC-SHA256 として受理する
+- CWT 形式の DPoP proof の `actx` / `ath` は claim label が TBD である。`CwtDpopProofCodec::new` に呼び出し側が label を指定し、発行、デコード、検証で同じ値を使う。ライブラリが正式な label を割り当てることはない
+- CWT 形式の proof を MOQT の AUTHORIZATION_TOKEN に載せる方法は仕様で未定義である。独自の envelope を決めない
+- 非ゼロの `moqt-reval` は既定の `CatClaims::validate` では拒否されない。再検証できない場合は拒否し、再検証できる場合はその間隔で再検証すること。Composite claims の評価と `catreplay` 2 は未対応
+- 旧 compact 形式、旧 JWT 形式の proof、`cnf` の key 3 は互換 API である。新しい実装では COSE 形式のトークンと CWT 形式の proof を使う
 - 開発中のライブラリであり、仕様は積極的に変更される場合がある

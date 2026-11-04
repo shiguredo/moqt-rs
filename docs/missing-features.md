@@ -2,11 +2,11 @@
 
 調査日: 2026-10-14 (develop の f91baf3 時点)。
 
-最終更新: 2026-11-04 (対象仕様を MOQT draft-23 / LOC draft-05 に更新し、節番号・パラメータ名を
-追随させた)。
+最終更新: 2026-11-04 (対象仕様を MOQT draft-23 / LOC draft-05 / C4M draft-02 に更新し、
+節番号とパラメータ名を追随させた)。
 
 対象仕様は `refs/moq/` の MOQT `draft-ietf-moq-transport-23`、LOC `draft-ietf-moq-loc-05`、
-MSF `draft-ietf-moq-msf-01`、C4M `draft-ietf-moq-c4m-01` である。
+MSF `draft-ietf-moq-msf-01`、C4M `draft-ietf-moq-c4m-02` である。
 対象コードは `src/` (ライブラリ)、`crates/moq-pub`、`crates/moq-sub`、
 `crates/tokio-moq` (transport 層)。
 
@@ -14,7 +14,7 @@ MSF `draft-ietf-moq-msf-01`、C4M `draft-ietf-moq-c4m-01` である。
 MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUBSCRIBE_TRACKS` /
 `NAMESPACE` / `NAMESPACE_DONE` / `PUBLISH_SKIPPED`、§7 全体、§3.2.3 Relay Fetch Handling、
 §7.5.1 / §7.7.1 Relay Switchover、namespace 発見・forwarding) は本稿の対象外とする。
-`docs/moqt.md` / `docs/msf.md` / `docs/loc.md` / `docs/c4m.md` の「未対応」に
+`docs/moqt.md` / `docs/msf.md` / `docs/loc.md` / `docs/c4m.md` の「未対応」や「残る制約」に
 書かれている内容も既知として扱い、重複して数え上げない。
 
 ## 1. 結論
@@ -43,7 +43,7 @@ MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUB
 
 以下、根拠となる仕様の節とコード位置を添えて列挙する。
 
-## 2. 仕様側で未実装 (issue 起票済み)
+## 2. 仕様側で未実装
 
 | 機能 | 仕様 | 現状 | issue |
 | --- | --- | --- | --- |
@@ -53,8 +53,20 @@ MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUB
 | LOC の Video Payload Format | LOC §2.1 | 部分実装。`lengthSizeMinusOne` による length prefix のみで、§2.1.3 (length 1 = start code) と §2.1.4 (start code prefix) は未対応 | `issues/pending/0005-add-loc-video-payload-format.md` |
 | LOC の Track スコープ Property | LOC §6.1 Table 1 | PUBLISH / SUBSCRIBE_OK で受信した場合、受信側は `Subscription::peer_track_properties` から `TrackProperties::find_varint` / `find_bytes` と `codec_string` (0x11 CODEC_STRING、UTF-8 検証) で取得できる。publisher example からの送信は未対応 | 未起票 |
 | WebTransport over HTTP/3 の `RESET_STREAM_AT` | draft-ietf-webtrans-http3-16 §4.4 (MUST) | s2n-quic が送出できず `RESET_STREAM` にフォールバックする | `issues/pending/0094-bug-webtransport-reset-stream-at-unsupported.md` |
-| DPoP proof の送信 | C4M §3.2.2 | ライブラリに発行 API はあるが、example の URL 経路では送らない | 未起票 |
-| C4M の複合クレーム / RSA / CWT 形式 proof | C4M §2 | 未実装 (docs/c4m.md の「未対応」に記載) | docs/c4m.md |
+| DPoP proof の送信 | C4M §4.2 / §4.3 | CWT 形式 proof の codec と一括検証 API は実装済み。CWT proof を MOQT の AUTHORIZATION_TOKEN に載せる方法は仕様で未定義であり、example の URL 経路も proof を送らない | 未起票 |
+| C4M の複合クレーム評価 | C4M §2.1.1 / 付録 A.6 | 未実装。`CatClaims::raw` に保持するだけで、nested claim set の or / and / nor を評価しない。複合クレームだけを持つトークンは `moqt` が読めず認可されない。top-level の `moqt` と複合クレームが併存するトークンは top-level だけで認可されるため、複合クレームによる制限を評価する利用側は fail-closed に扱うこと | 未起票 |
+| C4M の RSA 署名 | C4M §4.2 (DPoP proof の alg) / CAT の COSE alg | 未実装。ES256 / ES384 / ES512 / EdDSA のみ | 未起票 |
+| C4M の `catreplay` 2 | C4M §3 | 未実装。2 は実装定義であり、bearer 検証では未対応として拒否する | 未起票 |
+| C4M の `moqt-reval` 再検証 | C4M §2.2 | ライブラリは再検証を実行しない。既定の `CatClaims::validate` は非ゼロの `moqt-reval` を拒否せず、利用側の再検証能力に応じた拒否または再検証が必要 | `issues/0345-bug-c4m-moqt-reval.md` |
+| C4M の PBT モデルと fuzz の穴 | C4M 全体 (2026-11-04 時点は draft-02) | PBT の一部のモデルが実装の写経で、仕様の解釈違いを検出できない。旧 JWT 形式 proof の encode 経路 (`DpopProofBuilder::build`) や `CatClaims::validate` が fuzz の対象になっていない。テストが通っていても違反を検出できない状態が残る | `issues/0356-test-c4m-pbt-model-fuzz-gaps.md` |
+| 旧 JWT 形式 DPoP の replay cache と key 3 | C4M draft-01 互換 API (標準形式ではない) | `DpopReplayCache` は現在の proof の `catdpop` ウィンドウで古い記録を破棄する。ウィンドウの異なるトークンで共有すると `jti` を再受理し得る。`cnf` の key 3 は IANA では `kid` だが、旧形式の検証は JWK サムプリントとして参照する | `issues/0346-bug-c4m-dpop-validation.md` |
+
+C4M draft-02 の `moqt` クレームの map 化と未知キーの fail-closed、Private Use の暫定 claim label、
+アクション 1 〜 9、`catreplay` 1 の接続束縛、CWT 形式 proof の codec と一括検証、公式ベクタへの
+追従は実装済みである。CWT 形式 proof の一括検証は実装済みのため未対応表から外し、proof の
+運搬は「DPoP proof の送信」として残した。proof の運搬方法が仕様で確定したわけではない。
+付録 A.5 の `moqt_admin_wildcard` は action 0 の期待値が公式ベクタと実装で一致しないため、
+公式ベクタを保持したうえで action 0 を既知 action としない扱いを続ける。
 
 ## 3. ライブラリの API 露出と example での未使用
 

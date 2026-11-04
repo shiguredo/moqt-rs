@@ -5,15 +5,17 @@
 //!
 //! 直列化は 2 種類を扱う。
 //!
-//! - compact: `base64url(protected).base64url(claims).base64url(signature)`。
-//!   draft-ietf-moq-c4m-01 付録 A のテストベクタの形式で、署名対象は ASCII の
-//!   `protected.claims` である
 //! - COSE: CWT タグ 61 + COSE_Sign1 (タグ 18) / COSE_Mac0 (タグ 17)。RFC 8392 /
-//!   RFC 9052 の形式で、署名対象は `Sig_structure` / `MAC_structure` である
+//!   RFC 9052 の形式で、署名対象は `Sig_structure` / `MAC_structure` である。
+//!   draft-ietf-moq-c4m-02 付録 A.3 のベクタは CWT タグを付けない COSE 構造である
+//! - compact: `base64url(protected).base64url(claims).base64url(signature)`。
+//!   旧 draft-ietf-moq-c4m-01 付録 A のテストベクタの形式で、署名対象は ASCII の
+//!   `protected.claims` である。互換 API であり、新しい実装では COSE 形式を使う
 //!
 //! CTA-5007-B 本体は有償仕様のため、クレームキーは IANA の CWT Claims レジストリと
-//! IANA の CWT Confirmation Methods レジストリ、および draft-ietf-moq-c4m-01 の
-//! テストベクタに従う。
+//! IANA の CWT Confirmation Methods レジストリ、および draft-ietf-moq-c4m-02 付録 A の
+//! テストベクタに従う。旧 draft-01 のベクタは compact 形式と key 3 の互換テストにだけ
+//! 使う。
 //!
 //! bearer トークンの接続束縛 (draft-ietf-moq-c4m-02 §3 / §7.2) は、受信者が所有する
 //! [`BearerReplayCache`] と [`CatToken::verify_bearer`] で扱う。Sans I/O を保つため、
@@ -140,19 +142,19 @@ const COSE_KEY_THUMBPRINT_SHA256_LENGTH: usize = 32;
 /// 発行は [`CONFIRMATION_JWK_THUMBPRINT`] を既定とする。
 pub const CONFIRMATION_C4M_DRAFT_JWK_THUMBPRINT: i64 = 3;
 
-/// MOQT の Auth Token Type (CAT) (draft-ietf-moq-c4m-01 §7.1)
+/// MOQT の Auth Token Type (CAT) (draft-ietf-moq-c4m-02 §8.2.1)
 pub const MOQT_AUTH_TOKEN_TYPE_CAT: u64 = 0x01;
 
 /// CAT の COSE ヘッダの `typ` の値
 ///
-/// draft-ietf-moq-c4m-01 付録 A のテストベクタが protected ヘッダに置く値。
+/// draft-ietf-moq-c4m-02 付録 A のテストベクタが protected ヘッダに置く値。
 /// [`VerifyOptions::expected_type`] に渡して検証できる。
 pub const CAT_CONTENT_TYPE: &str = "CAT";
 
 /// CAT のトークン直列化
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenFormat {
-    /// draft-ietf-moq-c4m-01 付録 A の compact 形式
+    /// 旧 draft-ietf-moq-c4m-01 付録 A の compact 形式 (互換 API)
     Compact,
     /// COSE_Sign1 (タグ 18) の COSE 形式
     CoseSign1,
@@ -330,8 +332,8 @@ impl CatReplay {
 /// CAT のクレームセット (CWT のクレーム + CAT / C4M のクレーム)
 ///
 /// 型付きで解釈しないクレームは [`CatClaims::raw`] にそのまま保持する。CAT の
-/// クレームは IANA の登録と draft-ietf-moq-c4m-01 のベクタで値型が一致しないもの
-/// (catv / catu など) があるため、意味論を定める C4M のクレームだけを型付きにする。
+/// クレームは意味論をこのモジュールで定めないため、CWT / C4M が意味論を定める
+/// クレーム (`iss` / `aud` / `moqt` / `catreplay` など) だけを型付きにする。
 ///
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CatClaims {
@@ -360,8 +362,10 @@ pub struct CatClaims {
     /// §2.2 は「再検証できない受信者は `moqt-reval` 付きトークンを拒否する MUST」
     /// 「再検証間隔が自身の能力を下回る場合も拒否する MUST」を定める。本ライブラリは
     /// Sans-I/O のため再検証の実行は行わず、この値の解釈と拒否の判断は利用側が行う。
+    /// [`CatClaims::validate`] は値の有限性だけを検査し、非ゼロの `moqt-reval` でも
+    /// 成功する。既定の検証だけで受理してよいと解釈してはならない。
     pub moqt_reval: Option<f64>,
-    /// `catdpop` (draft-ietf-moq-c4m-01 §3.1.1)
+    /// `catdpop` (CTA-5007-B §4.8 / draft-ietf-moq-c4m-02 §4.1)
     pub catdpop: Option<CatDpop>,
     /// `catreplay` (draft-ietf-moq-c4m-02 §3)
     ///
@@ -421,7 +425,7 @@ fn finite_claim_number(entry: &Value, name: &'static str) -> Result<f64, CatErro
 impl CatClaims {
     /// クレームセットをデコードする
     ///
-    /// `moqt` / `moqt-reval` は draft-ietf-moq-c4m-02 §A.5 の暫定 label
+    /// `moqt` / `moqt-reval` は draft-ietf-moq-c4m-02 付録 A 冒頭の暫定 label
     /// (-65537 / -65538) だけを型付きで解釈する。旧 draft-01 のベクタの 327 / 328 は
     /// 未知のクレームとして raw に保持し、型付きフィールドへは写さない。
     /// `catreplay` は整数の 0 / 1 / 2 だけを型付きで解釈し、整数でない値とそれ以外の
@@ -646,7 +650,8 @@ impl CatClaims {
     /// 数値クレームを拒否する。
     ///
     /// この関数はクレームだけを見る stateless な検証であり、`catreplay` が要求する
-    /// 接続への束縛も、`catreplay` 1 の cti / exp 必須条件も検証しない。つまり単独では、
+    /// 接続への束縛も、`catreplay` 1 の cti / exp 必須条件も検証しない。また
+    /// `moqt-reval` の再検証も行わず、非ゼロの `moqt-reval` でも成功する。つまり単独では、
     /// `catreplay` 1 のトークンが別の接続で使われても検出できず、cti / exp を欠いた
     /// トークンも受理され得る。接続束縛まで含めて bearer トークンを検証する場合は
     /// [`CatToken::verify_bearer`] を使うこと。
@@ -1045,8 +1050,9 @@ impl CatToken {
     /// トークンをデコードする
     ///
     /// `.` で区切られた 3 分割の compact 形式、COSE 形式の CBOR、COSE 形式を
-    /// base64url または標準 Base64 で包んだテキストの順に判別する。標準 Base64 は
-    /// URL に埋め込む場合の表現 (draft-ietf-moq-c4m-01 §2 / §4) である。
+    /// base64url または標準 Base64 で包んだテキストの順に判別する。draft-02 §2 / §5 は
+    /// Base64 (RFC 4648) とだけ定め、§4 と §5 のどちらを使うかは指定しないため、
+    /// 両方の表現を受理する。
     pub fn decode(input: &[u8]) -> Result<Self, CatError> {
         let mut token = if let Ok(text) = core::str::from_utf8(input)
             && text.matches('.').count() == 2
@@ -1139,7 +1145,7 @@ impl CatToken {
 
     /// MOQT の Auth Token Type と Token Value からデコードする
     ///
-    /// draft-ietf-moq-c4m-01 §7.1 の Token Type が 0x01 (CAT) 以外の場合はエラーを
+    /// draft-ietf-moq-c4m-02 §8.2.1 の Token Type が 0x01 (CAT) 以外の場合はエラーを
     /// 返す。
     pub fn decode_moqt_auth_token(token_type: u64, value: &[u8]) -> Result<Self, CatError> {
         if token_type != MOQT_AUTH_TOKEN_TYPE_CAT {
@@ -1481,10 +1487,12 @@ impl CatTokenBuilder {
         self
     }
 
-    /// compact 形式 (draft-ietf-moq-c4m-01 付録 A) のトークンを発行する
+    /// compact 形式 (旧 draft-ietf-moq-c4m-01 付録 A) のトークンを発行する
     ///
+    /// 旧形式との相互運用が必要な場合だけ使う。draft-ietf-moq-c4m-02 の標準形式は
+    /// [`CatTokenBuilder::build_cose`] である。
     /// HMAC-SHA256 のアルゴリズム識別子は RFC 9053 の HMAC 256/256 (5) を使う。
-    /// ドラフト付録 A のベクタは -4 を使うが、IANA の COSE Algorithms レジストリでは
+    /// 旧ドラフト付録 A のベクタは -4 を使うが、IANA の COSE Algorithms レジストリでは
     /// -4 は A192KW であり発行には使わない (検証は
     /// [`super::cose::C4M_DRAFT_HMAC_SHA256_ALGORITHM_ID`] も HMAC-SHA256 として受理する)。
     pub fn build_compact<C: CoseCrypto>(
@@ -1502,9 +1510,10 @@ impl CatTokenBuilder {
         Ok(format!("{signing_input}.{}", base64url_encode(&signature)))
     }
 
-    /// COSE 形式 (CWT + COSE_Sign1 / COSE_Mac0) のトークンを発行する
+    /// COSE 形式 (COSE_Sign1 / COSE_Mac0) のトークンを発行する
     ///
-    /// CWT タグ (61) と COSE タグ (17 / 18) を付与する。
+    /// draft-ietf-moq-c4m-02 の標準の直列化である。CWT タグ (61) と COSE タグ
+    /// (17 / 18) を付与する。
     pub fn build_cose<C: CoseCrypto>(
         &self,
         crypto: &C,
@@ -1743,7 +1752,7 @@ mod tests {
 
     #[test]
     fn typed_claim_keys_include_c4m_claim_labels() {
-        // draft-ietf-moq-c4m-02 §A.5 の Private Use の暫定 label を採用する
+        // draft-ietf-moq-c4m-02 付録 A 冒頭の Private Use の暫定 label を採用する
         assert_eq!(CLAIM_MOQT, -65537);
         assert_eq!(CLAIM_MOQT_REVAL, -65538);
         // 暫定 label は型付きで解釈する

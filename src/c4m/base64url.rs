@@ -1,10 +1,11 @@
 //! base64url (RFC 4648 §5) と標準 Base64 (§4) のエンコード / デコード
 //!
-//! CAT の compact 形式 (draft-ietf-moq-c4m-01 付録 A) と JWS compact (RFC 7515) は
+//! CAT の compact 形式 (旧 draft-ietf-moq-c4m-01 付録 A) と JWS compact (RFC 7515) は
 //! パディング無しの base64url を使う。JWK (RFC 7517) の値はパディング無しが仕様で
 //! あるが、パディング付きの入力も受理する。また、CAT トークンを URL に埋め込む
-//! 場合は標準 Base64 (RFC 4648 §4) が使われる (§2 / §4) ため、トークン全体の
-//! デコードでは両方を受理する。
+//! 場合は標準 Base64 (RFC 4648 §4) を使う想定である (draft-ietf-moq-c4m-02 §2 / §5 は
+//! Base64 (RFC 4648) とだけ定め、§4 と §5 のどちらを使うかは指定しない) ため、
+//! トークン全体のデコードでは両方を受理する。
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -31,7 +32,7 @@ pub(crate) fn decode(text: &str) -> Result<Vec<u8>, ()> {
 /// base64url または標準 Base64 (RFC 4648 §4) をデコードする
 ///
 /// CAT トークンを URL に埋め込む場合は標準 Base64 が使われるため
-/// (draft-ietf-moq-c4m-01 §2 / §4)、トークン全体のデコードでは両方を受理する。
+/// (draft-ietf-moq-c4m-02 §2 / §5)、トークン全体のデコードでは両方を受理する。
 /// base64url を優先し、パディングの有無も両方を受ける。
 pub(crate) fn decode_base64_or_url(text: &str) -> Result<Vec<u8>, ()> {
     if let Ok(bytes) = Base64UrlUnpadded::decode_vec(text) {

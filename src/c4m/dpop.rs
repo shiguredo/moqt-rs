@@ -1,22 +1,21 @@
-//! DPoP proof の検証と発行 (draft-nandakumar-moq-generic-dpop-proof-00)
+//! DPoP proof の検証と発行
 //!
-//! C4M (draft-ietf-moq-c4m-01 §3.1.2) は [DPOP-PROOF] の JWT 形式の DPoP proof を
-//! 使う。proof の署名は埋め込まれた JWK で検証し、`cnf` の JWK サムプリントとの
-//! 一致 (鍵バインディング)、`catdpop` のウィンドウによる鮮度、jti によるリプレイ
-//! 保護、Authorization Context (actx) の検証を行う。
+//! draft-ietf-moq-c4m-02 §4.2 の CWT 形式の DPoP proof (`dpop-proof+cwt`) が標準で
+//! ある。proof は COSE_Sign1 で、protected ヘッダに `alg` / `typ` / `kccs` を持ち、
+//! ペイロードの CWT Claims Set に `cti` / `iat` / `actx` / `ath` を持つ。この形式は
+//! [`CwtDpopProofCodec`] が扱う。`actx` と `ath` の claim label はドラフトで
+//! `TBD_ACTX` / `TBD_ATH` のままなので、呼び出し側が明示する。
+//! [`CwtDpopProof::verify_signature`] は proof 単独の署名を、
+//! [`CwtDpopProof::verify_key_binding`] は `kccs` 公開鍵と CAT トークンの `cnf` の
+//! 照合を行う。受理判定は [`CwtDpopProof::verify_against_cat_token`] が
+//! [`CwtDpopVerification`] と [`CwtDpopReplayCache`] を受け取って、CAT の検証を含めて
+//! 一括して行う。
 //!
-//! draft-ietf-moq-c4m-02 §4.2 は MOQT 用の CWT 形式の DPoP proof
-//! (`dpop-proof+cwt`) を定義する。proof は COSE_Sign1 で、protected ヘッダに
-//! `alg` / `typ` / `kccs` を持ち、ペイロードの CWT Claims Set に `cti` / `iat` /
-//! `actx` / `ath` を持つ。この形式は [`CwtDpopProofCodec`] が扱う。`actx` と `ath`
-//! の claim label はドラフトで `TBD_ACTX` / `TBD_ATH` のままなので、呼び出し側が
-//! 明示する。`CwtDpopProofCodec` は proof のデコードと発行を提供し、署名検証は
-//! [`CwtDpopProof::verify_signature`] が行う。
-//! デコードした proof の `kccs` 公開鍵と CAT トークンの `cnf` の照合は
-//! [`CwtDpopProof::verify_key_binding`] が行うが、`actx` / `ath` / 鮮度 / replay の
-//! 受理判定は行わない。受理判定は [`CwtDpopProof::verify_against_cat_token`] が
-//! [`CwtDpopVerification`] と [`CwtDpopReplayCache`] を受け取って一括して行う
-//! (旧 JWT 形式側は [`DpopProof`] の検証 API が受理判定の一部を行う)。
+//! 旧 draft-ietf-moq-c4m-01 と draft-nandakumar-moq-generic-dpop-proof-00 の JWT 形式の
+//! proof ([`DpopProof`]) は互換 API として残している。proof の署名は埋め込まれた JWK で
+//! 検証し、`cnf` の JWK サムプリントとの一致 (鍵バインディング)、`catdpop` のウィンドウに
+//! よる鮮度、jti によるリプレイ保護、Authorization Context (actx) の検証を行う。
+//! ただし、この API は CAT トークンの署名・クレーム・scope を検証しない。
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -62,7 +61,8 @@ const ACTX_NAMESPACE: i64 = 2;
 /// CWT 形式の actx の `track` のメンバーキー (draft-ietf-moq-c4m-02 §4.2)
 const ACTX_TRACK_NAME: i64 = 3;
 
-/// DPoP proof の JWT ヘッダ (§4.3.1)
+/// 旧 JWT 形式の DPoP proof のヘッダ
+/// (draft-nandakumar-moq-generic-dpop-proof-00 §4.3.1)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DpopProofHeader {
     /// `typ`。"dpop-proof+jwt" でなければならない
@@ -75,7 +75,8 @@ pub struct DpopProofHeader {
     pub key_id: Option<String>,
 }
 
-/// DPoP proof の Authorization Context (§4.2 / §5.1)
+/// 旧 JWT 形式の DPoP proof の Authorization Context
+/// (draft-nandakumar-moq-generic-dpop-proof-00 §4.2 / §5.1)
 ///
 /// `tns` / `tn` は draft-ietf-moq-transport-23 §8.8 の正規シリアライズ (`crate::name`) を使う。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,7 +146,7 @@ impl AuthorizationContext {
     ///
     /// `tns` / `tn` は draft-nandakumar-moq-generic-dpop-proof-00 §5.1.3 の正規
     /// シリアライズと比較する。`tn` が proof に無い場合はエラーを返す
-    /// (draft-ietf-moq-c4m-01 §3.1.2 は `tn` を必須としている)。
+    /// (旧 draft-ietf-moq-c4m-01 §3.1.2 は `tn` を必須としている)。
     pub fn verify_target(
         &self,
         namespace: &TrackNamespace,
@@ -167,7 +168,7 @@ impl AuthorizationContext {
     /// `resource` が指定されている場合に `tns` / `tn` と整合するかどうかを検証する
     ///
     /// `resource` は `moqt://<relay-endpoint>?tns=<namespace>&tn=<track>` の形式
-    /// (draft-ietf-moq-c4m-01 §3.1.3) を前提とし、クエリパラメータを文字列として
+    /// (旧 draft-ietf-moq-c4m-01 §3.1.3) を前提とし、クエリパラメータを文字列として
     /// 比較する。パーセントエンコーディングは解釈しない。
     ///
     /// §3.1.3 が挙げる接続確立時の `moqt://<relay-endpoint>` (クエリ無し) は
@@ -201,7 +202,8 @@ impl AuthorizationContext {
     }
 }
 
-/// DPoP proof の JWT ペイロード (§4.3.2)
+/// 旧 JWT 形式の DPoP proof のペイロード
+/// (draft-nandakumar-moq-generic-dpop-proof-00 §4.3.2)
 #[derive(Debug, Clone, PartialEq)]
 pub struct DpopProofClaims {
     /// `jti`。proof の一意な識別子
@@ -245,7 +247,9 @@ impl DpopProofClaims {
     }
 }
 
-/// DPoP proof
+/// 旧 JWT 形式 (互換 API) の DPoP proof
+///
+/// draft-ietf-moq-c4m-02 の標準は CWT 形式であり、[`CwtDpopProof`] を使う。
 #[derive(Debug, Clone, PartialEq)]
 pub struct DpopProof {
     jws: JwsCompact,
@@ -253,7 +257,10 @@ pub struct DpopProof {
     claims: DpopProofClaims,
 }
 
-/// DPoP proof を CAT トークンに束縛して検証するための入力
+/// 旧 JWT 形式の DPoP proof を CAT トークンに束縛して検証するための入力
+///
+/// この入力を使う [`DpopProof::verify_against_token`] は proof 側だけを検証し、
+/// CAT の署名・クレーム・scope は検証しない。
 #[derive(Debug, Clone, Copy)]
 pub struct DpopVerification<'a> {
     /// 検証対象の CAT のクレーム
@@ -426,8 +433,8 @@ impl DpopProof {
     ///
     /// 検証は type → action → resource → target の順に行う。旧 JWT 形式の actx を
     /// 対象とするため、type が正しい場合、旧形式に対応する文字列を持たない
-    /// SUBSCRIBE_TRACKS は [`DpopError::ActionMismatch`] で拒否する。本 API は旧 JWT
-    /// 形式だけを対象とし、CWT 形式の proof は未対応である。
+    /// SUBSCRIBE_TRACKS は [`DpopError::ActionMismatch`] で拒否する。CWT 形式の proof は
+    /// [`CwtDpopProof::verify_authorization_context`] を使う。
     pub fn verify_authorization_context(
         &self,
         action: MoqtAction,
@@ -450,6 +457,10 @@ impl DpopProof {
     ///
     /// 署名、`ath`、JWK サムプリントのバインディング、Authorization Context、
     /// `catdpop` のウィンドウによる鮮度、jti によるリプレイ保護の順に検証する。
+    ///
+    /// この API は proof 側だけを検証する。CAT トークンの署名・クレーム・scope は
+    /// 検証しないため、呼び出し側が別途検証すること。CWT 形式と CAT の検証を
+    /// まとめて行う場合は [`CwtDpopProof::verify_against_cat_token`] を使う。
     ///
     /// `token` は `CatToken::decode` に渡した生バイト (`CatToken::raw_token`) を
     /// `ath` に使う。発行側が別の表現 (base64url など) をハッシュしている場合は
@@ -487,6 +498,8 @@ impl DpopProof {
     ///
     /// `catdpop` が jti の処理を要求している場合 (`honor_jti` が真) は
     /// `replay_cache` が必須である。
+    ///
+    /// この API は proof 側だけを検証し、CAT の署名・クレーム・scope は検証しない。
     pub fn verify_against_token<C: CoseCrypto>(
         &self,
         crypto: &C,
@@ -599,10 +612,11 @@ impl DpopReplayCache {
     }
 }
 
-/// DPoP proof を発行するビルダー
+/// 旧 JWT 形式の DPoP proof を発行するビルダー
 ///
 /// クライアント側で proof を生成するために使う。署名鍵と埋め込む JWK が同じ公開鍵を
-/// 表していることを確認してから署名する。
+/// 表していることを確認してから署名する。draft-02 の標準は CWT 形式であり、
+/// [`CwtDpopProofCodec`] を使う。
 #[derive(Debug, Clone, PartialEq)]
 pub struct DpopProofBuilder {
     /// `kid` (任意)

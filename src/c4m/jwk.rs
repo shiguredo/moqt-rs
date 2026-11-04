@@ -1,11 +1,13 @@
 //! JWK (JSON Web Key, RFC 7517) と JWK サムプリント (RFC 7638)
 //!
-//! DPoP proof (draft-nandakumar-moq-generic-dpop-proof) の JWT ヘッダに埋め込まれる
-//! 公開鍵を扱う。JWK サムプリントは RFC 7638 §3.2 の正規化 JSON (必須メンバーを
-//! 辞書順に並べ、空白を入れない) に対する SHA-256 である。
+//! DPoP proof の JWT ヘッダ (旧 JWT 形式) に埋め込まれる公開鍵を扱う。JWK サムプリントは
+//! RFC 7638 §3.2 の正規化 JSON (必須メンバーを辞書順に並べ、空白を入れない) に対する
+//! SHA-256 である。
 //!
-//! CAT トークンの `cnf` の `jkt` と照合するため、CWT 形式の DPoP proof が kccs で
-//! 運ぶ公開 [`CoseKey`] から等価な JWK を作る [`Jwk::from_cose_key`] も提供する。
+//! CAT トークンの `cnf` の `jkt` (RFC 7638 の JWK サムプリント) と照合するため、
+//! CWT 形式の DPoP proof が kccs で運ぶ公開 [`CoseKey`] から等価な JWK を作る
+//! [`Jwk::from_cose_key`] も提供する。`ckt` (RFC 9679 の COSE Key Thumbprint) は
+//! [`CoseKey::cose_key_thumbprint_sha256`] が扱い、JWK を介さない。
 
 use alloc::format;
 use alloc::string::{String, ToString};

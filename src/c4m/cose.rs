@@ -49,11 +49,12 @@ pub const HEADER_TYPE: i64 = 16;
 /// COSE_Key (1) を入れる。
 pub const HEADER_KCCS: i64 = 14;
 
-/// ドラフトのテストベクタが HMAC-SHA256 に使うアルゴリズム ID
+/// 旧ドラフトの互換テストベクタが HMAC-SHA256 に使うアルゴリズム ID
 ///
-/// draft-ietf-moq-c4m-01 付録 A のベクタは `alg = -4` を HMAC-SHA256 として扱う。
-/// IANA の COSE Algorithms レジストリでは -4 は A192KW であり、HMAC 256/256 は 5
-/// である。検証では両方を HMAC-SHA256 として扱い、発行は 5 を使う
+/// 旧 draft-ietf-moq-c4m-01 付録 A の compact ベクタは `alg = -4` を HMAC-SHA256
+/// として扱う。IANA の COSE Algorithms レジストリでは -4 は A192KW であり、
+/// HMAC 256/256 は 5 である。draft-ietf-moq-c4m-02 のベクタは 5 を使う。
+/// 検証では両方を HMAC-SHA256 として扱い、発行は 5 を使う
 /// ([`crate::c4m::cat::CatTokenBuilder::build_compact`])。
 pub const C4M_DRAFT_HMAC_SHA256_ALGORITHM_ID: i64 = -4;
 
@@ -107,9 +108,10 @@ impl Algorithm {
         }
     }
 
-    /// 識別子からアルゴリズムを返す (C4M ドラフトの別名を含む)
+    /// 識別子からアルゴリズムを返す (旧 C4M ドラフトの別名を含む)
     ///
-    /// [`C4M_DRAFT_HMAC_SHA256_ALGORITHM_ID`] を HMAC-SHA256 として受理する。
+    /// [`C4M_DRAFT_HMAC_SHA256_ALGORITHM_ID`] を HMAC-SHA256 として受理する。旧
+    /// compact ベクタとの互換のための別名であり、draft-ietf-moq-c4m-02 の標準ではない。
     pub const fn from_identifier_with_c4m_draft_alias(identifier: i64) -> Option<Self> {
         if identifier == C4M_DRAFT_HMAC_SHA256_ALGORITHM_ID {
             return Some(Self::HmacSha256);

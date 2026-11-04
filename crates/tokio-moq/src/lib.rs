@@ -39,16 +39,6 @@ use shiguredo_moqt::msf::uri::{MsfConnectionType, MsfFragment, parse_msf_fragmen
 
 use crate::error::TransportError;
 
-/// draft-ietf-moq-transport-23 §9.1 (SETUP) に基づく基本 Setup Options を構築する
-///
-/// path (0x01) と authority (0x05) は QUIC 接続時にのみ含まれ、
-/// WebTransport 使用時は draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY) /
-/// §9.1.2 (PATH) により MUST NOT のため呼び出し側で None を渡す。
-/// §9.1.5 (MOQT IMPLEMENTATION) の `impl_name` (option type 0x07) は常に含まれる。
-///
-/// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
-/// 各要素を AUTHORIZATION_TOKEN (option type 0x03) として含める。空の場合は
-/// AUTHORIZATION_TOKEN を含めない。
 /// peer が内容を制御できる文字列をログ出力用にサニタイズする
 ///
 /// draft-ietf-moq-transport-23 §15.9 (Logging of Untrusted String Fields): Reason Phrase や
@@ -73,6 +63,17 @@ pub fn sanitize_for_log(value: &str) -> String {
     sanitized
 }
 
+/// draft-ietf-moq-transport-23 §9.1 (SETUP) に基づく基本 Setup Options を構築する
+///
+/// path (0x01) と authority (0x05) は QUIC 接続時にのみ含まれ、
+/// WebTransport 使用時は draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY) /
+/// §9.1.2 (PATH) により MUST NOT のため呼び出し側で None を渡す。
+/// §9.1.5 (MOQT IMPLEMENTATION) の `impl_name` (option type 0x07) は常に含まれる。
+///
+/// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
+/// 各要素を AUTHORIZATION_TOKEN (option type 0x03) として含める。空の場合は
+/// AUTHORIZATION_TOKEN を含めない。この関数はトークンのバイト列を運ぶだけで、
+/// デコード・署名検証・認可は行わない。
 pub fn build_setup_options(
     path: Option<&str>,
     authority: Option<&str>,
@@ -115,13 +116,17 @@ pub fn build_setup_options(
     options
 }
 
-/// C4M トークンの Token Value を AUTHORIZATION TOKEN の Token 構造へ変換する
+/// C4M トークンのバイト列を AUTHORIZATION TOKEN の Token 構造へ包む
 ///
 /// SETUP の AUTHORIZATION_TOKEN (option type 0x03) と、制御メッセージの
 /// AUTHORIZATION_TOKEN (param type 0x03) の双方で同じ表現を使う。
-/// Token Type は CAT (0x01) を使い (draft-ietf-moq-c4m-01 §7.1.1)、alias の登録・参照を
+/// Token Type は CAT (0x01) を使い (draft-ietf-moq-c4m-02 §8.2.1)、alias の登録・参照を
 /// 行わないため USE_VALUE (Alias Type 0x3) を使う
 /// (draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression))。
+///
+/// この関数はトークンのバイト列を運ぶだけで、トークンのデコード、署名 / MAC の検証、
+/// クレームや scope の認可、DPoP proof の検証を行わない。これらはトークンを受理する
+/// 側 (リレー) またはアプリケーションの責務である。
 pub(crate) fn c4m_authorization_token(token_value: &[u8]) -> AuthorizationToken {
     AuthorizationToken::UseValue {
         token_type: MOQT_AUTH_TOKEN_TYPE_CAT,
@@ -279,10 +284,10 @@ pub struct ServerUrl {
     /// MSF fragment の `c4m` パラメータから取り出した C4M 認可トークン (出現順)
     ///
     /// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) は `c4m` を
-    /// "A base64 encoded C4M token" と定め、draft-ietf-moq-c4m-01 §2 / §4 は
+    /// "A base64 encoded C4M token" と定め、draft-ietf-moq-c4m-02 §2 / §5 は
     /// トークンを URL に埋め込むときの Base64 エンコードを定める。
     /// Base64 をデコードしたバイト列が MOQT の AUTHORIZATION_TOKEN
-    /// (Token Type CAT) の Token Value になる (draft-ietf-moq-c4m-01 §7.1.1)。
+    /// (Token Type CAT) の Token Value になる (draft-ietf-moq-c4m-02 §8.2.1)。
     ///
     /// `msf` 以外の fragment と `c4m` パラメータ無しの `msf` fragment では空。
     /// 同一のトークンが複数回現れた場合は 1 つに畳む
@@ -620,7 +625,8 @@ fn parse_msf_value(url: &str, fragment_value: &str) -> Result<MsfFragment, Strin
 ///
 /// 各 `c4m` の値は RFC 3986 §2.1 (Percent-Encoding) の `%XX` をデコードしてから
 /// Base64 としてデコードする。得られたバイト列が MOQT の AUTHORIZATION_TOKEN
-/// (Token Type CAT) の Token Value になる (draft-ietf-moq-c4m-01 §7.1.1)。
+/// (Token Type CAT) の Token Value になる (draft-ietf-moq-c4m-02 §8.2.1)。
+/// この関数はバイト列を取り出すだけで、トークンの検証と認可は行わない。
 ///
 /// # Errors
 ///
@@ -642,7 +648,7 @@ fn parse_c4m_tokens(url: &str, msf: &MsfFragment) -> Result<Vec<Vec<u8>>, String
 ///
 /// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) は `c4m` を
 /// "A base64 encoded C4M token" と定める。RFC 4648 は §4 の Base64 と §5 の
-/// base64url を定義しており、draft-ietf-moq-c4m-01 §4 はどちらを使うかを指定しないため、
+/// base64url を定義しており、draft-ietf-moq-c4m-02 §2 / §5 はどちらを使うかを指定しないため、
 /// 両方とパディングの有無を受理する (library の `CatToken::decode` が URL 埋め込みの
 /// Base64 を扱う規則と同じである)。
 ///

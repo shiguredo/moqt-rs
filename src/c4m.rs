@@ -1,9 +1,10 @@
 //! MOQT の認可トークン (C4M) のコーデック
 //!
 //! draft-ietf-moq-c4m-02 (Authorization scheme for MOQT using Common Access
-//! Tokens) の `moqt` クレーム (map 形式) と draft-01 の `moqt-reval` クレーム、
-//! その基盤となる CBOR (RFC 8949) / COSE (RFC 9052) / CAT (CTA-5007-B) の
-//! トークンを扱う。
+//! Tokens) の `moqt` クレーム (map 形式) と `moqt-reval` クレーム、`catreplay`
+//! の接続束縛、DPoP の CWT 形式 proof を扱う。基盤は CBOR (RFC 8949) / COSE
+//! (RFC 9052) / CAT (CTA-5007-B) である。旧 draft-01 の compact 形式と JWT 形式の
+//! proof は互換 API として残している。
 //!
 //! - [`cbor`](crate::c4m::cbor): CBOR のコーデック
 //! - [`cose`](crate::c4m::cose): COSE の構造とアルゴリズム定義
@@ -60,10 +61,10 @@ pub const CLAIM_MOQT: i64 = -65537;
 /// フィールドへは写さない。この暫定値は IANA の割当が確定した時点で置き換える。
 pub const CLAIM_MOQT_REVAL: i64 = -65538;
 
-/// `bin-match` の prefix マッチを表す match-type (draft-ietf-moq-c4m-01 §2.1)
+/// `bin-match` の prefix マッチを表す match-type (draft-ietf-moq-c4m-02 §2.1)
 pub const MATCH_TYPE_PREFIX: i64 = 1;
 
-/// `bin-match` の suffix マッチを表す match-type (draft-ietf-moq-c4m-01 §2.1)
+/// `bin-match` の suffix マッチを表す match-type (draft-ietf-moq-c4m-02 §2.1)
 pub const MATCH_TYPE_SUFFIX: i64 = 2;
 
 /// MOQT のアクション (draft-ietf-moq-c4m-02 §2.1 Table 1)
@@ -193,7 +194,7 @@ impl MoqtAction {
     }
 }
 
-/// `bin-match` (draft-ietf-moq-c4m-01 §2.1)
+/// `bin-match` (draft-ietf-moq-c4m-02 §2.1)
 ///
 /// バイト文字列は完全一致、`[match-type, match-value]` は prefix / suffix マッチを
 /// 表す。マッチはバイト単位で行い、正規化はしない。
@@ -258,7 +259,7 @@ impl Match {
     }
 }
 
-/// `moqt-ns-match` (draft-ietf-moq-c4m-01 §2.1)
+/// `moqt-ns-match` (draft-ietf-moq-c4m-02 §2.1)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NamespaceMatch {
     /// `bin-match` による名前空間フィールドのマッチ
@@ -267,7 +268,7 @@ pub enum NamespaceMatch {
     End,
 }
 
-/// `moqt-scope` (draft-ietf-moq-c4m-01 §2.1)
+/// `moqt-scope` (draft-ietf-moq-c4m-02 §2.1)
 ///
 /// アクションの配列と、省略可能な名前空間マッチの配列 / トラック名マッチを持つ。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -565,22 +566,23 @@ impl MoqtClaim {
     }
 }
 
-/// `catdpop` クレーム (CTA-5007-B / draft-ietf-moq-c4m-01 §3.1.1)
+/// `catdpop` クレーム (CTA-5007-B §4.8 / draft-ietf-moq-c4m-02 §4.1)
 ///
-/// DPoP proof の処理設定を持つ。label 0 が受理ウィンドウ (秒)、label 1 が jti に
-/// よるリプレイ保護を行うかどうかを表す。
+/// DPoP proof の処理設定を持つ。label 0 が受理ウィンドウ (秒)、label 1 が
+/// リプレイ保護を行うかどうかを表す。旧 JWT 形式の proof は `jti`、CWT 形式の
+/// proof は `cti` による保護に対応する。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CatDpop {
     /// label 0: DPoP proof を受理する時間ウィンドウ (秒)
     pub window_seconds: Option<f64>,
-    /// label 1: jti によるリプレイ保護を行うかどうか
+    /// label 1: リプレイ保護を行うかどうか (旧 JWT 形式は `jti`、CWT 形式は `cti`)
     pub honor_jti: Option<bool>,
     /// 解釈しなかった設定
     pub raw: Vec<(i64, Value)>,
 }
 
 impl CatDpop {
-    /// ウィンドウと jti の扱いを指定して作る
+    /// ウィンドウとリプレイ保護の有無を指定して作る
     pub fn new(window_seconds: f64, honor_jti: bool) -> Self {
         Self {
             window_seconds: Some(window_seconds),
@@ -652,9 +654,10 @@ impl CatDpop {
         self.window_seconds.unwrap_or(default)
     }
 
-    /// jti によるリプレイ保護を行うかどうかを返す
+    /// リプレイ保護を行うかどうかを返す
     ///
-    /// 未指定の場合は `false` を返す。
+    /// 未指定の場合は `false` を返す。旧 JWT 形式の proof は `jti`、CWT 形式の
+    /// proof は `cti` を記録するかの判定に使う。
     pub fn honors_jti(&self) -> bool {
         self.honor_jti.unwrap_or(false)
     }

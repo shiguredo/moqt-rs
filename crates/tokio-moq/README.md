@@ -85,7 +85,8 @@ DATAGRAM は経路での損失を下位の TCP が再送するため起きない
 
 ## C4M 認可トークン
 
-MSF fragment (`#msf:<track-identifier>&c4m=<token>`) の `c4m` パラメータに C4M トークンを指定すると、SETUP の AUTHORIZATION_TOKEN (Token Type CAT) として送信する (draft-ietf-moq-msf-01 §11.1.1、draft-ietf-moq-c4m-01 §7.1.1)。
+MSF fragment (`#msf:<track-identifier>&c4m=<token>`) の `c4m` パラメータに C4M トークンを指定すると、SETUP の AUTHORIZATION_TOKEN (Token Type CAT) として送信する (draft-ietf-moq-msf-01 §11.1.1、draft-ietf-moq-c4m-02 §8.2.1)。
+この経路はトークンのバイト列を運ぶだけで、トークンのデコード、署名 / MAC の検証、クレームや scope の認可、DPoP proof の検証は行わない。検証はトークンを受け取る側 (リレー) またはアプリケーションの責務である。
 あわせて PUBLISH / SUBSCRIBE / REQUEST_UPDATE の AUTHORIZATION_TOKEN としてもすべてのトークンを送信する (draft-ietf-moq-msf-01 §11.4.3 の MUST。SETUP に載せていても免除されない。`MoqtClient` が catalog を解析しないため track とトークンの対応付けは行わず、アクションごとの選別はしない)。
 
 ```bash

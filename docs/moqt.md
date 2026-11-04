@@ -209,14 +209,14 @@ MoQ リレー専用の `RENDEZVOUS_TIMEOUT` (`0x04`) は §9.19.6 (RENDEZVOUS TI
 
 | モジュール | 概要 |
 | --- | --- |
-| `c4m` | C4M (CAT / CWT) のトークン発行 / 検証と `moqt` クレームの認可 |
-| `c4m::cat` | CAT のクレーム / トークン / 発行ビルダー |
+| `c4m` | C4M (CAT / CWT) のトークン発行 / 検証、bearer の接続束縛、`moqt` クレームの認可 |
+| `c4m::cat` | CAT のクレーム / トークン / 発行ビルダー / bearer 検証 |
 | `c4m::cbor` | CBOR (RFC 8949) の encode / decode |
 | `c4m::cose` | COSE (RFC 9052) の構造とアルゴリズム定義 |
 | `c4m::crypto` | 署名 / 検証 / ハッシュの trait と鍵表現 (aws-lc-rs 実装は feature) |
 | `c4m::jwk` | JWK (RFC 7517) と JWK サムプリント (RFC 7638) |
-| `c4m::jwt` | JWS compact (RFC 7515) の JWT |
-| `c4m::dpop` | DPoP proof の検証と発行 (draft-nandakumar-moq-generic-dpop-proof-00) |
+| `c4m::jwt` | JWS compact (RFC 7515) の JWT (旧 JWT 形式の DPoP proof 用) |
+| `c4m::dpop` | DPoP proof の検証と発行。旧 JWT 形式と draft-02 §4.2 の CWT 形式 |
 | `decoder` | バッファ付きインクリメンタル制御メッセージデコーダー |
 | `error` | コーデックエラー型とセッション終了 / REQUEST_ERROR / PUBLISH_DONE / Stream Reset の各コード |
 | `grease` | GREASE 値の生成と判定ユーティリティ |

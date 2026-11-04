@@ -1639,8 +1639,8 @@ fn authorization_parameter(token: &AuthorizationToken) -> MessageParameter {
 /// 落ちて MUST の付与漏れになるため、保持しているトークンをすべて載せる。
 ///
 /// 複数のトークンを提示したときに relay がどう評価するかは一次資料に規定が無く実装依存で
-/// ある。draft-ietf-moq-c4m-01 §7.1.1 (CAT Token Type) は relay にトークン検証を課し、
-/// 検証に失敗した場合はアクションの拒否を MUST とするため、track に紐づかないトークンを
+/// ある。draft-ietf-moq-c4m-02 §8.2.1 (CAT Token Type) は relay にトークン検証を課し、
+/// 検証に失敗した場合は接続またはアクションの拒否を MUST とするため、track に紐づかないトークンを
 /// 載せると制御メッセージが拒否されうる。あわせて draft-ietf-moq-transport-23 §8.9
 /// (Authorization Token Compression) の MUST (整形だが内容が不正なトークンを含むメッセージは
 /// MALFORMED_AUTH_TOKEN で拒否) の対象にもなりうる。付与漏れ
