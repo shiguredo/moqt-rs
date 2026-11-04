@@ -4,10 +4,11 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-stop-sending-reset-open-streams
 - Polished: 2026-10-19
+- Refreshed: 2026-11-04
 
 ## 目的
 
-draft-ietf-moq-transport-22 §3.1.2 (Subscription State Management) は "The Publisher can remove subscription
+draft-ietf-moq-transport-23 §3.1.2 (Subscription State Management) は "The Publisher can remove subscription
 state as soon as it has received STOP_SENDING. It MUST reset any open streams associated with the SUBSCRIBE."
 と MUST を課す。これは SUBSCRIBE の bidi request stream に対する STOP_SENDING を指す。§3.2.4 (Fetch State Management) も "The
 Publisher can remove fetch state as soon as it has received a STOP_SENDING. It MUST reset the bidi request
