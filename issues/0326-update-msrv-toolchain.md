@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/update-msrv-toolchain
 - Polished: 2026-10-20
+- Refreshed: 2026-11-04
 
 ## 目的
 
@@ -31,7 +32,7 @@ shiguredo-rust はライブラリの MSRV を 1.95 とし、`Cargo.toml` の `ru
 - `.github/workflows/ci.yml` の冒頭コメント「MSRV 検証は含めない。crates 配下の crate が rust-version 1.95 を要求するため workspace 単位の 1.93 検証が構造的にできない」を、MSRV 1.95 と channel 1.95 が一致し、既存の CI が 1.95 で workspace をビルド・テストするため MSRV 1.95 が検証される旨に更新する。新しい CI ジョブは追加しない。
 - `fuzz` は独立 workspace で CI の `cargo test --workspace` の対象外であり、fuzz のビルド検証は CI では行わない。`fuzz/Cargo.toml` の `rust-version` を 1.95 にするのは宣言の整合のためであり、fuzz 用の CI ジョブは追加しない。
 - `CHANGES.md` にはエントリを追加しない (CODEBASE.md の「変更履歴を `CHANGES.md` に残さないこと」に従う)。
-- `issues/` 内の 1.93 への言及 (例: `issues/0300-draft-22-authority-ipv6-validation.md`) は別 issue の記述であり、本 issue では変更しない。必要な場合は refresh-issue で同期する。
+- `issues/` 内の 1.93 への言及 (例: `issues/0300-draft-23-authority-ipv6-validation.md`) は別 issue の記述であり、本 issue では変更しない。必要な場合は refresh-issue で同期する。
 - CODEBASE.md の「Pull-Request やブランチを作らず develop にコミットしていくこと」「1 issue 1 commit 1 push」に従い、`Branch:` のブランチは作らず develop に直接コミットする。上記の変更は 1 コミットにまとめる。
 
 ## 完了条件
