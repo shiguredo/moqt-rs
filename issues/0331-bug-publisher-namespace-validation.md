@@ -4,10 +4,11 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-publisher-namespace-validation
 - Polished: 2026-10-20
+- Refreshed: 2026-11-04
 
 ## 目的
 
-Track は Track Namespace と Track Name からなる Full Track Name で識別される (draft-ietf-moq-transport-22 §2.4.1 (Track Naming))。SUBSCRIBE (§9.6) と FETCH (§9.11) はどちらも Track Namespace と Track Name を運ぶ。moq-pub は受信 SUBSCRIBE / FETCH の track name だけを見て受理するため、別 namespace の要求に自分の namespace のコンテンツを返し得る。誤った配信を防ぐ。
+Track は Track Namespace と Track Name からなる Full Track Name で識別される (draft-ietf-moq-transport-23 §2.4.1 (Track Naming))。SUBSCRIBE (§9.6) と FETCH (§9.11) はどちらも Track Namespace と Track Name を運ぶ。moq-pub は受信 SUBSCRIBE / FETCH の track name だけを見て受理するため、別 namespace の要求に自分の namespace のコンテンツを返し得る。誤った配信を防ぐ。
 
 ## 現状
 
@@ -16,8 +17,9 @@ Track は Track Namespace と Track Name からなる Full Track Name で識別�
   `config.video_enabled && track_name == config.track_name.as_bytes()` で catalog / メディアを判定し、
   `fetch.track_namespace` を見ない。`serve_media_fetch` は `media_cache.largest(&config.namespace, track_name)` と
   `media_cache.plan(published, &config.namespace, track_name, ...)` で常に `config.namespace` の cache を引く。
+- draft-ietf-moq-transport-23 §2.4.1 (Track Naming) は Track Name を 1 バイト以上とし、長さ 0 の Track Name の受信に `PROTOCOL_VIOLATION` を要求する。Session は SUBSCRIBE / FETCH の decode 時に `src/message/common.rs` の `validate_track_name` でこれを検証するため、`serve_peer_request` に追加する検証は namespace の一致だけである。
 - 影響: 別 namespace の SUBSCRIBE を受理して SUBSCRIBE_OK を返し、別 namespace の FETCH には自分の namespace のコンテンツを返し得る。relay 経由でも起こり得る。
-- REQUEST_UPDATE は Track Namespace を運ばず、既存の request (SUBSCRIBE / FETCH など) の Request ID に紐づく (draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE))。`SessionEvent::RequestUpdateReceived` の `request_id` は対象 request の Request ID である。
+- REQUEST_UPDATE は Track Namespace を運ばず、既存の request (SUBSCRIBE / FETCH など) の Request ID に紐づく (draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE))。`SessionEvent::RequestUpdateReceived` の `request_id` は対象 request の Request ID である。
 - 現在の `client.subscription_track_name(update.request_id)` による映像購読の判定は track 名だけを見る。しかし、subscription に対する
   REQUEST_UPDATE が届くのは Established の subscription だけであり、Established になるのは SUBSCRIBE を受理したものか、自側が
   `config.namespace` で PUBLISH したものだけである。したがって追加の namespace 検証は不要である。FETCH への REQUEST_UPDATE は namespace を持たず、
@@ -25,7 +27,7 @@ Track は Track Namespace と Track Name からなる Full Track Name で識別�
 - FILL_PARAMETERS 付き SUBSCRIBE で fill fetch stream を開く条件を満たす場合、Session は SUBSCRIBE を Pending として受理した直後、アプリが応答する前に `OpenFillFetchStream` を発行する。
 - `MoqtClient::next_event` は `IncomingRequest` を `OpenFillFetchStream` より先に返し、`serve_peer_request` が SUBSCRIBE
   を拒否すると subscription は Terminated になる。その後の fill 応答は `send_fill_fetch_header` が Terminated を拒否するため、
-  コンテンツは送られない。fill 経路の追加変更は不要である (draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams))。
+  コンテンツは送られない。fill 経路の追加変更は不要である (draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams))。
 
 ## 再現手順
 
@@ -50,7 +52,7 @@ Track は Track Namespace と Track Name からなる Full Track Name で識別�
 - REQUEST_UPDATE には namespace の検証を追加しない。REQUEST_UPDATE は namespace を運ばず、subscription に対する REQUEST_UPDATE が届くのは
   Established の subscription だけであり、Established になるのは SUBSCRIBE の受理時に namespace を検証済みの subscription か、自側が
   `config.namespace` で PUBLISH した subscription だけである。`subscription_track_name` による映像購読の判定はその前提で安全である。
-  `REQUEST_DOES_NOT_EXIST` は draft-ietf-moq-transport-22 §12.3 (Request Error Codes) で publisher が SUBSCRIBE /
+  `DOES_NOT_EXIST` (コード定数 `REQUEST_DOES_NOT_EXIST`、0x10) は draft-ietf-moq-transport-23 §12.3 (Request Error Codes) で publisher が SUBSCRIBE /
   FETCH / TRACK_STATUS / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS への応答に使うコードであり、REQUEST_UPDATE への応答には使わない。
 - `crates/moq-pub/src/pipeline.rs` の `#[cfg(test)] mod tests` に `published_track` の単体テストを追加する。`Config` は
   `cli::parse_args` で組み立てる。別 namespace の video / audio / catalog が `None` になること、同じ namespace の有効な video /
@@ -60,7 +62,7 @@ Track は Track Namespace と Track Name からなる Full Track Name で識別�
 
 ## 完了条件
 
-- 別 namespace の SUBSCRIBE / FETCH (catalog / video / audio) が `REQUEST_DOES_NOT_EXIST` で拒否されること。
+- 別 namespace の SUBSCRIBE / FETCH (catalog / video / audio) が `DOES_NOT_EXIST` (`REQUEST_DOES_NOT_EXIST`、0x10) で拒否されること。
 - 自分の namespace の SUBSCRIBE / FETCH (catalog / video / audio) は従来どおり受理されること。
 - `published_track` の単体テストが追加され、別 namespace の要求と配信していない track (無効な video / audio を含む) が `None` になり、同じ namespace の有効な track が正しい種別になること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
