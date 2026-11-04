@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-track-scope-loc-properties
 - Polished: 2026-10-25
+- Refreshed: 2026-11-04
 - Updated: 2026-10-10
 
 ## 目的
@@ -30,9 +31,9 @@ draft-ietf-moq-loc-04 §6.1 (MOQ Properties Registry) の Table 1 は `0x08` (TI
 >                                 Table 1
 > ```
 
-Scope が Track である値は Track Properties として購読確立時に一度だけ送れる。draft-ietf-moq-transport-22 §8.4 (Track and Object Properties) は Track Properties の位置を次のように定める。
+Scope が Track である値は Track Properties として購読確立時に一度だけ送れる。draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) は Track Properties の位置を次のように定める。
 
-> Properties are serialized as Key-Value-Pairs (see Figure 3).
+> Properties are serialized as Key-Value-Pairs (see Figure 4).
 > Track Properties always appear as the final field in the messages that carry them; their length is the remaining bytes of the message after all preceding fields have been consumed.
 > Object Properties (Section 11.1.2) are preceded by an explicit length field.
 
@@ -47,7 +48,7 @@ Scope が Track である値は Track Properties として購読確立時に一�
 - `src/session/subscription/send.rs` の `send_publish` / `send_subscribe_ok` は `TrackProperties` を引数で受け取って wire に載せる。publisher 役の `Subscription` にも自側の値を個別フィールドとして保持するだけで、受け取った `TrackProperties` そのものは保持しない
 - `src/track_properties.rs` の `TrackProperties` は `as_slice()` と `find_varint()` を持ち、奇数型の値を `TrackPropertyValue::Bytes(Vec<u8>)` として保持する。LOC の `0x0D` / `0x0F` は最上位リストに置かれた場合はこの形で生バイト列を取り出せる
 - `src/session/subscription.rs` の `Session::subscription` / `Session::subscriptions` は `&Subscription` を返すため、`Subscription` にフィールドを追加すれば application から参照できる
-- `src/object_properties.rs` の `ObjectProperties` は MOQT が定義する Object Properties (draft-ietf-moq-transport-22 §16.8 (Properties) Table 15) だけを対象にしており、LOC のプロパティを解釈する口は無い
+- `src/object_properties.rs` の `ObjectProperties` は MOQT が定義する Object Properties (draft-ietf-moq-transport-23 §16.8 (Properties) Table 15) だけを対象にしており、LOC のプロパティを解釈する口は無い
 - `crates/tokio-moq/src/moqt_client.rs` の `publish_track` は呼び出し側が渡した `TrackProperties` を PUBLISH する。
   `crates/moq-pub/src/pipeline.rs` の `publish_video_track` / `publish_audio_track` は `MAX_CACHE_DURATION` を載せ、
   映像のエンコード経路では `DYNAMIC_GROUPS` も載せる。`serve_peer_request` は `subscribe_ok_properties` が返す
@@ -72,7 +73,7 @@ Scope が Track である値は Track Properties として購読確立時に一�
 - `pbt/tests/prop_session/` は `Subscription` を直接構築しないため影響を受けない (`pbt` は workspace member であり `make test` の対象である)
 - 既知の MOQT 値 (DYNAMIC_GROUPS / DEFAULT_PUBLISHER_PRIORITY / DEFAULT_PUBLISHER_GROUP_ORDER / delivery timeout) の取り込みは現状のまま維持する。フィールドの追加であり、既存の個別フィールドを置き換えない
 - publisher 役 (`send_publish` / `send_subscribe_ok`) が持つ自側の値と混同しないよう、フィールドの意味を「peer が送った Track Properties」に限定して doc コメントに書く
-- INCLUDE_PROPERTIES=0 で空化された Track Properties は空のまま保持する (draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter) は空化を SHOULD とする)。空化された場合は application が Object Properties 側の値を使う判断をする
+- INCLUDE_PROPERTIES=0 で空化された Track Properties は空のまま保持する (draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter) は空化を SHOULD とする)。空化された場合は application が Object Properties 側の値を使う判断をする
 - LOC の Track スコープ値をどう解釈するか (Timestamp の単位決定にどう効かせるか) は 0103 (closed、2026-10-06) の
   wall-clock 統一方針と整合させる。0103 は live capture では publisher が `PROP_TIMESCALE` を付けない方針を
   確定させている (`--input-mp4` / `--input-mp4-reencode` は入力ファイルのメディア時刻を送るため入力トラックの
