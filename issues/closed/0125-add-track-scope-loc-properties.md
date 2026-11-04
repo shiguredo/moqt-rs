@@ -127,7 +127,7 @@ Scope が Track である値は Track Properties として購読確立時に一�
 | 既知 MOQT 値の取り込みが変わらないこと | 同ファイルの `publish_keeps_known_moq_values_with_loc_properties` / `subscribe_ok_keeps_known_moq_values_with_loc_properties` と既存の default_publisher_properties / delivery timeout テスト |
 | peer が Track Properties を送らない場合と INCLUDE_PROPERTIES=0 で空化された場合に空として取得できること | 同ファイルの `*_without_track_properties_*` / `subscribe_ok_with_include_properties_zero_*` |
 | publisher 役と send_subscribe 直後の Subscription では空であること | 同ファイルの `local_side_subscriptions_have_empty_peer_track_properties` |
-| `make test` / `make clippy` / `make fmt` が通ること | Linux 環境では workspace ビルドが libpulse 依存で失敗するため、libpulse を展開した代替環境で `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo test --workspace` / `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` を実行し、すべて成功した |
+| `make test` / `make clippy` / `make fmt` が通ること | Linux 環境では workspace ビルドが libpulse 依存で失敗するため、libpulse を展開した代替環境で fmt / clippy / test / rustdoc を実行し、すべて成功した |
 
 検証コマンド `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets -- -D warnings` /
 `cargo test --workspace` / `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` は
