@@ -4,15 +4,16 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/change-webtransport-grease-error-code-limits
 - Polished: 2026-09-28
+- Refreshed: 2026-11-04
 - Updated: 2026-10-10
 
 ## 目的
 
 draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams) と draft-ietf-webtrans-http2-15 §6.2 / §6.3 は、
 WebTransport のストリーム操作 (RESET_STREAM / STOP_SENDING) のアプリケーションエラーコードを
-32 ビット (0x00000000-0xffffffff) に限る一方、draft-ietf-moq-transport-22 §13 (Grease) の greasing 値
+32 ビット (0x00000000-0xffffffff) に限る一方、draft-ietf-moq-transport-23 §13 (Grease) の greasing 値
 (`0x7f * N + 0x9D`、`0x9D, 0x11C, ..., 0x3fffffffffffffde`) は 32 ビットを超える値を取り得る。
-§16.11.4 (Stream Reset Error Codes) の registry も greasing 予約を持つため、MOQT の reset コードとして
+§16.12.4 (Stream Reset Error Codes) の registry も greasing 予約を持つため、MOQT の reset コードとして
 32 ビット超の値が正当にあり得る。
 
 現状は QUIC 経路 (`moqt://`) では任意の varint (`2^62 - 1` 以下) を送れるが、WebTransport 経路
@@ -49,7 +50,7 @@ WebTransport のストリーム操作 (RESET_STREAM / STOP_SENDING) のアプリ
   `crates/tokio-moq/src/moqt_client.rs` の `SessionEvent::ResetRequestStream` 分岐など) も範囲を検証しない。
   現行 example が渡すのは `SubgroupTermination::reset_error_code()` / `DataStreamResetReason::Cancelled.error_code()`
   の MOQT §12.5 の小さい値だけなので、32 ビット超は公開 API 経由で送信時に初めて問題になる。
-- close 経路 (MOQT §16.11.1 の Session Termination Error Codes) の 32 ビット超の扱いは本 issue の対象外であり、
+- close 経路 (MOQT §16.12.1 の Session Termination Error Codes) の 32 ビット超の扱いは本 issue の対象外であり、
   [issues/0176](../issues/closed/0176-bug-moqt-close-code-over-32-bits.md) (closed、2026-09-30) が対応済みである。
 
 ## 設計方針
