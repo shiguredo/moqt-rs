@@ -257,7 +257,7 @@ fn authorize_bearer<C: CoseCrypto>(
 }
 ```
 
-`CatToken::decode` が成功しても、それはトークンをデコードできたというだけです。
+`CatToken::decode` / `CatToken::decode_moqt_auth_token` が成功しても、それはトークンをデコードできたというだけです。
 署名検証だけでも action は認可できません。認可には `moqt` クレームの scope の確認まで必要です。
 接続束縛 (`catreplay`) を含む bearer トークンは `CatToken::verify_bearer` を、`cnf` 付きトークンは DPoP proof と合わせて `CwtDpopProof::verify_against_cat_token` を使ってください。
 `catreplay` が 1 でない bearer トークンでも `verify_bearer` を使い、接続識別子と replay cache を渡してください。

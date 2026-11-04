@@ -1767,7 +1767,7 @@ moqt-rs には vsync が無く、呼び出し側のループ周期 (example は 
   - <https://datatracker.ietf.org/doc/html/draft-ietf-moq-msf-01>
 - draft-ietf-moq-c4m-02 - Authorization scheme for MOQT using Common Access Tokens
   - <https://datatracker.ietf.org/doc/html/draft-ietf-moq-c4m-02>
-- draft-nandakumar-moq-generic-dpop-proof-00 - Application-Agnostic Demonstrating Proof-of-Possession (旧 JWT 形式の互換 API)
+- draft-nandakumar-moq-generic-dpop-proof-00 - Application-Agnostic Demonstration Proof of Possession (DPoP) Framework (旧 JWT 形式の互換 API)
   - <https://datatracker.ietf.org/doc/draft-nandakumar-moq-generic-dpop-proof/>
 - RFC 8949 - Concise Binary Object Representation (CBOR)
   - <https://www.rfc-editor.org/rfc/rfc8949>

@@ -733,7 +733,7 @@ let proof_jwt = DpopProofBuilder::new(jti, unix_now, actx)
 ## 対応仕様
 
 - [draft-ietf-moq-c4m-02](https://datatracker.ietf.org/doc/html/draft-ietf-moq-c4m-02) - Authorization scheme for MOQT using Common Access Tokens
-- [draft-nandakumar-moq-generic-dpop-proof-00](https://datatracker.ietf.org/doc/draft-nandakumar-moq-generic-dpop-proof/) - Application-Agnostic Demonstrating Proof-of-Possession (旧 JWT 形式の互換 API)
+- [draft-nandakumar-moq-generic-dpop-proof-00](https://datatracker.ietf.org/doc/draft-nandakumar-moq-generic-dpop-proof/) - Application-Agnostic Demonstration Proof of Possession (DPoP) Framework (旧 JWT 形式の互換 API)
 - [RFC 8949](https://www.rfc-editor.org/rfc/rfc8949) - Concise Binary Object Representation (CBOR)
 - [RFC 9052](https://www.rfc-editor.org/rfc/rfc9052) / [RFC 9053](https://www.rfc-editor.org/rfc/rfc9053) - CBOR Object Signing and Encryption (COSE)
 - [RFC 8392](https://www.rfc-editor.org/rfc/rfc8392) - CBOR Web Token (CWT)
