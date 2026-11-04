@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/update-doc-comment-format-compliance
 - Polished: 2026-10-20
+- Refreshed: 2026-11-04
 
 ## 目的
 
@@ -40,7 +41,7 @@ shiguredo-doc は全角半角の境界、半角括弧、中黒の扱いを定め
   `・` と ASCII の間が 83 箇所、全角括弧と ASCII の間が 32 箇所
   (2026-10-20 時点、`rg` で確認)。全角括弧は `src/` と `tests/` のコメントに 116 箇所あり、
   半角 `()` に統一する。`src/message_parameter.rs` の `（EXPIRES=0 のとき）`、
-  `src/session/types.rs` の `§9.20.16（将来の draft で変更される可能性がある）` など。
+  `src/session/types.rs` の `§9.19.16（将来の draft で変更される可能性がある）` など。
 - draft の changelog PR 番号 (`#1595`, `#1583`, `#1540`, `#1790`, `#1872`, `#1623`) が
   `src/` と `tests/`, `pbt/` の 18 ファイルにある。`src/varint.rs`, `src/message.rs`,
   `src/message_parameter.rs`, `src/subgroup_tracker.rs` はその一部。
@@ -52,7 +53,7 @@ shiguredo-doc は全角半角の境界、半角括弧、中黒の扱いを定め
 ## 設計方針
 
 - 英語のみのコメントを日本語にする (手順説明、テストデータの説明、コードの意図を含む)。
-  仕様の英語引用は `"..."` で囲み、直前または直後に `draft-ietf-moq-transport-22 §...` の
+  仕様の英語引用は `"..."` で囲み、直前または直後に `draft-ietf-moq-transport-23 §...` の
   形で引用元を付けて残す。
 - テストの panic / assert メッセージは日本語にする。本体コードと `crates/` のログ /
   `println!` / `eprintln!` メッセージは英語のままとする (`shiguredo-rust`)。
@@ -65,13 +66,15 @@ shiguredo-doc は全角半角の境界、半角括弧、中黒の扱いを定め
 - source コメントからこのリポジトリの issue 番号・issue パス・「本 issue」への言及を削除し、
   理由そのもの (仕様の節番号・再現条件・設計意図) に置き換える。draft の changelog PR 番号は
   draft の版が変わると辿れなくなるため削除し、
-  `draft-ietf-moq-transport-22 Appendix A.x (Since draft-ietf-moq-transport-y)` の形に置き換える。
+  `draft-ietf-moq-transport-23 Appendix A.x (Since draft-ietf-moq-transport-y)` の形に置き換える。
+  draft-23 の Appendix A.1 は "Since draft-ietf-moq-transport-22" であり、draft-22 以前の変更を指す
+  A.x は draft-22 の対応する番号に 1 を足したものになる (例: draft-22 の A.3 は A.4)。
 - `# Errors` などの rustdoc 見出しは現行のプロジェクト慣例を維持し、本 issue では変更しない。
 
 ## 完了条件
 
 - 対象のコメントとテストメッセージが日本語であること。仕様の英語引用は引用と分かる形
-  (`"..."` と `draft-ietf-moq-transport-22 §...`) で残っていること。`# Errors` などの
+  (`"..."` と `draft-ietf-moq-transport-23 §...`) で残っていること。`# Errors` などの
   rustdoc 見出しは現行のままであること。
 - 対象のコメントに全角括弧・全角中黒・全角半角間のスペース欠落が無いこと。
   `rg -n '//.*[（）]' src tests pbt crates`、
