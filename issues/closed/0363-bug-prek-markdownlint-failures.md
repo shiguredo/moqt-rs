@@ -25,11 +25,11 @@ develop の CI の prek ジョブが markdownlint-cli2 で失敗し続けてお�
 
 ## 変更対象
 
-- `issues/0302-draft-22-sender-delivery-timeout.md`
-- `issues/0305-draft-22-response-parameter-scope.md`
-- `issues/0306-draft-22-send-response-prevalidation.md`
-- `issues/0308-draft-22-stop-sending-reset-open-streams.md`
-- `issues/0311-draft-22-error-classification-consistency.md`
+- `issues/0302-draft-23-sender-delivery-timeout.md`
+- `issues/0305-draft-23-response-parameter-scope.md`
+- `issues/0306-draft-23-send-response-prevalidation.md`
+- `issues/0308-draft-23-stop-sending-reset-open-streams.md`
+- `issues/0311-draft-23-error-classification-consistency.md`
 - `issues/0314-change-consume-payload-contract.md`
 - `issues/0331-bug-publisher-namespace-validation.md`
 - `issues/0348-bug-playout-target-latency-ceiling.md`
