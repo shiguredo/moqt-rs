@@ -1,9 +1,9 @@
-//! CAT (CTA-5007-B / draft-ietf-moq-c4m-01) のテスト
+//! CAT (CTA-5007-B / draft-ietf-moq-c4m-01 / draft-ietf-moq-c4m-02) のテスト
 
 use shiguredo_moqt::c4m::cat::{
-    CAT_CONTENT_TYPE, CLAIM_CAT_VERSION, CLAIM_CONFIRMATION, CatClaims, CatError, CatToken,
-    ClaimValidationError, ClaimValidationOptions, Confirmation, MOQT_AUTH_TOKEN_TYPE_CAT,
-    TokenFormat,
+    CAT_CONTENT_TYPE, CLAIM_CAT_REPLAY, CLAIM_CAT_VERSION, CLAIM_CONFIRMATION, CatClaims, CatError,
+    CatReplay, CatToken, ClaimValidationError, ClaimValidationOptions, Confirmation,
+    MOQT_AUTH_TOKEN_TYPE_CAT, TokenFormat,
 };
 use shiguredo_moqt::c4m::cbor::Value;
 use shiguredo_moqt::c4m::{
@@ -1282,3 +1282,99 @@ fn url_embedded_cose_token_accepts_standard_base64() {
         TokenFormat::CoseMac0
     );
 }
+
+/// `catreplay` の整数値と型付きの値の対応を固定すること
+///
+/// encode / decode の往復は PBT の `cat_replay_roundtrip` が検証する。
+#[test]
+fn cat_replay_key_mapping() {
+    for (replay, key) in [
+        (CatReplay::NotProtected, 0),
+        (CatReplay::SingleConnection, 1),
+        (CatReplay::ImplementationDefined, 2),
+    ] {
+        assert_eq!(replay.key(), key);
+        assert_eq!(CatReplay::from_key(key), Some(replay));
+    }
+    // 0 / 1 / 2 以外の整数は解釈しない
+    for key in [3, 4, -1, i64::MAX, i64::MIN] {
+        assert_eq!(CatReplay::from_key(key), None, "key={key}");
+    }
+}
+
+/// `catreplay` が整数でない場合と 0 / 1 / 2 以外の整数の場合を拒否すること
+#[test]
+fn invalid_cat_replay_values_are_rejected() {
+    // 符号なし整数でない値は型のエラーになる (catreplay の値型は unsigned integer)
+    for value in [
+        Value::TextString(String::from("1")),
+        Value::Float(1.0),
+        Value::Bool(true),
+        Value::Null,
+        Value::Negative(0),
+        Value::Negative(1),
+    ] {
+        let claims = Value::Map(vec![(Value::integer(CLAIM_CAT_REPLAY), value)]);
+        assert_eq!(
+            CatClaims::decode(&claims),
+            Err(CatError::UnexpectedType("catreplay"))
+        );
+    }
+
+    // 0 / 1 / 2 以外の符号なし整数は値のエラーになる
+    for value in [3, 4, u64::MAX] {
+        let claims = Value::Map(vec![(
+            Value::integer(CLAIM_CAT_REPLAY),
+            Value::Unsigned(value),
+        )]);
+        assert_eq!(
+            CatClaims::decode(&claims),
+            Err(CatError::InvalidCatReplayValue(value))
+        );
+    }
+}
+
+/// 型付きフィールドと raw の両方に `catreplay` を置くとエンコードを拒否すること
+#[test]
+fn cat_replay_typed_claim_key_is_rejected_in_raw() {
+    // 型付きフィールドと raw の両方に置くと、どちらを使うか曖昧になる
+    let claims = CatClaims {
+        cat_replay: Some(CatReplay::SingleConnection),
+        raw: vec![(Value::integer(CLAIM_CAT_REPLAY), Value::Null)],
+        ..CatClaims::default()
+    };
+    assert_eq!(
+        claims.encode(),
+        Err(CatError::DuplicateClaim(CLAIM_CAT_REPLAY))
+    );
+
+    // 型付きフィールドが未設定でも raw に置けば拒否する
+    let claims = CatClaims {
+        raw: vec![(Value::integer(CLAIM_CAT_REPLAY), Value::integer(1))],
+        ..CatClaims::default()
+    };
+    assert_eq!(
+        claims.encode(),
+        Err(CatError::DuplicateClaim(CLAIM_CAT_REPLAY))
+    );
+}
+
+/// ビルダーが `catreplay` を設定して発行できること
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn builder_sets_cat_replay() {
+    let crypto = AwsLcRsCrypto::new();
+    let token_bytes = CatTokenBuilder::new()
+        .issuer("https://auth.example.com")
+        .expiration(1700086400.0)
+        .cwt_id(b"id-1".to_vec())
+        .cat_replay(CatReplay::SingleConnection)
+        .build_cose(&crypto, &hmac_key())
+        .expect("catreplay 付きのトークンを発行できる");
+    let token = CatToken::decode(&token_bytes).expect("デコードできる");
+    assert_eq!(token.claims().cat_replay, Some(CatReplay::SingleConnection));
+    assert!(token.claims().raw.is_empty());
+}
+
+#[path = "cat/bearer.rs"]
+mod bearer;

@@ -3,18 +3,20 @@
 //! - クレームセットのラウンドトリップ
 //! - compact 形式と COSE 形式のトークンのデコード
 //! - `CatClaims::validate` の判定が仕様のモデルと一致すること
+//! - `catreplay` の型付きデコードと bearer の接続束縛 (保持期限・解放) の一致性
 
 use pbt::common::{sample_bytes, test_runner};
 use shiguredo_moqt::c4m::CatDpop;
 use shiguredo_moqt::c4m::cat::{
-    CatClaims, CatError, CatToken, ClaimValidationError, ClaimValidationOptions, Confirmation,
-    TokenFormat,
+    BearerReplayCache, BearerReplayError, CatClaims, CatError, CatReplay, CatToken,
+    ClaimValidationError, ClaimValidationOptions, Confirmation, TokenFormat,
 };
 use shiguredo_moqt::c4m::cbor::{self, Value};
 use shiguredo_moqt::c4m::cose::{Algorithm, CoseEncodingOptions, CoseMac0, CoseMessage, CoseSign1};
 
 use super::common::{
-    base64url_encode, base64url_encode_padded, sample_catdpop, sample_moqt_claim, sample_safe_text,
+    base64url_encode, base64url_encode_padded, sample_cat_replay, sample_catdpop,
+    sample_moqt_claim, sample_safe_text,
 };
 use super::cose::sample_header;
 
@@ -118,6 +120,11 @@ fn sample_claims(ctx: &mut noprop::TestCaseContext) -> CatClaims {
         },
         catdpop: if noprop::sample_bool(ctx) {
             Some(sample_catdpop(ctx))
+        } else {
+            None
+        },
+        cat_replay: if noprop::sample_bool(ctx) {
+            Some(sample_cat_replay(ctx))
         } else {
             None
         },
@@ -518,6 +525,7 @@ fn claims_validate_matches_model() -> noprop::TestResult {
             moqt: None,
             moqt_reval,
             catdpop,
+            cat_replay: None,
             raw: Vec::new(),
         };
 
@@ -614,6 +622,170 @@ fn claims_validate_matches_model() -> noprop::TestResult {
     assert!(
         audience_mismatch_seen.get() > 0,
         "aud が一致しないケースが生成されなかった\n{runner}"
+    );
+    Ok(())
+}
+
+/// `catreplay` の整数変換とクレームのラウンドトリップ
+#[test]
+fn cat_replay_roundtrip() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let replay = sample_cat_replay(ctx);
+        // key と from_key は相互に変換できる
+        assert_eq!(CatReplay::from_key(replay.key()), Some(replay));
+        // 任意の整数は 0 / 1 / 2 のときだけ型付きになる
+        let arbitrary = noprop::sample_i64(ctx);
+        assert_eq!(
+            CatReplay::from_key(arbitrary).is_some(),
+            (0..=2).contains(&arbitrary)
+        );
+        // クレームの encode -> decode で値が保たれ、整数で書き出される
+        let claims = CatClaims {
+            cat_replay: Some(replay),
+            ..CatClaims::default()
+        };
+        let value = claims.encode().expect("catreplay をエンコードできる");
+        assert_eq!(
+            value.map_get(&Value::integer(shiguredo_moqt::c4m::cat::CLAIM_CAT_REPLAY)),
+            Some(&Value::integer(replay.key()))
+        );
+        assert_eq!(
+            CatClaims::decode(&value).expect("catreplay をデコードできる"),
+            claims
+        );
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// `catreplay` の decode が 0 / 1 / 2 だけを受理すること
+#[test]
+fn cat_replay_decode_accepts_only_supported_integers() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        // 0 / 1 / 2 の受理 branch と、境界・範囲外の拒否 branch を確実に踏むため、
+        // 一様乱数だけでなく仕様上の境界値を混ぜる
+        let value = match noprop::sample_usize_in(ctx, 0..5) {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            3 => 3,
+            _ => noprop::sample_i64(ctx),
+        };
+        let claims = Value::Map(vec![(
+            Value::integer(shiguredo_moqt::c4m::cat::CLAIM_CAT_REPLAY),
+            Value::integer(value),
+        )]);
+        match value {
+            0 => assert_eq!(
+                CatClaims::decode(&claims)
+                    .expect("0 は型付きでデコードできる")
+                    .cat_replay,
+                Some(CatReplay::NotProtected)
+            ),
+            1 => assert_eq!(
+                CatClaims::decode(&claims)
+                    .expect("1 は型付きでデコードできる")
+                    .cat_replay,
+                Some(CatReplay::SingleConnection)
+            ),
+            2 => assert_eq!(
+                CatClaims::decode(&claims)
+                    .expect("2 は型付きでデコードできる")
+                    .cat_replay,
+                Some(CatReplay::ImplementationDefined)
+            ),
+            value if value < 0 => assert_eq!(
+                CatClaims::decode(&claims),
+                Err(CatError::UnexpectedType("catreplay"))
+            ),
+            value => assert_eq!(
+                CatClaims::decode(&claims),
+                Err(CatError::InvalidCatReplayValue(value as u64))
+            ),
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// `BearerReplayCache` の束縛・再利用・解放がモデルと一致する
+#[test]
+fn bearer_replay_cache_matches_model() -> noprop::TestResult {
+    let mismatch_seen = std::cell::Cell::new(0usize);
+    let release_seen = std::cell::Cell::new(0usize);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let leeway = noprop::sample_f64_in(ctx, 0.0, 10.0);
+        let mut cache =
+            BearerReplayCache::new(leeway).expect("有限で 0 以上の leeway で構築できる");
+        // cti と接続識別子は小さな集合から選び、衝突と再利用を高い確率で作る
+        let ctis = [b"cti-0".as_slice(), b"cti-1".as_slice(), b"cti-2".as_slice()];
+        let connections = [
+            b"connection-0".as_slice(),
+            b"connection-1".as_slice(),
+            b"connection-2".as_slice(),
+        ];
+        // モデル: cti -> (接続識別子, 保持期限)
+        let mut model: std::collections::BTreeMap<Vec<u8>, (Vec<u8>, f64)> =
+            std::collections::BTreeMap::new();
+        for _ in 0..noprop::sample_usize_in(ctx, 1..=16) {
+            let cti = ctis[noprop::sample_usize_in(ctx, 0..ctis.len())];
+            let connection = connections[noprop::sample_usize_in(ctx, 0..connections.len())];
+            let reference = noprop::sample_f64_in(ctx, 0.0, 100.0);
+            let retain_until = noprop::sample_f64_in(ctx, 0.0, 120.0);
+            // 未失効の束縛が別の接続にある場合は、解放も含めて何も変更せずに拒否する
+            let rejected = model
+                .get(cti)
+                .is_some_and(|(bound, until)| bound.as_slice() != connection && reference <= *until);
+            let expected = if rejected {
+                mismatch_seen.set(mismatch_seen.get() + 1);
+                Err(BearerReplayError::ConnectionMismatch)
+            } else {
+                // 参照時刻が保持期限を超えた記録だけを解放する (等しい間は保持する)
+                let before_release = model.len();
+                model.retain(|_, (_, until)| reference <= *until);
+                if model.len() < before_release {
+                    release_seen.set(release_seen.get() + 1);
+                }
+                match model.get_mut(cti) {
+                    Some((_, until)) => {
+                        // 同じ接続の再利用は許し、保持期限は後ろにだけ延ばす
+                        if retain_until > *until {
+                            *until = retain_until;
+                        }
+                        Ok(())
+                    }
+                    None => {
+                        model.insert(cti.to_vec(), (connection.to_vec(), retain_until));
+                        Ok(())
+                    }
+                }
+            };
+            assert_eq!(
+                cache.check_and_bind(cti, connection, retain_until, reference),
+                expected,
+                "cti={cti:?} connection={connection:?} reference={reference} retain_until={retain_until}"
+            );
+            assert_eq!(cache.len(), model.len(), "記録数がモデルと一致しない");
+        }
+        // 参照時刻 0 ではどの記録も失効しないため、モデルの接続と保持期限が残っている
+        for (cti, (connection, until)) in &model {
+            cache
+                .check_and_bind(cti, connection, *until, 0.0)
+                .expect("モデルに残る cti は同じ接続で再利用できる");
+        }
+        assert_eq!(cache.len(), model.len());
+        Ok(())
+    })?;
+    assert!(
+        mismatch_seen.get() > 0,
+        "別接続による拒否のケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        release_seen.get() > 0,
+        "保持期限を過ぎた記録の解放ケースが生成されなかった\n{runner}"
     );
     Ok(())
 }

@@ -1,6 +1,7 @@
 //! C4M の property テストで共有する生成器とモデル
 
 use pbt::common::sample_bytes;
+use shiguredo_moqt::c4m::cat::CatReplay;
 use shiguredo_moqt::c4m::{CatDpop, Match, MoqtAction, MoqtClaim, MoqtScope, NamespaceMatch};
 
 /// 仕様 (draft-ietf-moq-c4m-01 §2.1) のマッチ規則をそのまま実装したモデル
@@ -264,6 +265,18 @@ pub fn sample_safe_text(ctx: &mut noprop::TestCaseContext, max_len: usize) -> St
     (0..len)
         .map(|_| char::from(noprop::sample_choice(ctx, CHARS)))
         .collect()
+}
+
+/// `catreplay` クレームを生成する
+pub fn sample_cat_replay(ctx: &mut noprop::TestCaseContext) -> CatReplay {
+    noprop::sample_choice(
+        ctx,
+        &[
+            CatReplay::NotProtected,
+            CatReplay::SingleConnection,
+            CatReplay::ImplementationDefined,
+        ],
+    )
 }
 
 /// `catdpop` クレームを生成する
