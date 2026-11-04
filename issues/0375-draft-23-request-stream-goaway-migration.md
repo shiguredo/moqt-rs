@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: develop
 - Polished: 2026-10-25
+- Refreshed: 2026-11-04
 
 ## reopened にした理由
 
@@ -12,9 +13,11 @@
 
 ## 目的
 
-draft-ietf-moq-transport-22 §9.2 (GOAWAY) は、request stream 上の GOAWAY を受けた endpoint に "the endpoint SHOULD re-issue that specific
-request on a session at the specified URI (or the current session if no URI is provided), and close the old request stream using
-the appropriate mechanism (e.g. FIN, stream reset, or PUBLISH_DONE)" を SHOULD で要求する。現在の crates は移行先 URL が現在の URL と
+draft-ietf-moq-transport-23 §9.2 (GOAWAY) は、request stream 上の GOAWAY を送れるのは request の receiver だけで
+("Only the receiver of a request can send GOAWAY on its request stream.")、request stream 上の GOAWAY を受けた
+request の sender に "the sender of the request SHOULD re-issue that specific request on a session at the specified
+URI (or the current session if no URI is provided), and close the old request stream using the appropriate mechanism
+(e.g. FIN, stream reset, or PUBLISH_DONE)" を SHOULD で要求する。現在の crates は移行先 URL が現在の URL と
 同じときだけ現在の session で当該 request を再発行し、別 URL の非空 URI は warn して移行しない (subscriber)。
 publisher は空 URI のときだけ現在の session で PUBLISH を再発行し、非空 URI は同一 URL でも移行しない。`docs/moqt.md` と `docs/missing-features.md` に
 残課題として明記されている。
@@ -23,6 +26,11 @@ publisher は空 URI のときだけ現在の session で PUBLISH を再発行�
 
 - `src/session/types.rs` の `SessionEvent::GoawayReceived` は `new_session_uri` / `timeout` / `on_request_stream: Option<u64>`
   を持ち、request stream 上の GOAWAY を識別できる。
+- `src/session/goaway.rs` は draft-ietf-moq-transport-23 §9.2 (GOAWAY) の役割規則を実装済みである。
+  `send_goaway_on_request_stream` は自側が request の receiver の場合だけ request stream 上の GOAWAY の送信を許可し、
+  `handle_peer_goaway_on_request_stream` は自側が request の receiver のときに request stream 上の GOAWAY を受けると
+  `PROTOCOL_VIOLATION` でセッションを閉じる。本 issue が移行を扱うのは、自側が送信した request
+  (SUBSCRIBE / FETCH / PUBLISH) の stream で受け取る GOAWAY に限られる。
 - `crates/moq-sub/src/pipeline.rs` と `crates/moq-pub/src/pipeline.rs` は control GOAWAY を受けたときに新しい session を background
   で確立し、認可トークンの引き継ぎ・期限・指数バックオフ再試行を伴って購読 / 配信を張り直す移行経路を持つ。
 - moq-sub は `migration_target` と `same_session_url` により、移行先 URL が現在の URL と同じなら現在の session で当該 request を
