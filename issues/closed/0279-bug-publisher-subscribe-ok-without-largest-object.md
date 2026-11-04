@@ -44,7 +44,7 @@ subscription をすべて forget すると、以降の SUBSCRIBE_OK に LARGEST_
 - `src/session/data.rs` の `send_subgroup_object` / `send_object_datagram` は、送信時に
   `Subscription::record_largest_received_location` で当該 subscription の最大を更新するが、
   Track 単位では保持しない。
-- `issues/0304-draft-22-track-status-largest-object.md` は「publisher 役 subscription を
+- `issues/0304-draft-23-track-status-largest-object.md` は「publisher 役 subscription を
   すべて `forget_subscription` した後は自動補完できない。Track 単位で largest を永続保持する
   改善は本 issue のスコープ外とする」と既知の制約として明記している。本 issue でその制約を
   解消する。
@@ -127,7 +127,7 @@ publisher 役 subscription をすべて forget した後も §9.20.17 (LARGEST O
   本 issue の対象外である。
 - doc を実装に合わせて更新した。対象は `Session::publisher_track_largest` /
   `record_published_track_largest` の doc、`docs/moqt.md` の Message Parameters の Largest Object、
-  `issues/0304-draft-22-track-status-largest-object.md` の「Track 単位の永続保持はスコープ外」
+  `issues/0304-draft-23-track-status-largest-object.md` の「Track 単位の永続保持はスコープ外」
   という記述である。
 - `tests/test_session/subscription/largest_object_track_aggregate.rs` にテストを追加した。
   subgroup で publish した後と datagram で publish した後に publisher 役 subscription を forget
