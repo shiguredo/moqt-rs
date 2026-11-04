@@ -4,12 +4,13 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-setup-auth-token-uniqueness
 - Polished: 2026-10-25
+- Refreshed: 2026-11-04
 
 ## 目的
 
 `Session::recv_control` はデコード済みの `ControlMessage` を受理する sans-I/O API である。
 アプリが `SetupOptions` を組み立てて `Setup` として渡すと `SetupOptions::decode` の検証を
-経由しないため、draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) の
+経由しないため、draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression) の
 一意性条件が API 経由で抜ける。
 
 §8.9 は "An Authorization Token MAY be repeated within a message as long as the combination of
