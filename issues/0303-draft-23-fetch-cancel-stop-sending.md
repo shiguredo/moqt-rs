@@ -4,11 +4,12 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-fetch-cancel-stop-sending
 - Polished: 2026-10-19
+- Refreshed: 2026-11-04
 
 ## 目的
 
-draft-ietf-moq-transport-22 §3.2.4 (Fetch State Management) は "If the data stream is already open, the subscriber wishing to cancel the FETCH MAY send STOP_SENDING for the data stream as well as the bidi request stream. It MUST send STOP_SENDING for the bidi request stream." と定める。
-draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection) も、cancel は開いている方向を「送信方向は RESET_STREAM、受信方向は STOP_SENDING」で打ち切ると定める。
+draft-ietf-moq-transport-23 §3.2.4 (Fetch State Management) は "If the data stream is already open, the subscriber wishing to cancel the FETCH MAY send STOP_SENDING for the data stream as well as the bidi request stream. It MUST send STOP_SENDING for the bidi request stream." と定める。
+draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection) も、cancel は開いている方向を「送信方向は RESET_STREAM、受信方向は STOP_SENDING」で打ち切ると定める。
 現状のアプリ起点の FETCH cancel (`Session::send_fetch_stop_sending`) は bidi request stream の受信方向に STOP_SENDING を発行しない。
 
 ## 現状
@@ -22,7 +23,9 @@ draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection) も�
 
 ## 設計方針
 
-- `send_fetch_stop_sending` で `StopSendingRequestStream { error_code: STREAM_CANCELLED }` を `ResetRequestStream` より先に発行する。両イベントの `error_code` は `STREAM_CANCELLED` (0x1) とする (§12.5)。`StopSendingRequestStream` は bidi request stream の受信方向、`ResetRequestStream` は送信方向の cancel である (§6.4.2.3)。
+- `send_fetch_stop_sending` で `StopSendingRequestStream { error_code: STREAM_CANCELLED }` を `ResetRequestStream` より先に発行する。
+  両イベントの `error_code` は `STREAM_CANCELLED` (0x1) とする (§12.5 (Stream Reset Error Codes) の CANCELLED (0x1))。
+  `StopSendingRequestStream` は bidi request stream の受信方向、`ResetRequestStream` は送信方向の cancel である (§6.4.2.3)。
 - `SessionEvent` の順序契約を doc に明記する。同じ cancel 処理で両イベントを発行する場合は、受信方向の STOP_SENDING → 送信方向の RESET_STREAM の順とする。GOAWAY timeout のように `ResetRequestStream` のみを発行する経路は対象外である。
 - 次の doc を新挙動に合わせて更新する。
   - `src/session/fetch.rs` の `send_fetch_stop_sending` doc: 本関数が bidi request stream の受信方向に `StopSendingRequestStream`、送信方向に `ResetRequestStream` を発行することを明記し、要約 (「FETCH データストリームに対して STOP_SENDING を送出した」) と「I/O 層が QUIC STOP_SENDING を送出したうえで本関数を呼ぶ」という記述を修正する。
