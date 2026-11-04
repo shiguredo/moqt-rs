@@ -28,7 +28,7 @@ pub struct EncodedFrame {
     /// タイムスタンプ
     ///
     /// live capture では Unix epoch マイクロ秒 (Timescale を載せないため LOC の既定。
-    /// draft-ietf-moq-loc-04 §2.3.1.1)、MP4 の経路では入力トラックの timescale 単位である。
+    /// draft-ietf-moq-loc-05 §2.3.1.1)、MP4 の経路では入力トラックの timescale 単位である。
     pub timestamp: u64,
     /// PROP_VIDEO_CONFIG に載せる codec 固有の設定データ
     ///

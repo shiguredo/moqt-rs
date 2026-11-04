@@ -3,7 +3,7 @@
 //! リレーサーバーに接続し、指定トラックを SUBSCRIBE してデータを受信・デコード・再生する。
 //! `--mp4` を指定すると受信した映像 / 音声を MP4 ファイルへ保存し、`--no-play` を併せて
 //! 指定すると再生せずに受信と保存だけを行う。
-//! draft-ietf-moq-transport-23、draft-ietf-moq-loc-04、draft-ietf-moq-msf-01 に準拠。
+//! draft-ietf-moq-transport-23、draft-ietf-moq-loc-05、draft-ietf-moq-msf-01 に準拠。
 //!
 //! 使い方:
 //!   cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example

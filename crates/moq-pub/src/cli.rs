@@ -85,7 +85,7 @@ pub struct Config {
     ///
     /// 入力フレームの Timestamp の差分がこの値に達したらキーフレームを強制し、
     /// 新しい Group を開始する。映像のキーフレーム間隔はそのまま Group 長になる
-    /// (Group はキーフレームで始まる、draft-ietf-moq-loc-04 §4.2)。フレーム数で
+    /// (Group はキーフレームで始まる、draft-ietf-moq-loc-05 §4.2)。フレーム数で
     /// 指定すると実時間長が fps に依存するため、時間で指定する。
     /// MSF カタログの `maxGopDuration` / `maxGroupDuration` の基になる
     /// (draft-ietf-moq-msf-01 §5.2.24 / §5.2.25)。
@@ -110,7 +110,7 @@ pub struct Config {
     pub audio_bitrate: u32,
     /// 音声トラックを datagram で送るかどうか
     ///
-    /// 既定は真である (draft-ietf-moq-loc-04 §4.1 (Application with one audio track) は
+    /// 既定は真である (draft-ietf-moq-loc-05 §4.1 (Application with one audio track) は
     /// 1 audio frame = 1 Object = 1 Group と定める)。datagram は再送されないため、遅れた
     /// 音声を届けるより落とす方が A/V のずれを残さない。映像は 1 group = 1 unidirectional
     /// stream で送る (§4.2)。`--audio-subgroup` で subgroup 配送へ切り替える。
@@ -124,7 +124,7 @@ pub struct Config {
     pub audio_redundancy: u8,
     /// object datagram の上限サイズ (bytes)
     ///
-    /// 1 つの QUIC パケットに収まる必要があるため (draft-ietf-moq-loc-04 §4.1)、
+    /// 1 つの QUIC パケットに収まる必要があるため (draft-ietf-moq-loc-05 §4.1)、
     /// 上限を超える object は送らずに対処法を示すエラーにする。
     pub datagram_max_size: usize,
     /// MSF カタログのターゲットレイテンシ (ms)
@@ -1225,7 +1225,7 @@ mod tests {
 
     /// 音声は既定で datagram 配送になり、`--audio-subgroup` で subgroup 配送になること
     ///
-    /// datagram 配送が既定である (draft-ietf-moq-loc-04 §4.1 (Application with one audio
+    /// datagram 配送が既定である (draft-ietf-moq-loc-05 §4.1 (Application with one audio
     /// track) は 1 audio frame = 1 Object = 1 Group と定める)。映像は 1 group = 1
     /// unidirectional stream のままである (§4.2)。
     #[test]

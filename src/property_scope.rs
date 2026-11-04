@@ -28,8 +28,8 @@
 //! 節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 
 use crate::loc::{
-    PROP_AUDIO_CONFIG, PROP_AUDIO_LEVEL, PROP_TIMESCALE, PROP_TIMESTAMP, PROP_VIDEO_CONFIG,
-    PROP_VIDEO_FRAME_MARKING,
+    PROP_AUDIO_CONFIG, PROP_AUDIO_LEVEL, PROP_CODEC_STRING, PROP_TIMESCALE, PROP_TIMESTAMP,
+    PROP_VIDEO_CONFIG, PROP_VIDEO_FRAME_MARKING,
 };
 use crate::object_properties::{PROP_PRIOR_GROUP_ID_GAP, PROP_PRIOR_OBJECT_ID_GAP};
 use crate::track_properties::{
@@ -39,7 +39,10 @@ use crate::track_properties::{
 };
 use alloc::vec::Vec;
 
-/// Property の許可スコープ (draft-ietf-moq-transport-23 §16.8 (Properties) Table 15 / Table 16)
+/// Property の許可スコープ
+///
+/// draft-ietf-moq-transport-23 §16.8 (Properties) の Table 15 / Table 16 と、
+/// draft-ietf-moq-loc-05 §6.1 (MOQ Properties Registry) Table 1 に基づく。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PropertyScope {
     /// Track Properties にのみ現れてよい
@@ -52,9 +55,10 @@ pub(crate) enum PropertyScope {
 
 /// この実装が意味を理解する Property Type の許可スコープを返す
 ///
-/// draft-ietf-moq-transport-23 §16.8 (Properties) の Table 15 (MOQT 定義) と Table 16
-/// (他 draft の暫定登録。本実装は draft-ietf-moq-loc の 6 型を `crate::loc` で解釈する) の
-/// うち、本実装がアクセサを持つ型を返す。解釈しない型と GREASE 値は `None` を返す。
+/// draft-ietf-moq-transport-23 §16.8 (Properties) の Table 15 (MOQT 定義) / Table 16
+/// (他 draft の暫定登録)、draft-ietf-moq-loc-05 §6.1 (MOQ Properties Registry) Table 1
+/// (LOC の IANA 登録) のうち、本実装がアクセサを持つ型を返す。解釈しない型と GREASE 値は
+/// `None` を返す。
 ///
 /// Table 16 の 0x0A (ENCRYPTED_LIST) / 0x32 (PADDING) は draft-ietf-moq-secure-objects の
 /// 定義であり本実装は解釈しないため返さない (§16.8 の "Endpoints MUST ignore unknown
@@ -76,6 +80,9 @@ pub(crate) fn known_property_scope(prop_type: u64) -> Option<PropertyScope> {
         // draft-ietf-moq-transport-23 §16.8 Table 16 / draft-ietf-moq-loc-05 §6.1:
         // Track と Object の両方
         PROP_TIMESCALE | PROP_VIDEO_CONFIG | PROP_AUDIO_CONFIG => Some(PropertyScope::Both),
+        // draft-ietf-moq-loc-05 §6.1 Table 1: Track と Object の両方。LOC の他の 6 型は
+        // transport-23 §16.8 Table 16 にも載るが、0x11 は同 Table 1 だけに載る。
+        PROP_CODEC_STRING => Some(PropertyScope::Both),
         // draft-ietf-moq-transport-23 §16.8 Table 16 / draft-ietf-moq-loc-05 §6.1:
         // Object のみ
         PROP_TIMESTAMP | PROP_VIDEO_FRAME_MARKING | PROP_AUDIO_LEVEL => Some(PropertyScope::Object),
@@ -106,11 +113,11 @@ pub(crate) fn is_track_only(prop_type: u64) -> bool {
 /// "MUST allow multiple instances of the Property" とする。§16.8 (Properties) の
 /// "Endpoints MUST ignore unknown Property types" も同じ扱いを求める。
 ///
-/// この実装が意味を理解する既知の型 (draft-ietf-moq-transport-23 §16.8 Table 15 / Table 16 の
-/// うち [`known_property_scope`] が返す型) は、いずれの定義節にも複数インスタンスを許す規則が
-/// 無いため単一に限られる。LOC Properties の各定義 (draft-ietf-moq-loc-05 §2.3) にも複数を
-/// 許す規則は無い。既知の型に複数を許す定義が加わった場合は、この関数の判定を型ごとに
-/// 分ける必要がある。
+/// この実装が意味を理解する既知の型 (draft-ietf-moq-transport-23 §16.8 Table 15 / Table 16
+/// と draft-ietf-moq-loc-05 §6.1 Table 1 のうち [`known_property_scope`] が返す型) は、
+/// いずれの定義節にも複数インスタンスを許す規則が無いため単一に限られる。LOC Properties の
+/// 各定義 (draft-ietf-moq-loc-05 §2.3) にも複数を許す規則は無い。既知の型に複数を許す定義が
+/// 加わった場合は、この関数の判定を型ごとに分ける必要がある。
 ///
 /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties) は、複数の値を許す Property に
 /// 限り mutable リストと IMMUTABLE_PROPERTIES の内側の両方に同じ型が現れてよいと定める。
@@ -172,7 +179,7 @@ mod tests {
         }
     }
 
-    /// LOC の 6 型のスコープが draft-ietf-moq-loc-05 §6.1 と一致すること
+    /// LOC の 7 型のスコープが draft-ietf-moq-loc-05 §6.1 と一致すること
     #[test]
     fn loc_properties_match_registry() {
         let expected = [
@@ -182,6 +189,7 @@ mod tests {
             (0x0C, PropertyScope::Object),     // AUDIO_LEVEL
             (0x0D, PropertyScope::Both),       // VIDEO_CONFIG
             (0x0F, PropertyScope::Both),       // AUDIO_CONFIG
+            (0x11, PropertyScope::Both),       // CODEC_STRING
         ];
         for (prop_type, scope) in expected {
             assert_eq!(
@@ -248,8 +256,8 @@ mod tests {
     #[test]
     fn known_properties_allow_single_instance_only() {
         let known = [
-            0x02_u64, 0x04, 0x06, 0x08, 0x09, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x22, 0x30, 0x3C,
-            0x3E,
+            0x02_u64, 0x04, 0x06, 0x08, 0x09, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x22, 0x30,
+            0x3C, 0x3E,
         ];
         for prop_type in known {
             assert!(
@@ -261,7 +269,7 @@ mod tests {
                 "{prop_type:#x} は単一に限られること"
             );
         }
-        for prop_type in [0x00_u64, 0x0A, 0x11, 0x32, 0x9D, 0x1000, 0x401D, 0x7F9D] {
+        for prop_type in [0x00_u64, 0x0A, 0x12, 0x32, 0x9D, 0x1000, 0x401D, 0x7F9D] {
             assert!(
                 known_property_scope(prop_type).is_none(),
                 "テストフィクスチャの前提条件を満たす ({prop_type:#x} は未知型)"

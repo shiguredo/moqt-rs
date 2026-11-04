@@ -25,7 +25,7 @@ pub struct DatagramWriter {
     publisher_priority: u8,
     /// object datagram の上限サイズ (bytes)
     ///
-    /// datagram は 1 つの QUIC パケットに収まる必要がある (draft-ietf-moq-loc-04 §4.1)。
+    /// datagram は 1 つの QUIC パケットに収まる必要がある (draft-ietf-moq-loc-05 §4.1)。
     /// 上限を超える object は送らずにエラーにする。
     max_size: usize,
     /// 同じ Object の datagram をワイヤへ出す回数
@@ -217,7 +217,7 @@ mod tests {
 
     /// 上限と等しいサイズは送信でき、上限を超えるとエラーになる
     ///
-    /// datagram は 1 つの QUIC パケットに収まる必要があるため (draft-ietf-moq-loc-04 §4.1)、
+    /// datagram は 1 つの QUIC パケットに収まる必要があるため (draft-ietf-moq-loc-05 §4.1)、
     /// 境界 (上限未満 / 上限と等しい / 上限 + 1) を固定する。
     #[test]
     fn datagram_size_boundary() {

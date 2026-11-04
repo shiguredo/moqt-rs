@@ -1,9 +1,9 @@
 //! Low Overhead Media Container (LOC) プロパティ
 //!
-//! draft-ietf-moq-loc-04 に基づく実装。
+//! draft-ietf-moq-loc-05 に基づく実装。
 //! 本仕様は draft 由来であり、将来の改訂で変更される可能性がある。
 //!
-//! LOC Properties は Public と Private に分類される (draft-ietf-moq-loc-04 §2.2):
+//! LOC Properties は Public と Private に分類される (draft-ietf-moq-loc-05 §2.2):
 //!   - LOC Public Properties: MOQ Object Properties に含まれ、リレーから参照可能
 //!   - LOC Private Properties: MOQ Object Payload に含まれ、E2E 暗号化で保護可能
 //!
@@ -29,10 +29,22 @@
 //! Properties を IMMUTABLE_PROPERTIES (0x0B) として符号化することを SHOULD とする。
 //! draft-ietf-moq-transport-23 §10.7 (Immutable Properties) は、値の取得時に mutable
 //! プロパティ列と IMMUTABLE_PROPERTIES の内側の両方を探索することを MUST とする。
+//! # CODEC_STRING (0x11) の検証
+//!
+//! draft-ietf-moq-loc-05 §2.3.1.3 (Codec String) の CODEC_STRING は UTF-8 文字列であり、
+//! draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) は、受信側が Type を理解する
+//! 場合に Value が定義された serialization と一致しなければ MALFORMED_KEY_VALUE で
+//! セッションを閉じることを MUST とする。[`LocProperties::encode`] は最上位と
+//! IMMUTABLE_PROPERTIES の内側の 0x11 を検証し、内側が解析できない入力は拒否する。
+//! [`LocProperties::decode`] は最上位の 0x11 を検証し、内側の 0x11 は内側 KVP が解析できる
+//! 場合だけ検証する (内側の構造破損は Session の `ObjectProperties` に委ねる)。
+//! [`LocProperties::codec_string`] は欠落と不正 UTF-8 を区別して返す。
+//!
 //! [`LocProperties::find_varint`] / [`LocProperties::find_bytes`] と既知プロパティの
 //! accessor は最上位リストを優先し、無ければ IMMUTABLE_PROPERTIES の内側を探索する。
 //! [`LocProperties::iter`] は最上位リストだけを返す。
 
+use crate::property::validate_codec_string_utf8;
 use crate::track_properties::PROP_IMMUTABLE_PROPERTIES;
 use crate::{error::MessageError, varint};
 use alloc::vec::Vec;
@@ -45,7 +57,7 @@ const DUPLICATE_LOC_PROPERTY: &str = "duplicate LOC property ID";
 
 /// Audio Level の最大値 (下位 8 bit = 0-255)
 ///
-/// draft-ietf-moq-loc-04 §2.3.3.2: `least significant 8 bits of a vi64`
+/// draft-ietf-moq-loc-05 §2.3.3.2: `least significant 8 bits of a vi64`
 /// draft の `Value: vi64 (1-2 bytes to encode values 0x00-0xFF)` と整合する。
 const AUDIO_LEVEL_MAX: u64 = 255;
 
@@ -59,7 +71,7 @@ const AUDIO_LEVEL_MAX: u64 = 255;
 fn validate_known_property(prop_id: u64, value: u64) -> Result<(), MessageError> {
     match prop_id {
         PROP_AUDIO_LEVEL if value > AUDIO_LEVEL_MAX => Err(MessageError::MalformedKeyValue(
-            "Audio Level value exceeds 8-bit range (draft-ietf-moq-loc-04 §2.3.3.2)",
+            "Audio Level value exceeds 8-bit range (draft-ietf-moq-loc-05 §2.3.3.2)",
         )),
         _ => Ok(()),
     }
@@ -67,7 +79,7 @@ fn validate_known_property(prop_id: u64, value: u64) -> Result<(), MessageError>
 
 /// 既知プロパティのバイト列長を検証する
 ///
-/// draft-ietf-moq-loc-04 §2.3.2.2: Video Frame Marking の `Length: Varies (1-4 bytes)`。
+/// draft-ietf-moq-loc-05 §2.3.2.2: Video Frame Marking の `Length: Varies (1-4 bytes)`。
 /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure):
 /// 受信側が既知 Type の Length が定義された serialization と一致しない場合、
 /// MALFORMED_KEY_VALUE でセッションを閉じなければならない (MUST)。
@@ -78,16 +90,32 @@ fn validate_known_property_len(prop_id: u64, len: u64) -> Result<(), MessageErro
     match prop_id {
         PROP_VIDEO_FRAME_MARKING if !(1..=4).contains(&len) => {
             Err(MessageError::MalformedKeyValue(
-                "Video Frame Marking length must be 1-4 bytes (draft-ietf-moq-loc-04 §2.3.2.2)",
+                "Video Frame Marking length must be 1-4 bytes (draft-ietf-moq-loc-05 §2.3.2.2)",
             ))
         }
         _ => Ok(()),
     }
 }
 
+/// 借用走査した LOC プロパティ列に含まれる CODEC_STRING (0x11) を検証する
+///
+/// [`LocProperties::decode`] が最上位リストを走査した結果と、encode / decode が
+/// IMMUTABLE_PROPERTIES (0x0B) の内側を走査した結果の両方に使う。最上位リストの encode は
+/// 所有権を持つ [`LocProperty`] を直接見るため、この関数を経由しない。
+fn validate_codec_strings(properties: &[LocPropertyRef<'_>]) -> Result<(), MessageError> {
+    for property in properties {
+        if property.prop_id == PROP_CODEC_STRING
+            && let LocPropertyValueRef::Bytes(bytes) = property.value
+        {
+            validate_codec_string_utf8(bytes)?;
+        }
+    }
+    Ok(())
+}
+
 /// Timestamp プロパティ ID (偶数 → varint 値)
 ///
-/// draft-ietf-moq-loc-04 §2.3.1.1 (ID=0x10, Value: vi64 1-9 bytes)
+/// draft-ietf-moq-loc-05 §2.3.1.1 (ID=0x10, Value: vi64 1-9 bytes)
 /// IANA 登録済み (§6.1: MOQ Properties Registry, Type=0x10, Scope=Object)
 ///
 /// エンコードされたメディアフレームのタイムスタンプを vi64 で表現する。
@@ -100,7 +128,7 @@ pub const PROP_TIMESTAMP: u64 = 0x10;
 
 /// Timescale プロパティ ID (偶数 → varint 値)
 ///
-/// draft-ietf-moq-loc-04 §2.3.1.2 (ID=0x08, Value: vi64 1-9 bytes)
+/// draft-ietf-moq-loc-05 §2.3.1.2 (ID=0x08, Value: vi64 1-9 bytes)
 /// IANA 登録済み (§6.1: MOQ Properties Registry, Type=0x08, Scope=Track, Object)
 ///
 /// Timestamp プロパティの単位を「1 秒あたりの Timestamp ユニット数」で定義する。
@@ -114,9 +142,27 @@ pub const PROP_TIMESTAMP: u64 = 0x10;
 /// このプロパティが存在しない場合、Timestamp は Unix エポック以降のマイクロ秒にデフォルトする。
 pub const PROP_TIMESCALE: u64 = 0x08;
 
+/// Codec String プロパティ ID (奇数 → バイト列)
+///
+/// draft-ietf-moq-loc-05 §2.3.1.3 (ID=0x11, Length: Varies, Value: Varies)
+/// IANA 登録済み (§6.1: MOQ Properties Registry Table 1, Type=0x11,
+/// Name=CODEC_STRING, Scope=Track, Object)
+///
+/// WebCodecs Codec Registry が定義する codec 値の UTF-8 文字列であり、WebCodecs の
+/// AudioDecoderConfig / VideoDecoderConfig の codec プロパティ (UTF-16) に対応する。
+/// 映像専用ではなく、音声と映像のどちらの Track / Object にも載り得る。
+/// 長さは共通 KVP の Length フィールドに UTF-8 のバイト数を入れ、独自の内側 length は
+/// 追加しない (§8.3 (Key-Value-Pair Structure) の奇数 Type の表現)。
+///
+/// 値の検証と Property Type は Track 側と共有するため `crate::property` に置いている
+/// (Scope が Track と Object の両方であり、transport 側でも同じ値を扱うため)。
+///
+/// この定義は draft 由来であり、将来の draft 改版で ID・名前・値の扱いが変わる可能性がある。
+pub const PROP_CODEC_STRING: u64 = crate::property::CODEC_STRING_TYPE;
+
 /// Video Frame Marking プロパティ ID (奇数 → バイト列)
 ///
-/// draft-ietf-moq-loc-04 §2.3.2.2 (ID=0x09, Length: Varies (1-4 bytes))
+/// draft-ietf-moq-loc-05 §2.3.2.2 (ID=0x09, Length: Varies (1-4 bytes))
 /// IANA 登録済み (§6.1: MOQ Properties Registry, Type=0x09, Scope=Object)
 ///
 /// RFC 9626 で定義されるビデオフレームのフラグ。
@@ -126,7 +172,7 @@ pub const PROP_VIDEO_FRAME_MARKING: u64 = 0x09;
 
 /// Audio Level プロパティ ID (偶数 → varint 値)
 ///
-/// draft-ietf-moq-loc-04 §2.3.3.2 (ID=0x0C, Value: vi64 1-2 bytes, 0x00-0xFF)
+/// draft-ietf-moq-loc-05 §2.3.3.2 (ID=0x0C, Value: vi64 1-2 bytes, 0x00-0xFF)
 /// IANA 登録済み (§6.1: MOQ Properties Registry, Type=0x0C, Scope=Object)
 ///
 /// RFC 6464 で定義される音声レベルと音声アクティビティ。
@@ -135,7 +181,7 @@ pub const PROP_AUDIO_LEVEL: u64 = 0x0C;
 
 /// Video Config プロパティ ID (奇数 → バイト列)
 ///
-/// draft-ietf-moq-loc-04 §2.3.2.1 (ID=0x0D, Length: Varies)
+/// draft-ietf-moq-loc-05 §2.3.2.1 (ID=0x0D, Length: Varies)
 /// IANA 登録済み (§6.1: MOQ Properties Registry, Type=0x0D, Scope=Track, Object)
 ///
 /// ビデオコーデック設定 ("extradata")。
@@ -145,7 +191,7 @@ pub const PROP_VIDEO_CONFIG: u64 = 0x0D;
 
 /// Audio Config プロパティ ID (奇数 → バイト列)
 ///
-/// draft-ietf-moq-loc-04 §2.3.3.1 (ID=0x0F, Length: Varies)
+/// draft-ietf-moq-loc-05 §2.3.3.1 (ID=0x0F, Length: Varies)
 /// IANA 登録済み (§6.1: MOQ Properties Registry, Type=0x0F, Scope=Track, Object)
 ///
 /// 音声コーデックの configuration bytes。
@@ -154,7 +200,7 @@ pub const PROP_AUDIO_CONFIG: u64 = 0x0F;
 
 /// LOC プロパティの値
 ///
-/// draft-ietf-moq-loc-04 §2.3
+/// draft-ietf-moq-loc-05 §2.3
 /// プロパティ ID の偶奇で値の型が決まる:
 ///   - 偶数 ID: varint 値 (VarInt)
 ///   - 奇数 ID: 長さプレフィックス付きバイト列 (Bytes)
@@ -168,19 +214,19 @@ pub enum LocPropertyValue {
 
 /// LOC プロパティエントリ
 ///
-/// draft-ietf-moq-loc-04 §2.3
+/// draft-ietf-moq-loc-05 §2.3
 /// 1 つのプロパティは ID と値のペアで構成される。
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocProperty {
-    /// プロパティ ID (draft-ietf-moq-loc-04 §2.3)
+    /// プロパティ ID (draft-ietf-moq-loc-05 §2.3)
     pub prop_id: u64,
-    /// プロパティ値 (draft-ietf-moq-loc-04 §2.3)
+    /// プロパティ値 (draft-ietf-moq-loc-05 §2.3)
     pub value: LocPropertyValue,
 }
 
 /// LOC プロパティのコレクション
 ///
-/// draft-ietf-moq-loc-04 §2.3
+/// draft-ietf-moq-loc-05 §2.3
 /// `encode()` / `decode()` は Properties Length を含む完全なブロックを扱う。
 ///
 /// ワイヤーフォーマット:
@@ -233,19 +279,33 @@ impl LocProperties {
     /// (Track and Object Properties) の "MUST allow multiple instances of the Property")。
     /// 同一 ID の並び順はソートが安定であるため入力順を保つ。
     ///
-    /// IMMUTABLE_PROPERTIES (0x0B) の値はバイト列としてそのまま書き出し、内側の KVP 列は
-    /// 解釈も検証もしない (値の取得時に [`LocProperties::find_varint`] /
-    /// [`LocProperties::find_bytes`] が検証する)。
+    /// IMMUTABLE_PROPERTIES (0x0B) の値はバイト列としてそのまま書き出す (再エンコードは
+    /// しない)。ただしローカル入力の検証として、内側の KVP 列の構造・値域・重複と、
+    /// CODEC_STRING (0x11) の UTF-8 を検証し、失敗時はエラーを返す。内側が解析できない
+    /// 場合 (構造破損・入れ子の 0x0B など) は malformed な直列化を生成しないため、
+    /// [`LocProperties::decode`] の「内側の構造破損を検出しない」挙動とは異なる。
     ///
     /// # Errors
     ///
     /// - 偶数 ID に `Bytes` 値: `ProtocolViolation`
     /// - 奇数 ID に `VarInt` 値: `ProtocolViolation`
     /// - 単一に限られる既知 ID の重複: `ProtocolViolation`
-    ///   (ローカル入力の検証であり、受信 Track の malformed 判定とは別)
+    ///   (ローカル入力の検証であり、受信 Track の malformed 判定とは別。最上位リスト内と
+    ///   IMMUTABLE_PROPERTIES の内側をそれぞれ検査し、両リストをまたぐ重複は検出しない)
     /// - バイト列が 65535 バイトを超える: `PayloadTooLong`
     /// - 既知プロパティの値域違反 (Audio Level が 255 超過): `MalformedKeyValue`
     /// - Video Frame Marking の長さが 1-4 バイトでない: `MalformedKeyValue`
+    /// - CODEC_STRING (0x11) の値が不正な UTF-8: `MalformedKeyValue`
+    ///   (最上位と IMMUTABLE_PROPERTIES の内側)
+    /// - IMMUTABLE_PROPERTIES の内側 KVP が不正: `ProtocolViolation`
+    ///   (内側の `MalformedKeyValue` / `MalformedTrack` をローカル入力の検証として写す。
+    ///   内側の構造・値域の検証を通った後に CODEC_STRING の UTF-8 だけが不正な場合は
+    ///   `MalformedKeyValue` のまま返す。他の検証で先に失敗した場合はそのエラーが優先する)
+    /// - IMMUTABLE_PROPERTIES の内側の varint が途中終端、または宣言長が残りバイトを
+    ///   超える: `UnexpectedEof` (渡された直列化の切り詰めであり、内側の走査エラーを
+    ///   透過する)
+    /// - IMMUTABLE_PROPERTIES の内側の宣言長が 65535 バイトを超える:
+    ///   `FieldLengthExceeded` / delta-key のオーバーフロー: `DeltaEncodingOverflow`
     pub fn encode(&self) -> Result<Vec<u8>, MessageError> {
         // draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header):
         // "Objects with no properties or non-Normal status set Properties Length to 0."
@@ -294,6 +354,44 @@ impl LocProperties {
                         return Err(MessageError::PayloadTooLong);
                     }
                     validate_known_property_len(prop.prop_id, b.len() as u64)?;
+                    if prop.prop_id == PROP_CODEC_STRING {
+                        // draft-ietf-moq-loc-05 §2.3.1.3 (Codec String) の値を UTF-8 として
+                        // 検証する。不正な UTF-8 は §8.3 (Key-Value-Pair Structure) の
+                        // MALFORMED_KEY_VALUE に対応する。
+                        validate_codec_string_utf8(b)?;
+                    }
+                    if prop.prop_id == PROP_IMMUTABLE_PROPERTIES {
+                        // draft-ietf-moq-transport-23 §10.7 (Immutable Properties): 0x0B の
+                        // 内側は Key-Value-Pair 列であり、Property は mutable リストと内側の
+                        // どちらに置いてもよい。ローカル入力の encode では、内側 KVP の構造と
+                        // 値域を検証し、malformed な直列化を生成しない。
+                        let inner_properties = match walk_kv_pairs(b, false) {
+                            Ok(inner_properties) => inner_properties,
+                            Err(err) => {
+                                return Err(match err {
+                                    MessageError::MalformedKeyValue(_) => {
+                                        MessageError::ProtocolViolation(
+                                            "immutable properties inner KVP is malformed",
+                                        )
+                                    }
+                                    // 内側の重複は受信 Track の malformed 判定
+                                    // (draft-ietf-moq-transport-23 §12.1 (Malformed Tracks)
+                                    // 条件 9) の分類であり、ローカル入力の encode では
+                                    // ProtocolViolation に写す。
+                                    MessageError::MalformedTrack(_) => {
+                                        MessageError::ProtocolViolation(
+                                            "immutable properties inner KVP contains duplicate single-instance property",
+                                        )
+                                    }
+                                    other => other,
+                                });
+                            }
+                        };
+                        // CODEC_STRING (0x11) の UTF-8 は値の書式違反であるため、
+                        // draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の
+                        // MALFORMED_KEY_VALUE に対応する MalformedKeyValue のまま返す。
+                        validate_codec_strings(&inner_properties)?;
+                    }
                     varint::encode(b.len() as u64, &mut inner);
                     inner.extend_from_slice(b);
                 }
@@ -313,10 +411,20 @@ impl LocProperties {
     /// 未知 ID の複数インスタンスは正当として保持する (draft-ietf-moq-transport-23 §8.4
     /// (Track and Object Properties) の "MUST allow multiple instances of the Property")。
     ///
-    /// IMMUTABLE_PROPERTIES (0x0B) の内側は構造として保持するだけで、この関数では検証しない。
-    /// 内側の検証 (重複 ID・既知プロパティの値域と長さ) は [`LocProperties::find_varint`] /
-    /// [`LocProperties::find_bytes`] の探索時に、この関数と共通の KVP パーサーで行う。内側が
-    /// 破損している場合は探索結果を `None` とし、この関数の戻り値とエラー分類は変えない。
+    /// IMMUTABLE_PROPERTIES (0x0B) の内側は構造として保持するだけとし、構造・値域・重複 ID の
+    /// 検証は [`LocProperties::find_varint`] / [`LocProperties::find_bytes`] の探索時に、
+    /// この関数と共通の KVP パーサーで行う。内側が破損している場合は探索結果を `None` とし、
+    /// この関数の戻り値とエラー分類は変えない。
+    ///
+    /// 例外として、CODEC_STRING (0x11) の UTF-8 だけは、最上位リストと、内側 KVP が解析
+    /// できる場合の IMMUTABLE_PROPERTIES の内側で検証する (draft-ietf-moq-loc-05 §2.3.1.3
+    /// (Codec String) / draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure))。
+    /// 内側の KVP が解析できない場合 (構造破損・入れ子の 0x0B・重複 ID・Audio Level の値域
+    /// 違反・Video Frame Marking の長さ違反など) は、その内側に不正な UTF-8 があっても検出
+    /// できないため、この関数を失敗させずに受理する。構造破損と CODEC_STRING の UTF-8 は
+    /// `Session` の `ObjectProperties` も検証するが、LOC 固有の Audio Level の値域・
+    /// Video Frame Marking の長さ規則は `ObjectProperties` では検証しない。この残るギャップは
+    /// `docs/missing-features.md` §4.1 に記録している。
     ///
     /// # Errors
     ///
@@ -334,6 +442,8 @@ impl LocProperties {
     /// - Audio Level が 255 を超える: `MalformedKeyValue`
     /// - Video Frame Marking の宣言長が 1-4 バイトでない: `MalformedKeyValue`
     ///   (宣言長の検証は切り詰め検査 `UnexpectedEof` より先に行う)
+    /// - CODEC_STRING (0x11) の値が不正な UTF-8: `MalformedKeyValue`
+    ///   (最上位と、解析できる IMMUTABLE_PROPERTIES の内側)
     /// - バッファが不足する: `UnexpectedEof`
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), MessageError> {
         let mut pos = 0;
@@ -354,7 +464,25 @@ impl LocProperties {
         // 最上位リストの走査は IMMUTABLE_PROPERTIES の内側探索と共通の walk_kv_pairs に置く。
         // この経路では 0x0B を通常の奇数 ID プロパティとして保持するため、入れ子の 0x0B も
         // 従来どおり受理する (decode の戻り値とエラー分類を変えない)。
-        let properties = walk_kv_pairs(inner, true)?
+        let properties = walk_kv_pairs(inner, true)?;
+        validate_codec_strings(&properties)?;
+
+        // IMMUTABLE_PROPERTIES の内側の CODEC_STRING は、内側 KVP が解析できる場合だけ検証する。
+        // 内側の構造破損は従来どおりこの関数では検出せず、Session の ObjectProperties に
+        // 検証を委ねる。そのため、ここでの walk_kv_pairs の Err は握り潰す。
+        if let Some(inner_bytes) = properties
+            .iter()
+            .find(|p| p.prop_id == PROP_IMMUTABLE_PROPERTIES)
+            .and_then(|p| match p.value {
+                LocPropertyValueRef::Bytes(bytes) => Some(bytes),
+                LocPropertyValueRef::VarInt(_) => None,
+            })
+            && let Ok(inner_properties) = walk_kv_pairs(inner_bytes, false)
+        {
+            validate_codec_strings(&inner_properties)?;
+        }
+
+        let properties = properties
             .into_iter()
             .map(LocPropertyRef::to_owned_property)
             .collect();
@@ -370,7 +498,7 @@ impl LocProperties {
 
     /// Timestamp (ID=0x10): エンコードされたメディアフレームのタイムスタンプ
     ///
-    /// draft-ietf-moq-loc-04 §2.3.1.1
+    /// draft-ietf-moq-loc-05 §2.3.1.1
     /// Timescale プロパティが存在しない場合は Unix エポック以降のマイクロ秒。
     /// Timescale プロパティが存在する場合は Timescale で定義された単位のメディア時刻。
     /// 最上位リストに無ければ IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。
@@ -380,7 +508,7 @@ impl LocProperties {
 
     /// Timescale (ID=0x08): Timestamp の単位を定義する (1 秒あたりのユニット数)
     ///
-    /// draft-ietf-moq-loc-04 §2.3.1.2 (Value: vi64 1-9 bytes = u64 全域)
+    /// draft-ietf-moq-loc-05 §2.3.1.2 (Value: vi64 1-9 bytes = u64 全域)
     /// 値域は u64 全域のため、Timestamp と同様に上限検証は不要。
     /// 一般的な値: 1000000 (マイクロ秒), 48000 (48kHz オーディオ), 90000 (90kHz ビデオ)
     /// このプロパティが存在しない場合、Timestamp は Unix エポック以降のマイクロ秒にデフォルトする。
@@ -389,9 +517,33 @@ impl LocProperties {
         self.find_varint(PROP_TIMESCALE)
     }
 
+    /// Codec String (ID=0x11): WebCodecs Codec Registry の codec 値 (UTF-8)
+    ///
+    /// draft-ietf-moq-loc-05 §2.3.1.3 (Codec String) / §6.1 (MOQ Properties Registry)
+    /// Table 1 (Scope=Track, Object)。音声と映像のどちらの Track / Object にも載り得る。
+    /// 最上位リストに無ければ IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。
+    ///
+    /// 欠落は `Ok(None)`、値が不正な UTF-8 の場合は `MalformedKeyValue` を返す
+    /// (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の
+    /// MALFORMED_KEY_VALUE)。欠落と不正値を区別できるよう `Option` だけでは表現しない。
+    ///
+    /// wire から decode した場合、解析できる値の不正 UTF-8 は [`LocProperties::decode`] が
+    /// 先に `MalformedKeyValue` で拒否するため、本メソッドの `Err` は主に in-memory で
+    /// 構築した [`LocProperties`] を対象とする。IMMUTABLE_PROPERTIES (0x0B) の内側 KVP が
+    /// 解析または検証に失敗した場合、その内側の値は検証できず `Ok(None)` になる
+    /// (既知の制約)。
+    ///
+    /// この定義は draft 由来であり、将来の draft 改版で変わる可能性がある。
+    pub fn codec_string(&self) -> Result<Option<&str>, MessageError> {
+        match self.find_bytes(PROP_CODEC_STRING) {
+            Some(bytes) => validate_codec_string_utf8(bytes).map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// Video Frame Marking (ID=0x09): RFC 9626 に基づくビデオフレームフラグ
     ///
-    /// draft-ietf-moq-loc-04 §2.3.2.2 (奇数 ID のバイト列、長さ 1-4 bytes)
+    /// draft-ietf-moq-loc-05 §2.3.2.2 (奇数 ID のバイト列、長さ 1-4 bytes)
     /// フラグの内容は解釈せず、バイト列としてそのまま返す。
     /// 最上位リストに無ければ IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。
     pub fn video_frame_marking(&self) -> Option<&[u8]> {
@@ -400,7 +552,7 @@ impl LocProperties {
 
     /// Audio Level (ID=0x0C): RFC 6464 に基づく音声レベルと音声アクティビティ (下位 8 bit)
     ///
-    /// draft-ietf-moq-loc-04 §2.3.3.2 (偶数 ID の varint 値、0x00-0xFF)
+    /// draft-ietf-moq-loc-05 §2.3.3.2 (偶数 ID の varint 値、0x00-0xFF)
     /// 最上位リストに無ければ IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。
     pub fn audio_level(&self) -> Option<u64> {
         self.find_varint(PROP_AUDIO_LEVEL)
@@ -408,7 +560,7 @@ impl LocProperties {
 
     /// Video Config (ID=0x0D): ビデオコーデック設定 (extradata)
     ///
-    /// draft-ietf-moq-loc-04 §2.3.2.1
+    /// draft-ietf-moq-loc-05 §2.3.2.1
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     /// 最上位リストに無ければ IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。
     pub fn video_config(&self) -> Option<&[u8]> {
@@ -417,7 +569,7 @@ impl LocProperties {
 
     /// Audio Config (ID=0x0F): 音声コーデックの configuration bytes
     ///
-    /// draft-ietf-moq-loc-04 §2.3.3.1
+    /// draft-ietf-moq-loc-05 §2.3.3.1
     /// WebCodecs の AudioDecoderConfig description プロパティに対応する。
     /// LOC 層はコーデックの内容を解釈せず、opaque bytes として返す。
     /// 最上位リストに無ければ IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。
@@ -471,9 +623,13 @@ impl LocProperties {
     /// draft-ietf-moq-loc-05 §3.1.2 (Immutable Properties) は、relay から見える不変の LOC
     /// Properties を IMMUTABLE_PROPERTIES として符号化することを SHOULD とする。
     /// draft-ietf-moq-loc-05 §6.1 (MOQ Properties Registry) の Table 1 は 0x0D
-    /// (VIDEO_CONFIG) / 0x0F (AUDIO_CONFIG) の Scope を "Track, Object" と定める。どの
-    /// プロパティを immutable にするかは publisher の判断であり、本実装は値の取得時に
-    /// transport 側の MUST に従って内側も探索する。
+    /// (VIDEO_CONFIG) / 0x0F (AUDIO_CONFIG) / 0x11 (CODEC_STRING) の Scope を
+    /// "Track, Object" と定める。どのプロパティを immutable にするかは publisher の判断で
+    /// あり、本実装は値の取得時に transport 側の MUST に従って内側も探索する。
+    ///
+    /// CODEC_STRING (0x11) の値を文字列として取得する場合は、UTF-8 の検証を行う
+    /// [`LocProperties::codec_string`] を使う。本メソッドは生バイト列を返すため、不正な
+    /// UTF-8 もそのまま返す。
     ///
     /// 内側から取得する場合も外側の `Bytes` を借用したまま返し、値のバイト列を `Vec` に
     /// コピーしない。ID と値形式 (奇数 ID はバイト列) の両方が一致する最初のインスタンスを
@@ -618,10 +774,10 @@ impl LocPropertyRef<'_> {
 
 /// LOC プロパティの Key-Value-Pair 列をバッファ全体から借用して走査する
 ///
-/// カウントプレフィックスなしで `inner` 末尾まで読む。`LocProperties::decode` の本体と、
-/// IMMUTABLE_PROPERTIES (0x0B) の内側探索 ([`LocProperties::find_varint`] /
-/// [`LocProperties::find_bytes`]) が共有する唯一のパーサーである。奇数 ID の値は `Vec` へ
-/// コピーせず `inner` への借用のまま返す。
+/// カウントプレフィックスなしで `inner` 末尾まで読む。`LocProperties::decode` の本体、
+/// `LocProperties::encode` の IMMUTABLE_PROPERTIES (0x0B) 内側検証、内側探索
+/// ([`LocProperties::find_varint`] / [`LocProperties::find_bytes`]) が共有する唯一の
+/// パーサーである。奇数 ID の値は `Vec` へコピーせず `inner` への借用のまま返す。
 ///
 /// 検証は `LocProperties::decode` と同一である。
 ///
@@ -767,6 +923,10 @@ mod tests {
             prop_id: PROP_AUDIO_CONFIG,
             value: LocPropertyValue::Bytes(vec![0xCC, 0xDD]),
         });
+        props.push(LocProperty {
+            prop_id: PROP_CODEC_STRING,
+            value: LocPropertyValue::Bytes(b"av01.0.04M.08".to_vec()),
+        });
         let encoded = props
             .encode()
             .expect("正当なテスト入力の encode は成功する");
@@ -779,6 +939,7 @@ mod tests {
         assert_eq!(decoded.audio_level(), Some(0x50));
         assert_eq!(decoded.video_config(), Some(&[0xAAu8, 0xBB][..]));
         assert_eq!(decoded.audio_config(), Some(&[0xCCu8, 0xDD][..]));
+        assert_eq!(decoded.codec_string(), Ok(Some("av01.0.04M.08")));
     }
 
     #[test]

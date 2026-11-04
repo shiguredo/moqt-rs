@@ -968,7 +968,7 @@ fn content_duration_us(
 ///
 /// - `timescale` が観測されていれば `timestamp * 1_000_000 / timescale`
 /// - 観測済みの timescale があり、このサンプルが timescale を持たない場合はそれを使う
-/// - 一度も timescale を観測していない場合は draft-ietf-moq-loc-04 §2.3.1.1 の既定に従い
+/// - 一度も timescale を観測していない場合は draft-ietf-moq-loc-05 §2.3.1.1 の既定に従い
 ///   Unix エポックからのマイクロ秒として扱う
 ///
 /// `timestamp` が無い場合は `None` を返す。
@@ -994,7 +994,7 @@ fn to_microseconds(
 
 /// video のサンプルエントリーを構築する
 ///
-/// 受信ペイロードは length-prefixed NAL (AVCC / HVCC) を前提とする。LOC-04 §2.1.3 は
+/// 受信ペイロードは length-prefixed NAL (AVCC / HVCC) を前提とする。LOC-05 §2.1.3 は
 /// payload が canonical (length prefix) と Annex B のどちらでもよいとし、長さ値 1 を
 /// 開始コードとして解釈する SHOULD を定めるが、moq-pub は length-prefixed で送るため
 /// Annex B からの変換は行わない。
@@ -1411,7 +1411,7 @@ mod tests {
         assert_eq!(
             to_microseconds(&mut timescale, Some(1_700_000_000_000_000), None),
             Some(1_700_000_000_000_000),
-            "LOC-04 §2.3.1.1 の既定 (Unix エポックからのマイクロ秒)"
+            "LOC-05 §2.3.1.1 の既定 (Unix エポックからのマイクロ秒)"
         );
     }
 
@@ -2051,7 +2051,7 @@ mod tests {
 
     /// Timescale が混在するトラックでも片方が全滅せず録画される
     ///
-    /// LOC-04 §2.3.1.1 は Timescale が無い場合を epoch マイクロ秒と定めるため、
+    /// LOC-05 §2.3.1.1 は Timescale が無い場合を epoch マイクロ秒と定めるため、
     /// media time のトラックと epoch マイクロ秒のトラックが混在し得る。
     #[test]
     fn recorder_keeps_tracks_with_mixed_time_bases() {

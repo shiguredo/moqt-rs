@@ -15,7 +15,7 @@ draft-ietf-moq-transport-23 に基づく Sans I/O / no_std な Media over QUIC T
 - **Session 状態機械**: 1 本の Transport Session に閉じた endpoint-local な状態管理
 - **インクリメンタルデコード**: フレーム境界に依存せず受信バッファに蓄積しながらデコード
 - **音声の再生補助**: 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期の遅延制御、時間圧縮・伸長と欠落の補間 (no_std / Sans I/O)
-- **対応仕様**: MOQT `draft-23` / LOC `draft-04` / MSF `draft-01` / C4M `draft-01`
+- **対応仕様**: MOQT `draft-23` / LOC `draft-05` / MSF `draft-01` / C4M `draft-01`
 
 ## バージョン情報
 
@@ -941,6 +941,7 @@ fn decode(buf: &[u8]) -> Result<(LocProperties, usize), MessageError>
 // アクセサ
 fn timestamp(&self) -> Option<u64>
 fn timescale(&self) -> Option<u64>
+fn codec_string(&self) -> Result<Option<&str>, MessageError>
 fn video_frame_marking(&self) -> Option<&[u8]>
 fn audio_level(&self) -> Option<u64>
 fn video_config(&self) -> Option<&[u8]>
@@ -953,17 +954,24 @@ fn find_bytes(&self, prop_id: u64) -> Option<&[u8]>
 先に、次に `IMMUTABLE_PROPERTIES` (0x0B) の内側を探索する (draft-ietf-moq-transport-23 §10.7
 (Immutable Properties) の "MUST search both")。既知プロパティの accessor も同じ探索を行う。
 `iter` / `len` / `is_empty` は最上位リストだけを対象にし、`IMMUTABLE_PROPERTIES` の内側は含まない。
+`codec_string` は CODEC_STRING (`0x11`) を UTF-8 文字列として返し、欠落は `Ok(None)`、
+不正な UTF-8 は `MalformedKeyValue` にする。`IMMUTABLE_PROPERTIES` の内側 KVP が解析・
+検証できない場合も `Ok(None)` になる (既知の制約)。encode / decode は最上位と
+`IMMUTABLE_PROPERTIES` 内側の UTF-8 を検証する。encode は内側の構造・値域も検証して
+解析できない内側を拒否し、decode は解析できる内側だけ UTF-8 を検証する。
 
 | 定数 | 値 |
 | --- | --- |
 | `PROP_TIMESTAMP` | `0x10` |
 | `PROP_TIMESCALE` | `0x08` |
+| `PROP_CODEC_STRING` | `0x11` |
 | `PROP_VIDEO_FRAME_MARKING` | `0x09` |
 | `PROP_AUDIO_LEVEL` | `0x0C` |
 | `PROP_VIDEO_CONFIG` | `0x0D` |
 | `PROP_AUDIO_CONFIG` | `0x0F` |
 
-偶数 ID は varint 値、奇数 ID は長さ付きバイト列。
+偶数 ID は varint 値、奇数 ID は長さ付きバイト列。`PROP_CODEC_STRING` の値は WebCodecs
+Codec Registry の codec 値の UTF-8 文字列である (draft-ietf-moq-loc-05 §2.3.1.3)。
 
 ## Object / Track Properties
 
@@ -1016,6 +1024,7 @@ fn object_delivery_timeout(&self) -> Option<u64>
 fn subgroup_delivery_timeout(&self) -> Option<u64>
 fn has_unknown_mandatory(&self) -> bool
 fn unknown_mandatory_types(&self) -> Vec<u64>
+fn codec_string(&self) -> Result<Option<&str>, MessageError>
 fn find_varint(&self, prop_type: u64) -> Option<u64>
 fn find_bytes(&self, prop_type: u64) -> Option<&[u8]>
 ```
@@ -1035,9 +1044,11 @@ fn find_bytes(&self, prop_type: u64) -> Option<&[u8]>
 `find_varint` は偶数型、`find_bytes` は奇数型の値を返す。どちらも mutable リストを先に、
 次に `IMMUTABLE_PROPERTIES` (0x0B) の内側を探索する (draft-ietf-moq-transport-23 §10.7
 (Immutable Properties) の "MUST search both")。LOC の Track スコープ値
-(0x08 TIMESCALE / 0x0D VIDEO_CONFIG / 0x0F AUDIO_CONFIG など) は、peer が
+(0x08 TIMESCALE / 0x0D VIDEO_CONFIG / 0x0F AUDIO_CONFIG / 0x11 CODEC_STRING など) は、peer が
 PUBLISH / SUBSCRIBE_OK で送った Track Properties を保持する
-`Subscription::peer_track_properties` から取得する。`Subscription` は
+`Subscription::peer_track_properties` から取得する。`codec_string` は CODEC_STRING (`0x11`) を
+UTF-8 文字列として返し、欠落は `Ok(None)`、不正な UTF-8 は `MalformedKeyValue` にする。
+`Subscription` は
 `Session::subscription(request_id)` で参照でき、FETCH_OK / TRACK_STATUS_OK の
 Track Properties はこのフィールドには入らない。
 
@@ -1522,8 +1533,8 @@ moqt-rs には vsync が無く、呼び出し側のループ周期 (example は 
 
 - draft-ietf-moq-transport-23 - Media over QUIC Transport
   - <https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-23>
-- draft-ietf-moq-loc-04 - Media over QUIC - Low Overhead Container
-  - <https://datatracker.ietf.org/doc/html/draft-ietf-moq-loc-04>
+- draft-ietf-moq-loc-05 - Media over QUIC - Low Overhead Container
+  - <https://datatracker.ietf.org/doc/html/draft-ietf-moq-loc-05>
 - draft-ietf-moq-msf-01 - MOQT Streaming Format
   - <https://datatracker.ietf.org/doc/html/draft-ietf-moq-msf-01>
 - draft-ietf-moq-c4m-01 - Authorization scheme for MOQT using Common Access Tokens

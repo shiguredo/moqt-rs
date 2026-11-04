@@ -249,7 +249,7 @@ impl Default for VideoDecodeOrder {
 ///
 /// `properties_bytes` は Properties Length varint を含む Object Properties の生バイト列
 /// (Subgroup Object / Object Datagram / FETCH 応答の Object はいずれもこの表現で届く)。
-/// LOC の Public Properties は同じブロックに載るため (draft-ietf-moq-loc-04 §2.2 (MOQ Object
+/// LOC の Public Properties は同じブロックに載るため (draft-ietf-moq-loc-05 §2.2 (MOQ Object
 /// Mapping))、LOC の Property を含むバイト列をそのまま渡してよい。
 ///
 /// draft-ietf-moq-transport-23 §10.9 (Prior Object ID Gap): Prior Object ID Gap は、この

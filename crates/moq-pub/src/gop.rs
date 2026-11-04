@@ -1,7 +1,7 @@
 //! 映像 Group の長さを時間ベースで決める判定
 //!
 //! 映像は 1 Group = 1 unidirectional stream で送り、Group はキーフレームで始まる
-//! (draft-ietf-moq-loc-04 §4.2)。Group 長をフレーム数で指定すると、実時間長が fps に
+//! (draft-ietf-moq-loc-05 §4.2)。Group 長をフレーム数で指定すると、実時間長が fps に
 //! よって変わり (fps 5 で 12 秒 / fps 120 で 0.5 秒)、MSF カタログへ宣言する
 //! `maxGopDuration` / `maxGroupDuration` (draft-ietf-moq-msf-01 §5.2.24 / §5.2.25) も
 //! fps ごとの値になってしまう。そこで映像のキーフレーム間隔 (= Group 長) は時間

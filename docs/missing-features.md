@@ -2,9 +2,10 @@
 
 調査日: 2026-10-14 (develop の f91baf3 時点)。
 
-最終更新: 2026-11-04 (対象仕様を MOQT draft-23 に更新し、節番号・パラメータ名を追随させた)。
+最終更新: 2026-11-04 (対象仕様を MOQT draft-23 / LOC draft-05 に更新し、節番号・パラメータ名を
+追随させた)。
 
-対象仕様は `refs/moq/` の MOQT `draft-ietf-moq-transport-23`、LOC `draft-ietf-moq-loc-04`、
+対象仕様は `refs/moq/` の MOQT `draft-ietf-moq-transport-23`、LOC `draft-ietf-moq-loc-05`、
 MSF `draft-ietf-moq-msf-01`、C4M `draft-ietf-moq-c4m-01` である。
 対象コードは `src/` (ライブラリ)、`crates/moq-pub`、`crates/moq-sub`、
 `crates/tokio-moq` (transport 層)。
@@ -32,8 +33,9 @@ MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUB
 3. **アプリ機能として欠けているもの**: request stream GOAWAY の非空 URI による個別 request
    移行 (2 session の併走が必要)、REQUEST_ERROR の REDIRECT 追随、トラック選択と切替、
    シーク / 巻き戻し、ライブ中の track 追加への追随、配信終了のシグナリング、統計表示。
-4. **MUST 未達・仕様違反になりうる箇所**: Object 側 `IMMUTABLE_PROPERTIES` 内側の LOC 固有値の
-   `MALFORMED_KEY_VALUE` によるセッション終了が未対応 (§8.3)、`isLive=false` の `targetLatency` (MSF §5.2.8)、
+4. **MUST 未達・仕様違反になりうる箇所**: Object 側 `IMMUTABLE_PROPERTIES` 内側の Audio Level /
+   Video Frame Marking 違反の `MALFORMED_KEY_VALUE` によるセッション終了が未対応 (§8.3)、
+   `isLive=false` の `targetLatency` (MSF §5.2.8)、
    catalog 更新をまたいだ
    `isLive` の False → True (MSF §5.2.7)、`connectionUri` の検証と新規接続 (MSF §5.2.36)、
    range パラメータの union (MSF §11.1.1)、`initDataList` の配置 (§5.1.7)、
@@ -49,7 +51,7 @@ MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUB
 | MSF_COMPRESSION property による catalog 圧縮 | MSF §5.5 / §12.1 | 未実装。Track Property ID が TBD のため wire 実装しない | `issues/pending/0002-change-msf-compression-signaling.md` |
 | Log / Metrics track の payload | MSF §9 / §10 | 未実装。`packaging` の値は扱うが payload は未対応 | `issues/pending/0003-add-msf-log-metrics-payload.md` |
 | LOC の Video Payload Format | LOC §2.1 | 部分実装。`lengthSizeMinusOne` による length prefix のみで、§2.1.3 (length 1 = start code) と §2.1.4 (start code prefix) は未対応 | `issues/pending/0005-add-loc-video-payload-format.md` |
-| LOC の Track スコープ Property | LOC §6.1 Table 1 | PUBLISH / SUBSCRIBE_OK で受信した場合、受信側は `Subscription::peer_track_properties` から `TrackProperties::find_varint` / `find_bytes` で取得できる。publisher example からの送信は未対応 | 未起票 |
+| LOC の Track スコープ Property | LOC §6.1 Table 1 | PUBLISH / SUBSCRIBE_OK で受信した場合、受信側は `Subscription::peer_track_properties` から `TrackProperties::find_varint` / `find_bytes` と `codec_string` (0x11 CODEC_STRING、UTF-8 検証) で取得できる。publisher example からの送信は未対応 | 未起票 |
 | WebTransport over HTTP/3 の `RESET_STREAM_AT` | draft-ietf-webtrans-http3-16 §4.4 (MUST) | s2n-quic が送出できず `RESET_STREAM` にフォールバックする | `issues/pending/0094-bug-webtransport-reset-stream-at-unsupported.md` |
 | DPoP proof の送信 | C4M §3.2.2 | ライブラリに発行 API はあるが、example の URL 経路では送らない | 未起票 |
 | C4M の複合クレーム / RSA / CWT 形式 proof | C4M §2 | 未実装 (docs/c4m.md の「未対応」に記載) | docs/c4m.md |
@@ -87,7 +89,7 @@ MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUB
 
 ## 4. MUST 未達・仕様違反になりうる箇所
 
-### 4.1 Object 側 `IMMUTABLE_PROPERTIES` 内側の LOC 固有検証エラーを通知しない (§10.7 / §8.3、ライブラリ)
+### 4.1 Object 側 `IMMUTABLE_PROPERTIES` 内側の Audio Level / Video Frame Marking 違反を通知しない (§10.7 / §8.3、ライブラリ)
 
 draft-23 §10.7 は「When looking for the value of a property, processors MUST search both the
 mutable properties and the contents of Immutable Properties.」と定める。
@@ -106,19 +108,28 @@ Video Frame Marking を取得できる。
    要求する MALFORMED_KEY_VALUE によるセッション終了が残る MUST 未達であり、
    Video Frame Marking 欠落時はキーフレーム判定が Video Config の有無で代用される
    (`crates/moq-sub/src/pipeline.rs` の `is_video_keyframe`)。
+   CODEC_STRING (0x11) の不正 UTF-8 は `LocProperties` の encode / decode と
+   `ObjectProperties` の encode / decode が検証し、MALFORMED_KEY_VALUE として扱う
+   (`LocProperties::decode` の内側は KVP が解析できる場合だけ)。
 2. `LocProperties` 単体では、最上位と `IMMUTABLE_PROPERTIES` の内側に同じ単一値の既知 ID が
    現れる多重違反を検出しない (§8.4 / §12.1 条件 9)。Session の受信経路では
    `ObjectProperties::validate` が mutable と内側を合わせて検出し、購読の cancel へ渡す。
 3. 内側の構造破損 (delta-key のオーバーフロー・宣言長超過・切り詰め・入れ子 0x0B) は
    `LocProperties::decode` では検出しないが、Session の受信経路では `ObjectProperties` の
    decode / validate が先に拒否し、`terminate_malformed_track` による購読の cancel へ渡す
-   (I/O 層の decode 経路ではセッション終了になる場合がある)。`LocProperties::encode` も
-   0x0B の内側を検証しないため、ライブラリ単体では malformed な Track を生成し得る
-   (`ObjectProperties::encode` / `TrackProperties::encode` は内側を検証する)。
+   (I/O 層の decode 経路ではセッション終了になる場合がある)。`LocProperties::encode` は
+   0x0B の内側の構造と値域を検証し、CODEC_STRING (0x11) の UTF-8 も検証するため、構造・値域・
+   UTF-8 については malformed な直列化を生成しない (`ObjectProperties::encode` /
+   `TrackProperties::encode` も内側を検証する)。item 2 の cross-list 重複は encode でも
+   検出しない。
 
 Track スコープ側は PUBLISH / SUBSCRIBE_OK で受信した場合に
 `Subscription::peer_track_properties` で公開済みであり、最上位と内側の両方を探索できる。
 FETCH_OK / TRACK_STATUS_OK の Track Properties は公開していない。
+
+また `OBJECT_PROPERTY_FILTER` を持つ購読では、`object_passes_filters` が Object Properties の
+decode エラーをフィルタ不通過 (`FilteredOut`) に畳むため、不正な CODEC_STRING が
+MALFORMED_KEY_VALUE によるセッション終了にならない場合がある (フィルタ設計上の既知の扱い)。
 
 ### 4.2 `isLive=false` の `targetLatency` を使う (MSF §5.2.8、moq-sub)
 
@@ -563,8 +574,8 @@ moqt-js (HEAD `6da25d10`) の playout のうち、次の 2 つは移植してい
 6. Object Status と PUBLISH_DONE の未解釈 (6.11) — トラック終端を正しく検知できない
 7. 配送タイムアウトの未設定 (5.3) — ライブ遅延が伸びる
 8. トラック選択 (6.2) と `isLive=false` の扱い (4.2 / 4.3) — 意図しないトラックを選ぶ
-9. Object 側 `IMMUTABLE_PROPERTIES` 内側の LOC 固有値の `MALFORMED_KEY_VALUE` による
-   セッション終了が未対応 (4.1) — 探索は実装済み、エラー分類が残る
+9. Object 側 `IMMUTABLE_PROPERTIES` 内側の Audio Level / Video Frame Marking 違反の
+   `MALFORMED_KEY_VALUE` によるセッション終了が未対応 (4.1) — 探索は実装済み、エラー分類が残る
 10. `END_OF_GROUP` (3 章) / Track Properties / `EXPIRES` (5.2〜5.5) — リレーと購読者への情報不足
 11. Range Filters の有効化 (5.6 / 6.10)、TRACK_STATUS (5.7 / 6.8)、REDIRECT (6.7)、pause (6.9)
 12. STOP_SENDING 時の open stream の reset (4.7) — アプリが閉じ忘れると cleanup が進まない
@@ -574,10 +585,10 @@ moqt-js (HEAD `6da25d10`) の playout のうち、次の 2 つは移植してい
 ## 10. 要確認
 
 - Object 側 `IMMUTABLE_PROPERTIES` の探索 (4.1) は実装済み。Session の受信経路で残るのは、
-  内側だけの LOC 固有値域・長さ違反を `MALFORMED_KEY_VALUE` によるセッション終了として
-  扱うことだけである。
-  ライブラリ単体では、cross-list の単一値 ID 重複の検出と `decode` / `encode` の内側構造検証も
-  残る (Track 側は `Subscription::peer_track_properties` で公開済み)
+  内側だけの Audio Level の値域違反 / Video Frame Marking の長さ違反を
+  `MALFORMED_KEY_VALUE` によるセッション終了として扱うことである。ライブラリ単体では、
+  cross-list の単一値 ID 重複の検出と `LocProperties::decode` の内側構造検証も残る
+  (Track 側は `Subscription::peer_track_properties` で公開済み)
 - LOC §2.2 (Private Properties) の実害 (`src/loc.rs:12-13` は application 責務としている)
 - `issues/pending/0010` (WebTransport の datagram 受信) が現行コードで再現するか
 - Video Frame Marking の D / B / T / S ビットを使う予定があるか

@@ -1557,9 +1557,10 @@ pub struct Subscription {
     /// 自側が発行した値は既知の MOQT 値として個別フィールドにのみ反映され、LOC などのその他の
     /// 自側発行値は保持しない。同じ Track でも両端の値は一致するとは限らない。
     ///
-    /// Track スコープの LOC プロパティ (0x08 TIMESCALE / 0x0D VIDEO_CONFIG / 0x0F AUDIO_CONFIG
-    /// など、draft-ietf-moq-loc-05 §6.1 (MOQ Properties Registry) Table 1) は
-    /// [`TrackProperties::find_varint`] / [`TrackProperties::find_bytes`] で取得する。両メソッドは
+    /// Track スコープの LOC プロパティ (0x08 TIMESCALE / 0x0D VIDEO_CONFIG / 0x0F AUDIO_CONFIG /
+    /// 0x11 CODEC_STRING など、draft-ietf-moq-loc-05 §6.1 (MOQ Properties Registry) Table 1) は
+    /// [`TrackProperties::find_varint`] / [`TrackProperties::find_bytes`] で取得する。
+    /// CODEC_STRING は [`TrackProperties::codec_string`] で UTF-8 文字列として取得する。各メソッドは
     /// mutable リストを先に、次に IMMUTABLE_PROPERTIES (0x0B) の内側を探索する
     /// (draft-ietf-moq-transport-23 §10.7 (Immutable Properties) の "MUST search both")。
     ///

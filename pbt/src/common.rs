@@ -5,6 +5,7 @@
 //! `#[path] mod` による取り込みはターゲット毎コンパイルで未使用ヘルパーが
 //! dead_code になるため使わない。
 
+use shiguredo_moqt::loc::PROP_CODEC_STRING;
 use shiguredo_moqt::message::common::TrackNamespace;
 use shiguredo_moqt::message_parameter::{
     PARAM_OBJECT_PROPERTY_FILTER, PARAM_OBJECTID_FILTER, PARAM_PRIORITY_FILTER,
@@ -311,18 +312,25 @@ pub fn sample_non_immutable_property(ctx: &mut noprop::TestCaseContext) -> Track
             prop_type: noprop::sample_choice(ctx, &[0x08u64, 0x0Au64, 0x12u64]),
             value: TrackPropertyValue::VarInt(sample_small_varint(ctx)),
         },
-        // 奇数型 (Object 専用の 0x09 VIDEO_FRAME_MARKING と IMMUTABLE_PROPERTIES 0x0B は
-        // 除外する。0x0B は専用の生成関数で生成する)
+        // 奇数型 (Object 専用の 0x09 VIDEO_FRAME_MARKING と、専用の生成関数を持つ
+        // IMMUTABLE_PROPERTIES 0x0B は除外する。0x11 CODEC_STRING は既知型であり、
+        // 値が UTF-8 でなければ encode が拒否するため、有効な UTF-8 の文字列を生成する)
         _ => {
             let t = noprop::sample_usize_in(ctx, 0..98) as u64;
             // t == 4 (0x09) と t == 5 (0x0B) を飛ばして以降を 2 つずらす
             let t = if t >= 4 { t + 2 } else { t };
             let prop_type = t * 2 + 1;
             let len = noprop::sample_usize_in(ctx, 0..=50);
-            TrackProperty {
-                prop_type,
-                value: TrackPropertyValue::Bytes(noprop::sample_bytes_vec(ctx, len)),
-            }
+            let value = if prop_type == PROP_CODEC_STRING {
+                // draft-ietf-moq-loc-05 §2.3.1.3 (Codec String): WebCodecs Codec Registry の
+                // codec 値に相当する UTF-8 文字列。ASCII の printable 文字だけを使う。
+                TrackPropertyValue::Bytes(
+                    noprop::sample_ascii_printable_string(ctx, len).into_bytes(),
+                )
+            } else {
+                TrackPropertyValue::Bytes(noprop::sample_bytes_vec(ctx, len))
+            };
+            TrackProperty { prop_type, value }
         }
     }
 }

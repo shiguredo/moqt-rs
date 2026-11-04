@@ -3,8 +3,8 @@
 use libfuzzer_sys::fuzz_target;
 
 use shiguredo_moqt::loc::{
-    LocProperties, PROP_AUDIO_CONFIG, PROP_AUDIO_LEVEL, PROP_TIMESCALE, PROP_TIMESTAMP,
-    PROP_VIDEO_CONFIG, PROP_VIDEO_FRAME_MARKING,
+    LocProperties, PROP_AUDIO_CONFIG, PROP_AUDIO_LEVEL, PROP_CODEC_STRING, PROP_TIMESCALE,
+    PROP_TIMESTAMP, PROP_VIDEO_CONFIG, PROP_VIDEO_FRAME_MARKING,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -25,6 +25,8 @@ fuzz_target!(|data: &[u8]| {
     let _ = props.find_bytes(PROP_VIDEO_CONFIG);
     let _ = props.find_bytes(PROP_AUDIO_CONFIG);
     let _ = props.find_bytes(PROP_VIDEO_FRAME_MARKING);
+    let _ = props.find_bytes(PROP_CODEC_STRING);
+    let _ = props.codec_string();
     let _ = props.len();
     let _ = props.iter().count();
 });

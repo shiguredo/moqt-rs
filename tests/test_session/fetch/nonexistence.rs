@@ -1577,3 +1577,128 @@ fn drain_malformed_reasons(session: &mut Session) -> Vec<&'static str> {
     }
     reasons
 }
+
+/// FETCH 応答の Object Properties が不正な CODEC_STRING (0x11) を持つ場合に
+/// MALFORMED_KEY_VALUE (0x6) を返すこと
+///
+/// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): 受信側が Type を理解する
+/// 場合、Value が定義された serialization と一致しなければ MALFORMED_KEY_VALUE (0x6) で
+/// セッションを閉じる (MUST)。CODEC_STRING の値は UTF-8 文字列
+/// (draft-ietf-moq-loc-05 §2.3.1.3 (Codec String)) であるため、不正な UTF-8 は 0x6 に写る。
+/// data plane の API はセッションを直接閉じず、戻り値のコードで通知する (閉じるのは呼び出し側)。
+#[test]
+fn fetch_object_with_invalid_codec_string_reports_malformed_key_value() {
+    use shiguredo_moqt::error::SESSION_MALFORMED_KEY_VALUE;
+    use shiguredo_moqt::loc::PROP_CODEC_STRING;
+
+    let (mut client, mut server) = establish_pair();
+    let fetch_rid = establish_fetch(
+        &mut client,
+        &mut server,
+        fetch_range_params(
+            Location {
+                group_id: 0,
+                object_id: 5,
+            },
+            Location {
+                group_id: 0,
+                object_id: 5,
+            },
+        ),
+        Location {
+            group_id: 0,
+            object_id: 5,
+        },
+    );
+
+    // CODEC_STRING (0x11) に不正な UTF-8 ([0xFF]) を載せた Object Properties を組み立てる。
+    let mut properties_kvp = Vec::new();
+    shiguredo_moqt::varint::encode(PROP_CODEC_STRING, &mut properties_kvp);
+    shiguredo_moqt::varint::encode(1, &mut properties_kvp);
+    properties_kvp.push(0xFF);
+    let mut properties_bytes = Vec::new();
+    shiguredo_moqt::varint::encode(properties_kvp.len() as u64, &mut properties_bytes);
+    properties_bytes.extend_from_slice(&properties_kvp);
+
+    let fetch_stream = DataStreamId(212);
+    open_fetch_stream(&mut client, fetch_rid, fetch_stream);
+    let err = client
+        .recv_fetch_entry(
+            fetch_stream,
+            &DecodedFetchEntry::Object(DecodedFetchObject {
+                group_id: 0,
+                subgroup_id: 0,
+                object_id: 5,
+                publisher_priority: 128,
+                is_datagram_origin: false,
+                payload_length: 0,
+                properties_bytes: Some(properties_bytes),
+            }),
+        )
+        .expect_err("不正な UTF-8 の CODEC_STRING は MALFORMED_KEY_VALUE になること");
+    assert_eq!(
+        err.code, SESSION_MALFORMED_KEY_VALUE,
+        "FETCH 応答の Object Properties も MALFORMED_KEY_VALUE (0x6) を返すこと"
+    );
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "data plane のエラーは戻り値で通知し、セッション終了は呼び出し側が行うこと"
+    );
+}
+
+/// FETCH 応答の Object Properties の宣言長と実データ長が一致しない場合に
+/// MALFORMED_OBJECT (0x201) を返すこと
+///
+/// `ObjectProperties::decode_exact` は Properties Length と実データ長の不一致を
+/// `MalformedObject` (MALFORMED_OBJECT 0x201) に写す
+/// (draft-ietf-moq-transport-23 §11.1.2 (Object Properties) / §12.2
+/// (Session Termination Codes))。FETCH 応答の Object Properties も同じ分類で通知される。
+#[test]
+fn fetch_object_with_inconsistent_properties_length_reports_malformed_object() {
+    use shiguredo_moqt::error::SESSION_MALFORMED_OBJECT;
+
+    let (mut client, mut server) = establish_pair();
+    let fetch_rid = establish_fetch(
+        &mut client,
+        &mut server,
+        fetch_range_params(
+            Location {
+                group_id: 0,
+                object_id: 5,
+            },
+            Location {
+                group_id: 0,
+                object_id: 5,
+            },
+        ),
+        Location {
+            group_id: 0,
+            object_id: 5,
+        },
+    );
+
+    // Properties Length = 5 だが実データは 3 バイトしかない。
+    let properties_bytes = vec![0x05, 0x11, 0x01, 0xFF];
+
+    let fetch_stream = DataStreamId(213);
+    open_fetch_stream(&mut client, fetch_rid, fetch_stream);
+    let err = client
+        .recv_fetch_entry(
+            fetch_stream,
+            &DecodedFetchEntry::Object(DecodedFetchObject {
+                group_id: 0,
+                subgroup_id: 0,
+                object_id: 5,
+                publisher_priority: 128,
+                is_datagram_origin: false,
+                payload_length: 0,
+                properties_bytes: Some(properties_bytes),
+            }),
+        )
+        .expect_err("Properties Length と実データ長の不一致は MALFORMED_OBJECT になること");
+    assert_eq!(
+        err.code, SESSION_MALFORMED_OBJECT,
+        "FETCH 応答の Object Properties の長さ不一致も MALFORMED_OBJECT (0x201) を返すこと"
+    );
+}

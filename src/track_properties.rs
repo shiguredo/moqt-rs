@@ -21,6 +21,10 @@
 //!
 //! 書式は `object_properties` モジュールの対応表と揃えている。
 //!
+//! このほか draft-ietf-moq-loc-05 §6.1 (MOQ Properties Registry) Table 1 の
+//! 0x11 CODEC_STRING (Scope=Track, Object) を扱う。値の UTF-8 検証は
+//! `crate::property` の共有検証を使い、`TrackProperties::codec_string` から取得する。
+//!
 //! # スコープ検証と多重検証
 //!
 //! draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) は、この実装が意味を理解する
@@ -33,6 +37,11 @@
 //! [`crate::track_properties::TrackProperties::validate`] で検証する (構造と意味の分離)。
 //! ローカル入力の検証である `encode` は、受信 Track の判定と混同しないよう
 //! `ProtocolViolation` で拒否する。
+// CODEC_STRING (0x11) は LOC が定義する Property だが、Scope が Track と Object の両方で
+// あるため transport 側の TrackProperties でも UTF-8 を検証する。Property Type と検証規則は
+// 共有のため `crate::property` に置いており、このモジュールは `crate::loc` の型・関数を
+// 直接 import しない (LOC の定数はスコープ表 `crate::property_scope` 経由で参照する)。
+use crate::property::{CODEC_STRING_TYPE as PROP_CODEC_STRING, validate_codec_string_utf8};
 use crate::{error::MessageError, varint};
 use alloc::vec::Vec;
 
@@ -75,6 +84,14 @@ const OBJECT_ONLY_IN_TRACK_SCOPE: &str = "Object-only property in Track scope";
 /// 受信時の `MalformedTrack` とローカル入力検証時の `ProtocolViolation` が同じ理由を
 /// 指すように 1 箇所に置く (どちらも `MessageError` の `&'static str` である)。
 const DUPLICATE_TRACK_PROPERTY: &str = "duplicate track property";
+
+/// 奇数型 KVP の宣言長が残りバイトを超えたときの説明
+///
+/// decode ではこの説明を持つ `MalformedKeyValue` を返す。encode の
+/// IMMUTABLE_PROPERTIES 内側検証は `MalformedKeyValue` をまとめて `ProtocolViolation` に
+/// 写すため、この理由文字列でエラーを判別しない。CODEC_STRING (0x11) の不正 UTF-8 は
+/// 別経路で検証し、`MalformedKeyValue` のまま返す。
+const LENGTH_EXCEEDS_BUFFER: &str = "track property value length exceeds remaining buffer";
 
 /// Track Property の値
 ///
@@ -145,14 +162,20 @@ impl TrackProperties {
     ///   `ProtocolViolation` (ローカル入力の検証であり、受信 Track の malformed 判定とは別)
     /// - 型と値形式の不一致: `InvalidParameter`
     /// - 既知 Type の値域違反 (DYNAMIC_GROUPS が 0/1 以外など): `MalformedKeyValue`
+    /// - CODEC_STRING (0x11) の値が不正な UTF-8: `MalformedKeyValue`
+    ///   (mutable リストと、解析できる IMMUTABLE_PROPERTIES の内側)
     /// - Object 専用の既知 Type (PRIOR_GROUP_ID_GAP など) を Track scope に含む:
     ///   `ProtocolViolation` (ローカル入力の検証であり、受信 Track の malformed 判定とは別)
     /// - トップレベルのバイト列が 65535 バイトを超える: `PayloadTooLong`
-    /// - IMMUTABLE_PROPERTIES の内側 KVP が不正 (入れ子の 0x0B、宣言長が残りバイト超過など):
-    ///   `ProtocolViolation` (decode 層の `MalformedKeyValue` を `ProtocolViolation`
-    ///   に写す)
+    /// - IMMUTABLE_PROPERTIES の内側 KVP が不正 (入れ子の 0x0B、宣言長が残りバイト超過、
+    ///   既知 Type の値域違反など): `ProtocolViolation` (decode 層の `MalformedKeyValue` を
+    ///   `ProtocolViolation` に写す。ただし CODEC_STRING の不正 UTF-8 は値の書式違反として
+    ///   `MalformedKeyValue` のまま返す)
     /// - IMMUTABLE_PROPERTIES の内側 KVP の varint が途中終端: `UnexpectedEof`
     ///   (呼び出し側が渡した直列化の切り詰めであり、透過する)
+    /// - IMMUTABLE_PROPERTIES の内側 KVP の宣言長が 65535 バイトを超える:
+    ///   `FieldLengthExceeded` / 内側の delta-key のオーバーフロー: `DeltaEncodingOverflow`
+    ///   (内側の走査エラーをそのまま透過する)
     pub fn encode(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
         let mut sorted = self.0.clone();
         sorted.sort_by_key(|p| p.prop_type);
@@ -199,23 +222,29 @@ impl TrackProperties {
                     if bytes.len() > 65535 {
                         return Err(MessageError::PayloadTooLong);
                     }
+                    if prop.prop_type == PROP_CODEC_STRING {
+                        // draft-ietf-moq-loc-05 §2.3.1.3 (Codec String) の値を UTF-8 として
+                        // 検証する。不正な UTF-8 は draft-ietf-moq-transport-23 §8.3
+                        // (Key-Value-Pair Structure) の MALFORMED_KEY_VALUE に対応する。
+                        validate_codec_string_utf8(bytes)?;
+                    }
                     // draft-ietf-moq-transport-23 §10.7 (Immutable Properties): IMMUTABLE_PROPERTIES の内側を Track Property KVP 列として
                     // 検証する (入れ子の 0x0B を拒否)。検証のみで、バイト列はそのまま再出力する
                     // (draft-ietf-moq-transport-23 §10.7 (Immutable Properties) の "the serialization ... of
                     // the Key-Value-Pairs MUST NOT change")。
                     if prop.prop_type == PROP_IMMUTABLE_PROPERTIES {
-                        let inner = match decode_track_kv_pairs(bytes, false) {
+                        // 内側の構造・値域を CODEC_STRING の UTF-8 検証なしで借用走査する。
+                        // ローカル入力の検証である encode では、この走査で返る
+                        // MalformedKeyValue (宣言長超過・既知 Type の値域違反など) を、既存の
+                        // encode 検証 (重複・2^16-1 超) と同じ ProtocolViolation に揃える。
+                        // 入れ子の 0x0B など ProtocolViolation 系はそのまま透過させる。
+                        let inner = match walk_track_kv_pairs(bytes, false, false) {
                             Ok(inner) => inner,
                             Err(err) => {
-                                // ローカル入力の検証である encode では、内側 KVP の書式違反
-                                // (MalformedKeyValue) を、既存の encode 検証 (重複・2^16-1 超)
-                                // と同じ ProtocolViolation に揃える。内側 decode の切り詰め
-                                // (UnexpectedEof) は呼び出し側が渡した直列化の切り詰めであるため
-                                // そのまま透過する。
                                 return Err(match err {
                                     MessageError::MalformedKeyValue(_) => {
                                         MessageError::ProtocolViolation(
-                                            "immutable properties inner KVP length exceeds remaining buffer",
+                                            "immutable properties inner KVP is malformed",
                                         )
                                     }
                                     other => other,
@@ -225,12 +254,24 @@ impl TrackProperties {
                         // 内側も mutable リストと同じスコープ規則で検証する
                         // (draft-ietf-moq-transport-23 §10.7 (Immutable Properties) の
                         // "Properties MAY appear either in the mutable property list or
-                        // inside Immutable Properties")。
+                        // inside Immutable Properties")。入力の並び順でエラー分類が
+                        // 変わらないよう、スコープ検証を UTF-8 検証より先に行う。
                         for inner_prop in &inner {
                             if crate::property_scope::is_object_only(inner_prop.prop_type) {
                                 return Err(MessageError::ProtocolViolation(
                                     OBJECT_ONLY_IN_TRACK_SCOPE,
                                 ));
+                            }
+                        }
+                        for inner_prop in &inner {
+                            // CODEC_STRING (0x11) の UTF-8 を検証する。これは値の書式違反
+                            // であるため draft-ietf-moq-transport-23 §8.3
+                            // (Key-Value-Pair Structure) の MALFORMED_KEY_VALUE に対応する
+                            // MalformedKeyValue のまま返す。
+                            if inner_prop.prop_type == PROP_CODEC_STRING
+                                && let TrackPropertyValueRef::Bytes(value) = inner_prop.value
+                            {
+                                validate_codec_string_utf8(value)?;
                             }
                         }
                     }
@@ -266,6 +307,8 @@ impl TrackProperties {
     /// - KVP Type の delta overflow / 入れ子の IMMUTABLE_PROPERTIES:
     ///   `ProtocolViolation`
     /// - 既知 Type の値域違反 (DYNAMIC_GROUPS が 0/1 以外など): `MalformedKeyValue`
+    /// - CODEC_STRING (0x11) の値が不正な UTF-8: `MalformedKeyValue`
+    ///   (mutable リストと IMMUTABLE_PROPERTIES の内側)
     ///
     /// **スコープ違反と多重違反は検証しない。** draft-ietf-moq-transport-23 §8.4 (Track and
     /// Object Properties) / §12.1 (Malformed Tracks) の条件 8 / 9 は構造ではなく意味の検証で
@@ -273,7 +316,7 @@ impl TrackProperties {
     /// 持たないため、[`TrackProperties::validate`] を Request ID と Full Track Name を持つ
     /// `Session` の受信ハンドラが呼ぶ (構造と意味の分離)。
     pub fn decode(buf: &[u8]) -> Result<Self, MessageError> {
-        Ok(Self(decode_track_kv_pairs(buf, true)?))
+        Ok(Self(decode_track_kv_pairs(buf, true, true)?))
     }
 
     /// Track Properties に Object 専用の既知 Property が含まれていないかを検証する
@@ -392,11 +435,11 @@ impl TrackProperties {
     /// 取得する場合も外側の `Bytes` を借用したまま返すため、値のバイト列を `Vec` にコピーしない。
     ///
     /// draft-ietf-moq-loc-05 §6.1 (MOQ Properties Registry) Table 1 は 0x0D (VIDEO_CONFIG) /
-    /// 0x0F (AUDIO_CONFIG) の Scope を "Track, Object" と定める。draft-ietf-moq-loc-05
-    /// §3.1.2 (Immutable Properties) は、relay から見える不変の LOC プロパティを
-    /// IMMUTABLE_PROPERTIES として符号化することを SHOULD とする。そのため Track スコープの
-    /// これらの値は、最上位リストと IMMUTABLE_PROPERTIES の内側のどちらに置かれても本メソッドで
-    /// 取り出せなければならない。LOC に限らず任意の奇数型を扱う。
+    /// 0x0F (AUDIO_CONFIG) / 0x11 (CODEC_STRING) の Scope を "Track, Object" と定める。
+    /// draft-ietf-moq-loc-05 §3.1.2 (Immutable Properties) は、relay から見える不変の LOC
+    /// プロパティを IMMUTABLE_PROPERTIES として符号化することを SHOULD とする。そのため
+    /// Track スコープのこれらの値は、最上位リストと IMMUTABLE_PROPERTIES の内側のどちらに
+    /// 置かれても本メソッドで取り出せなければならない。LOC に限らず任意の奇数型を扱う。
     ///
     /// prop_type と値形式の両方が一致する最初のインスタンスを返す。本メソッド自体は多重検証を
     /// 行わない点は [`TrackProperties::find_varint`] と同じである。
@@ -406,11 +449,41 @@ impl TrackProperties {
     /// [`TrackProperties::decode`] が内側の書式を検証済みなので、この制約が観測されるのは
     /// in-memory 構築の入力だけである。
     ///
+    /// CODEC_STRING (0x11) の値を文字列として取得する場合は、UTF-8 の検証を行う
+    /// [`TrackProperties::codec_string`] を使う。本メソッドは生バイト列を返すため、不正な
+    /// UTF-8 もそのまま返す。
+    ///
     /// この探索規則と LOC の節番号は draft 由来であり、将来の draft 改版で変わる可能性がある。
     pub fn find_bytes(&self, prop_type: u64) -> Option<&[u8]> {
         match self.find_property(prop_type, FindValue::Bytes)? {
             TrackPropertyValueRef::VarInt(_) => None,
             TrackPropertyValueRef::Bytes(b) => Some(b),
+        }
+    }
+
+    /// Codec String (Property Type 0x11) を UTF-8 文字列として返す
+    ///
+    /// draft-ietf-moq-loc-05 §2.3.1.3 (Codec String) / §6.1 (MOQ Properties Registry)
+    /// Table 1 (Scope=Track, Object)。WebCodecs Codec Registry が定義する codec 値であり、
+    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties) の「MUST search both」に
+    /// 従って mutable リストと IMMUTABLE_PROPERTIES (0x0B) の内側を探索する。
+    ///
+    /// 欠落は `Ok(None)`、値が不正な UTF-8 の場合は `MalformedKeyValue` を返す
+    /// (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の
+    /// MALFORMED_KEY_VALUE)。欠落と不正値を区別できるよう `Option` だけでは表現しない。
+    ///
+    /// 内側の探索は構造・値域・長さを検証する (スコープと多重可否は
+    /// [`TrackProperties::validate`] が行う)。UTF-8 は本メソッドが値を文字列として
+    /// 取り出すときに検証する。そのため `push` で積んだ IMMUTABLE_PROPERTIES の内側に
+    /// 不正な UTF-8 があり、かつ mutable リストに 0x11 が無い場合は `MalformedKeyValue` に
+    /// なる。内側の走査が失敗した場合 (構造破損・値域違反・長さ超過・入れ子の 0x0B など) は
+    /// [`TrackProperties::find_bytes`] が `None` を返し、本メソッドも `Ok(None)` になる。
+    /// wire 経由の値は [`TrackProperties::decode`] が不正な UTF-8 を拒否するため、この
+    /// 区別が観測されるのは in-memory 構築の入力だけである。
+    pub fn codec_string(&self) -> Result<Option<&str>, MessageError> {
+        match self.find_bytes(PROP_CODEC_STRING) {
+            Some(bytes) => validate_codec_string_utf8(bytes).map(Some),
+            None => Ok(None),
         }
     }
 
@@ -441,7 +514,7 @@ impl TrackProperties {
         }
         // IMMUTABLE_PROPERTIES の内側を探索する。内側の値は外側の Bytes への借用のまま返す。
         let inner = self.immutable_properties()?;
-        let props = walk_track_kv_pairs(inner, false).ok()?;
+        let props = walk_track_kv_pairs(inner, false, false).ok()?;
         props
             .into_iter()
             .find(|p| p.prop_type == prop_type && p.value.matches(wanted))
@@ -609,7 +682,9 @@ impl TrackProperties {
         let Some(bytes) = self.immutable_properties() else {
             return Vec::new();
         };
-        decode_track_kv_pairs(bytes, false).unwrap_or_default()
+        // UTF-8 は encode / decode / codec_string が検証する。ここで検証すると、in-memory の
+        // 不正 UTF-8 が内側全体を空にしてスコープ・多重・未知必須の診断まで落としてしまう。
+        decode_track_kv_pairs(bytes, false, false).unwrap_or_default()
     }
 }
 
@@ -721,10 +796,10 @@ impl TrackPropertyRef<'_> {
 
 /// Track Property の Key-Value-Pair 列をバッファ全体からデコードする (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties))
 ///
-/// カウントプレフィックスなしで `buf` 末尾まで読む。`TrackProperties::decode` 本体、
-/// encode の IMMUTABLE_PROPERTIES (0x0B) 内側検証、統合検索
-/// (`immutable_inner_properties`) から呼ばれる。decode 時の IMMUTABLE_PROPERTIES 内側検証は
-/// 借用走査の [`walk_track_kv_pairs`] が行う。
+/// カウントプレフィックスなしで `buf` 末尾まで読む。`TrackProperties::decode` 本体と、
+/// スコープ・多重・未知必須の診断に使う統合検索 (`immutable_inner_properties`) から呼ばれる。
+/// encode の IMMUTABLE_PROPERTIES (0x0B) 内側検証は、所有権変換を伴わない借用走査の
+/// [`walk_track_kv_pairs`] を直接使う。
 ///
 /// 奇数 Type の宣言長が 2^16-1 以下で残りバイトを超える場合は
 /// `MessageError::MalformedKeyValue` を返す。既知 Type は draft-ietf-moq-transport-23
@@ -751,11 +826,14 @@ impl TrackPropertyRef<'_> {
 fn decode_track_kv_pairs(
     buf: &[u8],
     allow_immutable: bool,
+    validate_codec_string: bool,
 ) -> Result<Vec<TrackProperty>, MessageError> {
-    Ok(walk_track_kv_pairs(buf, allow_immutable)?
-        .into_iter()
-        .map(TrackPropertyRef::to_owned_property)
-        .collect())
+    Ok(
+        walk_track_kv_pairs(buf, allow_immutable, validate_codec_string)?
+            .into_iter()
+            .map(TrackPropertyRef::to_owned_property)
+            .collect(),
+    )
 }
 
 /// Track Property の Key-Value-Pair 列をバッファ全体から借用して走査する
@@ -763,10 +841,20 @@ fn decode_track_kv_pairs(
 /// [`decode_track_kv_pairs`] の走査本体であり、奇数型の値のバイト列を `Vec` へコピーせず元の
 /// バッファへの借用として返す。[`TrackProperties::find_bytes`] が IMMUTABLE_PROPERTIES (0x0B)
 /// の内側から生バイト列を借用したまま返すために使う。書式の検証とエラーの分類は
-/// [`decode_track_kv_pairs`] と同一であり、専用のパーサーを別に持たない。
+/// [`decode_track_kv_pairs`] と共通であり、専用のパーサーを別に持たない (CODEC_STRING の
+/// 検証可否だけを引数で切り替える)。
+///
+/// `validate_codec_string` が true の場合、CODEC_STRING (0x11) の値の UTF-8 を検証する
+/// (draft-ietf-moq-loc-05 §2.3.1.3 (Codec String) / draft-ietf-moq-transport-23 §8.3
+/// (Key-Value-Pair Structure) の MALFORMED_KEY_VALUE)。[`TrackProperties::decode`] は true を
+/// 渡す。encode の IMMUTABLE_PROPERTIES 内側検証は構造・値域だけを見るため false で走査し、
+/// CODEC_STRING の UTF-8 はその走査結果に対して別途検証する。[`TrackProperties::find_bytes`]
+/// の借用探索も false を渡す (構造と値域は検証するが、UTF-8 は
+/// [`TrackProperties::codec_string`] が値を文字列として取り出すときに検証する)。
 fn walk_track_kv_pairs<'a>(
     buf: &'a [u8],
     allow_immutable: bool,
+    validate_codec_string: bool,
 ) -> Result<Vec<TrackPropertyRef<'a>>, MessageError> {
     let mut pos = 0;
     let mut props = Vec::new();
@@ -809,18 +897,25 @@ fn walk_track_kv_pairs<'a>(
             // §10.7 (Immutable Properties) の malformed Track と重なる条件だが、decode 層は
             // Track / request を特定できず購読 cancel を発行できないため、§8.3 のセッション
             // 終了を優先する (本実装の判断であり、§10.7 への写像は別途対応する)。
-            let len = varint::checked_len(len, buf[pos..].len()).map_err(|_| {
-                MessageError::MalformedKeyValue(
-                    "track property value length exceeds remaining buffer",
-                )
-            })?;
+            let len = varint::checked_len(len, buf[pos..].len())
+                .map_err(|_| MessageError::MalformedKeyValue(LENGTH_EXCEEDS_BUFFER))?;
             let bytes = &buf[pos..pos + len];
             pos += len;
+
+            // draft-ietf-moq-loc-05 §2.3.1.3 (Codec String): CODEC_STRING の値は UTF-8
+            // 文字列である。受信側が Type を理解する場合、Length/Value が定義された
+            // serialization と一致しなければ MALFORMED_KEY_VALUE でセッションを閉じる
+            // (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure))。Track scope の
+            // 値は mutable リストと IMMUTABLE_PROPERTIES の内側のどちらにも置けるため、
+            // walk_track_kv_pairs の 1 箇所で両方を検証する。
+            if validate_codec_string && prop_type == PROP_CODEC_STRING {
+                validate_codec_string_utf8(bytes)?;
+            }
 
             // draft-ietf-moq-transport-23 §10.7 (Immutable Properties): IMMUTABLE_PROPERTIES 自体は許可するが、内側を Track Property KVP 列
             // として検証する (内側の入れ子 0x0B を拒否する)。空 (length=0) の内側は許容される。
             if prop_type == PROP_IMMUTABLE_PROPERTIES {
-                walk_track_kv_pairs(bytes, false)?;
+                walk_track_kv_pairs(bytes, false, validate_codec_string)?;
             }
 
             TrackPropertyValueRef::Bytes(bytes)

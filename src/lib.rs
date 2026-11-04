@@ -41,7 +41,7 @@ pub mod group_switch_gate;
 /// KVP (Key-Value-Pair) の delta-key 骨格を集約する内部モジュール (外部公開しない)
 pub(crate) mod kvp;
 pub mod loc;
-/// メディア時刻を Unix epoch の壁時計へ換算する処理 (draft-ietf-moq-loc-04 §2.3.1.1)
+/// メディア時刻を Unix epoch の壁時計へ換算する処理 (draft-ietf-moq-loc-05 §2.3.1.1)
 pub mod media_clock;
 pub mod message;
 /// メッセージ パラメータ群 (draft-ietf-moq-transport-23 §9.19 (Control Message Parameters))
@@ -57,6 +57,8 @@ pub mod parameter;
 pub mod pending_subgroup_buffer;
 /// 音声の再生に関する処理 (時間圧縮・伸長、到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期)
 pub mod playout;
+/// Property の値の検証を Track / Object / LOC で共有する内部モジュール (外部公開しない)
+pub(crate) mod property;
 /// Property の許可スコープ (Track / Object) の表を集約する内部モジュール (外部公開しない)
 pub(crate) mod property_scope;
 pub mod session;

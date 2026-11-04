@@ -120,7 +120,7 @@ struct AudioDeliveryCounters {
 
 /// 音声 Object を送出してよいかを、購読の境界と送出済みの TIMESTAMP で決める状態機械
 ///
-/// 音声は 1 Object = 1 Group で届き (draft-ietf-moq-loc-04 §4.1 (Application with one audio
+/// 音声は 1 Object = 1 Group で届き (draft-ietf-moq-loc-05 §4.1 (Application with one audio
 /// track))、購読より前に publish された Group は relay の replay で届きうる。購読の境界は
 /// `SUBSCRIBE_OK` が運んだ Largest Object であり (draft-ietf-moq-transport-23 §3.1.4
 /// (Largest Object) / §9.19.17 (LARGEST OBJECT Parameter))、境界以下は購読より前の配信で
@@ -441,7 +441,7 @@ fn subgroup_object_location(header: &SubgroupHeader, object: &DecodedSubgroupObj
 
 /// 音声 Object を再生経路へ流すための共有状態
 ///
-/// 音声 Object は subgroup stream と datagram の両方で届く (draft-ietf-moq-loc-04 §4.1)。
+/// 音声 Object は subgroup stream と datagram の両方で届く (draft-ietf-moq-loc-05 §4.1)。
 /// 経路に依存しない値をここへまとめ、重複の判定 → 購読境界の判定 → 録画 → Audio Config の
 /// 検証 → 送出順の判定 → デコード → catch-up の観測 → デコード済みフレームの送出という順序が
 /// 経路ごとに食い違わないようにする。重複と境界以下は Audio Config の検証だけを行い、復号・
@@ -1506,7 +1506,7 @@ fn fetch_target_of(kind: TrackKind) -> Option<FetchTarget> {
 
 /// 購読した映像 track の直近 Group を FETCH で要求し、対応表へ記録する
 ///
-/// 音声の明示 FETCH は発行しない。音声は 1 Object = 1 Group で届き (draft-ietf-moq-loc-04
+/// 音声の明示 FETCH は発行しない。音声は 1 Object = 1 Group で届き (draft-ietf-moq-loc-05
 /// §4.1)、起動時の実測で明示 FETCH の起動・再生・録画への寄与が無かった。残る OpusHead の
 /// 取得も再生に必須ではなく、録画は catalog の値で代替できる。映像だけを対象にすることは
 /// 関数名 (`fetch_recent_video_groups`) で示す。
@@ -2387,7 +2387,7 @@ pub async fn run(
     let mut catalog_request_id = catalog_sub.request_id;
     let mut catalog_alias = catalog_sub.track_alias;
 
-    // 音声は 1 object = 1 subgroup stream で届く (LOC draft-ietf-moq-loc-04 §4.1)。
+    // 音声は 1 object = 1 subgroup stream で届く (LOC draft-ietf-moq-loc-05 §4.1)。
     // stream ごとにデコーダを作り直すと 20 ms ごとにデコーダ状態が失われ、
     // フレーム境界で波形が不連続になってノイズになる。
     // subscription で 1 つのデコーダを共有し、Audio Config の処理済みフラグも共有する。
@@ -2715,7 +2715,7 @@ pub async fn run(
                         }
                     }
                     // 映像とカタログの datagram は本 example では扱わない。LOC の映像は
-                    // 1 group = 1 unidirectional stream で配送され (draft-ietf-moq-loc-04 §4.2)、
+                    // 1 group = 1 unidirectional stream で配送され (draft-ietf-moq-loc-05 §4.2)、
                     // moq-pub も datagram では送らない
                     DatagramAction::Unsupported { track_alias } => {
                         if unsupported_aliases.insert(track_alias) {
@@ -5204,7 +5204,7 @@ async fn handle_stream_body(
                         Some(decoder) => Some(decoder.lock().await),
                         None => None,
                     };
-                    // Audio Config の中身はコーデック依存 (LOC draft-ietf-moq-loc-04 §2.3.3.1 (Audio Config)) のため、
+                    // Audio Config の中身はコーデック依存 (LOC draft-ietf-moq-loc-05 §2.3.3.1 (Audio Config)) のため、
                     // catalog の codec が opus の場合のみ OpusHead として解釈する。AAC (mp4a.*) の
                     // Audio Config は AudioSpecificConfig であり、AudioToolbox のデコーダは
                     // 入力のサンプルレートとチャンネル数だけで構成できるため解釈しない。
@@ -5935,8 +5935,10 @@ fn send_decoded_frames(
 /// に写すため、抽出関数は `Ok(None)` を返す。最上位リストの構造破損は
 /// `LocProperties::decode` が `Err` にし、内側の構造破損は `LocProperties::decode` では
 /// 検出せず getter が `None` に写す (Session 経路では `ObjectProperties::decode` が先に
-/// 拒否する)。内側だけの LOC 固有検証で `MalformedKeyValue` を返すのは別課題である
-/// (docs/missing-features.md §4.1)。
+/// 拒否する)。内側だけの LOC 固有検証 (Audio Level の値域や Video Frame Marking の長さ) で
+/// `MalformedKeyValue` を返すのは別課題である (docs/missing-features.md §4.1)。
+/// CODEC_STRING (0x11) の不正 UTF-8 は `LocProperties::decode` が解析できる範囲で
+/// `MalformedKeyValue` として返すが、このファイルの抽出関数は CODEC_STRING を扱わない。
 type ExtractResult<T> = std::result::Result<T, MessageError>;
 
 /// object の properties バイト列から PROP_VIDEO_CONFIG を取り出す
@@ -6077,7 +6079,7 @@ fn record_audio_object(
 /// `i64::MAX` に飽和させる。
 ///
 /// `Timescale` が無いときの Timestamp は Unix epoch からのマイクロ秒である
-/// (draft-ietf-moq-loc-04 §2.3.1.1)。音声のサンプル数でもフレーム数でもないため、
+/// (draft-ietf-moq-loc-05 §2.3.1.1)。音声のサンプル数でもフレーム数でもないため、
 /// サンプルレートを仮定した換算はしない。Timescale が 0 のときも同じ扱いにする。
 /// `timestamp` が無いときは `None` を返す。
 fn loc_timestamp_us(timestamp: Option<u64>, timescale: Option<u64>) -> Option<i64> {
@@ -6096,7 +6098,7 @@ fn loc_timestamp_us(timestamp: Option<u64>, timescale: Option<u64>) -> Option<i6
 /// moqt-js の `createMediaSubscriber` と同じ規則である。TIMESTAMP が無ければ
 /// [`TimestampKind::None`]、TIMESCALE が無ければ TIMESTAMP は Unix epoch からの
 /// マイクロ秒 ([`TimestampKind::WallClock`])、TIMESCALE があれば publisher のメディア時刻
-/// ([`TimestampKind::MediaTime`]) である (draft-ietf-moq-loc-04 §2.3.1.1)。
+/// ([`TimestampKind::MediaTime`]) である (draft-ietf-moq-loc-05 §2.3.1.1)。
 /// 受信側の時間軸へ観測して表示時刻を決められるのは壁時計の TIMESTAMP だけである。
 ///
 /// TIMESCALE が 0 のときも「TIMESCALE がある」ものとしてメディア時刻にする
@@ -6259,7 +6261,7 @@ enum DatagramAction<'a> {
 /// (datagram は 1 メッセージ = 1 データグラムであるため、残りはすべて payload である)。
 ///
 /// 音声以外をメディアとして扱わないのは、LOC の映像が 1 group = 1 unidirectional stream で
-/// 配送されるためである (draft-ietf-moq-loc-04 §4.2)。カタログも stream で届く。
+/// 配送されるためである (draft-ietf-moq-loc-05 §4.2)。カタログも stream で届く。
 fn plan_datagram<'a>(raw: &'a [u8], track_map: &HashMap<u64, TrackKind>) -> DatagramAction<'a> {
     // Session が同じバイト列を検証済みであるため、ここでの decode 失敗は実装の不整合を表す。
     // メディアを黙って落とさないよう警告する
@@ -6286,7 +6288,7 @@ fn plan_datagram<'a>(raw: &'a [u8], track_map: &HashMap<u64, TrackKind>) -> Data
 
 /// 1 本の audio subgroup ストリームから音声パケットを順次デコードする
 ///
-/// LOC draft-ietf-moq-loc-04 §4.1 (Application with one audio track) では「1 audio chunk = 1 Object = 1 Group」と例示されているが、
+/// LOC draft-ietf-moq-loc-05 §4.1 (Application with one audio track) では「1 audio chunk = 1 Object = 1 Group」と例示されているが、
 /// 防御的に subgroup 内の object をすべて処理する。
 ///
 /// 配送 (録画・Audio Config の検証・デコード・フレーム送出) は [`AudioDelivery::deliver`] が
@@ -7601,7 +7603,7 @@ mod tests {
     }
 
     // timescale が None のときは Timestamp を Unix epoch からのマイクロ秒として扱う
-    // (draft-ietf-moq-loc-04 §2.3.1.1)
+    // (draft-ietf-moq-loc-05 §2.3.1.1)
     #[test]
     fn loc_timestamp_us_treats_missing_timescale_as_microseconds() {
         assert_eq!(
@@ -7968,7 +7970,7 @@ mod tests {
 
     /// PROP_VIDEO_CONFIG の抽出: LOC の Public Properties から parameter set を取り出せる
     ///
-    /// draft-ietf-moq-loc-04 §2.2 (MOQ Object Mapping) は LOC の Public Properties を
+    /// draft-ietf-moq-loc-05 §2.2 (MOQ Object Mapping) は LOC の Public Properties を
     /// MOQ Object Properties に載せると規定する。Subgroup 経路と FETCH 経路の両方が
     /// この関数を通して H.264/H.265 の AVCDecoderConfigurationRecord を取り出す。
     #[test]
@@ -7995,7 +7997,7 @@ mod tests {
     /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) は、理解している型の
     /// Length/Value が定義と一致しない場合に MALFORMED_KEY_VALUE (0x6) で
     /// セッションを閉じる MUST を定める。Video Frame Marking の Length は 1-4 バイト
-    /// (draft-ietf-moq-loc-04 §2.3.2.2 (Video Frame Marking)) である。
+    /// (draft-ietf-moq-loc-05 §2.3.2.2 (Video Frame Marking)) である。
     /// 書式違反をプロパティ無しに潰さないことを固定する。
     #[test]
     fn extract_video_config_reports_key_value_formatting_error() {
@@ -8075,7 +8077,7 @@ mod tests {
 
     /// LOC の書式違反 (Audio Level 256) は MalformedKeyValue
     ///
-    /// Audio Level は 8 bit 範囲 (draft-ietf-moq-loc-04 §2.3.3.2 (Audio Level)) のため、256 は
+    /// Audio Level は 8 bit 範囲 (draft-ietf-moq-loc-05 §2.3.3.2 (Audio Level)) のため、256 は
     /// §8.3 (Key-Value-Pair Structure) の書式違反になる。Audio Config / Timestamp /
     /// Timescale の抽出も同じ扱いであることを固定する。
     #[test]
@@ -8166,6 +8168,30 @@ mod tests {
         outer
             .encode()
             .expect("テストフィクスチャの外側 KVP の encode は成功する")
+    }
+
+    /// IMMUTABLE_PROPERTIES (0x0B) の内側に任意のバイト列を持つ properties を組み立てる
+    ///
+    /// `LocProperties::encode` はローカル入力の検証として 0x0B の内側の構造・値域を検証する
+    /// ため、破損した内側を意図的に持つフィクスチャは wire 形式を直接組み立てる。
+    /// `video_config` を渡すと最上位リストに Video Config (0x0D) も置く。
+    fn properties_with_inner_immutable(inner: &[u8], video_config: Option<&[u8]>) -> Vec<u8> {
+        use shiguredo_moqt::track_properties::PROP_IMMUTABLE_PROPERTIES;
+
+        let mut kvp = Vec::new();
+        shiguredo_moqt::varint::encode(PROP_IMMUTABLE_PROPERTIES, &mut kvp);
+        shiguredo_moqt::varint::encode(inner.len() as u64, &mut kvp);
+        kvp.extend_from_slice(inner);
+        if let Some(video_config) = video_config {
+            shiguredo_moqt::varint::encode(PROP_VIDEO_CONFIG - PROP_IMMUTABLE_PROPERTIES, &mut kvp);
+            shiguredo_moqt::varint::encode(video_config.len() as u64, &mut kvp);
+            kvp.extend_from_slice(video_config);
+        }
+
+        let mut wire = Vec::new();
+        shiguredo_moqt::varint::encode(kvp.len() as u64, &mut wire);
+        wire.extend_from_slice(&kvp);
+        wire
     }
 
     /// IMMUTABLE_PROPERTIES の内側だけにある Video Config を取り出せること
@@ -8259,14 +8285,7 @@ mod tests {
         let mut inner_bytes = Vec::new();
         shiguredo_moqt::varint::encode(PROP_AUDIO_LEVEL, &mut inner_bytes);
         shiguredo_moqt::varint::encode(256, &mut inner_bytes); // 0-255 の範囲外
-        let mut outer = LocProperties::new();
-        outer.push(LocProperty {
-            prop_id: shiguredo_moqt::track_properties::PROP_IMMUTABLE_PROPERTIES,
-            value: LocPropertyValue::Bytes(inner_bytes),
-        });
-        let bytes = outer
-            .encode()
-            .expect("テストフィクスチャの外側 KVP の encode は成功する");
+        let bytes = properties_with_inner_immutable(&inner_bytes, None);
 
         // 内側の走査が値域違反で失敗するため、どの抽出関数も「値が無い」として扱う。
         assert_eq!(
@@ -8304,19 +8323,8 @@ mod tests {
         shiguredo_moqt::varint::encode(5, &mut inner_bytes); // 1-4 バイトの範囲外
         inner_bytes.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05]);
 
-        let mut outer = LocProperties::new();
-        outer.push(LocProperty {
-            prop_id: shiguredo_moqt::track_properties::PROP_IMMUTABLE_PROPERTIES,
-            value: LocPropertyValue::Bytes(inner_bytes),
-        });
         // 最上位の Video Config は decode も取得もできる (内側の破損とは独立)。
-        outer.push(LocProperty {
-            prop_id: PROP_VIDEO_CONFIG,
-            value: LocPropertyValue::Bytes(vec![0xAA]),
-        });
-        let bytes = outer
-            .encode()
-            .expect("テストフィクスチャの外側 KVP の encode は成功する");
+        let bytes = properties_with_inner_immutable(&inner_bytes, Some(&[0xAA]));
 
         let video_config =
             extract_video_config(Some(&bytes)).expect("Video Config は取得できること");
@@ -8864,7 +8872,7 @@ mod tests {
     ///
     /// publisher は 1 audio chunk = 1 Object = 1 Group の datagram に Timestamp / Timescale を
     /// 載せ、最初の Object にだけ Audio Config (OpusHead) を載せる
-    /// (draft-ietf-moq-loc-04 §4.1)。
+    /// (draft-ietf-moq-loc-05 §4.1)。
     fn audio_loc_properties(
         timestamp: u64,
         timescale: u64,
@@ -8891,7 +8899,7 @@ mod tests {
     /// テスト用: Timescale を載せない LOC プロパティ (壁時計の TIMESTAMP) を組み立てる
     ///
     /// Timescale が無いときの Timestamp は Unix epoch からのマイクロ秒である
-    /// (draft-ietf-moq-loc-04 §2.3.1.1)。受信の入口の入力の遅れを測れる音はこの形である。
+    /// (draft-ietf-moq-loc-05 §2.3.1.1)。受信の入口の入力の遅れを測れる音はこの形である。
     fn audio_loc_properties_without_timescale(
         timestamp: u64,
         audio_config: Option<&[u8]>,
@@ -8967,7 +8975,7 @@ mod tests {
     /// datagram で届いた音声 Object が subgroup stream と同じ経路でデコードされること
     ///
     /// moq-pub は `--audio-datagram` で 1 audio chunk = 1 Object = 1 Group の datagram を送る
-    /// (draft-ietf-moq-loc-04 §4.1)。購読側は payload を decode してデコード済みフレームを
+    /// (draft-ietf-moq-loc-05 §4.1)。購読側は payload を decode してデコード済みフレームを
     /// 送出する必要がある。
     #[tokio::test]
     async fn audio_datagram_object_is_decoded_into_a_frame() {
@@ -9099,7 +9107,7 @@ mod tests {
     /// 映像とカタログの datagram は非対応のトラックとして報告されること
     ///
     /// LOC の映像は 1 group = 1 unidirectional stream で配送される
-    /// (draft-ietf-moq-loc-04 §4.2)。moq-sub は datagram の映像 / カタログを扱わない。
+    /// (draft-ietf-moq-loc-05 §4.2)。moq-sub は datagram の映像 / カタログを扱わない。
     #[test]
     fn plan_datagram_reports_tracks_this_subscriber_does_not_handle() {
         let mut track_map = HashMap::new();
@@ -9538,7 +9546,7 @@ mod tests {
     /// テスト用: LOC の TIMESTAMP と位置を指定して音声 Object を 1 つ配送する
     ///
     /// Timescale は 1_000_000 とする。Timestamp がそのままマイクロ秒になり、受信側の
-    /// 壁時計と比べられる値 (draft-ietf-moq-loc-04 §2.3.1.1) をそのまま渡せる。
+    /// 壁時計と比べられる値 (draft-ietf-moq-loc-05 §2.3.1.1) をそのまま渡せる。
     async fn deliver_audio_at(
         delivery: &AudioDelivery<'_>,
         decoder: &mut AudioDecoder,

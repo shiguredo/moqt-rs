@@ -1270,7 +1270,7 @@ pub async fn run(
                             let video_request_id =
                                 video_request_id.expect("video request_id enabled");
                             // 映像は 1 group = 1 unidirectional stream で送る
-                            // (draft-ietf-moq-loc-04 §4.2)。datagram 配送は音声トラックだけに
+                            // (draft-ietf-moq-loc-05 §4.2)。datagram 配送は音声トラックだけに
                             // 指定でき、キーフレーム (IDR) が 1 QUIC datagram に収まらない
                             // 映像では使わない。
                             if let Some(writer) = current_video_writer.take() {
@@ -1584,7 +1584,7 @@ pub async fn run(
                         };
                         let properties =
                             build_audio_loc_properties(timestamp, audio_timescale, audio_config);
-                        // LOC draft-ietf-moq-loc-04 §4.1 (Application with one audio track): 1 audio frame = 1 Object = 1 Group
+                        // LOC draft-ietf-moq-loc-05 §4.1 (Application with one audio track): 1 audio frame = 1 Object = 1 Group
                         if config.audio_datagram {
                             // datagram の送信は完了が返らない (fire-and-forget)。書き込みの
                             // 戻りを完了とみなすため、投入の直前の時刻を控える
@@ -3686,7 +3686,7 @@ fn slope_millis_per_second(slope_us_per_second: Option<i64>) -> String {
 /// トラックごとに 1 つの [`WallClockMapper`] を保持する。
 ///
 /// 換算結果と読んだ壁時計の差を debug ログに出す。LOC は Timescale を載せないとき
-/// Timestamp を Unix epoch マイクロ秒として扱うため (draft-ietf-moq-loc-04 §2.3.1.1)、
+/// Timestamp を Unix epoch マイクロ秒として扱うため (draft-ietf-moq-loc-05 §2.3.1.1)、
 /// 実機でこの差が許容範囲に収まっていることを確認できるようにする。
 fn map_capture_timestamp_us(
     mapper: &mut WallClockMapper,
@@ -3856,7 +3856,7 @@ impl AudioCaptureTimeline {
 ///
 /// `timescale` は入力ファイル由来のメディア時刻を送るときだけ渡す。live capture は
 /// Unix epoch マイクロ秒を送るため `None` にし、`PROP_TIMESCALE` を付けない
-/// (draft-ietf-moq-loc-04 §2.3.1.1 の既定)。
+/// (draft-ietf-moq-loc-05 §2.3.1.1 の既定)。
 fn build_video_loc_properties(frame: &EncodedFrame, timescale: Option<u64>) -> LocProperties {
     let mut props = LocProperties::new();
     // RFC 9626 §3.2 (Short Extension for Non-Scalable Streams) の 1 octet 形式は
@@ -3895,7 +3895,7 @@ fn build_video_loc_properties(frame: &EncodedFrame, timescale: Option<u64>) -> L
 ///
 /// `timescale` は入力ファイル由来のメディア時刻を送るときだけ渡す。live capture は
 /// Unix epoch マイクロ秒を送るため `None` にし、`PROP_TIMESCALE` を付けない
-/// (draft-ietf-moq-loc-04 §2.3.1.1 の既定)。
+/// (draft-ietf-moq-loc-05 §2.3.1.1 の既定)。
 ///
 /// `audio_config` に codec 固有の configuration bytes (Opus は OpusHead、AAC-LC は
 /// AudioSpecificConfig) を渡すと Audio Config プロパティ (0x0F) として付与する。
@@ -4898,7 +4898,7 @@ mod tests {
     /// live capture の映像 LOC プロパティ: keyframe でも Timescale が付与されないこと
     ///
     /// LOC は Timescale が無ければ Timestamp を Unix epoch マイクロ秒として扱う
-    /// (draft-ietf-moq-loc-04 §2.3.1.1)。delta frame を単体で見ても同じ解釈になる。
+    /// (draft-ietf-moq-loc-05 §2.3.1.1)。delta frame を単体で見ても同じ解釈になる。
     #[test]
     fn build_video_loc_properties_live_capture_has_no_timescale() {
         let frame = EncodedFrame {
@@ -4994,7 +4994,7 @@ mod tests {
     /// live capture の音声 LOC プロパティ: Timestamp のみで Timescale が付与されないこと
     ///
     /// LOC は Timescale が無ければ Timestamp を Unix epoch マイクロ秒として扱う
-    /// (draft-ietf-moq-loc-04 §2.3.1.1)。
+    /// (draft-ietf-moq-loc-05 §2.3.1.1)。
     #[test]
     fn build_audio_loc_properties_live_capture_has_no_timescale() {
         let props = build_audio_loc_properties(1_700_000_000_000_000, None, None);

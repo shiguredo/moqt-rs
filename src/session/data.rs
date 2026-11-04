@@ -2184,9 +2184,14 @@ impl Session {
                 {
                     Ok(properties) => properties,
                     Err(err) => {
+                        // 購読・fetch の cancel は terminate_malformed_track が扱う。
+                        // セッション終了コードは Object Properties の decode エラー分類に従う
+                        // (MALFORMED_KEY_VALUE などは専用コード、MalformedTrack は
+                        // draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) の cancel で
+                        // セッションは閉じないため PROTOCOL_VIOLATION にフォールバックする)。
                         let reason = err.reason();
                         self.terminate_malformed_track(request_id, Some(stream_id), reason);
-                        return Err(SessionError::new(SESSION_PROTOCOL_VIOLATION, reason));
+                        return Err(session_error_from_data_message(err));
                     }
                 };
                 let location = Location {

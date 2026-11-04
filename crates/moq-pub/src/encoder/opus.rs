@@ -63,7 +63,7 @@ impl OpusEncoder {
 
 /// OpusHead パケットを構築する (RFC 7845 §5.1 (Identification Header))
 ///
-/// Audio Config プロパティ (draft-ietf-moq-loc-04 §2.3.3.1 (Audio Config)) に載せる
+/// Audio Config プロパティ (draft-ietf-moq-loc-05 §2.3.3.1 (Audio Config)) に載せる
 /// Opus の configuration bytes を生成する。
 ///
 /// フォーマット:

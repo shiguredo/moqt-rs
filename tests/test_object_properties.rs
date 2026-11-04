@@ -1167,3 +1167,241 @@ mod property_multiplicity {
         );
     }
 }
+
+mod codec_string {
+    use super::*;
+    use shiguredo_moqt::loc::PROP_CODEC_STRING;
+
+    /// Object Properties から CODEC_STRING (0x11) の値を取得する
+    fn codec_string_bytes(props: &ObjectProperties) -> Option<&[u8]> {
+        props.as_slice().iter().find_map(|p| {
+            if p.prop_type != PROP_CODEC_STRING {
+                return None;
+            }
+            match &p.value {
+                ObjectPropertyValue::Bytes(b) => Some(b.as_slice()),
+                ObjectPropertyValue::VarInt(_) => None,
+            }
+        })
+    }
+
+    /// 最上位の CODEC_STRING (0x11) を任意のバイト列で持つ Object Properties wire を組み立てる
+    ///
+    /// encode は不正な UTF-8 を拒否するため、decode の検証用に入力を直接組み立てる。
+    fn wire_with_top_level_codec_string(value: &[u8]) -> Vec<u8> {
+        let mut kvp = Vec::new();
+        varint::encode(PROP_CODEC_STRING, &mut kvp);
+        varint::encode(value.len() as u64, &mut kvp);
+        kvp.extend_from_slice(value);
+
+        let mut wire = Vec::new();
+        varint::encode(kvp.len() as u64, &mut wire);
+        wire.extend_from_slice(&kvp);
+        wire
+    }
+
+    /// IMMUTABLE_PROPERTIES (0x0B) の内側に CODEC_STRING を任意のバイト列で持つ wire
+    fn wire_with_inner_codec_string(value: &[u8]) -> Vec<u8> {
+        let mut inner = Vec::new();
+        varint::encode(PROP_CODEC_STRING, &mut inner);
+        varint::encode(value.len() as u64, &mut inner);
+        inner.extend_from_slice(value);
+
+        let mut kvp = Vec::new();
+        varint::encode(PROP_IMMUTABLE_PROPERTIES, &mut kvp);
+        varint::encode(inner.len() as u64, &mut kvp);
+        kvp.extend_from_slice(&inner);
+
+        let mut wire = Vec::new();
+        varint::encode(kvp.len() as u64, &mut wire);
+        wire.extend_from_slice(&kvp);
+        wire
+    }
+
+    #[test]
+    fn codec_string_top_level_roundtrip() {
+        // Object scope の CODEC_STRING (0x11) を最上位に構築・取得できること。
+        let codec = "av01.0.04M.08";
+        let mut props = ObjectProperties::new();
+        props.push(ObjectProperty {
+            prop_type: PROP_CODEC_STRING,
+            value: ObjectPropertyValue::Bytes(codec.as_bytes().to_vec()),
+        });
+        let mut buf = Vec::new();
+        props
+            .encode(&mut buf)
+            .expect("正当な CODEC_STRING の encode は成功する");
+        let (decoded, consumed) =
+            ObjectProperties::decode(&buf).expect("正当な CODEC_STRING の decode は成功する");
+        assert_eq!(consumed, buf.len());
+        assert_eq!(
+            codec_string_bytes(&decoded),
+            Some(codec.as_bytes()),
+            "最上位の CODEC_STRING を取得できること"
+        );
+    }
+
+    #[test]
+    fn codec_string_inside_immutable_properties_roundtrip() {
+        // IMMUTABLE_PROPERTIES の内側だけに CODEC_STRING を置いても構築・decode でき、
+        // 内側の KVP 列と、Track スコープの codec_string で文字列として取得できること。
+        let codec = "vp09.00.10.08";
+        let mut inner = ObjectProperties::new();
+        inner.push(ObjectProperty {
+            prop_type: PROP_CODEC_STRING,
+            value: ObjectPropertyValue::Bytes(codec.as_bytes().to_vec()),
+        });
+        let mut inner_buf = Vec::new();
+        inner
+            .encode(&mut inner_buf)
+            .expect("内側の CODEC_STRING の encode は成功する");
+        let (_, length_field_len) =
+            varint::decode(&inner_buf).expect("Properties Length を読めること");
+        let inner_kvp = inner_buf[length_field_len..].to_vec();
+
+        let mut props = ObjectProperties::new();
+        props.push(ObjectProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: ObjectPropertyValue::Bytes(inner_kvp.clone()),
+        });
+        let mut buf = Vec::new();
+        props
+            .encode(&mut buf)
+            .expect("IMMUTABLE_PROPERTIES を含む encode は成功する");
+        let (decoded, _) =
+            ObjectProperties::decode(&buf).expect("IMMUTABLE_PROPERTIES を含む decode は成功する");
+        // ObjectProperties は IMMUTABLE_PROPERTIES の内側を Bytes として保持するため、
+        // 内側の KVP 列が往復で変わらないことを固定する。
+        assert_eq!(
+            decoded.as_slice().first().and_then(|p| match &p.value {
+                ObjectPropertyValue::Bytes(b) => Some(b.as_slice()),
+                ObjectPropertyValue::VarInt(_) => None,
+            }),
+            Some(inner_kvp.as_slice()),
+            "IMMUTABLE_PROPERTIES の内側のバイト列を保持すること"
+        );
+        assert_eq!(
+            codec_string_bytes(&decoded),
+            None,
+            "外側には 0x11 が無いこと"
+        );
+        // ObjectProperties は bytes 型の型付き accessor を持たないため、同じ wire を
+        // LocProperties で decode して文字列として取得できることを固定する (KVP 形式は共通)。
+        let loc_wire = wire_with_inner_codec_string(codec.as_bytes());
+        let (loc_props, _) = shiguredo_moqt::loc::LocProperties::decode(&loc_wire)
+            .expect("同じ wire は LocProperties として decode できること");
+        assert_eq!(
+            loc_props.codec_string(),
+            Ok(Some(codec)),
+            "IMMUTABLE_PROPERTIES の内側の CODEC_STRING を文字列として取得できること"
+        );
+    }
+
+    #[test]
+    fn codec_string_invalid_utf8_rejected_on_decode() {
+        // 最上位の CODEC_STRING が不正な UTF-8 なら、Object Properties の decode も
+        // MALFORMED_KEY_VALUE (MalformedKeyValue) で拒否すること。
+        let wire = wire_with_top_level_codec_string(&[0xFF, 0xFE]);
+        assert!(matches!(
+            ObjectProperties::decode(&wire),
+            Err(MessageError::MalformedKeyValue(_))
+        ));
+    }
+
+    #[test]
+    fn codec_string_invalid_utf8_inside_immutable_rejected_on_decode() {
+        // IMMUTABLE_PROPERTIES の内側の CODEC_STRING の不正 UTF-8 も decode で拒否すること。
+        let wire = wire_with_inner_codec_string(&[0x80]);
+        assert!(matches!(
+            ObjectProperties::decode(&wire),
+            Err(MessageError::MalformedKeyValue(_))
+        ));
+    }
+
+    #[test]
+    fn codec_string_invalid_utf8_rejected_on_encode() {
+        // ローカル入力の encode でも、最上位と IMMUTABLE_PROPERTIES 内側の不正 UTF-8 を
+        // 拒否すること。
+        let mut props = ObjectProperties::new();
+        props.push(ObjectProperty {
+            prop_type: PROP_CODEC_STRING,
+            value: ObjectPropertyValue::Bytes(vec![0xFF]),
+        });
+        let mut buf = Vec::new();
+        assert!(matches!(
+            props.encode(&mut buf),
+            Err(MessageError::MalformedKeyValue(_))
+        ));
+
+        let mut inner = Vec::new();
+        varint::encode(PROP_CODEC_STRING, &mut inner);
+        varint::encode(1, &mut inner);
+        inner.push(0xFF);
+        let mut props = ObjectProperties::new();
+        props.push(ObjectProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: ObjectPropertyValue::Bytes(inner),
+        });
+        let mut buf = Vec::new();
+        assert!(matches!(
+            props.encode(&mut buf),
+            Err(MessageError::MalformedKeyValue(_))
+        ));
+    }
+
+    #[test]
+    fn codec_string_varint_value_rejected_on_encode() {
+        // CODEC_STRING は奇数型 (長さ付きバイト列) であるため、VarInt 値での encode は
+        // 型と値形式の不一致として ProtocolViolation で拒否されること。
+        let mut props = ObjectProperties::new();
+        props.push(ObjectProperty {
+            prop_type: PROP_CODEC_STRING,
+            value: ObjectPropertyValue::VarInt(1),
+        });
+        let mut buf = Vec::new();
+        assert!(matches!(
+            props.encode(&mut buf),
+            Err(MessageError::ProtocolViolation(_))
+        ));
+    }
+
+    #[test]
+    fn duplicate_codec_string_is_malformed_track() {
+        // CODEC_STRING を既知の単一インスタンス型として扱うため、重複は受信経路で
+        // MalformedTrack (decode の validate) / ローカル encode で ProtocolViolation。
+        let mut wire = Vec::new();
+        let mut kvp = Vec::new();
+        for (index, codec) in [b"av01".as_slice(), b"vp09".as_slice()]
+            .into_iter()
+            .enumerate()
+        {
+            // 1 個目は 0x11 の delta、2 個目は delta=0 で同じ型を表す
+            if index == 0 {
+                varint::encode(PROP_CODEC_STRING, &mut kvp);
+            } else {
+                varint::encode(0, &mut kvp);
+            }
+            varint::encode(codec.len() as u64, &mut kvp);
+            kvp.extend_from_slice(codec);
+        }
+        varint::encode(kvp.len() as u64, &mut wire);
+        wire.extend_from_slice(&kvp);
+        assert!(matches!(
+            ObjectProperties::decode(&wire),
+            Err(MessageError::MalformedTrack(_))
+        ));
+
+        let mut props = ObjectProperties::new();
+        for codec in [b"av01".as_slice(), b"vp09".as_slice()] {
+            props.push(ObjectProperty {
+                prop_type: PROP_CODEC_STRING,
+                value: ObjectPropertyValue::Bytes(codec.to_vec()),
+            });
+        }
+        let mut buf = Vec::new();
+        assert!(matches!(
+            props.encode(&mut buf),
+            Err(MessageError::ProtocolViolation(_))
+        ));
+    }
+}

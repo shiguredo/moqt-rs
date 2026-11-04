@@ -208,7 +208,7 @@ fn flush(encoder: &mut Encoder) {
     while encoder.next_frame().is_some() {}
 }
 
-/// Audio Config プロパティ (LOC draft-ietf-moq-loc-04 §2.3.3.1) に載せる
+/// Audio Config プロパティ (LOC draft-ietf-moq-loc-05 §2.3.3.1) に載せる
 /// AudioSpecificConfig を構築する
 ///
 /// 構成は ISO/IEC 14496-3 §1.6.2.1 (AudioSpecificConfig) の

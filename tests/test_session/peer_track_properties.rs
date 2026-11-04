@@ -8,7 +8,8 @@
 //! draft-ietf-moq-loc-05 §3.1.2 (Immutable Properties) は、relay から見える不変の LOC
 //! プロパティを IMMUTABLE_PROPERTIES として符号化することを SHOULD とする。
 //! draft-ietf-moq-loc-05 §6.1 (MOQ Properties Registry) Table 1 は 0x08 (TIMESCALE) /
-//! 0x0D (VIDEO_CONFIG) / 0x0F (AUDIO_CONFIG) の Scope を "Track, Object" と定める。
+//! 0x0D (VIDEO_CONFIG) / 0x0F (AUDIO_CONFIG) / 0x11 (CODEC_STRING) の Scope を
+//! "Track, Object" と定める。
 //!
 //! 本ファイルは、それらの Track スコープ値が peer から届いたときに application が
 //! `Session::subscription(request_id)` 経由で取得できることを、公開入口
@@ -17,7 +18,9 @@
 //! 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
 
 use super::*;
-use shiguredo_moqt::loc::{PROP_AUDIO_CONFIG, PROP_TIMESCALE, PROP_VIDEO_CONFIG};
+use shiguredo_moqt::loc::{
+    PROP_AUDIO_CONFIG, PROP_CODEC_STRING, PROP_TIMESCALE, PROP_VIDEO_CONFIG,
+};
 use shiguredo_moqt::message_parameter::PARAM_INCLUDE_PROPERTIES;
 use shiguredo_moqt::session::types::{DynamicGroupsSupport, Subscription};
 use shiguredo_moqt::track_properties::{
@@ -37,13 +40,16 @@ const AUDIO_CONFIG: &[u8] = b"OpusHead";
 /// TIMESCALE (0x08) として送る 1 秒あたりのユニット数 (48 kHz)
 const TIMESCALE: u64 = 48_000;
 
+/// CODEC_STRING (0x11) として送る WebCodecs Codec Registry の codec 値 (AV1)
+const CODEC_STRING: &str = "av01.0.04M.08";
+
 /// この実装が意味を理解しない未知の奇数型 Property (複数インスタンスが許される)
 const UNKNOWN_ODD_TYPE: u64 = 0x1001;
 
 /// 未知の奇数型 Property の値 (加工されずに保持されることの確認用)
 const UNKNOWN_ODD_VALUE: &[u8] = &[0xAA, 0xBB];
 
-/// Track スコープの LOC プロパティ 3 つを最上位リストに持つ Track Properties
+/// Track スコープの LOC プロパティ 4 つを最上位リストに持つ Track Properties
 fn loc_track_properties() -> TrackProperties {
     let mut tp = TrackProperties::new();
     tp.push(TrackProperty {
@@ -58,10 +64,14 @@ fn loc_track_properties() -> TrackProperties {
         prop_type: PROP_AUDIO_CONFIG,
         value: TrackPropertyValue::Bytes(AUDIO_CONFIG.to_vec()),
     });
+    tp.push(TrackProperty {
+        prop_type: PROP_CODEC_STRING,
+        value: TrackPropertyValue::Bytes(CODEC_STRING.as_bytes().to_vec()),
+    });
     tp
 }
 
-/// IMMUTABLE_PROPERTIES (0x0B) の内側だけに LOC プロパティ 3 つを持つ Track Properties
+/// IMMUTABLE_PROPERTIES (0x0B) の内側だけに LOC プロパティ 4 つを持つ Track Properties
 ///
 /// draft-ietf-moq-loc-05 §3.1.2 (Immutable Properties) が SHOULD とする符号化を再現する。
 /// 内側は `TrackProperties::encode` で組み立てることで、実装が生成するのと同じ
@@ -79,7 +89,7 @@ fn loc_track_properties_in_immutable() -> TrackProperties {
     tp
 }
 
-/// 既知の MOQT 値 5 つ・LOC プロパティ 3 つ・未知の奇数型 1 つを併せ持つ Track Properties
+/// 既知の MOQT 値 5 つ・LOC プロパティ 4 つ・未知の奇数型 1 つを併せ持つ Track Properties
 ///
 /// 既知 MOQT 値の取り込みが LOC 値や未知の Property の追加で変わらないことを確かめる
 /// ための入力である。
@@ -114,9 +124,9 @@ fn track_properties_with_known_moq_and_loc_values() -> TrackProperties {
 
 /// 受信側 subscription の `peer_track_properties` から LOC の Track スコープ値を検証する
 ///
-/// 0x0D / 0x0F は奇数型なので `find_bytes` で生バイト列として、0x08 は偶数型なので
-/// `find_varint` で varint として取得できなければならない。型を取り違えた探索が
-/// 値を返さないことも併せて確認する。
+/// 0x0D / 0x0F / 0x11 は奇数型なので `find_bytes` で生バイト列として、0x08 は偶数型なので
+/// `find_varint` で varint として取得できなければならない。0x11 は `codec_string` で
+/// UTF-8 文字列として取得できること、型を取り違えた探索が値を返さないことも併せて確認する。
 fn assert_loc_track_properties(sub: &Subscription) {
     assert_eq!(
         sub.peer_track_properties.find_bytes(PROP_VIDEO_CONFIG),
@@ -127,6 +137,16 @@ fn assert_loc_track_properties(sub: &Subscription) {
         sub.peer_track_properties.find_bytes(PROP_AUDIO_CONFIG),
         Some(AUDIO_CONFIG),
         "AUDIO_CONFIG (0x0F) の生バイト列が取得できること"
+    );
+    assert_eq!(
+        sub.peer_track_properties.find_bytes(PROP_CODEC_STRING),
+        Some(CODEC_STRING.as_bytes()),
+        "CODEC_STRING (0x11) の生バイト列が取得できること"
+    );
+    assert_eq!(
+        sub.peer_track_properties.codec_string(),
+        Ok(Some(CODEC_STRING)),
+        "CODEC_STRING (0x11) を UTF-8 文字列として取得できること"
     );
     assert_eq!(
         sub.peer_track_properties.find_varint(PROP_TIMESCALE),

@@ -1,14 +1,14 @@
 use pbt::common::test_runner;
 use shiguredo_moqt::loc::{
     LocProperties, LocProperty, LocPropertyValue, PROP_AUDIO_CONFIG, PROP_AUDIO_LEVEL,
-    PROP_TIMESCALE, PROP_TIMESTAMP, PROP_VIDEO_CONFIG, PROP_VIDEO_FRAME_MARKING,
+    PROP_CODEC_STRING, PROP_TIMESCALE, PROP_TIMESTAMP, PROP_VIDEO_CONFIG, PROP_VIDEO_FRAME_MARKING,
 };
 use shiguredo_moqt::track_properties::PROP_IMMUTABLE_PROPERTIES;
 
 /// 空を含む LOC プロパティコレクションを生成する
 ///
 /// draft-ietf-moq-transport-23 §11.1.2 (Object Properties) / §11.3.1 (Subgroup Header) に従い、空 (Properties Length = 0) も合法。
-/// draft-ietf-moq-loc-04 の既知プロパティを組み合わせる。同一 prop_id の重複は含まない。
+/// draft-ietf-moq-loc-05 の既知プロパティを組み合わせる。同一 prop_id の重複は含まない。
 fn sample_loc_properties(ctx: &mut noprop::TestCaseContext) -> LocProperties {
     let has_vfm = noprop::sample_bool(ctx);
     let has_ts = noprop::sample_bool(ctx);
@@ -16,6 +16,7 @@ fn sample_loc_properties(ctx: &mut noprop::TestCaseContext) -> LocProperties {
     let has_al = noprop::sample_bool(ctx);
     let has_vc = noprop::sample_bool(ctx);
     let has_ac = noprop::sample_bool(ctx);
+    let has_cs = noprop::sample_bool(ctx);
     let vfm_len = noprop::sample_usize_in(ctx, 1..=4);
     let vfm_bytes = noprop::sample_bytes_vec(ctx, vfm_len); // video_frame_marking: 長さ 1-4 bytes
     let ts_val = noprop::sample_u64_in(ctx, 0..=u64::MAX); // timestamp: vi64 1-9 bytes (u64 全域)
@@ -25,10 +26,13 @@ fn sample_loc_properties(ctx: &mut noprop::TestCaseContext) -> LocProperties {
     let vc_bytes = noprop::sample_bytes_vec(ctx, vc_len); // video_config の値
     let ac_len = noprop::sample_usize_in(ctx, 0..=100);
     let ac_bytes = noprop::sample_bytes_vec(ctx, ac_len); // audio_config の値
+    let cs_len = noprop::sample_usize_in(ctx, 0..=100);
+    // codec_string: WebCodecs Codec Registry の codec 値に相当する UTF-8 (ASCII) 文字列
+    let cs_val = noprop::sample_ascii_printable_string(ctx, cs_len);
 
     // encode は prop_id 昇順にソートするため、ラウンドトリップが恒等になるよう昇順で push する
     // 昇順: 0x08 (Timescale), 0x09 (VFM), 0x0C (AudioLevel), 0x0D (VideoConfig),
-    // 0x0F (AudioConfig), 0x10 (Timestamp)
+    // 0x0F (AudioConfig), 0x10 (Timestamp), 0x11 (CodecString)
     let mut props = LocProperties::new();
     if has_tsc {
         props.push(LocProperty {
@@ -64,6 +68,12 @@ fn sample_loc_properties(ctx: &mut noprop::TestCaseContext) -> LocProperties {
         props.push(LocProperty {
             prop_id: PROP_TIMESTAMP,
             value: LocPropertyValue::VarInt(ts_val),
+        });
+    }
+    if has_cs {
+        props.push(LocProperty {
+            prop_id: PROP_CODEC_STRING,
+            value: LocPropertyValue::Bytes(cs_val.into_bytes()),
         });
     }
     props
@@ -111,13 +121,16 @@ fn roundtrip_including_empty() -> noprop::TestResult {
 ///
 /// (has_ts, has_tsc) は (true, false) / (false, true) / (true, true) の 3 状態から
 /// valid-by-construction で選び、assume (reject) なしに has_ts || has_tsc を保証する。
+/// CODEC_STRING は有無と Some / None の両方のブランチを観測する。
 #[test]
 fn accessor_consistency() -> noprop::TestResult {
-    // timestamp / timescale の Some と None の両ブランチの観測を数える
+    // timestamp / timescale / codec_string の Some と None の両ブランチの観測を数える
     let ts_some_seen = std::cell::Cell::new(false);
     let ts_none_seen = std::cell::Cell::new(false);
     let tsc_some_seen = std::cell::Cell::new(false);
     let tsc_none_seen = std::cell::Cell::new(false);
+    let cs_some_seen = std::cell::Cell::new(false);
+    let cs_none_seen = std::cell::Cell::new(false);
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
         let (has_ts, has_tsc) = match noprop::sample_weighted_index(ctx, &[1, 1, 1]) {
@@ -127,6 +140,9 @@ fn accessor_consistency() -> noprop::TestResult {
         };
         let ts_val = noprop::sample_u64_in(ctx, 0..=u64::MAX);
         let tsc_val = noprop::sample_u64_in(ctx, 0..=u64::MAX);
+        let has_cs = noprop::sample_bool(ctx);
+        let cs_len = noprop::sample_usize_in(ctx, 0..=100);
+        let cs_val = noprop::sample_ascii_printable_string(ctx, cs_len);
 
         let mut props = LocProperties::new();
         if has_ts {
@@ -139,6 +155,12 @@ fn accessor_consistency() -> noprop::TestResult {
             props.push(LocProperty {
                 prop_id: PROP_TIMESCALE,
                 value: LocPropertyValue::VarInt(tsc_val),
+            });
+        }
+        if has_cs {
+            props.push(LocProperty {
+                prop_id: PROP_CODEC_STRING,
+                value: LocPropertyValue::Bytes(cs_val.clone().into_bytes()),
             });
         }
 
@@ -162,6 +184,13 @@ fn accessor_consistency() -> noprop::TestResult {
             assert_eq!(decoded.timescale(), None);
             tsc_none_seen.set(true);
         }
+        if has_cs {
+            assert_eq!(decoded.codec_string(), Ok(Some(cs_val.as_str())));
+            cs_some_seen.set(true);
+        } else {
+            assert_eq!(decoded.codec_string(), Ok(None));
+            cs_none_seen.set(true);
+        }
         Ok(())
     })?;
     assert!(
@@ -179,6 +208,14 @@ fn accessor_consistency() -> noprop::TestResult {
     assert!(
         tsc_none_seen.get(),
         "timescale が None を返すケースが 1 つも観測されなかった\n{runner}"
+    );
+    assert!(
+        cs_some_seen.get(),
+        "codec_string が Some を返すケースが 1 つも観測されなかった\n{runner}"
+    );
+    assert!(
+        cs_none_seen.get(),
+        "codec_string が None を返すケースが 1 つも観測されなかった\n{runner}"
     );
     Ok(())
 }
@@ -220,6 +257,7 @@ fn immutable_properties_are_searched_like_top_level() -> noprop::TestResult {
         assert_eq!(decoded.audio_level(), inner.audio_level());
         assert_eq!(decoded.video_config(), inner.video_config());
         assert_eq!(decoded.audio_config(), inner.audio_config());
+        assert_eq!(decoded.codec_string(), inner.codec_string());
 
         // find_varint / find_bytes も内側の値に到達する
         assert_eq!(
@@ -245,6 +283,10 @@ fn immutable_properties_are_searched_like_top_level() -> noprop::TestResult {
         assert_eq!(
             decoded.find_bytes(PROP_VIDEO_FRAME_MARKING),
             inner.find_bytes(PROP_VIDEO_FRAME_MARKING)
+        );
+        assert_eq!(
+            decoded.find_bytes(PROP_CODEC_STRING),
+            inner.find_bytes(PROP_CODEC_STRING)
         );
 
         // iter / len は最上位リストだけを対象にする

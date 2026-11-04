@@ -1,4 +1,5 @@
 use pbt::common::test_runner;
+use shiguredo_moqt::loc::PROP_CODEC_STRING;
 use shiguredo_moqt::object_properties::{ObjectProperties, ObjectProperty, ObjectPropertyValue};
 use shiguredo_moqt::track_properties::{
     PROP_DEFAULT_PUBLISHER_GROUP_ORDER, PROP_DEFAULT_PUBLISHER_PRIORITY, PROP_DYNAMIC_GROUPS,
@@ -38,6 +39,11 @@ fn sample_unique_non_immutable_properties(
         }
         let value = if id.is_multiple_of(2) {
             ObjectPropertyValue::VarInt(id.wrapping_mul(3))
+        } else if id == PROP_CODEC_STRING {
+            // CODEC_STRING (0x11) の値は UTF-8 文字列であり、encode が不正な UTF-8 を
+            // 拒否するため、有効な ASCII 文字列を生成する
+            // (draft-ietf-moq-loc-05 §2.3.1.3 (Codec String))。
+            ObjectPropertyValue::Bytes(b"av01.0.04M.08".to_vec())
         } else {
             ObjectPropertyValue::Bytes(vec![(id & 0xff) as u8; (id % 8) as usize])
         };

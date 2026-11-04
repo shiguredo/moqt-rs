@@ -76,7 +76,7 @@ impl AudioEncoder {
         }
     }
 
-    /// Audio Config プロパティ (LOC draft-ietf-moq-loc-04 §2.3.3.1) に載せる
+    /// Audio Config プロパティ (LOC draft-ietf-moq-loc-05 §2.3.3.1) に載せる
     /// codec 固有の設定データを構築する
     ///
     /// - Opus: OpusHead (RFC 7845 §5.1)

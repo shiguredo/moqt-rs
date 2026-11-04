@@ -269,7 +269,7 @@ fn start_publisher(url: &str, transport: &str, namespace: &str) -> Publisher {
 /// 音声だけを datagram で配信する publisher を起動する
 ///
 /// 音声は既定で OBJECT_DATAGRAM 配送になる
-/// (draft-ietf-moq-loc-04 §4.1 (Application with one audio track))。namespace の解決は
+/// (draft-ietf-moq-loc-05 §4.1 (Application with one audio track))。namespace の解決は
 /// [`start_publisher`] と同じく MSF fragment から行う。冗長度は既定 (1) を使う。
 fn start_audio_publisher(url: &str, transport: &str, namespace: &str) -> Publisher {
     start_audio_publisher_with_redundancy(url, transport, namespace, None)
@@ -531,7 +531,7 @@ async fn publish_and_subscribe_roundtrip() {
 /// relay を介した datagram 音声の往復を検証する
 ///
 /// publisher は音声を OBJECT_DATAGRAM 配送にする (既定)
-/// (draft-ietf-moq-loc-04 §4.1 (Application with one audio track))。subscriber が datagram の
+/// (draft-ietf-moq-loc-05 §4.1 (Application with one audio track))。subscriber が datagram の
 /// payload を decode していなければ、音声フレームは 1 つも届かない。
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "MOQT_E2E_URL を設定したうえで --ignored を付けて実行する"]

@@ -2,10 +2,43 @@ use shiguredo_moqt::{
     error::MessageError,
     loc::{
         LocProperties, LocProperty, LocPropertyValue, PROP_AUDIO_CONFIG, PROP_AUDIO_LEVEL,
-        PROP_TIMESCALE, PROP_TIMESTAMP, PROP_VIDEO_CONFIG, PROP_VIDEO_FRAME_MARKING,
+        PROP_CODEC_STRING, PROP_TIMESCALE, PROP_TIMESTAMP, PROP_VIDEO_CONFIG,
+        PROP_VIDEO_FRAME_MARKING,
     },
     track_properties::PROP_IMMUTABLE_PROPERTIES,
 };
+
+/// `LocProperties::encode` が付ける Properties Length を除いた KVP 列を返す
+///
+/// IMMUTABLE_PROPERTIES (0x0B) の値は外側の Properties Length を伴わない delta-key
+/// KVP 列である (draft-ietf-moq-transport-23 §10.7 (Immutable Properties) / §8.3
+/// (Key-Value-Pair Structure))。内側のプロパティ列は `LocProperties` の encode で
+/// 正規の delta-key 表現を作り、先頭の Properties Length だけを読み飛ばして取り出す。
+fn kvp_sequence(props: &LocProperties) -> Vec<u8> {
+    let encoded = props
+        .encode()
+        .expect("テストフィクスチャの内側 KVP の encode は成功する");
+    let (_, length_field_len) =
+        shiguredo_moqt::varint::decode(&encoded).expect("Properties Length の varint を読めること");
+    encoded[length_field_len..].to_vec()
+}
+
+/// 外側に IMMUTABLE_PROPERTIES (0x0B) だけを持つ wire 形式を組み立てる
+///
+/// `inner` は 0x0B の値としてそのまま格納する delta-key KVP 列である。encode は 0x0B の
+/// 内側の KVP を検証するため、破損した内側を decode に通すフィクスチャはこの helper で
+/// 直接組み立てる。
+fn wire_with_inner_bytes(inner: &[u8]) -> Vec<u8> {
+    let mut kvp = Vec::new();
+    shiguredo_moqt::varint::encode(PROP_IMMUTABLE_PROPERTIES, &mut kvp);
+    shiguredo_moqt::varint::encode(inner.len() as u64, &mut kvp);
+    kvp.extend_from_slice(inner);
+
+    let mut wire = Vec::new();
+    shiguredo_moqt::varint::encode(kvp.len() as u64, &mut wire);
+    wire.extend_from_slice(&kvp);
+    wire
+}
 
 mod accessors {
     use super::*;
@@ -74,6 +107,471 @@ mod accessors {
         assert_eq!(props.video_frame_marking(), None);
         assert_eq!(props.audio_level(), None);
         assert_eq!(props.video_config(), None);
+        assert_eq!(props.codec_string(), Ok(None));
+    }
+}
+
+mod codec_string {
+    use super::*;
+
+    /// 最上位の CODEC_STRING (0x11) を任意のバイト列で持つ wire 形式を組み立てる
+    ///
+    /// encode は不正な UTF-8 を拒否するため、decode の検証用に入力を直接組み立てる。
+    fn wire_with_top_level_codec_string(value: &[u8]) -> Vec<u8> {
+        let mut inner = Vec::new();
+        shiguredo_moqt::varint::encode(PROP_CODEC_STRING, &mut inner);
+        shiguredo_moqt::varint::encode(value.len() as u64, &mut inner);
+        inner.extend_from_slice(value);
+        let mut wire = Vec::new();
+        shiguredo_moqt::varint::encode(inner.len() as u64, &mut wire);
+        wire.extend_from_slice(&inner);
+        wire
+    }
+
+    /// IMMUTABLE_PROPERTIES (0x0B) の内側に CODEC_STRING を任意のバイト列で持つ wire 形式
+    ///
+    /// 外側の encode は内側の CODEC_STRING の UTF-8 も検証するため、decode の検証用入力を
+    /// 直接組み立てる。
+    fn wire_with_inner_codec_string(value: &[u8]) -> Vec<u8> {
+        let mut inner = Vec::new();
+        shiguredo_moqt::varint::encode(PROP_CODEC_STRING, &mut inner);
+        shiguredo_moqt::varint::encode(value.len() as u64, &mut inner);
+        inner.extend_from_slice(value);
+        wire_with_inner_bytes(&inner)
+    }
+
+    #[test]
+    fn codec_string_top_level() {
+        // 最上位の CODEC_STRING (0x11) を構築・取得できること。UTF-8 のバイト長が共通 KVP の
+        // Length フィールドに入り、独自の内側 length が追加されないことを wire で固定する。
+        let codec = "av01.0.04M.08";
+        let mut props = LocProperties::new();
+        props.push(LocProperty {
+            prop_id: PROP_CODEC_STRING,
+            value: LocPropertyValue::Bytes(codec.as_bytes().to_vec()),
+        });
+        assert_eq!(props.codec_string(), Ok(Some(codec)));
+
+        let encoded = props
+            .encode()
+            .expect("正当なテスト入力の encode は成功する");
+        // [Properties Length][delta=0x11][Length=13][UTF-8 の値]
+        assert_eq!(encoded[0], 2 + codec.len() as u8);
+        assert_eq!(encoded[1], PROP_CODEC_STRING as u8);
+        assert_eq!(encoded[2], codec.len() as u8);
+        assert_eq!(&encoded[3..], codec.as_bytes());
+
+        let (decoded, consumed) =
+            LocProperties::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(consumed, encoded.len());
+        assert_eq!(decoded.codec_string(), Ok(Some(codec)));
+        assert_eq!(
+            decoded.find_bytes(PROP_CODEC_STRING),
+            Some(codec.as_bytes()),
+            "生バイト列の accessor でも同じ値が取得できること"
+        );
+    }
+
+    #[test]
+    fn codec_string_inside_immutable_properties() {
+        // draft-ietf-moq-transport-23 §10.7 (Immutable Properties) は Property を mutable
+        // リストと IMMUTABLE_PROPERTIES の内側のどちらに置いてもよいとし、LOC 側の
+        // draft-ietf-moq-loc-05 §3.1.2 (Immutable Properties) は relay から見える不変の
+        // LOC プロパティを内側に置くことを SHOULD とする。最上位には 0x0B だけを置き、
+        // CODEC_STRING を内側にだけ持つ Object でも取得できることを固定する。
+        let codec = "vp09.00.10.08";
+        let mut inner = LocProperties::new();
+        inner.push(LocProperty {
+            prop_id: PROP_CODEC_STRING,
+            value: LocPropertyValue::Bytes(codec.as_bytes().to_vec()),
+        });
+        let wire = wire_with_inner_bytes(&kvp_sequence(&inner));
+        let (decoded, consumed) =
+            LocProperties::decode(&wire).expect("IMMUTABLE_PROPERTIES の decode は成功すること");
+        assert_eq!(consumed, wire.len());
+        assert_eq!(decoded.len(), 1, "最上位は 0x0B だけであること");
+        assert_eq!(decoded.codec_string(), Ok(Some(codec)));
+        assert_eq!(
+            decoded.find_bytes(PROP_CODEC_STRING),
+            Some(codec.as_bytes())
+        );
+    }
+
+    #[test]
+    fn codec_string_missing_is_ok_none() {
+        // CODEC_STRING が無い場合はエラーではなく Ok(None) であり、他のプロパティが
+        // あっても欠落として扱うこと。
+        let empty = LocProperties::new();
+        assert_eq!(empty.codec_string(), Ok(None));
+
+        let mut props = LocProperties::new();
+        props.push(LocProperty {
+            prop_id: PROP_TIMESTAMP,
+            value: LocPropertyValue::VarInt(1),
+        });
+        assert_eq!(props.codec_string(), Ok(None));
+    }
+
+    #[test]
+    fn codec_string_invalid_utf8_is_error() {
+        // 欠落 (Ok(None)) と不正 UTF-8 (Err) を区別すること。最上位と、push で組み立てた
+        // IMMUTABLE_PROPERTIES の内側の両方で Err になることを固定する。
+        let mut top_level = LocProperties::new();
+        top_level.push(LocProperty {
+            prop_id: PROP_CODEC_STRING,
+            value: LocPropertyValue::Bytes(vec![0xFF, 0xFE]),
+        });
+        assert!(matches!(
+            top_level.codec_string(),
+            Err(MessageError::MalformedKeyValue(_))
+        ));
+
+        // 内側は encode を通すと検証で拒否されるため、KVP 列を直接組み立てる。push だけで
+        // 組み立てた outer は encode を経由しないので、accessor の検証だけを観測できる。
+        let mut inner_bytes = Vec::new();
+        shiguredo_moqt::varint::encode(PROP_CODEC_STRING, &mut inner_bytes);
+        shiguredo_moqt::varint::encode(1, &mut inner_bytes);
+        inner_bytes.push(0x80);
+        let mut outer = LocProperties::new();
+        outer.push(LocProperty {
+            prop_id: PROP_IMMUTABLE_PROPERTIES,
+            value: LocPropertyValue::Bytes(inner_bytes),
+        });
+        assert!(matches!(
+            outer.codec_string(),
+            Err(MessageError::MalformedKeyValue(_))
+        ));
+    }
+
+    #[test]
+    fn codec_string_multibyte_roundtrip() {
+        // UTF-8 のマルチバイト文字も、Length にバイト数が入って往復すること。WebCodecs の
+        // codec 値は ASCII だが、値の型は UTF-8 文字列であり、バイト長と文字数の混同を
+        // 防ぐためにマルチバイトを含む値で固定する。
+        let codec = "av01.0.04M.08+日本語";
+        let mut props = LocProperties::new();
+        props.push(LocProperty {
+            prop_id: PROP_CODEC_STRING,
+            value: LocPropertyValue::Bytes(codec.as_bytes().to_vec()),
+        });
+        let encoded = props
+            .encode()
+            .expect("正当なテスト入力の encode は成功する");
+        assert_eq!(encoded[2], codec.len() as u8);
+        let (decoded, _) =
+            LocProperties::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(decoded.codec_string(), Ok(Some(codec)));
+        assert_eq!(
+            decoded.find_bytes(PROP_CODEC_STRING).map(<[u8]>::len),
+            Some(codec.len()),
+            "Length は文字数ではなく UTF-8 のバイト数であること"
+        );
+    }
+
+    #[test]
+    fn encode_rejects_invalid_codec_string_utf8() {
+        // 最上位の CODEC_STRING が不正な UTF-8 なら、ローカル入力の encode でも
+        // MALFORMED_KEY_VALUE の分類で拒否すること。
+        let mut props = LocProperties::new();
+        props.push(LocProperty {
+            prop_id: PROP_CODEC_STRING,
+            value: LocPropertyValue::Bytes(vec![0xFF, 0xFE]),
+        });
+        assert!(matches!(
+            props.encode(),
+            Err(MessageError::MalformedKeyValue(_))
+        ));
+    }
+
+    #[test]
+    fn encode_rejects_invalid_codec_string_utf8_inside_immutable() {
+        // IMMUTABLE_PROPERTIES の内側が解析できる場合、その中の CODEC_STRING の不正 UTF-8 も
+        // encode で拒否すること。
+        let mut inner = Vec::new();
+        shiguredo_moqt::varint::encode(PROP_CODEC_STRING, &mut inner);
+        shiguredo_moqt::varint::encode(2, &mut inner);
+        inner.extend_from_slice(&[0xFF, 0xFE]);
+
+        let mut outer = LocProperties::new();
+        outer.push(LocProperty {
+            prop_id: PROP_IMMUTABLE_PROPERTIES,
+            value: LocPropertyValue::Bytes(inner),
+        });
+        assert!(matches!(
+            outer.encode(),
+            Err(MessageError::MalformedKeyValue(_))
+        ));
+    }
+
+    #[test]
+    fn encode_rejects_unparseable_immutable_properties() {
+        // 内側 KVP が解析できない 0x0B は、ローカル入力の検証として encode が拒否すること。
+        // decode の寛容な扱い (内側の構造破損を検出しない) とは別に、送信側は malformed な
+        // Track を生成しない。
+        //
+        // (1) 入れ子の 0x0B は malformed Track であるため ProtocolViolation。
+        let mut nested = Vec::new();
+        shiguredo_moqt::varint::encode(PROP_IMMUTABLE_PROPERTIES, &mut nested);
+        shiguredo_moqt::varint::encode(0, &mut nested);
+
+        let mut outer = LocProperties::new();
+        outer.push(LocProperty {
+            prop_id: PROP_IMMUTABLE_PROPERTIES,
+            value: LocPropertyValue::Bytes(nested),
+        });
+        let err = outer
+            .encode()
+            .expect_err("入れ子の 0x0B を持つ内側は encode で拒否されること");
+        assert!(
+            matches!(err, MessageError::ProtocolViolation(_)),
+            "入れ子の 0x0B は ProtocolViolation であること: {err:?}"
+        );
+
+        // (2) 宣言長が残りバイトを超える内側 KVP も、内側の走査エラーとして拒否されること。
+        let mut truncated = Vec::new();
+        shiguredo_moqt::varint::encode(0x1001, &mut truncated); // 未知の奇数 ID
+        shiguredo_moqt::varint::encode(5, &mut truncated); // 宣言長 5
+        truncated.push(0xAA); // 実体は 1 バイトだけ (宣言長超過)
+
+        let mut outer = LocProperties::new();
+        outer.push(LocProperty {
+            prop_id: PROP_IMMUTABLE_PROPERTIES,
+            value: LocPropertyValue::Bytes(truncated),
+        });
+        assert!(
+            matches!(outer.encode(), Err(MessageError::UnexpectedEof)),
+            "宣言長が残りバイトを超える内側は切り詰めとして UnexpectedEof になること"
+        );
+
+        // (3) 内側に単一に限られる既知 ID の重複 (0x11 を 2 つ) がある場合も、ローカル入力の
+        // 検証として ProtocolViolation で拒否されること (受信 Track の malformed 判定に使う
+        // MalformedTrack を encode から返さない)。
+        let mut duplicate = Vec::new();
+        shiguredo_moqt::varint::encode(PROP_CODEC_STRING, &mut duplicate);
+        shiguredo_moqt::varint::encode(4, &mut duplicate);
+        duplicate.extend_from_slice(b"av01");
+        shiguredo_moqt::varint::encode(0, &mut duplicate); // delta=0 → 同じ 0x11
+        shiguredo_moqt::varint::encode(4, &mut duplicate);
+        duplicate.extend_from_slice(b"vp09");
+
+        let mut outer = LocProperties::new();
+        outer.push(LocProperty {
+            prop_id: PROP_IMMUTABLE_PROPERTIES,
+            value: LocPropertyValue::Bytes(duplicate),
+        });
+        assert!(
+            matches!(outer.encode(), Err(MessageError::ProtocolViolation(_))),
+            "内側の既知 ID の重複は ProtocolViolation になること"
+        );
+    }
+
+    #[test]
+    fn decode_rejects_invalid_codec_string_utf8() {
+        // 最上位の CODEC_STRING が不正な UTF-8 なら decode は MALFORMED_KEY_VALUE になること。
+        let wire = wire_with_top_level_codec_string(&[0xFF, 0xFE]);
+        assert!(matches!(
+            LocProperties::decode(&wire),
+            Err(MessageError::MalformedKeyValue(_))
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_invalid_codec_string_utf8_inside_immutable() {
+        // IMMUTABLE_PROPERTIES の内側が解析できる場合、内側の CODEC_STRING の不正 UTF-8 も
+        // decode で拒否すること。0x80 は UTF-8 の継続バイト単独であり不正である。
+        let wire = wire_with_inner_codec_string(&[0x80]);
+        assert!(matches!(
+            LocProperties::decode(&wire),
+            Err(MessageError::MalformedKeyValue(_))
+        ));
+    }
+
+    #[test]
+    fn decode_keeps_unparseable_immutable_with_invalid_codec_string() {
+        // 内側 KVP が解析できない場合、decode は内側の CODEC_STRING を検証せず成功すること
+        // (内側の構造破損を decode では検出しない従来の方針の維持)。
+        //
+        // (1) 不正 UTF-8 の CODEC_STRING の後ろに切り詰めがあり、内側全体が解析できない。
+        let mut truncated = Vec::new();
+        shiguredo_moqt::varint::encode(PROP_CODEC_STRING, &mut truncated);
+        shiguredo_moqt::varint::encode(2, &mut truncated);
+        truncated.extend_from_slice(&[0xFF, 0xFE]);
+        shiguredo_moqt::varint::encode(1, &mut truncated);
+        shiguredo_moqt::varint::encode(5, &mut truncated);
+        truncated.push(0xAA);
+
+        let wire = wire_with_inner_bytes(&truncated);
+        let (decoded, _) =
+            LocProperties::decode(&wire).expect("内側が解析できない場合の decode は成功すること");
+        assert_eq!(decoded.find_bytes(PROP_CODEC_STRING), None);
+        assert_eq!(decoded.codec_string(), Ok(None));
+
+        // (2) 入れ子の IMMUTABLE_PROPERTIES (0x0B) があると内側の走査は打ち切られるため、
+        // 後続の CODEC_STRING が不正な UTF-8 でも decode は成功する。
+        let mut nested = Vec::new();
+        shiguredo_moqt::varint::encode(PROP_IMMUTABLE_PROPERTIES, &mut nested);
+        shiguredo_moqt::varint::encode(0, &mut nested);
+        shiguredo_moqt::varint::encode(PROP_CODEC_STRING - PROP_IMMUTABLE_PROPERTIES, &mut nested);
+        shiguredo_moqt::varint::encode(1, &mut nested);
+        nested.push(0xFF);
+
+        let wire = wire_with_inner_bytes(&nested);
+        let (decoded, _) = LocProperties::decode(&wire)
+            .expect("入れ子の 0x0B がある内側も decode を失敗させないこと");
+        assert_eq!(decoded.find_bytes(PROP_CODEC_STRING), None);
+        assert_eq!(decoded.codec_string(), Ok(None));
+
+        // (3) LOC 固有の値域違反 (Audio Level 256) も内側の走査を失敗させるため、後続の
+        // CODEC_STRING が不正な UTF-8 でも decode は成功する。この残るギャップは
+        // docs/missing-features.md §4.1 に記録している。
+        let mut value_violation = Vec::new();
+        shiguredo_moqt::varint::encode(PROP_AUDIO_LEVEL, &mut value_violation);
+        shiguredo_moqt::varint::encode(256, &mut value_violation);
+        shiguredo_moqt::varint::encode(PROP_CODEC_STRING - PROP_AUDIO_LEVEL, &mut value_violation);
+        shiguredo_moqt::varint::encode(1, &mut value_violation);
+        value_violation.push(0xFF);
+
+        let wire = wire_with_inner_bytes(&value_violation);
+        let (decoded, _) = LocProperties::decode(&wire)
+            .expect("内側の値域違反がある場合も decode を失敗させないこと");
+        assert_eq!(
+            decoded.codec_string(),
+            Ok(None),
+            "値域違反で内側を解析できない場合は欠落として扱われること"
+        );
+    }
+
+    #[test]
+    fn codec_string_max_length_accepted() {
+        // 奇数 ID の値長上限 2^16-1 バイト (draft-ietf-moq-transport-23 §8.3
+        // (Key-Value-Pair Structure)) ちょうどの CODEC_STRING を往復できること。
+        let codec = "a".repeat(65535);
+        let mut props = LocProperties::new();
+        props.push(LocProperty {
+            prop_id: PROP_CODEC_STRING,
+            value: LocPropertyValue::Bytes(codec.as_bytes().to_vec()),
+        });
+        let encoded = props
+            .encode()
+            .expect("上限ちょうどの UTF-8 値は encode できること");
+        let (decoded, _) =
+            LocProperties::decode(&encoded).expect("上限ちょうどの UTF-8 値は decode できること");
+        assert_eq!(decoded.codec_string(), Ok(Some(codec.as_str())));
+        assert_eq!(
+            decoded.find_bytes(PROP_CODEC_STRING).map(<[u8]>::len),
+            Some(65535)
+        );
+    }
+
+    #[test]
+    fn codec_string_over_65535_rejected() {
+        // 上限を 1 バイト超える CODEC_STRING は encode で PayloadTooLong になること
+        // (既知の値域・長さ検証より汎用の長さ上限が先に効く)。
+        let mut props = LocProperties::new();
+        props.push(LocProperty {
+            prop_id: PROP_CODEC_STRING,
+            value: LocPropertyValue::Bytes(vec![b'a'; 65536]),
+        });
+        assert_eq!(props.encode(), Err(MessageError::PayloadTooLong));
+    }
+
+    #[test]
+    fn codec_string_varint_value_rejected() {
+        // CODEC_STRING (0x11) は奇数 ID であり、値は Length + バイト列でなければならない。
+        // VarInt 値を持つ in-memory 入力は encode で ProtocolViolation になること。
+        let mut props = LocProperties::new();
+        props.push(LocProperty {
+            prop_id: PROP_CODEC_STRING,
+            value: LocPropertyValue::VarInt(0),
+        });
+        assert!(matches!(
+            props.encode(),
+            Err(MessageError::ProtocolViolation(_))
+        ));
+    }
+
+    #[test]
+    fn unknown_property_preserved_alongside_codec_string() {
+        // CODEC_STRING を追加しても、未知 Property の値と複数インスタンスの保持が変わらない
+        // こと (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) の "MUST allow
+        // multiple instances of the Property" / §16.8 (Properties) の "Endpoints MUST ignore
+        // unknown Property types")。
+        let codec = "av01.0.04M.08";
+        let mut props = LocProperties::new();
+        props.push(LocProperty {
+            prop_id: PROP_CODEC_STRING,
+            value: LocPropertyValue::Bytes(codec.as_bytes().to_vec()),
+        });
+        props.push(LocProperty {
+            prop_id: 0x1000,
+            value: LocPropertyValue::VarInt(42),
+        });
+        props.push(LocProperty {
+            prop_id: 0x1001,
+            value: LocPropertyValue::Bytes(b"unknown".to_vec()),
+        });
+        props.push(LocProperty {
+            prop_id: 0x1001,
+            value: LocPropertyValue::Bytes(b"duplicate unknown".to_vec()),
+        });
+
+        let encoded = props
+            .encode()
+            .expect("未知 Property を含む encode は成功する");
+        let (decoded, consumed) =
+            LocProperties::decode(&encoded).expect("未知 Property を含む decode は成功する");
+        assert_eq!(consumed, encoded.len());
+        assert_eq!(decoded.codec_string(), Ok(Some(codec)));
+        assert_eq!(decoded.find_varint(0x1000), Some(42));
+        assert_eq!(
+            decoded.find_bytes(0x1001),
+            Some(&b"unknown"[..]),
+            "同じ未知 ID の最初のインスタンスを返すこと"
+        );
+        assert_eq!(
+            decoded.iter().count(),
+            4,
+            "未知 Property の複数インスタンスを保持すること"
+        );
+    }
+
+    #[test]
+    fn duplicate_codec_string_rejected_on_encode() {
+        // CODEC_STRING は単一インスタンスの既知型であるため、ローカル入力の encode では
+        // ProtocolViolation で拒否すること (draft-ietf-moq-transport-23 §8.4 (Track and
+        // Object Properties) / §12.1 (Malformed Tracks) 条件 9)。
+        let mut props = LocProperties::new();
+        for codec in ["av01.0.04M.08", "vp09.00.10.08"] {
+            props.push(LocProperty {
+                prop_id: PROP_CODEC_STRING,
+                value: LocPropertyValue::Bytes(codec.as_bytes().to_vec()),
+            });
+        }
+        assert!(matches!(
+            props.encode(),
+            Err(MessageError::ProtocolViolation(_))
+        ));
+    }
+
+    #[test]
+    fn duplicate_codec_string_is_malformed_on_decode() {
+        // decode では単一に限られる既知 ID の重複を malformed Track として報告すること
+        // (draft-ietf-moq-transport-23 §8.4 / §12.1 (Malformed Tracks) 条件 9)。
+        let mut inner = Vec::new();
+        shiguredo_moqt::varint::encode(PROP_CODEC_STRING, &mut inner);
+        shiguredo_moqt::varint::encode(3, &mut inner);
+        inner.extend_from_slice(b"av1");
+        shiguredo_moqt::varint::encode(0, &mut inner); // delta=0 で同じ ID を繰り返す
+        shiguredo_moqt::varint::encode(3, &mut inner);
+        inner.extend_from_slice(b"av1");
+
+        let mut wire = Vec::new();
+        shiguredo_moqt::varint::encode(inner.len() as u64, &mut wire);
+        wire.extend_from_slice(&inner);
+        assert!(matches!(
+            LocProperties::decode(&wire),
+            Err(MessageError::MalformedTrack(_))
+        ));
     }
 }
 
@@ -334,21 +832,6 @@ mod error_cases {
 mod immutable_properties {
     use super::*;
 
-    /// `LocProperties::encode` が付ける Properties Length を除いた KVP 列を返す
-    ///
-    /// IMMUTABLE_PROPERTIES (0x0B) の値は外側の Properties Length を伴わない delta-key
-    /// KVP 列である (draft-ietf-moq-transport-23 §10.7 (Immutable Properties) / §8.3
-    /// (Key-Value-Pair Structure))。内側のプロパティ列は `LocProperties` の encode で
-    /// 正規の delta-key 表現を作り、先頭の Properties Length だけを読み飛ばして取り出す。
-    fn kvp_sequence(props: &LocProperties) -> Vec<u8> {
-        let encoded = props
-            .encode()
-            .expect("テストフィクスチャの内側 KVP の encode は成功する");
-        let (_, length_field_len) = shiguredo_moqt::varint::decode(&encoded)
-            .expect("Properties Length の varint を読めること");
-        encoded[length_field_len..].to_vec()
-    }
-
     /// 外側に IMMUTABLE_PROPERTIES (0x0B) だけを持つ LOC Properties を wire 形式にする
     ///
     /// `inner` は 0x0B の値としてそのまま格納する delta-key KVP 列である。
@@ -363,29 +846,18 @@ mod immutable_properties {
             .expect("テストフィクスチャの外側 KVP の encode は成功する")
     }
 
-    /// 任意のバイト列を IMMUTABLE_PROPERTIES (0x0B) の値に持つ wire 形式を組み立てる
-    ///
-    /// 破損した内側 KVP を decode に通さずに作るために使う。
-    fn wire_with_inner_bytes(inner: &[u8]) -> Vec<u8> {
-        let mut outer = LocProperties::new();
-        outer.push(LocProperty {
-            prop_id: PROP_IMMUTABLE_PROPERTIES,
-            value: LocPropertyValue::Bytes(inner.to_vec()),
-        });
-        outer
-            .encode()
-            .expect("テストフィクスチャの外側 KVP の encode は成功する")
-    }
-
     #[test]
     fn finds_known_properties_only_inside_immutable_properties() {
+        // draft-ietf-moq-transport-23 §10.7 (Immutable Properties) は Property を mutable
+        // リストと IMMUTABLE_PROPERTIES (0x0B) の内側のどちらに置いてもよいとする。LOC 側の
         // draft-ietf-moq-loc-05 §3.1.2 (Immutable Properties) は、relay から見える不変の
-        // LOC Properties を IMMUTABLE_PROPERTIES (0x0B) として符号化することを SHOULD と
-        // する。外側の mutable リストには 0x0B だけを置き、6 つの既知 LOC プロパティを
+        // LOC Properties を内側に置くことを SHOULD とする (LOC-05 自身は immutable を定義
+        // しない)。外側の mutable リストには 0x0B だけを置き、7 つの既知 LOC プロパティを
         // 内側にだけ置いた Object でも find_varint / find_bytes と既知 accessor で値を
         // 取得できることを固定する。
         let video_config = vec![0x01u8, 0x64, 0x00, 0x1F];
         let audio_config = b"OpusHead".to_vec();
+        let codec = "av01.0.04M.08";
 
         let mut inner = LocProperties::new();
         inner.push(LocProperty {
@@ -412,13 +884,17 @@ mod immutable_properties {
             prop_id: PROP_TIMESTAMP,
             value: LocPropertyValue::VarInt(7_200_000),
         });
+        inner.push(LocProperty {
+            prop_id: PROP_CODEC_STRING,
+            value: LocPropertyValue::Bytes(codec.as_bytes().to_vec()),
+        });
 
         let wire = immutable_only_wire(&inner);
         let (decoded, consumed) = LocProperties::decode(&wire)
             .expect("IMMUTABLE_PROPERTIES だけを持つ properties は decode できること");
         assert_eq!(consumed, wire.len());
 
-        // iter() は最上位リストだけを返す (内側の 6 プロパティは列挙されない)
+        // iter() は最上位リストだけを返す (内側の 7 プロパティは列挙されない)
         assert_eq!(decoded.len(), 1);
         let top_level_ids: Vec<u64> = decoded.iter().map(|p| p.prop_id).collect();
         assert_eq!(top_level_ids, vec![PROP_IMMUTABLE_PROPERTIES]);
@@ -441,6 +917,10 @@ mod immutable_properties {
             decoded.find_bytes(PROP_VIDEO_FRAME_MARKING),
             Some(&[0x20u8][..])
         );
+        assert_eq!(
+            decoded.find_bytes(PROP_CODEC_STRING),
+            Some(codec.as_bytes())
+        );
 
         // 既知 accessor も同じ値に到達する
         assert_eq!(decoded.timestamp(), Some(7_200_000));
@@ -449,6 +929,7 @@ mod immutable_properties {
         assert_eq!(decoded.video_config(), Some(video_config.as_slice()));
         assert_eq!(decoded.audio_config(), Some(audio_config.as_slice()));
         assert_eq!(decoded.video_frame_marking(), Some(&[0x20u8][..]));
+        assert_eq!(decoded.codec_string(), Ok(Some(codec)));
     }
 
     #[test]
@@ -485,6 +966,10 @@ mod immutable_properties {
             prop_id: PROP_TIMESTAMP,
             value: LocPropertyValue::VarInt(200),
         });
+        inner.push(LocProperty {
+            prop_id: PROP_CODEC_STRING,
+            value: LocPropertyValue::Bytes(b"vp09.00.10.08".to_vec()),
+        });
 
         let mut outer = LocProperties::new();
         outer.push(LocProperty {
@@ -515,6 +1000,10 @@ mod immutable_properties {
             prop_id: PROP_AUDIO_CONFIG,
             value: LocPropertyValue::Bytes(b"outer".to_vec()),
         });
+        outer.push(LocProperty {
+            prop_id: PROP_CODEC_STRING,
+            value: LocPropertyValue::Bytes(b"av01.0.04M.08".to_vec()),
+        });
 
         let wire = outer
             .encode()
@@ -528,6 +1017,7 @@ mod immutable_properties {
         assert_eq!(decoded.audio_level(), Some(2));
         assert_eq!(decoded.video_config(), Some(&[0xAAu8][..]));
         assert_eq!(decoded.audio_config(), Some(&b"outer"[..]));
+        assert_eq!(decoded.codec_string(), Ok(Some("av01.0.04M.08")));
 
         // find_varint / find_bytes も accessor と同じく最上位を返す
         assert_eq!(decoded.find_varint(PROP_TIMESTAMP), Some(100));
@@ -536,6 +1026,10 @@ mod immutable_properties {
         assert_eq!(
             decoded.find_bytes(PROP_VIDEO_FRAME_MARKING),
             Some(&[0x20u8][..])
+        );
+        assert_eq!(
+            decoded.find_bytes(PROP_CODEC_STRING),
+            Some(b"av01.0.04M.08".as_slice())
         );
     }
 

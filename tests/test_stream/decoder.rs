@@ -1670,7 +1670,7 @@ fn test_fetch_finish_after_end_of_range_ok() {
 /// draft-ietf-moq-transport-23 §11.4.1 (Fetch Header) の Fetch Object は Properties フィールドを持ち、
 /// その構造は §11.4.1.1 (Flags) の "The Object Properties structure is defined in Section 11.1.2."
 /// により §11.1.2 (Object Properties) と同じである。
-/// draft-ietf-moq-loc-04 §2.2 (MOQ Object Mapping) は LOC の Public Properties を
+/// draft-ietf-moq-loc-05 §2.2 (MOQ Object Mapping) は LOC の Public Properties を
 /// MOQ Object Properties に載せると規定するため、LOC の Video Config / Timestamp / Timescale が
 /// そのまま取り出せることを固定する。
 #[test]

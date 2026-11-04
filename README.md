@@ -45,7 +45,7 @@ MOQT のクライアントやサーバーを実装する場合に利用できま
   - オプション機能 `aws-lc-rs` で有効になります
 - 対応仕様
   - [Media over QUIC Transport](https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-23) `draft-23`
-  - [Low Overhead Container](https://datatracker.ietf.org/doc/html/draft-ietf-moq-loc-04) `draft-04`
+  - [Low Overhead Container](https://datatracker.ietf.org/doc/html/draft-ietf-moq-loc-05) `draft-05`
   - [MOQT Streaming Format](https://datatracker.ietf.org/doc/html/draft-ietf-moq-msf-01) `draft-01`
   - [Authorization scheme for MOQT using Common Access Tokens](https://datatracker.ietf.org/doc/html/draft-ietf-moq-c4m-01) `draft-01`
 

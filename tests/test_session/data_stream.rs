@@ -4087,6 +4087,67 @@ fn malformed_object_properties_blob() -> Vec<u8> {
     block
 }
 
+/// CODEC_STRING (0x11) が不正な UTF-8 の Object Properties を subgroup Object で受信すると
+/// SESSION_MALFORMED_KEY_VALUE でセッションを閉じること
+///
+/// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): 受信側が Type を理解する
+/// 場合、Value が定義された serialization と一致しなければ MALFORMED_KEY_VALUE (0x6) で
+/// セッションを閉じる (MUST)。CODEC_STRING の値は UTF-8 文字列
+/// (draft-ietf-moq-loc-05 §2.3.1.3 (Codec String)) であるため、不正な UTF-8 は 0x6 に写る。
+#[test]
+fn subgroup_object_with_invalid_codec_string_properties_requires_malformed_key_value() {
+    use shiguredo_moqt::error::SESSION_MALFORMED_KEY_VALUE;
+    use shiguredo_moqt::loc::PROP_CODEC_STRING;
+
+    let alias = 843u64;
+    let (mut client, _server, _rid) = establish_subscribe_track(alias);
+    let stream_id = DataStreamId(74);
+    let header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(10),
+        has_properties: true,
+        end_of_group: false,
+        first_object: true,
+    };
+    client
+        .recv_data_stream_type(stream_id, 0x15)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_subgroup_header(stream_id, &header)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let mut kvps = Vec::new();
+    shiguredo_moqt::varint::encode(PROP_CODEC_STRING, &mut kvps);
+    shiguredo_moqt::varint::encode(1, &mut kvps);
+    kvps.push(0xFF); // 不正な UTF-8
+    let mut block = Vec::new();
+    shiguredo_moqt::varint::encode(kvps.len() as u64, &mut block);
+    block.extend_from_slice(&kvps);
+
+    let err = client
+        .recv_subgroup_object(
+            stream_id,
+            &DecodedSubgroupObject {
+                object_id: 0,
+                payload_length: 4,
+                status: None,
+                properties_bytes: Some(block),
+            },
+        )
+        .expect_err("不正な UTF-8 の CODEC_STRING は MALFORMED_KEY_VALUE");
+    assert_eq!(
+        err.code, SESSION_MALFORMED_KEY_VALUE,
+        "KVP の直列化不整合は MALFORMED_KEY_VALUE (0x6) に写ること"
+    );
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "data plane のエラーは戻り値で通知し、セッション終了は呼び出し側が行うこと"
+    );
+}
+
 /// フレーミングは正しいが KVP が不正な Object Properties を subgroup Object で受信すると
 /// Malformed Track として subscription が終端される
 ///

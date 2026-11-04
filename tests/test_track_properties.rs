@@ -302,6 +302,316 @@ mod accessors {
     }
 }
 
+mod codec_string {
+    use super::*;
+    use shiguredo_moqt::loc::PROP_CODEC_STRING;
+    use shiguredo_moqt::track_properties::PROP_IMMUTABLE_PROPERTIES;
+
+    /// 最上位の CODEC_STRING (0x11) を任意のバイト列で持つ wire 形式を組み立てる
+    ///
+    /// encode は不正な UTF-8 を拒否するため、decode の検証用に入力を直接組み立てる。
+    fn wire_with_top_level_codec_string(value: &[u8]) -> Vec<u8> {
+        let mut wire = Vec::new();
+        shiguredo_moqt::varint::encode(PROP_CODEC_STRING, &mut wire);
+        shiguredo_moqt::varint::encode(value.len() as u64, &mut wire);
+        wire.extend_from_slice(value);
+        wire
+    }
+
+    /// IMMUTABLE_PROPERTIES (0x0B) の内側に CODEC_STRING を任意のバイト列で持つ wire 形式
+    fn wire_with_inner_codec_string(value: &[u8]) -> Vec<u8> {
+        let inner = wire_with_top_level_codec_string(value);
+        let mut wire = Vec::new();
+        shiguredo_moqt::varint::encode(PROP_IMMUTABLE_PROPERTIES, &mut wire);
+        shiguredo_moqt::varint::encode(inner.len() as u64, &mut wire);
+        wire.extend_from_slice(&inner);
+        wire
+    }
+
+    #[test]
+    fn codec_string_top_level_and_missing() {
+        // Track スコープの CODEC_STRING を最上位に構築・取得できること。欠落は
+        // Ok(None) であり、エラーではない。
+        let codec = "av01.0.04M.08";
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_CODEC_STRING,
+            value: TrackPropertyValue::Bytes(codec.as_bytes().to_vec()),
+        });
+        assert_eq!(props.codec_string(), Ok(Some(codec)));
+        assert_eq!(
+            props.find_bytes(PROP_CODEC_STRING),
+            Some(codec.as_bytes()),
+            "生バイト列の accessor でも同じ値が取得できること"
+        );
+
+        assert_eq!(TrackProperties::new().codec_string(), Ok(None));
+    }
+
+    #[test]
+    fn codec_string_searches_inside_immutable() {
+        // draft-ietf-moq-transport-23 §10.7 (Immutable Properties) の "MUST search both"
+        // により、IMMUTABLE_PROPERTIES の内側にだけ CODEC_STRING がある場合も取得できること。
+        // draft-ietf-moq-loc-05 §6.1 (MOQ Properties Registry) Table 1 は 0x11 の Scope を
+        // "Track, Object" と定める。
+        let codec = "vp09.00.10.08";
+        let inner = wire_with_top_level_codec_string(codec.as_bytes());
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: TrackPropertyValue::Bytes(inner),
+        });
+        assert_eq!(props.codec_string(), Ok(Some(codec)));
+
+        // wire を経由しても同じ結果になること。
+        let mut buf = Vec::new();
+        props
+            .encode(&mut buf)
+            .expect("IMMUTABLE を含む TrackProperties は encode 可能");
+        let decoded = TrackProperties::decode(&buf).expect("encode した IMMUTABLE は decode 可能");
+        assert_eq!(decoded.codec_string(), Ok(Some(codec)));
+    }
+
+    #[test]
+    fn codec_string_invalid_utf8_inside_immutable_is_error() {
+        // IMMUTABLE_PROPERTIES の内側の不正 UTF-8 も、欠落 (Ok(None)) に畳まず
+        // MALFORMED_KEY_VALUE として返すこと。push で組み立てた in-memory 入力で、
+        // 内側の構造は解析できるが値だけが不正なケースを固定する。
+        let inner = wire_with_top_level_codec_string(&[0xFF, 0xFE]);
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: TrackPropertyValue::Bytes(inner),
+        });
+        assert!(matches!(
+            props.codec_string(),
+            Err(MessageError::MalformedKeyValue(_))
+        ));
+    }
+
+    #[test]
+    fn codec_string_invalid_utf8_rejected_on_encode() {
+        // 最上位の CODEC_STRING が不正な UTF-8 なら、Track 側でも MALFORMED_KEY_VALUE の
+        // 分類で encode を拒否すること。
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_CODEC_STRING,
+            value: TrackPropertyValue::Bytes(vec![0xFF, 0xFE]),
+        });
+        let mut buf = Vec::new();
+        assert!(matches!(
+            props.encode(&mut buf),
+            Err(MessageError::MalformedKeyValue(_))
+        ));
+    }
+
+    #[test]
+    fn codec_string_invalid_utf8_inside_immutable_rejected_on_encode() {
+        // IMMUTABLE_PROPERTIES の内側の CODEC_STRING が不正な UTF-8 なら、encode は
+        // ProtocolViolation ではなく MALFORMED_KEY_VALUE の分類で拒否すること
+        // (内側の構造・値域の違反は ProtocolViolation、UTF-8 だけが MalformedKeyValue)。
+        let inner = wire_with_top_level_codec_string(&[0xFF, 0xFE]);
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: TrackPropertyValue::Bytes(inner),
+        });
+        let mut buf = Vec::new();
+        assert!(
+            matches!(
+                props.encode(&mut buf),
+                Err(MessageError::MalformedKeyValue(_))
+            ),
+            "内側の CODEC_STRING の不正 UTF-8 は MALFORMED_KEY_VALUE のまま返すこと"
+        );
+    }
+
+    #[test]
+    fn codec_string_invalid_utf8_rejected_on_decode() {
+        // 最上位の CODEC_STRING が不正な UTF-8 なら、Track 側の decode も
+        // MALFORMED_KEY_VALUE で拒否すること。
+        let wire = wire_with_top_level_codec_string(&[0xFF, 0xFE]);
+        assert!(matches!(
+            TrackProperties::decode(&wire),
+            Err(MessageError::MalformedKeyValue(_))
+        ));
+    }
+
+    #[test]
+    fn codec_string_invalid_utf8_inside_immutable_rejected_on_decode() {
+        // IMMUTABLE_PROPERTIES の内側も Track Property KVP 列として走査するため、内側の
+        // CODEC_STRING の不正 UTF-8 も decode で拒否すること。
+        let wire = wire_with_inner_codec_string(&[0x80]);
+        assert!(matches!(
+            TrackProperties::decode(&wire),
+            Err(MessageError::MalformedKeyValue(_))
+        ));
+    }
+
+    #[test]
+    fn codec_string_varint_value_rejected_on_encode() {
+        // CODEC_STRING は奇数型 (長さ付きバイト列) であるため、VarInt 値での encode は
+        // 型と値形式の不一致として InvalidParameter で拒否されること。
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_CODEC_STRING,
+            value: TrackPropertyValue::VarInt(1),
+        });
+        let mut buf = Vec::new();
+        assert!(matches!(
+            props.encode(&mut buf),
+            Err(MessageError::InvalidParameter)
+        ));
+    }
+
+    #[test]
+    fn codec_string_length_boundary() {
+        // 奇数型の値長上限は 2^16-1 バイト (draft-ietf-moq-transport-23 §8.3
+        // (Key-Value-Pair Structure))。上限ちょうどは往復でき、上限超過は
+        // PayloadTooLong で拒否されること。
+        let max = "a".repeat(65535);
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_CODEC_STRING,
+            value: TrackPropertyValue::Bytes(max.as_bytes().to_vec()),
+        });
+        let mut buf = Vec::new();
+        props
+            .encode(&mut buf)
+            .expect("上限ちょうどの UTF-8 値は encode できること");
+        let decoded = TrackProperties::decode(&buf).expect("上限ちょうどの値は decode できること");
+        assert_eq!(decoded.codec_string(), Ok(Some(max.as_str())));
+        assert_eq!(
+            decoded.find_bytes(PROP_CODEC_STRING).map(<[u8]>::len),
+            Some(65535)
+        );
+
+        let mut over = TrackProperties::new();
+        over.push(TrackProperty {
+            prop_type: PROP_CODEC_STRING,
+            value: TrackPropertyValue::Bytes(vec![b'a'; 65536]),
+        });
+        let mut over_buf = Vec::new();
+        assert!(matches!(
+            over.encode(&mut over_buf),
+            Err(MessageError::PayloadTooLong)
+        ));
+    }
+
+    #[test]
+    fn duplicate_codec_string_rejected_on_encode() {
+        // CODEC_STRING は単一に限られる既知型であるため、重複はローカル入力の検証として
+        // ProtocolViolation で拒否されること。
+        let mut props = TrackProperties::new();
+        for value in [b"av01".as_slice(), b"vp09".as_slice()] {
+            props.push(TrackProperty {
+                prop_type: PROP_CODEC_STRING,
+                value: TrackPropertyValue::Bytes(value.to_vec()),
+            });
+        }
+        let mut buf = Vec::new();
+        assert!(matches!(
+            props.encode(&mut buf),
+            Err(MessageError::ProtocolViolation(_))
+        ));
+    }
+
+    #[test]
+    fn codec_string_invalid_utf8_in_memory_is_error() {
+        // in-memory で構築した TrackProperties でも、codec_string は不正 UTF-8 を
+        // MalformedKeyValue として返すこと (欠落の Ok(None) と区別する)。
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_CODEC_STRING,
+            value: TrackPropertyValue::Bytes(vec![0xFF, 0xFE]),
+        });
+        assert!(matches!(
+            props.codec_string(),
+            Err(MessageError::MalformedKeyValue(_))
+        ));
+        assert_eq!(
+            props.find_bytes(PROP_CODEC_STRING),
+            Some(&[0xFFu8, 0xFE][..])
+        );
+    }
+
+    #[test]
+    fn codec_string_invalid_utf8_in_memory_inside_immutable_is_error() {
+        // 内側の 0x0B に in-memory で不正 UTF-8 を置いても、codec_string は欠落に畳まず
+        // MalformedKeyValue を返すこと。
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: TrackPropertyValue::Bytes(wire_with_top_level_codec_string(&[0xFF])),
+        });
+        assert!(matches!(
+            props.codec_string(),
+            Err(MessageError::MalformedKeyValue(_))
+        ));
+    }
+
+    #[test]
+    fn codec_string_returns_none_for_corrupt_immutable_inner() {
+        // IMMUTABLE_PROPERTIES の内側の走査が失敗した場合、find_bytes は None を返し、
+        // codec_string も Ok(None) になること (欠落と区別しない既知の制約)。
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            // 内側: CODEC_STRING (0x11) の宣言長 5 だが実体は 1 バイト (切り詰め)
+            value: TrackPropertyValue::Bytes(vec![0x11, 0x05, 0xAA]),
+        });
+        assert_eq!(props.find_bytes(PROP_CODEC_STRING), None);
+        assert_eq!(props.codec_string(), Ok(None));
+    }
+
+    #[test]
+    fn inner_scope_violation_precedes_codec_string_utf8_error() {
+        // IMMUTABLE_PROPERTIES の内側に Object 専用プロパティ (0x10) と不正 UTF-8 の
+        // CODEC_STRING (0x11) を併置した場合、入力の並び順によらずスコープ違反の
+        // ProtocolViolation を優先すること (encode の検証順序の回帰防止)。
+        let mut inner = Vec::new();
+        shiguredo_moqt::varint::encode(0x10, &mut inner); // TIMESTAMP (Object 専用)
+        shiguredo_moqt::varint::encode(128, &mut inner);
+        shiguredo_moqt::varint::encode(PROP_CODEC_STRING - 0x10, &mut inner);
+        shiguredo_moqt::varint::encode(1, &mut inner);
+        inner.push(0xFF); // 不正な UTF-8
+
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: TrackPropertyValue::Bytes(inner),
+        });
+        let mut buf = Vec::new();
+        assert!(
+            matches!(
+                props.encode(&mut buf),
+                Err(MessageError::ProtocolViolation(_))
+            ),
+            "内側のスコープ違反は UTF-8 検証より先に ProtocolViolation になること"
+        );
+    }
+
+    #[test]
+    fn inner_value_range_violation_is_protocol_violation_on_encode() {
+        // IMMUTABLE_PROPERTIES の内側の既知型の値域違反 (DYNAMIC_GROUPS=2) は、ローカル入力の
+        // 検証である encode では ProtocolViolation で拒否すること。CODEC_STRING の不正
+        // UTF-8 だけが MalformedKeyValue (値の書式違反) として区別される。
+        let mut inner = Vec::new();
+        shiguredo_moqt::varint::encode(0x30, &mut inner); // DYNAMIC_GROUPS
+        shiguredo_moqt::varint::encode(2, &mut inner); // 0/1 以外
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: TrackPropertyValue::Bytes(inner),
+        });
+        let mut buf = Vec::new();
+        assert!(matches!(
+            props.encode(&mut buf),
+            Err(MessageError::ProtocolViolation(_))
+        ));
+    }
+}
+
 mod mandatory_properties {
     use super::*;
     use shiguredo_moqt::track_properties::{
@@ -844,7 +1154,9 @@ mod immutable_properties {
     #[test]
     fn encode_maps_inner_length_exceeding_buffer_to_protocol_violation() {
         // encode はローカル入力の検証であるため、内側 KVP の宣言長超過
-        // (decode 層では MalformedKeyValue) を ProtocolViolation に写す
+        // (decode 層では MalformedKeyValue) を ProtocolViolation に写す。
+        // 既知型の値域違反も同じ写像になる (CODEC_STRING の不正 UTF-8 だけは
+        // MalformedKeyValue のまま返す)。
         let mut props = TrackProperties::new();
         props.push(TrackProperty {
             prop_type: PROP_IMMUTABLE_PROPERTIES,
@@ -854,9 +1166,7 @@ mod immutable_properties {
         let mut buf = Vec::new();
         assert!(matches!(
             props.encode(&mut buf),
-            Err(MessageError::ProtocolViolation(
-                "immutable properties inner KVP length exceeds remaining buffer"
-            ))
+            Err(MessageError::ProtocolViolation(_))
         ));
     }
 
