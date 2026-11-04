@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/remove-dead-public-api
 - Polished: 2026-10-20
+- Refreshed: 2026-11-04
 
 ## 目的
 
@@ -15,7 +16,7 @@
 - `src/object_properties.rs` の `ObjectProperties::len` / `iter` は、`src/`, `tests/`, `pbt/`, `crates/` のどこからも呼ばれていない。`as_slice()` が公開されているため、`as_slice().len()` / `as_slice().iter()` で代替できる。
 - `src/message_parameter.rs` の `MessageParameters::track_namespace_prefix` は、`src/`, `tests/`, `crates/` のどこからも呼ばれていない。`PARAM_TRACK_NAMESPACE_PREFIX` (type 0x34) を設定する request は未実装である。
   未対応 request (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUBSCRIBE_TRACKS`) の本体は `src/session/core.rs` の `decode_unsupported_request_body` が Track Namespace Prefix フィールドを `TrackNamespace::decode_from` で読み飛ばすだけで、getter は通らない。
-- `src/track_properties.rs` の private な `is_known_mandatory` は引数を無視して常に `false` を返す。`has_unknown_mandatory` の判定からこの呼び出しを外しても、draft-ietf-moq-transport-22 時点では 0x4000-0x7FFF に既知プロパティが無いため挙動は変わらない。`tests/test_track_properties.rs` のコメントは `is_known_mandatory` を名指ししているので、削除に合わせて更新する。
+- `src/track_properties.rs` の private な `is_known_mandatory` は引数を無視して常に `false` を返す。`has_unknown_mandatory` の判定からこの呼び出しを外しても、draft-ietf-moq-transport-23 §3.7 時点では 0x4000-0x7FFF に既知プロパティが無いため挙動は変わらない。`tests/test_track_properties.rs` のコメントは `is_known_mandatory` を名指ししているので、削除に合わせて更新する。
 - `src/stream/decoder.rs` の `SubgroupStreamDecoder::resolved_subgroup_id` と `FetchStreamDecoder::set_subgroup_final_object`、`src/pending_subgroup_buffer.rs` の `PendingSubgroupBuffer::take_ready`、`src/subgroup_tracker.rs` の `SubgroupTracker::get` は、`src/` と `crates/` から呼ばれず、テストと PBT だけが使っている。
   - `set_subgroup_final_object` が設定する `FetchValidationState::subgroup_final_objects` は、この setter 以外に設定経路が無い。setter を削除すると、`FetchValidationState` の最終 Object 検証と prune も到達不能になる。
   - `take_ready` は `take_ready_for` と並ぶ公開 API だが、`crates/moq-sub` は `take_ready_for` だけを使っている。`src/pending_subgroup_buffer.rs` のモジュール doc と各メソッドの doc は `take_ready` を前提に書かれている。
