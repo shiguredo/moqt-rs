@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-loc-draft-05-codec-string-property
 - Polished: 2026-11-03
+- Refreshed: 2026-11-04
 
 ## 目的
 
@@ -35,7 +36,7 @@ catalog と値が異なる場合の decoder 自動切り替え規則はこの dr
 ## 依存・関連
 
 - 先行: [0125](0125-add-track-scope-loc-properties.md)
-- 先行: [0309](0309-draft-22-object-immutable-properties-search.md)
+- 先行: [0309](0309-draft-23-object-immutable-properties-search.md)
 - 関連: [0400](0400-moqt-draft-23-property-scope.md)
 
 ## 差分の確認範囲
