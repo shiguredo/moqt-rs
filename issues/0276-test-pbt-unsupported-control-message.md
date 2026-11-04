@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/test-pbt-unsupported-control-message
 - Polished: 2026-10-25
+- Refreshed: 2026-11-04
 
 ## 目的
 
@@ -18,7 +19,9 @@
 
 ## 設計方針
 
-- `sample_control_message` に `ControlMessage::Unsupported` を追加する。draft-ietf-moq-transport-22 §9 Table 5 のうち本ライブラリが実装しない 6 型を対象にする。
+- `sample_control_message` に `ControlMessage::Unsupported` を追加する。draft-ietf-moq-transport-23 §9 Table 5 のうち本ライブラリが実装しない 6 型を対象にする。
+  draft-23 の Table 5 では 0x18 が `RESERVED (FETCH_OK in <= 22)` であり、RESERVED 行を除く定義済みメッセージは 18 型である。
+  このうち `ControlMessage` が実装するのは 12 型で、残る 6 型が `UNSUPPORTED_MESSAGE_TYPES` と一致する。
 - 生成する型は request として届く 3 種 (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS、型 ID 0x06 / 0x50 / 0x51) と応答専用の 3 種 (NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED、型 ID 0x08 / 0x0E / 0x0F) である。`request_id` は型に応じて `Some` / `None` を設定する。
 - `UNSUPPORTED_MESSAGE_TYPES` は `pub(crate)` のため、PBT 側では型 ID を直接指定する。
 - body は生バイト列としてサンプル生成する。request 型は `ControlMessage::decode` が本体の先頭 varint を Request ID として読むため、非空で先頭 varint が `request_id` と一致するバイト列にする (`varint::encode` で `request_id` を body の先頭に書き、その後ろは任意のバイト列でよい)。
