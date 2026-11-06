@@ -54,8 +54,7 @@ scheme は RFC 3986 §3.1 に従い大文字小文字を区別しない (`MOQT:/
 
 接続経路は `--transport` で選ぶ。`--transport` を省略した場合は `--url` の `msf` fragment の
 `connection` (`q`: native QUIC / `wt`: WebTransport) を使い、それも無ければ `quic` になる
-(draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters))。WebTransport 経路と QMux 経路は
-experimental のため、`--transport` も `connection` も無いときの既定にはしない。`connection=wt` の
+(draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters))。`connection=wt` の
 ときの既定は `wt-h3` (HTTP/2 にする場合は `--transport wt-h2` を明示する)。`connection` と矛盾する
 `--transport`、`connection=q` と `connection=wt` の併記、`connection=q` / `connection=wt` と
 `--transport qmux` の組み合わせはエラーになる。
@@ -63,17 +62,35 @@ experimental のため、`--transport` も `connection` も無いときの既定
 | `--transport` | `Transport` | 接続経路 | 備考 |
 | --- | --- | --- | --- |
 | `quic` | `Transport::Quic` | QUIC 直接接続 | ALPN は `moqt-23` |
-| `wt-h3` | `Transport::WtH3` | WebTransport over HTTP/3 | QUIC 上の ALPN は `h3`。experimental |
-| `wt-h2` | `Transport::WtH2` | WebTransport over HTTP/2 | TCP+TLS 上の ALPN は `h2`。experimental |
+| `wt-h3` | `Transport::WtH3` | WebTransport over HTTP/3 | QUIC 上の ALPN は `h3` |
+| `wt-h2` | `Transport::WtH2` | WebTransport over HTTP/2 | TCP+TLS 上の ALPN は `h2` |
 | `qmux` | `Transport::Qmux` | QMux | TCP+TLS 上の ALPN は `moqt-23`。UDP が使えない環境向け。experimental |
+
+### QUIC バックエンド
+
+tobi-quic を採用している。ネイティブ QUIC (`--transport quic`) の実装は cargo feature で選び、s2n-quic / ngtcp2-rs も選べる。ちょうど 1 つだけを有効にすること。
+
+| feature | QUIC 実装 | 備考 |
+| --- | --- | --- |
+| `quic-tobi` | tobi-quic | crates.io 未公開のため git の main を追う。この実装を採用している |
+| `quic-s2n` | s2n-quic | |
+| `quic-ngtcp2` | ngtcp2-rs | `shiguredo_ngtcp2_tokio` 経由。初回ビルドで ngtcp2 本体を取得・ビルドする |
+
+```bash
+# tobi-quic
+cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example
+
+# s2n-quic / ngtcp2-rs に切り替える (-p の crate と依存の既定 feature を同時に外す)
+cargo run -p moq-pub --no-default-features --features quic-s2n -- --url moqt://127.0.0.1:4443 --namespace moq-example
+cargo run -p moq-sub --no-default-features --features quic-ngtcp2 -- --url moqt://127.0.0.1:4443 --namespace moq-example
+```
+
+WebTransport over HTTP/3 (`wt-h3`) の QUIC 層は tobi-quic 固定である。s2n-quic と ngtcp2-rs は
+ネイティブ QUIC にだけ使う。このため tobi-quic はバックエンドの選択に関わらず依存に含まれる。
 
 WebTransport 経路では draft-ietf-webtrans-http3-16 / draft-ietf-webtrans-http2-15 に従い、Extended CONNECT でセッションを確立する。MOQT のプロトコル識別子 (`MOQT_PROTOCOL` = `moqt-23`) は `WT-Available-Protocols` で通知し、サーバーが `WT-Protocol` で選択しなければ接続を失敗させる (draft-ietf-moq-transport-23 §6.2)。
 
-WebTransport 経路 (`wt-h3` / `wt-h2`) は experimental として扱う。draft-ietf-webtrans-http3-16 §4.4 は WebTransport のデータストリームを reset するとき、WebTransport ヘッダ以上の Reliable Size を持つ `RESET_STREAM_AT` を使うことを MUST とする。
-ただし example が使う s2n-quic は `RESET_STREAM_AT` を送出できず、`reset_stream_at` transport parameter も広告しない。
-このため `wt-h3` の reset は `RESET_STREAM` へのフォールバックになり、WebTransport ヘッダが確実に届く保証が無い。`wt-h2` は `WT_RESET_STREAM` capsule で reset するため `RESET_STREAM_AT` は不要だが、MoQ リレーの capsule 対応に依存する。
-reset を伴う経路 (request stream の cancel や、送信中の subgroup / data stream の中断) は MoQ リレーによっては成立しない。
-この経路を選ぶと、接続の前に experimental である旨の警告ログ (英語) が出る。
+`wt-h2` は `WT_RESET_STREAM` capsule で reset するため、MoQ リレーの capsule 対応に依存する。
 
 QMux 経路 (`qmux`) は experimental として扱う。QMux は順序保証された 1 本の双方向バイトストリーム (TLS over TCP) の上で QUIC version 1 のストリームと DATAGRAM を多重化する経路で (draft-ietf-quic-qmux-02)、UDP が使えない環境でも MOQT を試せるようにするためのものである。
 QMux 自体は暗号化も ALPN のネゴシエーションも行わないため、ALPN は native QUIC と同じ `moqt-23` をこのクレートが張る (`wt-h2` の ALPN は `h2` のままである)。
@@ -108,6 +125,6 @@ cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video&c4m=
 
 ## テスト
 
-`peer_harness` (テスト専用、`#[cfg(test)]`) が s2n-quic のサーバーを 127.0.0.1 に立て、in-process で MOQT peer を駆動する。モックやスタブは使わず、ライブラリと example の公開 API だけを使う。対象は QUIC 直接接続と QMux である。
+`peer_harness` (テスト専用、`#[cfg(test)]`) が tobi-quic のサーバーを 127.0.0.1 に立て、in-process で MOQT peer を駆動する。モックやスタブは使わず、ライブラリの公開 API だけを使う。対象は QUIC 直接接続と QMux である。
 
 QMux は `QmuxTestPeerServer` が TCP + TLS (ALPN `moqt-23`) を 127.0.0.1 に立て、`qmux` モジュールのテストが SETUP の交換、PUBLISH / SUBSCRIBE、subgroup stream と datagram の往復、ピアの STOP_SENDING の観測を実行で検証する。

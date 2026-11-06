@@ -2,7 +2,7 @@
 name = "tokio-moq"
 version = "2026.0.0"
 edition = "2024"
-# 依存の s2n-quic が MSRV 1.95 を要求するため、それに合わせる
+# 依存の QUIC バックエンド (s2n-quic / tobi-quic) が MSRV 1.95 を要求するため、それに合わせる
 rust-version = "1.95"
 publish = false
 
@@ -30,10 +30,19 @@ tokio-qmux = { git = "https://github.com/shiguredo/qmux-rs", rev = "3e0dc0f6a740
 base64ct = "1.8"
 # バイト列操作
 bytes = "1.12"
-# TLS バックエンド (s2n-quic provider と WebTransport over HTTP/2 の rustls で使う)
+# TLS バックエンド (QUIC と WebTransport over HTTP/2 の rustls で使う)
 rustls = "0.23"
-# QUIC クライアント
-s2n-quic = { version = "1.91", default-features = false, features = ["provider-address-token-default", "provider-tls-rustls", "unstable-provider-datagram"] }
+# QUIC 実装 (s2n-quic)。quic-s2n feature で有効にする
+s2n-quic = { version = "1.91", default-features = false, features = ["provider-address-token-default", "provider-tls-rustls", "unstable-provider-datagram"], optional = true }
+# QUIC 実装 (ngtcp2)。quic-ngtcp2 feature で有効にする
+shiguredo_ngtcp2_tokio = { version = "2026.1.0-canary.4", optional = true }
+# QUIC 実装 (tobi-quic)
+#
+# crates.io に公開されていないため git で参照する。このリポジトリの main は
+# 公開のたびに 1 コミットへ作り直される (履歴を積まない) ため、rev ではなく
+# branch を指定する。ネイティブ QUIC のバックエンドと WebTransport over HTTP/3 の
+# QUIC 層の両方で使うため、常に依存に含める。
+tobi_quic = { git = "https://github.com/shiguredo/tobi-quic", branch = "main" }
 # 非同期ランタイム
 tokio = { version = "1.54", features = ["full"] }
 # Tokio タスクメトリクス計測
@@ -49,3 +58,11 @@ rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs"] }
 # テストで tokio の時計を止める (start_paused / advance) ため test-util を有効にする。
 # full は通常依存で有効なため、ここでは足りない feature だけを足す
 tokio = { version = "1.54", features = ["test-util"] }
+
+[features]
+default = ["quic-tobi"]
+quic-ngtcp2 = ["dep:shiguredo_ngtcp2_tokio"]
+quic-s2n = ["dep:s2n-quic"]
+# ネイティブ QUIC のバックエンド。ちょうど 1 つだけを有効にする。
+# WebTransport over HTTP/3 は tobi-quic を直接使うため、この選択の対象外である。
+quic-tobi = []

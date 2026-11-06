@@ -1,9 +1,9 @@
-//! TCP + TLS (rustls) のクライアント設定
+//! TLS (rustls) のクライアント設定
 //!
-//! TCP + TLS を使う経路 (QMux と WebTransport over HTTP/2) が共有する。両者は TLS の
-//! 組み立て (CA 証明書の読み込み、証明書検証の無効化) が同じで、ALPN だけが異なる。
-//! QUIC を使う経路 (native QUIC と WebTransport over HTTP/3) は s2n-quic に TLS を
-//! 任せるため、このモジュールを使わない。
+//! すべての経路が共有する。TLS の組み立て (CA 証明書の読み込み、証明書検証の無効化) は
+//! 共通であり、ALPN だけが異なる。TCP + TLS を使う経路 (QMux と WebTransport over
+//! HTTP/2) と、QUIC を使う経路 (native QUIC と WebTransport over HTTP/3) のどちらも
+//! ここで作った設定を使う。
 
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ use crate::error::{Result, TransportError};
 ///
 /// `disable_cert_validation` が true の場合と CA 証明書が指定されていない場合は
 /// 証明書検証を行わない (開発用)。両方指定された場合は無効化を優先する。
-/// `alpn` は TLS の ALPN に載せる 1 要素で、経路ごとに異なる (`h2` と `moqt-23`)。
+/// `alpn` は TLS の ALPN に載せる 1 要素で、経路ごとに異なる (`h2` / `h3` / `moqt-23`)。
 ///
 /// 検証を無効化したことの警告は呼び出し側が出す (経路ごとに理由が異なるため)。
 pub(crate) fn build_client_config(
@@ -54,6 +54,31 @@ pub(crate) fn build_client_config(
     };
     tls_config.alpn_protocols = vec![alpn.to_vec()];
     Ok(Arc::new(tls_config))
+}
+
+/// QUIC 用の rustls クライアント設定を構築する
+///
+/// `cert_path` が指定された場合は、そのファイルを CA 証明書として読み込んで検証を行う。
+/// 指定がない場合は開発用に証明書検証をスキップする。`alpn` は QUIC の ALPN に載せる
+/// 識別子 (`moqt-23` / `h3`) である。
+#[cfg(any(feature = "quic-tobi", feature = "quic-s2n"))]
+pub(crate) fn build_quic_client_config(
+    cert_path: Option<&str>,
+    alpn: &[u8],
+) -> Result<Arc<rustls::ClientConfig>> {
+    match cert_path {
+        Some(path) => {
+            let pem = std::fs::read_to_string(path).map_err(|e| {
+                TransportError::Quic(format!("failed to read certificate '{path}': {e}"))
+            })?;
+            build_client_config(Some(&pem), false, alpn)
+        }
+        None => {
+            // 開発用: 証明書検証をスキップする
+            tracing::warn!("TLS certificate verification is disabled (development mode)");
+            build_client_config(None, true, alpn)
+        }
+    }
 }
 
 /// 証明書を検証しない `ServerCertVerifier` (開発用)

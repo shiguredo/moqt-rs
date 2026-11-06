@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use crate::quic::QuicError;
 use bytes::Bytes;
 use shiguredo_moqt::session::types::RequestStreamEnd;
 use tokio::sync::Mutex;
@@ -27,7 +28,7 @@ pub enum RecvChunk {
 
 /// 送信ストリーム
 pub enum SendStream {
-    Quic(s2n_quic::stream::SendStream),
+    Quic(crate::quic::SendStream),
     WtH3(WtSendStream),
     WtH2(WtH2SendStream),
     /// QMux (draft-ietf-quic-qmux-02)
@@ -38,7 +39,7 @@ impl SendStream {
     /// データを送信する
     pub async fn send(&mut self, data: Bytes) -> Result<(), TransportError> {
         match self {
-            SendStream::Quic(s) => s.send(data).await.map_err(|e| {
+            SendStream::Quic(s) => s.send_all(&data).await.map_err(|e| {
                 TransportError::from_send_error(e, |e| TransportError::Quic(format!("{e}")))
             }),
             SendStream::WtH3(s) => s.send(&data).await,
@@ -70,10 +71,10 @@ impl SendStream {
     /// [`TransportError::StreamReset`] / [`TransportError::StreamClosed`])。
     pub async fn finish(&mut self) -> Result<(), TransportError> {
         match self {
-            SendStream::Quic(s) => s.finish().map_err(|e| {
+            SendStream::Quic(s) => s.finish().await.map_err(|e| {
                 TransportError::from_send_error(e, |e| TransportError::Quic(format!("{e}")))
             }),
-            SendStream::WtH3(s) => s.finish(),
+            SendStream::WtH3(s) => s.finish().await,
             SendStream::WtH2(s) => s.finish().await,
             SendStream::Qmux(s) => s.finish().await.map_err(TransportError::from_qmux),
         }
@@ -85,14 +86,10 @@ impl SendStream {
     /// peer が cancel 済みのストリームでは I/O 層が拒否を返す (`finish` と同じ)。
     pub async fn reset(&mut self, error_code: u64) -> Result<(), TransportError> {
         match self {
-            SendStream::Quic(s) => {
-                let code = s2n_quic::application::Error::new(error_code)
-                    .map_err(|e| TransportError::Quic(format!("{e}")))?;
-                s.reset(code).map_err(|e| {
-                    TransportError::from_send_error(e, |e| TransportError::Quic(format!("{e}")))
-                })
-            }
-            SendStream::WtH3(s) => s.reset(error_code),
+            SendStream::Quic(s) => s.reset(error_code).await.map_err(|e| {
+                TransportError::from_send_error(e, |e| TransportError::Quic(format!("{e}")))
+            }),
+            SendStream::WtH3(s) => s.reset(error_code).await,
             SendStream::WtH2(s) => s.reset(error_code).await,
             SendStream::Qmux(s) => s.reset(error_code).await.map_err(TransportError::from_qmux),
         }
@@ -101,7 +98,8 @@ impl SendStream {
 
 /// 受信ストリーム
 pub enum RecvStream {
-    Quic(s2n_quic::stream::ReceiveStream),
+    /// QUIC 直接接続の受信ストリーム
+    Quic(crate::quic::RecvStream),
     WtH3(WtRecvStream),
     WtH2(WtH2RecvStream),
     /// QMux (draft-ietf-quic-qmux-02)
@@ -117,6 +115,11 @@ pub enum RecvStream {
 }
 
 impl RecvStream {
+    /// QUIC の受信ストリームを作る
+    pub(crate) fn new_quic(stream: crate::quic::RecvStream) -> Self {
+        Self::Quic(stream)
+    }
+
     /// QMux の受信ストリームを作る
     ///
     /// 読み出し用のバッファは初回の読み出しで確保する。受理したまま読まれないストリームが
@@ -127,13 +130,13 @@ impl RecvStream {
     /// データまたは終端を受信する
     pub async fn receive_chunk(&mut self) -> Result<RecvChunk, TransportError> {
         match self {
-            RecvStream::Quic(s) => match s.receive().await {
-                Ok(Some(data)) => Ok(RecvChunk::Data(data)),
+            RecvStream::Quic(stream) => match stream.receive().await {
+                Ok(Some(data)) => Ok(RecvChunk::Data(Bytes::from(data))),
                 Ok(None) => Ok(RecvChunk::End(RequestStreamEnd::Fin)),
-                Err(s2n_quic::stream::Error::StreamReset { error, .. }) => {
+                Err(QuicError::Reset { error_code }) => {
                     // QUIC 経路は QUIC のコード空間であり常にコードがあるため Some にする
                     Ok(RecvChunk::End(RequestStreamEnd::Reset {
-                        error_code: Some(error.into()),
+                        error_code: Some(error_code),
                         reliable_size: None,
                     }))
                 }
@@ -182,13 +185,11 @@ impl RecvStream {
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub async fn stop_sending(&mut self, error_code: u64) -> Result<(), TransportError> {
         match self {
-            RecvStream::Quic(s) => {
-                let code = s2n_quic::application::Error::new(error_code)
-                    .map_err(|e| TransportError::Quic(format!("{e}")))?;
-                s.stop_sending(code)
-                    .map_err(|e| TransportError::Quic(format!("{e}")))
-            }
-            RecvStream::WtH3(s) => s.stop_sending(error_code),
+            RecvStream::Quic(stream) => stream
+                .stop_sending(error_code)
+                .await
+                .map_err(|e| TransportError::Quic(format!("{e}"))),
+            RecvStream::WtH3(s) => s.stop_sending(error_code).await,
             RecvStream::WtH2(s) => s.stop_sending(error_code),
             RecvStream::Qmux { stream, .. } => stream
                 .stop_sending(error_code)
@@ -200,7 +201,7 @@ impl RecvStream {
     /// ストリーム ID を返す
     pub fn stream_id(&self) -> u64 {
         match self {
-            RecvStream::Quic(s) => s.id(),
+            RecvStream::Quic(stream) => stream.id(),
             RecvStream::WtH3(s) => s.stream_id(),
             RecvStream::WtH2(s) => s.stream_id(),
             RecvStream::Qmux { stream, .. } => stream.id().as_u64(),
@@ -264,7 +265,11 @@ pub(crate) fn remap_stop_sending_error_code(
 /// (`WtSession::take_uni_receiver` / `WtH2Session::take_uni_receiver`)。
 #[derive(Clone)]
 pub enum StreamHandle {
-    Quic(s2n_quic::connection::Handle),
+    /// QUIC 直接接続の接続ハンドル
+    ///
+    /// いずれのバックエンドのハンドルも Clone 可能であり、複数タスクから同じ接続を
+    /// 操作できる。
+    Quic(crate::quic::Connection),
     WtH3(Arc<Mutex<WtSession>>),
     WtH2(Arc<Mutex<WtH2Session>>),
     /// QMux (draft-ietf-quic-qmux-02)
@@ -280,9 +285,9 @@ impl StreamHandle {
     pub async fn open_send_stream(&self) -> Result<SendStream, TransportError> {
         match self {
             StreamHandle::Quic(handle) => {
+                // いずれのバックエンドも、ピアが許可した枠が空くまで待つ
                 let stream = handle
-                    .clone()
-                    .open_send_stream()
+                    .open_send_stream_wait()
                     .await
                     .map_err(|e| TransportError::Quic(format!("{e}")))?;
                 Ok(SendStream::Quic(stream))
@@ -355,13 +360,12 @@ impl StreamHandle {
     pub async fn open_bidi_stream(&self) -> Result<(SendStream, RecvStream), TransportError> {
         match self {
             StreamHandle::Quic(handle) => {
-                let stream = handle
-                    .clone()
-                    .open_bidirectional_stream()
+                // `open_send_stream` と同じ理由で、枠が空くまで待つ variant を使う
+                let (send, recv) = handle
+                    .open_bidirectional_stream_wait()
                     .await
                     .map_err(|e| TransportError::Quic(format!("{e}")))?;
-                let (recv, send) = stream.split();
-                Ok((SendStream::Quic(send), RecvStream::Quic(recv)))
+                Ok((SendStream::Quic(send), RecvStream::new_quic(recv)))
             }
             StreamHandle::WtH3(session) => {
                 let mut session = session.lock().await;
@@ -395,9 +399,8 @@ impl StreamHandle {
     pub async fn close(&self, code: u64, reason: &str) -> Result<(), TransportError> {
         match self {
             StreamHandle::Quic(handle) => {
-                let err = s2n_quic::application::Error::new(code)
-                    .unwrap_or(s2n_quic::application::Error::UNKNOWN);
-                handle.close(err);
+                // 可変長整数に収まらないコードは s2n-quic と同じく UNKNOWN で閉じる
+                crate::quic::close_application(handle, code).await?;
                 Ok(())
             }
             StreamHandle::WtH3(session) => {
@@ -440,7 +443,7 @@ impl StreamHandle {
 
     /// datagram を送信する (publisher 側で使用)
     ///
-    /// QUIC では s2n-quic の datagram sender を使い、WebTransport では HTTP Datagram 経由で送信する。
+    /// QUIC では DATAGRAM (RFC 9221) を、WebTransport では HTTP Datagram 経由で送信する。
     ///
     /// QUIC の送信のキューが満杯のときは、空きができるまで待つ。datagram は再送されないため、
     /// ここで捨てると音声が飛ぶ。満杯になるのは回線が詰まっているときであり、待てば送れる。
@@ -448,24 +451,11 @@ impl StreamHandle {
     pub async fn send_datagram(&self, data: &[u8]) -> Result<(), TransportError> {
         match self {
             StreamHandle::Quic(handle) => {
-                let mut bytes = Bytes::copy_from_slice(data);
-                // `poll_send_datagram` は空きが無いとき `Waker` を登録するため、
-                // ポーリングで待たずに空きができ次第おきる
-                std::future::poll_fn(|cx| {
-                    let sent = handle.datagram_mut(
-                        |sender: &mut s2n_quic::provider::datagram::default::Sender| {
-                            sender.poll_send_datagram(&mut bytes, cx)
-                        },
-                    );
-                    match sent {
-                        Ok(sent) => sent
-                            .map_err(|e| TransportError::Quic(format!("datagram send error: {e}"))),
-                        Err(e) => std::task::Poll::Ready(Err(TransportError::Quic(format!(
-                            "datagram send error: {e}"
-                        )))),
-                    }
-                })
-                .await
+                // 送信キューの空きができるまで待つ。待たずに捨てると音声が飛ぶ
+                handle
+                    .send_datagram_wait(data.to_vec())
+                    .await
+                    .map_err(|e| TransportError::Quic(format!("datagram send error: {e}")))
             }
             StreamHandle::WtH3(session) => {
                 let session = session.lock().await;
@@ -491,7 +481,7 @@ impl StreamHandle {
 
     /// datagram を受信する (subscriber 側で使用)
     ///
-    /// QUIC では `s2n-quic` の datagram プロバイダーから、WebTransport では
+    /// QUIC では接続の DATAGRAM 受信キューから、WebTransport では
     /// `WtSession::take_buffered_datagrams` / `WtH2Session::take_buffered_datagrams`
     /// から取得する。
     /// WebTransport ではセッション終了を検知した場合に `ConnectionClosed` を返し、
@@ -499,45 +489,14 @@ impl StreamHandle {
     pub async fn recv_datagrams(&self) -> Result<Vec<Vec<u8>>, TransportError> {
         match self {
             StreamHandle::Quic(handle) => {
-                let mut datagrams = Vec::new();
-                let mut query_error: Option<String> = None;
-                // 1 つも無いときに即座に返すと、呼び出し側の受信ループが空回りして CPU を
-                // 1 コア使い切り、同じ runtime で動く QUIC エンドポイントの I/O を飢えさせる
-                // (受信パケットが落ち、relay 側の輻輳ウィンドウも崩壊する)。最初の 1 つは
-                // 届くまで待ち、続けて届いている分はまとめて取る
-                let first = std::future::poll_fn(|cx| {
-                    let received = handle.datagram_mut(
-                        |receiver: &mut s2n_quic::provider::datagram::default::Receiver| {
-                            receiver.poll_recv_datagram(cx)
-                        },
-                    );
-                    match received {
-                        Ok(received) => received,
-                        Err(e) => {
-                            // `datagram_mut` 自体の失敗 (接続が既に閉じている) は待っても
-                            // 直らない。空の datagram で打ち切って呼び出し側へ伝える
-                            query_error = Some(format!("datagram query error: {e}"));
-                            std::task::Poll::Ready(Ok(Bytes::new()))
-                        }
-                    }
-                })
-                .await
-                .map_err(|e| TransportError::Quic(format!("datagram receive error: {e}")))?;
-                if let Some(e) = query_error {
-                    return Err(TransportError::Quic(e));
+                // 1 つ届くまで待つ。空のまま返すと呼び出し側の受信ループが空回りして
+                // CPU を 1 コア使い切り、同じ runtime で動く接続の I/O を飢えさせる
+                match handle.receive_datagram().await {
+                    Ok(datagram) => Ok(vec![datagram]),
+                    // 接続が終了した。MOQT 層の受信ループを待たせないようセッション終了として返す
+                    Err(QuicError::ConnectionClosed) => Err(TransportError::ConnectionClosed),
+                    Err(e) => Err(TransportError::Quic(format!("datagram receive error: {e}"))),
                 }
-                datagrams.push(first.to_vec());
-                // 続けて届いている分を取る (空になったら返す)
-                handle
-                    .datagram_mut(
-                        |receiver: &mut s2n_quic::provider::datagram::default::Receiver| {
-                            while let Some(next) = receiver.recv_datagram() {
-                                datagrams.push(next.to_vec());
-                            }
-                        },
-                    )
-                    .map_err(|e| TransportError::Quic(format!("datagram query error: {e}")))?;
-                Ok(datagrams)
             }
             StreamHandle::WtH3(session) => {
                 let session = session.lock().await;
@@ -566,7 +525,11 @@ impl StreamHandle {
 
 /// 単方向ストリーム (data stream) を受け入れるためのアクセプター (subscriber 側で使用)
 pub enum StreamAcceptor {
-    Quic(s2n_quic::connection::ReceiveStreamAcceptor),
+    /// QUIC 直接接続のストリーム受理
+    ///
+    /// 単方向と双方向の受理を別のタスクから同時に待つため `Arc` で共有する。
+    /// 各バックエンドは `&self` で受理できるよう内部で排他する。
+    Quic(Arc<crate::quic::StreamAcceptor>),
     WtH3 {
         /// ストリームを開く側で使う session。accept ではロックを取らない
         session: Arc<Mutex<WtSession>>,
@@ -602,13 +565,12 @@ impl StreamAcceptor {
     /// `ConnectionClosed` を返す (MOQT 層の受信ループを待たせないため)。
     pub async fn accept_recv_stream(&mut self) -> Result<Option<RecvStream>, TransportError> {
         match self {
-            StreamAcceptor::Quic(acceptor) => {
-                let stream = acceptor
-                    .accept_receive_stream()
-                    .await
-                    .map_err(|e| TransportError::Quic(format!("{e}")))?;
-                Ok(stream.map(RecvStream::Quic))
-            }
+            StreamAcceptor::Quic(acceptor) => match acceptor.accept_receive_stream().await {
+                Ok(stream) => Ok(Some(RecvStream::new_quic(stream))),
+                // 接続終了は「これ以上ストリームが来ない」として扱う
+                Err(e) if crate::quic::is_connection_closed(&e) => Ok(None),
+                Err(e) => Err(TransportError::Quic(format!("{e}"))),
+            },
             StreamAcceptor::WtH3 {
                 session: _session,
                 uni_rx,
@@ -664,7 +626,8 @@ impl StreamAcceptor {
 /// request stream として転送する (draft-ietf-moq-transport-23 §6.3 (Session initialization))。
 /// publisher はこのストリームを受理しなければ要求に応答できない。
 pub enum BidiStreamAcceptor {
-    Quic(s2n_quic::connection::BidirectionalStreamAcceptor),
+    /// QUIC 直接接続の双方向ストリーム受理 (`StreamAcceptor` と実体を共有する)
+    Quic(Arc<crate::quic::StreamAcceptor>),
     WtH3 {
         /// ストリームを開く側で使う session。accept ではロックを取らない
         session: Arc<Mutex<WtSession>>,
@@ -706,14 +669,14 @@ impl BidiStreamAcceptor {
     ) -> Result<Option<(SendStream, RecvStream)>, TransportError> {
         match self {
             BidiStreamAcceptor::Quic(acceptor) => {
-                let stream = acceptor
-                    .accept_bidirectional_stream()
-                    .await
-                    .map_err(|e| TransportError::Quic(format!("{e}")))?;
-                Ok(stream.map(|stream| {
-                    let (recv, send) = stream.split();
-                    (SendStream::Quic(send), RecvStream::Quic(recv))
-                }))
+                match acceptor.accept_bidirectional_stream().await {
+                    Ok((send, recv)) => {
+                        Ok(Some((SendStream::Quic(send), RecvStream::new_quic(recv))))
+                    }
+                    // 接続終了は「これ以上ストリームが来ない」として扱う
+                    Err(e) if crate::quic::is_connection_closed(&e) => Ok(None),
+                    Err(e) => Err(TransportError::Quic(format!("{e}"))),
+                }
             }
             BidiStreamAcceptor::WtH3 {
                 session: _session,

@@ -1694,7 +1694,7 @@ impl MoqtClient {
     /// peer 起動の request stream は MoqtClient 内部の受理タスクが受け取るため、
     /// publisher も本 API を使える。
     pub async fn establish_quic(
-        connection: s2n_quic::connection::Connection,
+        connection: crate::quic::Connected,
         stop_sending_rx: StopSendingReceiver,
         path: &str,
         authority: &str,
@@ -1703,7 +1703,9 @@ impl MoqtClient {
         task_monitor: &tokio_metrics::TaskMonitor,
     ) -> Result<(Self, StreamAcceptor)> {
         let (handle, acceptor) = connection.split();
-        let (bidi_acceptor, mut recv_acceptor) = acceptor.split();
+        // 単方向と双方向の受理を別のタスクから同時に待つため `Arc` で共有する
+        let acceptor = std::sync::Arc::new(acceptor);
+        let bidi_acceptor = BidiStreamAcceptor::Quic(std::sync::Arc::clone(&acceptor));
         let handle = StreamHandle::Quic(handle);
 
         // 自側 uni stream (control 送信側) を開く
@@ -1725,15 +1727,12 @@ impl MoqtClient {
         tracing::info!("Sent SETUP message");
 
         // peer uni stream を受信して stream type を検証
-        let recv_stream = recv_acceptor
+        let recv_stream = acceptor
             .accept_receive_stream()
             .await
-            .map_err(|e| TransportError::Quic(format!("failed to accept control stream: {e}")))?
-            .ok_or_else(|| {
-                TransportError::Quic("connection closed before control stream".into())
-            })?;
+            .map_err(|e| TransportError::Quic(format!("failed to accept control stream: {e}")))?;
         let mut control_recv = ControlStream::new(
-            RecvStream::Quic(recv_stream),
+            RecvStream::new_quic(recv_stream),
             session.local_max_control_message_size(),
         );
         recv_control_stream_type(&mut session, &handle, &mut control_recv).await?;
@@ -1745,14 +1744,14 @@ impl MoqtClient {
                 handle,
                 stop_sending_rx: Some(stop_sending_rx),
                 control_recv,
-                bidi_acceptor: BidiStreamAcceptor::Quic(bidi_acceptor),
+                bidi_acceptor,
                 wt_session_state: None,
             },
             c4m_tokens,
             task_monitor,
         )
         .await?;
-        Ok((client, StreamAcceptor::Quic(recv_acceptor)))
+        Ok((client, StreamAcceptor::Quic(acceptor)))
     }
 
     /// QMux (draft-ietf-quic-qmux-02) 接続で MOQT client を確立する
@@ -3267,8 +3266,8 @@ impl MoqtClient {
         }
         let notified = {
             let mut session = lock_session(&self.session);
-            // 受信方向の RESET_STREAM と同じ終端として扱う。`reliable_size` は s2n-quic が
-            // RESET_STREAM_AT に対応しないため None を渡す
+            // 受信方向の RESET_STREAM と同じ終端として扱う。STOP_SENDING には
+            // Reliable Size が無いため `reliable_size` は None を渡す
             match session.recv_request_stream_closed(
                 request_id,
                 RequestStreamEnd::Reset {

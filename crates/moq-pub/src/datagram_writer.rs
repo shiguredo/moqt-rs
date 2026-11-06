@@ -164,7 +164,7 @@ impl DatagramWriter {
 
         // RFC 9221 §3 は peer が広告した max_datagram_frame_size を超える DATAGRAM の送信を
         // MUST NOT とし、受信側は PROTOCOL_VIOLATION で接続を閉じる MUST を負う。path MTU を
-        // 超えた datagram は s2n-quic が通知なく破棄し、draft-ietf-moq-transport-23 §11.2 も
+        // 超えた datagram は I/O 層がエラーにし、draft-ietf-moq-transport-23 §11.2 も
         // 「上限を超えた object は通知なく破棄される」と定める。送信前にサイズを判定して
         // 原因と対処が分かるエラーにする。
         check_datagram_size(buf.len(), self.max_size)?;

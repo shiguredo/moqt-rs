@@ -5,17 +5,29 @@ MoQ リレーへ catalog / audio / video track を PUBLISH する publisher ク�
 音声は Opus / AAC-LC で、映像は VP8 / VP9 / AV1 / H.264 / H.265 でエンコードする。
 
 AAC-LC は macOS の Audio Toolbox、H.264 / H.265 は macOS の Video Toolbox を使うため macOS 限定である。
-VP8 / VP9 は libvpx を使う。libvpx の Windows ビルド (MSVC) は動作しないため、Windows では `vp8` / `vp9` を指定できない。
+VP8 / VP9 は libvpx を使う (Windows は x86_64-pc-windows-msvc のみ対応する)。
 
 入力はカメラとマイクのほかに MP4 ファイルに対応し、`--input-mp4` は映像トラックを再エンコードせずに配信し、`--input-mp4-reencode` は音声 / 映像をデコードして再エンコードして配信する。
 
 publisher / subscriber の接続先となる MoQ リレーは別途用意する。
 `--url` の URL スキーム、`--transport`、`--namespace`、C4M 認可トークン、TLS 証明書の指定は publisher と subscriber で共通である。規則は [tokio-moq](../tokio-moq/README.md) を参照すること。
 
+## QUIC バックエンド
+
+moq-pub は QUIC の実装に tobi-quic を採用している。ネイティブ QUIC は cargo feature で
+s2n-quic / ngtcp2-rs も選べる (`--no-default-features` と `--features quic-s2n` /
+`--features quic-ngtcp2` を組み合わせる)。
+WebTransport over HTTP/3 の QUIC 層は tobi-quic 固定である。詳細は
+[tokio-moq](../tokio-moq/README.md) を参照すること。
+
+```bash
+cargo run -p moq-pub --no-default-features --features quic-s2n -- --url moqt://127.0.0.1:4443 --namespace moq-example
+```
+
 ## 実行例
 
 ```bash
-# QUIC で起動する (440 Hz サイン波音声と raden 生成の疑似映像)
+# QUIC で起動する
 cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --fake-capture-device
 
 # WebTransport over HTTP/3 で起動する
@@ -43,7 +55,7 @@ cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video' --f
 | オプション | デフォルト | 説明 |
 | --- | --- | --- |
 | `--url` | (必須) | 接続先 URL (`moqt://`) |
-| `--transport` | (省略時は `--url` の `msf` fragment の `connection`、無ければ `quic`) | 接続経路 (`quic` / `wt-h3` / `wt-h2` / `qmux`)。`wt-h3` / `wt-h2` / `qmux` は experimental |
+| `--transport` | (省略時は `--url` の `msf` fragment の `connection`、無ければ `quic`) | 接続経路 (`quic` / `wt-h3` / `wt-h2` / `qmux`)。`qmux` は experimental |
 | `--cert` | | TLS CA 証明書パス |
 | `--device-id` | | カメラデバイス ID |
 | `--width` | `1280` | 映像幅 (px) |
@@ -56,7 +68,7 @@ cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video' --f
 | `--fake-capture-device` | | 実デバイスの代わりに 440 Hz サイン波音声と raden 生成の疑似映像を使う |
 | `--input-mp4` | | MP4 ファイルの映像トラックを再エンコードせずに配信する (AV1 / H.264 / H.265。音声は配信せず、B フレームを含む MP4 は拒否する) |
 | `--input-mp4-reencode` | | MP4 ファイルの音声 / 映像をデコードして再エンコード配信する (音声は Opus のみ、映像は AV1 / H.264 / H.265。解像度 / フレームレートは MP4 から自動検出する) |
-| `--video-codec` | `av1` | 映像コーデック (vp8 / vp9 / av1 / h264 / h265。h264 / h265 は macOS 限定、vp8 / vp9 は Windows 非対応) |
+| `--video-codec` | `av1` | 映像コーデック (vp8 / vp9 / av1 / h264 / h265。h264 / h265 は macOS 限定) |
 | `--no-video` | | 映像トラックの送信を無効化する |
 | `--no-audio` | | 音声トラックの送信を無効化する |
 | `--audio-device-id` | | 音声入力デバイス ID |
@@ -97,9 +109,8 @@ cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video' --f
   - `--fake-capture-device`
   - `--audio-device-id`
 
-WebTransport 経路 (`--transport wt-h3` / `--transport wt-h2`) は experimental であり、正常に動作しない。
-`wt-h3` は s2n-quic が reset stream (`RESET_STREAM_AT`) を実装していないため、WebTransport が MUST とする Reliable Size 付きのデータストリーム reset を行えない。`reset_stream_at` を要求する MoQ リレーとは接続できず、reset を伴う経路 (request stream の cancel や、送信中の subgroup / data stream の中断) も成立しない。
-`wt-h2` は reset を `WT_RESET_STREAM` capsule で行うため `RESET_STREAM_AT` は不要だが、MoQ リレーの capsule 対応に依存しており、実リレーでの動作を確認していない。
+WebTransport 経路 (`--transport wt-h3` / `--transport wt-h2`) は Extended CONNECT でセッションを確立する。
+`wt-h2` は reset を `WT_RESET_STREAM` capsule で行うため、MoQ リレーの capsule 対応に依存する。
 詳細は [tokio-moq](../tokio-moq/README.md) を参照すること。
 
 QMux 経路 (`--transport qmux`) は experimental である。QMux は TCP + TLS の上で QUIC version 1 のストリームと DATAGRAM を多重化する経路で、UDP が使えない環境向けである。
@@ -142,7 +153,7 @@ moq-pub は FETCH を次のように扱う。
 
 ## ログ
 
-環境変数 `RUST_LOG` でログレベルを制御できる。未設定の場合の既定は `error` である。WebTransport や QMux が experimental である旨などの警告ログを見るには `RUST_LOG=warn` 以上を指定する。
+環境変数 `RUST_LOG` でログレベルを制御できる。未設定の場合の既定は `error` である。QMux が experimental である旨などの警告ログを見るには `RUST_LOG=warn` 以上を指定する。
 
 ```bash
 RUST_LOG=debug cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --fake-capture-device

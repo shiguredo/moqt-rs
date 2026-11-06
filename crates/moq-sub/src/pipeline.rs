@@ -2045,16 +2045,6 @@ pub async fn run(
     // 録画対象のトラック情報はカタログ取得後に確定するため、起動はその時点で行う。
     let recording_requested = config.mp4.is_some();
 
-    // WebTransport 経路は experimental である (s2n-quic が `RESET_STREAM_AT` を送出できず、
-    // WebTransport が MUST とする Reliable Size 付きの reset を行えないため)。接続の前に 1 度だけ
-    // 警告し、どのトランスポートで接続するかを実行時に分かるようにする。
-    if matches!(config.transport, Transport::WtH3 | Transport::WtH2) {
-        tracing::warn!(
-            "WebTransport transport ({:?}) is experimental: RESET_STREAM_AT is unavailable, so stream resets may not work",
-            config.transport
-        );
-    }
-
     // QMux 経路も experimental である。DATAGRAM は経路での損失を下位の TCP が再送するため
     // 起きないが、TCP の再送で遅延が伸びる。QMux は速やかに配送できない DATAGRAM の破棄を
     // 許すため (draft-ietf-quic-qmux-02 Section 6)、受信側のバッファが溢れると欠落しうる
@@ -2513,9 +2503,10 @@ pub async fn run(
     // 枠が埋まっている間は新しく accept した stream を `pending_streams` に積み、
     // ループの先頭で枠が空いた分だけ流し込む。`select!` の分岐の中で permit を
     // 待ってはならない。分岐の中で待つと、permit が返るまで `client.next_event()`
-    // が poll されず、session の ACK 送信とタイマー処理が止まる。s2n-quic の
-    // エンドポイントは `next_event()` の poll で動くため、ここが止まると受信も
-    // 送信も完全に停止し、relay 側の輻輳ウィンドウが最小値へ落ちて復帰しない。
+    // が poll されず、session の ACK 送信とタイマー処理が止まる。QUIC の endpoint は
+    // バックグラウンドで駆動しているが、MOQT session の進行は `next_event()` の poll に
+    // 依存するため、ここが止まると受信も送信も完全に停止し、relay 側の輻輳ウィンドウが
+    // 最小値へ落ちて復帰しない。
     let stream_slots = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_STREAMS));
     // Track Alias 未確立の Subgroup ストリームの保留バッファ。stream task ごとに持つと
     // per-session の上限が per-stream の上限としてしか働かず、未知 alias のストリームが
@@ -2824,7 +2815,7 @@ pub async fn run(
         }
 
         // 水が多すぎるときは accept を止める。select! の分岐に入らなければ
-        // s2n-quic が stream を保持する
+        // 接続が stream を保持する
         let accepting = pending_streams.len() < MAX_CONCURRENT_STREAMS * 4;
 
         tokio::select! {
@@ -3779,8 +3770,9 @@ fn is_transport_session_end(error: &Error) -> bool {
 
 /// transport エラーが peer によるストリーム終端 (送信方向への STOP_SENDING) を表すかどうか
 ///
-/// s2n-quic は peer の STOP_SENDING を受信したストリームの送信 API を `StreamReset` で
-/// 失敗させる。これは該当ストリームだけの終端でありセッションは継続するため
+/// peer の STOP_SENDING を受信したストリームの送信 API は失敗し、I/O 層はそれを
+/// [`Error::StreamReset`] に写す (QUIC 直接接続は `tobi-quic` の `StreamError::Stopped`、
+/// QMux は `Error::Stopped`)。これは該当ストリームだけの終端でありセッションは継続するため
 /// (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))、
 /// pipeline は致命エラーにしない。
 ///
@@ -10797,9 +10789,7 @@ mod tests {
 
         /// テスト用: 実エンコーダで VP8 のキーフレームと後続の inter frame を 1 つずつ作る
         ///
-        /// 実デコーダで復号できる本物のフレームを使う。libvpx の Windows ビルドは動作しない
-        /// ため、呼び出し側を Windows 以外に限定する。
-        #[cfg(not(target_os = "windows"))]
+        /// 実デコーダで復号できる本物のフレームを使う。
         pub(super) fn encode_vp8_frames() -> (Vec<u8>, Vec<u8>) {
             use std::num::NonZeroUsize;
 
@@ -11144,7 +11134,6 @@ mod tests {
         /// live の Subgroup stream と FETCH 応答 stream が共有する `deliver_video_object` を
         /// 実 VP8 エンコーダと実デコーダで通す。境界以下でも復号は行う (境界以降のフレームが
         /// 参照しうるため) が、表示経路へは送らない。
-        #[cfg(not(target_os = "windows"))]
         #[tokio::test(flavor = "multi_thread")]
         async fn video_delivery_does_not_send_objects_before_the_subscription_boundary() {
             let (payload, _) = encode_vp8_frames();
@@ -11214,7 +11203,6 @@ mod tests {
         /// 境界以下のキーフレームを復号しないと、境界より後の inter frame を復号できない。
         /// 境界判定を復号の前に移す誤りを検出するため、境界以下のキーフレームと、その直後の
         /// 境界より後の inter frame を実エンコーダと実デコーダで通す。
-        #[cfg(not(target_os = "windows"))]
         #[tokio::test(flavor = "multi_thread")]
         async fn video_delivery_decodes_objects_before_the_subscription_boundary() {
             let (keyframe, inter_frame) = encode_vp8_frames();
@@ -11287,7 +11275,6 @@ mod tests {
         }
 
         /// 購読の境界より後の live の映像が従来どおり送出されること
-        #[cfg(not(target_os = "windows"))]
         #[tokio::test(flavor = "multi_thread")]
         async fn video_delivery_sends_live_objects_after_the_subscription_boundary() {
             let (payload, _) = encode_vp8_frames();
@@ -11346,7 +11333,6 @@ mod tests {
         }
 
         /// 購読の境界が無い場合は映像を送出すること
-        #[cfg(not(target_os = "windows"))]
         #[tokio::test(flavor = "multi_thread")]
         async fn video_delivery_sends_objects_when_there_is_no_boundary() {
             let (payload, _) = encode_vp8_frames();
@@ -11521,7 +11507,6 @@ mod tests {
         /// 実エンコーダで作ったキーフレームと inter frame を、live と同じ `deliver_video_at`
         /// 経由で `frame_tx` へ流す。保留中は `frame_tx` に何も届かず、解除後にキーフレーム、
         /// inter frame の順で 1 枚ずつ届くことを確かめる。
-        #[cfg(not(target_os = "windows"))]
         #[tokio::test(flavor = "multi_thread")]
         async fn held_video_object_is_delivered_in_order_after_release() {
             let (keyframe, inter_frame) = encode_vp8_frames();

@@ -16,7 +16,6 @@ pub(crate) mod h264;
 #[cfg(target_os = "macos")]
 pub(crate) mod h265;
 pub(crate) mod opus;
-#[cfg(not(target_os = "windows"))]
 pub(crate) mod vpx;
 
 /// エンコード済みフレーム
@@ -43,7 +42,7 @@ pub struct EncodedFrame {
 /// サンプル publisher が扱うビデオエンコーダ
 ///
 /// codec ごとの実装を variant に持つ Enum とし、呼び出し側は本型のメソッド経由で
-/// 利用する。macOS 限定の codec と Windows 非対応の codec は variant 単位で `cfg` を付ける。
+/// 利用する。macOS 限定の codec は variant 単位で `cfg` を付ける。
 pub(crate) enum VideoEncoder {
     /// AV1 エンコーダ
     ///
@@ -55,11 +54,9 @@ pub(crate) enum VideoEncoder {
     /// H.265 エンコーダ (Apple Video Toolbox、macOS 限定)
     #[cfg(target_os = "macos")]
     H265(h265::H265Encoder),
-    /// VP8 エンコーダ (libvpx、Windows 非対応)
-    #[cfg(not(target_os = "windows"))]
+    /// VP8 エンコーダ (libvpx)
     Vp8(vpx::VpxEncoder),
-    /// VP9 エンコーダ (libvpx、Windows 非対応)
-    #[cfg(not(target_os = "windows"))]
+    /// VP9 エンコーダ (libvpx)
     Vp9(vpx::VpxEncoder),
 }
 
@@ -82,9 +79,7 @@ impl VideoEncoder {
             VideoEncoder::H264(e) => e.encode(frame, timestamp_us, force_keyframe),
             #[cfg(target_os = "macos")]
             VideoEncoder::H265(e) => e.encode(frame, timestamp_us, force_keyframe),
-            #[cfg(not(target_os = "windows"))]
             VideoEncoder::Vp8(e) => e.encode(frame, timestamp_us, force_keyframe),
-            #[cfg(not(target_os = "windows"))]
             VideoEncoder::Vp9(e) => e.encode(frame, timestamp_us, force_keyframe),
         }
     }
@@ -97,9 +92,7 @@ impl VideoEncoder {
             VideoEncoder::H264(e) => e.catalog_codec_string(),
             #[cfg(target_os = "macos")]
             VideoEncoder::H265(e) => e.catalog_codec_string(),
-            #[cfg(not(target_os = "windows"))]
             VideoEncoder::Vp8(e) => e.catalog_codec_string(),
-            #[cfg(not(target_os = "windows"))]
             VideoEncoder::Vp9(e) => e.catalog_codec_string(),
         }
     }

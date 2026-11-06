@@ -117,6 +117,7 @@ version = "0.47.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8bfbe32ac36b3c428696ce315464181bc4029d689fd58e3f2a4e58c252242f52"
 dependencies = [
+ "bindgen 0.73.2",
  "cc",
  "cmake",
  "dunce",
@@ -887,7 +888,6 @@ dependencies = [
  "bytes",
  "noargs",
  "raden",
- "s2n-quic",
  "shiguredo_aom",
  "shiguredo_audio_device",
  "shiguredo_audio_toolbox",
@@ -914,7 +914,6 @@ dependencies = [
  "bytes",
  "noargs",
  "raw_player",
- "s2n-quic",
  "shiguredo_audio_toolbox",
  "shiguredo_dav1d",
  "shiguredo_http3",
@@ -1602,6 +1601,41 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf0af704514ba7e8e9e2221af2b27af7f7e7d412acdad4aea2ad82ea86a6ed41"
 
 [[package]]
+name = "shiguredo_ngtcp2"
+version = "2026.1.0-canary.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c161a87bead0ef06239af97d295a89694d6f9ee9bcf894e1e742421675f80e5"
+dependencies = [
+ "aws-lc-rs",
+ "libc",
+ "shiguredo_ngtcp2_sys",
+]
+
+[[package]]
+name = "shiguredo_ngtcp2_sys"
+version = "2026.1.0-canary.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fccbd54446b35fdec5392f39dd0821f50684f454258a56f7e535f74138e55209"
+dependencies = [
+ "aws-lc-sys",
+ "libc",
+ "shiguredo_cmake",
+ "shiguredo_toml",
+]
+
+[[package]]
+name = "shiguredo_ngtcp2_tokio"
+version = "2026.1.0-canary.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a171e2204b06cd8cbafbd4a7687ac851bd217c3aa734025938966722855606cc"
+dependencies = [
+ "libc",
+ "shiguredo_ngtcp2",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "shiguredo_opus"
 version = "2026.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1816,6 +1850,90 @@ dependencies = [
 ]
 
 [[package]]
+name = "tobi_core"
+version = "2026.0.0"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#6ddb149dedecabb77a275be932b52bc9b69681bf"
+dependencies = [
+ "hashbrown 0.17.1",
+ "libm",
+]
+
+[[package]]
+name = "tobi_crypto"
+version = "2026.0.0"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#6ddb149dedecabb77a275be932b52bc9b69681bf"
+dependencies = [
+ "aws-lc-rs",
+ "tobi_core",
+ "zeroize",
+]
+
+[[package]]
+name = "tobi_platform"
+version = "2026.0.0"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#6ddb149dedecabb77a275be932b52bc9b69681bf"
+dependencies = [
+ "aws-lc-rs",
+ "libc",
+ "rustls",
+ "socket2",
+ "tobi_core",
+ "tobi_crypto",
+ "tobi_qlog",
+ "tobi_transport",
+ "tokio",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
+name = "tobi_qlog"
+version = "2026.0.0"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#6ddb149dedecabb77a275be932b52bc9b69681bf"
+dependencies = [
+ "nojson",
+ "tobi_core",
+]
+
+[[package]]
+name = "tobi_quic"
+version = "2026.0.0"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#6ddb149dedecabb77a275be932b52bc9b69681bf"
+dependencies = [
+ "aws-lc-rs",
+ "nojson",
+ "rustls",
+ "tobi_core",
+ "tobi_crypto",
+ "tobi_platform",
+ "tobi_qlog",
+ "tobi_transport",
+ "tokio",
+]
+
+[[package]]
+name = "tobi_rustls"
+version = "2026.0.0"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#6ddb149dedecabb77a275be932b52bc9b69681bf"
+dependencies = [
+ "aws-lc-rs",
+ "rustls",
+ "tobi_core",
+]
+
+[[package]]
+name = "tobi_transport"
+version = "2026.0.0"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#6ddb149dedecabb77a275be932b52bc9b69681bf"
+dependencies = [
+ "tobi_core",
+ "tobi_crypto",
+ "tobi_qlog",
+ "tobi_rustls",
+ "tracing",
+]
+
+[[package]]
 name = "tokio"
 version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1867,7 +1985,9 @@ dependencies = [
  "shiguredo_http2",
  "shiguredo_http3",
  "shiguredo_moqt",
+ "shiguredo_ngtcp2_tokio",
  "shiguredo_qmux",
+ "tobi_quic",
  "tokio",
  "tokio-metrics",
  "tokio-qmux",

@@ -8,11 +8,6 @@
 //! `--url` の `moqt://` URI は [`parse_url`] でパースし、`--namespace` と `--url` の MSF fragment
 //! からの Track Namespace の解決は [`resolve_namespace`] が担う。
 //!
-//! WebTransport 経路 ([`Transport::WtH3`] / [`Transport::WtH2`]) は experimental である。
-//! s2n-quic が `RESET_STREAM_AT` を送出できず、WebTransport が MUST とする Reliable Size 付きの
-//! データストリーム reset を行えないため (draft-ietf-webtrans-http3-16 §4.4)、reset を伴う経路は
-//! relay によっては成立しない。
-//!
 //! QMux 経路 ([`Transport::Qmux`]) も experimental である。QMux は順序保証された 1 本の
 //! バイトストリーム (TLS over TCP) の上で QUIC version 1 のストリームと DATAGRAM を多重化する
 //! ため (draft-ietf-quic-qmux-02)、経路での損失は下位の TCP が再送するが、TCP の再送で
@@ -171,15 +166,10 @@ pub enum Transport {
     Quic,
     /// WebTransport over HTTP/3 (QUIC 上の ALPN `h3`)
     ///
-    /// experimental。s2n-quic が `RESET_STREAM_AT` を送出できないため、WebTransport が
-    /// MUST とする Reliable Size 付きのデータストリーム reset を行えない
-    /// (draft-ietf-webtrans-http3-16 §4.4)。reset は `RESET_STREAM` へフォールバックし、
-    /// WebTransport ヘッダが確実に届く保証が無い。
     WtH3,
     /// WebTransport over HTTP/2 (TCP+TLS 上の ALPN `h2`)
     ///
-    /// experimental。reset は `WT_RESET_STREAM` capsule で行うため `RESET_STREAM_AT` は
-    /// 不要だが、relay の capsule 対応に依存する。
+    /// reset は `WT_RESET_STREAM` capsule で行うため、relay の capsule 対応に依存する。
     WtH2,
     /// QMux (TCP+TLS 上の ALPN `moqt-23`)
     ///
@@ -238,7 +228,7 @@ impl Transport {
 /// `type` が `msf` のときだけ、[`parse_url`] が value を
 /// `shiguredo_moqt::msf::uri::parse_msf_fragment` で MSF fragment として検証し、
 /// 予約パラメータ `c4m` の認可トークンを取り出す ([`ServerUrl::c4m_tokens`])。
-/// 他の `type` の value は example が解釈しないため、構文 (§6.1.1) の検証だけを行う。
+/// 他の `type` の value は moq-pub / moq-sub が解釈しないため、構文 (§6.1.1) の検証だけを行う。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MoqtFragment {
     /// fragment type (`<type>` 部分)。ASCII 小文字 / 数字 / ハイフンに限る
@@ -278,7 +268,7 @@ pub struct ServerUrl {
     /// track-identifier が示す namespace と track name、パラメータ列を保持する。
     ///
     /// fragment が無い場合と fragment type が `msf` 以外の場合は `None`。
-    /// `msf` fragment は example が解釈すると宣言した fragment type であり、形式が
+    /// `msf` fragment は moq-pub / moq-sub が解釈すると宣言した fragment type であり、形式が
     /// §11.1 の ABNF に一致しない場合は [`parse_url`] がエラーにする。
     pub msf: Option<MsfFragment>,
     /// MSF fragment の `c4m` パラメータから取り出した C4M 認可トークン (出現順)
@@ -363,7 +353,7 @@ pub fn parse_url(url: &str) -> Result<ServerUrl, String> {
         None => None,
     };
     // draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation): fragment type
-    // "msf" の value は MSF の track-identifier とパラメータ列である。example が解釈するのは
+    // "msf" の value は MSF の track-identifier とパラメータ列である。moq-pub / moq-sub が解釈するのは
     // track-identifier が示す namespace、予約パラメータ c4m の認可トークン、予約パラメータ
     // connection の接続種別 ([`resolve_transport`]) である。
     // 同じ value を 2 度パースしないよう、解釈結果を 1 度だけ作って共有する。
@@ -402,7 +392,7 @@ impl ServerUrl {
 /// (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation)) の track-identifier が
 /// 示す namespace を使う。moq-pub / moq-sub が共通で使う。
 ///
-/// 解決した namespace は 1 つ以上のフィールドを持つ必要がある。example が扱う catalog と
+/// 解決した namespace は 1 つ以上のフィールドを持つ必要がある。moq-pub / moq-sub が扱う catalog と
 /// トラックは 1 つ以上のフィールドを持つ namespace に置くため、0 フィールドは
 /// `--namespace` の空文字と同じく CLI の時点でエラーにする。
 ///
@@ -417,7 +407,7 @@ pub fn resolve_namespace(
 ) -> Result<TrackNamespace, String> {
     let namespace = match explicit {
         Some(value) => {
-            // 空文字は §8.8 では 0 フィールドの namespace になるが、example は 1 つ以上の
+            // 空文字は §8.8 では 0 フィールドの namespace になるが、moq-pub / moq-sub は 1 つ以上の
             // フィールドを持つ namespace を扱うため、指定の欠如と同じく CLI の時点で拒否する
             if value.is_empty() {
                 return Err("--namespace must not be empty".to_string());
@@ -444,9 +434,9 @@ pub fn resolve_namespace(
 ///
 /// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) の予約パラメータ `connection`
 /// は、client に接続種別を MUST で指定する (`q` は native QUIC、`wt` は WebTransport)。`wt` は
-/// WebTransport の実装 (HTTP/3 / HTTP/2) を指定しないため、本 example は `wt-h3` (HTTP/3 上の
+/// WebTransport の実装 (HTTP/3 / HTTP/2) を指定しないため、本実装は `wt-h3` (HTTP/3 上の
 /// WebTransport) を既定にし、`wt-h2` は `--transport wt-h2` を明示したときだけ使う。WebTransport の
-/// 主経路は HTTP/3 であり、`wt-h2` は relay の capsule 対応に依存する experimental な経路である
+/// 主経路は HTTP/3 であり、`wt-h2` は relay の capsule 対応に依存する経路である
 /// (draft-ietf-moq-transport-23 §6.2 (Session establishment) は HTTP/2 上の WebTransport も
 /// 許容する)。
 ///
@@ -465,7 +455,7 @@ pub fn resolve_namespace(
 ///   within the same URL for the same parameter, the client MUST process the union of those
 ///   ranges.`) は値域 (range) を対象とした規則であり `connection` には適用しないため、
 ///   [`MsfFragment::connection_types`] は `connection` の値を出現順にすべて返すだけである。
-///   example はその結果を見て両立しない組み合わせを拒否する
+///   moq-pub / moq-sub はその結果を見て両立しない組み合わせを拒否する
 ///
 /// 値域の検証 (`q` / `wt` 以外の拒否) は [`MsfFragment::connection_types`] が行う。
 ///
@@ -607,7 +597,7 @@ fn is_fragment_type(fragment_type: &str) -> bool {
 /// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の
 /// `msf-fragment-value = track-identifier [ "&" parameter-list ]` に従い、value 全体を
 /// [`parse_msf_fragment`] で検証する。MSF fragment の形式が不正な場合は [`parse_url`] の
-/// エラーとして扱う (example が解釈すると宣言した fragment type の値は、黙って無視せず
+/// エラーとして扱う (moq-pub / moq-sub が解釈すると宣言した fragment type の値は、黙って無視せず
 /// 仕様どおりに扱う)。
 ///
 /// # Errors
@@ -1369,9 +1359,7 @@ pub struct ConnectParams<'a> {
 /// [`MoqtClient`](crate::moqt_client::MoqtClient) と data stream を受信する
 /// [`StreamAcceptor`](crate::transport::StreamAcceptor) を返す。
 ///
-/// WebTransport 経路は experimental である (s2n-quic が `RESET_STREAM_AT` を送出できない)。
-/// experimental であることの警告は呼び出し側で 1 度だけ出す (`--cert` を省略したときの
-/// 証明書検証の無効化は、この関数が試行ごとに警告する)。
+/// 証明書検証の無効化 (`--cert` の省略) は、この関数が試行ごとに警告する。
 ///
 /// # Errors
 ///
@@ -1540,12 +1528,15 @@ fn resolve_failed(authority: &str, reason: &str) -> TransportError {
 ///
 /// `0.0.0.0:0` 固定だと IPv4 ソケットから IPv6 宛に送信できず、IPv6 に解決された
 /// 接続先へパケットを送れない。接続先のファミリに合わせる。
-pub(crate) fn local_bind_addr(remote: SocketAddr) -> &'static str {
-    if remote.is_ipv6() {
+pub(crate) fn local_bind_addr(remote: SocketAddr) -> SocketAddr {
+    let wildcard = if remote.is_ipv6() {
         "[::]:0"
     } else {
         "0.0.0.0:0"
-    }
+    };
+    wildcard
+        .parse()
+        .expect("the wildcard address literal must parse")
 }
 
 #[cfg(test)]
@@ -2161,7 +2152,7 @@ mod tests {
 
     /// `connection=wt` は WebTransport を要求し、既定は `wt-h3` になる
     ///
-    /// `wt` は WebTransport の実装 (HTTP/3 / HTTP/2) を指定しないため、example は `wt-h3` を
+    /// `wt` は WebTransport の実装 (HTTP/3 / HTTP/2) を指定しないため、本実装は `wt-h3` を
     /// 既定にする。
     #[test]
     fn resolve_transport_requires_webtransport_and_defaults_to_wt_h3() {
@@ -2326,7 +2317,7 @@ mod tests {
 
     /// msf fragment の namespace が 0 フィールドの場合はエラーになる
     ///
-    /// 0 フィールドの namespace は `--namespace` の空文字と同じく example が扱わない。
+    /// 0 フィールドの namespace は `--namespace` の空文字と同じく moq-pub / moq-sub が扱わない。
     #[test]
     fn resolve_namespace_rejects_msf_fragment_without_namespace_fields() {
         let url =
@@ -2715,7 +2706,12 @@ mod tests {
         let remote: std::net::SocketAddr = "127.0.0.1:4443"
             .parse()
             .expect("アドレスの解釈に成功すること");
-        assert_eq!(local_bind_addr(remote), "0.0.0.0:0");
+        assert_eq!(
+            local_bind_addr(remote),
+            "0.0.0.0:0"
+                .parse::<std::net::SocketAddr>()
+                .expect("アドレスの解釈に成功すること")
+        );
     }
 
     /// IPv6 の接続先には IPv6 のローカルソケットを使う
@@ -2726,7 +2722,12 @@ mod tests {
         let remote: std::net::SocketAddr = "[2001:db8::1]:4443"
             .parse()
             .expect("アドレスの解釈に成功すること");
-        assert_eq!(local_bind_addr(remote), "[::]:0");
+        assert_eq!(
+            local_bind_addr(remote),
+            "[::]:0"
+                .parse::<std::net::SocketAddr>()
+                .expect("アドレスの解釈に成功すること")
+        );
     }
 
     /// IP リテラルの authority は 1 件の列に解決され、既定ポートを補う
@@ -2879,39 +2880,26 @@ mod tests {
     /// 確立するため、試行回数の期待値を環境に依存させない。
     #[tokio::test]
     async fn connect_with_fallback_tries_resolved_addrs_in_order() {
-        // IPv4 のみを待ち受ける QUIC サーバーを立てる。`with_rx_socket` に
-        // `127.0.0.1` で bind したソケットを渡し、IPv6 では待ち受けないようにする。
-        let listener = std::net::UdpSocket::bind("127.0.0.1:0").expect("IPv4 で bind できること");
-        let port = listener
-            .local_addr()
-            .expect("ローカルアドレスを取得できること")
-            .port();
+        // IPv4 のみを待ち受ける QUIC サーバーを立てる。`127.0.0.1` で bind し、
+        // IPv6 では待ち受けないようにする。
         let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
             .expect("自己署名証明書を生成できること");
-        let server_tls = s2n_quic::provider::tls::rustls::Server::builder()
-            .with_certificate(
-                vec![certified.cert.der().to_vec()],
-                certified.signing_key.serialize_der(),
-            )
-            .expect("サーバー証明書を設定できること")
-            // クライアントは ALPN で MOQT_PROTOCOL を広告する。既定の `h3` のままだと
-            // ハンドシェイクが HANDSHAKE_FAILURE で失敗する
-            .with_application_protocols([MOQT_PROTOCOL].into_iter())
-            .expect("ALPN を設定できること")
-            .build()
-            .expect("サーバー TLS を構築できること");
-        let server_io = s2n_quic::provider::io::tokio::Builder::default()
-            .with_rx_socket(listener)
-            .expect("受信ソケットを設定できること")
-            .build()
-            .expect("サーバー I/O を構築できること");
-        let mut server = s2n_quic::Server::builder()
-            .with_tls(server_tls)
-            .expect("TLS を設定できること")
-            .with_io(server_io)
-            .expect("I/O を設定できること")
-            .start()
-            .expect("サーバーを起動できること");
+        // クライアントは ALPN で MOQT_PROTOCOL を広告する。既定の `h3` のままだと
+        // ハンドシェイクが HANDSHAKE_FAILURE で失敗する
+        let tls = crate::quic::ServerTls {
+            cert_der: certified.cert.der().to_vec(),
+            key_der: certified.signing_key.serialize_der(),
+            alpn: vec![MOQT_PROTOCOL.as_bytes().to_vec()],
+        };
+        let mut server = crate::quic::start_server(
+            tls,
+            "127.0.0.1:0"
+                .parse()
+                .expect("the wildcard address literal must parse"),
+        )
+        .await
+        .expect("サーバーを起動できること");
+        let port = server.local_addr().port();
 
         // 解決に IPv6 が含まれる環境では先頭の試行が失敗する。含まれない環境では 1 回で成功する
         let addrs = resolve_socket_addrs_within("localhost", RESOLVE_TIMEOUT)
@@ -2923,6 +2911,7 @@ mod tests {
             let connection = server.accept().await.expect("接続を受け付けられること");
             connection
                 .remote_addr()
+                .await
                 .expect("接続元アドレスを取得できること")
                 .ip()
         });

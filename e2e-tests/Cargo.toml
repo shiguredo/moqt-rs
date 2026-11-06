@@ -2,15 +2,15 @@
 name = "e2e-tests"
 version = "0.0.0"
 edition = "2024"
-# moq-pub / moq-sub の依存 (s2n-quic) が MSRV 1.95 を要求するため、それに合わせる
+# moq-pub / moq-sub の依存 (QUIC バックエンド) が MSRV 1.95 を要求するため、それに合わせる
 rust-version = "1.95"
 publish = false
 
 [dev-dependencies]
 # publisher (ローカル参照)
-moq-pub = { path = "../crates/moq-pub" }
+moq-pub = { path = "../crates/moq-pub", default-features = false }
 # subscriber (ローカル参照)
-moq-sub = { path = "../crates/moq-sub" }
+moq-sub = { path = "../crates/moq-sub", default-features = false }
 # 非同期ランタイム
 tokio = { version = "1.54", features = ["full"] }
 # Tokio タスクメトリクス計測
@@ -20,3 +20,11 @@ tokio-utils = "0.1"
 # テスト中のログ (失敗したときに publisher / subscriber の動きを追う)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = ["quic-tobi"]
+quic-ngtcp2 = ["moq-pub/quic-ngtcp2", "moq-sub/quic-ngtcp2"]
+quic-s2n = ["moq-pub/quic-s2n", "moq-sub/quic-s2n"]
+# ネイティブ QUIC のバックエンド。ちょうど 1 つだけを有効にする。
+# テスト対象の publisher / subscriber に同じバックエンドを選ぶ。
+quic-tobi = ["moq-pub/quic-tobi", "moq-sub/quic-tobi"]

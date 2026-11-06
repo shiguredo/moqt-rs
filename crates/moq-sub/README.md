@@ -9,12 +9,24 @@ MoQ リレーから catalog を SUBSCRIBE して取得し、audio / video を SU
 音声トラックは subgroup stream と datagram のどちらで届いてもデコードして再生する。
 
 AAC-LC は macOS の Audio Toolbox、H.264 / H.265 は macOS の Video Toolbox を使うため macOS 限定である。
-VP8 / VP9 は libvpx を使う。libvpx の Windows ビルド (MSVC) は動作しないため、Windows では `vp8` / `vp09.*` のトラックをデコードできない。
+VP8 / VP9 は libvpx を使う (Windows は x86_64-pc-windows-msvc のみ対応する)。
 
 `--mp4` を指定すると、受信した音声 / 映像を再エンコードせずに MP4 ファイルへ保存する。
 
 publisher / subscriber の接続先となる MoQ リレーは別途用意する。
 `--url` の URL スキーム、`--transport`、`--namespace`、C4M 認可トークン、TLS 証明書の指定は publisher と subscriber で共通である。規則は [tokio-moq](../tokio-moq/README.md) を参照すること。
+
+## QUIC バックエンド
+
+moq-sub は QUIC の実装に tobi-quic を採用している。ネイティブ QUIC は cargo feature で
+s2n-quic / ngtcp2-rs も選べる (`--no-default-features` と `--features quic-s2n` /
+`--features quic-ngtcp2` を組み合わせる)。
+WebTransport over HTTP/3 の QUIC 層は tobi-quic 固定である。詳細は
+[tokio-moq](../tokio-moq/README.md) を参照すること。
+
+```bash
+cargo run -p moq-sub --no-default-features --features quic-s2n -- --url moqt://127.0.0.1:4443 --namespace moq-example
+```
 
 ## 実行例
 
@@ -22,8 +34,8 @@ publisher / subscriber の接続先となる MoQ リレーは別途用意する�
 # QUIC で起動する
 cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
 
-# WebTransport over HTTP/2 で起動する
-cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --transport wt-h2
+# WebTransport over HTTP/3 で起動する
+cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --transport wt-h3
 
 # QMux (TCP+TLS。UDP が使えない環境向け。experimental) で起動する
 cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --transport qmux
@@ -45,7 +57,7 @@ cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video'
 | オプション | デフォルト | 説明 |
 | --- | --- | --- |
 | `--url` | (必須) | 接続先 URL (`moqt://`) |
-| `--transport` | (省略時は `--url` の `msf` fragment の `connection`、無ければ `quic`) | 接続経路 (`quic` / `wt-h3` / `wt-h2` / `qmux`)。`wt-h3` / `wt-h2` / `qmux` は experimental |
+| `--transport` | (省略時は `--url` の `msf` fragment の `connection`、無ければ `quic`) | 接続経路 (`quic` / `wt-h3` / `wt-h2` / `qmux`)。`qmux` は experimental |
 | `--cert` | | TLS CA 証明書パス |
 | `--namespace` | (省略時は `--url` の `msf` fragment) | Track Namespace (§8.8 表現。`-` が namespace フィールドの区切り) |
 | `--no-video` | | 映像トラックの購読を無効化する |
@@ -59,13 +71,13 @@ cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video'
 - `--no-play` と `--mp4` を併用した場合はデコードをスキップし、MP4 への保存だけを行う
 - `--no-play` を `--mp4` なしで指定した場合は受信したメディアを破棄する (警告ログが出る)
 
-WebTransport 経路 (`--transport wt-h3` / `--transport wt-h2`) は experimental であり、正常に動作しない。
-`wt-h3` は s2n-quic が reset stream (`RESET_STREAM_AT`) を実装していないため、WebTransport が MUST とする Reliable Size 付きのデータストリーム reset を行えない。`reset_stream_at` を要求する MoQ リレーとは接続できず、reset を伴う経路 (request stream の cancel や、送信中の subgroup / data stream の中断) も成立しない。
-`wt-h2` は reset を `WT_RESET_STREAM` capsule で行うため `RESET_STREAM_AT` は不要だが、MoQ リレーの capsule 対応に依存しており、実リレーでの動作を確認していない。
+WebTransport 経路 (`--transport wt-h3` / `--transport wt-h2`) は Extended CONNECT でセッションを確立する。
+`wt-h2` は reset を `WT_RESET_STREAM` capsule で行うため、MoQ リレーの capsule 対応に依存する。
 詳細は [tokio-moq](../tokio-moq/README.md) を参照すること。
 
 QMux 経路 (`--transport qmux`) は experimental である。QMux は TCP + TLS の上で QUIC version 1 のストリームと DATAGRAM を多重化する経路で、UDP が使えない環境向けである。
-音声の datagram は経路での損失を下位の TCP が再送するため起きないが、TCP の再送で遅延が伸びる。QMux は速やかに配送できない DATAGRAM の破棄を許すため、受信側のバッファが溢れると欠落しうる。詳細は [tokio-moq](../tokio-moq/README.md) を参照すること。
+音声の datagram は経路での損失を下位の TCP が再送するため起きないが、TCP の再送で遅延が伸びる。QMux は速やかに配送できない DATAGRAM の破棄を許すため、受信側のバッファが溢れると欠落しうる。
+詳細は [tokio-moq](../tokio-moq/README.md) を参照すること。
 
 ## 再生と遅延
 

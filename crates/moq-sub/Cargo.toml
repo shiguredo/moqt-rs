@@ -2,7 +2,8 @@
 name = "moq-sub"
 version = "2026.0.0"
 edition = "2024"
-# 依存の s2n-quic が MSRV 1.95 を要求するため、それに合わせる
+# 依存の QUIC バックエンド (s2n-quic / tobi-quic) が MSRV 1.95 を要求するため、
+# それに合わせる
 rust-version = "1.95"
 publish = false
 
@@ -13,6 +14,8 @@ publish = false
 shiguredo_dav1d = "2026.3"
 # HTTP/3 / WebTransport クライアント
 shiguredo_http3 = "2026.1.0-canary.13"
+# VP8 / VP9 デコーダ (libvpx)。Windows は x86_64-pc-windows-msvc のみ対応する
+shiguredo_libvpx = "2026.2.0-canary.3"
 # MOQT 本体 (ローカル参照)
 shiguredo_moqt = { path = "../../" }
 # MP4 mux (録画)
@@ -21,7 +24,7 @@ shiguredo_mp4 = "2026.6.0-canary.2"
 shiguredo_opus = "2026.4"
 
 # crates 配下で共有するトランスポート crate (QUIC / WebTransport / QMux)
-tokio-moq = { path = "../tokio-moq" }
+tokio-moq = { path = "../tokio-moq", default-features = false }
 
 # 外部クレート
 
@@ -33,8 +36,6 @@ noargs = "0.4"
 # 2026.2 は映像のみ再生で再生時計が PTS からずれると描画が止まり続けるため、
 # 最新フレームへ復帰する処理と理由別ドロップ数が入った canary を使う
 raw_player = "2026.3.0-canary.1"
-# QUIC クライアント
-s2n-quic = { version = "1.91", default-features = false, features = ["provider-address-token-default", "provider-tls-rustls", "unstable-provider-datagram"] }
 # 非同期ランタイム
 tokio = { version = "1.54", features = ["full"] }
 # Tokio タスクメトリクス計測
@@ -51,11 +52,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # full は通常依存で有効なため、ここでは足りない feature だけを足す
 tokio = { version = "1.54", features = ["test-util"] }
 
-# libvpx の Windows ビルド (MSVC) は動作しないため、Windows 以外に限って依存させる
-[target.'cfg(not(target_os = "windows"))'.dependencies]
-# VP8 / VP9 デコーダ (libvpx)
-shiguredo_libvpx = "2026.2.0-canary.3"
-
 [target.'cfg(target_os = "macos")'.dependencies]
 # AAC-LC デコーダ (Apple Audio Toolbox)
 # 2026.1.0 は 1 回の AudioConverterFillComplexBuffer で同じパケットを再入力する不具合があり、
@@ -66,3 +62,10 @@ shiguredo_audio_toolbox = "2026.2.0-canary.2"
 # 同じ workspace の moq-pub のエンコードが失敗するため、修正が入った canary を使う
 # (workspace では shiguredo_video_toolbox が 1 つのバージョンに解決される)
 shiguredo_video_toolbox = "2026.2.0-canary.4"
+
+[features]
+default = ["quic-tobi"]
+quic-ngtcp2 = ["tokio-moq/quic-ngtcp2"]
+quic-s2n = ["tokio-moq/quic-s2n"]
+# ネイティブ QUIC のバックエンド。ちょうど 1 つだけを有効にする。
+quic-tobi = ["tokio-moq/quic-tobi"]

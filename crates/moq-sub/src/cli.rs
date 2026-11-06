@@ -107,11 +107,9 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     let transport_opt: Option<Transport> = noargs::opt("transport")
         .ty("TYPE")
         .doc(
-            "Transport (quic | wt-h3 | wt-h2 | qmux; wt-h3 / wt-h2 (WebTransport) are \
-             experimental and do not work properly: wt-h3 requires RESET_STREAM_AT, which \
-             s2n-quic does not implement, and wt-h2 depends on relay support for \
-             WT_RESET_STREAM capsules; qmux (QMux over TCP+TLS) is also experimental). If \
-             --transport is omitted, uses the 'connection' parameter of the --url MSF \
+            "Transport (quic | wt-h3 | wt-h2 | qmux; qmux (QMux over TCP+TLS) is \
+             experimental; wt-h2 depends on relay support for WT_RESET_STREAM capsules). \
+             If --transport is omitted, uses the 'connection' parameter of the --url MSF \
              fragment (q: native QUIC, wt: WebTransport over HTTP/3, or wt-h2 with \
              --transport wt-h2 for HTTP/2); otherwise defaults to quic. A conflicting \
              --transport, or 'connection=q' with 'connection=wt', is an error",
@@ -216,8 +214,7 @@ mod tests {
 
     /// `--url` の `msf` fragment に `connection` が無いときの `--transport` の既定は `quic` である
     ///
-    /// WebTransport 経路 (`wt-h3` / `wt-h2`) は experimental であり、既定にしてはいけない
-    /// (s2n-quic が `RESET_STREAM_AT` を送出できず、reset を伴う経路が成立しないため)。
+    /// 接続種別の指定が無いときの既定は native QUIC である。
     #[test]
     fn transport_defaults_to_quic() {
         let config = parse_args(BASE_ARGS)

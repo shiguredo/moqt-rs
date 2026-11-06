@@ -800,16 +800,6 @@ pub async fn run(
         config.audio_enabled = false;
     }
 
-    // WebTransport 経路は experimental である (s2n-quic が `RESET_STREAM_AT` を送出できず、
-    // WebTransport が MUST とする Reliable Size 付きの reset を行えないため)。接続の前に 1 度だけ
-    // 警告し、どのトランスポートで接続するかを実行時に分かるようにする。
-    if matches!(config.transport, Transport::WtH3 | Transport::WtH2) {
-        tracing::warn!(
-            "WebTransport transport ({:?}) is experimental: RESET_STREAM_AT is unavailable, so stream resets may not work",
-            config.transport
-        );
-    }
-
     // QMux 経路も experimental である。DATAGRAM は経路での損失を下位の TCP が再送するため
     // 起きないが、TCP の再送で遅延が伸びる。QMux は速やかに配送できない DATAGRAM の破棄を
     // 許すため (draft-ietf-quic-qmux-02 Section 6)、受信側のバッファが溢れると欠落しうる
@@ -891,7 +881,6 @@ pub async fn run(
             VideoCodec::H265 => {
                 return Err(unsupported_macos_encoder("H.265"));
             }
-            #[cfg(not(target_os = "windows"))]
             VideoCodec::Vp8 => encoder::VideoEncoder::Vp8(encoder::vpx::VpxEncoder::new(
                 encoder::vpx::VpxCodec::Vp8,
                 encode_width,
@@ -900,7 +889,6 @@ pub async fn run(
                 config.bitrate,
                 keyframe_interval_frames,
             )?),
-            #[cfg(not(target_os = "windows"))]
             VideoCodec::Vp9 => encoder::VideoEncoder::Vp9(encoder::vpx::VpxEncoder::new(
                 encoder::vpx::VpxCodec::Vp9,
                 encode_width,
@@ -909,14 +897,6 @@ pub async fn run(
                 config.bitrate,
                 keyframe_interval_frames,
             )?),
-            #[cfg(target_os = "windows")]
-            VideoCodec::Vp8 => {
-                return Err(unsupported_windows_encoder("VP8"));
-            }
-            #[cfg(target_os = "windows")]
-            VideoCodec::Vp9 => {
-                return Err(unsupported_windows_encoder("VP9"));
-            }
         };
         Some(enc)
     } else {
@@ -2813,17 +2793,6 @@ fn unsupported_macos_encoder(codec: &str) -> Error {
     ))
 }
 
-/// Windows で VP8 / VP9 のエンコーダを指定したときのエラーを作る
-///
-/// libvpx の Windows ビルド (MSVC) は動作しないため、Windows では VP8 / VP9 を
-/// エンコードできない。
-#[cfg(target_os = "windows")]
-fn unsupported_windows_encoder(codec: &str) -> Error {
-    Error::Other(format!(
-        "{codec} encoder is not available on Windows; specify --video-codec av1"
-    ))
-}
-
 /// transport がセッション終了 (WebTransport の CONNECT stream の close / WT_CLOSE_SESSION) や
 /// 接続クローズを検知したことを表すエラーか
 ///
@@ -2843,8 +2812,9 @@ fn is_transport_session_end(error: &Error) -> bool {
 
 /// transport エラーが peer によるストリーム終端 (送信方向への STOP_SENDING) を表すかどうか
 ///
-/// s2n-quic は peer の STOP_SENDING を受信したストリームの送信 API を `StreamReset` で
-/// 失敗させる。これは該当ストリームだけの終端でありセッションは継続するため
+/// peer の STOP_SENDING を受信したストリームの送信 API は失敗し、I/O 層はそれを
+/// [`Error::StreamReset`] に写す (QUIC 直接接続は `tobi-quic` の `StreamError::Stopped`、
+/// QMux は `Error::Stopped`)。これは該当ストリームだけの終端でありセッションは継続するため
 /// (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))、
 /// pipeline は致命エラーにしない。
 ///

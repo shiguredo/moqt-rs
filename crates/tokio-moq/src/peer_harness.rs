@@ -1,7 +1,7 @@
 //! MOQT peer (サーバー役) の in-process 試験基盤
 //!
 //! example の I/O 経路 (ハンドシェイク、peer 起点 request stream への送信、client 起点 request
-//! stream の受理) を実行で検証するためのテスト専用モジュールである。s2n-quic のサーバーを
+//! stream の受理) を実行で検証するためのテスト専用モジュールである。tobi-quic のサーバーを
 //! 127.0.0.1 で立て、sans-I/O な `Session` を `Session::new_server` で駆動する。モック /
 //! スタブは使わない。
 //!
@@ -24,7 +24,7 @@
 //!   テストで観測する)
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -126,65 +126,16 @@ fn request_stream_id(message: &ControlMessage) -> Option<u64> {
 /// 「終了コードが届かない」として切り分けられるようにする。
 const CLOSE_CODE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// client が送る CONNECTION_CLOSE の終了コードを記録する購読者
-///
-/// s2n-quic は application close を `s2n_quic::connection::Error::Application` として
-/// `on_connection_closed` に届ける (`initiator` が `Remote` なら peer 起点である)。peer 側で
-/// 終了コードを観測する唯一の経路であり、example が終了コード付きで閉じたことをテストが
-/// 確かめるために使う。
-///
-/// 記録は `std::sync::Mutex` で保護する。購読者は s2n-quic の駆動スレッドから同期で呼ばれ、
-/// `tokio::sync::Mutex` を await できないため、ロックを保持する区間を「Vec へ 1 件 push する」
-/// だけに限って使う。
-#[derive(Debug, Default)]
-struct CloseCodeRecorder {
-    /// 観測した終了コード
-    codes: Arc<StdMutex<Vec<u64>>>,
-}
-
-impl s2n_quic::provider::event::Subscriber for CloseCodeRecorder {
-    type ConnectionContext = ();
-
-    fn create_connection_context(
-        &mut self,
-        _meta: &s2n_quic::provider::event::ConnectionMeta,
-        _info: &s2n_quic::provider::event::ConnectionInfo<'_>,
-    ) -> Self::ConnectionContext {
-    }
-
-    fn on_connection_closed(
-        &mut self,
-        _context: &mut Self::ConnectionContext,
-        _meta: &s2n_quic::provider::event::ConnectionMeta,
-        event: &s2n_quic::provider::event::events::ConnectionClosed,
-    ) {
-        // `Application` は自側の close でも作られるため、peer 起点 (`Remote`) に限る
-        if let s2n_quic::connection::Error::Application {
-            error,
-            initiator: s2n_quic::provider::event::Location::Remote,
-            ..
-        } = &event.error
-        {
-            self.codes
-                .lock()
-                .expect("終了コードの記録を壊さない")
-                .push(u64::from(*error));
-        }
-    }
-}
-
-/// client の接続を受理する前の in-process peer (s2n-quic サーバー)
+/// client の接続を受理する前の in-process peer (QUIC サーバー)
 pub(crate) struct TestPeerServer {
-    /// 接続を受理する s2n-quic サーバー
-    server: s2n_quic::Server,
+    /// 接続を受理する QUIC サーバー
+    server: crate::quic::Server,
     /// 待ち受けているアドレス
     local_addr: SocketAddr,
-    /// client が送る終了コードの記録 (サーバーごとに 1 つで、受理した全接続が共有する)
-    close_codes: Arc<StdMutex<Vec<u64>>>,
 }
 
 impl TestPeerServer {
-    /// s2n-quic サーバーを 127.0.0.1 で起動する
+    /// QUIC サーバーを 127.0.0.1 で起動する
     ///
     /// サーバー証明書は自己署名を rcgen で生成し、ALPN には MOQT のプロトコル識別子を広告する。
     /// client は ALPN で [`crate::MOQT_PROTOCOL`] を要求するため、既定の `h3` のままだと
@@ -193,7 +144,7 @@ impl TestPeerServer {
         Self::start_with_alpn(&[crate::MOQT_PROTOCOL.as_bytes()]).await
     }
 
-    /// ALPN に載せる識別子を指定して s2n-quic サーバーを 127.0.0.1 で起動する
+    /// ALPN に載せる識別子を指定して QUIC サーバーを 127.0.0.1 で起動する
     ///
     /// `alpn` が空の場合は ALPN を広告しないサーバーになる。MOQT のプロトコル識別子を
     /// 選択しない相手を client が拒否することを、実接続で確かめるために使う。
@@ -202,47 +153,22 @@ impl TestPeerServer {
             rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).map_err(|e| {
                 TransportError::Internal(format!("failed to generate certificate: {e}"))
             })?;
-        let server_tls = s2n_quic::provider::tls::rustls::Server::builder()
-            .with_certificate(
-                vec![certified.cert.der().to_vec()],
-                certified.signing_key.serialize_der(),
-            )
-            .map_err(|e| TransportError::Internal(format!("failed to set certificate: {e}")))?
-            .with_application_protocols(alpn.iter().copied())
-            .map_err(|e| TransportError::Internal(format!("failed to set ALPN: {e}")))?
-            .build()
-            .map_err(|e| TransportError::Internal(format!("failed to build server TLS: {e}")))?;
-
         // IPv4 のみを待ち受ける (client は 127.0.0.1 へ接続する)
-        let listener = std::net::UdpSocket::bind("127.0.0.1:0")
-            .map_err(|e| TransportError::Internal(format!("failed to bind UDP socket: {e}")))?;
-        let local_addr = listener
-            .local_addr()
-            .map_err(|e| TransportError::Internal(format!("failed to get local address: {e}")))?;
-        let server_io = s2n_quic::provider::io::tokio::Builder::default()
-            .with_rx_socket(listener)
-            .map_err(|e| TransportError::Internal(format!("failed to set receive socket: {e}")))?
-            .build()
-            .map_err(|e| TransportError::Internal(format!("failed to build server I/O: {e}")))?;
+        let tls = crate::quic::ServerTls {
+            cert_der: certified.cert.der().to_vec(),
+            key_der: certified.signing_key.serialize_der(),
+            alpn: alpn.iter().map(|protocol| protocol.to_vec()).collect(),
+        };
+        let server = crate::quic::start_server(
+            tls,
+            "127.0.0.1:0"
+                .parse()
+                .expect("the wildcard address literal must parse"),
+        )
+        .await?;
+        let local_addr = server.local_addr();
 
-        let close_codes = Arc::new(StdMutex::new(Vec::new()));
-        let server = s2n_quic::Server::builder()
-            .with_tls(server_tls)
-            .map_err(|e| TransportError::Internal(format!("failed to set TLS: {e}")))?
-            .with_io(server_io)
-            .map_err(|e| TransportError::Internal(format!("failed to set I/O: {e}")))?
-            .with_event(CloseCodeRecorder {
-                codes: Arc::clone(&close_codes),
-            })
-            .map_err(|e| TransportError::Internal(format!("failed to set event: {e}")))?
-            .start()
-            .map_err(|e| TransportError::Internal(format!("failed to start server: {e}")))?;
-
-        Ok(Self {
-            server,
-            local_addr,
-            close_codes,
-        })
+        Ok(Self { server, local_addr })
     }
 
     /// 待ち受けているアドレス
@@ -252,12 +178,8 @@ impl TestPeerServer {
 
     /// client の接続を 1 つ受理する
     pub(crate) async fn accept(&mut self) -> Result<TestPeer> {
-        let connection = self
-            .server
-            .accept()
-            .await
-            .ok_or_else(|| TransportError::Quic("server stopped before connection".into()))?;
-        TestPeer::new(connection, Arc::clone(&self.close_codes))
+        let connection = self.server.accept().await?;
+        TestPeer::new(connection).await
     }
 }
 
@@ -340,8 +262,8 @@ impl QmuxTestPeerServer {
 
 /// peer から受理した request stream
 ///
-/// 送信半と reader の両方を保持する。s2n-quic では送信半の drop で FIN、受信半の drop で
-/// STOP_SENDING が送られるため、保持しないと request の終端
+/// 送信半と reader の両方を保持する。QUIC では送信半の drop で RESET_STREAM、受信半の
+/// drop で STOP_SENDING が送られるため、保持しないと request の終端
 /// (draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure) /
 /// §6.4.2.3 (Request Cancellation and Rejection)) が peer に観測される。テストが終わるまで
 /// 保持する。
@@ -362,12 +284,12 @@ struct AcceptedRequest {
 
 /// peer が開いた request stream
 ///
-/// 送信半と reader を保持する。drop すると送信半は FIN、受信半は STOP_SENDING として peer に
-/// 観測されるため、テストが終わるまで保持する。
+/// 送信半と reader を保持する。QUIC では drop すると送信半は RESET_STREAM、受信半は
+/// STOP_SENDING として peer に観測されるため、テストが終わるまで保持する。
 struct OpenedRequest {
     /// 先頭メッセージの Request ID (先頭メッセージが request でない場合は `None`)
     request_id: Option<u64>,
-    /// 送信半 (drop すると FIN が peer へ届くため保持する)
+    /// 送信半 (drop すると RESET_STREAM が peer へ届くため保持する)
     send: SendStream,
     /// 応答を読む reader
     reader: ControlStream,
@@ -395,12 +317,10 @@ pub(crate) struct TestPeer {
     control_recv: Option<ControlStream>,
     /// 自側が開いた request stream
     ///
-    /// 送信半の drop は FIN、reader の drop は STOP_SENDING として peer に観測されるため保持する。
+    /// 送信半の drop は RESET_STREAM、reader の drop は STOP_SENDING として peer に観測されるため保持する。
     opened_requests: Vec<OpenedRequest>,
     /// peer から受理した request stream
     accepted_requests: Vec<AcceptedRequest>,
-    /// client が送る終了コードの記録
-    close_codes: Arc<StdMutex<Vec<u64>>>,
 }
 
 impl TestPeer {
@@ -426,30 +346,30 @@ impl TestPeer {
             control_recv: None,
             opened_requests: Vec::new(),
             accepted_requests: Vec::new(),
-            // QMux 経路は終了コードの観測タスクを持たない (QUIC の ConnectionObserver に相当する
-            // 仕組みが無い)。終了は `wait_qmux_closed` で `CloseReason` として観測する
-            close_codes: Arc::new(StdMutex::new(Vec::new())),
         })
     }
 
     /// 受理した QUIC 接続から peer を作る
-    fn new(
-        connection: s2n_quic::connection::Connection,
-        close_codes: Arc<StdMutex<Vec<u64>>>,
-    ) -> Result<Self> {
+    async fn new(connection: crate::quic::Connected) -> Result<Self> {
+        // テストは peer の受信ループを常に poll するわけではない。tobi-quic の既定は
+        // コマンド駆動であり、API を呼んでいない間は受信を処理しないため、
+        // 接続終了の観測 (`recv_close_code`) が止まらないようバックグラウンド駆動を有効にする
+        connection.enable_background_driver().await.map_err(|e| {
+            TransportError::Internal(format!("failed to enable the background driver: {e}"))
+        })?;
         let (handle, acceptor) = connection.split();
-        let (bidi_acceptor, recv_acceptor) = acceptor.split();
+        // tobi-quic の `StreamAcceptor` は単方向と双方向の両方を受け付けるため `Arc` で共有する
+        let acceptor = Arc::new(acceptor);
         let session = Session::new_server(MoqtTransport::Quic, SetupOptions::new())?;
         Ok(Self {
             session,
             handle: StreamHandle::Quic(handle),
-            bidi_acceptor: BidiStreamAcceptor::Quic(bidi_acceptor),
-            recv_acceptor: StreamAcceptor::Quic(recv_acceptor),
+            bidi_acceptor: BidiStreamAcceptor::Quic(Arc::clone(&acceptor)),
+            recv_acceptor: StreamAcceptor::Quic(acceptor),
             control_send: None,
             control_recv: None,
             opened_requests: Vec::new(),
             accepted_requests: Vec::new(),
-            close_codes,
         })
     }
 
@@ -902,23 +822,23 @@ impl TestPeer {
     /// example が終了コードを送らずに接続を切った場合と、上限時間までに届かなかった場合は
     /// `TransportError::Internal` を返す。
     pub(crate) async fn recv_close_code(&mut self) -> Result<u64> {
-        let deadline = Instant::now() + CLOSE_CODE_TIMEOUT;
-        loop {
-            if let Some(code) = self
-                .close_codes
-                .lock()
-                .expect("終了コードの記録を壊さない")
-                .first()
-                .copied()
-            {
-                return Ok(code);
-            }
-            if Instant::now() >= deadline {
+        let connection = match &self.handle {
+            StreamHandle::Quic(connection) => connection,
+            StreamHandle::WtH3(_) | StreamHandle::WtH2(_) | StreamHandle::Qmux(_) => {
                 return Err(TransportError::Internal(
-                    "client did not send CONNECTION_CLOSE".into(),
+                    "recv_close_code is only available for the QUIC transport".into(),
                 ));
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        let closed = tokio::time::timeout(CLOSE_CODE_TIMEOUT, connection.closed())
+            .await
+            .map_err(|_| TransportError::Internal("client did not send CONNECTION_CLOSE".into()))?;
+        // 正常終了 (終了コード 0) はコード 0 として観測する
+        match closed.as_ref().and_then(|reason| reason.application_code()) {
+            Some(code) => Ok(code),
+            None => Err(TransportError::Internal(format!(
+                "client did not send an application CONNECTION_CLOSE: {closed:?}"
+            ))),
         }
     }
 }
@@ -972,24 +892,23 @@ mod tests {
     /// peer が開く uni stream (FETCH 応答など) を client 側で読むテストが使う。
     async fn connect_pair_with_acceptor() -> (TestPeer, MoqtClient, crate::transport::StreamAcceptor)
     {
-        // server はこの関数を抜けるまで保持する。s2n-quic の endpoint は Server ハンドルとは
-        // 独立に駆動されるが、待ち受けを意図せず閉じないことをコードで示しておく
+        // server はこの関数を抜けるまで保持する。待ち受けを意図せず閉じないことを
+        // コードで示しておく
         let mut server = TestPeerServer::start()
             .await
             .expect("サーバーを起動できること");
         let addr = server.local_addr();
 
-        let connect =
-            tokio::spawn(async move { crate::quic::connect(addr, "localhost", None).await });
-        // 接続を先に待つ。接続に失敗した場合 accept は完了しないため、この順序でないと
-        // 失敗が上限時間のタイムアウトとしてしか観測されない。s2n-quic の endpoint は
-        // Server ハンドルとは独立に駆動されるので、accept より先にハンドシェイクが
-        // 完了してよい
-        let (connection, stop_sending_rx) = connect
-            .await
-            .expect("接続タスクが終了すること")
-            .expect("接続できること");
-        let mut peer = server.accept().await.expect("接続を受理できること");
+        // 接続と受理は並行に進める。tobi-quic のサーバーは `accept()` の poll で
+        // ハンドシェイクを進めるため、client の `connect()` を先に待つと停止する
+        // 接続と受理は並行に進める。tobi-quic のサーバーは `accept()` の poll で
+        // ハンドシェイクを進めるため、client の `connect()` を先に待つと停止する
+        let (connection, peer) = tokio::join!(
+            crate::quic::connect(addr, "localhost", None),
+            server.accept(),
+        );
+        let (connection, stop_sending_rx) = connection.expect("接続できること");
+        let mut peer = peer.expect("接続を受理できること");
 
         let task_monitor = tokio_metrics::TaskMonitor::new();
         let establish = tokio::spawn(async move {
@@ -1484,13 +1403,14 @@ mod tests {
             .expect("サーバーを起動できること");
         let addr = server.local_addr();
 
-        let connect =
-            tokio::spawn(async move { crate::quic::connect(addr, "localhost", None).await });
-        let (connection, stop_sending_rx) = connect
-            .await
-            .expect("接続タスクが終了すること")
-            .expect("接続できること");
-        let peer = server.accept().await.expect("接続を受理できること");
+        // 接続と受理は並行に進める。tobi-quic のサーバーは `accept()` の poll で
+        // ハンドシェイクを進めるため、client の `connect()` を先に待つと停止する
+        let (connection, peer) = tokio::join!(
+            crate::quic::connect(addr, "localhost", None),
+            server.accept(),
+        );
+        let (connection, stop_sending_rx) = connection.expect("接続できること");
+        let peer = peer.expect("接続を受理できること");
 
         let task_monitor = tokio_metrics::TaskMonitor::new();
         let establish = tokio::spawn(async move {

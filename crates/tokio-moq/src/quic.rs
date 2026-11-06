@@ -1,22 +1,75 @@
 //! QUIC クライアント接続の確立
 //!
-//! TLS / ALPN / datagram エンドポイントを構築し、s2n-quic で接続を確立する。
+//! TLS / ALPN / DATAGRAM を設定し、選択した QUIC 実装で接続を確立する。
+//!
+//! QUIC の実装は cargo feature で選ぶ。3 つから 1 つだけを有効にすること。
+//!
+//! - `quic-tobi` (既定): tobi-quic
+//! - `quic-s2n`: s2n-quic
+//! - `quic-ngtcp2`: ngtcp2 (shiguredo_ngtcp2_tokio)
+//!
+//! WebTransport over HTTP/3 は [tobi](tobi) を直接使うため、この選択の対象外である。
+//! そのため `tobi_quic` は常に依存に含まれる。
 
-use std::sync::Arc;
-
-use s2n_quic::Client;
-use s2n_quic::client::Connect;
-use s2n_quic::connection::Connection;
-use s2n_quic::provider::event::events::{Frame, FrameReceived};
-use s2n_quic::provider::tls::rustls as s2n_rustls;
 use tokio::sync::mpsc;
 
-use crate::error::{Result, TransportError};
+use crate::error::TransportError;
 
 /// ALPN プロトコル識別子 (draft-ietf-moq-transport-23 §6.2 (Session establishment))
 ///
 /// WebTransport の `WT-Available-Protocols` と共通の定数を使う。
-const ALPN: &[u8] = crate::MOQT_PROTOCOL.as_bytes();
+pub(crate) const ALPN: &[u8] = crate::MOQT_PROTOCOL.as_bytes();
+
+#[cfg(not(any(
+    all(
+        feature = "quic-tobi",
+        not(feature = "quic-s2n"),
+        not(feature = "quic-ngtcp2")
+    ),
+    all(
+        feature = "quic-s2n",
+        not(feature = "quic-tobi"),
+        not(feature = "quic-ngtcp2")
+    ),
+    all(
+        feature = "quic-ngtcp2",
+        not(feature = "quic-tobi"),
+        not(feature = "quic-s2n")
+    ),
+)))]
+compile_error!("exactly one QUIC backend must be selected: quic-tobi / quic-s2n / quic-ngtcp2");
+
+/// tobi-quic を使うヘルパー
+///
+/// WebTransport over HTTP/3 は常に tobi-quic で接続するため、このモジュールは
+/// ネイティブ QUIC のバックエンドに関わらず常にコンパイルされる。
+pub(crate) mod tobi;
+
+#[cfg(feature = "quic-tobi")]
+mod tobi_backend;
+
+#[cfg(feature = "quic-s2n")]
+mod s2n;
+
+#[cfg(feature = "quic-ngtcp2")]
+mod ngtcp2;
+
+#[cfg(feature = "quic-tobi")]
+use tobi_backend as backend;
+
+#[cfg(feature = "quic-s2n")]
+use s2n as backend;
+
+#[cfg(feature = "quic-ngtcp2")]
+use ngtcp2 as backend;
+
+// バックエンドの型は `transport` の公開 enum のフィールドとして外部へ現れるため、
+// 型の到達可能性を保つ必要がある。選択されたバックエンドの型だけを再エクスポートする。
+pub use backend::{Connected, Connection, RecvStream, SendStream, StreamAcceptor};
+pub(crate) use backend::{close_application, connect};
+
+#[cfg(test)]
+pub(crate) use backend::{Server, start_server};
 
 /// peer から受信した STOP_SENDING の観測結果
 ///
@@ -40,110 +93,95 @@ pub struct StopSendingObserved {
 /// 観測を止めること (閉じた receiver を poll し続けると待たずに `None` が返り続ける)。
 pub type StopSendingReceiver = mpsc::UnboundedReceiver<StopSendingObserved>;
 
-/// 接続イベントの購読者
+/// QUIC バックエンドのエラー
 ///
-/// 2 つの役割を持つ。
-///
-/// - 受信パケットの内訳 (受信 / 破棄 / 復号失敗) を数える診断。`MOQT_PACKET_DIAG=1` の
-///   ときだけ 1 秒ごとのログ出力を有効化する。受信が止まったときに「パケットが来ていない」
-///   のか「来ているが復号に失敗している」のかを切り分けるために使う。常時出力すると
-///   計測そのものを歪めるため、環境変数で明示的に有効化する
-/// - peer の STOP_SENDING の観測。診断ではなく MOQT 層へ渡す必要のある情報であるため、
-///   `MOQT_PACKET_DIAG` の有無に関わらず常に行う
-///
-/// s2n-quic の `with_event` は 1 接続につき 1 購読者しか差し込めないため、診断と観測を
-/// 同じ購読者に同居させている。
-#[derive(Debug, Clone, Default)]
-pub(crate) struct ConnectionObserver {
-    received: Arc<std::sync::atomic::AtomicU64>,
-    dropped: Arc<std::sync::atomic::AtomicU64>,
-    decryption_failed: Arc<std::sync::atomic::AtomicU64>,
-    /// peer の STOP_SENDING を流す先。観測が不要な場合は `None`
-    stop_sending_tx: Option<mpsc::UnboundedSender<StopSendingObserved>>,
+/// バックエンドごとにエラー型が異なるため、MOQT 層が必要とする分類だけを持つ共通型に
+/// 写す。バックエンド固有のメッセージは [`QuicError::Other`] に文字列で保持する。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuicError {
+    /// peer が STOP_SENDING で送信方向を終端した (RFC 9000 §19.5)
+    Stopped {
+        /// peer が載せたアプリケーションエラーコード
+        error_code: u64,
+    },
+    /// peer が RESET_STREAM で受信方向を終端した (RFC 9000 §19.4)
+    Reset {
+        /// peer が載せたアプリケーションエラーコード
+        error_code: u64,
+    },
+    /// 接続が終了した
+    ConnectionClosed,
+    /// 上記以外のエラー
+    Other(String),
 }
 
-impl ConnectionObserver {
-    /// peer の STOP_SENDING を `tx` へ流す購読者を作る
-    pub(crate) fn with_stop_sending(tx: mpsc::UnboundedSender<StopSendingObserved>) -> Self {
-        Self {
-            stop_sending_tx: Some(tx),
-            ..Self::default()
-        }
-    }
-
-    /// 1 秒ごとに内訳を出すタスクを起動する
-    pub(crate) fn spawn_logger(&self) {
-        let received = Arc::clone(&self.received);
-        let dropped = Arc::clone(&self.dropped);
-        let decryption_failed = Arc::clone(&self.decryption_failed);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                tracing::warn!(
-                    "PKTDIAG received={} dropped={} decryption_failed={}",
-                    received.load(std::sync::atomic::Ordering::Relaxed),
-                    dropped.load(std::sync::atomic::Ordering::Relaxed),
-                    decryption_failed.load(std::sync::atomic::Ordering::Relaxed),
-                );
+impl std::fmt::Display for QuicError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stopped { error_code } => {
+                write!(f, "stream stopped by peer: error_code={error_code:#x}")
             }
-        });
+            Self::Reset { error_code } => {
+                write!(f, "stream reset by peer: error_code={error_code:#x}")
+            }
+            Self::ConnectionClosed => write!(f, "connection closed"),
+            Self::Other(message) => write!(f, "{message}"),
+        }
     }
 }
 
-impl s2n_quic::provider::event::Subscriber for ConnectionObserver {
-    type ConnectionContext = ();
+impl std::error::Error for QuicError {}
 
-    fn create_connection_context(
-        &mut self,
-        _meta: &s2n_quic::provider::event::ConnectionMeta,
-        _info: &s2n_quic::provider::event::ConnectionInfo<'_>,
-    ) -> Self::ConnectionContext {
+impl From<QuicError> for TransportError {
+    fn from(e: QuicError) -> Self {
+        Self::Quic(e.to_string())
     }
+}
 
-    fn on_packet_received(
-        &mut self,
-        _context: &mut Self::ConnectionContext,
-        _meta: &s2n_quic::provider::event::ConnectionMeta,
-        _event: &s2n_quic::provider::event::events::PacketReceived,
-    ) {
-        self.received
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn on_frame_received(
-        &mut self,
-        _context: &mut Self::ConnectionContext,
-        _meta: &s2n_quic::provider::event::ConnectionMeta,
-        event: &FrameReceived<'_>,
-    ) {
-        // peer が送出した STOP_SENDING を観測して MOQT 層へ渡す。送信 API の失敗からは
-        // 検知できない場合がある (FIN ack 済みのストリームでは s2n-quic が RESET を
-        // 組み立てず、STOP_SENDING に由来するエラーが `send` / `finish` に現れない) ため、
-        // フレームの観測を検知の唯一の経路にする。
-        // 自側が送出した STOP_SENDING はこのフックに現れないため、peer 由来に限られる。
-        if let Frame::StopSending { id, error_code, .. } = &event.frame
-            && let Some(tx) = &self.stop_sending_tx
-        {
-            let _ = tx.send(StopSendingObserved {
-                stream_id: *id,
-                error_code: *error_code,
-            });
+impl From<tobi_quic::Error> for QuicError {
+    fn from(e: tobi_quic::Error) -> Self {
+        match e {
+            tobi_quic::Error::Stream(tobi_quic::StreamError::Stopped { error_code }) => {
+                Self::Stopped { error_code }
+            }
+            tobi_quic::Error::Stream(tobi_quic::StreamError::Reset { error_code, .. }) => {
+                Self::Reset { error_code }
+            }
+            tobi_quic::Error::Connection(_) => Self::ConnectionClosed,
+            tobi_quic::Error::Stream(tobi_quic::StreamError::ConnectionLost(_)) => {
+                Self::ConnectionClosed
+            }
+            e => Self::Other(e.to_string()),
         }
     }
+}
 
-    fn on_packet_dropped(
-        &mut self,
-        _context: &mut Self::ConnectionContext,
-        _meta: &s2n_quic::provider::event::ConnectionMeta,
-        event: &s2n_quic::provider::event::events::PacketDropped,
-    ) {
-        self.dropped
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if let s2n_quic::provider::event::events::PacketDropReason::DecryptionFailed { .. } =
-            &event.reason
-        {
-            self.decryption_failed
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+/// 接続の終了理由
+///
+/// テスト用の peer が、client が送った終了コードを観測するために使う。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloseReason {
+    /// アプリケーションエラーで閉じた
+    Application {
+        /// 終了コード
+        code: u64,
+    },
+    /// 正常終了 (終了コード 0)
+    Normal,
+    /// その他の終了
+    Other(String),
+}
+
+impl CloseReason {
+    /// アプリケーションエラーコードを取り出す
+    ///
+    /// 正常終了はコード 0 として扱う。終了コードを持たない終了 (タイムアウトなど) は
+    /// `None` を返す。
+    pub fn application_code(&self) -> Option<u64> {
+        match self {
+            Self::Application { code } => Some(*code),
+            Self::Normal => Some(0),
+            Self::Other(_) => None,
         }
     }
 }
@@ -153,228 +191,56 @@ pub(crate) fn packet_diag_enabled() -> bool {
     std::env::var("MOQT_PACKET_DIAG").is_ok_and(|v| v == "1")
 }
 
-/// QUIC クライアント接続を確立する
-///
-/// `socket_addr` は呼び出し側が [`crate::resolve_socket_addrs`] で解決した接続先の
-/// 1 件を使う。複数に解決された場合の試行順は [`crate::connect_with_fallback`] が決める。
-///
-/// 戻り値の [`StopSendingReceiver`] は peer の STOP_SENDING の観測であり、QUIC 直接接続
-/// (`moqt://`) では QUIC の code space のコードがそのまま流れる。MOQT 層が送信ストリームの
-/// 終端として扱う。
-pub async fn connect(
-    socket_addr: std::net::SocketAddr,
-    server_name: &str,
-    cert_path: Option<&str>,
-) -> Result<(Connection, StopSendingReceiver)> {
-    let tls = build_tls_client(cert_path)?;
-
-    // QUIC DATAGRAM の送受信のキューの容量を決める。s2n-quic の既定はどちらも 0 であり、
-    // 送信の容量が 0 のままだと `poll_send_datagram` が常に `Poll::Pending` を返すため、
-    // datagram を 1 つも送れない (音声の配信がそこで止まる)。受信の容量は 20 ms ごとに
-    // 届く音声をまとめて取り出せるだけの余裕を持たせる
-    let datagram_endpoint = s2n_quic::provider::datagram::default::Endpoint::builder()
-        .with_send_capacity(64)
-        .map_err(|e| TransportError::Quic(format!("datagram endpoint: {e}")))?
-        .with_recv_capacity(64)
-        .map_err(|e| TransportError::Quic(format!("datagram endpoint: {e}")))?
-        .build()
-        .expect("datagram endpoint build must succeed after capacities are set");
-
-    // 受信パケットの内訳を見るときだけ記録する。
-    //
-    // `with_event` は builder の型を変えるため if で分岐できない。購読者は常に
-    // 差し込み、カウンタの加算とログ出力を環境変数で切り替える。無効時は
-    // atomic の加算だけが残るが、分岐のための型の複雑さを避けるほうを取る。
-    // peer の STOP_SENDING の観測は診断ではなく MOQT 層へ渡す必要のある情報であるため、
-    // `MOQT_PACKET_DIAG` の有無に関わらず常に行う。
-    let (stop_sending_tx, stop_sending_rx) = mpsc::unbounded_channel();
-    let diag = ConnectionObserver::with_stop_sending(stop_sending_tx);
-    if packet_diag_enabled() {
-        diag.spawn_logger();
-        tracing::warn!("packet diagnostics are enabled (MOQT_PACKET_DIAG=1)");
-    }
-
-    let client = Client::builder()
-        .with_tls(tls)
-        .map_err(|e| TransportError::Quic(format!("TLS configuration failed: {e}")))?
-        .with_io(crate::local_bind_addr(socket_addr))
-        .map_err(|e| TransportError::Quic(format!("I/O binding failed: {e}")))?
-        .with_datagram(datagram_endpoint)
-        .map_err(|e| TransportError::Quic(format!("datagram provider failed: {e}")))?
-        .with_limits(build_limits()?)
-        .map_err(|e| TransportError::Quic(format!("limits provider failed: {e}")))?
-        .with_event(diag)
-        .map_err(|e| TransportError::Quic(format!("event provider failed: {e}")))?
-        .start()
-        .map_err(|e| TransportError::Quic(format!("client start failed: {e}")))?;
-
-    let connect = Connect::new(socket_addr).with_server_name(server_name);
-    let connection = client
-        .connect(connect)
-        .await
-        .map_err(|e| TransportError::Quic(format!("connection failed: {e}")))?;
-
-    // サーバーが選択したサブプロトコルを検証する (draft-ietf-moq-transport-23 §6.2)。
-    //
-    // QUIC は ALPN の選択を必須とするため (RFC 9001 §8.1)、rustls の時点で候補外の選択と
-    // 選択なしの接続は失敗する。候補は MOQT の識別子 1 つだけなので、ここへ来た接続は
-    // 必ず `moqt-23` を選択している。それでも確かめるのは、下位の TLS 実装が変わったときに
-    // draft 番号の異なる相手を受け入れないようにするためである。
-    let selected = connection
-        .application_protocol()
-        .map_err(|e| TransportError::Quic(format!("failed to read the negotiated ALPN: {e}")))?;
-    verify_alpn(&selected)?;
-
-    tracing::info!("Connected to {socket_addr}");
-    Ok((connection, stop_sending_rx))
-}
-
 /// 交渉されたサブプロトコルが MOQT の識別子かを検証する
 ///
 /// draft-ietf-moq-transport-23 §6.2: draft の ALPN は `moqt-` に draft 番号を付けた値で
 /// あり、draft-23 では `moqt-23` である。識別子が一致しない接続は MOQT のセッションを
 /// 運べないため、確立しない。
-fn verify_alpn(selected: &[u8]) -> Result<()> {
-    if selected == ALPN {
+pub(crate) fn verify_alpn(selected: Option<&[u8]>) -> std::result::Result<(), TransportError> {
+    if selected == Some(ALPN) {
         return Ok(());
     }
     Err(TransportError::Quic(format!(
         "the server did not select the MOQT ALPN ({}): {}",
         crate::MOQT_PROTOCOL,
-        String::from_utf8_lossy(selected)
+        selected.map_or_else(
+            || "none".to_string(),
+            |value| String::from_utf8_lossy(value).into_owned()
+        )
     )))
 }
 
-/// クライアントの接続 limits を構築する。
+/// 接続終了を表すエラーかどうか
 ///
-/// 既定のままだと、ピアが開ける単方向 stream の累積上限が 100 と小さい。
-/// この example は audio を 20ms ごと、video を 1 frame ごとに 1 本の
-/// subgroup stream で受けるため、stream の消費速度が上限の回復速度を上回り、
-/// 購読が数秒から数十秒で止まる。上限とウィンドウを明示して余裕を持たせる。
-///
-/// 値は s2n-quic の既定 (100 stream / 3.75MB) に対して、この example が
-/// 必要とする同時実行数 (MAX_CONCURRENT_STREAMS = 4) と 1 group あたりの
-/// サイズから決めている。過大にしても受信側が accept しなければ flow control
-/// で止まるだけなので、上限そのものは大きくて困らない。
-fn build_limits() -> Result<s2n_quic::provider::limits::Limits> {
-    s2n_quic::provider::limits::Limits::new()
-        // ピア (relay) が開ける単方向 stream の累積上限
-        .with_max_open_remote_unidirectional_streams(10_000)
-        .map_err(|e| TransportError::Quic(format!("remote uni stream limit: {e}")))?
-        // ピア (relay) が開ける双方向 stream の累積上限
-        .with_max_open_remote_bidirectional_streams(1_000)
-        .map_err(|e| TransportError::Quic(format!("remote bidi stream limit: {e}")))?
-        // 接続レベルで受け入れを許す総バイト数
-        .with_data_window(64 * 1024 * 1024)
-        .map_err(|e| TransportError::Quic(format!("data window: {e}")))?
-        // 単方向 stream (relay -> subscriber の data stream) 1 本あたりの窓
-        .with_unidirectional_data_window(16 * 1024 * 1024)
-        .map_err(|e| TransportError::Quic(format!("uni stream window: {e}")))?
-        .with_bidirectional_local_data_window(16 * 1024 * 1024)
-        .map_err(|e| TransportError::Quic(format!("bidi local stream window: {e}")))?
-        .with_bidirectional_remote_data_window(16 * 1024 * 1024)
-        .map_err(|e| TransportError::Quic(format!("bidi remote stream window: {e}")))
+/// ストリームの受理は、接続が終了すると [`QuicError::ConnectionClosed`] を返す。
+/// MOQT 層は「それ以上ストリームが来ない」ことを `Ok(None)` で扱うため、
+/// 接続終了だけを受理の終端として切り分ける。
+pub(crate) fn is_connection_closed(error: &QuicError) -> bool {
+    matches!(error, QuicError::ConnectionClosed)
 }
 
-/// rustls TLS クライアントを構築する
-fn build_tls_client(cert_path: Option<&str>) -> Result<s2n_rustls::Client> {
-    match cert_path {
-        Some(path) => {
-            // CA 証明書を指定して証明書検証を行う
-            let client = s2n_rustls::Client::builder()
-                .with_certificate(std::path::Path::new(path))
-                .map_err(|e| {
-                    TransportError::Quic(format!("failed to load certificate '{path}': {e}"))
-                })?
-                .with_application_protocols([ALPN].iter())
-                .map_err(|e| TransportError::Quic(format!("failed to set ALPN: {e}")))?
-                .build()
-                .map_err(|e| TransportError::Quic(format!("failed to build TLS client: {e}")))?;
-            Ok(client)
-        }
-        None => {
-            // 開発用: 証明書検証をスキップする
-            tracing::warn!("TLS certificate verification is disabled (development mode)");
-            build_insecure_tls_client(&[ALPN])
-        }
-    }
-}
-
-/// 証明書検証をスキップする開発用 TLS クライアントを構築する
+/// テスト用サーバーの TLS 材料
 ///
-/// `alpn_protocols` には接続方式に応じた ALPN を渡す。QUIC 直接接続は MOQT の
-/// プロトコル識別子 (`moqt-23`)、WebTransport over HTTP/3 は `h3` を使う。
-/// s2n-quic の default TLS は feature `provider-tls-rustls` で rustls に解決されるため、
-/// rustls の `ClientConfig` を直接構築して渡す。
-pub(crate) fn build_insecure_tls_client(alpn_protocols: &[&[u8]]) -> Result<s2n_rustls::Client> {
-    let provider = rustls::crypto::aws_lc_rs::default_provider();
-
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|e| TransportError::Quic(format!("failed to set TLS versions: {e}")))?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(NoVerifier))
-        .with_no_client_auth();
-
-    let mut config = config;
-    config.alpn_protocols = alpn_protocols.iter().map(|p| p.to_vec()).collect();
-
-    Ok(s2n_rustls::Client::from(config))
-}
-
-/// 証明書検証をスキップする Verifier (開発用)
-#[derive(Debug)]
-struct NoVerifier;
-
-impl rustls::client::danger::ServerCertVerifier for NoVerifier {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
-    }
+/// バックエンドによって TLS 実装が異なる (rustls / BoringSSL) ため、DER と PEM の
+/// 両方を渡す。各バックエンドは必要な方だけを使う。
+#[cfg(test)]
+pub(crate) struct ServerTls {
+    /// サーバー証明書 (DER)
+    pub(crate) cert_der: Vec<u8>,
+    /// サーバー秘密鍵 (PKCS#8 DER)
+    pub(crate) key_der: Vec<u8>,
+    /// ALPN に載せる識別子
+    pub(crate) alpn: Vec<Vec<u8>>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::peer_harness::TestPeerServer;
-
-    /// 接続結果を待つ上限時間 (ハングを失敗として観測する)
-    const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
     /// 選択されたサブプロトコルが moqt-23 なら受理する
     #[test]
     fn verify_alpn_accepts_moqt_23() {
-        verify_alpn(crate::MOQT_PROTOCOL.as_bytes()).expect("moqt-23 は受理されること");
+        verify_alpn(Some(crate::MOQT_PROTOCOL.as_bytes())).expect("moqt-23 は受理されること");
     }
 
     /// draft 22 の識別子と選択なしは交渉失敗にする
@@ -384,7 +250,13 @@ mod tests {
     /// セッションを運べない。
     #[test]
     fn verify_alpn_rejects_other_identifiers() {
-        for selected in [&b"moqt-22"[..], b"moqt", b"h3", b""] {
+        for selected in [
+            Some(&b"moqt-22"[..]),
+            Some(b"moqt"),
+            Some(b"h3"),
+            Some(b""),
+            None,
+        ] {
             let error = verify_alpn(selected).expect_err("拒否されること");
             let message = match &error {
                 TransportError::Quic(message) => message,
@@ -397,6 +269,20 @@ mod tests {
         }
     }
 
+    /// 接続結果を待つ上限時間 (ハングを失敗として観測する)
+    const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// 接続が失敗することを確かめ、そのエラーを返す
+    ///
+    /// `Connected` は `Debug` を実装しないため、`Result::expect_err` は使えない。
+    async fn expect_connect_error(addr: std::net::SocketAddr, message: &str) -> TransportError {
+        match tokio::time::timeout(TEST_TIMEOUT, connect(addr, "localhost", None)).await {
+            Ok(Ok(_)) => panic!("{message}"),
+            Ok(Err(error)) => error,
+            Err(_) => panic!("上限時間以内に完了すること"),
+        }
+    }
+
     /// ALPN を選択しないサーバーとは接続できない
     ///
     /// RFC 9001 §8.1 は、サーバーが互換なアプリケーションプロトコルを選択できない場合を
@@ -404,19 +290,20 @@ mod tests {
     /// 選択が必須であり、ALPN を広告しないサーバーとはハンドシェイクが成立しない。
     #[tokio::test(flavor = "multi_thread")]
     async fn connect_rejects_a_peer_without_alpn_selection() {
-        let server = TestPeerServer::start_with_alpn(&[])
+        let mut server = crate::peer_harness::TestPeerServer::start_with_alpn(&[])
             .await
             .expect("サーバーを起動できること");
         let addr = server.local_addr();
+        // サーバーは `accept()` を poll してハンドシェイクを進めるため、接続と並行して回す
+        let accept = tokio::spawn(async move { server.accept().await });
 
-        let error = tokio::time::timeout(TEST_TIMEOUT, connect(addr, "localhost", None))
-            .await
-            .expect("上限時間以内に完了すること")
-            .expect_err("ALPN を選択しない相手とは接続できないこと");
+        let error = expect_connect_error(addr, "ALPN を選択しない相手とは接続できないこと").await;
         assert!(
             matches!(error, TransportError::Quic(_)),
             "ハンドシェイクの失敗として返ること: {error:?}"
         );
+        // ハンドシェイクは失敗するため受理は完了しない。タスクを止める
+        accept.abort();
     }
 
     /// draft 22 の識別子だけを広告するサーバーとは接続できない
@@ -426,18 +313,37 @@ mod tests {
     /// なので、ALPN の交渉で失敗し、draft-22 の相手を draft-23 として受け入れない。
     #[tokio::test(flavor = "multi_thread")]
     async fn connect_rejects_a_draft_22_peer() {
-        let server = TestPeerServer::start_with_alpn(&[b"moqt-22"])
+        let mut server = crate::peer_harness::TestPeerServer::start_with_alpn(&[b"moqt-22"])
             .await
             .expect("サーバーを起動できること");
         let addr = server.local_addr();
+        // サーバーは `accept()` を poll してハンドシェイクを進めるため、接続と並行して回す
+        let accept = tokio::spawn(async move { server.accept().await });
 
-        let error = tokio::time::timeout(TEST_TIMEOUT, connect(addr, "localhost", None))
-            .await
-            .expect("上限時間以内に完了すること")
-            .expect_err("draft 22 の識別子しか広告しない相手とは接続できないこと");
+        let error = expect_connect_error(
+            addr,
+            "draft 22 の識別子しか広告しない相手とは接続できないこと",
+        )
+        .await;
         assert!(
             matches!(error, TransportError::Quic(_)),
             "ハンドシェイクの失敗として返ること: {error:?}"
+        );
+        // ハンドシェイクは失敗するため受理は完了しない。タスクを止める
+        accept.abort();
+    }
+
+    /// 正常終了は終了コード 0 として扱う
+    #[test]
+    fn close_reason_maps_normal_to_zero() {
+        assert_eq!(
+            CloseReason::Application { code: 7 }.application_code(),
+            Some(7)
+        );
+        assert_eq!(CloseReason::Normal.application_code(), Some(0));
+        assert_eq!(
+            CloseReason::Other("timeout".into()).application_code(),
+            None
         );
     }
 }

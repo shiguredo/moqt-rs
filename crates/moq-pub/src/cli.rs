@@ -17,9 +17,9 @@ pub enum VideoCodec {
     H264,
     /// H.265 / HEVC (Apple Video Toolbox, macOS 限定)
     H265,
-    /// VP8 (libvpx、Windows 非対応)
+    /// VP8 (libvpx)
     Vp8,
-    /// VP9 (libvpx、Windows 非対応)
+    /// VP9 (libvpx)
     Vp9,
 }
 
@@ -259,11 +259,9 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     let transport_opt: Option<Transport> = noargs::opt("transport")
         .ty("TYPE")
         .doc(
-            "Transport (quic | wt-h3 | wt-h2 | qmux; wt-h3 / wt-h2 (WebTransport) are \
-             experimental and do not work properly: wt-h3 requires RESET_STREAM_AT, which \
-             s2n-quic does not implement, and wt-h2 depends on relay support for \
-             WT_RESET_STREAM capsules; qmux (QMux over TCP+TLS) is also experimental). If \
-             --transport is omitted, uses the 'connection' parameter of the --url MSF \
+            "Transport (quic | wt-h3 | wt-h2 | qmux; qmux (QMux over TCP+TLS) is \
+             experimental; wt-h2 depends on relay support for WT_RESET_STREAM capsules). \
+             If --transport is omitted, uses the 'connection' parameter of the --url MSF \
              fragment (q: native QUIC, wt: WebTransport over HTTP/3, or wt-h2 with \
              --transport wt-h2 for HTTP/2); otherwise defaults to quic. A conflicting \
              --transport, or 'connection=q' with 'connection=wt', is an error",
@@ -357,7 +355,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
 
     let video_codec_opt = noargs::opt("video-codec")
         .ty("CODEC")
-        .doc("Video codec (av1 | h264 | h265 | vp8 | vp9). h264/h265 require macOS, vp8/vp9 are unavailable on Windows")
+        .doc("Video codec (av1 | h264 | h265 | vp8 | vp9). h264/h265 require macOS")
         .default("av1")
         .take(&mut args);
     let video_codec_explicit = is_explicit(&video_codec_opt);
@@ -712,8 +710,7 @@ mod tests {
 
     /// `--url` の `msf` fragment に `connection` が無いときの `--transport` の既定は `quic` である
     ///
-    /// WebTransport 経路 (`wt-h3` / `wt-h2`) は experimental であり、既定にしてはいけない
-    /// (s2n-quic が `RESET_STREAM_AT` を送出できず、reset を伴う経路が成立しないため)。
+    /// 接続種別の指定が無いときの既定は native QUIC である。
     #[test]
     fn transport_defaults_to_quic() {
         let config = parse_args(BASE_ARGS)
@@ -1310,8 +1307,8 @@ mod tests {
 
     /// `--video-codec` が av1 / h264 / h265 / vp8 / vp9 を受け付けること
     ///
-    /// 省略時は av1 である。VP8 / VP9 は Windows 以外で使えるため、macOS 限定の
-    /// h264 / h265 と同じ扱いにしてはいけない (Windows での拒否は pipeline が担う)。
+    /// 省略時は av1 である。VP8 / VP9 は macOS 以外でも使えるため、macOS 限定の
+    /// h264 / h265 と同じ扱いにしてはいけない。
     #[test]
     fn video_codec_accepts_vp8_and_vp9() {
         let cases: &[(&[&str], VideoCodec)] = &[

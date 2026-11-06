@@ -1,28 +1,19 @@
 //! WebTransport over HTTP/3 クライアント実装
 //!
-//! s2n-quic + shiguredo_http3 (Sans I/O) を使い WebTransport セッションを確立する。
+//! tobi-quic + shiguredo_http3 (Sans I/O) を使い WebTransport セッションを確立する。
 //! 節番号は draft-ietf-webtrans-http3-16 を参照する。依存する shiguredo_http3 が
 //! 対応する wire バージョンは draft-15 相当 (`:protocol` 値は共通)。
 //!
 //! publisher (datagram 送信) と subscriber (datagram 受信 + 受信ストリーム accept) の
 //! 双方が利用する union API を提供する。
 //!
-//! 本モジュールはクライアント例であり、サーバ側専用の要件 (非対応リソースへの 405 応答など)
+//! 本モジュールはクライアント実装であり、サーバ側専用の要件 (非対応リソースへの 405 応答など)
 //! や、未実装の任意要件 (応答前の optimistic capsule 送信) は対象外とする。
 //! 対象外の詳細は `WtClient::connect` / `WtSession::close` のコメントを参照。
-//!
-//! 本モジュールの reset は s2n-quic が `RESET_STREAM_AT` を送出できないため `RESET_STREAM` に
-//! フォールバックする。draft-ietf-webtrans-http3-16 §4.4 は WebTransport のデータストリームを
-//! reset するとき、WebTransport ヘッダ以上の Reliable Size を持つ `RESET_STREAM_AT` を使う
-//! ことを MUST とするため、reset を伴う経路は relay によっては成立しない。この理由により
-//! WebTransport 経路 (`wt-h3` / `wt-h2`) は experimental として扱う。
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
 
-use bytes::Bytes;
-use s2n_quic::client::Connect;
-use s2n_quic::stream::{ReceiveStream, SendStream};
 use shiguredo_http3::event::WebTransportEvent;
 use shiguredo_http3::webtransport::ApplicationErrorCode;
 use shiguredo_http3::webtransport::ErrorCode as WtErrorCode;
@@ -33,6 +24,10 @@ use shiguredo_http3::webtransport::stream::{
 };
 use shiguredo_http3::{ClientConnection, ErrorCode as H3ErrorCode, Event, Settings as H3Settings};
 use shiguredo_moqt::session::types::RequestStreamEnd;
+use tobi_quic::SendStream;
+use tobi_quic::{Client, ClientTlsConfig, Connect, IoConfig};
+
+use crate::quic::tobi::RecvStream as QuicRecvStream;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -44,8 +39,7 @@ use crate::webtransport::{
 
 /// WebTransport over HTTP/3 の ALPN プロトコル識別子 (RFC 9114 §3.1)
 ///
-/// s2n-quic の default TLS builder も既定で `h3` を設定するため、証明書検証を
-/// スキップする開発用経路でも同じ値を明示する。
+/// rustls の設定には ALPN を明示する必要があるため、開発用経路でも同じ値を設定する。
 const H3_ALPN: &[u8] = b"h3";
 
 // ---------------------------------------------------------------------------
@@ -170,8 +164,8 @@ impl ClientConnectionState {
     /// h3 層は Sans I/O のため、I/O 層が通知しないと RESET_STREAM を処理できない。
     /// CONNECT stream の RESET_STREAM はセッション終了であり (draft-ietf-webtrans-http3-16 §6)、
     /// h3 層は `WebTransportEvent::SessionClosed` を発火する。
-    /// `stream_reset` の `final_size` (RFC 9000 §19.4 の Final Size) は、s2n-quic の
-    /// ストリームエラーが値を運ばないため常に 0 を渡す (セッション終了の判定には使われない)。
+    /// `stream_reset` の `final_size` (RFC 9000 §19.4 の Final Size) は、h3 層が
+    /// セッション終了の判定に使わないため常に 0 を渡す。
     fn process_stream_reset(&mut self, id: u64, error_code: u64) -> H3FeedOutcome {
         let result = self.h3_conn.stream_reset(id, error_code, 0);
         self.drain_after(result)
@@ -182,10 +176,10 @@ impl ClientConnectionState {
     /// h3 層は Sans I/O のため、I/O 層が通知しないと STOP_SENDING を処理できない
     /// (draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams))。h3 層は登録済みの
     /// WebTransport ストリームに対して `WebTransportEvent::StreamStopSending` を、
-    /// それ以外には汎用の `Event::StopSending` を発火する。本 example は
+    /// それ以外には汎用の `Event::StopSending` を発火する。本実装は
     /// `register_local_wt_stream` を呼ばないため実際には後者になるが、送信データの破棄と
     /// QPACK の Stream Cancellation という h3 層側の処理はどちらでも行われる。
-    /// example はフレーム観測でコードを既に持つため、これらのイベントは h3 層の状態更新として
+    /// 本実装はフレーム観測でコードを既に持つため、これらのイベントは h3 層の状態更新として
     /// drain して捨てる。
     fn process_stop_sending(&mut self, id: u64, error_code: u64) -> H3FeedOutcome {
         let result = self.h3_conn.stop_sending(id, error_code);
@@ -287,12 +281,12 @@ impl ClientConnectionState {
 ///
 /// RFC 9114 §8 は接続エラー (接続を直ちに閉じる。§5.3) とストリームエラー (そのストリーム
 /// だけを終了する) を区別し、wire のエラーコードは §8.1 の登録簿が定める。h3 層はこの 2 つを
-/// `Error` の variant で区別するため、example は variant で切り分けて接続を閉じるかどうかを
+/// `Error` の variant で区別するため、本実装は variant で切り分けて接続を閉じるかどうかを
 /// 決める。
 ///
 /// `Error::ConnectionError` だけが接続を閉じる対象であり、`Error::StreamError` などの
 /// 接続エラーでないものは接続を閉じない。エラーコードは h3 層の
-/// [`shiguredo_http3::ErrorCode`] が持つ wire の値をそのまま返し、example 側で数値を
+/// [`shiguredo_http3::ErrorCode`] が持つ wire の値をそのまま返し、実装側で数値を
 /// 再定義しない。
 fn connection_error_code(error: &shiguredo_http3::Error) -> Option<u64> {
     match error {
@@ -318,7 +312,7 @@ fn connection_error_code(error: &shiguredo_http3::Error) -> Option<u64> {
 fn process_h3_result(
     result: std::result::Result<(), shiguredo_http3::Error>,
     session_state: &watch::Sender<WtSessionState>,
-    handle: &s2n_quic::connection::Handle,
+    handle: &tobi_quic::Connection,
     stream_kind: &str,
 ) -> Result<()> {
     let Err(error) = result else {
@@ -338,7 +332,7 @@ fn process_h3_result(
         }
         None => {
             // 接続エラー以外のエラーは接続を閉じない。h3 層は `Error::StreamError` を
-            // 「そのストリームを reset すべき」と定義するが、本 example が h3 層へ流すのは
+            // 「そのストリームを reset すべき」と定義するが、本実装が h3 層へ流すのは
             // 他セッション向けの双方向ストリームと制御 / QPACK ストリームであり、自前で
             // reset すべきストリームを所有していない。そのため、その入力の処理を止めると
             // ログにとどめる
@@ -366,7 +360,7 @@ fn process_h3_result(
 fn process_h3_outcome(
     outcome: H3FeedOutcome,
     session_state: &watch::Sender<WtSessionState>,
-    handle: &s2n_quic::connection::Handle,
+    handle: &tobi_quic::Connection,
     stream_kind: &str,
 ) -> Result<()> {
     let _ = process_h3_events(outcome.events, session_state);
@@ -381,7 +375,7 @@ fn process_h3_outcome(
 /// レスポンス待ち / CONNECT stream の受信タスク / 制御・QPACK ストリームの
 /// ルーティングタスク / datagram 受信タスク / `take_buffered_datagrams`) がこの関数を通す。
 ///
-/// 本 example は 1 接続 1 セッションであり、イベントの `session_id` は照合しない
+/// 本実装は 1 接続 1 セッションであり、イベントの `session_id` は照合しない
 /// (h3 層は自セッションに関わるイベントだけを発火する)。`decide_route` の session ID 検証は
 /// どのストリームを MOQT 層へ渡すかの判定であり、ここでの照合とは役割が異なる
 /// (両方で照合すると同じ前提を二重に管理することになる)。
@@ -408,7 +402,7 @@ fn process_h3_events(
                 // draft-ietf-webtrans-http3-16 §6: CONNECT stream の close (FIN / RESET_STREAM)
                 // または WT_CLOSE_SESSION の送受信でセッションが終了する。
                 //
-                // `reset_streams` は h3 層が把握しているストリームしか含まず、example が h3 層へ
+                // `reset_streams` は h3 層が把握しているストリームしか含まず、本実装が h3 層へ
                 // feed していないストリーム (自側が開いた送信ストリーム) は含まれない。そのため
                 // 中断対象の台帳には使わず、状態を配って各ストリームを所有するタスクに自分の
                 // ストリームを中断させる (`register_local_wt_stream` による登録も行わない)。
@@ -448,14 +442,14 @@ fn process_h3_events(
 ///
 /// QPACK のブロック解除 (`retry_blocked_streams`) は drain の中で行われるため、drain する
 /// タスクによっては別ストリーム (CONNECT レスポンス) のイベントがここで発火し得る。
-/// 本 example は `SETTINGS_QPACK_MAX_TABLE_CAPACITY` を広告しない (既定の
+/// 本実装は `SETTINGS_QPACK_MAX_TABLE_CAPACITY` を広告しない (既定の
 /// `Settings::default()` は `None` = 0) ため peer は動的テーブルを参照できず、ブロック解除
 /// 由来のイベントは発生しない。この広告を有効にする場合は、確立前の drain をセッション
 /// 確立ループだけが行うように見直すこと。
 fn feed_stream_to_h3(
     state: &Arc<StdMutex<ClientConnectionState>>,
     session_state: &watch::Sender<WtSessionState>,
-    handle: &s2n_quic::connection::Handle,
+    handle: &tobi_quic::Connection,
     stream_id: u64,
     data: &[u8],
     fin: bool,
@@ -487,7 +481,7 @@ enum ConnectOutcome {
     /// 確立前にプロトコル交渉の失敗でセッションが閉じられた (draft-ietf-webtrans-http3-16 §3.3)
     ///
     /// h3 層は失敗の理由 (`WT-Protocol` 無し / 不正 / `WT-Available-Protocols` に無い値) を
-    /// 区別せず終了コードだけを通知するため、example は理由を切り分けない。
+    /// 区別せず終了コードだけを通知するため、本実装は理由を切り分けない。
     ProtocolNegotiationFailed { error_code: u64 },
     /// 確立前にセッションが閉じられた (§6)
     ///
@@ -548,7 +542,7 @@ struct ConnectObservation {
 impl ConnectObservation {
     /// h3 層のイベント列を観測に取り込む
     ///
-    /// 本 example は 1 接続 1 CONNECT リクエストであり、イベントの `stream_id` は照合しない
+    /// 本実装は 1 接続 1 CONNECT リクエストであり、イベントの `stream_id` は照合しない
     /// (h3 層は自セッションに関わるイベントだけを発火する。`process_h3_events` と同じ前提)。
     /// 複数の CONNECT リクエストを扱う場合は、判定対象の `connect_stream_id` を渡して
     /// `stream_id` を照合する必要がある。
@@ -681,7 +675,7 @@ fn parse_status(value: &[u8]) -> Option<u16> {
 ///
 /// draft-ietf-webtrans-http3-16 §3.2: クライアントは 2xx 応答受信時のみセッション確立とみなす。
 /// §3.3 (Application Protocol Negotiation) の `WT-Protocol` の検証は h3 層
-/// (`handle_wt_connect_response`) が行い、example は再実装しない。交渉に失敗した場合、h3 層は
+/// (`handle_wt_connect_response`) が行い、本実装は再実装しない。交渉に失敗した場合、h3 層は
 /// `WT_ALPN_ERROR` の `SessionClosed` を発行し `SessionEstablished` は発行しないため、
 /// 観測した終了コードで交渉失敗を判別する。
 fn connect_outcome(observation: &ConnectObservation) -> ConnectOutcome {
@@ -740,7 +734,7 @@ fn connect_outcome(observation: &ConnectObservation) -> ConnectOutcome {
 /// 閉じるべきセッションが既に終了している。
 ///
 /// h3 層は交渉失敗だけでなくプロトコルエラーでも `SessionClosed` を発行し、フロー制御違反では
-/// §5.6.2 が `WT_FLOW_CONTROL_ERROR` でのクローズを MUST とする。本 example が送る
+/// §5.6.2 が `WT_FLOW_CONTROL_ERROR` でのクローズを MUST とする。本実装が送る
 /// `webtransport::Settings` は `wt_enabled` だけを設定し、宣言に使う
 /// `wt_initial_max_streams_uni` / `wt_initial_max_streams_bidi` / `wt_initial_max_data` と
 /// `wt_max_sessions_draft14` は 0 / `None` のままにするためフロー制御を宣言しない。§5.1 は
@@ -756,7 +750,7 @@ fn closes_with_wt_alpn_error(outcome: ConnectOutcome) -> bool {
 /// セッションを確立した場合と判定中はエラーにしない (`None`)。
 ///
 /// h3 層の `SessionClosed` は交渉失敗以外にもプロトコルエラー (フロー制御違反) で発行され得る
-/// が、本 example はフロー制御を宣言しないため [`closes_with_wt_alpn_error`] の doc に書いた
+/// が、本実装はフロー制御を宣言しないため [`closes_with_wt_alpn_error`] の doc に書いた
 /// とおりその経路には到達しない。
 fn connect_error(outcome: ConnectOutcome) -> Option<TransportError> {
     match outcome {
@@ -833,7 +827,7 @@ fn connect_actions(
 /// 戻り値はセッションが確立したかどうか。[`connect_actions`] が返した並びの順に実行する。
 fn run_connect_actions(
     actions: Vec<ConnectAction>,
-    handle: &s2n_quic::connection::Handle,
+    handle: &tobi_quic::Connection,
 ) -> Result<bool> {
     let mut established = false;
     for action in actions {
@@ -856,62 +850,50 @@ pub struct WtClient;
 impl WtClient {
     /// WebTransport セッションを確立する
     pub async fn connect(config: ClientConfig, path: &str) -> Result<WtSession> {
-        let datagram_endpoint = s2n_quic::provider::datagram::default::Endpoint::builder()
-            .with_recv_capacity(64)
-            .map_err(|e| TransportError::Internal(format!("datagram endpoint: {e}")))?
-            .build()
-            .expect("datagram endpoint build must succeed after recv capacity is set");
-
-        // peer の STOP_SENDING を MOQT 層へ渡すチャネル。
-        //
-        // WebTransport over HTTP/3 では HTTP/3 の code space を共有するため、MOQT 層が
-        // `wt_stop_sending_error_code` で MOQT のコードへ戻す。観測は診断ではなく MOQT 層へ
-        // 渡す必要のある情報であるため、`MOQT_PACKET_DIAG` の有無に関わらず常に行う。
-        let (stop_sending_tx, stop_sending_rx) = mpsc::unbounded_channel();
-        let diag = crate::quic::ConnectionObserver::with_stop_sending(stop_sending_tx);
-        // QUIC 直接接続と同じく、環境変数で明示的に有効化したときだけ診断ログを出す
-        if crate::quic::packet_diag_enabled() {
-            diag.spawn_logger();
-            tracing::warn!("packet diagnostics are enabled (MOQT_PACKET_DIAG=1)");
-        }
-
-        let client = if config.disable_cert_validation {
+        let tls = if config.disable_cert_validation {
             // 開発用: 証明書検証をスキップする。WebTransport over HTTP/3 の ALPN は
-            // `h3` (RFC 9114 §3.1) を使う。s2n-quic の default TLS は feature
-            // `provider-tls-rustls` で rustls に解決されるため、cert_store が空の
-            // builder では `missing trusted root certificate(s)` で必ず失敗する。
-            let tls = crate::quic::build_insecure_tls_client(&[H3_ALPN])?;
-            s2n_quic::Client::builder()
-                .with_tls(tls)
-                .map_err(TransportError::transport)?
-                .with_io(crate::local_bind_addr(config.remote_addr))
-                .map_err(TransportError::transport)?
-                .with_datagram(datagram_endpoint)
-                .map_err(TransportError::transport)?
-                .with_event(diag)
-                .map_err(TransportError::transport)?
-                .start()
-                .map_err(TransportError::transport)?
+            // `h3` (RFC 9114 §3.1) を使う
+            crate::tls::build_client_config(None, true, H3_ALPN)?
         } else if let Some(ref ca_pem) = config.ca_cert_pem {
-            s2n_quic::Client::builder()
-                .with_tls(ca_pem.as_str())
-                .map_err(TransportError::transport)?
-                .with_io(crate::local_bind_addr(config.remote_addr))
-                .map_err(TransportError::transport)?
-                .with_datagram(datagram_endpoint)
-                .map_err(TransportError::transport)?
-                .with_event(diag)
-                .map_err(TransportError::transport)?
-                .start()
-                .map_err(TransportError::transport)?
+            crate::tls::build_client_config(Some(ca_pem), false, H3_ALPN)?
         } else {
             return Err(TransportError::InvalidState(
                 "ca_cert_pem or disable_cert_validation is required".to_string(),
             ));
         };
 
-        let connect = Connect::new(config.remote_addr).with_server_name(&*config.server_name);
-        let connection = client.connect(connect).await?;
+        let client = Client::builder()
+            .with_tls(ClientTlsConfig::new(tls))
+            .with_io(IoConfig::new(crate::local_bind_addr(config.remote_addr)))
+            // tobi-quic の `with_datagram` は現在の transport 設定へ書き込むため、
+            // `with_transport` で置き換えた後に呼ぶ (逆順だと DATAGRAM の広告が消える)
+            .with_transport(crate::quic::tobi::build_transport_config())
+            .with_datagram(crate::quic::tobi::datagram_config())
+            .start()
+            .map_err(|e| TransportError::Internal(format!("client start failed: {e}")))?;
+
+        let connection = client
+            .connect(Connect::new(
+                config.remote_addr,
+                config.server_name.as_str(),
+            ))
+            .await
+            .map_err(TransportError::transport)?;
+        // s2n-quic の endpoint は接続とは独立に常時ソケットを駆動していた。tobi-quic の既定は
+        // コマンド駆動であり、API を呼んでいない間は受信とタイマーを処理しないため、
+        // 同じ挙動になるようバックグラウンド駆動を有効にする
+        connection
+            .enable_background_driver()
+            .await
+            .map_err(TransportError::transport)?;
+
+        // peer の STOP_SENDING の観測を MOQT 層へ渡すタスクを起動する。
+        //
+        // WebTransport over HTTP/3 では HTTP/3 の code space を共有するため、MOQT 層が
+        // `wt_stop_sending_error_code` で MOQT のコードへ戻す。観測は診断ではなく MOQT 層へ
+        // 渡す必要のある情報であるため、`MOQT_PACKET_DIAG` の有無に関わらず常に行う。
+        let stop_sending_rx = crate::quic::tobi::spawn_connection_observer(&connection);
+        crate::quic::tobi::spawn_packet_diagnostics(&connection);
 
         let state = Arc::new(StdMutex::new(ClientConnectionState::new(
             config.h3_settings,
@@ -923,19 +905,19 @@ impl WtClient {
         // ピアの transport parameter (max_datagram_frame_size > 0 と RESET_STREAM_AT 対応) を
         // 検証することを求める。I/O 層がその結果を注入しないと CONNECT は拒否される。
         //
-        // - max_datagram_frame_size: 本 example は s2n-quic の datagram provider を有効にして
-        //   接続しており、ピアが DATAGRAM (RFC 9221) を広告しない場合は以降の WebTransport
-        //   datagram 送受信が成立しない。s2n-quic の公開 API にピアの
-        //   max_datagram_frame_size を取得する手段が無いため、provider を有効にしていることを
-        //   根拠に true を渡す (moq は常に datagram を有効にして接続する)。
-        // - reset_stream_at: s2n-quic は RESET_STREAM_AT を送出しないため false を渡す。
-        //   本 example が接続する draft (draft-15 相当) では必須ではない。
+        // - max_datagram_frame_size: ピアが DATAGRAM (RFC 9221) を広告しない場合は以降の
+        //   WebTransport datagram 送受信が成立しないため、ピアの広告の有無を渡す。
+        // - reset_stream_at: ピアの広告の有無を渡す。広告があれば `RESET_STREAM_AT` で
+        //   reset し、無ければ `RESET_STREAM` にフォールバックする。draft-15 以降は
+        //   ピアの対応が前提条件になるため、非対応の相手とは CONNECT で失敗する。
+        let datagram_supported = connection.max_datagram_size().await.is_some();
+        let reset_stream_at_supported = connection.peer_supports_reset_stream_at().await;
         {
             let mut s = state
                 .lock()
                 .expect("connection state mutex must not be poisoned");
             s.h3_conn
-                .set_webtransport_transport_verified(true, false)
+                .set_webtransport_transport_verified(datagram_supported, reset_stream_at_supported)
                 .map_err(|e| {
                     TransportError::Internal(format!(
                         "failed to set WebTransport transport parameters: {e}"
@@ -950,8 +932,11 @@ impl WtClient {
         // 受信していることを要求する。peer の SETTINGS はサーバーの制御ストリーム
         // (単方向) で届くため、CONNECT を送る前に単方向ストリームを受信して
         // HTTP/3 状態へ流し込む必要がある。
-        let (mut handle, stream_acceptor) = connection.split();
-        let (mut bidi_acceptor, mut uni_acceptor) = stream_acceptor.split();
+        let (handle, stream_acceptor) = connection.split();
+        // tobi-quic の `StreamAcceptor` は単方向と双方向の両方を受け付けるため `Arc` で共有する
+        let stream_acceptor = Arc::new(stream_acceptor);
+        let bidi_acceptor = Arc::clone(&stream_acceptor);
+        let uni_acceptor = stream_acceptor;
 
         let unblock_notify = Arc::new(Notify::new());
         let (uni_tx, uni_rx) = mpsc::channel::<WtRecvStream>(16);
@@ -969,6 +954,7 @@ impl WtClient {
             state: Arc::clone(&state),
             notify: Arc::clone(&unblock_notify),
             handle: handle.clone(),
+            reset_stream_at_supported,
             session_state: session_state_tx.clone(),
         };
 
@@ -978,21 +964,39 @@ impl WtClient {
         // 単方向ストリームは `uni_tx` へ渡す。
         let context_for_uni = route_context.clone();
         tokio::spawn(async move {
-            while let Ok(Some(recv)) = uni_acceptor.accept_receive_stream().await {
+            loop {
+                let recv = match uni_acceptor.accept_receive_stream().await {
+                    Ok(recv) => recv,
+                    // 接続が終了した。これ以上ストリームは届かない
+                    Err(_) => break,
+                };
                 let context = context_for_uni.clone();
                 let uni_tx = uni_tx.clone();
                 let session_id = session_id_rx.clone();
                 let stream_id: u64 = recv.id();
                 tokio::spawn(route_uni_stream(
-                    stream_id, recv, uni_tx, session_id, context,
+                    stream_id,
+                    QuicRecvStream::new(recv),
+                    uni_tx,
+                    session_id,
+                    context,
                 ));
             }
         });
 
         // H3 ストリーム (制御 + QPACK encoder/decoder) を初期化する
-        let mut control_send = handle.open_send_stream().await?;
-        let encoder_send = handle.open_send_stream().await?;
-        let decoder_send = handle.open_send_stream().await?;
+        let mut control_send = handle
+            .open_send_stream_wait()
+            .await
+            .map_err(TransportError::transport)?;
+        let encoder_send = handle
+            .open_send_stream_wait()
+            .await
+            .map_err(TransportError::transport)?;
+        let decoder_send = handle
+            .open_send_stream_wait()
+            .await
+            .map_err(TransportError::transport)?;
 
         let init_data = {
             let mut s = state
@@ -1002,9 +1006,9 @@ impl WtClient {
                 .init_h3_streams(control_send.id(), encoder_send.id(), decoder_send.id())?
         };
 
-        control_send
-            .send(Bytes::from(init_data.control_data))
-            .await?;
+        crate::quic::tobi::send_all(&mut control_send, &init_data.control_data)
+            .await
+            .map_err(crate::quic::QuicError::from)?;
         // encoder/decoder は初期データだけ送れば良い (ストリーム自体は保持不要)
 
         // peer の SETTINGS を待ってから CONNECT を送る
@@ -1016,9 +1020,13 @@ impl WtClient {
         wait_for_peer_settings(&state, &unblock_notify, &mut settings_session_state).await?;
 
         // CONNECT リクエスト (双方向ストリーム) を開く
-        let connect_stream = handle.open_bidirectional_stream().await?;
+        let connect_stream = handle
+            .open_bidirectional_stream_wait()
+            .await
+            .map_err(TransportError::transport)?;
         let connect_stream_id: u64 = connect_stream.id();
-        let (mut recv_stream, mut send_stream) = connect_stream.split();
+        let (mut send_stream, recv_stream) = connect_stream.split();
+        let mut recv_stream = QuicRecvStream::new(recv_stream);
         // 単方向ストリームのルーティングタスクへ session ID を配る (draft-ietf-webtrans-http3-16 §4)
         session_id_tx.send_replace(Some(connect_stream_id));
 
@@ -1051,10 +1059,9 @@ impl WtClient {
         // CONNECT リクエストを送信する (fin=false)
         // draft-ietf-webtrans-http3-16 §3.2: クライアントは応答前に capsule を楽観送信してよい (MAY)。
         // 本実装は 2xx 受信まで capsule を送らない (非対応)。
-        send_stream
-            .send(Bytes::from(request_data))
+        crate::quic::tobi::send_all(&mut send_stream, &request_data)
             .await
-            .map_err(TransportError::transport)?;
+            .map_err(crate::quic::QuicError::from)?;
 
         // 双方向ストリーム受信タスク
         //
@@ -1064,7 +1071,12 @@ impl WtClient {
         // CONNECT stream の id が要るため、CONNECT を開いた後に起動する。
         let context_for_bi = route_context.clone();
         tokio::spawn(async move {
-            while let Ok(Some(stream)) = bidi_acceptor.accept_bidirectional_stream().await {
+            loop {
+                let stream = match bidi_acceptor.accept_bidirectional_stream().await {
+                    Ok(stream) => stream,
+                    // 接続が終了した。これ以上ストリームは届かない
+                    Err(_) => break,
+                };
                 let context = context_for_bi.clone();
                 let bi_tx = bi_tx.clone();
                 let stream_id: u64 = stream.id();
@@ -1088,13 +1100,17 @@ impl WtClient {
             let mut session_state_rx_for_datagram = session_state_tx.subscribe();
             tokio::spawn(async move {
                 loop {
-                    let result = handle_for_datagram.datagram_mut(
-                        |receiver: &mut s2n_quic::provider::datagram::default::Receiver| {
-                            receiver.recv_datagram()
-                        },
-                    );
+                    let result = tokio::select! {
+                        result = handle_for_datagram.receive_datagram() => result,
+                        // セッション終了 (§6) や h3 層の接続エラーを検知したら受信を止める。
+                        // 止めないと `watch::Sender` の clone を保持し続けて他の待機側の
+                        // sender drop 経路も塞ぐ
+                        _ = wait_until_terminated(&mut session_state_rx_for_datagram) => {
+                            break;
+                        }
+                    };
                     match result {
-                        Ok(Some(bytes)) => {
+                        Ok(bytes) => {
                             // h3 状態のロックは feed の間だけ保持し、イベント処理はロック外で行う
                             let outcome = {
                                 let mut s = state_for_datagram
@@ -1122,27 +1138,13 @@ impl WtClient {
                                 break;
                             }
                         }
-                        Ok(None) => {
-                            // キューが空のときだけセッション終了 (§6) を観測する。キューに
-                            // datagram が残っている間は読み続けるため、終了直前に届いた
-                            // datagram を落とさず、終了後は受信を続けない。止めないと
-                            // `watch::Sender` の clone を保持し続けて他の待機側の sender drop
-                            // 経路も塞ぐ。MOQT 層は `take_buffered_datagrams` が返す
-                            // `ConnectionClosed` でセッション終了を検知する
-                            tokio::select! {
-                                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
-                                _ = wait_until_terminated(&mut session_state_rx_for_datagram) => {
-                                    break;
-                                }
-                            }
-                        }
                         Err(e) => {
                             // datagram の受信 API のエラーは datagram を読めないことを意味する
                             // ためこのタスクは止まる。購読を静かに止めないよう、MOQT 層の
                             // 受信ループを待たせないセッション終了として共有状態へ進める
                             // (h3 層の接続エラーで既に終了していれば、この遷移は
                             // `update_session_state` が同じ段階として無視する)
-                            tracing::warn!("Datagram query error: {e}");
+                            tracing::warn!("Datagram receive error: {e}");
                             update_session_state(
                                 &session_state_for_datagram,
                                 WtSessionState::ConnectionFailed,
@@ -1177,9 +1179,9 @@ impl WtClient {
             tokio::select! {
                 received = recv_stream.receive() => {
                     let (data, fin) = match received {
-                        Ok(Some(data)) => (data.to_vec(), false),
+                        Ok(Some(data)) => (data, false),
                         Ok(None) => (vec![], true),
-                        Err(s2n_quic::stream::Error::StreamReset { error, .. }) => {
+                        Err(crate::quic::QuicError::Reset { error_code }) => {
                             // draft-ietf-webtrans-http3-16 §6: CONNECT stream の RESET_STREAM は
                             // セッション終了である。確立後の CONNECT stream の受信タスクと同じ
                             // 経路で h3 層へ通知する (h3 層は `SessionClosed` を発行し、
@@ -1189,7 +1191,7 @@ impl WtClient {
                                 &session_state_tx,
                                 &handle,
                                 connect_stream_id,
-                                error.into(),
+                                error_code,
                             );
                             // 確立前に終了したため確立待ちを終える (ループのあとの判定が
                             // セッション終了のエラーを返す)
@@ -1285,7 +1287,7 @@ impl WtClient {
                                     &e,
                                     *session_state_for_connect.borrow(),
                                 ) {
-                                    abort_connect_stream_with_message_error(&mut recv_stream);
+                                    abort_connect_stream_with_message_error(&mut recv_stream).await;
                                     break;
                                 }
                                 // 依存 shiguredo_http3 には `SessionClosed` を発行せずにエラーを
@@ -1326,7 +1328,7 @@ impl WtClient {
                             }
                             break;
                         }
-                        Err(s2n_quic::stream::Error::StreamReset { error, .. }) => {
+                        Err(crate::quic::QuicError::Reset { error_code }) => {
                             // RESET_STREAM (CONNECT stream の abrupt な close) もセッション終了である (§6)。
                             // h3 層は Sans I/O のため、I/O 層からの通知で `SessionClosed` を発火する
                             reset_connect_stream(
@@ -1334,7 +1336,7 @@ impl WtClient {
                                 &session_state_for_connect,
                                 &handle_for_connect,
                                 connect_stream_id,
-                                error.into(),
+                                error_code,
                             );
                             break;
                         }
@@ -1356,14 +1358,14 @@ impl WtClient {
                         // `WT_SESSION_GONE` で中断する。§6 はセッション終了を検知したときに
                         // "abort reading on the receive side of all unidirectional and
                         // bidirectional streams" を MUST とし、`WT_CLOSE_SESSION` を送った側にも
-                        // 同じ中断を定める。中断しないと `ReceiveStream` の drop で s2n-quic が
-                        // `stop_sending(0x0)` を送り、プロトコルコードが peer へ伝わらない。
+                        // 同じ中断を定める。中断しないと `ReceiveStream` の drop で
+                        // `stop_sending(0x0)` が送られ、プロトコルコードが peer へ伝わらない。
                         //
                         // `wait_until_terminated` は `abort_streams` が真になったときのほか、
                         // 状態を配る sender が drop されたときにも返る。後者は状態を観測できない
                         // 場合であり、送信しても失敗する (production では通常到達しない)。
                         // 観測した状態は問わず、受信半の中断だけを行う
-                        abort_connect_stream_read(&mut recv_stream);
+                        abort_connect_stream_read(&mut recv_stream).await;
                         break;
                     }
                 }
@@ -1372,8 +1374,9 @@ impl WtClient {
 
         Ok(WtSession {
             session_id: connect_stream_id,
+            reset_stream_at_supported,
             handle,
-            connect_send: send_stream,
+            connect_send: StdMutex::new(send_stream),
             uni_rx: Some(uni_rx),
             bi_rx: Some(bi_rx),
             stop_sending_rx: Some(stop_sending_rx),
@@ -1396,7 +1399,7 @@ impl WtClient {
 fn feed_connect_stream(
     state: &Arc<StdMutex<ClientConnectionState>>,
     session_state: &watch::Sender<WtSessionState>,
-    handle: &s2n_quic::connection::Handle,
+    handle: &tobi_quic::Connection,
     stream_id: u64,
     data: &[u8],
     fin: bool,
@@ -1429,12 +1432,12 @@ fn is_close_session_extra_data_error(
 ///
 /// `H3_MESSAGE_ERROR` は HTTP/3 のプロトコルエラーコードであり、§4.4 のアプリケーション
 /// エラーコードの remap (`moqt_to_wt_code`) を通さない (`StreamErrorCode::Protocol`)。
-/// 数値は example 側で再定義せず依存 crate の定義を使う。
-fn abort_connect_stream_with_message_error(recv_stream: &mut ReceiveStream) {
+/// 数値は 実装側で再定義せず依存 crate の定義を使う。
+async fn abort_connect_stream_with_message_error(recv_stream: &mut QuicRecvStream) {
     let error =
         stream_application_error(StreamErrorCode::Protocol(H3ErrorCode::MessageError as u64))
             .expect("H3_MESSAGE_ERROR fits in the QUIC application error code range");
-    match recv_stream.stop_sending(error) {
+    match recv_stream.stop_sending(error).await {
         Ok(()) => {
             tracing::debug!("Reset the WebTransport CONNECT stream with H3_MESSAGE_ERROR");
         }
@@ -1448,13 +1451,12 @@ fn abort_connect_stream_with_message_error(recv_stream: &mut ReceiveStream) {
 
 /// CONNECT stream の RESET_STREAM を h3 層へ伝え、イベントをセッション状態へ反映する
 ///
-/// s2n-quic のストリームエラーは RFC 9000 §19.4 の Final Size を運ばないため、h3 層へは
-/// 0 を渡す (`ClientConnectionState::process_stream_reset`)。
+/// h3 層へは `error_code` だけを渡す (`ClientConnectionState::process_stream_reset`)。
 /// 戻り値を使わないのは、接続エラーの扱いが `process_h3_outcome` の中で完結しているためである。
 fn reset_connect_stream(
     state: &Arc<StdMutex<ClientConnectionState>>,
     session_state: &watch::Sender<WtSessionState>,
-    handle: &s2n_quic::connection::Handle,
+    handle: &tobi_quic::Connection,
     stream_id: u64,
     error_code: u64,
 ) {
@@ -1479,11 +1481,11 @@ fn reset_connect_stream(
 /// code" を MUST とする。CONNECT stream 自身も対象に含まれるため、peer 主導の終了を観測した
 /// ときに受信半へ STOP_SENDING を送る。`WT_SESSION_GONE` はプロトコルコードであり §4.4 の
 /// remap を通さない (`StreamErrorCode::Protocol`)。
-fn abort_connect_stream_read(recv_stream: &mut ReceiveStream) {
+async fn abort_connect_stream_read(recv_stream: &mut QuicRecvStream) {
     // `WT_SESSION_GONE` (0x170d7b68) は QUIC の application error code の範囲に収まるため失敗しない
     let error = stream_application_error(session_gone_code())
         .expect("WT_SESSION_GONE fits in the QUIC application error code range");
-    match recv_stream.stop_sending(error) {
+    match recv_stream.stop_sending(error).await {
         Ok(()) => {
             tracing::debug!("Aborted reading the WebTransport CONNECT stream with WT_SESSION_GONE");
         }
@@ -1565,8 +1567,17 @@ async fn wait_for_peer_settings(
 /// 変化を観測して自分のストリームを中断する (`wait_until_terminated` を参照)。
 pub struct WtSession {
     session_id: u64,
-    handle: s2n_quic::connection::Handle,
-    connect_send: SendStream,
+    /// ピアが `reset_stream_at` transport parameter を提示しているか
+    ///
+    /// WebTransport のデータストリームの reset に `RESET_STREAM_AT` を使えるかどうか
+    /// (draft-ietf-webtrans-http3-16 §4.4)。
+    reset_stream_at_supported: bool,
+    handle: tobi_quic::Connection,
+    /// CONNECT stream の送信側
+    ///
+    /// `tobi_quic::SendStream` は `Sync` ではないため、`MoqtClient` を `Sync` に保つ目的で
+    /// `Mutex` で包む。操作はすべて `&mut self` なので `get_mut` でロックを取らずに使う。
+    connect_send: StdMutex<SendStream>,
     /// 単方向受信ストリームの receiver。`take_uni_receiver` で取り出すと None になる
     uni_rx: Option<mpsc::Receiver<WtRecvStream>>,
     /// 双方向受信ストリームの receiver。`take_bi_receiver` で取り出すと None になる
@@ -1598,7 +1609,7 @@ impl WtSession {
     /// 新しいストリームを開ける状態かを確認する
     ///
     /// draft-ietf-webtrans-http3-16 §6 はセッション終了の検知後に新しいストリームを開くことを
-    /// 禁じ (MUST NOT)、§4.7 の drain の通知後もセッションの利用は許す (MAY) が、本 example は
+    /// 禁じ (MUST NOT)、§4.7 の drain の通知後もセッションの利用は許す (MAY) が、本実装は
     /// drain を「できるだけ早く終了する」合図として扱い、新規ストリームの open を拒否する。
     ///
     /// どちらの状態でも MOQT 層へは `ConnectionClosed` を返す。MOQT 層に必要な情報は
@@ -1634,9 +1645,11 @@ impl WtSession {
     /// 単方向送信ストリームを開く
     pub async fn open_uni_stream(&mut self) -> Result<WtSendStream> {
         self.ensure_new_stream_allowed()?;
+        // s2n-quic の `open_send_stream` は枠が空くまで待っていたため、待たない
+        // `open_send_stream` ではなく `open_send_stream_wait` を使う
         let stream = self
             .handle
-            .open_send_stream()
+            .open_send_stream_wait()
             .await
             .map_err(TransportError::transport)?;
         let stream_id: u64 = stream.id();
@@ -1648,13 +1661,16 @@ impl WtSession {
         StreamHeader::new(self.session_id)
             .expect("session_id must be a client-initiated bidirectional stream ID")
             .encode_unidirectional(&mut header);
-        send.send(Bytes::from(header))
+        crate::quic::tobi::send_all(&mut send, &header)
             .await
-            .map_err(TransportError::transport)?;
+            .map_err(crate::quic::QuicError::from)?;
+        let header_len = header.len() as u64;
 
         Ok(WtSendStream {
             stream_id,
-            send,
+            send: StdMutex::new(send),
+            header_len,
+            reset_stream_at_supported: self.reset_stream_at_supported,
             session_state: self.session_state_receiver(),
         })
     }
@@ -1723,25 +1739,29 @@ impl WtSession {
         self.ensure_new_stream_allowed()?;
         let stream = self
             .handle
-            .open_bidirectional_stream()
+            .open_bidirectional_stream_wait()
             .await
             .map_err(TransportError::transport)?;
         let stream_id: u64 = stream.id();
-        let (recv, mut send) = stream.split();
+        let (mut send, recv) = stream.split();
+        let recv = QuicRecvStream::new(recv);
 
         let mut header = Vec::new();
         // session_id は CONNECT stream ID である (client 起動の双方向、session_id % 4 == 0)
         StreamHeader::new(self.session_id)
             .expect("session_id must be a client-initiated bidirectional stream ID")
             .encode_bidirectional(&mut header);
-        send.send(Bytes::from(header))
+        crate::quic::tobi::send_all(&mut send, &header)
             .await
-            .map_err(TransportError::transport)?;
+            .map_err(crate::quic::QuicError::from)?;
+        let header_len = header.len() as u64;
 
         Ok(WtBiStream {
             stream_id,
             recv,
             send,
+            header_len,
+            reset_stream_at_supported: self.reset_stream_at_supported,
             pending: Vec::new(),
             session_state: self.session_state_receiver(),
         })
@@ -1775,17 +1795,18 @@ impl WtSession {
             MoqtCloseCode::Capsule(code) => code,
             MoqtCloseCode::ConnectionClose(code) => {
                 // RFC 9000 §19.19: application error code は varint。`moqt_close_code` が
-                // 上限を判定済みのため `Error::new` は成功する
-                let error = s2n_quic::application::Error::new(code).map_err(|e| {
-                    TransportError::Internal(format!(
-                        "MOQT close code {code:#x} cannot be sent as a CONNECTION_CLOSE application error code: {e}"
-                    ))
-                })?;
-                self.handle.close(error);
+                // 上限を判定済みのため、そのまま載せられる
+                self.handle
+                    .close_application(code, &[])
+                    .await
+                    .map_err(TransportError::transport)?;
                 return Ok(());
             }
             MoqtCloseCode::ConnectionCloseUnknown => {
-                self.handle.close(s2n_quic::application::Error::UNKNOWN);
+                self.handle
+                    .close_application(0, &[])
+                    .await
+                    .map_err(TransportError::transport)?;
                 return Ok(());
             }
         };
@@ -1795,14 +1816,21 @@ impl WtSession {
         };
         let mut buf = Vec::new();
         capsule.encode(&mut buf);
-        self.connect_send
-            .send(Bytes::from(buf))
-            .await
-            .map_err(TransportError::transport)?;
+        crate::quic::tobi::send_all(
+            self.connect_send
+                .get_mut()
+                .expect("the connect stream mutex must not be poisoned"),
+            &buf,
+        )
+        .await
+        .map_err(crate::quic::QuicError::from)?;
         // draft-ietf-webtrans-http3-16 §6 (Session Termination):
         // WT_CLOSE_SESSION 送信後は CONNECT stream に即座に FIN を送る (MUST)
         self.connect_send
+            .get_mut()
+            .expect("the connect stream mutex must not be poisoned")
             .finish()
+            .await
             .map_err(TransportError::transport)
     }
 
@@ -1844,9 +1872,8 @@ impl WtSession {
 
     /// datagram を送信する (publisher 側で使用)
     ///
-    /// HTTP Datagram フォーマットでエンコードし、s2n-quic の datagram sender で送信する。
-    /// `state` のロックは HTTP Datagram 生成後に解放してから `handle.datagram_mut` を呼び、
-    /// デッドロックを回避する。
+    /// HTTP Datagram フォーマットでエンコードし、QUIC の DATAGRAM で送信する。
+    /// `state` のロックは HTTP Datagram 生成後に解放してから送信し、デッドロックを回避する。
     /// セッション終了・drain の検知後は新しい datagram を送らない (§6 の MUST NOT / §4.7)。
     pub async fn send_datagram(&self, payload: &[u8]) -> Result<()> {
         self.ensure_datagram_allowed()?;
@@ -1857,16 +1884,11 @@ impl WtSession {
                 .expect("connection state mutex must not be poisoned");
             s.h3_conn.send_datagram(self.session_id, payload)?
         };
-        let bytes = Bytes::from(datagram_bytes);
+        // 送信キューの空きができるまで待つ。待たずに捨てるとメディアが飛ぶ
         self.handle
-            .datagram_mut(
-                |sender: &mut s2n_quic::provider::datagram::default::Sender| {
-                    sender.send_datagram(bytes)
-                },
-            )
-            .map_err(TransportError::transport)?
-            .map_err(|e| TransportError::Internal(format!("datagram send: {e}")))?;
-        Ok(())
+            .send_datagram_wait(datagram_bytes)
+            .await
+            .map_err(TransportError::transport)
     }
 }
 
@@ -2033,18 +2055,18 @@ enum StreamErrorCode {
     Protocol(u64),
 }
 
-/// ストリーム操作のエラーコードを s2n-quic のアプリケーションエラーへ変換する
+/// ストリーム操作のエラーコードを QUIC の application error code へ変換する
 ///
-/// remap した値 / wire の値だけを `s2n_quic::application::Error::new` に渡す経路を
-/// この関数に閉じ、`WtSendStream` / `WtRecvStream` の reset / stop_sending から呼ぶ。
-fn stream_application_error(code: StreamErrorCode) -> Result<s2n_quic::application::Error> {
+/// remap した値 / wire の値だけをここに通す経路に閉じ、`WtSendStream` / `WtRecvStream` の
+/// reset / stop_sending から呼ぶ。tobi-quic のストリーム操作は `u64` のコードを受け取る。
+fn stream_application_error(code: StreamErrorCode) -> Result<u64> {
     let wire_code = match code {
         StreamErrorCode::Application(code) => moqt_to_wt_code(code)?,
         // プロトコルコードは §4.4 の remap を通さない (`moqt_to_wt_code` は MOQT の
         // アプリケーションエラーコード専用)。そのまま wire に載せる
         StreamErrorCode::Protocol(code) => code,
     };
-    s2n_quic::application::Error::new(wire_code).map_err(TransportError::transport)
+    Ok(wire_code)
 }
 
 /// セッション終了時にストリームを中断するエラーコード (draft-ietf-webtrans-http3-16 §6)
@@ -2054,33 +2076,20 @@ fn stream_application_error(code: StreamErrorCode) -> Result<s2n_quic::applicati
 /// WT_SESSION_GONE error code" と定める。`WT_SESSION_GONE` は
 /// "a protocol-level error code rather than an application error code" であるため、
 /// MOQT のアプリケーションエラーコードとして扱わない (`StreamErrorCode::Protocol`)。
-/// 数値は example 側で再定義せず依存 crate の定義を使う。
+/// 数値は 実装側で再定義せず依存 crate の定義を使う。
 fn session_gone_code() -> StreamErrorCode {
     StreamErrorCode::Protocol(WtErrorCode::SessionGone as u64)
 }
 
 /// wire の HTTP/3 エラーコードから `RequestStreamEnd::Reset` を組み立てる
 ///
-/// `reliable_size` は `RESET_STREAM_AT` を受信したときに埋まる値だが、s2n-quic は
-/// `RESET_STREAM_AT` に対応していないため常に `None` にする。
+/// `reliable_size` は `RESET_STREAM_AT` を受信したときに埋まる値だが、
+/// `StreamError::Reset` の `final_size` は `RESET_STREAM` でも設定されるため、
+/// `RESET_STREAM_AT` を受信したかを区別できない。受信側では常に `None` にする。
 fn wt_reset_stream_end(http3_code: u64) -> RequestStreamEnd {
     RequestStreamEnd::Reset {
         error_code: wt_reset_error_code(http3_code),
         reliable_size: None,
-    }
-}
-
-/// `WtRecvStream::recv_chunk` のエラー分岐を `RecvChunk` へ変換する
-///
-/// `RESET_STREAM` を受信したときは wire の HTTP/3 コードを MOQT のコードへ戻して
-/// `RequestStreamEnd::Reset` にし、それ以外のストリームエラーはそのままエラーにする。
-/// I/O ハンドルを持たないため `recv_chunk` から切り出して単体テストできるようにしている。
-fn wt_recv_end(error: s2n_quic::stream::Error) -> Result<RecvChunk> {
-    match error {
-        s2n_quic::stream::Error::StreamReset { error, .. } => {
-            Ok(RecvChunk::End(wt_reset_stream_end(error.into())))
-        }
-        e => Err(TransportError::transport(e)),
     }
 }
 
@@ -2095,7 +2104,18 @@ fn wt_recv_end(error: s2n_quic::stream::Error) -> Result<RecvChunk> {
 /// 送信待ちの間に終了を観測したら、送信方向を `WT_SESSION_GONE` で中断する (§6 の MUST)。
 pub struct WtSendStream {
     stream_id: u64,
-    send: SendStream,
+    /// tobi-quic の送信ストリーム
+    ///
+    /// `tobi_quic::SendStream` は進行中の書き込み future を保持するため `Sync` ではない。
+    /// `MoqtClient` を `Sync` に保つため `Mutex` で包む。操作はすべて `&mut self` なので、
+    /// `get_mut` でロックを取らずに使う。
+    send: StdMutex<SendStream>,
+    /// WebTransport ストリームヘッダーの長さ (バイト)
+    ///
+    /// `RESET_STREAM_AT` の Reliable Size に使う (draft-ietf-webtrans-http3-16 §4.4)。
+    header_len: u64,
+    /// ピアが `reset_stream_at` transport parameter を提示しているか
+    reset_stream_at_supported: bool,
     session_state: watch::Receiver<WtSessionState>,
 }
 
@@ -2106,21 +2126,36 @@ impl WtSendStream {
     /// 中断し、MOQT 層へ `ConnectionClosed` を返す (受信経路と同じ扱い)。
     pub async fn send(&mut self, data: &[u8]) -> Result<()> {
         tokio::select! {
-            sent = self.send.send(Bytes::copy_from_slice(data)) => {
-                sent.map_err(|e| TransportError::from_send_error(e, TransportError::transport))
+            sent = crate::quic::tobi::send_all(
+                self.send
+                    .get_mut()
+                    .expect("the send stream mutex must not be poisoned"),
+                data,
+            ) => {
+                sent.map_err(|e| {
+                    TransportError::from_send_error(crate::quic::QuicError::from(e), TransportError::transport)
+                })
             }
             _ = wait_until_terminated(&mut self.session_state) => {
-                self.abort_session_gone();
+                self.abort_session_gone().await;
                 Err(TransportError::ConnectionClosed)
             }
         }
     }
 
     /// ストリームの送信方向を終了する (FIN)
-    pub fn finish(&mut self) -> Result<()> {
+    pub async fn finish(&mut self) -> Result<()> {
         self.send
+            .get_mut()
+            .expect("the send stream mutex must not be poisoned")
             .finish()
-            .map_err(|e| TransportError::from_send_error(e, TransportError::transport))
+            .await
+            .map_err(|e| {
+                TransportError::from_send_error(
+                    crate::quic::QuicError::from(e),
+                    TransportError::transport,
+                )
+            })
     }
 
     /// ストリームの送信方向を reset する (QUIC RESET_STREAM)
@@ -2128,8 +2163,9 @@ impl WtSendStream {
     /// MOQT のエラーコードは WebTransport のアプリケーションエラーコードとして
     /// WT_APPLICATION_ERROR の範囲へ remap してから送る (draft-ietf-webtrans-http3-16 §4.4)。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
-    pub fn reset(&mut self, error_code: u64) -> Result<()> {
+    pub async fn reset(&mut self, error_code: u64) -> Result<()> {
         self.reset_with(StreamErrorCode::Application(error_code))
+            .await
     }
 
     /// セッション終了時の中断 (draft-ietf-webtrans-http3-16 §6)
@@ -2138,11 +2174,11 @@ impl WtSendStream {
     /// エラーコードではない。§4.4 の remap はアプリケーションエラーコード専用のため通さない
     /// (`StreamErrorCode::Protocol` で渡す)。
     ///
-    /// `RESET_STREAM_AT` が無い現状の QUIC 実装では `RESET_STREAM` にフォールバックする
-    /// (`SendStream::reset` が `RESET_STREAM` を送出する)。
-    fn abort_session_gone(&mut self) {
+    /// ピアが `reset_stream_at` transport parameter を提示している場合は
+    /// `RESET_STREAM_AT` を使い、提示していない場合は `RESET_STREAM` にフォールバックする。
+    async fn abort_session_gone(&mut self) {
         let stream_id = self.stream_id;
-        match self.reset_with(session_gone_code()) {
+        match self.reset_with(session_gone_code()).await {
             Ok(()) => {
                 tracing::debug!("Reset WebTransport send stream {stream_id} with WT_SESSION_GONE");
             }
@@ -2155,10 +2191,24 @@ impl WtSendStream {
     }
 
     /// エラーコードの種別を指定してストリームの送信方向を reset する
-    fn reset_with(&mut self, code: StreamErrorCode) -> Result<()> {
-        self.send
-            .reset(stream_application_error(code)?)
-            .map_err(|e| TransportError::from_send_error(e, TransportError::transport))
+    async fn reset_with(&mut self, code: StreamErrorCode) -> Result<()> {
+        let error_code = stream_application_error(code)?;
+        // WebTransport ヘッダーの長さまでを Reliable Size にする (§4.4)
+        let send = self
+            .send
+            .get_mut()
+            .expect("the send stream mutex must not be poisoned");
+        let result = if self.reset_stream_at_supported {
+            send.reset_stream_at(error_code, self.header_len).await
+        } else {
+            send.reset_stream(error_code).await
+        };
+        result.map_err(|e| {
+            TransportError::from_send_error(
+                crate::quic::QuicError::from(e),
+                TransportError::transport,
+            )
+        })
     }
 
     /// ストリーム ID を返す (publisher 側で使用)
@@ -2177,7 +2227,7 @@ impl WtSendStream {
 /// 受信待ちの間に終了を観測したら、受信方向を `WT_SESSION_GONE` で中断する (§6 の MUST)。
 pub struct WtRecvStream {
     stream_id: u64,
-    recv: ReceiveStream,
+    recv: QuicRecvStream,
     pending: Vec<u8>,
     session_state: watch::Receiver<WtSessionState>,
 }
@@ -2205,7 +2255,7 @@ impl std::fmt::Debug for RecvChunk {
 impl WtRecvStream {
     fn new(
         stream_id: u64,
-        recv: ReceiveStream,
+        recv: QuicRecvStream,
         pending: Vec<u8>,
         session_state: watch::Receiver<WtSessionState>,
     ) -> Self {
@@ -2227,12 +2277,15 @@ impl WtRecvStream {
         }
         tokio::select! {
             received = self.recv.receive() => match received {
-                Ok(Some(data)) => Ok(RecvChunk::Data(data.to_vec())),
+                Ok(Some(data)) => Ok(RecvChunk::Data(data)),
                 Ok(None) => Ok(RecvChunk::End(RequestStreamEnd::Fin)),
-                Err(e) => wt_recv_end(e),
+                Err(crate::quic::QuicError::Reset { error_code }) => {
+                    Ok(RecvChunk::End(wt_reset_stream_end(error_code)))
+                }
+                Err(e) => Err(TransportError::transport(e)),
             },
             _ = wait_until_terminated(&mut self.session_state) => {
-                self.abort_session_gone();
+                self.abort_session_gone().await;
                 Err(TransportError::ConnectionClosed)
             }
         }
@@ -2243,16 +2296,17 @@ impl WtRecvStream {
     /// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection): 受信方向の
     /// cancel は STOP_SENDING で行う。error code は §12.5 (Stream Reset Error Codes) から選ぶ。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
-    pub fn stop_sending(&mut self, error_code: u64) -> Result<()> {
+    pub async fn stop_sending(&mut self, error_code: u64) -> Result<()> {
         self.stop_sending_with(StreamErrorCode::Application(error_code))
+            .await
     }
 
     /// セッション終了時の中断 (draft-ietf-webtrans-http3-16 §6)
     ///
     /// エラーコードの扱いは `WtSendStream::abort_session_gone` を参照する。
-    fn abort_session_gone(&mut self) {
+    async fn abort_session_gone(&mut self) {
         let stream_id = self.stream_id;
-        match self.stop_sending_with(session_gone_code()) {
+        match self.stop_sending_with(session_gone_code()).await {
             Ok(()) => {
                 tracing::debug!(
                     "Aborted WebTransport receive stream {stream_id} with WT_SESSION_GONE"
@@ -2267,9 +2321,10 @@ impl WtRecvStream {
     }
 
     /// エラーコードの種別を指定して受信方向へ STOP_SENDING を送出する
-    fn stop_sending_with(&mut self, code: StreamErrorCode) -> Result<()> {
+    async fn stop_sending_with(&mut self, code: StreamErrorCode) -> Result<()> {
         self.recv
             .stop_sending(stream_application_error(code)?)
+            .await
             .map_err(TransportError::transport)
     }
 
@@ -2282,8 +2337,12 @@ impl WtRecvStream {
 /// WebTransport の双方向ストリーム
 pub struct WtBiStream {
     stream_id: u64,
-    recv: ReceiveStream,
+    recv: QuicRecvStream,
     send: SendStream,
+    /// WebTransport ストリームヘッダーの長さ (バイト)
+    header_len: u64,
+    /// ピアが `reset_stream_at` transport parameter を提示しているか
+    reset_stream_at_supported: bool,
     pending: Vec<u8>,
     session_state: watch::Receiver<WtSessionState>,
 }
@@ -2296,7 +2355,9 @@ impl WtBiStream {
         (
             WtSendStream {
                 stream_id: self.stream_id,
-                send: self.send,
+                send: StdMutex::new(self.send),
+                header_len: self.header_len,
+                reset_stream_at_supported: self.reset_stream_at_supported,
                 session_state: self.session_state.clone(),
             },
             WtRecvStream::new(self.stream_id, self.recv, self.pending, self.session_state),
@@ -2398,7 +2459,9 @@ struct RouteContext {
     /// h3 層へデータを流したことの通知
     notify: Arc<Notify>,
     /// 接続を HTTP/3 のエラーコードで閉じるためのハンドル
-    handle: s2n_quic::connection::Handle,
+    handle: tobi_quic::Connection,
+    /// ピアが `reset_stream_at` transport parameter を提示しているか
+    reset_stream_at_supported: bool,
     /// セッション状態 (§6 の終了 / §4.7 の drain / h3 層が返した接続エラー) を配る sender
     ///
     /// ルーティングタスクは自分が h3 層へ流したイベントを `process_h3_events` で処理し、
@@ -2419,7 +2482,7 @@ struct RouteContext {
 /// (publisher は datagram を受信しないため `take_buffered_datagrams` も通らない)。
 async fn route_uni_stream(
     stream_id: u64,
-    mut recv_stream: ReceiveStream,
+    mut recv_stream: QuicRecvStream,
     uni_tx: mpsc::Sender<WtRecvStream>,
     session_id: watch::Receiver<Option<u64>>,
     context: RouteContext,
@@ -2476,6 +2539,7 @@ async fn route_uni_stream(
                 context.notify.notify_one();
                 return;
             }
+            // 種別判定の途中での RESET_STREAM とその他のエラーは、読み捨てる以外にできることが無い
             Err(_) => return,
         }
     }
@@ -2520,7 +2584,12 @@ async fn route_uni_stream(
             if fed.is_err() {
                 return;
             }
-            while let Ok(Some(data)) = recv_stream.receive().await {
+            loop {
+                let data = match recv_stream.receive().await {
+                    Ok(Some(data)) => data,
+                    // FIN・RESET_STREAM・接続断のいずれでも読み出しは終わる
+                    Ok(None) | Err(_) => break,
+                };
                 let fed = feed_stream_to_h3(
                     &context.state,
                     &context.session_state,
@@ -2570,11 +2639,12 @@ async fn route_uni_stream(
 async fn route_bi_stream(
     session_id: u64,
     stream_id: u64,
-    stream: s2n_quic::stream::BidirectionalStream,
+    stream: tobi_quic::BidirectionalStream,
     bi_tx: mpsc::Sender<(WtSendStream, WtRecvStream)>,
     context: RouteContext,
 ) {
-    let (mut recv_stream, send_stream) = stream.split();
+    let (send_stream, recv_stream) = stream.split();
+    let mut recv_stream = QuicRecvStream::new(recv_stream);
     let mut header_buf: Vec<u8> = Vec::new();
     let mut data_offset: Option<usize> = None;
 
@@ -2603,8 +2673,8 @@ async fn route_bi_stream(
                     decided => action = Some(decided),
                 }
             }
-            Ok(None) => return,
-            Err(_) => return,
+            // 種別判定の途中で終端したストリームは MOQT 層へ渡さない
+            Ok(None) | Err(_) => return,
         }
     }
 
@@ -2614,7 +2684,10 @@ async fn route_bi_stream(
             let pending = header_buf[offset..].to_vec();
             let wt_send = WtSendStream {
                 stream_id,
-                send: send_stream,
+                send: StdMutex::new(send_stream),
+                // peer が付けた WebTransport ヘッダーの長さが Reliable Size になる
+                header_len: offset as u64,
+                reset_stream_at_supported: context.reset_stream_at_supported,
                 session_state: context.session_state.subscribe(),
             };
             let wt_recv = WtRecvStream::new(
@@ -2629,7 +2702,7 @@ async fn route_bi_stream(
             // 他 session の双方向ストリームは HTTP/3 層の管轄である。feed のあとは必ず drain して
             // イベントを処理する (`route_uni_stream` と同じ理由)。h3 層は Sans I/O であり、
             // この経路は受け取ったヘッダーを流すところまでで、続きの受信は h3 層ではなく
-            // I/O 層 (s2n-quic) が行う。戻り値を使わないのは、接続エラーの扱いが
+            // I/O 層 (tobi-quic) が行う。戻り値を使わないのは、接続エラーの扱いが
             // `process_h3_outcome` の中で完結しているためである
             let _ = feed_stream_to_h3(
                 &context.state,
@@ -2662,17 +2735,17 @@ async fn wait_for_session_id(mut session_id: watch::Receiver<Option<u64>>) -> Op
 
 /// 接続を HTTP/3 のエラーコードで閉じる
 ///
-/// h3 層は Sans I/O のため CONNECTION_CLOSE の送出は I/O 層 (s2n-quic) が行う。application
+/// h3 層は Sans I/O のため CONNECTION_CLOSE の送出は I/O 層 (tobi-quic) が行う。application
 /// error code に HTTP/3 のエラーコードの wire の値を渡す。draft-ietf-webtrans-http3-16 §4 の
 /// H3_ID_ERROR と RFC 9114 §8 の接続エラー (wire の値は §8.1 の登録簿) はどちらもこの関数を
-/// 通り、数値は example 側で再定義せず依存 crate の定義 (`ErrorCode`) から得る。
+/// 通り、数値は 実装側で再定義せず依存 crate の定義 (`ErrorCode`) から得る。
 ///
-/// ここでは example が接続を閉じた事実を構造化フィールドで残す。理由 (h3 層が返したエラー) を
+/// ここでは本実装が接続を閉じた事実を構造化フィールドで残す。理由 (h3 層が返したエラー) を
 /// 説明する warn は、h3 層のエラーを検知した `process_h3_result` が出す。
-/// `RouteAction::CloseConnection` の経路は h3 層のエラーではなく example の判定
+/// `RouteAction::CloseConnection` の経路は h3 層のエラーではなく本実装の判定
 /// (`decide_route`) で閉じるため、その warn は出ない。
 fn close_connection_with_h3_error(
-    handle: &s2n_quic::connection::Handle,
+    handle: &tobi_quic::Connection,
     error_code: u64,
     stream_kind: &str,
 ) {
@@ -2684,11 +2757,15 @@ fn close_connection_with_h3_error(
         stream_kind,
         "closing connection with HTTP/3 error code"
     );
-    // HTTP/3 のエラーコードは QUIC の application error code の範囲に収まるため失敗しない。
-    // 失敗時に別のコードで閉じると MUST の通知が変わってしまうため、ここで止める
-    let error = s2n_quic::application::Error::new(error_code)
-        .expect("HTTP/3 error code fits in the QUIC application error code range");
-    handle.close(error);
+    // HTTP/3 のエラーコードは QUIC の application error code の範囲に収まる。
+    // 送出は非同期であり、この関数は呼び出し元の処理を止めない (s2n-quic の `close` も
+    // 送出をキューに積むだけだった)
+    let handle = handle.clone();
+    tokio::spawn(async move {
+        if let Err(e) = handle.close_application(error_code, &[]).await {
+            tracing::warn!("Failed to close the connection with the HTTP/3 error code: {e}");
+        }
+    });
 }
 
 /// プロトコル交渉の失敗を `WT_ALPN_ERROR` で peer へ通知する (draft-ietf-webtrans-http3-16 §3.3)
@@ -2696,42 +2773,39 @@ fn close_connection_with_h3_error(
 /// §3.3 はアプリケーションプロトコル交渉を要求するクライアントに対し、成功応答の
 /// `WT-Protocol` が無い / 不正 / `WT-Available-Protocols` に無い値だった場合に、
 /// `WT_ALPN_ERROR` でセッションを閉じる MUST を定める。判定は h3 層
-/// (`handle_wt_connect_response`) が行い、example は `SessionClosed` の観測で結果を受け取る。
+/// (`handle_wt_connect_response`) が行い、本実装は `SessionClosed` の観測で結果を受け取る。
 ///
 /// h3 層は Sans I/O であり CONNECTION_CLOSE の送出 API を持たないため、I/O 層である
-/// example が接続を閉じる。`WtSendStream::reset` と同じく `s2n_quic::application::Error` 経由で
+/// 本実装が接続を閉じる。`WtSendStream::reset` と同じく application error code として
 /// プロトコルコードを渡す。
 ///
-/// `Handle::close` は CONNECTION_CLOSE の送出をキューに積むだけであり、実送出は endpoint の
-/// タスクが行う (s2n-quic の `application_close` は接続にアプリケーションエラーを記録して
-/// wakeup するだけで、フレームの組み立てと送信は endpoint のイベントループが行う)。そのため
-/// 送出は非同期の best-effort であり、交渉失敗では直後にエラーが呼び出し元へ伝播して example が
-/// 終了するため、peer が `WT_ALPN_ERROR` を観測できない可能性がある。実機確認では example 側の
-/// ログだけでなく、relay 側で `WT_ALPN_ERROR` を観測して確かめること。
-///
-/// 送出完了は待たない。`Handle` にクローズの完了を待つ API が無く、endpoint のイベントループは
-/// 接続を追跡している間は `Client` を drop しても止まらない (止まるのは追跡する接続が無くなり、
-/// かつ接続を開く手段も無くなったときと、`Client::wait_idle` で閉じたとき) ため、待機を挟まなくても
-/// 送出は試みられる。ただし example が終了してランタイムが止まれば送出されないため、待つなら
-/// endpoint のイベントを購読する仕組みが要る。そこまではしない。
-fn close_connection_with_wt_alpn_error(handle: &s2n_quic::connection::Handle) {
+/// `Connection::close_application` は CONNECTION_CLOSE の送出を driver に依頼して完了を待つが、
+/// この関数はそれを専用タスクへ渡して呼び出し元を止めない。交渉失敗では直後にエラーが
+/// 呼び出し元へ伝播して 本実装が終了するため、peer が `WT_ALPN_ERROR` を観測できない可能性が
+/// ある。実機確認では 実装側のログだけでなく、relay 側で `WT_ALPN_ERROR` を観測して
+/// 確かめること。
+fn close_connection_with_wt_alpn_error(handle: &tobi_quic::Connection) {
     let error = wt_alpn_error();
     tracing::warn!(
-        code = u64::from(error),
+        code = error,
         "closing connection with WT_ALPN_ERROR after application protocol negotiation failure"
     );
-    handle.close(error);
+    let handle = handle.clone();
+    tokio::spawn(async move {
+        if let Err(e) = handle.close_application(error, &[]).await {
+            tracing::warn!("Failed to close the connection with WT_ALPN_ERROR: {e}");
+        }
+    });
 }
 
-/// `WT_ALPN_ERROR` を載せた s2n-quic のアプリケーションエラーを作る
+/// `WT_ALPN_ERROR` の wire の値を返す
 ///
 /// `WT_ALPN_ERROR` は WebTransport / HTTP/3 のプロトコルコード (draft-ietf-webtrans-http3-16 §9.5) で
 /// あり、MOQT のアプリケーションエラーコードではない。§4.4 の remap
 /// (`StreamErrorCode::Application`) はアプリケーションエラーコード専用であるため通さず、
-/// wire の値のまま渡す。数値は example 側で再定義せず依存 crate の定義を使う。
-fn wt_alpn_error() -> s2n_quic::application::Error {
-    s2n_quic::application::Error::new(WtErrorCode::AlpnError as u64)
-        .expect("WT_ALPN_ERROR fits in the QUIC application error code range")
+/// wire の値のまま渡す。数値は 実装側で再定義せず依存 crate の定義を使う。
+fn wt_alpn_error() -> u64 {
+    WtErrorCode::AlpnError as u64
 }
 
 #[cfg(test)]
@@ -3050,8 +3124,8 @@ mod tests {
     /// (datagram あり / RESET_STREAM_AT 対応) を注入する。draft-15 は `reset_stream_at` を
     /// 必須とする (draft-ietf-webtrans-http3-16 §3.1) ため、これが偽だと
     /// `is_wt_fully_negotiated()` が偽になり `feed_datagram` が入力を捨ててしまう。
-    /// 本番の example は RESET_STREAM_AT を送出しないため偽を渡しており、draft-15 の peer とは
-    /// 交渉が完了しない (この状態を作れるのは交渉の前提を注入したテストだけである)。
+    /// 本番ではピアの transport parameter を検証した結果を渡す。ここでは交渉を完了させるため
+    /// 検証済みの値を注入する。
     fn negotiated_connection_state() -> ClientConnectionState {
         let mut state = ClientConnectionState::new(test_local_settings());
         state
@@ -3168,7 +3242,7 @@ mod tests {
     /// h3 層の接続エラーだけが接続を閉じる判断になる (RFC 9114 §8)
     ///
     /// 接続エラーは「接続を直ちに閉じる」(§5.3)、ストリームエラーは「そのストリームだけを
-    /// 終了する」である。example は variant で切り分け、接続エラーの場合だけ接続を閉じる。
+    /// 終了する」である。本実装は variant で切り分け、接続エラーの場合だけ接続を閉じる。
     #[test]
     fn connection_error_code_only_matches_connection_errors() {
         // 接続を閉じる判断になるエラーと、その HTTP/3 エラーコード
@@ -3204,7 +3278,7 @@ mod tests {
 
     /// 接続エラーのエラーコードは仕様側の登録値である (RFC 9114 §8.1)
     ///
-    /// example は数値を再定義せず依存 crate の `ErrorCode` を使う。ここでは切り分けが
+    /// 本実装は数値を再定義せず依存 crate の `ErrorCode` を使う。ここでは切り分けが
     /// 参照する値そのものを固定する。
     #[test]
     fn connection_error_codes_match_registered_values() {
@@ -3308,7 +3382,7 @@ mod tests {
         );
     }
 
-    /// 接続を閉じるコードは example 側で再定義しない
+    /// 接続を閉じるコードは 実装側で再定義しない
     ///
     /// 接続エラーの数値は依存 crate の `ErrorCode` から得る (h3 層が返す値と一致する)。
     #[test]
@@ -3326,9 +3400,11 @@ mod tests {
                 Some(code),
                 "{code} の数値が登録値から往復して戻ること"
             );
-            // QUIC の application error code の範囲に収まるため CONNECTION_CLOSE に載る
-            s2n_quic::application::Error::new(error_code)
-                .expect("QUIC の application error code として扱えること");
+            // QUIC の application error code は可変長整数であり、HTTP/3 のコードは収まる
+            assert!(
+                error_code < (1 << 62),
+                "QUIC の application error code として扱えること: {error_code:#x}"
+            );
         }
     }
 
@@ -3568,9 +3644,9 @@ mod tests {
         );
     }
 
-    /// remap した値で s2n-quic のアプリケーションエラーを構築する
+    /// remap した値を wire のコードとして返す
     #[test]
-    fn stream_application_error_remaps_moqt_codes_before_creating_s2n_error() {
+    fn stream_application_error_remaps_moqt_codes() {
         for (moqt_code, expected) in [
             (0x0_u64, 0x52e4a40fa8db_u64),
             (0x1, 0x52e4a40fa8dc),
@@ -3580,8 +3656,7 @@ mod tests {
             let error = stream_application_error(StreamErrorCode::Application(moqt_code))
                 .expect("remap に成功すること");
             assert_eq!(
-                u64::from(error),
-                expected,
+                error, expected,
                 "{moqt_code:#x} の wire の値が remap 後の値になること"
             );
         }
@@ -3601,56 +3676,15 @@ mod tests {
     fn stream_application_error_keeps_protocol_codes_as_is() {
         let protocol = stream_application_error(session_gone_code()).expect("varint に収まること");
         assert_eq!(
-            u64::from(protocol),
-            WT_SESSION_GONE,
+            protocol, WT_SESSION_GONE,
             "WT_SESSION_GONE が remap されずに wire へ載ること"
         );
 
         let application = stream_application_error(StreamErrorCode::Application(WT_SESSION_GONE))
             .expect("remap に成功すること");
         assert_ne!(
-            u64::from(application),
-            WT_SESSION_GONE,
+            application, WT_SESSION_GONE,
             "アプリケーションエラーコードとして渡すと remap されて別の値になること"
-        );
-    }
-
-    /// `RESET_STREAM` の受信エラーを remap した `RequestStreamEnd::Reset` に変換する
-    ///
-    /// `StreamError` の variant は `#[non_exhaustive]` で、接続なしに `RESET_STREAM` の値を組み立てるには
-    /// s2n-quic が公開している `stream_reset` を使うしかない (ドキュメント非公開の補助 API)。
-    #[test]
-    fn wt_recv_end_maps_stream_reset_to_remapped_request_stream_end() {
-        for (http3_code, expected) in [
-            (
-                moqt_to_wt_code(0x12).expect("remap に成功すること"),
-                Some(0x12_u64),
-            ),
-            (WT_SESSION_GONE, None),
-        ] {
-            let application_error =
-                s2n_quic::application::Error::new(http3_code).expect("varint に収まること");
-            let end = wt_recv_end(s2n_quic::stream::Error::stream_reset(application_error))
-                .expect("End に変換できること");
-            assert_eq!(
-                end,
-                RecvChunk::End(RequestStreamEnd::Reset {
-                    error_code: expected,
-                    reliable_size: None,
-                }),
-                "wire の {http3_code:#x} の remap 結果が入ること"
-            );
-        }
-    }
-
-    /// `RESET_STREAM` 以外のストリームエラーはエラーのまま返る
-    #[test]
-    fn wt_recv_end_keeps_other_stream_errors() {
-        let error = wt_recv_end(s2n_quic::stream::Error::send_after_finish())
-            .expect_err("エラーになること");
-        assert!(
-            matches!(error, TransportError::Transport(_)),
-            "ストリームエラーとして返ること: {error:?}"
         );
     }
 
@@ -3690,7 +3724,7 @@ mod tests {
                 );
             }
         }
-        // 数値は example 側で再定義しない (spec 側の値を固定する)
+        // 数値は 実装側で再定義しない (spec 側の値を固定する)
         assert_eq!(H3ErrorCode::IdError.code(), 0x108);
     }
 
@@ -3856,7 +3890,7 @@ mod tests {
     /// (peer_settings() が Some にならないため)、確立待ちが 10 秒のタイムアウトまで待って
     /// 接続を閉じた原因と無関係な `TransportError::Internal` で失敗する。
     ///
-    /// 待機は `ClientConnectionState` と `Notify` と状態の watch だけで構築でき、s2n-quic の
+    /// 待機は `ClientConnectionState` と `Notify` と状態の watch だけで構築でき、QUIC の
     /// ハンドルを必要としない。
     #[tokio::test]
     async fn wait_for_peer_settings_ends_when_the_session_is_gone() {
@@ -3956,7 +3990,7 @@ mod tests {
     /// セッション状態を終了へ遷移させると watch で観測でき、中断には WT_SESSION_GONE を渡す
     ///
     /// ストリームを所有するタスクは watch の変化を観測して自分のストリームを中断する (§6)。
-    /// ストリーム自体は s2n-quic の I/O ハンドルを持つため、I/O を持たない範囲
+    /// ストリーム自体は QUIC の I/O ハンドルを持つため、I/O を持たない範囲
     /// (状態の遷移と観測、中断に使うエラーコード) を固定する。
     ///
     /// このテストが保証するのは「終了済みの状態を観測できる」ことである。`watch::Receiver::wait_for`
@@ -4045,8 +4079,7 @@ mod tests {
         );
         let error = stream_application_error(session_gone_code()).expect("varint に収まること");
         assert_eq!(
-            u64::from(error),
-            WT_SESSION_GONE,
+            error, WT_SESSION_GONE,
             "WT_SESSION_GONE が remap されずに中断のコードになること"
         );
     }
@@ -4824,7 +4857,7 @@ mod tests {
     /// 交渉失敗の接続クローズには WT_ALPN_ERROR をそのまま載せる
     ///
     /// draft-ietf-webtrans-http3-16 §3.3 は交渉失敗時に `WT_ALPN_ERROR` でセッションを閉じる
-    /// MUST を定める。数値は依存 crate の定義を使い、example 側に直書きしない (§9.5 の登録値で固定する)。
+    /// MUST を定める。数値は依存 crate の定義を使い、実装側に直書きしない (§9.5 の登録値で固定する)。
     #[test]
     fn wt_alpn_error_carries_the_registered_error_code() {
         assert_eq!(
@@ -4833,7 +4866,7 @@ mod tests {
             "WT_ALPN_ERROR が §9.5 の登録値であること"
         );
         assert_eq!(
-            u64::from(wt_alpn_error()),
+            wt_alpn_error(),
             WtErrorCode::AlpnError as u64,
             "接続クローズに載せる値が WT_ALPN_ERROR であること"
         );

@@ -52,7 +52,6 @@ MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUB
 | Log / Metrics track の payload | MSF §9 / §10 | 未実装。`packaging` の値は扱うが payload は未対応 | `issues/pending/0003-add-msf-log-metrics-payload.md` |
 | LOC の Video Payload Format | LOC §2.1 | 部分実装。`lengthSizeMinusOne` による length prefix のみで、§2.1.3 (length 1 = start code) と §2.1.4 (start code prefix) は未対応 | `issues/pending/0005-add-loc-video-payload-format.md` |
 | LOC の Track スコープ Property | LOC §6.1 Table 1 | PUBLISH / SUBSCRIBE_OK で受信した場合、受信側は `Subscription::peer_track_properties` から `TrackProperties::find_varint` / `find_bytes` と `codec_string` (0x11 CODEC_STRING、UTF-8 検証) で取得できる。publisher example からの送信は未対応 | 未起票 |
-| WebTransport over HTTP/3 の `RESET_STREAM_AT` | draft-ietf-webtrans-http3-16 §4.4 (MUST) | s2n-quic が送出できず `RESET_STREAM` にフォールバックする | `issues/pending/0094-bug-webtransport-reset-stream-at-unsupported.md` |
 | DPoP proof の送信 | C4M §4.2 / §4.3 | CWT 形式 proof の codec と一括検証 API は実装済み。CWT proof を MOQT の AUTHORIZATION_TOKEN に載せる方法は仕様で未定義であり、example の URL 経路も proof を送らない | 未起票 |
 | C4M の複合クレーム評価 | C4M §2.1.1 / 付録 A.6 | 未実装。`CatClaims::raw` に保持するだけで、nested claim set の or / and / nor を評価しない。複合クレームだけを持つトークンは `moqt` が読めず認可されない。top-level の `moqt` と複合クレームが併存するトークンは top-level だけで認可されるため、複合クレームによる制限を評価する利用側は fail-closed に扱うこと | 未起票 |
 | C4M の RSA 署名 | C4M §4.2 (DPoP proof の alg) / CAT の COSE alg | 未実装。ES256 / ES384 / ES512 / EdDSA のみ | 未起票 |
@@ -607,7 +606,7 @@ moqt-js (HEAD `6da25d10`) の playout のうち、次の 2 つは移植してい
   (現状は I ビットのみ、`crates/moq-sub/src/pipeline.rs:3143-3165`)
 - カメラ経路のエンコーダ (Video Toolbox / libaom / libvpx) が B フレームを出力しうるか
   (パススルーは B フレーム入力を明示的に拒否する)
-- 0-RTT: rustls の `enable_early_data` 既定は false だが s2n-quic 側の既定は未確認
+- 0-RTT: rustls の `enable_early_data` 既定は false。tobi-quic の `connect_early` を使うかは未検討
 - STOP_SENDING 受信時の subgroup / FETCH uni stream の reset (4.7) を
   アプリ責務と解釈しているか (`src/session/types.rs:750-756` は設計として明記している)
 - moqt URI のパースをライブラリに置くか example に置くか (§6.1、URL 系の issue は
