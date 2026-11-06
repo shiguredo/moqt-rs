@@ -3485,7 +3485,7 @@ pub async fn run(
             }
             changed = async {
                 // WebTransport の drain (WT_DRAIN_SESSION / HTTP/3 GOAWAY) を観測する
-                // (draft-ietf-webtrans-http3-16 §4.7 / draft-ietf-webtrans-http2-15 §6.13)。
+                // (draft-ietf-webtrans-http3-16 §4.7 / draft-ietf-webtrans-http2-16 §6.13)。
                 // draft 由来の仕様であり将来変更されうる。QUIC 直接接続と QMux では
                 // `wt_session_state_rx` が `None` になり、この分岐は発火しない
                 match wt_session_state_rx.as_mut() {
@@ -3777,7 +3777,7 @@ fn is_transport_session_end(error: &Error) -> bool {
 /// pipeline は致命エラーにしない。
 ///
 /// WebTransport over HTTP/2 も driver が受領した `WT_STOP_SENDING` のエラーコードを
-/// `StreamReset` として返すため本判定の対象になる (draft-ietf-webtrans-http2-15 §6.3)。
+/// `StreamReset` として返すため本判定の対象になる (draft-ietf-webtrans-http2-16 §6.3)。
 /// WebTransport over HTTP/3 の送信 API も同じ `StreamReset` を返す (コードは HTTP/3 の
 /// code space のままで、MOQT のコードへ写すのは観測経路だけである)。
 /// 本判定は variant のみを見るため、コードの空間に依存しない。

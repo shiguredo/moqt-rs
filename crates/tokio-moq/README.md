@@ -88,7 +88,7 @@ cargo run -p moq-sub --no-default-features --features quic-ngtcp2 -- --url moqt:
 WebTransport over HTTP/3 (`wt-h3`) の QUIC 層は tobi-quic 固定である。s2n-quic と ngtcp2-rs は
 ネイティブ QUIC にだけ使う。このため tobi-quic はバックエンドの選択に関わらず依存に含まれる。
 
-WebTransport 経路では draft-ietf-webtrans-http3-16 / draft-ietf-webtrans-http2-15 に従い、Extended CONNECT でセッションを確立する。MOQT のプロトコル識別子 (`MOQT_PROTOCOL` = `moqt-23`) は `WT-Available-Protocols` で通知し、サーバーが `WT-Protocol` で選択しなければ接続を失敗させる (draft-ietf-moq-transport-23 §6.2)。
+WebTransport 経路では draft-ietf-webtrans-http3-16 / draft-ietf-webtrans-http2-16 に従い、Extended CONNECT でセッションを確立する。MOQT のプロトコル識別子 (`MOQT_PROTOCOL` = `moqt-23`) は `WT-Available-Protocols` で通知し、サーバーが `WT-Protocol` で選択しなければ接続を失敗させる (draft-ietf-moq-transport-23 §6.2)。
 
 `wt-h2` は `WT_RESET_STREAM` capsule で reset するため、MoQ リレーの capsule 対応に依存する。
 

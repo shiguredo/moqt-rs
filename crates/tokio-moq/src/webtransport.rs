@@ -7,7 +7,7 @@
 
 use tokio::sync::watch;
 
-/// WebTransport セッションの状態 (draft-ietf-webtrans-http3-16 §6 / §4.7、draft-ietf-webtrans-http2-15 §6.12 / §6.13)
+/// WebTransport セッションの状態 (draft-ietf-webtrans-http3-16 §6 / §4.7、draft-ietf-webtrans-http2-16 §6.12 / §6.13)
 ///
 /// `tokio::sync::watch` で各タスクへ配る値であり、セッション状態の唯一の置き場所である。
 /// ストリームを所有するタスクはこの値の変化を観測し、終了を検知したら自分のストリームを
@@ -32,7 +32,7 @@ pub enum WtSessionState {
     ///
     /// HTTP/3 の `Error::ConnectionError(code)` は RFC 9114 §8 の接続エラーである。
     /// HTTP/2 は RFC 9113 §5.4 の接続エラーと、CONNECT stream の RST_STREAM
-    /// (draft-ietf-webtrans-http2-15 §3.4 がストリームエラーを求める場合を含む) である。
+    /// (draft-ietf-webtrans-http2-16 §3.4 がストリームエラーを求める場合を含む) である。
     /// 依存 crate は接続エラーを記録した接続を回復不能として扱い、以後のデータ処理・
     /// イベント生成・送信 API の呼び出しを拒否する。datagram 受信 API のエラーも以後
     /// datagram を読めないため、購読を静かに止めないよう同じ終了として扱う。どちらの場合も
@@ -78,7 +78,7 @@ pub(crate) struct SessionPolicy {
 /// セッションの状態から動作を決める純関数
 ///
 /// 終了時の MUST / MAY の根拠は draft-ietf-webtrans-http3-16 §6 / §4.7 と
-/// draft-ietf-webtrans-http2-15 §6.12 / §6.13 が同じ内容を定める。
+/// draft-ietf-webtrans-http2-16 §6.12 / §6.13 が同じ内容を定める。
 ///
 /// セッション終了を検知したら関連する全 uni / bidi ストリームを `WT_SESSION_GONE` で
 /// 中断する MUST、新しい datagram の送信・新しいストリームの open を禁じる MUST NOT を
@@ -164,7 +164,7 @@ pub enum MoqtCloseCode {
     /// `WT_CLOSE_SESSION` capsule の Application Error Code として送る
     ///
     /// capsule の Application Error Code は 32 ビットである
-    /// (draft-ietf-webtrans-http3-16 §6 / draft-ietf-webtrans-http2-15 §6.12)。
+    /// (draft-ietf-webtrans-http3-16 §6 / draft-ietf-webtrans-http2-16 §6.12)。
     Capsule(u32),
     /// QUIC の `CONNECTION_CLOSE` で接続を閉じ、application error code に元のコードを載せる
     ///

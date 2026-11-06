@@ -1951,22 +1951,6 @@ impl MoqtClient {
         let shared = Arc::new(TokioMutex::new(wt_session));
         let handle = StreamHandle::WtH2(shared.clone());
         // 受信ストリームの receiver は acceptor が持ち、accept の待機中に
-        // session のロックを保持しないようにする (`WtH2Session::take_uni_receiver`)。
-        // セッション状態の receiver も同じ理由でここで取り出す (セッション終了を
-        // accept の待機中に観測し、受信ループを待たせないため)。
-        let (wt_uni_rx, wt_bi_rx, stop_sending_rx, session_state) = {
-            let mut s = shared.lock().await;
-            let uni_rx = s.take_uni_receiver().ok_or_else(|| {
-                TransportError::Internal("uni stream receiver already taken".into())
-            })?;
-            let bi_rx = s.take_bi_receiver().ok_or_else(|| {
-                TransportError::Internal("bidi stream receiver already taken".into())
-            })?;
-            let stop_sending_rx = s.take_stop_sending_receiver();
-            let session_state = s.session_state_receiver();
-            (uni_rx, bi_rx, stop_sending_rx, session_state)
-        };
-
         let wt_send = {
             let mut s = shared.lock().await;
             s.open_uni_stream().await?
@@ -1994,6 +1978,25 @@ impl MoqtClient {
             session.local_max_control_message_size(),
         );
         recv_control_stream_type(&mut session, &handle, &mut control_recv).await?;
+
+        // 受信ストリームの receiver は acceptor が持ち、accept の待機中に
+        // session のロックを保持しないようにする (`WtH2Session::take_uni_receiver`)。
+        // セッション状態の receiver も同じ理由でここで取り出す (セッション終了を
+        // accept の待機中に観測し、受信ループを待たせないため)。
+        // ハンドシェイク中の peer 制御ストリームの受理は `accept_uni_stream` が
+        // session 側の receiver を使うため、取り出しはハンドシェイク完了後に行う。
+        let (wt_uni_rx, wt_bi_rx, stop_sending_rx, session_state) = {
+            let mut s = shared.lock().await;
+            let uni_rx = s.take_uni_receiver().ok_or_else(|| {
+                TransportError::Internal("uni stream receiver already taken".into())
+            })?;
+            let bi_rx = s.take_bi_receiver().ok_or_else(|| {
+                TransportError::Internal("bidi stream receiver already taken".into())
+            })?;
+            let stop_sending_rx = s.take_stop_sending_receiver();
+            let session_state = s.session_state_receiver();
+            (uni_rx, bi_rx, stop_sending_rx, session_state)
+        };
 
         let client = Self::finish_handshake(
             session,
@@ -2144,7 +2147,7 @@ impl MoqtClient {
 
     /// WebTransport セッションの drain 状態を購読する receiver を返す
     ///
-    /// draft-ietf-webtrans-http3-16 §4.7 / draft-ietf-webtrans-http2-15 §6.13: HTTP/3 /
+    /// draft-ietf-webtrans-http3-16 §4.7 / draft-ietf-webtrans-http2-16 §6.13: HTTP/3 /
     /// HTTP/2 の GOAWAY や `WT_DRAIN_SESSION` を受けると [`WtSessionState::Draining`] へ
     /// 遷移する。アプリはこの変化を観測し、MOQT の GOAWAY より先に移行を始められる。
     /// QUIC 直接接続と QMux では drain の通知が無いため `None` を返す。
@@ -3158,7 +3161,7 @@ impl MoqtClient {
     /// wire のコードの扱いは経路で異なる。WebTransport over HTTP/3 は HTTP/3 の code space を
     /// 共有するため、h3 層への通知と MOQT のコードへの remap を行う
     /// (draft-ietf-webtrans-http3-16 §4.4)。WebTransport over HTTP/2 は capsule が MOQT の
-    /// コードをそのまま運ぶため remap は不要である (draft-ietf-webtrans-http2-15 §6.3)。
+    /// コードをそのまま運ぶため remap は不要である (draft-ietf-webtrans-http2-16 §6.3)。
     async fn handle_stop_sending(&mut self, observed: StopSendingObserved) -> Result<()> {
         let StopSendingObserved {
             stream_id,

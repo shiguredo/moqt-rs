@@ -10,7 +10,7 @@ publish = false
 # 時雨堂クレート
 
 # HTTP/2 / WebTransport over HTTP/2 クライアント
-shiguredo_http2 = "2026.1.0-canary.16"
+shiguredo_http2 = "2026.1.0-canary.17"
 # HTTP/3 / WebTransport over HTTP/3 クライアント
 shiguredo_http3 = "2026.1.0-canary.13"
 # MOQT 本体 (ローカル参照)

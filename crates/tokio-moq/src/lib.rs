@@ -1394,7 +1394,7 @@ pub async fn connect(
         let task_monitor = task_monitor.clone();
         async move {
             // :authority は target URI の authority を URL の表記どおりに渡す
-            // (draft-ietf-webtrans-http3-16 §3.2 / draft-ietf-webtrans-http2-15 §3.2)
+            // (draft-ietf-webtrans-http3-16 §3.2 / draft-ietf-webtrans-http2-16 §3.2)
             let authority_url = url.authority.clone();
             match transport {
                 Transport::Quic => {

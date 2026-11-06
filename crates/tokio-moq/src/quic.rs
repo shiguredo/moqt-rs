@@ -78,7 +78,7 @@ pub(crate) use backend::{Server, start_server};
 /// 共有するため `wt_stop_sending_error_code` で MOQT のコードへ戻す
 /// (draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams))。
 /// WebTransport over HTTP/2 は capsule がアプリケーションエラーコードをそのまま運ぶため
-/// remap は不要である (draft-ietf-webtrans-http2-15 §6.3)。
+/// remap は不要である (draft-ietf-webtrans-http2-16 §6.3)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StopSendingObserved {
     /// STOP_SENDING の対象となったストリーム ID

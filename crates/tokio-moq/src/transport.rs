@@ -219,7 +219,7 @@ pub(crate) enum StopSendingTransport {
     /// WebTransport over HTTP/3。HTTP/3 の code space を共有する
     WtH3,
     /// WebTransport over HTTP/2。capsule がアプリケーションエラーコードを直接運ぶため
-    /// remap しない (draft-ietf-webtrans-http2-15 §6.3)
+    /// remap しない (draft-ietf-webtrans-http2-16 §6.3)
     WtH2,
     /// QMux。QUIC version 1 のフレームをそのまま多重化するため QUIC の code space を
     /// 共有し、remap しない (draft-ietf-quic-qmux-02 Section 4)
@@ -232,7 +232,7 @@ pub(crate) enum StopSendingTransport {
 /// QMux は QUIC version 1 のフレーム (STOP_SENDING / RESET_STREAM) をそのまま多重化するため
 /// remap しない (draft-ietf-quic-qmux-02 Section 4)。
 /// WebTransport over HTTP/2 は capsule がアプリケーションエラーコードをそのまま運ぶため
-/// remap しない (draft-ietf-webtrans-http2-15 §6.3)。
+/// remap しない (draft-ietf-webtrans-http2-16 §6.3)。
 /// WebTransport over HTTP/3 は HTTP/3 の code space を共有するため §4.4 の remap を行い、
 /// remap できない値は「アプリケーションエラーコード無し」を表す `None` にする
 /// (draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams))。
@@ -319,7 +319,7 @@ impl StreamHandle {
     /// 受信を通知する必要がある (draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams))。
     /// QUIC 直接接続は h3 層を持たず、WebTransport over HTTP/2 は driver が capsule を
     /// 受信して自ら状態を更新するため、どちらも何もしない
-    /// (draft-ietf-webtrans-http2-15 §6.3)。QMux も h3 層を持たないため何もしない
+    /// (draft-ietf-webtrans-http2-16 §6.3)。QMux も h3 層を持たないため何もしない
     /// (QMux 自身がストリーム状態を管理する)。
     pub(crate) async fn notify_received_stop_sending(
         &self,

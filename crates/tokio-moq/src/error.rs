@@ -84,7 +84,7 @@ pub enum TransportError {
     /// code space、WebTransport over HTTP/3 は HTTP/3 の code space になる (MOQT のコードへ
     /// 戻すには `StreamHandle::remap_stop_sending_error_code` を通す)。WebTransport over
     /// HTTP/2 は capsule が MOQT のコードをそのまま運ぶため remap は不要である
-    /// (draft-ietf-webtrans-http2-15 §6.3)。受信方向の終端 (RESET_STREAM) は
+    /// (draft-ietf-webtrans-http2-16 §6.3)。受信方向の終端 (RESET_STREAM) は
     /// `RequestStreamEnd::Reset` が運ぶ。
     StreamReset {
         /// peer が載せた wire のエラーコード

@@ -2,7 +2,7 @@
 //!
 //! TCP+TLS (rustls、ALPN `h2`) の上で shiguredo_http2 (Sans I/O) の `Connection` と
 //! `webtransport::WtSession` を駆動し WebTransport セッションを確立する。
-//! 節番号は draft-ietf-webtrans-http2-15 を参照する。
+//! 節番号は draft-ietf-webtrans-http2-16 を参照する。
 //!
 //! WebTransport over HTTP/2 は、HTTP/2 の 1 本の Extended CONNECT ストリーム上に
 //! Capsule Protocol でストリーム (WT_STREAM capsule) と DATAGRAM を多重化する。
@@ -43,7 +43,7 @@ use crate::webtransport::{
 /// WebTransport over HTTP/2 の ALPN プロトコル識別子 (RFC 9113 §3.3)
 const H2_ALPN: &[u8] = b"h2";
 
-/// WebTransport CONNECT の `:protocol` 値 (draft-ietf-webtrans-http2-15 §3.1)
+/// WebTransport CONNECT の `:protocol` 値 (draft-ietf-webtrans-http2-16 §3.1)
 const WEBTRANSPORT_PROTOCOL: &[u8] = b"webtransport";
 
 /// WT 出力を `Connection::send_data` に 1 回で渡せる上限
@@ -51,7 +51,7 @@ const WEBTRANSPORT_PROTOCOL: &[u8] = b"webtransport";
 /// shiguredo_http2 のストリーム送信バッファの固定容量 (`DEFAULT_INITIAL_WINDOW_SIZE` =
 /// 65535) と同じ値である。1 回の `send_data` にそれ以上を渡すと全量拒否されるため、
 /// WT の capsule は capsule 境界と無関係に分割して送る
-/// (draft-ietf-webtrans-http2-15 §2 / RFC 9297 §3.1)。
+/// (draft-ietf-webtrans-http2-16 §2 / RFC 9297 §3.1)。
 const WT_SEND_CHUNK_SIZE: usize = DEFAULT_INITIAL_WINDOW_SIZE as usize;
 
 /// peer の SETTINGS を待つ上限 (ms)
@@ -102,7 +102,7 @@ impl ClientConfig {
 
     /// CONNECT の `:authority` を設定する
     ///
-    /// draft-ietf-webtrans-http2-15 §3.2 は Extended CONNECT で `:authority` と `:path` を
+    /// draft-ietf-webtrans-http2-16 §3.2 は Extended CONNECT で `:authority` と `:path` を
     /// 設定する MUST を定める。SNI 用の `server_name` とは別に、target URI の authority を
     /// URL の表記どおり (ポートの有無も含めて) 指定するために使う。
     pub fn authority(mut self, authority: impl Into<String>) -> Self {
@@ -284,7 +284,7 @@ impl WtH2Client {
     /// 1. TCP 接続と TLS ハンドシェイク (ALPN `h2`)
     /// 2. HTTP/2 の接続プリフェイスと SETTINGS (WebTransport の初期フロー制御値を広告する)
     /// 3. peer SETTINGS の待機 (`SETTINGS_ENABLE_CONNECT_PROTOCOL` と `SETTINGS_WT_ENABLED`
-    ///    の確認。draft-ietf-webtrans-http2-15 §3.1)
+    ///    の確認。draft-ietf-webtrans-http2-16 §3.1)
     /// 4. Extended CONNECT (`:protocol=webtransport`) の送信と 2xx 応答の待機 (§3.2)
     /// 5. driver タスクの起動
     ///
@@ -358,7 +358,7 @@ impl WtH2Client {
         //
         // over HTTP/2 の WT_STOP_SENDING capsule はアプリケーションエラーコード
         // (MOQT §12.5 のコード) をそのまま運ぶため、HTTP/3 のような code space の
-        // remap は不要である (draft-ietf-webtrans-http2-15 §6.3)。
+        // remap は不要である (draft-ietf-webtrans-http2-16 §6.3)。
         let (stop_sending_tx, stop_sending_rx) = mpsc::unbounded_channel();
         let (session_state_tx, _) = watch::channel(WtSessionState::Active);
         let datagrams = Arc::new(StdMutex::new(VecDeque::new()));
@@ -407,7 +407,7 @@ impl WtH2Client {
 
 /// WebTransport の初期フロー制御値を含む `Limits` を構築する
 ///
-/// draft-ietf-webtrans-http2-15 §4.3.1: 初期フロー制御値は SETTINGS で広告する。
+/// draft-ietf-webtrans-http2-16 §4.3.1: 初期フロー制御値は SETTINGS で広告する。
 /// §3.1: WebTransport を使うには `SETTINGS_ENABLE_CONNECT_PROTOCOL` と
 /// `SETTINGS_WT_ENABLED` の両方が必要である。
 /// 初期値を SETTINGS で広告するため、任意の `WebTransport-Init` ヘッダーは送らない
@@ -437,7 +437,7 @@ fn build_limits(wt_config: &WtConfig) -> Result<Limits> {
 
 /// WebTransport CONNECT のリクエストヘッダーを構築する
 ///
-/// draft-ietf-webtrans-http2-15 §3.1 / §3.2: `:method=CONNECT`、`:protocol=webtransport`、
+/// draft-ietf-webtrans-http2-16 §3.1 / §3.2: `:method=CONNECT`、`:protocol=webtransport`、
 /// `:scheme=https`、`:authority`、`:path` を設定する。MOQT は
 /// `WT-Available-Protocols` でプロトコル識別子を通知する
 /// (draft-ietf-moq-transport-23 §6.2 (Session establishment))。
@@ -464,7 +464,7 @@ fn build_connect_headers(authority: &str, path: &str) -> Result<Vec<HeaderField>
 
 /// peer の SETTINGS を受信し、WebTransport に対応していることを確認する
 ///
-/// draft-ietf-webtrans-http2-15 §3.1: クライアントはサーバーが
+/// draft-ietf-webtrans-http2-16 §3.1: クライアントはサーバーが
 /// `SETTINGS_ENABLE_CONNECT_PROTOCOL=1` と `SETTINGS_WT_ENABLED=1` を送るまで
 /// WebTransport の CONNECT を送ってはならない。最初の SETTINGS で両方が無い場合は
 /// この接続では WebTransport を使えないため、待ち続けずに失敗させる。
@@ -503,7 +503,7 @@ async fn wait_for_peer_settings(io: &mut H2Io<TlsStream>) -> Result<()> {
 
 /// CONNECT の 2xx 応答を待ち、`WT-Protocol` を検証する
 ///
-/// draft-ietf-webtrans-http2-15 §3.2: 2xx でセッションが確立する。§3.3: クライアントが
+/// draft-ietf-webtrans-http2-16 §3.2: 2xx でセッションが確立する。§3.3: クライアントが
 /// `WT-Available-Protocols` を送った場合、サーバーが `WT-Protocol` を含めるなら
 /// 候補の中から 1 つを選ばなければならない。MOQT はプロトコル識別子の交渉に使うため、
 /// 2xx に `WT-Protocol` が無い場合も失敗させる (§3.3 の MUST)。
@@ -567,7 +567,7 @@ async fn wait_for_connect_response(
 
 /// 応答の `WT-Protocol` が送った候補に一致するかを検証する
 ///
-/// draft-ietf-webtrans-http2-15 §3.3: 2xx 応答の `WT-Protocol` は
+/// draft-ietf-webtrans-http2-16 §3.3: 2xx 応答の `WT-Protocol` は
 /// `WT-Available-Protocols` に含めた値でなければならない。String 以外の型は無視され、
 /// パラメータは読み飛ばされる (同節)。パラメータの読み飛ばしは
 /// `WtAvailableProtocols::parse` の List パーサーに任せ、要素数を 1 に限定して
@@ -655,7 +655,7 @@ impl WtH2Session {
 
     /// 新しいストリームを開ける状態かを確認する
     ///
-    /// draft-ietf-webtrans-http2-15 §6.12 はセッション終了の検知後に新しいストリームを
+    /// draft-ietf-webtrans-http2-16 §6.12 はセッション終了の検知後に新しいストリームを
     /// 開くことを禁じ、§6.13 の drain 後もセッションの利用は許す (MAY) が、本 example は
     /// drain を「できるだけ早く終了する」合図として扱い新規の作業を始めない。
     /// どちらの状態でも MOQT 層へは `ConnectionClosed` を返す。
@@ -704,7 +704,7 @@ impl WtH2Session {
         self.stop_sending_rx.take()
     }
 
-    /// セッションをクローズする (draft-ietf-webtrans-http2-15 §6.12)
+    /// セッションをクローズする (draft-ietf-webtrans-http2-16 §6.12)
     ///
     /// `WT_CLOSE_SESSION` を送り、直後に CONNECT ストリームを END_STREAM で half-close する
     /// (MUST)。`code` は 32 ビットの Application Error Code である
@@ -952,7 +952,7 @@ impl WtH2RecvStream {
                         // 空のデータ capsule (FIN なし) は次を待つ
                     }
                     Some(StreamPacket::Reset { error_code }) => {
-                        // WT_RESET_STREAM は Reliable Size も運ぶが (draft-ietf-webtrans-http2-15
+                        // WT_RESET_STREAM は Reliable Size も運ぶが (draft-ietf-webtrans-http2-16
                         // §6.2)、`WtEvent::StreamReset` には現れないため `None` にする
                         // (over HTTP/2 の WT_RESET_STREAM は MOQT §12.5 のコードをそのまま運ぶため
                         // エラーコードは常にある。HTTP/3 のような code space の remap は不要)
@@ -1095,9 +1095,9 @@ struct DriverState {
     ///
     /// 以降の送信を拒否し、未送信データを該当ストリームの終端として失敗させる。
     /// エラーコードは capsule が運んだ MOQT のコードであり、アプリへそのまま伝える
-    /// (draft-ietf-webtrans-http2-15 §6.3)。
+    /// (draft-ietf-webtrans-http2-16 §6.3)。
     /// エントリは削除せず、上限も設けない。WebTransport のストリーム ID は QUIC の識別子を
-    /// 写したもので再利用されないため (draft-ietf-webtrans-http2-15 §5.2 が RFC 9000 §2.1 の
+    /// 写したもので再利用されないため (draft-ietf-webtrans-http2-16 §5.2 が RFC 9000 §2.1 の
     /// 識別子を写すと定める) 誤判定は起きず、削除すると遅延した送信が `StreamClosed`
     /// (アプリは該当ストリームの終端と判別できず致命エラーとして扱う) に化けるためである。
     /// したがって本 map は peer が cancel したストリーム数に比例して増える。
@@ -1317,7 +1317,7 @@ impl DriverState {
         }
     }
 
-    /// セッションをクローズする (draft-ietf-webtrans-http2-15 §6.12)
+    /// セッションをクローズする (draft-ietf-webtrans-http2-16 §6.12)
     ///
     /// `WT_CLOSE_SESSION` を送ったあと、CONNECT ストリームを END_STREAM で half-close する
     /// (MUST)。送信ウィンドウの枯渇で capsule が送り切れなかった場合は、呼び出し側が
@@ -1386,7 +1386,7 @@ impl DriverState {
                 error_code,
                 ..
             } if stream_id == self.connect_stream => {
-                // draft-ietf-webtrans-http2-15 §3.4: CONNECT ストリームの reset は
+                // draft-ietf-webtrans-http2-16 §3.4: CONNECT ストリームの reset は
                 // アプリケーション層の通知を伴わないセッション終了である
                 tracing::warn!(
                     "WebTransport session terminated by CONNECT stream reset: {error_code:?}"
@@ -1407,7 +1407,7 @@ impl DriverState {
                 ))
             }
             Event::GoawayReceived { error_code, .. } => {
-                // draft-ietf-webtrans-http2-15 §6.13: GOAWAY は新しいセッションを
+                // draft-ietf-webtrans-http2-16 §6.13: GOAWAY は新しいセッションを
                 // 作れなくする。既存セッションは継続できるため drain と同じ扱いにする
                 tracing::info!("Received GOAWAY: {error_code:?}");
                 update_session_state(&self.session_state, WtSessionState::Draining);
@@ -1463,7 +1463,7 @@ impl DriverState {
             } => {
                 if self.stop_sending_sent.contains(&stream_id) {
                     // draft-ietf-moq-transport-23 §6.4.2.3: STOP_SENDING 後のデータは破棄する。
-                    // ストリームウィンドウも拡張しない (draft-ietf-webtrans-http2-15 §6.6)
+                    // ストリームウィンドウも拡張しない (draft-ietf-webtrans-http2-16 §6.6)
                     if fin {
                         self.streams.remove(&stream_id);
                         self.stop_sending_sent.remove(&stream_id);
@@ -1531,7 +1531,7 @@ impl DriverState {
                 Ok(true)
             }
             WtEvent::SessionClosed { error_code, reason } => {
-                // draft-ietf-webtrans-http2-15 §6.12: WT_CLOSE_SESSION を受信したら
+                // draft-ietf-webtrans-http2-16 §6.12: WT_CLOSE_SESSION を受信したら
                 // CONNECT ストリームを END_STREAM で閉じる (MUST)
                 tracing::info!(
                     "WebTransport session closed by peer: error_code={error_code:#x}, reason={reason:?}"
@@ -1596,7 +1596,7 @@ impl DriverState {
 
     /// 受信ウィンドウを消費の進み具合に応じて拡張する
     ///
-    /// draft-ietf-webtrans-http2-15 §6.5 / §6.6: アプリが読んだ分だけ
+    /// draft-ietf-webtrans-http2-16 §6.5 / §6.6: アプリが読んだ分だけ
     /// `WT_MAX_DATA` / `WT_MAX_STREAM_DATA` を送る。読んでいない分を超えて
     /// ウィンドウを広げないため、アプリの停滞がメモリの増加にならない。
     fn grow_windows(&mut self, stream_id: WtStreamId) -> Result<()> {
@@ -1778,7 +1778,7 @@ impl DriverState {
 
     /// WT のセッションエラーでセッションを中断する
     ///
-    /// draft-ietf-webtrans-http2-15 §3.4 / §11.3: セッションエラーは CONNECT ストリームの
+    /// draft-ietf-webtrans-http2-16 §3.4 / §11.3: セッションエラーは CONNECT ストリームの
     /// RST_STREAM で伝える。エラーコードが特定できる場合は RST_STREAM を送ってから返す。
     async fn abort_session_with_wt_error(&mut self, error: WtError) -> TransportError {
         if let Some(code) = wt_http2_error_code(error.kind())
@@ -1793,7 +1793,7 @@ impl DriverState {
 
 /// セッション終了系の `WtErrorKind` を HTTP/2 のエラーコードへ対応付ける
 ///
-/// draft-ietf-webtrans-http2-15 §3.4 / §11.3: セッションエラーは CONNECT ストリームの
+/// draft-ietf-webtrans-http2-16 §3.4 / §11.3: セッションエラーは CONNECT ストリームの
 /// RST_STREAM で伝える。対応するコードが無い場合は `None` を返し、RST_STREAM を送らない。
 fn wt_http2_error_code(kind: WtErrorKind) -> Option<ErrorCode> {
     match kind {
@@ -2852,7 +2852,7 @@ mod tests {
     /// draft の識別子は `moqt-` に draft 番号を付けた値であり (draft-ietf-moq-transport-23
     /// §6.2)、`WT-Available-Protocols` には `moqt-23` だけを載せている。draft-22 の相手が
     /// `moqt-22` を選んでも、その値を draft-23 のセッションとして受け入れない
-    /// (draft-ietf-webtrans-http2-15 §3.3)。
+    /// (draft-ietf-webtrans-http2-16 §3.3)。
     #[tokio::test(flavor = "multi_thread")]
     async fn wt_h2_rejects_a_draft_22_selection() {
         let (addr, server) = spawn_connect_only_server(true, 200, Some("moqt-22")).await;

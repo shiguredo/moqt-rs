@@ -2152,7 +2152,7 @@ pub async fn run(
                     // 通常の利用状態。次の変化を待つ
                     Some(WtSessionState::Active) => {}
                     Some(WtSessionState::Draining) => {
-                        // draft-ietf-webtrans-http3-16 §4.7 / draft-ietf-webtrans-http2-15 §6.13:
+                        // draft-ietf-webtrans-http3-16 §4.7 / draft-ietf-webtrans-http2-16 §6.13:
                         // drain は「できるだけ早く終了する」合図である。MOQT の GOAWAY を待たずに
                         // 現在の URL を移行先として移行を開始する。GOAWAY の Timeout が無いため
                         // 期限はローカル既定値 (Timeout 0 と同じ扱い) を使う
@@ -2819,7 +2819,7 @@ fn is_transport_session_end(error: &Error) -> bool {
 /// pipeline は致命エラーにしない。
 ///
 /// WebTransport over HTTP/2 も driver が受領した `WT_STOP_SENDING` のエラーコードを
-/// `StreamReset` として返すため本判定の対象になる (draft-ietf-webtrans-http2-15 §6.3)。
+/// `StreamReset` として返すため本判定の対象になる (draft-ietf-webtrans-http2-16 §6.3)。
 /// WebTransport over HTTP/3 の送信 API も同じ `StreamReset` を返す (コードは HTTP/3 の
 /// code space のままで、MOQT のコードへ写すのは観測経路だけである)。
 /// 本判定は variant のみを見るため、コードの空間に依存しない。
