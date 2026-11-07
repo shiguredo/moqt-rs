@@ -11,9 +11,7 @@ publish = false
 # 時雨堂クレート
 
 # 映像プレイヤー (メインスレッド実行)
-# 2026.2 は映像のみ再生で再生時計が PTS からずれると描画が止まり続けるため、
-# 最新フレームへ復帰する処理と理由別ドロップ数が入った canary を使う
-raw_player = "2026.3.0-canary.1"
+raw_player = "2026.3"
 # AV1 デコーダ (dav1d)
 shiguredo_dav1d = "2026.3"
 # HTTP/3 / WebTransport クライアント
