@@ -108,6 +108,10 @@ pub enum QuicError {
     Reset {
         /// peer が載せたアプリケーションエラーコード
         error_code: u64,
+        /// `RESET_STREAM_AT` の Reliable Size (draft-ietf-quic-reliable-stream-reset-11 §5)
+        ///
+        /// `RESET_STREAM` で終端した場合は `None`。
+        reliable_size: Option<u64>,
     },
     /// 接続が終了した
     ConnectionClosed,
@@ -121,9 +125,16 @@ impl std::fmt::Display for QuicError {
             Self::Stopped { error_code } => {
                 write!(f, "stream stopped by peer: error_code={error_code:#x}")
             }
-            Self::Reset { error_code } => {
-                write!(f, "stream reset by peer: error_code={error_code:#x}")
-            }
+            Self::Reset {
+                error_code,
+                reliable_size,
+            } => match reliable_size {
+                Some(reliable_size) => write!(
+                    f,
+                    "stream reset by peer: error_code={error_code:#x}, reliable_size={reliable_size}"
+                ),
+                None => write!(f, "stream reset by peer: error_code={error_code:#x}"),
+            },
             Self::ConnectionClosed => write!(f, "connection closed"),
             Self::Other(message) => write!(f, "{message}"),
         }
@@ -144,9 +155,14 @@ impl From<tobi_quic::Error> for QuicError {
             tobi_quic::Error::Stream(tobi_quic::StreamError::Stopped { error_code }) => {
                 Self::Stopped { error_code }
             }
-            tobi_quic::Error::Stream(tobi_quic::StreamError::Reset { error_code, .. }) => {
-                Self::Reset { error_code }
-            }
+            tobi_quic::Error::Stream(tobi_quic::StreamError::Reset {
+                error_code,
+                reliable_size,
+                ..
+            }) => Self::Reset {
+                error_code,
+                reliable_size,
+            },
             tobi_quic::Error::Connection(_) => Self::ConnectionClosed,
             tobi_quic::Error::Stream(tobi_quic::StreamError::ConnectionLost(_)) => {
                 Self::ConnectionClosed
@@ -274,13 +290,12 @@ mod tests {
 
     /// 接続が失敗することを確かめ、そのエラーを返す
     ///
-    /// `Connected` は `Debug` を実装しないため、`Result::expect_err` は使えない。
+    /// ハングを「失敗」として観測するため、待ち合わせに上限を置く。
     async fn expect_connect_error(addr: std::net::SocketAddr, message: &str) -> TransportError {
-        match tokio::time::timeout(TEST_TIMEOUT, connect(addr, "localhost", None)).await {
-            Ok(Ok(_)) => panic!("{message}"),
-            Ok(Err(error)) => error,
-            Err(_) => panic!("上限時間以内に完了すること"),
-        }
+        let result = tokio::time::timeout(TEST_TIMEOUT, connect(addr, "localhost", None))
+            .await
+            .expect("上限時間以内に完了すること");
+        result.expect_err(message)
     }
 
     /// ALPN を選択しないサーバーとは接続できない

@@ -865,10 +865,14 @@ impl WtClient {
         let client = Client::builder()
             .with_tls(ClientTlsConfig::new(tls))
             .with_io(IoConfig::new(crate::local_bind_addr(config.remote_addr)))
-            // tobi-quic の `with_datagram` は現在の transport 設定へ書き込むため、
-            // `with_transport` で置き換えた後に呼ぶ (逆順だと DATAGRAM の広告が消える)
+            // ビルダーに保持した設定は `start()` で固定順に適用されるため、呼ぶ順序に
+            // 依存しない
             .with_transport(crate::quic::tobi::build_transport_config())
             .with_datagram(crate::quic::tobi::datagram_config())
+            // s2n-quic の endpoint は接続とは独立に常時ソケットを駆動していた。tobi-quic の
+            // 既定はコマンド駆動であり、API を呼んでいない間は受信とタイマーを処理しない
+            // ため、同じ挙動になるよう接続の生成時からバックグラウンド駆動を有効にする
+            .with_background_driver(true)
             .start()
             .map_err(|e| TransportError::Internal(format!("client start failed: {e}")))?;
 
@@ -879,14 +883,6 @@ impl WtClient {
             ))
             .await
             .map_err(TransportError::transport)?;
-        // s2n-quic の endpoint は接続とは独立に常時ソケットを駆動していた。tobi-quic の既定は
-        // コマンド駆動であり、API を呼んでいない間は受信とタイマーを処理しないため、
-        // 同じ挙動になるようバックグラウンド駆動を有効にする
-        connection
-            .enable_background_driver()
-            .await
-            .map_err(TransportError::transport)?;
-
         // peer の STOP_SENDING の観測を MOQT 層へ渡すタスクを起動する。
         //
         // WebTransport over HTTP/3 では HTTP/3 の code space を共有するため、MOQT 層が
@@ -1006,7 +1002,8 @@ impl WtClient {
                 .init_h3_streams(control_send.id(), encoder_send.id(), decoder_send.id())?
         };
 
-        crate::quic::tobi::send_all(&mut control_send, &init_data.control_data)
+        control_send
+            .send_all(&init_data.control_data)
             .await
             .map_err(crate::quic::QuicError::from)?;
         // encoder/decoder は初期データだけ送れば良い (ストリーム自体は保持不要)
@@ -1059,7 +1056,8 @@ impl WtClient {
         // CONNECT リクエストを送信する (fin=false)
         // draft-ietf-webtrans-http3-16 §3.2: クライアントは応答前に capsule を楽観送信してよい (MAY)。
         // 本実装は 2xx 受信まで capsule を送らない (非対応)。
-        crate::quic::tobi::send_all(&mut send_stream, &request_data)
+        send_stream
+            .send_all(&request_data)
             .await
             .map_err(crate::quic::QuicError::from)?;
 
@@ -1181,7 +1179,7 @@ impl WtClient {
                     let (data, fin) = match received {
                         Ok(Some(data)) => (data, false),
                         Ok(None) => (vec![], true),
-                        Err(crate::quic::QuicError::Reset { error_code }) => {
+                        Err(crate::quic::QuicError::Reset { error_code, .. }) => {
                             // draft-ietf-webtrans-http3-16 §6: CONNECT stream の RESET_STREAM は
                             // セッション終了である。確立後の CONNECT stream の受信タスクと同じ
                             // 経路で h3 層へ通知する (h3 層は `SessionClosed` を発行し、
@@ -1328,7 +1326,7 @@ impl WtClient {
                             }
                             break;
                         }
-                        Err(crate::quic::QuicError::Reset { error_code }) => {
+                        Err(crate::quic::QuicError::Reset { error_code, .. }) => {
                             // RESET_STREAM (CONNECT stream の abrupt な close) もセッション終了である (§6)。
                             // h3 層は Sans I/O のため、I/O 層からの通知で `SessionClosed` を発火する
                             reset_connect_stream(
@@ -1376,7 +1374,7 @@ impl WtClient {
             session_id: connect_stream_id,
             reset_stream_at_supported,
             handle,
-            connect_send: StdMutex::new(send_stream),
+            connect_send: send_stream,
             uni_rx: Some(uni_rx),
             bi_rx: Some(bi_rx),
             stop_sending_rx: Some(stop_sending_rx),
@@ -1574,10 +1572,7 @@ pub struct WtSession {
     reset_stream_at_supported: bool,
     handle: tobi_quic::Connection,
     /// CONNECT stream の送信側
-    ///
-    /// `tobi_quic::SendStream` は `Sync` ではないため、`MoqtClient` を `Sync` に保つ目的で
-    /// `Mutex` で包む。操作はすべて `&mut self` なので `get_mut` でロックを取らずに使う。
-    connect_send: StdMutex<SendStream>,
+    connect_send: SendStream,
     /// 単方向受信ストリームの receiver。`take_uni_receiver` で取り出すと None になる
     uni_rx: Option<mpsc::Receiver<WtRecvStream>>,
     /// 双方向受信ストリームの receiver。`take_bi_receiver` で取り出すと None になる
@@ -1661,14 +1656,14 @@ impl WtSession {
         StreamHeader::new(self.session_id)
             .expect("session_id must be a client-initiated bidirectional stream ID")
             .encode_unidirectional(&mut header);
-        crate::quic::tobi::send_all(&mut send, &header)
+        send.send_all(&header)
             .await
             .map_err(crate::quic::QuicError::from)?;
         let header_len = header.len() as u64;
 
         Ok(WtSendStream {
             stream_id,
-            send: StdMutex::new(send),
+            send,
             header_len,
             reset_stream_at_supported: self.reset_stream_at_supported,
             session_state: self.session_state_receiver(),
@@ -1751,7 +1746,7 @@ impl WtSession {
         StreamHeader::new(self.session_id)
             .expect("session_id must be a client-initiated bidirectional stream ID")
             .encode_bidirectional(&mut header);
-        crate::quic::tobi::send_all(&mut send, &header)
+        send.send_all(&header)
             .await
             .map_err(crate::quic::QuicError::from)?;
         let header_len = header.len() as u64;
@@ -1816,19 +1811,13 @@ impl WtSession {
         };
         let mut buf = Vec::new();
         capsule.encode(&mut buf);
-        crate::quic::tobi::send_all(
-            self.connect_send
-                .get_mut()
-                .expect("the connect stream mutex must not be poisoned"),
-            &buf,
-        )
-        .await
-        .map_err(crate::quic::QuicError::from)?;
+        self.connect_send
+            .send_all(&buf)
+            .await
+            .map_err(crate::quic::QuicError::from)?;
         // draft-ietf-webtrans-http3-16 §6 (Session Termination):
         // WT_CLOSE_SESSION 送信後は CONNECT stream に即座に FIN を送る (MUST)
         self.connect_send
-            .get_mut()
-            .expect("the connect stream mutex must not be poisoned")
             .finish()
             .await
             .map_err(TransportError::transport)
@@ -2086,10 +2075,10 @@ fn session_gone_code() -> StreamErrorCode {
 /// `reliable_size` は `RESET_STREAM_AT` を受信したときに埋まる値だが、
 /// `StreamError::Reset` の `final_size` は `RESET_STREAM` でも設定されるため、
 /// `RESET_STREAM_AT` を受信したかを区別できない。受信側では常に `None` にする。
-fn wt_reset_stream_end(http3_code: u64) -> RequestStreamEnd {
+fn wt_reset_stream_end(http3_code: u64, reliable_size: Option<u64>) -> RequestStreamEnd {
     RequestStreamEnd::Reset {
         error_code: wt_reset_error_code(http3_code),
-        reliable_size: None,
+        reliable_size,
     }
 }
 
@@ -2105,11 +2094,7 @@ fn wt_reset_stream_end(http3_code: u64) -> RequestStreamEnd {
 pub struct WtSendStream {
     stream_id: u64,
     /// tobi-quic の送信ストリーム
-    ///
-    /// `tobi_quic::SendStream` は進行中の書き込み future を保持するため `Sync` ではない。
-    /// `MoqtClient` を `Sync` に保つため `Mutex` で包む。操作はすべて `&mut self` なので、
-    /// `get_mut` でロックを取らずに使う。
-    send: StdMutex<SendStream>,
+    send: SendStream,
     /// WebTransport ストリームヘッダーの長さ (バイト)
     ///
     /// `RESET_STREAM_AT` の Reliable Size に使う (draft-ietf-webtrans-http3-16 §4.4)。
@@ -2126,12 +2111,7 @@ impl WtSendStream {
     /// 中断し、MOQT 層へ `ConnectionClosed` を返す (受信経路と同じ扱い)。
     pub async fn send(&mut self, data: &[u8]) -> Result<()> {
         tokio::select! {
-            sent = crate::quic::tobi::send_all(
-                self.send
-                    .get_mut()
-                    .expect("the send stream mutex must not be poisoned"),
-                data,
-            ) => {
+            sent = self.send.send_all(data) => {
                 sent.map_err(|e| {
                     TransportError::from_send_error(crate::quic::QuicError::from(e), TransportError::transport)
                 })
@@ -2145,17 +2125,12 @@ impl WtSendStream {
 
     /// ストリームの送信方向を終了する (FIN)
     pub async fn finish(&mut self) -> Result<()> {
-        self.send
-            .get_mut()
-            .expect("the send stream mutex must not be poisoned")
-            .finish()
-            .await
-            .map_err(|e| {
-                TransportError::from_send_error(
-                    crate::quic::QuicError::from(e),
-                    TransportError::transport,
-                )
-            })
+        self.send.finish().await.map_err(|e| {
+            TransportError::from_send_error(
+                crate::quic::QuicError::from(e),
+                TransportError::transport,
+            )
+        })
     }
 
     /// ストリームの送信方向を reset する (QUIC RESET_STREAM)
@@ -2194,14 +2169,10 @@ impl WtSendStream {
     async fn reset_with(&mut self, code: StreamErrorCode) -> Result<()> {
         let error_code = stream_application_error(code)?;
         // WebTransport ヘッダーの長さまでを Reliable Size にする (§4.4)
-        let send = self
-            .send
-            .get_mut()
-            .expect("the send stream mutex must not be poisoned");
         let result = if self.reset_stream_at_supported {
-            send.reset_stream_at(error_code, self.header_len).await
+            self.send.reset_stream_at(error_code, self.header_len).await
         } else {
-            send.reset_stream(error_code).await
+            self.send.reset_stream(error_code).await
         };
         result.map_err(|e| {
             TransportError::from_send_error(
@@ -2279,9 +2250,13 @@ impl WtRecvStream {
             received = self.recv.receive() => match received {
                 Ok(Some(data)) => Ok(RecvChunk::Data(data)),
                 Ok(None) => Ok(RecvChunk::End(RequestStreamEnd::Fin)),
-                Err(crate::quic::QuicError::Reset { error_code }) => {
-                    Ok(RecvChunk::End(wt_reset_stream_end(error_code)))
-                }
+                Err(crate::quic::QuicError::Reset {
+                    error_code,
+                    reliable_size,
+                }) => Ok(RecvChunk::End(wt_reset_stream_end(
+                    error_code,
+                    reliable_size,
+                ))),
                 Err(e) => Err(TransportError::transport(e)),
             },
             _ = wait_until_terminated(&mut self.session_state) => {
@@ -2355,7 +2330,7 @@ impl WtBiStream {
         (
             WtSendStream {
                 stream_id: self.stream_id,
-                send: StdMutex::new(self.send),
+                send: self.send,
                 header_len: self.header_len,
                 reset_stream_at_supported: self.reset_stream_at_supported,
                 session_state: self.session_state.clone(),
@@ -2684,7 +2659,7 @@ async fn route_bi_stream(
             let pending = header_buf[offset..].to_vec();
             let wt_send = WtSendStream {
                 stream_id,
-                send: StdMutex::new(send_stream),
+                send: send_stream,
                 // peer が付けた WebTransport ヘッダーの長さが Reliable Size になる
                 header_len: offset as u64,
                 reset_stream_at_supported: context.reset_stream_at_supported,
@@ -3627,7 +3602,7 @@ mod tests {
     fn wt_reset_stream_end_uses_remapped_code() {
         let http3_code = moqt_to_wt_code(0x12).expect("remap に成功すること");
         assert_eq!(
-            wt_reset_stream_end(http3_code),
+            wt_reset_stream_end(http3_code, None),
             RequestStreamEnd::Reset {
                 error_code: Some(0x12),
                 reliable_size: None,
@@ -3635,12 +3610,29 @@ mod tests {
             "remap できたコードが MOQT のコードとして入ること"
         );
         assert_eq!(
-            wt_reset_stream_end(WT_SESSION_GONE),
+            wt_reset_stream_end(WT_SESSION_GONE, None),
             RequestStreamEnd::Reset {
                 error_code: None,
                 reliable_size: None,
             },
             "remap できないコードはコード無し (None) になること"
+        );
+    }
+
+    /// `RESET_STREAM_AT` の Reliable Size が `RequestStreamEnd` へ渡ること
+    ///
+    /// draft-ietf-quic-reliable-stream-reset-11 §5: `RESET_STREAM_AT` を受信した場合、
+    /// MOQT 層は Reliable Size を使って「どこまで届いていれば再送が不要か」を判断できる。
+    #[test]
+    fn wt_reset_stream_end_keeps_reliable_size() {
+        let http3_code = moqt_to_wt_code(0x12).expect("remap に成功すること");
+        assert_eq!(
+            wt_reset_stream_end(http3_code, Some(1024)),
+            RequestStreamEnd::Reset {
+                error_code: Some(0x12),
+                reliable_size: Some(1024),
+            },
+            "RESET_STREAM_AT の Reliable Size がそのまま入ること"
         );
     }
 

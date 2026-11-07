@@ -133,11 +133,15 @@ impl RecvStream {
             RecvStream::Quic(stream) => match stream.receive().await {
                 Ok(Some(data)) => Ok(RecvChunk::Data(Bytes::from(data))),
                 Ok(None) => Ok(RecvChunk::End(RequestStreamEnd::Fin)),
-                Err(QuicError::Reset { error_code }) => {
-                    // QUIC 経路は QUIC のコード空間であり常にコードがあるため Some にする
+                Err(QuicError::Reset {
+                    error_code,
+                    reliable_size,
+                }) => {
+                    // QUIC 経路は QUIC のコード空間であり常にコードがあるため Some にする。
+                    // `RESET_STREAM_AT` を受信した場合は Reliable Size が載る
                     Ok(RecvChunk::End(RequestStreamEnd::Reset {
                         error_code: Some(error_code),
-                        reliable_size: None,
+                        reliable_size,
                     }))
                 }
                 Err(e) => Err(TransportError::Quic(format!("{e}"))),

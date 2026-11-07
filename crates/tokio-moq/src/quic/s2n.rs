@@ -171,6 +171,7 @@ impl s2n_quic::provider::event::Subscriber for CloseCodeRecorder {
 }
 
 /// 接続を確立する前の接続
+#[derive(Debug)]
 pub struct Connected {
     /// s2n-quic の接続
     inner: s2n_quic::connection::Connection,
@@ -195,11 +196,6 @@ impl Connected {
         )
     }
 
-    /// s2n-quic の endpoint は接続とは独立に駆動されるため、何もしない
-    pub async fn enable_background_driver(&self) -> std::result::Result<(), QuicError> {
-        Ok(())
-    }
-
     /// 接続元のアドレスを返す
     pub async fn remote_addr(&self) -> std::result::Result<SocketAddr, QuicError> {
         self.inner
@@ -209,7 +205,7 @@ impl Connected {
 }
 
 /// ストリームを開く側の接続ハンドル
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Connection {
     /// s2n-quic の接続ハンドル
     inner: s2n_quic::connection::Handle,
@@ -320,6 +316,7 @@ pub(crate) async fn close_application(connection: &Connection, code: u64) -> Res
 }
 
 /// 送信ストリーム
+#[derive(Debug)]
 pub struct SendStream {
     /// s2n-quic の送信ストリーム
     inner: s2n_quic::stream::SendStream,
@@ -355,6 +352,7 @@ impl SendStream {
 }
 
 /// 受信ストリーム
+#[derive(Debug)]
 pub struct RecvStream {
     /// s2n-quic の受信ストリーム
     inner: s2n_quic::stream::ReceiveStream,
@@ -371,8 +369,10 @@ impl RecvStream {
         match self.inner.receive().await {
             Ok(Some(data)) => Ok(Some(data.to_vec())),
             Ok(None) => Ok(None),
+            // s2n-quic は `RESET_STREAM_AT` を識別しないため Reliable Size は常に `None`
             Err(s2n_quic::stream::Error::StreamReset { error, .. }) => Err(QuicError::Reset {
                 error_code: u64::from(error),
+                reliable_size: None,
             }),
             Err(e) => Err(QuicError::Other(format!("{e}"))),
         }
@@ -397,6 +397,7 @@ impl RecvStream {
 /// 方向ごとに `tokio::sync::Mutex` で包む。単方向と双方向は別のタスクが同時に待つため、
 /// Mutex を分けて互いに待たせない。各方向の利用者は 1 つなので、ロックの取り合いは
 /// 起きない。
+#[derive(Debug)]
 pub struct StreamAcceptor {
     /// 双方向ストリームの受理
     bidi: Mutex<s2n_quic::connection::BidirectionalStreamAcceptor>,

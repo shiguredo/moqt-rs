@@ -44,6 +44,7 @@ const COMMAND_CHANNEL_CAPACITY: usize = 256;
 const MAX_DATAGRAM_SIZE: u64 = 65535;
 
 /// 接続を確立する前の接続
+#[derive(Debug)]
 pub struct Connected {
     /// 操作を依頼するチャネル
     tx: mpsc::Sender<Command>,
@@ -65,11 +66,6 @@ impl Connected {
         )
     }
 
-    /// ドライバは接続の生存中ずっと動き続けるため、何もしない
-    pub async fn enable_background_driver(&self) -> std::result::Result<(), QuicError> {
-        Ok(())
-    }
-
     /// 接続元のアドレスを返す
     pub async fn remote_addr(&self) -> std::result::Result<SocketAddr, QuicError> {
         Ok(self.remote_addr)
@@ -77,7 +73,7 @@ impl Connected {
 }
 
 /// ストリームを開く側の接続ハンドル
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Connection {
     /// 操作を依頼するチャネル
     tx: mpsc::Sender<Command>,
@@ -165,6 +161,7 @@ pub(crate) async fn close_application(connection: &Connection, code: u64) -> Res
 }
 
 /// 送信ストリーム
+#[derive(Debug)]
 pub struct SendStream {
     /// ストリーム ID
     id: StreamId,
@@ -234,6 +231,7 @@ enum RecvEvent {
 }
 
 /// 受信ストリーム
+#[derive(Debug)]
 pub struct RecvStream {
     /// ストリーム ID
     id: StreamId,
@@ -264,7 +262,10 @@ impl RecvStream {
             }
             Some(RecvEvent::Reset { error_code }) => {
                 self.ended = true;
-                Err(QuicError::Reset { error_code })
+                Err(QuicError::Reset {
+                    error_code,
+                    reliable_size: None,
+                })
             }
             // ドライバが終了した = 接続が終了した
             None => Err(QuicError::ConnectionClosed),
@@ -290,6 +291,7 @@ impl RecvStream {
 }
 
 /// ストリームを受理する側のハンドル
+#[derive(Debug)]
 pub struct StreamAcceptor {
     /// 操作を依頼するチャネル
     tx: mpsc::Sender<Command>,

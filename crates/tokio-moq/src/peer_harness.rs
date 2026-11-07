@@ -351,12 +351,10 @@ impl TestPeer {
 
     /// 受理した QUIC 接続から peer を作る
     async fn new(connection: crate::quic::Connected) -> Result<Self> {
-        // テストは peer の受信ループを常に poll するわけではない。tobi-quic の既定は
-        // コマンド駆動であり、API を呼んでいない間は受信を処理しないため、
-        // 接続終了の観測 (`recv_close_code`) が止まらないようバックグラウンド駆動を有効にする
-        connection.enable_background_driver().await.map_err(|e| {
-            TransportError::Internal(format!("failed to enable the background driver: {e}"))
-        })?;
+        // バックグラウンド駆動はテスト用サーバーの生成時に有効化済みである
+        // (`start_server` が `with_background_driver(true)` を渡す)。テストは peer の
+        // 受信ループを常に poll するわけではないため、これが無いと接続終了の観測
+        // (`recv_close_code`) が止まる
         let (handle, acceptor) = connection.split();
         // tobi-quic の `StreamAcceptor` は単方向と双方向の両方を受け付けるため `Arc` で共有する
         let acceptor = Arc::new(acceptor);

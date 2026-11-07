@@ -1,7 +1,7 @@
 //! tobi-quic をネイティブ QUIC のバックエンドとして使う実装
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tobi_quic::{Client, ClientTlsConfig, Connect, Connection as TobiConnection, IoConfig};
 #[cfg(test)]
@@ -18,6 +18,7 @@ use crate::error::{Result, TransportError};
 /// 接続を確立する前の接続
 ///
 /// `split` でストリームを開くハンドルと、ストリームを受理するハンドルに分ける。
+#[derive(Debug)]
 pub struct Connected {
     /// tobi-quic の接続
     inner: TobiConnection,
@@ -35,14 +36,6 @@ impl Connected {
         )
     }
 
-    /// アプリケーションが API を呼んでいない間も受信とタイマーを処理する
-    pub async fn enable_background_driver(&self) -> std::result::Result<(), QuicError> {
-        self.inner
-            .enable_background_driver()
-            .await
-            .map_err(tobi::map_error)
-    }
-
     /// 接続元のアドレスを返す
     pub async fn remote_addr(&self) -> std::result::Result<SocketAddr, QuicError> {
         self.inner.remote_addr().await.map_err(tobi::map_error)
@@ -50,7 +43,7 @@ impl Connected {
 }
 
 /// ストリームを開く側の接続ハンドル
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Connection {
     /// tobi-quic の接続ハンドル
     inner: TobiConnection,
@@ -64,9 +57,7 @@ impl Connection {
             .open_send_stream_wait()
             .await
             .map_err(tobi::map_error)?;
-        Ok(SendStream {
-            inner: Mutex::new(stream),
-        })
+        Ok(SendStream { inner: stream })
     }
 
     /// 新しい双方向ストリームを開く
@@ -79,12 +70,7 @@ impl Connection {
             .await
             .map_err(tobi::map_error)?;
         let (send, recv) = stream.split();
-        Ok((
-            SendStream {
-                inner: Mutex::new(send),
-            },
-            RecvStream::new(recv),
-        ))
+        Ok((SendStream { inner: send }, RecvStream::new(recv)))
     }
 
     /// datagram を送信する
@@ -125,40 +111,29 @@ pub(crate) async fn close_application(connection: &Connection, code: u64) -> Res
 }
 
 /// 送信ストリーム
+#[derive(Debug)]
 pub struct SendStream {
     /// tobi-quic の送信ストリーム
     ///
-    /// `tobi_quic::SendStream` はキャンセル安全性のために進行中の書き込み future を保持し、
-    /// `Sync` ではない。`MoqtClient` を `Sync` に保つため `Mutex` で包む。操作はすべて
-    /// `&mut self` なので、`get_mut` でロックを取らずに使う。
-    inner: Mutex<tobi_quic::SendStream>,
+    /// `tobi_quic::SendStream` は `Send + Sync` であり、`&SendStream` を async ブロック
+    /// 越しに保持しても `tokio::spawn` できる。
+    inner: tobi_quic::SendStream,
 }
 
 impl SendStream {
     /// データをすべて送信する
     pub(crate) async fn send_all(&mut self, data: &[u8]) -> std::result::Result<(), QuicError> {
-        let inner = self
-            .inner
-            .get_mut()
-            .expect("the send stream mutex must not be poisoned");
-        tobi::send_all(inner, data).await.map_err(tobi::map_error)
+        self.inner.send_all(data).await.map_err(tobi::map_error)
     }
 
     /// 送信方向を終了する (FIN)
     pub(crate) async fn finish(&mut self) -> std::result::Result<(), QuicError> {
-        self.inner
-            .get_mut()
-            .expect("the send stream mutex must not be poisoned")
-            .finish()
-            .await
-            .map_err(tobi::map_error)
+        self.inner.finish().await.map_err(tobi::map_error)
     }
 
     /// 送信方向を reset する (RESET_STREAM)
     pub(crate) async fn reset(&mut self, error_code: u64) -> std::result::Result<(), QuicError> {
         self.inner
-            .get_mut()
-            .expect("the send stream mutex must not be poisoned")
             .reset_stream(error_code)
             .await
             .map_err(tobi::map_error)
@@ -166,10 +141,7 @@ impl SendStream {
 
     /// ストリーム ID を返す
     pub(crate) fn id(&self) -> u64 {
-        self.inner
-            .lock()
-            .expect("the send stream mutex must not be poisoned")
-            .id()
+        self.inner.id()
     }
 }
 
@@ -177,6 +149,7 @@ impl SendStream {
 ///
 /// tobi-quic の `StreamAcceptor` は単方向と双方向の両方を受け付けられ、受理は `&self` を
 /// 取る。単方向と双方向を別のタスクから同時に待つため `Arc` で共有する。
+#[derive(Debug)]
 pub struct StreamAcceptor {
     /// tobi-quic のストリーム受理
     inner: Arc<tobi_quic::StreamAcceptor>,
@@ -203,12 +176,7 @@ impl StreamAcceptor {
             .await
             .map_err(tobi::map_error)?;
         let (send, recv) = stream.split();
-        Ok((
-            SendStream {
-                inner: Mutex::new(send),
-            },
-            RecvStream::new(recv),
-        ))
+        Ok((SendStream { inner: send }, RecvStream::new(recv)))
     }
 }
 
@@ -223,10 +191,16 @@ pub(crate) async fn connect(
     let client = Client::builder()
         .with_tls(ClientTlsConfig::new(tls))
         .with_io(IoConfig::new(crate::local_bind_addr(socket_addr)))
-        // tobi-quic の `with_datagram` は現在の transport 設定へ書き込むため、
-        // `with_transport` で置き換えた後に呼ぶ (逆順だと DATAGRAM の広告が消える)
+        // ビルダーに保持した設定は `start()` で固定順に適用されるため、呼ぶ順序に
+        // 依存しない
         .with_transport(tobi::build_transport_config())
         .with_datagram(tobi::datagram_config())
+        // s2n-quic の endpoint は Server / Client のハンドルとは独立したタスクで常時
+        // ソケットを駆動していた。tobi-quic の既定はコマンド駆動であり、アプリが API を
+        // 呼んでいない間は受信とタイマーを処理しないため、同じ挙動になるよう接続の生成時
+        // からバックグラウンド駆動を有効にする。無効のままだと、MOQT 層が受信待ちに
+        // 入っている間に ACK や再送が止まる。
+        .with_background_driver(true)
         .start()
         .map_err(|e| TransportError::Quic(format!("client start failed: {e}")))?;
 
@@ -234,14 +208,6 @@ pub(crate) async fn connect(
         .connect(Connect::new(socket_addr, server_name))
         .await
         .map_err(|e| TransportError::Quic(format!("connection failed: {e}")))?;
-
-    // s2n-quic の endpoint は Server / Client のハンドルとは独立したタスクで常時ソケットを
-    // 駆動していた。tobi-quic の既定はコマンド駆動であり、アプリケーションが API を呼んで
-    // いない間は受信とタイマーを処理しないため、同じ挙動になるようバックグラウンド駆動を
-    // 有効にする。無効のままだと、MOQT 層が受信待ちに入っている間に ACK や再送が止まる。
-    connection.enable_background_driver().await.map_err(|e| {
-        TransportError::Quic(format!("failed to enable the background driver: {e}"))
-    })?;
 
     let selected = connection.application_protocol().await;
     super::verify_alpn(selected.as_deref())?;
@@ -293,6 +259,7 @@ pub(crate) async fn start_server(tls: ServerTls, bind_addr: SocketAddr) -> Resul
         .with_io(IoConfig::new(bind_addr))
         .with_transport(tobi::build_transport_config())
         .with_datagram(tobi::datagram_config())
+        .with_background_driver(true)
         .start()
         .map_err(|e| TransportError::Internal(format!("failed to start server: {e}")))?;
     Ok(Server { inner: server })

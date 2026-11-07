@@ -5,7 +5,7 @@
 //! 選択に関わらずコンパイルされる。
 
 use tobi_quic::core::connection::ConnectionConfig;
-use tobi_quic::{Connection, DatagramConfig, ReceiveStream, SendStream};
+use tobi_quic::{Connection, DatagramConfig, ReceiveStream};
 
 use super::{QuicError, StopSendingObserved, StopSendingReceiver};
 #[cfg(feature = "quic-tobi")]
@@ -55,27 +55,18 @@ pub(crate) fn datagram_config() -> DatagramConfig {
 
 /// 受信ストリーム
 ///
-/// tobi-quic の `receive` は、データと FIN を同じ読み取りで返すことがある。また、FIN を
-/// 観測した後に再度 `receive` を呼ぶと `STREAM_STATE_ERROR` になる。MOQT 層は「もう一度
-/// 呼べば FIN が返る」前提で書かれているため、FIN を観測したことをこの型で覚え、以降は
-/// 接続を触らずに `None` を返す。
+/// tobi-quic の `receive_vec` が所有 `Vec<u8>` を返すため、バッファの管理も写しも要らない。
+/// FIN とリセットの再読み取りは tobi-quic 側が冪等に扱うため、終端を覚える必要はない。
+#[derive(Debug)]
 pub struct RecvStream {
     /// tobi-quic の受信ストリーム
-    inner: tobi_quic::ReceiveStream,
-    /// 読み出し用のバッファ (初回の読み出しまで確保しない)
-    buf: Option<Box<[u8]>>,
-    /// FIN を観測したか
-    fin: bool,
+    inner: ReceiveStream,
 }
 
 impl RecvStream {
     /// 受信ストリームを包む
     pub(crate) fn new(inner: ReceiveStream) -> Self {
-        Self {
-            inner,
-            buf: None,
-            fin: false,
-        }
+        Self { inner }
     }
 
     /// ストリーム ID を返す
@@ -87,33 +78,22 @@ impl RecvStream {
     /// データまたは FIN を受信する
     ///
     /// `Ok(Some(data))` はデータ、`Ok(None)` は FIN を表す。RESET_STREAM は
-    /// [`QuicError::Reset`] として返す。
+    /// [`QuicError::Reset`] として返す (Reliable Size を含む)。
     pub(crate) async fn receive(&mut self) -> std::result::Result<Option<Vec<u8>>, QuicError> {
-        if self.fin {
-            // FIN を観測した後の `receive` はストリームの状態エラーになるため呼ばない
+        let chunk = self
+            .inner
+            .receive_vec(crate::qmux::READ_BUFFER_SIZE)
+            .await
+            .map_err(map_error)?;
+        if !chunk.data.is_empty() {
+            // FIN とデータが同じ読み取りで返ることがある。データを先に返し、
+            // FIN は次の呼び出しで返す
+            return Ok(Some(chunk.data));
+        }
+        if chunk.fin {
             return Ok(None);
         }
-        let buf = self
-            .buf
-            .get_or_insert_with(|| vec![0u8; crate::qmux::READ_BUFFER_SIZE].into_boxed_slice());
-        let read = match self.inner.receive(buf).await {
-            Ok(read) => read,
-            Err(tobi_quic::Error::Stream(tobi_quic::StreamError::Reset { error_code, .. })) => {
-                return Err(QuicError::Reset { error_code });
-            }
-            Err(e) => return Err(map_error(e)),
-        };
-        if read.len > 0 {
-            // FIN とデータが同じ読み取りで返ることがある。FIN は次の呼び出しで返す
-            self.fin = read.fin;
-            return Ok(Some(buf[..read.len].to_vec()));
-        }
-        if read.fin {
-            self.fin = true;
-            return Ok(None);
-        }
-        // データも FIN も無い読み取りは、接続を進めない限り起きない。空のデータとして
-        // 返すと呼び出し側が空回りするため、エラーとして扱う
+        // データも FIN も無い読み取りは、バッファ長が 0 のとき以外は起きない
         Err(QuicError::Other(
             "the stream returned neither data nor FIN".into(),
         ))
@@ -183,10 +163,17 @@ pub(crate) fn spawn_packet_diagnostics(connection: &Connection) {
                 _ = connection.closed() => return,
             }
             let stats = connection.stats().await;
+            // 「パケットが来ていない」のか「来ているが復号に失敗している」のかを
+            // 切り分けられるよう、破棄の内訳と STOP_SENDING の取りこぼしも出す
             tracing::warn!(
-                "PKTDIAG received={} lost={}",
+                "PKTDIAG received={} lost={} dropped={} dropped_decryption_failure={} \
+                 dropped_invalid={} stop_sending_dropped={}",
                 stats.received_packets,
                 stats.lost_packets,
+                stats.packet_dropped,
+                stats.packet_dropped_decryption_failure,
+                stats.packet_dropped_invalid,
+                stats.stop_sending_dropped,
             );
         }
     });
@@ -213,32 +200,6 @@ pub(crate) async fn close_application(connection: &Connection, code: u64) -> Res
 /// QUIC の可変長整数で表せる最大値 (RFC 9000 §16)
 #[cfg(feature = "quic-tobi")]
 const MAX_VARINT: u64 = (1 << 62) - 1;
-
-/// ストリームへデータをすべて送る
-///
-/// tobi-quic の `SendStream::send` は、フロー制御の都合で受け付けたバイト数を返し、
-/// 引数の全体を送り切らないことがある。MOQT 層は「渡したデータがすべて送られた」ことを
-/// 前提にしているため、すべて受け付けられるまで繰り返す。
-///
-/// 空の入力は送信を開始しない (`Ok(0)`)。呼び出し側が空の入力を渡した場合は、そのまま
-/// 成功として扱う。
-pub(crate) async fn send_all(
-    stream: &mut SendStream,
-    data: &[u8],
-) -> std::result::Result<(), tobi_quic::Error> {
-    let mut offset = 0;
-    while offset < data.len() {
-        let sent = stream.send(&data[offset..]).await?;
-        if sent == 0 {
-            // 空でない入力で 0 バイトしか受け付けないのは、接続の終了以外では起きない
-            return Err(tobi_quic::Error::Internal(
-                "the stream accepted no data while sending".into(),
-            ));
-        }
-        offset += sent;
-    }
-    Ok(())
-}
 
 /// tobi-quic のエラーを共通の QUIC エラーへ写す
 pub(crate) fn map_error(error: tobi_quic::Error) -> QuicError {
