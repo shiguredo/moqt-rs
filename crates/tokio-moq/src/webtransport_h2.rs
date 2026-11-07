@@ -228,7 +228,8 @@ where
 
     /// 受信して接続状態へ流し込む
     ///
-    /// 戻り値は受信したバイト数である。0 は接続が閉じたことを表す。
+    /// 戻り値は受信したバイト数である。接続が閉じた場合は
+    /// [`TransportError::ConnectionClosed`] を返す。
     async fn recv_into_connection(&mut self) -> Result<usize> {
         let n = self
             .stream
@@ -238,8 +239,29 @@ where
         if n == 0 {
             return Err(TransportError::ConnectionClosed);
         }
-        self.conn.feed(&self.recv_buf[..n])?;
-        self.conn.process()?;
+        // RFC 9113 §5.4.1: connection error は GOAWAY で peer に伝える (SHOULD)。
+        // draft-ietf-webtrans-http2-16 §3.1 は `0x2b67 > 1` を PROTOCOL_ERROR の
+        // connection error とする。エラーを返すだけでは伝達にならないため、
+        // 依存が返した接続エラーコードを GOAWAY に載せてから失敗する
+        let result = match self.conn.feed(&self.recv_buf[..n]) {
+            Ok(_) => self.conn.process(),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = result {
+            if let shiguredo_http2::ErrorKind::ConnectionError(code) = error.kind() {
+                match self.conn.send_goaway(code, Vec::new()) {
+                    Ok(()) => {
+                        if let Err(e) = self.flush().await {
+                            tracing::debug!("Failed to flush the GOAWAY frame: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("Failed to send the GOAWAY frame for {code}: {e}");
+                    }
+                }
+            }
+            return Err(error.into());
+        }
         Ok(n)
     }
 
@@ -409,7 +431,8 @@ impl WtH2Client {
 ///
 /// draft-ietf-webtrans-http2-16 §4.3.1: 初期フロー制御値は SETTINGS で広告する。
 /// §3.1: WebTransport を使うには `SETTINGS_ENABLE_CONNECT_PROTOCOL` と
-/// `SETTINGS_WT_ENABLED` の両方が必要である。
+/// `SETTINGS_WT_ENABLED` (`0x2b67`) の両方が必要である。旧 draft-15 の `0x2b60` は
+/// 広告しない (依存は未知の SETTINGS として無視する)。
 /// 初期値を SETTINGS で広告するため、任意の `WebTransport-Init` ヘッダーは送らない
 /// (§4.3.2 のヘッダーは SETTINGS と併用する場合に大きい方が採用される)。
 fn build_limits(wt_config: &WtConfig) -> Result<Limits> {
@@ -465,8 +488,9 @@ fn build_connect_headers(authority: &str, path: &str) -> Result<Vec<HeaderField>
 /// peer の SETTINGS を受信し、WebTransport に対応していることを確認する
 ///
 /// draft-ietf-webtrans-http2-16 §3.1: クライアントはサーバーが
-/// `SETTINGS_ENABLE_CONNECT_PROTOCOL=1` と `SETTINGS_WT_ENABLED=1` を送るまで
-/// WebTransport の CONNECT を送ってはならない。最初の SETTINGS で両方が無い場合は
+/// `SETTINGS_ENABLE_CONNECT_PROTOCOL=1` と `SETTINGS_WT_ENABLED=1` (`0x2b67`) を送るまで
+/// WebTransport の CONNECT を送ってはならない。最初の SETTINGS で両方が無い場合
+/// (旧 draft-15 の `0x2b60` だけの場合と `0x2b67=0` の場合を含む) は、
 /// この接続では WebTransport を使えないため、待ち続けずに失敗させる。
 async fn wait_for_peer_settings(io: &mut H2Io<TlsStream>) -> Result<()> {
     let deadline =
@@ -2872,6 +2896,371 @@ mod tests {
             ),
             other => panic!("TransportError::InvalidState を期待したが {other:?} だった"),
         }
+        server
+            .await
+            .expect("サーバータスクの join に成功すること")
+            .expect("サーバーがエラーなく終了すること");
+    }
+
+    // -----------------------------------------------------------------------
+    // SETTINGS_WT_ENABLED の codepoint を生フレームで検証する
+    // -----------------------------------------------------------------------
+
+    /// 生 SETTINGS サーバーが観測したクライアントの振る舞い
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RawSettingsObservation {
+        /// CONNECT の HEADERS を受信した
+        Headers,
+        /// GOAWAY を受信した (接続エラーコード)
+        Goaway(ErrorCode),
+        /// クライアントが接続を閉じた
+        Closed,
+    }
+
+    /// 任意の SETTINGS を送る実 HTTP/2 サーバー
+    ///
+    /// `H2Io::server` は `Limits` で表現できる SETTINGS しか送れないため、生のフレームを
+    /// 書いて `0x2b60` / `0x2b67=0` / `0x2b67=2` を作る。モックではなく、自己署名証明書を
+    /// 使う実 TLS の peer である。
+    async fn run_raw_settings_server(
+        listener: tokio::net::TcpListener,
+        tls: tokio_rustls::TlsAcceptor,
+        settings: Vec<(u16, u32)>,
+        observed: oneshot::Sender<RawSettingsObservation>,
+    ) -> std::result::Result<(), String> {
+        let (tcp, _) = listener
+            .accept()
+            .await
+            .map_err(|e| format!("accept failed: {e}"))?;
+        let mut stream = tls
+            .accept(tcp)
+            .await
+            .map_err(|e| format!("TLS accept failed: {e}"))?;
+
+        // クライアントの接続プリフェイス (24 バイト) と最初の SETTINGS を読む。
+        // 最初の SETTINGS はクライアント自身の広告であり、新 codepoint を含み
+        // 旧 codepoint を含まないことを wire で固定する (draft-16 §3.1 / §9.1)
+        let mut preface = [0u8; 24];
+        stream
+            .read_exact(&mut preface)
+            .await
+            .map_err(|e| format!("failed to read the client preface: {e}"))?;
+        let (client_frame_type, client_settings) = read_raw_frame(&mut stream).await?;
+        if client_frame_type != 0x04 {
+            return Err(format!(
+                "expected the client SETTINGS frame, got frame type {client_frame_type:#x}"
+            ));
+        }
+        let mut advertises_new_codepoint = false;
+        let mut advertises_old_codepoint = false;
+        if client_settings.len() % 6 != 0 {
+            return Err(format!(
+                "the client SETTINGS payload length must be a multiple of 6: {}",
+                client_settings.len()
+            ));
+        }
+        for setting in client_settings.chunks_exact(6) {
+            let id = u16::from_be_bytes([setting[0], setting[1]]);
+            let value = u32::from_be_bytes([setting[2], setting[3], setting[4], setting[5]]);
+            if id == SETTINGS_WT_ENABLED_DRAFT16 && value == 1 {
+                advertises_new_codepoint = true;
+            }
+            if id == SETTINGS_WT_ENABLED_DRAFT15 {
+                advertises_old_codepoint = true;
+            }
+        }
+        if !advertises_new_codepoint || advertises_old_codepoint {
+            return Err(format!(
+                "the client must advertise 0x2b67=1 and must not advertise 0x2b60 (new={advertises_new_codepoint}, old={advertises_old_codepoint})"
+            ));
+        }
+
+        // 任意の SETTINGS を送る (RFC 9113 §6.5)
+        let mut payload = Vec::with_capacity(settings.len() * 6);
+        for (id, value) in settings {
+            payload.extend_from_slice(&id.to_be_bytes());
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        let mut frame = Vec::with_capacity(9 + payload.len());
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes()[1..]);
+        frame.push(0x04);
+        frame.push(0x00);
+        frame.extend_from_slice(&0u32.to_be_bytes());
+        frame.extend_from_slice(&payload);
+        stream
+            .write_all(&frame)
+            .await
+            .map_err(|e| format!("failed to send the server SETTINGS: {e}"))?;
+        stream
+            .flush()
+            .await
+            .map_err(|e| format!("failed to flush the server SETTINGS: {e}"))?;
+
+        // RFC 9113 §6.5.3: SETTINGS を処理したら ACK を返す MUST。
+        // このサーバーはクライアントの SETTINGS を解析済みなので ACK を送る
+        let ack = [0u8, 0, 0, 0x04, 0x01, 0, 0, 0, 0];
+        stream
+            .write_all(&ack)
+            .await
+            .map_err(|e| format!("failed to send the SETTINGS ACK: {e}"))?;
+        stream
+            .flush()
+            .await
+            .map_err(|e| format!("failed to flush the SETTINGS ACK: {e}"))?;
+
+        // クライアントの次のフレームを観測する。SETTINGS ACK や WINDOW_UPDATE は読み飛ばす
+        let observation = loop {
+            let Some((frame_type, payload)) = read_raw_frame_or_closed(&mut stream).await? else {
+                break RawSettingsObservation::Closed;
+            };
+            match frame_type {
+                // HEADERS
+                0x01 => break RawSettingsObservation::Headers,
+                // GOAWAY: last-stream-id (4) + error code (4)
+                0x07 => {
+                    let code = payload
+                        .get(4..8)
+                        .and_then(|bytes| bytes.try_into().ok())
+                        .map(u32::from_be_bytes)
+                        .map(ErrorCode::from_u32)
+                        .ok_or_else(|| "GOAWAY payload is too short".to_string())?;
+                    break RawSettingsObservation::Goaway(code);
+                }
+                _ => continue,
+            }
+        };
+        let _ = observed.send(observation);
+        Ok(())
+    }
+
+    /// 生の HTTP/2 フレームを 1 つ読む
+    async fn read_raw_frame<S>(stream: &mut S) -> std::result::Result<(u8, Vec<u8>), String>
+    where
+        S: AsyncRead + Unpin,
+    {
+        read_raw_frame_or_closed(stream)
+            .await?
+            .ok_or_else(|| "the connection was closed while reading a frame".to_string())
+    }
+
+    /// 生の HTTP/2 フレームを 1 つ読む。接続が閉じた場合は `None`
+    async fn read_raw_frame_or_closed<S>(
+        stream: &mut S,
+    ) -> std::result::Result<Option<(u8, Vec<u8>)>, String>
+    where
+        S: AsyncRead + Unpin,
+    {
+        let mut header = [0u8; 9];
+        match stream.read_exact(&mut header).await {
+            Ok(_) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::BrokenPipe
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(e) => return Err(format!("failed to read a frame header: {e}")),
+        }
+        let len = u32::from_be_bytes([0, header[0], header[1], header[2]]) as usize;
+        let mut payload = vec![0u8; len];
+        stream
+            .read_exact(&mut payload)
+            .await
+            .map_err(|e| format!("failed to read a frame payload: {e}"))?;
+        Ok(Some((header[3], payload)))
+    }
+
+    /// 生 SETTINGS サーバーを起動し、待ち受けアドレスと観測結果の receiver を返す
+    async fn spawn_raw_settings_server(
+        settings: Vec<(u16, u32)>,
+    ) -> (
+        SocketAddr,
+        oneshot::Receiver<RawSettingsObservation>,
+        tokio::task::JoinHandle<std::result::Result<(), String>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind に成功すること");
+        let addr = listener
+            .local_addr()
+            .expect("local_addr の取得に成功すること");
+        let (observed_tx, observed_rx) = oneshot::channel();
+        let server = tokio::spawn(run_raw_settings_server(
+            listener,
+            test_server_tls(),
+            settings,
+            observed_tx,
+        ));
+        (addr, observed_rx, server)
+    }
+
+    /// テストサーバーの観測結果をタイムアウト付きで受け取る
+    async fn recv_observation(
+        observed: oneshot::Receiver<RawSettingsObservation>,
+    ) -> RawSettingsObservation {
+        tokio::time::timeout(std::time::Duration::from_secs(5), observed)
+            .await
+            .expect("観測結果の待機がタイムアウトしないこと")
+            .expect("観測結果が届くこと")
+    }
+
+    /// SETTINGS_ENABLE_CONNECT_PROTOCOL (RFC 8441)
+    const SETTINGS_ENABLE_CONNECT_PROTOCOL: u16 = 0x08;
+    /// draft-16 の SETTINGS_WT_ENABLED
+    const SETTINGS_WT_ENABLED_DRAFT16: u16 = 0x2b67;
+    /// draft-15 の SETTINGS_WT_ENABLED
+    const SETTINGS_WT_ENABLED_DRAFT15: u16 = 0x2b60;
+
+    /// 0x2b67=1 と ENABLE_CONNECT_PROTOCOL を広告する peer と CONNECT を開始する
+    ///
+    /// draft-ietf-webtrans-http2-16 §3.1: サーバーが `SETTINGS_ENABLE_CONNECT_PROTOCOL=1` と
+    /// `SETTINGS_WT_ENABLED=1` (`0x2b67`) を広告したら、クライアントは CONNECT を開始できる。
+    /// サーバーは SETTINGS の後に応答を返さず接続を閉じるため、client の connect は
+    /// `ConnectionClosed` で失敗する。ここでは CONNECT の HEADERS が wire に載ったことを
+    /// 観測する。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_accepts_draft_16_settings_codepoint() {
+        let (addr, observed, server) = spawn_raw_settings_server(vec![
+            (SETTINGS_ENABLE_CONNECT_PROTOCOL, 1),
+            (SETTINGS_WT_ENABLED_DRAFT16, 1),
+        ])
+        .await;
+        let config = ClientConfig::new(addr, "localhost").insecure();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            WtH2Client::connect(config, "/test"),
+        )
+        .await
+        .expect("タイムアウトしないこと");
+        match result {
+            // サーバーが応答を返さず接続を閉じるため、EOF の観測方法に依存して
+            // ConnectionClosed または下位トランスポートエラーになる
+            Err(TransportError::ConnectionClosed) | Err(TransportError::Transport(_)) => {}
+            Err(error) => panic!("ConnectionClosed で失敗すること: {error}"),
+            Ok(_) => panic!("server が応答しないため接続は失敗すること"),
+        }
+        assert_eq!(
+            recv_observation(observed).await,
+            RawSettingsObservation::Headers,
+            "新 codepoint の peer とは CONNECT を開始すること"
+        );
+        server
+            .await
+            .expect("サーバータスクの join に成功すること")
+            .expect("サーバーがエラーなく終了すること");
+    }
+
+    /// 旧 codepoint だけを広告する peer とは CONNECT を開始しない
+    ///
+    /// draft-ietf-webtrans-http2-16 §3.1: 旧 draft-15 の `0x2b60` は新しい SETTINGS では
+    /// ないため、依存は未知の SETTINGS として無視する。`ENABLE_CONNECT_PROTOCOL=1` を
+    /// 併せて広告しても `wt_enabled` は偽のままであり、CONNECT を開始しない。
+    /// サーバーは HEADERS も GOAWAY も受信せず、接続が閉じたことだけを観測する。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_rejects_old_settings_codepoint() {
+        let (addr, observed, server) = spawn_raw_settings_server(vec![
+            (SETTINGS_ENABLE_CONNECT_PROTOCOL, 1),
+            (SETTINGS_WT_ENABLED_DRAFT15, 1),
+        ])
+        .await;
+        let config = ClientConfig::new(addr, "localhost").insecure();
+        let error = expect_connect_error(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                WtH2Client::connect(config, "/test"),
+            )
+            .await
+            .expect("タイムアウトしないこと"),
+        );
+        assert!(
+            matches!(error, TransportError::InvalidState(_)),
+            "{error:?}"
+        );
+        assert_eq!(
+            recv_observation(observed).await,
+            RawSettingsObservation::Closed,
+            "旧 codepoint の peer には CONNECT を送らないこと"
+        );
+        server
+            .await
+            .expect("サーバータスクの join に成功すること")
+            .expect("サーバーがエラーなく終了すること");
+    }
+
+    /// 0x2b67=0 を広告する peer とは CONNECT を開始しない
+    ///
+    /// draft-ietf-webtrans-http2-16 §3.1: `SETTINGS_WT_ENABLED` の既定値は 0 であり、
+    /// 0 は WebTransport 非対応を意味する。`ENABLE_CONNECT_PROTOCOL=1` があっても
+    /// CONNECT を開始しない。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_rejects_zero_wt_enabled_value() {
+        let (addr, observed, server) = spawn_raw_settings_server(vec![
+            (SETTINGS_ENABLE_CONNECT_PROTOCOL, 1),
+            (SETTINGS_WT_ENABLED_DRAFT16, 0),
+        ])
+        .await;
+        let config = ClientConfig::new(addr, "localhost").insecure();
+        let error = expect_connect_error(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                WtH2Client::connect(config, "/test"),
+            )
+            .await
+            .expect("タイムアウトしないこと"),
+        );
+        assert!(
+            matches!(error, TransportError::InvalidState(_)),
+            "{error:?}"
+        );
+        assert_eq!(
+            recv_observation(observed).await,
+            RawSettingsObservation::Closed,
+            "0x2b67=0 の peer には CONNECT を送らないこと"
+        );
+        server
+            .await
+            .expect("サーバータスクの join に成功すること")
+            .expect("サーバーがエラーなく終了すること");
+    }
+
+    /// 0x2b67 が 1 を超える場合は PROTOCOL_ERROR の GOAWAY を送る
+    ///
+    /// draft-ietf-webtrans-http2-16 §3.1: クライアントは 1 を超える
+    /// `SETTINGS_WT_ENABLED` を `PROTOCOL_ERROR` の connection error として扱う MUST。
+    /// connection error は GOAWAY で peer に伝える (RFC 9113 §5.4.1)。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_rejects_non_boolean_wt_enabled_value() {
+        let (addr, observed, server) = spawn_raw_settings_server(vec![
+            (SETTINGS_ENABLE_CONNECT_PROTOCOL, 1),
+            (SETTINGS_WT_ENABLED_DRAFT16, 2),
+        ])
+        .await;
+        let config = ClientConfig::new(addr, "localhost").insecure();
+        let error = expect_connect_error(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                WtH2Client::connect(config, "/test"),
+            )
+            .await
+            .expect("タイムアウトしないこと"),
+        );
+        match &error {
+            TransportError::Http2(error) => assert_eq!(
+                error.kind(),
+                shiguredo_http2::ErrorKind::ConnectionError(ErrorCode::ProtocolError),
+                "{error:?}"
+            ),
+            other => panic!("TransportError::Http2 を期待したが {other:?} だった"),
+        }
+        assert_eq!(
+            recv_observation(observed).await,
+            RawSettingsObservation::Goaway(ErrorCode::ProtocolError),
+            "PROTOCOL_ERROR の GOAWAY を送ること"
+        );
         server
             .await
             .expect("サーバータスクの join に成功すること")
