@@ -166,6 +166,9 @@ pub enum Transport {
     Quic,
     /// WebTransport over HTTP/3 (QUIC 上の ALPN `h3`)
     ///
+    /// draft-17 の `SETTINGS_WT_ENABLED` (`0x20b8933b`) だけを広告する。旧 codepoint
+    /// (`0x2c7cf000`) だけを広告するサーバーとは共通版が無いため、
+    /// `TransportError::InvalidState` で接続に失敗する (draft-ietf-webtrans-http3-17 §7.1)。
     WtH3,
     /// WebTransport over HTTP/2 (TCP+TLS 上の ALPN `h2`)
     ///
@@ -1412,13 +1415,13 @@ pub async fn connect(
                     .await
                 }
                 Transport::WtH3 => {
+                    // draft-ietf-webtrans-http3-17 §3.1 / §9.2: draft-17 の codepoint だけを
+                    // 広告する。旧 codepoint だけの peer は wait_for_peer_settings が
+                    // InvalidState で拒否する
                     let mut client_config =
                         crate::webtransport_h3::ClientConfig::new(socket_addr, &server_name)
                             .authority(&authority_url)
-                            .enable_webtransport(
-                                shiguredo_http3::webtransport::Settings::new()
-                                    .wt_enabled(shiguredo_http3::VarInt::from_static(1)),
-                            );
+                            .enable_webtransport(crate::webtransport_h3::wt_h3_settings());
                     if receive_datagrams {
                         // subscriber は datagram を継続受信するためバックグラウンドタスクを起動する
                         client_config = client_config.receive_datagrams();
@@ -3134,6 +3137,9 @@ mod tests {
         assert!(!is_retryable_connect_error(
             &TransportError::ProtocolNegotiationFailed { error_code: 0 }
         ));
+        assert!(!is_retryable_connect_error(&TransportError::InvalidState(
+            "no common WebTransport draft version".to_string()
+        )));
     }
 
     /// ログ用サニタイズが printable ASCII 以外をエスケープし、通常の ASCII を残すこと

@@ -1,8 +1,8 @@
 //! WebTransport over HTTP/3 クライアント実装
 //!
 //! tobi-quic + shiguredo_http3 (Sans I/O) を使い WebTransport セッションを確立する。
-//! 節番号は draft-ietf-webtrans-http3-16 を参照する。依存する shiguredo_http3 が
-//! 対応する wire バージョンは draft-15 相当 (`:protocol` 値は共通)。
+//! 節番号は特記しない限り draft-ietf-webtrans-http3-16 を参照する。SETTINGS の codepoint と
+//! 版選択は draft-ietf-webtrans-http3-17 に対応し、依存する shiguredo_http3 の `Draft17` を使う。
 //!
 //! publisher (datagram 送信) と subscriber (datagram 受信 + 受信ストリーム accept) の
 //! 双方が利用する union API を提供する。
@@ -66,6 +66,15 @@ pub struct ClientConfig {
     pub receive_datagrams: bool,
 }
 
+/// WtH3 のクライアント SETTINGS を構築する
+///
+/// draft-ietf-webtrans-http3-17 §3.1 / §9.2: draft-17 の codepoint (`0x20b8933b`) だけを
+/// 広告する。旧 codepoint (`0x2c7cf000`) は広告しない。
+pub(crate) fn wt_h3_settings() -> shiguredo_http3::webtransport::Settings {
+    shiguredo_http3::webtransport::Settings::new()
+        .wt_enabled_draft17(shiguredo_http3::VarInt::from_static(1))
+}
+
 impl ClientConfig {
     pub fn new(remote_addr: SocketAddr, server_name: impl Into<String>) -> Self {
         let server_name = server_name.into();
@@ -104,6 +113,12 @@ impl ClientConfig {
         self
     }
 
+    /// WebTransport をクライアントとして有効にする
+    ///
+    /// 受け取った `Settings` をそのまま `enable_webtransport_client` に渡す。どの
+    /// `SETTINGS_WT_ENABLED` の codepoint を広告するか (どの draft 版に対応するか) は
+    /// 呼び出し側の責務であり、本メソッドでは版を選ばない。draft-17 だけに対応する場合は
+    /// `Settings::new().wt_enabled_draft17(VarInt::from_static(1))` を渡す。
     pub fn enable_webtransport(mut self, wt: shiguredo_http3::webtransport::Settings) -> Self {
         self.h3_settings = self.h3_settings.enable_webtransport_client(wt);
         self
@@ -735,7 +750,7 @@ fn connect_outcome(observation: &ConnectObservation) -> ConnectOutcome {
 ///
 /// h3 層は交渉失敗だけでなくプロトコルエラーでも `SessionClosed` を発行し、フロー制御違反では
 /// §5.6.2 が `WT_FLOW_CONTROL_ERROR` でのクローズを MUST とする。本実装が送る
-/// `webtransport::Settings` は `wt_enabled` だけを設定し、宣言に使う
+/// `webtransport::Settings` は `wt_enabled_draft17` だけを設定し、宣言に使う
 /// `wt_initial_max_streams_uni` / `wt_initial_max_streams_bidi` / `wt_initial_max_data` と
 /// `wt_max_sessions_draft14` は 0 / `None` のままにするためフロー制御を宣言しない。§5.1 は
 /// フロー制御を両端点が宣言した場合に有効と定めるため、依存 crate (shiguredo_http3) の
@@ -867,7 +882,7 @@ impl WtClient {
             .with_io(IoConfig::new(crate::local_bind_addr(config.remote_addr)))
             // ビルダーに保持した設定は `start()` で固定順に適用されるため、呼ぶ順序に
             // 依存しない
-            .with_transport(crate::quic::tobi::build_transport_config())
+            .with_transport(crate::quic::tobi::build_webtransport_transport_config())
             .with_datagram(crate::quic::tobi::datagram_config())
             // s2n-quic の endpoint は接続とは独立に常時ソケットを駆動していた。tobi-quic の
             // 既定はコマンド駆動であり、API を呼んでいない間は受信とタイマーを処理しない
@@ -897,7 +912,7 @@ impl WtClient {
 
         // QUIC transport parameter レベルの前提条件を注入する
         //
-        // draft-ietf-webtrans-http3-16 Section 3.1 / 4.6 は WebTransport CONNECT の前に
+        // draft-ietf-webtrans-http3-17 Section 3.1 / 4.6 は WebTransport CONNECT の前に
         // ピアの transport parameter (max_datagram_frame_size > 0 と RESET_STREAM_AT 対応) を
         // 検証することを求める。I/O 層がその結果を注入しないと CONNECT は拒否される。
         //
@@ -923,8 +938,8 @@ impl WtClient {
 
         // 接続を分割し、単方向ストリームの受信タスクを先に起動する
         //
-        // draft-ietf-webtrans-http3-16 Section 3.1 / 4.6 は WebTransport CONNECT を
-        // 送る前に peer の SETTINGS (wt_enabled / enable_connect_protocol / h3_datagram) を
+        // draft-ietf-webtrans-http3-17 Section 3.1 / 4.6 は WebTransport CONNECT を
+        // 送る前に peer の SETTINGS (SETTINGS_WT_ENABLED / enable_connect_protocol / h3_datagram) を
         // 受信していることを要求する。peer の SETTINGS はサーバーの制御ストリーム
         // (単方向) で届くため、CONNECT を送る前に単方向ストリームを受信して
         // HTTP/3 状態へ流し込む必要がある。
@@ -1497,11 +1512,15 @@ async fn abort_connect_stream_read(recv_stream: &mut QuicRecvStream) {
 
 /// peer の SETTINGS 受信を待つ
 ///
-/// draft-ietf-webtrans-http3-16 Section 3.1 / 4.6 は WebTransport CONNECT の送信前に
+/// draft-ietf-webtrans-http3-17 Section 3.1 / 4.6 は WebTransport CONNECT の送信前に
 /// peer の SETTINGS を受信していることを要求する。待たずに送ると
 /// `WtSetupError::PeerSettingsNotReceived` で失敗する。
 /// peer の SETTINGS はサーバーの制御ストリーム (単方向) で届き、受信タスクが
 /// HTTP/3 状態へ流し込むたびに `notify` で通知する。
+///
+/// peer の SETTINGS を受信しても共通の WebTransport draft 版が無い場合
+/// (`negotiated_wt_draft_version()` が `None`) は、CONNECT を送らずに
+/// [`TransportError::InvalidState`] を返す (draft-ietf-webtrans-http3-17 §7.1)。
 ///
 /// 共有するセッション状態が終了へ進んだ場合も待機を終える。peer の制御ストリームが SETTINGS
 /// 以外のフレームで始まると h3 層は接続エラー (`H3_MISSING_SETTINGS`) を記録し、以後の入力を
@@ -1530,6 +1549,13 @@ async fn wait_for_peer_settings(
                 .lock()
                 .expect("connection state mutex must not be poisoned");
             if s.h3_conn.peer_settings().is_some() {
+                // draft-ietf-webtrans-http3-17 §7.1: 共通版が無い peer とは CONNECT を
+                // 開始しない。旧 codepoint だけの peer は `None` になる
+                if s.h3_conn.negotiated_wt_draft_version().is_none() {
+                    return Err(TransportError::InvalidState(
+                        "no common WebTransport draft version with the peer".to_string(),
+                    ));
+                }
                 return Ok(());
             }
         }
@@ -2958,21 +2984,35 @@ mod tests {
     /// `is_wt_fully_negotiated()` はローカルとピアの双方が WebTransport と H3 Datagram を
     /// 有効にしていることを要求するため、本番と同じ `enable_webtransport_client` を使う。
     fn test_local_settings() -> H3Settings {
-        H3Settings::default().enable_webtransport_client(
+        H3Settings::default().enable_webtransport_client(wt_h3_settings())
+    }
+
+    /// テストが peer (サーバー) として流す SETTINGS を作る
+    ///
+    /// サーバーは `ENABLE_CONNECT_PROTOCOL` を広告し、draft-17 の
+    /// `SETTINGS_WT_ENABLED` (`0x20b8933b`) も広告する (draft-ietf-webtrans-http3-17
+    /// §3.1 / §7.1)。h3 層と同じ `enable_webtransport_server` で構築する。
+    fn test_peer_settings() -> H3Settings {
+        H3Settings::default().enable_webtransport_server(
+            shiguredo_http3::webtransport::Settings::new()
+                .wt_enabled_draft17(shiguredo_http3::VarInt::from_static(1)),
+        )
+    }
+
+    /// 旧 codepoint (draft-15 / 16) だけを広告する peer の SETTINGS
+    fn test_peer_settings_legacy_codepoint() -> H3Settings {
+        H3Settings::default().enable_webtransport_server(
             shiguredo_http3::webtransport::Settings::new()
                 .wt_enabled(shiguredo_http3::VarInt::from_static(1)),
         )
     }
 
-    /// テストが peer (サーバー) として流す SETTINGS を作る
-    ///
-    /// サーバーは `ENABLE_CONNECT_PROTOCOL` を広告し、draft-15 では `SETTINGS_WT_ENABLED` も
-    /// 広告する (draft-ietf-webtrans-http3-16 §3.1 / §7.1)。h3 層と同じ
-    /// `enable_webtransport_server` で構築する。
-    fn test_peer_settings() -> H3Settings {
+    /// 旧 codepoint と新 codepoint の両方を広告する peer の SETTINGS
+    fn test_peer_settings_both() -> H3Settings {
         H3Settings::default().enable_webtransport_server(
             shiguredo_http3::webtransport::Settings::new()
-                .wt_enabled(shiguredo_http3::VarInt::from_static(1)),
+                .wt_enabled(shiguredo_http3::VarInt::from_static(1))
+                .wt_enabled_draft17(shiguredo_http3::VarInt::from_static(1)),
         )
     }
 
@@ -3090,18 +3130,23 @@ mod tests {
         buf
     }
 
-    /// draft-15 相当の peer と交渉済みの h3 接続状態を作る
+    /// draft-17 の peer と交渉済みの h3 接続状態を作る
     ///
     /// `feed_datagram` は WebTransport の交渉が完了するまで入力を `Ok(())` で捨てるため、
     /// peer の SETTINGS を流して交渉を完了させてから datagram のテストへ進む。
     ///
     /// QUIC transport parameter の検証結果は h3 層が「検証済み」とみなす値
-    /// (datagram あり / RESET_STREAM_AT 対応) を注入する。draft-15 は `reset_stream_at` を
-    /// 必須とする (draft-ietf-webtrans-http3-16 §3.1) ため、これが偽だと
+    /// (datagram あり / RESET_STREAM_AT 対応) を注入する。draft-17 は `reset_stream_at` を
+    /// 必須とする (draft-ietf-webtrans-http3-17 §3.1) ため、これが偽だと
     /// `is_wt_fully_negotiated()` が偽になり `feed_datagram` が入力を捨ててしまう。
     /// 本番ではピアの transport parameter を検証した結果を渡す。ここでは交渉を完了させるため
     /// 検証済みの値を注入する。
     fn negotiated_connection_state() -> ClientConnectionState {
+        negotiated_connection_state_with(&test_peer_settings())
+    }
+
+    /// 指定した peer SETTINGS を流し込んだ h3 接続状態を作る (共通版が無い設定も渡せる)
+    fn negotiated_connection_state_with(peer_settings: &H3Settings) -> ClientConnectionState {
         let mut state = ClientConnectionState::new(test_local_settings());
         state
             .h3_conn
@@ -3111,7 +3156,7 @@ mod tests {
             .h3_conn
             .feed_stream(
                 SERVER_CONTROL_STREAM_ID,
-                &peer_control_stream_bytes(&test_peer_settings()),
+                &peer_control_stream_bytes(peer_settings),
                 false,
             )
             .expect("peer の SETTINGS を流せること");
@@ -3933,6 +3978,108 @@ mod tests {
         assert!(
             result.is_ok(),
             "SETTINGS を受信していれば成功すること: {result:?}"
+        );
+    }
+
+    /// 新旧両方の codepoint を広告する peer とは CONNECT を開始する
+    #[tokio::test]
+    async fn wait_for_peer_settings_accepts_both_codepoints() {
+        let mut state = ClientConnectionState::new(test_local_settings());
+        state
+            .h3_conn
+            .feed_stream(
+                SERVER_CONTROL_STREAM_ID,
+                &peer_control_stream_bytes(&test_peer_settings_both()),
+                false,
+            )
+            .expect("peer の SETTINGS を流せること");
+        let state = Arc::new(StdMutex::new(state));
+        let notify = Notify::new();
+        let (_state_tx, mut state_rx) = watch::channel(WtSessionState::Active);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_peer_settings(&state, &notify, &mut state_rx),
+        )
+        .await
+        .expect("SETTINGS のタイムアウトを待たずに待機が終わること");
+        assert!(
+            result.is_ok(),
+            "新旧両方の peer とは交渉できること: {result:?}"
+        );
+    }
+
+    /// ローカルの SETTINGS は draft-17 の codepoint だけを広告する
+    #[test]
+    fn local_settings_advertise_only_draft17() {
+        let state = ClientConnectionState::new(test_local_settings());
+        let settings = state.h3_conn.local_settings();
+        assert!(settings.is_webtransport_enabled());
+        assert_eq!(
+            settings.webtransport_draft_pattern(),
+            Some(shiguredo_http3::webtransport::DraftVersion::Draft17)
+        );
+        let wt = settings
+            .wt_settings
+            .as_ref()
+            .expect("WebTransport の設定が入っていること");
+        assert_eq!(wt.wt_enabled, shiguredo_http3::VarInt::ZERO);
+        assert_eq!(
+            wt.wt_enabled_draft17,
+            shiguredo_http3::VarInt::from_static(1)
+        );
+    }
+
+    /// 新 codepoint だけの peer とは Draft17 を交渉する
+    #[test]
+    fn draft17_peer_is_negotiated() {
+        let state = negotiated_connection_state_with(&test_peer_settings());
+        assert_eq!(
+            state.h3_conn.negotiated_wt_draft_version(),
+            Some(shiguredo_http3::webtransport::DraftVersion::Draft17)
+        );
+    }
+
+    /// 新旧両方の codepoint を広告する peer とは Draft17 を交渉する
+    #[test]
+    fn both_codepoints_peer_selects_draft17() {
+        let state = negotiated_connection_state_with(&test_peer_settings_both());
+        assert_eq!(
+            state.h3_conn.negotiated_wt_draft_version(),
+            Some(shiguredo_http3::webtransport::DraftVersion::Draft17)
+        );
+    }
+
+    /// 旧 codepoint だけの peer とは共通版が無い
+    #[test]
+    fn legacy_codepoint_only_peer_has_no_common_version() {
+        let state = negotiated_connection_state_with(&test_peer_settings_legacy_codepoint());
+        assert_eq!(state.h3_conn.negotiated_wt_draft_version(), None);
+    }
+
+    /// 共通版が無い peer とは CONNECT を開始しない
+    #[tokio::test]
+    async fn wait_for_peer_settings_rejects_peer_without_common_version() {
+        let mut state = ClientConnectionState::new(test_local_settings());
+        state
+            .h3_conn
+            .feed_stream(
+                SERVER_CONTROL_STREAM_ID,
+                &peer_control_stream_bytes(&test_peer_settings_legacy_codepoint()),
+                false,
+            )
+            .expect("peer の SETTINGS を流せること");
+        let state = Arc::new(StdMutex::new(state));
+        let notify = Notify::new();
+        let (_state_tx, mut state_rx) = watch::channel(WtSessionState::Active);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_peer_settings(&state, &notify, &mut state_rx),
+        )
+        .await
+        .expect("SETTINGS のタイムアウトを待たずに待機が終わること");
+        assert!(
+            matches!(result, Err(TransportError::InvalidState(_))),
+            "共通版が無い peer は InvalidState で失敗すること: {result:?}"
         );
     }
 

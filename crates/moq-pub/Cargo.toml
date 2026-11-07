@@ -19,7 +19,7 @@ shiguredo_audio_device = "2026.4"
 # AV1 デコーダ (dav1d、MP4 再エンコード配信の入力デコード)
 shiguredo_dav1d = "2026.3"
 # HTTP/3 / WebTransport クライアント
-shiguredo_http3 = "2026.1.0-canary.13"
+shiguredo_http3 = "2026.1.0-canary.14"
 # VP8 / VP9 エンコーダ・デコーダ (libvpx)。Windows は x86_64-pc-windows-msvc のみ対応する
 shiguredo_libvpx = "2026.2.0-canary.3"
 # MOQT 本体 (ローカル参照)

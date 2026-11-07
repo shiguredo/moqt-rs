@@ -46,6 +46,17 @@ pub(crate) fn build_transport_config() -> ConnectionConfig {
     config
 }
 
+/// WebTransport over HTTP/3 用の transport parameter を構築する
+///
+/// draft-ietf-webtrans-http3-17 §3.1: WebTransport の端点は空の `reset_stream_at`
+/// transport parameter を広告する。ネイティブ QUIC のバックエンドは従来の
+/// [`build_transport_config`] を使い、この設定を広告しない。
+pub(crate) fn build_webtransport_transport_config() -> ConnectionConfig {
+    let mut config = build_transport_config();
+    config.transport_params.reset_stream_at = true;
+    config
+}
+
 /// DATAGRAM を有効にする設定
 ///
 /// MOQT は DATAGRAM (RFC 9221) で音声とメディアの一部を運ぶため、DATAGRAM を広告する。
@@ -204,4 +215,23 @@ const MAX_VARINT: u64 = (1 << 62) - 1;
 /// tobi-quic のエラーを共通の QUIC エラーへ写す
 pub(crate) fn map_error(error: tobi_quic::Error) -> QuicError {
     QuicError::from(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WtH3 の transport config だけが reset_stream_at を広告する
+    ///
+    /// draft-ietf-webtrans-http3-17 §3.1: WebTransport の端点は空の `reset_stream_at`
+    /// transport parameter を広告する。ネイティブ QUIC は広告しない。
+    #[test]
+    fn webtransport_config_advertises_reset_stream_at_only_for_webtransport() {
+        assert!(
+            build_webtransport_transport_config()
+                .transport_params
+                .reset_stream_at
+        );
+        assert!(!build_transport_config().transport_params.reset_stream_at);
+    }
 }
