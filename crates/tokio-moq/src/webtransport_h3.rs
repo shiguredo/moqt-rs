@@ -864,6 +864,13 @@ pub struct WtClient;
 
 impl WtClient {
     /// WebTransport セッションを確立する
+    ///
+    /// # 再開と SETTINGS
+    ///
+    /// 本クライアントは前回接続の WebTransport SETTINGS を保持・注入せず、0-RTT も使わない。
+    /// 現在の接続で受信した SETTINGS と、省略された項目の既定値だけを使う。版選択は
+    /// 現在のローカル SETTINGS と peer SETTINGS だけで決まり、前回接続の値には依存しない
+    /// (draft-ietf-webtrans-http3-17 §3.2 / §7.1)。
     pub async fn connect(config: ClientConfig, path: &str) -> Result<WtSession> {
         let tls = if config.disable_cert_validation {
             // 開発用: 証明書検証をスキップする。WebTransport over HTTP/3 の ALPN は
@@ -898,6 +905,9 @@ impl WtClient {
             ))
             .await
             .map_err(TransportError::transport)?;
+        // 0-RTT を使わないため `connect_early` は呼ばない。前回接続の SETTINGS を
+        // 注入せず、現接続で受信した SETTINGS だけを使う
+        // (draft-ietf-webtrans-http3-17 §3.2)。
         // peer の STOP_SENDING の観測を MOQT 層へ渡すタスクを起動する。
         //
         // WebTransport over HTTP/3 では HTTP/3 の code space を共有するため、MOQT 層が
@@ -3979,6 +3989,175 @@ mod tests {
             result.is_ok(),
             "SETTINGS を受信していれば成功すること: {result:?}"
         );
+    }
+
+    /// 前回接続の SETTINGS は draft-17 の現在値の比較に使われない
+    ///
+    /// draft-ietf-webtrans-http3-17 §3.2: draft-17 の 0-RTT 再開では前回の
+    /// WebTransport SETTINGS を保持した値として使わない。前回値より小さい現在値が
+    /// `H3_SETTINGS_ERROR` にならず、現在値がそのまま反映されることを確認する。
+    #[test]
+    fn previous_wt_settings_are_ignored_for_draft17() {
+        let mut state = ClientConnectionState::new(test_local_settings());
+        state.h3_conn.set_previous_wt_settings(
+            shiguredo_http3::webtransport::Settings::new()
+                .wt_enabled_draft17(shiguredo_http3::VarInt::from_static(1))
+                .wt_initial_max_streams_uni(shiguredo_http3::VarInt::from_static(100))
+                .wt_initial_max_streams_bidi(shiguredo_http3::VarInt::from_static(50))
+                .wt_initial_max_data(shiguredo_http3::VarInt::from_static(1_048_576)),
+        );
+        let peer = H3Settings::default().enable_webtransport_server(
+            shiguredo_http3::webtransport::Settings::new()
+                .wt_enabled_draft17(shiguredo_http3::VarInt::from_static(1))
+                .wt_initial_max_streams_uni(shiguredo_http3::VarInt::from_static(10))
+                .wt_initial_max_streams_bidi(shiguredo_http3::VarInt::from_static(5))
+                .wt_initial_max_data(shiguredo_http3::VarInt::from_static(1024)),
+        );
+        let result = state.h3_conn.feed_stream(
+            SERVER_CONTROL_STREAM_ID,
+            &peer_control_stream_bytes(&peer),
+            false,
+        );
+        assert!(
+            result.is_ok(),
+            "draft-17 では前回値との比較で H3_SETTINGS_ERROR にならないこと: {result:?}"
+        );
+        let current = state
+            .h3_conn
+            .peer_settings()
+            .and_then(|settings| settings.wt_settings.as_ref())
+            .expect("peer の WebTransport SETTINGS が入っていること");
+        assert_eq!(
+            current.wt_initial_max_streams_uni,
+            shiguredo_http3::VarInt::from_static(10),
+            "現在の peer SETTINGS の単方向上限定が反映されること"
+        );
+        assert_eq!(
+            current.wt_initial_max_streams_bidi,
+            shiguredo_http3::VarInt::from_static(5),
+            "現在の peer SETTINGS の双方向上限定が反映されること"
+        );
+        assert_eq!(
+            current.wt_initial_max_data,
+            shiguredo_http3::VarInt::from_static(1024),
+            "現在の peer SETTINGS のデータ上限が反映されること"
+        );
+        assert_eq!(
+            state.h3_conn.negotiated_wt_draft_version(),
+            Some(shiguredo_http3::webtransport::DraftVersion::Draft17)
+        );
+    }
+
+    /// ローカルが新旧両方を広告する場合、前回値は版選択に混入しない
+    ///
+    /// 前回接続が draft-17、現接続の peer が旧 codepoint だけなら、前回値が
+    /// peer 側の設定として混入しない限り Draft15 が選ばれる。
+    #[test]
+    fn previous_wt_settings_do_not_change_version_negotiation() {
+        let local = H3Settings::default().enable_webtransport_client(
+            shiguredo_http3::webtransport::Settings::new()
+                .wt_enabled(shiguredo_http3::VarInt::from_static(1))
+                .wt_enabled_draft17(shiguredo_http3::VarInt::from_static(1)),
+        );
+        let mut state = ClientConnectionState::new(local);
+        state.h3_conn.set_previous_wt_settings(
+            shiguredo_http3::webtransport::Settings::new()
+                .wt_enabled_draft17(shiguredo_http3::VarInt::from_static(1)),
+        );
+        state
+            .h3_conn
+            .feed_stream(
+                SERVER_CONTROL_STREAM_ID,
+                &peer_control_stream_bytes(&test_peer_settings_legacy_codepoint()),
+                false,
+            )
+            .expect("peer の SETTINGS を流せること");
+        assert_eq!(
+            state.h3_conn.negotiated_wt_draft_version(),
+            Some(shiguredo_http3::webtransport::DraftVersion::Draft15),
+            "前回値ではなく現在の peer SETTINGS だけで版を選ぶこと"
+        );
+    }
+
+    /// draft-15 では前回値より小さい現在値が H3_SETTINGS_ERROR になる
+    ///
+    /// draft-15 / 16 は前回接続の SETTINGS を引き継ぐため、減少は
+    /// `H3_SETTINGS_ERROR` になる。draft-17 の除外がこの比較まで無効化していないことを
+    /// 対照テストで固定する (draft-ietf-webtrans-http3-17 §3.2)。
+    #[test]
+    fn previous_wt_settings_are_compared_for_draft15() {
+        let local = H3Settings::default().enable_webtransport_client(
+            shiguredo_http3::webtransport::Settings::new()
+                .wt_enabled(shiguredo_http3::VarInt::from_static(1)),
+        );
+        let mut state = ClientConnectionState::new(local);
+        state.h3_conn.set_previous_wt_settings(
+            shiguredo_http3::webtransport::Settings::new()
+                .wt_enabled(shiguredo_http3::VarInt::from_static(1))
+                .wt_initial_max_data(shiguredo_http3::VarInt::from_static(1_048_576)),
+        );
+        let peer = H3Settings::default().enable_webtransport_server(
+            shiguredo_http3::webtransport::Settings::new()
+                .wt_enabled(shiguredo_http3::VarInt::from_static(1))
+                .wt_initial_max_data(shiguredo_http3::VarInt::from_static(1024)),
+        );
+        let result = state.h3_conn.feed_stream(
+            SERVER_CONTROL_STREAM_ID,
+            &peer_control_stream_bytes(&peer),
+            false,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(shiguredo_http3::Error::ConnectionError(
+                    shiguredo_http3::ErrorCode::SettingsError
+                ))
+            ),
+            "draft-15 では前回値より小さい現在値が H3_SETTINGS_ERROR になること: {result:?}"
+        );
+    }
+
+    /// 前回接続の SETTINGS だけでは SETTINGS 到着待ちが完了しない
+    #[tokio::test]
+    async fn wait_for_peer_settings_does_not_use_previous_settings() {
+        let mut state = ClientConnectionState::new(test_local_settings());
+        state.h3_conn.set_previous_wt_settings(
+            shiguredo_http3::webtransport::Settings::new()
+                .wt_enabled_draft17(shiguredo_http3::VarInt::from_static(1)),
+        );
+        let state = Arc::new(StdMutex::new(state));
+        let notify = Notify::new();
+        let (_state_tx, mut state_rx) = watch::channel(WtSessionState::Active);
+        let pending = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            wait_for_peer_settings(&state, &notify, &mut state_rx),
+        )
+        .await;
+        assert!(
+            pending.is_err(),
+            "前回値だけでは現接続の SETTINGS 到着待ちが完了しないこと"
+        );
+
+        {
+            let mut s = state
+                .lock()
+                .expect("connection state mutex must not be poisoned");
+            s.h3_conn
+                .feed_stream(
+                    SERVER_CONTROL_STREAM_ID,
+                    &peer_control_stream_bytes(&test_peer_settings()),
+                    false,
+                )
+                .expect("peer の SETTINGS を流せること");
+        }
+        notify.notify_waiters();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_peer_settings(&state, &notify, &mut state_rx),
+        )
+        .await
+        .expect("SETTINGS 到着後は待たずに終わること");
+        assert!(result.is_ok(), "現接続の SETTINGS で待機が完了すること");
     }
 
     /// 新旧両方の codepoint を広告する peer とは CONNECT を開始する
