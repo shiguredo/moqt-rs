@@ -1383,6 +1383,10 @@ impl DriverState {
                         return Ok(false);
                     }
                 }
+                // WT_MAX_* の増加で送信ウィンドウが広がった場合に、滞留中の送信を再開する。
+                // 受信した capsule の処理だけでは `Command::Send` が来るまで再開しないため、
+                // 増加を反映した直後にも送信可能分を流す
+                self.flush_pending_sends();
 
                 // RFC 9113 §6.9.1: 受信した分の WINDOW_UPDATE を即座に返し、
                 // 単一の CONNECT ストリーム上でピアが送り続けられるようにする
@@ -1666,10 +1670,9 @@ impl DriverState {
 
     /// 送信待ちのデータを送信ウィンドウの空きに応じて送る
     ///
-    /// 本メソッドを呼ぶのは [`Command::Send`] の処理だけである。送信ウィンドウの拡張
-    /// (`WT_MAX_STREAM_DATA` capsule) は [`WtEvent`] を発火しないため、滞留したデータは次の
-    /// `Command::Send` が届くまで送られない (既存の `send` にも共通の制約で、送信を待ってから
-    /// `finish` を呼ぶ現在の利用では空 FIN の特例で直ちに送られる)。
+    /// 本メソッドを呼ぶのは [`Command::Send`] の処理と、受信した `WT_MAX_*` の処理後である。
+    /// 増加した送信ウィンドウを反映した直後に呼ぶことで、滞留したデータを次の
+    /// `Command::Send` を待たずに送る。
     fn flush_pending_sends(&mut self) {
         let stream_ids: Vec<WtStreamId> = self.pending_sends.keys().copied().collect();
         for stream_id in stream_ids {
@@ -1921,6 +1924,36 @@ mod tests {
             limits.wt_initial_max_streams_uni(),
             Some(config.initial_max_streams_uni as u32)
         );
+    }
+
+    /// build_limits が WtConfig の 6 つの初期値を SETTINGS へ写す
+    ///
+    /// draft-ietf-webtrans-http2-16 §4.3.1 / §11.2: `SETTINGS_WT_INITIAL_MAX_*` は
+    /// session data / stream data (uni / bidi local / bidi remote) / streams (uni / bidi) に
+    /// 対応する。フィールドの取り違えを検出するため、すべて異なる値で検証する。
+    #[test]
+    fn build_limits_maps_each_webtransport_setting() {
+        let config = WtConfig {
+            initial_max_data: 2_000_001,
+            initial_max_stream_data_uni: 2_000_002,
+            initial_max_stream_data_bidi_local: 2_000_003,
+            initial_max_stream_data_bidi_remote: 2_000_004,
+            initial_max_streams_uni: 2_000_005,
+            initial_max_streams_bidi: 2_000_006,
+        };
+        let limits = build_limits(&config).expect("構築に成功すること");
+        assert_eq!(limits.wt_initial_max_data(), Some(2_000_001));
+        assert_eq!(limits.wt_initial_max_stream_data_uni(), Some(2_000_002));
+        assert_eq!(
+            limits.wt_initial_max_stream_data_bidi_local(),
+            Some(2_000_003)
+        );
+        assert_eq!(
+            limits.wt_initial_max_stream_data_bidi_remote(),
+            Some(2_000_004)
+        );
+        assert_eq!(limits.wt_initial_max_streams_uni(), Some(2_000_005));
+        assert_eq!(limits.wt_initial_max_streams_bidi(), Some(2_000_006));
     }
 
     /// 既定のフロー制御窓が制御メッセージ 1 通分を運べること
@@ -3265,5 +3298,772 @@ mod tests {
             .await
             .expect("サーバータスクの join に成功すること")
             .expect("サーバーがエラーなく終了すること");
+    }
+
+    // -----------------------------------------------------------------------
+    // WT_MAX_* capsule の厳密増加を実 peer で検証する
+    //
+    // draft-ietf-webtrans-http2-16 §6.5〜§6.7 は、前回受理した値または SETTINGS の
+    // 初期値を増加させない WT_MAX_DATA / WT_MAX_STREAM_DATA / WT_MAX_STREAMS を
+    // WT_FLOW_CONTROL_ERROR にする MUST を定める。初期値は §4.3 / §11.2 による。
+    // -----------------------------------------------------------------------
+
+    /// WT_MAX_* の厳密増加のテストで使う広告値・更新値・送信値
+    ///
+    /// `initial` は SETTINGS で広告する初期値、`raw` は生 capsule で送る非増加値、
+    /// `increase` は `WtSession::send_max_*` で送る増加値である。初期値は依存の
+    /// 既定値 (session data 1 MiB / stream data 256 KiB / streams 100) より大きい値を
+    /// 使い、`build_limits` の対応が壊れた場合に「増加」になってテストが落ちるようにする。
+    #[derive(Debug, Clone, Copy)]
+    enum FlowControlProbe {
+        /// WT_MAX_DATA を初期値と同じ値または小さい値で送る
+        MaxData { initial: u64, raw: u64 },
+        /// WT_MAX_DATA を増加させた後に同値・小さい値を送る
+        MaxDataUpdated {
+            initial: u64,
+            increase: u64,
+            raw: u64,
+        },
+        /// WT_MAX_DATA を増加させ、client がデータを送れることを確認する
+        MaxDataIncrease { initial: u64, increase: u64 },
+        /// 単方向ストリームの WT_MAX_STREAM_DATA を初期値と同じ値で送る
+        StreamDataUni { initial: u64, raw: u64 },
+        /// client 開始 bidi の WT_MAX_STREAM_DATA を初期値と同じ値で送る
+        StreamDataBidiRemote { initial: u64, raw: u64 },
+        /// server 開始 bidi の WT_MAX_STREAM_DATA を初期値と同じ値で送る
+        StreamDataBidiLocal { initial: u64, raw: u64 },
+        /// 単方向ストリームの WT_MAX_STREAM_DATA を増加させた後に同値・小さい値を送る
+        StreamDataUpdatedUni {
+            initial: u64,
+            increase: u64,
+            raw: u64,
+        },
+        /// server 開始 bidi の WT_MAX_STREAM_DATA を増加させ、client の送信を確認する
+        StreamDataIncreaseBidiLocal { initial: u64, increase: u64 },
+        /// WT_MAX_STREAMS を単方向で初期値と同じ値で送る
+        StreamsUni { initial: u64, raw: u64 },
+        /// WT_MAX_STREAMS を双方向で初期値と同じ値で送る
+        StreamsBidi { initial: u64, raw: u64 },
+        /// WT_MAX_STREAMS を単方向で増加させた後に同値・小さい値を送る
+        StreamsUpdatedUni {
+            initial: u64,
+            increase: u64,
+            raw: u64,
+        },
+        /// WT_MAX_STREAMS を単方向で増加させ、client のストリーム開設を確認する
+        StreamsIncreaseUni { initial: u64, increase: u64 },
+        /// WT_MAX_STREAMS を双方向で増加させ、client のストリーム開設を確認する
+        StreamsIncreaseBidi { initial: u64, increase: u64 },
+    }
+
+    /// WT_MAX_* のテストサーバーが観測した結果
+    #[derive(Debug, PartialEq, Eq)]
+    enum FlowControlObservation {
+        /// client が CONNECT stream を reset した
+        Reset(ErrorCode),
+        /// client からデータを受信した (増加値の受理)
+        Data(Vec<u8>),
+        /// client が開いたストリーム数を観測した
+        Streams(usize),
+        /// client が接続を閉じた
+        Closed,
+    }
+
+    /// WT_MAX_* のテストで使う `WtConfig`
+    fn flow_control_config(probe: FlowControlProbe) -> WtConfig {
+        let mut config = WtConfig::default();
+        match probe {
+            FlowControlProbe::MaxData { initial, .. }
+            | FlowControlProbe::MaxDataUpdated { initial, .. }
+            | FlowControlProbe::MaxDataIncrease { initial, .. } => {
+                config.initial_max_data = initial;
+            }
+            FlowControlProbe::StreamDataUni { initial, .. }
+            | FlowControlProbe::StreamDataUpdatedUni { initial, .. } => {
+                config.initial_max_stream_data_uni = initial;
+            }
+            FlowControlProbe::StreamDataBidiRemote { initial, .. } => {
+                config.initial_max_stream_data_bidi_remote = initial;
+            }
+            FlowControlProbe::StreamDataBidiLocal { initial, .. }
+            | FlowControlProbe::StreamDataIncreaseBidiLocal { initial, .. } => {
+                config.initial_max_stream_data_bidi_local = initial;
+                config.initial_max_streams_bidi = 1;
+            }
+            FlowControlProbe::StreamsUni { initial, .. }
+            | FlowControlProbe::StreamsUpdatedUni { initial, .. }
+            | FlowControlProbe::StreamsIncreaseUni { initial, .. } => {
+                config.initial_max_streams_uni = initial;
+            }
+            FlowControlProbe::StreamsBidi { initial, .. }
+            | FlowControlProbe::StreamsIncreaseBidi { initial, .. } => {
+                config.initial_max_streams_bidi = initial;
+            }
+        }
+        config
+    }
+
+    /// Capsule を wire のバイト列にする
+    fn encoded_capsule(capsule: shiguredo_http2::webtransport::Capsule) -> Vec<u8> {
+        let mut encoder = shiguredo_http2::webtransport::CapsuleEncoder::new();
+        encoder.encode(&capsule);
+        encoder.take()
+    }
+
+    /// CONNECT stream に capsule を直接送る
+    ///
+    /// `WtSession::send_max_data` / `send_max_stream_data` / `send_max_streams` は送信側でも
+    /// 非増加を拒否するため、拒否ケースの capsule は `CapsuleEncoder` で符号化して直接送る
+    /// (draft-ietf-webtrans-http2-16 §6.5 / §6.6 / §6.7)。
+    async fn send_raw_capsule<S>(
+        io: &mut H2Io<S>,
+        connect_stream: StreamId,
+        capsule: shiguredo_http2::webtransport::Capsule,
+    ) -> std::result::Result<(), String>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        io.conn
+            .send_data(connect_stream, encoded_capsule(capsule), false)
+            .map_err(|e| format!("failed to send a raw capsule: {e}"))?;
+        io.flush()
+            .await
+            .map_err(|e| format!("failed to flush a raw capsule: {e}"))
+    }
+
+    /// WT_MAX_* の厳密増加を検証するテストサーバー
+    ///
+    /// 広告値を `WtConfig` に設定し、client に同値・小さい値の capsule を送る。
+    /// 増加値のケースでは `WtSession::send_max_*` で増加を送り、client の送信や
+    /// ストリーム開設を待つ。
+    async fn run_flow_control_server(
+        listener: tokio::net::TcpListener,
+        tls: tokio_rustls::TlsAcceptor,
+        probe: FlowControlProbe,
+        observed: oneshot::Sender<FlowControlObservation>,
+    ) -> std::result::Result<(), String> {
+        let (tcp, _) = listener
+            .accept()
+            .await
+            .map_err(|e| format!("accept failed: {e}"))?;
+        let stream = tls
+            .accept(tcp)
+            .await
+            .map_err(|e| format!("TLS accept failed: {e}"))?;
+
+        let wt_config = flow_control_config(probe);
+        let limits = build_limits(&wt_config).map_err(|e| format!("limits failed: {e}"))?;
+        let mut io = H2Io::server(stream, limits);
+        io.send_preface()
+            .await
+            .map_err(|e| format!("failed to send server SETTINGS: {e}"))?;
+
+        let mut wt: Option<WtSession> = None;
+        let mut connect_stream: Option<StreamId> = None;
+        let mut target_stream: Option<WtStreamId> = None;
+        let mut target_is_local_bidi = false;
+        let mut received = Vec::new();
+        let mut opened_streams = 0usize;
+
+        loop {
+            let event = io
+                .next_event()
+                .await
+                .map_err(|e| format!("server next_event failed: {e}"))?;
+            match event {
+                Event::HeadersReceived {
+                    stream_id, headers, ..
+                } if connect_stream.is_none() => {
+                    let mut session =
+                        accept_wt_connect(&mut io, &wt_config, stream_id, &headers).await?;
+                    // CONNECT 直後に送れる capsule と、server 開始 bidi を準備する
+                    match probe {
+                        FlowControlProbe::MaxData { raw, .. } => {
+                            send_raw_capsule(
+                                &mut io,
+                                stream_id,
+                                shiguredo_http2::webtransport::Capsule::WtMaxData { maximum: raw },
+                            )
+                            .await?;
+                        }
+                        FlowControlProbe::MaxDataUpdated { increase, raw, .. } => {
+                            session
+                                .send_max_data(increase)
+                                .map_err(|e| format!("send_max_data failed: {e}"))?;
+                            pump_server_output(&mut io, &mut session, stream_id).await?;
+                            send_raw_capsule(
+                                &mut io,
+                                stream_id,
+                                shiguredo_http2::webtransport::Capsule::WtMaxData { maximum: raw },
+                            )
+                            .await?;
+                        }
+                        FlowControlProbe::MaxDataIncrease { increase, .. } => {
+                            session
+                                .send_max_data(increase)
+                                .map_err(|e| format!("send_max_data failed: {e}"))?;
+                            pump_server_output(&mut io, &mut session, stream_id).await?;
+                        }
+                        FlowControlProbe::StreamsUni { raw, .. } => {
+                            send_raw_capsule(
+                                &mut io,
+                                stream_id,
+                                shiguredo_http2::webtransport::Capsule::WtMaxStreams {
+                                    maximum: raw,
+                                    bidirectional: false,
+                                },
+                            )
+                            .await?;
+                        }
+                        FlowControlProbe::StreamsBidi { raw, .. } => {
+                            send_raw_capsule(
+                                &mut io,
+                                stream_id,
+                                shiguredo_http2::webtransport::Capsule::WtMaxStreams {
+                                    maximum: raw,
+                                    bidirectional: true,
+                                },
+                            )
+                            .await?;
+                        }
+                        FlowControlProbe::StreamsUpdatedUni { increase, raw, .. } => {
+                            session
+                                .send_max_streams(increase, false)
+                                .map_err(|e| format!("send_max_streams failed: {e}"))?;
+                            pump_server_output(&mut io, &mut session, stream_id).await?;
+                            send_raw_capsule(
+                                &mut io,
+                                stream_id,
+                                shiguredo_http2::webtransport::Capsule::WtMaxStreams {
+                                    maximum: raw,
+                                    bidirectional: false,
+                                },
+                            )
+                            .await?;
+                        }
+                        FlowControlProbe::StreamsIncreaseUni { increase, .. } => {
+                            session
+                                .send_max_streams(increase, false)
+                                .map_err(|e| format!("send_max_streams failed: {e}"))?;
+                            pump_server_output(&mut io, &mut session, stream_id).await?;
+                        }
+                        FlowControlProbe::StreamsIncreaseBidi { increase, .. } => {
+                            session
+                                .send_max_streams(increase, true)
+                                .map_err(|e| format!("send_max_streams failed: {e}"))?;
+                            pump_server_output(&mut io, &mut session, stream_id).await?;
+                        }
+                        FlowControlProbe::StreamDataBidiLocal { .. }
+                        | FlowControlProbe::StreamDataIncreaseBidiLocal { .. } => {
+                            let wt_stream_id = session
+                                .open_bidi_stream()
+                                .map_err(|e| format!("open_bidi_stream failed: {e}"))?;
+                            session
+                                .send_stream_data(wt_stream_id, b"hi", false)
+                                .map_err(|e| format!("send_stream_data failed: {e}"))?;
+                            if let FlowControlProbe::StreamDataIncreaseBidiLocal {
+                                increase, ..
+                            } = probe
+                            {
+                                session
+                                    .send_max_stream_data(wt_stream_id, increase)
+                                    .map_err(|e| format!("send_max_stream_data failed: {e}"))?;
+                            }
+                            pump_server_output(&mut io, &mut session, stream_id).await?;
+                            target_stream = Some(wt_stream_id);
+                            target_is_local_bidi = true;
+                        }
+                        _ => {}
+                    }
+                    wt = Some(session);
+                    connect_stream = Some(stream_id);
+                }
+                Event::DataReceived {
+                    stream_id,
+                    data,
+                    end_stream,
+                } if Some(stream_id) == connect_stream => {
+                    let session = wt.as_mut().ok_or("session is not established")?;
+                    session
+                        .feed(&data)
+                        .map_err(|e| format!("wt feed failed: {e}"))?;
+                    session
+                        .process()
+                        .map_err(|e| format!("wt process failed: {e}"))?;
+                    while let Some(event) = session.poll_event() {
+                        match event {
+                            WtEvent::StreamOpened {
+                                stream_id,
+                                bidirectional,
+                            } => {
+                                opened_streams += 1;
+                                match probe {
+                                    FlowControlProbe::StreamDataUni { raw, .. }
+                                        if !bidirectional && target_stream.is_none() =>
+                                    {
+                                        target_stream = Some(stream_id);
+                                        send_raw_capsule(
+                                            &mut io,
+                                            connect_stream.ok_or("connect stream is not established")?,
+                                            shiguredo_http2::webtransport::Capsule::WtMaxStreamData {
+                                                stream_id,
+                                                maximum: raw,
+                                            },
+                                        )
+                                        .await?;
+                                    }
+                                    FlowControlProbe::StreamDataBidiRemote { raw, .. }
+                                        if bidirectional && target_stream.is_none() =>
+                                    {
+                                        target_stream = Some(stream_id);
+                                        send_raw_capsule(
+                                            &mut io,
+                                            connect_stream.ok_or("connect stream is not established")?,
+                                            shiguredo_http2::webtransport::Capsule::WtMaxStreamData {
+                                                stream_id,
+                                                maximum: raw,
+                                            },
+                                        )
+                                        .await?;
+                                    }
+                                    FlowControlProbe::StreamDataUpdatedUni {
+                                        increase,
+                                        raw,
+                                        ..
+                                    } if !bidirectional && target_stream.is_none() => {
+                                        target_stream = Some(stream_id);
+                                        session.send_max_stream_data(stream_id, increase).map_err(
+                                            |e| format!("send_max_stream_data failed: {e}"),
+                                        )?;
+                                        pump_server_output(
+                                            &mut io,
+                                            session,
+                                            connect_stream
+                                                .ok_or("connect stream is not established")?,
+                                        )
+                                        .await?;
+                                        send_raw_capsule(
+                                            &mut io,
+                                            connect_stream.ok_or("connect stream is not established")?,
+                                            shiguredo_http2::webtransport::Capsule::WtMaxStreamData {
+                                                stream_id,
+                                                maximum: raw,
+                                            },
+                                        )
+                                        .await?;
+                                    }
+                                    FlowControlProbe::StreamsIncreaseUni { .. }
+                                    | FlowControlProbe::StreamsIncreaseBidi { .. }
+                                        if opened_streams >= 2 =>
+                                    {
+                                        let _ = observed.send(FlowControlObservation::Streams(2));
+                                        return Ok(());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            WtEvent::StreamData { data, .. } => {
+                                received.extend_from_slice(&data);
+                            }
+                            _ => {}
+                        }
+                    }
+                    pump_server_output(&mut io, session, stream_id).await?;
+                    if matches!(
+                        probe,
+                        FlowControlProbe::StreamsIncreaseUni { .. }
+                            | FlowControlProbe::StreamsIncreaseBidi { .. }
+                    ) && opened_streams >= 2
+                    {
+                        let _ = observed.send(FlowControlObservation::Streams(2));
+                        return Ok(());
+                    }
+                    if !received.is_empty() {
+                        match probe {
+                            FlowControlProbe::MaxDataIncrease { .. } => {
+                                let _ = observed.send(FlowControlObservation::Data(received));
+                                return Ok(());
+                            }
+                            FlowControlProbe::StreamDataIncreaseBidiLocal { .. } => {
+                                let _ = observed.send(FlowControlObservation::Data(received));
+                                return Ok(());
+                            }
+                            FlowControlProbe::StreamDataBidiLocal { raw, .. }
+                                if target_is_local_bidi =>
+                            {
+                                let target = target_stream.ok_or("target stream is missing")?;
+                                send_raw_capsule(
+                                    &mut io,
+                                    stream_id,
+                                    shiguredo_http2::webtransport::Capsule::WtMaxStreamData {
+                                        stream_id: target,
+                                        maximum: raw,
+                                    },
+                                )
+                                .await?;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if end_stream {
+                        break;
+                    }
+                }
+                Event::StreamReset {
+                    stream_id,
+                    error_code,
+                    ..
+                } if Some(stream_id) == connect_stream => {
+                    let _ = observed.send(FlowControlObservation::Reset(error_code));
+                    return Ok(());
+                }
+                Event::StreamClosed { stream_id } if Some(stream_id) == connect_stream => {
+                    let _ = observed.send(FlowControlObservation::Closed);
+                    return Ok(());
+                }
+                Event::ConnectionError { .. } => {
+                    let _ = observed.send(FlowControlObservation::Closed);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
+        let _ = observed.send(FlowControlObservation::Closed);
+        Ok(())
+    }
+
+    /// WT_MAX_* のテストサーバーを起動する
+    async fn spawn_flow_control_server(
+        probe: FlowControlProbe,
+    ) -> (
+        SocketAddr,
+        oneshot::Receiver<FlowControlObservation>,
+        tokio::task::JoinHandle<std::result::Result<(), String>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind に成功すること");
+        let addr = listener
+            .local_addr()
+            .expect("local_addr の取得に成功すること");
+        let (observed_tx, observed_rx) = oneshot::channel();
+        let server = tokio::spawn(run_flow_control_server(
+            listener,
+            test_server_tls(),
+            probe,
+            observed_tx,
+        ));
+        (addr, observed_rx, server)
+    }
+
+    /// client 側の準備 (ストリームの開設と送信)
+    async fn prepare_flow_control_client(session: &mut WtH2Session, probe: FlowControlProbe) {
+        let timeout = std::time::Duration::from_secs(5);
+        match probe {
+            FlowControlProbe::MaxDataIncrease { .. } => {
+                let mut send = tokio::time::timeout(timeout, session.open_uni_stream())
+                    .await
+                    .expect("open_uni_stream の待機がタイムアウトしないこと")
+                    .expect("open_uni_stream に成功すること");
+                tokio::time::timeout(timeout, send.send(b"hello"))
+                    .await
+                    .expect("send の待機がタイムアウトしないこと")
+                    .expect("send に成功すること");
+                tokio::time::timeout(timeout, send.finish())
+                    .await
+                    .expect("finish の待機がタイムアウトしないこと")
+                    .expect("finish に成功すること");
+            }
+            FlowControlProbe::StreamDataUni { .. }
+            | FlowControlProbe::StreamDataUpdatedUni { .. } => {
+                let mut send = tokio::time::timeout(timeout, session.open_uni_stream())
+                    .await
+                    .expect("open_uni_stream の待機がタイムアウトしないこと")
+                    .expect("open_uni_stream に成功すること");
+                tokio::time::timeout(timeout, send.send(b"x"))
+                    .await
+                    .expect("send の待機がタイムアウトしないこと")
+                    .expect("send に成功すること");
+            }
+            FlowControlProbe::StreamDataBidiRemote { .. } => {
+                let (mut send, _recv) = tokio::time::timeout(timeout, session.open_bi_stream())
+                    .await
+                    .expect("open_bi_stream の待機がタイムアウトしないこと")
+                    .expect("open_bi_stream に成功すること");
+                tokio::time::timeout(timeout, send.send(b"x"))
+                    .await
+                    .expect("send の待機がタイムアウトしないこと")
+                    .expect("send に成功すること");
+            }
+            FlowControlProbe::StreamDataBidiLocal { .. }
+            | FlowControlProbe::StreamDataIncreaseBidiLocal { .. } => {
+                let mut bi_rx = session
+                    .take_bi_receiver()
+                    .expect("bi receiver を取り出せること");
+                let (mut send, _recv) = tokio::time::timeout(timeout, bi_rx.recv())
+                    .await
+                    .expect("server 開始 bidi の受信がタイムアウトしないこと")
+                    .expect("server 開始 bidi を受信できること");
+                tokio::time::timeout(timeout, send.send(b"x"))
+                    .await
+                    .expect("send の待機がタイムアウトしないこと")
+                    .expect("send に成功すること");
+            }
+            FlowControlProbe::StreamsIncreaseUni { .. }
+            | FlowControlProbe::StreamsIncreaseBidi { .. } => {
+                let deadline = tokio::time::Instant::now() + timeout;
+                let mut opened = 0;
+                while opened < 2 {
+                    let bidirectional =
+                        matches!(probe, FlowControlProbe::StreamsIncreaseBidi { .. });
+                    let result =
+                        tokio::time::timeout(std::time::Duration::from_millis(200), async {
+                            if bidirectional {
+                                session.open_bi_stream().await.map(|(send, _recv)| send)
+                            } else {
+                                session.open_uni_stream().await
+                            }
+                        })
+                        .await;
+                    match result {
+                        Ok(Ok(mut send)) => {
+                            tokio::time::timeout(timeout, send.send(b"x"))
+                                .await
+                                .expect("send の待機がタイムアウトしないこと")
+                                .expect("send に成功すること");
+                            opened += 1;
+                        }
+                        _ => {
+                            assert!(
+                                tokio::time::Instant::now() < deadline,
+                                "WT_MAX_STREAMS の増加が反映されること"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// 拒否ケースの WT_MAX_* を実 peer で検証する
+    async fn assert_flow_control_reset(probe: FlowControlProbe) {
+        let (addr, observed, server) = spawn_flow_control_server(probe).await;
+        let config = ClientConfig::new(addr, "localhost").insecure();
+        let mut session = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            WtH2Client::connect(config, "/test"),
+        )
+        .await
+        .expect("タイムアウトしないこと")
+        .expect("接続に成功すること");
+        prepare_flow_control_client(&mut session, probe).await;
+        let observation = tokio::time::timeout(std::time::Duration::from_secs(10), observed)
+            .await
+            .expect("観測結果の待機がタイムアウトしないこと")
+            .expect("観測結果が届くこと");
+        assert_eq!(
+            observation,
+            FlowControlObservation::Reset(ErrorCode::WtFlowControlError),
+            "同値・小さい値の WT_MAX_* は WT_FLOW_CONTROL_ERROR で CONNECT stream を reset すること"
+        );
+        server
+            .await
+            .expect("サーバータスクの join に成功すること")
+            .expect("サーバーがエラーなく終了すること");
+    }
+
+    /// 増加値の受理を実 peer で検証する
+    async fn assert_flow_control_observation(
+        probe: FlowControlProbe,
+        expected: FlowControlObservation,
+    ) {
+        let (addr, observed, server) = spawn_flow_control_server(probe).await;
+        let config = ClientConfig::new(addr, "localhost").insecure();
+        let mut session = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            WtH2Client::connect(config, "/test"),
+        )
+        .await
+        .expect("タイムアウトしないこと")
+        .expect("接続に成功すること");
+        prepare_flow_control_client(&mut session, probe).await;
+        let observation = tokio::time::timeout(std::time::Duration::from_secs(10), observed)
+            .await
+            .expect("観測結果の待機がタイムアウトしないこと")
+            .expect("観測結果が届くこと");
+        assert_eq!(observation, expected, "増加値が受理されること");
+        server
+            .await
+            .expect("サーバータスクの join に成功すること")
+            .expect("サーバーがエラーなく終了すること");
+    }
+
+    /// SETTINGS 由来の初期値と同値の WT_MAX_DATA を拒否する
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_flow_control_rejects_equal_max_data_at_settings_value() {
+        assert_flow_control_reset(FlowControlProbe::MaxData {
+            initial: 2 * 1024 * 1024,
+            raw: 2 * 1024 * 1024,
+        })
+        .await;
+    }
+
+    /// SETTINGS 由来の初期値より小さい WT_MAX_DATA を拒否する
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_flow_control_rejects_smaller_max_data() {
+        assert_flow_control_reset(FlowControlProbe::MaxData {
+            initial: 2 * 1024 * 1024,
+            raw: 1024 * 1024 + 1,
+        })
+        .await;
+    }
+
+    /// 更新済みの WT_MAX_DATA と同値の値を拒否する
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_flow_control_rejects_equal_updated_max_data() {
+        assert_flow_control_reset(FlowControlProbe::MaxDataUpdated {
+            initial: 2 * 1024 * 1024,
+            increase: 3 * 1024 * 1024,
+            raw: 3 * 1024 * 1024,
+        })
+        .await;
+    }
+
+    /// 更新済みの WT_MAX_DATA より小さい値を拒否する
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_flow_control_rejects_smaller_updated_max_data() {
+        assert_flow_control_reset(FlowControlProbe::MaxDataUpdated {
+            initial: 2 * 1024 * 1024,
+            increase: 3 * 1024 * 1024,
+            raw: 3 * 1024 * 1024 - 1,
+        })
+        .await;
+    }
+
+    /// 単方向ストリームの初期値と同値の WT_MAX_STREAM_DATA を拒否する
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_flow_control_rejects_equal_uni_max_stream_data() {
+        assert_flow_control_reset(FlowControlProbe::StreamDataUni {
+            initial: 512 * 1024,
+            raw: 512 * 1024,
+        })
+        .await;
+    }
+
+    /// client 開始 bidi の初期値と同値の WT_MAX_STREAM_DATA を拒否する
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_flow_control_rejects_equal_bidi_remote_max_stream_data() {
+        assert_flow_control_reset(FlowControlProbe::StreamDataBidiRemote {
+            initial: 512 * 1024,
+            raw: 512 * 1024,
+        })
+        .await;
+    }
+
+    /// server 開始 bidi の初期値と同値の WT_MAX_STREAM_DATA を拒否する
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_flow_control_rejects_equal_bidi_local_max_stream_data() {
+        assert_flow_control_reset(FlowControlProbe::StreamDataBidiLocal {
+            initial: 512 * 1024,
+            raw: 512 * 1024,
+        })
+        .await;
+    }
+
+    /// 更新済みの WT_MAX_STREAM_DATA と同値の値を拒否する
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_flow_control_rejects_equal_updated_max_stream_data() {
+        assert_flow_control_reset(FlowControlProbe::StreamDataUpdatedUni {
+            initial: 512 * 1024,
+            increase: 1024 * 1024,
+            raw: 1024 * 1024,
+        })
+        .await;
+    }
+
+    /// 単方向の初期値と同値の WT_MAX_STREAMS を拒否する
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_flow_control_rejects_equal_uni_max_streams() {
+        assert_flow_control_reset(FlowControlProbe::StreamsUni {
+            initial: 200,
+            raw: 200,
+        })
+        .await;
+    }
+
+    /// 双方向の初期値と同値の WT_MAX_STREAMS を拒否する
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_flow_control_rejects_equal_bidi_max_streams() {
+        assert_flow_control_reset(FlowControlProbe::StreamsBidi {
+            initial: 200,
+            raw: 200,
+        })
+        .await;
+    }
+
+    /// 更新済みの WT_MAX_STREAMS と同値の値を拒否する
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_flow_control_rejects_equal_updated_max_streams() {
+        assert_flow_control_reset(FlowControlProbe::StreamsUpdatedUni {
+            initial: 200,
+            increase: 300,
+            raw: 300,
+        })
+        .await;
+    }
+
+    /// 増加した WT_MAX_DATA を受理し、その範囲で client が送信できる
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_flow_control_accepts_increased_max_data() {
+        assert_flow_control_observation(
+            FlowControlProbe::MaxDataIncrease {
+                initial: 0,
+                increase: 100,
+            },
+            FlowControlObservation::Data(b"hello".to_vec()),
+        )
+        .await;
+    }
+
+    /// 増加した WT_MAX_STREAMS を受理し、client がストリームを開ける
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_flow_control_accepts_increased_max_streams() {
+        assert_flow_control_observation(
+            FlowControlProbe::StreamsIncreaseUni {
+                initial: 0,
+                increase: 2,
+            },
+            FlowControlObservation::Streams(2),
+        )
+        .await;
+    }
+
+    /// 増加した WT_MAX_STREAMS を双方向で受理し、client がストリームを開ける
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_flow_control_accepts_increased_bidi_max_streams() {
+        assert_flow_control_observation(
+            FlowControlProbe::StreamsIncreaseBidi {
+                initial: 0,
+                increase: 2,
+            },
+            FlowControlObservation::Streams(2),
+        )
+        .await;
+    }
+
+    /// 増加した WT_MAX_STREAM_DATA を受理し、その範囲で client が送信できる
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_flow_control_accepts_increased_max_stream_data() {
+        assert_flow_control_observation(
+            FlowControlProbe::StreamDataIncreaseBidiLocal {
+                initial: 0,
+                increase: 16,
+            },
+            FlowControlObservation::Data(b"x".to_vec()),
+        )
+        .await;
     }
 }
