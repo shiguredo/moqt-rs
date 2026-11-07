@@ -19,10 +19,12 @@ shiguredo_moqt = { path = "../../" }
 shiguredo_ngtcp2_tokio = { version = "2026.1.0-canary.4", optional = true }
 # QMux (draft-ietf-quic-qmux-02) の Sans I/O 実装
 #
-# qmux-rs は当面タグを打つ予定が無く、crates.io にも公開されていない (tokio-qmux は
+# qmux-rs は当面タグを打つ予定が無く、crates.io にも公開されていない (shiguredo_tokio_qmux は
 # publish = false)。このためバージョンではなく git の rev で固定する。rev を上げるときは
-# tokio-qmux と揃え、追随が必要な API 変更をまとめて反映する。
-shiguredo_qmux = { git = "https://github.com/shiguredo/qmux-rs", rev = "3e0dc0f6a7404b940a67a42e04f986a79811a046" }
+# shiguredo_tokio_qmux と揃え、追随が必要な API 変更をまとめて反映する。
+shiguredo_qmux = { git = "https://github.com/shiguredo/qmux-rs", rev = "aedb7001415a9387c6b01d25624316a4aad50521" }
+# QMux の tokio ラッパー
+shiguredo_tokio_qmux = { git = "https://github.com/shiguredo/qmux-rs", rev = "aedb7001415a9387c6b01d25624316a4aad50521" }
 # QUIC 実装 (tobi-quic)
 #
 # crates.io に公開されていないため git で参照する。このリポジトリの main は
@@ -30,8 +32,6 @@ shiguredo_qmux = { git = "https://github.com/shiguredo/qmux-rs", rev = "3e0dc0f6
 # branch を指定する。ネイティブ QUIC のバックエンドと WebTransport over HTTP/3 の
 # QUIC 層の両方で使うため、常に依存に含める。
 tobi_quic = { git = "https://github.com/shiguredo/tobi-quic", branch = "main" }
-# QMux の tokio ラッパー
-tokio-qmux = { git = "https://github.com/shiguredo/qmux-rs", rev = "3e0dc0f6a7404b940a67a42e04f986a79811a046" }
 
 # 外部クレート
 

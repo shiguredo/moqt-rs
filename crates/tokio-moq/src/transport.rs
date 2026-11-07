@@ -32,7 +32,7 @@ pub enum SendStream {
     WtH3(WtSendStream),
     WtH2(WtH2SendStream),
     /// QMux (draft-ietf-quic-qmux-02)
-    Qmux(tokio_qmux::SendStream),
+    Qmux(shiguredo_tokio_qmux::SendStream),
 }
 
 impl SendStream {
@@ -45,7 +45,7 @@ impl SendStream {
             SendStream::WtH3(s) => s.send(&data).await,
             SendStream::WtH2(s) => s.send(&data).await,
             SendStream::Qmux(s) => {
-                // tokio-qmux の `write` は渡したデータをすべて受け付けるまで待つ
+                // shiguredo_tokio_qmux の `write` は渡したデータをすべて受け付けるまで待つ
                 // (フロー制御の調整はドライバが行う)。戻り値は常に `data.len()` になる
                 s.write(&data)
                     .await
@@ -104,11 +104,11 @@ pub enum RecvStream {
     WtH2(WtH2RecvStream),
     /// QMux (draft-ietf-quic-qmux-02)
     ///
-    /// `tokio_qmux::RecvStream::read` は呼び出し側のバッファへ書くため、読み出しごとの
+    /// `shiguredo_tokio_qmux::RecvStream::read` は呼び出し側のバッファへ書くため、読み出しごとの
     /// 確保を避けてストリームごとに 1 本持つ ([`RecvStream::new_qmux`])。
     Qmux {
         /// QMux の受信ストリーム
-        stream: tokio_qmux::RecvStream,
+        stream: shiguredo_tokio_qmux::RecvStream,
         /// 読み出し用のバッファ (初回の読み出しまで確保しない)
         buf: Option<Box<[u8]>>,
     },
@@ -124,7 +124,7 @@ impl RecvStream {
     ///
     /// 読み出し用のバッファは初回の読み出しで確保する。受理したまま読まれないストリームが
     /// 積まれても、ストリームごとの 64 KiB を先行確保しないためである。
-    pub(crate) fn new_qmux(stream: tokio_qmux::RecvStream) -> Self {
+    pub(crate) fn new_qmux(stream: shiguredo_tokio_qmux::RecvStream) -> Self {
         Self::Qmux { stream, buf: None }
     }
     /// データまたは終端を受信する
@@ -154,7 +154,7 @@ impl RecvStream {
                 }
                 crate::webtransport_h2::RecvChunk::End(end) => Ok(RecvChunk::End(end)),
             },
-            // `tokio_qmux::RecvStream::read` は await 点の前で内部状態を変えないため
+            // `shiguredo_tokio_qmux::RecvStream::read` は await 点の前で内部状態を変えないため
             // cancel safe である (qmux-rs の doc には明記されていないが、呼び出し側が
             // 破棄しても読み出し済みのバイトは失われない)。moq-sub は `select!` で
             // この future を破棄しうる
@@ -166,7 +166,7 @@ impl RecvStream {
                     Ok(Some(len)) => Ok(RecvChunk::Data(Bytes::copy_from_slice(&buf[..len]))),
                     Ok(None) => Ok(RecvChunk::End(RequestStreamEnd::Fin)),
                     // QMux は RESET_STREAM_AT 拡張を実装しないため reliable_size は常に None
-                    Err(tokio_qmux::Error::Reset(error_code)) => {
+                    Err(shiguredo_tokio_qmux::Error::Reset(error_code)) => {
                         Ok(RecvChunk::End(RequestStreamEnd::Reset {
                             error_code: Some(error_code),
                             reliable_size: None,
@@ -274,7 +274,7 @@ pub enum StreamHandle {
     WtH2(Arc<Mutex<WtH2Session>>),
     /// QMux (draft-ietf-quic-qmux-02)
     ///
-    /// `tokio_qmux::Connection` は Clone できないが、接続を必要とするメソッドはすべて
+    /// `shiguredo_tokio_qmux::Connection` は Clone できないが、接続を必要とするメソッドはすべて
     /// `&self` を取るため `Arc` で共有できる。accept の待機は接続を共有した別タスクが行い、
     /// 結果を receiver へ流す (`StreamAcceptor::Qmux` / `BidiStreamAcceptor::Qmux`)。
     Qmux(Arc<crate::qmux::QmuxHandle>),
@@ -428,10 +428,10 @@ impl StreamHandle {
             StreamHandle::Qmux(handle) => {
                 // QMux の CONNECTION_CLOSE のエラーコードは QUIC version 1 の code space を
                 // 共有するため、MOQT のコードをそのまま載せる (draft-ietf-quic-qmux-02 Section 4)。
-                // tokio-qmux の `close` は可変長整数で表せないコードだけをエラーにし、要求は
+                // shiguredo_tokio_qmux の `close` は可変長整数で表せないコードだけをエラーにし、要求は
                 // 送らない (RFC 9000 Section 19.19)。黙って閉じないよう、その失敗を返す。
                 // close 要求を送った後のドライバの終了は `closed()` で観測する
-                // (ピアの shutdown を待つ上限は tokio-qmux の既定で 3 秒)
+                // (ピアの shutdown を待つ上限は shiguredo_tokio_qmux の既定で 3 秒)
                 handle
                     .connection()
                     .close(code, reason)
@@ -466,7 +466,7 @@ impl StreamHandle {
                 session.send_datagram(data).await
             }
             StreamHandle::Qmux(handle) => {
-                // tokio-qmux の `send_datagram` は、ピアが DATAGRAM を広告していない場合や
+                // shiguredo_tokio_qmux の `send_datagram` は、ピアが DATAGRAM を広告していない場合や
                 // フレームが `max_datagram_frame_size` / `max_record_size` を超える場合に
                 // エラーを返す。黙って捨てる経路は無いため、そのまま伝播する。上限の不足は
                 // 接続確立時に `qmux::warn_if_datagram_too_large` が 1 度だけ警告する

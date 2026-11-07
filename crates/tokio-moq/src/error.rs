@@ -70,13 +70,13 @@ pub enum TransportError {
     /// WebTransport over HTTP/2 のセッション / ストリームエラー
     WtH2(shiguredo_http2::webtransport::WtError),
     /// QMux (draft-ietf-quic-qmux-02) の接続 / ストリームエラー
-    Qmux(tokio_qmux::Error),
+    Qmux(shiguredo_tokio_qmux::Error),
     /// 接続がクローズ済み
     ConnectionClosed,
     /// peer がこのストリームの送信方向を終端した (STOP_SENDING)
     ///
     /// tobi-quic は peer の STOP_SENDING を受信したストリームの送信 API (send / finish /
-    /// reset) を `StreamError::Stopped` で失敗させ、tokio-qmux は同じ条件で
+    /// reset) を `StreamError::Stopped` で失敗させ、shiguredo_tokio_qmux は同じ条件で
     /// `Error::Stopped` を返す。これは該当ストリームだけの終端でありセッションは継続するため
     /// (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))、
     /// アプリはセッション終了と区別して扱う必要がある。
@@ -141,21 +141,21 @@ impl TransportError {
         }
     }
 
-    /// QMux (tokio-qmux) のエラーを transport エラーへ写す
+    /// QMux (shiguredo_tokio_qmux) のエラーを transport エラーへ写す
     ///
     /// peer が STOP_SENDING を送った後の送信 API は `Error::Stopped` を返す。QUIC の
     /// STOP_SENDING と同じく該当ストリームだけの終端でありセッションは継続する
     /// ため、[`Self::StreamReset`] にして切断と区別する (draft-ietf-moq-transport-23
     /// §6.4.2.3 (Request Cancellation and Rejection))。
-    pub(crate) fn from_qmux(e: tokio_qmux::Error) -> Self {
+    pub(crate) fn from_qmux(e: shiguredo_tokio_qmux::Error) -> Self {
         match e {
-            tokio_qmux::Error::Stopped(error_code) => Self::StreamReset { error_code },
+            shiguredo_tokio_qmux::Error::Stopped(error_code) => Self::StreamReset { error_code },
             // 接続が閉じた場合は、セッション終了として variant で判定する経路
             // (moq-pub / moq-sub の `is_transport_session_end` 等) があるため、QUIC 経路と
             // 同じ ConnectionClosed に写す。`StreamFinished` は終端済みストリームへの書き込みで
-            // 返るストリーム単位の失敗であり (tokio-qmux の `SendStream::write`)、セッション
+            // 返るストリーム単位の失敗であり (shiguredo_tokio_qmux の `SendStream::write`)、セッション
             // 終了ではないため写像しない
-            tokio_qmux::Error::ConnectionClosed => Self::ConnectionClosed,
+            shiguredo_tokio_qmux::Error::ConnectionClosed => Self::ConnectionClosed,
             e => Self::Qmux(e),
         }
     }
@@ -212,8 +212,8 @@ impl From<shiguredo_http2::webtransport::WtError> for TransportError {
     }
 }
 
-impl From<tokio_qmux::Error> for TransportError {
-    fn from(e: tokio_qmux::Error) -> Self {
+impl From<shiguredo_tokio_qmux::Error> for TransportError {
+    fn from(e: shiguredo_tokio_qmux::Error) -> Self {
         Self::from_qmux(e)
     }
 }

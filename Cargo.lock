@@ -1650,7 +1650,16 @@ dependencies = [
 [[package]]
 name = "shiguredo_qmux"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/qmux-rs?rev=3e0dc0f6a7404b940a67a42e04f986a79811a046#3e0dc0f6a7404b940a67a42e04f986a79811a046"
+source = "git+https://github.com/shiguredo/qmux-rs?rev=aedb7001415a9387c6b01d25624316a4aad50521#aedb7001415a9387c6b01d25624316a4aad50521"
+
+[[package]]
+name = "shiguredo_tokio_qmux"
+version = "0.0.0"
+source = "git+https://github.com/shiguredo/qmux-rs?rev=aedb7001415a9387c6b01d25624316a4aad50521#aedb7001415a9387c6b01d25624316a4aad50521"
+dependencies = [
+ "shiguredo_qmux",
+ "tokio",
+]
 
 [[package]]
 name = "shiguredo_toml"
@@ -1987,21 +1996,12 @@ dependencies = [
  "shiguredo_moqt",
  "shiguredo_ngtcp2_tokio",
  "shiguredo_qmux",
+ "shiguredo_tokio_qmux",
  "tobi_quic",
  "tokio",
  "tokio-metrics",
- "tokio-qmux",
  "tokio-rustls",
  "tracing",
-]
-
-[[package]]
-name = "tokio-qmux"
-version = "0.0.0"
-source = "git+https://github.com/shiguredo/qmux-rs?rev=3e0dc0f6a7404b940a67a42e04f986a79811a046#3e0dc0f6a7404b940a67a42e04f986a79811a046"
-dependencies = [
- "shiguredo_qmux",
- "tokio",
 ]
 
 [[package]]

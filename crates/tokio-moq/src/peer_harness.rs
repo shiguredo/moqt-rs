@@ -187,7 +187,7 @@ impl TestPeerServer {
 ///
 /// [`TestPeerServer`] の QMux 版である。UDP を使わない経路を実行で検証するために置く。
 /// TCP を 127.0.0.1 で待ち受け、TLS (ALPN は [`crate::MOQT_PROTOCOL`]) で受理してから
-/// `tokio_qmux::Connection` を作る。QMux 自体はハンドシェイクを持たないため、接続が
+/// `shiguredo_tokio_qmux::Connection` を作る。QMux 自体はハンドシェイクを持たないため、接続が
 /// 確立した時点でクライアントの制御ストリームを受理できる。
 pub(crate) struct QmuxTestPeerServer {
     /// client の接続を待ち受ける TCP リスナー

@@ -48,7 +48,7 @@ const ALPN: &[u8] = crate::MOQT_PROTOCOL.as_bytes();
 
 /// 受信ストリームの読み出しに使うバッファ長
 ///
-/// tokio-qmux の `RecvStream::read` は呼び出し側のバッファへ書くため、読み出しごとの確保と
+/// shiguredo_tokio_qmux の `RecvStream::read` は呼び出し側のバッファへ書くため、読み出しごとの確保と
 /// ゼロ埋めを避けてストリームごとに 1 本持つ。収まらない Object は呼び出し側が繰り返し読む。
 /// QUIC 直接接続の per-stream の受信窓 (16 MiB) より十分小さいため、多数のストリームを
 /// 同時に保持しても `Arc` + 1 本のバッファで収まる。
@@ -72,14 +72,14 @@ const MAX_DATAGRAM_FRAME_SIZE: u64 = shiguredo_qmux::record::DEFAULT_MAX_RECORD_
 #[derive(Debug)]
 pub struct QmuxHandle {
     /// ストリームの open / DATAGRAM の送信 / 接続の close に使う
-    connection: Arc<tokio_qmux::Connection>,
+    connection: Arc<shiguredo_tokio_qmux::Connection>,
     /// 最後にログへ出した破棄数
     logged_dropped_datagrams: AtomicU64,
 }
 
 impl QmuxHandle {
     /// 接続を返す
-    pub(crate) fn connection(&self) -> &tokio_qmux::Connection {
+    pub(crate) fn connection(&self) -> &shiguredo_tokio_qmux::Connection {
         &self.connection
     }
 
@@ -141,7 +141,7 @@ pub(crate) async fn connect(
     // TCP。QMux は 1 本のバイトストリームを多重化するため、Nagle による遅延が全ストリームに
     // 乗る。音声の datagram を 20 ms ごとに送るため無効化する。
     //
-    // tokio-qmux は接続確立前の I/O エラーを表す variant を持たない (接続後の I/O エラーは
+    // shiguredo_tokio_qmux は接続確立前の I/O エラーを表す variant を持たない (接続後の I/O エラーは
     // 下位トランスポートの閉塞として `Connection::closed` の `CloseReason::TransportClosed`
     // で通知する)。接続確立前の失敗は他経路と同じ `TransportError::Transport` に写す。
     let tcp = TcpStream::connect(socket_addr)
@@ -179,7 +179,7 @@ pub(crate) async fn connect(
     }
 
     // QMux。`Connection::new` は送信できない設定の場合にエラーを返す。
-    let connection = Arc::new(tokio_qmux::Connection::new(
+    let connection = Arc::new(shiguredo_tokio_qmux::Connection::new(
         Role::Client,
         tls,
         build_config(),
@@ -194,10 +194,10 @@ pub(crate) async fn connect(
 /// 結果をチャネルへ流す。client は [`connect`] から呼び、テストの peer は接続を作った側から
 /// 呼ぶ (client / server で扱いは同じ)。
 pub(crate) fn split_connection(
-    connection: Arc<tokio_qmux::Connection>,
+    connection: Arc<shiguredo_tokio_qmux::Connection>,
     task_monitor: &tokio_metrics::TaskMonitor,
 ) -> QmuxSession {
-    // 受理チャネルは上限を設けない。tokio-qmux の受理チャネルは容量 16 だが、あふれた
+    // 受理チャネルは上限を設けない。shiguredo_tokio_qmux の受理チャネルは容量 16 だが、あふれた
     // ストリームはドライバが保持し、空きができ次第配送する (失われない)。ここで上限を
     // 設けると受理タスクが channel の空き待ちで止まり、制御ストリームや data stream の
     // 引き取りが遅れるため、上限なしで即座に流す。受信量は QMux のフロー制御で抑えられる。
@@ -225,11 +225,13 @@ pub(crate) fn split_connection(
 /// テストの peer は client と同じ設定を使う。ストリーム ID の parity は `Role` で決まるため、
 /// server 役は [`Role::Server`] を渡す。設定を共有するためここに置く。
 #[cfg(test)]
-pub(crate) fn build_server_connection<T>(io: T) -> tokio_qmux::Result<Arc<tokio_qmux::Connection>>
+pub(crate) fn build_server_connection<T>(
+    io: T,
+) -> shiguredo_tokio_qmux::Result<Arc<shiguredo_tokio_qmux::Connection>>
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    Ok(Arc::new(tokio_qmux::Connection::new(
+    Ok(Arc::new(shiguredo_tokio_qmux::Connection::new(
         Role::Server,
         io,
         build_config(),
@@ -263,10 +265,10 @@ fn build_config() -> Config {
 
 /// peer 起動の単方向ストリームを受理して receiver へ流すタスクを起動する
 ///
-/// accept の待機は接続を共有して別タスクで行う。tokio-qmux は受理待ちのストリームを
+/// accept の待機は接続を共有して別タスクで行う。shiguredo_tokio_qmux は受理待ちのストリームを
 /// ドライバ内に保持するため、引き取りが遅れてもストリームは失われない。
 fn spawn_accept_unidirectional(
-    connection: Arc<tokio_qmux::Connection>,
+    connection: Arc<shiguredo_tokio_qmux::Connection>,
     tx: mpsc::UnboundedSender<RecvStream>,
     task_monitor: &tokio_metrics::TaskMonitor,
 ) {
@@ -277,7 +279,7 @@ fn spawn_accept_unidirectional(
                 biased;
                 // アプリがアクセプターを drop したら止める。タスクが接続を握り続けると、
                 // close されないままアプリが終了した場合にドライバが動き続ける
-                // (tokio-qmux のドライバは close 後は linger の上限つきで終了する)
+                // (shiguredo_tokio_qmux のドライバは close 後は linger の上限つきで終了する)
                 _ = tx.closed() => break,
                 // 自側 / ピアの close を観測したら止める
                 _ = connection.closed() => break,
@@ -303,7 +305,7 @@ fn spawn_accept_unidirectional(
 
 /// peer 起動の双方向ストリームを受理して receiver へ流すタスクを起動する
 fn spawn_accept_bidirectional(
-    connection: Arc<tokio_qmux::Connection>,
+    connection: Arc<shiguredo_tokio_qmux::Connection>,
     tx: mpsc::UnboundedSender<(SendStream, RecvStream)>,
     task_monitor: &tokio_metrics::TaskMonitor,
 ) {
@@ -341,7 +343,7 @@ fn spawn_accept_bidirectional(
 /// `crate::quic::StopSendingObserved` へ詰め替えることで、`MoqtClient::handle_stop_sending`
 /// が QUIC 経路と同じ処理を行う。
 fn spawn_stop_sending(
-    connection: Arc<tokio_qmux::Connection>,
+    connection: Arc<shiguredo_tokio_qmux::Connection>,
     tx: mpsc::UnboundedSender<StopSendingObserved>,
     task_monitor: &tokio_metrics::TaskMonitor,
 ) {
@@ -398,7 +400,7 @@ enum DatagramLimit {
 
 /// ピアが広告した DATAGRAM の上限に対して、送る予定の datagram が収まるかを判定する
 ///
-/// tokio-qmux の `send_datagram` は、ピアが DATAGRAM を広告していない場合やフレームが
+/// shiguredo_tokio_qmux の `send_datagram` は、ピアが DATAGRAM を広告していない場合やフレームが
 /// 上限を超える場合にエラーを返す。音声は 20 ms ごとに送るため、そのエラーを毎回
 /// ログへ出すと量大になる。接続確立後 (制御ストリームを開いた後) に 1 度だけ判定して
 /// 警告し、原因と対処が分かるようにする。
@@ -851,7 +853,7 @@ mod tests {
 
     /// 自側の close でドライバと受理タスクが終了し、下位トランスポートが解放される
     ///
-    /// tokio-qmux のドライバは、自側の `close` で CONNECTION_CLOSE を送って下位トランスポートの
+    /// shiguredo_tokio_qmux のドライバは、自側の `close` で CONNECTION_CLOSE を送って下位トランスポートの
     /// 送信側を shutdown し、ピアの shutdown を linger (既定 3 秒) の上限つきで待って終了する。
     /// ドライバが終了すれば [`split_connection`] が起こした受理タスクも `closed()` の観測で
     /// 終了し、channel が閉じる (接続と TCP ソケットを握り続けない)。
@@ -937,7 +939,7 @@ mod tests {
 
     /// ピアが shutdown しない場合でも close 後にドライバが終了する
     ///
-    /// tokio-qmux のドライバは、自側の `close` の後に下位トランスポートの送信側を shutdown し、
+    /// shiguredo_tokio_qmux のドライバは、自側の `close` の後に下位トランスポートの送信側を shutdown し、
     /// ピアの shutdown を linger (既定 3 秒) の上限つきで待つ。ピアが CONNECTION_CLOSE を
     /// 読まずに shutdown もしない場合、linger が無いとドライバは終了せず、接続と TCP
     /// ソケットが残る。ここでは QMux を話さず読み取りもしない peer を立て、linger の上限で
@@ -1001,7 +1003,7 @@ mod tests {
             "自側の close として観測されること: {reason:?}"
         );
         assert!(
-            started.elapsed() >= tokio_qmux::DEFAULT_LINGER,
+            started.elapsed() >= shiguredo_tokio_qmux::DEFAULT_LINGER,
             "ピアが shutdown しない場合は linger の上限まで待つこと: {:?}",
             started.elapsed()
         );
