@@ -1765,7 +1765,7 @@ impl WtSession {
         )
     }
 
-    /// 双方向ストリームを開く (draft-ietf-webtrans-http3-16 Section 4.3)
+    /// 双方向ストリームを開く (draft-ietf-webtrans-http3-17 Section 4.3)
     pub async fn open_bi_stream(&mut self) -> Result<WtBiStream> {
         self.ensure_new_stream_allowed()?;
         let stream = self
@@ -2643,7 +2643,7 @@ async fn route_uni_stream(
 /// 双方向ストリームをルーティングする
 ///
 /// サーバーが開始する双方向ストリームには WT の双方向ストリームヘッダー
-/// (0x41 + session_id) が先頭に付く (draft-ietf-webtrans-http3-16 Section 4.3)。
+/// (0x41 + session_id) が先頭に付く (draft-ietf-webtrans-http3-17 Section 4.3)。
 /// ヘッダーを読み捨てた残りを payload として公開する。
 /// 自 session 以外の session_id を持つストリームは MOQT の request stream ではないため
 /// HTTP/3 層へ渡す。
@@ -3177,12 +3177,12 @@ mod tests {
         state
     }
 
-    /// 受信タスクが先にイベントを処理しても、datagram は終了後まで取り出せる
-    ///
-    /// 実際の h3 クライアントとサーバーで SETTINGS と CONNECT を交換する。受信側の
-    /// イベント処理を購読側の取り出しより先に進め、音声が全件失われる順序を再現する。
-    #[test]
-    fn background_event_processing_keeps_received_datagrams_until_consumed() {
+    /// CONNECT を確立したクライアント状態とサーバー接続を作る
+    fn established_connect_state() -> (
+        ClientConnectionState,
+        shiguredo_http3::ServerConnection,
+        u64,
+    ) {
         let mut state = negotiated_connection_state();
         let mut server = shiguredo_http3::ServerConnection::new(test_peer_settings());
         server
@@ -3219,7 +3219,7 @@ mod tests {
         server
             .send_response(session_id, &response, false)
             .expect("サーバーが CONNECT を受理できること");
-        let (session_state, session_receiver) = watch::channel(WtSessionState::Active);
+        let (session_state, _session_receiver) = watch::channel(WtSessionState::Active);
         let mut observation = ConnectObservation::default();
         while let Some((data, fin)) = server.take_stream_data(session_id) {
             let outcome = state.feed_stream_and_drain(session_id, &data, fin);
@@ -3232,6 +3232,59 @@ mod tests {
             ConnectOutcome::Established,
             "プロトコル交渉を含めてセッションが確立すること"
         );
+        (state, server, session_id)
+    }
+
+    /// 制御ストリームの WT_STREAM は H3_FRAME_UNEXPECTED の接続エラーになる
+    ///
+    /// draft-ietf-webtrans-http3-17 §4.3: WT_STREAM (`0x41`) は双方向ストリームの
+    /// initiator が送る最初のバイト列でだけ認められる。制御ストリームでは
+    /// `H3_FRAME_UNEXPECTED` の接続エラーにする。
+    #[test]
+    fn wt_stream_on_control_stream_is_frame_unexpected() {
+        let mut state = negotiated_connection_state();
+        let error = feed_error(&mut state, SERVER_CONTROL_STREAM_ID, &[0x40, 0x41], false);
+        assert_eq!(
+            error,
+            shiguredo_http3::Error::ConnectionError(H3ErrorCode::FrameUnexpected),
+            "制御ストリームの WT_STREAM が H3_FRAME_UNEXPECTED になること"
+        );
+        assert_eq!(
+            connection_error_code(&error),
+            Some(H3ErrorCode::FrameUnexpected.code()),
+            "接続終了コードが H3_FRAME_UNEXPECTED のままであること"
+        );
+    }
+
+    /// 分割された WT_STREAM も可変長整数の確定後に拒否する
+    #[test]
+    fn split_wt_stream_on_control_stream_is_frame_unexpected() {
+        let mut state = negotiated_connection_state();
+        state
+            .feed_stream_and_drain(SERVER_CONTROL_STREAM_ID, &[0x40], false)
+            .result
+            .expect("可変長整数の途中までは接続エラーにならないこと");
+        let error = feed_error(&mut state, SERVER_CONTROL_STREAM_ID, &[0x41], false);
+        assert_eq!(
+            error,
+            shiguredo_http3::Error::ConnectionError(H3ErrorCode::FrameUnexpected),
+            "分割された WT_STREAM が H3_FRAME_UNEXPECTED になること"
+        );
+        assert_eq!(
+            connection_error_code(&error),
+            Some(H3ErrorCode::FrameUnexpected.code()),
+            "接続終了コードが H3_FRAME_UNEXPECTED のままであること"
+        );
+    }
+
+    /// 受信タスクが先にイベントを処理しても、datagram は終了後まで取り出せる
+    ///
+    /// 実際の h3 クライアントとサーバーで SETTINGS と CONNECT を交換する。受信側の
+    /// イベント処理を購読側の取り出しより先に進め、音声が全件失われる順序を再現する。
+    #[test]
+    fn background_event_processing_keeps_received_datagrams_until_consumed() {
+        let (mut state, mut server, session_id) = established_connect_state();
+        let (session_state, session_receiver) = watch::channel(WtSessionState::Active);
 
         // 空の payload も含め、受信順と一度だけ取り出す性質を確認する。
         let payloads = vec![vec![0xaa, 0xbb], vec![], vec![0xcc]];
