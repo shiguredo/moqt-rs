@@ -824,6 +824,7 @@ fn cancel_subscription_resets_open_fill_streams() {
             stream_id,
             error_code,
             reliable_size,
+            tracking: _,
         } = e
         {
             assert_eq!(stream_id, DataStreamId(100));
@@ -1386,6 +1387,7 @@ fn reset_single_fill_stream_emits_reset_event() {
             stream_id: rid,
             error_code,
             reliable_size,
+            tracking: _,
         } = e
         {
             assert_eq!(rid, stream_id);
@@ -1555,6 +1557,7 @@ fn cancel_subscription_resets_all_open_fill_streams() {
             stream_id,
             error_code,
             reliable_size,
+            tracking: _,
         } = e
         {
             assert_eq!(error_code, STREAM_CANCELLED);

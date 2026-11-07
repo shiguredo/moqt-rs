@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 
 use super::super::core::Session;
 use super::super::types::{
-    DataStreamId, PendingUpdateGroup, RequestKind, SessionError, SessionEvent,
+    DataStreamId, PendingUpdateGroup, RequestKind, ResetTracking, SessionError, SessionEvent,
     SubscriptionInitiator, SubscriptionState, TrackRole,
 };
 use super::delivery::{
@@ -812,6 +812,7 @@ impl Session {
                 error_code: STREAM_DELIVERY_TIMEOUT,
                 // Session 自動発火のため RESET_STREAM_AT の自動計算はしない (別途検討)
                 reliable_size: None,
+                tracking: ResetTracking::Retained,
             });
         }
         // SUBGROUP_DELIVERY_TIMEOUT の判定
@@ -839,6 +840,7 @@ impl Session {
                 error_code: STREAM_DELIVERY_TIMEOUT,
                 // Session 自動発火のため RESET_STREAM_AT の自動計算はしない (別途検討)
                 reliable_size: None,
+                tracking: ResetTracking::Retained,
             });
         }
     }

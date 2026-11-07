@@ -90,12 +90,18 @@ fn object_delivery_timeout_tracks_first_object_header_complete_time() {
             stream_id: sid,
             error_code,
             reliable_size,
+            tracking,
         } = e
         {
             assert_eq!(error_code, STREAM_DELIVERY_TIMEOUT);
             assert_eq!(
                 reliable_size, None,
                 "自動発火では RESET_STREAM (reliable_size なし) になること"
+            );
+            assert_eq!(
+                tracking,
+                shiguredo_moqt::session::types::ResetTracking::Retained,
+                "配送 timeout では PUBLISH_DONE の flush まで追跡を残すこと"
             );
             reset_stream_id = Some(sid);
         }
@@ -250,6 +256,7 @@ fn object_delivery_timeout_uses_first_object_header_complete_time_as_baseline() 
             stream_id: sid,
             error_code,
             reliable_size,
+            tracking: _,
         } = e
         {
             assert_eq!(error_code, STREAM_DELIVERY_TIMEOUT);
@@ -419,6 +426,7 @@ fn subgroup_delivery_timeout_tracks_fin_and_emits_reset() {
             stream_id: sid,
             error_code,
             reliable_size,
+            tracking: _,
         } = e
         {
             assert_eq!(error_code, STREAM_DELIVERY_TIMEOUT);

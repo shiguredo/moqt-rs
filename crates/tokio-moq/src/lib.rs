@@ -1211,9 +1211,10 @@ pub fn is_retryable_connect_error(error: &TransportError) -> bool {
     match error {
         TransportError::InvalidAuthority(_) => false,
         TransportError::ProtocolNegotiationFailed { .. } => false,
-        TransportError::Moqt(_) | TransportError::InvalidState(_) | TransportError::Internal(_) => {
-            false
-        }
+        TransportError::Moqt(_)
+        | TransportError::InvalidState(_)
+        | TransportError::Unsupported(_)
+        | TransportError::Internal(_) => false,
         TransportError::ConnectFailed { status } => {
             matches!(status, None | Some(408 | 425 | 429) | Some(500..=599))
         }

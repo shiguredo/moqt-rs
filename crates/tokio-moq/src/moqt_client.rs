@@ -2623,7 +2623,7 @@ impl MoqtClient {
         if let Err(e) = data_plane.send_fill_fetch_header(stream_id, fill_request_id) {
             // 開いた stream を閉じずに返すと、Session にも peer にも終端が伝わらない
             let _ = stream
-                .reset(DataStreamResetReason::InternalError.error_code())
+                .reset(DataStreamResetReason::InternalError.error_code(), None)
                 .await;
             return Err(e);
         }
@@ -2676,7 +2676,7 @@ impl MoqtClient {
         let stream_id = DataStreamId(stream.stream_id());
         if let Err(e) = data_plane.send_fill_fetch_header(stream_id, fill_request_id) {
             let _ = stream
-                .reset(DataStreamResetReason::InternalError.error_code())
+                .reset(DataStreamResetReason::InternalError.error_code(), None)
                 .await;
             return Err(e);
         }
@@ -2687,7 +2687,7 @@ impl MoqtClient {
         let result = async {
             stream.send(Bytes::from(buf)).await?;
             stream
-                .reset(DataStreamResetReason::InternalError.error_code())
+                .reset(DataStreamResetReason::InternalError.error_code(), None)
                 .await?;
             Ok(())
         }
@@ -2807,7 +2807,7 @@ impl MoqtClient {
         // (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection): 送信方向は
         // RESET_STREAM、受信方向は STOP_SENDING)
         if let Some(mut send) = self.bidi_sends.remove(&request_id)
-            && let Err(e) = send.reset(error_code).await
+            && let Err(e) = send.reset(error_code, None).await
         {
             tracing::warn!("Failed to reset bidi request stream (request_id={request_id}): {e}");
         }
@@ -3465,7 +3465,7 @@ impl MoqtClient {
                     // (GOING_AWAY timeout reset と malformed cancel が重複して届きうる。
                     // `ResetRequestStream` の doc 参照)
                     if let Some(mut send) = self.bidi_sends.remove(&request_id)
-                        && let Err(e) = send.reset(error_code).await
+                        && let Err(e) = send.reset(error_code, None).await
                     {
                         tracing::warn!(
                             "Failed to reset bidi request stream (request_id={request_id}): {e}"
@@ -4120,6 +4120,7 @@ mod tests {
             stream_id: shiguredo_moqt::session::types::DataStreamId(3),
             error_code: 0x2,
             reliable_size: None,
+            tracking: shiguredo_moqt::session::types::ResetTracking::Removed,
         };
         assert!(is_notable_event(&event));
     }

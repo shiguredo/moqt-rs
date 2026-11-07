@@ -48,6 +48,9 @@ pub enum SubgroupStreamState {
     /// `reliable_size` が指定される。古い RESET_STREAM では `None`。
     Reset {
         /// RESET_STREAM_AT の reliable サイズ (古い RESET_STREAM では `None`)
+        ///
+        /// 受信側の wire の値であり、WebTransport over HTTP/3 ではストリームヘッダーを
+        /// 含む。送信側の `SessionEvent::ResetDataStream` は MOQT のバイト数で表す。
         reliable_size: Option<u64>,
     },
     /// Subscriber 側から STOP_SENDING を受けて終端した

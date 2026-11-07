@@ -1701,6 +1701,7 @@ impl WtSession {
             stream_id,
             send,
             header_len,
+            sent_data_len: 0,
             reset_stream_at_supported: self.reset_stream_at_supported,
             session_state: self.session_state_receiver(),
         })
@@ -2133,8 +2134,13 @@ pub struct WtSendStream {
     send: SendStream,
     /// WebTransport ストリームヘッダーの長さ (バイト)
     ///
-    /// `RESET_STREAM_AT` の Reliable Size に使う (draft-ietf-webtrans-http3-16 §4.4)。
+    /// `RESET_STREAM_AT` の Reliable Size にヘッダー長を加える
+    /// (draft-ietf-webtrans-http3-17 §4.4)。
     header_len: u64,
+    /// この送信方向で送ったアプリケーションデータの長さ (バイト)
+    ///
+    /// Final Size は `header_len + sent_data_len` になる。
+    sent_data_len: u64,
     /// ピアが `reset_stream_at` transport parameter を提示しているか
     reset_stream_at_supported: bool,
     session_state: watch::Receiver<WtSessionState>,
@@ -2146,7 +2152,7 @@ impl WtSendStream {
     /// セッション終了 (§6) を観測した場合は送信を待たずに送信方向を `WT_SESSION_GONE` で
     /// 中断し、MOQT 層へ `ConnectionClosed` を返す (受信経路と同じ扱い)。
     pub async fn send(&mut self, data: &[u8]) -> Result<()> {
-        tokio::select! {
+        let result = tokio::select! {
             sent = self.send.send_all(data) => {
                 sent.map_err(|e| {
                     TransportError::from_send_error(crate::quic::QuicError::from(e), TransportError::transport)
@@ -2156,7 +2162,11 @@ impl WtSendStream {
                 self.abort_session_gone().await;
                 Err(TransportError::ConnectionClosed)
             }
+        };
+        if result.is_ok() {
+            self.sent_data_len += data.len() as u64;
         }
+        result
     }
 
     /// ストリームの送信方向を終了する (FIN)
@@ -2169,14 +2179,53 @@ impl WtSendStream {
         })
     }
 
-    /// ストリームの送信方向を reset する (QUIC RESET_STREAM)
+    /// ストリームの送信方向を reset する
     ///
     /// MOQT のエラーコードは WebTransport のアプリケーションエラーコードとして
-    /// WT_APPLICATION_ERROR の範囲へ remap してから送る (draft-ietf-webtrans-http3-16 §4.4)。
+    /// WT_APPLICATION_ERROR の範囲へ remap してから送る (draft-ietf-webtrans-http3-17 §4.4)。
+    /// `reliable_size` が `Some(n)` の場合は MOQT の data stream の先頭 `n` バイトまでの
+    /// 配送を保証する `RESET_STREAM_AT` を送る。Final Size は
+    /// `header_len + sent_data_len` であり、`n` はヘッダー長を含まない。
+    /// ピアが `reset_stream_at` に対応していない場合は
+    /// [`TransportError::Unsupported`] を返す。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
-    pub async fn reset(&mut self, error_code: u64) -> Result<()> {
-        self.reset_with(StreamErrorCode::Application(error_code))
-            .await
+    pub async fn reset(&mut self, error_code: u64, reliable_size: Option<u64>) -> Result<()> {
+        let error_code = stream_application_error(StreamErrorCode::Application(error_code))?;
+        match reliable_size {
+            Some(size) => {
+                if !self.reset_stream_at_supported {
+                    return Err(TransportError::Unsupported(
+                        "the peer does not support RESET_STREAM_AT".to_string(),
+                    ));
+                }
+                let reliable_size =
+                    absolute_reliable_size(self.header_len, self.sent_data_len, size)?;
+                self.send
+                    .reset_stream_at(error_code, reliable_size)
+                    .await
+                    .map_err(|e| {
+                        TransportError::from_send_error(
+                            crate::quic::QuicError::from(e),
+                            TransportError::transport,
+                        )
+                    })
+            }
+            None => {
+                // アプリの offset 指定が無い場合も、従来どおりヘッダー長までを
+                // Reliable Size にする (ピアが対応している場合)
+                let result = if self.reset_stream_at_supported {
+                    self.send.reset_stream_at(error_code, self.header_len).await
+                } else {
+                    self.send.reset_stream(error_code).await
+                };
+                result.map_err(|e| {
+                    TransportError::from_send_error(
+                        crate::quic::QuicError::from(e),
+                        TransportError::transport,
+                    )
+                })
+            }
+        }
     }
 
     /// セッション終了時の中断 (draft-ietf-webtrans-http3-16 §6)
@@ -2222,6 +2271,31 @@ impl WtSendStream {
     pub fn stream_id(&self) -> u64 {
         self.stream_id
     }
+}
+
+/// MOQT の Reliable Size を WebTransport ストリームの絶対位置へ変換する
+///
+/// `header_len` は WebTransport のストリームヘッダー長、`sent_data_len` はこの送信方向で
+/// 送ったアプリケーションデータ長である。Final Size は `header_len + sent_data_len` になり、
+/// Reliable Size はヘッダー長を含まない MOQT のバイト数で指定される
+/// (draft-ietf-webtrans-http3-17 §4.4)。
+fn absolute_reliable_size(header_len: u64, sent_data_len: u64, reliable_size: u64) -> Result<u64> {
+    if reliable_size > sent_data_len {
+        return Err(TransportError::InvalidState(format!(
+            "reliable size {reliable_size} exceeds the sent data length {sent_data_len}"
+        )));
+    }
+    let absolute = header_len.checked_add(reliable_size).ok_or_else(|| {
+        TransportError::InvalidState("reliable size overflows the stream offset".to_string())
+    })?;
+    // RFC 9000 §16: QUIC の可変長整数の上限は 2^62 - 1
+    const MAX_VARINT: u64 = (1 << 62) - 1;
+    if absolute > MAX_VARINT {
+        return Err(TransportError::InvalidState(format!(
+            "reliable size {absolute} exceeds the QUIC varint limit"
+        )));
+    }
+    Ok(absolute)
 }
 
 /// WebTransport の受信ストリーム
@@ -2368,6 +2442,7 @@ impl WtBiStream {
                 stream_id: self.stream_id,
                 send: self.send,
                 header_len: self.header_len,
+                sent_data_len: 0,
                 reset_stream_at_supported: self.reset_stream_at_supported,
                 session_state: self.session_state.clone(),
             },
@@ -2696,8 +2771,10 @@ async fn route_bi_stream(
             let wt_send = WtSendStream {
                 stream_id,
                 send: send_stream,
-                // peer が付けた WebTransport ヘッダーの長さが Reliable Size になる
-                header_len: offset as u64,
+                // server 開始 bidi では peer がヘッダーを送っているため、自側の送信方向に
+                // WebTransport ヘッダーは含まれない (Final Size はデータ長だけ)
+                header_len: 0,
+                sent_data_len: 0,
                 reset_stream_at_supported: context.reset_stream_at_supported,
                 session_state: context.session_state.subscribe(),
             };
@@ -4237,6 +4314,37 @@ mod tests {
         assert!(
             result.is_ok(),
             "新旧両方の peer とは交渉できること: {result:?}"
+        );
+    }
+
+    /// Reliable Size は WebTransport ヘッダー長だけずらして Final Size を超えない
+    ///
+    /// draft-ietf-webtrans-http3-17 §4.4: Final Size は
+    /// `header_len + sent_data_len` であり、MOQT の Reliable Size はヘッダー長を含まない。
+    #[test]
+    fn reliable_size_is_offset_by_the_webtransport_header() {
+        for header_len in 0..=9 {
+            assert_eq!(
+                absolute_reliable_size(header_len, 100, 42).expect("変換に成功すること"),
+                header_len + 42,
+                "header_len={header_len} ではヘッダー長だけ加算すること"
+            );
+        }
+        assert_eq!(
+            absolute_reliable_size(3, 0, 0).expect("offset 0 はヘッダー長になること"),
+            3
+        );
+        assert_eq!(
+            absolute_reliable_size(3, 10, 10).expect("送信済み全長まで指定できること"),
+            13
+        );
+        assert!(
+            absolute_reliable_size(0, 10, 11).is_err(),
+            "送信済みデータ長を超える Reliable Size は拒否すること"
+        );
+        assert!(
+            absolute_reliable_size(0, u64::MAX, u64::MAX).is_err(),
+            "QUIC の可変長整数の上限を超える Reliable Size は拒否すること"
         );
     }
 

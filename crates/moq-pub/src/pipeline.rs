@@ -218,6 +218,8 @@ async fn reset_open_subgroup_stream(
     current_video_writer: &mut Option<SubgroupWriter>,
     stream_id: DataStreamId,
     error_code: u64,
+    reliable_size: Option<u64>,
+    tracking: shiguredo_moqt::session::types::ResetTracking,
 ) -> Result<bool> {
     // Session 側で追跡を除去済みの reset 経路 (app 発の reset / fill fetch stream /
     // malformed 検出) では send_data_stream_closed が未知 stream id でセッションを閉じる。
@@ -233,7 +235,10 @@ async fn reset_open_subgroup_stream(
     let writer = current_video_writer
         .take()
         .expect("applies is true only when an open subgroup stream matches");
-    match writer.reset_by_session(error_code).await {
+    match writer
+        .reset_by_session(error_code, reliable_size, tracking)
+        .await
+    {
         Ok(()) => {
             tracing::info!(
                 "Reset subgroup stream on session request: stream_id={}, error_code={:#x}",
@@ -1861,7 +1866,8 @@ pub async fn run(
                         Some(ClientEvent::Session(SessionEvent::ResetDataStream {
                             stream_id,
                             error_code,
-                            ..
+                            reliable_size,
+                            tracking,
                         })) => {
                             // I/O 層 (この example) が当該 uni data stream を RESET_STREAM で閉じ、
                             // その後に Session へ終端を通知する。通知が保留 PUBLISH_DONE の
@@ -1871,6 +1877,8 @@ pub async fn run(
                                 &mut current_video_writer,
                                 stream_id,
                                 error_code,
+                                reliable_size,
+                                tracking,
                             )
                             .await
                         }

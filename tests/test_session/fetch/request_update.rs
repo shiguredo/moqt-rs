@@ -401,6 +401,7 @@ fn request_error_update_failure_transitions_to_terminated_and_auto_resets_data_s
             stream_id: sid,
             error_code,
             reliable_size,
+            tracking: _,
         } = e
         {
             assert_eq!(sid, stream_id);

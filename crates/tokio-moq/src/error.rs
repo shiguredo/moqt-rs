@@ -113,6 +113,11 @@ pub enum TransportError {
     StreamClosed,
     /// 無効な状態
     InvalidState(String),
+    /// この transport では要求された操作を実装していない
+    ///
+    /// 再試行しても成功しない。Reliable Size 付きの reset (`RESET_STREAM_AT`) を
+    /// WebTransport over HTTP/3 以外で要求した場合などに返る。
+    Unsupported(String),
     /// 内部エラー
     Internal(String),
 }
@@ -187,6 +192,7 @@ impl std::fmt::Display for TransportError {
             ),
             Self::StreamClosed => write!(f, "stream closed"),
             Self::InvalidState(msg) => write!(f, "invalid state: {msg}"),
+            Self::Unsupported(msg) => write!(f, "unsupported: {msg}"),
             Self::Internal(msg) => write!(f, "internal error: {msg}"),
         }
     }

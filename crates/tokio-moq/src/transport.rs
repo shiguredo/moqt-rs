@@ -82,18 +82,45 @@ impl SendStream {
 
     /// ストリームの送信方向を reset する
     ///
-    /// Session の `ResetRequestStream` イベントに対応する。QUIC RESET_STREAM を送出する。
-    /// peer が cancel 済みのストリームでは I/O 層が拒否を返す (`finish` と同じ)。
-    pub async fn reset(&mut self, error_code: u64) -> Result<(), TransportError> {
+    /// Session の `ResetRequestStream` / `ResetDataStream` イベントに対応する。
+    /// `reliable_size` が `Some(n)` の場合は `RESET_STREAM_AT` を使い、MOQT の data stream の
+    /// 先頭 `n` バイトまでの配送を保証する。WebTransport over HTTP/3 だけが対応し、他の
+    /// transport では [`TransportError::Unsupported`] を返す。`None` は従来の RESET_STREAM である。
+    pub async fn reset(
+        &mut self,
+        error_code: u64,
+        reliable_size: Option<u64>,
+    ) -> Result<(), TransportError> {
         match self {
-            SendStream::Quic(s) => s.reset(error_code).await.map_err(|e| {
-                TransportError::from_send_error(e, |e| TransportError::Quic(format!("{e}")))
-            }),
-            SendStream::WtH3(s) => s.reset(error_code).await,
-            SendStream::WtH2(s) => s.reset(error_code).await,
-            SendStream::Qmux(s) => s.reset(error_code).await.map_err(TransportError::from_qmux),
+            SendStream::Quic(s) => {
+                reject_reliable_size(reliable_size)?;
+                s.reset(error_code).await.map_err(|e| {
+                    TransportError::from_send_error(e, |e| TransportError::Quic(format!("{e}")))
+                })
+            }
+            SendStream::WtH3(s) => s.reset(error_code, reliable_size).await,
+            SendStream::WtH2(s) => s.reset(error_code, reliable_size).await,
+            SendStream::Qmux(s) => {
+                reject_reliable_size(reliable_size)?;
+                s.reset(error_code).await.map_err(TransportError::from_qmux)
+            }
         }
     }
+}
+
+/// Reliable Size 付き reset がこの transport で未対応であることを表すエラー
+fn unsupported_reliable_size() -> TransportError {
+    TransportError::Unsupported(
+        "RESET_STREAM_AT is only supported by WebTransport over HTTP/3".to_string(),
+    )
+}
+
+/// WebTransport over HTTP/3 以外で Reliable Size 付き reset を拒否する
+fn reject_reliable_size(reliable_size: Option<u64>) -> Result<(), TransportError> {
+    if reliable_size.is_some() {
+        return Err(unsupported_reliable_size());
+    }
+    Ok(())
 }
 
 /// 受信ストリーム
@@ -787,6 +814,16 @@ mod tests {
             remap_stop_sending_error_code(StopSendingTransport::WtH3, u64::MAX),
             None,
             "範囲外の上限値もコード無し (None) になること"
+        );
+    }
+    /// Reliable Size 付き reset は WtH3 以外では拒否する
+    #[test]
+    fn reliable_size_is_rejected_without_webtransport_over_http3() {
+        assert!(reject_reliable_size(None).is_ok());
+        let error = reject_reliable_size(Some(1)).expect_err("拒否されること");
+        assert!(
+            matches!(error, TransportError::Unsupported(_)),
+            "Unsupported になること: {error:?}"
         );
     }
 }

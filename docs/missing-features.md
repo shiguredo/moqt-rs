@@ -84,7 +84,7 @@ C4M draft-02 の `moqt` クレームの map 化と未知キーの fail-closed、
 | `MAX_FILTER_RANGES` の宣言 | `SETUP_OPTION_MAX_FILTER_RANGES` | §9.1.6 | 既定 0 のため、購読者は Range Filters (§3.3.2) を送ってはならない。ライブラリのフィルタ評価実装が活きない |
 | `MAX_REQUEST_UPDATES` / `MAX_AUTH_TOKEN_CACHE_SIZE` | `SETUP_OPTION_*` | §9.1.7 / §9.1.3 | 既定値で実害は無いが、上限を宣言しない |
 | パディング | `send_padding_stream` / `send_padding_datagram` / `recv_padding_datagram` | §11.5 | 帯域の押し上げや MTU 探索に使えない (優先度は低い) |
-| RESET_STREAM_AT | `reset_outgoing_data_stream_at` | webtrans-http3 §4.4 | WebTransport 経路で MUST の reset ができない (0094 と同じ原因) |
+| RESET_STREAM_AT | `reset_outgoing_data_stream_at` | webtrans-http3 §4.4 | WtH3 は data stream の reset で送出できる。WtH2 / QUIC / QMux は未対応 (`Unsupported`) |
 | `PRIOR_GROUP_ID_GAP` | `ObjectProperties::prior_group_id_gap` | §10.8 / MSF §6.1 | moq-pub は前回の Group ID を永続化しないため gap を宣言できない (SHOULD の前提を満たさない) |
 | `END_OF_GROUP` | Subgroup Header / Object Datagram のフラグ | §11.2.1 / §11.3.1 | moq-pub は常に false を送る。音声は 1 Group = 1 Object のため、終端を早期に通知できない |
 | `publishTracks` | `MsfCatalog::publish_tracks` | MSF §5.1.5 / §5.6.16 | 逆方向 track (Log / Metrics) を告知できず、QoE メトリクスの返送経路が無い |
@@ -517,8 +517,9 @@ moqt-js (HEAD `6da25d10`) の playout のうち、次の 2 つは移植してい
 
 `crates/tokio-moq/README.md` に明記されている内容の再掲を含む。
 
-- `wt-h3` は `RESET_STREAM_AT` を送出できない (0094)。request stream の cancel や
-  送信中の data stream の中断が MoQ リレーによっては成立しない
+- `wt-h3` は data stream の reset で `RESET_STREAM_AT` を送出できる。request stream の
+  cancel は `reliable_size: None` のため従来の `RESET_STREAM` を使う。`wt-h2` / QUIC /
+  QMux は Reliable Size 付き reset に未対応で `Unsupported` を返す
 - `wt-h2` の reset は `WT_RESET_STREAM` capsule に依存し、リレーの対応が要る。
   また §6.2 により datagram が reliable / ordered になるため、音声を datagram で
   送る既定の遅延特性が変わる

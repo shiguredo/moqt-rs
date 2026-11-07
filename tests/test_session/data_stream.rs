@@ -518,6 +518,7 @@ fn subgroup_object_malformed_track_terminates_subscription() {
                 stream_id: reset_id,
                 error_code,
                 reliable_size,
+                tracking,
             } => {
                 assert_eq!(reset_id, stream_id);
                 assert_eq!(
@@ -528,6 +529,11 @@ fn subgroup_object_malformed_track_terminates_subscription() {
                 assert_eq!(
                     reliable_size, None,
                     "自動発火では RESET_STREAM (reliable_size なし) になること"
+                );
+                assert_eq!(
+                    tracking,
+                    shiguredo_moqt::session::types::ResetTracking::Removed,
+                    "malformed 検出では追跡を終了すること"
                 );
                 saw_reset = true;
             }
@@ -3524,6 +3530,7 @@ fn cancel_uses_stream_cancelled_code() {
             stream_id: reset_id,
             error_code,
             reliable_size,
+            tracking: _,
         } = e
         {
             assert_eq!(reset_id, stream_id);
@@ -3574,6 +3581,7 @@ fn reset_at_propagates_reliable_size_to_event_and_tracker() {
             stream_id: reset_id,
             error_code,
             reliable_size,
+            tracking: _,
         } = e
         {
             assert_eq!(reset_id, stream_id);

@@ -8,8 +8,9 @@ use bytes::Bytes;
 use shiguredo_moqt::loc::LocProperties;
 use shiguredo_moqt::{
     message::common::Location, session::types::DataStreamId, session::types::DataStreamResetReason,
-    session::types::RequestStreamEnd, stream::subgroup::SubgroupHeader,
-    stream::subgroup::SubgroupIdMode, stream::subgroup::SubgroupObject,
+    session::types::RequestStreamEnd, session::types::ResetTracking,
+    stream::subgroup::SubgroupHeader, stream::subgroup::SubgroupIdMode,
+    stream::subgroup::SubgroupObject,
 };
 
 use crate::error::Result;
@@ -383,7 +384,7 @@ impl SubgroupWriter {
         // (`transport::SendStream` を要求する分岐そのものは example の単体テストから観測できない)
         match termination.reset_error_code() {
             Some(error_code) => {
-                self.stream.reset(error_code).await?;
+                self.stream.reset(error_code, None).await?;
                 self.data_plane.send_data_stream_closed(
                     self.stream_id,
                     RequestStreamEnd::Reset {
@@ -417,21 +418,33 @@ impl SubgroupWriter {
     /// `reliable_size` は使わず RESET_STREAM で代替する (`Session` 自身も自動発火の reset では
     /// `reliable_size: None` を渡す)。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
-    pub async fn reset_by_session(mut self, error_code: u64) -> Result<()> {
+    pub async fn reset_by_session(
+        mut self,
+        error_code: u64,
+        reliable_size: Option<u64>,
+        tracking: ResetTracking,
+    ) -> Result<()> {
         tracing::debug!(
-            "reset subgroup stream by session: stream_id={}, group_id={}, error_code={:#x}",
+            "reset subgroup stream by session: stream_id={}, group_id={}, error_code={:#x}, reliable_size={:?}, tracking={:?}",
             self.stream_id.0,
             self.group_id,
             error_code,
+            reliable_size,
+            tracking,
         );
-        self.stream.reset(error_code).await?;
-        self.data_plane.send_data_stream_closed(
-            self.stream_id,
-            RequestStreamEnd::Reset {
-                error_code: Some(error_code),
-                reliable_size: None,
-            },
-        )?;
+        self.stream.reset(error_code, reliable_size).await?;
+        // 配送 timeout の reset は Session が stream 追跡を残しているため、終端を通知して
+        // 保留 PUBLISH_DONE の flush を進める。アプリ起点の reset は Session 側で既に
+        // 追跡を除去済みであり、通知すると未知 stream id になる
+        if tracking == ResetTracking::Retained {
+            self.data_plane.send_data_stream_closed(
+                self.stream_id,
+                RequestStreamEnd::Reset {
+                    error_code: Some(error_code),
+                    reliable_size,
+                },
+            )?;
+        }
         Ok(())
     }
 }

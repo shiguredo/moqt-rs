@@ -882,7 +882,16 @@ impl WtH2SendStream {
     /// ストリームは capsule 層が既に `WT_RESET_STREAM` を送っているため、本要求は driver が
     /// 送らず、[`TransportError::StreamReset`] または [`TransportError::StreamClosed`] を返す
     /// ([`Self::finish`] と同じ扱い)。
-    pub async fn reset(&mut self, error_code: u64) -> Result<()> {
+    ///
+    /// `reliable_size` が `Some` の場合は [`TransportError::Unsupported`] を返す。
+    /// `WT_RESET_STREAM` capsule は Reliable Size を運ばないため、RESET_STREAM_AT 相当は
+    /// この transport では実装しない。
+    pub async fn reset(&mut self, error_code: u64, reliable_size: Option<u64>) -> Result<()> {
+        if reliable_size.is_some() {
+            return Err(TransportError::Unsupported(
+                "RESET_STREAM_AT is not supported by WebTransport over HTTP/2".to_string(),
+            ));
+        }
         let (reply, rx) = oneshot::channel();
         let cmd_tx = self.cmd_tx.clone();
         let stream_id = self.stream_id;
@@ -2327,7 +2336,7 @@ mod tests {
                 Err(TransportError::StreamClosed) => {}
                 other => panic!("FIN 済みストリームへの FIN は StreamClosed になること: {other:?}"),
             }
-            match req_send.reset(0x1).await {
+            match req_send.reset(0x1, None).await {
                 Err(TransportError::StreamClosed) => {}
                 other => {
                     panic!("FIN 済みストリームへの reset は StreamClosed になること: {other:?}")
@@ -2396,7 +2405,18 @@ mod tests {
                 .send(b"reset-me")
                 .await
                 .expect("send に成功すること");
-            reset_send.reset(0x1).await.expect("reset に成功すること");
+            let error = reset_send
+                .reset(0x1, Some(1))
+                .await
+                .expect_err("WtH2 では Reliable Size 付き reset を拒否すること");
+            assert!(
+                matches!(error, TransportError::Unsupported(_)),
+                "Unsupported になること: {error:?}"
+            );
+            reset_send
+                .reset(0x1, None)
+                .await
+                .expect("reset に成功すること");
 
             // server → client (uni stream) への STOP_SENDING
             let mut extra = session
@@ -2687,7 +2707,7 @@ mod tests {
             // しまう)。
             let result = send.finish().await;
             assert_stream_reset(result, error_code, "cancel 後の FIN");
-            let result = send.reset(error_code).await;
+            let result = send.reset(error_code, None).await;
             assert_stream_reset(result, error_code, "cancel 後の reset");
 
             // cancel 後も新しいストリームへは送信できること (セッションは継続する)

@@ -41,8 +41,8 @@ use super::track_history::{
 use super::types::{
     DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING, DataStreamId, DataStreamResetReason,
     DatagramAcceptance, FetchHeaderAcceptance, FetchState, PUBLISHER_PRIORITY_DEFAULT,
-    RecvDataStreamError, RequestKind, RequestStreamEnd, SendRequestError, SessionError,
-    SessionEvent, SessionState, Subscription, SubscriptionState, TerminationReason,
+    RecvDataStreamError, RequestKind, RequestStreamEnd, ResetTracking, SendRequestError,
+    SessionError, SessionEvent, SessionState, Subscription, SubscriptionState, TerminationReason,
     TrackDataAcceptance, TrackRole, TrackStatusResponse,
 };
 
@@ -743,6 +743,7 @@ impl Session {
                 stream_id,
                 error_code,
                 reliable_size,
+                tracking: ResetTracking::Removed,
             });
             // 保留中の PUBLISH_DONE (UPDATE_FAILED) は `ResetDataStream` イベントより後に push する
             // (ワイヤ順序を RESET_STREAM → PUBLISH_DONE に保ち、§9.9 の MUST NOT を満たす。
@@ -766,6 +767,7 @@ impl Session {
                 stream_id,
                 error_code,
                 reliable_size,
+                tracking: ResetTracking::Removed,
             });
             self.maybe_flush_pending_publish_done(request_id);
             return Ok(());
@@ -2080,6 +2082,7 @@ impl Session {
                 error_code: STREAM_CANCELLED,
                 // Session 自動発火のため RESET_STREAM_AT の自動計算はしない (別途検討)
                 reliable_size: None,
+                tracking: ResetTracking::Removed,
             });
         }
     }
@@ -3651,6 +3654,7 @@ impl Session {
                         error_code: STREAM_MALFORMED_TRACK,
                         // malformed 検出時は header の完全性が保証できないため RESET_STREAM とする
                         reliable_size: None,
+                        tracking: ResetTracking::Removed,
                     });
                 }
                 return;
@@ -3718,6 +3722,7 @@ impl Session {
                 error_code: STREAM_MALFORMED_TRACK,
                 // malformed 検出時は header の完全性が保証できないため RESET_STREAM とする
                 reliable_size: None,
+                tracking: ResetTracking::Removed,
             });
         }
         self.events.push_back(SessionEvent::RequestTerminated {

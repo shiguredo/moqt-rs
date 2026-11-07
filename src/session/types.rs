@@ -187,6 +187,15 @@ impl core::error::Error for SendRequestError {
     }
 }
 
+/// `ResetDataStream` の後も Session が stream 追跡を続けるか
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetTracking {
+    /// 追跡を終了する (アプリ起点の reset や fill stream の reset)
+    Removed,
+    /// 追跡を続ける (配送 timeout の reset。PUBLISH_DONE の flush 完了まで追跡する)
+    Retained,
+}
+
 /// セッション層が生成するイベント
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionEvent {
@@ -451,21 +460,29 @@ pub enum SessionEvent {
         /// パディングのバイト長
         length: u64,
     },
-    /// データストリームをデリバリータイムアウトでリセットする (draft §5.2 (Delivery Timeouts and Data Reliability))
+    /// データストリームをリセットする (draft §5.2 (Delivery Timeouts and Data Reliability))
     ///
-    /// I/O 層は `stream_id` に相当する uni data stream を RESET_STREAM で閉じる。
-    /// `error_code` は [`STREAM_DELIVERY_TIMEOUT`](crate::error::STREAM_DELIVERY_TIMEOUT) (0x2) を使用する。
-    /// `reliable_size` が `Some(n)` の場合は RESET_STREAM_AT を `n` で発行し、
-    /// `None` の場合は従来の RESET_STREAM を発行する
-    /// (draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams))。
-    /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+    /// I/O 層は `stream_id` に相当する uni data stream を RESET_STREAM または
+    /// RESET_STREAM_AT で閉じる。`error_code` は配送 timeout では
+    /// [`STREAM_DELIVERY_TIMEOUT`](crate::error::STREAM_DELIVERY_TIMEOUT) (0x2) を使う。
+    /// `reliable_size` が `Some(n)` の場合は MOQT stream の先頭 `n` バイトまでを
+    /// Reliable Size とする RESET_STREAM_AT を発行する。`None` はアプリ指定の offset が
+    /// 無いことを表し、I/O 層は WebTransport のストリームヘッダー長までを Reliable Size に
+    /// できる (draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams))。
+    /// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     ResetDataStream {
         /// 対象 data stream の ID
         stream_id: DataStreamId,
         /// エラーコード
         error_code: u64,
-        /// RESET_STREAM_AT の reliable size (`None` は RESET_STREAM)
+        /// RESET_STREAM_AT の reliable size (`None` はアプリ指定 offset なし)
+        ///
+        /// MOQT の data stream のバイト数を表し、WebTransport のストリームヘッダーは
+        /// 含まない。I/O 層がヘッダー長を加えて送信側の Reliable Size を確定する。
+        /// 受信側の [`RequestStreamEnd::Reset`] は wire の値 (ヘッダーを含む) を保つ。
         reliable_size: Option<u64>,
+        /// この reset の後も Session が stream 追跡を続けるか
+        tracking: ResetTracking,
     },
     /// 受信 data stream に STOP_SENDING を送る (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))
     ///

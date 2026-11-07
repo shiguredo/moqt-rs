@@ -54,9 +54,9 @@ use super::request_id::{RequestIdGenerator, RequestIdTracker};
 use super::subscription::dispatch::SubscriptionOkResponse;
 use super::types::{
     DataStreamId, DeadlineTimer, Fetch, PeerControlMessageSizeLimit, PeerGoawayInfo,
-    RecvRequestError, RequestKind, RequestStreamEnd, Role, SendRequestError, SessionError,
-    SessionEvent, SessionState, Subscription, SubscriptionInitiator, SubscriptionState,
-    TerminationReason, TrackRole, TrackStatusEntry, Transport,
+    RecvRequestError, RequestKind, RequestStreamEnd, ResetTracking, Role, SendRequestError,
+    SessionError, SessionEvent, SessionState, Subscription, SubscriptionInitiator,
+    SubscriptionState, TerminationReason, TrackRole, TrackStatusEntry, Transport,
 };
 
 /// STOP_SENDING を受けた outgoing Subgroup の識別子 (`(track_alias, group_id, subgroup_id)`)
@@ -2337,6 +2337,7 @@ impl Session {
                 error_code: super::types::DataStreamResetReason::Cancelled.error_code(),
                 // FETCH_HEADER 長の自動計算はしない (別途検討)
                 reliable_size: None,
+                tracking: ResetTracking::Removed,
             });
         }
         Ok(())
