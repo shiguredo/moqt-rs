@@ -42,7 +42,7 @@ SETTINGS の connection error は GOAWAY で peer に伝える。エラーを返
 
 ## 依存・関連
 
-- 関連: [0406](0406-wt-h2-draft-16-flow-control-strict-increase.md)
+- 関連: [0406](../0406-wt-h2-draft-16-flow-control-strict-increase.md)
 
 ## 解決方法
 
