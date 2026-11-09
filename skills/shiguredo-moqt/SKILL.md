@@ -1468,8 +1468,8 @@ fn is_grease(value: u64) -> bool
 // subgroup_tracker
 use shiguredo_moqt::subgroup_tracker::{SubgroupStreamState, SubgroupTracker};
 fn new() -> SubgroupTracker
-fn open(&mut self, track_alias: u64, group_id: u64, subgroup_id: u64) -> Result<(), SessionError>
-fn mark_fin(&mut self, track_alias: u64, group_id: u64, subgroup_id: u64, last_object_id: Option<u64>) -> Result<(), SessionError>
+fn open(&mut self, track_alias: u64, group_id: u64, subgroup_id: u64) -> Result<(), MessageError>
+fn mark_fin(&mut self, track_alias: u64, group_id: u64, subgroup_id: u64, last_object_id: Option<u64>) -> Result<(), MessageError>
 fn mark_reset(&mut self, track_alias: u64, group_id: u64, subgroup_id: u64, reliable_size: Option<u64>)
 fn mark_stop_sending(&mut self, track_alias: u64, group_id: u64, subgroup_id: u64)
 fn get(&self, track_alias: u64, group_id: u64, subgroup_id: u64) -> Option<&SubgroupStreamState>
@@ -1480,7 +1480,7 @@ fn record_priority(
     group_id: u64,
     subgroup_id: u64,
     publisher_priority: u8,
-) -> Result<(), SessionError>
+) -> Result<(), MessageError>
 fn check_object_after_fin(
     &self,
     track_alias: u64,
@@ -1490,6 +1490,9 @@ fn check_object_after_fin(
 ) -> Option<&'static str>
 fn SubgroupStreamState::can_reopen(&self) -> bool
 ```
+
+`SubgroupTracker` は FIN を最優先の終端理由として扱う。`ClosedFin` のキーへの `mark_reset` / `mark_stop_sending` は状態を変えず、FIN 後の再オープンは拒否される (draft-ietf-moq-transport-23 §11.3.2 / §2.2)。
+`SubgroupStreamState::ClosedFin` は値を持たず、FIN 前の最終 Object ID は tracker が状態とは別に保持する (状態エントリの無いキーの FIN も記録し、§12.1 条件 2/3 の検出に使う)。
 
 ```rust
 // playout::stretch

@@ -88,25 +88,127 @@ fn concurrent_open_violation() {
 #[test]
 fn mark_without_open_is_noop() {
     let mut t = SubgroupTracker::new();
-    // open 無しでの終端マークは何も起きない (エントリが作られない)
+    // open 無しでの終端マークは状態エントリを作らない (FIN の最終 Object ID だけは記録する)
     t.mark_fin(1, 10, 0, None)
         .expect("テストフィクスチャの前提条件を満たす");
     t.mark_reset(1, 10, 0, None);
     t.mark_stop_sending(1, 10, 0);
-    // open は成功する (entry が無いため)
+    assert_eq!(t.get(1, 10, 0), None, "状態エントリは作られないこと");
+    // open は成功する (状態エントリが無いため)
     t.open(1, 10, 0)
         .expect("テストフィクスチャの前提条件を満たす");
+}
+
+/// 状態エントリの無いキーの FIN は、状態エントリを作らずに最終 Object ID を記録すること
+///
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 2 (FIN 済み Subgroup の最終 Object
+/// 超過) と条件 3 (複数 FIN の最終 Object 不一致) の検出には、状態エントリが無くても最終
+/// Object ID の記録が要る。
+#[test]
+fn mark_fin_on_unknown_key_records_only_final_object_id() {
+    let mut t = SubgroupTracker::new();
+    t.mark_fin(1, 10, 0, Some(5))
+        .expect("状態エントリの無いキーの FIN は成功すること");
+    assert_eq!(t.get(1, 10, 0), None, "状態エントリは作られないこと");
+    assert!(
+        t.check_object_after_fin(1, 10, 0, 6).is_some(),
+        "記録した最終 Object ID を超える Object は条件 2 で Malformed になること"
+    );
+    assert!(
+        t.check_object_after_fin(1, 10, 0, 5).is_none(),
+        "最終 Object ID 以下の Object は条件 2 に当たらないこと"
+    );
+    // 過去の FIN と最終 Object ID が異なる FIN は、状態エントリが無くても条件 3 で拒否する
+    assert!(
+        matches!(
+            t.mark_fin(1, 10, 0, Some(7)),
+            Err(MessageError::MalformedTrack(_))
+        ),
+        "最終 Object ID の異なる FIN は MalformedTrack になること"
+    );
+    assert_eq!(t.get(1, 10, 0), None, "拒否時も状態エントリを作らないこと");
+    assert!(
+        t.check_object_after_fin(1, 10, 0, 6).is_some(),
+        "拒否時は最終 Object ID の記録を更新しないこと"
+    );
+    // 状態エントリが無いため open は成功する
+    t.open(1, 10, 0)
+        .expect("状態エントリの無いキーは open できること");
+}
+
+/// FIN の後に RESET を記録しても ClosedFin のままで、再オープンを許さないこと
+///
+/// draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams): "If the application
+/// receives all data on the stream and the FIN, it can ignore any subsequent reset."
+/// 正常終了の事実を reset で上書きすると、§2.2 (Subgroups) が禁じる FIN 後の再オープンと
+/// 最終 Object ID 以下の Object の再受理を許してしまう。
+#[test]
+fn reset_after_fin_keeps_closed_fin() {
+    let mut t = SubgroupTracker::new();
+    t.open(1, 10, 0)
+        .expect("テストフィクスチャの前提条件を満たす");
+    t.mark_fin(1, 10, 0, Some(5))
+        .expect("テストフィクスチャの前提条件を満たす");
+    t.mark_reset(1, 10, 0, None);
+    t.mark_reset(1, 10, 0, Some(64));
+    assert_eq!(
+        t.get(1, 10, 0),
+        Some(&SubgroupStreamState::ClosedFin),
+        "FIN 後の RESET は ClosedFin を上書きしないこと"
+    );
+    assert!(
+        matches!(t.open(1, 10, 0), Err(MessageError::ProtocolViolation(_))),
+        "FIN 後の RESET を挟んでも再オープンは拒否すること"
+    );
+}
+
+/// FIN の後に STOP_SENDING を記録しても ClosedFin のままで、再オープンを許さないこと
+#[test]
+fn stop_sending_after_fin_keeps_closed_fin() {
+    let mut t = SubgroupTracker::new();
+    t.open(1, 10, 0)
+        .expect("テストフィクスチャの前提条件を満たす");
+    t.mark_fin(1, 10, 0, Some(5))
+        .expect("テストフィクスチャの前提条件を満たす");
+    t.mark_stop_sending(1, 10, 0);
+    assert_eq!(
+        t.get(1, 10, 0),
+        Some(&SubgroupStreamState::ClosedFin),
+        "FIN 後の STOP_SENDING は ClosedFin を上書きしないこと"
+    );
+    assert!(
+        matches!(t.open(1, 10, 0), Err(MessageError::ProtocolViolation(_))),
+        "FIN 後の STOP_SENDING を挟んでも再オープンは拒否すること"
+    );
+}
+
+/// RESET と STOP_SENDING の相互の上書きは後勝ちであること
+#[test]
+fn reset_and_stop_sending_overwrite_each_other() {
+    let mut t = SubgroupTracker::new();
+    t.open(1, 10, 0)
+        .expect("テストフィクスチャの前提条件を満たす");
+    t.mark_stop_sending(1, 10, 0);
+    t.mark_reset(1, 10, 0, Some(8));
+    assert_eq!(
+        t.get(1, 10, 0),
+        Some(&SubgroupStreamState::Reset {
+            reliable_size: Some(8)
+        }),
+        "STOP_SENDING の後の RESET は Reset にすること"
+    );
+    t.mark_stop_sending(1, 10, 0);
+    assert_eq!(
+        t.get(1, 10, 0),
+        Some(&SubgroupStreamState::StoppedByPeer),
+        "RESET の後の STOP_SENDING は StoppedByPeer にすること"
+    );
 }
 
 #[test]
 fn can_reopen_true_for_stopped_by_peer_and_reset() {
     assert!(!SubgroupStreamState::Open.can_reopen());
-    assert!(
-        !SubgroupStreamState::ClosedFin {
-            last_object_id: None
-        }
-        .can_reopen()
-    );
+    assert!(!SubgroupStreamState::ClosedFin.can_reopen());
     // draft-ietf-moq-transport-23 §2.2: premature reset は再オープン可能
     assert!(
         SubgroupStreamState::Reset {

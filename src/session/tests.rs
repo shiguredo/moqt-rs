@@ -1664,6 +1664,19 @@ fn discarded_fin_marks_tracker_terminal_and_allows_reopen() {
         MessageParameters::new(),
     );
 
+    // 同一 Subgroup の過去の FIN (最終 Object ID=5) を、header 受理より前に tracker へ記録する。
+    // 状態エントリの無いキーの FIN として最終 Object ID だけが残り、後で header を受理した
+    // stream は Open になる (Session の経路で到達できる状態)
+    client
+        .peer_subgroups
+        .mark_fin(5003, 0, 0, Some(5))
+        .expect("FIN の記録に成功すること");
+    assert_eq!(
+        client.peer_subgroups.get(5003, 0, 0),
+        None,
+        "状態エントリの無いキーの FIN は状態エントリを作らないこと"
+    );
+
     let stream_id = DataStreamId(903);
     let header = SubgroupHeader {
         track_alias: 5003,
@@ -1684,13 +1697,6 @@ fn discarded_fin_marks_tracker_terminal_and_allows_reopen() {
         TrackDataAcceptance::Accepted
     );
 
-    // 同一 Subgroup の 1 回目の FIN (最終 Object ID=5) を tracker に直接記録する
-    // (再オープン禁止により公開 API の通常手順では到達しない状態を直接作る)
-    client
-        .peer_subgroups
-        .mark_fin(5003, 0, 0, Some(5))
-        .expect("FIN 状態の記録に成功すること");
-
     // stream 所有者 rid1 をキャンセルする。stream は Object の帰属実績が無いため
     // FIN は破棄分岐に入る
     client
@@ -1698,8 +1704,8 @@ fn discarded_fin_marks_tracker_terminal_and_allows_reopen() {
         .expect("Established の subscription は stop_sending できること");
 
     // stream は Object を 1 つも受信していないため last_object_id は None になり、
-    // 記録済みの Some(5) と不一致で mark_fin は Err になる。破棄分岐は状態が
-    // Open のまま残らないよう reset として終端状態にする
+    // 記録済みの Some(5) と不一致で mark_fin は Err になる (状態は Open のまま)。
+    // 破棄分岐は状態が Open のまま残らないよう reset として終端状態にする
     client
         .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
         .expect("破棄対象 stream の FIN は Err にならないこと");

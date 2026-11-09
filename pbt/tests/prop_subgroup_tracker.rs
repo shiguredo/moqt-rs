@@ -34,6 +34,7 @@ fn sample_op(ctx: &mut noprop::TestCaseContext) -> Op {
 /// テスト側で独立した期待状態モデルを持ち、各操作の成否と `get()` 結果を突き合わせる。
 /// - `open`: 未登録または再オープン可能状態 (Reset / StoppedByPeer) のみ成功する
 /// - `mark_fin` / `mark_reset` / `mark_stop_sending`: 登録済みエントリのみ遷移させる
+/// - `mark_reset` / `mark_stop_sending` は `ClosedFin` を上書きしない (FIN が最優先の終端理由)
 /// - FIN 最終 Object ID 不一致はエラーを返し状態を変えない
 #[test]
 fn tracker_state_matches_model_after_random_ops() -> noprop::TestResult {
@@ -41,7 +42,7 @@ fn tracker_state_matches_model_after_random_ops() -> noprop::TestResult {
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Model {
         Open,
-        ClosedFin { last_object_id: Option<u64> },
+        ClosedFin,
         Reset { reliable_size: Option<u64> },
         StoppedByPeer,
     }
@@ -52,14 +53,15 @@ fn tracker_state_matches_model_after_random_ops() -> noprop::TestResult {
         fn as_state(&self) -> SubgroupStreamState {
             match self.clone() {
                 Self::Open => SubgroupStreamState::Open,
-                Self::ClosedFin { last_object_id } => {
-                    SubgroupStreamState::ClosedFin { last_object_id }
-                }
+                Self::ClosedFin => SubgroupStreamState::ClosedFin,
                 Self::Reset { reliable_size } => SubgroupStreamState::Reset { reliable_size },
                 Self::StoppedByPeer => SubgroupStreamState::StoppedByPeer,
             }
         }
     }
+    // ClosedFin のエントリへ RESET / STOP_SENDING を記録した回数
+    // (FIN を上書きしない規則が実際に試されたことの確認)
+    let terminate_after_fin_seen = std::cell::Cell::new(0usize);
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
         let mut tracker = SubgroupTracker::new();
@@ -107,27 +109,36 @@ fn tracker_state_matches_model_after_random_ops() -> noprop::TestResult {
                     if !expect_err {
                         fin_last.insert(key, last);
                         if model.contains_key(&key) {
-                            model.insert(
-                                key,
-                                Model::ClosedFin {
-                                    last_object_id: last,
-                                },
-                            );
+                            model.insert(key, Model::ClosedFin);
                         }
                     }
                 }
                 Op::Reset(a, g, s, sz) => {
                     let key = (a, g, s);
                     tracker.mark_reset(a, g, s, sz);
-                    if model.contains_key(&key) {
-                        model.insert(key, Model::Reset { reliable_size: sz });
+                    match model.get(&key) {
+                        // FIN を受けた後の reset は無視する (draft-ietf-moq-transport-23 §11.3.2)
+                        Some(Model::ClosedFin) => {
+                            terminate_after_fin_seen.set(terminate_after_fin_seen.get() + 1);
+                        }
+                        Some(_) => {
+                            model.insert(key, Model::Reset { reliable_size: sz });
+                        }
+                        None => {}
                     }
                 }
                 Op::Stop(a, g, s) => {
                     let key = (a, g, s);
                     tracker.mark_stop_sending(a, g, s);
-                    if model.contains_key(&key) {
-                        model.insert(key, Model::StoppedByPeer);
+                    match model.get(&key) {
+                        // FIN を受けた後の STOP_SENDING は正常終了の事実を上書きしない
+                        Some(Model::ClosedFin) => {
+                            terminate_after_fin_seen.set(terminate_after_fin_seen.get() + 1);
+                        }
+                        Some(_) => {
+                            model.insert(key, Model::StoppedByPeer);
+                        }
+                        None => {}
                     }
                 }
             }
@@ -154,6 +165,10 @@ fn tracker_state_matches_model_after_random_ops() -> noprop::TestResult {
         }
         Ok(())
     })?;
+    assert!(
+        terminate_after_fin_seen.get() > 0,
+        "ClosedFin への RESET / STOP_SENDING が生成されなかった\n{runner}"
+    );
     Ok(())
 }
 

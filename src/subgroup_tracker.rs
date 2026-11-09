@@ -35,13 +35,12 @@ pub enum SubgroupStreamState {
     Open,
     /// FIN で正常終端した
     ///
-    /// `last_object_id` は FIN 前に受信した最終 Object の ID (draft-ietf-moq-transport-23
-    /// §12.1 (Malformed Tracks) 条件 2/3 の検出に使う)。Object を 1 つも受信せずに
-    /// FIN した場合は `None`。
-    ClosedFin {
-        /// FIN 前に受信した最終 Object ID (Object 未受信の場合は `None`)
-        last_object_id: Option<u64>,
-    },
+    /// FIN は最優先の終端理由であり、この状態は後から RESET / STOP_SENDING を記録しても
+    /// 変わらない (draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams): "If the
+    /// application receives all data on the stream and the FIN, it can ignore any subsequent
+    /// reset.")。FIN 前に受信した最終 Object ID は [`SubgroupTracker`] が状態とは別に保持し、
+    /// §12.1 (Malformed Tracks) 条件 2/3 の検出に使う。
+    ClosedFin,
     /// RESET_STREAM / RESET_STREAM_AT で終端した
     ///
     /// draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams): RESET_STREAM_AT では
@@ -112,8 +111,9 @@ pub struct SubgroupTracker {
     priorities: HashMap<SubgroupKey, u8>,
     /// FIN 済み Subgroup の最終 Object ID を保持する (条件 2/3 の検出用)
     ///
-    /// `ClosedFin` 状態のエントリが削除されても、条件 2 の検出には過去の最終 Object ID が
-    /// 必要なため、state とは別に保持する。
+    /// 最終 Object ID の唯一の記録元である (`SubgroupStreamState::ClosedFin` は値を持たない)。
+    /// 状態エントリの無いキーの FIN もここに記録する。Object を 1 つも受信せずに FIN した
+    /// 場合は `None` を記録する。
     fin_last_object_ids: HashMap<SubgroupKey, Option<u64>>,
 }
 
@@ -154,14 +154,18 @@ impl SubgroupTracker {
         }
     }
 
-    /// FIN での正常終端を記録する (未知キーに対しては無視)
+    /// FIN での正常終端を記録する
     ///
     /// `last_object_id` は FIN 前に受信した最終 Object の ID。Object を 1 つも受信せずに
     /// FIN した場合は `None`。draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 2/3
     /// の検出に使う。
     ///
+    /// 状態エントリがあるキーは `ClosedFin` にする。状態エントリの無いキーには状態エントリを
+    /// 作らないが、最終 Object ID は記録する (条件 2/3 の検出に必要なため)。
+    ///
     /// 条件 3: 同一 Subgroup キーが 2 回目の FIN を迎えたとき、記録済みの最終 Object ID と
-    /// 異なれば Malformed Track に該当する。
+    /// 異なれば Malformed Track に該当する。この場合は状態エントリがあるかどうかにかかわらず
+    /// `Err` を返し、状態も最終 Object ID の記録も更新しない。
     pub fn mark_fin(
         &mut self,
         track_alias: u64,
@@ -180,12 +184,17 @@ impl SubgroupTracker {
         }
         self.fin_last_object_ids.insert(key, last_object_id);
         if let Some(state) = self.entries.get_mut(&key) {
-            *state = SubgroupStreamState::ClosedFin { last_object_id };
+            *state = SubgroupStreamState::ClosedFin;
         }
         Ok(())
     }
 
     /// RESET_STREAM / RESET_STREAM_AT での終端を記録する
+    ///
+    /// 状態エントリの無いキーと、`ClosedFin` のキーに対しては何もしない。FIN を受けた後の
+    /// reset は無視でき (draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams))、
+    /// 正常終了の事実を上書きすると FIN 後の再オープンを許してしまう (§2.2 (Subgroups))。
+    /// `Reset` / `StoppedByPeer` からは後勝ちで `Reset` にする。
     pub fn mark_reset(
         &mut self,
         track_alias: u64,
@@ -194,15 +203,23 @@ impl SubgroupTracker {
         reliable_size: Option<u64>,
     ) {
         let key = (track_alias, group_id, subgroup_id);
-        if let Some(state) = self.entries.get_mut(&key) {
+        if let Some(state) = self.entries.get_mut(&key)
+            && *state != SubgroupStreamState::ClosedFin
+        {
             *state = SubgroupStreamState::Reset { reliable_size };
         }
     }
 
     /// STOP_SENDING 受信による終端を記録する
+    ///
+    /// 状態エントリの無いキーと、`ClosedFin` のキーに対しては何もしない (FIN を最優先の
+    /// 終端理由として扱い、正常終了の事実を上書きしない)。`Reset` / `StoppedByPeer` からは
+    /// 後勝ちで `StoppedByPeer` にする。
     pub fn mark_stop_sending(&mut self, track_alias: u64, group_id: u64, subgroup_id: u64) {
         let key = (track_alias, group_id, subgroup_id);
-        if let Some(state) = self.entries.get_mut(&key) {
+        if let Some(state) = self.entries.get_mut(&key)
+            && *state != SubgroupStreamState::ClosedFin
+        {
             *state = SubgroupStreamState::StoppedByPeer;
         }
     }
