@@ -1,7 +1,7 @@
 # moqt-reval 付きトークンを既定の検証経路で fail-open にしない
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-10
 - Branch: develop
 - Polished: 2026-11-10
 
@@ -91,3 +91,26 @@ draft-ietf-moq-c4m-02 §2.2 は次の 2 つの MUST を定める。
 - `moqt-reval` を composition claims 内に置いたトークンの well-formed 性拒否は、`docs/missing-features.md` に記載のある別件とし、本 issue では扱わない。
 - `moqt_reval` の再検証そのもの (定期的な再検証の実行) は Sans-I/O の方針どおり利用側の責務とし、本 issue では扱わない。
 - 旧 JWT 形式の `DpopProof::verify_against_cat_token` は CAT のクレームを検証しない互換 API であり、呼び出し側が別途 `validate` を呼ぶ。本 issue の判定は `validate` 経由で効くため、この入口自体は変更しない。
+
+## 解決方法
+
+`ClaimValidationOptions` と `BearerVerificationOptions` に `revalidation_interval_seconds: Option<f64>` を追加し、`CatClaims::validate` で `moqt-reval` の受理可否を判定するようにした。
+判定は非公開の `validate_moqt_reval` にまとめ、非有限値の検査の直後、`exp` / `nbf` の検査の前に呼ぶ。
+`None` (既定) は値が 0 でも `RevalidationUnsupported` で拒否する。`Some(x)` は 0 を受理し、非ゼロは `x` 未満を `RevalidationIntervalTooShort` で拒否する。
+`x` が非有限または負なら `InvalidRevalidationInterval` で拒否する。
+
+`CatToken::verify_bearer` は `BearerVerificationOptions::revalidation_interval_seconds` を `validate` へ転送する。
+`CwtDpopProof::verify_against_cat_token` は `claim_options` 経由で同じ判定が効く。doc の「`moqt-reval` はこの入口の対象外」を、受理可否はこの入口が判定し再検証の実行だけを利用側の責務とする記述に改めた。
+再検証の責務は、非ゼロの `moqt-reval` を持つトークンを受理した場合に限ると明記した (0 は §2.2 で再検証してはならない)。
+
+テストは次を追加・更新した。
+
+- `tests/test_c4m/cat.rs`: `validate_moqt_reval_against_revalidation_capability` (境界値の表と、exp より先に判定する順序)、`revalidation_errors_display`
+- `tests/test_c4m/cat/bearer.rs`: `verify_bearer_checks_moqt_reval_against_revalidation_capability` (拒否時に cache を変更しないことを含む)
+- `tests/test_c4m/dpop/cwt/verification.rs`: `cwt_dpop_checks_moqt_reval_against_revalidation_capability` (拒否時に `cti` を記録しないことを含む)
+- `pbt/tests/prop_c4m/cat.rs`: `expected_validation_error` に再検証判定を写し、受信者の再検証能力を生成して新しい 3 つの variant のカウンタを追加した。
+  再検証判定が後段の検証に届くケースを減らすため、`claims_validate_matches_model` の実行回数を 512 回にし、非ゼロの等号境界 (50 / 100 / 200) を生成する
+- `tests/test_c4m/draft02.rs`: validation ベクタのリテラルに `revalidation_interval_seconds: None` を追加した
+
+`README.md` の bearer の使用例から `moqt_reval` の手動拒否を削除し、`docs/c4m.md`、`docs/missing-features.md`、`skills/shiguredo-moqt/SKILL.md` の記述と使用例を新しい挙動に合わせた。
+`CODEBASE.md` の規定に従い、ブランチと PR を作らず develop に直接コミットし、`CHANGES.md` は更新していない。
