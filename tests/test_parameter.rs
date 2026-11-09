@@ -872,4 +872,37 @@ mod setup_authorization_token_scope {
             "Token 構造のデコード失敗は MALFORMED_AUTH_TOKEN であること"
         );
     }
+
+    /// (Token Type, Token Value) が重複した SETUP の生バイト列は MALFORMED_AUTH_TOKEN で拒否する
+    ///
+    /// draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression): Token は alias 解決後の
+    /// (Token Type, Token Value) が一意である限り繰り返してよく、違反は MALFORMED_AUTH_TOKEN である。
+    /// `SetupOptions::encode` は重複を拒否するため、wire は手で組む。
+    #[test]
+    fn duplicate_token_type_and_value_is_malformed_auth_token() {
+        // USE_VALUE (0x3) + Token Type 1 + Token Value "tok"
+        let token = [0x03, 0x01, b't', b'o', b'k'];
+        // 1 件目は Type Delta = AUTHORIZATION_TOKEN、2 件目は同じ Type のため Type Delta = 0
+        let mut wire = setup_option_wire(&token);
+        wire.push(0x00);
+        wire.push(token.len() as u8);
+        wire.extend_from_slice(&token);
+        assert!(
+            matches!(
+                SetupOptions::decode(&wire),
+                Err(MessageError::MalformedAuthToken(_))
+            ),
+            "(Token Type, Token Value) の重複は MALFORMED_AUTH_TOKEN であること"
+        );
+
+        // Token Value が異なれば同じ Token Type を繰り返してよい
+        let other = [0x03, 0x01, b'a', b'b', b'c'];
+        let mut wire = setup_option_wire(&token);
+        wire.push(0x00);
+        wire.push(other.len() as u8);
+        wire.extend_from_slice(&other);
+        let (decoded, _) =
+            SetupOptions::decode(&wire).expect("値の異なる Token の繰り返しは受理すること");
+        assert_eq!(decoded.authorization_tokens().len(), 2);
+    }
 }

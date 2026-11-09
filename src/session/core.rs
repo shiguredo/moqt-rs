@@ -36,7 +36,9 @@ use crate::message::{
     TRACK_STATUS_OK_ALLOWED_PARAMS, common::Location, common::TrackNamespace,
     unsupported_request_allowed_params,
 };
-use crate::message_parameter::{AuthorizationToken, MessageParameters};
+use crate::message_parameter::{
+    AuthorizationToken, MessageParameters, validate_auth_token_uniqueness,
+};
 use crate::object_properties::ObjectFieldTracker;
 use crate::parameter::{
     DEFAULT_MAX_CONTROL_MESSAGE_SIZE, MIN_MAX_CONTROL_MESSAGE_SIZE,
@@ -2962,6 +2964,24 @@ impl Session {
             .unwrap_or(0);
         let mut peer_cache = AuthTokenCache::new(self_max_size);
         if let Err(err) = register_setup_auth_tokens(&setup.options, &mut peer_cache) {
+            self.fail(err.clone());
+            return Err(err);
+        }
+        // draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression): "An Authorization
+        // Token MAY be repeated within a message as long as the combination of Token Type and
+        // Token Value are unique after resolving any aliases." 違反は "MUST reject that message
+        // with an MALFORMED_AUTH_TOKEN error" であり、Request ID を持たない SETUP では §12.2 の
+        // MALFORMED_AUTH_TOKEN によるセッション終了で実現する。wire 経由の SETUP は
+        // `SetupOptions::decode` が同じ検証をするが、手組みの `Setup` はそれを経由しない。
+        // SETUP の USE_ALIAS / DELETE は直前の `register_setup_auth_tokens` で拒否済みのため、
+        // 残る REGISTER / USE_VALUE の (Token Type, Token Value) を比べれば alias 解決後の一意性と
+        // 一致する。拒否時は既存の検証と同じく peer の token cache も peer の SETUP も保持しない
+        // (§8.9 が REGISTER の登録を求めるのはセッションエラーにならない場合だけである)。
+        // 節番号・規則は draft 由来であり将来変更される可能性がある
+        if let Err(err) =
+            validate_auth_token_uniqueness(setup.options.authorization_tokens().into_iter())
+        {
+            let err = session_error_from_message(&err, SESSION_PROTOCOL_VIOLATION);
             self.fail(err.clone());
             return Err(err);
         }

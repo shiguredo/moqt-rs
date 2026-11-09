@@ -304,6 +304,93 @@ fn peer_authorization_token_register_over_self_limit_is_ignored() {
     assert!(cache.is_empty());
 }
 
+/// 手組み SETUP の (Token Type, Token Value) の重複は MALFORMED_AUTH_TOKEN でセッションを閉じる
+///
+/// draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression): "An Authorization Token
+/// MAY be repeated within a message as long as the combination of Token Type and Token Value are
+/// unique after resolving any aliases." 違反は "MUST reject that message with an
+/// MALFORMED_AUTH_TOKEN error" であり、Request ID を持たない SETUP ではセッション終了
+/// (§12.2 の MALFORMED_AUTH_TOKEN) になる。`Session::recv_control` に渡す手組みの `Setup` は
+/// `SetupOptions::decode` の検証を経由しないため、Session 側で検証する。
+/// 拒否したときは、登録しかけた alias も peer の SETUP も保持せず、Established にしない。
+#[test]
+fn peer_setup_duplicate_authorization_token_closes_with_malformed_auth_token() {
+    use shiguredo_moqt::error::SESSION_MALFORMED_AUTH_TOKEN;
+
+    let use_value = || AuthorizationToken::UseValue {
+        token_type: 1,
+        token_value: b"token".to_vec(),
+    };
+    let register = |alias| AuthorizationToken::Register {
+        alias,
+        token_type: 1,
+        token_value: b"token".to_vec(),
+    };
+    let cases = [
+        ("USE_VALUE の重複", vec![use_value(), use_value()]),
+        ("値の同じ REGISTER 2 件", vec![register(1), register(2)]),
+        (
+            "値の同じ REGISTER と USE_VALUE",
+            vec![register(1), use_value()],
+        ),
+    ];
+    for (name, tokens) in cases {
+        // REGISTER が登録され得るよう、自側の MAX_AUTH_TOKEN_CACHE_SIZE を十分に取る
+        let mut server_opts = SetupOptions::new();
+        server_opts.push(SetupOption {
+            option_type: shiguredo_moqt::parameter::SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE,
+            value: SetupOptionValue::VarInt(1024),
+        });
+        let mut server = Session::new_server(Transport::WebTransport, server_opts)
+            .expect("テストフィクスチャの前提条件を満たす");
+        let mut client_opts = SetupOptions::new();
+        for token in tokens {
+            client_opts.push(SetupOption {
+                option_type: shiguredo_moqt::parameter::SETUP_OPTION_AUTHORIZATION_TOKEN,
+                value: SetupOptionValue::AuthorizationToken(token),
+            });
+        }
+
+        let err = server
+            .recv_control(ControlMessage::Setup(Setup {
+                options: client_opts,
+            }))
+            .expect_err("重複トークンを含む SETUP は拒否すること");
+        assert_eq!(
+            err.code, SESSION_MALFORMED_AUTH_TOKEN,
+            "{name}: MALFORMED_AUTH_TOKEN で閉じること"
+        );
+        assert_eq!(
+            server.state(),
+            SessionState::Closing,
+            "{name}: セッションを閉じること"
+        );
+        assert!(
+            server.peer_auth_token_cache().is_empty(),
+            "{name}: 拒否した SETUP の alias を登録しないこと"
+        );
+        assert_eq!(
+            server.peer_control_message_size_limit(),
+            PeerControlMessageSizeLimit::BeforeSetup,
+            "{name}: 拒否した SETUP を peer の SETUP として保持しないこと"
+        );
+        let events = drain_events(&mut server);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                SessionEvent::CloseSession(close) if close.code == SESSION_MALFORMED_AUTH_TOKEN
+            )),
+            "{name}: MALFORMED_AUTH_TOKEN の CloseSession を発行すること: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::Established)),
+            "{name}: Established を発行しないこと: {events:?}"
+        );
+    }
+}
+
 /// 自側 SETUP 内の REGISTER で alias が重複すると new() で拒否される
 ///
 /// draft §8.9 (Authorization Token Compression): alias 重複の事前検出。
