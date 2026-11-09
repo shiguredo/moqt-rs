@@ -28,6 +28,9 @@ mod media_timeline;
 #[path = "test_msf/event_timeline.rs"]
 mod event_timeline;
 
+#[path = "test_msf/debug_redaction.rs"]
+mod debug_redaction;
+
 #[path = "test_msf/timeline_gzip.rs"]
 mod timeline_gzip;
 

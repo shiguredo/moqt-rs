@@ -28,12 +28,27 @@ pub struct MsfFragment {
 }
 
 /// MSF fragment の 1 パラメータ (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation))
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// 値は token を含み得る (§11.1.1 の `c4m`、§11.4.2)。パラメータ名は配備ごとに決まり、名前で
+/// 機密かどうかを判別できないため、`Debug` ではすべての値を伏せ、`value_bytes` として長さだけを
+/// 表示する。
+#[derive(Clone, PartialEq, Eq)]
 pub struct MsfFragmentParameter {
     /// パラメータ名 (case-sensitive)
     pub name: String,
     /// パラメータ値 (空文字列を許容する)
     pub value: String,
+}
+
+impl core::fmt::Debug for MsfFragmentParameter {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // フィールドを追加したときに表示漏れをコンパイラが検出できるよう、`..` を使わずに分解する
+        let Self { name, value } = self;
+        f.debug_struct("MsfFragmentParameter")
+            .field("name", name)
+            .field("value_bytes", &value.len())
+            .finish()
+    }
 }
 
 /// connection パラメータが要求する接続種別 (draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters))
@@ -81,7 +96,11 @@ pub struct MsfLocationRange {
 /// パース済みの MSF URI (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation))
 ///
 /// fragment 以外の要素は接続確立に使う付随情報として保持する。
-#[derive(Debug, Clone, PartialEq)]
+///
+/// connection URI のパラメータは token を含み得て (§11.4.2)、名前で機密かどうかを判別できない
+/// ため、`Debug` は `query` 全体を伏せ、バイト長を `Option<usize>` で表示する。`fragment` の
+/// パラメータ値は [`MsfFragmentParameter`] の `Debug` で伏せる。
+#[derive(Clone, PartialEq)]
 pub struct MsfUri {
     /// authority (host + optional port)
     pub authority: String,
@@ -91,6 +110,24 @@ pub struct MsfUri {
     pub query: Option<String>,
     /// `#` 以降の fragment
     pub fragment: MsfFragment,
+}
+
+impl core::fmt::Debug for MsfUri {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // フィールドを追加したときに表示漏れをコンパイラが検出できるよう、`..` を使わずに分解する
+        let Self {
+            authority,
+            path,
+            query,
+            fragment,
+        } = self;
+        f.debug_struct("MsfUri")
+            .field("authority", authority)
+            .field("path", path)
+            .field("query", &query.as_ref().map(String::len))
+            .field("fragment", fragment)
+            .finish()
+    }
 }
 
 impl MsfFragment {

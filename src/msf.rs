@@ -370,12 +370,26 @@ impl MsfTemplate {
 /// `value_raw` は単独の JSON 値でなければならず、`MsfCatalogDocument::encode` で検証する。
 /// 不正値を手構築すると `encode` が `InvalidCatalog` で失敗するため、単一 JSON 値にすること。
 /// 空 object は `Some` の空 `Vec` として保持し、重複 scheme は順序どおりに保持する。
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `value_raw` は §5.2.43 のとおり変数置換 (§5.4) を行った後の token の実値を含み得るため、`Debug` では値を伏せて
+/// `value_raw_bytes` として長さだけを表示する。
+#[derive(Clone, PartialEq)]
 pub struct MsfAuthInfo {
     /// 認可 scheme 名
     pub scheme: String,
     /// scheme 固有値の生 JSON
     pub value_raw: Vec<u8>,
+}
+
+impl core::fmt::Debug for MsfAuthInfo {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // フィールドを追加したときに表示漏れをコンパイラが検出できるよう、`..` を使わずに分解する
+        let Self { scheme, value_raw } = self;
+        f.debug_struct("MsfAuthInfo")
+            .field("scheme", scheme)
+            .field("value_raw_bytes", &value_raw.len())
+            .finish()
+    }
 }
 
 /// authInfo object の encode 用ラッパー
@@ -411,7 +425,12 @@ impl DisplayJson for MsfAccessibility {
 }
 
 /// MSF トラックオブジェクト (draft-ietf-moq-msf-01 §5.2 (Track Object Fields))
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `Debug` は機密値を伏せる。`token` (§5.2.37 の認証トークン)、`track_base_key` (§5.2.41 の
+/// 鍵材料)、`connection_uri` (§11.4.2 のとおり token パラメータを含み得る endpoint URI) は、
+/// 値の代わりにバイト長を `Option<usize>` で表示する。`auth_info` は [`MsfAuthInfo`] の
+/// `Debug` で値を伏せる。
+#[derive(Clone, PartialEq)]
 pub struct MsfTrack {
     /// トラック名 (draft-ietf-moq-msf-01 §5.2.3 (Track name)) - 必須
     pub name: String,
@@ -499,6 +518,98 @@ pub struct MsfTrack {
     pub auth_info: Option<Vec<MsfAuthInfo>>,
     /// accessibility 記述子列 (draft-ietf-moq-msf-01 §5.2.44 (Accessibility))
     pub accessibility: Vec<MsfAccessibility>,
+}
+
+impl core::fmt::Debug for MsfTrack {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // フィールドを追加したときに表示漏れをコンパイラが検出できるよう、`..` を使わずに分解する
+        let Self {
+            name,
+            namespace,
+            packaging,
+            event_type,
+            role,
+            is_live,
+            target_latency,
+            buffers,
+            label,
+            render_group,
+            alt_group,
+            init_ref,
+            depends,
+            template,
+            temporal_id,
+            spatial_id,
+            codec,
+            mime_type,
+            framerate,
+            timescale,
+            bitrate,
+            avg_bitrate,
+            max_gop_duration,
+            max_group_duration,
+            width,
+            height,
+            samplerate,
+            channel_config,
+            display_width,
+            display_height,
+            lang,
+            parent_name,
+            track_duration,
+            connection_uri,
+            token,
+            encryption_scheme,
+            cipher_suite,
+            key_id,
+            track_base_key,
+            auth_info,
+            accessibility,
+        } = self;
+        f.debug_struct("MsfTrack")
+            .field("name", name)
+            .field("namespace", namespace)
+            .field("packaging", packaging)
+            .field("event_type", event_type)
+            .field("role", role)
+            .field("is_live", is_live)
+            .field("target_latency", target_latency)
+            .field("buffers", buffers)
+            .field("label", label)
+            .field("render_group", render_group)
+            .field("alt_group", alt_group)
+            .field("init_ref", init_ref)
+            .field("depends", depends)
+            .field("template", template)
+            .field("temporal_id", temporal_id)
+            .field("spatial_id", spatial_id)
+            .field("codec", codec)
+            .field("mime_type", mime_type)
+            .field("framerate", framerate)
+            .field("timescale", timescale)
+            .field("bitrate", bitrate)
+            .field("avg_bitrate", avg_bitrate)
+            .field("max_gop_duration", max_gop_duration)
+            .field("max_group_duration", max_group_duration)
+            .field("width", width)
+            .field("height", height)
+            .field("samplerate", samplerate)
+            .field("channel_config", channel_config)
+            .field("display_width", display_width)
+            .field("display_height", display_height)
+            .field("lang", lang)
+            .field("parent_name", parent_name)
+            .field("track_duration", track_duration)
+            .field("connection_uri", &connection_uri.as_ref().map(String::len))
+            .field("token", &token.as_ref().map(String::len))
+            .field("encryption_scheme", encryption_scheme)
+            .field("cipher_suite", cipher_suite)
+            .field("key_id", key_id)
+            .field("track_base_key", &track_base_key.as_ref().map(String::len))
+            .field("auth_info", auth_info)
+            .field("accessibility", accessibility)
+            .finish()
+    }
 }
 
 impl MsfTrack {
@@ -821,7 +932,12 @@ impl DisplayJson for MsfTrack {
 /// 再定義された属性のみ上書きする。
 /// Track Name は新規でなければならない。
 /// この仕様は将来変更される可能性がある。
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `Debug` は機密値を伏せる。`token` (§5.2.37 の認証トークン)、`track_base_key` (§5.2.41 の
+/// 鍵材料)、`connection_uri` (§11.4.2 のとおり token パラメータを含み得る endpoint URI) は、
+/// 値の代わりにバイト長を `Option<usize>` で表示する。`auth_info` は [`MsfAuthInfo`] の
+/// `Debug` で値を伏せる。
+#[derive(Clone, PartialEq)]
 pub struct MsfCloneTrack {
     /// トラック名 (draft-ietf-moq-msf-01 §5.2.3 (Track name)) - 必須、新規でなければならない
     pub name: String,
@@ -914,6 +1030,100 @@ pub struct MsfCloneTrack {
     pub auth_info: Option<Vec<MsfAuthInfo>>,
     /// accessibility 記述子列 (draft-ietf-moq-msf-01 §5.2.44 (Accessibility)) - None は親から継承
     pub accessibility: Option<Vec<MsfAccessibility>>,
+}
+
+impl core::fmt::Debug for MsfCloneTrack {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // フィールドを追加したときに表示漏れをコンパイラが検出できるよう、`..` を使わずに分解する
+        let Self {
+            name,
+            parent_name,
+            parent_namespace,
+            packaging,
+            namespace,
+            event_type,
+            role,
+            is_live,
+            target_latency,
+            buffers,
+            label,
+            render_group,
+            alt_group,
+            init_ref,
+            depends,
+            template,
+            temporal_id,
+            spatial_id,
+            codec,
+            mime_type,
+            framerate,
+            timescale,
+            bitrate,
+            avg_bitrate,
+            max_gop_duration,
+            max_group_duration,
+            width,
+            height,
+            samplerate,
+            channel_config,
+            display_width,
+            display_height,
+            lang,
+            track_duration,
+            connection_uri,
+            token,
+            encryption_scheme,
+            cipher_suite,
+            key_id,
+            track_base_key,
+            auth_info,
+            accessibility,
+        } = self;
+        f.debug_struct("MsfCloneTrack")
+            .field("name", name)
+            .field("parent_name", parent_name)
+            .field("parent_namespace", parent_namespace)
+            .field("packaging", packaging)
+            .field("namespace", namespace)
+            .field("event_type", event_type)
+            .field("role", role)
+            .field("is_live", is_live)
+            .field("target_latency", target_latency)
+            .field("buffers", buffers)
+            .field("label", label)
+            .field("render_group", render_group)
+            .field("alt_group", alt_group)
+            .field("init_ref", init_ref)
+            .field("depends", depends)
+            .field("template", template)
+            .field("temporal_id", temporal_id)
+            .field("spatial_id", spatial_id)
+            .field("codec", codec)
+            .field("mime_type", mime_type)
+            .field("framerate", framerate)
+            .field("timescale", timescale)
+            .field("bitrate", bitrate)
+            .field("avg_bitrate", avg_bitrate)
+            .field("max_gop_duration", max_gop_duration)
+            .field("max_group_duration", max_group_duration)
+            .field("width", width)
+            .field("height", height)
+            .field("samplerate", samplerate)
+            .field("channel_config", channel_config)
+            .field("display_width", display_width)
+            .field("display_height", display_height)
+            .field("lang", lang)
+            .field("track_duration", track_duration)
+            .field("connection_uri", &connection_uri.as_ref().map(String::len))
+            .field("token", &token.as_ref().map(String::len))
+            .field("encryption_scheme", encryption_scheme)
+            .field("cipher_suite", cipher_suite)
+            .field("key_id", key_id)
+            .field("track_base_key", &track_base_key.as_ref().map(String::len))
+            .field("auth_info", auth_info)
+            .field("accessibility", accessibility)
+            .finish()
+    }
 }
 
 impl MsfCloneTrack {
@@ -2723,7 +2933,7 @@ fn decode_delta_operation(
 /// (`decode_common_track_fields`) に集約する。片方への修正漏れを防ぐための集約であり、
 /// 必須可否・継承可否などの妥当性規則は呼び出し側 (decode_track / decode_clone_track)
 /// が担う。encode 側は機械的な member 書き出しであり、roundtrip テストで drift を検出する。
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct CommonTrackFields {
     namespace: Option<String>,
     event_type: Option<String>,
