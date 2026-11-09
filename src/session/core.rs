@@ -564,7 +564,10 @@ pub struct Session {
     /// `SessionEvent::RequestTerminated { reason: PeerStreamFin }` を発行する。
     ///
     /// 記録するのは `fin: true` で最終メッセージを送る経路 (PUBLISH_DONE、単独
-    /// REQUEST_ERROR) である。解除は `peer_fin_received` と同時に行う。peer の FIN が届かな
+    /// REQUEST_ERROR、TRACK_STATUS_OK) である。記録は当該 request のイベント (最終メッセージの
+    /// `SendOnStream` と、それに伴う `ResetDataStream`) をすべて積んだ後に行う。peer の FIN を
+    /// 受信済みなら記録と同時に `RequestTerminated` が積まれ、それを当該 request の最後の
+    /// イベントにするためである。解除は `peer_fin_received` と同時に行う。peer の FIN が届かな
     /// ければ `Session::forget_subscription` などによる破棄まで残る (id 数の上限は
     /// `request_streams` と同じ)。この節番号・規則は draft 由来であり将来 draft 改定で
     /// 変わる可能性がある。
@@ -1712,10 +1715,15 @@ impl Session {
 
     /// 自側が送信方向を最終メッセージとともに FIN で閉じたことを記録する
     ///
-    /// `fin: true` で最終メッセージ (PUBLISH_DONE / 単独 REQUEST_ERROR) を送る経路から呼ぶ。
-    /// 既に peer の FIN を受信済みなら、この時点で request の終端が確定し
+    /// `fin: true` で最終メッセージ (PUBLISH_DONE / 単独 REQUEST_ERROR / TRACK_STATUS_OK) を
+    /// 送る経路から呼ぶ。既に peer の FIN を受信済みなら、この時点で request の終端が確定し
     /// `SessionEvent::RequestTerminated { reason: PeerStreamFin }` が発行される
     /// ([`Session::finish_request_on_fin_exchange`])。
+    ///
+    /// 呼び出し側は、その API 呼び出しで当該 request に積むイベント (最終メッセージの
+    /// `SendOnStream` と、それに伴う `ResetDataStream`) をすべて push した後に呼ぶこと。
+    /// `RequestTerminated` を当該 request の最後のイベントにし、アプリが終端を観測した後に
+    /// 最終メッセージの送信や data stream の reset を指示されないようにするためである。
     pub(super) fn mark_send_direction_closed_with_fin(&mut self, request_id: u64) {
         self.local_fin_sent.insert(request_id);
         self.finish_request_on_fin_exchange(request_id);
@@ -2146,14 +2154,16 @@ impl Session {
         });
         // draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES): 応答送信で peer クレジット回復
         self.restore_incoming_request_update_credit(request_id);
-        if fin {
-            self.mark_send_direction_closed_with_fin(request_id);
-        }
         self.events.push_back(SessionEvent::SendOnStream {
             request_id,
             message: msg,
             fin,
         });
+        // 送信方向の終端の記録は SendOnStream を積んだ後に行う。peer の FIN を受信済みなら
+        // ここで RequestTerminated が積まれ、最終メッセージより後になる
+        if fin {
+            self.mark_send_direction_closed_with_fin(request_id);
+        }
         // 受信時に拒否を決めてキューへ積んだ更新は、先行グループの OK を積んだ後で
         // REQUEST_ERROR を送る (draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE) の
         // 応答順序)。FETCH / TRACK_STATUS は未応答キューを持たないため対象外である。
@@ -2286,9 +2296,6 @@ impl Session {
             // 場合のみここで FIN する (§6.4.2.3 / §9.9)
             fin,
         });
-        if fin {
-            self.mark_send_direction_closed_with_fin(request_id);
-        }
         // draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions): REQUEST_UPDATE 失敗時、
         // publisher は PUBLISH_DONE(UPDATE_FAILED) を送信する MUST。
         // draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE): "A sender MUST NOT send
@@ -2339,6 +2346,12 @@ impl Session {
                 reliable_size: None,
                 tracking: ResetTracking::Removed,
             });
+        }
+        // REQUEST_ERROR 単独が最終メッセージのときの送信方向の終端は、FETCH の自動 reset まで
+        // 積んだ後に記録する。peer の FIN を受信済みならここで RequestTerminated が積まれ、
+        // 当該 request の最後のイベントになる
+        if fin {
+            self.mark_send_direction_closed_with_fin(request_id);
         }
         Ok(())
     }

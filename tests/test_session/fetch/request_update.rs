@@ -290,6 +290,123 @@ fn fetch_request_update_ok_emits_request_ok_received_event_with_kind_fetch() {
     );
 }
 
+/// requester の FIN 後に FETCH の REQUEST_UPDATE を REQUEST_ERROR で拒否すると、
+/// REQUEST_ERROR → ResetDataStream → RequestTerminated の順でイベントが出ること
+///
+/// 単独の REQUEST_ERROR は最終メッセージ (FIN) であり、peer の FIN を受信済みなら送信と同時に
+/// request の終端が確定する。draft-ietf-moq-transport-23 §9.5.1 の自動 reset ("When a REQUEST_UPDATE fails for a FETCH, the
+/// publisher MUST reset the FETCH data stream.") も同じ API 呼び出しで積むため、
+/// `RequestTerminated` はその後に出なければならない。逆順だと、アプリは終端を観測した後に
+/// data stream の reset を指示される。
+#[test]
+fn request_error_update_failure_after_requester_fin_terminates_last() {
+    use shiguredo_moqt::message::{ReasonPhrase, common::Location};
+    use shiguredo_moqt::session::types::RequestStreamEnd;
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_fetch(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            fetch_range_params(
+                Location {
+                    group_id: 0,
+                    object_id: 0,
+                },
+                Location {
+                    group_id: 5,
+                    object_id: 0,
+                },
+            ),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, fetch_msg) = take_send_request(&mut client);
+    server
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_fetch_ok(
+            rid,
+            fetch_ok_params(Some(Location {
+                group_id: 5,
+                object_id: 0,
+            })),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let stream_id = DataStreamId(150);
+    server
+        .send_fetch_header(stream_id, rid)
+        .expect("FETCH_HEADER の送信に成功すること");
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, upd_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // requester は REQUEST_UPDATE の後に送るものが無いため FIN で送信方向を閉じる
+    server
+        .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+        .expect("requester の FIN は responder の request を終端しないこと");
+    // 先に積まれたイベントを捨て、REQUEST_ERROR の送信で積まれるイベントだけを見る
+    drain_events(&mut server);
+
+    server
+        .send_request_error(
+            rid,
+            0x42,
+            0,
+            ReasonPhrase::new("update failed".to_string())
+                .expect("テストフィクスチャの前提条件を満たす"),
+            ErrorDetails::new(),
+        )
+        .expect("requester の FIN 後でも REQUEST_ERROR を送れること");
+    let events = drain_events(&mut server);
+    let error_index = event_position(&events, "FIN 付きの REQUEST_ERROR", |e| {
+        matches!(
+            e,
+            SessionEvent::SendOnStream {
+                request_id,
+                message: ControlMessage::RequestError(_),
+                fin: true,
+            } if *request_id == rid
+        )
+    });
+    let reset_index = event_position(&events, "FETCH data stream の ResetDataStream", |e| {
+        matches!(
+            e,
+            SessionEvent::ResetDataStream { stream_id: id, .. } if *id == stream_id
+        )
+    });
+    let terminated_index = event_position(&events, "RequestTerminated(PeerStreamFin)", |e| {
+        matches!(
+            e,
+            SessionEvent::RequestTerminated {
+                request_id,
+                kind: RequestKind::Fetch,
+                reason: TerminationReason::PeerStreamFin,
+            } if *request_id == rid
+        )
+    });
+    assert!(
+        error_index < reset_index,
+        "REQUEST_ERROR は自動 reset より先に出ること (ワイヤ順序): {events:?}"
+    );
+    assert!(
+        reset_index < terminated_index,
+        "RequestTerminated は自動 reset より後に出ること: {events:?}"
+    );
+    assert_eq!(
+        terminated_index,
+        events.len() - 1,
+        "RequestTerminated は当該 request の最後のイベントであること: {events:?}"
+    );
+}
+
 /// REQUEST_UPDATE 失敗応答で fetch が `Terminated` に遷移し、
 /// draft-ietf-moq-transport-23 §9.5.1 の "When a REQUEST_UPDATE fails for a FETCH, the
 /// publisher MUST reset the FETCH data stream." (MUST) が Session から自動発火されること。

@@ -1309,15 +1309,6 @@ fn establish_publisher_with_open_subgroups(
     (client, server, rid, stream_ids)
 }
 
-/// キューに積まれたイベントを全て取り出す
-fn drain_events(session: &mut Session) -> Vec<SessionEvent> {
-    let mut events = Vec::new();
-    while let Some(ev) = session.poll_event() {
-        events.push(ev);
-    }
-    events
-}
-
 /// イベント列に含まれる PUBLISH_DONE の送信イベント数を数える
 fn count_publish_done(events: &[SessionEvent]) -> usize {
     events

@@ -328,6 +328,9 @@ bidi request stream は方向ごとに独立して閉じる (draft-ietf-moq-tran
 `RequestTerminated { reason: PeerStreamFin }` は peer の FIN の到着と同時に発行されるとは限らず、
 自側が SUBSCRIBE / FETCH / TRACK_STATUS の responder、または PUBLISH を送った側 (publisher 役) で
 最終メッセージを未送信の場合は peer の FIN と自側が最終メッセージとともに送る FIN の両方が揃った時点で発行される。
+自側の最終メッセージで終端が確定する場合、`RequestTerminated` はその API 呼び出しで当該 request に積む最後のイベントであり、
+最終メッセージの `SendOnStream { fin: true }` と、FETCH の REQUEST_UPDATE 失敗による自動の `ResetDataStream` より後に出る。
+`RequestTerminated` を受けて request stream の送信半を捨てる I/O 層でも、最終メッセージと FIN を落とさない。
 request stream 上の GOAWAY の timeout 満了で自側が終端した場合は
 `RequestTerminated { reason: GoawayTimeout }` が発行される (draft-ietf-moq-transport-23 §9.2 (GOAWAY) の
 "SHOULD reset the stream with GOING_AWAY" を送信方向のみで満たすため、PUBLISH_DONE は送れず保留分は破棄される)。
@@ -424,7 +427,7 @@ PUBLISH の受理を観測した側は `notify_publish_accepted(request_id)` を
 `recv_request_stream_closed(rid, RequestStreamEnd::Fin)` は、自側が SUBSCRIBE / FETCH /
 TRACK_STATUS の responder、または PUBLISH を送った側 (publisher 役) で `Established` のとき
 request を終端しない。この場合 `RequestTerminated` は自側が最終メッセージを
-`fin: true` で送った時点 (PUBLISH_DONE、単独の REQUEST_ERROR) で発行される。
+`fin: true` で送った時点 (PUBLISH_DONE、単独の REQUEST_ERROR、TRACK_STATUS_OK) で発行される。
 request stream 上の GOAWAY の timeout が満了した場合も request を終端し、
 `RequestTerminated { reason: GoawayTimeout }` が発行される (詳細は `RequestTerminated` の項を参照)。
 このとき publisher 役 fetch の open 中の outgoing FETCH data stream は Session が reset しないため、

@@ -918,6 +918,50 @@ fn track_status_ok_with_include_properties_one_keeps_track_properties() {
     );
 }
 
+/// responder 側のイベント列で、TRACK_STATUS_OK の最終メッセージが RequestTerminated より先に
+/// 出ることを確認し、TRACK_STATUS_OK を返す
+///
+/// 自側の最終メッセージで request の終端が確定する場合、`RequestTerminated` はその API 呼び出しで
+/// 当該 request に積む最後のイベントでなければならない。逆順だと、`RequestTerminated` を受けて
+/// 送信半を捨てる I/O 層が TRACK_STATUS_OK と FIN を落とす (draft-ietf-moq-transport-23 §9.12
+/// (TRACK_STATUS) の "The bidi stream is closed with a FIN after TRACK_STATUS_OK ... are sent")。
+fn assert_track_status_ok_before_terminated(server: &mut Session, rid: u64) -> ControlMessage {
+    let events = drain_events(server);
+    let ok_index = event_position(&events, "FIN 付きの TRACK_STATUS_OK", |e| {
+        matches!(
+            e,
+            SessionEvent::SendOnStream {
+                request_id,
+                message: ControlMessage::RequestOk(_),
+                fin: true,
+            } if *request_id == rid
+        )
+    });
+    let terminated_index = event_position(&events, "RequestTerminated(PeerStreamFin)", |e| {
+        matches!(
+            e,
+            SessionEvent::RequestTerminated {
+                request_id,
+                kind: RequestKind::TrackStatus,
+                reason: TerminationReason::PeerStreamFin,
+            } if *request_id == rid
+        )
+    });
+    assert!(
+        ok_index < terminated_index,
+        "最終メッセージの SendOnStream は RequestTerminated より先に出ること: {events:?}"
+    );
+    assert_eq!(
+        terminated_index,
+        events.len() - 1,
+        "RequestTerminated は当該 request の最後のイベントであること: {events:?}"
+    );
+    match &events[ok_index] {
+        SessionEvent::SendOnStream { message, .. } => message.clone(),
+        _ => unreachable!("位置は SendOnStream を指している"),
+    }
+}
+
 /// 応答前に requester の FIN を受けても responder は終端せず TRACK_STATUS_OK を送れる
 ///
 /// draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure) の FIN は
@@ -949,8 +993,8 @@ fn responder_sends_track_status_ok_after_requester_fin() {
     server
         .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
         .expect("requester の FIN 後でも TRACK_STATUS_OK を送れること");
-    let (_, _, fin) = take_send_on_stream_with_fin(&mut server);
-    assert!(fin, "TRACK_STATUS_OK の送信後に FIN すること");
+    // TRACK_STATUS_OK を FIN 付きで送り、その後に両方向の終端で RequestTerminated が出る
+    assert_track_status_ok_before_terminated(&mut server, rid);
 }
 
 /// requester が TRACK_STATUS を送った直後に FIN しても responder は応答を送れる
@@ -973,8 +1017,8 @@ fn requester_fin_then_responder_sends_track_status_ok() {
     server
         .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
         .expect("TRACK_STATUS_OK の送信に成功すること");
-    let (_, ok_msg, fin) = take_send_on_stream_with_fin(&mut server);
-    assert!(fin, "TRACK_STATUS_OK の送信後に FIN すること");
+    // TRACK_STATUS_OK を FIN 付きで送り、その後に responder 側の RequestTerminated が出る
+    let ok_msg = assert_track_status_ok_before_terminated(&mut server, rid);
     // requester は応答を受け取り、その後 responder の FIN を受ける
     client
         .recv_stream_message(rid, ok_msg)

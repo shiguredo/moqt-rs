@@ -414,6 +414,11 @@ pub enum SessionEvent {
     /// Closure))、自側が SUBSCRIBE / FETCH / TRACK_STATUS の responder、または PUBLISH を
     /// 送った側 (publisher 役) で `Established` の場合は peer の FIN と自側が最終メッセージと
     /// ともに送る FIN の両方が揃った時点で発行される (FIN の到着順に依存しない)。
+    /// 自側の最終メッセージ (`fin: true` の [`SessionEvent::SendOnStream`]) で終端が確定する
+    /// 場合、本イベントはその API 呼び出しで当該 request に積む最後のイベントになる。
+    /// 最終メッセージの `SendOnStream` と、それに伴う [`SessionEvent::ResetDataStream`]
+    /// (FETCH の REQUEST_UPDATE 失敗による自動 reset) は本イベントより先に出る。peer の FIN が
+    /// 後から届く場合は、その通知 (`Session::recv_request_stream_closed`) の中で発行される。
     /// `GoawayTimeout` で終端した後に peer が GOAWAY / reset を観測する前に送ったメッセージ
     /// (REQUEST_UPDATE / PUBLISH_DONE / PUBLISH_STATE_NOTIFY 等) は Session が no-op で吸収する
     /// ため、本イベントが再度発行されることはない。

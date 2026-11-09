@@ -225,6 +225,28 @@ fn take_send_on_stream_with_fin(s: &mut Session) -> (u64, ControlMessage, bool) 
     panic!("SendOnStream イベントが期待されたが発行されなかった");
 }
 
+/// 取り出せるイベントをすべて発行順に取り出す
+///
+/// イベントの前後関係を検証するテストで使う。`take_*` 系の helper は目的のイベントまでを
+/// 読み捨てるため、順序の検証には使えない。
+fn drain_events(s: &mut Session) -> Vec<SessionEvent> {
+    core::iter::from_fn(|| s.poll_event()).collect()
+}
+
+/// `events` の中で条件を満たす最初のイベントの位置を返す
+///
+/// 見つからなければ `what` を含むメッセージで panic する。
+fn event_position(
+    events: &[SessionEvent],
+    what: &str,
+    predicate: impl Fn(&SessionEvent) -> bool,
+) -> usize {
+    events
+        .iter()
+        .position(predicate)
+        .unwrap_or_else(|| panic!("{what} が発行されること: {events:?}"))
+}
+
 /// `ControlMessage::RequestUpdate` の Request ID を取り出す
 ///
 /// draft-ietf-moq-transport-23 §6.4.2.1 (Request ID): REQUEST_UPDATE は購読とは別に
