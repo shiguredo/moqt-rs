@@ -3894,6 +3894,13 @@ impl AudioCaptureTimeline {
 /// `timescale` は入力ファイル由来のメディア時刻を送るときだけ渡す。live capture は
 /// Unix epoch マイクロ秒を送るため `None` にし、`PROP_TIMESCALE` を付けない
 /// (draft-ietf-moq-loc-05 §2.3.1.1 の既定)。
+///
+/// `timescale` を渡すときはキーフレームに限らず全 Object に `PROP_TIMESCALE` を付ける。
+/// Timescale の無い Timestamp は Unix epoch マイクロ秒として解釈されるため
+/// (draft-ietf-moq-loc-05 §2.3.1.1 / §2.3.1.2)、一部の Object にだけ付けると購読側が同じ
+/// Track の中でメディア時刻と壁時計を取り違える。TIMESCALE の Scope は "Track, Object" であり
+/// (§6.1 Table 1)、Object ごとに付与できる。この節番号はドラフト由来であり将来変更される
+/// 可能性がある。
 fn build_video_loc_properties(frame: &EncodedFrame, timescale: Option<u64>) -> LocProperties {
     let mut props = LocProperties::new();
     // RFC 9626 §3.2 (Short Extension for Non-Scalable Streams) の 1 octet 形式は
@@ -3911,19 +3918,20 @@ fn build_video_loc_properties(frame: &EncodedFrame, timescale: Option<u64>) -> L
         prop_id: PROP_TIMESTAMP,
         value: LocPropertyValue::VarInt(frame.timestamp),
     });
-    if frame.is_keyframe {
-        if let Some(timescale) = timescale {
-            props.push(LocProperty {
-                prop_id: PROP_TIMESCALE,
-                value: LocPropertyValue::VarInt(timescale),
-            });
-        }
-        if let Some(sh) = frame.video_config.as_deref() {
-            props.push(LocProperty {
-                prop_id: PROP_VIDEO_CONFIG,
-                value: LocPropertyValue::Bytes(sh.to_vec()),
-            });
-        }
+    if let Some(timescale) = timescale {
+        props.push(LocProperty {
+            prop_id: PROP_TIMESCALE,
+            value: LocPropertyValue::VarInt(timescale),
+        });
+    }
+    // Video Config はデコーダの構成情報であり、キーフレームにだけ付ける
+    if frame.is_keyframe
+        && let Some(sh) = frame.video_config.as_deref()
+    {
+        props.push(LocProperty {
+            prop_id: PROP_VIDEO_CONFIG,
+            value: LocPropertyValue::Bytes(sh.to_vec()),
+        });
     }
     props
 }
@@ -5113,7 +5121,11 @@ mod tests {
         props.encode().expect("LOC プロパティは encode できること");
     }
 
-    /// 非 keyframe の映像 LOC プロパティ: Video Frame Marking と Timestamp のみが付与され encode できること
+    /// 非 keyframe の映像 LOC プロパティ: Video Frame Marking / Timestamp / Timescale が付与され、
+    /// Video Config は付与されずに encode できること
+    ///
+    /// MP4 の経路では非 keyframe にも Timescale を付ける。付けないと購読側が Timestamp を
+    /// Unix epoch マイクロ秒として解釈する (draft-ietf-moq-loc-05 §2.3.1.1)。
     #[test]
     fn build_video_loc_properties_non_keyframe() {
         let frame = EncodedFrame {
@@ -5132,8 +5144,8 @@ mod tests {
         assert_eq!(props.timestamp(), Some(3033), "Timestamp が付与されること");
         assert_eq!(
             props.timescale(),
-            None,
-            "非 keyframe では Timescale は付与されないこと"
+            Some(90_000),
+            "MP4 の経路では非 keyframe にも Timescale が付与されること"
         );
         assert_eq!(
             props.video_config(),
