@@ -656,6 +656,13 @@ impl AudioDelivery<'_> {
             let now_us = crate::wall_clock_us();
             let lag_us = now_us.saturating_sub(pts_us);
             let input_lag_us = receive_input_lag_us(timestamp, timescale, arrival_us, pts_us);
+            // 端末間遅延 (publisher が載せた壁時計の TIMESTAMP から受信まで) を 5 秒に
+            // 1 回 debug で出す。relay が peer 窓のぶんだけ送信バッファへデータを溜めて
+            // いるとこの値が伸びるため、受信側が広告する窓の大きさの影響を見る診断である。
+            // TIMESTAMP が壁時計でない音では測れない (input_lag_us が None)
+            if let Some(lag_us) = input_lag_us {
+                log_audio_end_to_end_lag(arrival_us, lag_us);
+            }
             // ロックは await をまたがない (観測と判定だけの同期処理)
             let (decision, stats) = {
                 let mut catch_up = self
@@ -6121,6 +6128,48 @@ fn timestamp_kind_of(timestamp: Option<u64>, timescale: Option<u64>) -> Timestam
 /// `timestamp` と `timescale` は LOC の Timestamp / Timescale (無い場合は `None`)、
 /// `arrival_us` は Object の到着の壁時計 (マイクロ秒)、`pts_us` は TIMESTAMP から求めた
 /// 時刻 (マイクロ秒) である。
+/// 端末間遅延 (publisher の壁時計 TIMESTAMP から受信まで) の定期ログ
+///
+/// ストリーム経路と datagram 経路の両方から呼ばれるため、最後に出力した時刻を
+/// プロセス全体で共有して 5 秒に 1 回に制限する。単調時計ではなく壁時計で比較するが、
+/// 診断用の間隔判定であり、NTP のずれで間隔が多少伸び縮みしても害はない。
+///
+/// 出力レベルは debug である。relay が peer 窓のぶんだけ送信バッファへデータを
+/// 溜めているとこの値が伸びるため、受信側が広告する窓の大きさの影響を見る診断である。
+/// 通常の運用では出さない (`RUST_LOG=debug` を指定したときだけ出る)。
+///
+/// `arrival_us` は観測の基準に使う壁時計 (ログの間隔判定にも使う)。
+/// `lag_us` は Object の到着時刻 − TIMESTAMP である。
+fn log_audio_end_to_end_lag(arrival_us: i64, lag_us: i64) {
+    static LAST_LOGGED_AT_MS: std::sync::atomic::AtomicI64 =
+        std::sync::atomic::AtomicI64::new(i64::MIN);
+    const LOG_INTERVAL_MS: i64 = 5_000;
+
+    let now_ms = arrival_us / 1_000;
+    let last_ms = LAST_LOGGED_AT_MS.load(std::sync::atomic::Ordering::Relaxed);
+    // 未出力の初期値 (i64::MIN) との減算を飽和させる。壁時計の経過が負になったとき
+    // (時計の巻き戻り) も出力を抑える方向に倒れる
+    if now_ms.saturating_sub(last_ms) < LOG_INTERVAL_MS {
+        return;
+    }
+    // 複数の経路が同時に通っても 1 回だけ出るようにする。負けた経路は次の機会に出す
+    if LAST_LOGGED_AT_MS
+        .compare_exchange(
+            last_ms,
+            now_ms,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return;
+    }
+    tracing::debug!(
+        "Audio end-to-end lag: {}ms (object timestamp to arrival)",
+        lag_us / 1_000
+    );
+}
+
 fn receive_input_lag_us(
     timestamp: Option<u64>,
     timescale: Option<u64>,
