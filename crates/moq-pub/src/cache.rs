@@ -44,13 +44,14 @@ pub struct CachedObject {
 
 /// FETCH への応答内容
 ///
-/// 判定の順序は「対象外の track」→「要求の GROUP_ORDER」→「保持内容」である。Session が
+/// 判定の順序は「要求の GROUP_ORDER」→「cache に一度も入っていない track」→「保持内容」である。
+/// PUBLISH していない track の FETCH は、呼び出し側が [`MediaCache::plan`] より前に拒否する。Session が
 /// 受理した FETCH だけが呼び出し側へ届くため、受理の判定 (publish 実績の有無、空 range、
 /// Start Location が Largest Object を上回るか) はここでやり直さない。やり直すと、拒否済みの
 /// request に応答して致命終了するか、受理済みの request に無応答になる。
 #[derive(Debug)]
 pub enum FetchPlan<'a> {
-    /// この example が PUBLISH していない track (保持している Object も無い)
+    /// PUBLISH している track だが、一度も cache に Object を入れていない
     ///
     /// 呼び出し側が `REQUEST_DOES_NOT_EXIST` で拒否する。Session は publish 実績の無い track の
     /// FETCH を受理するため、応答が必要になる。
@@ -290,10 +291,9 @@ impl MediaCache {
 
     /// FETCH への応答内容を決める
     ///
-    /// `published` はこの example がその track を PUBLISH しているかどうかである。保持内容だけでは
-    /// 「publish していない track」と「まだ 1 件も publish していない track」を区別できないため、
-    /// 呼び出し側が渡す。`published` が真でも、その track の Object を 1 件も保持していなければ
-    /// (一度も publish していない) `UnknownTrack` を返す。
+    /// 呼び出し側は、FETCH の Full Track Name がこの example の PUBLISH している track である
+    /// ことを検証してから呼ぶ。その track の Object を一度も cache に入れていなければ
+    /// `UnknownTrack` を返す (Object を入れた後に期限切れで全て evict した track は対象外にしない)。
     ///
     /// `start` / `end` は要求の LOCATION_FILTER を解決した要求 range で、`end` は publish 済みの
     /// Largest Object でクランプした値である。Session が受理した FETCH の要求 range は空でない
@@ -302,16 +302,12 @@ impl MediaCache {
     /// 期限切れの評価はここでも行う。追加時だけだと、窓を過ぎた Object を配り得る。
     pub fn plan(
         &mut self,
-        published: bool,
         namespace: &TrackNamespace,
         track_name: &[u8],
         group_order: Option<u8>,
         start: Location,
         end: Location,
     ) -> FetchPlan<'_> {
-        if !published {
-            return FetchPlan::UnknownTrack;
-        }
         // draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter) / §3.2.1 (Fetch):
         // 要求された group order で送る MUST があるため、Descending の要求に昇順の
         // 保持範囲を返さない
@@ -502,40 +498,20 @@ mod tests {
         objects.iter().map(|object| object.location).collect()
     }
 
-    /// PUBLISH していない track は対象外として扱うこと
+    /// 一度も cache に入れていない track は対象外として扱うこと
     ///
     /// Session は publish 実績の無い track の FETCH を受理するため、応答の判断で
-    /// `REQUEST_DOES_NOT_EXIST` を返す経路が必要になる。
+    /// `REQUEST_DOES_NOT_EXIST` を返す経路が必要になる。PUBLISH していない track の FETCH は
+    /// 呼び出し元が `plan` より前に拒否する。
     #[test]
-    fn plan_reports_an_unpublished_track_as_unknown() {
+    fn plan_reports_a_never_cached_track_as_unknown() {
         let mut cache = MediaCache::new(60_000);
         insert(&mut cache, loc(1, 0), b"video");
 
-        let plan = cache.plan(true, &namespace(), b"audio", None, loc(1, 0), loc(1, 0));
+        let plan = cache.plan(&namespace(), b"audio", None, loc(1, 0), loc(1, 0));
         assert!(
             matches!(plan, FetchPlan::UnknownTrack),
-            "保持が無い track は対象外として扱うこと: {plan:?}"
-        );
-
-        let plan = cache.plan(false, &namespace(), TRACK, None, loc(1, 0), loc(1, 0));
-        assert!(
-            matches!(plan, FetchPlan::UnknownTrack),
-            "PUBLISH していない track は保持があっても対象外として扱うこと: {plan:?}"
-        );
-    }
-
-    /// 対象外の track の判定は GROUP_ORDER の判定より先であること
-    ///
-    /// 判定の順序は「対象外の track」→「GROUP_ORDER」→「保持内容」である。順序を入れ替えると、
-    /// 応答できない track に `REQUEST_NOT_SUPPORTED` を返してしまう。
-    #[test]
-    fn plan_checks_the_track_before_the_group_order() {
-        let mut cache = MediaCache::new(60_000);
-
-        let plan = cache.plan(false, &namespace(), TRACK, Some(0x02), loc(0, 0), loc(0, 0));
-        assert!(
-            matches!(plan, FetchPlan::UnknownTrack),
-            "対象外の track を先に判定すること: {plan:?}"
+            "一度も cache に入れていない track は対象外として扱うこと: {plan:?}"
         );
     }
 
@@ -548,7 +524,7 @@ mod tests {
         let mut cache = MediaCache::new(60_000);
         insert(&mut cache, loc(1, 0), b"video");
 
-        let plan = cache.plan(true, &namespace(), TRACK, Some(0x02), loc(1, 0), loc(1, 0));
+        let plan = cache.plan(&namespace(), TRACK, Some(0x02), loc(1, 0), loc(1, 0));
         assert!(
             matches!(plan, FetchPlan::UnsupportedGroupOrder),
             "Descending では昇順の保持範囲を返さないこと: {plan:?}"
@@ -564,7 +540,7 @@ mod tests {
         insert(&mut cache, loc(2, 0), b"c");
 
         // 要求 Start は保持の先頭と一致するため End of Unknown Range を置かない
-        let plan = cache.plan(true, &namespace(), TRACK, Some(0x01), loc(1, 1), loc(2, 0));
+        let plan = cache.plan(&namespace(), TRACK, Some(0x01), loc(1, 1), loc(2, 0));
         let (_, leading_unknown, objects) = serve_parts(plan);
         assert_eq!(
             leading_unknown, None,
@@ -586,7 +562,7 @@ mod tests {
         let mut cache = MediaCache::new(60_000);
         insert(&mut cache, loc(5, 0), b"a");
 
-        let plan = cache.plan(true, &namespace(), TRACK, None, loc(1, 0), loc(5, 0));
+        let plan = cache.plan(&namespace(), TRACK, None, loc(1, 0), loc(5, 0));
         let (_, leading_unknown, objects) = serve_parts(plan);
         assert_eq!(
             leading_unknown, None,
@@ -616,7 +592,7 @@ mod tests {
         insert(&mut cache, loc(2, 0), b"c");
         insert(&mut cache, loc(2, 1), b"d");
 
-        let plan = cache.plan(true, &namespace(), TRACK, None, loc(1, 0), loc(2, 1));
+        let plan = cache.plan(&namespace(), TRACK, None, loc(1, 0), loc(2, 1));
         let (_, leading_unknown, objects) = serve_parts(plan);
         assert_eq!(
             leading_unknown,
@@ -638,7 +614,7 @@ mod tests {
         wait_for_expiry();
         insert(&mut cache, loc(2, 0), b"b");
 
-        let plan = cache.plan(true, &namespace(), TRACK, None, loc(2, 0), loc(2, 0));
+        let plan = cache.plan(&namespace(), TRACK, None, loc(2, 0), loc(2, 0));
         let (_, leading_unknown, objects) = serve_parts(plan);
         assert_eq!(
             leading_unknown, None,
@@ -661,7 +637,7 @@ mod tests {
         insert(&mut cache, loc(10, 0), b"a");
 
         // 最初に publish した Group より前だけを要求する
-        let plan = cache.plan(true, &namespace(), TRACK, None, loc(4, 0), loc(5, 0));
+        let plan = cache.plan(&namespace(), TRACK, None, loc(4, 0), loc(5, 0));
         assert!(
             matches!(plan, FetchPlan::EmptyRange),
             "未 publish の範囲は空の応答になること: {plan:?}"
@@ -680,7 +656,7 @@ mod tests {
         insert(&mut cache, loc(10, 1), b"b");
         insert(&mut cache, loc(11, 0), b"c");
 
-        let plan = cache.plan(true, &namespace(), TRACK, None, loc(4, 0), loc(11, 0));
+        let plan = cache.plan(&namespace(), TRACK, None, loc(4, 0), loc(11, 0));
         let (non_existent, unknown, objects) = serve_parts(plan);
         assert!(objects.is_empty(), "保持は無いこと");
         assert_eq!(
@@ -705,7 +681,7 @@ mod tests {
         insert(&mut cache, loc(10, 0), b"a");
         insert(&mut cache, loc(10, 1), b"b");
 
-        let plan = cache.plan(true, &namespace(), TRACK, None, loc(10, 0), loc(10, 1));
+        let plan = cache.plan(&namespace(), TRACK, None, loc(10, 0), loc(10, 1));
         match plan {
             FetchPlan::AllUnknown { end_location } => {
                 assert_eq!(end_location, loc(10, 1), "End Location に置くこと");
@@ -728,7 +704,7 @@ mod tests {
         // 保持される Object
         insert(&mut cache, loc(12, 0), b"new");
 
-        let plan = cache.plan(true, &namespace(), TRACK, None, loc(4, 0), loc(12, 0));
+        let plan = cache.plan(&namespace(), TRACK, None, loc(4, 0), loc(12, 0));
         let entries = plan.entries();
         match entries.as_slice() {
             [
@@ -751,7 +727,7 @@ mod tests {
         insert(&mut cache, loc(10, 0), b"a");
         insert(&mut cache, loc(10, 1), b"b");
 
-        let plan = cache.plan(true, &namespace(), TRACK, None, loc(10, 0), loc(10, 1));
+        let plan = cache.plan(&namespace(), TRACK, None, loc(10, 0), loc(10, 1));
         let entries = plan.entries();
         assert_eq!(entries.len(), 2, "Object 2 件だけであること: {entries:?}");
         for entry in &entries {
@@ -769,25 +745,21 @@ mod tests {
         insert(&mut cache, loc(10, 0), b"a");
 
         // 未 publish の範囲 (FETCH_HEADER だけを書く)
-        let plan = cache.plan(true, &namespace(), TRACK, None, loc(4, 0), loc(5, 0));
+        let plan = cache.plan(&namespace(), TRACK, None, loc(4, 0), loc(5, 0));
         assert!(
             plan.entries().is_empty(),
             "空の応答では entry を書かないこと"
         );
 
-        // 対象外の track (応答しない)
-        let plan = cache.plan(false, &namespace(), TRACK, None, loc(10, 0), loc(10, 0));
-        assert!(plan.entries().is_empty(), "対象外では entry を書かないこと");
+        // 一度も cache に入れていない track (応答しない)
+        let plan = cache.plan(&namespace(), b"audio", None, loc(10, 0), loc(10, 0));
+        assert!(
+            plan.entries().is_empty(),
+            "一度も cache に入れていない track では entry を書かないこと"
+        );
 
         // Descending (拒否する)
-        let plan = cache.plan(
-            true,
-            &namespace(),
-            TRACK,
-            Some(0x02),
-            loc(10, 0),
-            loc(10, 0),
-        );
+        let plan = cache.plan(&namespace(), TRACK, Some(0x02), loc(10, 0), loc(10, 0));
         assert!(plan.entries().is_empty(), "拒否では entry を書かないこと");
     }
 
@@ -817,7 +789,7 @@ mod tests {
             Some(loc(1, 0)),
             "Largest Object は変わらないこと"
         );
-        let plan = cache.plan(true, &namespace(), TRACK, None, loc(1, 0), loc(2, 0));
+        let plan = cache.plan(&namespace(), TRACK, None, loc(1, 0), loc(2, 0));
         let (_, _, objects) = serve_parts(plan);
         assert_eq!(
             locations(&objects),
@@ -837,7 +809,7 @@ mod tests {
         insert(&mut cache, loc(1, 1), b"b");
         wait_for_expiry();
 
-        let plan = cache.plan(true, &namespace(), TRACK, None, loc(1, 0), loc(1, 1));
+        let plan = cache.plan(&namespace(), TRACK, None, loc(1, 0), loc(1, 1));
         assert!(
             matches!(plan, FetchPlan::AllUnknown { end_location } if end_location == loc(1, 1)),
             "窓を過ぎた Object は配らないこと: {plan:?}"
@@ -892,7 +864,7 @@ mod tests {
             .insert(&namespace(), TRACK, loc(1, 0), &props, b"payload")
             .expect("Object を保持できること");
 
-        let plan = cache.plan(true, &namespace(), TRACK, None, loc(1, 0), loc(1, 0));
+        let plan = cache.plan(&namespace(), TRACK, None, loc(1, 0), loc(1, 0));
         let (_, _, objects) = serve_parts(plan);
         assert_eq!(
             objects[0].properties_data,
@@ -929,7 +901,7 @@ mod tests {
             )
             .expect("Object を保持できること");
 
-        let plan = cache.plan(true, &namespace(), TRACK, None, loc(1, 0), loc(1, 0));
+        let plan = cache.plan(&namespace(), TRACK, None, loc(1, 0), loc(1, 0));
         let (_, _, objects) = serve_parts(plan);
         assert_eq!(
             objects[0].properties_data,
@@ -952,7 +924,7 @@ mod tests {
             Some(loc(2, 0)),
             "Largest Object は evict 後も保持すること"
         );
-        let plan = cache.plan(true, &namespace(), TRACK, None, loc(1, 0), loc(2, 0));
+        let plan = cache.plan(&namespace(), TRACK, None, loc(1, 0), loc(2, 0));
         assert!(
             matches!(plan, FetchPlan::AllUnknown { end_location } if end_location == loc(2, 0)),
             "保持しない時間窓では常に不明として返すこと: {plan:?}"

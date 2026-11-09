@@ -2919,6 +2919,48 @@ struct CatalogState<'a> {
     location: Location,
 }
 
+/// この example が配信している track の種別
+///
+/// 受信した SUBSCRIBE / FETCH の Full Track Name を [`published_track`] で照合した結果である。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishedTrack {
+    /// 映像 track (`--track-name`)
+    Video,
+    /// 音声 track ([`AUDIO_TRACK_NAME`])
+    Audio,
+    /// MSF カタログ track ([`MSF_CATALOG_TRACK_NAME`])
+    Catalog,
+}
+
+/// 受信した Full Track Name がこの example の配信している track かを判定する
+///
+/// draft-ietf-moq-transport-23 §2.4.1 (Track Naming): Track は Track Namespace と Track Name から
+/// なる Full Track Name で識別され、各フィールドはバイト単位で比較する。namespace が
+/// `config.namespace` と完全一致しない要求は、track 名が同じでも別の track であるため `None` を
+/// 返す。配信していない映像 / 音声も `None` になる。catalog は映像・音声の有無に関係なく常に
+/// PUBLISH するため、namespace が一致すれば `Some(Catalog)` を返す。
+///
+/// `--track-name` は catalog / audio (音声を配信する場合) と重ならないことを CLI が保証するため、
+/// 判定の順序で結果は変わらない。この節番号はドラフト由来であり将来変更される可能性がある。
+fn published_track(
+    config: &Config,
+    namespace: &TrackNamespace,
+    name: &[u8],
+) -> Option<PublishedTrack> {
+    if *namespace != config.namespace {
+        return None;
+    }
+    if config.video_enabled && name == config.track_name.as_bytes() {
+        Some(PublishedTrack::Video)
+    } else if config.audio_enabled && name == AUDIO_TRACK_NAME.as_bytes() {
+        Some(PublishedTrack::Audio)
+    } else if name == MSF_CATALOG_TRACK_NAME {
+        Some(PublishedTrack::Catalog)
+    } else {
+        None
+    }
+}
+
 /// MOQT relay が転送してきた要求 (SUBSCRIBE / FETCH) に応答する
 ///
 /// relay は subscriber の SUBSCRIBE / FETCH を publisher 側 session の新しい
@@ -2946,18 +2988,19 @@ async fn serve_peer_request(
     match request.message {
         ControlMessage::Subscribe(subscribe) => {
             let track: &[u8] = &subscribe.track_name;
-            let track_alias = if config.video_enabled && track == config.track_name.as_bytes() {
-                Some(VIDEO_TRACK_ALIAS)
-            } else if config.audio_enabled && track == AUDIO_TRACK_NAME.as_bytes() {
-                Some(AUDIO_TRACK_ALIAS)
-            } else if track == MSF_CATALOG_TRACK_NAME {
-                // カタログの購読を受理する。SUBSCRIBE_OK の LARGEST_OBJECT は session 層が
-                // この track の publish 済み Object から補完する
-                // (draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter))
-                Some(CATALOG_TRACK_ALIAS)
-            } else {
-                None
-            };
+            // Track Name だけでなく Track Namespace も照合する。別 namespace の SUBSCRIBE を
+            // 受理すると、別の track の購読として自分のコンテンツを配ってしまう
+            let track_alias =
+                published_track(config, &subscribe.track_namespace, track).map(|published| {
+                    match published {
+                        PublishedTrack::Video => VIDEO_TRACK_ALIAS,
+                        PublishedTrack::Audio => AUDIO_TRACK_ALIAS,
+                        // カタログの購読を受理する。SUBSCRIBE_OK の LARGEST_OBJECT は session 層が
+                        // この track の publish 済み Object から補完する
+                        // (draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter))
+                        PublishedTrack::Catalog => CATALOG_TRACK_ALIAS,
+                    }
+                });
             match track_alias {
                 Some(track_alias) => {
                     // 購読者は DYNAMIC_GROUPS を知らずに SUBSCRIBE へ NEW_GROUP_REQUEST を
@@ -3000,7 +3043,8 @@ async fn serve_peer_request(
                 }
                 None => {
                     tracing::warn!(
-                        "Rejecting SUBSCRIBE for unknown track: {}",
+                        "Rejecting SUBSCRIBE for unknown track: namespace={}, track={}",
+                        serialize_namespace(&subscribe.track_namespace),
                         String::from_utf8_lossy(track),
                     );
                     client
@@ -3010,7 +3054,22 @@ async fn serve_peer_request(
             }
         }
         ControlMessage::Fetch(fetch) => {
-            if fetch.track_name == MSF_CATALOG_TRACK_NAME {
+            // Track Name だけでなく Track Namespace も照合する。別 namespace の FETCH に自分の
+            // namespace のコンテンツを返さない (draft-ietf-moq-transport-23 §2.4.1)
+            let Some(published) =
+                published_track(config, &fetch.track_namespace, &fetch.track_name)
+            else {
+                tracing::warn!(
+                    "Rejecting FETCH for unknown track: namespace={}, track={}",
+                    serialize_namespace(&fetch.track_namespace),
+                    String::from_utf8_lossy(&fetch.track_name),
+                );
+                client
+                    .send_request_error(request_id, REQUEST_DOES_NOT_EXIST, "unknown track")
+                    .await?;
+                return Ok(());
+            };
+            if published == PublishedTrack::Catalog {
                 // 要求された Location Filter から range を解決し、範囲外の Object を
                 // 送らないようにする (draft-ietf-moq-transport-23 §3.2 (Fetch) /
                 // §3.3.1 (Location Filters) / §9.19.9 (LOCATION FILTER Parameter))。
@@ -3123,8 +3182,8 @@ fn fetch_ok_parameters(largest_in_range: Option<Location>) -> MessageParameters 
 /// であるため、`end` は Largest Object でクランプする。
 ///
 /// Largest Object が無い (まだ 1 件も publish していない) track でも、境界の解決を Session と
-/// 揃えて先頭側に解決する。この場合に配れる Object は無く、応答の判断は対象外の track と
-/// 同じになる。
+/// 揃えて先頭側に解決する。この場合に配れる Object は無く、応答は cache に一度も入っていない
+/// track ([`cache::FetchPlan::UnknownTrack`]) として決まる。
 ///
 /// 戻り値の `end` は Largest Object でクランプ済みなので、`largest == end` が
 /// 「Largest Object が要求範囲内」の判定になる。範囲内なら FETCH_OK に LARGEST_OBJECT を
@@ -3160,6 +3219,10 @@ fn fetch_request_range(
 /// (draft-ietf-moq-transport-23 §3.2 (Fetch) / §11.4 (Fetch Streams))。
 /// 応答は「End of Unknown Range (必要なら) → Object → (全滅なら End of Unknown Range)」を
 /// 順に書き、FIN で閉じる。
+///
+/// 呼び出し元の [`serve_peer_request`] は、Full Track Name がこの example の配信している
+/// 映像 / 音声 track であることを [`published_track`] で検証済みである。そのため namespace は
+/// `config.namespace` と一致し、ここでは track の配信有無を判定しない。
 async fn serve_media_fetch(
     client: &mut MoqtClient,
     request_id: u64,
@@ -3186,9 +3249,6 @@ async fn serve_media_fetch(
             .await?;
         return Ok(());
     }
-    // この example が PUBLISH しているメディア track かどうか。catalog は呼び出し元が扱う
-    let published = (config.video_enabled && track_name == config.track_name.as_bytes())
-        || (config.audio_enabled && track_name == AUDIO_TRACK_NAME.as_bytes());
     // 要求された Location Filter から range を解決する。wire 経路では decode 層が不正な
     // 符号化を弾くため、ここでの失敗はアプリが手組みしたメッセージだけが到達する
     let filter = match fetch.parameters.location_filter_typed() {
@@ -3214,7 +3274,6 @@ async fn serve_media_fetch(
     // `end` は Largest Object でクランプ済みのため、一致すれば範囲内である。
     let largest_in_range = largest.filter(|largest| *largest == end);
     let plan = media_cache.plan(
-        published,
         &config.namespace,
         track_name,
         fetch.parameters.group_order(),
@@ -3258,7 +3317,7 @@ async fn serve_media_fetch(
         }
         cache::FetchPlan::UnknownTrack => {
             tracing::warn!(
-                "Rejecting FETCH for unknown track: {}",
+                "Rejecting FETCH for a track that has never been cached: {}",
                 String::from_utf8_lossy(track_name),
             );
             client
@@ -4058,6 +4117,161 @@ mod tests {
             assert!(
                 err.to_string().contains("invalid new session URI"),
                 "解釈できない URI として報告すること: {err}"
+            );
+        }
+    }
+
+    /// 受信した SUBSCRIBE / FETCH の Full Track Name の照合を固定する
+    ///
+    /// draft-ietf-moq-transport-23 §2.4.1 (Track Naming): Track は Track Namespace と Track Name
+    /// の組で識別される。track 名だけで判定すると、別 namespace の要求に自分の namespace の
+    /// コンテンツを返してしまう。
+    mod published_track_tests {
+        use super::*;
+
+        /// `--namespace moq-example` を含むテスト用の設定を組み立てる
+        fn config_with(extra: &[&str]) -> Config {
+            let mut args = vec![
+                "--url",
+                "moqt://127.0.0.1:4443",
+                "--namespace",
+                "moq-example",
+            ];
+            args.extend_from_slice(extra);
+            crate::cli::parse_args(&args)
+                .expect("オプションの解析に成功すること")
+                .expect("設定が返ること")
+        }
+
+        /// フィールド列から Track Namespace を作る
+        ///
+        /// `--namespace moq-example` は §8.8 の表現として `["moq", "example"]` の 2 フィールドになる。
+        fn namespace(fields: &[&str]) -> TrackNamespace {
+            TrackNamespace::new(
+                fields
+                    .iter()
+                    .map(|field| field.as_bytes().to_vec())
+                    .collect(),
+            )
+            .expect("テスト用の namespace を作れること")
+        }
+
+        /// 自分の namespace の配信中の track は種別を返すこと
+        #[test]
+        fn own_namespace_returns_the_published_track() {
+            let config = config_with(&[]);
+            let own = namespace(&["moq", "example"]);
+            assert_eq!(
+                published_track(&config, &own, b"video"),
+                Some(PublishedTrack::Video),
+                "既定の映像 track 名は Video であること"
+            );
+            assert_eq!(
+                published_track(&config, &own, AUDIO_TRACK_NAME.as_bytes()),
+                Some(PublishedTrack::Audio),
+                "音声 track は Audio であること"
+            );
+            assert_eq!(
+                published_track(&config, &own, MSF_CATALOG_TRACK_NAME),
+                Some(PublishedTrack::Catalog),
+                "カタログ track は Catalog であること"
+            );
+            assert_eq!(
+                published_track(&config, &own, b"unknown"),
+                None,
+                "配信していない track 名は None であること"
+            );
+        }
+
+        /// 別 namespace の要求は track 名が同じでも None を返すこと
+        #[test]
+        fn other_namespace_returns_none() {
+            let config = config_with(&[]);
+            // 別の namespace、区切りの異なる namespace、自分の namespace の前方一致や延長はどれも別物である
+            let others = [
+                namespace(&["other", "example"]),
+                namespace(&["moq-example"]),
+                namespace(&["moq", "example", "sub"]),
+                namespace(&["moq"]),
+            ];
+            for other in &others {
+                for name in [
+                    b"video".as_slice(),
+                    AUDIO_TRACK_NAME.as_bytes(),
+                    MSF_CATALOG_TRACK_NAME,
+                ] {
+                    assert_eq!(
+                        published_track(&config, other, name),
+                        None,
+                        "別 namespace の {} は None であること: {other:?}",
+                        String::from_utf8_lossy(name)
+                    );
+                }
+            }
+        }
+
+        /// 配信していない映像 / 音声は None を返し、カタログは常に返すこと
+        #[test]
+        fn disabled_media_returns_none_but_catalog_remains() {
+            let own = namespace(&["moq", "example"]);
+
+            let config = config_with(&["--no-video"]);
+            assert_eq!(
+                published_track(&config, &own, b"video"),
+                None,
+                "映像を配信しない場合は映像 track が None であること"
+            );
+            assert_eq!(
+                published_track(&config, &own, AUDIO_TRACK_NAME.as_bytes()),
+                Some(PublishedTrack::Audio),
+                "音声は配信を続けること"
+            );
+            assert_eq!(
+                published_track(&config, &own, MSF_CATALOG_TRACK_NAME),
+                Some(PublishedTrack::Catalog),
+                "映像が無くてもカタログは返すこと"
+            );
+
+            let config = config_with(&["--no-audio"]);
+            assert_eq!(
+                published_track(&config, &own, AUDIO_TRACK_NAME.as_bytes()),
+                None,
+                "音声を配信しない場合は音声 track が None であること"
+            );
+            assert_eq!(
+                published_track(&config, &own, b"video"),
+                Some(PublishedTrack::Video),
+                "映像は配信を続けること"
+            );
+
+            // 音声を配信しない場合は映像 track 名に audio を使える。判定の順序によらず Video になる
+            let config = config_with(&["--no-audio", "--track-name", "audio"]);
+            assert_eq!(
+                published_track(&config, &own, AUDIO_TRACK_NAME.as_bytes()),
+                Some(PublishedTrack::Video),
+                "--track-name audio の映像 track は Video であること"
+            );
+            assert_eq!(
+                published_track(&config, &own, MSF_CATALOG_TRACK_NAME),
+                Some(PublishedTrack::Catalog),
+                "音声が無くてもカタログは返すこと"
+            );
+        }
+
+        /// 映像 track 名は `--track-name` に従うこと
+        #[test]
+        fn custom_video_track_name_is_matched() {
+            let config = config_with(&["--track-name", "camera"]);
+            let own = namespace(&["moq", "example"]);
+            assert_eq!(
+                published_track(&config, &own, b"camera"),
+                Some(PublishedTrack::Video),
+                "--track-name の名前が Video であること"
+            );
+            assert_eq!(
+                published_track(&config, &own, b"video"),
+                None,
+                "既定名はもう配信していないため None であること"
             );
         }
     }
