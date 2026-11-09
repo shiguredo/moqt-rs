@@ -1,7 +1,7 @@
 # MP4 入力の非キーフレームにも PROP_TIMESCALE を付与する
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-10
 - Branch: develop
 - Polished: 2026-11-10
 
@@ -43,3 +43,16 @@ moq-pub は MP4 パススルー / 再エンコード経路で入力トラック�
 - Timescale 付きの映像 Object が購読側で `TimestampKind::MediaTime` に分類されること (既存の `timestamp_kind_of_returns_media_time_with_a_timescale` で確認する)。
 - live capture では `PROP_TIMESCALE` を付与しないこと (`build_video_loc_properties_live_capture_has_no_timescale` のテストで確認する)。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+`crates/moq-pub/src/pipeline.rs` の `build_video_loc_properties` で、`PROP_TIMESCALE` の push を `if frame.is_keyframe` の外へ移し、`timescale` が `Some` なら映像の全 Object に付けるようにした。
+`PROP_VIDEO_CONFIG` は従来どおりキーフレームだけに付ける (clippy の `collapsible_if` に合わせて let-chain にした)。live capture は `timescale` が `None` のため従来どおり付けない。
+関数の doc に、全 Object に付ける理由 (draft-ietf-moq-loc-05 §2.3.1.1 / §2.3.1.2) と Object ごとに付与できる根拠 (§6.1 Table 1) を書いた。
+送信と FETCH 用の `media_cache.insert` は同じ Properties を使うため、FETCH 応答の Object にも Timescale が付く。
+
+テストは `build_video_loc_properties_non_keyframe` を、`Some(90_000)` のときに `props.timescale() == Some(90_000)` を期待するよう直した。
+`build_video_loc_properties_keyframe` と `build_video_loc_properties_live_capture_has_no_timescale` は現状の期待のまま通る。
+購読側が Timescale 付きの Object を `MediaTime` に分類することは既存の `timestamp_kind_of_returns_media_time_with_a_timescale` で確認した。
+
+`CODEBASE.md` の規定に従い、ブランチと PR を作らず develop に直接コミットし、`CHANGES.md` は更新していない。
