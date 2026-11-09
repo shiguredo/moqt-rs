@@ -363,6 +363,99 @@ fn test_priority_change_in_same_subgroup_is_rejected() {
     ));
 }
 
+/// Priority の変更を拒否するときのエラーメッセージ (draft-ietf-moq-transport-23 §12.1 条件 1)
+const PRIORITY_CHANGE_MESSAGE: &str =
+    "publisher priority must not change within the same subgroup in a FETCH response";
+
+/// 非 Datagram 起源・Properties なしの Object 入力を作る
+fn object_input(group_id: u64, object_id: u64, publisher_priority: u8) -> FetchObjectInput {
+    FetchObjectInput {
+        group_id,
+        subgroup_id: 0,
+        object_id,
+        publisher_priority,
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 1,
+    }
+}
+
+/// Priority の変更を拒否したとき、出力バッファに部分バイトを残さないこと
+///
+/// ストリーム層の encode 系は「検証に失敗した場合、呼び出し側の出力バッファを変化させない」
+/// 契約で揃えている。`buf` を再利用する利用者が壊れた wire を送らないようにするため。
+#[test]
+fn test_priority_change_rejection_leaves_buf_unchanged() {
+    let mut encoder = FetchStreamEncoder::new(1);
+    let mut stream = encoder.encode_header();
+    encoder
+        .encode_object(&object_input(0, 0, 128), None, &mut stream)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let before = stream.clone();
+
+    assert_eq!(
+        encoder.encode_object(&object_input(0, 1, 64), None, &mut stream),
+        Err(MessageError::ProtocolViolation(PRIORITY_CHANGE_MESSAGE)),
+        "同一 Subgroup の Priority 変更は拒否すること"
+    );
+    assert_eq!(stream, before, "失敗時に buf が変化しないこと");
+
+    // 失敗した呼び出しの後も、同じ Priority の Object は続けてエンコードできる
+    encoder
+        .encode_object(&object_input(0, 1, 128), None, &mut stream)
+        .expect("失敗後も prior 状態が保たれ、続きをエンコードできること");
+}
+
+/// group 変更の Object が失敗しても、元の group の Priority の記録が失われないこと
+///
+/// 過去 group の記録の破棄を失敗し得る処理より前に行うと、失敗後に元の group の同一 Subgroup で
+/// Priority を変えた Object を受理してしまう (draft-ietf-moq-transport-23 §12.1 条件 1 の見逃し)。
+/// 失敗は `FetchStreamObject::encode` の properties 検証で起こす。group ID delta の
+/// アンダーフローで失敗させると修正前でも拒否されるため、ここでは使わない。
+#[test]
+fn test_failed_group_change_keeps_priority_record() {
+    // GROUP ORDER の値 (draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter))
+    const ASCENDING: u8 = 0x01;
+    const DESCENDING: u8 = 0x02;
+
+    // (group order, 失敗させる group)。Descending で前進する group は小さい側である
+    for (group_order, failing_group) in [(ASCENDING, 6), (DESCENDING, 4)] {
+        let mut encoder = FetchStreamEncoder::new_with_group_order(1, group_order)
+            .expect("テストフィクスチャの前提条件を満たす");
+        let mut stream = encoder.encode_header();
+        encoder
+            .encode_object(&object_input(5, 0, 128), None, &mut stream)
+            .expect("テストフィクスチャの前提条件を満たす");
+        let before = stream.clone();
+
+        // group を前進させる Object を properties 不正で失敗させる
+        let mut failing = object_input(failing_group, 0, 128);
+        failing.has_properties = true;
+        assert!(
+            matches!(
+                encoder.encode_object(&failing, None, &mut stream),
+                Err(MessageError::ProtocolViolation(_))
+            ),
+            "properties の指定が不正な Object は拒否すること (group order={group_order})"
+        );
+        assert_eq!(
+            stream, before,
+            "失敗時に buf が変化しないこと (group order={group_order})"
+        );
+
+        // 元の group の同一 Subgroup で Priority を変えた Object は、記録が残っていれば拒否される
+        assert_eq!(
+            encoder.encode_object(&object_input(5, 1, 64), None, &mut stream),
+            Err(MessageError::ProtocolViolation(PRIORITY_CHANGE_MESSAGE)),
+            "失敗後も元の group の Priority の記録が残ること (group order={group_order})"
+        );
+        assert_eq!(
+            stream, before,
+            "Priority の変更の拒否でも buf が変化しないこと (group order={group_order})"
+        );
+    }
+}
+
 #[test]
 fn test_non_sequential_object_id() {
     // prior との差が 1 でない場合は実際の差から 2 を引いた delta が明示される

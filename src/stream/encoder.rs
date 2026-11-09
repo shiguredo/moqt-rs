@@ -190,6 +190,9 @@ impl FetchStreamEncoder {
     ///
     /// エンコードに成功した場合、この呼び出しは内部の prior 状態
     /// (直前の Group ID / Subgroup ID / Object ID / Priority と prior 参照文脈) を更新する。
+    /// 失敗した場合は `buf` に何も書き込まず、内部の prior 状態も Subgroup ごとの Publisher
+    /// Priority の記録も変更しない。そのため、失敗した呼び出しの後も同じエンコーダで続きを
+    /// エンコードでき、§12.1 条件 1 の検出も失われない。
     pub fn encode_object(
         &mut self,
         input: &FetchObjectInput,
@@ -212,6 +215,11 @@ impl FetchStreamEncoder {
         } else {
             input.subgroup_id
         };
+        // group が前進するかどうか。過去 group の per-group エントリの破棄は、失敗し得る処理が
+        // すべて成功した後に行う (失敗時に記録を変えない)
+        let group_advances = self
+            .prior_state
+            .is_some_and(|prior| prior.group_id != input.group_id);
         let (group_id, subgroup_id, object_id, publisher_priority) = match self.prior_state {
             None => {
                 // 最初のオブジェクト: Group ID / Object ID / Publisher Priority は絶対値で明示必須
@@ -241,20 +249,6 @@ impl FetchStreamEncoder {
                         "FETCH response objects within the same group must be strictly increasing by object ID",
                     ));
                 }
-                // group が前進したら過去 group の per-group エントリを破棄する
-                // (グループは要求順に送られるため再出現しない)。
-                // 記録量が Object 数に比例して増えないようにする。
-                if input.group_id != prior.group_id {
-                    let ascending = self.group_order == FETCH_GROUP_ORDER_ASCENDING;
-                    if ascending {
-                        self.subgroup_priorities
-                            .retain(|&(g, _), _| g >= input.group_id);
-                    } else {
-                        self.subgroup_priorities
-                            .retain(|&(g, _), _| g <= input.group_id);
-                    }
-                }
-
                 let prior_actual = prior.actual_object;
                 let can_use_subgroup_prior =
                     matches!(self.prior_context, FetchPriorContext::HasPriorObject);
@@ -364,23 +358,44 @@ impl FetchStreamEncoder {
             payload_length: input.payload_length,
         };
 
-        let entry = FetchStreamEntry::Object(fetch_obj);
-        entry.encode(properties_data, self.prior_context, buf)?;
-
         // draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 1:
         // 同一 Subgroup 内で Publisher Priority が変わってはならない。判定は
         // (group_id, subgroup_id) ごとの最後の Priority との比較で行い、間に別 Subgroup や
         // datagram 起源 Object が挟まっても検出する (decoder と対称)。
         // datagram 起源 Object は Subgroup ID を持たないため比較にも記録にも使わない。
-        if !input.is_datagram_origin {
-            let key = (input.group_id, effective_subgroup_id);
-            if let Some(previous_priority) = self.subgroup_priorities.get(&key)
-                && *previous_priority != input.publisher_priority
-            {
-                return Err(MessageError::ProtocolViolation(
-                    "publisher priority must not change within the same subgroup in a FETCH response",
-                ));
+        // 検証は `buf` へ書き込む前に行い、失敗時に呼び出し側の出力バッファへ部分バイトを残さない
+        // (ストリーム層の encode 系の契約)。
+        let priority_key =
+            (!input.is_datagram_origin).then_some((input.group_id, effective_subgroup_id));
+        if let Some(key) = priority_key
+            && let Some(previous_priority) = self.subgroup_priorities.get(&key)
+            && *previous_priority != input.publisher_priority
+        {
+            return Err(MessageError::ProtocolViolation(
+                "publisher priority must not change within the same subgroup in a FETCH response",
+            ));
+        }
+
+        // `FetchStreamObject::encode` は書き込み前に全検証を行うため、失敗時に `buf` を変化させない
+        let entry = FetchStreamEntry::Object(fetch_obj);
+        entry.encode(properties_data, self.prior_context, buf)?;
+
+        // ここから先は失敗しない。失敗し得る処理がすべて成功した後で記録と prior 状態を
+        // 更新し、エラー時には `buf` も `subgroup_priorities` も変化させない。
+        //
+        // group が前進したら過去 group の per-group エントリを破棄する
+        // (グループは要求順に送られるため再出現しない)。
+        // 記録量が Object 数に比例して増えないようにする。
+        if group_advances {
+            if self.group_order == FETCH_GROUP_ORDER_ASCENDING {
+                self.subgroup_priorities
+                    .retain(|&(g, _), _| g >= input.group_id);
+            } else {
+                self.subgroup_priorities
+                    .retain(|&(g, _), _| g <= input.group_id);
             }
+        }
+        if let Some(key) = priority_key {
             self.subgroup_priorities
                 .insert(key, input.publisher_priority);
         }
