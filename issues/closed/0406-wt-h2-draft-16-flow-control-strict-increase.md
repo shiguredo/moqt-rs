@@ -16,7 +16,9 @@
 
 `crates/tokio-moq/Cargo.toml` / `Cargo.lock` は `shiguredo_http2 2026.1.0-canary.17` を固定している。
 canary.17 の `src/webtransport/flow_control.rs` の `WtFlowControl::update_send_max` / `update_max_streams` は、前回受理した値 (未受信なら SETTINGS 由来の初期値) を増加させない値を `WtErrorKind::FlowControlError` にする。
-`src/webtransport/stream.rs` の `WtStream::update_send_max` も同値・減少を拒否し、`WtSession::process` は WT_MAX_STREAM_DATA について、暗黙生成するピア開始 bidi ストリームの初期値と削除済みストリームの最後の受理値に対しても非増加を拒否する。削除済みストリームの記録は上限 (10,000 件) 付きであり、追い出された ID ではこの比較が成り立たない。adapter は capsule の解析・状態管理を `WtSession::feed` / `process` に委譲し、`DriverState::handle_event` の `Event::DataReceived` で `WtError` を受けると `abort_session_with_wt_error` → `wt_http2_error_code` で CONNECT stream を `WT_FLOW_CONTROL_ERROR` の RST_STREAM にする。
+`src/webtransport/stream.rs` の `WtStream::update_send_max` も同値・減少を拒否し、`WtSession::process` は WT_MAX_STREAM_DATA について、暗黙生成するピア開始 bidi ストリームの初期値と削除済みストリームの最後の受理値に対しても非増加を拒否する。
+削除済みストリームの記録は上限 (10,000 件) 付きであり、追い出された ID ではこの比較が成り立たない。
+adapter は capsule の解析・状態管理を `WtSession::feed` / `process` に委譲し、`DriverState::handle_event` の `Event::DataReceived` で `WtError` を受けると `abort_session_with_wt_error` → `wt_http2_error_code` で CONNECT stream を `WT_FLOW_CONTROL_ERROR` の RST_STREAM にする。
 この経路を実 peer で固定するテストは無く、単体テストは `wt_http2_error_code_maps_session_errors` の対応付けだけである。
 
 ## 設計方針
@@ -50,7 +52,7 @@ production code の変更は、受信した WT_MAX_* の増加で滞留中の送
 
 ## 解決方法
 
-canary.17 の WT_MAX_* の厳密増加を、自己署名証明書を使う実 TLS peer との結合テストで固定した。production code は、受信した WT_MAX_* の増加で滞留中の送信を再開するため、`handle_event` の受信処理後に `flush_pending_sends` を呼ぶようにした。
+canary.17 の WT_MAX_\* の厳密増加を、自己署名証明書を使う実 TLS peer との結合テストで固定した。production code は、受信した WT_MAX_* の増加で滞留中の送信を再開するため、`handle_event` の受信処理後に `flush_pending_sends` を呼ぶようにした。
 
 - WT_MAX_DATA、WT_MAX_STREAM_DATA (uni / bidi remote / bidi local)、WT_MAX_STREAMS (uni / bidi) の初期値と更新値の同値・小さい値を拒否する
 - WT_MAX_DATA / WT_MAX_STREAMS / WT_MAX_STREAM_DATA の増加を受理し、送信またはストリーム開設の成立で確認する

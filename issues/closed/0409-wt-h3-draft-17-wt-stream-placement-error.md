@@ -13,9 +13,11 @@
 
 ## 現状
 
-0407 で `shiguredo_http3` を `2026.1.0-canary.14` に更新する。canary.14 の `src/stream/control.rs` は SETTINGS 受信後の制御ストリームで `0x41` を `ConnectionError(FrameUnexpected)` にし、`src/stream/request.rs` は initiator の先頭以外の `0x41` を `ConnectionError(FrameUnexpected)` にする。SETTINGS 受信前の制御ストリームは RFC 9114 §6.2.1 を優先して `H3_MISSING_SETTINGS` になる。
+0407 で `shiguredo_http3` を `2026.1.0-canary.14` に更新する。
+canary.14 の `src/stream/control.rs` は SETTINGS 受信後の制御ストリームで `0x41` を `ConnectionError(FrameUnexpected)` にし、`src/stream/request.rs` は initiator の先頭以外の `0x41` を `ConnectionError(FrameUnexpected)` にする。SETTINGS 受信前の制御ストリームは RFC 9114 §6.2.1 を優先して `H3_MISSING_SETTINGS` になる。
 
-`crates/tokio-moq/src/webtransport_h3.rs` の `feed_stream_to_h3` は h3 層の結果を `process_h3_result` に渡す。`connection_error_code` が `Error::ConnectionError(code)` からコードを取り出し、`process_h3_result` が `close_connection_with_h3_error` に渡して接続を閉じる。呼び出し元へ返る値は `TransportError::ConnectionClosed` であり、コードは close の application error code として wire に渡る。
+`crates/tokio-moq/src/webtransport_h3.rs` の `feed_stream_to_h3` は h3 層の結果を `process_h3_result` に渡す。
+`connection_error_code` が `Error::ConnectionError(code)` からコードを取り出し、`process_h3_result` が `close_connection_with_h3_error` に渡して接続を閉じる。呼び出し元へ返る値は `TransportError::ConnectionClosed` であり、コードは close の application error code として wire に渡る。
 
 不正位置の WT_STREAM を受けたときに close のコードが `H3_FRAME_UNEXPECTED` のままであることを固定するテストは無い。§4.3 の参照コメントは draft-16 のままである。
 

@@ -18,9 +18,12 @@ WtH3 は tobi-quic を使い、ピアが `reset_stream_at` を広告していれ
 
 `crates/tokio-moq/src/webtransport_h3.rs` の `WtSendStream` は送信済みデータ長を保持していない。`header_len` は送信側では `open_uni_stream` / `open_bi_stream` が実際に送ったヘッダ長を持つが、サーバー開始 bidi を受理した `route_bi_stream` ではピアが送ったヘッダ長を入れている。responder のクライアントはそのストリームに WebTransport header を送っていないため、この値は Reliable Size に使えない。
 
-`crates/tokio-moq/src/transport.rs` の `SendStream::reset` と `WtSendStream::reset` は error code だけを受け取る。`SessionEvent::ResetDataStream` は `reliable_size` を持つが、`crates/moq-pub/src/pipeline.rs` の `ResetDataStream` 処理は `..` で値を捨て、`SubgroupWriter::reset_by_session` は `reliable_size: None` で `send_data_stream_closed` を呼ぶ。
+`crates/tokio-moq/src/transport.rs` の `SendStream::reset` と `WtSendStream::reset` は error code だけを受け取る。
+`SessionEvent::ResetDataStream` は `reliable_size` を持つが、`crates/moq-pub/src/pipeline.rs` の `ResetDataStream` 処理は `..` で値を捨て、`SubgroupWriter::reset_by_session` は `reliable_size: None` で `send_data_stream_closed` を呼ぶ。
 
-`Session::reset_outgoing_data_stream_at*` は `ResetDataStream` を発行する前に Session 側の stream 追跡を除去する。そのため、このイベントを受けた I/O 層が `send_data_stream_closed` を呼ぶと `SESSION_PROTOCOL_VIOLATION` になる。一方、delivery timeout の `tick_subscription_timeouts` は追跡を保持したまま `ResetDataStream` を発行し、I/O 層の `send_data_stream_closed` を待つ。両者を区別しないと、app 発 reset では `SESSION_PROTOCOL_VIOLATION` になり、delivery timeout では PUBLISH_DONE の flush が止まる。
+`Session::reset_outgoing_data_stream_at*` は `ResetDataStream` を発行する前に Session 側の stream 追跡を除去する。
+そのため、このイベントを受けた I/O 層が `send_data_stream_closed` を呼ぶと `SESSION_PROTOCOL_VIOLATION` になる。
+一方、delivery timeout の `tick_subscription_timeouts` は追跡を保持したまま `ResetDataStream` を発行し、I/O 層の `send_data_stream_closed` を待つ。両者を区別しないと、app 発 reset では `SESSION_PROTOCOL_VIOLATION` になり、delivery timeout では PUBLISH_DONE の flush が止まる。
 
 `Some(n)` を発行する production 側の呼び出しは無く、raw `Session` の `reset_outgoing_data_stream_at*` を使う利用者だけが発行できる。
 
@@ -58,7 +61,8 @@ WtH3 は tobi-quic を使い、ピアが `reset_stream_at` を広告していれ
 
 `SessionEvent::ResetDataStream` に `tracking: ResetTracking` を追加する。`ResetTracking::Removed` は app 発 reset を表し、Session は追跡を除去済みで I/O 層は wire の reset だけを行う。`ResetTracking::Retained` は delivery timeout などを表し、I/O 層は wire の reset 後に `send_data_stream_closed` を呼ぶ。
 
-`crates/moq-pub/src/pipeline.rs` の `ResetDataStream` 処理で `tracking` と `reliable_size` を取り出し、`reset_open_subgroup_stream` に渡す。`SubgroupWriter::reset_by_session(error_code, reliable_size, tracking)` は `Retained` のときだけ `send_data_stream_closed` を呼ぶ。`SubgroupWriter::finish` の reset はアプリ offset を持たないため `None` を渡し、従来どおり通知する。
+`crates/moq-pub/src/pipeline.rs` の `ResetDataStream` 処理で `tracking` と `reliable_size` を取り出し、`reset_open_subgroup_stream` に渡す。
+`SubgroupWriter::reset_by_session(error_code, reliable_size, tracking)` は `Retained` のときだけ `send_data_stream_closed` を呼ぶ。`SubgroupWriter::finish` の reset はアプリ offset を持たないため `None` を渡し、従来どおり通知する。
 
 `SendStream::reset` の他の呼び出し元 (`moqt_client` の `StopSending` / `ResetRequestStream` 経路) は `None` を渡す。bidi request stream の reset は `ResetRequestStream` に `reliable_size` が無いため、本 issue の対象外である。
 
@@ -100,9 +104,12 @@ WtH3 は tobi-quic を使い、ピアが `reset_stream_at` を広告していれ
 
 ## 解決方法
 
-`SessionEvent::ResetDataStream` に `tracking: ResetTracking` を追加し、app 発 reset (`Removed`) と配送 timeout (`Retained`) を区別した。`SubgroupWriter::reset_by_session(error_code, reliable_size, tracking)` は `Retained` のときだけ `send_data_stream_closed` を呼び、app 発 reset で `SESSION_PROTOCOL_VIOLATION` にならず、配送 timeout では保留 PUBLISH_DONE が従来どおり flush される。
+`SessionEvent::ResetDataStream` に `tracking: ResetTracking` を追加し、app 発 reset (`Removed`) と配送 timeout (`Retained`) を区別した。
+`SubgroupWriter::reset_by_session(error_code, reliable_size, tracking)` は `Retained` のときだけ `send_data_stream_closed` を呼び、app 発 reset で `SESSION_PROTOCOL_VIOLATION` にならず、配送 timeout では保留 PUBLISH_DONE が従来どおり flush される。
 
-`SendStream::reset(error_code, reliable_size: Option<u64>)` に変更し、WtH3 は `header_len + reliable_size` を `RESET_STREAM_AT` の Reliable Size として送る。`WtSendStream` は `sent_data_len` を保持し、Final Size を `header_len + sent_data_len` とする。サーバー開始 bidi を受理した `WtSendStream` は `header_len: 0` にした。`Some(n)` は `n <= sent_data_len` と varint 上限を検査し、ピアが `reset_stream_at` 非対応なら `Unsupported` を返す。`None` は従来どおりヘッダー長までを Reliable Size にする。
+`SendStream::reset(error_code, reliable_size: Option<u64>)` に変更し、WtH3 は `header_len + reliable_size` を `RESET_STREAM_AT` の Reliable Size として送る。
+`WtSendStream` は `sent_data_len` を保持し、Final Size を `header_len + sent_data_len` とする。サーバー開始 bidi を受理した `WtSendStream` は `header_len: 0` にした。
+`Some(n)` は `n <= sent_data_len` と varint 上限を検査し、ピアが `reset_stream_at` 非対応なら `Unsupported` を返す。`None` は従来どおりヘッダー長までを Reliable Size にする。
 
 `TransportError::Unsupported` を追加し、WtH2 / QUIC / QMux の `Some(n)` はディスパッチ前に拒否する。`moqt_client` の request stream reset は `None` を渡す。`docs/missing-features.md` の RESET_STREAM_AT の記述を更新した。
 
