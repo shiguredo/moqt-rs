@@ -1,7 +1,7 @@
 # MoqtClient::fetch の REQUEST_ERROR をアプリへ配送する
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-10
 - Branch: develop
 - Polished: 2026-11-10
 
@@ -132,3 +132,23 @@ doc が約束する配送を実装し、doc と実装を一致させる。
   記述が実装と一致すること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+`crates/tokio-moq/src/moqt_client.rs` で `SessionEvent::RequestErrorReceived` を notable にした。
+
+- `is_notable_event` に `RequestErrorReceived` を加えた。
+- `drain_events` の `RequestErrorReceived` arm は、従来どおり `request_errors` に `(error_code, reason)` を記録したうえで `notable_events` へ積む。`is_notable_event` との一致は arm 内の `debug_assert!` で検査する。
+- `next_event` の doc の notable 一覧を `is_notable_event` と一致させ、SUBSCRIBE / PUBLISH / TRACK_STATUS / REQUEST_UPDATE の拒否もこのイベントで届くこと (同期 API の戻り値との二重性と、Retry Interval / Error Details はイベントにだけ載ること) を書いた。
+- `fetch` の doc に、拒否が `next_event` で届き、`retry_interval` と `error_details` (REDIRECT の移動先は `error_details.redirect()`) も含むことを追記した。
+- 単体テスト `request_error_is_notable_event` を追加した。
+
+`crates/tokio-moq/src/peer_harness.rs` の `TestPeer` に `send_request_error` を追加し、
+`client_fetch_request_error_is_delivered_to_the_application` で、client が発行した FETCH を peer が DOES_NOT_EXIST と Retry Interval 付きで拒否すると、`next_event` が `request_id` / `error_code` / `retry_interval` / `reason` の一致する `RequestErrorReceived` を返し、`error_details.redirect()` が `None` であることを固定した。
+`rejected_fetch_is_not_delivered_to_the_application` は変更せずに通る。
+
+`crates/moq-sub/src/pipeline.rs` のメインループに `RequestErrorReceived` の arm を追加し、`request_id` / `error_code` / `retry_interval` / `reason` / REDIRECT の有無を warn ログに残す。
+`fetch_targets` の値が `FetchTarget::Video` の request だけを映像 FETCH の拒否として対応表から外し、catalog の購読 (`FetchTarget::Catalog`) などは変更しない。`fetch_recent_video_groups` の doc を新しい挙動に合わせた。
+
+`docs/missing-features.md` §6.7 を、イベントで `retry_interval` と `error_details` が届くが example はリダイレクトにも Retry Interval にも追随しない、という実態に更新し、REQUEST_ERROR の型の誤記 (`0x34`) を `0x05` に直した。
+`CODEBASE.md` の規定に従い、ブランチと PR を作らず develop に直接コミットし、`CHANGES.md` は更新していない。
