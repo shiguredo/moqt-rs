@@ -462,18 +462,14 @@ impl AudioPlayoutTimingStats {
         }
     }
 
-    /// 鳴らすと決めた音を記録する
+    /// 鳴らした音の実績を 1 つ記録する
     ///
+    /// `play` は [`crate::playout::scheduler::AudioPlayoutScheduler::commit`] が返す値である。
+    /// 時間圧縮・時間伸長・サンプルへの丸めを適用して出力へ積んだ後に記録すること。
     /// 余裕と遅れは、時間軸が決めた再生予定時刻との差である。到着基準で鳴らした音でも、
     /// 時間軸が予定を決めていればその予定との差を記録する (音が予定よりどれだけ遅れて
     /// 鳴っているかを読むため)。到着から鳴り始めるまでの時間は、予定の有無に関係なく
-    /// 記録する。
-    /// 鳴らした音の実績を 1 つ記録する
-    ///
-    /// `play` は [`crate::playout::scheduler::AudioPlayoutScheduler::last_play`] の値である。
-    /// 実際に鳴る長さ ([`AudioPlayoutPlay::played_us`]) を確定した後に記録すること
-    /// (scheduler の `confirm_stretch` / `confirm_expansion` / `confirm_playout_end` を
-    /// すべて返した後に `last_play` を読む)。記録した長さは、`pending_us` /
+    /// 記録する。記録した長さ ([`AudioPlayoutPlay::played_us`]) は、`pending_us` /
     /// `pending_end_us` と、停止時に切った長さ (`record_stopped`) の元になる。
     pub fn record_play(&mut self, play: AudioPlayoutPlay) {
         self.prune_pending(play.arrival_us);

@@ -612,11 +612,26 @@ fn sync_never_moves_more_than_the_compensation_limit() -> noprop::TestResult {
             ) else {
                 continue;
             };
-            // 素の表示の遅れの差から、補償の上限を引いた分までが不感帯へ収まる
+            // 素の表示の遅れの差から、補償の上限を引いた分までが不感帯へ収まる。
+            // 合わせる側の jitter buffer が表示の遅れの上限に当たると、その分は
+            // 補償できず差として残るため、上限までの余りも「合わせない分」に含める
             let natural_difference_us = natural_difference_us_of(&timeline);
-            let allowed_us = TIMELINE_SYNC_MIN_DELTA_US.max(
-                natural_difference_us.saturating_sub(TIMELINE_MAX_COMPENSATED_DIFFERENCE_US),
-            );
+            let natural_of = |track: shiguredo_moqt::playout::timeline::TrackBreakdown| {
+                track.base_delay_us.unwrap_or(0) + track.jitter_delay_us.unwrap_or(0)
+            };
+            let audio_natural_us = natural_of(breakdown.audio);
+            let video_natural_us = natural_of(breakdown.video);
+            let lagging_natural_us = audio_natural_us.min(video_natural_us);
+            let lagging_room_us = breakdown
+                .presentation_delay_cap_us
+                .saturating_sub(lagging_natural_us)
+                .max(0);
+            let allowed_us = TIMELINE_SYNC_MIN_DELTA_US
+                .max(
+                    natural_difference_us
+                        .saturating_sub(TIMELINE_MAX_COMPENSATED_DIFFERENCE_US),
+                )
+                .max(natural_difference_us.saturating_sub(lagging_room_us));
             // 足すのは即座、戻すのは毎秒の速さまで、という設計のため、後行側が前の状態で
             // 足した分はまだ戻り切っていないことがある。その分は差に残る
             let audio_total_us = breakdown.audio.base_delay_us.unwrap_or(0)
@@ -750,7 +765,9 @@ fn long_arrivals_keep_the_difference_within_the_uncompensated_part() -> noprop::
             .expect("映像の表示時刻が決まる");
         timeline.record_presentation(Track::Audio, timestamp_us, audio_present_us);
         timeline.record_presentation(Track::Video, timestamp_us, video_present_us);
-        let skew_us = timeline.skew_us().expect("同期ずれが求まること");
+        let skew_us = timeline
+            .skew_us(audio_present_us.max(video_present_us))
+            .expect("同期ずれが求まること");
         assert!(
             skew_us.saturating_abs() <= allowed_us + trailing_extra_us + allowance_us,
             "seed={seed}: 同期ずれが合わせない分に収まること: {skew_us}"

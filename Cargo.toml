@@ -27,6 +27,9 @@ aws-lc-rs = { version = "1.19", optional = true }
 base64ct = { version = "1.8", default-features = false, features = ["alloc"] }
 # no_std 環境向けハッシュマップ / ハッシュセット
 hashbrown = "0.17"
+# no_std 環境向け三角関数 (ダウンサンプリングの窓付き sinc の係数生成に使用する)
+# std の f64::sin / f64::cos は no_std では使えないため、libm を使う
+libm = "0.2"
 # no_std 環境向け DEFLATE / GZIP 圧縮・展開 (MSF Timeline の payload 圧縮に使用する)
 # draft-ietf-moq-msf-01 §7.1 (Media Timeline track payload) / §8.1 (Event Timeline data format)
 noflate = "0.1"

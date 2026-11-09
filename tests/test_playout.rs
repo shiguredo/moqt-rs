@@ -13,6 +13,8 @@ mod expansion;
 mod gap;
 #[path = "test_playout/publish_catch_up.rs"]
 mod publish_catch_up;
+#[path = "test_playout/resample.rs"]
+mod resample;
 #[path = "test_playout/scheduler.rs"]
 mod scheduler;
 #[path = "test_playout/splice_fade.rs"]

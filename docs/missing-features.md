@@ -497,7 +497,7 @@ datagram で届いた Object を処理するのは音声だけで (`pipeline.rs:
 
 ### 6.15 playout の適用層と復号前遅延を移植していない
 
-moqt-js (HEAD `6da25d10`) の playout のうち、次の 2 つは移植していない。
+moqt-js (HEAD `f6a171e8`) の playout のうち、次の 2 つは移植していない。
 
 - 出力側の欠落補間の適用層。moqt-js は `AudioWorklet` の出力コールバックで実出力の
   欠落を検出し、そのときだけ補間する (`AudioRenderConcealer`)。moqt-rs には出力
@@ -508,6 +508,11 @@ moqt-js (HEAD `6da25d10`) の playout のうち、次の 2 つは移植してい
 - 復号前遅延 (`PreDecodeDelayQueue` / `PreDecodeDelayStage`) と、復号の入力 Timestamp の
   対応表 (`decodeInputTimestamps`)。復号の手前で待つ制御と、復号入力の時刻の対応を
   持たない
+
+`AudioClockBridge` (`getOutputTimestamp()` と `performance.now()` の対応、100 ms の
+平滑化、停止の検出) と `AudioRenderQueue` (フレームをまたぐ連続 PCM のキュー) も
+移植していない。moqt-rs は `raw_player` の累積サンプル数から実出力の先行量を測り、
+レート変換は `playout::resample` の 1 ブロック単位の関数を呼び出し側が使う。
 
 計器 (`playout::timing`) は `AudioWorklet` が返す実描画量を前提にした
 `record_rendered_gap` / `record_rendered_boundary` を持つが、上の適用層が無いため、

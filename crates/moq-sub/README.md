@@ -63,6 +63,7 @@ cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video'
 | `--no-video` | | 映像トラックの購読を無効化する |
 | `--no-audio` | | 音声トラックの購読を無効化する |
 | `--audio-output-device` | `default` | 音声の出力先。`none` はスピーカーへ出力せず受信とデコードだけを続ける (`default` と `none` のみ対応) |
+| `--audio-min-delay-ms` | `50` | 音声の待ち時間の下限 (0〜100 ms)。到着の揺らぎと実出力の先行量から決まる自動予算の下限になる |
 | `--mp4` | | 受信した音声 / 映像を MP4 ファイルへ保存する (再エンコードせずに mux する。音声は Opus のみで、AAC-LC のトラックでは音声を録画せず警告する。既存ファイルは上書きし、音声は subgroup stream と datagram のどちらで届いても保存する) |
 | `--no-play` | | 再生を行わない (SDL を初期化せず、デコードもしない) |
 

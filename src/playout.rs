@@ -10,6 +10,7 @@ pub mod expansion;
 pub mod gap;
 pub mod predictor;
 pub mod publish_catch_up;
+pub mod resample;
 pub mod scheduler;
 pub mod splice_fade;
 pub mod stretch;

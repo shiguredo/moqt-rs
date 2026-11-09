@@ -786,6 +786,10 @@ fn compression_splice<T: AsRef<[f32]>>(channels: &[T], period: usize, center: us
 /// 削る位置は音の中央で検証したあと、クロスフェードで波形を打ち消さない位置を探す
 /// (`compression_splice`)。削る長さは変えない。
 ///
+/// [`compress`] と違い、直前の実音を解析の履歴として渡せる。5 / 10 ms の音は 4 kHz へ
+/// 間引くと相関窓 (61 サンプル、15.25 ms) に足りず、周期を求められない。履歴と連結した
+/// 30 ms の窓で周期を探し、現在の音の切断位置でも周期が続いているときだけ使う。
+///
 /// # 戻り値
 ///
 /// 長さの変化 (サンプル数)。負が圧縮、0 が操作なし。0 のときバッファは変更しない。
@@ -797,6 +801,23 @@ pub fn compress(
     sample_rate: u32,
     max_length_change_samples: usize,
 ) -> isize {
+    compress_with_history(channels, sample_rate, max_length_change_samples, &[])
+}
+
+/// 直前の実音を解析の履歴に使って、音声を時間圧縮する
+///
+/// `history` は `channels` と同じチャンネル数で、各チャンネルの長さが揃っていること。
+/// 各チャンネルは短くてもよく、末尾の最大 30 ms だけを使う。音が 20 ms 未満のときに
+/// 周期を求められなかった場合だけ連結して探す。20 ms 以上では従来どおり現在の音だけで
+/// 求める (履歴との連結で、直前の音の周期を現在の音へ押し付けないため)。
+///
+/// それ以外の契約と戻り値は [`compress`] と同じである。
+pub fn compress_with_history(
+    channels: &mut [&mut [f32]],
+    sample_rate: u32,
+    max_length_change_samples: usize,
+    history: &[Vec<f32>],
+) -> isize {
     if channels.is_empty() {
         return 0;
     }
@@ -806,19 +827,21 @@ pub fn compress(
     }
     // 圧縮の可否と削る周期は中央で決める。位置の選択で遅延制御を変えない
     let center = length >> 1;
-    let (removed, splice) = {
-        let Some(pitch) = pitch_period_of(channels, sample_rate, center) else {
-            return 0;
-        };
-        if pitch.samples > max_length_change_samples {
-            // 遅れより長い周期しか無い。削ると行き過ぎるため、この音では詰めない
-            return 0;
-        }
-        (
-            pitch.samples,
-            compression_splice(channels, pitch.samples, center),
-        )
+    let mut pitch = pitch_period_of(channels, sample_rate, center);
+    // 5 / 10 ms の音は現在の音だけで相関窓を満たさない。履歴と連結して周期を探し、
+    // 現在の切断位置でもその周期が続いているときだけ使う
+    if pitch.is_none() && length < short_frame_samples(sample_rate) {
+        pitch = short_frame_pitch(channels, history, sample_rate, center);
+    }
+    let Some(pitch) = pitch else {
+        return 0;
     };
+    if pitch.samples > max_length_change_samples {
+        // 遅れより長い周期しか無い。削ると行き過ぎるため、この音では詰めない
+        return 0;
+    }
+    let removed = pitch.samples;
+    let splice = compression_splice(channels, removed, center);
     for channel in channels.iter_mut() {
         let channel: &mut [f32] = channel;
         // 切れ目の前後は同じバッファの隣り合う領域であるため、分割して借用する
@@ -828,6 +851,87 @@ pub fn compress(
         channel.copy_within(splice + removed.., splice);
     }
     -(removed as isize)
+}
+
+/// 短いフレームで、履歴と連結した窓から圧縮の周期を求める
+///
+/// 連結した窓で求めた周期が、現在の音の切断位置でも続いていることを確かめる。履歴が
+/// 強い周期を持っていても、現在の音がその周期で繰り返していなければ削ると継ぎ目が
+/// 崩れるため、現在の音の相関と切断位置の一致の両方を見る。
+fn short_frame_pitch(
+    channels: &[&mut [f32]],
+    history: &[Vec<f32>],
+    sample_rate: u32,
+    center: usize,
+) -> Option<PitchPeriod> {
+    let combined = with_history(
+        channels,
+        history,
+        round_positive(f64::from(sample_rate) * 0.03),
+    )?;
+    let pitch = pitch_period_of(&combined, sample_rate, combined.first()?.len() >> 1)?;
+    let period = pitch.samples;
+    if period == 0 || period > center {
+        return None;
+    }
+    let length = channels.first()?.len();
+    for channel in channels {
+        let channel: &[f32] = channel;
+        let score = compression_splice_score(channel, center as isize - period as isize, period);
+        if score.silent {
+            // 無音は削っても聞こえないため、そのまま操作してよい
+            continue;
+        }
+        if !score.correlated
+            || full_rate_normalized_correlation(channel, length, length - period, period)
+                < TIME_STRETCH_CORRELATION_THRESHOLD
+        {
+            return None;
+        }
+    }
+    Some(pitch)
+}
+
+/// 短期間の履歴と今回の音を、解析用の連続したサンプル列にする
+///
+/// `limit` は履歴として使う最大のサンプル数である。履歴のチャンネル数か長さが今回の音と
+/// 合わないときは None を返す (別の形式の音を連結しない)。
+fn with_history<T: AsRef<[f32]>>(
+    channels: &[T],
+    history: &[Vec<f32>],
+    limit: usize,
+) -> Option<Vec<Vec<f32>>> {
+    if channels.is_empty() || history.len() != channels.len() {
+        return None;
+    }
+    let history_len = history.first()?.len();
+    if history.iter().any(|channel| channel.len() != history_len) {
+        return None;
+    }
+    let old_length = history_len.min(limit);
+    if old_length == 0 {
+        return None;
+    }
+    Some(
+        channels
+            .iter()
+            .zip(history)
+            .map(|(channel, previous)| {
+                let mut combined = Vec::new();
+                combined.extend_from_slice(&previous[previous.len() - old_length..]);
+                combined.extend_from_slice(channel.as_ref());
+                combined
+            })
+            .collect(),
+    )
+}
+
+/// 短いフレームとみなす長さ (サンプル数)
+///
+/// 20 ms 未満では 4 kHz の相関窓 (61 サンプル、15.25 ms) を現在の音だけで満たせない。
+/// この長さ未満のときだけ、履歴を連結した窓で周期を探す。
+fn short_frame_samples(sample_rate: u32) -> usize {
+    round_positive(f64::from(sample_rate) * 0.02)
 }
 
 /// 予備的な時間伸長の結果
@@ -847,14 +951,16 @@ pub struct PreemptiveExpansion {
 ///
 /// NetEq `PreemptiveExpand::CheckCriteriaAndStretch` の overlap-add を採用する。根拠は
 /// WebRTC の `modules/audio_coding/neteq/preemptive_expand.cc` である。上流全体の移植では
-/// なく、浮動小数点 PCM と既存の周期判定を使う (上流の方式は将来変わり得る)。直前の実音
-/// 10 ms と今回の実音を重ね、追加の入力やタイマーは待たない。
+/// なく、浮動小数点 PCM と既存の周期判定を使う (上流の方式は将来変わり得る)。20 ms 以上は
+/// 直前の実音 10 ms と今回の実音を重ね、短いフレームは最大 30 ms の履歴で周期を推定して
+/// 未再生の今回の先頭で伸ばす。追加の入力やタイマーは待たない。
 ///
 /// 手順は次のとおりである。
 ///
 /// - 無音なら、今回の音の最後のサンプルで要求された長さ (今回の音の長さまで) を埋める
-/// - 今回の音の前に直前の実音 (最大 10 ms) を置き、その 15 ms の位置の前後 1 周期を
-///   クロスフェードして 1 周期を足す
+/// - 今回の音の前に直前の実音を置く。重ね合わせの位置は、20 ms 以上の音では 15 ms、
+///   20 ms 未満の音では履歴の先頭である
+/// - その位置の前後 1 周期をクロスフェードして 1 周期を足す
 /// - 増やす長さは `max_length_change_samples` を超えない。周期がこれを超えるときは操作しない
 /// - 全チャンネルで、その周期の重なりが十分に相関しているときだけ操作する
 ///
@@ -912,23 +1018,25 @@ pub fn preemptively_expand(
     if history.iter().any(|channel| channel.len() != history_len) {
         return unchanged;
     }
-    // 直前の実音は最大 10 ms、重ね合わせの位置は 15 ms にする
-    let old_length = history_len.min(round_positive(f64::from(sample_rate) * 0.01));
-    let splice = round_positive(f64::from(sample_rate) * 0.015);
-    if old_length + length < round_positive(f64::from(sample_rate) * 0.03) {
+    // 20 ms 未満の短いフレームは、重ね合わせの位置を履歴の先頭に置き、履歴を最大 30 ms
+    // 使って周期を探す。20 ms 以上は直前の実音を最大 10 ms、重ね合わせの位置を 15 ms に
+    // する (NetEq の PreemptiveExpand と同じ)
+    let short = length < short_frame_samples(sample_rate);
+    let old_length = history_len.min(round_positive(
+        f64::from(sample_rate) * if short { 0.03 } else { 0.01 },
+    ));
+    let splice = if short {
+        old_length
+    } else {
+        round_positive(f64::from(sample_rate) * 0.015)
+    };
+    if old_length + length < round_positive(f64::from(sample_rate) * 0.03) || splice == 0 {
         return unchanged;
     }
     // 直前の実音の末尾と今回の実音を並べたものから周期を探す
-    let combined: Vec<Vec<f32>> = channels
-        .iter()
-        .zip(history.iter())
-        .map(|(channel, previous)| {
-            let mut combined = Vec::new();
-            combined.extend_from_slice(&previous[previous.len() - old_length..]);
-            combined.extend_from_slice(channel);
-            combined
-        })
-        .collect();
+    let Some(combined) = with_history(channels, history, old_length) else {
+        return unchanged;
+    };
     let Some(pitch) = pitch_period_of(&combined, sample_rate, splice) else {
         return unchanged;
     };

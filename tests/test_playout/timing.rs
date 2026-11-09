@@ -3,8 +3,8 @@
 //! 公開 API (`AudioPlayoutTimingStats` / `summarize_timings`) の契約を確認する。
 
 use shiguredo_moqt::playout::scheduler::{
-    AUDIO_PLAYOUT_DELAY_US, AudioPlayoutBasis, AudioPlayoutDecision, AudioPlayoutInput,
-    AudioPlayoutPlay, AudioPlayoutScheduler,
+    AUDIO_PLAYOUT_DELAY_US, AudioPlayoutBasis, AudioPlayoutCommit, AudioPlayoutDecision,
+    AudioPlayoutInput, AudioPlayoutPlay, AudioPlayoutScheduler,
 };
 use shiguredo_moqt::playout::timing::{
     AUDIO_PLAYOUT_TIMING_WINDOW_US, AudioMissReason, AudioMissTotal, AudioPlayoutGap,
@@ -799,23 +799,27 @@ fn scheduler_play_is_recorded_without_conversion() {
         stretch_min_us: None,
     });
     assert_eq!(
-        decision,
+        decision.decision(),
         AudioPlayoutDecision::Play {
             start_at_us: 180_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
             expand_us: 0,
-            gap_start_us: None,
             total_gap_us: 0,
             unrecoverable_gap_us: 0,
             conceal_us: 0,
         },
         "目標に間に合う音は目標の時刻で鳴らすこと"
     );
-
     let play = scheduler
-        .last_play()
-        .expect("鳴らすと決めた音の値が残っている");
+        .commit(
+            decision,
+            AudioPlayoutCommit {
+                start_at_us: 180_000,
+                played_us: 20_000,
+            },
+        )
+        .expect("実際に積んだ値で確定できること");
     assert_eq!(play.arrival_us, 100_000);
     assert_eq!(play.target_start_us, Some(180_000));
     assert_eq!(play.start_at_us, 180_000);
@@ -853,7 +857,7 @@ fn confirmed_play_length_reaches_the_stats() {
     let mut scheduler = AudioPlayoutScheduler::new();
     let mut stats = AudioPlayoutTimingStats::new();
     // 到着基準の 1 つ目は 50 ms から 70 ms まで鳴る
-    scheduler.schedule(AudioPlayoutInput {
+    let first = scheduler.schedule(AudioPlayoutInput {
         now_us: 0,
         arrival_us: 0,
         timestamp_us: 0,
@@ -865,6 +869,19 @@ fn confirmed_play_length_reaches_the_stats() {
         presentation_delay_us: AUDIO_PLAYOUT_DELAY_US,
         stretch_min_us: None,
     });
+    scheduler
+        .commit(
+            first,
+            AudioPlayoutCommit {
+                start_at_us: 50_000,
+                played_us: 20_000,
+            },
+        )
+        .expect("1 つ目の音を確定できること");
+    assert!(matches!(
+        first.decision(),
+        AudioPlayoutDecision::Play { .. }
+    ));
     // 200 ms 過ぎて届いた音は 210 ms から鳴り、深さを戻すために 20 ms の伸長を要求する
     let decision = scheduler.schedule(AudioPlayoutInput {
         now_us: 200_000,
@@ -878,17 +895,21 @@ fn confirmed_play_length_reaches_the_stats() {
         presentation_delay_us: AUDIO_PLAYOUT_DELAY_US,
         stretch_min_us: None,
     });
-    let AudioPlayoutDecision::Play { expand_us, .. } = decision else {
+    let AudioPlayoutDecision::Play { expand_us, .. } = decision.decision() else {
         panic!("鳴らす決定になること");
     };
     assert_eq!(expand_us, 20_000, "再同期後の伸長を要求すること");
 
     // 実際に 20 ms 伸ばし、バッファへ書いた実際の終端を 250 ms で確定する
-    scheduler.confirm_expansion(20_000);
-    scheduler.confirm_playout_end(250_000);
     let play = scheduler
-        .last_play()
-        .expect("鳴らすと決めた音の値が残っている");
+        .commit(
+            decision,
+            AudioPlayoutCommit {
+                start_at_us: 210_000,
+                played_us: 40_000,
+            },
+        )
+        .expect("伸長した後の長さで確定できること");
     assert_eq!(
         play.played_us, 40_000,
         "20 ms の音に 20 ms の伸長を確定すると 40 ms になること"

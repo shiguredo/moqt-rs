@@ -1590,6 +1590,7 @@ dependencies = [
  "aws-lc-rs",
  "base64ct",
  "hashbrown 0.17.1",
+ "libm",
  "noflate",
  "nojson",
 ]

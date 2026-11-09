@@ -11,6 +11,7 @@ mod catch_up;
 mod expansion;
 mod gap;
 mod publish_catch_up;
+mod resample;
 mod scheduler;
 mod splice_fade;
 mod stretch;

@@ -9,7 +9,8 @@
 
 use shiguredo_moqt::playout::stretch::{
     TIME_STRETCH_CONCEAL_FADE_MS, TIME_STRETCH_MAX_CONCEAL_US, TIME_STRETCH_MIN_LAG, compress,
-    conceal, concealment_end_gain, is_time_stretch_available, preemptively_expand,
+    compress_with_history, conceal, concealment_end_gain, is_time_stretch_available,
+    preemptively_expand,
 };
 
 /// 周期 `period` の矩形波を `length` サンプル作る
@@ -1655,4 +1656,54 @@ fn preemptive_expand_ignores_unusable_input() {
         preemptively_expand(&[Vec::new()], &[], SAMPLE_RATE, 480).added_samples,
         0
     );
+}
+
+#[test]
+fn compress_uses_the_history_for_a_short_frame() {
+    let sample_rate = 48_000;
+    // 5 ms (240 サンプル) は 4 kHz へ間引くと 20 サンプルであり、相関窓 (61 サンプル) に
+    // 足りない。直前の 30 ms と連結すると 400 Hz (120 サンプル) の周期を求められる
+    let history = voiced_samples(400.0, sample_rate, 1_440);
+    let mut current = voiced_samples(400.0, sample_rate, 240);
+    let mut channels: Vec<&mut [f32]> = vec![current.as_mut_slice()];
+    assert_eq!(
+        compress(&mut channels, sample_rate, 120),
+        0,
+        "履歴なしでは 5 ms の音だけで周期を求めないこと"
+    );
+    let mut channels: Vec<&mut [f32]> = vec![current.as_mut_slice()];
+    assert_eq!(
+        compress_with_history(&mut channels, sample_rate, 120, &[history]),
+        -120,
+        "履歴と連結すると 5 ms の音でも 1 周期を削れること"
+    );
+}
+
+#[test]
+fn compress_rejects_a_short_frame_that_does_not_follow_the_history() {
+    let sample_rate = 48_000;
+    // 履歴は 400 Hz、今回の音は 1000 Hz。履歴の周期を現在の音へ押し付けないこと
+    let history = voiced_samples(400.0, sample_rate, 1_440);
+    let mut current = voiced_samples(1_000.0, sample_rate, 240);
+    let mut channels: Vec<&mut [f32]> = vec![current.as_mut_slice()];
+    assert_eq!(
+        compress_with_history(&mut channels, sample_rate, 120, &[history]),
+        0,
+        "現在の音が履歴の周期で繰り返していなければ削らないこと"
+    );
+}
+
+#[test]
+fn preemptive_expand_uses_the_history_for_a_short_frame() {
+    let sample_rate = 48_000;
+    // 10 ms (480 サンプル) の 200 Hz。履歴の 30 ms と連結した窓で周期 (240 サンプル) を
+    // 求め、今回の音の先頭で 1 周期を重ねる
+    let history = voiced_samples(200.0, sample_rate, 1_440);
+    let current = voiced_samples(200.0, sample_rate, 480);
+    let expansion = preemptively_expand(&[current], &[history], sample_rate, 240);
+    assert_eq!(
+        expansion.added_samples, 240,
+        "短いフレームでも履歴から周期を求めて 1 周期を伸ばすこと"
+    );
+    assert_eq!(expansion.channels[0].len(), 480 + 240);
 }

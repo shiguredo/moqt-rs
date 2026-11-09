@@ -25,6 +25,11 @@ pub struct Config {
     pub audio_enabled: bool,
     /// 音声の出力先
     pub audio_output_device: AudioOutputDevice,
+    /// 音声の待ち時間の下限 (ミリ秒。0〜100)
+    ///
+    /// 到着の揺らぎと実出力の先行量から決まる自動予算の下限である。moqt-js の
+    /// `audio.minDelayMs` に対応する。
+    pub audio_min_delay_ms: i64,
     /// 受信した映像・音声を保存する MP4 ファイルのパス
     pub mp4: Option<String>,
     /// 再生を行わないかどうか
@@ -157,6 +162,23 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         .take(&mut args)
         .then(|o| AudioOutputDevice::parse(o.value()))?;
 
+    // 音声の待ち時間の下限。0〜100 ms の範囲だけを受け付ける
+    let audio_min_delay_ms: i64 = noargs::opt("audio-min-delay-ms")
+        .ty("MS")
+        .doc("Minimum audio playout delay in milliseconds (0-100, default 50)")
+        .default("50")
+        .take(&mut args)
+        .then(|o| {
+            let value: i64 = o
+                .value()
+                .parse()
+                .map_err(|_| format!("--audio-min-delay-ms must be an integer: {}", o.value()))?;
+            if !(0..=100).contains(&value) {
+                return Err("--audio-min-delay-ms must be between 0 and 100".to_string());
+            }
+            Ok(value)
+        })?;
+
     let mp4: Option<String> = noargs::opt("mp4")
         .ty("PATH")
         .doc("Save received video and audio to an MP4 file (overwritten if it exists)")
@@ -193,6 +215,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         video_enabled,
         audio_enabled,
         audio_output_device,
+        audio_min_delay_ms,
         mp4,
         no_play,
     }))
@@ -211,6 +234,42 @@ mod tests {
         "--namespace",
         "moq-example",
     ];
+
+    /// 音声の待ち時間の下限は既定で 50 ms である
+    #[test]
+    fn audio_min_delay_defaults_to_50_ms() {
+        let config = parse_args(BASE_ARGS)
+            .expect("引数を解釈できること")
+            .expect("ヘルプではないこと");
+        assert_eq!(config.audio_min_delay_ms, 50);
+    }
+
+    /// 音声の待ち時間の下限は 0〜100 ms の境界を受け付ける
+    #[test]
+    fn audio_min_delay_accepts_the_bounds() {
+        for value in [0i64, 100] {
+            let option = value.to_string();
+            let mut args = BASE_ARGS.to_vec();
+            args.extend(["--audio-min-delay-ms", &option]);
+            let config = parse_args(&args)
+                .expect("引数を解釈できること")
+                .expect("ヘルプではないこと");
+            assert_eq!(config.audio_min_delay_ms, value);
+        }
+    }
+
+    /// 音声の待ち時間の下限は範囲外と整数でない値を拒否する
+    #[test]
+    fn audio_min_delay_rejects_invalid_values() {
+        for value in ["-1", "101", "1.5", "abc", ""] {
+            let mut args = BASE_ARGS.to_vec();
+            args.extend(["--audio-min-delay-ms", value]);
+            assert!(
+                parse_args(&args).is_err(),
+                "--audio-min-delay-ms {value} を拒否すること"
+            );
+        }
+    }
 
     /// `--url` の `msf` fragment に `connection` が無いときの `--transport` の既定は `quic` である
     ///
