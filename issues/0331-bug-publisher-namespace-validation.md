@@ -1,7 +1,7 @@
 # moq-pub が SUBSCRIBE / FETCH の Track Namespace を検証する
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-10
 - Branch: develop
 - Polished: 2026-11-10
 - Refreshed: 2026-11-04
@@ -72,3 +72,23 @@ Track は Track Namespace と Track Name からなる Full Track Name で識別�
 - `MediaCache::plan` の `published` 引数と `serve_media_fetch` の `published` の計算が削除され、`cache.rs` のテストが追随していること。
 - `published_track` の単体テストが追加され、別 namespace の要求と配信していない track (無効な video / audio を含む) が `None` になり、同じ namespace の有効な track が正しい種別になること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+`crates/moq-pub/src/pipeline.rs` に private な `PublishedTrack` (`Video` / `Audio` / `Catalog`) と
+`published_track(config, namespace, name)` を追加した。
+`namespace` が `config.namespace` と完全一致しなければ `None` を返し、一致すれば有効な video / audio と catalog の種別を返す。
+
+- `serve_peer_request` の SUBSCRIBE 分岐は `published_track` の結果から track alias を決め、`None` なら `REQUEST_DOES_NOT_EXIST` で拒否する。
+- FETCH 分岐は先頭で `published_track` を呼び、`None` なら `REQUEST_DOES_NOT_EXIST` で拒否する。`Catalog` だけを catalog の FETCH 処理へ、`Video` / `Audio` だけを `serve_media_fetch` へ渡す。
+- 拒否のログは namespace を §8.8 の表現 (`serialize_namespace`) で出す。
+- `serve_media_fetch` の `published` の計算と、`crates/moq-pub/src/cache.rs` の `MediaCache::plan` の `published` 引数・`!published` の分岐を削除した。
+  `FetchPlan` / `FetchPlan::UnknownTrack` / `plan` の doc を、配信中だが一度も cache に入れていない track の意味に合わせ、`UnknownTrack` の分岐のログも区別できる文言にした。
+
+テストは次のとおり。
+
+- `pipeline.rs` の `published_track_tests` を追加した。自分の namespace の video / audio / catalog の判定、別 namespace (区切りの違い・前方一致・延長を含む) の `None`、`--no-video` / `--no-audio` での判定、`--track-name` の指定、`--no-audio --track-name audio` を固定する。
+- `cache.rs` の `plan_reports_an_unpublished_track_as_unknown` を `plan_reports_a_never_cached_track_as_unknown` にして一度も cache に入れていない track だけを検証し、`published = false` を使う `plan_checks_the_track_before_the_group_order` を削除した。
+
+別 namespace の SUBSCRIBE / FETCH の拒否と自分の namespace の受理は、`published_track` の単体テストと、両分岐が `published_track` の結果だけで受理と拒否を分けることのコード確認で満たした。
+`CODEBASE.md` の規定に従い、ブランチと PR を作らず develop に直接コミットし、`CHANGES.md` は更新していない。
