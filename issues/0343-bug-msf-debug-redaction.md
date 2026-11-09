@@ -1,7 +1,7 @@
 # MSF の公開型の Debug 出力から token / trackBaseKey / authInfo / URI の機密値を隠す
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-10
 - Branch: develop
 - Polished: 2026-11-10
 
@@ -60,3 +60,18 @@ MSF の公開型の `Debug` 出力には、bearer token、trackBaseKey、authInf
 
 - `parse_fragment_pairs` の戻り値 (`Vec<(String, String)>`) と `resolve_catalog_variables` の戻り値 (`Vec<u8>`) は標準の型であり、独自 `Debug` で覆うには newtype への API 変更が必要になるため扱わない。
 - `crates/tokio-moq/src/lib.rs` の `ServerUrl` は `derive(Debug)` で、fragment の生文字列を持つ `MoqtFragment::value` と、C4M token のバイト列を持つ `c4m_tokens` を表示する。MSF の公開型ではなく example 側の型のため、本 issue では扱わない。
+
+## 解決方法
+
+`src/msf.rs` の `MsfTrack` / `MsfCloneTrack` / `MsfAuthInfo` と、`src/msf/uri.rs` の `MsfFragmentParameter` / `MsfUri` から `derive(Debug)` を外し、機密値を伏せる `core::fmt::Debug` を実装した。
+
+- `MsfTrack` / `MsfCloneTrack` の `token` / `track_base_key` / `connection_uri` と、`MsfUri` の `query` は、フィールド名を変えずにバイト長を `Option<usize>` で表示する。
+- `MsfAuthInfo` は `scheme` と `value_raw_bytes`、`MsfFragmentParameter` は `name` と `value_bytes` を表示する。fragment パラメータは名前にかかわらずすべての値を伏せる。
+- 独自 `Debug` は `..` を使わずに全フィールドを分解してから `debug_struct` に渡し、フィールドの表示漏れをコンパイラが検出できるようにした。
+- コンテナ型 (`MsfCatalog` / `MsfDeltaUpdate` / `MsfCatalogDocument` / `MsfDeltaOperation` / `MsfFragment`) は `derive(Debug)` のままで、内側の型の `Debug` を通じて値が伏せられる。`MsfCatalog` の `Debug` は従来どおり `removed_tracks` を含む。
+- 伏せる理由と表示形式を各型の struct の doc に書いた。使われていない private の `CommonTrackFields` の `derive(Debug)` も外した。
+
+`tests/test_msf/debug_redaction.rs` を追加し、`tests/test_msf.rs` に登録した。実値の文字列が含まれないこと、十進のバイト列 (`format!("{:?}", bytes)` の中身) と `value_raw: [` が含まれないこと、長さと非機密フィールドが表示されることを、5 型とコンテナ型について検証する。
+レビューで、修正前のコードでは 7 件中 5 件が失敗すること、各機密フィールドを生表示に戻す 8 通りの変異をすべて検出することを確認した。
+
+`CODEBASE.md` の規定に従い、ブランチと PR を作らず develop に直接コミットし、`CHANGES.md` は更新していない。
