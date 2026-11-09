@@ -13,26 +13,43 @@ use crate::error::{Result, TransportError};
 
 /// 接続で広告する transport parameter を構築する
 ///
-/// tobi-quic の `ConnectionConfig` の既定は、この example が必要とするストリーム数と
-/// ウィンドウに対して小さい (単方向 100 本 / 双方向 100 本 / 接続 1 MiB / ストリーム 64 KiB)。
-/// この example は audio を 20ms ごと、video を 1 frame ごとに 1 本の subgroup stream で
-/// 受けるため、stream の消費速度が上限の回復速度を上回り、購読が数秒から数十秒で止まる。
-/// 上限とウィンドウを明示して余裕を持たせる。
+/// 窓の大きさは、想定する最高ビットレート (4K / 8K の 30 Mbps、2s GOP で
+/// 1 group ≒ 7.5MB) を基準に決める。
 ///
-/// 値は s2n-quic の既定 (100 stream / 3.75MB) に対して、この example が
-/// 必要とする同時実行数 (MAX_CONCURRENT_STREAMS = 4) と 1 group あたりの
-/// サイズから決めている。過大にしても受信側が accept しなければ flow control
-/// で止まるだけなので、上限そのものは大きくて困らない。
+/// - stream 窓 (16 MiB): 30 Mbps でも 2 group 以上を保持できる。credit の返却は
+///   消費の半分で行うため、窓が group より小さいと group の途中で送信が止まりうる
+/// - 接続窓 (48 MiB): 映像 1 本 + 音声の複数本 + catalog を同時に保持できるぶん
+/// - stream 数 (1,000): relay は音声の subgroup stream を 10 秒程度で張り替えるため、
+///   累積上限でも長時間の購読に耐える余裕である。FIN を受けて閉じた stream 分は
+///   MAX_STREAMS で回収される
+///
+/// 窓を大きくする代償として、relay が窓ぶんのデータを送信バッファに溜められるため、
+/// 購読の遅延の上限が「窓 ÷ ビットレート」で伸びる (30 Mbps で stream 窓 16 MiB なら
+/// 最大 4.3 秒)。live でさらに低遅延が要る場合は、窓を縮めるか、消費レートに応じて
+/// 窓を伸ばす auto-tune を入れる。
+///
+/// 遅延 ACK は RFC 9000 Section 13.2.2 の通常動作 (2 個の ack-eliciting パケットを
+/// 受けるまで遅延し、max_ack_delay 以内に送る) である。tobi-quic の既定は
+/// rebind 時の interop 問題を避けるため無効になっているが、この example では
+/// 明示的に有効にする。既定の毎パケット即時 ACK を sora-moq の relay へ使うと、
+/// relay のコネクションプロセスが ACK 処理で飽和し、RTT を処理時刻で計測している
+/// (kernel 到着時刻を使わない) ため RTT 見積もりが膨らみ、pacing rate =
+/// N × cwnd / smoothed_rtt が滑らかに減衰して購読が止まることを実環境で確認した。
 ///
 /// WebTransport のクライアントも同じ値を使う。
 pub(crate) fn build_transport_config() -> ConnectionConfig {
-    let mut config = ConnectionConfig::default();
+    // 遅延 ACK (RFC 9000 Section 13.2.2)。既定 (毎パケット即時 ACK) から変更する
+    let mut config = ConnectionConfig {
+        delayed_ack: true,
+        ..Default::default()
+    };
+
     // ピア (relay) が開ける単方向 stream の累積上限
-    config.transport_params.initial_max_streams_uni = 10_000;
+    config.transport_params.initial_max_streams_uni = 1_000;
     // ピア (relay) が開ける双方向 stream の累積上限
     config.transport_params.initial_max_streams_bidi = 1_000;
     // 接続レベルで受け入れを許す総バイト数
-    config.transport_params.initial_max_data = 64 * 1024 * 1024;
+    config.transport_params.initial_max_data = 48 * 1024 * 1024;
     // 単方向 stream (relay -> subscriber の data stream) 1 本あたりの窓
     config.transport_params.initial_max_stream_data_uni = 16 * 1024 * 1024;
     config.transport_params.initial_max_stream_data_bidi_local = 16 * 1024 * 1024;
