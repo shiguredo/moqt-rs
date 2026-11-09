@@ -1,7 +1,7 @@
 # PendingSubgroupBuffer の stream 終端通知を entry 単位にする
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-10
 - Branch: develop
 - Polished: 2026-11-10
 
@@ -52,3 +52,23 @@ example の task はその stream を `abort_subgroup_stream` して、保持済
 - 同一 alias の別 stream の entry が、1 本の stream の終端 (FIN / RESET_STREAM / Session の STOP_SENDING 指示) で終端扱いにならないこと。
 - example が自ストリームの終端で他の保留 stream を abort しないこと (example の変更はコード上で確認する)。
 - 上記のライブラリ側の性質を `tests/test_pending_subgroup_buffer.rs` のテストと `pbt/tests/prop_pending_subgroup_buffer.rs` の PBT で固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+`src/pending_subgroup_buffer.rs` の `PendingSubgroupBuffer::note_end_of_stream` の引数を `PendingSubgroupEntryId` に変え、指定した entry のうち理由が未設定のものだけに `EndOfStream` を設定するようにした。
+同じ Track Alias の他の entry の状態は変えない。存在しない識別子と理由の確定した entry には何もしない (最初の理由を優先する契約を維持する)。
+モジュール doc の「entry のライフサイクル」、`note_end_of_stream` と `PendingNotifyReason::EndOfStream` の doc を entry 単位の通知に合わせた。
+
+`crates/moq-sub/src/pipeline.rs` の `register_subgroup_header` は、自ストリームの終端 (FIN / RESET_STREAM / Session の STOP_SENDING 指示) で `note_end_of_stream(id)` を呼ぶ。
+`abort_subgroup_stream` の呼び出し箇所と条件は変えていない。保留経路を駆動するテスト基盤が無いため、example 側はコード上で確認した。
+
+テストは次のとおり。
+
+- `tests/test_pending_subgroup_buffer.rs`: `note_end_of_stream_releases_that_alias` を `note_end_of_stream_releases_the_entry_with_chunks` に改名し、`take_ready_for` で検証するようにした。
+  `note_end_of_stream_does_not_end_other_entries_on_same_alias` (同じ alias の別 entry は引き取り可能にならず、チャンクも残り、後の購読の確立で引き取れる) と
+  `note_end_of_stream_ignores_removed_and_notified_entries` を追加した。
+- `pbt/tests/prop_pending_subgroup_buffer.rs`: `Command::NoteEndOfStream` を entry 指定にし、モデルは指定した entry だけを終端させる。
+  同じ alias に未通知の別 entry がある状態での終端を数えるゲートを追加した。その場面を十分に生成するため、終端の通知と追加の 3/4 を未通知 entry に寄せ、ケース数を 512 にした。
+  5000 シードでゲートを含めて失敗が 0 であること、修正前の alias 単位の挙動に戻した変異体を 300 シードすべてで検出することを確認した。
+
+`CODEBASE.md` の規定に従い、ブランチと PR を作らず develop に直接コミットし、`CHANGES.md` は更新していない。
