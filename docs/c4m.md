@@ -52,7 +52,7 @@ use shiguredo_moqt::c4m::{MoqtAction, MoqtClaim, MoqtScope};
   - アクション 1〜9 (§2.1 Table 1)。未知のアクション整数は保持するが、既知のアクションの許可には使わない
   - exact / prefix / suffix マッチと `nil` の末尾固定、複数スコープの OR 評価
   - `CatClaims::authorize` による scope 認可
-- `moqt-reval` (暫定 claim label -65538) のデコードと値の保持。再検証の実行と拒否の判断は利用側の責務
+- `moqt-reval` (暫定 claim label -65538) のデコードと、受信者が宣言した再検証能力による受理可否の判定 (§2.2)。再検証の実行は利用側の責務
 - `catreplay` の 0 / 1 / 2 のデコード。1 の接続束縛は `BearerReplayCache` と `CatToken::verify_bearer` で扱う
 - DPoP
   - `cnf` の `ckt` (RFC 9679 の COSE Key Thumbprint、confirmation key 5) と `jkt` (RFC 7638 の JWK サムプリント、confirmation key 323)
@@ -75,10 +75,10 @@ use shiguredo_moqt::c4m::{MoqtAction, MoqtClaim, MoqtScope};
 | `CatToken::decode` | 直列化とクレームの構文 | 署名、時刻、認可 |
 | `CatToken::verify` | 署名 / MAC のみ | クレーム、scope、`catreplay`、DPoP |
 | `CatToken::verify_with` | 署名 / MAC と、`VerifyOptions` を指定した場合の `alg` / `typ` | クレーム、scope、`catreplay`、DPoP |
-| `CatClaims::validate` | `exp` / `nbf` / `iss` / `aud` と数値の有限性 (stateless) | 署名、scope、`catreplay`、DPoP、`moqt-reval` の再検証 |
+| `CatClaims::validate` | `exp` / `nbf` / `iss` / `aud`、`moqt-reval` の受理可否、数値の有限性 (stateless) | 署名、scope、`catreplay`、DPoP、`moqt-reval` の再検証の実行 |
 | `CatClaims::authorize` | `moqt` クレームの scope | 署名、時刻、`catreplay`、DPoP |
-| `CatToken::verify_bearer` | `cnf` を持たないこと (あれば拒否)、署名、クレーム、scope、`catreplay` 1 の接続束縛 (2 は拒否) | DPoP (`cnf` 付きトークンは拒否)、`moqt-reval` の再検証 |
-| `CwtDpopProof::verify_against_cat_token` | CAT の署名、クレーム、scope と、proof の署名、鍵束縛、`ath`、`actx`、鮮度、`cti` replay | `moqt-reval` の再検証、proof の運搬 |
+| `CatToken::verify_bearer` | `cnf` を持たないこと (あれば拒否)、署名、クレーム (`moqt-reval` の受理可否を含む)、scope、`catreplay` 1 の接続束縛 (2 は拒否) | DPoP (`cnf` 付きトークンは拒否)、`moqt-reval` の再検証の実行 |
+| `CwtDpopProof::verify_against_cat_token` | CAT の署名、クレーム (`moqt-reval` の受理可否を含む)、scope と、proof の署名、鍵束縛、`ath`、`actx`、鮮度、`cti` replay | `moqt-reval` の再検証の実行、proof の運搬 |
 | `DpopProof::verify_against_cat_token` (旧 JWT 形式) | proof の署名、`ath`、鍵束縛、`actx`、鮮度、`jti` replay | CAT の署名、クレーム、scope (呼び出し側で別途検証する) |
 
 - `CatToken::verify` は署名だけを検証します。`CatToken::verify` が成功しても、action を認可できるとは限りません
@@ -253,6 +253,8 @@ token.claims().validate(&ClaimValidationOptions {
     clock_tolerance_seconds: 60.0,
     expected_issuers: &["https://auth.example.com"],
     expected_audiences: &["https://relay.example.com"],
+    // 再検証できない受信者は None を渡す。moqt-reval 付きトークンは拒否される
+    revalidation_interval_seconds: None,
 })?;
 ```
 
@@ -389,11 +391,22 @@ let scope = MoqtScope::new([MoqtAction::Publish])
 - 受信者が再検証できない場合、受信者が用意できる間隔より再検証間隔が小さい場合は、そのトークンを拒否する MUST があります
 - クレームが composition claims の中にあるトークンは well-formed ではありません。本ライブラリは複合クレームを評価しないため、この well-formed 性検査は行いません。複合クレームの中にしか `moqt` が無いトークンは、`moqt` が読めず全アクションがブロックされます
 
-本ライブラリは Sans-I/O のため再検証を実行しません。
-`CatClaims::validate` は `moqt-reval` の値の有限性だけを検査し、非ゼロの `moqt-reval` を既定では拒否しません。
-そのため、`CatClaims::validate` が成功したことを「非ゼロの `moqt-reval` 付きトークンを受理してよい」と解釈してはいけません。
-利用側は `claims().moqt_reval` を確認し、再検証できない場合は非ゼロの値を拒否し、再検証できる場合はその間隔で再検証してください。
-再検証を実行しないアプリケーションが `validate` だけを呼ぶと、この MUST を満たせません。
+`CatClaims::validate` は `ClaimValidationOptions::revalidation_interval_seconds` で受信者の再検証能力を受け取り、`moqt-reval` の受理可否を判定します。
+`CatToken::verify_bearer` は `BearerVerificationOptions::revalidation_interval_seconds` を、`CwtDpopProof::verify_against_cat_token` は `claim_options` をそのまま使います。
+
+| `revalidation_interval_seconds` | `moqt-reval` が無い | `moqt-reval` が 0 | `moqt-reval` が非ゼロ |
+| --- | --- | --- | --- |
+| `None` (既定。再検証できない) | 受理 | `RevalidationUnsupported` | `RevalidationUnsupported` |
+| `Some(x)` (`x` 秒以上の間隔なら再検証できる) | 受理 | 受理 | `x` 以上なら受理、`x` 未満なら `RevalidationIntervalTooShort` |
+| `Some(x)` で `x` が有限でない / 負 | `InvalidRevalidationInterval` | `InvalidRevalidationInterval` | `InvalidRevalidationInterval` |
+
+- §2.2 の「再検証できない受信者は `moqt-reval` を持つトークンをすべて拒否する」は値で限定していないため、既定では値が 0 でも拒否します
+- 0 は再検証しない指示なので、再検証できる受信者 (`Some(x)`) は受理します
+- 非有限の `moqt-reval` は、`revalidation_interval_seconds` の値にかかわらず `NonFiniteClaim("moqt-reval")` で拒否します
+
+本ライブラリは Sans-I/O のため再検証そのものは実行しません。
+`Some(x)` を渡して非ゼロの `moqt-reval` を持つトークンを受理したアプリケーションは、その間隔以内にトークンを検証し直し、受理できなくなったら認可したアクションを継続しないでください。
+`moqt-reval` が 0 のトークンは再検証してはいけません (§2.2)。
 
 ### `catreplay` クレーム (claim key 308)
 
@@ -464,6 +477,8 @@ token.verify_bearer(&crypto, &key, &BearerVerificationOptions {
     reference_time_seconds: unix_now,
     expected_issuers: &["https://auth.example.com"],
     expected_audiences: &["https://relay.example.com"],
+    // 再検証できない受信者は None を渡す。moqt-reval 付きトークンは拒否される
+    revalidation_interval_seconds: None,
     verify_options: VerifyOptions::default(),
     action: MoqtAction::Subscribe,
     namespace: &[b"example.com"],
@@ -518,7 +533,7 @@ MOQT の AUTHORIZATION_TOKEN に CWT 形式の DPoP proof をどう載せるか�
   claim key としない前提で書かれています
 - CWT 形式の DPoP proof を MOQT の AUTHORIZATION_TOKEN に載せる方法は仕様で未定義です。ライブラリは proof の codec と検証だけを提供し、運搬用の envelope を独自に定義しません
 - `catreplay` 2 は実装定義ですが、本ライブラリの bearer 検証では未対応として拒否します
-- 非ゼロの `moqt-reval` は、既定の `CatClaims::validate` では拒否されません。利用側が再検証するか拒否してください
+- `moqt-reval` の再検証そのものは実行しません。`revalidation_interval_seconds` に `Some` を渡して非ゼロの `moqt-reval` を持つトークンを受理した利用側が、その間隔以内で検証し直してください (0 は再検証しません)
 - `cnf` と `catreplay` 1 / 2 が併存するトークンは、両者の意味が未定義のため `CwtDpopProof::verify_against_cat_token` では受理しません
 - 旧 JWT 形式の `DpopReplayCache` は、現在の proof の `catdpop` ウィンドウで古い記録を破棄します。ウィンドウの異なるトークンで同じキャッシュを共有すると、記録が早く消えて `jti` を再受理し得ます。旧形式の互換 API を使う場合は、トークンごとにキャッシュを分けるか、最大ウィンドウ以上の運用をしてください
 - CTA-5007-B の HTTP 向けクレームの意味論 (`catu` のマッチ評価、`catr` の更新など)
@@ -625,6 +640,8 @@ proof.verify_against_cat_token(&crypto, &CwtDpopVerification {
         clock_tolerance_seconds: 60.0,
         expected_issuers: &["https://auth.example.com"],
         expected_audiences: &["https://relay.example.com"],
+        // 再検証できない受信者は None を渡す。moqt-reval 付きトークンは拒否される
+        revalidation_interval_seconds: None,
     },
     action: MoqtAction::Subscribe,
     namespace: Some(namespace),
@@ -638,7 +655,7 @@ proof.verify_against_cat_token(&crypto, &CwtDpopVerification {
 
 1. `default_window_seconds` が有限で 0 以上であること
 2. CAT の署名 / MAC
-3. CAT のクレーム (`exp` / `nbf` / `iss` / `aud`)
+3. CAT のクレーム (`exp` / `nbf` / `iss` / `aud` と `moqt-reval` の受理可否)
 4. proof のクレームが codec の label 設定と一致すること
 5. proof の署名 (`kccs` の公開鍵)
 6. `kccs` の公開鍵と `cnf` の `ckt` / `jkt` の一致

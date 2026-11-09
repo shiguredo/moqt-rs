@@ -448,6 +448,24 @@ fn expected_validation_error(
     {
         return Some(ClaimValidationError::NonFiniteClaim("catdpop window"));
     }
+    // moqt-reval の受理可否 (draft-ietf-moq-c4m-02 §2.2)。
+    // 不正な最小間隔はクレームの有無にかかわらず拒否する
+    if let Some(interval) = options.revalidation_interval_seconds
+        && (!interval.is_finite() || interval < 0.0)
+    {
+        return Some(ClaimValidationError::InvalidRevalidationInterval);
+    }
+    if let Some(moqt_reval) = claims.moqt_reval {
+        match options.revalidation_interval_seconds {
+            // 再検証できない受信者は値が 0 でも拒否する
+            None => return Some(ClaimValidationError::RevalidationUnsupported),
+            // 0 は再検証しない指示のため受理し、非ゼロは最小間隔未満を拒否する
+            Some(interval) if moqt_reval != 0.0 && moqt_reval < interval => {
+                return Some(ClaimValidationError::RevalidationIntervalTooShort);
+            }
+            Some(_) => {}
+        }
+    }
     if let Some(expiration) = claims.expiration
         && options.reference_time_seconds > expiration + options.clock_tolerance_seconds
     {
@@ -498,8 +516,13 @@ fn claims_validate_matches_model() -> noprop::TestResult {
     let not_yet_valid_seen = std::cell::Cell::new(0usize);
     let issuer_mismatch_seen = std::cell::Cell::new(0usize);
     let audience_mismatch_seen = std::cell::Cell::new(0usize);
+    let revalidation_unsupported_seen = std::cell::Cell::new(0usize);
+    let revalidation_too_short_seen = std::cell::Cell::new(0usize);
+    let invalid_revalidation_interval_seen = std::cell::Cell::new(0usize);
     let mut runner = test_runner()?;
-    runner.run(256, |ctx| {
+    // 再検証判定が iss / aud の検証より前にあり後段まで届くケースが減るため、
+    // 他の検証と同じ 256 回では後段のカウンタが 0 になる seed があり得る。回数を増やす
+    runner.run(512, |ctx| {
         let expiration = sample_optional_number(ctx);
         let not_before = sample_optional_number(ctx);
         let issued_at = sample_optional_number(ctx);
@@ -562,11 +585,30 @@ fn claims_validate_matches_model() -> noprop::TestResult {
             expected_issuers.iter().map(String::as_str).collect();
         let expected_audience_refs: Vec<&str> =
             expected_audiences.iter().map(String::as_str).collect();
+        // 受信者の再検証能力は、再検証できない / 有効な最小間隔 / 不正な最小間隔の
+        // 3 種類を生成する。有効な最小間隔は moqt-reval の生成範囲と重ねて大小両方を作る
+        let revalidation_interval = match noprop::sample_weighted_index(ctx, &[2, 5, 1]) {
+            0 => None,
+            1 => Some(noprop::sample_with_boundaries(
+                ctx,
+                // 50 / 100 / 200 は TIME_BOUNDARIES と重なり、非ゼロの等号境界を踏む
+                &[0.0, -0.0, 1.0, 50.0, 100.0, 200.0, 300.0],
+                noprop::Ratio::one_nth(3),
+                |ctx| noprop::sample_f64_in(ctx, 0.0, 300.0),
+            )),
+            _ => Some(noprop::sample_with_boundaries(
+                ctx,
+                &[-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY],
+                noprop::Ratio::one_nth(2),
+                |ctx| noprop::sample_f64_in(ctx, -100.0, -0.001),
+            )),
+        };
         let options = ClaimValidationOptions {
             reference_time_seconds: reference,
             clock_tolerance_seconds: tolerance,
             expected_issuers: &expected_issuer_refs,
             expected_audiences: &expected_audience_refs,
+            revalidation_interval_seconds: revalidation_interval,
         };
 
         let expected = expected_validation_error(&claims, &options);
@@ -576,7 +618,7 @@ fn claims_validate_matches_model() -> noprop::TestResult {
                 Some(error) => Err(error),
                 None => Ok(()),
             },
-            "検証結果がモデルと一致しない: claims={claims:?} reference={reference} tolerance={tolerance}"
+            "検証結果がモデルと一致しない: claims={claims:?} reference={reference} tolerance={tolerance} revalidation_interval={revalidation_interval:?}"
         );
         match expected {
             None => ok_seen.set(ok_seen.get() + 1),
@@ -597,6 +639,16 @@ fn claims_validate_matches_model() -> noprop::TestResult {
             }
             Some(ClaimValidationError::AudienceMismatch) => {
                 audience_mismatch_seen.set(audience_mismatch_seen.get() + 1);
+            }
+            Some(ClaimValidationError::RevalidationUnsupported) => {
+                revalidation_unsupported_seen.set(revalidation_unsupported_seen.get() + 1);
+            }
+            Some(ClaimValidationError::RevalidationIntervalTooShort) => {
+                revalidation_too_short_seen.set(revalidation_too_short_seen.get() + 1);
+            }
+            Some(ClaimValidationError::InvalidRevalidationInterval) => {
+                invalid_revalidation_interval_seen
+                    .set(invalid_revalidation_interval_seen.get() + 1);
             }
         }
         Ok(())
@@ -628,6 +680,18 @@ fn claims_validate_matches_model() -> noprop::TestResult {
     assert!(
         audience_mismatch_seen.get() > 0,
         "aud が一致しないケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        revalidation_unsupported_seen.get() > 0,
+        "再検証できない受信者が moqt-reval を拒否するケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        revalidation_too_short_seen.get() > 0,
+        "moqt-reval が最小間隔を下回るケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        invalid_revalidation_interval_seen.get() > 0,
+        "不正な最小間隔のケースが生成されなかった\n{runner}"
     );
     Ok(())
 }

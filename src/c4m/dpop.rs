@@ -907,6 +907,8 @@ pub struct CwtDpopVerification<'a> {
     /// CAT のクレーム検証オプション
     ///
     /// `reference_time_seconds` は proof の鮮度と replay の記録にも使う。
+    /// `revalidation_interval_seconds` は `moqt-reval` の受理可否の判定に使い、`None`
+    /// (再検証できない) では `moqt-reval` を持つトークンを値が 0 でも拒否する。
     pub claim_options: ClaimValidationOptions<'a>,
     /// 要求されたアクション
     pub action: MoqtAction,
@@ -1234,7 +1236,8 @@ impl CwtDpopProof {
     ///    (有限かつ 0 以上)
     /// 2. CAT の署名 / MAC ([`CatToken::verify_with`])。信頼済み鍵と
     ///    [`CwtDpopVerification::token_verify_options`] を使う
-    /// 3. CAT のクレーム (`exp` / `nbf` / `iss` / `aud`) ([`CatClaims::validate`])
+    /// 3. CAT のクレーム (`exp` / `nbf` / `iss` / `aud` と `moqt-reval` の受理可否)
+    ///    ([`CatClaims::validate`])
     /// 4. proof のクレームが [`CwtDpopVerification::codec`] の label 設定と一致すること
     /// 5. proof の署名 ([`CwtDpopProof::verify_signature`])
     /// 6. `kccs` の公開鍵と `cnf` の `ckt` / `jkt` の一致
@@ -1251,8 +1254,10 @@ impl CwtDpopProof {
     /// 13. `catdpop` が replay detection を要求している場合 (`honor_jti`) の `cti` の
     ///     確認と記録 ([`CwtDpopReplayCache::check_and_record`])
     ///
-    /// `moqt-reval` の再検証と拒否はこの入口の対象外であり、利用側の責務である
-    /// ([`CatClaims::validate`] は `moqt-reval` を解釈しない)。
+    /// `moqt-reval` の受理可否は [`CwtDpopVerification::claim_options`] の
+    /// `revalidation_interval_seconds` で判定する。再検証そのもの (定期的に検証し直す
+    /// こと) は実行しないため、非ゼロの `moqt-reval` を持つトークンを受理した利用側が
+    /// その間隔以内で再検証すること (0 は再検証してはならない)。
     ///
     /// `cnf` を持たないトークンは鍵束縛を確認できないため [`DpopError::MissingConfirmation`]
     /// で拒否する。この入口は proof を必須とし、`cnf` を持つトークンのアクションを
@@ -1286,7 +1291,7 @@ impl CwtDpopProof {
         request
             .token
             .verify_with(crypto, request.token_key, &request.token_verify_options)?;
-        // 3. CAT の時刻・issuer・audience を検証する
+        // 3. CAT の時刻・issuer・audience と moqt-reval の受理可否を検証する
         request
             .token
             .claims()

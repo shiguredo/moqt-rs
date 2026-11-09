@@ -56,7 +56,7 @@ MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUB
 | C4M の複合クレーム評価 | C4M §2.1.1 / 付録 A.6 | 未実装。`CatClaims::raw` に保持するだけで、nested claim set の or / and / nor を評価しない。複合クレームだけを持つトークンは `moqt` が読めず認可されない。top-level の `moqt` と複合クレームが併存するトークンは top-level だけで認可されるため、複合クレームによる制限を評価する利用側は fail-closed に扱うこと | 未起票 |
 | C4M の RSA 署名 | C4M §4.2 (DPoP proof の alg) / CAT の COSE alg | 未実装。ES256 / ES384 / ES512 / EdDSA のみ | 未起票 |
 | C4M の `catreplay` 2 | C4M §3 | 未実装。2 は実装定義であり、bearer 検証では未対応として拒否する | 未起票 |
-| C4M の `moqt-reval` 再検証 | C4M §2.2 | ライブラリは再検証を実行しない。既定の `CatClaims::validate` は非ゼロの `moqt-reval` を拒否せず、利用側の再検証能力に応じた拒否または再検証が必要 | `issues/0345-bug-c4m-moqt-reval.md` |
+| C4M の `moqt-reval` 再検証 | C4M §2.2 | 受理可否の判定は実装済み。既定 (再検証できない) では `moqt-reval` を持つトークンを拒否し、`revalidation_interval_seconds` で宣言した再検証能力に応じて受理する。ライブラリは Sans-I/O のため再検証そのものは実行せず、非ゼロの `moqt-reval` を持つトークンを受理した利用側がその間隔以内で検証し直す必要がある (0 は再検証しない) | 未起票 |
 | C4M の PBT モデルと fuzz の穴 | C4M 全体 (2026-11-04 時点は draft-02) | PBT の一部のモデルが実装の写経で、仕様の解釈違いを検出できない。旧 JWT 形式 proof の encode 経路 (`DpopProofBuilder::build`) や `CatClaims::validate` が fuzz の対象になっていない。テストが通っていても違反を検出できない状態が残る | `issues/0356-test-c4m-pbt-model-fuzz-gaps.md` |
 | 旧 JWT 形式 DPoP の replay cache と key 3 | C4M draft-01 互換 API (標準形式ではない) | `DpopReplayCache` は現在の proof の `catdpop` ウィンドウで古い記録を破棄する。ウィンドウの異なるトークンで共有すると `jti` を再受理し得る。`cnf` の key 3 は IANA では `kid` だが、旧形式の検証は JWK サムプリントとして参照する | `issues/0346-bug-c4m-dpop-validation.md` |
 

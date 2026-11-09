@@ -925,6 +925,8 @@ fn validation_vectors_decode_and_validate() {
             clock_tolerance_seconds: 0.0,
             expected_issuers: vector.expected_issuers,
             expected_audiences: vector.expected_audiences,
+            // validation ベクタは moqt-reval を持たないため、再検証能力は結果に影響しない
+            revalidation_interval_seconds: None,
         };
         let result = token.claims().validate(&options);
         match vector.expected_error {

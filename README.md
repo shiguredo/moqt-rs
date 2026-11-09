@@ -229,17 +229,14 @@ fn authorize_bearer<C: CoseCrypto>(
         return Ok(false);
     }
 
-    // 非ゼロの moqt-reval は再検証できる場合だけ受理する。ここでは拒否する
-    if token.claims().moqt_reval.is_some_and(|value| value != 0.0) {
-        return Ok(false);
-    }
-
     // 署名・クレーム・scope 認可・catreplay の接続束縛をまとめて検証する。
     // 信頼済みの鍵、現在時刻、接続識別子は呼び出し側が用意する
     let options = BearerVerificationOptions {
         reference_time_seconds: 1_700_000_000.0,
         expected_issuers: &["https://auth.example.com"],
         expected_audiences: &["https://relay.example.com"],
+        // 再検証できない受信者は None を渡し、moqt-reval 付きトークンを拒否させる
+        revalidation_interval_seconds: None,
         verify_options: VerifyOptions {
             expected_algorithm: None,
             expected_type: None,

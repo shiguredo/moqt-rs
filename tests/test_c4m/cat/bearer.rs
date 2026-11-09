@@ -245,6 +245,8 @@ fn verification_options<'a>(
         reference_time_seconds,
         expected_issuers: EXPECTED_ISSUERS,
         expected_audiences: EXPECTED_AUDIENCES,
+        // 既定は再検証できない受信者として検証する
+        revalidation_interval_seconds: None,
         verify_options: VerifyOptions {
             expected_algorithm: Some(Algorithm::HmacSha256),
             expected_type: Some(CAT_CONTENT_TYPE),
@@ -254,6 +256,71 @@ fn verification_options<'a>(
         track_name: TRACK_NAME,
         connection_id,
     }
+}
+
+/// `moqt-reval` を持つ bearer トークンを、受信者の再検証能力に応じて受理・拒否すること
+///
+/// draft-ietf-moq-c4m-02 §2.2。`BearerVerificationOptions` の再検証能力が
+/// `CatClaims::validate` へそのまま渡ることを確認する。拒否した場合は cache を変更しない。
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn verify_bearer_checks_moqt_reval_against_revalidation_capability() {
+    let crypto = AwsLcRsCrypto::new();
+    // catreplay 1 の cti を持たせ、受理したときだけ cache に記録されることを確かめる
+    let token_bytes = CatTokenBuilder::new()
+        .issuer(ISSUER)
+        .audience(AUDIENCE)
+        .expiration(1000.0)
+        .cwt_id(b"cti-reval".to_vec())
+        .cat_replay(CatReplay::SingleConnection)
+        .moqt_reval(300.0)
+        .moqt(MoqtClaim::new().scope(MoqtScope::new([MoqtAction::Setup])))
+        .build_cose(&crypto, &super::hmac_key())
+        .expect("moqt-reval 付きの bearer トークンを発行できる");
+    let token = CatToken::decode(&token_bytes).expect("bearer トークンをデコードできる");
+    let mut cache = BearerReplayCache::new(10.0).expect("cache を構築できる");
+
+    // 既定 (再検証できない) では拒否し、cache を変更しない
+    assert_eq!(
+        token.verify_bearer(
+            &crypto,
+            &super::hmac_key(),
+            &verification_options(900.0, MoqtAction::Setup, b"conn-a"),
+            &mut cache,
+        ),
+        Err(CatError::Claims(
+            ClaimValidationError::RevalidationUnsupported
+        ))
+    );
+    assert!(cache.is_empty(), "拒否したトークンで cache を変更した");
+
+    // 最小間隔が moqt-reval より長い受信者は拒否する
+    let mut options = verification_options(900.0, MoqtAction::Setup, b"conn-a");
+    options.revalidation_interval_seconds = Some(600.0);
+    assert_eq!(
+        token.verify_bearer(&crypto, &super::hmac_key(), &options, &mut cache),
+        Err(CatError::Claims(
+            ClaimValidationError::RevalidationIntervalTooShort
+        ))
+    );
+    assert!(cache.is_empty(), "拒否したトークンで cache を変更した");
+
+    // 不正な最小間隔は拒否する
+    options.revalidation_interval_seconds = Some(f64::NAN);
+    assert_eq!(
+        token.verify_bearer(&crypto, &super::hmac_key(), &options, &mut cache),
+        Err(CatError::Claims(
+            ClaimValidationError::InvalidRevalidationInterval
+        ))
+    );
+    assert!(cache.is_empty(), "拒否したトークンで cache を変更した");
+
+    // moqt-reval の間隔以下で再検証できる受信者は受理し、接続束縛を記録する
+    options.revalidation_interval_seconds = Some(300.0);
+    token
+        .verify_bearer(&crypto, &super::hmac_key(), &options, &mut cache)
+        .expect("moqt-reval の間隔で再検証できる受信者は受理する");
+    assert_eq!(cache.len(), 1);
 }
 
 /// 同じ接続では同じトークンを複数の action で再利用できること

@@ -234,6 +234,8 @@ fn validation_vectors_decode_and_validate() {
             clock_tolerance_seconds: 0.0,
             expected_issuers: vector.expected_issuers,
             expected_audiences: vector.expected_audiences,
+            // validation ベクタは moqt-reval を持たないため、再検証能力は結果に影響しない
+            revalidation_interval_seconds: None,
         };
         let result = token.claims().validate(&options);
         match vector.expected_error {
@@ -1145,6 +1147,174 @@ fn validate_rejects_non_finite_claims_built_by_hand() {
     assert_eq!(
         claims.validate(&ClaimValidationOptions::default()),
         Err(ClaimValidationError::NonFiniteClaim("catdpop window"))
+    );
+}
+
+/// `moqt-reval` の受理可否を、受信者の再検証能力との組み合わせごとに検証する
+///
+/// draft-ietf-moq-c4m-02 §2.2 の 2 つの MUST (再検証できない受信者は `moqt-reval`
+/// 付きトークンをすべて拒否する / 間隔が受信者の能力を下回れば拒否する) と、0 は
+/// 再検証しない指示であることの境界を固定する。
+#[test]
+fn validate_moqt_reval_against_revalidation_capability() {
+    use ClaimValidationError::{
+        InvalidRevalidationInterval, NonFiniteClaim, RevalidationIntervalTooShort,
+        RevalidationUnsupported,
+    };
+    // (moqt_reval, revalidation_interval_seconds, 期待する結果, 説明)
+    type Case = (
+        Option<f64>,
+        Option<f64>,
+        Result<(), ClaimValidationError>,
+        &'static str,
+    );
+    let cases: &[Case] = &[
+        // 再検証できない受信者 (既定)
+        (None, None, Ok(()), "クレームが無ければ受理する"),
+        (
+            Some(0.0),
+            None,
+            Err(RevalidationUnsupported),
+            "値が 0 でもクレームがあれば拒否する",
+        ),
+        (
+            Some(300.0),
+            None,
+            Err(RevalidationUnsupported),
+            "非ゼロの間隔を拒否する",
+        ),
+        (
+            Some(-1.0),
+            None,
+            Err(RevalidationUnsupported),
+            "負の間隔も拒否する",
+        ),
+        // 再検証できる受信者 (最小間隔 60 秒)
+        (None, Some(60.0), Ok(()), "クレームが無ければ受理する"),
+        (
+            Some(0.0),
+            Some(60.0),
+            Ok(()),
+            "0 は再検証しない指示のため受理する",
+        ),
+        (Some(-0.0), Some(60.0), Ok(()), "-0 も 0 として受理する"),
+        (
+            Some(60.0),
+            Some(60.0),
+            Ok(()),
+            "最小間隔と等しい間隔は受理する",
+        ),
+        (
+            Some(300.0),
+            Some(60.0),
+            Ok(()),
+            "最小間隔より長い間隔は受理する",
+        ),
+        (
+            Some(59.5),
+            Some(60.0),
+            Err(RevalidationIntervalTooShort),
+            "最小間隔より短い間隔は拒否する",
+        ),
+        (
+            Some(-1.0),
+            Some(60.0),
+            Err(RevalidationIntervalTooShort),
+            "負の間隔は最小間隔を下回るため拒否する",
+        ),
+        // 最小間隔 0 秒 (いくらでも短い間隔で再検証できる)
+        (Some(0.5), Some(0.0), Ok(()), "正の間隔はすべて受理する"),
+        (
+            Some(-1.0),
+            Some(0.0),
+            Err(RevalidationIntervalTooShort),
+            "負の間隔は拒否する",
+        ),
+        // 不正な最小間隔はクレームの有無にかかわらず拒否する
+        (
+            None,
+            Some(-1.0),
+            Err(InvalidRevalidationInterval),
+            "負の最小間隔はクレームが無くても拒否する",
+        ),
+        (
+            Some(300.0),
+            Some(f64::NAN),
+            Err(InvalidRevalidationInterval),
+            "NaN の最小間隔で比較を素通りさせない",
+        ),
+        (
+            Some(0.0),
+            Some(f64::INFINITY),
+            Err(InvalidRevalidationInterval),
+            "無限大の最小間隔を拒否する",
+        ),
+        (
+            None,
+            Some(f64::NEG_INFINITY),
+            Err(InvalidRevalidationInterval),
+            "負の無限大の最小間隔を拒否する",
+        ),
+        // 非有限の moqt-reval は最小間隔の値より先に拒否する
+        (
+            Some(f64::NAN),
+            None,
+            Err(NonFiniteClaim("moqt-reval")),
+            "NaN の moqt-reval を拒否する",
+        ),
+        (
+            Some(f64::INFINITY),
+            Some(f64::NAN),
+            Err(NonFiniteClaim("moqt-reval")),
+            "最小間隔が不正でも非有限の moqt-reval を先に拒否する",
+        ),
+    ];
+    for &(moqt_reval, revalidation_interval_seconds, expected, description) in cases {
+        let claims = CatClaims {
+            moqt_reval,
+            ..CatClaims::default()
+        };
+        let options = ClaimValidationOptions {
+            revalidation_interval_seconds,
+            ..ClaimValidationOptions::default()
+        };
+        assert_eq!(
+            claims.validate(&options),
+            expected,
+            "{description}: moqt_reval={moqt_reval:?} revalidation_interval_seconds={revalidation_interval_seconds:?}"
+        );
+    }
+
+    // 再検証判定は exp の検証より先に行う
+    let claims = CatClaims {
+        expiration: Some(0.0),
+        moqt_reval: Some(300.0),
+        ..CatClaims::default()
+    };
+    assert_eq!(
+        claims.validate(&ClaimValidationOptions {
+            reference_time_seconds: 100.0,
+            ..ClaimValidationOptions::default()
+        }),
+        Err(RevalidationUnsupported),
+        "期限切れより先に再検証できないことで拒否すること"
+    );
+}
+
+/// 再検証判定のエラーの Display 出力を固定する
+#[test]
+fn revalidation_errors_display() {
+    assert_eq!(
+        ClaimValidationError::RevalidationUnsupported.to_string(),
+        "token has moqt-reval but the recipient cannot revalidate tokens"
+    );
+    assert_eq!(
+        ClaimValidationError::RevalidationIntervalTooShort.to_string(),
+        "moqt-reval interval is shorter than the recipient can revalidate"
+    );
+    assert_eq!(
+        ClaimValidationError::InvalidRevalidationInterval.to_string(),
+        "minimum revalidation interval must be finite and non-negative"
     );
 }
 

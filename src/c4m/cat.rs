@@ -359,11 +359,13 @@ pub struct CatClaims {
     pub moqt: Option<MoqtClaim>,
     /// `moqt-reval` (draft-ietf-moq-c4m-02 §2.2) の再検証間隔 (秒)
     ///
-    /// §2.2 は「再検証できない受信者は `moqt-reval` 付きトークンを拒否する MUST」
-    /// 「再検証間隔が自身の能力を下回る場合も拒否する MUST」を定める。本ライブラリは
-    /// Sans-I/O のため再検証の実行は行わず、この値の解釈と拒否の判断は利用側が行う。
-    /// [`CatClaims::validate`] は値の有限性だけを検査し、非ゼロの `moqt-reval` でも
-    /// 成功する。既定の検証だけで受理してよいと解釈してはならない。
+    /// §2.2 は「再検証できない受信者は `moqt-reval` 付きトークンをすべて拒否する MUST」
+    /// 「再検証間隔が自身の能力を下回る場合も拒否する MUST」を定める。
+    /// [`CatClaims::validate`] は [`ClaimValidationOptions::revalidation_interval_seconds`]
+    /// で宣言された再検証能力に照らしてこのクレームの受理可否を判定し、既定 (再検証
+    /// できない) では値が 0 でも拒否する。本ライブラリは Sans-I/O のため再検証そのもの
+    /// (定期的に検証し直すこと) は実行しない。非ゼロの値を持つトークンを受理した利用側が
+    /// この間隔以内で再検証すること。0 は再検証してはならない指示である。
     pub moqt_reval: Option<f64>,
     /// `catdpop` (CTA-5007-B §4.8 / draft-ietf-moq-c4m-02 §4.1)
     pub catdpop: Option<CatDpop>,
@@ -646,12 +648,18 @@ impl CatClaims {
     /// 時刻と期待値に対するクレームの検証を行う
     ///
     /// 署名の検証は [`CatToken::verify`] が行う。ここでは `exp` / `nbf` / `iss` /
-    /// `aud` を検証し、加えて現在時刻 / 許容ずれの有限性と、手組みで入り得る非有限の
-    /// 数値クレームを拒否する。
+    /// `aud` と `moqt-reval` の受理可否を検証し、加えて現在時刻 / 許容ずれの有限性と、
+    /// 手組みで入り得る非有限の数値クレームを拒否する。
+    ///
+    /// `moqt-reval` は [`ClaimValidationOptions::revalidation_interval_seconds`] で
+    /// 宣言された再検証能力に照らして判定する (draft-ietf-moq-c4m-02 §2.2)。既定の
+    /// `None` (再検証できない) では、値が 0 でも `moqt-reval` を持つトークンを
+    /// [`ClaimValidationError::RevalidationUnsupported`] で拒否する。再検証そのものは
+    /// 実行しないため、非ゼロの `moqt-reval` を持つトークンを受理した利用側がその間隔
+    /// 以内で再検証すること (0 は再検証してはならない)。
     ///
     /// この関数はクレームだけを見る stateless な検証であり、`catreplay` が要求する
-    /// 接続への束縛も、`catreplay` 1 の cti / exp 必須条件も検証しない。また
-    /// `moqt-reval` の再検証も行わず、非ゼロの `moqt-reval` でも成功する。つまり単独では、
+    /// 接続への束縛も、`catreplay` 1 の cti / exp 必須条件も検証しない。つまり単独では、
     /// `catreplay` 1 のトークンが別の接続で使われても検出できず、cti / exp を欠いた
     /// トークンも受理され得る。接続束縛まで含めて bearer トークンを検証する場合は
     /// [`CatToken::verify_bearer`] を使うこと。
@@ -683,6 +691,8 @@ impl CatClaims {
         {
             return Err(ClaimValidationError::NonFiniteClaim("catdpop window"));
         }
+        // 非有限の moqt-reval は直前の検査で拒否済みのため、ここに届くのは無いか有限値
+        validate_moqt_reval(self.moqt_reval, options.revalidation_interval_seconds)?;
         if let Some(expiration) = self.expiration
             && options.reference_time_seconds > expiration + options.clock_tolerance_seconds
         {
@@ -726,6 +736,18 @@ pub struct ClaimValidationOptions<'a> {
     pub expected_issuers: &'a [&'a str],
     /// 期待する `aud` の一覧。空の場合は検証しない
     pub expected_audiences: &'a [&'a str],
+    /// 受信者が再検証できる最小間隔 (秒)。`None` は再検証できないことを表す
+    ///
+    /// `moqt-reval` (draft-ietf-moq-c4m-02 §2.2) の受理可否の判定に使う。
+    ///
+    /// - `None` (既定): `moqt-reval` を持つトークンを値が 0 でも拒否する (fail-closed)
+    /// - `Some(x)`: `moqt-reval` が 0 なら受理し、非ゼロなら `x` 以上のときだけ受理する
+    ///
+    /// `Some(x)` の `x` は有限かつ 0 以上でなければならず、そうでなければ
+    /// [`ClaimValidationError::InvalidRevalidationInterval`] で拒否する。`Some` を渡す
+    /// 利用側は、非ゼロの `moqt-reval` を持つトークンを受理したら、その間隔以内で
+    /// 再検証する責務を負う (0 は再検証してはならない)。
+    pub revalidation_interval_seconds: Option<f64>,
 }
 
 impl Default for ClaimValidationOptions<'_> {
@@ -735,8 +757,47 @@ impl Default for ClaimValidationOptions<'_> {
             clock_tolerance_seconds: 0.0,
             expected_issuers: &[],
             expected_audiences: &[],
+            // 再検証できない受信者として扱い、moqt-reval 付きトークンを拒否する
+            revalidation_interval_seconds: None,
         }
     }
+}
+
+/// `moqt-reval` の受理可否を判定する (draft-ietf-moq-c4m-02 §2.2)
+///
+/// `moqt_reval` は無いか有限値であることを呼び出し側が保証する。ドラフトの規定のため
+/// 将来変更される可能性がある。
+fn validate_moqt_reval(
+    moqt_reval: Option<f64>,
+    revalidation_interval_seconds: Option<f64>,
+) -> Result<(), ClaimValidationError> {
+    // 不正な最小間隔のまま比較すると `moqt_reval < x` が偽になり fail-open になるため、
+    // クレームの有無にかかわらず先に拒否する
+    if let Some(interval) = revalidation_interval_seconds
+        && (!interval.is_finite() || interval < 0.0)
+    {
+        return Err(ClaimValidationError::InvalidRevalidationInterval);
+    }
+    let Some(moqt_reval) = moqt_reval else {
+        return Ok(());
+    };
+    let Some(interval) = revalidation_interval_seconds else {
+        // §2.2 "If a recipient is unable to revalidate tokens, it MUST reject all tokens
+        // with a "moqt-reval" claim." は値で限定していないため、0 も拒否する
+        return Err(ClaimValidationError::RevalidationUnsupported);
+    };
+    // §2.2 "When the value of this claim is zero, the token MUST NOT be revalidated."
+    // 0 は再検証間隔ではなく再検証しない指示であり、再検証できる受信者はそれに従えばよい
+    if moqt_reval == 0.0 {
+        return Ok(());
+    }
+    // §2.2 "If the revalidation interval is smaller than the recipient is prepared or
+    // able to revalidate, the recipient MUST reject the token."
+    // 負の間隔も 0 以上の最小間隔を下回るため、ここで拒否する
+    if moqt_reval < interval {
+        return Err(ClaimValidationError::RevalidationIntervalTooShort);
+    }
+    Ok(())
 }
 
 /// クレームの検証エラー
@@ -754,6 +815,13 @@ pub enum ClaimValidationError {
     InvalidReferenceTime,
     /// クレームの数値が有限でない (NaN / 無限大)
     NonFiniteClaim(&'static str),
+    /// `moqt-reval` を持つトークンだが、受信者が再検証できない
+    /// ([`ClaimValidationOptions::revalidation_interval_seconds`] が `None`)
+    RevalidationUnsupported,
+    /// `moqt-reval` の再検証間隔が、受信者が再検証できる最小間隔を下回る
+    RevalidationIntervalTooShort,
+    /// [`ClaimValidationOptions::revalidation_interval_seconds`] が有限でない / 負である
+    InvalidRevalidationInterval,
 }
 
 impl fmt::Display for ClaimValidationError {
@@ -768,6 +836,20 @@ impl fmt::Display for ClaimValidationError {
                 "reference time must be finite and clock tolerance must be finite and non-negative"
             ),
             Self::NonFiniteClaim(name) => write!(f, "{name} must be finite"),
+            Self::RevalidationUnsupported => write!(
+                f,
+                "token has moqt-reval but the recipient cannot revalidate tokens"
+            ),
+            Self::RevalidationIntervalTooShort => write!(
+                f,
+                "moqt-reval interval is shorter than the recipient can revalidate"
+            ),
+            Self::InvalidRevalidationInterval => {
+                write!(
+                    f,
+                    "minimum revalidation interval must be finite and non-negative"
+                )
+            }
         }
     }
 }
@@ -1001,6 +1083,12 @@ pub struct BearerVerificationOptions<'a> {
     pub expected_issuers: &'a [&'a str],
     /// 期待する `aud` の一覧。空の場合は検証しない
     pub expected_audiences: &'a [&'a str],
+    /// 受信者が再検証できる最小間隔 (秒)。`None` は再検証できないことを表す
+    ///
+    /// [`CatClaims::validate`] に [`ClaimValidationOptions::revalidation_interval_seconds`]
+    /// としてそのまま渡し、`moqt-reval` の受理可否を判定する。`None` では `moqt-reval`
+    /// を持つトークンを値が 0 でも拒否する。
+    pub revalidation_interval_seconds: Option<f64>,
     /// 署名検証のオプション
     pub verify_options: VerifyOptions<'a>,
     /// 要求されたアクション
@@ -1259,8 +1347,10 @@ impl CatToken {
     ///    アクションに DPoP proof を伴わなければ受理できないため、bearer 用のこの
     ///    入口では扱わない
     /// 2. 署名 / MAC を [`CatToken::verify_with`] で検証する
-    /// 3. [`CatClaims::validate`] で `exp` / `nbf` / `iss` / `aud` を検証する。
-    ///    `clock_tolerance_seconds` には `cache` の leeway を使う
+    /// 3. [`CatClaims::validate`] で `exp` / `nbf` / `iss` / `aud` と `moqt-reval` の
+    ///    受理可否を検証する。`clock_tolerance_seconds` には `cache` の leeway を、
+    ///    `revalidation_interval_seconds` には
+    ///    [`BearerVerificationOptions::revalidation_interval_seconds`] を使う
     /// 4. `moqt` クレームが要求されたアクションを認可するか
     ///    [`CatClaims::authorize`] で検証する
     /// 5. `catreplay` が 1 ([`CatReplay::SingleConnection`]) なら `cti` と `exp` を
@@ -1295,6 +1385,7 @@ impl CatToken {
             clock_tolerance_seconds: cache.leeway_seconds(),
             expected_issuers: options.expected_issuers,
             expected_audiences: options.expected_audiences,
+            revalidation_interval_seconds: options.revalidation_interval_seconds,
         })?;
         if !self
             .claims

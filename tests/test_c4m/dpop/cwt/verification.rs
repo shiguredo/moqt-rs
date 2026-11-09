@@ -253,6 +253,8 @@ struct CwtVerifier {
     expected_issuers: &'static [&'static str],
     /// 期待する宛先
     expected_audiences: &'static [&'static str],
+    /// 受信者が再検証できる最小間隔。`None` は再検証できないことを表す
+    revalidation_interval_seconds: Option<f64>,
     /// proof の claim label 設定
     codec: CwtDpopProofCodec,
     /// CAT の署名検証オプション
@@ -270,6 +272,7 @@ impl CwtVerifier {
             default_window_seconds: 300.0,
             expected_issuers: CWT_ISSUERS,
             expected_audiences: CWT_AUDIENCES,
+            revalidation_interval_seconds: None,
             codec: codec(),
             token_verify_options: VerifyOptions {
                 expected_algorithm: Some(Algorithm::Es256),
@@ -302,6 +305,7 @@ impl CwtVerifier {
                 clock_tolerance_seconds: 0.0,
                 expected_issuers: self.expected_issuers,
                 expected_audiences: self.expected_audiences,
+                revalidation_interval_seconds: self.revalidation_interval_seconds,
             },
             action,
             namespace,
@@ -1466,6 +1470,94 @@ fn cwt_dpop_rejects_invalid_cat_signature_without_recording() {
         ),
         Err(DpopError::Replayed)
     );
+}
+
+/// `moqt-reval` を持つ CAT を、`claim_options` の再検証能力に応じて受理・拒否すること
+///
+/// draft-ietf-moq-c4m-02 §2.2。拒否した場合は proof の `cti` を記録しない。
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn cwt_dpop_checks_moqt_reval_against_revalidation_capability() {
+    let namespace = cwt_namespace();
+    let claims = CatClaims {
+        issuer: Some(String::from(CWT_ISSUER)),
+        audience: vec![String::from(CWT_AUDIENCE)],
+        expiration: Some(CWT_REFERENCE_TIME + 3600.0),
+        issued_at: Some(CWT_REFERENCE_TIME - 10.0),
+        cwt_id: Some(b"cat-token-reval".to_vec()),
+        confirmation: Some(cwt_ckt_confirmation()),
+        catdpop: Some(CatDpop::new(300.0, true)),
+        moqt: Some(cwt_scope(&[MoqtAction::Subscribe])),
+        moqt_reval: Some(120.0),
+        ..CatClaims::default()
+    };
+    let token_bytes = CatTokenBuilder {
+        claims,
+        ..CatTokenBuilder::default()
+    }
+    .build_cose_with(
+        &AwsLcRsCrypto::new(),
+        &es256_private_key(),
+        &CoseEncodingOptions::default(),
+    )
+    .expect("moqt-reval 付きの CAT を発行できる");
+    let token = CatToken::decode(&token_bytes).expect("発行した CAT をデコードできる");
+    let proof = cwt_proof(&cwt_subscribe_claims(
+        &token,
+        CWT_REFERENCE_TIME as i64,
+        b"proof-reval",
+    ));
+
+    // 既定 (再検証できない) では拒否し、記録しない
+    let verifier = CwtVerifier::new();
+    let mut cache = verifier.cache();
+    assert_eq!(
+        verifier.verify(
+            &proof,
+            &token,
+            MoqtAction::Subscribe,
+            Some(&namespace),
+            Some(CWT_TRACK_NAME),
+            &mut cache,
+        ),
+        Err(DpopError::Cat(CatError::Claims(
+            ClaimValidationError::RevalidationUnsupported
+        )))
+    );
+    assert!(cache.is_empty(), "再検証できない受信者で記録した");
+
+    // 最小間隔が moqt-reval より長い受信者は拒否し、記録しない
+    let mut too_slow = CwtVerifier::new();
+    too_slow.revalidation_interval_seconds = Some(300.0);
+    assert_eq!(
+        too_slow.verify(
+            &proof,
+            &token,
+            MoqtAction::Subscribe,
+            Some(&namespace),
+            Some(CWT_TRACK_NAME),
+            &mut cache,
+        ),
+        Err(DpopError::Cat(CatError::Claims(
+            ClaimValidationError::RevalidationIntervalTooShort
+        )))
+    );
+    assert!(cache.is_empty(), "最小間隔を下回る moqt-reval で記録した");
+
+    // moqt-reval の間隔以下で再検証できる受信者は受理し、cti を記録する
+    let mut capable = CwtVerifier::new();
+    capable.revalidation_interval_seconds = Some(60.0);
+    capable
+        .verify(
+            &proof,
+            &token,
+            MoqtAction::Subscribe,
+            Some(&namespace),
+            Some(CWT_TRACK_NAME),
+            &mut cache,
+        )
+        .expect("moqt-reval の間隔で再検証できる受信者は受理する");
+    assert_eq!(cache.len(), 1);
 }
 
 /// CAT の通常クレーム (期限・issuer・audience) が不正な場合は拒否し、記録しないこと
