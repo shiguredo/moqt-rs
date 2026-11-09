@@ -16,6 +16,9 @@
 //!   指定する `take_ready_for` を混ぜても成り立つ)
 //! - `Timeout` が返るのは追加から `timeout_us` を過ぎた entry だけである
 //!
+//! ストリームの終端の通知は entry 単位であり、同じ Track Alias の別 entry の理由を変えない
+//! ことも、モデル (`note_entry`) との突き合わせで確かめる。
+//!
 //! あわせて、操作と引き取り理由の分岐ごとに到達を数え、どの性質も空振りしていない
 //! ことを確かめる。
 
@@ -93,8 +96,8 @@ enum Command {
     Push { index: usize, len: usize },
     /// 購読の確立を通知する
     NoteSubscriber { track_alias: u64 },
-    /// ストリームの終端を通知する
-    NoteEndOfStream { track_alias: u64 },
+    /// 指定した entry のストリームの終端を通知する
+    NoteEndOfStream { index: usize },
     /// session の終了を通知する
     NoteSessionClose,
     /// 引き取り可能な entry を取り出す (バッファ全体)
@@ -117,7 +120,19 @@ fn sample_alias(ctx: &mut noprop::TestCaseContext) -> u64 {
 /// entry が 1 つも無いときは `Push` / `TakeFor` / `Remove` が成立しないため、`Add` と
 /// `Take` だけを選ぶ。成立しないオペレーションを生成して捨てるより、状態に合うものだけを
 /// 選ぶ。
-fn sample_command(ctx: &mut noprop::TestCaseContext, entry_count: usize) -> Command {
+///
+/// `open_sibling_indexes` は、同じ Track Alias に未通知の別 entry を持つ未通知 entry の
+/// 位置である。一様に選ぶだけでは「1 本の終端が同じ alias の別ストリームを巻き込まない」
+/// 場面が 1 ケースあたり数回しか起きないため、終端の通知の 3/4 はここから選ぶ。
+///
+/// `open_aliases` は未通知 entry の Track Alias である。同じ alias に未通知の entry が
+/// 並ぶ状態を作るため、entry がある間の追加の 3/4 はこの alias を再利用する。
+fn sample_command(
+    ctx: &mut noprop::TestCaseContext,
+    entry_count: usize,
+    open_sibling_indexes: &[usize],
+    open_aliases: &[u64],
+) -> Command {
     if entry_count == 0 {
         return match noprop::sample_weighted_index(ctx, &[3, 1]) {
             0 => Command::Add {
@@ -133,7 +148,13 @@ fn sample_command(ctx: &mut noprop::TestCaseContext, entry_count: usize) -> Comm
     // 通すために、全体の引き取りと同じくらいの重みを与える
     match noprop::sample_weighted_index(ctx, &[3, 6, 2, 2, 1, 5, 4, 2]) {
         0 => Command::Add {
-            track_alias: sample_alias(ctx),
+            track_alias: if !open_aliases.is_empty()
+                && noprop::sample_weighted_index(ctx, &[1, 3]) == 1
+            {
+                open_aliases[noprop::sample_usize_in(ctx, 0..open_aliases.len())]
+            } else {
+                sample_alias(ctx)
+            },
         },
         1 => Command::Push {
             index: noprop::sample_usize_in(ctx, 0..entry_count),
@@ -145,7 +166,13 @@ fn sample_command(ctx: &mut noprop::TestCaseContext, entry_count: usize) -> Comm
             track_alias: noprop::sample_usize_in(ctx, 0..=7) as u64,
         },
         3 => Command::NoteEndOfStream {
-            track_alias: noprop::sample_usize_in(ctx, 0..=7) as u64,
+            index: if !open_sibling_indexes.is_empty()
+                && noprop::sample_weighted_index(ctx, &[1, 3]) == 1
+            {
+                open_sibling_indexes[noprop::sample_usize_in(ctx, 0..open_sibling_indexes.len())]
+            } else {
+                noprop::sample_usize_in(ctx, 0..entry_count)
+            },
         },
         4 => Command::NoteSessionClose,
         5 => Command::Take,
@@ -283,6 +310,33 @@ impl Model {
             if entry.track_alias == track_alias && entry.reason.is_none() {
                 entry.reason = Some(reason);
             }
+        }
+    }
+
+    /// 同じ Track Alias に未通知の別 entry を持つ未通知 entry の位置を返す
+    fn open_sibling_indexes(&self) -> Vec<usize> {
+        (0..self.entries.len())
+            .filter(|&index| self.has_open_sibling(index))
+            .collect()
+    }
+
+    /// 指定した entry が未通知で、同じ Track Alias に未通知の別 entry があるかを返す
+    fn has_open_sibling(&self, index: usize) -> bool {
+        let target = &self.entries[index];
+        target.reason.is_none()
+            && self.entries.iter().enumerate().any(|(other, entry)| {
+                other != index && entry.track_alias == target.track_alias && entry.reason.is_none()
+            })
+    }
+
+    /// 指定した entry だけに通知する
+    ///
+    /// ストリームの終端は Subgroup ストリーム 1 本の事象であり、同じ Track Alias の
+    /// 他の entry には及ばない。
+    fn note_entry(&mut self, index: usize, reason: PendingNotifyReason) {
+        let entry = &mut self.entries[index];
+        if entry.reason.is_none() {
+            entry.reason = Some(reason);
         }
     }
 
@@ -477,11 +531,15 @@ fn pending_subgroup_buffer_matches_model() -> noprop::TestResult {
     let deadline_snaps = Cell::new(0usize);
     let deadline_boundary_takes = Cell::new(0usize);
     let deadline_boundary_takes_for = Cell::new(0usize);
+    // 同じ Track Alias に未通知の別 entry がある状態で終端を通知した回数
+    // (1 本のストリームの終端が同じ alias の別ストリームを巻き込まないことの検証)
+    let end_of_stream_with_open_sibling = Cell::new(0usize);
 
     let mut runner = test_runner()?;
-    // 1 ケースあたり最大 24 オペレーション、256 ケース。重みは `sample_command` に
-    // まとめてあり、どの分岐も 1 ケースで平均数回は通る
-    runner.run(256, |ctx| {
+    // 1 ケースあたり最大 24 オペレーション、512 ケース。重みは `sample_command` に
+    // まとめてあり、どの分岐も 1 ケースで平均数回は通る。到達を数えるゲートが多く、
+    // 256 ケースでは時刻シードによって一部のゲートが 0 回になり得るため、ケース数を増やす
+    runner.run(512, |ctx| {
         let options = PendingSubgroupBufferOptions {
             per_stream_max_bytes: noprop::sample_with_boundaries(
                 ctx,
@@ -524,7 +582,19 @@ fn pending_subgroup_buffer_matches_model() -> noprop::TestResult {
                 |ctx| noprop::sample_usize_in(ctx, 0..=50),
             ) as i64);
 
-            let command = sample_command(ctx, model.entries.len());
+            let open_sibling_indexes = model.open_sibling_indexes();
+            let open_aliases: Vec<u64> = model
+                .entries
+                .iter()
+                .filter(|entry| entry.reason.is_none())
+                .map(|entry| entry.track_alias)
+                .collect();
+            let command = sample_command(
+                ctx,
+                model.entries.len(),
+                &open_sibling_indexes,
+                &open_aliases,
+            );
             match command {
                 Command::Add { track_alias } => {
                     let id = sut.add(track_alias, now_us);
@@ -544,9 +614,14 @@ fn pending_subgroup_buffer_matches_model() -> noprop::TestResult {
                     sut.note_subscriber(track_alias);
                     model.note_alias(track_alias, PendingNotifyReason::Subscriber);
                 }
-                Command::NoteEndOfStream { track_alias } => {
-                    sut.note_end_of_stream(track_alias);
-                    model.note_alias(track_alias, PendingNotifyReason::EndOfStream);
+                Command::NoteEndOfStream { index } => {
+                    // 同じ alias に未通知の別 entry がある状態での終端は、その別 entry を
+                    // 終端扱いにしない (以後の引き取りでモデルと照合する)
+                    if model.has_open_sibling(index) {
+                        bump(&end_of_stream_with_open_sibling);
+                    }
+                    sut.note_end_of_stream(model.entries[index].id);
+                    model.note_entry(index, PendingNotifyReason::EndOfStream);
                 }
                 Command::NoteSessionClose => {
                     sut.note_session_close();
@@ -726,6 +801,10 @@ fn pending_subgroup_buffer_matches_model() -> noprop::TestResult {
     assert!(
         deadline_boundary_takes_for.get() > 0,
         "期限ちょうどで Timeout になる境界 (entry 指定) が観測されなかった\n{runner}"
+    );
+    assert!(
+        end_of_stream_with_open_sibling.get() > 0,
+        "同じ alias に未通知の別 entry がある状態での終端が観測されなかった\n{runner}"
     );
     assert_eq!(
         runner.stats().rejected_cases,

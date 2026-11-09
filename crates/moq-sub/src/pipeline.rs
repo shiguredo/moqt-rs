@@ -5438,7 +5438,7 @@ async fn register_subgroup_header(
                         ready.track_alias,
                     );
                 }
-                // FIN / RESET_STREAM でストリームが終わった
+                // FIN / RESET_STREAM / Session の STOP_SENDING 指示でストリームが終わった
                 PendingNotifyReason::EndOfStream => {
                     tracing::debug!(
                         "Stream #{stream_num}: stream ended while holding the subgroup stream \
@@ -5502,11 +5502,10 @@ async fn register_subgroup_header(
         .await
         {
             Ok(Ok(Some(data))) => pending_subgroups.lock().await.push(id, &data),
-            // ストリームが終端した。entry に終端を通知し、次のループで引き取る
-            Ok(Ok(None)) => pending_subgroups
-                .lock()
-                .await
-                .note_end_of_stream(header.track_alias),
+            // ストリームが終端した (FIN / RESET_STREAM / Session の STOP_SENDING 指示)。
+            // 自分の entry だけに終端を通知し、次のループで引き取る。同じ alias の別ストリームの
+            // entry は別のストリームに対応するため、その状態は変えない
+            Ok(Ok(None)) => pending_subgroups.lock().await.note_end_of_stream(id),
             Ok(Err(e)) => {
                 log_failure(
                     format_args!("Stream #{stream_num}: failed to read held subgroup stream: {e}"),

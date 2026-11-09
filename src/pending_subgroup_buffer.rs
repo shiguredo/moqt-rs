@@ -29,9 +29,10 @@
 //!   を記録する
 //! - `push` はチャンクを足してバイト数を集計する。上限に収まらないチャンクは足さず、
 //!   entry ごと破棄する
-//! - 購読が確立した alias は `note_subscriber` で、session の終了は `note_session_close` で、
-//!   ストリームの終端は `note_end_of_stream` で通知する。通知した entry は
-//!   `take_ready` または `take_ready_for` が引き取り待ちとして返す
+//! - 購読の確立は alias 単位の `note_subscriber` で、session の終了は全 entry への
+//!   `note_session_close` で、ストリームの終端は entry 単位の `note_end_of_stream` で通知する。
+//!   終端は Subgroup ストリーム 1 本の事象であり、同じ alias の別ストリームの entry には
+//!   及ばない。通知した entry は `take_ready` または `take_ready_for` が引き取り待ちとして返す
 //! - `take_ready` はバッファ全体で 1 つの entry を、`take_ready_for` は指定した識別子の
 //!   entry だけを返す。1 つのバッファを複数の主体で共有する場合は、各主体が自分の entry の
 //!   識別子を保持して `take_ready_for` を呼ぶこと
@@ -112,7 +113,9 @@ pub enum PendingNotifyReason {
     OverflowPerSession,
     /// session が終了した
     SessionClose,
-    /// ストリームが終端した (FIN / RESET_STREAM)
+    /// entry のストリームが終端した (FIN / RESET_STREAM)
+    ///
+    /// 同じ Track Alias の他の entry には及ばない。
     EndOfStream,
 }
 
@@ -319,12 +322,20 @@ impl PendingSubgroupBuffer {
         self.notify_alias(track_alias, PendingNotifyReason::Subscriber);
     }
 
-    /// 該当 Track Alias の全 entry にストリームの終端を通知する
+    /// 指定した entry にストリームの終端を通知する
     ///
-    /// FIN や RESET_STREAM でストリームが終わったことを知らせる。保持しているチャンクは
-    /// 捨てない (所有者が読み直せるように残す)。
-    pub fn note_end_of_stream(&mut self, track_alias: u64) {
-        self.notify_alias(track_alias, PendingNotifyReason::EndOfStream);
+    /// FIN や RESET_STREAM でその entry のストリームが終わったことを知らせる。entry は
+    /// Subgroup ストリーム 1 本に対応するため、同じ Track Alias の他の entry には通知せず、
+    /// その状態を変えない。
+    ///
+    /// 保持しているチャンクは捨てない (所有者が読み直せるように残す)。既に理由が確定した
+    /// entry と、存在しない識別子に対しては何もしない。
+    pub fn note_end_of_stream(&mut self, id: PendingSubgroupEntryId) {
+        if let Some(entry) = self.entries.get_mut(&id)
+            && entry.reason.is_none()
+        {
+            entry.reason = Some(PendingNotifyReason::EndOfStream);
+        }
     }
 
     /// 全 entry に session の終了を通知する

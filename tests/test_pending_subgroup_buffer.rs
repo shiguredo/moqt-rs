@@ -12,6 +12,8 @@
 //! - 破棄済みの entry には以後のチャンクを足さない (無関係な stream を巻き込まない)
 //! - 引き取りと削除でバイト数の集計が戻る
 //! - 同じ Track Alias に複数の entry を保持できる
+//! - ストリームの終端 (`note_end_of_stream`) は指定した entry だけを引き取り待ちにし、
+//!   同じ Track Alias の別 entry を巻き込まない
 //! - `take_ready_for` は指定した entry だけを返し、他の entry の状態を変えない
 //! - `Discarded` / `FilteredOut` 相当の Object は保持しない
 //! - `reset` で全 entry と集計を捨てる
@@ -434,17 +436,20 @@ fn note_session_close_releases_all_entries() {
     assert_eq!(buffer.stream_count(), 1, "引き取っただけでは削除されない");
 }
 
-/// note_end_of_stream は該当 Track Alias の entry を引き取り待ちにする
+/// note_end_of_stream を通知した entry は EndOfStream で引き取れ、チャンクは残る
+///
+/// 別 alias の entry を使い、通知した entry の引き取りを固定する。同じ alias の別 entry を
+/// 巻き込まないことは `note_end_of_stream_does_not_end_other_entries_on_same_alias` が固定する。
 #[test]
-fn note_end_of_stream_releases_that_alias() {
+fn note_end_of_stream_releases_the_entry_with_chunks() {
     let mut buffer = PendingSubgroupBuffer::new(options(1024, 4096));
     let id = buffer.add(9, 0);
     let other = buffer.add(10, 0);
     buffer.push(id, &[0; 6]);
-    buffer.note_end_of_stream(9);
+    buffer.note_end_of_stream(id);
     let ready = buffer
-        .take_ready(0)
-        .expect("終端した alias の entry が引き取れるはずである");
+        .take_ready_for(id, 0)
+        .expect("終端した entry が引き取れるはずである");
     assert_eq!(ready.reason, PendingNotifyReason::EndOfStream);
     assert_eq!(
         ready.chunks,
@@ -452,12 +457,93 @@ fn note_end_of_stream_releases_that_alias() {
         "終端でもチャンクは残る"
     );
     assert!(
-        buffer.take_ready(0).is_none(),
-        "終端していない alias の entry は引き取れない"
+        buffer.take_ready_for(other, 0).is_none(),
+        "終端していない entry は引き取れない"
     );
     buffer.remove(ready.id);
     buffer.remove(other);
     assert_eq!(buffer.total_bytes(), 0, "削除で集計が 0 に戻る");
+}
+
+/// 同じ Track Alias の 1 本のストリームの終端は、別ストリームの entry を終端扱いにしない
+///
+/// entry は Subgroup ストリーム 1 本に対応し、同じ alias に複数並び得る。1 本の FIN /
+/// RESET_STREAM で同じ alias の別ストリームまで終端扱いにすると、まだ開いているストリームの
+/// 保持済みチャンクが捨てられる。終端していない entry は保持を続け、後から購読が確立すれば
+/// チャンクごと引き取れる。
+#[test]
+fn note_end_of_stream_does_not_end_other_entries_on_same_alias() {
+    let mut buffer = PendingSubgroupBuffer::new(options(1024, 4096));
+    let ended = buffer.add(5, 0);
+    let open = buffer.add(5, 0);
+    buffer.push(ended, &[1; 2]);
+    buffer.push(open, &[2; 3]);
+    buffer.note_end_of_stream(ended);
+
+    assert!(
+        buffer.take_ready_for(open, 0).is_none(),
+        "同じ alias でも終端していない entry は引き取り可能にならない"
+    );
+    assert_eq!(
+        buffer.total_bytes(),
+        5,
+        "終端の通知ではどちらの entry のチャンクも捨てない"
+    );
+    let ready = buffer
+        .take_ready_for(ended, 0)
+        .expect("終端した entry は引き取れるはずである");
+    assert_eq!(ready.reason, PendingNotifyReason::EndOfStream);
+    assert_eq!(
+        ready.chunks,
+        vec![vec![1, 1]],
+        "終端した entry のチャンクが返る"
+    );
+    buffer.remove(ended);
+
+    // 終端していない entry は保持を続け、後から購読が確立すればチャンクごと引き取れる
+    buffer.push(open, &[3; 1]);
+    buffer.note_subscriber(5);
+    let ready = buffer
+        .take_ready_for(open, 0)
+        .expect("購読の確立で引き取れるはずである");
+    assert_eq!(
+        ready.reason,
+        PendingNotifyReason::Subscriber,
+        "別ストリームの終端の理由は付かない"
+    );
+    assert_eq!(
+        ready.chunks,
+        vec![vec![2, 2, 2], vec![3]],
+        "保持済みのチャンクは失われない"
+    );
+}
+
+/// 存在しない entry と理由の確定した entry への終端の通知は何もしない
+#[test]
+fn note_end_of_stream_ignores_removed_and_notified_entries() {
+    let mut buffer = PendingSubgroupBuffer::new(options(1024, 4096));
+    let removed = buffer.add(1, 0);
+    let alive = buffer.add(1, 0);
+    buffer.remove(removed);
+    buffer.note_end_of_stream(removed);
+    assert_eq!(buffer.stream_count(), 1, "削除済みの entry は作り直さない");
+    assert!(
+        buffer.take_ready_for(alive, 0).is_none(),
+        "削除済みの識別子への通知は同じ alias の生きている entry に及ばない"
+    );
+    buffer.remove(alive);
+
+    let id = buffer.add(1, 0);
+    buffer.note_subscriber(1);
+    buffer.note_end_of_stream(id);
+    let ready = buffer
+        .take_ready_for(id, 0)
+        .expect("購読の確立で引き取れるはずである");
+    assert_eq!(
+        ready.reason,
+        PendingNotifyReason::Subscriber,
+        "先に確定した理由は終端の通知で上書きしない"
+    );
 }
 
 /// 期限を過ぎた entry だけが Timeout で引き取れる
@@ -511,7 +597,7 @@ fn overflow_reason_is_not_overwritten_by_later_notification() {
     buffer.push(id, &[0; 5]);
     buffer.note_subscriber(1);
     buffer.note_session_close();
-    buffer.note_end_of_stream(1);
+    buffer.note_end_of_stream(id);
     let ready = buffer
         .take_ready(0)
         .expect("上限超過で通知済みになるはずである");
