@@ -1525,10 +1525,9 @@ fn fetch_target_of(kind: TrackKind) -> Option<FetchTarget> {
 /// 残して live の購読を続ける (FETCH は欠落した Group を埋めるための補助であり、
 /// live の受信を止める理由にはならない)。
 ///
-/// peer が REQUEST_ERROR で拒否した場合は応答 stream が届かない。拒否は
-/// `MoqtClient` がアプリへ配送しない (`SessionEvent::RequestErrorReceived` は notable
-/// イベントではない) ためログに残せないが、live の購読は影響を受けない
-/// (対応表に残った Request ID は、同じ session では再利用されないため誤配送しない)。
+/// peer が REQUEST_ERROR で拒否した場合は応答 stream が届かない。拒否は `MoqtClient::next_event`
+/// の `SessionEvent::RequestErrorReceived` で届き、メインループがログに残して対応表から
+/// 当該 Request ID を外す。live の購読は影響を受けない。
 async fn fetch_recent_video_groups(
     client: &mut MoqtClient,
     fetch_targets: &mut HashMap<u64, FetchTarget>,
@@ -3187,6 +3186,34 @@ pub async fn run(
                                  end_location=({}, {})",
                                 end_location.group_id,
                                 end_location.object_id,
+                            );
+                            Ok(false)
+                        }
+                        Some(ClientEvent::Session(SessionEvent::RequestErrorReceived {
+                            request_id,
+                            error_code,
+                            retry_interval,
+                            reason,
+                            error_details,
+                        })) => {
+                            // 自側が送った request が peer に拒否された
+                            // (draft-ietf-moq-transport-23 §9.4 (REQUEST_ERROR))。映像のメディア
+                            // FETCH の拒否なら応答 stream は届かないため、対応表から外す。
+                            // 対応表には catalog の購読 (`FetchTarget::Catalog`) の Request ID も
+                            // 入るため、値で映像 FETCH かを判定する。それ以外 (映像 SUBSCRIBE への
+                            // REQUEST_UPDATE の失敗など) はログに残すだけで、対応表を変えない。
+                            // この example はリダイレクトに追随せず、再試行もしない
+                            let video_fetch =
+                                matches!(fetch_targets.get(&request_id), Some(FetchTarget::Video));
+                            if video_fetch {
+                                fetch_targets.remove(&request_id);
+                            }
+                            tracing::warn!(
+                                "Received REQUEST_ERROR: request_id={request_id}, \
+                                 video_fetch={video_fetch}, error_code={error_code:#x}, \
+                                 retry_interval={retry_interval}, reason={}, redirect={}",
+                                reason.as_str(),
+                                error_details.redirect().is_some(),
                             );
                             Ok(false)
                         }

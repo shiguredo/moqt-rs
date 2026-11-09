@@ -417,11 +417,11 @@ session で再発行する。
 
 ### 6.7 REQUEST_ERROR の REDIRECT に追随しない
 
-REDIRECT Error Detail (`0x01`) 付きの `REQUEST_ERROR` (`0x34`、§9.4.2.1) を example は解釈しない。
-session は `error_details` と `retry_interval` をイベントに載せる
-(`src/session/types.rs`) が、transport 層は `(error_code, reason)` だけを記録して
-`error_details` を捨てる (`crates/tokio-moq/src/moqt_client.rs`)。
-リダイレクト先へ購読を張り直す経路が無い。
+REDIRECT Error Detail (`0x01`) 付きの `REQUEST_ERROR` (`0x05`、§9.4.2.1) の移動先へ example は追随しない。
+`MoqtClient::next_event` は `SessionEvent::RequestErrorReceived` を配送し、`retry_interval` と
+`error_details` (移動先は `error_details.redirect()`) もアプリへ届く (`crates/tokio-moq/src/moqt_client.rs`)。
+moq-sub はこのイベントをログに残し、映像 FETCH の拒否なら FETCH 応答の振り分け表から外すだけで、
+リダイレクト先へ購読を張り直す経路も、Retry Interval に従って再試行する経路も無い。
 
 ### 6.8 TRACK_STATUS を使わない
 

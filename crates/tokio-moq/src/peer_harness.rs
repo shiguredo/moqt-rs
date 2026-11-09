@@ -631,6 +631,32 @@ impl TestPeer {
         self.flush_queued_response(request_id).await
     }
 
+    /// 受理した request に REQUEST_ERROR で応答する
+    ///
+    /// `Session::send_request_error` は応答を `SessionEvent::SendOnStream` として積むため、該当する
+    /// request stream へ書き出す。`error_code` は wire に載るコードを使うこと (LOCAL 系のコードは
+    /// Session が INTERNAL_ERROR に置き換える)。
+    pub(crate) async fn send_request_error(
+        &mut self,
+        request_id: u64,
+        error_code: u64,
+        retry_interval: u64,
+        reason: &str,
+    ) -> Result<()> {
+        let reason = shiguredo_moqt::message::ReasonPhrase::new(reason)
+            .map_err(|e| TransportError::Internal(format!("invalid reason phrase: {e}")))?;
+        self.session
+            .send_request_error(
+                request_id,
+                error_code,
+                retry_interval,
+                reason,
+                shiguredo_moqt::message::ErrorDetails::new(),
+            )
+            .map_err(|e| TransportError::Internal(format!("send_request_error: {e}")))?;
+        self.flush_queued_response(request_id).await
+    }
+
     /// 自側が開く uni stream を開き、送信ハンドルを返す
     ///
     /// FETCH 応答 (draft-ietf-moq-transport-23 §11.4.1) のように、peer が自ら uni stream を
@@ -2682,6 +2708,68 @@ mod tests {
             decoder
                 .finish()
                 .expect("entry 境界で終端した応答は finish で受容されること");
+        })
+        .await;
+    }
+
+    /// client が発行した FETCH の REQUEST_ERROR がアプリへ届く
+    ///
+    /// `MoqtClient::fetch` の拒否は `next_event` の `SessionEvent::RequestErrorReceived` でしか
+    /// 観測できない。Retry Interval と Error Details (REDIRECT を含む) もこのイベントにだけ載り、
+    /// アプリの再試行や代替の判断材料になる (draft-ietf-moq-transport-23 §9.4 (REQUEST_ERROR))。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_fetch_request_error_is_delivered_to_the_application() {
+        use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
+        use shiguredo_moqt::message_parameter::MessageParameters;
+
+        run_with_timeout(async {
+            let (mut peer, mut client, _acceptor) = connect_pair_with_acceptor().await;
+
+            let namespace =
+                TrackNamespace::new(vec![b"live".to_vec()]).expect("名前空間を作れること");
+            let request_id = client
+                .fetch(namespace, b"video".to_vec(), MessageParameters::new())
+                .await
+                .expect("FETCH を発行できること");
+            peer.recv_request_start()
+                .await
+                .expect("FETCH を受理できること");
+
+            // peer が DOES_NOT_EXIST と Retry Interval 付きで拒否する
+            peer.send_request_error(request_id, REQUEST_DOES_NOT_EXIST, 1500, "unknown track")
+                .await
+                .expect("REQUEST_ERROR を返せること");
+
+            let event = client.next_event().await.expect("イベントを取得できること");
+            match event {
+                Some(ClientEvent::Session(SessionEvent::RequestErrorReceived {
+                    request_id: received_request_id,
+                    error_code,
+                    retry_interval,
+                    reason,
+                    error_details,
+                })) => {
+                    assert_eq!(received_request_id, request_id, "Request ID が一致すること");
+                    assert_eq!(
+                        error_code, REQUEST_DOES_NOT_EXIST,
+                        "peer が送ったエラーコードが届くこと"
+                    );
+                    assert_eq!(
+                        retry_interval, 1500,
+                        "peer が送った Retry Interval が届くこと"
+                    );
+                    assert_eq!(
+                        reason.as_str(),
+                        "unknown track",
+                        "peer が送った理由句が届くこと"
+                    );
+                    assert!(
+                        error_details.redirect().is_none(),
+                        "REDIRECT でない拒否は移動先を持たないこと"
+                    );
+                }
+                other => panic!("FETCH の REQUEST_ERROR が届くこと: {other:?}"),
+            }
         })
         .await;
     }

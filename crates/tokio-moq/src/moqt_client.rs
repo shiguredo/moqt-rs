@@ -1275,6 +1275,11 @@ fn is_notable_event(event: &SessionEvent) -> bool {
             // (draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties))。
             // 未対応の型はアプリが Track を利用しない判断に使うため、アプリへ届ける
             | SessionEvent::TrackStatusUnsupported { .. }
+            // RequestErrorReceived は自側が送った request (FETCH / SUBSCRIBE / PUBLISH /
+            // TRACK_STATUS / REQUEST_UPDATE) の拒否である (draft-ietf-moq-transport-23 §9.4
+            // (REQUEST_ERROR))。Retry Interval と Error Details (REDIRECT を含む) は再試行や
+            // 代替の判断材料であり、FETCH の拒否は他の経路では観測できないため、アプリへ届ける
+            | SessionEvent::RequestErrorReceived { .. }
     )
 }
 
@@ -2315,6 +2320,9 @@ impl MoqtClient {
     /// draft-ietf-moq-transport-23 §9.11 (FETCH)。取り出す範囲は LOCATION_FILTER パラメータで
     /// 指定する。応答は [`ClientEvent::Session`] の [`SessionEvent::FetchOkReceived`]
     /// (応答範囲の終端 Location) または [`SessionEvent::RequestErrorReceived`] として届く。
+    /// 拒否 (REQUEST_ERROR) は [`MoqtClient::next_event`] で届き、Retry Interval
+    /// (`retry_interval`) と Error Details (`error_details`。REDIRECT の移動先は
+    /// `error_details.redirect()`) も含む。
     /// 応答範囲の終端は LARGEST_OBJECT が要求範囲内ならその値、そうでなければ要求で明示した
     /// End Location になる (§3.2 (Fetch) / §3.2.2 (Gaps in a Fetch Stream))。Track の終端は
     /// 応答ストリームの End of Group / End of Track で届く (§11.4.2.2 (Prior Object Fields))。
@@ -2401,8 +2409,9 @@ impl MoqtClient {
 
     /// 次のイベントを返す
     ///
-    /// session の注目イベント (GoawayReceived / CloseSession / PublishDoneReceived /
-    /// ResetDataStream) に加えて、peer (MOQT relay) から届いた要求を
+    /// session の注目イベント (GoawayReceived / GoawayDrainReady / CloseSession /
+    /// PublishDoneReceived / ResetDataStream / OpenFillFetchStream / FetchOkReceived /
+    /// TrackStatusUnsupported / RequestErrorReceived) に加えて、peer (MOQT relay) から届いた要求を
     /// [`ClientEvent::Request`]、REQUEST_UPDATE を [`ClientEvent::RequestUpdate`] として返す。
     /// 未処理の要求が溜まっている場合はそちらを優先して返す (アプリ向けキュー
     /// (`incoming_updates` / `incoming_requests`) は notable イベントより優先する)。
@@ -2411,6 +2420,12 @@ impl MoqtClient {
     ///
     /// Session のイベントは `drain_events` で I/O 操作へ変換し、配送対象
     /// (`is_notable_event`) は `notable_events` 経由で返す。
+    ///
+    /// `RequestErrorReceived` は FETCH に限らず、自側が送った SUBSCRIBE / PUBLISH /
+    /// TRACK_STATUS / REQUEST_UPDATE の拒否でも届く。`subscribe_track` / `publish_track` は
+    /// 同期 API として戻り値でも失敗を返すため、同じ request の拒否がこのイベントでも
+    /// 届き得る (戻り値は同期 API の失敗、イベントはセッションの通知であり、Retry Interval と
+    /// Error Details はイベントにだけ載る)。
     ///
     /// この future は `tokio::select!` の分岐で使えるよう、await の途中で破棄されても
     /// 送信半の台帳 (`bidi_sends`) を壊さない。破棄された時点で送信中だったメッセージは
@@ -3591,16 +3606,27 @@ impl MoqtClient {
                     // 到達しない。
                     // その他の Received 系 / Established / RequestTerminated は本 example では特別な処理を行わない。
                 }
-                SessionEvent::RequestErrorReceived {
-                    request_id,
-                    error_code,
-                    reason,
-                    ..
-                } => {
-                    // 拒否の理由を保持し、request の失敗をアプリへ伝えるときに添える
+                ev @ SessionEvent::RequestErrorReceived { .. } => {
+                    // 拒否の理由を保持し、同期 API (`subscribe_track` / `publish_track`) が
+                    // request の失敗を返すときに添える
                     // (draft-ietf-moq-transport-23 §9.4.1 (REQUEST_ERROR Message Format))。
-                    self.request_errors
-                        .insert(request_id, (error_code, reason.as_str().to_string()));
+                    if let SessionEvent::RequestErrorReceived {
+                        request_id,
+                        error_code,
+                        reason,
+                        ..
+                    } = &ev
+                    {
+                        self.request_errors
+                            .insert(*request_id, (*error_code, reason.as_str().to_string()));
+                    }
+                    // アプリ (`next_event`) へも届ける notable イベントである。FETCH の拒否は
+                    // この経路でしか観測できず、Retry Interval と Error Details もここにだけ載る
+                    debug_assert!(
+                        is_notable_event(&ev),
+                        "notable event predicate is inconsistent with this arm"
+                    );
+                    self.notable_events.push_back(ev);
                 }
             }
         }
@@ -4121,6 +4147,22 @@ mod tests {
             error_code: 0x2,
             reliable_size: None,
             tracking: shiguredo_moqt::session::types::ResetTracking::Removed,
+        };
+        assert!(is_notable_event(&event));
+    }
+
+    /// REQUEST_ERROR の受信はアプリが観測する notable イベントである
+    ///
+    /// 自側が発行した FETCH の拒否は他の経路では観測できず、Retry Interval と Error Details
+    /// (REDIRECT を含む) もこのイベントにだけ載る。
+    #[test]
+    fn request_error_is_notable_event() {
+        let event = SessionEvent::RequestErrorReceived {
+            request_id: 4,
+            error_code: 0x10,
+            retry_interval: 0,
+            reason: ReasonPhrase::new("not found").expect("理由句は有効である"),
+            error_details: shiguredo_moqt::message::ErrorDetails::new(),
         };
         assert!(is_notable_event(&event));
     }
