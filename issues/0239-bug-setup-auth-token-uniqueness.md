@@ -1,7 +1,7 @@
 # 手組み SETUP でも AUTHORIZATION_TOKEN の一意性を検証する
 
 - Created: 2026-10-12
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-10
 - Branch: develop
 - Polished: 2026-11-10
 - Refreshed: 2026-11-04
@@ -75,3 +75,21 @@ MALFORMED_AUTH_TOKEN error." を課す。SETUP は Request ID を持たないた
   `tests/test_session/` のテストで固定し、重複トークンを含む SETUP の生バイト列の `SetupOptions::decode` の拒否を
   `tests/test_parameter.rs` の単体テストで固定する (wire 経由の close code は peer_harness の既存テストが固定している)。
 - 既存の SETUP 検証のテストが引き続き通ること。
+
+## 解決方法
+
+`src/session/core.rs` の `Session::handle_peer_setup` で、`register_setup_auth_tokens` の検証の直後、`self.auth.peer_token_cache = peer_cache;` より前に、
+`SetupOptions::authorization_tokens()` を `src/message_parameter.rs` の `validate_auth_token_uniqueness` に渡して (Token Type, Token Value) の一意性を検証するようにした。
+重複時は `session_error_from_message` で `SESSION_MALFORMED_AUTH_TOKEN` (0x16) の `SessionError` にしてセッションを閉じる。
+既存の検証 (duplicate SETUP / role / transport / URI / MAX_CONTROL_MESSAGE_SIZE / REGISTER alias) を通過した後に置くため、既存エラーの優先順位は変わらない。
+拒否時は peer の token cache も peer の SETUP も保持せず、`Established` にしない。検証ロジックは encode / decode と同じヘルパを共有し、複製していない。
+
+テストは次のとおり。
+
+- `tests/test_session/setup.rs` に `peer_setup_duplicate_authorization_token_closes_with_malformed_auth_token` を追加した。
+  USE_VALUE の重複、値の同じ REGISTER 2 件、値の同じ REGISTER と USE_VALUE の各手組み SETUP で、0x16 で閉じること、`state()` が `Closing`、
+  `peer_auth_token_cache()` が空、`peer_control_message_size_limit()` が `BeforeSetup` のままで、`CloseSession` を発行し `Established` を発行しないことを固定する。修正前の実装では失敗する。
+- `tests/test_parameter.rs` に `duplicate_token_type_and_value_is_malformed_auth_token` を追加し、重複トークンを含む生バイト列の `SetupOptions::decode` が `MessageError::MalformedAuthToken` になること、値の異なる Token の繰り返しは受理することを固定した。
+- wire 経由の close code は `crates/tokio-moq/src/peer_harness.rs` の既存テスト `initial_setup_with_duplicate_tokens_closes_with_malformed_auth_token` が固定している。
+
+`CODEBASE.md` の規定に従い、ブランチと PR を作らず develop に直接コミットし、`CHANGES.md` は更新していない。
