@@ -1,7 +1,7 @@
 # SubgroupTracker の状態不変条件を守る
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-10
 - Branch: develop
 - Polished: 2026-11-10
 - Refreshed: 2026-11-04
@@ -64,3 +64,22 @@
 - `tests/test_subgroup_tracker.rs` に上記の状態遷移テストと未知キーのテストが追加され、`pbt/tests/prop_subgroup_tracker.rs` のモデルが新しい規則に追従していること。
 - `src/session/tests.rs` の `discarded_fin_marks_tracker_terminal_and_allows_reopen` を、事前の FIN の記録を header 受理の前に行う形へ直したうえで通り、破棄分岐が `mark_fin` 失敗後の `Open` を `Reset` にして再オープンを許すこと。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+`src/subgroup_tracker.rs` で、FIN を最優先の終端理由として扱うようにした。
+
+- `mark_reset` / `mark_stop_sending` は `ClosedFin` のキーに対して何もしない。`Reset` と `StoppedByPeer` の相互の上書きは従来どおり後勝ちである。
+- `SubgroupStreamState::ClosedFin` から `last_object_id` を削除し、フィールド無しの variant にした (公開 API の破壊的変更)。最終 Object ID は `fin_last_object_ids` に一本化した。
+- `mark_fin` の doc を「状態エントリのあるキーは `ClosedFin` にし、無いキーには状態エントリを作らずに最終 Object ID を記録する。条件 3 の不一致では状態も記録も更新しない」に直した。`mark_reset` / `mark_stop_sending`、`ClosedFin`、`fin_last_object_ids` の doc も更新した。
+- `ClosedFin` を `Reset` に戻す recovery 用のメソッドは追加していない。`Session::recv_data_stream_closed` の破棄分岐で `mark_fin` が失敗した時点のエントリは `Open` であり、既存の `mark_reset` で `Reset` になる。
+
+テストは次のとおり。
+
+- `tests/test_subgroup_tracker.rs`: `mark_fin_on_unknown_key_records_only_final_object_id`、`reset_after_fin_keeps_closed_fin`、`stop_sending_after_fin_keeps_closed_fin`、`reset_and_stop_sending_overwrite_each_other` を追加し、`mark_without_open_is_noop` のコメントと検証を状態エントリを作らない挙動に合わせた。
+  `can_reopen_true_for_stopped_by_peer_and_reset` の `ClosedFin` の構築を新しい variant に直した。
+- `pbt/tests/prop_subgroup_tracker.rs`: モデルの `ClosedFin` を値なしにし、`ClosedFin` への RESET / STOP_SENDING で状態を変えない規則に直した。その場面が生成されたことを数えるゲートを追加した。
+- `src/session/tests.rs` の `discarded_fin_marks_tracker_terminal_and_allows_reopen`: 事前の FIN の記録を header 受理の前へ移し、Session の経路で到達できる状態 (未知キーの FIN の記録 → header 受理で `Open` → 最終 Object ID 不一致の FIN を破棄分岐が `Reset` にする) で再オープンを検証するようにした。
+
+`skills/shiguredo-moqt/SKILL.md` の `SubgroupTracker` の API 一覧の戻り値の型を実装 (`MessageError`) に合わせ、FIN を最優先する規則と最終 Object ID の保持を追記した。
+`CODEBASE.md` の規定に従い、ブランチと PR を作らず develop に直接コミットし、`CHANGES.md` は更新していない。
