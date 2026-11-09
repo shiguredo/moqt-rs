@@ -45,6 +45,10 @@ compile_error!("exactly one QUIC backend must be selected: quic-tobi / quic-s2n 
 /// ネイティブ QUIC のバックエンドに関わらず常にコンパイルされる。
 pub(crate) mod tobi;
 
+/// tobi-quic の qlog 出力。tobi-quic を使う経路 (native QUIC / WebTransport over
+/// HTTP/3) から使う。
+pub(crate) mod qlog;
+
 #[cfg(feature = "quic-tobi")]
 mod tobi_backend;
 

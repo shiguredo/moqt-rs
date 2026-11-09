@@ -884,6 +884,7 @@ impl WtClient {
             ));
         };
 
+        // WebTransport over HTTP/3 は draft-ietf-webtrans-http3-17 §3.1 の ALPN
         let client = Client::builder()
             .with_tls(ClientTlsConfig::new(tls))
             .with_io(IoConfig::new(crate::local_bind_addr(config.remote_addr)))
@@ -894,7 +895,13 @@ impl WtClient {
             // s2n-quic の endpoint は接続とは独立に常時ソケットを駆動していた。tobi-quic の
             // 既定はコマンド駆動であり、API を呼んでいない間は受信とタイマーを処理しない
             // ため、同じ挙動になるよう接続の生成時からバックグラウンド駆動を有効にする
-            .with_background_driver(true)
+            .with_background_driver(true);
+        // qlog は QLOGDIR が設定されているときだけ有効にする (診断用)
+        let client = match crate::quic::qlog::DirFactory::from_env() {
+            Some(factory) => client.with_qlog_writer_factory(factory),
+            None => client,
+        };
+        let client = client
             .start()
             .map_err(|e| TransportError::Internal(format!("client start failed: {e}")))?;
 

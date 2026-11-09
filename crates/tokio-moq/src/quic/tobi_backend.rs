@@ -188,11 +188,14 @@ pub(crate) async fn connect(
 ) -> Result<(Connected, StopSendingReceiver)> {
     let tls = crate::tls::build_quic_client_config(cert_path, ALPN)?;
 
-    let client = Client::builder()
+    // qlog は QLOGDIR が設定されているときだけ有効にする (診断用)
+    let qlog_factory = crate::quic::qlog::DirFactory::from_env();
+
+    // ビルダーに保持した設定は `start()` で固定順に適用されるため、呼ぶ順序に
+    // 依存しない
+    let builder = Client::builder()
         .with_tls(ClientTlsConfig::new(tls))
         .with_io(IoConfig::new(crate::local_bind_addr(socket_addr)))
-        // ビルダーに保持した設定は `start()` で固定順に適用されるため、呼ぶ順序に
-        // 依存しない
         .with_transport(tobi::build_transport_config())
         .with_datagram(tobi::datagram_config())
         // s2n-quic の endpoint は Server / Client のハンドルとは独立したタスクで常時
@@ -200,7 +203,12 @@ pub(crate) async fn connect(
         // 呼んでいない間は受信とタイマーを処理しないため、同じ挙動になるよう接続の生成時
         // からバックグラウンド駆動を有効にする。無効のままだと、MOQT 層が受信待ちに
         // 入っている間に ACK や再送が止まる。
-        .with_background_driver(true)
+        .with_background_driver(true);
+    let client = match qlog_factory {
+        Some(factory) => builder.with_qlog_writer_factory(factory),
+        None => builder,
+    };
+    let client = client
         .start()
         .map_err(|e| TransportError::Quic(format!("client start failed: {e}")))?;
 

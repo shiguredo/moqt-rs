@@ -192,16 +192,21 @@ pub(crate) fn spawn_packet_diagnostics(connection: &Connection) {
             }
             let stats = connection.stats().await;
             // 「パケットが来ていない」のか「来ているが復号に失敗している」のかを
-            // 切り分けられるよう、破棄の内訳と STOP_SENDING の取りこぼしも出す
+            // 切り分けられるよう、破棄の内訳と STOP_SENDING の取りこぼしも出す。
+            // バイト数と自側の送出量も出し、ピアの送出量の推移と ACK の量を追えるようにする
             tracing::warn!(
-                "PKTDIAG received={} lost={} dropped={} dropped_decryption_failure={} \
-                 dropped_invalid={} stop_sending_dropped={}",
+                "PKTDIAG received={} rx_bytes={} lost={} dropped={} dropped_decryption_failure={} \
+                 dropped_invalid={} stop_sending_dropped={} sent={} tx_bytes={} retransmitted={}",
                 stats.received_packets,
+                stats.received_bytes,
                 stats.lost_packets,
                 stats.packet_dropped,
                 stats.packet_dropped_decryption_failure,
                 stats.packet_dropped_invalid,
                 stats.stop_sending_dropped,
+                stats.sent_packets,
+                stats.sent_bytes,
+                stats.retransmitted_packets,
             );
         }
     });
