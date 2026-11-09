@@ -1,7 +1,7 @@
 # 最終応答の SendOnStream を RequestTerminated より先に発行する
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-10
 - Branch: develop
 - Polished: 2026-11-10
 
@@ -42,3 +42,22 @@ peer FIN 受信済みの request に最終メッセージ (`fin: true` の `Send
 - Established の FETCH への REQUEST_UPDATE 失敗を peer FIN 受信済みで送るとき、`SendOnStream(REQUEST_ERROR, fin: true)` → `ResetDataStream` → `RequestTerminated { reason: PeerStreamFin }` の順でイベントが出ることをテストで固定すること。修正前の実装では失敗すること。
 - `SessionEvent::RequestTerminated`、`local_fin_sent`、`mark_send_direction_closed_with_fin` の doc に設計方針の契約と前提が書かれていること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+`src/session/core.rs` の `send_request_ok` で、`SendOnStream` を push してから `mark_send_direction_closed_with_fin` を呼ぶようにした。
+`send_request_error` の REQUEST_ERROR 単独 (FIN) の場合の `mark_send_direction_closed_with_fin` を、FETCH の REQUEST_UPDATE 失敗による自動 `ResetDataStream` の push の後 (関数の末尾) へ移した。
+これで peer FIN 受信済みの request では、`RequestTerminated { reason: PeerStreamFin }` がその API 呼び出しで当該 request に積む最後のイベントになる。
+subscription の PUBLISH_DONE が続く経路は `fin` が偽のため変わらない。
+
+`SessionEvent::RequestTerminated` の doc の `PeerStreamFin` の段落に上の契約を書き、`local_fin_sent` / `mark_send_direction_closed_with_fin` の doc に最終メッセージとして TRACK_STATUS_OK を加え、当該 request のイベントをすべて push した後に呼ぶ前提を書いた。
+`skills/shiguredo-moqt/SKILL.md` の request stream の終端の説明にも同じ契約と TRACK_STATUS_OK を加えた。
+
+テストは次のとおり。
+
+- `tests/test_session.rs` にイベント列を取り出す `drain_events` と位置を求める `event_position` を追加した (`tests/test_session/subscription/request_update.rs` の同等のローカル定義は削除した)。
+- `tests/test_session/track_status.rs` の `responder_sends_track_status_ok_after_requester_fin` / `requester_fin_then_responder_sends_track_status_ok` で、FIN 付きの TRACK_STATUS_OK が `RequestTerminated(PeerStreamFin)` より先に出て、`RequestTerminated` が最後のイベントであることを検証する。
+- `tests/test_session/fetch/request_update.rs` に `request_error_update_failure_after_requester_fin_terminates_last` を追加し、`SendOnStream(REQUEST_ERROR, fin)` → `ResetDataStream` → `RequestTerminated(PeerStreamFin)` の順と、`RequestTerminated` が最後であることを固定した。
+- 3 件とも、修正前の `core.rs` では失敗し、修正後に通ることを確認した。
+
+`CODEBASE.md` の規定に従い、ブランチと PR を作らず develop に直接コミットし、`CHANGES.md` は更新していない。
