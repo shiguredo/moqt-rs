@@ -1,7 +1,7 @@
 # FetchStreamEncoder::encode_object がエラー時に出力バッファへ部分書き込みしないようにする
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-10
 - Branch: develop
 - Polished: 2026-11-10
 
@@ -46,3 +46,20 @@
   - エラーは `ProtocolViolation` の variant だけでなく、メッセージ `publisher priority must not change within the same subgroup in a FETCH response` で照合すること (Object ID の非増加など別理由の拒否で通らないようにする)。
 - Priority 検証の失敗時に `buf` が変化しないことをテストで固定すること (現行では失敗した Object のエントリ全体が残る)。
 - 上記を `tests/test_stream/encoder.rs` で固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+`src/stream/encoder.rs` の `FetchStreamEncoder::encode_object` を、失敗し得る処理をすべて終えてから状態を更新する構成に並べ替えた。
+
+- Publisher Priority の一貫性検証 (§12.1 条件 1) を `entry.encode` による `buf` への書き込みより前に移した。検証は入力と既存の記録だけを参照するため、一時バッファは使っていない。
+- group の前進時の `subgroup_priorities` の `retain` (過去 group の記録の破棄) を、group ID delta の計算や `entry.encode` より後へ移した。前進するかどうかは match の前に `group_advances` として求める。
+- `subgroup_priorities` への insert、`prior_context` / `prior_state` の更新は、`entry.encode` が成功した後にまとめて行う。書き込みの後に失敗し得る処理は無い。
+- `encode_object` の doc に、失敗時は `buf` にも内部状態にも何も残さない契約を書いた。
+
+テストは `tests/test_stream/encoder.rs` に次の 2 件を追加した。どちらも修正前の実装では失敗し、修正後に通る。
+
+- `test_priority_change_rejection_leaves_buf_unchanged`: 同一 Subgroup の Priority 変更をメッセージで照合して拒否し、`buf` が変化しないこと、失敗後も同じ Priority の Object を続けてエンコードできること。
+- `test_failed_group_change_keeps_priority_record`: Ascending (5 → 6 で失敗 → 5) と Descending (5 → 4 で失敗 → 5) で、group を前進させる Object を properties 不正で失敗させた後も、元の group の同一 Subgroup で Priority を変えた Object が拒否され、`buf` が変化しないこと。
+
+group ID delta のアンダーフローで失敗する経路は記録の変化を挙動で観測できないため、`retain` を全成功後へ移す並べ替えで担保した。
+`CODEBASE.md` の規定に従い、ブランチと PR を作らず develop に直接コミットし、`CHANGES.md` は更新していない。
