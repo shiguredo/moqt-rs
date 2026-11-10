@@ -1,7 +1,7 @@
 # moq-pub が受信 SUBSCRIBE の購読に Object と PUBLISH_DONE を送る
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-10
 - Branch: feature/fix-publisher-subscribe-serving
 - Polished: 2026-11-10
 - Refreshed: 2026-11-04
@@ -91,3 +91,14 @@ moq-pub は relay からの SUBSCRIBE を受理して SUBSCRIBE_OK を返すが�
   (relay 側構成が用意できない場合は、session 層の単体テストで送出経路を固定し、統合テスト (0338) に
   配信経路の検証を引き継ぐことを issue の解決方法に明記すること)。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `crates/moq-pub/src/pipeline.rs` の `serve_peer_request` を書き換えた。受信 SUBSCRIBE を受理したとき、Track Alias を PUBLISH の固定値から採番する代わりに `next_peer_alias` カウンタ (PUBLISH の固定値 0 / 1 / 2 の次から) で購読ごとに一意な alias を採番して SUBSCRIBE_OK に載せる (draft-ietf-moq-transport-23 §3.1 の "A publisher MAY assign the same or different Track Aliases to these subscriptions." / 同一 (track_alias, group_id, subgroup_id) の並行 stream を避ける §11.3 の SHOULD NOT)。`subscribe_ok_properties` を track 種別 (新設 `PublishedTrack`) を明示的に受け取る形に変え、alias による種別判定を除去した。受理結果を新設の `AcceptedPeerSubscribe` (request_id / track / alias) として呼び出し元へ返す。
+- 受信 SUBSCRIBE の購読の送出状態を新設の `PeerSubscription` (request_id / track / alias / writer / audio_config_sent / ended) で管理する。映像は Group 境界で PUBLISH 購読の writer と同じく閉じて開き直し、次の Group (キーフレーム) の先頭から配信する (Group の途中で受理した購読は次の Group から届く)。各 Object は PUBLISH 購読の writer に加えて各受信 SUBSCRIBE の writer にも書く (§3.1 の MUST)。Object ID は writer を Group 境界で開き直すため PUBLISH 購読と同じ系列に保たれる。フィルタと `PAUSED=1` は Session が subscription ごとに評価する設計 (`send_subgroup_object` の `object_passes_filters`) を採用した (README 制限の追加は不要)。
+- 音声は Audio Config を購読ごとの最初の Object に付与する (`audio_config_sent` を購読ごとに保持)。datagram モードの購読は Object ごとに `DatagramWriter` を作り、subgroup モードの購読は PUBLISH 側と同じ 1 object = 1 stream で送る。`media_cache` への insert と送信統計 (`record_audio_send`) は PUBLISH 購読の `Pass` を基準に従来どおり 1 Object につき 1 回とする。
+- カタログは受理した時点で現在のカタログ Object を新しい Group で送り直し (`republish_catalog_at_next_group`)、以後の republish ごとに受信 SUBSCRIBE の購読にも同じ Object を書く (`republish_catalog_at_group` を拡張)。`catalog_json` は受信 SUBSCRIBE の writer にも同じ Object を送るための経路として使う。
+- 終端検出は tick で `subscription_track_name(request_id)` が `None` になった購読を送出一覧から除く (writer の finish と `ended` 設定)。
+- PUBLISH_DONE: run 終了時の後始末で受信 SUBSCRIBE の購読の writer を閉じ (`finish`)、`PUBLISH_DONE(GOING_AWAY)` を送る (§6.4.2.2 の MUST / §9.9 の MUST NOT)。終端済み (`ended`) の購読には送らない。GOAWAY 移行時も同じ処理を移行分岐に入れ、旧 session での送信を `shutdown_old_session` に `peer_request_ids` として渡す。Session が open stream があると拒否するため、PUBLISH_DONE の前に writer を閉じる順序を保証する。
+- フィルタ付き・`PAUSED=1` の受信 SUBSCRIBE は `object_passes_filters` で Object をスキップする設計としたため、明示的な拒否 (`REQUEST_NOT_SUPPORTED`) と README 制限は行わない。
+- テスト: session 層の送出 API の挙動を固定する単体テスト `tests/test_session/peer_subscribe_serving.rs` を新規追加した (受信 SUBSCRIBE 購読への subgroup 送出 + Stream Count 1 の PUBLISH_DONE 成功 / datagram 送出 / open stream 残置時の PUBLISH_DONE 拒否)。
