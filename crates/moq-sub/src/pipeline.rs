@@ -786,7 +786,8 @@ use tokio_moq::RetryPolicy;
 use tokio_moq::Transport;
 use tokio_moq::error::TransportError;
 use tokio_moq::error::{
-    data_stream_termination_code, normalize_publish_done_code, session_error_code,
+    PUBLISH_DONE_GOING_AWAY, PUBLISH_DONE_TRACK_ENDED, data_stream_termination_code,
+    normalize_publish_done_code, session_error_code,
 };
 use tokio_moq::moqt_client::{
     ClientEvent, DataPlaneHandle, FetchHeaderRegistration, FetchHeaderResolution, MoqtClient,
@@ -852,6 +853,39 @@ async fn close_session(client: &mut MoqtClient, termination: SessionError) {
 /// GOAWAY は subscription state に影響しないため、この条件には含めない。
 fn should_stop_sending(peer_ended: bool, session_terminated: bool) -> bool {
     !peer_ended && !session_terminated
+}
+
+/// shutdown 時の STOP_SENDING 対象を判定する
+///
+/// 対象は「まだ active な購読」のみである。PUBLISH_DONE を受けた購読
+/// (`active_requests` から外れた request id) と、`video_request_id` などを参照できても
+/// 終端済みで active でない購読は、`Session::stop_sending` が Terminated を拒否するため
+/// 対象外にする (0100 型の警告を再発させない)。全部 media track が恒久終了して
+/// `peer_ended` を立てる終了経路では `should_stop_sending` が偽になるため、外側の
+/// 全体ゲートで送らない。残った catalog は session close で終わる。
+fn stop_sending_targets(
+    video_request_id: Option<u64>,
+    audio_request_id: Option<u64>,
+    catalog_request_id: Option<u64>,
+    active_requests: &HashSet<u64>,
+) -> Vec<(TrackKind, u64)> {
+    let mut targets = Vec::new();
+    if let Some(rid) = video_request_id
+        && active_requests.contains(&rid)
+    {
+        targets.push((TrackKind::Video, rid));
+    }
+    if let Some(rid) = audio_request_id
+        && active_requests.contains(&rid)
+    {
+        targets.push((TrackKind::Audio, rid));
+    }
+    if let Some(rid) = catalog_request_id
+        && active_requests.contains(&rid)
+    {
+        targets.push((TrackKind::Catalog, rid));
+    }
+    targets
 }
 
 /// 正常終了の後始末で GOAWAY と正常 close (`close(0, "")`) を送るか
@@ -1122,7 +1156,7 @@ fn spawn_stream_task(
 }
 
 /// トラック種別 (data stream 処理で使用)
-#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+#[derive(PartialEq, Eq, Debug, Clone, Copy, Hash)]
 enum TrackKind {
     Video,
     Audio,
@@ -1135,11 +1169,39 @@ enum TrackKind {
     Catalog,
 }
 
+/// PUBLISH_DONE の status code から決める購読の disposition
+///
+/// draft-ietf-moq-transport-23 §12.4 (Publish Done Codes)。`TRACK_ENDED` (0x2) は
+/// publisher 側 track の正常終端、`GOING_AWAY` (0x4) は session 移行に伴う終端を示し、
+/// それ以外 (未知 code を含む) はエラーの終端である。未知 code は §13 (Grease) の MUST
+/// により INTERNAL_ERROR 相当に正規化され、分類もエラーになる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishDoneDisposition {
+    TrackEnded,
+    GoingAway,
+    Error,
+}
+
+/// status code から [`PublishDoneDisposition`] を決める
+///
+/// 呼び出し側はログ表示のために `normalize_publish_done_code` を通すが、分類結果には
+/// 影響しない (未知 code はどのみちエラーになる)。本関数内では正規化しない。
+fn publish_done_disposition(status_code: u64) -> PublishDoneDisposition {
+    match status_code {
+        PUBLISH_DONE_TRACK_ENDED => PublishDoneDisposition::TrackEnded,
+        PUBLISH_DONE_GOING_AWAY => PublishDoneDisposition::GoingAway,
+        _ => PublishDoneDisposition::Error,
+    }
+}
+
 /// 移行先の session で張り直す購読の指定
+///
+/// catalog は PUBLISH_DONE で恒久終了した場合 (最後の `catalog_state` を使う場合) は
+/// `None` になる。
 #[derive(Clone)]
 struct ResubscribePlan {
-    /// catalog track の namespace
-    catalog_namespace: TrackNamespace,
+    /// catalog track の namespace (購読する場合)
+    catalog_namespace: Option<TrackNamespace>,
     /// 映像トラック (購読する場合)
     video: Option<SubscribeTarget>,
     /// 音声トラック (購読する場合)
@@ -1156,9 +1218,12 @@ struct SubscribeTarget {
 }
 
 /// 張り直した購読の結果
+///
+/// catalog は `plan.catalog_namespace` が `None` (PUBLISH_DONE で恒久終了した場合) の
+/// 場合は `None` になり、最後の `catalog_state` を使う。
 struct Resubscribed {
-    /// catalog の購読
-    catalog: SubscribeResult,
+    /// catalog の購読 (購読する場合)
+    catalog: Option<SubscribeResult>,
     /// 映像の購読 (購読する場合)
     video: Option<SubscribeResult>,
     /// 音声の購読 (購読する場合)
@@ -1168,6 +1233,121 @@ struct Resubscribed {
     /// Request ID は session ごとに払い出されるため、旧 session の対応表は移行先では
     /// 使えない。移行に成功した時点でこの表へ差し替える
     fetch_targets: HashMap<u64, FetchTarget>,
+}
+
+/// GOAWAY による移行開始時の plan 組み立てと、恒久終了扱いにする終了待ち entry の列挙
+///
+/// `base` は起動時の購読指定である。plan は次の規則で構成する。
+///
+/// - `permanently_ended_tracks` に含まれる track (cleanup 完了済みの恒久終了) は
+///   plan から除外する。catalog が恒久終了した場合は catalog の購読も張り直さず、
+///   最後の `catalog_state` を使う (`ResubscribePlan.catalog_namespace` を `None` にする)
+/// - 終了待ち entry (`pending`) の disposition も参照する。`TrackEnded` / `Error` の
+///   entry は plan から除外し、返り値の `resolve_as_ended` に載せて呼び出し側が
+///   `permanently_ended_tracks` へ移して entry を解消させる (移行開始から cleanup 完了まで
+///   の窓で plan に載せないため)。`GoingAway` の entry は plan に含める (移行先で張り
+///   直すため; base は恒久終了でない限り plan に載っている)。`GoingAway` の entry の
+///   解消は移行成功時に行う
+///
+/// draft-ietf-moq-transport-23 §12.4 の status code による track の恒久終了を移行経路で
+/// 侵入させないための規則である。
+fn plan_for_migration(
+    base: &ResubscribePlan,
+    permanently_ended_tracks: &HashSet<TrackKind>,
+    pending: &HashMap<u64, (TrackKind, PublishDoneDisposition)>,
+) -> (ResubscribePlan, Vec<(u64, TrackKind)>) {
+    // cleanup 完了済みの恒久終了と、終了待ち entry の TrackEnded / Error を plan から
+    // 外す対象として集める
+    let mut exclude_kinds: HashSet<TrackKind> = HashSet::new();
+    let mut resolve_as_ended: Vec<(u64, TrackKind)> = Vec::new();
+    for kind in permanently_ended_tracks {
+        exclude_kinds.insert(*kind);
+    }
+    for (request_id, (kind, disposition)) in pending {
+        match disposition {
+            PublishDoneDisposition::TrackEnded | PublishDoneDisposition::Error => {
+                // 新たに恒久終了扱いにする track (既に恒久終了済みなら 2 つ目以降の
+                // PUBLISH_DONE で解消だけ起こる) を解消対象に載せる。cleanup 完了を
+                // 待たずに plan から外す
+                exclude_kinds.insert(*kind);
+                resolve_as_ended.push((*request_id, *kind));
+            }
+            PublishDoneDisposition::GoingAway => {
+                // plan に含める (base が恒久終了でなければ載る)
+            }
+        }
+    }
+    let plan = ResubscribePlan {
+        catalog_namespace: if exclude_kinds.contains(&TrackKind::Catalog) {
+            None
+        } else {
+            base.catalog_namespace.clone()
+        },
+        video: if exclude_kinds.contains(&TrackKind::Video) {
+            None
+        } else {
+            base.video.clone()
+        },
+        audio: if exclude_kinds.contains(&TrackKind::Audio) {
+            None
+        } else {
+            base.audio.clone()
+        },
+    };
+    (plan, resolve_as_ended)
+}
+
+/// request stream の GOAWAY を受けた request の再発行の可否
+///
+/// 終端済み購読 (終了待ち entry あり / tick 解消済み) が request stream の GOAWAY を後着
+/// させたときの判定を 1 か所にまとめる (`publish_done_pending` が tick で空になった後に
+/// 判定しても状態が崩れないよう、`permanently_ended_tracks` も参照する)。
+///
+/// - `permanently_ended_tracks` に含まれる track は恒久終了したため再発行しない
+///   (`None` を返す)
+/// - 終了待ち entry の disposition が `TrackEnded` / `Error` の request は恒久終了のため
+///   再発行しない。entry は解消しない (cleanup 経路と後続の plan 組み立ての disposition
+///   参照を維持する)
+/// - 終了待ち entry の disposition が `GoingAway` の request と、entry が無い request
+///   (Established または tick 解消済みの移行待ち) は再発行する
+fn reissue_request_target(
+    kind: TrackKind,
+    pending: Option<PublishDoneDisposition>,
+    permanently_ended_tracks: &HashSet<TrackKind>,
+) -> Option<TrackKind> {
+    if permanently_ended_tracks.contains(&kind) {
+        return None;
+    }
+    match pending {
+        Some(PublishDoneDisposition::TrackEnded) | Some(PublishDoneDisposition::Error) => None,
+        Some(PublishDoneDisposition::GoingAway) | None => Some(kind),
+    }
+}
+
+/// request の再発行の前に STOP_SENDING を送るか
+///
+/// `Session::stop_sending` は Terminated を拒否するため、PUBLISH_DONE 済みの購読 (終了待ち
+/// entry が残っている場合) と、tick で解消済みの移行待ち (`migration_pending_tracks` に
+/// 載っている kind) には送らない (0100 型の警告を再発させない)。Established の通常
+/// 再発行では送る。`permanently_ended_tracks` に含まれる track は再発行しないため
+/// 判定対象外である (安全側として送らない)。
+fn reissue_send_stop_sending(
+    pending: Option<PublishDoneDisposition>,
+    permanently_ended_tracks: &HashSet<TrackKind>,
+    migration_pending_tracks: &HashSet<TrackKind>,
+    kind: TrackKind,
+) -> bool {
+    if permanently_ended_tracks.contains(&kind) {
+        return false;
+    }
+    // 移行待ち (tick 解消済み) の subscription は PUBLISH_DONE 受信時点で Terminated に
+    // 遷移しているため、送っても拒否される
+    match pending {
+        Some(PublishDoneDisposition::TrackEnded) | Some(PublishDoneDisposition::Error) => false,
+        Some(PublishDoneDisposition::GoingAway) => false,
+        None if migration_pending_tracks.contains(&kind) => false,
+        None => true,
+    }
 }
 
 /// GOAWAY または transport drain による再購読の経路
@@ -1318,28 +1498,39 @@ fn record_last_location(
 ///
 /// track alias は peer が SUBSCRIBE_OK で決めるため、起動時と同じ値になる保証はない。
 /// 返った alias で `track_map` を更新するのは呼び出し側の責務である。
+///
+/// catalog の購読は `plan.catalog_namespace` が `None` の場合は張り直さない
+/// (PUBLISH_DONE で catalog が恒久終了した場合は、最後の `catalog_state` を使う)。
 async fn resubscribe_tracks(
     client: &mut MoqtClient,
     plan: &ResubscribePlan,
     last_locations: &LastReceivedLocations,
 ) -> Result<Resubscribed> {
-    let catalog = client
-        .subscribe_track_with_parameters(
-            plan.catalog_namespace.clone(),
-            MSF_CATALOG_TRACK_NAME.to_vec(),
-            catalog_subscribe_parameters(),
-        )
-        .await?;
-    tracing::info!(
-        "Resubscribed to catalog track: alias={}, request_id={}",
-        catalog.track_alias,
-        catalog.request_id,
-    );
+    let catalog = match &plan.catalog_namespace {
+        Some(namespace) => {
+            let sub = client
+                .subscribe_track_with_parameters(
+                    namespace.clone(),
+                    MSF_CATALOG_TRACK_NAME.to_vec(),
+                    catalog_subscribe_parameters(),
+                )
+                .await?;
+            tracing::info!(
+                "Resubscribed to catalog track: alias={}, request_id={}",
+                sub.track_alias,
+                sub.request_id,
+            );
+            Some(sub)
+        }
+        None => None,
+    };
 
     let mut fetch_targets: HashMap<u64, FetchTarget> = HashMap::new();
     // catalog 購読の fill fetch stream をカタログとして適用するため、Request ID を登録する
     // (移行中に更新された catalog が fill の完全な catalog で届く)
-    fetch_targets.insert(catalog.request_id, FetchTarget::Catalog);
+    if let Some(sub) = &catalog {
+        fetch_targets.insert(sub.request_id, FetchTarget::Catalog);
+    }
     let video = match &plan.video {
         Some(target) => {
             let sub = client
@@ -1597,11 +1788,14 @@ fn same_session_url(a: &tokio_moq::ServerUrl, b: &tokio_moq::ServerUrl) -> bool 
 /// 呼び出し側は何もしない。
 fn goaway_request_kind(
     request_id: u64,
-    catalog_request_id: u64,
+    catalog_request_id: Option<u64>,
     video_request_id: Option<u64>,
     audio_request_id: Option<u64>,
 ) -> Option<TrackKind> {
-    if request_id == catalog_request_id {
+    // catalog が既に恒久終了 (`catalog_request_id = None`) の場合は照合しない
+    // (移行先で media の request id が 0 から採番され、旧 session の catalog request id
+    // 0 と衝突するため)
+    if catalog_request_id == Some(request_id) {
         return Some(TrackKind::Catalog);
     }
     if video_request_id == Some(request_id) {
@@ -1937,20 +2131,23 @@ struct ReissuedRequest {
 /// 併走が必要になるため行わない (呼び出し側が判定する)。
 ///
 /// 旧 request stream は STOP_SENDING で閉じる (§6.4.2.3 (Request Cancellation and
-/// Rejection))。購読の張り直しは移行時と同じ手順 (映像は SUBSCRIBER_PRIORITY の
-/// REQUEST_UPDATE と直近 Group の FETCH、音声は SUBSCRIBE だけ) で行う。
-/// draft 由来の仕様であり、将来変更される可能性がある。
+/// Rejection))。ただし発行済みの購読が既に Terminated の場合 (PUBLISH_DONE の
+/// `GOING_AWAY` 受信済みの再発行) は送らない (`Session::stop_sending` は Terminated を
+/// 拒否し、0100 型の警告が出るため)。購読の張り直しは移行時と同じ手順 (映像は
+/// SUBSCRIBER_PRIORITY の REQUEST_UPDATE と直近 Group の FETCH、音声は SUBSCRIBE だけ)
+/// で行う。draft 由来の仕様であり、将来変更される可能性がある。
 async fn reissue_request(
     client: &mut MoqtClient,
     kind: TrackKind,
     request_id: u64,
     plan: &ResubscribePlan,
     last_locations: &LastReceivedLocations,
+    send_stop_sending: bool,
 ) -> Result<ReissuedRequest> {
     // 旧 request stream を閉じる。購読は Terminated へ遷移する
     // (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))。
     // peer が既に終端させていた場合は状態機械に拒否されるが、その場合も再発行は続ける
-    if let Err(e) = client.stop_sending(request_id).await {
+    if send_stop_sending && let Err(e) = client.stop_sending(request_id).await {
         tracing::warn!(
             "Failed to send STOP_SENDING for request {request_id} before re-issuing it: {e}"
         );
@@ -1958,9 +2155,14 @@ async fn reissue_request(
     let mut fetch_targets: HashMap<u64, FetchTarget> = HashMap::new();
     let subscription = match kind {
         TrackKind::Catalog => {
+            let Some(namespace) = &plan.catalog_namespace else {
+                return Err(Error::Other(
+                    "the catalog subscription is not configured".to_string(),
+                ));
+            };
             let sub = client
                 .subscribe_track_with_parameters(
-                    plan.catalog_namespace.clone(),
+                    namespace.clone(),
                     MSF_CATALOG_TRACK_NAME.to_vec(),
                     catalog_subscribe_parameters(),
                 )
@@ -2133,6 +2335,29 @@ pub async fn run(
         catalog_sub.largest_object,
     );
 
+    // 現在受信前提の購読の request id。PUBLISH_DONE を受けた request はここから外し、
+    // shutdown 時の STOP_SENDING 対象を絞る
+    let mut active_requests: HashSet<u64> = HashSet::new();
+    active_requests.insert(catalog_sub.request_id);
+    // PUBLISH_DONE で Terminated になった購読の終了待ち
+    //
+    // draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE) は購読単位の終端であり、
+    // §12.4 (Publish Done Codes) は status ごとに意味が異なる。1 track の終了で
+    // `peer_ended` を立ててパイプライン全体を終了させるのではなく、終了待ちの
+    // request を Session の cleanup_ready の完了まで追い、cleanup できた track だけを
+    // 終了させる
+    let mut publish_done_pending: HashMap<u64, (TrackKind, PublishDoneDisposition)> =
+        HashMap::new();
+    // 恒久的に終了した track (media に加えて catalog も) と、移行待ち
+    // (GOING_AWAY) の track。全 media 終了の判定は video / audio のみを見るため、
+    // catalog がこの集合に載っても media の終了判定には影響しない
+    //
+    // 起動時の購読 (catalog / video / audio) は、購読を確立したときに active_requests へ
+    // 登録する。reissue / session 移行の経路は張り直した new request_id を登録する。reissue
+    // 成功時 / session 移行成功時に `migration_pending_tracks` は解除される
+    let mut permanently_ended_tracks: HashSet<TrackKind> = HashSet::new();
+    let mut migration_pending_tracks: HashSet<TrackKind> = HashSet::new();
+
     // fill fetch stream と購読で届くカタログを読み、MSF の配置規則で適用する
     let catalog_resolution = receive_catalog(
         &mut recv_acceptor,
@@ -2267,6 +2492,7 @@ pub async fn run(
         track_map.insert(video_sub.track_alias, TrackKind::Video);
         video_alias = Some(video_sub.track_alias);
         video_request_id = Some(video_sub.request_id);
+        active_requests.insert(video_sub.request_id);
         video_largest_object = video_sub.largest_object;
 
         // REQUEST_UPDATE で video subscription の subscriber priority を変更するサンプル
@@ -2339,6 +2565,7 @@ pub async fn run(
         track_map.insert(audio_sub.track_alias, TrackKind::Audio);
         audio_alias = Some(audio_sub.track_alias);
         audio_request_id = Some(audio_sub.request_id);
+        active_requests.insert(audio_sub.request_id);
         audio_largest_object = audio_sub.largest_object;
 
         let channels = match a.channel_config.as_str() {
@@ -2360,9 +2587,11 @@ pub async fn run(
     // 移行 (GOAWAY) で購読を張り直すための指定と、現在の session の Request ID / alias
     //
     // catalog は移行時に読み直さない。購読済みの指定をそのまま使えば、移行先の session で
-    // 届く Object から同じ `CatalogState` が再び更新される
+    // 届く Object から同じ `CatalogState` が再び更新される。catalog が PUBLISH_DONE で
+    // 恒久終了した場合は catalog_namespace を `None` にして張り直さない
+    // (`permanently_ended_tracks` は本時点では空のため初期は購読を継続する)
     let resubscribe_plan = ResubscribePlan {
-        catalog_namespace: catalog_namespace_for_migration,
+        catalog_namespace: Some(catalog_namespace_for_migration),
         // `subscribe_video` / `subscribe_audio` は catalog から得た track がある場合だけ真に
         // なるため、ここで `Option` の条件と購読の有無が一致する
         video: video_info
@@ -2380,8 +2609,12 @@ pub async fn run(
                 track_name: info.track_name.as_bytes().to_vec(),
             }),
     };
-    let mut catalog_request_id = catalog_sub.request_id;
-    let mut catalog_alias = catalog_sub.track_alias;
+    // 現在の catalog 購読の request id と alias。恒久終了後に session 移行で張り直さない
+    // 場合は旧 session の値が新 session の request id (0 から採番) と衝突するため、
+    // `None` にして照合対象から外す (media の `video_request_id` / `audio_request_id` と
+    // 同じ `Option` の契約にする)
+    let mut catalog_request_id: Option<u64> = Some(catalog_sub.request_id);
+    let mut catalog_alias: Option<u64> = Some(catalog_sub.track_alias);
 
     // 音声は 1 object = 1 subgroup stream で届く (LOC draft-ietf-moq-loc-05 §4.1)。
     // stream ごとにデコーダを作り直すと 20 ms ごとにデコーダ状態が失われ、
@@ -2953,7 +3186,24 @@ pub async fn run(
                                                 url: target.url,
                                                 transport: config.transport,
                                                 cert: config.cert.clone(),
-                                                plan: resubscribe_plan.clone(),
+                                                plan: {
+                                                    let (plan, resolve_as_ended) =
+                                                        plan_for_migration(
+                                                            &resubscribe_plan,
+                                                            &permanently_ended_tracks,
+                                                            &publish_done_pending,
+                                                        );
+                                                    for (request_id, kind) in
+                                                        resolve_as_ended
+                                                    {
+                                                        // 移行開始時点で恒久終了扱いに切り替える
+                                                        // (cleanup 完了を待たずに plan から外す)
+                                                        publish_done_pending
+                                                            .remove(&request_id);
+                                                        permanently_ended_tracks.insert(kind);
+                                                    }
+                                                    plan
+                                                },
                                                 last_locations,
                                                 deadline,
                                             };
@@ -2999,28 +3249,55 @@ pub async fn run(
                                                 );
                                                 return Ok(false);
                                             };
-                                            tracing::info!(
-                                                "Re-issuing the {kind:?} request after a request-scoped GOAWAY: request_id={request_id}"
-                                            );
-                                            let last_locations = *last_received_locations
-                                                .lock()
-                                                .expect(
-                                                    "last locations lock is not poisoned",
-                                                );
-                                            match reissue_request(
-                                                &mut client,
-                                                kind,
-                                                request_id,
-                                                &resubscribe_plan,
-                                                &last_locations,
-                                            )
-                                            .await
+                                            // 終端済み購読の request stream GOAWAY の扱いを 1 か所で
+                                            // 決める (`reissue_request_target` 参照)。tick の
+                                            // entry 解消と後着 GOAWAY の順序で
+                                            // `publish_done_pending` が空になっても、
+                                            // `permanently_ended_tracks` / `migration_pending_tracks`
+                                            // の状態で判定が崩れない
+                                            if let Some(kind) =
+                                                reissue_request_target(
+                                                    kind,
+                                                    publish_done_pending
+                                                        .get(&request_id)
+                                                        .map(|(_, disposition)| *disposition),
+                                                    &permanently_ended_tracks,
+                                                )
                                             {
+                                                tracing::info!(
+                                                    "Re-issuing the {kind:?} request after a request-scoped GOAWAY: request_id={request_id}"
+                                                );
+                                                let last_locations = *last_received_locations
+                                                    .lock()
+                                                    .expect(
+                                                        "last locations lock is not poisoned",
+                                                    );
+                                                // PUBLISH_DONE 済みの購読 (GoingAway の entry あり)
+                                                // は `Session::stop_sending` が Terminated を拒否する
+                                                // ため送らない (tick 解消済みの移行待ちも送らない)
+                                                let send_stop_sending = reissue_send_stop_sending(
+                                                    publish_done_pending
+                                                        .get(&request_id)
+                                                        .map(|(_, disposition)| *disposition),
+                                                    &permanently_ended_tracks,
+                                                    &migration_pending_tracks,
+                                                    kind,
+                                                );
+                                                match reissue_request(
+                                                    &mut client,
+                                                    kind,
+                                                    request_id,
+                                                    &resubscribe_plan,
+                                                    &last_locations,
+                                                    send_stop_sending,
+                                                )
+                                                .await
+                                                {
                                                 Ok(reissued) => {
                                                     // 旧 alias を外して新しい alias を登録する
                                                     // (alias は peer が決めるため変わりうる)
                                                     let old_alias = match kind {
-                                                        TrackKind::Catalog => Some(catalog_alias),
+                                                        TrackKind::Catalog => catalog_alias,
                                                         TrackKind::Video => video_alias,
                                                         TrackKind::Audio => audio_alias,
                                                     };
@@ -3040,8 +3317,8 @@ pub async fn run(
                                                     match kind {
                                                         TrackKind::Catalog => {
                                                             catalog_request_id =
-                                                                reissued.subscription.request_id;
-                                                            catalog_alias = new_alias;
+                                                                Some(reissued.subscription.request_id);
+                                                            catalog_alias = Some(new_alias);
                                                         }
                                                         TrackKind::Video => {
                                                             video_request_id = Some(
@@ -3129,6 +3406,14 @@ pub async fn run(
                                                         data_plane.clone(),
                                                         datagram_map,
                                                     ));
+                                                    // 再発行後の request の active と pending 管理
+                                                    active_requests.remove(&request_id);
+                                                    active_requests
+                                                        .insert(reissued.subscription.request_id);
+                                                    publish_done_pending.remove(&request_id);
+                                                    // 移行待ち (GoingAway 済み) の track は再発行で
+                                                    // active に戻るため、集合から外す
+                                                    migration_pending_tracks.remove(&kind);
                                                     tracing::info!(
                                                         "Re-issued the {kind:?} request: alias={new_alias}, request_id={}",
                                                         reissued.subscription.request_id,
@@ -3137,11 +3422,15 @@ pub async fn run(
                                                 Err(e) => {
                                                     // 再発行に失敗しても session は維持する
                                                     // (当該購読だけが失われ、live の受信は他の
-                                                    // 購読で続く)
+                                                    // 購読で続く)。旧 request の購読は再発行の前の
+                                                    // STOP_SENDING 送信で終端済みであるため、
+                                                    // shutdown 時の STOP_SENDING 対象から外す
+                                                    active_requests.remove(&request_id);
                                                     tracing::warn!(
                                                         "Failed to re-issue request {request_id} after a request-scoped GOAWAY: {e}"
                                                     );
                                                 }
+                                            }
                                             }
                                             Ok(false)
                                         }
@@ -3157,15 +3446,96 @@ pub async fn run(
                             }
                         }
                         Some(ClientEvent::Session(SessionEvent::PublishDoneReceived {
+                            request_id,
                             status_code,
                             stream_count,
                             ..
                         })) => {
-                            tracing::info!(
-                                "Received PUBLISH_DONE (status_code={status_code},                                  normalized_status_code={}, stream_count={stream_count})",
-                                normalize_publish_done_code(status_code)
+                            // draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE) はその
+                            // subscription の終端であり、§12.4 (Publish Done Codes) は
+                            // status ごとに意味が異なる。1 track の終了でパイプライン全体を
+                            // 停止させない。Session は終端済み subscription を drain timer
+                            // と Stream Count の完了条件を持って回収するため、example 側は
+                            // それを待ってから track を終端させる
+                            let disposition = publish_done_disposition(
+                                normalize_publish_done_code(status_code),
                             );
-                            Ok(true)
+                            tracing::info!(
+                                "Received PUBLISH_DONE (status_code={status_code}, \
+                                 normalized_status_code={}, stream_count={stream_count}, \
+                                 disposition={:?}, request_id={request_id})",
+                                normalize_publish_done_code(status_code),
+                                disposition,
+                            );
+                            match goaway_request_kind(
+                                request_id,
+                                catalog_request_id,
+                                video_request_id,
+                                audio_request_id,
+                            ) {
+                                Some(kind) => {
+                                    // 終了待ちの request を Session の cleanup_ready の
+                                    // 完了まで追う。shutdown 時の STOP_SENDING はこの
+                                    // request に送らないため active_requests から外す
+                                    active_requests.remove(&request_id);
+                                    match publish_done_pending.get(&request_id) {
+                                        Some((_, existing)) if *existing == disposition => {
+                                            // 同じ request に重複した PUBLISH_DONE。
+                                            // 既存の disposition は維持する
+                                        }
+                                        Some((_, existing)) => {
+                                            // disposition が変わった (通常は起こらない)。
+                                            // 既存の disposition と異なる PUBLISH_DONE であった
+                                            // 場合は新しい disposition で上書きする
+                                            tracing::warn!(
+                                                "PUBLISH_DONE disposition conflicts with a pending PUBLISH_DONE: request_id={request_id}, existing={existing:?}, new={:?}",
+                                                disposition,
+                                            );
+                                            publish_done_pending.insert(
+                                                request_id,
+                                                (kind, disposition),
+                                            );
+                                        }
+                                        None => {
+                                            publish_done_pending.insert(
+                                                request_id,
+                                                (kind, disposition),
+                                            );
+                                        }
+                                    }
+                                    if let Some((_, disposition)) =
+                                        publish_done_pending.get(&request_id)
+                                    {
+                                        let message = match disposition {
+                                            PublishDoneDisposition::Error => {
+                                                "error status; the track will end after drain".to_string()
+                                            }
+                                            PublishDoneDisposition::TrackEnded => {
+                                                "the track ended".to_string()
+                                            }
+                                            PublishDoneDisposition::GoingAway => {
+                                                "the session is going away; the track will be re-established after a migration".to_string()
+                                            }
+                                        };
+                                        // エラーだけを warn にする (正常終端と移行待ちは info)。
+                                        // PUBLISH_DONE 送信直後に GOAWAY が届くことがあるため、
+                                        // PUBLISH_DONE を移行のトリガーにしない
+                                        if PublishDoneDisposition::Error == *disposition {
+                                            tracing::warn!("PUBLISH_DONE error: {message}");
+                                        } else {
+                                            tracing::info!("PUBLISH_DONE: {message}");
+                                        }
+                                    }
+                                }
+                                // 移行で request_id は session ごとに変わりうるため、現在の
+                                // request_id に対応しないものは無視する。
+                                None => {
+                                    tracing::debug!(
+                                        "Ignoring a PUBLISH_DONE for an unknown request: request_id={request_id}"
+                                    );
+                                }
+                            }
+                            Ok(false)
                         }
                         Some(ClientEvent::Session(SessionEvent::FetchOkReceived {
                             request_id,
@@ -3422,10 +3792,9 @@ pub async fn run(
                                 .write()
                                 .expect("track_map lock must not be poisoned");
                             map.clear();
-                            map.insert(
-                                outcome.resubscribed.catalog.track_alias,
-                                TrackKind::Catalog,
-                            );
+                            if let Some(ref sub) = outcome.resubscribed.catalog {
+                                map.insert(sub.track_alias, TrackKind::Catalog);
+                            }
                             if let Some(ref sub) = outcome.resubscribed.video {
                                 map.insert(sub.track_alias, TrackKind::Video);
                             }
@@ -3446,15 +3815,14 @@ pub async fn run(
                         ));
                         // 旧 session は STOP_SENDING を送ってから NO_ERROR で閉じる (§6.6.1 /
                         // §9.2)。GOAWAY の Timeout は待たず、main ループを塞がないよう別タスクで
-                        // 行う
-                        let old_request_ids: Vec<u64> = [
-                            Some(catalog_request_id),
-                            video_request_id,
-                            audio_request_id,
-                        ]
-                        .into_iter()
-                        .flatten()
-                        .collect();
+                        // 行う。PUBLISH_DONE で Terminated になった購読と Session が回収済み
+                        // の購読は STOP_SENDING を送らない (active_requests から外れている)
+                        let old_request_ids: Vec<u64> =
+                            active_requests.iter().copied().collect();
+                        // 終了待ち entry は Session 入れ替えで request_id がすべて新しくなるため
+                        // 解消する (張り直した track と旧 request_id のどちらも、移行後の poll で
+                        // 誤って終了しない)
+                        publish_done_pending.clear();
                         let old_client = std::mem::replace(&mut client, outcome.client);
                         old_session_closers.push(spawn_old_session_close(
                             &task_monitor,
@@ -3466,8 +3834,16 @@ pub async fn run(
                         config.url = outcome.url;
                         recv_acceptor = outcome.recv_acceptor;
                         data_plane = outcome.data_plane;
-                        catalog_request_id = outcome.resubscribed.catalog.request_id;
-                        catalog_alias = outcome.resubscribed.catalog.track_alias;
+                        catalog_request_id = outcome
+                            .resubscribed
+                            .catalog
+                            .as_ref()
+                            .map(|sub| sub.request_id);
+                        catalog_alias = outcome
+                            .resubscribed
+                            .catalog
+                            .as_ref()
+                            .map(|sub| sub.track_alias);
                         video_request_id = outcome
                             .resubscribed
                             .video
@@ -3492,6 +3868,20 @@ pub async fn run(
                         // session ごとに払い出されるため、旧 session の表で移行先の FETCH 応答
                         // stream を振り分けることはできない
                         fetch_targets = outcome.resubscribed.fetch_targets;
+                        // 移行先の subscription を active 側に載せ替える
+                        active_requests.clear();
+                        if let Some(ref sub) = outcome.resubscribed.catalog {
+                            active_requests.insert(sub.request_id);
+                        }
+                        if let Some(ref sub) = outcome.resubscribed.video {
+                            active_requests.insert(sub.request_id);
+                        }
+                        if let Some(ref sub) = outcome.resubscribed.audio {
+                            active_requests.insert(sub.request_id);
+                        }
+                        // 移行先で張り直した media track は再開したため、移行待ちをクリアする
+                        // (恒久終了の track は維持する)
+                        migration_pending_tracks.clear();
                         wt_session_state_rx = new_wt_session_state;
                         tracing::info!(
                             "Migrated the session to {}",
@@ -3571,7 +3961,20 @@ pub async fn run(
                                         url: config.url.clone(),
                                         transport: config.transport,
                                         cert: config.cert.clone(),
-                                        plan: resubscribe_plan.clone(),
+                                        plan: {
+                                            let (plan, resolve_as_ended) = plan_for_migration(
+                                                &resubscribe_plan,
+                                                &permanently_ended_tracks,
+                                                &publish_done_pending,
+                                            );
+                                            for (request_id, kind) in resolve_as_ended {
+                                                // 移行開始時点で恒久終了扱いに切り替える
+                                                // (cleanup 完了を待たずに plan から外す)
+                                                publish_done_pending.remove(&request_id);
+                                                permanently_ended_tracks.insert(kind);
+                                            }
+                                            plan
+                                        },
                                         last_locations,
                                         deadline,
                                     };
@@ -3642,6 +4045,115 @@ pub async fn run(
                     &mut logged_video_boundary_objects,
                     video_before_boundary,
                 );
+
+                // PUBLISH_DONE で Terminated になった購読の cleanup 状態を 100 ms tick で
+                // 観測する。`Some(true)` (drain timer 満了または Stream Count 超過かつ open
+                // stream 0) または `None` (Session が回収済み) になった時点で track を終了させる
+                let mut ready_to_end: Vec<(u64, TrackKind, PublishDoneDisposition)> = Vec::new();
+                for (request_id, (kind, disposition)) in publish_done_pending.iter() {
+                    match client.subscription_cleanup_ready(*request_id) {
+                        Some(true) | None => {
+                            ready_to_end.push((*request_id, *kind, *disposition));
+                        }
+                        Some(false) => {
+                            // drain 中。late-arriving object を受信経路で処理して待つ
+                        }
+                    }
+                }
+                for (request_id, kind, disposition) in ready_to_end {
+                    publish_done_pending.remove(&request_id);
+                    let alias = match kind {
+                        TrackKind::Catalog => catalog_alias,
+                        TrackKind::Video => video_alias,
+                        TrackKind::Audio => audio_alias,
+                    };
+                    // track_map と datagram 受信タスクの alias 表の両方から該当 alias を
+                    // 除去する。catalog は fill fetch stream が Request ID で振り分けられる
+                    // ため `fetch_targets` からも除去する
+                    {
+                        let mut map = track_map
+                            .write()
+                            .expect("track_map lock must not be poisoned");
+                        if let Some(alias) = alias {
+                            map.remove(&alias);
+                        }
+                        let map_for_datagram = map.clone();
+                        let _ = datagram_session_tx.send((
+                            client.handle(),
+                            data_plane.clone(),
+                            Arc::new(map_for_datagram),
+                        ));
+                    }
+                    match kind {
+                        TrackKind::Catalog => {
+                            // fill fetch stream は Request ID で振り分けられるため、
+                            // 対応表から外す
+                            fetch_targets.remove(&request_id);
+                            // catalog も恒久終了の状態機械に乗せる (`TrackEnded` / `Error`
+                            // は恒久終了として記録し、移行先で購読し直さない。最後の
+                            // `catalog_state` を使う)。`GoingAway` は移行待ちとして
+                            // `migration_pending_tracks` に登録する (後着の request stream
+                            // GOAWAY で tick で解消済みの Terminated 済み購読へ STOP_SENDING
+                            // を送らないための記録。再発行成功時と session 移行成功時に集合から
+                            // 外れる。全 media 終了の判定は video / audio のみを見るため
+                            // catalog の登録は media の終了判定に影響しない)
+                            match disposition {
+                                PublishDoneDisposition::TrackEnded
+                                | PublishDoneDisposition::Error => {
+                                    permanently_ended_tracks.insert(kind);
+                                }
+                                PublishDoneDisposition::GoingAway => {
+                                    migration_pending_tracks.insert(kind);
+                                }
+                            }
+                            tracing::info!(
+                                "Catalog subscription ended by PUBLISH_DONE (disposition={:?}, request_id={request_id})",
+                                disposition,
+                            );
+                        }
+                        TrackKind::Video | TrackKind::Audio => match disposition {
+                            PublishDoneDisposition::TrackEnded
+                            | PublishDoneDisposition::Error => {
+                                permanently_ended_tracks.insert(kind);
+                                tracing::info!(
+                                    "Track ended permanently by PUBLISH_DONE: kind={kind:?}, \
+                                     request_id={request_id}"
+                                );
+                            }
+                            PublishDoneDisposition::GoingAway => {
+                                migration_pending_tracks.insert(kind);
+                                tracing::info!(
+                                    "Track pending migration by PUBLISH_DONE: kind={kind:?}, \
+                                     request_id={request_id}"
+                                );
+                            }
+                        },
+                    }
+                    // 全 media track が恒久的に終了し、移行待ちも無ければ pipeline を終える
+                    // (catalog だけ残っていても media が無ければ終了する。catalog の
+                    // 終了では media が終了した扱いにしない)
+                    if matches!(kind, TrackKind::Video | TrackKind::Audio) {
+                        let video_done = permanently_ended_tracks.contains(&TrackKind::Video);
+                        let audio_done = permanently_ended_tracks.contains(&TrackKind::Audio);
+                        let media_done = (video_done || !subscribe_video)
+                            && (audio_done || !subscribe_audio);
+                        // media の移行待ちのみを判定に使う (catalog が GoingAway で
+                        // `migration_pending_tracks` に載っていても、catalog の移行待ちは
+                        // media の終了判定に影響しない)
+                        let media_migration_pending = migration_pending_tracks
+                            .iter()
+                            .any(|kind| {
+                                matches!(kind, TrackKind::Video | TrackKind::Audio)
+                            });
+                        if media_done && !media_migration_pending {
+                            tracing::info!(
+                                "All media tracks ended permanently: ending the pipeline"
+                            );
+                            peer_ended = true;
+                            break 'main;
+                        }
+                    }
+                }
             }
             _ = shutdown_monitor.recv() => {
                 tracing::info!("Shutdown signal received");
@@ -3693,29 +4205,23 @@ pub async fn run(
     // GOAWAY 起因の停止に GOING_AWAY (§12.5) ではなく CANCELLED を使うのは、
     // tokio-moq の stop_sending API がコードを指定できないためである。
     if should_stop_sending(peer_ended, session_terminated) {
-        if let Some(rid) = video_request_id
-            && let Err(e) = client.stop_sending(rid).await
-        {
-            // `should_stop_sending` のガードにより、ここでは peer_ended / session_terminated は
-            // どちらも偽である (peer 起点の終了では送らず、その他の失敗だけがここに来る)
-            log_failure(
-                format_args!("Failed to send STOP_SENDING for video: {e}"),
-                is_connection_closed(&e),
-            );
-        }
-        if let Some(rid) = audio_request_id
-            && let Err(e) = client.stop_sending(rid).await
-        {
-            log_failure(
-                format_args!("Failed to send STOP_SENDING for audio: {e}"),
-                is_connection_closed(&e),
-            );
-        }
-        if let Err(e) = client.stop_sending(catalog_request_id).await {
-            log_failure(
-                format_args!("Failed to send STOP_SENDING for catalog: {e}"),
-                is_connection_closed(&e),
-            );
+        // 対象は「まだ active な購読」だけである ([`stop_sending_targets`] を参照)。PUBLISH
+        // DONE で Terminated になった購読と Session が回収済みの購読は拒否されるため、
+        // 0100 型の警告を出さない
+        for (kind, rid) in stop_sending_targets(
+            video_request_id,
+            audio_request_id,
+            catalog_request_id,
+            &active_requests,
+        ) {
+            if let Err(e) = client.stop_sending(rid).await {
+                // `should_stop_sending` のガードにより、ここでは peer_ended / session_terminated は
+                // どちらも偽である (peer 起点の終了では送らず、その他の失敗だけがここに来る)
+                log_failure(
+                    format_args!("Failed to send STOP_SENDING for {kind:?}: {e}"),
+                    is_connection_closed(&e),
+                );
+            }
         }
     }
 
@@ -7728,29 +8234,71 @@ mod tests {
     #[test]
     fn goaway_request_kind_matches_the_request_id() {
         assert_eq!(
-            goaway_request_kind(1, 1, Some(2), Some(3)),
+            goaway_request_kind(1, Some(1), Some(2), Some(3)),
             Some(TrackKind::Catalog),
             "catalog の Request ID を判定できること"
         );
         assert_eq!(
-            goaway_request_kind(2, 1, Some(2), Some(3)),
+            goaway_request_kind(2, Some(1), Some(2), Some(3)),
             Some(TrackKind::Video),
             "映像の Request ID を判定できること"
         );
         assert_eq!(
-            goaway_request_kind(3, 1, Some(2), Some(3)),
+            goaway_request_kind(3, Some(1), Some(2), Some(3)),
             Some(TrackKind::Audio),
             "音声の Request ID を判定できること"
         );
         assert_eq!(
-            goaway_request_kind(4, 1, Some(2), Some(3)),
+            goaway_request_kind(4, Some(1), Some(2), Some(3)),
             None,
             "未知の Request ID は判定できないこと"
         );
         assert_eq!(
-            goaway_request_kind(2, 1, None, None),
+            goaway_request_kind(2, Some(1), None, None),
             None,
             "購読していない track の Request ID は判定できないこと"
+        );
+        assert_eq!(
+            goaway_request_kind(0, None, Some(0), None),
+            Some(TrackKind::Video),
+            "catalog が恒久終了している場合は照合対象から外すこと (移行先で media request id 0 との衝突を防ぐ)"
+        );
+    }
+
+    /// PUBLISH_DONE の status code から disposition を判定すること
+    ///
+    /// draft-ietf-moq-transport-23 §12.4 (Publish Done Codes)。`TRACK_ENDED` (0x2) は
+    /// 正常終端、`GOING_AWAY` (0x4) は移行に伴う終端、それ以外はエラー終結である。
+    /// 未知 code は §13 (Grease) の MUST に従い INTERNAL_ERROR に正規化されるため、
+    /// 分類はエラーとなる (UNKNOWN code 単体の分類の上限は session library が担う)。
+    #[test]
+    fn publish_done_disposition_matches_the_status_code() {
+        assert_eq!(
+            publish_done_disposition(PUBLISH_DONE_TRACK_ENDED),
+            PublishDoneDisposition::TrackEnded,
+            "TRACK_ENDED は正常終端として扱うこと"
+        );
+        assert_eq!(
+            publish_done_disposition(PUBLISH_DONE_GOING_AWAY),
+            PublishDoneDisposition::GoingAway,
+            "GOING_AWAY は移行待ちとして扱うこと"
+        );
+        // その他の既知 code (INTERNAL_ERROR 0x0 / UNAUTHORIZED 0x1 / TOO_FAR_BEHIND 0x5 /
+        // EXPIRED 0x6 / EXPIRED_AUTH_TOKEN 0x7 / UPDATE_FAILED 0x8 / EXCESSIVE_LOAD 0x9 /
+        // MALFORMED_TRACK 0x12) はエラーとして扱う
+        for code in [0x0, 0x1, 0x5, 0x6, 0x7, 0x8, 0x9, 0x12] {
+            assert_eq!(
+                publish_done_disposition(code),
+                PublishDoneDisposition::Error,
+                "エラーの status code をエラー disposition にすること: code={code:#}"
+            );
+        }
+        // 未知 code は §13 (Grease) MUST で INTERNAL_ERROR (0x0) に正規化される。
+        // 呼び出し側は normalize_publish_done_code を先に通すため、分類はエラーになる
+        assert_eq!(
+            publish_done_disposition(normalize_publish_done_code(0x18)),
+            PublishDoneDisposition::Error,
+            "未知 code は INTERNAL_ERROR に正規化してエラー disposition にすること"
         );
     }
 
@@ -9118,6 +9666,227 @@ mod tests {
         assert!(
             !should_close_gracefully(true),
             "両方が終了した場合は GOAWAY と正常 close を送らないこと"
+        );
+    }
+
+    /// shutdown 時の STOP_SENDING 対象が active な購読に絞られること
+    ///
+    /// PUBLISH_DONE を受けた購読 (`active_requests` から外れた request id) と、request id
+    /// が残っていても active でない購読は対象外にする (library (`shiguredo_moqt`) の
+    /// `Session` は Terminated を拒否するため)。active な購読は送信対象に含める。
+    #[test]
+    fn stop_sending_targets_follow_active_requests() {
+        let mut active_requests = HashSet::new();
+        active_requests.insert(3);
+        active_requests.insert(5);
+
+        // active な request id (audio 5 / catalog 3) だけが対象になる。video 2 は active
+        // から外れている (PUBLISH_DONE を受けた購読)
+        let targets = stop_sending_targets(Some(2), Some(5), Some(3), &active_requests);
+        assert_eq!(
+            targets,
+            vec![(TrackKind::Audio, 5), (TrackKind::Catalog, 3)],
+            "active な購読だけを送信対象とすること"
+        );
+
+        // 全部の request id が active でなければ対象は空である (送らない)
+        let empty: HashSet<u64> = HashSet::new();
+        assert!(
+            stop_sending_targets(Some(2), Some(5), Some(3), &empty).is_empty(),
+            "active でない購読は対象外とすること"
+        );
+
+        // video / audio を購読していない場合 (request id が None) は対象に含まれない
+        let targets = stop_sending_targets(None, None, Some(3), &active_requests);
+        assert_eq!(
+            targets,
+            vec![(TrackKind::Catalog, 3)],
+            "購読していない track は対象外とすること"
+        );
+    }
+
+    /// 移行開始時の plan 組み立てと恒久終了化の対象が disposition を参照すること
+    ///
+    /// 終了待ち entry の `TrackEnded` / `Error` は plan から除外し (`permanently_ended_tracks`
+    /// へ移す対象として返す)、`GoingAway` の entry は plan に含める。
+    #[test]
+    fn plan_for_migration_follows_pending_dispositions() {
+        let base = ResubscribePlan {
+            catalog_namespace: Some(
+                TrackNamespace::new(vec![b"live".to_vec()]).expect("名前空間を作れること"),
+            ),
+            video: Some(SubscribeTarget {
+                namespace: TrackNamespace::new(vec![b"live".to_vec()])
+                    .expect("名前空間を作れること"),
+                track_name: b"video".to_vec(),
+            }),
+            audio: None,
+        };
+
+        // 終了待ちが無ければ base の plan がそのまま使われる
+        let empty: HashSet<TrackKind> = HashSet::new();
+        let pending: HashMap<u64, (TrackKind, PublishDoneDisposition)> = HashMap::new();
+        let (plan, resolve) = plan_for_migration(&base, &empty, &pending);
+        assert!(plan.catalog_namespace.is_some(), "catalog を含めること");
+        assert!(plan.video.is_some(), "video を含めること");
+        assert!(plan.audio.is_none(), "購読していない audio は含めないこと");
+        assert!(resolve.is_empty(), "解消対象が無いこと");
+
+        // video の PUBLISH_DONE(TRACK_ENDED) が終了待ちのまま移行が始まった場合:
+        // plan から video を外し、恒久終了化の対象として返す
+        let mut pending = HashMap::new();
+        pending.insert(2, (TrackKind::Video, PublishDoneDisposition::TrackEnded));
+        let (plan, resolve) = plan_for_migration(&base, &empty, &pending);
+        assert!(
+            plan.video.is_none(),
+            "恒久終了予定の video を plan から外すこと"
+        );
+        assert!(plan.catalog_namespace.is_some(), "catalog は維持すること");
+        assert_eq!(
+            resolve,
+            vec![(2, TrackKind::Video)],
+            "恒久終了化して entry を解消する対象として返すこと"
+        );
+
+        // PUBLISH_DONE(GOING_AWAY) は plan に含める (移行先で張り直す)。base に track が
+        // ある GoingAway ケースで「含める」を固定する (外して解消もしない regress を
+        // 検出できるようにする)
+        let mut pending = HashMap::new();
+        pending.insert(5, (TrackKind::Video, PublishDoneDisposition::GoingAway));
+        let (plan, resolve) = plan_for_migration(&base, &empty, &pending);
+        assert!(
+            plan.video.is_some(),
+            "移行待ち (GoingAway) の track は plan に含めること"
+        );
+        assert!(resolve.is_empty(), "GoingAway は恒久終了化しないこと");
+
+        // PUBLISH_DONE の Error disposition は TrackEnded と同じ恒久終了扱いであること
+        let mut pending = HashMap::new();
+        pending.insert(7, (TrackKind::Video, PublishDoneDisposition::Error));
+        let (plan, resolve) = plan_for_migration(&base, &empty, &pending);
+        assert!(
+            plan.video.is_none(),
+            "エラー status の track を plan から外すこと"
+        );
+        assert_eq!(
+            resolve,
+            vec![(7, TrackKind::Video)],
+            "エラー status の track を恒久終了化する対象として返すこと"
+        );
+
+        // cleanup 完了済みの恒久終了 track は plan から外れる (entry は解消済み)
+        let mut ended: HashSet<TrackKind> = HashSet::new();
+        ended.insert(TrackKind::Video);
+        let pending: HashMap<u64, (TrackKind, PublishDoneDisposition)> = HashMap::new();
+        let (plan, resolve) = plan_for_migration(&base, &ended, &pending);
+        assert!(
+            plan.video.is_none(),
+            "恒久終了済みの video を plan から外すこと"
+        );
+        assert!(
+            resolve.is_empty(),
+            "既に恒久終了済みの entry は解消対象外とすること"
+        );
+    }
+
+    /// 終端済み購読の request stream GOAWAY の再発行判定が disposition と状態を参照すること
+    ///
+    /// tick の entry 解消 (恒久終了 / 移行待ち) と後着 GOAWAY の順序で
+    /// `publish_done_pending` が空になっても判定が崩れないこと。
+    #[test]
+    fn reissue_request_target_and_send_stop_sending_follow_states() {
+        let empty: HashSet<TrackKind> = HashSet::new();
+
+        // 終了待ち entry なし (Established の通常再発行): 再発行して STOP_SENDING を送る
+        assert_eq!(
+            reissue_request_target(TrackKind::Video, None, &empty),
+            Some(TrackKind::Video),
+            "active な購読は再発行すること"
+        );
+        assert!(
+            reissue_send_stop_sending(None, &empty, &empty, TrackKind::Video),
+            "Established の通常再発行では STOP_SENDING を送ること"
+        );
+
+        // 終了待ち entry が TrackEnded / Error: 再発行しない (STOP_SENDING も送らない)
+        assert_eq!(
+            reissue_request_target(
+                TrackKind::Video,
+                Some(PublishDoneDisposition::TrackEnded),
+                &empty
+            ),
+            None,
+            "恒久終了予定の購読は再発行しないこと"
+        );
+        assert!(
+            !reissue_send_stop_sending(
+                Some(PublishDoneDisposition::TrackEnded),
+                &empty,
+                &empty,
+                TrackKind::Video
+            ),
+            "Terminated 済みの購読へ STOP_SENDING を送らないこと"
+        );
+
+        // 終了待ち entry が GoingAway: 再発行するが STOP_SENDING は送らない
+        assert_eq!(
+            reissue_request_target(
+                TrackKind::Audio,
+                Some(PublishDoneDisposition::GoingAway),
+                &empty
+            ),
+            Some(TrackKind::Audio),
+            "移行待ちの購読は同じ session で再発行すること"
+        );
+        assert!(
+            !reissue_send_stop_sending(
+                Some(PublishDoneDisposition::GoingAway),
+                &empty,
+                &empty,
+                TrackKind::Audio
+            ),
+            "Terminated 済みの購読へ STOP_SENDING を送らないこと"
+        );
+
+        // tick 解消済みの移行待ち (entry 無し、migration_pending_tracks に載っている):
+        // 再発行するが STOP_SENDING は送らない (Terminated 済み)
+        let mut migration_pending: HashSet<TrackKind> = HashSet::new();
+        migration_pending.insert(TrackKind::Audio);
+        assert_eq!(
+            reissue_request_target(TrackKind::Audio, None, &empty),
+            Some(TrackKind::Audio),
+            "移行待ち解消済みの購読も再発行すること"
+        );
+        assert!(
+            !reissue_send_stop_sending(None, &empty, &migration_pending, TrackKind::Audio),
+            "tick 解消済みの Terminated 済み購読へ STOP_SENDING を送らないこと"
+        );
+
+        // catalog の GoingAway (tick 解消済み) も移行待ち集合で保護される。Terminated
+        // 済みのため STOP_SENDING は送らない (media と同一の規則)
+        let mut catalog_pending: HashSet<TrackKind> = HashSet::new();
+        catalog_pending.insert(TrackKind::Catalog);
+        assert_eq!(
+            reissue_request_target(TrackKind::Catalog, None, &empty),
+            Some(TrackKind::Catalog),
+            "tick 解消済みの catalog 移行待ちも再発行すること"
+        );
+        assert!(
+            !reissue_send_stop_sending(None, &empty, &catalog_pending, TrackKind::Catalog),
+            "tick 解消済みの Terminated 済み catalog へ STOP_SENDING を送らないこと"
+        );
+
+        // 恒久終了済みの track は再発行しない
+        let mut ended: HashSet<TrackKind> = HashSet::new();
+        ended.insert(TrackKind::Video);
+        assert_eq!(
+            reissue_request_target(TrackKind::Video, None, &ended),
+            None,
+            "恒久終了済みの track を再発行しないこと"
+        );
+        assert!(
+            !reissue_send_stop_sending(None, &ended, &empty, TrackKind::Video),
+            "恒久終了済みの購読へ STOP_SENDING を送らないこと"
         );
     }
 

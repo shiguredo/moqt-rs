@@ -961,6 +961,26 @@ mod tests {
         (peer, client, acceptor)
     }
 
+    /// 未知の request id は `subscription_cleanup_ready` で `None` を返すこと
+    ///
+    /// アプリが終端済み subscription の cleanup 状態を [`MoqtClient::subscription_cleanup_ready`]
+    /// で問うた後、Session が回収済み (`Session::forget_subscription` 済み) の request id と
+    /// 存在しない request id のどちらも `None` になる受け取り方を固定する。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn subscription_cleanup_ready_returns_none_for_unknown_request() {
+        run_with_timeout(async {
+            let (_peer, client) = connect_pair().await;
+            // 購読していない session なので、どの request id も未知である。Session 側の
+            // request id は 0 始まりの採番のため、測定には想定外の大きな値も含める
+            assert_eq!(
+                client.subscription_cleanup_ready(u64::MAX),
+                None,
+                "未知の request id は None を返すこと"
+            );
+        })
+        .await;
+    }
+
     /// peer が SETUP を送ってハンドシェイクが完了し、peer 起点 request stream の先頭に
     /// 送ったメッセージを example が受理する
     ///

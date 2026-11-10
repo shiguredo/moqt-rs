@@ -2160,6 +2160,21 @@ impl MoqtClient {
         self.wt_session_state.clone()
     }
 
+    /// 終端済み subscription の cleanup 状態を返す
+    ///
+    /// `Session::subscription_cleanup_ready` の値 (Subscription::cleanup_ready の結果) を
+    /// そのまま返す。`None` は Session にその request id の subscription が無いこと
+    /// (回収済み / 未知の request id) を表す。`Some(true)` は open な受信 stream が 0 で、
+    /// drain timer 満了または PUBLISH_DONE の Stream Count 超過に達したことを表す。
+    ///
+    /// 終端済み subscription の回収 (`forget_ready_requests`) はこの値を見て行う
+    /// (`pending_publish_done` は Publisher 起点の経路にのみ現れるため、Subscriber では
+    /// `Some(true)` の直後に cleanup が回収する)。
+    pub fn subscription_cleanup_ready(&self, request_id: u64) -> Option<bool> {
+        let session = lock_session(&self.session);
+        session.subscription_cleanup_ready(request_id)
+    }
+
     /// data plane 通知用ハンドルのクローン
     pub fn data_plane(&self) -> DataPlaneHandle {
         DataPlaneHandle::new(

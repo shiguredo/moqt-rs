@@ -13,6 +13,10 @@ use shiguredo_moqt::error::{MessageError, SESSION_PROTOCOL_VIOLATION};
 // (draft-ietf-moq-transport-23 §13 (Grease) の MUST)。
 pub use shiguredo_moqt::error::normalize_publish_done_code;
 pub use shiguredo_moqt::error::normalize_request_error_code;
+// PUBLISH_DONE の status code 定数は library の値をそのまま公開する
+// (draft-ietf-moq-transport-23 §12.4 (Publish Done Codes))。
+pub use shiguredo_moqt::error::PUBLISH_DONE_GOING_AWAY;
+pub use shiguredo_moqt::error::PUBLISH_DONE_TRACK_ENDED;
 
 /// data stream の復号エラーをセッション終了コードへ分類する
 ///
