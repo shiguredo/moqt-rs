@@ -3910,6 +3910,250 @@ async fn receive_registered_stream_data(
     }
 }
 
+/// `PendingNotifyReason::Subscriber` で起きた task の自分の `recv_subgroup_header` 再試行結果
+///
+/// 検出元 (自分のループ再試行で `Accepted` を観測した task) は再試行を行わないため `None`
+/// になる。Session は受理済みの stream への 2 度目の SUBGROUP_HEADER
+/// (`draft-ietf-moq-transport-23` §12.2 の `UNEXPECTED_MESSAGE` (0x303)) を拒否するため、
+/// 再試行は検出先だけが行う。
+enum PendingSubscriberRetry {
+    /// 自分の再試行が `Accepted`
+    Accepted,
+    /// 自分の再試行が `UnknownTrackAlias`
+    UnknownTrackAlias,
+    /// 自分の再試行が `Discarded`
+    Discarded,
+    /// 自分の再試行が `FilteredOut`
+    FilteredOut,
+    /// 自分の再試行がエラーで終わった (エラーメッセージを含む)
+    Error(String),
+}
+
+/// `Subscriber` で引き取った entry の処理の分類
+///
+/// 検出元は受理済みのため復帰する。検出先は自分の header の受理を確認してから復帰する
+/// (`draft-ietf-moq-transport-23` §3.1 (Subscriptions) の Object 配信前の header 受理前提)。
+enum PendingSubscriberAction {
+    /// 保持したチャンクを decoder へ戻して処理を続ける
+    Resume,
+    /// task ローカルで保留を続ける (entry は引き取り済み・削除済みのためバッファに戻せない)
+    HoldLocal,
+    /// 会計を閉じて破棄する (`abort_subgroup_stream` を呼ぶ)
+    AbortDiscard,
+    /// 会計を閉じずに破棄する (ループ再試行の `Err` 分岐と同じ扱い)
+    DiscardQuietly,
+}
+
+/// 検出元フラグと自分の再試行結果から `Subscriber` 引き取りの処理分類を返す
+///
+/// 検出元 (検出元フラグが true) は、既に自分で `Accepted` を観測して `note_subscriber` を呼んだ
+/// task であるため、entry を引き取った時点で自分の stream は session の受理済み状態であり、
+/// 常に復帰する。検出先は引取ったあとに自分の再試行結果で処理を続けるか破棄するかを決める。
+/// `None` は検出先で再試行が行われなかった場合 (呼び出し誤り) を表すが、安全性のため
+/// 検出元と同じ復帰ではなく破棄にする。
+fn pending_subscriber_action(
+    detected_self: bool,
+    retry: Option<&PendingSubscriberRetry>,
+) -> PendingSubscriberAction {
+    if detected_self {
+        return PendingSubscriberAction::Resume;
+    }
+    match retry {
+        Some(PendingSubscriberRetry::Accepted) => PendingSubscriberAction::Resume,
+        Some(PendingSubscriberRetry::UnknownTrackAlias) => PendingSubscriberAction::HoldLocal,
+        Some(PendingSubscriberRetry::Discarded | PendingSubscriberRetry::FilteredOut) => {
+            PendingSubscriberAction::AbortDiscard
+        }
+        Some(PendingSubscriberRetry::Error(_)) | None => PendingSubscriberAction::DiscardQuietly,
+    }
+}
+
+/// task ローカルで保持するチャンクと期限
+///
+/// entry は intake の直後に削除されるため、チャンクと期限の管理を task に移す。
+struct LocalPendingHold {
+    chunks: Vec<Vec<u8>>,
+    deadline_us: i64,
+}
+
+/// `Subscriber` で起きた task が `UnknownTrackAlias` だった保留を task ローカルで続ける
+///
+/// entry は intake の直後に削除済みのため、バッファ側からは通知が再び届かない
+/// (`take_ready_for` は `None`、`push` は no-op、`expire` による `Timeout` は発火しない)。
+/// そのためチャンクと期限を task ローカルで持ち替え、自分の `recv_subgroup_header` の再試行で
+/// 確立を待つ。期限 (`deadline_us`) は intake 時点の値を使い、entry の再追加による期限延長は
+/// 行わない。
+///
+/// 継続中は stream を読み続け、チャンクをバッファに積まないで task 内で保持する。このため
+/// チャンクは per-session 上限の集計から外れ、per-stream 上限のみ task 側で適用する
+/// (超えたときは既存の overflow 分岐と同じ警告を出して破棄する)。読み出しが終端
+/// (`End` / `StoppedBySession`) を観測したら、終端種別を task 内で記録して読み出しを止める。
+/// session への会計通知は既存の読み出しヘルパがそのまま行う。RESET_STREAM と Session の
+/// STOP_SENDING 指示による終端は、ストリームの内容が欠けている可能性があるため既存の
+/// 終端分岐と同じく破棄する (session 側では stream が除去済みのため、その後の再試行は
+/// unknown stream id のエラーになる)。FIN はこの task では保持継続の対象とせず、期限まで
+/// 待ったうえで既存の Timeout 分岐と同じ警告で破棄する。
+///
+/// 待ち順序は「期限付きの読み出し、そのあとで自分の再試行」である (既存の保留ループとは
+/// 逆)。入口の直前に検出先の再試行で `UnknownTrackAlias` を観測済みのため、直後の重複
+/// 呼び出しを避ける。保持中にこの stream でチャンクが届かない場合、復帰と破棄の判断は
+/// 最初の読み出しが終わったあとに行われるため、確立済みでも残り期限のぶんだけ遅くなり得る。
+async fn continue_pending_subscriber_locally(
+    stream: &mut transport::RecvStream,
+    data_plane: &DataPlaneHandle,
+    stream_id: DataStreamId,
+    header: &SubgroupHeader,
+    decoder: &mut SubgroupStreamDecoder,
+    stream_num: u64,
+    hold: LocalPendingHold,
+) -> bool {
+    let LocalPendingHold {
+        chunks: mut held,
+        deadline_us,
+    } = hold;
+    let options = DEFAULT_PENDING_SUBGROUP_BUFFER_OPTIONS;
+    let mut held_bytes: usize = held.iter().map(Vec::len).sum();
+    // FIN を観測して読み出しを止めた状態。終端種別の task 内での記録である
+    // (`draft-ietf-moq-transport-23` §3.1.3.1 は保持で順序入れ替わりを処理する MAY を与える)。
+    // FIN 済みの保持を Session 通知の遅延とともに扱うのは、後続の FIN 保持対応であり、
+    // この task では session 会計の既存契約 (FIN 観測で stream が除去済み) に従う
+    let mut read_ended_in_fin = false;
+    loop {
+        let remaining_us = deadline_us.saturating_sub(monotonic_now_us());
+        if remaining_us <= 0 {
+            // 期限までに自分の header が受理されなかった。既存の Timeout 分岐と同じく破棄する
+            tracing::warn!(
+                "Stream #{stream_num}: dropping the locally held subgroup stream \
+                 (track alias={} was not established within {} ms)",
+                header.track_alias,
+                options.timeout_us / 1000,
+            );
+            abort_subgroup_stream(stream, data_plane, stream_id).await;
+            return false;
+        }
+
+        if !read_ended_in_fin {
+            match tokio::time::timeout(
+                std::time::Duration::from_micros(remaining_us.saturating_sub(1) as u64),
+                receive_registered_stream_data_outcome(stream, data_plane, stream_id),
+            )
+            .await
+            {
+                Ok(Ok(RegisteredStreamData::Data(data))) => {
+                    if held_bytes.saturating_add(data.len()) > options.per_stream_max_bytes {
+                        tracing::warn!(
+                            "Stream #{stream_num}: dropping the locally held subgroup stream \
+                             (per-stream buffer overflow: track alias={}, limit={} bytes)",
+                            header.track_alias,
+                            options.per_stream_max_bytes,
+                        );
+                        abort_subgroup_stream(stream, data_plane, stream_id).await;
+                        return false;
+                    }
+                    held_bytes += data.len();
+                    held.push(data.to_vec());
+                }
+                // 終端。既存の読み出しヘルパが session への会計通知を済ませているため、
+                // ここでは終端種別を記録して以後の読み出しを止める
+                Ok(Ok(RegisteredStreamData::End(RequestStreamEnd::Fin))) => {
+                    tracing::debug!(
+                        "Stream #{stream_num}: stream ended with FIN while holding the \
+                         subgroup stream (track alias={})",
+                        header.track_alias,
+                    );
+                    read_ended_in_fin = true;
+                }
+                // RESET_STREAM と Session の STOP_SENDING 指示による終端は、ストリームの
+                // 内容が欠けている可能性があるため既存の終端分岐と同じく破棄する (既存の
+                // 読み出しヘルパが session への会計通知を済ませている)
+                Ok(Ok(RegisteredStreamData::End(RequestStreamEnd::Reset { .. }))) => {
+                    tracing::debug!(
+                        "Stream #{stream_num}: stream reset while holding the subgroup stream \
+                         (track alias={})",
+                        header.track_alias,
+                    );
+                    abort_subgroup_stream(stream, data_plane, stream_id).await;
+                    return false;
+                }
+                Ok(Ok(RegisteredStreamData::StoppedBySession)) => {
+                    tracing::debug!(
+                        "Stream #{stream_num}: subgroup stream stopped by session instruction \
+                         while holding (track alias={})",
+                        header.track_alias,
+                    );
+                    abort_subgroup_stream(stream, data_plane, stream_id).await;
+                    return false;
+                }
+                Ok(Err(e)) => {
+                    log_failure(
+                        format_args!(
+                            "Stream #{stream_num}: failed to read held subgroup stream: {e}"
+                        ),
+                        is_transport_session_end(&e),
+                    );
+                    return false;
+                }
+                // 期限切れは loop 先頭の remaining 判定で処理する
+                Err(_) => {}
+            }
+        }
+
+        // FIN 済み (read_ended_in_fin) のときは読み出しをしない。期限まで待ってから
+        // Timeout 分岐相当で破棄する (busy loop を作らない)
+        if read_ended_in_fin {
+            tokio::time::sleep(std::time::Duration::from_micros(
+                deadline_us.saturating_sub(monotonic_now_us()).max(0) as u64,
+            ))
+            .await;
+            continue;
+        }
+
+        // 自分の再試行で確立を確認する。確立していれば保持したチャンクを decoder へ戻す
+        match data_plane.recv_subgroup_header(stream_id, header) {
+            Ok(TrackDataAcceptance::Accepted) => {
+                for chunk in &held {
+                    decoder.push(chunk);
+                }
+                tracing::debug!(
+                    "Stream #{stream_num}: released the locally held subgroup stream \
+                     (track alias={}, buffered={} bytes)",
+                    header.track_alias,
+                    held_bytes,
+                );
+                return true;
+            }
+            // 保留を続ける。entry は削除済みのため、次の loop の読み出しと再試行で待つ
+            Ok(TrackDataAcceptance::UnknownTrackAlias) => {}
+            // draft-ietf-moq-transport-23 §3.1.3 (Track Alias): キャンセル済み subscription の
+            // alias に届いた不要 Object。session を閉じずに破棄する (既存の再試行分岐と同じ)
+            Ok(TrackDataAcceptance::Discarded) => {
+                tracing::debug!(
+                    "Stream #{stream_num}: discarding objects for cancelled track alias={}",
+                    header.track_alias,
+                );
+                abort_subgroup_stream(stream, data_plane, stream_id).await;
+                return false;
+            }
+            // draft-ietf-moq-transport-23 §3.1 (Subscriptions): フィルタ再適用の結果どの
+            // subscription にも属さなかった Object。session を閉じずに捨てる (既存の再試行
+            // 分岐と同じ)
+            Ok(TrackDataAcceptance::FilteredOut) => {
+                tracing::debug!(
+                    "Stream #{stream_num}: object filtered out for track alias={}",
+                    header.track_alias,
+                );
+                abort_subgroup_stream(stream, data_plane, stream_id).await;
+                return false;
+            }
+            // 既存の再試行分岐の `Err` と同じく会計を閉じずに破棄する
+            Err(e) => {
+                tracing::warn!("Stream #{stream_num}: failed to register subgroup header: {e}");
+                return false;
+            }
+        }
+    }
+}
+
 /// 途中終了した FIN を `Session::report_mid_object_fin` へ報告すべきか
 ///
 /// draft-ietf-moq-transport-23 §11.3 (Subgroup Streams): FIN の途中終了は
@@ -5335,13 +5579,29 @@ async fn handle_stream_body(
 ///
 /// 購読の確立は 2 つの経路で検出する。
 ///
-/// - `recv_subgroup_header` の再試行が `Accepted` を返す (Session が alias を解決できる)
-/// - 呼び出し側が `note_subscriber` を呼び、`take_ready_for` が `Subscriber` を返す
+/// - `recv_subgroup_header` の再試行が `Accepted` を返す (Session が alias を解決できる)。
+///   この task は自分で header を受理した (検出元)。`note_subscriber` で同じ alias の全
+///   entry に通知したあと、次のループで自分の entry を引き取ったら再試行せずに復帰する。
+///   受理済みの stream への 2 度目の SUBGROUP_HEADER は session の契約
+///   (`draft-ietf-moq-transport-23` §12.2 の `UNEXPECTED_MESSAGE` (0x303)) で拒否されるため、
+///   検出元での再試行は行わない
+/// - 別の task が検出元となった場合 (受信ループ実行中の `reissue_request` による購読確立や、
+///   同一 alias の並行 stream task による確立検出)、その通知で起きた task (検出先) は
+///   `Subscriber` を引き取った時点では自分の stream の header が未受理であり、復帰の前に
+///   自分の `recv_subgroup_header` を再試行して `Accepted` を確認する
 ///
-/// この example は受信ループを始める前にすべての `SUBSCRIBE_OK` を処理するため、
-/// 受信ループの実行中に購読が確立する経路は無く `note_subscriber` を呼ぶ箇所はない。
-/// そのため再試行で検出する (将来、実行中に購読を追加する場合は、確立した時点で
-/// `note_subscriber` を呼べば保持している chunk を直ちに引き取れる)。
+/// 検出先の再試行の処理:
+///
+/// - `Accepted` → チャンクを戻して復帰する。この経路で `note_subscriber` を呼ぶ必要は無い
+///   (各 task が自分の再試行で検出するため)
+/// - `UnknownTrackAlias` → 保留を続ける。entry は引き取りの直後に削除されるため、チャンクと
+///   期限を task ローカルで保持する (`continue_pending_subscriber_locally` 参照)
+/// - `Discarded` / `FilteredOut` → 通常の再試行分岐と同じく `abort_subgroup_stream` で会計を
+///   閉じて破棄する
+/// - エラー → 通常の再試行分岐の `Err` と同じく会計を閉じずに破棄する
+///
+/// `note_subscriber` は理由設定済みの entry に対して no-op であり、entry の引き取りは 1 回限り
+/// であるため、複数 task が各自の再試行でいくら `Accepted` を観測しても重複処理は起こらない。
 ///
 /// 戻り値が false の場合は header を登録できず、ストリームを破棄した
 /// (会計から外して読み捨て済み。wire の STOP_SENDING は送らない)。
@@ -5401,6 +5661,10 @@ async fn register_subgroup_header(
         pending.add(header.track_alias, added_us)
     };
     let deadline_us = added_us.saturating_add(options.timeout_us);
+    // 検出元フラグ。自分のループ再試行で `Accepted` を観測した task は、引き取り後に
+    // 自分の再試行を行ってはいけない (session は受理済み stream への 2 度目の
+    // SUBGROUP_HEADER を UNEXPECTED_MESSAGE (0x303) で拒否する)
+    let mut detected_self = false;
     tracing::debug!(
         "Stream #{stream_num}: holding subgroup stream until the track alias={} is established",
         header.track_alias,
@@ -5419,18 +5683,85 @@ async fn register_subgroup_header(
         if let Some(ready) = taken {
             match ready.reason {
                 PendingNotifyReason::Subscriber => {
-                    // 購読が確立した。保持したチャンクを decoder へ戻して続きを読む
+                    // 検出元は自分で `Accepted` を観測済みのため再試行せずに復帰する。
+                    // 検出先は自分の `recv_subgroup_header` を再試行して受理を確認してから
+                    // 復帰する (session は受理済み stream への 2 度目の SUBGROUP_HEADER を
+                    // UNEXPECTED_MESSAGE (0x303) で拒否する)
                     let buffered: usize = ready.chunks.iter().map(Vec::len).sum();
-                    for chunk in &ready.chunks {
-                        decoder.push(chunk);
-                    }
-                    tracing::debug!(
-                        "Stream #{stream_num}: released the held subgroup stream \
-                         (track alias={}, buffered={} bytes)",
-                        ready.track_alias,
-                        buffered,
-                    );
-                    return true;
+                    let retry = if detected_self {
+                        None
+                    } else {
+                        Some(match data_plane.recv_subgroup_header(stream_id, header) {
+                            Ok(TrackDataAcceptance::Accepted) => PendingSubscriberRetry::Accepted,
+                            Ok(TrackDataAcceptance::UnknownTrackAlias) => {
+                                PendingSubscriberRetry::UnknownTrackAlias
+                            }
+                            Ok(TrackDataAcceptance::Discarded) => PendingSubscriberRetry::Discarded,
+                            Ok(TrackDataAcceptance::FilteredOut) => {
+                                PendingSubscriberRetry::FilteredOut
+                            }
+                            Err(e) => PendingSubscriberRetry::Error(e.to_string()),
+                        })
+                    };
+                    return match pending_subscriber_action(detected_self, retry.as_ref()) {
+                        PendingSubscriberAction::Resume => {
+                            // 購読が確立した。保持したチャンクを decoder へ戻して続きを読む
+                            for chunk in &ready.chunks {
+                                decoder.push(chunk);
+                            }
+                            tracing::debug!(
+                                "Stream #{stream_num}: released the held subgroup stream \
+                                 (track alias={}, buffered={} bytes)",
+                                ready.track_alias,
+                                buffered,
+                            );
+                            true
+                        }
+                        PendingSubscriberAction::HoldLocal => {
+                            // UnknownTrackAlias。entry は削除済みのため task ローカルで
+                            // 保留を続ける
+                            let hold = LocalPendingHold {
+                                chunks: ready.chunks,
+                                deadline_us,
+                            };
+                            continue_pending_subscriber_locally(
+                                stream, data_plane, stream_id, header, decoder, stream_num, hold,
+                            )
+                            .await
+                        }
+                        PendingSubscriberAction::AbortDiscard => {
+                            // 既存の再試行分岐と同じく会計を閉じて破棄する。entry は
+                            // 引き取り済み・削除済みのため remove は不要である
+                            if let Some(PendingSubscriberRetry::Discarded) = retry {
+                                tracing::debug!(
+                                    "Stream #{stream_num}: discarding objects for cancelled \
+                                     track alias={}",
+                                    ready.track_alias,
+                                );
+                            }
+                            if let Some(PendingSubscriberRetry::FilteredOut) = retry {
+                                tracing::debug!(
+                                    "Stream #{stream_num}: object filtered out for \
+                                     track alias={}",
+                                    ready.track_alias,
+                                );
+                            }
+                            abort_subgroup_stream(stream, data_plane, stream_id).await;
+                            false
+                        }
+                        PendingSubscriberAction::DiscardQuietly => {
+                            // 既存の再試行分岐の `Err` と同じく会計を閉じずに破棄する
+                            let message = match &retry {
+                                Some(PendingSubscriberRetry::Error(e)) => e.clone(),
+                                _ => "recv_subgroup_header retry did not run".to_string(),
+                            };
+                            tracing::warn!(
+                                "Stream #{stream_num}: failed to register subgroup header: \
+                                 {message}"
+                            );
+                            false
+                        }
+                    };
                 }
                 // 購読が確立しないまま保持の上限を過ぎた。破棄した理由を残す
                 PendingNotifyReason::Timeout => {
@@ -5481,7 +5812,8 @@ async fn register_subgroup_header(
         // 購読の確立を再試行する。確立していれば Session が alias を解決して受理する
         match data_plane.recv_subgroup_header(stream_id, header) {
             Ok(TrackDataAcceptance::Accepted) => {
-                // 確立を検出した。entry を引き取り待ちにして次のループでチャンクを戻す
+                // 確立を検出した (検出元)。entry を引き取り待ちにして次のループでチャンクを戻す
+                detected_self = true;
                 pending_subgroups
                     .lock()
                     .await
@@ -6756,6 +7088,102 @@ mod tests {
     use super::*;
     use shiguredo_moqt::stream::subgroup::SubgroupIdMode;
     use shiguredo_moqt::stream::subgroup::SubgroupObject;
+
+    /// `Subscriber` 引き取りの処理分類を固定する
+    ///
+    /// 検出元 (自分の再試行で `Accepted` を観測した task) は、session は受理済みの stream に
+    /// 対する 2 度目の SUBGROUP_HEADER を UNEXPECTED_MESSAGE (0x303) で拒否するため、
+    /// 常に再試行せずに復帰する。検出先は自分の再試行結果で処理を決める。
+    mod pending_subscriber_action_tests {
+        use super::*;
+
+        /// 検出元は再試行結果が既に定まっていない case でも復帰すること
+        #[test]
+        fn detected_self_resumes_without_retry() {
+            assert!(
+                matches!(
+                    pending_subscriber_action(true, None),
+                    PendingSubscriberAction::Resume
+                ),
+                "検出元は再試行せず復帰すること"
+            );
+        }
+
+        /// 検出先が Accept したなら復帰すること
+        #[test]
+        fn cross_wake_with_accepted_resumes() {
+            assert!(
+                matches!(
+                    pending_subscriber_action(false, Some(&PendingSubscriberRetry::Accepted)),
+                    PendingSubscriberAction::Resume
+                ),
+                "自分の再試行の受理では復帰すること"
+            );
+        }
+
+        /// 検出先が未知 alias なら task ローカルの保留継続になること
+        #[test]
+        fn cross_wake_with_unknown_alias_holds_locally() {
+            assert!(
+                matches!(
+                    pending_subscriber_action(
+                        false,
+                        Some(&PendingSubscriberRetry::UnknownTrackAlias)
+                    ),
+                    PendingSubscriberAction::HoldLocal
+                ),
+                "未知 alias で保留を続けること"
+            );
+        }
+
+        /// 検出先が破棄判定なら会計を閉じること
+        #[test]
+        fn cross_wake_with_discard_aborts() {
+            assert!(
+                matches!(
+                    pending_subscriber_action(false, Some(&PendingSubscriberRetry::Discarded)),
+                    PendingSubscriberAction::AbortDiscard
+                ),
+                "Discarded は会計を閉じて破棄すること"
+            );
+            assert!(
+                matches!(
+                    pending_subscriber_action(false, Some(&PendingSubscriberRetry::FilteredOut)),
+                    PendingSubscriberAction::AbortDiscard
+                ),
+                "FilteredOut は会計を閉じて破棄すること"
+            );
+        }
+
+        /// 検出先の再試行がエラーのときは会計を閉じずに破棄すること
+        #[test]
+        fn cross_wake_with_error_discards_quietly() {
+            assert!(
+                matches!(
+                    pending_subscriber_action(
+                        false,
+                        Some(&PendingSubscriberRetry::Error(
+                            "subgroup header received for unknown stream id".to_string()
+                        ))
+                    ),
+                    PendingSubscriberAction::DiscardQuietly
+                ),
+                "エラーは会計を閉じずに破棄すること (既存の Err 分岐と同じ)"
+            );
+        }
+
+        /// 検出先で再試行が行われていない (誤用) のときは破棄に倒すこと
+        #[test]
+        fn cross_wake_without_retry_discards_quietly() {
+            assert!(
+                matches!(
+                    pending_subscriber_action(false, None),
+                    PendingSubscriberAction::DiscardQuietly
+                ),
+                "再試行の無い検出先は破棄に倒すこと"
+            );
+        }
+    }
 
     /// GOAWAY の New Session URI から移行先を決める判断を固定する
     ///
