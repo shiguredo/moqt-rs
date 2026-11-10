@@ -313,16 +313,14 @@ fn video_publish_properties(mp4_passthrough: bool, cache_duration_ms: u64) -> Tr
 /// `NEW_GROUP_REQUEST` を送れるようになる (§9.19.19 の MUST NOT)。音声トラックには
 /// `MAX_CACHE_DURATION` だけを載せ、カタログには何も載せない。
 fn subscribe_ok_properties(
-    track_alias: u64,
+    track: PublishedTrack,
     mp4_passthrough: bool,
     cache_duration_ms: u64,
 ) -> TrackProperties {
-    if track_alias == VIDEO_TRACK_ALIAS {
-        video_publish_properties(mp4_passthrough, cache_duration_ms)
-    } else if track_alias == AUDIO_TRACK_ALIAS {
-        cache_duration_properties(cache_duration_ms)
-    } else {
-        TrackProperties::new()
+    match track {
+        PublishedTrack::Video => video_publish_properties(mp4_passthrough, cache_duration_ms),
+        PublishedTrack::Audio => cache_duration_properties(cache_duration_ms),
+        PublishedTrack::Catalog => TrackProperties::new(),
     }
 }
 
@@ -1103,6 +1101,10 @@ pub async fn run(
     let mut audio_group_id: u64 = group_id::allocate_initial_group_id()?;
     let mut audio_frame_count: u64 = 0;
     let mut current_video_writer: Option<SubgroupWriter> = None;
+    // 受信 SUBSCRIBE で確立した購読の送出状態 (draft-ietf-moq-transport-23 §3.1)。
+    // Track Alias は PUBLISH の固定値 (0 / 1 / 2) の次から採番する
+    let mut peer_subscriptions: Vec<PeerSubscription> = Vec::new();
+    let mut next_peer_alias: u64 = AUDIO_TRACK_ALIAS + 1;
     // 映像 Group の開始時刻を追跡する。キーフレームの要求はエンコーダを使う経路
     // (live capture / MP4 再エンコード) でだけ行い、MP4 パススルーでは Group 長の観測
     // (debug ログ) にだけ使う
@@ -1263,6 +1265,42 @@ pub async fn run(
                                 .finish(client.subscription_filter_start(video_request_id))
                                 .await?;
                             }
+                            // 受信 SUBSCRIBE の購読 (video) の writer も同じ Group 境界で
+                            // 閉じて開き直す (受信 SUBSCRIBE は次の Group のキーフレームの
+                            // 先頭から配信するため。Group の途中で受理した購読は次の Group
+                            // から届く)。PUBLISH 済みの購読と同じ Object を送る
+                            // (draft-ietf-moq-transport-23 §3.1 の MUST)
+                            for peer in peer_subscriptions.iter_mut() {
+                                if peer.track != PublishedTrack::Video {
+                                    continue;
+                                }
+                                if let Some(writer) = peer.writer.take()
+                                    && let Err(e) = writer
+                                        .finish(
+                                            client.subscription_filter_start(peer.request_id),
+                                        )
+                                        .await
+                                {
+                                    tracing::debug!(
+                                        "Failed to finish a peer video stream: request_id={}, {e}",
+                                        peer.request_id
+                                    );
+                                }
+                                if !peer.ended {
+                                    let writer = SubgroupWriter::new(
+                                        &handle,
+                                        &data_plane,
+                                        peer.request_id,
+                                        peer.alias,
+                                        video_group_id,
+                                        DEFAULT_PUBLISHER_PRIORITY,
+                                        true,
+                                        client.subscription_filter_start(peer.request_id),
+                                    )
+                                    .await?;
+                                    peer.writer = Some(writer);
+                                }
+                            }
                             // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
                             // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
                             // 映像ストリームには毎フレーム LOC プロパティを付与するため true を渡す
@@ -1312,6 +1350,32 @@ pub async fn run(
                                     &properties,
                                     &ef.data,
                                 )?;
+                            }
+                        }
+                        // 受信 SUBSCRIBE の購読にも同じ Object を送る
+                        // (draft-ietf-moq-transport-23 §3.1 の "the publisher MUST send the
+                        // Object once for each matching subscription")。フィルタと PAUSED は
+                        // Session が subscription ごとに評価するため、Pass の成否は送信側の
+                        // 状態に使わない (media_cache / 送信統計は PUBLISH 購読の writer の
+                        // Pass を基準にする)。購読が reset された stream だけを捨てる
+                        for peer in peer_subscriptions.iter_mut() {
+                            if peer.track != PublishedTrack::Video || peer.ended {
+                                continue;
+                            }
+                            let Some(writer) = peer.writer.as_mut() else {
+                                continue;
+                            };
+                            if let Err(e) = writer.write_object(&ef.data, &properties).await {
+                                if is_peer_stream_reset(&e) {
+                                    tracing::info!(
+                                        "Peer video stream was reset by peer; dropping the subscription: request_id={}",
+                                        peer.request_id
+                                    );
+                                    peer.writer = None;
+                                    peer.ended = true;
+                                } else {
+                                    return Err(e);
+                                }
                             }
                         }
                     }
@@ -1656,6 +1720,117 @@ pub async fn run(
                                 );
                             }
                         }
+                        // 受信 SUBSCRIBE の購読 (音声) にも同じ Object を送る
+                        // (draft-ietf-moq-transport-23 §3.1 の MUST)。フィルタと PAUSED は
+                        // Session が subscription ごとに評価する。Audio Config は購読ごとの
+                        // 最初の Object に付与する (`audio_config_sent` を購読ごとに持つ)。
+                        // datagram モードの購読は Object ごとに writer を作り、subgroup
+                        // モードの購読は 1 object = 1 stream で PUBLISH 側と同じ形で送る。
+                        // 送信統計 (`record_audio_send`) は PUBLISH 購読の Pass を基準に
+                        // するためここでは行わない
+                        for peer in peer_subscriptions.iter_mut() {
+                            if peer.track != PublishedTrack::Audio || peer.ended {
+                                continue;
+                            }
+                            let audio_config_for_peer = if peer.audio_config_sent {
+                                None
+                            } else {
+                                audio_config
+                            };
+                            let peer_properties = build_audio_loc_properties(
+                                timestamp,
+                                audio_timescale,
+                                audio_config_for_peer,
+                            );
+                            if config.audio_datagram {
+                                let mut writer = DatagramWriter::new(
+                                    &handle,
+                                    &data_plane,
+                                    peer.request_id,
+                                    peer.alias,
+                                    audio_group_id,
+                                    DEFAULT_PUBLISHER_PRIORITY,
+                                    config.datagram_max_size,
+                                    config.audio_redundancy,
+                                );
+                                let outcome =
+                                    writer.write_object(&encoded, &peer_properties).await;
+                                match outcome {
+                                    Ok(outcome) => {
+                                        if outcome == ObjectFilterOutcome::Pass {
+                                            peer.audio_config_sent = true;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if is_peer_stream_reset(&e) {
+                                            tracing::info!(
+                                                "Peer audio datagram was reset by peer; dropping the subscription: request_id={}",
+                                                peer.request_id
+                                            );
+                                            peer.ended = true;
+                                        } else {
+                                            return Err(e);
+                                        }
+                                    }
+                                }
+                            } else {
+                                let writer_result = SubgroupWriter::new(
+                                    &handle,
+                                    &data_plane,
+                                    peer.request_id,
+                                    peer.alias,
+                                    audio_group_id,
+                                    DEFAULT_PUBLISHER_PRIORITY,
+                                    true,
+                                    client.subscription_filter_start(peer.request_id),
+                                )
+                                .await;
+                                match writer_result {
+                                    Ok(mut writer) => {
+                                        let (write_error, write_passed) =
+                                            match writer
+                                                .write_object(&encoded, &peer_properties)
+                                                .await
+                                            {
+                                                Ok(outcome) => {
+                                                    (
+                                                        None,
+                                                        outcome == ObjectFilterOutcome::Pass,
+                                                    )
+                                                }
+                                                Err(e) => (Some(e), false),
+                                            };
+                                        let finish_error = writer
+                                            .finish(client.subscription_filter_start(peer.request_id))
+                                            .await
+                                            .err();
+                                        if let Some(e) = write_error.or(finish_error)
+                                        {
+                                            if is_peer_stream_reset(&e) {
+                                                tracing::info!(
+                                                    "Peer audio stream was reset by peer; dropping the subscription: request_id={}",
+                                                    peer.request_id
+                                                );
+                                                peer.ended = true;
+                                            } else {
+                                                return Err(e);
+                                            }
+                                        } else if write_passed {
+                                            peer.audio_config_sent = true;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if is_transport_session_end(&e) {
+                                            return Err(e);
+                                        }
+                                        tracing::warn!(
+                                            "Failed to open a peer audio stream: request_id={}, {e}",
+                                            peer.request_id
+                                        );
+                                    }
+                                }
+                            }
+                        }
                         audio_group_id += 1;
                         audio_frame_count += 1;
                     }
@@ -1755,6 +1930,7 @@ pub async fn run(
                                                             &catalog_json,
                                                             &mut catalog_group_id,
                                                             &mut catalog_location,
+                                                            &peer_subscriptions,
                                                         )
                                                         .await
                                                     {
@@ -1883,7 +2059,7 @@ pub async fn run(
                             .await
                         }
                         Some(ClientEvent::Request(request)) => {
-                            serve_peer_request(
+                            let accepted = serve_peer_request(
                                 &mut client,
                                 request,
                                 &config,
@@ -1894,8 +2070,40 @@ pub async fn run(
                                 &mut gop_tracker,
                                 started_video_group_id,
                                 &mut media_cache,
+                                &mut next_peer_alias,
                             )
                             .await?;
+                            if let Some(accepted) = accepted {
+                                peer_subscriptions.push(PeerSubscription {
+                                    request_id: accepted.request_id,
+                                    track: accepted.track,
+                                    alias: accepted.alias,
+                                    writer: None,
+                                    audio_config_sent: false,
+                                    ended: false,
+                                });
+                                // カタログの購読は、受理した時点で現在のカタログ Object を
+                                // 新しい Group で送り直す (draft-ietf-moq-msf-01 §5: 独立した
+                                // カタログは新しい Group の先頭に置く MUST)。次の定周期の
+                                // republish を待つと購読直後の相手にカタログが届かない
+                                if accepted.track == PublishedTrack::Catalog
+                                    && let Err(e) = republish_catalog_at_next_group(
+                                        &client,
+                                        &handle,
+                                        &data_plane,
+                                        catalog_request_id,
+                                        &catalog_json,
+                                        &mut catalog_group_id,
+                                        &mut catalog_location,
+                                        &peer_subscriptions,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "Failed to send the catalog to a newly accepted peer subscription: {e}"
+                                    );
+                                }
+                            }
                             Ok(false)
                         }
                         Some(ClientEvent::Session(SessionEvent::OpenFillFetchStream {
@@ -2109,6 +2317,30 @@ pub async fn run(
                             // 新しい Group を開始する。エンコーダ経路は次のフレームでキーフレームを
                             // 要求し、切替の空白を短くする
                             gop_tracker.request_new_group();
+                            // 旧 session の受信 SUBSCRIBE 購読の writer を閉じる
+                            // (open 中の outgoing stream が残っていると旧 session の
+                            // PUBLISH_DONE が拒否される。§9.9)。Session は入れ替わるため
+                            // 受信 SUBSCRIBE の購読も旧 session で終端される
+                            for peer in peer_subscriptions.iter_mut() {
+                                peer.ended = true;
+                                if let Some(writer) = peer.writer.take()
+                                    && let Err(e) = writer
+                                        .finish(
+                                            old_client
+                                                .subscription_filter_start(peer.request_id),
+                                        )
+                                        .await
+                                {
+                                    tracing::debug!(
+                                        "Failed to finish a peer subscription stream during migration: request_id={}, {e}",
+                                        peer.request_id
+                                    );
+                                }
+                            }
+                            let peer_request_ids: Vec<u64> = peer_subscriptions
+                                .iter()
+                                .map(|peer| peer.request_id)
+                                .collect();
                             // 旧 session の終了は main ループを止めないよう別タスクに任せる。
                             // JoinHandle は run の終了時に打ち切るため保持する
                             old_session_closers.push(spawn_old_session_close(
@@ -2117,7 +2349,12 @@ pub async fn run(
                                 old_video_request_id,
                                 old_audio_request_id,
                                 old_catalog_request_id,
+                                peer_request_ids,
                             ));
+                            // 受信 SUBSCRIBE の購読は旧 session の PUBLISH_DONE で終端したため、
+                            // 新 session では送出しない (移行後に再確立しない。購読者が必要なら
+                            // 再度 SUBSCRIBE する)
+                            peer_subscriptions.clear();
                             tracing::info!(
                                 "Migrated the publisher session to {}",
                                 config.url.authority
@@ -2132,6 +2369,7 @@ pub async fn run(
                                 &catalog_json,
                                 &mut catalog_group_id,
                                 &mut catalog_location,
+                                &peer_subscriptions,
                             )
                             .await
                             {
@@ -2250,6 +2488,7 @@ pub async fn run(
                     &catalog_json,
                     &mut catalog_group_id,
                     &mut catalog_location,
+                    &peer_subscriptions,
                 )
                 .await;
                 match outcome {
@@ -2358,6 +2597,43 @@ pub async fn run(
             format_args!("Failed to send PUBLISH_DONE for catalog: {e}"),
             session_ended || is_connection_closed(&e),
         );
+    }
+
+    // 受信 SUBSCRIBE で確立した購読の writer を閉じ、PUBLISH_DONE を送る
+    // (draft-ietf-moq-transport-23 §6.4.2.2 の MUST / §9.9 の MUST NOT。終端済みの購読
+    // (`ended`) には送らない)
+    for peer in peer_subscriptions.iter_mut() {
+        if peer.ended {
+            continue;
+        }
+        peer.ended = true;
+        if let Some(writer) = peer.writer.take()
+            && let Err(e) = writer
+                .finish(client.subscription_filter_start(peer.request_id))
+                .await
+        {
+            // 終端に伴う失敗と接続クローズだけを info に落とす (`cleanup_finish_is_expected`
+            // と `Error::ConnectionClosed` の判定)
+            log_failure(
+                format_args!(
+                    "Failed to finish peer subscription stream (request_id={}): {e}",
+                    peer.request_id
+                ),
+                session_ended || cleanup_finish_is_expected(session_ended, &e),
+            );
+        }
+        if let Err(e) = client
+            .send_publish_done(peer.request_id, PUBLISH_DONE_GOING_AWAY, "")
+            .await
+        {
+            log_failure(
+                format_args!(
+                    "Failed to send PUBLISH_DONE for peer subscribe (request_id={}): {e}",
+                    peer.request_id
+                ),
+                session_ended || is_connection_closed(&e),
+            );
+        }
     }
 
     if let Err(e) = client.send_goaway(Vec::new(), 5000).await {
@@ -2547,6 +2823,7 @@ fn spawn_old_session_close(
     video_request_id: Option<u64>,
     audio_request_id: Option<u64>,
     catalog_request_id: u64,
+    peer_request_ids: Vec<u64>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(task_monitor.clone().instrument(async move {
         shutdown_old_session(
@@ -2554,6 +2831,7 @@ fn spawn_old_session_close(
             video_request_id,
             audio_request_id,
             catalog_request_id,
+            peer_request_ids,
         )
         .await;
     }))
@@ -2571,14 +2849,21 @@ async fn shutdown_old_session(
     video_request_id: Option<u64>,
     audio_request_id: Option<u64>,
     catalog_request_id: u64,
+    peer_request_ids: Vec<u64>,
 ) {
     // PUBLISH した track を PUBLISH_DONE で終端する。映像の subgroup stream は呼び出し側が
-    // 終端済みであり、全 outgoing stream が閉じているため PUBLISH_DONE を送れる (§9.9)
-    for (track, request_id) in [
+    // 終端済みであり、全 outgoing stream が閉じているため PUBLISH_DONE を送れる (§9.9)。
+    // 受信 SUBSCRIBE で確立した購読にも PUBLISH_DONE を送る
+    // (draft-ietf-moq-transport-23 §6.4.2.2 の MUST)
+    let mut pairs: Vec<(&str, Option<u64>)> = vec![
         ("video", video_request_id),
         ("audio", audio_request_id),
         ("catalog", Some(catalog_request_id)),
-    ] {
+    ];
+    for request_id in peer_request_ids {
+        pairs.push(("peer subscribe", Some(request_id)));
+    }
+    for (track, request_id) in pairs {
         let Some(request_id) = request_id else {
             continue;
         };
@@ -2644,8 +2929,9 @@ async fn republish_catalog_at_group(
     catalog_request_id: u64,
     catalog_group: u64,
     catalog_json: &[u8],
+    peer_subscriptions: &[PeerSubscription],
 ) -> Result<ObjectFilterOutcome> {
-    catalog::publish_catalog_object(
+    let outcome = catalog::publish_catalog_object(
         handle,
         data_plane,
         catalog_request_id,
@@ -2654,7 +2940,33 @@ async fn republish_catalog_at_group(
         catalog_json,
         client.subscription_filter_start(catalog_request_id),
     )
-    .await
+    .await?;
+    // 受信 SUBSCRIBE で確立した catalog 購読にも同じ Object を送る
+    // (draft-ietf-moq-transport-23 §3.1 の "the publisher MUST send the Object once for each
+    // matching subscription")。各購読は独立した stream で受けるため、同じ Group の先頭に
+    // 置ける。失敗しても main の catalog 送出を壊さない (購読が終端済みの可能性が高い)
+    for peer in peer_subscriptions
+        .iter()
+        .filter(|peer| peer.track == PublishedTrack::Catalog && !peer.ended)
+    {
+        if let Err(e) = catalog::publish_catalog_object(
+            handle,
+            data_plane,
+            peer.request_id,
+            peer.alias,
+            catalog_group,
+            catalog_json,
+            client.subscription_filter_start(peer.request_id),
+        )
+        .await
+        {
+            tracing::debug!(
+                "Failed to send the catalog to a peer subscription: request_id={}, {e}",
+                peer.request_id
+            );
+        }
+    }
+    Ok(outcome)
 }
 
 /// カタログを次の Group で送り直し、送信できた場合は現在の Location を更新する
@@ -2662,6 +2974,10 @@ async fn republish_catalog_at_group(
 /// Group ID は送信の成否によらず先に進める。同じ Location を 2 度送ると購読側で重複として
 /// 扱われ、失敗した Group を再送すると同じ Group の Object が二重に登録されうるためである
 /// (draft-ietf-moq-msf-01 §6.1 (Group numbering))。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "main ループが持つ catalog 送出の状態と受信 SUBSCRIBE の一覧を渡すため"
+)]
 async fn republish_catalog_at_next_group(
     client: &MoqtClient,
     handle: &StreamHandle,
@@ -2670,6 +2986,7 @@ async fn republish_catalog_at_next_group(
     catalog_json: &[u8],
     catalog_group_id: &mut u64,
     catalog_location: &mut Location,
+    peer_subscriptions: &[PeerSubscription],
 ) -> Result<ObjectFilterOutcome> {
     let next_group_id = group_id::next_group_id(*catalog_group_id);
     *catalog_group_id = next_group_id;
@@ -2680,6 +2997,7 @@ async fn republish_catalog_at_next_group(
         catalog_request_id,
         next_group_id,
         catalog_json,
+        peer_subscriptions,
     )
     .await?;
     if published == ObjectFilterOutcome::Pass {
@@ -2922,6 +3240,39 @@ struct CatalogState<'a> {
 /// この example が配信している track の種別
 ///
 /// 受信した SUBSCRIBE / FETCH の Full Track Name を [`published_track`] で照合した結果である。
+/// 受理した受信 SUBSCRIBE の情報
+///
+/// draft-ietf-moq-transport-23 §3.1: 受信 SUBSCRIBE の購読は、自側が送った PUBLISH 購読と
+/// 並行して Object を送る (追加の subgroup stream / datagram / PUBLISH_DONE)。Track Alias
+/// は購読ごとに採番する (§3.1 の "A publisher MAY assign the same or different Track
+/// Aliases to these subscriptions.")。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AcceptedPeerSubscribe {
+    /// 受信 SUBSCRIBE の Request ID
+    request_id: u64,
+    /// 配信する track
+    track: PublishedTrack,
+    /// SUBSCRIBE_OK に載せた Track Alias (購読ごとに一意)
+    alias: u64,
+}
+
+/// 受信 SUBSCRIBE で確立した購読の送出状態
+///
+/// `writer` は subgroup 送出の購読 (映像 / 音声 subgroup / catalog) が持つ。音声 datagram
+/// は Object ごとに `DatagramWriter` を作るため保持しない。`ended` は購読が終端した
+/// (peer の STOP_SENDING / RESET_STREAM、Session の回収) ことを表し、送出を止める。
+struct PeerSubscription {
+    request_id: u64,
+    track: PublishedTrack,
+    alias: u64,
+    writer: Option<SubgroupWriter>,
+    audio_config_sent: bool,
+    ended: bool,
+}
+
+/// この example が配信している track の種別
+///
+/// 受信した SUBSCRIBE / FETCH の Full Track Name を [`published_track`] で照合した結果である。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PublishedTrack {
     /// 映像 track (`--track-name`)
@@ -2975,6 +3326,10 @@ fn published_track(
 /// (draft-ietf-moq-transport-23 §9.19.19) を映像のキーフレーム要求へ配線するために使う。
 /// `media_cache` は publish 済みメディアの保持であり、メディアの FETCH に配る Object と
 /// End of Unknown Range を決めるために使う。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "main ループが持つ peer 受付の状態をまとめて渡すため"
+)]
 async fn serve_peer_request(
     client: &mut MoqtClient,
     request: IncomingRequest,
@@ -2983,32 +3338,33 @@ async fn serve_peer_request(
     gop_tracker: &mut gop::GopTracker,
     started_video_group_id: Option<u64>,
     media_cache: &mut cache::MediaCache,
-) -> Result<()> {
+    next_peer_alias: &mut u64,
+) -> Result<Option<AcceptedPeerSubscribe>> {
     let request_id = request.request_id;
     match request.message {
         ControlMessage::Subscribe(subscribe) => {
-            let track: &[u8] = &subscribe.track_name;
+            let track_name: &[u8] = &subscribe.track_name;
             // Track Name だけでなく Track Namespace も照合する。別 namespace の SUBSCRIBE を
             // 受理すると、別の track の購読として自分のコンテンツを配ってしまう
-            let track_alias =
-                published_track(config, &subscribe.track_namespace, track).map(|published| {
-                    match published {
-                        PublishedTrack::Video => VIDEO_TRACK_ALIAS,
-                        PublishedTrack::Audio => AUDIO_TRACK_ALIAS,
-                        // カタログの購読を受理する。SUBSCRIBE_OK の LARGEST_OBJECT は session 層が
-                        // この track の publish 済み Object から補完する
-                        // (draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter))
-                        PublishedTrack::Catalog => CATALOG_TRACK_ALIAS,
-                    }
-                });
-            match track_alias {
-                Some(track_alias) => {
+            let published = published_track(config, &subscribe.track_namespace, track_name);
+            match published {
+                Some(track) => {
+                    // 受信 SUBSCRIBE ごとに一意な Track Alias を採番する
+                    // (draft-ietf-moq-transport-23 §3.1: "A publisher MAY assign the same or
+                    // different Track Aliases to these subscriptions.")。購読ごとの stream は
+                    // `SubgroupTracker::open` が同一 (track_alias, group_id, subgroup_id) の
+                    // 並行 stream を PROTOCOL_VIOLATION で拒否するため (§11.3 の SHOULD NOT)、
+                    // alias を分けて header field values を分ける
+                    let peer_alias = *next_peer_alias;
+                    *next_peer_alias = next_peer_alias
+                        .checked_add(1)
+                        .expect("peer track alias counter overflowed");
                     // 購読者は DYNAMIC_GROUPS を知らずに SUBSCRIBE へ NEW_GROUP_REQUEST を
                     // 載せられる (§9.19.19)。Group の途中で参加した購読者が新しい Group を
                     // 要求する経路であり、映像トラックのときだけ受け付ける。MP4 パススルーは
                     // キーフレームを要求できないため受け付けない
                     let new_group_request = accepted_new_group_request(
-                        track_alias == VIDEO_TRACK_ALIAS && config.input_mp4.is_none(),
+                        track == PublishedTrack::Video && config.input_mp4.is_none(),
                         &subscribe.parameters,
                         started_video_group_id,
                     );
@@ -3017,21 +3373,21 @@ async fn serve_peer_request(
                     // (draft-ietf-moq-transport-23 §3.5.1)、REQUEST_UPDATE で
                     // NEW_GROUP_REQUEST を送れるようになる (§9.19.19 の MUST NOT)
                     let subscribe_properties = subscribe_ok_properties(
-                        track_alias,
+                        track,
                         config.input_mp4.is_some(),
                         config.cache_duration_ms,
                     );
                     client
                         .send_subscribe_ok(
                             request_id,
-                            track_alias,
+                            peer_alias,
                             MessageParameters::new(),
                             subscribe_properties,
                         )
                         .await?;
                     tracing::info!(
-                        "Accepted SUBSCRIBE (request_id={request_id}, track={}, alias={track_alias})",
-                        String::from_utf8_lossy(track),
+                        "Accepted SUBSCRIBE (request_id={request_id}, track={}, alias={peer_alias})",
+                        String::from_utf8_lossy(track_name),
                     );
                     // 購読が成立している要求だけを受け付ける
                     if let Some(next_group_id) = new_group_request {
@@ -3040,12 +3396,17 @@ async fn serve_peer_request(
                             "Received NEW_GROUP_REQUEST in SUBSCRIBE: next_group_id={next_group_id}"
                         );
                     }
+                    return Ok(Some(AcceptedPeerSubscribe {
+                        request_id,
+                        track,
+                        alias: peer_alias,
+                    }));
                 }
                 None => {
                     tracing::warn!(
                         "Rejecting SUBSCRIBE for unknown track: namespace={}, track={}",
                         serialize_namespace(&subscribe.track_namespace),
-                        String::from_utf8_lossy(track),
+                        String::from_utf8_lossy(track_name),
                     );
                     client
                         .send_request_error(request_id, REQUEST_DOES_NOT_EXIST, "unknown track")
@@ -3067,7 +3428,7 @@ async fn serve_peer_request(
                 client
                     .send_request_error(request_id, REQUEST_DOES_NOT_EXIST, "unknown track")
                     .await?;
-                return Ok(());
+                return Ok(None);
             };
             if published == PublishedTrack::Catalog {
                 // 要求された Location Filter から range を解決し、範囲外の Object を
@@ -3089,7 +3450,7 @@ async fn serve_peer_request(
                                 "invalid location filter",
                             )
                             .await?;
-                        return Ok(());
+                        return Ok(None);
                     }
                 };
                 match catalog::catalog_fetch_response(filter.as_ref(), catalog.location) {
@@ -3156,7 +3517,7 @@ async fn serve_peer_request(
                 .await?;
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// FETCH の初回成功応答に載せるパラメータを組み立てる
@@ -4776,19 +5137,19 @@ mod tests {
                 "音声の PUBLISH に同じ値を載せること: {cache_duration_ms}"
             );
             assert_eq!(
-                subscribe_ok_properties(VIDEO_TRACK_ALIAS, false, cache_duration_ms)
+                subscribe_ok_properties(PublishedTrack::Video, false, cache_duration_ms)
                     .find_varint(PROP_MAX_CACHE_DURATION),
                 Some(cache_duration_ms),
                 "映像の SUBSCRIBE_OK に同じ値を載せること: {cache_duration_ms}"
             );
             assert_eq!(
-                subscribe_ok_properties(AUDIO_TRACK_ALIAS, false, cache_duration_ms)
+                subscribe_ok_properties(PublishedTrack::Audio, false, cache_duration_ms)
                     .find_varint(PROP_MAX_CACHE_DURATION),
                 Some(cache_duration_ms),
                 "音声の SUBSCRIBE_OK に同じ値を載せること: {cache_duration_ms}"
             );
             assert_eq!(
-                subscribe_ok_properties(CATALOG_TRACK_ALIAS, false, cache_duration_ms)
+                subscribe_ok_properties(PublishedTrack::Catalog, false, cache_duration_ms)
                     .find_varint(PROP_MAX_CACHE_DURATION),
                 None,
                 "カタログの SUBSCRIBE_OK には載せないこと: {cache_duration_ms}"
@@ -4944,27 +5305,28 @@ mod tests {
     #[test]
     fn subscribe_ok_properties_announce_dynamic_groups_for_the_video_track() {
         assert_eq!(
-            subscribe_ok_properties(VIDEO_TRACK_ALIAS, false, DEFAULT_CACHE_DURATION_MS)
+            subscribe_ok_properties(PublishedTrack::Video, false, DEFAULT_CACHE_DURATION_MS)
                 .dynamic_groups(),
             Some(1),
             "映像トラックには告知すること"
         );
         assert!(
-            subscribe_ok_properties(VIDEO_TRACK_ALIAS, true, DEFAULT_CACHE_DURATION_MS)
+            subscribe_ok_properties(PublishedTrack::Video, true, DEFAULT_CACHE_DURATION_MS)
                 .dynamic_groups()
                 .is_none(),
             "MP4 パススルーでは告知しないこと"
         );
-        for track_alias in [AUDIO_TRACK_ALIAS, CATALOG_TRACK_ALIAS] {
+        for track in [PublishedTrack::Audio, PublishedTrack::Catalog] {
             assert!(
-                subscribe_ok_properties(track_alias, false, DEFAULT_CACHE_DURATION_MS)
+                subscribe_ok_properties(track, false, DEFAULT_CACHE_DURATION_MS)
                     .dynamic_groups()
                     .is_none(),
-                "音声とカタログには DYNAMIC_GROUPS を載せないこと: {track_alias}"
+                "音声とカタログには DYNAMIC_GROUPS を載せないこと: {track:?}"
             );
         }
         assert_eq!(
-            subscribe_ok_properties(CATALOG_TRACK_ALIAS, false, DEFAULT_CACHE_DURATION_MS).len(),
+            subscribe_ok_properties(PublishedTrack::Catalog, false, DEFAULT_CACHE_DURATION_MS)
+                .len(),
             0,
             "カタログには何も載せないこと"
         );
