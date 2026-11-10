@@ -1,7 +1,7 @@
 # moq-sub が購読の確立前に FIN まで届いた Subgroup ストリームを捨てない
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-10
 - Branch: feature/fix-subscriber-pending-fin-stream-discard
 - Polished: 2026-11-10
 
@@ -43,3 +43,13 @@ moq-sub は Track Alias が未確立の Subgroup ストリームを短時間保�
 - 保持 / abort 判定の純関数を `crates/moq-sub/src/pipeline.rs` の `mod tests` に切り出し、FIN (保持: `recv_data_stream_closed` を呼ばない) / RESET_STREAM (abort) / STOP_SENDING 指示 (abort) の分岐を単体テストで固定すること。経路の駆動は `transport::RecvStream` と `DataPlaneHandle` を組み立てる基盤が無く、モック・スタブも使えない (AGENTS.md が禁止) ためコード上で確認すること。
 - moqt-js (外部リポジトリ) との挙動の違いは pipeline の doc に理由とともに書かれていること。`register_subgroup_header` の doc が FIN の遅延通知と保持解除の契約を説明していること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `crates/moq-sub/src/pipeline.rs` に保持経路専用の読み出し `receive_pending_hold_stream_outcome` を追加した。既存の `receive_registered_stream_data_outcome` と同じ select 構造で、`RecvChunk::End` を観測しても `recv_data_stream_closed` を呼ばない。FIN の Session 会計通知は保持の解除後の decode ループが 1 度だけ行う。
+- `register_subgroup_header` の保持ループの読み出しを上記ヘルパに替え、FIN を観測したら entry を理由未設定のまま保持して読み出しを止めた。期限・`Timeout` / `Overflow` / `SessionClose` 理由の取得起点 (`take_ready_for`) と STOP_SENDING 指示の監視 (`wait_data_stream_stop_sending`) を維持し、確立待ちは自分の `recv_subgroup_header` 再試行と別 task の `note_subscriber` 通知で行う。
+- RESET_STREAM / STOP_SENDING 指示による終端は従来どおり `note_end_of_stream` → 終端分岐 (abort) で破棄する。abort 経路の読み捨ては新設の `drain_registered_stream_quietly` (会計通知を遅らせる読み出し) に統一し、FIN について `recv_data_stream_closed` は成功・破棄いずれの経路でも 1 回以内に限る (unknown stream id の警告は出ない)。
+- 0426 で導入した task ローカル保持 (`LocalPendingHold` + `continue_pending_subscriber_locally`) を FIN 済み保持に拡張した (`already_fin` を追加)。FIN を観測した保持も、読み出しを止めて自分の再試行で確立を待ち、確立したら保持チャンクを decoder へ戻して処理を続ける (poll 間隔 `LOCAL_PENDING_HOLD_POLL_INTERVAL_US` で待機し、busy loop を作らない)。
+- 保持 / abort 判定の純関数 `pending_hold_end_decision` を追加し、`pipeline::tests::pending_hold_end_decision_tests` に FIN (保持) / RESET_STREAM (abort) / STOP_SENDING 指示 (abort) の分岐を固定した。経路の駆動はコード上で確認した (AGENTS.md がモック・スタブを禁止しているため)。
+- moqt-js (外部リポジトリ) との挙動の違いと FIN の遅延通知、保持解除の契約を `register_subgroup_header` と `continue_pending_subscriber_locally` の doc に記載した。
+- Session 側 (`src/session/data.rs`) と `src/pending_subgroup_buffer.rs` は変更しない (完了条件のとおり)。
