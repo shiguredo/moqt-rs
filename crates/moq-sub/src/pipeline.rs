@@ -3910,6 +3910,67 @@ async fn receive_registered_stream_data(
     }
 }
 
+/// 保持経路専用の読み出し。`End` を観測しても Session への会計通知を遅らせる
+///
+/// [`receive_registered_stream_data_outcome`] と同じ select 構造で、`RecvChunk::End` を観測して
+/// も `recv_data_stream_closed` を呼ばない。購読の確立前に FIN まで届いた stream は Session 会
+/// 計に残ったまま保持され、保持の解除後に decode ループが `End(Fin)` を観測して初めて
+/// `recv_data_stream_closed` を 1 度だけ通る。保持の破棄 (abort 経路) では、Session への会計
+/// 通知は `abort_subgroup_stream` の `send_data_stream_stop_sending` が行い、
+/// `recv_data_stream_closed` は呼ばない。`draft-ietf-moq-transport-23` §3.1.3.1 は未知 alias
+/// の stream を "buffer it briefly" することを許す。
+async fn receive_pending_hold_stream_outcome(
+    stream: &mut transport::RecvStream,
+    data_plane: &DataPlaneHandle,
+    stream_id: DataStreamId,
+) -> Result<RegisteredStreamData> {
+    tokio::select! {
+        biased;
+        error_code = data_plane.wait_data_stream_stop_sending(stream_id) => {
+            // Session 側は破棄対象として会計を閉じている。読み出しを打ち切り、
+            // 保持経路の破棄 (abort 経路) に任せる。送出の前に指示の登録を破棄し、
+            // 同じ stream へ STOP_SENDING を二重に送らない
+            data_plane.clear_data_stream_stop_sending(stream_id);
+            if let Err(e) = stream.stop_sending(error_code).await {
+                tracing::warn!(
+                    "Failed to send STOP_SENDING for data stream: \
+                     stream_id={}, error_code={error_code:#x} {e}",
+                    stream_id.0
+                );
+            }
+            Ok(RegisteredStreamData::StoppedBySession)
+        }
+        chunk = stream.receive_chunk() => match chunk? {
+            transport::RecvChunk::Data(data) => Ok(RegisteredStreamData::Data(data)),
+            // draft-ietf-moq-transport-23 §3.1.3.1 の保持経路では、FIN の会計通知
+            // (`recv_data_stream_closed`) の時点を保持の解除後に移すため、ここでは呼ばない。
+            // 終端種別は呼び出し側で分類する
+            transport::RecvChunk::End(end) => Ok(RegisteredStreamData::End(end)),
+        },
+    }
+}
+
+/// [`abort_subgroup_stream`] の読み捨て。Session への会計通知を遅らせる読み出しを使う
+///
+/// 保持した stream を破棄する経路から呼ばれる。`recv_data_stream_closed` を呼ばないため、
+/// FIN / RESET / STOP_SENDING 指示のいずれの終端でも会計は 2 度通知されない
+/// (保持が FIN を session に未通知のまま abort した場合、会計は
+/// `send_data_stream_stop_sending` で閉じられる)。
+async fn drain_registered_stream_quietly(
+    stream: &mut transport::RecvStream,
+    data_plane: &DataPlaneHandle,
+    stream_id: DataStreamId,
+) -> Result<()> {
+    loop {
+        match receive_pending_hold_stream_outcome(stream, data_plane, stream_id).await? {
+            RegisteredStreamData::Data(_) => continue,
+            RegisteredStreamData::End(_) | RegisteredStreamData::StoppedBySession => {
+                return Ok(());
+            }
+        }
+    }
+}
+
 /// `PendingNotifyReason::Subscriber` で起きた task の自分の `recv_subgroup_header` 再試行結果
 ///
 /// 検出元 (自分のループ再試行で `Accepted` を観測した task) は再試行を行わないため `None`
@@ -3968,13 +4029,50 @@ fn pending_subscriber_action(
     }
 }
 
+/// 保持ループでの終端観測の処理分類
+///
+/// FIN は保持を継続する (`draft-ietf-moq-transport-23` §3.1.3.1 の保持の目的を FIN 済みの
+/// stream でも果たすため)。Session への会計通知は保持の解除後の decode ループで 1 度だけ
+/// 行う。RESET_STREAM と Session の STOP_SENDING 指示による終端は、stream の内容が
+/// 欠けている可能性があるため既存どおり破棄する (`draft-ietf-moq-transport-23` §11.3.2
+/// (Closing Subgroup Streams) は FIN 受信後の RESET の無視を許すが、保持時の判断は
+/// 保守的に破棄とする)。
+enum PendingHoldEnd {
+    /// FIN を観測した。保持を継続し、Session への会計通知は解除後に遅らせる
+    KeepHoldingWithFin,
+    /// RESET_STREAM / Session の STOP_SENDING 指示。既存の終端分岐どおり abort する
+    AbortDiscard,
+}
+
+/// 終端種別 (または Session の STOP_SENDING 指示) から保持ループの処理を分類する
+///
+/// `end` が `None` の場合は Session の STOP_SENDING 指示 (`StoppedBySession`) を表す。
+fn pending_hold_end_decision(end: Option<&RequestStreamEnd>) -> PendingHoldEnd {
+    match end {
+        Some(RequestStreamEnd::Fin) => PendingHoldEnd::KeepHoldingWithFin,
+        None | Some(RequestStreamEnd::Reset { .. }) => PendingHoldEnd::AbortDiscard,
+    }
+}
+
 /// task ローカルで保持するチャンクと期限
 ///
 /// entry は intake の直後に削除されるため、チャンクと期限の管理を task に移す。
+/// `already_fin` は intake 時点で FIN を観測済みであることを伝える (保持の解除後に
+/// decode ループが session への会計通知を行うため、FIN は遅延する)。
 struct LocalPendingHold {
     chunks: Vec<Vec<u8>>,
     deadline_us: i64,
+    already_fin: bool,
 }
+
+/// FIN 済みの保留と task ローカル保持の周期待ち間隔 (マイクロ秒)
+///
+/// 保持ループ (`register_subgroup_header`) と task ローカル保持
+/// (`continue_pending_subscriber_locally`) の FIN 済み待機の両方で使う。FIN 済みの stream
+/// は読み出しをしないため、購読の確立 (`recv_subgroup_header` 再試行) と `note_subscriber`
+/// 通知を定周期で観測する。読み出しを停止し、poll 間隔と deadline 判定で待つため busy loop
+/// を作らない。
+const LOCAL_PENDING_HOLD_POLL_INTERVAL_US: i64 = 10_000;
 
 /// `Subscriber` で起きた task が `UnknownTrackAlias` だった保留を task ローカルで続ける
 ///
@@ -3986,13 +4084,17 @@ struct LocalPendingHold {
 ///
 /// 継続中は stream を読み続け、チャンクをバッファに積まないで task 内で保持する。このため
 /// チャンクは per-session 上限の集計から外れ、per-stream 上限のみ task 側で適用する
-/// (超えたときは既存の overflow 分岐と同じ警告を出して破棄する)。読み出しが終端
-/// (`End` / `StoppedBySession`) を観測したら、終端種別を task 内で記録して読み出しを止める。
-/// session への会計通知は既存の読み出しヘルパがそのまま行う。RESET_STREAM と Session の
-/// STOP_SENDING 指示による終端は、ストリームの内容が欠けている可能性があるため既存の
-/// 終端分岐と同じく破棄する (session 側では stream が除去済みのため、その後の再試行は
-/// unknown stream id のエラーになる)。FIN はこの task では保持継続の対象とせず、期限まで
-/// 待ったうえで既存の Timeout 分岐と同じ警告で破棄する。
+/// (超えたときは既存の overflow 分岐と同じ警告を出して破棄する)。読み出しは session の
+/// 会計通知を遅らせる `receive_pending_hold_stream_outcome` を使う。読み出しが終端
+/// (`End` / `StoppedBySession` 指示) を観測したら、終端種別を task 内で記録して読み出しを
+/// 止める。RESET_STREAM と Session の STOP_SENDING 指示による終端は、ストリームの内容が
+/// 欠けている可能性があるため既存の終端分岐と同じく破棄する (abort 経路の
+/// `send_data_stream_stop_sending` で会計を閉じるため、unknown stream id の警告は出ない)。
+/// FIN は保持を継続する (`read_ended_in_fin`)。
+/// FIN を観測した保持は、読み出しを止めて自分の再試行で確立を待ち、確立したら保持チャンクを
+/// decoder へ戻す (Session への会計通知は decode ループが 1 度だけ行う)。入力時に既に FIN を
+/// 観測していた保持を出し入れするため、`LocalPendingHold::already_fin` を引く。期限切れなら
+/// 期限分岐と同じく破棄する (会計は `send_data_stream_stop_sending` で閉じる)。
 ///
 /// 待ち順序は「期限付きの読み出し、そのあとで自分の再試行」である (既存の保留ループとは
 /// 逆)。入口の直前に検出先の再試行で `UnknownTrackAlias` を観測済みのため、直後の重複
@@ -4010,14 +4112,16 @@ async fn continue_pending_subscriber_locally(
     let LocalPendingHold {
         chunks: mut held,
         deadline_us,
+        already_fin,
     } = hold;
     let options = DEFAULT_PENDING_SUBGROUP_BUFFER_OPTIONS;
     let mut held_bytes: usize = held.iter().map(Vec::len).sum();
     // FIN を観測して読み出しを止めた状態。終端種別の task 内での記録である
     // (`draft-ietf-moq-transport-23` §3.1.3.1 は保持で順序入れ替わりを処理する MAY を与える)。
-    // FIN 済みの保持を Session 通知の遅延とともに扱うのは、後続の FIN 保持対応であり、
-    // この task では session 会計の既存契約 (FIN 観測で stream が除去済み) に従う
-    let mut read_ended_in_fin = false;
+    // FIN 済みの保持は読み出しを止めて自分の再試行で確立を待つ。確立したら保持チャンクを
+    // decoder へ戻し、decode ループが FIN の session 会計通知 (recv_data_stream_closed) を
+    // 1 度だけ行う。期限までは保持を続け、期限切れは Deadline 分岐と同じく破棄する
+    let mut read_ended_in_fin = already_fin;
     loop {
         let remaining_us = deadline_us.saturating_sub(monotonic_now_us());
         if remaining_us <= 0 {
@@ -4035,7 +4139,7 @@ async fn continue_pending_subscriber_locally(
         if !read_ended_in_fin {
             match tokio::time::timeout(
                 std::time::Duration::from_micros(remaining_us.saturating_sub(1) as u64),
-                receive_registered_stream_data_outcome(stream, data_plane, stream_id),
+                receive_pending_hold_stream_outcome(stream, data_plane, stream_id),
             )
             .await
             {
@@ -4053,8 +4157,9 @@ async fn continue_pending_subscriber_locally(
                     held_bytes += data.len();
                     held.push(data.to_vec());
                 }
-                // 終端。既存の読み出しヘルパが session への会計通知を済ませているため、
-                // ここでは終端種別を記録して以後の読み出しを止める
+                // 終端。この読み出しは session への会計通知を遅らせるため、FIN はここでは
+                // 通知せず、終端種別を記録して以後の読み出しを止める (保持の解除後に
+                // decode ループが `End(Fin)` を観測して初めて session 会計を閉じる)
                 Ok(Ok(RegisteredStreamData::End(RequestStreamEnd::Fin))) => {
                     tracing::debug!(
                         "Stream #{stream_num}: stream ended with FIN while holding the \
@@ -4063,9 +4168,10 @@ async fn continue_pending_subscriber_locally(
                     );
                     read_ended_in_fin = true;
                 }
-                // RESET_STREAM と Session の STOP_SENDING 指示による終端は、ストリームの
-                // 内容が欠けている可能性があるため既存の終端分岐と同じく破棄する (既存の
-                // 読み出しヘルパが session への会計通知を済ませている)
+                // RESET_STREAM。session への会計通知はここでは行わない (stream は Session 会
+                // 計に残っているため、`abort_subgroup_stream` の
+                // `send_data_stream_stop_sending` で会計を閉じ、unknown stream id の警告は
+                // 出ない)
                 Ok(Ok(RegisteredStreamData::End(RequestStreamEnd::Reset { .. }))) => {
                     tracing::debug!(
                         "Stream #{stream_num}: stream reset while holding the subgroup stream \
@@ -4098,17 +4204,39 @@ async fn continue_pending_subscriber_locally(
             }
         }
 
-        // FIN 済み (read_ended_in_fin) のときは読み出しをしない。期限まで待ってから
-        // Timeout 分岐相当で破棄する (busy loop を作らない)
+        // FIN 済み (read_ended_in_fin) のときは読み出しをしない。終端済み stream は FIN を
+        // 即時に再配信するため読み出しを loop に入れると busy loop になる。再試行の周期
+        // 待ち (poll 間隔) と STOP_SENDING 指示の監視を行い、期限は loop 先頭の deadline 判定
+        // で破棄へ収束させる
         if read_ended_in_fin {
-            tokio::time::sleep(std::time::Duration::from_micros(
-                deadline_us.saturating_sub(monotonic_now_us()).max(0) as u64,
-            ))
-            .await;
-            continue;
+            tokio::select! {
+                biased;
+                stop_code = data_plane.wait_data_stream_stop_sending(stream_id) => {
+                    // STOP_SENDING 指示。session が指示で会計を閉じているため、既存の
+                    // 終端分岐と同じく破棄する (既存の読み出しヘルパと同じく指示の登録を
+                    // 破棄して stream を止める)
+                    data_plane.clear_data_stream_stop_sending(stream_id);
+                    if let Err(e) = stream.stop_sending(stop_code).await {
+                        tracing::warn!(
+                            "Failed to send STOP_SENDING for data stream: \
+                             stream_id={}, error_code={stop_code:#x} {e}",
+                            stream_id.0
+                        );
+                    }
+                    abort_subgroup_stream(stream, data_plane, stream_id).await;
+                    return false;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_micros(
+                    remaining_us
+                        .min(LOCAL_PENDING_HOLD_POLL_INTERVAL_US)
+                        .saturating_sub(1)
+                        as u64,
+                )) => {}
+            }
         }
 
         // 自分の再試行で確立を確認する。確立していれば保持したチャンクを decoder へ戻す
+        // (FIN 保持中に `UnknownTrackAlias` が続く限り、この再試行が唯一の確立検出手段である)
         match data_plane.recv_subgroup_header(stream_id, header) {
             Ok(TrackDataAcceptance::Accepted) => {
                 for chunk in &held {
@@ -5603,6 +5731,17 @@ async fn handle_stream_body(
 /// `note_subscriber` は理由設定済みの entry に対して no-op であり、entry の引き取りは 1 回限り
 /// であるため、複数 task が各自の再試行でいくら `Accepted` を観測しても重複処理は起こらない。
 ///
+/// FIN の終端通知は遅らせる (`draft-ietf-moq-transport-23` §3.1.3.1 の保持)。保持中に FIN を
+/// 読んだ場合は entry を理由未設定のまま維持して読み出しを止め、検出先の再試行と同じく
+/// 自分の `recv_subgroup_header` 再試行で確立を待つ (購読の確立は別 task の `note_subscriber`
+/// でも起こる)。確立後に保持チャンクを decoder へ戻すと、decode ループが `End(Fin)` を
+/// 観測して初めて session の `recv_data_stream_closed` を 1 度だけ通るため、FIN の会計
+/// 通知は二重にならない。期限切れ・RESET_STREAM / STOP_SENDING 指示による abort では
+/// 会計を `send_data_stream_stop_sending` で閉じるため、FIN の通知は成功経路・破棄経路の
+/// どちらでも 1 回以内である。移植元の moqt-js (外部リポジトリ) は FIN の時点で subscriber
+/// が居なければ entry を破棄する。本 example は保持を継続して購読の確立を待つ点が異なる
+/// (`draft-ietf-moq-transport-23` §3.1.3.1 の保持の目的を FIN 済みの stream でも果たすため)。
+///
 /// 戻り値が false の場合は header を登録できず、ストリームを破棄した
 /// (会計から外して読み捨て済み。wire の STOP_SENDING は送らない)。
 ///
@@ -5665,6 +5804,9 @@ async fn register_subgroup_header(
     // 自分の再試行を行ってはいけない (session は受理済み stream への 2 度目の
     // SUBGROUP_HEADER を UNEXPECTED_MESSAGE (0x303) で拒否する)
     let mut detected_self = false;
+    // FIN を観測して読み出しを止めた状態。保持チャンクは捨てず、Session への会計通知は
+    // 保持解除後の decode ループで行うため、entry は理由未設定のまま保持する
+    let mut hold_fin = false;
     tracing::debug!(
         "Stream #{stream_num}: holding subgroup stream until the track alias={} is established",
         header.track_alias,
@@ -5723,6 +5865,7 @@ async fn register_subgroup_header(
                             let hold = LocalPendingHold {
                                 chunks: ready.chunks,
                                 deadline_us,
+                                already_fin: hold_fin,
                             };
                             continue_pending_subscriber_locally(
                                 stream, data_plane, stream_id, header, decoder, stream_num, hold,
@@ -5854,17 +5997,65 @@ async fn register_subgroup_header(
             // 期限切れ。次のループで take_ready_for が Timeout を返す
             continue;
         }
+        // FIN を観測したあとは読み出しを止める。待機は保持の期限 (`deadline_us`) までの
+        // 周期待ち (`LocalPendingHold` 用の poll 間隔) と STOP_SENDING 指示の監視で行い、
+        // 終端済み stream の即時再配信による busy loop を作らない。購読の確立は次のループの
+        // 自分の再試行 (`recv_subgroup_header`) と、他 task の `note_subscriber` で観測する
+        if hold_fin {
+            tokio::select! {
+                biased;
+                stop_code = data_plane.wait_data_stream_stop_sending(stream_id) => {
+                    // STOP_SENDING 指示。既存の読み出しヘルパと同じく指示の登録を破棄して
+                    // stream を止め、終端分岐 (abort) で会計を閉じる
+                    data_plane.clear_data_stream_stop_sending(stream_id);
+                    if let Err(e) = stream.stop_sending(stop_code).await {
+                        tracing::warn!(
+                            "Failed to send STOP_SENDING for data stream: \
+                             stream_id={}, error_code={stop_code:#x} {e}",
+                            stream_id.0
+                        );
+                    }
+                    pending_subgroups.lock().await.note_end_of_stream(id);
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_micros(
+                    remaining_us.min(LOCAL_PENDING_HOLD_POLL_INTERVAL_US).saturating_sub(1)
+                        as u64,
+                )) => {}
+            }
+            continue;
+        }
         match tokio::time::timeout(
             std::time::Duration::from_micros(remaining_us as u64),
-            receive_registered_stream_data(stream, data_plane, stream_id),
+            receive_pending_hold_stream_outcome(stream, data_plane, stream_id),
         )
         .await
         {
-            Ok(Ok(Some(data))) => pending_subgroups.lock().await.push(id, &data),
-            // ストリームが終端した (FIN / RESET_STREAM / Session の STOP_SENDING 指示)。
-            // 自分の entry だけに終端を通知し、次のループで引き取る。同じ alias の別ストリームの
-            // entry は別のストリームに対応するため、その状態は変えない
-            Ok(Ok(None)) => pending_subgroups.lock().await.note_end_of_stream(id),
+            Ok(Ok(RegisteredStreamData::Data(data))) => {
+                pending_subgroups.lock().await.push(id, &data)
+            }
+            Ok(Ok(RegisteredStreamData::End(end))) => {
+                match pending_hold_end_decision(Some(&end)) {
+                    PendingHoldEnd::KeepHoldingWithFin => {
+                        // FIN。保持チャンクは捨てず、Session への会計通知を遅らせる。
+                        // "通知は最初の 1 回だけ有効" の契約により `note_end_of_stream` を
+                        // 呼ばない (後から `note_subscriber` で引き取りできるようにする)。
+                        // 読み出しは止める (終端済み stream は FIN を即時に再配信する)
+                        hold_fin = true;
+                    }
+                    PendingHoldEnd::AbortDiscard => {
+                        // RESET_STREAM。ストリームの内容が欠けている可能性があるため既存
+                        // どおり破棄する。session への会計通知は abort 経路の
+                        // `send_data_stream_stop_sending` で行い、ここでは呼ばない
+                        pending_subgroups.lock().await.note_end_of_stream(id);
+                    }
+                }
+            }
+            Ok(Ok(RegisteredStreamData::StoppedBySession)) => {
+                // Session の STOP_SENDING 指示 (DATA_STREAM_TIMEOUT など)。既存の読み出し
+                // ヘルパが指示の登録を破棄して stream を止めたため、終端分岐 (abort) で
+                // 会計を閉じる
+                pending_subgroups.lock().await.note_end_of_stream(id);
+            }
             Ok(Err(e)) => {
                 log_failure(
                     format_args!("Stream #{stream_num}: failed to read held subgroup stream: {e}"),
@@ -5891,7 +6082,9 @@ async fn abort_subgroup_stream(
     stream_id: DataStreamId,
 ) {
     let _ = data_plane.send_data_stream_stop_sending(stream_id);
-    let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
+    // 読み捨てには Session 通知を遅らせる読み出しを使う。FIN を session に未通知のまま
+    // abort した stream では、会計は `send_data_stream_stop_sending` で 1 度だけ閉じる
+    let _ = drain_registered_stream_quietly(stream, data_plane, stream_id).await;
 }
 
 /// 単調増加するマイクロ秒時刻
@@ -7181,6 +7374,54 @@ mod tests {
                     PendingSubscriberAction::DiscardQuietly
                 ),
                 "再試行の無い検出先は破棄に倒すこと"
+            );
+        }
+    }
+
+    /// 保持ループの終端観測の処理分類を固定する
+    ///
+    /// FIN は保持を継続する (`draft-ietf-moq-transport-23` §3.1.3.1 の保持の目的を FIN 済み
+    /// stream でも果たす)。RESET_STREAM と Session の STOP_SENDING 指示は stream の内容が
+    /// 欠けている可能性があるため既存どおり abort する。
+    mod pending_hold_end_decision_tests {
+        use super::*;
+
+        /// FIN は保持を継続すること
+        #[test]
+        fn fin_keeps_holding() {
+            assert!(
+                matches!(
+                    pending_hold_end_decision(Some(&RequestStreamEnd::Fin)),
+                    PendingHoldEnd::KeepHoldingWithFin
+                ),
+                "FIN は保持を継続すること"
+            );
+        }
+
+        /// RESET_STREAM は既存どおり abort すること
+        #[test]
+        fn reset_aborts() {
+            assert!(
+                matches!(
+                    pending_hold_end_decision(Some(&RequestStreamEnd::Reset {
+                        error_code: None,
+                        reliable_size: None,
+                    })),
+                    PendingHoldEnd::AbortDiscard
+                ),
+                "RESET_STREAM は abort すること"
+            );
+        }
+
+        /// Session の STOP_SENDING 指示 (end が None) は既存どおり abort すること
+        #[test]
+        fn stop_sending_indication_aborts() {
+            assert!(
+                matches!(
+                    pending_hold_end_decision(None),
+                    PendingHoldEnd::AbortDiscard
+                ),
+                "STOP_SENDING 指示は abort すること"
             );
         }
     }
