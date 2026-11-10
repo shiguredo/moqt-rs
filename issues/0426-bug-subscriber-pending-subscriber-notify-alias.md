@@ -1,7 +1,7 @@
 # moq-sub の保留ストリームが自分の SUBGROUP_HEADER の受理を確認してから処理を進める
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-10
 - Branch: feature/fix-subscriber-pending-subscriber-notify
 - Polished: 2026-11-10
 
@@ -51,3 +51,12 @@ Session 側ではそのストリームが header 未受理の状態のままで�
 - 検出先の処理分類 (検出元フラグ × 再試行結果から復帰 / 保留継続 / abort / 破棄を返す判定) は純関数に切り出し、`crates/moq-sub/src/pipeline.rs` の `mod tests` の単体テストで固定すること (0425 と同等の基準)。経路の駆動は `transport::RecvStream` と `DataPlaneHandle` を組み立てる基盤が無く、モック・スタブも使えない (AGENTS.md が禁止) ためコード上で確認すること。
 - `register_subgroup_header` の doc が検出元・検出先の区別と検出先再試行の処理分類を説明していること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `crates/moq-sub/src/pipeline.rs` の `register_subgroup_header` を検出元 (自分のループ再試行で `Accepted` を観測した task) と検出先 (別 task の `note_subscriber` で起きた task) に区別して整理した。検出元は entry を `Subscriber` で引き取ったら再試行せずに復帰し、検出先は自分の `recv_subgroup_header` を再試行して `Accepted` を確認してから復帰する。session は受理済みの stream への 2 度目の SUBGROUP_HEADER を `SESSION_UNEXPECTED_MESSAGE` (0x303) で拒否するため、検出元での再試行は発生しない。
+- 検出先の再試行結果の処理分類 (復帰 / 保留継続 / 会計を閉じる破棄 / 会計を閉じない破棄) を純関数 `pending_subscriber_action` に切り出した。`Discarded` / `FilteredOut` は既存の再試行分岐と同じ `abort_subgroup_stream` で会計を閉じ、エラーは既存の `Err` 分岐と同じく会計を閉じずに破棄する。
+- `UnknownTrackAlias` での保留継続は task ローカル保持に替えた (`LocalPendingHold` と `continue_pending_subscriber_locally`)。entry は引き取りの直後に削除されるため、チャンクと期限 (`deadline_us = added_us + timeout_us`) を task 内で持ち、バッファに戻さない (期限延長を行わない)。読み出しは `receive_registered_stream_data_outcome` を直用して終端種別を区別し、終端を task 内で記録して読み出しを止める。RESET_STREAM / Session の STOP_SENDING 指示は既存の終端分岐相当で破棄し、FIN は期限まで待ってから既存の Timeout 分岐相当で破棄する (FIN 済み保持の保持解除は後続の FIN 保持対応で導入する)。
+- per-stream 上限は task 側で適用し、超過時は既存の overflow 分岐と同じ警告で破棄する。per-session 上限の集計から外れる制約を `register_subgroup_header` と `continue_pending_subscriber_locally` の doc に明記した。doc の「受信ループの実行中に購読が確立する経路は無く」の記述を実態に合わせて削除した。
+- テスト: `pipeline::tests::pending_subscriber_action_tests` に検出元の無条件復帰、検出先の `Accepted` / `UnknownTrackAlias` / `Discarded` / `FilteredOut` / エラー / 再試行なしの 6 分岐を固定した。
+- Session 側 (`src/session/data.rs`) と `src/pending_subgroup_buffer.rs` は変更しない (完了条件のとおり)。
