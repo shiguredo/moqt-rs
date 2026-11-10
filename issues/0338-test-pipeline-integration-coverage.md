@@ -25,7 +25,9 @@ library の tests / PBT / fuzz は厚いが、example の pipeline 統合経路 
 - `fuzz/fuzz_targets/fuzz_session.rs` は `RecvFetchHeader` と `SendFetch` を持つが、FETCH entry の受信と REQUEST_OK (FETCH_OK) + 応答 stream の成功経路を踏まない。
 - `peer_harness` は `crates/tokio-moq/src/lib.rs` の `#[cfg(test)] mod peer_harness;` であり、`crates/moq-pub` / `crates/moq-sub` / `e2e-tests` から参照できない。`TestPeer` などの型とメソッドも `pub(crate)` である。
 - 影響: 0339 / 0340 の example 改修 (pipeline 分割、decoder 共通化) を安全に進められない。
-- 依存: 0330 (受信 SUBSCRIBE の Object / PUBLISH_DONE)、0332 (MP4 の PROP_TIMESCALE)、0333 (PUBLISH_DONE の track 単位処理)、0335 (GOAWAY 移行後の Audio Config リセット) の実装後に着手する。これらの挙動を固定するテストは、各 issue の実装後に追加する。
+- 依存: 0330 (受信 SUBSCRIBE の Object / PUBLISH_DONE)、0333 (PUBLISH_DONE の track 単位処理) の実装後に着手する。これらの挙動を固定するテストは、各 issue の実装後に追加する。
+  0332 (MP4 の PROP_TIMESCALE) は解決済みである。0335 (GOAWAY 移行後の Audio Config リセット) のうち publisher 側の `audio_config_sent` のリセットは
+  60244e5e で実装済みであり (`crates/moq-pub/src/pipeline.rs`)、publisher 側の再送の確認は 0335 を待たない。
 
 ## 設計方針
 
@@ -42,12 +44,14 @@ library の tests / PBT / fuzz は厚いが、example の pipeline 統合経路 
   - 統合テストは各 example crate の `#[cfg(test)] mod tests` に置き、`run` または private な pipeline 関数をクレート内から呼ぶ。pipeline の private 関数をテストのために公開しない。
 - moq-pub の統合テスト:
   - `serve_peer_request` 経由で video / audio / catalog の SUBSCRIBE が SUBSCRIBE_OK になり、未知の track が REQUEST_ERROR(REQUEST_DOES_NOT_EXIST) になること。
+  - 配信中の track と同じ track name で別の Track Namespace を指す SUBSCRIBE / FETCH が、REQUEST_ERROR(REQUEST_DOES_NOT_EXIST) になること (`published_track` の照合経路)。
   - `NEW_GROUP_REQUEST` が live capture の映像だけで受理され、MP4 パススルーでは受理されないこと (`accepted_new_group_request` の呼び出し経路)。
   - フィルタ付き / PAUSED 1 (旧 FORWARD 0) の SUBSCRIBE は、0330 の実装に従って Object をフィルタするか REQUEST_NOT_SUPPORTED で拒否すること。
   - catalog の FETCH が Object / Empty / InvalidRange の各応答になること。
   - media の FETCH が unknown track / no published objects / empty range / descending group order / range filter の各応答になること。
+    0427 の実装後は、Object を 1 件も cache に入れていない配信中の track が REQUEST_ERROR(INVALID_RANGE) になることを確認する。
   - `serve_fetch_entries` が End of Non-Existent Range / End of Unknown Range / Object を正しい順序で書き、FIN で閉じること。
-  - `run` を `--input-mp4` で起動し、映像の全 Object に `PROP_TIMESCALE` が付き、PTS 間隔が入力トラックの timescale と一致すること (0332 の実装後)。MP4 fixture は `shiguredo_mp4` の muxer でテスト内に生成する。
+  - `run` を `--input-mp4` で起動し、映像の全 Object に `PROP_TIMESCALE` が付き、PTS 間隔が入力トラックの timescale と一致すること。MP4 fixture は `shiguredo_mp4` の muxer でテスト内に生成する。
 - moq-sub の統合テスト:
   - `receive_catalog` が fill fetch stream と subgroup stream の両方から catalog を適用し、delta を適用し、期限切れ・request_id 不一致・不正 Object をエラーにすること。
   - `resubscribe_tracks` が GOAWAY 移行先で catalog を FILL_PARAMETERS 付きで購読し、video に REQUEST_UPDATE を送り、映像にだけ直近 Group の FETCH を発行すること (video / audio の購読に FILL_PARAMETERS は載せない。音声の明示 FETCH は発行しない)。
@@ -59,7 +63,7 @@ library の tests / PBT / fuzz は厚いが、example の pipeline 統合経路 
   - `run` が catalog 取得から購読確立、shutdown までを完了すること。音声 1 Object の受信経路は、既存のテスト用 Opus データを使って検証する。
 - GOAWAY 移行と PUBLISH_DONE の track 単位処理は peer_harness で検証する。
   - 2 つの `TestPeerServer` を立て、移行元から `send_goaway` で移行先を指定する。移行先で再購読と FETCH が行われることを確認する。
-  - 移行後に Audio Config が再送されることは 0335 の実装後に確認する。
+  - 移行後に publisher が最初の音声 Object に Audio Config を載せ直すことを確認する。subscriber 側の `audio_config_handled` のリセットは 0335 の扱いに従う。
   - 移行先の harness が audio の SUBSCRIBE にだけ PUBLISH_DONE(TRACK_ENDED) を送り、video の受信が継続することを確認する (0333 の実装後)。
 - e2e は real relay でしか検証できない経路に限定する。
   - 既存の live 3 本はそのまま維持する。
