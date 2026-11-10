@@ -1,7 +1,7 @@
 # moq-sub が PUBLISH_DONE を status code と購読単位で扱う
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-10
 - Branch: feature/fix-subscriber-publish-done-handling
 - Polished: 2026-11-10
 - Refreshed: 2026-11-04
@@ -91,3 +91,15 @@ draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE) と §12.4 (Publish Done Codes)
 - request_id から track 種別への対応が既存の `goaway_request_kind` と既存テストで担保されていること (改名しない限り新規実装はしない)。
 - PUBLISH_DONE で Terminated になった購読へ STOP_SENDING を送らないこと (対象判定の純関数の単体テストと、STOP_SENDING 失敗時に `log_failure` になる実装経路の確認で検証し、shutdown と移行のどちらの経路でも警告が出ないことをコード上で確認する)。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `crates/moq-sub/src/pipeline.rs` のメインループの `SessionEvent::PublishDoneReceived` 分岐を書き換えた。`goaway_request_kind` (既存の純関数を流用) で request_id を TrackKind に対応させ、`publish_done_disposition(status_code)` の純関数で `TRACK_ENDED` / `GOING_AWAY` / エラー / 未知 code を分類して、PUBLISH_DONE を受けた購読を「終了待ち」 (`HashMap<u64, (TrackKind, PublishDoneDisposition)>` の `publish_done_pending`) に記録するようにした。1 track の終了ではパイプライン全体を終了させない (`Ok(false)` を返す)。
+- `crates/tokio-moq/src/moqt_client.rs` に `subscription_cleanup_ready(request_id) -> Option<bool>` を追加した (`Session::subscription_cleanup_ready` の転送)。未知 request id で `None` を返す。テスト `subscription_cleanup_ready_returns_none_for_unknown_request` を `peer_harness` に追加した。
+- 100 ms tick で終了待ちの entry を観測し、`Some(true)` または `None` (回収済み) になった時点で track を終了させる。`track_map` と datagram 受信タスクの alias 表から該当 alias を外し、catalog は `fetch_targets` からも外す。`permanently_ended_tracks` (恒久終了) と `migration_pending_tracks` (移行待ち) に分類し、全 media track が恒久終了して media の移行待ちが無ければ `peer_ended` を立ててメインループを終了させる (録画の finalize は従来の後始末経路で走る)。
+- 移行開始時 (session GOAWAY と transport drain の両経路) に終了待ち entry の disposition を参照して plan を組み立てる純関数 `plan_for_migration` を追加した。`TrackEnded` / `Error` は plan から除外して恒久終了化し、`GoingAway` は plan に含める。session 移行成功時は終了待ち entry をすべて解消する (`publish_done_pending.clear()`)。`ResubscribePlan.catalog_namespace` と `Resubscribed.catalog` を `Option` 化した (恒久終了済み catalog は張り直さず、最後の `catalog_state` を使う)。
+- 移行時の request id 衝突を防ぐため `catalog_request_id` / `catalog_alias` を `Option<u64>` にした (恒久終了後に移行先 media の request id 0 を旧 catalog request id と誤判定しない)。`goaway_request_kind` は `None` の catalog を照合対象から外す。
+- `MigrationScope::Request` の再発行判定を純関数 `reissue_request_target` に統一した (恒久終了済み / `TrackEnded` / `Error` は再発行しない。`GoingAway` と active な購読は再発行)。再発行前の STOP_SENDING 判定を純関数 `reissue_send_stop_sending` に統一した (Terminated 済み購入に送らない)。再発行成功時は `active_requests` を載せ替え、`migration_pending_tracks` から外す。
+- shutdown 時の STOP_SENDING 対象を純関数 `stop_sending_targets` に統一し、`active_requests` に含まれる request id だけを送る (PUBLISH_DONE 済み / 回収済み購読への STOP_SENDING を送らない)。
+- テスト: `publish_done_disposition_matches_the_status_code` / `stop_sending_targets_follow_active_requests` / `plan_for_migration_follows_pending_dispositions` / `reissue_request_target_and_send_stop_sending_follow_states` を `pipeline::tests` に追加した。
+- Session 側と `pending_subgroup_buffer` は変更しない。
