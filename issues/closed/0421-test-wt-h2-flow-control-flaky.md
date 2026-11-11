@@ -40,8 +40,11 @@
 
 ## 解決方法
 
-- `crates/tokio-moq/src/webtransport_h2.rs` の `run_flow_control_server` を変更した。受理系 4 分岐 (`MaxDataIncrease` / `StreamDataIncreaseBidiLocal` / `StreamsIncreaseUni` / `StreamsIncreaseBidi`) の `return Ok(())` をやめ、観測結果の送信後に通常の event ループを続けてテスト側の接続終了を待つ。観測結果の送信は `observed` を `Option<oneshot::Sender>` にして `take()` するガードで 1 回だけにした (同一観測の再評価箇所が複数あるため)。後続の再評価では `observed` が `None` になるため 2 回目の送信は起きない。
+- `crates/tokio-moq/src/webtransport_h2.rs` の `run_flow_control_server` を変更した。受理系 4 分岐 (`MaxDataIncrease` / `StreamDataIncreaseBidiLocal` / `StreamsIncreaseUni` / `StreamsIncreaseBidi`) の `return Ok(())` をやめ、観測結果の送信後に通常の event ループを続けてテスト側の接続終了を待つ。観測結果の送信は `observed` を `Option<oneshot::Sender
+  >` にして `take()` するガードで 1 回だけにした (同一観測の再評価箇所が複数あるため)。後続の再評価では `observed` が `None` になるため 2 回目の送信は起きない。
 - `next_event` のエラーを、観測結果を送り終えた後 (`observed` が `None` のとき) は正常終了 (`Ok(())`) として扱うようにした。テストは観測受信後に session を drop して接続を閉じるため、EOF が `TransportError::ConnectionClosed` として届くが (session drop は CONNECT stream に END_STREAM を送らず io drop による TCP 閉鎖で届く)、観測済みの接続終了をエラーにしない。
-- テスト側の `assert_flow_control_observation` を変更した。観測受信と assert の後、`server.await` の前に session を drop して接続を閉じる手順にする。server が自発的に閉じない設計では、session drop (旧手順では `server.await` の後) と server task の終了待ちの依存が逆になり解決しないためである。client 側の送信手順 (`prepare_flow_control_client`) は現状のまま変えない (`FlowControlProbe::StreamDataIncreaseBidiLocal` に `finish()` を追加する変更もしない。拒否テスト用の `FlowControlProbe::StreamDataBidiLocal` と共用であり、server が先に閉じない設計では競合源を増やす必要が無いため)。
+- テスト側の `assert_flow_control_observation` を変更した。観測受信と assert の後、`server.await` の前に session を drop して接続を閉じる手順にする。server が自発的に閉じない設計では、session drop (旧手順では `server.await` の後) と server task の終了待ちの依存が逆になり解決しないためである。client 側の送信手順 (`prepare_flow_control_client`) は現状のまま変えない (`FlowControlProbe::Strea
+  mDataIncreaseBidiLocal` に `finish()` を追加する変更もしない。拒否テスト用の `FlowControlProbe::StreamDataBidiLocal` と共用であり、server が先に閉じない設計では競合源を増やす必要が無いため)。
 - reject 系分岐 (`StreamReset` / `StreamClosed` / `ConnectionError` / ループ末端) も `observed.take()` を経由する形に統一した (挙動は不変。旧実装の「send 1 回して return」と同一意味論)。
-- 検証: `cargo test -p tokio-moq --lib flow_control` を通常設定 15 回 + 並列負荷 15 回 + 修正後 20 回の計 50 回実行して 0 失敗 (完了条件の 30 回以上を満たす)。`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` / `cargo build -p shiguredo_moqt --target thumbv7em-none-eabihf` も通る。
+- 検証: `cargo test -p tokio-moq --lib flow_control` を通常設定 15 回 + 並列負荷 15 回 + 修正後 20 回の計 50 回実行して 0 失敗 (完了条件の 30 回以上を満たす)。`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` / `carg
+  o build -p shiguredo_moqt --target thumbv7em-none-eabihf` も通る。
