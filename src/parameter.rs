@@ -13,6 +13,7 @@ use crate::{
     varint,
 };
 use alloc::vec::Vec;
+use core::str::FromStr;
 
 /// MAX_CONTROL_MESSAGE_SIZE の既定値 (65535 バイト)
 ///
@@ -194,60 +195,23 @@ fn validate_ipv_future(value: &[u8]) -> Result<(), SetupUriValidationError> {
     Ok(())
 }
 
+/// RFC 3986 §3.2.2 の `IPv6address` を検証する
+///
+/// `IPv6address` の文法は「16 ビット単位の 16 進 8 個」を軸に、`::` による省略と末尾の
+/// IPv4 表記 (`ls32 = h16 ":" h16 / IPv4address`) を許す 7 つの代替からなる。
+/// `core::net::Ipv6Addr` の `FromStr` はこの文法をそのまま受理するため、手書きの
+/// セグメント数え上げではなくパーサに委ねる。手書き実装では `[1:::2]` のような空セグメントを
+/// 黙って読み飛ばしていた。
+///
+/// draft §9.1.1 (AUTHORITY) は AUTHORITY が RFC 3986 の URI formatting rules に従うことを
+/// 要求し、違反時は MALFORMED_AUTHORITY でセッションを閉じることを MUST とする。
+/// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
 fn validate_ipv6addr(s: &str) -> Result<(), SetupUriValidationError> {
-    if s.is_empty() || s.len() > 39 {
-        return Err(SetupUriValidationError::Authority);
-    }
-
-    // IPv4 マップアドレスの末尾部分を検出する
-    let (ipv6_part, ipv4_part) = match s.rsplit_once(':') {
-        Some((rest, last)) if last.contains('.') => (rest, Some(last)),
-        _ => (s, None),
-    };
-
-    let has_double_colon = ipv6_part.contains("::");
-
-    // "::" が複数回出現してはならない
-    if ipv6_part.matches("::").count() > 1 {
-        return Err(SetupUriValidationError::Authority);
-    }
-
-    // 各セグメントを抽出し検証する
-    let segments: alloc::vec::Vec<&str> =
-        ipv6_part.split(':').filter(|seg| !seg.is_empty()).collect();
-
-    for seg in &segments {
-        if seg.len() > 4 || !seg.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(SetupUriValidationError::Authority);
-        }
-    }
-
-    let max_segments = if ipv4_part.is_some() { 6 } else { 8 };
-
-    if segments.len() > max_segments {
-        return Err(SetupUriValidationError::Authority);
-    }
-
-    if has_double_colon {
-        // "::" が存在する場合、セグメント数は max_segments 未満でなければならない
-        if segments.len() >= max_segments {
-            return Err(SetupUriValidationError::Authority);
-        }
-    } else {
-        // "::" が無い場合、セグメント数は max_segments と一致しなければならない
-        if segments.len() != max_segments {
-            return Err(SetupUriValidationError::Authority);
-        }
-    }
-
-    // IPv4 末尾部分の検証
-    if let Some(ipv4) = ipv4_part
-        && !is_ipv4_address(ipv4.as_bytes())
-    {
-        return Err(SetupUriValidationError::Authority);
-    }
-
-    Ok(())
+    // `Ipv6Addr` のパーサはゾーン ID (`fe80::1%25eth0` の `%25eth0` 等) を受理しないため、
+    // RFC 3986 §3.2.2 の `IPv6address` にゾーン ID が含まれないことと整合する。
+    core::net::Ipv6Addr::from_str(s)
+        .map(|_| ())
+        .map_err(|_| SetupUriValidationError::Authority)
 }
 
 fn validate_ip_literal(value: &[u8]) -> Result<(), SetupUriValidationError> {
@@ -811,5 +775,98 @@ impl SetupOptions {
             validate_authority(authority)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RFC 3986 §3.2.2 の `IPv6address` として不正なリテラルを拒否すること
+    ///
+    /// 空セグメントを読み飛ばす手書き実装では `1:::2` や先頭・末尾の余分な `:` が
+    /// 受理されていた。`IPv6address` の ABNF は空の 16 ビット単位を許さない。
+    #[test]
+    fn rejects_invalid_ipv6_literal() {
+        for literal in [
+            // "::" の前後に空セグメントが付く
+            "1:::2",
+            "1:2:3:4:5:6:7:8:",
+            ":1:2:3:4:5:6:7:8",
+            // 16 ビット単位が 9 個
+            "1:2:3:4:5:6:7:8:9",
+            // 16 進でない文字
+            "gggg::1",
+            // 空文字
+            "",
+        ] {
+            assert!(
+                validate_ipv6addr(literal).is_err(),
+                "{literal:?} は IPv6address として拒否されること"
+            );
+        }
+    }
+
+    /// RFC 3986 §3.2.2 の `IPv6address` として正当なリテラルを受理すること
+    ///
+    /// IPv4-mapped 表記は 45 文字になり、旧実装の長さ上限 39 では拒否されていた。
+    /// `"::" ls32` 形式 (`::1.2.3.4`) も ABNF の 5 番目の代替として正当である。
+    #[test]
+    fn accepts_valid_ipv6_literal() {
+        for literal in [
+            "::",
+            "::1",
+            "2001:db8::1",
+            "::1.2.3.4",
+            "::ffff:192.0.2.1",
+            "1:2:3:4:5:6:1.2.3.4",
+            // IPv4-mapped 表記の最大長 (45 文字)
+            "0000:0000:0000:0000:0000:ffff:255.255.255.255",
+            "1:2:3:4:5:6:7:8",
+        ] {
+            assert!(
+                validate_ipv6addr(literal).is_ok(),
+                "{literal:?} は IPv6address として受理されること"
+            );
+        }
+    }
+
+    /// IPv6 リテラルを含む AUTHORITY が `validate_uri_format` を通ること
+    ///
+    /// draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY): 違反時は
+    /// MALFORMED_AUTHORITY で閉じるため、正当な値はここで受理される必要がある。
+    #[test]
+    fn authority_with_ipv6_literal_is_accepted() {
+        let mut options = SetupOptions::new();
+        options.push(SetupOption {
+            option_type: SETUP_OPTION_AUTHORITY,
+            value: SetupOptionValue::Bytes(
+                b"[0000:0000:0000:0000:0000:ffff:255.255.255.255]:4433".to_vec(),
+            ),
+        });
+        options
+            .validate_uri_format()
+            .expect("45 文字の IPv4-mapped 表記は受理されること");
+
+        let mut invalid = SetupOptions::new();
+        invalid.push(SetupOption {
+            option_type: SETUP_OPTION_AUTHORITY,
+            value: SetupOptionValue::Bytes(b"[1:::2]:4433".to_vec()),
+        });
+        assert!(
+            invalid.validate_uri_format().is_err(),
+            "不正な IPv6 リテラルは拒否されること"
+        );
+    }
+
+    /// IPvFuture の検証を維持すること
+    ///
+    /// `validate_ip_literal` の `v` / `V` 分岐は IPvFuture であり、IPv6 パーサへ
+    /// 委ねてはならない (ABNF の `IPvFuture` は `v` で始まる)。
+    #[test]
+    fn ipv_future_is_still_accepted() {
+        assert!(validate_ip_literal(b"v1.fe80::").is_ok());
+        assert!(validate_ip_literal(b"V1.fe80::").is_ok());
+        assert!(validate_ip_literal(b"v1").is_err());
     }
 }

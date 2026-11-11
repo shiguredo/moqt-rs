@@ -888,3 +888,76 @@ fn peer_max_control_message_size_at_minimum_is_accepted() {
         PeerControlMessageSizeLimit::Advertised(65_535)
     );
 }
+
+/// AUTHORITY の IPv6 リテラルを RFC 3986 §3.2.2 の `IPv6address` として検証する
+///
+/// draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY): "If an AUTHORITY option does not
+/// conform to these rules, the session MUST be closed with MALFORMED_AUTHORITY."
+/// 自側 (new_client) と peer (recv_control) の両経路で同じ判定になることを固定する。
+#[test]
+fn malformed_ipv6_authority_rejected() {
+    for literal in [
+        // "::" の前後に空セグメントが付く
+        b"[1:::2]".as_slice(),
+        b"[1:2:3:4:5:6:7:8:]".as_slice(),
+        b"[:1:2:3:4:5:6:7:8]".as_slice(),
+    ] {
+        // 自側: URI 検証に失敗するのでセッションを作る前に拒否する
+        let mut options = SetupOptions::new();
+        options.push(SetupOption {
+            option_type: shiguredo_moqt::parameter::SETUP_OPTION_AUTHORITY,
+            value: SetupOptionValue::Bytes(literal.to_vec()),
+        });
+        let err = Session::new_client(Transport::Quic, options)
+            .expect_err("不正な IPv6 リテラルは new_client で拒否されること");
+        assert_eq!(
+            err.code, SESSION_MALFORMED_AUTHORITY,
+            "{literal:?} は MALFORMED_AUTHORITY であること"
+        );
+
+        // peer: SETUP 受信時に同じ判定でセッションを閉じる
+        let mut server = Session::new_server(Transport::Quic, SetupOptions::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let mut malformed = SetupOptions::new();
+        malformed.push(SetupOption {
+            option_type: shiguredo_moqt::parameter::SETUP_OPTION_AUTHORITY,
+            value: SetupOptionValue::Bytes(literal.to_vec()),
+        });
+        let err = server
+            .recv_control(ControlMessage::Setup(Setup { options: malformed }))
+            .expect_err("不正な IPv6 リテラルは recv_control で拒否されること");
+        assert_eq!(err.code, SESSION_MALFORMED_AUTHORITY);
+        match drain_until_close(&mut server) {
+            SessionEvent::CloseSession(err) => assert_eq!(err.code, SESSION_MALFORMED_AUTHORITY),
+            _ => unreachable!(),
+        }
+    }
+}
+
+/// 正当な IPv6 リテラルを含む AUTHORITY は受理される
+///
+/// IPv4-mapped 表記は 45 文字になり、`"::" ls32` 形式 (`::1.2.3.4`) も ABNF の
+/// 正当な代替である。どちらも旧実装では誤って拒否していた。
+#[test]
+fn valid_ipv6_authority_accepted() {
+    for literal in [
+        b"[0000:0000:0000:0000:0000:ffff:255.255.255.255]".as_slice(),
+        b"[::1.2.3.4]".as_slice(),
+        b"[2001:db8::1]:4433".as_slice(),
+    ] {
+        let mut options = SetupOptions::new();
+        options.push(SetupOption {
+            option_type: shiguredo_moqt::parameter::SETUP_OPTION_AUTHORITY,
+            value: SetupOptionValue::Bytes(literal.to_vec()),
+        });
+        let mut client = Session::new_client(Transport::Quic, options)
+            .expect("正当な IPv6 リテラルは new_client で受理されること");
+        let mut server = Session::new_server(Transport::Quic, SetupOptions::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let client_setup = take_send_control(&mut client);
+        server
+            .recv_control(client_setup)
+            .expect("正当な IPv6 リテラルは recv_control で受理されること");
+        assert_eq!(server.state(), SessionState::Established);
+    }
+}
