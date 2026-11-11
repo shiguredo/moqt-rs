@@ -1,8 +1,8 @@
 # SETUP Options の重複 Option Type ポリシーをテストで固定する
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
-- Branch: feature/test-setup-options-duplicate-policy
+- Completed: 2026-11-11
+- Branch: develop (CODEBASE.md の規約により develop に直接コミットする)
 - Polished: 2026-10-20
 - Refreshed: 2026-11-04
 
@@ -17,8 +17,9 @@ draft-ietf-moq-transport-23 §9.1 (SETUP) は「Senders MUST NOT repeat the same
 - `src/parameter.rs` の `SetupOptions::decode` は AUTHORIZATION_TOKEN 以外の既知型の重複を `InvalidField` にし、未知型の重複は受理する。
   - AUTHORIZATION_TOKEN (0x03) は既知型だが重複が許可されており、この重複判定の対象外である (`known_types` に含まれない)。
 - `src/parameter.rs` の `SetupOptions::encode` / `decode` は `validate_auth_token_uniqueness` により、AUTHORIZATION_TOKEN の同一 (Token Type, Token Value) の重複を `MalformedAuthToken` にする。
-- `tests/test_parameter.rs` と `pbt/tests/prop_parameter.rs` に重複を扱うテストが無い。PBT の `sample_setup_options_with` は `dedup_by_key(|p| p.option_type)` で型を dedup するため、この分岐を通らない。
-- 影響: §9.1 の送信側 MUST と未知型の受信側 MUST が未固定で、将来の変更で規約違反を検出できない。
+- `tests/test_parameter.rs` には 0x09 (MAX_CONTROL_MESSAGE_SIZE) の重複を encode / decode 双方で拒否する `duplicate_option_is_rejected` と、同一 (Token Type, Token Value) の重複を `MalformedAuthToken` にする `duplicate_token_type_and_value_is_malformed_auth_token` がある。ただし PATH / AUTHORITY の重複、未知型の重複受理、値の異なる Token の重複、偶数型 Bytes / 奇数型 VarInt の型不一致は未固定である。
+- `pbt/tests/prop_parameter.rs` の `sample_setup_options_with` は `dedup_by_key(|p| p.option_type)` で型を dedup するため、この分岐を通らない。
+- 影響: §9.1 の送信側 MUST のうち PATH / AUTHORITY と、未知型の重複受理の MUST、値の異なる Token の重複許可が未固定で、将来の変更で規約違反を検出できない。
 
 ## 設計方針
 
@@ -45,3 +46,16 @@ draft-ietf-moq-transport-23 §9.1 (SETUP) は「Senders MUST NOT repeat the same
 - PBT の `sample_setup_options_with` と既存のテストは変更しないこと。
 - `src/parameter.rs` は変更しないこと。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `tests/test_parameter.rs` に `setup_option_duplicate_policy` モジュールを追加し、§9.1 (SETUP) の重複ポリシーをテストで固定した。`src/parameter.rs` は変更していない (現行実装が issue の前提どおりであることを確認済み)。
+- 追加したテスト:
+  - `known_odd_type_duplicate_rejected_on_encode`: PATH (0x01) の `Bytes` 2 件を encode すると `InvalidParameter` になり、出力バッファが空のままであること。
+  - `known_odd_type_duplicate_rejected_on_decode`: AUTHORITY (0x05) を Type Delta = 0 で 2 件並べた手組み wire を decode すると `InvalidField` になること。
+  - `unknown_odd_type_duplicate_accepted_on_decode`: レジストリ表に無い 0x0B の重複を decode すると受理され、`consumed == buf.len()` かつ 2 件とも保持されること。
+  - `distinct_authorization_tokens_accepted`: (Token Type, Token Value) が異なる `AuthorizationToken::UseValue` 2 件を encode / decode しても受理され、2 件とも `authorization_tokens()` に含まれること。
+  - `type_mismatch_rejected_on_encode`: 偶数型 (0x04) に `Bytes`、奇数型 (0x01) に `VarInt` を 1 件だけ入れた `SetupOptions` の encode が `InvalidParameter` になること。
+- issue の「現状」にあった「`tests/test_parameter.rs` に重複を扱うテストが無い」は事実と異なっていた。0x09 の重複拒否と同一 Token の重複を `MalformedAuthToken` にするテストは既に存在したため、記述を実際の未固定範囲 (PATH / AUTHORITY の重複、未知型の重複受理、値の異なる Token、型不一致) に修正した。
+- `pbt/src/common.rs` の `sample_setup_options_with` は型を dedup する仕様のまま変更していない。
+- 検証: `cargo test -p shiguredo_moqt --test test_parameter` (53 件) / `cargo clippy -p shiguredo_moqt --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通る。
