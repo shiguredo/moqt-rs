@@ -813,8 +813,12 @@ pub struct WtH2SendStream {
 impl WtH2SendStream {
     /// データを送信する
     ///
-    /// driver が `WT_STREAM` capsule へ変換して CONNECT ストリームに載せるまで待つ
-    /// (WT の送信ウィンドウが枯渇している間は待つ)。セッション終了を観測した場合は
+    /// 返り値は driver が `WT_STREAM` capsule への変換を受理したことのみを表す。
+    /// capsule を `WtSession` の出力バッファに積めた時点で返るため、CONNECT ストリーム
+    /// への載せ込みと socket への書き出し完了は保証しない (いずれも reply 送出後の
+    /// driver の pump で行う)。WT の送信ウィンドウが枯渇している間は待つ。
+    /// reply が既に完成している場合は、セッション終了を観測しても reply の結果
+    /// (Ok または下記の詳細エラー) を先に返す。セッション終了を観測した場合は
     /// `ConnectionClosed` を返す。peer の STOP_SENDING で cancel 済みのストリームでは
     /// [`TransportError::StreamReset`]、送信方向を既に閉じたストリームでは
     /// [`TransportError::StreamClosed`] を返す。
@@ -833,7 +837,13 @@ impl WtH2SendStream {
                 .map_err(|_| TransportError::ConnectionClosed)?;
             rx.await.map_err(|_| TransportError::ConnectionClosed)?
         };
+        // 操作分岐 (reply) を先頭に置いて biased にする。両 ready のとき
+        // reply の結果 (Ok または StreamReset / StreamClosed 等の詳細エラー) を優先する。
+        // watch を選んで reply を捨てると「送信を受理したのに ConnectionClosed を返す」
+        // 誤報告になる (reject 系では reply 送出 → violation → watch 発火の順が
+        // 固定で、watch 発火時点で reply は常に完成している (必ず両 ready になる))
         tokio::select! {
+            biased;
             sent = send => sent,
             _ = wait_until_terminated(&mut self.session_state) => {
                 Err(TransportError::ConnectionClosed)
@@ -851,7 +861,8 @@ impl WtH2SendStream {
     /// doc を参照)。
     ///
     /// 送信データが flow control で滞留している間は返らないため、[`Self::send`] と同じく
-    /// セッションの終端を観測しながら待つ。
+    /// セッションの終端を観測しながら待つ。reply が既に完成している場合は reply の結果を
+    /// 先に返す点も [`Self::send`] と同じである。
     pub async fn finish(&mut self) -> Result<()> {
         let (reply, rx) = oneshot::channel();
         let cmd_tx = self.cmd_tx.clone();
@@ -867,7 +878,9 @@ impl WtH2SendStream {
                 .map_err(|_| TransportError::ConnectionClosed)?;
             rx.await.map_err(|_| TransportError::ConnectionClosed)?
         };
+        // 操作分岐 (reply) を先頭に置いて biased にする (`send` と同じ契約)
         tokio::select! {
+            biased;
             finished = finish => finished,
             _ = wait_until_terminated(&mut self.session_state) => {
                 Err(TransportError::ConnectionClosed)
@@ -885,7 +898,8 @@ impl WtH2SendStream {
     ///
     /// `reliable_size` が `Some` の場合は [`TransportError::Unsupported`] を返す。
     /// `WT_RESET_STREAM` capsule は Reliable Size を運ばないため、RESET_STREAM_AT 相当は
-    /// この transport では実装しない。
+    /// この transport では実装しない。reply が既に完成している場合は reply の結果を
+    /// 先に返す点も [`Self::send`] と同じである。
     pub async fn reset(&mut self, error_code: u64, reliable_size: Option<u64>) -> Result<()> {
         if reliable_size.is_some() {
             return Err(TransportError::Unsupported(
@@ -905,7 +919,9 @@ impl WtH2SendStream {
                 .map_err(|_| TransportError::ConnectionClosed)?;
             rx.await.map_err(|_| TransportError::ConnectionClosed)?
         };
+        // 操作分岐 (reply) を先頭に置いて biased にする (`send` と同じ契約)
         tokio::select! {
+            biased;
             reset = reset => reset,
             _ = wait_until_terminated(&mut self.session_state) => {
                 Err(TransportError::ConnectionClosed)

@@ -1,8 +1,8 @@
 # WtH2SendStream の send / finish / reset が終了 watch と両 ready のときランダムで ConnectionClosed を返す
 
 - Created: 2026-11-11
-- Completed: {YYYY-MM-DD}
-- Branch: feature/fix-wt-send-connection-closed-race
+- Completed: 2026-11-11
+- Branch: develop (CODEBASE.md の規約により develop に直接コミットする)
 - Polished: {YYYY-MM-DD}
 
 ## 目的
@@ -37,3 +37,10 @@ reply (またはそのエラー) が届いている場合に `ConnectionClosed` 
 - 負荷の高い並列実行 (`cargo test -p tokio-moq --lib flow_control` を通常設定 15 回 + 並列負荷 15 回、またはそれと同等の反復) で reject 系のうち送信を伴う 4 テスト (`wt_h2_flow_control_rejects_equal_uni_max_stream_data` / `..._equal_bidi_remote_max_stream_data` / `..._equal_bidi_local_max_stream_data`
    / `..._equal_updated_max_stream_data`) が失敗しないこと。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `crates/tokio-moq/src/webtransport_h2.rs` の `WtH2SendStream::send` / `finish` / `reset` の 3 select に `biased;` を追加した。分岐順は現行のまま操作分岐 (reply) が先頭であるため、両 ready のとき reply の結果 (Ok または `StreamReset` / `StreamClosed` / `WtH2` 等の詳細エラー) を決定的に返す。
+  reply を捨てて `ConnectionClosed` を返す誤報告 (送信を受理したのに終端を返す) を除去した。driver が死んでいる経路 (`cmd_tx.send` 失敗 / watch 未発火 / watch 発火済みで reply 未送出) の意味論は変えない (いずれも `ConnectionClosed`)。
+- `send` の doc を reply 送出タイミングと整合させた。返り値は `WtSession` の出力バッファへの積み込みまでを表す (CONNECT ストリームへの載せ込みと socket への書き出しは reply 送出後の driver の pump)。reply が既に完成している場合はセッション終了より先に reply の結果を返すことを doc に明記し、`finish` / `reset` も同じ優先規約を参照する形にした。
+- 検証: `cargo test -p tokio-moq --lib flow_control` を通常設定 25 回 + 負荷下 (`--test-threads=96`) 14 回の計 39 回実行して 0 失敗 (reject 系のうち送信を伴う 4 テストを含む)。`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` も通る。
