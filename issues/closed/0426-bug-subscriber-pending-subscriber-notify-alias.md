@@ -26,10 +26,14 @@ Session 側ではそのストリームが header 未受理の状態のままで�
 
 ## 設計方針
 
-- 検出元 (自分のループ再試行で `Accepted` を観測した task) と検出先 (別 task の `note_subscriber` によって通知され `Subscriber` を引き取った task) を区別する。検出元は、`Accepted` を観測したときに task ローカルのフラグ (検出元フラグ) を立て、次のループ先頭で自分の entry を `Subscriber` で引き取ったら再試行せずにチャンクを decoder へ戻して `true` を返す (現行の挙動を維持する)。検出先のみ、`true` を返す前に自分の `recv_subgroup_header` を再試行して `Accepted` を確認してからチャンクを戻す。同じ stream への 2 度目の `recv_subgroup_header` は `SESSION_UNEXPECTED_MESSAGE` (0x303) で拒否されるため、検出元での再試行は禁止する。
+- 検出元 (自分のループ再試行で `Accepted` を観測した task) と検出先 (別 task の `note_subscriber` によって通知され `Subscriber` を引き取った task) を区別する。検出元は、`Accepted` を観測したときに task ローカルのフラグ (検出元フラグ) を立て、次のループ先頭で自分の entry を `Subscriber` で引き取ったら再試行せずにチャンクを decoder へ戻して `true` を返す (現行の挙動を維持する)。
+  検出先のみ、`true` を返す前に自分の `recv_subgroup_header` を再試行して `Accepted` を確認してからチャンクを戻す。同じ stream への 2 度目の `recv_subgroup_header` は `SESSION_UNEXPECTED_MESSAGE` (0x303) で拒否されるため、検出元での再試行は禁止する。
 - 検出先の再試行結果は次のように処理する。
   - `Accepted` → チャンクを decoder へ戻して `true` を返す。この分岐で `note_subscriber` を呼ぶ必要は無い (各 task が自分の再試行で検出する。自分の entry は既に `Subscriber` で引き取り済みであり、他の entry への再通知も no-op であるため衝突は起こらない)。
-  - `UnknownTrackAlias` → 保留を続ける。entry は引き取り済み・削除済みであり、`take_ready_for` による `Timeout` 確定も二度と起こらないため、保持チャンクと継続読み出しのチャンクを task ローカルで保持する。期限は保持の開始時刻 (`added_us`) からの `timeout_us` (`deadline_us = added_us + timeout_us`) を task 側で判定し、期限を延長しない (entry の再追加は期限を `now + timeout_us` に延ばすため行わない)。継続中も stream は読み続ける (既存の保留ループと同じ形で `wait_data_stream_stop_sending` の監視と `recv_subgroup_header` の再試行を続ける)。読み出しが終端 (`End` / Session の STOP_SENDING 指示 = `StoppedBySession`) を観測したら、終端種別を task ローカルで記録して読み出しを止める (終端済み stream は FIN を即時に再配信するため読み出しを続けると busy loop になる。Session への通知は既存の読み出しヘルパがそのまま行い、本 issue では Session 側の契約を変えない)。終端観測後の本 issue 時点の扱いは RESET / STOP_SENDING 指示と同じ破棄である (FIN 済み保持は 0425 が Session 通知の遅延とともに導入するため、ここで先取りしない)。終端を観測したまま期限に達した場合、既存の `Timeout` 分岐と同じ warn ログを出して破棄する。この経路のチャンクはバッファに積まれないため、per-session 上限の集計からは外れる。この時間窓は自分の `recv_subgroup_header` の再試行で早く解消する短期間であり、受入れられる制約としてその旨を doc に明記する。
+  - `UnknownTrackAlias` → 保留を続ける。entry は引き取り済み・削除済みであり、`take_ready_for` による `Timeout` 確定も二度と起こらないため、保持チャンクと継続読み出しのチャンクを task ローカルで保持する。期限は保持の開始時刻 (`added_us`) からの `timeout_us` (`deadline_us = added_us + timeout_us`) を task 側で判定し、期限を延長しない (entry の再追加は期限を `now + timeout_us` に延ばすため行わない)。
+    継続中も stream は読み続ける (既存の保留ループと同じ形で `wait_data_stream_stop_sending` の監視と `recv_subgroup_header` の再試行を続ける)。読み出しが終端 (`End` / Session の STOP_SENDING 指示 = `StoppedBySession`) を観測したら、終端種別を task ローカルで記録して読み出しを止める (終端済み stream は FIN を即時に再配信するため読み出しを続けると busy loop になる。
+    Session への通知は既存の読み出しヘルパがそのまま行い、本 issue では Session 側の契約を変えない)。終端観測後の本 issue 時点の扱いは RESET / STOP_SENDING 指示と同じ破棄である (FIN 済み保持は 0425 が Session 通知の遅延とともに導入するため、ここで先取りしない)。終端を観測したまま期限に達した場合、既存の `Timeout` 分岐と同じ warn ログを出して破棄する。この経路のチャンクはバッファに積まれないため、per-session 上限の集計からは外れる。
+    この時間窓は自分の `recv_subgroup_header` の再試行で早く解消する短期間であり、受入れられる制約としてその旨を doc に明記する。
   - `Discarded` / `FilteredOut` → 既存の再試行分岐と同じく `abort_subgroup_stream` を呼んで `false` を返す (entry は既に削除済みのため `remove` は不要である)。
   - `Err` → 既存の再試行分岐と同じく abort を呼ばずに `false` を返す。
 - ライブラリの `PendingSubgroupBuffer::note_subscriber` は変更しない。
@@ -54,9 +58,11 @@ Session 側ではそのストリームが header 未受理の状態のままで�
 
 ## 解決方法
 
-- `crates/moq-sub/src/pipeline.rs` の `register_subgroup_header` を検出元 (自分のループ再試行で `Accepted` を観測した task) と検出先 (別 task の `note_subscriber` で起きた task) に区別して整理した。検出元は entry を `Subscriber` で引き取ったら再試行せずに復帰し、検出先は自分の `recv_subgroup_header` を再試行して `Accepted` を確認してから復帰する。session は受理済みの stream への 2 度目の SUBGROUP_HEADER を `SESSION_UNEXPECTED_MESSAGE` (0x303) で拒否するため、検出元での再試行は発生しない。
+- `crates/moq-sub/src/pipeline.rs` の `register_subgroup_header` を検出元 (自分のループ再試行で `Accepted` を観測した task) と検出先 (別 task の `note_subscriber` で起きた task) に区別して整理した。検出元は entry を `Subscriber` で引き取ったら再試行せずに復帰し、検出先は自分の `recv_subgroup_header` を再試行して `Accepted` を確認してから復帰する。
+  session は受理済みの stream への 2 度目の SUBGROUP_HEADER を `SESSION_UNEXPECTED_MESSAGE` (0x303) で拒否するため、検出元での再試行は発生しない。
 - 検出先の再試行結果の処理分類 (復帰 / 保留継続 / 会計を閉じる破棄 / 会計を閉じない破棄) を純関数 `pending_subscriber_action` に切り出した。`Discarded` / `FilteredOut` は既存の再試行分岐と同じ `abort_subgroup_stream` で会計を閉じ、エラーは既存の `Err` 分岐と同じく会計を閉じずに破棄する。
-- `UnknownTrackAlias` での保留継続は task ローカル保持に替えた (`LocalPendingHold` と `continue_pending_subscriber_locally`)。entry は引き取りの直後に削除されるため、チャンクと期限 (`deadline_us = added_us + timeout_us`) を task 内で持ち、バッファに戻さない (期限延長を行わない)。読み出しは `receive_registered_stream_data_outcome` を直用して終端種別を区別し、終端を task 内で記録して読み出しを止める。RESET_STREAM / Session の STOP_SENDING 指示は既存の終端分岐相当で破棄し、FIN は期限まで待ってから既存の Timeout 分岐相当で破棄する (FIN 済み保持の保持解除は後続の FIN 保持対応で導入する)。
+- `UnknownTrackAlias` での保留継続は task ローカル保持に替えた (`LocalPendingHold` と `continue_pending_subscriber_locally`)。entry は引き取りの直後に削除されるため、チャンクと期限 (`deadline_us = added_us + timeout_us`) を task 内で持ち、バッファに戻さない (期限延長を行わない)。
+  読み出しは `receive_registered_stream_data_outcome` を直用して終端種別を区別し、終端を task 内で記録して読み出しを止める。RESET_STREAM / Session の STOP_SENDING 指示は既存の終端分岐相当で破棄し、FIN は期限まで待ってから既存の Timeout 分岐相当で破棄する (FIN 済み保持の保持解除は後続の FIN 保持対応で導入する)。
 - per-stream 上限は task 側で適用し、超過時は既存の overflow 分岐と同じ警告で破棄する。per-session 上限の集計から外れる制約を `register_subgroup_header` と `continue_pending_subscriber_locally` の doc に明記した。doc の「受信ループの実行中に購読が確立する経路は無く」の記述を実態に合わせて削除した。
 - テスト: `pipeline::tests::pending_subscriber_action_tests` に検出元の無条件復帰、検出先の `Accepted` / `UnknownTrackAlias` / `Discarded` / `FilteredOut` / エラー / 再試行なしの 6 分岐を固定した。
 - Session 側 (`src/session/data.rs`) と `src/pending_subgroup_buffer.rs` は変更しない (完了条件のとおり)。
