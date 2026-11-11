@@ -353,3 +353,71 @@ fn track_status_responder_terminated_by_peer_reset_does_not_block_drain() {
         "終端済み TRACK_STATUS を破棄できること"
     );
 }
+
+/// 自側が request stream に GOAWAY を送った後に TRACK_STATUS_OK を FIN 付きで送った場合、
+/// peer の FIN は届けていない状態で deadline が満了しても reset と `GoawayTimeout` の
+/// 終端は発行されないこと (修正前の実装では両方とも発行するため本テストは失敗する)。
+///
+/// deadline の解除を `send_request_error` と同じ位置 (最終メッセージ送信時) に置く理由は
+/// 「最終メッセージを送った後は reset する理由が無い」である。
+#[test]
+fn track_status_ok_fin_clears_request_stream_goaway_deadline() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("TRACK_STATUS の送信に成功すること");
+    let (_, status_msg) = take_send_request(&mut client);
+    server
+        .recv_request(status_msg)
+        .expect("TRACK_STATUS の受信に成功すること");
+
+    // 先に tick を 1 度進めて deadline の基準時刻を確定させる (既存テストと同じ駆動)
+    server.tick(1_000);
+    server
+        .send_goaway_on_request_stream(rid, b"moqt://relay.example/".to_vec(), 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    let (_, _) = take_send_on_stream(&mut server);
+
+    // TRACK_STATUS_OK を FIN 付きで送る (peer FIN は届けない)
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+        .expect("TRACK_STATUS_OK の送信に成功すること");
+    let (_, _, fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(fin, "TRACK_STATUS_OK の送信後に bidi stream を閉じること");
+
+    // peer FIN を届けないまま deadline を満了させる
+    server.tick(1_100);
+    let mut resets = 0;
+    let mut terminations = Vec::new();
+    while let Some(e) = server.poll_event() {
+        match e {
+            SessionEvent::ResetRequestStream {
+                request_id: _rid, ..
+            } => {
+                resets += 1;
+            }
+            SessionEvent::RequestTerminated {
+                request_id: _rid,
+                kind,
+                reason,
+            } => {
+                terminations.push((kind, reason));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(resets, 0, "FIN 済み送信方向への reset は発行されないこと");
+    assert!(
+        terminations.is_empty(),
+        "応答済み request が GoawayTimeout で誤終端しないこと: {terminations:?}"
+    );
+    // entry は終端済みの扱いにはならない (応答済みのみで破棄対象になる)
+    let entry = server
+        .track_status_request(rid)
+        .expect("track status entry が残ること");
+    assert!(
+        !entry.terminated,
+        "応答済み request が GoawayTimeout で終端扱いにされないこと"
+    );
+    assert!(entry.response.is_some(), "応答は登録されたままであること");
+}

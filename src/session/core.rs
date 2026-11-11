@@ -2156,12 +2156,20 @@ impl Session {
         });
         // draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES): 応答送信で peer クレジット回復
         self.restore_incoming_request_update_credit(request_id);
+        // TRACK_STATUS_OK を FIN 付きで送った後は reset する理由が無いため、
+        // request stream GOAWAY の reset deadline を解除する (send_request_error の FIN 分岐と
+        // 同じ契約。解除しないと deadline 満了で `ResetRequestStream` と
+        // `RequestTerminated { reason: GoawayTimeout }` が誤って発行され、
+        // 応答済みの request が自側 reset で終端したと報告されてしまう
+        // (draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS) の FIN 規則)
+        if fin {
+            self.clear_request_stream_goaway_deadline(request_id);
+        }
         self.events.push_back(SessionEvent::SendOnStream {
             request_id,
             message: msg,
             fin,
-        });
-        // 送信方向の終端の記録は SendOnStream を積んだ後に行う。peer の FIN を受信済みなら
+        }); // 送信方向の終端の記録は SendOnStream を積んだ後に行う。peer の FIN を受信済みなら
         // ここで RequestTerminated が積まれ、最終メッセージより後になる
         if fin {
             self.mark_send_direction_closed_with_fin(request_id);
