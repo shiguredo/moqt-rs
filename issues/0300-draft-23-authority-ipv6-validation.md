@@ -1,8 +1,8 @@
 # SETUP の AUTHORITY に含まれる IPv6 リテラルを RFC 3986 の IPv6address として検証する
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
-- Branch: feature/fix-authority-ipv6-validation
+- Completed: 2026-11-11
+- Branch: develop (CODEBASE.md の規約により develop に直接コミットする)
 - Polished: 2026-10-19
 - Refreshed: 2026-11-04
 
@@ -39,3 +39,13 @@ draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY) は AUTHORITY が RFC 3986 の U
 - `tests/test_session/setup.rs` に `Session::new_client` と `recv_control` 経由の `SESSION_MALFORMED_AUTHORITY` テストがあり、上記の拒否ケースと 45 文字の受理ケースを確認すること。
 - `tests/test_parameter.rs` の既存の codec 往復テストが維持されていること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `src/parameter.rs` の `validate_ipv6addr` を、`split(':')` と `matches("::")` の回数による手書き検証から `core::net::Ipv6Addr::from_str` に置き換えた。`core::net` は no_std で利用でき、MSRV 1.93 でも使える。これにより RFC 3986 §3.2.2 の `IPv6address` の 7 つの代替 (`::` による省略と `ls32` の IPv4 表記を含む) をそのまま受理し、空セグメントを読み飛ばす旧実装の緩さ (`1:::2` や先頭・末尾の余分な `:` を受理) と、長さ上限 39 による IPv4-mapped 表記の誤拒否、`rsplit_once` による `"::" ls32` 形式の誤拒否を同時に解消した。
+- `validate_ip_literal` の `v` / `V` 分岐 (IPvFuture) は変更していない。拒否時は従来どおり `SetupUriValidationError::Authority` を返し、`validate_setup_uri_format` が `SESSION_MALFORMED_AUTHORITY` に写す経路も変えていない。
+- `src/parameter.rs` に `#[cfg(test)]` モジュールを新設し、`rejects_invalid_ipv6_literal` (`1:::2` / `1:2:3:4:5:6:7:8:` / `:1:2:3:4:5:6:7:8` / 16 ビット単位 9 個 / 非 16 進 / 空文字)、`accepts_valid_ipv6_literal` (`::` / `::1` / `2001:db8::1` / `::1.2.3.4` / `::ffff:192.0.2.1` / 45 文字の IPv4-mapped 表記)、`authority_with_ipv6_literal_is_accepted`、`ipv_future_is_still_accepted` を追加した。
+- `tests/test_session/setup.rs` に `malformed_ipv6_authority_rejected` と `valid_ipv6_authority_accepted` を追加した。前者は `Session::new_client` (自側) と `recv_control` (peer) の両経路で `SESSION_MALFORMED_AUTHORITY` になることを、後者は 45 文字の IPv4-mapped 表記と `[::1.2.3.4]` を両経路で受理することを固定する。
+- `tests/test_parameter.rs` の既存 codec 往復テスト (`authority_with_ipv6_port_roundtrip`) は変更していない。`SetupOptions::decode` は URI 検証を行わないため、このファイルには受理・拒否テストを置いていない。
+- 検証: `cargo test -p shiguredo_moqt --lib` (133 件) / `cargo test -p shiguredo_moqt --test test_parameter` (48 件) / `cargo test -p shiguredo_moqt --test test_session` (1097 件) / `cargo clippy -p shiguredo_moqt --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通る。
+  `cargo clippy --workspace --all-targets` は moq-pub のビルドがホストに libpulse を要求するため、この環境では実行できない (変更前から同じ)。
