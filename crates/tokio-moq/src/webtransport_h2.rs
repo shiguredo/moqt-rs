@@ -3460,7 +3460,7 @@ mod tests {
         listener: tokio::net::TcpListener,
         tls: tokio_rustls::TlsAcceptor,
         probe: FlowControlProbe,
-        observed: oneshot::Sender<FlowControlObservation>,
+        mut observed: Option<oneshot::Sender<FlowControlObservation>>,
     ) -> std::result::Result<(), String> {
         let (tcp, _) = listener
             .accept()
@@ -3484,12 +3484,19 @@ mod tests {
         let mut target_is_local_bidi = false;
         let mut received = Vec::new();
         let mut opened_streams = 0usize;
-
         loop {
-            let event = io
-                .next_event()
-                .await
-                .map_err(|e| format!("server next_event failed: {e}"))?;
+            let event = match io.next_event().await {
+                Ok(event) => event,
+                Err(e) => {
+                    // 観測結果を送り終えた後の接続終了は正常終了として扱う。テストは
+                    // 観測受信後に session を drop して接続を閉じるため、EOF が届く
+                    // (CONNECT stream に END_STREAM は送られないため EOF で届く)
+                    if observed.is_none() {
+                        return Ok(());
+                    }
+                    return Err(format!("server next_event failed: {e}"));
+                }
+            };
             match event {
                 Event::HeadersReceived {
                     stream_id, headers, ..
@@ -3676,8 +3683,13 @@ mod tests {
                                     | FlowControlProbe::StreamsIncreaseBidi { .. }
                                         if opened_streams >= 2 =>
                                     {
-                                        let _ = observed.send(FlowControlObservation::Streams(2));
-                                        return Ok(());
+                                        // 観測結果の送信は 1 回だけ (2 本目の開設観測は
+                                        // poll_event 内と pump 後の 2 箇所で評価される)。
+                                        // 接続は自発的に閉じない (テスト側の session drop で閉じる)
+                                        if let Some(observed) = observed.take() {
+                                            let _ =
+                                                observed.send(FlowControlObservation::Streams(2));
+                                        }
                                     }
                                     _ => {}
                                 }
@@ -3695,18 +3707,30 @@ mod tests {
                             | FlowControlProbe::StreamsIncreaseBidi { .. }
                     ) && opened_streams >= 2
                     {
-                        let _ = observed.send(FlowControlObservation::Streams(2));
-                        return Ok(());
+                        // 観測結果の送信は 1 回だけ (take で 2 回目の送信を防ぐ)
+                        if let Some(observed) = observed.take() {
+                            let _ = observed.send(FlowControlObservation::Streams(2));
+                        }
                     }
                     if !received.is_empty() {
                         match probe {
                             FlowControlProbe::MaxDataIncrease { .. } => {
-                                let _ = observed.send(FlowControlObservation::Data(received));
-                                return Ok(());
+                                // 受信データ観測で観測結果を送り、接続は自発的に閉じない
+                                // (テスト側の session drop で閉じる)。take で 2 回目の送信を防ぐ。
+                                // ループを続けるため received は move せず clone を送る
+                                if let Some(observed) = observed.take() {
+                                    let _ = observed
+                                        .send(FlowControlObservation::Data(received.clone()));
+                                }
                             }
                             FlowControlProbe::StreamDataIncreaseBidiLocal { .. } => {
-                                let _ = observed.send(FlowControlObservation::Data(received));
-                                return Ok(());
+                                // 受信データ観測で観測結果を送り、接続は自発的に閉じない
+                                // (テスト側の session drop で閉じる)。take で 2 回目の送信を防ぐ。
+                                // ループを続けるため received は move せず clone を送る
+                                if let Some(observed) = observed.take() {
+                                    let _ = observed
+                                        .send(FlowControlObservation::Data(received.clone()));
+                                }
                             }
                             FlowControlProbe::StreamDataBidiLocal { raw, .. }
                                 if target_is_local_bidi =>
@@ -3734,22 +3758,30 @@ mod tests {
                     error_code,
                     ..
                 } if Some(stream_id) == connect_stream => {
-                    let _ = observed.send(FlowControlObservation::Reset(error_code));
+                    if let Some(observed) = observed.take() {
+                        let _ = observed.send(FlowControlObservation::Reset(error_code));
+                    }
                     return Ok(());
                 }
                 Event::StreamClosed { stream_id } if Some(stream_id) == connect_stream => {
-                    let _ = observed.send(FlowControlObservation::Closed);
+                    if let Some(observed) = observed.take() {
+                        let _ = observed.send(FlowControlObservation::Closed);
+                    }
                     return Ok(());
                 }
                 Event::ConnectionError { .. } => {
-                    let _ = observed.send(FlowControlObservation::Closed);
+                    if let Some(observed) = observed.take() {
+                        let _ = observed.send(FlowControlObservation::Closed);
+                    }
                     return Ok(());
                 }
                 _ => {}
             }
         }
 
-        let _ = observed.send(FlowControlObservation::Closed);
+        if let Some(observed) = observed.take() {
+            let _ = observed.send(FlowControlObservation::Closed);
+        }
         Ok(())
     }
 
@@ -3772,7 +3804,7 @@ mod tests {
             listener,
             test_server_tls(),
             probe,
-            observed_tx,
+            Some(observed_tx),
         ));
         (addr, observed_rx, server)
     }
@@ -3915,6 +3947,11 @@ mod tests {
             .expect("観測結果の待機がタイムアウトしないこと")
             .expect("観測結果が届くこと");
         assert_eq!(observation, expected, "増加値が受理されること");
+        // server は観測結果の送信後に接続を自発的に閉じないため、session を drop して
+        // 接続を閉じる。drop は io の TCP 閉鎖 (EOF) として server へ届き、server task は
+        // 観測済みの接続終了を正常終了として扱う。session drop を server.await の前に
+        // 行わないと server task の終了待ちと session drop の依存が逆になり解決しない
+        drop(session);
         server
             .await
             .expect("サーバータスクの join に成功すること")
