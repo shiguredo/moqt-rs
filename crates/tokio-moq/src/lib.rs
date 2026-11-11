@@ -903,27 +903,55 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// 名前解決が失敗した場合・[`RESOLVE_TIMEOUT`] を超えた場合・解決結果が
 /// 0 件の場合は [`TransportError::ResolutionFailed`] になる。
 // テスト方針: IP リテラルと `localhost` の経路は単体テストで固定し、タイムアウトの
-// 行使は短いタイムアウトを渡す単体テストと、タイムアウト値を一時的に縮めた実機確認で確認する。
+// 行使は resolver を差し替える単体テスト (応答しない resolver を future で置き換える) と、
+// タイムアウト値を一時的に縮めた実機確認で確認する。
 pub async fn resolve_socket_addrs(authority: &str) -> Result<Vec<SocketAddr>, TransportError> {
     resolve_socket_addrs_within(authority, RESOLVE_TIMEOUT).await
 }
 
-/// authority をタイムアウト付きで解決する
+/// authority をタイムアウト付きで解決する (実 DNS を注入する薄いラッパー)
 ///
-/// タイムアウト値を引数に取るのは、応答しないリゾルバを用意できない環境でも
-/// 打ち切りの経路を単体テストで固定できるようにするため。
+/// 実 DNS ([`tokio::net::lookup_host`]) を [`resolve_socket_addrs_with`] に渡して解決する。
+/// resolver を差し替えてタイムアウト経路を決定的に固定する単体テストは
+/// [`resolve_socket_addrs_with`] を直接使うため、この関数は既存の呼び出し点を
+/// 変えないためのラッパーである。
 /// 公開 API は [`RESOLVE_TIMEOUT`] を渡す [`resolve_socket_addrs`] だけにする。
 async fn resolve_socket_addrs_within(
     authority: &str,
     timeout: Duration,
 ) -> Result<Vec<SocketAddr>, TransportError> {
+    // 本体は resolver を差し替えられる core 関数に委ねる。実 DNS の経路は
+    // `tokio::net::lookup_host` を注入する形で変わらない
+    resolve_socket_addrs_with(authority, timeout, |addr_text| {
+        tokio::net::lookup_host(addr_text)
+    })
+    .await
+}
+
+/// authority をタイムアウト付きで解決する (resolver を注入する本体)
+///
+/// `lookup` は socket addr 文字列を受け取り、解決済みアドレスの列を返す future を作る。
+/// resolver を差し替えられるのは、応答しないリゾルバを実際の OS リゾルバでは用意できない
+/// 環境でも、タイムアウトの行使の経路を単体テストで決的に固定できるようにするためである
+/// ([`connect_with_fallback`] の注入クロージャと同じ方式)。実 DNS による解決は
+/// [`resolve_socket_addrs_within`] 経由でのみ行う。
+async fn resolve_socket_addrs_with<F, Fut, I>(
+    authority: &str,
+    timeout: Duration,
+    lookup: F,
+) -> Result<Vec<SocketAddr>, TransportError>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<I>>,
+    I: Iterator<Item = SocketAddr>,
+{
     let parts = authority_parts(authority)?;
     let addr_text = parts.socket_addr_string();
 
     let addrs = if let Ok(addr) = addr_text.parse::<SocketAddr>() {
         vec![addr]
     } else {
-        let resolved = tokio::time::timeout(timeout, tokio::net::lookup_host(addr_text.as_str()))
+        let resolved = tokio::time::timeout(timeout, lookup(addr_text))
             .await
             .map_err(|_| {
                 resolve_failed(
@@ -2806,27 +2834,27 @@ mod tests {
 
     /// 名前解決がタイムアウトで打ち切られる
     ///
-    /// 一意な `example-<pid>.invalid` は RFC 2606 §2 の予約 TLD `.invalid` のため必ず解決に
-    /// 失敗する。
-    /// `tokio::net::lookup_host` は OS のリゾルバを待つため、この名前の解決は待機中の future になる。
-    /// タイムアウトを 100 ナノ秒にして、成功し得ないことを固定する。
-    /// タイムアウト無しでは従来どおり解決に失敗することも
-    /// [`resolve_socket_addrs_reports_resolution_failure`] (`example.invalid` を使う) で
-    /// 固定する。
-    ///
-    /// ただし OS が否定応答をキャッシュすると、解決が最初のポーリングで即座に失敗して
-    /// タイムアウトを観測できなくなる ([`resolve_socket_addrs_reports_resolution_failure`] が
-    /// 先に同じ名前を解決した場合や、直前の実行のキャッシュが残っている場合である)。
-    /// テストごとに一意な名前を使い、キャッシュの状態に依存しないようにする。
+    /// resolver を「応答しない」future で置き換えてタイムアウト経路を決定的に検証する。
+    /// 本物の DNS (`example.invalid` など) は OS リゾルバの挙動 (即時の否定応答や
+    /// キャッシュ) に依存し、環境によってはタイムアウトより先に future が完成するため
+    /// タイムアウト経路が観測できず、テストが環境依存になってしまう。
+    /// `std::future::pending` はモックやスタブではなく、resolver が応答しないという
+    /// テストの前提をそのまま表す fixture である (応答を偽装しない)。
+    /// hanging future は 100ns のタイムアウトより早く完成しないため、タイムアウト経路が
+    /// 全環境で決定的に勝つ。
+    /// タイムアウト ([`RESOLVE_TIMEOUT`]) を超える前に解決が失敗すれば従来どおり
+    /// 解決に失敗することも [`resolve_socket_addrs_reports_resolution_failure`]
+    /// (`example.invalid` を使う) で固定する。
     #[tokio::test]
     async fn resolve_socket_addrs_times_out_when_resolver_does_not_answer() {
         let started = std::time::Instant::now();
-        // `.invalid` は予約 TLD のため必ず解決に失敗する。他のテストや過去の実行と衝突しない
-        // 名前を使う
-        let authority = format!("example-{}.invalid", std::process::id());
-        let err = resolve_socket_addrs_within(&authority, Duration::from_nanos(100))
-            .await
-            .expect_err("タイムアウトでエラーになること");
+        let authority = "example.invalid";
+        // resolver が永遠に応答しない前提をそのまま表す fixture (応答の偽装はしない)
+        let err = resolve_socket_addrs_with(authority, Duration::from_nanos(100), |_addr_text| {
+            std::future::pending::<std::io::Result<std::vec::IntoIter<SocketAddr>>>()
+        })
+        .await
+        .expect_err("タイムアウトでエラーになること");
         assert!(
             matches!(err, TransportError::ResolutionFailed(_)),
             "名前解決の失敗として返ること: {err}"
@@ -2840,7 +2868,7 @@ mod tests {
             "使ったタイムアウトが理由に含まれること: {err}"
         );
         assert!(
-            err.to_string().contains(&authority),
+            err.to_string().contains(authority),
             "入力の authority が含まれること: {err}"
         );
         assert!(
