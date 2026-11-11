@@ -906,3 +906,160 @@ mod setup_authorization_token_scope {
         assert_eq!(decoded.authorization_tokens().len(), 2);
     }
 }
+
+/// SETUP Options の重複 Option Type ポリシー
+///
+/// draft-ietf-moq-transport-23 §9.1 (SETUP): "Senders MUST NOT repeat the same Option Type
+/// in a message unless the option definition explicitly allows multiple instances." /
+/// "Receivers MUST allow duplicates of unknown Setup Options."
+/// 既知型の重複は encode と decode の双方で拒否し、未知型の重複は受理する。
+mod setup_option_duplicate_policy {
+    use super::*;
+    use shiguredo_moqt::parameter::{
+        SETUP_OPTION_AUTHORITY, SETUP_OPTION_AUTHORIZATION_TOKEN, SETUP_OPTION_PATH,
+    };
+
+    /// 既知型 (PATH、奇数型) の重複は encode で拒否される
+    ///
+    /// §9.1 の送信側 MUST。encode は型番号でソートしてから隣接重複を見るため、
+    /// 入力順に関係なく検出される。
+    #[test]
+    fn known_odd_type_duplicate_rejected_on_encode() {
+        let mut options = SetupOptions::new();
+        options.push(SetupOption {
+            option_type: SETUP_OPTION_PATH,
+            value: SetupOptionValue::Bytes(b"/first".to_vec()),
+        });
+        options.push(SetupOption {
+            option_type: SETUP_OPTION_PATH,
+            value: SetupOptionValue::Bytes(b"/second".to_vec()),
+        });
+        let mut buf = Vec::new();
+        assert_eq!(
+            options.encode(&mut buf),
+            Err(MessageError::InvalidParameter),
+            "PATH (0x01) の重複は encode で拒否されること"
+        );
+        assert!(
+            buf.is_empty(),
+            "拒否時に出力バッファへ書き込まないこと (実際: {buf:?})"
+        );
+    }
+
+    /// 既知型 (AUTHORITY、奇数型) の重複は decode で拒否される
+    ///
+    /// encode は重複を拒否するため wire は手で組む。Type Delta = 0 で同じ型を 2 件並べる。
+    #[test]
+    fn known_odd_type_duplicate_rejected_on_decode() {
+        // 1 件目: Type Delta = AUTHORITY (0x05)、Length 6、"a.test"
+        let mut wire = vec![SETUP_OPTION_AUTHORITY as u8, 0x06];
+        wire.extend_from_slice(b"a.test");
+        // 2 件目: Type Delta = 0 (同じ型)、Length 6、"b.test"
+        wire.push(0x00);
+        wire.push(0x06);
+        wire.extend_from_slice(b"b.test");
+
+        assert!(
+            matches!(
+                SetupOptions::decode(&wire),
+                Err(MessageError::InvalidField(_))
+            ),
+            "既知型の重複は decode で InvalidField になること"
+        );
+    }
+
+    /// 未知型 (0x0B、奇数型) の重複は decode で受理される
+    ///
+    /// §9.1 の受信側 MUST。0x0B は §16.4 (Setup Options) のレジストリ表に無い奇数型であり、
+    /// Setup Options は Message Parameter とは別名前空間なので未知型として扱う。
+    #[test]
+    fn unknown_odd_type_duplicate_accepted_on_decode() {
+        let mut wire = vec![0x0B, 0x02, 0xAA, 0xBB];
+        wire.push(0x00); // Type Delta = 0 (同じ型)
+        wire.push(0x02);
+        wire.extend_from_slice(&[0xCC, 0xDD]);
+
+        let (decoded, consumed) =
+            SetupOptions::decode(&wire).expect("未知型の重複は decode で受理されること");
+        assert_eq!(consumed, wire.len());
+        assert_eq!(
+            decoded.iter().count(),
+            2,
+            "未知型の重複は 2 件とも保持されること"
+        );
+    }
+
+    /// 値の異なる AUTHORIZATION_TOKEN の重複は encode / decode とも受理される
+    ///
+    /// draft-ietf-moq-transport-23 §9.1.4 (AUTHORIZATION TOKEN): "The endpoint can specify
+    /// one or more tokens in SETUP" / §8.9 (Authorization Token Compression): "An
+    /// Authorization Token MAY be repeated within a message as long as the combination of
+    /// Token Type and Token Value are unique after resolving any aliases."
+    #[test]
+    fn distinct_authorization_tokens_accepted() {
+        let first = AuthorizationToken::UseValue {
+            token_type: 1,
+            token_value: b"first".to_vec(),
+        };
+        let second = AuthorizationToken::UseValue {
+            token_type: 2,
+            token_value: b"second".to_vec(),
+        };
+        let mut options = SetupOptions::new();
+        options.push(SetupOption {
+            option_type: SETUP_OPTION_AUTHORIZATION_TOKEN,
+            value: SetupOptionValue::AuthorizationToken(first.clone()),
+        });
+        options.push(SetupOption {
+            option_type: SETUP_OPTION_AUTHORIZATION_TOKEN,
+            value: SetupOptionValue::AuthorizationToken(second.clone()),
+        });
+        let mut buf = Vec::new();
+        options
+            .encode(&mut buf)
+            .expect("値の異なる AUTHORIZATION_TOKEN の重複は encode で受理されること");
+
+        let (decoded, consumed) =
+            SetupOptions::decode(&buf).expect("同じ wire を decode できること");
+        assert_eq!(consumed, buf.len());
+        assert_eq!(
+            decoded.authorization_tokens(),
+            vec![&first, &second],
+            "2 件とも保持されること"
+        );
+    }
+
+    /// 偶数型に Bytes、奇数型に VarInt を入れた型不一致は encode で拒否される
+    ///
+    /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): 偶数型は varint、
+    /// 奇数型は Length 付きバイト列。重複チェックで先に落ちないよう 1 件だけの
+    /// `SetupOptions` で検証する。
+    #[test]
+    fn type_mismatch_rejected_on_encode() {
+        // 偶数型 (MAX_AUTH_TOKEN_CACHE_SIZE、0x04) に Bytes
+        let mut even_mismatch = SetupOptions::new();
+        even_mismatch.push(SetupOption {
+            option_type: shiguredo_moqt::parameter::SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE,
+            value: SetupOptionValue::Bytes(b"value".to_vec()),
+        });
+        let mut buf = Vec::new();
+        assert_eq!(
+            even_mismatch.encode(&mut buf),
+            Err(MessageError::InvalidParameter),
+            "偶数型の Bytes は encode で拒否されること"
+        );
+
+        // 奇数型 (PATH、0x01) に VarInt
+        let mut odd_mismatch = SetupOptions::new();
+        odd_mismatch.push(SetupOption {
+            option_type: SETUP_OPTION_PATH,
+            value: SetupOptionValue::VarInt(1),
+        });
+        let mut buf = Vec::new();
+        assert_eq!(
+            odd_mismatch.encode(&mut buf),
+            Err(MessageError::InvalidParameter),
+            "奇数型の VarInt は encode で拒否されること"
+        );
+    }
+}
