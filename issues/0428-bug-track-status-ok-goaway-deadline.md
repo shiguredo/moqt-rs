@@ -1,7 +1,7 @@
 # TRACK_STATUS_OK を FIN 付きで送ったら request stream の GOAWAY deadline を解除する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-10
 - Branch: feature/fix-track-status-ok-goaway-deadline
 - Polished: 2026-11-10
 
@@ -31,3 +31,9 @@
 - 自側が request stream に GOAWAY を送った後に TRACK_STATUS_OK を FIN 付きで送り、peer の FIN は届けていない状態で tick により deadline を満了させると、`ResetRequestStream` と `RequestTerminated { reason: GoawayTimeout }` が発行されないこと。
 - 上記を `tests/test_session/` (GOAWAY の deadline のテスト群) で固定すること。修正前の実装では失敗すること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `src/session/core.rs` の `send_request_ok` に `clear_request_stream_goaway_deadline` の呼び出しを追加した。TRACK_STATUS_OK を FIN 付きで送る (`fin = true`) とき、`SendOnStream` を積む前に deadline を解除する (`send_request_error` の FIN 分岐と同じ契約。FIN 済み送信方向への後発 reset は I/O 層で無視されるため意味が無く、`RequestTerminated { reason: GoawayTimeout }` は応答済み request が自側 reset で終端したと報告する誤ったシグナルになる)。この clear を呼ばない FIN 付き最終メッセージ経路は他に無い (`send_request_error` / `emit_request_error_with_details` / `maybe_flush_pending_publish_done` / `send_publish_done` は既に clear を呼ぶ)。
+- テスト: `tests/test_session/goaway/deadline.rs` に `track_status_ok_fin_clears_request_stream_goaway_deadline` を追加した。tick → request stream GOAWAY (timeout=100) → TRACK_STATUS_OK を FIN 付きで送信 → peer の FIN を届けないまま tick で deadline を満了させ、`ResetRequestStream` と `RequestTerminated { reason: GoawayTimeout }` の両方が発行されないこと (reset 0 件 / 終端 0 件)、entry が `terminated` にならず応答 (`response`) が登録されたままであることを固定する。修正前の実装では 2 つのイベントが発行されるため本テストは失敗することを確認した (RED → GREEN で検証)。
+- TRACK_STATUS_OK 送信後の `send_goaway_on_request_stream` による deadline 登録は本 issue の対象外である (送信方向が閉じた request への GOAWAY は I/O 層で届かない)。
