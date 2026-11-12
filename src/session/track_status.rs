@@ -24,6 +24,7 @@ use crate::track_properties::TrackProperties;
 use alloc::vec::Vec;
 
 use super::core::Session;
+use super::subscription::delivery::update_largest_object_in_parameters;
 use super::types::terminationreason_from_end;
 use super::types::{
     RequestKind, RequestStreamEnd, SendRequestError, SessionError, SessionEvent, TerminationReason,
@@ -212,7 +213,19 @@ impl Session {
     /// draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS): "If successful, the publisher
     /// responds with a TRACK_STATUS_OK with the same parameters and Track Properties it would
     /// have set in a SUBSCRIBE_OK." 送信する Track Properties はアプリが渡した値であり、
-    /// 本関数は `INCLUDE_PROPERTIES=0` のときの空化と応答済み記録だけを行う。
+    /// 本関数は `INCLUDE_PROPERTIES=0` のときの空化と応答済み記録を行う。
+    ///
+    /// draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter): 送信端点がその
+    /// Track で Object を publish / 受信していれば、TRACK_STATUS_OK に LARGEST_OBJECT を
+    /// 載せることを MUST とする。SUBSCRIBE_OK / PUBLISH / subscription の REQUEST_UPDATE_OK /
+    /// PUBLISH_STATE_NOTIFY と同じく、[`Session::publisher_track_largest`] が返す Track 最大を
+    /// [`update_largest_object_in_parameters`] で自動補完する。同関数はアプリ指定値との
+    /// 大きい方を採るため、アプリが明示した値を下げない。Object 未 publish の Track では
+    /// 補完しない (アプリ指定値もそのまま残す)。
+    ///
+    /// 最終的に載った LARGEST_OBJECT は [`TrackStatusResponse::Ok::largest_location`] に
+    /// 記録する。送信した応答でも「LARGEST_OBJECT parameter があれば保持する」という
+    /// 同 enum の doc に合わせた挙動である。
     ///
     /// draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter): "If
     /// INCLUDE_PROPERTIES is 0, the Track Properties are still present in the message, but
@@ -225,41 +238,64 @@ impl Session {
     pub(crate) fn send_ok_for_track_status(
         &mut self,
         request_id: u64,
+        parameters: &mut MessageParameters,
         track_properties: TrackProperties,
     ) -> Result<TrackProperties, SessionError> {
-        let Some(entry) = self.track_status_requests.get_mut(&request_id) else {
-            return Err(SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
-                "track_status not found for send_ok_for_track_status",
-            ));
+        // 検証とフィールドの取り出しは不変借用で行う。`publisher_track_largest` も `self` を
+        // 不変借用するため、entry の可変借用を先に取ると両立しない。
+        let (track_namespace, track_name, include_properties) = {
+            let Some(entry) = self.track_status_requests.get(&request_id) else {
+                return Err(SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "track_status not found for send_ok_for_track_status",
+                ));
+            };
+            if entry.my_role != TrackRole::Publisher {
+                return Err(SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "TRACK_STATUS_OK can only be sent by the responder side",
+                ));
+            }
+            if entry.terminated {
+                return Err(SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "TRACK_STATUS_OK on a request whose stream is already closed",
+                ));
+            }
+            if entry.response.is_some() {
+                return Err(SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "TRACK_STATUS_OK on already-responded entry",
+                ));
+            }
+            (
+                entry.track_namespace.clone(),
+                entry.track_name.clone(),
+                entry.include_properties,
+            )
         };
-        if entry.my_role != TrackRole::Publisher {
-            return Err(SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
-                "TRACK_STATUS_OK can only be sent by the responder side",
-            ));
+        // draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter): publisher 役
+        // subscription をすべて forget した後も Track 単位の送信実績から補完できる
+        if let Some(largest) = self.publisher_track_largest(&track_namespace, &track_name) {
+            update_largest_object_in_parameters(parameters, &largest);
         }
-        if entry.terminated {
-            return Err(SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
-                "TRACK_STATUS_OK on a request whose stream is already closed",
-            ));
-        }
-        if entry.response.is_some() {
-            return Err(SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
-                "TRACK_STATUS_OK on already-responded entry",
-            ));
-        }
+        // 最終的に載った値を応答の記録に残す (アプリ指定値と自動補完値の大きい方)
+        let largest_location = parameters
+            .largest_object()
+            .map(|(group_id, object_id)| Location {
+                group_id,
+                object_id,
+            });
+        let entry = self
+            .track_status_requests
+            .get_mut(&request_id)
+            .expect("track_status presence checked above");
         entry.response = Some(TrackStatusResponse::Ok {
-            // 自側が送る応答では Largest Location と EXPIRES を保持しない (送信側の entry
-            // だけが peer から受信した値を保持する)
-            largest_location: None,
+            largest_location,
+            // EXPIRES は自側が送る応答では保持しない (送信側の entry だけが peer から
+            // 受信した値を保持する)
             expires_ms: None,
         });
-        // draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter): 空化の判断は
-        // entry の借用を解放してから行う
-        let include_properties = entry.include_properties;
         self.clear_control_message_deadline(request_id);
         Ok(if include_properties == Some(0) {
             TrackProperties::new()

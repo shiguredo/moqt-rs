@@ -167,7 +167,8 @@ fn send_track_status_registers_pending_entry() {
 /// REQUEST_OK を受信すると entry が応答済みになり、RequestOkReceived が発行される
 ///
 /// draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS): 受信側は SUBSCRIBE と同様に扱い、
-/// TRACK_STATUS_OK を返す。LARGEST_OBJECT は任意で載る。
+/// TRACK_STATUS_OK を返す。LARGEST_OBJECT は公開済み Object がある場合に載る
+/// (§9.19.17 (LARGEST OBJECT Parameter) の MUST、補完の詳細は `largest_object` モジュール)。
 #[test]
 fn track_status_completes_on_request_ok() {
     let (mut client, _server) = establish_pair();
@@ -1453,6 +1454,225 @@ fn late_request_ok_for_locally_cancelled_track_status_is_absorbed() {
         assert!(
             !matches!(e, SessionEvent::TrackStatusUnsupported { .. }),
             "ローカル終端済みの entry に新たな未対応通知を発行しないこと"
+        );
+    }
+}
+
+/// TRACK_STATUS_OK の LARGEST_OBJECT 自動補完 (§9.19.17 (LARGEST OBJECT Parameter))
+///
+/// "It MAY appear in SUBSCRIBE_OK, PUBLISH, REQUEST_UPDATE_OK, TRACK_STATUS_OK, FETCH_OK,
+/// or PUBLISH_STATE_NOTIFY. ... If the sending endpoint has published or received any Objects
+/// in the Track, it MUST include this parameter in the above messages it sends."
+mod largest_object {
+    use super::*;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_LARGEST_OBJECT,
+    };
+    use shiguredo_moqt::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
+
+    /// server (publisher) 側で SUBSCRIBE を Established にし、{group, object} を公開する
+    ///
+    /// 返り値は publisher 役 subscription の request_id。
+    fn establish_publisher_subscription_with_object(
+        client: &mut Session,
+        server: &mut Session,
+        group: u64,
+        object: u64,
+    ) -> u64 {
+        let sub_rid = client
+            .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, sub_msg) = take_send_request(client);
+        server
+            .recv_request(sub_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+        server
+            .send_subscribe_ok(sub_rid, 1, MessageParameters::new(), TrackProperties::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, ok_msg) = take_send_on_stream(server);
+        client
+            .recv_stream_message(sub_rid, ok_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+
+        let stream_id = DataStreamId(1);
+        server
+            .send_subgroup_header(
+                stream_id,
+                sub_rid,
+                &SubgroupHeader {
+                    track_alias: 1,
+                    group_id: group,
+                    subgroup_id: SubgroupIdMode::Explicit(0),
+                    publisher_priority: Some(128),
+                    has_properties: false,
+                    end_of_group: false,
+                    first_object: false,
+                },
+            )
+            .expect("テストフィクスチャの前提条件を満たす");
+        server
+            .send_subgroup_object(stream_id, object, None)
+            .expect("テストフィクスチャの前提条件を満たす");
+        sub_rid
+    }
+
+    /// アプリ指定の LARGEST_OBJECT を持つパラメータ列を作る
+    fn largest_object_params(group_id: u64, object_id: u64) -> MessageParameters {
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter {
+            param_type: PARAM_LARGEST_OBJECT,
+            value: MessageParameterValue::Location {
+                group: group_id,
+                object: object_id,
+            },
+        });
+        parameters
+    }
+
+    /// TRACK_STATUS を server へ送って entry を応答待ちにする
+    fn send_track_status(client: &mut Session, server: &mut Session) -> u64 {
+        send_track_status_to_server(client, server)
+    }
+
+    /// publish 済み Track への TRACK_STATUS_OK に LARGEST_OBJECT が自動補完される
+    #[test]
+    fn track_status_ok_fills_track_largest_object() {
+        let (mut client, mut server) = establish_pair();
+        let sub_rid = establish_publisher_subscription_with_object(&mut client, &mut server, 3, 7);
+        let rid = send_track_status(&mut client, &mut server);
+
+        server
+            .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+            .expect("TRACK_STATUS_OK の送信に成功すること");
+        let (send_rid, ok_msg, _) = take_send_on_stream_with_fin(&mut server);
+        assert_eq!(send_rid, rid);
+        let params = match &ok_msg {
+            ControlMessage::RequestOk(ok) => &ok.parameters,
+            other => panic!("RequestOk が期待されたが {other:?} を受け取った"),
+        };
+        assert_eq!(
+            params.largest_object(),
+            Some((3, 7)),
+            "publish 済み Track の TRACK_STATUS_OK に Track 最大が載ること"
+        );
+        // 送信した応答でも最終値を保持する (TrackStatusResponse::Ok の doc)
+        assert_eq!(
+            server
+                .track_status_request(rid)
+                .expect("entry が存在すること")
+                .response,
+            Some(TrackStatusResponse::Ok {
+                largest_location: Some(Location {
+                    group_id: 3,
+                    object_id: 7,
+                }),
+                expires_ms: None,
+            }),
+            "送信した TRACK_STATUS_OK の最終 LARGEST_OBJECT が entry に反映されること"
+        );
+        assert!(server.subscription(sub_rid).is_some());
+
+        // client 側でも同じ値を受信できる
+        client
+            .recv_stream_message(rid, ok_msg)
+            .expect("TRACK_STATUS_OK の受信に成功すること");
+        assert_eq!(
+            client
+                .track_status_request(rid)
+                .expect("entry が存在すること")
+                .response,
+            Some(TrackStatusResponse::Ok {
+                largest_location: Some(Location {
+                    group_id: 3,
+                    object_id: 7,
+                }),
+                expires_ms: None,
+            })
+        );
+    }
+
+    /// Object 未 publish の Track では LARGEST_OBJECT を自動補完しない
+    #[test]
+    fn track_status_ok_omits_largest_object_without_published_object() {
+        let (mut client, mut server) = establish_pair();
+        let rid = send_track_status(&mut client, &mut server);
+
+        server
+            .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+            .expect("TRACK_STATUS_OK の送信に成功すること");
+        let (_, ok_msg, _) = take_send_on_stream_with_fin(&mut server);
+        let params = match &ok_msg {
+            ControlMessage::RequestOk(ok) => &ok.parameters,
+            other => panic!("RequestOk が期待されたが {other:?} を受け取った"),
+        };
+        assert_eq!(
+            params.largest_object(),
+            None,
+            "Object 未 publish の Track では補完しないこと"
+        );
+        assert_eq!(
+            server
+                .track_status_request(rid)
+                .expect("entry が存在すること")
+                .response,
+            Some(TrackStatusResponse::Ok {
+                largest_location: None,
+                expires_ms: None,
+            })
+        );
+    }
+
+    /// アプリ指定値と自動補完値の大きい方が載る (アプリ指定値を下げない)
+    #[test]
+    fn track_status_ok_keeps_larger_app_supplied_largest_object() {
+        // アプリ指定値が観測最大より大きい: そのまま残る
+        let (mut client, mut server) = establish_pair();
+        establish_publisher_subscription_with_object(&mut client, &mut server, 3, 7);
+        let rid = send_track_status(&mut client, &mut server);
+        server
+            .send_request_ok(rid, largest_object_params(5, 1), TrackProperties::new())
+            .expect("TRACK_STATUS_OK の送信に成功すること");
+        let (_, ok_msg, _) = take_send_on_stream_with_fin(&mut server);
+        let params = match &ok_msg {
+            ControlMessage::RequestOk(ok) => &ok.parameters,
+            other => panic!("RequestOk が期待されたが {other:?} を受け取った"),
+        };
+        assert_eq!(
+            params.largest_object(),
+            Some((5, 1)),
+            "アプリ指定値が観測最大より大きい場合は下げないこと"
+        );
+
+        // アプリ指定値が観測最大より小さい: 観測最大へ引き上げる
+        let (mut client, mut server) = establish_pair();
+        establish_publisher_subscription_with_object(&mut client, &mut server, 3, 7);
+        let rid = send_track_status(&mut client, &mut server);
+        server
+            .send_request_ok(rid, largest_object_params(1, 1), TrackProperties::new())
+            .expect("TRACK_STATUS_OK の送信に成功すること");
+        let (_, ok_msg, _) = take_send_on_stream_with_fin(&mut server);
+        let params = match &ok_msg {
+            ControlMessage::RequestOk(ok) => &ok.parameters,
+            other => panic!("RequestOk が期待されたが {other:?} を受け取った"),
+        };
+        assert_eq!(
+            params.largest_object(),
+            Some((3, 7)),
+            "アプリ指定値が観測最大より小さい場合は観測最大へ引き上げること"
+        );
+        assert_eq!(
+            server
+                .track_status_request(rid)
+                .expect("entry が存在すること")
+                .response,
+            Some(TrackStatusResponse::Ok {
+                largest_location: Some(Location {
+                    group_id: 3,
+                    object_id: 7,
+                }),
+                expires_ms: None,
+            }),
+            "引き上げ後の値を entry に保持すること"
         );
     }
 }

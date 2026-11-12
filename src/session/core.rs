@@ -2150,7 +2150,8 @@ impl Session {
             }
             Some(RequestTable::Fetch) => self.send_ok_for_fetch(request_id, &mut parameters)?,
             Some(RequestTable::TrackStatus) => {
-                track_properties = self.send_ok_for_track_status(request_id, track_properties)?;
+                track_properties =
+                    self.send_ok_for_track_status(request_id, &mut parameters, track_properties)?;
                 // draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS): "The bidi stream is closed
                 // with a FIN after TRACK_STATUS_OK or TRACK_STATUS_ERROR are sent."
                 fin = true;

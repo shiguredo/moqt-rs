@@ -70,9 +70,9 @@
 - Paused / Unpaused (旧 FORWARD を置き換えた PAUSED。Type `0x11`、0 = unpaused / 1 = paused、既定 0)
 - Group Order
 - Include Properties
-- Largest Object (SUBSCRIBE_OK / PUBLISH / 購読と FETCH の REQUEST_UPDATE_OK / PUBLISH_STATE_NOTIFY では session 層が
-  Track 単位で自動補完する。自動補完は利用者指定値と観測最大の大きい方を載せ、指定値を下げない。観測値は
-  publisher 役 subscription の送信記録に限られ、FETCH 応答で送った Object は含まれない。TRACK_STATUS_OK は未対応。
+- Largest Object (SUBSCRIBE_OK / PUBLISH / 購読と FETCH の REQUEST_UPDATE_OK / TRACK_STATUS_OK / PUBLISH_STATE_NOTIFY では
+  session 層が Track 単位で自動補完する。自動補完は利用者指定値と観測最大の大きい方を載せ、指定値を下げない。
+  観測値は publisher 役 subscription の送信記録に限られ、FETCH 応答で送った Object は含まれない。
   自側が publish した最大は publisher 役 subscription を forget した後も保持する。
   FETCH_OK は要求範囲と Largest Object から応答範囲の終端を導出し、Largest Object が要求範囲内なら
   LARGEST_OBJECT を載せて応答をそこへ切り詰め、範囲外なら取り除く。要求が End を省略している場合の End は
