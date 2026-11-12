@@ -1,8 +1,8 @@
 # 送信側 delivery timeout を先頭 Object の Object Property override と送信前チェックに対応させる
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
-- Branch: feature/fix-sender-delivery-timeout
+- Completed: 2026-11-11
+- Branch: develop (CODEBASE.md の規約により develop に直接コミットする)
 - Polished: 2026-10-19
 - Refreshed: 2026-11-04
 
@@ -59,3 +59,17 @@ override は subgroup の先頭 Object に限られ、datagram には適用さ�
 - `crates/tokio-moq/src/moqt_client.rs` の `send_subgroup_object` が `LocalSubgroupTimeout` を `Skip` として扱い、example の publish ループがエラー終了しないこと。
 - 送信側 override と送信直前チェックを `tests/test_session/subscription/delivery.rs` に追加して固定すること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- 送信側の Object Property override を `subscription.delivery_timeouts.subgroup_overrides` に登録するようにした。`src/session/data.rs` の `send_subgroup_object` が先頭 Object の Properties を `decode_object_properties` で decode し、(group_id, subgroup_id) 単位で登録する。登録はフィルタ通過と FirstObjectId 解決の後、最大位置の更新と提供完了時刻の記録より前に行う。Properties の decode に失敗した場合は登録しない (不正な Properties の拒否は encoder の検証に委ねる)。
+- 先頭 Object の判定を stream 単位で行う。FirstObjectId モードは `subgroup_id` の解決を初回送信時に伴うため解決後の値で判定でき、Explicit / Zero モードは `OutgoingDataStream::first_object_sent` で判定する。
+- `send_subgroup_object` に送信直前の OBJECT_DELIVERY_TIMEOUT 検査を追加した。override 込みの effective 値で判定し、既存の提供完了時刻からの経過が timeout 以上なら `SessionEvent::ResetDataStream` (`STREAM_DELIVERY_TIMEOUT`, `reliable_size: None`, `ResetTracking::Retained`) を発行して `SendRequestError::LocalSubgroupTimeout` を返し、Object を送らず最大位置も更新しない。stream 追跡は保持するため、I/O 層は reset 後に `send_data_stream_closed` で終端通知できる。重複 reset を避けるため、当該 stream の timing エントリを除去し、`OutgoingDataStream::delivery_timeout_reset` を立てて以後の再送も拒否する。
+- `tick_subscription_timeouts` を override 反映にした。OBJECT_DELIVERY_TIMEOUT は stream の (group_id, subgroup_id) で、SUBGROUP_DELIVERY_TIMEOUT は FIN タイマーが保持する (group_id, subgroup_id) で effective 値を再計算する。FIN タイマーの保持値を `(Option<u64>, u64)` から `SubgroupFinTimer { fin_ms, request_id, group_id, subgroup_id }` に変え、stream が `data_streams.outgoing` から除去された後も override を引けるようにした。tick の reset でも `delivery_timeout_reset` を立て、再送を拒否する。
+- override の削除を追加した。RESET 終端と FIN 終端で FIN タイマーを開始しない場合は `close_outgoing_subgroup_stream` で削除し、FIN タイマーを開始した場合はタイマー発火時に削除する。`forget_subscription` では subscription ごと破棄される。
+- `SendRequestError::LocalSubgroupTimeout` を追加し、`Display` / `source` を実装した。`crates/tokio-moq/src/moqt_client.rs` の `send_subgroup_object` は `LocalFilterMismatch` と同じく `ObjectFilterOutcome::Skip` として扱い、`ObjectFilterOutcome::Skip` の doc と `crates/moq-pub/src/stream_writer.rs` の doc を delivery timeout を含む形に更新した。example の publish ループは `Skip` で継続する。
+- `send_object_datagram` は §5.2 の override 対象外であり、既存の `effective_object_ms` と `LocalDatagramTimeout` の drop 判定を変更していない。
+- テスト:
+  - `tests/test_session/subscription/delivery.rs` に `sender_override` モジュールを追加した。override が Track Property より長い場合に早く reset されないこと (OBJECT / SUBGROUP の両方)、期限を超えると reset されること、再送が `LocalSubgroupTimeout` で拒否され重複 reset を発行しないこと、Track Property のみでも再送前チェックが働くこと、期限前の再送が通ること、RESET 終端で override が削除されること、datagram の `LocalDatagramTimeout` が維持されることを固定した。
+  - `src/session/tests.rs` に `send_subgroup_object_rejects_expired_resend_before_tick` を追加した。sans-I/O の時間は `last_tick_ms` で進むため通常の API 呼び出しでは「tick 済みだが timing エントリが古い」状態を作れない。内部状態を直接構成して送信直前チェック単体の振る舞い (reset イベント・`LocalSubgroupTimeout`・追跡保持) を固定した。
+- 検証: `cargo test -p shiguredo_moqt --lib` (134 件) / `cargo test -p shiguredo_moqt --test test_session` (1132 件) / `cargo test -p tokio-moq --lib` (296 件) / `cargo test -p moq-sub --lib` (229 件) / `cargo clippy -p shiguredo_moqt -p tokio-moq -p moq-sub --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通る。moq-pub はホストに libpulse が無いためビルドできず、doc コメントのみの変更である (CI の macOS runner で検証される)。
