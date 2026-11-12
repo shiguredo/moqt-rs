@@ -3723,3 +3723,314 @@ fn request_error_unavailable_is_not_normalized() {
         "UNAVAILABLE は正規化で INTERNAL_ERROR に落ちないこと"
     );
 }
+
+// ─── cancel 後に届く遅延制御応答の吸収 ────
+
+/// 購読 cancel 後に届く SUBSCRIBE_OK / REQUEST_ERROR を吸収する
+///
+/// draft-ietf-moq-transport-23 §3.1 (Subscriptions): "The subscriber terminates a
+/// subscription in the Pending (Subscriber) or Established states by sending STOP_SENDING."
+/// 購読者が cancel した直後に、peer が STOP_SENDING を観測する前に送った SUBSCRIBE_OK /
+/// REQUEST_ERROR が届くのは正当な競合であり、セッションを閉じてはならない。
+mod late_control_response_after_cancel {
+    use super::*;
+
+    /// SUBSCRIBE を Pending(Subscriber) のまま cancel し、遅延 SUBSCRIBE_OK を注入する
+    #[test]
+    fn late_subscribe_ok_after_cancel_is_absorbed() {
+        let (mut client, _server) = establish_pair();
+        let rid = client
+            .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let _ = take_send_request(&mut client);
+        client
+            .stop_sending(rid)
+            .expect("Pending(Subscriber) から cancel できること");
+
+        client
+            .recv_stream_message(
+                rid,
+                ControlMessage::SubscribeOk(shiguredo_moqt::message::SubscribeOk {
+                    track_alias: 1,
+                    parameters: MessageParameters::new(),
+                    track_properties: TrackProperties::new(),
+                }),
+            )
+            .expect("cancel 後の遅延 SUBSCRIBE_OK は吸収されること");
+
+        // 購読は Terminated のまま、状態遷移も追加イベントも起きない
+        let entry = client
+            .subscription(rid)
+            .expect("購読状態は保持されていること");
+        assert_eq!(entry.state, SubscriptionState::Terminated);
+        assert_eq!(entry.track_alias, None, "Track Alias を設定しないこと");
+        let mut subscribe_ok_events = 0;
+        while let Some(e) = client.poll_event() {
+            if matches!(e, SessionEvent::RequestOkReceived { .. }) {
+                subscribe_ok_events += 1;
+            }
+        }
+        assert_eq!(
+            subscribe_ok_events, 0,
+            "遅延 SUBSCRIBE_OK はイベントを発行しないこと"
+        );
+        assert_eq!(client.state(), SessionState::Established);
+    }
+
+    /// Established で cancel した後でも遅延 SUBSCRIBE_OK を吸収する
+    #[test]
+    fn late_subscribe_ok_after_cancel_of_established_is_absorbed() {
+        let (mut client, mut server) = establish_pair();
+        let rid = client
+            .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, sub_msg) = take_send_request(&mut client);
+        server
+            .recv_request(sub_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+        server
+            .send_subscribe_ok(rid, 1, MessageParameters::new(), TrackProperties::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, ok_msg) = take_send_on_stream(&mut server);
+        client
+            .recv_stream_message(rid, ok_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+        while client.poll_event().is_some() {}
+
+        client
+            .stop_sending(rid)
+            .expect("Established から cancel できること");
+        client
+            .recv_stream_message(
+                rid,
+                ControlMessage::SubscribeOk(shiguredo_moqt::message::SubscribeOk {
+                    track_alias: 2,
+                    parameters: MessageParameters::new(),
+                    track_properties: TrackProperties::new(),
+                }),
+            )
+            .expect("cancel 後の遅延 SUBSCRIBE_OK は吸収されること");
+        let entry = client
+            .subscription(rid)
+            .expect("購読状態は保持されていること");
+        assert_eq!(entry.state, SubscriptionState::Terminated);
+        assert_eq!(
+            entry.track_alias,
+            Some(1),
+            "遅延応答で Track Alias を上書きしないこと"
+        );
+    }
+
+    /// cancel 後の遅延 REQUEST_ERROR は RequestErrorReceived だけを発行する
+    #[test]
+    fn late_request_error_after_cancel_is_absorbed() {
+        let (mut client, mut server) = establish_pair();
+        let rid = client
+            .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, sub_msg) = take_send_request(&mut client);
+        server
+            .recv_request(sub_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+        client
+            .stop_sending(rid)
+            .expect("テストフィクスチャの前提条件を満たす");
+        server
+            .send_request_error(
+                rid,
+                shiguredo_moqt::error::REQUEST_UNAVAILABLE,
+                0,
+                shiguredo_moqt::message::ReasonPhrase::new("gone")
+                    .expect("テストフィクスチャの前提条件を満たす"),
+                ErrorDetails::new(),
+            )
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, err_msg) = take_send_on_stream(&mut server);
+        client
+            .recv_stream_message(rid, err_msg)
+            .expect("cancel 後の遅延 REQUEST_ERROR は吸収されること");
+
+        let mut error_received = 0;
+        let mut terminated = 0;
+        while let Some(e) = client.poll_event() {
+            match e {
+                SessionEvent::RequestErrorReceived { request_id, .. } => {
+                    assert_eq!(request_id, rid);
+                    error_received += 1;
+                }
+                SessionEvent::RequestTerminated { .. } => terminated += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            error_received, 1,
+            "RequestErrorReceived は 1 回発行されること"
+        );
+        assert_eq!(terminated, 0, "RequestTerminated は追加発行されないこと");
+        assert_eq!(client.state(), SessionState::Established);
+    }
+
+    /// cancel 後に制御メッセージ応答待ち deadline が解除される
+    ///
+    /// STOP_SENDING による cancel で deadline を解除しないと、遅延応答を吸収しても
+    /// `Session::tick` の CONTROL_MESSAGE_TIMEOUT でセッションが閉じる。
+    #[test]
+    fn stop_sending_clears_control_message_deadline() {
+        let (mut client, _server) = establish_pair();
+        client.tick(0);
+        client.set_control_message_timeout_ms(Some(10));
+        let rid = client
+            .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let _ = take_send_request(&mut client);
+        client
+            .stop_sending(rid)
+            .expect("Pending(Subscriber) から cancel できること");
+        // deadline が解除されていれば満了時刻を過ぎてもセッションは閉じない
+        client.tick(1000);
+        assert_eq!(client.state(), SessionState::Established);
+        let mut closed = 0;
+        while let Some(e) = client.poll_event() {
+            if matches!(e, SessionEvent::CloseSession(_)) {
+                closed += 1;
+            }
+        }
+        assert_eq!(
+            closed, 0,
+            "cancel 後に CONTROL_MESSAGE_TIMEOUT で閉じないこと"
+        );
+    }
+
+    /// supersede で Terminated になった購読への遅延 SUBSCRIBE_OK も吸収する
+    ///
+    /// draft-ietf-moq-transport-23 §3.1 (Subscriptions): SUBSCRIBE と PUBLISH が交差した
+    /// 場合、既存の Pending(Subscriber) は Terminated になる。その後に届く SUBSCRIBE_OK は
+    /// 正当な競合として吸収する。
+    #[test]
+    fn late_subscribe_ok_after_supersede_is_absorbed() {
+        use shiguredo_moqt::message::Publish;
+        let (mut client, mut server) = establish_pair();
+        let sub_rid = client
+            .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, sub_msg) = take_send_request(&mut client);
+        let publish_rid = server
+            .next_local_request_id()
+            .expect("テストフィクスチャの前提条件を満たす");
+        client
+            .recv_request(ControlMessage::Publish(Publish {
+                request_id: publish_rid,
+                track_namespace: ns(&[b"live"]),
+                track_name: b"cam".to_vec(),
+                track_alias: 123,
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }))
+            .expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(
+            client
+                .subscription(sub_rid)
+                .expect("購読状態は保持されていること")
+                .state,
+            SubscriptionState::Terminated
+        );
+        // 旧 SUBSCRIBE の bidi stream は server 側で閉じられている想定
+        let _ = sub_msg;
+        client
+            .recv_stream_message(
+                sub_rid,
+                ControlMessage::SubscribeOk(shiguredo_moqt::message::SubscribeOk {
+                    track_alias: 1,
+                    parameters: MessageParameters::new(),
+                    track_properties: TrackProperties::new(),
+                }),
+            )
+            .expect("supersede 後の遅延 SUBSCRIBE_OK は吸収されること");
+        assert_eq!(
+            client
+                .subscription(sub_rid)
+                .expect("購読状態は保持されていること")
+                .state,
+            SubscriptionState::Terminated
+        );
+        assert!(client.subscription(publish_rid).is_some());
+        assert_eq!(client.state(), SessionState::Established);
+    }
+
+    /// cancel 後の遅延 REQUEST_ERROR でも REDIRECT の MUST 検証は残る
+    ///
+    /// `handle_err_for_subscription` の吸収経路より前に `handle_peer_request_error` の
+    /// Redirect 検証があるため、cancel 済みでも非ゼロ Connect URI は ROLE_VIOLATION になる
+    /// (draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT))。
+    #[test]
+    fn late_request_error_with_redirect_closes_session() {
+        let (mut client, mut server, rid) = establish_subscribe_track(1);
+        client
+            .stop_sending(rid)
+            .expect("Established から cancel できること");
+        let err = server
+            .recv_stream_message(
+                rid,
+                ControlMessage::RequestError(RequestError {
+                    error_code: shiguredo_moqt::error::REQUEST_REDIRECT,
+                    retry_interval: 0,
+                    reason: shiguredo_moqt::message::ReasonPhrase::new("redirect")
+                        .expect("正当な reason phrase である"),
+                    error_details: redirect_details(b"moqt://relay.example/", b"track"),
+                }),
+            )
+            .expect_err("非ゼロ Connect URI の REDIRECT は拒否されること");
+        assert_eq!(err.code, SESSION_ROLE_VIOLATION);
+        assert_eq!(server.state(), SessionState::Closing);
+        let _ = client;
+    }
+
+    /// 遅延 SUBSCRIBE_OK の Track Alias が別 Track の Established と衝突する場合は閉じる
+    ///
+    /// 吸収経路でも MUST 検証 (draft-ietf-moq-transport-23 §3.1.3 (Track Alias)) は残す。
+    #[test]
+    fn late_subscribe_ok_with_conflicting_alias_closes_session() {
+        let (mut client, mut server) = establish_pair();
+        // 別 Track の購読を Established にして Track Alias 1 を確定させる
+        let other_rid = client
+            .send_subscribe(ns(&[b"live"]), b"other".to_vec(), MessageParameters::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, other_msg) = take_send_request(&mut client);
+        server
+            .recv_request(other_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+        server
+            .send_subscribe_ok(
+                other_rid,
+                1,
+                MessageParameters::new(),
+                TrackProperties::new(),
+            )
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, ok_msg) = take_send_on_stream(&mut server);
+        client
+            .recv_stream_message(other_rid, ok_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+
+        // 別 Track の購読を Pending にして cancel し、同じ alias の遅延応答を注入する
+        let rid = client
+            .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let _ = take_send_request(&mut client);
+        client
+            .stop_sending(rid)
+            .expect("テストフィクスチャの前提条件を満たす");
+        let err = client
+            .recv_stream_message(
+                rid,
+                ControlMessage::SubscribeOk(shiguredo_moqt::message::SubscribeOk {
+                    track_alias: 1,
+                    parameters: MessageParameters::new(),
+                    track_properties: TrackProperties::new(),
+                }),
+            )
+            .expect_err("別 Track の alias を再利用した遅延応答は拒否されること");
+        assert_eq!(err.code, SESSION_DUPLICATE_TRACK_ALIAS);
+        assert_eq!(client.state(), SessionState::Closing);
+    }
+}

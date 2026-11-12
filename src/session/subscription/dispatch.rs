@@ -636,8 +636,15 @@ impl Session {
     ) -> Result<(), SessionError> {
         // ローカル終端済みの request は検証 (呼び出し元の REDIRECT Detail の検証) だけを行い、
         // 状態遷移はしない (peer が reset を観測する前に送った正当な応答が遅延して届く)。
-        // `RequestErrorReceived` は呼び出し元 `handle_peer_request_error` が通知する
-        if self.is_locally_terminated_request(request_id) {
+        // `RequestErrorReceived` は呼び出し元 `handle_peer_request_error` が通知する。
+        //
+        // STOP_SENDING などの cancel で `Terminated` かつ `publish_done` 未設定になった購読も
+        // 同じ扱いにする (`is_cancelled_terminated_subscription`)。cancel は
+        // `rejected_request_ids` に記録しないため `is_locally_terminated_request` だけでは
+        // 拾えず、遅延 REQUEST_ERROR が UNEXPECTED_MESSAGE でセッションを閉じていた。
+        if self.is_locally_terminated_request(request_id)
+            || self.is_cancelled_terminated_subscription(request_id)
+        {
             return Ok(());
         }
         // 自側 publisher の PUBLISH 起点 subscription で REQUEST_UPDATE 失敗応答

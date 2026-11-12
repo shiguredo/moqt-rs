@@ -4475,7 +4475,7 @@ impl Session {
     /// 判定できる。PUBLISH_DONE 受信による `Terminated`（`publish_done` が `Some`）は
     /// drain 期間中の遅延データを受理するため対象外
     /// (draft-ietf-moq-transport-23 §9.9)。
-    fn is_cancelled_terminated_subscription(&self, request_id: u64) -> bool {
+    pub(super) fn is_cancelled_terminated_subscription(&self, request_id: u64) -> bool {
         self.subscriptions
             .get(&request_id)
             .is_some_and(is_cancelled_terminated)

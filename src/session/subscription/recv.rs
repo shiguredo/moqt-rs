@@ -75,6 +75,11 @@ impl Session {
             ));
         }
         subscription.state = SubscriptionState::Terminated;
+        // draft §3.1 (Subscriptions): subscriber は STOP_SENDING で購読を終端する。cancel 後に
+        // peer が送った SUBSCRIBE_OK / REQUEST_ERROR は正当な競合として吸収するため
+        // (`is_cancelled_terminated_subscription`)、応答待ちの deadline は解除する。解除しないと
+        // 遅延応答を吸収しても `Session::tick` の CONTROL_MESSAGE_TIMEOUT でセッションが閉じる。
+        self.clear_control_message_deadline(request_id);
         // subscriber 主導の cancel で購読が終端したため、未応答の REQUEST_UPDATE と
         // MAX_REQUEST_UPDATES のクレジットを解放する
         // (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))。
@@ -663,7 +668,13 @@ impl Session {
         // その場合は本関数の検証 (Track Alias の衝突) だけを行い、状態遷移とイベント発行は
         // しない。draft §3.7 (Mandatory to Understand Track Properties) の cancel は
         // 既に終端済みのため不要である。
+        //
+        // キャンセル由来 `Terminated` の購読も同じく遅延応答を吸収する対象である。STOP_SENDING
+        // による cancel は `rejected_request_ids` に記録しないため (その集合は request_streams に
+        // 未登録の拒否 request 用)、`is_locally_terminated_request` だけでは拾えない。以後の
+        // 応答を待たない状態であり、状態遷移もイベント発行もしない。
         let locally_terminated = self.is_locally_terminated_request(request_id);
+        let cancelled_terminated = self.is_cancelled_terminated_subscription(request_id);
         let Some(subscription) = self.subscriptions.get_mut(&request_id) else {
             let err = SessionError::new(
                 SESSION_UNEXPECTED_MESSAGE,
@@ -683,7 +694,7 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        if !(subscription.is_pending_subscriber() || locally_terminated) {
+        if !(subscription.is_pending_subscriber() || locally_terminated || cancelled_terminated) {
             let err = SessionError::new(
                 SESSION_UNEXPECTED_MESSAGE,
                 "SUBSCRIBE_OK in unexpected subscription state",
@@ -713,8 +724,9 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        // ローカル終端済みの request はここまでの MUST 検証だけを行い、状態遷移しない
-        if locally_terminated {
+        // ローカル終端済み・キャンセル済みの request はここまでの MUST 検証だけを行い、
+        // 状態遷移もイベント発行もしない
+        if locally_terminated || cancelled_terminated {
             return Ok(());
         }
         let subscription = self
