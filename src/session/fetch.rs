@@ -603,18 +603,29 @@ impl Session {
         self.terminate_subscriber_fetch(request_id, kind)
     }
 
-    /// subscriber 側: FETCH データストリームに対して STOP_SENDING を送出した
+    /// subscriber 側: FETCH の cancel を行う
     ///
     /// 通常の FETCH 応答 stream 用であり、`request_id` には `Fetch` の Request ID を
     /// 渡す。fill fetch stream の cancel は stream id 系
     /// (`send_data_stream_stop_sending`) で通知すること。
     ///
-    /// draft §3.2.4 (Fetch State Management): subscriber が自ら cancel する経路。
-    /// state は `Terminated` に遷移する。I/O 層が QUIC STOP_SENDING を送出
-    /// したうえで本関数を呼ぶ (session 層は frame 送出しない)。
-    /// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection):
-    /// cancel は開いている方向を打ち切る。I/O 層は `ResetRequestStream` を受けて
-    /// bidi request stream の送信方向を reset する。
+    /// draft §3.2.4 (Fetch State Management): "If the data stream is already open, the
+    /// subscriber wishing to cancel the FETCH MAY send STOP_SENDING for the data stream as
+    /// well as the bidi request stream. It MUST send STOP_SENDING for the bidi request
+    /// stream." 本関数は bidi request stream の受信方向に
+    /// [`SessionEvent::StopSendingRequestStream`]、送信方向に
+    /// [`SessionEvent::ResetRequestStream`] を発行する。データストリーム (MAY) への
+    /// STOP_SENDING はアプリの判断に委ね、本関数は発行しない。
+    ///
+    /// draft §6.4.2.3 (Request Cancellation and Rejection): cancel は開いている方向を
+    /// 「送信方向は `RESET_STREAM`、受信方向は `STOP_SENDING`」で打ち切る。両イベントの
+    /// `error_code` は §12.5 (Stream Reset Error Codes) の CANCELLED (0x1) を使う。
+    /// 発行順は受信方向の `StopSendingRequestStream` → 送信方向の `ResetRequestStream`
+    /// である ([`SessionEvent`](crate::session::types::SessionEvent) の順序契約を参照)。
+    ///
+    /// state は `Terminated` に遷移する。`RequestTerminated` は発行しない (cancel の
+    /// 完了は bidi request stream の終端通知 `recv_request_stream_closed` が伝える)。
+    /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     pub fn send_fetch_stop_sending(&mut self, request_id: u64) -> Result<(), SessionError> {
         self.terminate_subscriber_fetch(request_id, SubscriberFetchCloseKind::StopSending)?;
         if let Some(fetch) = self.fetches.get_mut(&request_id) {
@@ -624,11 +635,18 @@ impl Session {
         // ローカル送信方向を reset で閉じるため、request stream GOAWAY の reset deadline は
         // 不要になる
         self.clear_request_stream_goaway_deadline(request_id);
-        // subscriber による cancel のため bidi 送信方向を reset する (§6.4.2.3)。
-        // CANCELLED (0x1) はいずれかの端点による cancel に該当する (§12.5)。
+        // subscriber による cancel のため bidi の受信方向を STOP_SENDING、送信方向を
+        // RESET_STREAM で打ち切る (§6.4.2.3)。CANCELLED (0x1) はいずれかの端点による
+        // cancel に該当する (§12.5)。
+        let error_code = super::types::DataStreamResetReason::Cancelled.error_code();
+        self.events
+            .push_back(SessionEvent::StopSendingRequestStream {
+                request_id,
+                error_code,
+            });
         self.events.push_back(SessionEvent::ResetRequestStream {
             request_id,
-            error_code: super::types::DataStreamResetReason::Cancelled.error_code(),
+            error_code,
         });
         // cancel で応答を返す経路が無くなるため、REQUEST_UPDATE のクレジット会計を解放する
         self.remove_request_update_credit_entries(request_id);

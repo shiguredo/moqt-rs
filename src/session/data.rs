@@ -4078,7 +4078,12 @@ impl Session {
 
     /// 受信 uni data stream に対して local endpoint が STOP_SENDING を送ることを通知する
     ///
-    /// 通常の FETCH 応答 stream は既存の `send_fetch_stop_sending` に dispatch し、
+    /// 通常の FETCH 応答 stream (`fetches` に entry を持つ FETCH stream) は既存の
+    /// `send_fetch_stop_sending` に dispatch する。dispatch 先は bidi request stream の
+    /// 受信方向へ `StopSendingRequestStream`、送信方向へ `ResetRequestStream` を順に発行する
+    /// ため (draft-ietf-moq-transport-23 §3.2.4 (Fetch State Management) /
+    /// §6.4.2.3 (Request Cancellation and Rejection))、data stream だけを止めて
+    /// bidi を開いたまま残すことはない。
     /// fill fetch stream (`fetches` に entry を持たない FETCH stream) は Stream Count の
     /// open 数を戻して吸収する。subgroup stream は
     /// reopen prohibited の追跡用に `StoppedByPeer` として記録する。

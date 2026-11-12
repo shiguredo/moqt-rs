@@ -76,7 +76,12 @@ fn fetch_stream_reset_transitions_to_terminated() {
     );
 }
 
-/// subscriber が STOP_SENDING を送出 → Terminated
+/// subscriber のアプリ起点 cancel で bidi の両方向が CANCELLED で打ち切られる
+///
+/// draft-ietf-moq-transport-23 §3.2.4 (Fetch State Management): "It MUST send STOP_SENDING
+/// for the bidi request stream." §6.4.2.3 (Request Cancellation and Rejection): cancel は
+/// 送信方向を RESET_STREAM、受信方向を STOP_SENDING で打ち切る。発行順は受信方向の
+/// StopSendingRequestStream → 送信方向の ResetRequestStream である。
 #[test]
 fn send_fetch_stop_sending_transitions_to_terminated() {
     use shiguredo_moqt::message::common::Location;
@@ -100,24 +105,48 @@ fn send_fetch_stop_sending_transitions_to_terminated() {
             .state,
         shiguredo_moqt::session::types::FetchState::Terminated
     );
-    // subscriber の cancel は bidi 送信方向の reset 指示になる (§6.4.2.3)
-    let mut saw_reset = false;
+    // cancel の 2 イベントを発行順に取り出す。他のイベントは順序判定に影響しない
+    let mut cancel_events = Vec::new();
+    let mut saw_request_terminated = false;
     while let Some(e) = client.poll_event() {
-        if let SessionEvent::ResetRequestStream {
-            request_id,
-            error_code,
-        } = e
-        {
-            assert_eq!(request_id, rid);
-            assert_eq!(
+        match e {
+            SessionEvent::StopSendingRequestStream {
+                request_id,
                 error_code,
-                shiguredo_moqt::error::STREAM_CANCELLED,
-                "CANCELLED (0x1) で reset されること"
-            );
-            saw_reset = true;
+            } => {
+                assert_eq!(request_id, rid);
+                assert_eq!(
+                    error_code,
+                    shiguredo_moqt::error::STREAM_CANCELLED,
+                    "CANCELLED (0x1) で STOP_SENDING されること"
+                );
+                cancel_events.push("stop_sending");
+            }
+            SessionEvent::ResetRequestStream {
+                request_id,
+                error_code,
+            } => {
+                assert_eq!(request_id, rid);
+                assert_eq!(
+                    error_code,
+                    shiguredo_moqt::error::STREAM_CANCELLED,
+                    "CANCELLED (0x1) で reset されること"
+                );
+                cancel_events.push("reset");
+            }
+            SessionEvent::RequestTerminated { .. } => saw_request_terminated = true,
+            _ => {}
         }
     }
-    assert!(saw_reset, "cancel では ResetRequestStream が発行されること");
+    assert_eq!(
+        cancel_events,
+        vec!["stop_sending", "reset"],
+        "受信方向の STOP_SENDING → 送信方向の RESET_STREAM の順で発行されること"
+    );
+    assert!(
+        !saw_request_terminated,
+        "アプリ起点の FETCH cancel は RequestTerminated を発行しないこと"
+    );
 }
 
 /// publisher が STOP_SENDING 受信 → Terminated
@@ -2788,5 +2817,58 @@ fn descending_fetch_truncates_the_end_to_largest_object() {
         fetch.group_order,
         Some(2),
         "要求した Group Order が保持されること"
+    );
+}
+
+/// 通常の FETCH 応答 stream への STOP_SENDING でも bidi の両方向が打ち切られる
+///
+/// `Session::send_data_stream_stop_sending` は通常の FETCH 応答 stream の cancel を
+/// `Session::send_fetch_stop_sending` へ dispatch するため、bidi request stream の
+/// 受信方向 (STOP_SENDING) と送信方向 (RESET_STREAM) が同じ順序で発行される。
+/// draft-ietf-moq-transport-23 §3.2.4 (Fetch State Management) /
+/// §6.4.2.3 (Request Cancellation and Rejection)。
+#[test]
+fn send_data_stream_stop_sending_for_fetch_response_stops_bidi() {
+    let (mut client, _server, rid) = establish_fetch();
+    let stream_id = DataStreamId(121);
+    client
+        .recv_data_stream_type(stream_id, FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_fetch_header(stream_id, &FetchHeader { request_id: rid })
+        .expect("テストフィクスチャの前提条件を満たす");
+    // ここまでのイベントは判定に影響しない
+    while client.poll_event().is_some() {}
+
+    client
+        .send_data_stream_stop_sending(stream_id)
+        .expect("通常の FETCH 応答 stream の STOP_SENDING は受理されること");
+
+    let mut cancel_events = Vec::new();
+    while let Some(e) = client.poll_event() {
+        match e {
+            SessionEvent::StopSendingRequestStream {
+                request_id,
+                error_code,
+            } => {
+                assert_eq!(request_id, rid);
+                assert_eq!(error_code, shiguredo_moqt::error::STREAM_CANCELLED);
+                cancel_events.push("stop_sending");
+            }
+            SessionEvent::ResetRequestStream {
+                request_id,
+                error_code,
+            } => {
+                assert_eq!(request_id, rid);
+                assert_eq!(error_code, shiguredo_moqt::error::STREAM_CANCELLED);
+                cancel_events.push("reset");
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        cancel_events,
+        vec!["stop_sending", "reset"],
+        "data stream 経由の cancel でも受信方向 → 送信方向の順で発行されること"
     );
 }

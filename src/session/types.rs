@@ -197,6 +197,15 @@ pub enum ResetTracking {
 }
 
 /// セッション層が生成するイベント
+///
+/// 同じ cancel 処理で bidi request stream の両方向を打ち切る場合、Session は
+/// 受信方向の [`SessionEvent::StopSendingRequestStream`] を先に、送信方向の
+/// [`SessionEvent::ResetRequestStream`] を後に発行する。この順序は I/O 層が 1 回の
+/// cancel で両方向を打ち切ることを前提に固定しており、逆順にすると受信方向が開いたまま
+/// 残る期間が生じる。`ResetRequestStream` 単独の経路 (§9.2 (GOAWAY) の deadline 満了) は
+/// この契約の対象外である。
+/// この規則は draft の cancel 手順 (draft-ietf-moq-transport-23 §6.4.2.3 (Request
+/// Cancellation and Rejection)) 由来であり将来 draft 改定で変わる可能性がある。
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionEvent {
     /// 制御ストリーム (SETUP / GOAWAY) に書くべきメッセージ
@@ -567,13 +576,26 @@ pub enum SessionEvent {
     /// and STOP_SENDING for a direction they are receiving."
     /// I/O 層は `request_id` に対応する bidi stream の送信方向を `error_code` で reset する。
     /// `error_code` は §12.5 (Stream Reset Error Codes) のコードを使う。
-    /// Session が本イベントを発行するのは、Malformed Track 検出時 (§12.1 (Malformed Tracks)、
-    /// [`STREAM_MALFORMED_TRACK`](crate::error::STREAM_MALFORMED_TRACK)) と、未知の
-    /// Mandatory Track Property を含む SUBSCRIBE_OK / FETCH_OK の受信時
-    /// (§3.7 (Mandatory to Understand Track Properties) の cancel、
-    /// [`STREAM_CANCELLED`](crate::error::STREAM_CANCELLED)) である。どちらも
-    /// `StopSendingRequestStream` と対で発行する。加えて、request stream 上の GOAWAY の
-    /// timeout 満了時 (§9.2 (GOAWAY)、[`STREAM_GOING_AWAY`](crate::error::STREAM_GOING_AWAY)) は
+    /// Session が本イベントを発行するのは次の経路である。
+    ///
+    /// - Malformed Track 検出時 (§12.1 (Malformed Tracks)、
+    ///   [`STREAM_MALFORMED_TRACK`](crate::error::STREAM_MALFORMED_TRACK))
+    /// - 未知の Mandatory Track Property を含む SUBSCRIBE_OK / FETCH_OK の受信時
+    ///   (§3.7 (Mandatory to Understand Track Properties) の cancel、
+    ///   [`STREAM_CANCELLED`](crate::error::STREAM_CANCELLED))
+    /// - アプリ起点の FETCH cancel
+    ///   ([`Session::send_fetch_stop_sending`](crate::session::core::Session::send_fetch_stop_sending)、
+    ///   §3.2.4 (Fetch State Management) / §6.4.2.3 (Request Cancellation and Rejection)、
+    ///   [`STREAM_CANCELLED`](crate::error::STREAM_CANCELLED))
+    /// - publisher 側で FETCH の STOP_SENDING を受信した時
+    ///   ([`Session::fetch_stop_sending_received`](crate::session::core::Session::fetch_stop_sending_received)、
+    ///   §3.2.4)
+    ///
+    /// 上記のうち SUBSCRIBE_OK / FETCH_OK の cancel とアプリ起点の FETCH cancel は
+    /// `StopSendingRequestStream` と対で、受信方向 → 送信方向の順に発行する。
+    /// `fetch_stop_sending_received` は peer が受信方向を既に打ち切っているため
+    /// `StopSendingRequestStream` を伴わない。加えて、request stream 上の GOAWAY の
+    /// timeout 満了時 (§9.2 (GOAWAY)、[`STREAM_GOING_AWAY`](crate::error::STREAM_GOING_AWAY)) も
     /// `StopSendingRequestStream` を伴わずに単独で発行する。
     /// 送信方向が既に FIN / RESET 済みの request に対する本イベントは I/O 層で無視する
     /// (送信方向を再度 reset しない。Session は送信方向の閉塞を追跡しないため、
@@ -590,7 +612,7 @@ pub enum SessionEvent {
     /// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection) の
     /// 受信方向の打ち切り。I/O 層は `request_id` に対応する bidi stream の受信方向に
     /// `error_code` で STOP_SENDING を送る。`error_code` は §12.5 のコードを使う。
-    /// Session が本イベントを発行するのは、新規に `Terminated` へ遷移させる次の 2 経路である
+    /// Session が本イベントを発行するのは、新規に `Terminated` へ遷移させる次の 3 経路である
     /// (いずれも続けて送信方向の cancel として `ResetRequestStream` を発行する)。
     ///
     /// - Malformed Track 検出 (§12.1 (Malformed Tracks))。
@@ -598,6 +620,10 @@ pub enum SessionEvent {
     /// - 未知の Mandatory Track Property を含む SUBSCRIBE_OK / FETCH_OK の受信
     ///   (§3.7 (Mandatory to Understand Track Properties) の cancel)。`error_code` は
     ///   [`STREAM_CANCELLED`](crate::error::STREAM_CANCELLED)
+    /// - アプリ起点の FETCH cancel
+    ///   ([`Session::send_fetch_stop_sending`](crate::session::core::Session::send_fetch_stop_sending)、
+    ///   §3.2.4 (Fetch State Management) / §6.4.2.3 (Request Cancellation and Rejection))。
+    ///   `error_code` は [`STREAM_CANCELLED`](crate::error::STREAM_CANCELLED)
     ///
     /// request stream 上の GOAWAY の deadline 満了による終端 (§9.2 (GOAWAY)) では本イベントを
     /// 発行しない。§9.2 が求めるのは送信方向の reset であり、受信方向は peer が閉じるためである

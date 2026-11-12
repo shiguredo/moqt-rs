@@ -3506,10 +3506,11 @@ impl MoqtClient {
                     request_id,
                     error_code,
                 } => {
-                    // Session が Malformed Track 検出 (§12.1) または未知の Mandatory Track
-                    // Property を含む SUBSCRIBE_OK / FETCH_OK の受信 (§3.7) で発行する受信方向の
-                    // cancel (draft-ietf-moq-transport-23 §6.4.2.3)。bidi 受信タスクへ
-                    // STOP_SENDING を指示する。
+                    // Session が Malformed Track 検出 (§12.1)、未知の Mandatory Track
+                    // Property を含む SUBSCRIBE_OK / FETCH_OK の受信 (§3.7)、アプリ起点の
+                    // FETCH cancel (`Session::send_fetch_stop_sending`、§3.2.4) で発行する
+                    // 受信方向の cancel (draft-ietf-moq-transport-23 §6.4.2.3)。
+                    // bidi 受信タスクへ STOP_SENDING を指示する。
                     // 受信タスク終了後は peer の close を検知できないため、回収対象として登録する
                     self.closed_request_streams.insert(request_id);
                     self.request_stop_sending(request_id, error_code).await;
