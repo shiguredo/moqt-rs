@@ -1,8 +1,8 @@
 # STOP_SENDING を受けた購読と FETCH の open な送信 stream を Session が reset する
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
-- Branch: feature/fix-stop-sending-reset-open-streams
+- Completed: 2026-11-11
+- Branch: develop (CODEBASE.md の規約により develop に直接コミットする)
 - Polished: 2026-10-19
 - Refreshed: 2026-11-04
 
@@ -67,3 +67,28 @@ REQUEST_UPDATE 失敗応答で outgoing FETCH data stream を自動 reset して
 - 上記を `tests/test_session/subscription/`、`tests/test_session/fetch/`、`tests/test_session/data_stream.rs` のテストで固定すること。
 - `docs/missing-features.md` §4.7 を解消済みとして更新し、同節を参照する箇所 (要約リストや「要確認」) も更新すること (削除する場合は後続の節番号と参照も更新する)。関連する doc コメント (`fetch_stop_sending_received` / `send_fetch_data_stream_closed` / `Fetch::data_stream_finished` / `SessionEvent::ResetDataStream` など) も新挙動に合わせて更新すること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `src/session/core.rs` の `DataStreamState` に `auto_reset: HashMap<DataStreamId, u64>` を追加した。cancel 経路で Session が自動 reset した送信 data stream id を保持し、以後の `send_data_stream_closed` / `send_fetch_data_stream_closed` を `Ok(())` で吸収する。値は対象 stream の request id で、`forget_subscription` / `forget_fetch` で破棄する (request id の再利用時に無関係な stream の終端通知を吸収しないため)。
+- `src/session/data.rs` に 2 つのヘルパを追加した。
+  - `reset_open_outgoing_subgroup_streams`: publisher 役 subscription の open な `data_streams.outgoing` を stream_id の昇順に列挙し、`close_outgoing_subgroup_stream` で追跡終端と subgroup tracker の reset 終端への前進を行ったうえで `ResetDataStream { error_code: STREAM_CANCELLED, reliable_size: None, tracking: Removed }` を発行する。
+  - `reset_open_outgoing_fetch_streams`: publisher 役 FETCH の open な `outgoing_fetch` を除去し、`Fetch::data_stream_finished` を true にして同じ `ResetDataStream` を発行する。
+- `src/session/subscription/send.rs` の `close_subscription_on_stream_end` は `RequestStreamEnd::Reset` のときだけ `reset_open_outgoing_subgroup_streams` を呼ぶ。FIN は cancel ではないため自動 reset しない (draft §6.4.2.3)。`ResetDataStream` は呼び出し元が積む `RequestTerminated` より前に発行される。
+- `src/session/fetch.rs` の `close_fetch_on_stream_end` は `RequestStreamEnd::Reset` のときだけ `reset_open_outgoing_fetch_streams` を呼ぶ (`RequestTerminated` より前)。`fetch_stop_sending_received` は `ResetRequestStream` の後に呼ぶ (bidi → data stream の順)。
+- `send_data_stream_closed` / `send_fetch_data_stream_closed` は先頭で `auto_reset` を確認し、自動 reset 済みの stream なら `Ok(())` を返す。未知の stream id は従来どおり `SESSION_PROTOCOL_VIOLATION` である。
+- doc を更新した。
+  - `src/session/types.rs` の `ResetDataStream`: 発行経路 (timeout / アプリ API / STOP_SENDING の cancel) と、cancel での `STREAM_CANCELLED`・`ResetTracking::Removed`・bidi との順序を明記した。
+  - `src/session/types.rs` の `GoawayTimeout`: GOAWAY timeout は cancel ではないため自動 reset しないことを経路限定で明記した (従来の「Session が reset しない」という一般記述を修正)。
+  - `src/session/types.rs` の `Fetch::data_stream_finished`: cancel で自動 reset した時点で true になることを明記した。
+  - `src/session/data.rs` の `send_data_stream_closed` / `send_fetch_data_stream_closed`: 自動 reset 済み stream の吸収を明記した。
+  - `src/session/fetch.rs` の `fetch_stop_sending_received`: アプリがデータストリームを reset する前提の記述を、Session が `ResetDataStream` で指示する記述に直した。
+  - `docs/missing-features.md` §4.7 を解消済みとして書き換え、要約リストと「要確認」の 4.7 参照を削除して番号を詰めた。
+- テスト: `tests/test_session/subscription/cancel_reset_open_streams.rs` を追加した。
+  - `subscription_cancel_resets_open_outgoing_subgroup_streams`: cancel で open な subgroup stream が stream_id 昇順に `STREAM_CANCELLED` で reset され、アプリの終端通知が `Ok`、未知 id は `SESSION_PROTOCOL_VIOLATION` になること。
+  - `subscription_fin_does_not_reset_open_outgoing_subgroup_streams`: FIN では自動 reset しないこと。
+  - `fetch_cancel_resets_open_outgoing_fetch_stream`: bidi の Reset で outgoing FETCH data stream が reset され、`data_stream_finished` が true になること。
+  - `fetch_stop_sending_received_resets_open_outgoing_fetch_stream`: uni data stream の STOP_SENDING 受信でも reset され、bidi → data stream の順であること。
+  - `fetch_fin_does_not_reset_outgoing_fetch_stream`: FIN では自動 reset しないこと。
+  - 既存の fill fetch stream の cancel テスト 3 件は、open な subgroup stream も reset されるようになったため fill stream のイベントを選んで検証する形に更新した。
+- 検証: `cargo test -p shiguredo_moqt --test test_session` (1125 件) / `cargo test -p shiguredo_moqt --lib` (133 件) / `cargo test -p tokio-moq --lib` (296 件) / `cargo test -p moq-sub --lib` (229 件) / `cargo clippy -p shiguredo_moqt -p tokio-moq -p moq-sub --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通る。
