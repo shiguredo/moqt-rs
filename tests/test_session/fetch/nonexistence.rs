@@ -213,7 +213,7 @@ fn explicit_missing_range_then_object_cancels_track_requests() {
         .expect_err("不存在区間内の Object は Malformed Track になる");
     assert_eq!(
         err.reason,
-        "malformed track: object received in a range recorded as non-existent"
+        "object received in a range recorded as non-existent"
     );
     assert_eq!(client.state(), SessionState::Established);
     assert_eq!(
@@ -231,7 +231,7 @@ fn explicit_missing_range_then_object_cancels_track_requests() {
     // 生きている subscription へは MalformedTrack が通知される。
     assert_eq!(
         drain_malformed_reasons(&mut client),
-        vec!["malformed track: object received in a range recorded as non-existent"],
+        vec!["object received in a range recorded as non-existent"],
         "生きている subscription に MalformedTrack を通知すること"
     );
 }
@@ -272,10 +272,7 @@ fn object_then_explicit_missing_range_cancels_track_requests() {
     let err = client
         .recv_fetch_entry(fetch_stream, &fetch_end_of_non_existent_range_entry(0, 1))
         .expect_err("既出 Object を覆う不存在通知は Malformed Track になる");
-    assert_eq!(
-        err.reason,
-        "malformed track: non-existent range covers a received object"
-    );
+    assert_eq!(err.reason, "non-existent range covers a received object");
     assert_eq!(client.state(), SessionState::Established);
     assert_eq!(
         client
@@ -339,7 +336,7 @@ fn implicit_gap_between_objects_is_recorded_as_missing() {
         .expect_err("暗黙 gap 内の Object は Malformed Track になる");
     assert_eq!(
         err.reason,
-        "malformed track: object received in a range recorded as non-existent"
+        "object received in a range recorded as non-existent"
     );
     assert_eq!(
         client
@@ -386,10 +383,7 @@ fn implicit_gap_covering_received_object_is_rejected() {
     let err = client
         .recv_fetch_entry(fetch_stream, &fetch_object_entry(0, 2))
         .expect_err("既出 Object を覆う暗黙 gap は Malformed Track になる");
-    assert_eq!(
-        err.reason,
-        "malformed track: non-existent range covers a received object"
-    );
+    assert_eq!(err.reason, "non-existent range covers a received object");
     assert_eq!(
         client
             .subscription(sub_rid)
@@ -605,7 +599,7 @@ fn prior_gap_is_shared_across_requests() {
         .expect_err("Prior Gap 内の Object は Malformed Track になる");
     assert_eq!(
         err.reason,
-        "malformed track: object ID falls within a previously communicated gap"
+        "object ID falls within a previously communicated gap"
     );
     assert_eq!(
         client
@@ -662,10 +656,7 @@ fn past_group_object_is_shared_with_new_fetch() {
     let err = client
         .recv_fetch_entry(fetch_stream, &fetch_end_of_non_existent_range_entry(5, 1))
         .expect_err("過去 Group の既出 Object を覆う不存在通知は Malformed Track になる");
-    assert_eq!(
-        err.reason,
-        "malformed track: non-existent range covers a received object"
-    );
+    assert_eq!(err.reason, "non-existent range covers a received object");
     assert_eq!(
         client
             .subscription(sub_rid)
@@ -706,7 +697,7 @@ fn track_history_survives_one_forget_and_is_released_after_last() {
         .expect_err("他の request が共有する不存在区間との矛盾を検出すること");
     assert_eq!(
         err.reason,
-        "malformed track: object received in a range recorded as non-existent"
+        "object received in a range recorded as non-existent"
     );
     client
         .forget_fetch(fetch_b)
@@ -777,7 +768,7 @@ fn implicit_leading_and_trailing_gaps_are_recorded() {
         .expect_err("先頭 gap 内の Object は Malformed Track になる");
     assert_eq!(
         err.reason,
-        "malformed track: object received in a range recorded as non-existent"
+        "object received in a range recorded as non-existent"
     );
     assert_eq!(
         client
@@ -839,7 +830,7 @@ fn implicit_trailing_gap_is_recorded_at_fin() {
         .expect_err("FIN で確定した末尾 gap 内の Object は Malformed Track になる");
     assert_eq!(
         err.reason,
-        "malformed track: object received in a range recorded as non-existent"
+        "object received in a range recorded as non-existent"
     );
     assert_eq!(
         client
@@ -924,7 +915,7 @@ fn trailing_gap_is_deferred_until_fetch_ok_arrives() {
         .expect_err("FETCH_OK で確定した末尾 gap 内の Object は Malformed Track になる");
     assert_eq!(
         err.reason,
-        "malformed track: object received in a range recorded as non-existent"
+        "object received in a range recorded as non-existent"
     );
     assert_eq!(
         client
@@ -1016,7 +1007,7 @@ fn descending_multi_group_gap_is_clamped_to_request() {
         .expect_err("降順応答の gap 内の Object は Malformed Track になる");
     assert_eq!(
         err.reason,
-        "malformed track: object received in a range recorded as non-existent"
+        "object received in a range recorded as non-existent"
     );
 }
 
@@ -1105,7 +1096,7 @@ fn descending_data_before_fetch_ok_keeps_later_objects() {
         .expect_err("先頭 gap 内の Object は Malformed Track になる");
     assert_eq!(
         err.reason,
-        "malformed track: object received in a range recorded as non-existent"
+        "object received in a range recorded as non-existent"
     );
     assert_eq!(
         client
@@ -1210,7 +1201,7 @@ fn ascending_data_before_fetch_ok_keeps_later_objects() {
         .expect_err("先頭 gap 内の Object は Malformed Track になる");
     assert_eq!(
         err.reason,
-        "malformed track: object received in a range recorded as non-existent"
+        "object received in a range recorded as non-existent"
     );
 }
 
@@ -1289,7 +1280,7 @@ fn descending_leading_marker_before_fetch_ok_is_resolved() {
         .expect_err("先頭 marker から次の Object までの Object は Malformed Track になる");
     assert_eq!(
         err.reason,
-        "malformed track: object received in a range recorded as non-existent"
+        "object received in a range recorded as non-existent"
     );
     assert_eq!(
         client
@@ -1375,7 +1366,7 @@ fn fin_before_fetch_ok_records_trailing_gap() {
         .expect_err("FIN と FETCH_OK で確定した末尾 gap 内の Object は Malformed Track になる");
     assert_eq!(
         err.reason,
-        "malformed track: object received in a range recorded as non-existent"
+        "object received in a range recorded as non-existent"
     );
     assert_eq!(
         client
@@ -1441,7 +1432,7 @@ fn direct_fetch_data_stream_fin_records_trailing_gap() {
         .expect_err("request ID だけの FIN でも末尾 gap 内の Object は Malformed Track になる");
     assert_eq!(
         err.reason,
-        "malformed track: object received in a range recorded as non-existent"
+        "object received in a range recorded as non-existent"
     );
     assert_eq!(
         client
@@ -1506,7 +1497,7 @@ fn fill_stream_shares_track_history() {
         .expect_err("fill が通知した不存在区間内の Object は Malformed Track になる");
     assert_eq!(
         err.reason,
-        "malformed track: object received in a range recorded as non-existent"
+        "object received in a range recorded as non-existent"
     );
     assert_eq!(
         client

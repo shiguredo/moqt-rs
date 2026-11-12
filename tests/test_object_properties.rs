@@ -157,7 +157,11 @@ fn nested_immutable_properties_rejected_on_decode() {
         0x00, // inner value length = 0
     ];
     let err = ObjectProperties::decode(&buf).unwrap_err();
-    assert!(matches!(err, MessageError::ProtocolViolation(_)));
+    // 受信した Object の malformed 条件 (§10.7 / §12.1) なので MalformedTrack で返す
+    assert!(
+        matches!(err, MessageError::MalformedTrack(_)),
+        "入れ子 IMMUTABLE_PROPERTIES は MalformedTrack であること: {err:?}"
+    );
 }
 
 #[test]
@@ -1404,4 +1408,45 @@ mod codec_string {
             Err(MessageError::ProtocolViolation(_))
         ));
     }
+}
+
+/// `ObjectPropertyTracker::observe_object` の入れ子 IMMUTABLE_PROPERTIES は MalformedTrack
+///
+/// draft-ietf-moq-transport-23 §10.7 (Immutable Properties) は IMMUTABLE_PROPERTIES の内側に
+/// 別の IMMUTABLE_PROPERTIES を含む Track を malformed (§12.1 (Malformed Tracks)) と定める。
+/// `decode_exact` は `MalformedTrack` を `ProtocolViolation` へ畳まず透過するため、
+/// Tracker 経由でも分類が保たれる。
+#[test]
+fn tracker_observe_object_nested_immutable_is_malformed_track() {
+    // 外側 IMMUTABLE_PROPERTIES の中に IMMUTABLE_PROPERTIES を置く (Length=4)
+    let bytes = [0x04u8, 0x0B, 0x02, 0x0B, 0x00];
+    let mut tracker = ObjectPropertyTracker::new();
+    let err = tracker
+        .observe_object(0, 0, Some(&bytes))
+        .expect_err("入れ子 IMMUTABLE_PROPERTIES は拒否されること");
+    assert!(
+        matches!(err, MessageError::MalformedTrack(_)),
+        "observe_object は MalformedTrack を返すこと: {err:?}"
+    );
+}
+
+/// encode の KVP 値長 65535 バイト超は FieldLengthExceeded
+///
+/// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): 値長が 2^16-1 バイトを
+/// 超える場合は FIELD_LENGTH_EXCEEDED で閉じる。decode と同じ variant に揃える。
+#[test]
+fn encode_rejects_value_over_65535_as_field_length_exceeded() {
+    let mut props = ObjectProperties::new();
+    props.push(ObjectProperty {
+        prop_type: 0x09, // 奇数型 (VIDEO_FRAME_MARKING) は Length 付きバイト列
+        value: ObjectPropertyValue::Bytes(vec![0x01; 65536]),
+    });
+    let mut buf = Vec::new();
+    assert!(
+        matches!(
+            props.encode(&mut buf),
+            Err(MessageError::FieldLengthExceeded(_))
+        ),
+        "65535 バイトを超える値は FieldLengthExceeded になること"
+    );
 }

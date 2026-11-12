@@ -56,6 +56,10 @@ pub enum MessageError {
     /// Malformed Track の検出 (説明付き)
     ///
     /// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) が列挙する条件に該当する検出。
+    /// 代表例は、draft-ietf-moq-transport-23 §10.7 (Immutable Properties) が malformed と定める
+    /// 「Object の IMMUTABLE_PROPERTIES の内側に別の IMMUTABLE_PROPERTIES を含む」条件である
+    /// (同節の malformed 条件は Object を主語にしており、Track scope の入れ子はこの variant
+    /// ではなく `ProtocolViolation` で扱う)。
     /// 同節は該当する subscription / fetch の cancel (MUST) とアプリへのエラー通知 (SHOULD)
     /// を求めており、セッションは終了しない。§6.4.2.3 (Request Cancellation and Rejection) の
     /// cancel は送信方向の RESET_STREAM と受信方向の STOP_SENDING で表現される。

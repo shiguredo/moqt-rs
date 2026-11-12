@@ -179,7 +179,7 @@ impl SubgroupTracker {
             && prev != last_object_id
         {
             return Err(MessageError::MalformedTrack(
-                "malformed track: same Subgroup FINed with different final Object IDs",
+                "same Subgroup FINed with different final Object IDs",
             ));
         }
         self.fin_last_object_ids.insert(key, last_object_id);
@@ -265,7 +265,7 @@ impl SubgroupTracker {
         let key = (track_alias, group_id, subgroup_id);
         match self.priorities.get(&key) {
             Some(&prev) if prev != publisher_priority => Err(MessageError::MalformedTrack(
-                "malformed track: Publisher Priority differs from previous Object with same Subgroup ID",
+                "Publisher Priority differs from previous Object with same Subgroup ID",
             )),
             Some(_) => Ok(()),
             None => {

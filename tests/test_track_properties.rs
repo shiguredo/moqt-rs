@@ -160,8 +160,9 @@ mod error_cases {
 
     #[test]
     fn encode_rejects_bytes_value_over_65535() {
-        // 奇数型の Bytes 値が 65536 バイトなら encode 時に PayloadTooLong
-        // (object_properties / loc と同じ上限)
+        // 奇数型の Bytes 値が 65536 バイトなら encode 時に FieldLengthExceeded
+        // (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の値長上限 2^16-1。
+        // decode と同じ variant に揃える)。
         let mut props = TrackProperties::new();
         props.push(TrackProperty {
             prop_type: 0x05,
@@ -169,10 +170,12 @@ mod error_cases {
         });
         let mut buf = Vec::new();
 
-        assert_eq!(
-            props.encode(&mut buf),
-            Err(MessageError::PayloadTooLong),
-            "65535 バイトを超える Bytes 値は PayloadTooLong になること"
+        assert!(
+            matches!(
+                props.encode(&mut buf),
+                Err(MessageError::FieldLengthExceeded(_))
+            ),
+            "65535 バイトを超える Bytes 値は FieldLengthExceeded になること"
         );
     }
 }
@@ -468,7 +471,7 @@ mod codec_string {
     fn codec_string_length_boundary() {
         // 奇数型の値長上限は 2^16-1 バイト (draft-ietf-moq-transport-23 §8.3
         // (Key-Value-Pair Structure))。上限ちょうどは往復でき、上限超過は
-        // PayloadTooLong で拒否されること。
+        // FieldLengthExceeded で拒否されること (decode と同じ variant)。
         let max = "a".repeat(65535);
         let mut props = TrackProperties::new();
         props.push(TrackProperty {
@@ -494,7 +497,7 @@ mod codec_string {
         let mut over_buf = Vec::new();
         assert!(matches!(
             over.encode(&mut over_buf),
-            Err(MessageError::PayloadTooLong)
+            Err(MessageError::FieldLengthExceeded(_))
         ));
     }
 

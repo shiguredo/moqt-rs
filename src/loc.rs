@@ -292,7 +292,8 @@ impl LocProperties {
     /// - 単一に限られる既知 ID の重複: `ProtocolViolation`
     ///   (ローカル入力の検証であり、受信 Track の malformed 判定とは別。最上位リスト内と
     ///   IMMUTABLE_PROPERTIES の内側をそれぞれ検査し、両リストをまたぐ重複は検出しない)
-    /// - バイト列が 65535 バイトを超える: `PayloadTooLong`
+    /// - バイト列が 65535 バイトを超える: `FieldLengthExceeded`
+    ///   (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の値長上限 2^16-1)
     /// - 既知プロパティの値域違反 (Audio Level が 255 超過): `MalformedKeyValue`
     /// - Video Frame Marking の長さが 1-4 バイトでない: `MalformedKeyValue`
     /// - CODEC_STRING (0x11) の値が不正な UTF-8: `MalformedKeyValue`
@@ -351,7 +352,9 @@ impl LocProperties {
                         ));
                     }
                     if b.len() > 65535 {
-                        return Err(MessageError::PayloadTooLong);
+                        return Err(MessageError::FieldLengthExceeded(
+                            "LOC property value length exceeds 65535",
+                        ));
                     }
                     validate_known_property_len(prop.prop_id, b.len() as u64)?;
                     if prop.prop_id == PROP_CODEC_STRING {

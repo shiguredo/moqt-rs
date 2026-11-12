@@ -162,7 +162,8 @@ impl ObjectProperties {
     /// - Track 専用の既知 Property (MAX_CACHE_DURATION など) を含む: `ProtocolViolation`
     ///   (ローカル入力の検証であり、受信 Track の malformed 判定とは別)
     /// - IMMUTABLE_PROPERTIES の内側に IMMUTABLE_PROPERTIES を含む: `ProtocolViolation`
-    /// - バイト列が 65535 バイトを超える: `PayloadTooLong`
+    /// - バイト列が 65535 バイトを超える: `FieldLengthExceeded`
+    ///   (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の値長上限 2^16-1)
     /// - CODEC_STRING (0x11) の値が不正な UTF-8: `MalformedKeyValue`
     ///   (draft-ietf-moq-loc-05 §2.3.1.3 (Codec String) / draft-ietf-moq-transport-23 §8.3
     ///   (Key-Value-Pair Structure) の MALFORMED_KEY_VALUE。最上位と
@@ -207,7 +208,9 @@ impl ObjectProperties {
                 }
                 ObjectPropertyValue::Bytes(b) => {
                     if b.len() > 65535 {
-                        return Err(MessageError::PayloadTooLong);
+                        return Err(MessageError::FieldLengthExceeded(
+                            "object property value length exceeds 65535",
+                        ));
                     }
                     // CODEC_STRING (0x11) の値を UTF-8 として検証する。内側の 0x11 は
                     // 下の validate_immutable_inner (decode_kv_pairs) が検証する。
@@ -218,7 +221,7 @@ impl ObjectProperties {
                     // 内側の KVP が書式として壊れていないかを検証する。内側の意味検証
                     // (スコープと多重可否) は上の `validate` が両リストを合わせて行う。
                     if prop.prop_type == PROP_IMMUTABLE_PROPERTIES {
-                        validate_immutable_inner(b)?;
+                        validate_immutable_inner(b, KvpContext::Encode)?;
                     }
                     varint::encode(b.len() as u64, &mut inner);
                     inner.extend_from_slice(b);
@@ -306,7 +309,7 @@ impl ObjectProperties {
         let inner = &buf[pos..pos + prop_len];
         pos += prop_len;
 
-        let props = decode_kv_pairs(inner, true)?;
+        let props = decode_kv_pairs(inner, true, KvpContext::Decode)?;
         let properties = Self(props);
         properties.validate()?;
         Ok((properties, pos))
@@ -396,7 +399,7 @@ impl ObjectProperties {
         let Some(bytes) = self.immutable_properties() else {
             return Vec::new();
         };
-        decode_kv_pairs(bytes, false).unwrap_or_default()
+        decode_kv_pairs(bytes, false, KvpContext::Decode).unwrap_or_default()
     }
 
     /// 偶数型 Object Property から varint 値を取得する
@@ -552,14 +555,14 @@ impl ObjectPropertyTracker {
             for prop_type in [PROP_PRIOR_GROUP_ID_GAP, PROP_PRIOR_OBJECT_ID_GAP] {
                 if properties.count_instances(prop_type) > 1 {
                     return Err(MessageError::MalformedTrack(
-                        "malformed track: duplicate Prior Group/Object ID Gap property",
+                        "duplicate Prior Group/Object ID Gap property",
                     ));
                 }
             }
         }
         if self.prior_group_gaps.contains(group_id) {
             return Err(MessageError::MalformedTrack(
-                "malformed track: group ID falls within a previously communicated gap",
+                "group ID falls within a previously communicated gap",
             ));
         }
         if self
@@ -568,7 +571,7 @@ impl ObjectPropertyTracker {
             .is_some_and(|ranges| ranges.contains(object_id))
         {
             return Err(MessageError::MalformedTrack(
-                "malformed track: object ID falls within a previously communicated gap",
+                "object ID falls within a previously communicated gap",
             ));
         }
 
@@ -578,14 +581,14 @@ impl ObjectPropertyTracker {
                     && *previous_gap != group_gap
                 {
                     return Err(MessageError::MalformedTrack(
-                        "malformed track: PRIOR_GROUP_ID_GAP differs within the same group",
+                        "PRIOR_GROUP_ID_GAP differs within the same group",
                     ));
                 }
                 self.group_gap_values.insert(group_id, group_gap);
 
                 if group_gap > group_id {
                     return Err(MessageError::MalformedTrack(
-                        "malformed track: PRIOR_GROUP_ID_GAP exceeds the current group ID",
+                        "PRIOR_GROUP_ID_GAP exceeds the current group ID",
                     ));
                 }
                 if group_gap > 0 {
@@ -593,7 +596,7 @@ impl ObjectPropertyTracker {
                     let gap_end = group_id - 1;
                     if self.seen_groups.overlaps(gap_start, gap_end) {
                         return Err(MessageError::MalformedTrack(
-                            "malformed track: PRIOR_GROUP_ID_GAP covers a previously received group",
+                            "PRIOR_GROUP_ID_GAP covers a previously received group",
                         ));
                     }
                     self.prior_group_gaps.insert(gap_start, gap_end);
@@ -603,7 +606,7 @@ impl ObjectPropertyTracker {
             if let Some(object_gap) = properties.prior_object_id_gap() {
                 if object_gap > object_id {
                     return Err(MessageError::MalformedTrack(
-                        "malformed track: PRIOR_OBJECT_ID_GAP exceeds the current object ID",
+                        "PRIOR_OBJECT_ID_GAP exceeds the current object ID",
                     ));
                 }
                 if object_gap > 0 {
@@ -612,7 +615,7 @@ impl ObjectPropertyTracker {
                     let seen_objects = self.seen_objects.entry(group_id).or_default();
                     if seen_objects.overlaps(gap_start, gap_end) {
                         return Err(MessageError::MalformedTrack(
-                            "malformed track: PRIOR_OBJECT_ID_GAP covers a previously received object",
+                            "PRIOR_OBJECT_ID_GAP covers a previously received object",
                         ));
                     }
                     self.prior_object_gaps
@@ -710,6 +713,21 @@ fn validate_object_property_type(prop_type: u64) -> Result<(), MessageError> {
     Ok(())
 }
 
+/// KVP 列を解析する文脈 (入れ子 IMMUTABLE_PROPERTIES の分類を決める)
+///
+/// draft-ietf-moq-transport-23 §10.7 (Immutable Properties) / §12.1 (Malformed Tracks) は
+/// IMMUTABLE_PROPERTIES の内側に別の IMMUTABLE_PROPERTIES を含む Object の Track を malformed
+/// と定める。したがって受信した Object Properties の decode では `MalformedTrack` を返す。
+/// 一方、ローカル入力の encode は受信 Track の判定ではないため `ProtocolViolation` のまま
+/// 据え置く (セッション終了と cancel を戻り値で分岐する呼び出し側の契約を崩さないため)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KvpContext {
+    /// 受信した Object Properties の decode
+    Decode,
+    /// ローカル入力の encode
+    Encode,
+}
+
 /// IMMUTABLE_PROPERTIES の中身バイト列を書式として検証する
 ///
 /// 内側に IMMUTABLE_PROPERTIES を含む場合、KVP の宣言長が残りバイトを超える場合、
@@ -718,8 +736,11 @@ fn validate_object_property_type(prop_type: u64) -> Result<(), MessageError> {
 /// UTF-8 は同 §8.3 (Key-Value-Pair Structure) / draft-ietf-moq-loc-05 §2.3.1.3
 /// (Codec String))。内側の意味検証 (スコープと多重可否) は
 /// [`ObjectProperties::validate`] が mutable リストと合わせて行う。
-fn validate_immutable_inner(bytes: &[u8]) -> Result<(), MessageError> {
-    decode_kv_pairs(bytes, false)?;
+///
+/// `context` は入れ子 IMMUTABLE_PROPERTIES の分類を決める
+/// ([`KvpContext`] の doc 参照)。
+fn validate_immutable_inner(bytes: &[u8], context: KvpContext) -> Result<(), MessageError> {
+    decode_kv_pairs(bytes, false, context)?;
     Ok(())
 }
 
@@ -731,10 +752,12 @@ fn validate_immutable_inner(bytes: &[u8]) -> Result<(), MessageError> {
 /// "MUST allow multiple instances of the Property" により未知の Type の複数は正当である)。
 ///
 /// `allow_immutable` が false の場合、IMMUTABLE_PROPERTIES (0x0B) の出現を拒否する
-/// (入れ子 IMMUTABLE_PROPERTIES は draft-ietf-moq-transport-23 §10.7 (Immutable Properties) により禁止)。
+/// (入れ子 IMMUTABLE_PROPERTIES は draft-ietf-moq-transport-23 §10.7 (Immutable Properties) により
+/// 禁止)。拒否時の分類は `context` に従う ([`KvpContext`] の doc 参照)。
 fn decode_kv_pairs(
     inner: &[u8],
     allow_immutable: bool,
+    context: KvpContext,
 ) -> Result<Vec<ObjectProperty>, MessageError> {
     let mut props = Vec::new();
     let mut inner_pos = 0;
@@ -744,9 +767,12 @@ fn decode_kv_pairs(
         let (prop_type, _delta) = crate::kvp::decode_delta_key(prev_type, inner, &mut inner_pos)?;
 
         if !allow_immutable && prop_type == PROP_IMMUTABLE_PROPERTIES {
-            return Err(MessageError::ProtocolViolation(
-                "nested IMMUTABLE_PROPERTIES is not allowed (draft-ietf-moq-transport-23 §10.7 (Immutable Properties))",
-            ));
+            let reason = "nested IMMUTABLE_PROPERTIES is not allowed (draft-ietf-moq-transport-23 §10.7 (Immutable Properties))";
+            return Err(match context {
+                // 受信した Object の malformed 条件 (§10.7 / §12.1)
+                KvpContext::Decode => MessageError::MalformedTrack(reason),
+                KvpContext::Encode => MessageError::ProtocolViolation(reason),
+            });
         }
         prev_type = prop_type;
 
@@ -778,7 +804,7 @@ fn decode_kv_pairs(
 
             // IMMUTABLE_PROPERTIES 自体は許可するが内側を検証する
             if prop_type == PROP_IMMUTABLE_PROPERTIES {
-                validate_immutable_inner(&bytes)?;
+                validate_immutable_inner(&bytes, context)?;
             }
 
             ObjectPropertyValue::Bytes(bytes)

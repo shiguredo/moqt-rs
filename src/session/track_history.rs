@@ -209,7 +209,7 @@ impl PeerTrackHistory {
     ) -> Result<(), MessageError> {
         if self.missing.contains(location) {
             return Err(MessageError::MalformedTrack(
-                "malformed track: object received in a range recorded as non-existent",
+                "object received in a range recorded as non-existent",
             ));
         }
         // Group 単位の状態を保持する前に上限を適用する。Prior Gap の検証が失敗しても
@@ -236,7 +236,7 @@ impl PeerTrackHistory {
     pub(super) fn observe_missing(&mut self, range: MissingRange) -> Result<(), MessageError> {
         if self.existing.overlaps(range) {
             return Err(MessageError::MalformedTrack(
-                "malformed track: non-existent range covers a received object",
+                "non-existent range covers a received object",
             ));
         }
         if let MissingRange::Objects { group_id, .. } = range {

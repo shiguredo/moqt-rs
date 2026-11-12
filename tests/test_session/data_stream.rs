@@ -2986,7 +2986,7 @@ fn malformed_track_via_datagram_terminates_subscription() {
         })
         .expect_err("Malformed Track として拒否される");
     assert_eq!(
-        err.reason, "malformed track: PRIOR_OBJECT_ID_GAP covers a previously received object",
+        err.reason, "PRIOR_OBJECT_ID_GAP covers a previously received object",
         "二重 Length による decode 失敗ではなく PRIOR_OBJECT_ID_GAP 経路で拒否されること"
     );
 
@@ -3011,7 +3011,7 @@ fn malformed_track_via_datagram_terminates_subscription() {
             } => {
                 assert_eq!(
                     reason,
-                    "malformed track: PRIOR_OBJECT_ID_GAP covers a previously received object"
+                    "PRIOR_OBJECT_ID_GAP covers a previously received object"
                 );
                 saw_terminated = true;
             }

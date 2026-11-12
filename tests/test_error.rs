@@ -142,6 +142,41 @@ fn message_error_converts_into_boxed_error() {
     assert!(err.source().is_none(), "内包するエラーは無いこと");
 }
 
+/// `MessageError` の `Display` が variant ごとの接頭辞を 1 つだけ付ける
+///
+/// `MalformedTrack` の生成側メッセージから "malformed track: " を外したため、`Display` が
+/// 二重接頭辞にならない。`reason()` も接頭辞を含まない (生成側の文字列をそのまま返す)。
+#[test]
+fn message_error_display_has_single_prefix() {
+    use shiguredo_moqt::error::MessageError;
+
+    // 二重接頭辞が無いこと
+    let err = MessageError::MalformedTrack("duplicate track property");
+    assert_eq!(
+        err.to_string(),
+        "malformed track: duplicate track property",
+        "MalformedTrack の Display は接頭辞を 1 つだけ付けること"
+    );
+    assert_eq!(
+        err.reason(),
+        "duplicate track property",
+        "reason() は接頭辞を含まないこと"
+    );
+
+    // ProtocolViolation でも接頭辞は 1 つだけ
+    let err = MessageError::ProtocolViolation(
+        "object IDs in the same FETCH response group must be strictly increasing",
+    );
+    assert_eq!(
+        err.to_string(),
+        "protocol violation: object IDs in the same FETCH response group must be strictly increasing"
+    );
+    assert_eq!(
+        err.reason(),
+        "object IDs in the same FETCH response group must be strictly increasing"
+    );
+}
+
 mod unknown_error_code_normalization {
     use shiguredo_moqt::error::{
         PUBLISH_DONE_EXPIRED_AUTH_TOKEN, PUBLISH_DONE_INTERNAL_ERROR, PUBLISH_DONE_TRACK_ENDED,

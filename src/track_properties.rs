@@ -166,7 +166,8 @@ impl TrackProperties {
     ///   (mutable リストと、解析できる IMMUTABLE_PROPERTIES の内側)
     /// - Object 専用の既知 Type (PRIOR_GROUP_ID_GAP など) を Track scope に含む:
     ///   `ProtocolViolation` (ローカル入力の検証であり、受信 Track の malformed 判定とは別)
-    /// - トップレベルのバイト列が 65535 バイトを超える: `PayloadTooLong`
+    /// - トップレベルのバイト列が 65535 バイトを超える: `FieldLengthExceeded`
+    ///   (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の値長上限 2^16-1)
     /// - IMMUTABLE_PROPERTIES の内側 KVP が不正 (入れ子の 0x0B、宣言長が残りバイト超過、
     ///   既知 Type の値域違反など): `ProtocolViolation` (decode 層の `MalformedKeyValue` を
     ///   `ProtocolViolation` に写す。ただし CODEC_STRING の不正 UTF-8 は値の書式違反として
@@ -220,7 +221,9 @@ impl TrackProperties {
                     // 奇数型の値長上限は 2^16-1 バイト。object_properties / loc と同様に
                     // encode 側でも検証し、上限超過のワイヤーフォーマット生成を防ぐ。
                     if bytes.len() > 65535 {
-                        return Err(MessageError::PayloadTooLong);
+                        return Err(MessageError::FieldLengthExceeded(
+                            "track property value length exceeds 65535",
+                        ));
                     }
                     if prop.prop_type == PROP_CODEC_STRING {
                         // draft-ietf-moq-loc-05 §2.3.1.3 (Codec String) の値を UTF-8 として

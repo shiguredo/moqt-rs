@@ -465,14 +465,18 @@ mod codec_string {
 
     #[test]
     fn codec_string_over_65535_rejected() {
-        // 上限を 1 バイト超える CODEC_STRING は encode で PayloadTooLong になること
-        // (既知の値域・長さ検証より汎用の長さ上限が先に効く)。
+        // 上限を 1 バイト超える CODEC_STRING は encode で FieldLengthExceeded になること
+        // (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の値長上限 2^16-1。
+        // decode と同じ variant に揃える)。
         let mut props = LocProperties::new();
         props.push(LocProperty {
             prop_id: PROP_CODEC_STRING,
             value: LocPropertyValue::Bytes(vec![b'a'; 65536]),
         });
-        assert_eq!(props.encode(), Err(MessageError::PayloadTooLong));
+        assert!(matches!(
+            props.encode(),
+            Err(MessageError::FieldLengthExceeded(_))
+        ));
     }
 
     #[test]

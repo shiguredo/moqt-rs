@@ -583,3 +583,20 @@ fn prior_object_id_gap_of_keeps_malformed_track_for_scope_violation() {
         ))
     );
 }
+
+/// `prior_object_id_gap_of` の入れ子 IMMUTABLE_PROPERTIES は MalformedTrack
+///
+/// draft-ietf-moq-transport-23 §10.7 (Immutable Properties) / §12.1 (Malformed Tracks)。
+/// Properties は書式として読めるが意味として malformed であるため、`MalformedTrack` を
+/// 保ったまま返す (`crates/moq-sub` はこれを購読 cancel として扱う)。
+#[test]
+fn prior_object_id_gap_of_nested_immutable_is_malformed_track() {
+    // 外側 IMMUTABLE_PROPERTIES の中に IMMUTABLE_PROPERTIES を置く (Length=4)
+    let bytes = [0x04u8, 0x0B, 0x02, 0x0B, 0x00];
+    let err = shiguredo_moqt::video_decode_order::prior_object_id_gap_of(Some(&bytes))
+        .expect_err("入れ子 IMMUTABLE_PROPERTIES は拒否されること");
+    assert!(
+        matches!(err, MessageError::MalformedTrack(_)),
+        "prior_object_id_gap_of は MalformedTrack を返すこと: {err:?}"
+    );
+}

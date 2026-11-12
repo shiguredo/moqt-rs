@@ -596,7 +596,7 @@ impl FetchStreamDecoder {
             && *max_seen > final_object_id
         {
             return Err(MessageError::MalformedTrack(
-                "malformed track: object ID exceeds the known final object for the subgroup",
+                "object ID exceeds the known final object for the subgroup",
             ));
         }
         self.validation
@@ -723,7 +723,7 @@ impl FetchStreamDecoder {
             )
         {
             return Err(MessageError::MalformedTrack(
-                "malformed track: fetch entry received after end of track",
+                "fetch entry received after end of track",
             ));
         }
         match entry {
@@ -1071,19 +1071,19 @@ impl FetchStreamDecoder {
         if let Some(previous) = self.validation.last_object {
             if obj.group_id == previous.group_id && obj.object_id <= previous.object_id {
                 return Err(MessageError::ProtocolViolation(
-                    "malformed track: object IDs in the same FETCH response group must be strictly increasing",
+                    "object IDs in the same FETCH response group must be strictly increasing",
                 ));
             }
 
             match self.group_order {
                 FETCH_GROUP_ORDER_ASCENDING if obj.group_id < previous.group_id => {
                     return Err(MessageError::ProtocolViolation(
-                        "malformed track: FETCH response groups are not in ascending order",
+                        "FETCH response groups are not in ascending order",
                     ));
                 }
                 FETCH_GROUP_ORDER_DESCENDING if obj.group_id > previous.group_id => {
                     return Err(MessageError::ProtocolViolation(
-                        "malformed track: FETCH response groups are not in descending order",
+                        "FETCH response groups are not in descending order",
                     ));
                 }
                 _ => {}
@@ -1106,14 +1106,14 @@ impl FetchStreamDecoder {
                 && *previous_priority != obj.publisher_priority
             {
                 return Err(MessageError::MalformedTrack(
-                    "malformed track: publisher priority changed within the same subgroup in a FETCH response",
+                    "publisher priority changed within the same subgroup in a FETCH response",
                 ));
             }
             if let Some(final_object_id) = self.validation.subgroup_final_objects.get(&key)
                 && obj.object_id > *final_object_id
             {
                 return Err(MessageError::MalformedTrack(
-                    "malformed track: object ID exceeds the known final object for the subgroup",
+                    "object ID exceeds the known final object for the subgroup",
                 ));
             }
             self.validation
