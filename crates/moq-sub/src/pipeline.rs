@@ -4350,8 +4350,10 @@ fn log_failure(message: std::fmt::Arguments<'_>, expected: bool) {
 
 /// 受信 data stream から次のチャンクを読む
 ///
-/// Session が DATA_STREAM_TIMEOUT で STOP_SENDING を指示した場合は、受信半に STOP_SENDING を
-/// 送出して読み取りを打ち切る (`SessionEvent::StopSendingDataStream` の doc と
+/// Session が STOP_SENDING を指示した場合 (open な subgroup stream の DATA_STREAM_TIMEOUT、
+/// subscriber 役 subscription への REQUEST_ERROR 送信 (§9.8 (PUBLISH))、購読状態の削除
+/// (§9.9 (PUBLISH_DONE))) は、受信半に STOP_SENDING を送出して読み取りを打ち切る
+/// (`SessionEvent::StopSendingDataStream` の doc と
 /// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) を参照)。
 /// セッションは閉じないため、購読と他の stream の受信は継続する。
 /// 登録済み data stream の受信結果
@@ -4360,7 +4362,7 @@ enum RegisteredStreamData {
     Data(Bytes),
     /// FIN / RESET_STREAM による終端
     End(RequestStreamEnd),
-    /// Session が STOP_SENDING を指示した (DATA_STREAM_TIMEOUT など)
+    /// Session が STOP_SENDING を指示した (timeout / 購読削除など)
     StoppedBySession,
 }
 

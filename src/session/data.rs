@@ -75,6 +75,24 @@ fn live_attributed_request_id(
     })
 }
 
+/// `remove_incoming_data_streams_for_request` が除去した受信 data stream の内訳
+///
+/// `Session::forget_subscription` はこのうち STOP_SENDING を指示すべき stream に
+/// `SessionEvent::StopSendingDataStream` を発行する (draft-ietf-moq-transport-23
+/// §9.9 (PUBLISH_DONE): "The subscriber SHOULD send STOP_SENDING on all streams related to
+/// the subscription when it deletes subscription state.")。
+/// 共有 Track Alias で生きた subscription へ移管した stream は含まない (移管先の受信を
+/// 止めてしまうため)。`Discarded` の stream と既に終端済みの stream も含まない
+/// (既に破棄対象として扱われており、STOP_SENDING を重ねて発行しない)。
+#[derive(Debug, Default)]
+pub(super) struct RemovedIncomingStreams {
+    /// 移管先が無く除去した open な subgroup stream の id (昇順)
+    pub subgroup_ids: Vec<DataStreamId>,
+    /// 除去した FETCH data stream の id (昇順)。通常の FETCH 応答 stream か
+    /// fill fetch stream かは `Session::fetches` の entry 有無で判定する
+    pub fetch_ids: Vec<DataStreamId>,
+}
+
 /// 受信中の uni data stream の内部状態
 #[derive(Debug, Clone, Copy)]
 pub(super) enum IncomingDataStream {
@@ -4208,9 +4226,25 @@ impl Session {
     /// DEFAULT_PUBLISHER_PRIORITY が異なる購読間で共有される前提は置かない)。
     ///
     /// 移管先が無い場合のみ、従来どおり stream を除去し、帰属先が別 subscription の
-    /// override を削除して id を破棄対象の保持集合へ移す。
-    pub(super) fn remove_incoming_data_streams_for_request(&mut self, request_id: u64) {
+    /// override を削除して id を破棄対象の保持集合へ移す。除去した FETCH data stream
+    /// (fill fetch stream) の id も、購読の破棄後に関終端通知が届きうるため保持集合へ移す
+    /// (`Session::forget_subscription` が STOP_SENDING を指示する経路)。
+    ///
+    /// 戻り値の [`RemovedIncomingStreams`] は `Session::forget_subscription` が
+    /// `SessionEvent::StopSendingDataStream` を発行する対象を表す。
+    /// # 戻り値
+    ///
+    /// 除去した stream の id を [`RemovedIncomingStreams`] で返す。呼び出し側
+    /// (`Session::forget_subscription`) はこのうち STOP_SENDING を指示すべき stream に
+    /// `SessionEvent::StopSendingDataStream` を発行する。FETCH の破棄経路
+    /// (`Session::forget_fetch` / `terminate_subscriber_fetch` / `fetch_stop_sending_received`)
+    /// は購読状態の削除ではないためイベントを発行しない。
+    pub(super) fn remove_incoming_data_streams_for_request(
+        &mut self,
+        request_id: u64,
+    ) -> RemovedIncomingStreams {
         let mut removed_ids = Vec::new();
+        let mut removed_terminated_ids = Vec::new();
         let mut removed_fetch_ids = Vec::new();
         // 帰属先 (または同一 Track Alias の生きた他候補) へ移管した stream の移管先 request_id
         let mut migrated_request_ids = Vec::new();
@@ -4281,7 +4315,9 @@ impl Session {
                     request_id: Some(stream_request_id),
                 } => {
                     if *stream_request_id == request_id {
-                        removed_ids.push(*stream_id);
+                        // 既に破棄対象として扱われている stream には STOP_SENDING を重ねて
+                        // 発行しない (保持集合への移動だけを行う)
+                        removed_terminated_ids.push(*stream_id);
                         false
                     } else {
                         true
@@ -4305,28 +4341,26 @@ impl Session {
                 self.fail(err.clone());
             }
         }
-        for id in removed_fetch_ids {
-            self.timing.data_stream_last_activity_ms.remove(&id);
-            // fetch stream は通常は破棄対象の保持集合へ移さない
-            // (fetch は 1 request 1 stream で共有 alias がなく、Terminated 後の終端は
-            // 既存の no-op 吸収が担う。保持集合は subscription の破棄対象 stream 専用)。
-            // ただしローカル終端済み、または自側が request stream の GOAWAY を送った request
-            // に属する stream (遅延して開かれた fill fetch stream を含む) は、アプリが先に
-            // subscription / fetch を破棄した後も終端通知が届きうるため保持集合へ移し、
-            // unknown stream id のエラーにしない。
+        for id in &removed_fetch_ids {
+            self.timing.data_stream_last_activity_ms.remove(id);
+            // 除去した fill fetch stream は破棄対象の保持集合へ常に移す。購読の
+            // `forget_subscription` は open な受信 stream が残ったまま呼べるため
+            // (キャンセル由来 `Terminated` は `cleanup_ready()` が即 true)、STOP_SENDING の
+            // 指示後に peer が送る FIN / RESET_STREAM を unknown stream id の
+            // `SESSION_PROTOCOL_VIOLATION` にしないためである。
+            self.retain_discarded_stream_id(*id);
             if self.tolerates_late_data_stream(request_id) {
-                self.retain_discarded_stream_id(id);
                 // 遅延 fetch stream の終端観測で request ID の許容を解除できるよう逆引きを残す
-                self.fetch_error_late_stream_ids.insert(id, request_id);
+                self.fetch_error_late_stream_ids.insert(*id, request_id);
             }
         }
-        for id in removed_ids {
-            self.timing.data_stream_last_activity_ms.remove(&id);
+        for id in removed_ids.iter().chain(removed_terminated_ids.iter()) {
+            self.timing.data_stream_last_activity_ms.remove(id);
             // アプリは open 中 stream が残ったまま `forget_subscription` を呼びうる
             // (キャンセル由来 `Terminated` は `cleanup_ready()` が即 true)。
             // 除去した破棄対象 stream id は保持集合へ移し、以後の受信・終端を
             // no-op で吸収し続ける (draft §11.1)
-            self.retain_discarded_stream_id(id);
+            self.retain_discarded_stream_id(*id);
         }
         // 共有 Track Alias では override の帰属先が stream 所有者と異なりうる。stream と
         // 一緒に除去しないと、帰属先の終端通知が来ず override が残留する
@@ -4339,6 +4373,13 @@ impl Session {
             );
         }
         self.peer_object_fields.remove(&request_id);
+        // stream id の昇順に揃え、呼び出し側のイベント発行順を決定的にする
+        removed_ids.sort_unstable();
+        removed_fetch_ids.sort_unstable();
+        RemovedIncomingStreams {
+            subgroup_ids: removed_ids,
+            fetch_ids: removed_fetch_ids,
+        }
     }
 
     /// 指定 request の outgoing subgroup stream と datagram の追跡エントリを掃除する

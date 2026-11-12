@@ -318,7 +318,7 @@ End of Unknown Range (`0x10C`、§11.4.2 (End of Range)) を示したうえで�
 | `SendPaddingStream { length }` | 指定長のパディングストリームを送る |
 | `SendPaddingDatagram { length }` | 指定長のパディングデータグラムを送る |
 | `ResetDataStream { stream_id, error_code, reliable_size }` | data stream を reset する |
-| `StopSendingDataStream { stream_id, error_code }` | 受信 data stream に STOP_SENDING を送る (subgroup stream の DATA_STREAM_TIMEOUT、または subscriber 役 subscription への REQUEST_ERROR 送信 (§9.8)。`error_code` は `STREAM_CANCELLED`。timeout 後の遅延到着は保持期間の間 no-op) |
+| `StopSendingDataStream { stream_id, error_code }` | 受信 data stream に STOP_SENDING を送る (subgroup stream の DATA_STREAM_TIMEOUT、subscriber 役 subscription への REQUEST_ERROR 送信 (§9.8)、または `forget_subscription` による購読状態の削除 (§9.9)。`error_code` は `STREAM_CANCELLED`。除去した stream への遅延到着は保持期間の間 no-op。`forget_subscription` では移管先の無い open な subgroup stream と fill fetch stream が対象で、stream_id の昇順に発行する) |
 | `OpenFillFetchStream { request_id, subscription_request_id, start, end }` | fill fetch stream を開く。`request_id` は FETCH_HEADER の起因 Request ID、`subscription_request_id` は fill 対象購読、`start` / `end` は解決済み range。FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE の処理と PUBLISH の送信で発火する |
 | `ResetRequestStream { request_id, error_code }` | request stream の送信方向を reset する |
 | `StopSendingRequestStream { request_id, error_code }` | request stream の受信方向に STOP_SENDING を送る |
@@ -579,6 +579,13 @@ SUBSCRIBE_OK で提示される見込みの購読期限であり、TRACK_STATUS 
 TRACK_STATUS は単発要求であるため、この値で期限タイマーは起動せず、FIN と `forget_track_status` の
 条件も EXPIRES の有無で変わらない。FETCH_OK の EXPIRES は `Fetch::expires_ms` に保持され
 (受信側は受信値、送信側は送信値)、同じく期限タイマーは起動しない。
+
+`Session::forget_subscription` は、購読状態の削除時に関連する open な受信 data stream へ
+`SessionEvent::StopSendingDataStream` (CANCELLED 0x1) を stream_id の昇順で発行する
+(draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE) の SHOULD)。対象は移管先の無い subgroup stream と
+fill fetch stream であり、共有 Track Alias で生きた別 subscription へ移管する stream、通常の
+FETCH 応答 stream、`Discarded` と終端済みの stream は対象外である。除去した fill fetch stream の
+id は破棄対象の保持集合へ移るため、その後に届く FIN / RESET_STREAM は no-op で吸収される。
 
 `Session::forget_subscription` は、保留中の PUBLISH_DONE (`Subscription::pending_publish_done`) が
 ある間は呼ばないこと。呼ぶと PUBLISH_DONE が送信されず、draft-ietf-moq-transport-23 §9.5.1

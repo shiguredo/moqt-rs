@@ -502,11 +502,23 @@ pub enum SessionEvent {
     ///
     /// I/O 層は `stream_id` に相当する uni data stream の受信方向に `error_code` で
     /// STOP_SENDING を送る。`error_code` は §12.5 (Stream Reset Error Codes) のコードを使う。
-    /// Session が本イベントを発行するのは、open な subgroup stream で新しい object header を
-    /// 待って DATA_STREAM_TIMEOUT (0x12) の期限に達した場合と、subscriber 役 subscription への
-    /// REQUEST_ERROR 送信で当該 subscription を終端した場合 (draft §9.8 (PUBLISH) の
-    /// "abandon reading any publisher initiated streams associated with that subscription using
-    /// a STOP_SENDING frame") である。前者の `error_code` は `STREAM_CANCELLED` を使い、§12.2 は
+    /// Session が本イベントを発行するのは次の 3 経路である。
+    ///
+    /// - open な subgroup stream で新しい object header を待って DATA_STREAM_TIMEOUT (0x12) の
+    ///   期限に達した場合
+    /// - subscriber 役 subscription への REQUEST_ERROR 送信で当該 subscription を終端した場合
+    ///   (draft §9.8 (PUBLISH) の "abandon reading any publisher initiated streams associated
+    ///   with that subscription using a STOP_SENDING frame")
+    /// - `Session::forget_subscription` で購読状態を削除する場合
+    ///   (draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE): "The subscriber SHOULD send
+    ///   STOP_SENDING on all streams related to the subscription when it deletes subscription
+    ///   state.")。対象は移管先の無い open な subgroup stream と fill fetch stream であり、
+    ///   共有 Track Alias で生きた別 subscription へ移管する stream、通常の FETCH 応答 stream、
+    ///   `Discarded` と終端済みの stream は含まない。`error_code` は `STREAM_CANCELLED` で、
+    ///   除去した stream id は破棄対象の保持集合へ移すため、その後に届く FIN / RESET_STREAM は
+    ///   no-op で吸収される。複数 stream を除去する場合は stream_id の昇順で発行する。
+    ///
+    /// DATA_STREAM_TIMEOUT の `error_code` は `STREAM_CANCELLED` を使い、§12.2 は
     /// この場合の措置を
     /// "it MAY send a STOP_SENDING on that stream or terminate the subscription" と定め、
     /// セッション全体のクローズを挙げていない (§6.6 (Termination) は単一購読の条件を

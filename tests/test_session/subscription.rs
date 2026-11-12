@@ -34,6 +34,8 @@ fn one_range_subgroup_filter() -> MessageParameters {
 
 #[path = "subscription/delivery.rs"]
 mod delivery;
+#[path = "subscription/forget_stop_sending.rs"]
+mod forget_stop_sending;
 #[path = "subscription/handshake.rs"]
 mod handshake;
 #[path = "subscription/largest_location.rs"]

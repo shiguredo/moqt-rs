@@ -719,11 +719,13 @@ impl DataPlaneHandle {
         }
     }
 
-    /// Session が DATA_STREAM_TIMEOUT で指示した STOP_SENDING を待つ
+    /// Session が指示した STOP_SENDING を待つ
     ///
     /// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes): open な subgroup stream で
     /// 新しい object header を待って timeout した場合、Session はセッションを閉じず
-    /// [`SessionEvent::StopSendingDataStream`] を発行する。受信タスクは
+    /// [`SessionEvent::StopSendingDataStream`] を発行する。購読状態の削除
+    /// (`Session::forget_subscription`、§9.9 (PUBLISH_DONE)) と subscriber 役 subscription への
+    /// REQUEST_ERROR 送信 (§9.8 (PUBLISH)) でも同じイベントが発行される。受信タスクは
     /// `stream.receive_chunk()` と併せて本 future を select し、完了したら
     /// `transport::RecvStream::stop_sending` に本メソッドが返す error code を渡す。
     /// 既に指示済みの場合は即座に返る。

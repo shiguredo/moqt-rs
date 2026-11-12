@@ -15,6 +15,7 @@ use super::core::{Session, remove_alias_holder};
 use super::types::{
     RequestKind, SessionEvent, Subscription, SubscriptionState, TerminationReason, TrackRole,
 };
+use crate::error::STREAM_CANCELLED;
 use crate::message::common::TrackNamespace;
 use alloc::vec::Vec;
 
@@ -101,6 +102,14 @@ impl Session {
     /// 受信 subgroup stream のうち Object の帰属先が別の subscription のものは削除せず、
     /// 帰属先へ付け替える (共有 Track Alias では stream 所有者と Object の帰属先が
     /// 異なりうる。詳細は `remove_incoming_data_streams_for_request` の doc を参照)。
+    ///
+    /// 実際に除去する open な受信 data stream には `SessionEvent::StopSendingDataStream`
+    /// (`error_code` は CANCELLED (0x1)) を stream_id の昇順で発行する
+    /// (draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE) の SHOULD)。対象は移管先の無い
+    /// subgroup stream と fill fetch stream であり、移管する subgroup stream・通常の FETCH
+    /// 応答 stream・`Discarded` と終端済みの stream は対象外である。除去した fill fetch
+    /// stream の id は破棄対象の保持集合へ移すため、STOP_SENDING の後に届く FIN /
+    /// RESET_STREAM は no-op で吸収される。
     /// 最後の帰属先が既に回収・キャンセル済みの場合は、同じ Track Alias の生きた他候補の
     /// 先頭へ移管する。移管対象は移管先の `incoming_subgroup_count` /
     /// `open_incoming_subgroup_count` に加算され、移管先の終端処理まで会計が維持される。
@@ -181,7 +190,33 @@ impl Session {
                 }
             }
         }
-        self.remove_incoming_data_streams_for_request(request_id);
+        // draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE): "The subscriber SHOULD send
+        // STOP_SENDING on all streams related to the subscription when it deletes
+        // subscription state." 購読状態の削除時点で、実際に除去する open な受信 data stream に
+        // STOP_SENDING を指示する。共有 Track Alias で生きた別 subscription へ移管した stream は
+        // 移管先の受信を止めてしまうため対象外であり、`Discarded` と終端済み stream も
+        // 既に破棄対象として扱われているため重ねて発行しない。fill fetch stream は
+        // `fetches` に entry を持たない FETCH data stream であり、通常の FETCH 応答 stream は
+        // subscription の request id と一致しないため対象外になる。
+        let removed_incoming = self.remove_incoming_data_streams_for_request(request_id);
+        // 通常の FETCH 応答 stream は `fetches` に entry を持つため除外する
+        let fill_fetch_streams = if self.fetches.contains_key(&request_id) {
+            Vec::new()
+        } else {
+            removed_incoming.fetch_ids
+        };
+        let mut stop_sending_streams = removed_incoming.subgroup_ids;
+        stop_sending_streams.extend(fill_fetch_streams);
+        // 複数 stream を除去する場合は stream_id の昇順で発行し、出力順を決定的にする
+        stop_sending_streams.sort_unstable();
+        for stream_id in stop_sending_streams {
+            self.events.push_back(SessionEvent::StopSendingDataStream {
+                stream_id,
+                // draft-ietf-moq-transport-23 §12.5 (Stream Reset Error Codes) の CANCELLED。
+                // 自端の購読削除による打ち切りであり、relay の MALFORMED_TRACK 検出ではない。
+                error_code: STREAM_CANCELLED,
+            });
+        }
         // Track 履歴の参照を解放する。同じ Track の他の request が参照している間は
         // 履歴を保持する。
         self.release_peer_track_history(request_id);
