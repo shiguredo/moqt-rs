@@ -278,7 +278,9 @@ fn is_missing(
 
 /// 不存在として記録された Object の受信エラーか
 fn is_non_existent_object_error(err: &SessionError) -> bool {
-    err.reason == "malformed track: object received in a range recorded as non-existent"
+    // `MessageError::MalformedTrack` の Display が "malformed track: " を付けるため、
+    // reason 自体は接頭辞を含まない
+    err.reason == "object received in a range recorded as non-existent"
 }
 
 /// 要求範囲外の Location は不存在として記録されない
