@@ -1,8 +1,8 @@
 # 購読 cancel 後に届く SUBSCRIBE_OK / REQUEST_ERROR でセッションを閉じない
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
-- Branch: feature/fix-subscription-cancel-late-response
+- Completed: 2026-11-11
+- Branch: develop (CODEBASE.md の規約により develop に直接コミットする)
 - Polished: 2026-10-19
 - Refreshed: 2026-11-04
 
@@ -18,9 +18,9 @@ draft-ietf-moq-transport-23 §3.1 (Subscriptions) は "The subscriber terminates
 
 - `src/session/subscription/recv.rs` の `stop_sending` は subscription を `Terminated` にするだけで、`rejected_request_ids` に記録しないため、既存の `is_locally_terminated_request` 経路では吸収されない。control message 応答待ち deadline も解除しない。timeout を設定している場合、cancel 後に応答が届かなくても deadline 満了で `CONTROL_MESSAGE_TIMEOUT` によりセッションが閉じる。
 - `src/session/subscription.rs` の `supersede_pending_subscriber` は `Terminated` にして control message deadline を解除するが、`rejected_request_ids` には記録しないため、同じく `is_locally_terminated_request` 経路では吸収されない。
-- `src/session/subscription/recv.rs` の `handle_peer_subscribe_ok` は「Pending(Subscriber) でも拒否済み (`is_locally_terminated_request`) でもない」SUBSCRIBE_OK を `PROTOCOL_VIOLATION` で閉じる。
-- `src/session/subscription/dispatch.rs` の `handle_err_for_subscription` も、`rejected_request_ids` に無い `Terminated` subscription への REQUEST_ERROR を同様に閉じる。
-- FETCH 側は `src/session/fetch.rs` の `handle_peer_fetch_ok` が `Terminated` を許容してセッションを閉じず、`FetchOkReceived` を発行する。`handle_err_for_fetch` も `Terminated` の REQUEST_ERROR を受理する。subscription だけが `PROTOCOL_VIOLATION` で閉じる点が非対称である。
+- `src/session/subscription/recv.rs` の `handle_peer_subscribe_ok` は「Pending(Subscriber) でも拒否済み (`is_locally_terminated_request`) でもない」SUBSCRIBE_OK を `UNEXPECTED_MESSAGE` (0x303) で閉じる。
+- `src/session/subscription/dispatch.rs` の `handle_err_for_subscription` も、`rejected_request_ids` に無い `Terminated` subscription への REQUEST_ERROR を同様に `UNEXPECTED_MESSAGE` (0x303) で閉じる。
+- FETCH 側は `src/session/fetch.rs` の `handle_ok_for_fetch_initial` が `Terminated` を許容してセッションを閉じず、`FetchOkReceived` を発行する。`handle_err_for_fetch` も `Terminated` の REQUEST_ERROR を受理する。subscription だけが `PROTOCOL_VIOLATION` で閉じる点が非対称である。
 - 遅延した制御応答を注入するテストは無い (`tests/test_session/request_stream.rs` の supersede テストは旧 request id の forget までしか見ていない)。
 - 影響: cancel と応答の競合で全購読が落ちる。`stop_sending` は control message deadline を解除しないため、timeout 設定時は deadline 満了で `CONTROL_MESSAGE_TIMEOUT` によりセッションが閉じる。example の STOP_SENDING 経路でも起こり得る。
 
@@ -46,3 +46,20 @@ draft-ietf-moq-transport-23 §3.1 (Subscriptions) は "The subscriber terminates
 - 遅延 SUBSCRIBE_OK で Track Alias が異なる Track の Established subscription と衝突する場合は、従来どおり `DUPLICATE_TRACK_ALIAS` で閉じること。
 - 遅延 REQUEST_ERROR が非ゼロ Connect URI の Redirect を伴う場合は、server 側で draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT) の `ROLE_VIOLATION` により閉じること。
 - 上記を `tests/test_session` で固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `src/session/subscription/recv.rs` の `stop_sending` で `Session::clear_control_message_deadline` を呼び、応答待ち deadline を解除するようにした。解除しないと遅延応答を吸収しても `Session::tick` の CONTROL_MESSAGE_TIMEOUT でセッションが閉じていた。
+- `src/session/data.rs` の `is_cancelled_terminated_subscription` を `pub(super)` にして、`src/session/subscription/recv.rs` の `handle_peer_subscribe_ok` と `src/session/subscription/dispatch.rs` の `handle_err_for_subscription` から共用するようにした。キャンセル由来 `Terminated` (`publish_done` が `None`) の購読への SUBSCRIBE_OK / REQUEST_ERROR は、状態遷移も `RequestTerminated` も発行せずに吸収する。
+- `handle_peer_subscribe_ok` は状態検証の許可条件と早期 return の両方に `is_cancelled_terminated_subscription` を加えた。Track Alias 衝突検証は早期 return より前にあるため、別 Track の Established と衝突する遅延 SUBSCRIBE_OK は従来どおり `DUPLICATE_TRACK_ALIAS` で閉じる。`handle_err_for_subscription` は早期 return の条件に加えたため、`handle_peer_request_error` の既存契約どおり `RequestErrorReceived` は 1 回発行され、状態遷移と `RequestTerminated` は起きない。Redirect の検証は `handle_peer_request_error` 側で `handle_err_for_subscription` より前に行われるため、cancel 済みでも非ゼロ Connect URI は `ROLE_VIOLATION` になる。
+- `rejected_request_ids` への記録は行っていない。同集合は `request_streams` に未登録の拒否 request を対象とする既存契約であり、state を持つ cancel 済み subscription を登録すると close 通知時の削除契約と齟齬が出るためである。
+- テスト: `tests/test_session/request_stream.rs` に `late_control_response_after_cancel` モジュールを追加した。
+  - `late_subscribe_ok_after_cancel_is_absorbed`: Pending(Subscriber) で `stop_sending` した直後の SUBSCRIBE_OK を吸収し、Track Alias を設定せずイベントも発行しないこと。
+  - `late_subscribe_ok_after_cancel_of_established_is_absorbed`: Established で cancel した後も吸収し、保持済みの Track Alias を上書きしないこと。
+  - `late_request_error_after_cancel_is_absorbed`: `RequestErrorReceived` が 1 回だけ発行され、`RequestTerminated` が追加発行されないこと。
+  - `stop_sending_clears_control_message_deadline`: cancel 後に tick しても CONTROL_MESSAGE_TIMEOUT で閉じないこと。
+  - `late_subscribe_ok_after_supersede_is_absorbed`: supersede で Terminated になった購読への遅延 SUBSCRIBE_OK も吸収すること。
+  - `late_subscribe_ok_with_conflicting_alias_closes_session`: 別 Track の Established と Track Alias が衝突する場合は `DUPLICATE_TRACK_ALIAS` で閉じること。
+  - `late_request_error_with_redirect_closes_session`: cancel 済みでも非ゼロ Connect URI の REDIRECT は `ROLE_VIOLATION` で閉じること。
+- issue の「現状」にあったエラーコード (`PROTOCOL_VIOLATION`) と FETCH 側の関数名 (`handle_peer_fetch_ok`) は現行コードとずれていたため、実態 (`UNEXPECTED_MESSAGE` / `handle_ok_for_fetch_initial`) に同期した。
+- 検証: `cargo test -p shiguredo_moqt --test test_session` (1111 件) / `cargo test -p shiguredo_moqt --lib` (133 件) / `cargo clippy -p shiguredo_moqt --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通る。
