@@ -228,6 +228,11 @@ impl Session {
         self.remove_fill_request_subscriptions(request_id);
         // STOP_SENDING による再オープン禁止エントリも破棄する
         self.stopped_outgoing_subgroups.remove(&request_id);
+        // 自動 reset した stream id の記録も破棄する (request id の再利用時に
+        // 無関係な stream の終端通知を吸収しないため)
+        self.data_streams
+            .auto_reset
+            .retain(|_, stream_request_id| *stream_request_id != request_id);
         // `rejected_request_ids` はここでは除去しない。drain 中の malformed 終端で登録した
         // id は、破棄後に peer が bidi request stream の close 通知を送っても no-op で
         // 吸収するために残す (登録の意図と除去の詳細はフィールド doc と

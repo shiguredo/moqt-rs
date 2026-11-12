@@ -289,6 +289,19 @@ pub(super) struct DataStreamState {
     /// (共有 alias で `Established` subscription が残っている間は tombstone が
     /// 登録されず、連動すると掃除が発火しない)。
     pub(super) discarded: HashMap<DataStreamId, super::types::DeadlineTimer>,
+    /// cancel 経路で Session が自動 reset した送信 data stream id
+    ///
+    /// draft-ietf-moq-transport-23 §3.1.2 (Subscription State Management) の
+    /// "It MUST reset any open streams associated with the SUBSCRIBE." と §3.2.4 (Fetch State
+    /// Management) の "It MUST reset the bidi request stream and unidirectional data stream
+    /// associated with the FETCH." により、STOP_SENDING を受けた購読と FETCH の open な送信
+    /// stream は Session が reset する。reset した id を記録し、以後の
+    /// `send_data_stream_closed` / `send_fetch_data_stream_closed` を `Ok(())` にする
+    /// (自動 reset の事実をアプリが知らないまま呼びうる)。未知 id の通知は従来どおり
+    /// `SESSION_PROTOCOL_VIOLATION` であり、区別するために集合を使う。
+    /// 値は対象 stream が属する request id であり、`forget_subscription` / `forget_fetch`
+    /// で破棄する。
+    pub(super) auto_reset: HashMap<DataStreamId, u64>,
     /// FIN で閉じた受信 data stream id の保持集合
     ///
     /// draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams): "A sender might send
@@ -740,6 +753,7 @@ impl Session {
                 outgoing_fetch: HashMap::new(),
                 outgoing_fill: HashMap::new(),
                 discarded: HashMap::new(),
+                auto_reset: HashMap::new(),
                 fin_closed: HashMap::new(),
             },
             fetch_error_late_streams: HashMap::new(),

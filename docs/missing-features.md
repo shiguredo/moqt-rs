@@ -182,18 +182,15 @@ Tracks field.」と定める。ライブラリは `nojson` がキー出現順を
 順序検証を行わないと明記している (`src/msf.rs:2589-2591`)。encode は順序を守る。
 仕様違反のカタログを受理するが実害は小さい。
 
-### 4.7 STOP_SENDING 受信時に open な stream を reset しない (§3.1.2 / §3.2.4、ライブラリ)
+### 4.7 STOP_SENDING 受信時の open な stream の reset (§3.1.2 / §3.2.4、ライブラリ)
 
-§3.1.2 は「The Publisher can remove subscription state as soon as it has received
-STOP_SENDING. It MUST reset any open streams associated with the SUBSCRIBE.」と定め、
-§3.2.4 も FETCH について bidi request stream と uni data stream の reset を MUST とする。
-ライブラリが自動で reset するのは fill fetch stream だけで
-(`src/session/data.rs:1914`)、送信中の subgroup stream と FETCH の uni data stream は
-reset しないと明記している (`src/session/types.rs:750-756`)。
-アプリが `send_data_stream_closed` / `send_fetch_data_stream_closed` を呼ぶ前提であり、
-取りこぼすと Stream Count の確定 (PUBLISH_DONE) と cleanup が進まない。
-`issues/0246-bug-cancel-outgoing-stream-cleanup.md` は順序契約の話で、
-自動 reset の欠落そのものは起票されていない。
+解消済み。§3.1.2 の「The Publisher can remove subscription state as soon as it has received
+STOP_SENDING. It MUST reset any open streams associated with the SUBSCRIBE.」と §3.2.4 の
+bidi request stream / uni data stream の reset MUST に従い、購読と FETCH の cancel で
+open な送信 stream を Session が reset する (`Session::reset_open_outgoing_subgroup_streams` /
+`Session::reset_open_outgoing_fetch_streams`)。自動 reset した stream id への
+`send_data_stream_closed` / `send_fetch_data_stream_closed` は `Ok(())` で吸収し、
+未知の stream id は従来どおり `SESSION_PROTOCOL_VIOLATION` になる。
 
 ### 4.8 peer の SETUP を API から読めない (§6.3.2 / §9.1.5、ライブラリ)
 
@@ -595,9 +592,8 @@ moqt-js (HEAD `f6a171e8`) の playout のうち、次の 2 つは移植してい
    `MALFORMED_KEY_VALUE` によるセッション終了が未対応 (4.1) — 探索は実装済み、エラー分類が残る
 10. `END_OF_GROUP` (3 章) / Track Properties / `EXPIRES` (5.2〜5.5) — リレーと購読者への情報不足
 11. Range Filters の有効化 (5.6 / 6.10)、TRACK_STATUS (5.7 / 6.8)、REDIRECT (6.7)、pause (6.9)
-12. STOP_SENDING 時の open stream の reset (4.7) — アプリが閉じ忘れると cleanup が進まない
-13. Timeline / 変数置換 / Metrics (5.13、6.12)、複数トラック配信 (5.10)
-14. extension negotiation の API 非公開 (4.8)、PUBLISH_OK / FETCH_OK 前の Object 送信 (3 章、いずれも MAY)
+12. Timeline / 変数置換 / Metrics (5.13、6.12)、複数トラック配信 (5.10)
+13. extension negotiation の API 非公開 (4.8)、PUBLISH_OK / FETCH_OK 前の Object 送信 (3 章、いずれも MAY)
 
 ## 10. 要確認
 
@@ -613,8 +609,6 @@ moqt-js (HEAD `f6a171e8`) の playout のうち、次の 2 つは移植してい
 - カメラ経路のエンコーダ (Video Toolbox / libaom / libvpx) が B フレームを出力しうるか
   (パススルーは B フレーム入力を明示的に拒否する)
 - 0-RTT: rustls の `enable_early_data` 既定は false。tobi-quic の `connect_early` を使うかは未検討
-- STOP_SENDING 受信時の subgroup / FETCH uni stream の reset (4.7) を
-  アプリ責務と解釈しているか (`src/session/types.rs:750-756` は設計として明記している)
 - moqt URI のパースをライブラリに置くか example に置くか (§6.1、URL 系の issue は
   example 側で closed になっている)
 - 送信パラメータ検証の残存ギャップ (`src/session/subscription/send.rs:126` / `:307` /

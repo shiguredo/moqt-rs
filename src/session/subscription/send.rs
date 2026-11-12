@@ -76,6 +76,16 @@ impl Session {
             ));
         };
         sub.state = SubscriptionState::Terminated;
+        // draft-ietf-moq-transport-23 §3.1.2 (Subscription State Management): "The Publisher
+        // can remove subscription state as soon as it has received STOP_SENDING. It MUST reset
+        // any open streams associated with the SUBSCRIBE." I/O 層は bidi request stream の
+        // STOP_SENDING を `RequestStreamEnd::Reset` として渡すため、cancel のときは open な
+        // outgoing subgroup stream も Session が reset する。FIN は cancel ではないため
+        // 対象外である (draft §6.4.2.3 (Request Cancellation and Rejection))。
+        // `ResetDataStream` は呼び出し元が積む `RequestTerminated` より前に発行する。
+        if matches!(end, RequestStreamEnd::Reset { .. }) {
+            self.reset_open_outgoing_subgroup_streams(request_id);
+        }
         // draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams):
         // "When the subscription is cancelled, the publisher MUST reset any open fill fetch
         // streams." 自側が publisher 役のときは open 中の fill fetch stream を持ちうるため、

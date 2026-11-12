@@ -818,6 +818,8 @@ fn cancel_subscription_resets_open_fill_streams() {
         )
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(server.open_outgoing_fill_stream_count(sub_rid), 0);
+    // open な subgroup stream も §3.1.2 の MUST で reset されるため、fill stream の
+    // イベントを選んで検証する
     let mut saw_reset = false;
     while let Some(e) = server.poll_event() {
         if let SessionEvent::ResetDataStream {
@@ -826,8 +828,8 @@ fn cancel_subscription_resets_open_fill_streams() {
             reliable_size,
             tracking: _,
         } = e
+            && stream_id == DataStreamId(100)
         {
-            assert_eq!(stream_id, DataStreamId(100));
             assert_eq!(error_code, STREAM_CANCELLED);
             assert_eq!(
                 reliable_size, None,
@@ -1151,6 +1153,8 @@ fn publish_origin_peer_reset_resets_open_fill_streams() {
         0,
         "cancel では open 中の fill stream を reset すること"
     );
+    // open な subgroup stream も §3.1.2 の MUST で reset されるため、fill stream の
+    // イベントを選んで検証する
     let mut saw_reset = false;
     while let Some(e) = server.poll_event() {
         if let SessionEvent::ResetDataStream {
@@ -1158,8 +1162,8 @@ fn publish_origin_peer_reset_resets_open_fill_streams() {
             error_code,
             ..
         } = e
+            && stream_id == fill_stream
         {
-            assert_eq!(stream_id, fill_stream);
             assert_eq!(error_code, STREAM_CANCELLED);
             saw_reset = true;
         }
@@ -1565,7 +1569,11 @@ fn cancel_subscription_resets_all_open_fill_streams() {
                 reliable_size, None,
                 "自動発火では RESET_STREAM (reliable_size なし) になること"
             );
-            resets.push(stream_id);
+            // open な subgroup stream も §3.1.2 の MUST で reset されるため、
+            // fill stream の id だけを集める
+            if matches!(stream_id, DataStreamId(100) | DataStreamId(101)) {
+                resets.push(stream_id);
+            }
         }
     }
     resets.sort_by_key(|id| id.0);

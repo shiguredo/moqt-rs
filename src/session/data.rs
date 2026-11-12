@@ -809,6 +809,11 @@ impl Session {
     /// 本 API は既に I/O 層が閉じた stream を Session へ通知する用途で、
     /// `ResetDataStream` イベントは発行しない。
     ///
+    /// STOP_SENDING を受けた購読の cancel では Session が open な subgroup stream を自動
+    /// reset する (draft-ietf-moq-transport-23 §3.1.2 (Subscription State Management) の MUST)。
+    /// 自動 reset した stream への本 API は `Ok(())` を返す (アプリは自動 reset を知らないまま
+    /// 呼びうる)。未知の stream id は従来どおり `SESSION_PROTOCOL_VIOLATION` である。
+    ///
     /// 終端後に内部で `maybe_flush_pending_publish_done` を呼ぶ。同関数は該当 request の
     /// 全 outgoing data stream (subgroup / fill fetch) が閉じ、subscription が Terminated で
     /// 保留中の PUBLISH_DONE (UPDATE_FAILED) があれば自動送信する (§9.5.1 の MUST)。
@@ -826,6 +831,12 @@ impl Session {
         end: RequestStreamEnd,
     ) -> Result<(), SessionError> {
         self.require_established()?;
+        // cancel 経路で Session が自動 reset した stream への終端通知は no-op で吸収する
+        // (アプリは自動 reset を知らないまま `send_data_stream_closed` を呼びうる)。
+        // 未知の stream id は従来どおり `SESSION_PROTOCOL_VIOLATION` である。
+        if self.data_streams.auto_reset.remove(&stream_id).is_some() {
+            return Ok(());
+        }
         let Some(request_id) = self.close_outgoing_subgroup_stream(stream_id, end) else {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
@@ -2033,11 +2044,21 @@ impl Session {
     /// fill fetch stream は `send_err_for_subscription` が §3.4.1 の MUST に従って
     /// 先に reset するため、保留中に open であり続ける fill fetch stream は存在しない
     /// (subscription が Terminated の間は `send_fill_fetch_header` も拒否する)。
+    /// STOP_SENDING を受けた publisher 役 FETCH の cancel では Session が open な outgoing
+    /// FETCH data stream を自動 reset する (draft-ietf-moq-transport-23 §3.2.4 (Fetch State
+    /// Management) の MUST)。自動 reset した stream への本 API は `Ok(())` を返す。
+    /// 未知の stream id は従来どおり `SESSION_PROTOCOL_VIOLATION` である。
     pub fn send_fetch_data_stream_closed(
         &mut self,
         stream_id: DataStreamId,
     ) -> Result<(), SessionError> {
         self.require_established()?;
+        // cancel 経路で Session が自動 reset した stream への終端通知は no-op で吸収する
+        // (アプリは自動 reset を知らないまま `send_fetch_data_stream_closed` を呼びうる)。
+        // 未知の stream id は従来どおり `SESSION_PROTOCOL_VIOLATION` である。
+        if self.data_streams.auto_reset.remove(&stream_id).is_some() {
+            return Ok(());
+        }
         // fill fetch stream の終端。対応する `Fetch` 状態は存在しないため除去のみで
         // 終端記録は不要。subscription 側の終端は FIN / RESET とは独立している
         // (draft-ietf-moq-transport-23 §3.4.1)。
@@ -2103,6 +2124,90 @@ impl Session {
                 tracking: ResetTracking::Removed,
             });
         }
+    }
+
+    /// 指定 subscription の open な送信 subgroup stream を Session が reset する
+    ///
+    /// draft-ietf-moq-transport-23 §3.1.2 (Subscription State Management): "The Publisher can
+    /// remove subscription state as soon as it has received STOP_SENDING. It MUST reset any
+    /// open streams associated with the SUBSCRIBE." STOP_SENDING を受けた購読の open な
+    /// subgroup stream はアプリの終端通知に依存せず Session が reset する。
+    ///
+    /// stream ごとに `SessionEvent::ResetDataStream` (`STREAM_CANCELLED`、
+    /// `reliable_size: None`) を stream_id の昇順で発行し、追跡から除去して subgroup tracker を
+    /// reset 終端へ進める。stream 追跡は `ResetTracking::Removed` で終端するため、I/O 層は
+    /// 以後の終端通知を `send_data_stream_closed` で返す必要がない。ただしアプリが呼んでも
+    /// `Ok(())` になるよう id を [`DataStreamState::auto_reset`] に記録する。
+    ///
+    /// FIN による終端は cancel ではないため、呼び出し側は `RequestStreamEnd::Reset` のときだけ
+    /// 本関数を呼ぶこと (draft §6.4.2.3 (Request Cancellation and Rejection))。
+    pub(super) fn reset_open_outgoing_subgroup_streams(&mut self, request_id: u64) {
+        let mut stream_ids: Vec<DataStreamId> = self
+            .data_streams
+            .outgoing
+            .iter()
+            .filter(|(_, stream)| stream.request_id == request_id)
+            .map(|(&stream_id, _)| stream_id)
+            .collect();
+        // 出力順を決定的にする
+        stream_ids.sort_unstable();
+        for stream_id in stream_ids {
+            let end = RequestStreamEnd::Reset {
+                error_code: Some(STREAM_CANCELLED),
+                reliable_size: None,
+            };
+            // 追跡の終端と subgroup tracker の reset 終端への前進をまとめて行う
+            if self
+                .close_outgoing_subgroup_stream(stream_id, end)
+                .is_none()
+            {
+                continue;
+            }
+            self.events.push_back(SessionEvent::ResetDataStream {
+                stream_id,
+                error_code: STREAM_CANCELLED,
+                reliable_size: None,
+                tracking: ResetTracking::Removed,
+            });
+            self.data_streams.auto_reset.insert(stream_id, request_id);
+        }
+    }
+
+    /// 指定 FETCH の open な送信 FETCH data stream を Session が reset する
+    ///
+    /// draft-ietf-moq-transport-23 §3.2.4 (Fetch State Management): "The Publisher can remove
+    /// fetch state as soon as it has received a STOP_SENDING. It MUST reset the bidi request
+    /// stream and unidirectional data stream associated with the FETCH." 対象は publisher 役
+    /// FETCH の open な `outgoing_fetch` であり、1 本の FETCH 応答は 1 本の data stream で
+    /// 送るため高々 1 本である (§3.2.1 (Fetch Object Delivery))。
+    ///
+    /// 追跡から除去し、`Fetch::data_stream_finished` を true にして
+    /// `SessionEvent::ResetDataStream` (`STREAM_CANCELLED`、`reliable_size: None`) を発行する。
+    /// アプリが `send_fetch_data_stream_closed` を呼んでも `Ok(())` になるよう id を
+    /// [`DataStreamState::auto_reset`] に記録する。
+    pub(super) fn reset_open_outgoing_fetch_streams(&mut self, request_id: u64) {
+        let stream_id = self
+            .data_streams
+            .outgoing_fetch
+            .iter()
+            .filter(|(_, stream)| stream.request_id == request_id)
+            .map(|(&stream_id, _)| stream_id)
+            .min();
+        let Some(stream_id) = stream_id else {
+            return;
+        };
+        self.data_streams.outgoing_fetch.remove(&stream_id);
+        if let Some(fetch) = self.fetches.get_mut(&request_id) {
+            // 終端済み記録: RESET も破棄可能な終端種別に含まれる (§3.2.4)
+            fetch.data_stream_finished = true;
+        }
+        self.events.push_back(SessionEvent::ResetDataStream {
+            stream_id,
+            error_code: STREAM_CANCELLED,
+            reliable_size: None,
+            tracking: ResetTracking::Removed,
+        });
+        self.data_streams.auto_reset.insert(stream_id, request_id);
     }
 
     /// 受信した FETCH stream のデコード済み entry を Session に取り込む

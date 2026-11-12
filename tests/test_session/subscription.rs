@@ -32,6 +32,8 @@ fn one_range_subgroup_filter() -> MessageParameters {
     params
 }
 
+#[path = "subscription/cancel_reset_open_streams.rs"]
+mod cancel_reset_open_streams;
 #[path = "subscription/delivery.rs"]
 mod delivery;
 #[path = "subscription/forget_stop_sending.rs"]

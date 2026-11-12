@@ -195,6 +195,11 @@ impl Session {
         self.data_streams
             .outgoing_fetch
             .retain(|&_, stream| stream.request_id != request_id);
+        // 自動 reset した stream id の記録も破棄する (request id の再利用時に
+        // 無関係な stream の終端通知を吸収しないため)
+        self.data_streams
+            .auto_reset
+            .retain(|_, stream_request_id| *stream_request_id != request_id);
         self.remove_request_update_credit_entries(request_id);
         self.fetches.remove(&request_id)
     }
@@ -222,6 +227,17 @@ impl Session {
             ));
         };
         fetch.state = FetchState::Terminated;
+        // draft-ietf-moq-transport-23 §3.2.4 (Fetch State Management): "The Publisher can
+        // remove fetch state as soon as it has received a STOP_SENDING. It MUST reset the bidi
+        // request stream and unidirectional data stream associated with the FETCH."
+        // I/O 層は bidi request stream の STOP_SENDING を `RequestStreamEnd::Reset` として
+        // 渡すため、cancel のときは open な outgoing FETCH data stream も Session が reset
+        // する。FIN は cancel ではないため対象外である (draft §6.4.2.3)。
+        // `ResetDataStream` は `RequestTerminated` より前に発行し、ワイヤ順序を
+        // RESET_STREAM → (呼び出し元が積む) RequestTerminated に保つ。
+        if matches!(end, RequestStreamEnd::Reset { .. }) {
+            self.reset_open_outgoing_fetch_streams(request_id);
+        }
         // 応答 (FETCH_OK) が来ないまま request が終端したため、応答終端を待つ gap 判定を
         // 破棄する。
         self.pending_fetch_tails.remove(&request_id);
@@ -673,13 +689,13 @@ impl Session {
     /// draft §3.2.4: "The Publisher can remove fetch state as soon as it has received a
     /// STOP_SENDING. It MUST reset the bidi request stream and unidirectional data stream
     /// associated with the FETCH." (MUST) のとおり、bidi request stream の reset は
-    /// `SessionEvent::ResetRequestStream` で I/O 層に指示する。データストリームの reset は
-    /// アプリケーション層が本関数呼び出し後に行い、`send_fetch_data_stream_closed` を
-    /// 呼んで終端を通知すること。アプリが `forget_fetch` を呼んだ場合はその安全網が
-    /// 残った outgoing FETCH stream エントリを掃除する。終端通知を済ませた fetch は
-    /// bidi request stream の終端を待たずに破棄できる
-    /// (`forget_fetch` の doc 参照。終端通知漏れの場合は従来どおり破棄前に
-    /// bidi request stream の終端 (`RequestTerminated`) を確認すること)。
+    /// `SessionEvent::ResetRequestStream`、open な outgoing FETCH data stream の reset は
+    /// `SessionEvent::ResetDataStream` (`STREAM_CANCELLED`) で I/O 層に指示する。発行順は
+    /// `ResetRequestStream` → `ResetDataStream` である。Session が自動 reset した stream に
+    /// アプリが `send_fetch_data_stream_closed` を呼んでも `Ok(())` になる
+    /// (未知の stream id は従来どおり `SESSION_PROTOCOL_VIOLATION`)。
+    /// アプリが `forget_fetch` を呼んだ場合はその安全網が残った outgoing FETCH stream の
+    /// エントリを掃除する。
     ///
     /// `error_code` は peer が STOP_SENDING に載せたアプリケーションエラーコードである
     /// (`None` は「アプリケーションエラーコード無し」。意味は [`RequestStreamEnd::Reset`] の
@@ -721,10 +737,14 @@ impl Session {
         self.clear_request_stream_goaway_deadline(request_id);
         // §3.2.4 MUST の bidi reset を I/O 層に指示する。CANCELLED (0x1) は
         // subscriber による cancel に該当する (§12.5)。
+        let cancel_code = super::types::DataStreamResetReason::Cancelled.error_code();
         self.events.push_back(SessionEvent::ResetRequestStream {
             request_id,
-            error_code: super::types::DataStreamResetReason::Cancelled.error_code(),
+            error_code: cancel_code,
         });
+        // §3.2.4 MUST の uni data stream の reset も Session が指示する
+        // (bidi の reset より後に発行する)
+        self.reset_open_outgoing_fetch_streams(request_id);
         // peer の cancel で応答を返す経路が無くなるため、REQUEST_UPDATE のクレジット会計を
         // 解放する (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))
         self.remove_request_update_credit_entries(request_id);

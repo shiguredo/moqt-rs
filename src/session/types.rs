@@ -478,7 +478,26 @@ pub enum SessionEvent {
     ///
     /// I/O 層は `stream_id` に相当する uni data stream を RESET_STREAM または
     /// RESET_STREAM_AT で閉じる。`error_code` は配送 timeout では
-    /// [`STREAM_DELIVERY_TIMEOUT`](crate::error::STREAM_DELIVERY_TIMEOUT) (0x2) を使う。
+    /// [`STREAM_DELIVERY_TIMEOUT`](crate::error::STREAM_DELIVERY_TIMEOUT) (0x2)、cancel では
+    /// [`STREAM_CANCELLED`](crate::error::STREAM_CANCELLED) (0x1) を使う。
+    ///
+    /// Session が本イベントを発行するのは次の経路である。
+    ///
+    /// - 配送 timeout の期限到達 (`Session::tick`、`tracking` は [`ResetTracking::Retained`])
+    /// - アプリの reset API (`Session::reset_outgoing_data_stream` など)
+    /// - STOP_SENDING を受けた購読と FETCH の cancel
+    ///   (draft-ietf-moq-transport-23 §3.1.2 (Subscription State Management) の
+    ///   "It MUST reset any open streams associated with the SUBSCRIBE." と §3.2.4 (Fetch State
+    ///   Management) の "It MUST reset the bidi request stream and unidirectional data stream
+    ///   associated with the FETCH.")。`error_code` は `STREAM_CANCELLED` で、`tracking` は
+    ///   [`ResetTracking::Removed`]、`reliable_size` は `None` である。bidi の cancel を表す
+    ///   [`SessionEvent::ResetRequestStream`] より後に発行する (STOP_SENDING 受信経路では
+    ///   bidi → data stream の順)。`Session::forget_subscription` 由来の fill fetch stream の
+    ///   reset も同じ形で発行する
+    ///   (draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams) の
+    ///   "When the subscription is cancelled, the publisher MUST reset any open fill fetch
+    ///   streams.")。
+    ///
     /// `reliable_size` が `Some(n)` の場合は MOQT stream の先頭 `n` バイトまでを
     /// Reliable Size とする RESET_STREAM_AT を発行する。`None` はアプリ指定の offset が
     /// 無いことを表し、I/O 層は WebTransport のストリームヘッダー長までを Reliable Size に
@@ -961,12 +980,13 @@ pub enum TerminationReason {
     /// の doc 参照)。1 回目の peer FIN / RESET_STREAM も同じく no-op で吸収される。
     /// GOAWAY を送れるのは request の受信側 (responder) だけなので (§9.2)、終端されるのは
     /// 自側が応答側だった entry であり、応答を送れないまま応答を持たずに残る
-    /// (`Session::forget_*` で回収できる)。publisher 役 fetch の open 中の
-    /// outgoing FETCH data stream は Session が reset しないため、アプリが
-    /// `Session::send_fetch_data_stream_closed` で閉じること。publisher 役 subscription の
-    /// open 中の outgoing subgroup stream も同様に Session が reset しないため、
-    /// アプリが `Session::send_data_stream_closed` で閉じること (subscription 側で Session が
-    /// reset するのは、購読の終端に伴い §3.4.1 の MUST が課る fill fetch stream だけである)。
+    /// (`Session::forget_*` で回収できる)。GOAWAY timeout の経路は STOP_SENDING による
+    /// cancel ではないため (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and
+    /// Rejection) の cancel は RESET_STREAM / STOP_SENDING)、publisher 役 fetch の open 中の
+    /// outgoing FETCH data stream と publisher 役 subscription の open 中の outgoing subgroup
+    /// stream は Session が自動 reset しない。アプリが
+    /// `Session::send_fetch_data_stream_closed` / `Session::send_data_stream_closed` で閉じること
+    /// (STOP_SENDING を受けた cancel では Session が自動 reset する。`ResetDataStream` の doc 参照)。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     GoawayTimeout,
 }
@@ -2134,9 +2154,12 @@ pub struct Fetch {
     /// 自端点が FETCH データストリームを終端済みか (publisher 側のみで更新)
     ///
     /// `send_fetch_data_stream_closed` が呼ばれた時点で `true` になる (FIN と RESET の
-    /// 両方の終端通知を含む)。「1 本以上の outgoing stream の終端」を意味し、全ストリーム
-    /// の終端はアプリの責務 (draft-ietf-moq-transport-23 §11 は 1 つの FETCH に
-    /// 対する応答を 1 本のデータストリームに限定する)。draft-ietf-moq-transport-23 §3.2.4
+    /// 両方の終端通知を含む)。STOP_SENDING を受けた publisher 役 FETCH の cancel では
+    /// Session が open な outgoing FETCH data stream を reset した時点で `true` にする
+    /// (draft-ietf-moq-transport-23 §3.2.4 (Fetch State Management) の MUST)。
+    /// 「1 本以上の outgoing stream の終端」を意味し、全ストリームの終端はアプリの責務
+    /// (draft-ietf-moq-transport-23 §11 は 1 つの FETCH に対する応答を 1 本のデータストリームに
+    /// 限定する)。draft-ietf-moq-transport-23 §3.2.4
     /// (Fetch State Management): "It can remove all FETCH state after closing the data
     /// stream with a FIN." に従い、データストリーム終端済みの publisher 側 fetch は
     /// `Established` のままでも破棄可能にするための記録。subscriber 側は常に false のまま
