@@ -192,17 +192,21 @@ fn assert_malformed_terminations(client: &mut Session, expected: &[(u64, Request
 /// Track 文脈を解決して cancel し、アプリへは正常な受信として通知しない。
 #[test]
 fn publish_with_object_only_property_is_not_registered_and_is_cancelled() {
+    use shiguredo_moqt::message::Publish;
     let (mut client, mut server) = establish_pair();
+    // 送信 API はスコープ違反の Track Properties を拒否するため、wire 上の不正メッセージを
+    // 直接組み立てて受信側へ渡す
     let rid = client
-        .send_publish(
-            ns(&[b"live"]),
-            b"cam".to_vec(),
-            700,
-            MessageParameters::new(),
-            track_properties_with_prior_group_id_gap(),
-        )
+        .next_local_request_id()
         .expect("テストフィクスチャの前提条件を満たす");
-    let (_, publish) = take_send_request(&mut client);
+    let publish = ControlMessage::Publish(Publish {
+        request_id: rid,
+        track_namespace: ns(&[b"live"]),
+        track_name: b"cam".to_vec(),
+        track_alias: 700,
+        parameters: MessageParameters::new(),
+        track_properties: track_properties_with_prior_group_id_gap(),
+    });
     server
         .recv_request(publish)
         .expect("Malformed Track の検出はセッションを閉じないこと");
@@ -225,17 +229,21 @@ fn publish_with_object_only_property_is_not_registered_and_is_cancelled() {
 /// IMMUTABLE_PROPERTIES の内側だけに Object 専用 Property を持つ PUBLISH も同じ経路で取消へ進む
 #[test]
 fn publish_with_object_only_property_in_immutable_is_cancelled() {
+    use shiguredo_moqt::message::Publish;
     let (mut client, mut server) = establish_pair();
+    // 送信 API はスコープ違反の Track Properties を拒否するため、wire 上の不正メッセージを
+    // 直接組み立てて受信側へ渡す
     let rid = client
-        .send_publish(
-            ns(&[b"live"]),
-            b"cam".to_vec(),
-            701,
-            MessageParameters::new(),
-            track_properties_with_prior_group_id_gap_in_immutable(),
-        )
+        .next_local_request_id()
         .expect("テストフィクスチャの前提条件を満たす");
-    let (_, publish) = take_send_request(&mut client);
+    let publish = ControlMessage::Publish(Publish {
+        request_id: rid,
+        track_namespace: ns(&[b"live"]),
+        track_name: b"cam".to_vec(),
+        track_alias: 701,
+        parameters: MessageParameters::new(),
+        track_properties: track_properties_with_prior_group_id_gap_in_immutable(),
+    });
     server
         .recv_request(publish)
         .expect("Malformed Track の検出はセッションを閉じないこと");
@@ -306,17 +314,21 @@ fn publish_with_object_only_property_cancels_existing_subscription_for_same_trac
         SubscriptionState::Established
     );
 
-    // 同じ Track の PUBLISH が Object 専用 Property を含んで届く
+    // 同じ Track の PUBLISH が Object 専用 Property を含んで届く。
+    // 送信 API はスコープ違反の Track Properties を拒否するため、wire 上の不正メッセージを
+    // 直接組み立てて受信側へ渡す
+    use shiguredo_moqt::message::Publish;
     let published = server
-        .send_publish(
-            ns(&[b"live"]),
-            b"cam".to_vec(),
-            703,
-            MessageParameters::new(),
-            track_properties_with_prior_group_id_gap(),
-        )
+        .next_local_request_id()
         .expect("テストフィクスチャの前提条件を満たす");
-    let (_, publish) = take_send_request(&mut server);
+    let publish = ControlMessage::Publish(Publish {
+        request_id: published,
+        track_namespace: ns(&[b"live"]),
+        track_name: b"cam".to_vec(),
+        track_alias: 703,
+        parameters: MessageParameters::new(),
+        track_properties: track_properties_with_prior_group_id_gap(),
+    });
     client
         .recv_request(publish)
         .expect("Malformed Track の検出はセッションを閉じないこと");
@@ -614,16 +626,16 @@ fn track_status_ok_with_object_only_property_cancels_related_requests() {
     server
         .recv_request(track_status)
         .expect("テストフィクスチャの前提条件を満たす");
-    server
-        .send_request_ok(
-            status,
-            MessageParameters::new(),
-            track_properties_with_prior_group_id_gap(),
-        )
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, ok) = take_send_on_stream(&mut server);
+    // 送信 API はスコープ違反の Track Properties を拒否するため、wire 上の不正応答を
+    // 直接組み立てて受信側へ渡す
     client
-        .recv_stream_message(status, ok)
+        .recv_stream_message(
+            status,
+            ControlMessage::RequestOk(shiguredo_moqt::message::RequestOk {
+                parameters: MessageParameters::new(),
+                track_properties: track_properties_with_prior_group_id_gap(),
+            }),
+        )
         .expect("Malformed Track の検出はセッションを閉じないこと");
 
     // TRACK_STATUS は応答済みの失敗として確定し、成功イベントを発行しない

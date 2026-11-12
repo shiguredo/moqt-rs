@@ -279,6 +279,9 @@ impl Session {
             )
             .into());
         }
+        // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の
+        // 4096 バイト上限を request_id 発行前に検証する (超過は FIELD_LENGTH_EXCEEDED)
+        Self::validate_outgoing_full_track_name(&track_namespace, &track_name)?;
         let filter = match parameters.location_filter_typed() {
             Ok(filter) => filter,
             Err(_) => {
@@ -461,6 +464,15 @@ impl Session {
                 "FETCH_OK parameter not allowed in this context",
             ));
         }
+        // Track Properties の事前検証: `RequestOk::encode_message_body` の
+        // `track_properties.encode(buf)?` と同一の検証を `fetch.state = Established` の代入より
+        // 前に通す。検証がないと、Established に遷移した後に I/O 層のエンコードで失敗し、
+        // fetch が応答を再送できない孤児状態が残る。`INCLUDE_PROPERTIES=0` による空化は
+        // 検証後に適用するため、検証対象はアプリが渡した入力の Track Properties である。
+        Self::validate_outgoing_track_properties(
+            &track_properties,
+            "invalid track properties in FETCH_OK",
+        )?;
         let mut parameters = parameters;
         // draft-ietf-moq-transport-23 §3.1.4 (Largest Object) / §9.19.17 (LARGEST OBJECT
         // Parameter): Largest Object は送信端点が把握している Track の最大 Location である。

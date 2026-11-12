@@ -23,12 +23,12 @@ use hashbrown::{HashMap, HashSet};
 use crate::error::{
     MessageError, PUBLISH_DONE_UPDATE_FAILED, REQUEST_DOES_NOT_EXIST, REQUEST_INTERNAL_ERROR,
     REQUEST_INVALID_FILTER, REQUEST_MALFORMED_AUTH_TOKEN, REQUEST_REDIRECT,
-    SESSION_AUTH_TOKEN_CACHE_OVERFLOW, SESSION_CLOSED_CONTROL_STREAM, SESSION_INTERNAL_ERROR,
-    SESSION_INVALID_AUTHORITY, SESSION_INVALID_FIELD, SESSION_INVALID_PARAMETER,
-    SESSION_INVALID_PATH, SESSION_INVALID_STREAM_HEADER, SESSION_MALFORMED_AUTHORITY,
-    SESSION_MALFORMED_MESSAGE, SESSION_MALFORMED_PATH, SESSION_PROTOCOL_VIOLATION,
-    SESSION_ROLE_VIOLATION, SESSION_UNEXPECTED_MESSAGE, SESSION_UNKNOWN_AUTH_TOKEN_ALIAS,
-    is_local_error_code,
+    SESSION_AUTH_TOKEN_CACHE_OVERFLOW, SESSION_CLOSED_CONTROL_STREAM,
+    SESSION_FIELD_LENGTH_EXCEEDED, SESSION_INTERNAL_ERROR, SESSION_INVALID_AUTHORITY,
+    SESSION_INVALID_FIELD, SESSION_INVALID_PARAMETER, SESSION_INVALID_PATH,
+    SESSION_INVALID_STREAM_HEADER, SESSION_MALFORMED_AUTHORITY, SESSION_MALFORMED_MESSAGE,
+    SESSION_MALFORMED_PATH, SESSION_PROTOCOL_VIOLATION, SESSION_ROLE_VIOLATION,
+    SESSION_UNEXPECTED_MESSAGE, SESSION_UNKNOWN_AUTH_TOKEN_ALIAS, is_local_error_code,
 };
 use crate::message::{
     ControlMessage, ErrorDetails, FETCH_OK_ALLOWED_PARAMS, PublishDone,
@@ -1124,6 +1124,51 @@ impl Session {
                 self.fail(err.clone());
                 Err(err)
             }
+        }
+    }
+
+    /// 自側が送る Track Properties が encode 可能かを状態遷移前に検証する
+    ///
+    /// sans-I/O では encode は I/O 層で行われるため、送信 API が状態遷移後に encode で
+    /// 失敗すると、状態だけ進んで peer に応答が届かない孤児状態が残る。本関数は
+    /// [`TrackProperties::encode`] と同一の検証 (同一 prop_type の重複・型整合性・値域・
+    /// IMMUTABLE_PROPERTIES 内側の KVP 列) を一時バッファに対して行い、失敗を
+    /// `SESSION_PROTOCOL_VIOLATION` の [`SessionError`] に変換する。`what` は呼び出し元の
+    /// メッセージ種別を表す理由文字列である。
+    ///
+    /// この規則は sans-I/O の状態整合性のための実装方針であり、draft の MUST そのものでは
+    /// ない (draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure) の 4096 バイト上限は
+    /// [`Session::validate_outgoing_full_track_name`] が扱う)。
+    pub(super) fn validate_outgoing_track_properties(
+        track_properties: &TrackProperties,
+        what: &'static str,
+    ) -> Result<(), SessionError> {
+        let mut buf = Vec::new();
+        match track_properties.encode(&mut buf) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(SessionError::new(SESSION_PROTOCOL_VIOLATION, what)),
+        }
+    }
+
+    /// 自側が送る Full Track Name の長さを request_id 発行前に検証する
+    ///
+    /// draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): "The maximum total length
+    /// of a Full Track Name is 4,096 bytes. ... If an endpoint receives a Track Namespace or a
+    /// Full Track Name exceeding 4,096 bytes, it MUST close the session with
+    /// FIELD_LENGTH_EXCEEDED." 超過は encode 時にしか検出されないため、送信 API が
+    /// request 登録後に失敗すると、Session に request が登録されたまま送信されない状態を
+    /// 作り得る。`src/message/common.rs` の `validate_full_track_name` を再利用し、超過時は
+    /// FIELD_LENGTH_EXCEEDED (0x401) に対応する [`SESSION_FIELD_LENGTH_EXCEEDED`] を返す。
+    pub(super) fn validate_outgoing_full_track_name(
+        track_namespace: &TrackNamespace,
+        track_name: &[u8],
+    ) -> Result<(), SessionError> {
+        match crate::message::common::validate_full_track_name(track_namespace, track_name) {
+            Ok(()) => Ok(()),
+            Err(err) => Err(SessionError::new(
+                SESSION_FIELD_LENGTH_EXCEEDED,
+                err.reason(),
+            )),
         }
     }
 

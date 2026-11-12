@@ -111,6 +111,9 @@ impl Session {
         // で非同期に失敗し、アプリがエンコードエラーを無視すると control deadline
         // タイムアウトという後続の誤作動につながる。
         // 検証は request_id 発行より前に置き、エラー時に欠番を作らない。
+        // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の
+        // 4096 バイト上限を request_id 発行前に検証する (超過は FIELD_LENGTH_EXCEEDED)
+        Self::validate_outgoing_full_track_name(&track_namespace, &track_name)?;
         if parameters
             .validate_scope(crate::message::TRACK_STATUS_ALLOWED_PARAMS)
             .is_err()
@@ -241,6 +244,16 @@ impl Session {
         parameters: &mut MessageParameters,
         track_properties: TrackProperties,
     ) -> Result<TrackProperties, SessionError> {
+        // Track Properties の事前検証: `RequestOk::encode_message_body` の
+        // `track_properties.encode(buf)?` と同一の検証を `entry.response` の代入と
+        // control message deadline の解除より前に通す。検証がないと、応答済みとして記録した
+        // 後に I/O 層のエンコードで失敗し、応答を再送できない孤児状態が残る。
+        // `INCLUDE_PROPERTIES=0` による空化は検証後に適用するため、検証対象はアプリが渡した
+        // 入力の Track Properties である。
+        Self::validate_outgoing_track_properties(
+            &track_properties,
+            "invalid track properties in TRACK_STATUS_OK",
+        )?;
         // 検証とフィールドの取り出しは不変借用で行う。`publisher_track_largest` も `self` を
         // 不変借用するため、entry の可変借用を先に取ると両立しない。
         let (track_namespace, track_name, include_properties) = {

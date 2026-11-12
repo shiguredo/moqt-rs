@@ -1078,9 +1078,11 @@ fn client_receives_unsupported_property_details_for_rejected_publish() {
         prop_type: 0x4000,
         value: TrackPropertyValue::VarInt(1),
     });
+    // 0x4005 は奇数型のため値は長さ付きバイト列でなければならない
+    // (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties))
     tp.push(TrackProperty {
         prop_type: 0x4005,
-        value: TrackPropertyValue::VarInt(2),
+        value: TrackPropertyValue::Bytes(vec![0x02]),
     });
     let rid = client
         .send_publish(

@@ -223,17 +223,21 @@ fn validate_reports_duplicate_track_property() {
 /// Track 文脈を解決して cancel し、アプリへは正常な受信として通知しない。
 #[test]
 fn publish_with_duplicate_track_property_is_not_registered_and_is_cancelled() {
+    use shiguredo_moqt::message::Publish;
     let (mut client, mut server) = establish_pair();
+    // 送信 API は多重違反の Track Properties を拒否するため、wire 上の不正メッセージを
+    // 直接組み立てて受信側へ渡す
     let rid = client
-        .send_publish(
-            ns(&[b"live"]),
-            b"cam".to_vec(),
-            700,
-            MessageParameters::new(),
-            track_properties_with_duplicate_delivery_timeout(),
-        )
+        .next_local_request_id()
         .expect("テストフィクスチャの前提条件を満たす");
-    let (_, publish) = take_send_request(&mut client);
+    let publish = ControlMessage::Publish(Publish {
+        request_id: rid,
+        track_namespace: ns(&[b"live"]),
+        track_name: b"cam".to_vec(),
+        track_alias: 700,
+        parameters: MessageParameters::new(),
+        track_properties: track_properties_with_duplicate_delivery_timeout(),
+    });
     server
         .recv_request(publish)
         .expect("Malformed Track の検出はセッションを閉じないこと");
@@ -252,17 +256,21 @@ fn publish_with_duplicate_track_property_is_not_registered_and_is_cancelled() {
 /// IMMUTABLE_PROPERTIES の内側だけに重複を持つ PUBLISH も同じ経路で取消へ進む
 #[test]
 fn publish_with_duplicate_track_property_in_immutable_is_cancelled() {
+    use shiguredo_moqt::message::Publish;
     let (mut client, mut server) = establish_pair();
+    // 送信 API は多重違反の Track Properties を拒否するため、wire 上の不正メッセージを
+    // 直接組み立てて受信側へ渡す
     let rid = client
-        .send_publish(
-            ns(&[b"live"]),
-            b"cam".to_vec(),
-            701,
-            MessageParameters::new(),
-            track_properties_with_duplicate_delivery_timeout_in_immutable(),
-        )
+        .next_local_request_id()
         .expect("テストフィクスチャの前提条件を満たす");
-    let (_, publish) = take_send_request(&mut client);
+    let publish = ControlMessage::Publish(Publish {
+        request_id: rid,
+        track_namespace: ns(&[b"live"]),
+        track_name: b"cam".to_vec(),
+        track_alias: 701,
+        parameters: MessageParameters::new(),
+        track_properties: track_properties_with_duplicate_delivery_timeout_in_immutable(),
+    });
     server
         .recv_request(publish)
         .expect("Malformed Track の検出はセッションを閉じないこと");

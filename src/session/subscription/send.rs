@@ -114,6 +114,9 @@ impl Session {
         self.check_peer_goaway()?;
         // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は送出しない
         Self::validate_outgoing_track_name(&track_name)?;
+        // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の
+        // 4096 バイト上限を request_id 発行前に検証する (超過は FIELD_LENGTH_EXCEEDED)
+        Self::validate_outgoing_full_track_name(&track_namespace, &track_name)?;
         // draft-ietf-moq-transport-23 §2.4.3 (Reserved Namespaces): single period `.` 予約名前空間への SUBSCRIBE は送信不可
         if track_namespace.is_single_period() {
             return Err(SessionError::new(
@@ -311,6 +314,9 @@ impl Session {
         self.check_peer_goaway()?;
         // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は送出しない
         Self::validate_outgoing_track_name(&track_name)?;
+        // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の
+        // 4096 バイト上限を request_id 発行前に検証する (超過は FIELD_LENGTH_EXCEEDED)
+        Self::validate_outgoing_full_track_name(&track_namespace, &track_name)?;
         // draft-ietf-moq-transport-23 §2.4.3 (Reserved Namespaces): single period `.` 予約名前空間への PUBLISH は送信不可
         if track_namespace.is_single_period() {
             return Err(SessionError::new(
@@ -416,6 +422,15 @@ impl Session {
         if let Some(largest) = self.publisher_track_largest(&track_namespace, &track_name) {
             update_largest_object_in_parameters(&mut parameters, &largest);
         }
+        // Track Properties の事前検証: `Publish::encode_message_body` の
+        // `track_properties.encode(buf)?` と同一の検証を request_id 発行と状態登録より前に
+        // 通す。検証がないと、subscription が Pending のまま登録され、Pending は
+        // `Subscription::cleanup_ready` が Terminated を要求するため `forget_subscription` で
+        // 回収できず、同じ request_id で PUBLISH を再送できない孤児状態が残る。
+        Self::validate_outgoing_track_properties(
+            &track_properties,
+            "invalid track properties in PUBLISH",
+        )?;
         let request_id = self.request_ids.local_generator.next_id();
         // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): 送信前に値域を検証し、
         // 不正値の送出と状態登録を防ぐ
@@ -637,22 +652,14 @@ impl Session {
         }
         // track_properties の事前検証: `SubscribeOk::encode_message_body` の
         // `track_properties.encode(buf)?` と同一の検証 (同一 prop_type の重複・型整合性・
-        // 値域 (`validate_track_property_value_range`)・ IMMUTABLE_PROPERTIES 内側の KVP
-        // 列検証) を状態遷移・ track_alias 代入・パラメータ適用より前に通す。検証がないと、
-        // それらの適用後に I/O 層のエンコードで失敗し、subscription が Established に遷移
-        // 済みのまま peer に SUBSCRIBE_OK が送られない孤児状態が残る (エンコードは
-        // sans-I/O のため I/O 層で行われる)。事前呼び出しの成功は track_properties 部分の
-        // I/O 層エンコード成功を保証する (`validate_track_property_value_range` のみの
-        // 公開化では値域のみで、型整合・重複・ IMMUTABLE 内側の孤児化経路が残る)。
-        // `encode` は `MessageError` を返すため `?` では伝播できず、`is_err()` 判定で
-        // `SessionError` に変換する。
-        let mut buf = Vec::new();
-        if track_properties.encode(&mut buf).is_err() {
-            return Err(SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
-                "invalid track properties in SUBSCRIBE_OK",
-            ));
-        }
+        // 値域・ IMMUTABLE_PROPERTIES 内側の KVP 列検証) を状態遷移・ track_alias 代入・
+        // パラメータ適用より前に通す。検証がないと、それらの適用後に I/O 層のエンコードで
+        // 失敗し、subscription が Established に遷移済みのまま peer に SUBSCRIBE_OK が
+        // 送られない孤児状態が残る (エンコードは sans-I/O のため I/O 層で行われる)。
+        Self::validate_outgoing_track_properties(
+            &track_properties,
+            "invalid track properties in SUBSCRIBE_OK",
+        )?;
         // draft §3.1.3 (Track Alias): 異なる Track への alias 再利用のみ拒否する。
         // 同一 Track の別 subscription が同じ alias を使うのは §3.1 が許可している。
         let (ns_for_alias, name_for_alias) = (

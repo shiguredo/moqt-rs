@@ -884,6 +884,8 @@ mod property_duplicates;
 mod property_scope;
 #[path = "test_session/request_stream.rs"]
 mod request_stream;
+#[path = "test_session/send_prevalidation.rs"]
+mod send_prevalidation;
 #[path = "test_session/setup.rs"]
 mod setup;
 #[path = "test_session/shared_track_alias.rs"]
