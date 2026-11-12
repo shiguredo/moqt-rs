@@ -1,8 +1,8 @@
 # MessageError の分類と表示を一貫させる
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
-- Branch: feature/fix-error-classification-consistency
+- Completed: 2026-11-11
+- Branch: develop (CODEBASE.md の規約により develop に直接コミットする)
 - Polished: 2026-10-19
 - Refreshed: 2026-11-04
 
@@ -58,7 +58,7 @@ IMMUTABLE_PROPERTIES を含む Track を malformed (§12.1 (Malformed Tracks)) �
   `tests/test_error.rs` に `Display` と `reason()` のテストを追加する。`tests/test_message.rs` に `ControlMessage::encode`
   の `FieldLengthExceeded` が変わらないことを固定するテストを追加する。`tests/test_object_properties.rs` に
   `ObjectPropertyTracker::observe_object` の入れ子 IMMUTABLE_PROPERTIES が `MalformedTrack` になるテストと、encode の KVP 値長
-  65535 超が `ProtocolViolation` になるテストを追加する。`tests/test_video_decode_order.rs` に `prior_object_id_gap_of` の入れ子
+  65535 超が `FieldLengthExceeded` になるテストを追加する。`tests/test_video_decode_order.rs` に `prior_object_id_gap_of` の入れ子
   IMMUTABLE_PROPERTIES が `MalformedTrack` になるテストを追加する。`tests/test_loc.rs` に encode の KVP 値長 65535 超が
   `ProtocolViolation` になるテストを追加する。
 
@@ -73,3 +73,18 @@ IMMUTABLE_PROPERTIES を含む Track を malformed (§12.1 (Malformed Tracks)) �
 - `ObjectProperties::encode` / `TrackProperties::encode` / `LocProperties::encode` の KVP 値長 65535 超が `FieldLengthExceeded` になること。
   同じ 3 つの `# Errors` が `FieldLengthExceeded` に更新されていること。`ControlMessage::encode` の `FieldLengthExceeded` は変わらないこと。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- Object 側の入れ子 IMMUTABLE_PROPERTIES を decode で `MalformedTrack` に統一した。`src/object_properties.rs` に `KvpContext` (`Decode` / `Encode`) を導入し、`decode_kv_pairs` / `validate_immutable_inner` が文脈に応じて `MalformedTrack` と `ProtocolViolation` を返し分ける。`ObjectProperties::encode` は `ProtocolViolation` のまま据え置いた。これにより `ObjectProperties::decode_exact` 経由の `ObjectPropertyTracker::observe_object` と `prior_object_id_gap_of` も `MalformedTrack` を返す (decode_exact は `MalformedTrack` を畳まず透過する既存方針をそのまま使う)。`decode_kv_pairs` / `validate_immutable_inner` / `KvpContext` の doc に分類の根拠を書いた。
+- Track 側の入れ子 IMMUTABLE_PROPERTIES は `ProtocolViolation` のまま据え置いた。`decode_track_kv_pairs` の doc は既に §10.7 の malformed 条件が Object を主語にしていることを根拠付きで説明していたため変更していない。`src/error.rs` の `MessageError::MalformedTrack` doc に §10.7 の入れ子条件を追記した。
+- `Display` の二重接頭辞を解消した。`MessageError::MalformedTrack` の生成メッセージと、`src/stream/decoder.rs` の `validate_fetch_object` が返す `ProtocolViolation` から "malformed track: " 接頭辞を外した (`src/object_properties.rs` / `src/subgroup_tracker.rs` / `src/stream/decoder.rs` / `src/session/track_history.rs`)。`ObjectFieldMismatch` の reason と `SubgroupTracker::check_object_after_fin` が返す reason 文字列は `MessageError` ではないため対象外として接頭辞を残した。`MessageError::reason()` の戻り値からも接頭辞が消えたため、該当テストの期待値を更新した。
+- Properties の KVP 値長 65535 超の encode を `FieldLengthExceeded` に統一した (`ObjectProperties::encode` / `TrackProperties::encode` / `LocProperties::encode`)。3 箇所の `# Errors` も更新した。`ControlMessage::encode` のメッセージペイロード長 (MAX_CONTROL_MESSAGE_SIZE、§9.1.8) は別条件のため変更しておらず、既存の `encode_rejects_body_over_send_limit` が `FieldLengthExceeded` を固定している。
+- テスト:
+  - `tests/test_object_properties.rs`: `nested_immutable_properties_rejected_on_decode` の期待値を `MalformedTrack` に更新し、`tracker_observe_object_nested_immutable_is_malformed_track` と `encode_rejects_value_over_65535_as_field_length_exceeded` を追加した。
+  - `tests/test_video_decode_order.rs`: `prior_object_id_gap_of_nested_immutable_is_malformed_track` を追加した。
+  - `tests/test_error.rs`: `message_error_display_has_single_prefix` を追加し、`Display` の接頭辞が 1 つだけであることと `reason()` が接頭辞を含まないことを固定した。
+  - `tests/test_track_properties.rs` / `tests/test_loc.rs`: encode の値長超過の期待値を `FieldLengthExceeded` に更新した。
+  - `tests/test_session/` の該当する reason 期待値 (接頭辞付き) を接頭辞なしに更新した。
+- issue の完了条件にあった「encode の KVP 値長 65535 超が `ProtocolViolation`」は設計方針および他の完了条件 (`FieldLengthExceeded` に統一) と矛盾していたため、`FieldLengthExceeded` に修正した。
+- 検証: `cargo test -p shiguredo_moqt` (全テスト) / `cargo test -p tokio-moq --lib` (296 件) / `cargo test -p moq-sub --lib` (229 件) / `cargo clippy -p shiguredo_moqt --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通る。
