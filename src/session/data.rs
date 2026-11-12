@@ -8,8 +8,8 @@
 use crate::error::{
     MessageError, PUBLISH_DONE_UPDATE_FAILED, SESSION_INVALID_STREAM_HEADER,
     SESSION_MALFORMED_OBJECT, SESSION_PROTOCOL_VIOLATION, SESSION_ROLE_VIOLATION,
-    SESSION_TRUNCATED_OBJECT, SESSION_UNEXPECTED_MESSAGE, STREAM_CANCELLED, STREAM_INTERNAL_ERROR,
-    STREAM_MALFORMED_TRACK, is_local_error_code,
+    SESSION_TRUNCATED_OBJECT, SESSION_UNEXPECTED_MESSAGE, STREAM_CANCELLED,
+    STREAM_DELIVERY_TIMEOUT, STREAM_INTERNAL_ERROR, STREAM_MALFORMED_TRACK, is_local_error_code,
 };
 use crate::message::{
     ControlMessage, PublishDone, ReasonPhrase, common::Location, common::TrackNamespace,
@@ -278,6 +278,23 @@ pub(super) struct OutgoingDataStream {
     /// DEFAULT_PRIORITY bit が立っている場合は Track Property → 既定値 128 の順で解決した値。
     /// §3.3.2 (Range Filters) の PRIORITY_FILTER 評価に使う。
     pub(super) publisher_priority: u8,
+    /// tick の OBJECT_DELIVERY_TIMEOUT で既に reset したか
+    ///
+    /// draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability): tick が
+    /// DELIVERY_TIMEOUT で stream を reset した後も追跡 (`ResetTracking::Retained`) は残るため、
+    /// その後の再送は transport に渡してはならない。tick 側で timing エントリを除去する
+    /// 代わりにこのフラグを立て、`send_subgroup_object` が
+    /// `SendRequestError::LocalSubgroupTimeout` を返す判定に使う (重複した
+    /// `ResetDataStream` は発行しない)。
+    pub(super) delivery_timeout_reset: bool,
+    /// 先頭 Object を一度送信したか
+    ///
+    /// draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability): per-subgroup の
+    /// Object Property override は「subgroup の先頭 Object」に限られる。FirstObjectId モードは
+    /// `subgroup_id` の解決を初回送信時に伴うため `subgroup_id` の有無で判定できるが、
+    /// Explicit / Zero モードでは stream を開いた時点で `subgroup_id` が確定するため、この
+    /// フラグで先頭 Object を判定する。
+    pub(super) first_object_sent: bool,
 }
 
 /// 候補評価に渡すフィルタ入力
@@ -490,6 +507,10 @@ impl Session {
                 group_id: header.group_id,
                 subgroup_id,
                 publisher_priority,
+                // 先頭 Object はまだ送信していない (§5.2 の override 判定に使う)
+                first_object_sent: false,
+                // まだ DELIVERY_TIMEOUT で reset していない
+                delivery_timeout_reset: false,
             },
         );
         Ok(())
@@ -626,6 +647,133 @@ impl Session {
             };
             stream.subgroup_id = Some(object_id);
         }
+        // draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability): 先頭 Object の
+        // Object Property override を (group_id, subgroup_id) 単位で登録し、送信直前の
+        // OBJECT_DELIVERY_TIMEOUT 検査にも反映する。FirstObjectId モードは `subgroup_id` の
+        // 解決を初回送信時に伴うため、解決後の値で先頭判定と登録を行う。
+        let Some(resolved_subgroup_id) = self
+            .data_streams
+            .outgoing
+            .get(&stream_id)
+            .and_then(|stream| stream.subgroup_id)
+        else {
+            return Err(SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "outgoing subgroup object without a resolved subgroup id",
+            )
+            .into());
+        };
+        // tick の OBJECT_DELIVERY_TIMEOUT で既に reset した stream への再送は transport に
+        // 渡さない (§5.2)。重複した `ResetDataStream` は発行しない。
+        if self
+            .data_streams
+            .outgoing
+            .get(&stream_id)
+            .is_some_and(|stream| stream.delivery_timeout_reset)
+        {
+            return Err(SendRequestError::LocalSubgroupTimeout);
+        }
+        let is_first_object = self
+            .data_streams
+            .outgoing
+            .get(&stream_id)
+            .is_some_and(|stream| !stream.first_object_sent);
+        // 先頭 Object の properties から override を取り出す。decode に失敗した場合は
+        // override を登録しない (不正な Properties 自体の拒否は `SubgroupObject::encode` の
+        // 検証に委ねる)。timeout を 1 つも含まない場合も登録しない。
+        let first_object_override: Option<(Option<u64>, Option<u64>)> = if is_first_object {
+            decode_object_properties(properties_bytes)
+                .ok()
+                .flatten()
+                .and_then(|properties| {
+                    let subgroup_timeout = properties.subgroup_delivery_timeout();
+                    let object_timeout = properties.object_delivery_timeout();
+                    (subgroup_timeout.is_some() || object_timeout.is_some())
+                        .then_some((subgroup_timeout, object_timeout))
+                })
+        } else {
+            None
+        };
+        // 検査に使う publisher 値は「先頭 Object の override (これから登録する値) があればそれ、
+        // なければ既に登録済みの override、それも無ければ Track Property」である (§5.2)。
+        let (publisher_object_ms, publisher_subgroup_ms) = {
+            let subscription = self.subscriptions.get(&request_id).ok_or_else(|| {
+                SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "subscription not found for outgoing subgroup object",
+                )
+            })?;
+            let stored = subscription
+                .delivery_timeouts
+                .subgroup_overrides
+                .get(&(group_id, resolved_subgroup_id))
+                .copied();
+            let (subgroup_override, object_override) = match first_object_override {
+                Some((subgroup_timeout, object_timeout)) => (subgroup_timeout, object_timeout),
+                None => stored.unwrap_or((None, None)),
+            };
+            (
+                object_override.or(subscription.delivery_timeouts.publisher_object_ms),
+                subgroup_override.or(subscription.delivery_timeouts.publisher_subgroup_ms),
+            )
+        };
+        // 送信直前の OBJECT_DELIVERY_TIMEOUT 検査
+        // draft-ietf-moq-transport-23 §5.2: "The implementation SHOULD check object delivery
+        // timeouts before retransmitting object data if the underlying transport implementation
+        // allows." 再送では初回の提供完了時刻が既に記録されているため、経過時間が
+        // OBJECT_DELIVERY_TIMEOUT 以上なら transport に渡さず stream を DELIVERY_TIMEOUT で
+        // reset する (初回送信は呼び出し時刻を提供完了時刻の近似とするため経過 0 になる)。
+        let effective_object_ms = {
+            let subscription = self.subscriptions.get(&request_id).expect("checked above");
+            super::subscription::delivery::compute_effective_delivery_timeout_ms(
+                subscription.delivery_timeouts.subscriber_object_ms,
+                publisher_object_ms,
+            )
+        };
+        let _ = publisher_subgroup_ms;
+        if let Some(timeout_ms) = effective_object_ms
+            && let Some(header_complete_ms) = self
+                .timing
+                .object_delivery_header_complete_ms
+                .get(&(stream_id, object_id))
+                .copied()
+        {
+            let elapsed_ms = self.timing.last_tick_ms.unwrap_or(0).saturating_sub(
+                header_complete_ms.unwrap_or(self.timing.last_tick_ms.unwrap_or(0)),
+            );
+            if elapsed_ms >= timeout_ms {
+                // stream 追跡は保持する (I/O 層が reset 後に `send_data_stream_closed` で
+                // 終端通知できる契約を維持する)。重複 reset を避けるため timing エントリは除去する。
+                self.timing
+                    .object_delivery_header_complete_ms
+                    .retain(|&(sid, _), _| sid != stream_id);
+                self.timing.subgroup_delivery_fin_ms.remove(&stream_id);
+                // 以後の再送も拒否できるよう、reset 済みであることを stream に記録する
+                if let Some(stream) = self.data_streams.outgoing.get_mut(&stream_id) {
+                    stream.delivery_timeout_reset = true;
+                }
+                self.events.push_back(SessionEvent::ResetDataStream {
+                    stream_id,
+                    error_code: STREAM_DELIVERY_TIMEOUT,
+                    reliable_size: None,
+                    tracking: ResetTracking::Retained,
+                });
+                return Err(SendRequestError::LocalSubgroupTimeout);
+            }
+        }
+        // 検査を通った先頭 Object の override を登録する
+        if let Some((subgroup_timeout, object_timeout)) = first_object_override
+            && let Some(subscription) = self.subscriptions.get_mut(&request_id)
+        {
+            subscription.delivery_timeouts.subgroup_overrides.insert(
+                (group_id, resolved_subgroup_id),
+                (subgroup_timeout, object_timeout),
+            );
+        }
+        // 先頭 Object 送信済みフラグを更新する
+        if let Some(stream) = self.data_streams.outgoing.get_mut(&stream_id) {
+            stream.first_object_sent = true;
+        }
         // alias ではなく stream が保持する request_id を使う。alias は同一 Track の複数
         // subscription で共有されうる (draft §5.1) が、送信 stream は必ず 1 subscription に
         // 属するため、alias 索引を引くと共有時に別 subscription の状態を更新してしまう。
@@ -643,11 +791,14 @@ impl Session {
             if let Some((track_namespace, track_name)) = track {
                 if let Some(subscription) = self.subscriptions.get_mut(&request_id) {
                     subscription.record_largest_received_location(published_location);
-                    // delivery_timeouts.effective_object_ms が Some かつ未記録の場合のみ記録。
+                    // 検査に使った effective OBJECT_DELIVERY_TIMEOUT (override 反映済み) が
+                    // Some かつ未記録の場合のみ記録する。Track Property だけでは None でも
+                    // override により Some になる場合は記録する。
                     // last_tick_ms が None の場合は None で挿入し、最初の tick で確定する。
                     // draft-ietf-moq-transport-23 §5.2: object 単位で object header 提供完了時刻を保持する (MUST)。
                     // `send_subgroup_object` 呼び出し tick が last header byte 提供時刻の近似になる。
-                    if subscription.delivery_timeouts.effective_object_ms.is_some() {
+                    let _ = subscription;
+                    if effective_object_ms.is_some() {
                         self.timing
                             .object_delivery_header_complete_ms
                             .entry((stream_id, object_id))
@@ -882,16 +1033,33 @@ impl Session {
         // draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability): subgroup stream が
         // FIN で終了した場合、SUBGROUP_DELIVERY_TIMEOUT のタイマーを開始し、
         // 期限内に全てのデータがコミットされなければ DELIVERY_TIMEOUT でリセットする (MUST)
-        if matches!(end, RequestStreamEnd::Fin)
-            && let Some(subscription) = self.subscriptions.get(&request_id)
-            && subscription
-                .delivery_timeouts
-                .effective_subgroup_ms
-                .is_some()
-        {
-            self.timing
-                .subgroup_delivery_fin_ms
-                .insert(stream_id, (self.timing.last_tick_ms, request_id));
+        // per-subgroup の Object Property override を反映した effective 値で判定し、
+        // tick 時に再計算できるよう (group_id, subgroup_id) を保持する。
+        let fin_effective_subgroup_ms = match subgroup_id {
+            Some(subgroup_id) => {
+                self.subgroup_effective_delivery_timeout(request_id, group_id, subgroup_id)
+                    .0
+            }
+            // FirstObjectId 未解決 (Object を送っていない) subgroup は override も無い
+            None => self
+                .subscriptions
+                .get(&request_id)
+                .and_then(|subscription| subscription.delivery_timeouts.effective_subgroup_ms),
+        };
+        if matches!(end, RequestStreamEnd::Fin) && fin_effective_subgroup_ms.is_some() {
+            self.timing.subgroup_delivery_fin_ms.insert(
+                stream_id,
+                super::core::SubgroupFinTimer {
+                    fin_ms: self.timing.last_tick_ms,
+                    request_id,
+                    group_id,
+                    subgroup_id: subgroup_id.unwrap_or(0),
+                },
+            );
+        } else {
+            // FIN タイマーを開始しない場合と RESET 終端では override を保持しない
+            // (subgroup は終端しており以後の判定で参照しない)
+            self.remove_subgroup_override(request_id, group_id, subgroup_id);
         }
         if let Some(subgroup_id) = subgroup_id {
             match end {
@@ -4880,6 +5048,27 @@ impl Session {
                 stream.group_id,
                 subgroup_id,
             );
+        }
+    }
+
+    /// publisher 側 subscription の per-subgroup delivery timeout オーバーライドを削除する
+    ///
+    /// 送信側の override は (group_id, subgroup_id) 単位で subscription に保持する。
+    /// FIN タイマーを開始しない終端と RESET 終端で削除する。
+    pub(super) fn remove_subgroup_override(
+        &mut self,
+        request_id: u64,
+        group_id: u64,
+        subgroup_id: Option<u64>,
+    ) {
+        let Some(subgroup_id) = subgroup_id else {
+            return;
+        };
+        if let Some(subscription) = self.subscriptions.get_mut(&request_id) {
+            subscription
+                .delivery_timeouts
+                .subgroup_overrides
+                .remove(&(group_id, subgroup_id));
         }
     }
 

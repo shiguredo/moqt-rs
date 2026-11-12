@@ -57,12 +57,16 @@ const DEFAULT_SUBSCRIBER_PRIORITY: u8 = 128;
 ///
 /// draft-ietf-moq-transport-23 §3.3.3 (Combining Filters): "The publisher MUST forward only
 /// objects that pass all filters."。フィルタ不通過のオブジェクトはワイヤに出さずスキップする。
+/// 加えて、再送時の delivery timeout 超過 (draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts
+/// and Data Reliability) の SHOULD) もスキップに含める。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use = "Skip の場合はワイヤ送信を省略する必要がある"]
 pub enum ObjectFilterOutcome {
     /// フィルタを通過したため、ワイヤへ送信してよい
     Pass,
-    /// フィルタ不通過 (SendRequestError::LocalFilterMismatch)。ワイヤ送信をスキップする
+    /// 送信しない (SendRequestError::LocalFilterMismatch のフィルタ不通過、または
+    /// SendRequestError::LocalSubgroupTimeout の delivery timeout 超過)。
+    /// 呼び出し側はワイヤ送信をスキップして処理を続ける
     Skip,
 }
 
@@ -758,8 +762,11 @@ impl DataPlaneHandle {
 
     /// subgroup object を Session に通知し、フィルタ評価の結果を返す
     ///
-    /// `SendRequestError::LocalFilterMismatch` (フィルタ不通過) は `Skip` として返し、
-    /// 呼び出し側はワイヤ送信をスキップする。その他のエラーは伝播する。
+    /// `SendRequestError::LocalFilterMismatch` (フィルタ不通過) と
+    /// `SendRequestError::LocalSubgroupTimeout` (再送時の delivery timeout 超過) は `Skip`
+    /// として返し、呼び出し側はワイヤ送信をスキップして処理を続ける。timeout 超過時は
+    /// Session が `SessionEvent::ResetDataStream` (`STREAM_DELIVERY_TIMEOUT`) を発行しており、
+    /// I/O 層が当該 stream を reset する。その他のエラーは伝播する。
     pub fn send_subgroup_object(
         &self,
         stream_id: DataStreamId,
@@ -769,7 +776,9 @@ impl DataPlaneHandle {
         let mut session = lock_session(&self.session);
         match session.send_subgroup_object(stream_id, object_id, properties_bytes) {
             Ok(()) => Ok(ObjectFilterOutcome::Pass),
-            Err(SendRequestError::LocalFilterMismatch) => Ok(ObjectFilterOutcome::Skip),
+            Err(SendRequestError::LocalFilterMismatch | SendRequestError::LocalSubgroupTimeout) => {
+                Ok(ObjectFilterOutcome::Skip)
+            }
             Err(e) => Err(TransportError::Internal(format!(
                 "send_subgroup_object: {e}"
             ))),

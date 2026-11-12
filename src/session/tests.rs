@@ -2474,3 +2474,137 @@ fn request_termination_releases_pending_updates_and_credit() {
         "完了で RequestTerminated (PeerStreamFin) が発行されること"
     );
 }
+
+/// `send_subgroup_object` の送信直前チェックが期限超過の再送を拒否する
+///
+/// draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability): "The
+/// implementation SHOULD check object delivery timeouts before retransmitting object data if
+/// the underlying transport implementation allows." tick が先に検出する場合と異なり、tick を
+/// 挟まずに提供完了時刻だけが古い状態を作り、送信直前チェック単体の振る舞いを固定する
+/// (sans-I/O の時間は `last_tick_ms` で進むため、この状態は通常の API 呼び出しでは作れない)。
+#[test]
+fn send_subgroup_object_rejects_expired_resend_before_tick() {
+    use crate::error::STREAM_DELIVERY_TIMEOUT;
+    use crate::message::{ControlMessage, Setup};
+    use crate::message_parameter::MessageParameters;
+    use crate::parameter::SetupOptions;
+    use crate::session::types::{
+        DataStreamId, RequestStreamEnd, ResetTracking, SendRequestError, SessionEvent, SessionState,
+    };
+    use crate::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
+    use crate::track_properties::{
+        PROP_OBJECT_DELIVERY_TIMEOUT, TrackProperties, TrackProperty, TrackPropertyValue,
+    };
+
+    // Session を Established にし、publisher 役の subscription を Established にする
+    let mut publisher = Session::new_server(Transport::Quic, SetupOptions::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let mut subscriber = Session::new_client(Transport::Quic, SetupOptions::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    publisher
+        .recv_control(ControlMessage::Setup(Setup {
+            options: SetupOptions::new(),
+        }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    subscriber
+        .recv_control(ControlMessage::Setup(Setup {
+            options: SetupOptions::new(),
+        }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(publisher.state(), SessionState::Established);
+
+    // client から SUBSCRIBE を送り、server が SUBSCRIBE_OK で確立する
+    let rid = subscriber
+        .send_subscribe(
+            TrackNamespace::new(vec![b"live".to_vec()])
+                .expect("テストフィクスチャの前提条件を満たす"),
+            b"cam".to_vec(),
+            MessageParameters::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let subscribe = {
+        let mut found = None;
+        while let Some(e) = subscriber.poll_event() {
+            if let SessionEvent::SendRequest { message, .. } = e {
+                found = Some(message);
+                break;
+            }
+        }
+        found.expect("SendRequest が発行されること")
+    };
+    publisher
+        .recv_request(subscribe)
+        .expect("SUBSCRIBE を受理できること");
+    let mut track_properties = TrackProperties::new();
+    track_properties.push(TrackProperty {
+        prop_type: PROP_OBJECT_DELIVERY_TIMEOUT,
+        value: TrackPropertyValue::VarInt(100),
+    });
+    publisher
+        .send_subscribe_ok(rid, 1, MessageParameters::new(), track_properties)
+        .expect("SUBSCRIBE_OK を送信できること");
+    while publisher.poll_event().is_some() {}
+
+    // 時間を進めてから subgroup stream を開き、先頭 Object を送る
+    publisher.tick(1_000);
+    let stream_id = DataStreamId(10);
+    publisher
+        .send_subgroup_header(
+            stream_id,
+            rid,
+            &SubgroupHeader {
+                track_alias: 1,
+                group_id: 1,
+                subgroup_id: SubgroupIdMode::Explicit(0),
+                publisher_priority: Some(128),
+                has_properties: false,
+                end_of_group: false,
+                first_object: false,
+            },
+        )
+        .expect("SUBGROUP_HEADER を送信できること");
+    publisher
+        .send_subgroup_object(stream_id, 0, None)
+        .expect("初回送信は成功すること");
+    while publisher.poll_event().is_some() {}
+
+    // tick を挟まずに「提供完了時刻だけが古い」状態を作る
+    publisher.tick(1_100);
+    publisher
+        .timing
+        .object_delivery_header_complete_ms
+        .insert((stream_id, 0), Some(1_000));
+    // tick を戻して経過時間だけを大きくする (送信直前チェック単体を検証するため)
+    publisher.timing.last_tick_ms = Some(1_100);
+
+    let err = publisher
+        .send_subgroup_object(stream_id, 0, None)
+        .expect_err("期限超過の再送は拒否されること");
+    assert_eq!(err, SendRequestError::LocalSubgroupTimeout);
+    let mut resets = Vec::new();
+    while let Some(e) = publisher.poll_event() {
+        if let SessionEvent::ResetDataStream {
+            stream_id: sid,
+            error_code,
+            reliable_size,
+            tracking,
+        } = e
+        {
+            resets.push((sid, error_code, reliable_size, tracking));
+        }
+    }
+    assert_eq!(
+        resets,
+        vec![(
+            stream_id,
+            STREAM_DELIVERY_TIMEOUT,
+            None,
+            ResetTracking::Retained
+        )],
+        "送信直前に DELIVERY_TIMEOUT で reset し、追跡は保持されること"
+    );
+    // 追跡が保持されているため、I/O 層の終端通知を受理できる
+    publisher
+        .send_data_stream_closed(stream_id, RequestStreamEnd::Fin)
+        .expect("reset 後の終端通知は受理されること");
+}

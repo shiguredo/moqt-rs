@@ -261,6 +261,9 @@ impl SubgroupWriter {
     /// (draft-ietf-moq-transport-23 §3.3.3 (Combining Filters): "The publisher MUST forward
     /// only objects that pass all filters.")。フィルタ不通過
     /// (`SendRequestError::LocalFilterMismatch`) のオブジェクトはワイヤに出さず `Skip` を返す。
+    /// 再送時の delivery timeout 超過 (`SendRequestError::LocalSubgroupTimeout`、draft §5.2
+    /// (Delivery Timeouts and Data Reliability)) も同じく `Skip` として扱い、Session が
+    /// 発行する `SessionEvent::ResetDataStream` に従って stream を閉じる。
     /// オブジェクト ID だけ進める (ID ギャップは draft §11.3.1 (Subgroup Header) の
     /// "A consumer cannot infer information about the existence of Objects between the current
     /// and previous Object ID in the Subgroup" により許容される。なおフィルタ由来の

@@ -369,6 +369,24 @@ pub(super) struct GoawayState {
     pub(super) request_stream_deadlines: HashMap<u64, super::types::DeadlineTimer>,
 }
 
+/// SUBGROUP_DELIVERY_TIMEOUT の FIN タイマー保持値
+///
+/// draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability): FIN 時点の
+/// 購読者値と Track Property だけでは足りず、per-subgroup の Object Property override を
+/// tick 時に再計算する必要がある。stream は FIN で `data_streams.outgoing` から除去される
+/// ため、override のキーになる (group_id, subgroup_id) をタイマー側で保持する。
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SubgroupFinTimer {
+    /// FIN 検出時刻 (ms)。`None` は tick 未到達で未確定であることを示す
+    pub(super) fin_ms: Option<u64>,
+    /// 対象 stream が属する subscription の request id
+    pub(super) request_id: u64,
+    /// 対象 subgroup の Group ID
+    pub(super) group_id: u64,
+    /// 対象 subgroup の Subgroup ID
+    pub(super) subgroup_id: u64,
+}
+
 #[derive(Debug)]
 pub(super) struct TimingState {
     pub(super) last_tick_ms: Option<u64>,
@@ -383,8 +401,13 @@ pub(super) struct TimingState {
     /// by the original publisher application."
     /// Sans I/O 制約下では `send_subgroup_object` 呼び出し tick を object header 提供完了の近似とする。
     pub(super) object_delivery_header_complete_ms: HashMap<(DataStreamId, u64), Option<u64>>,
-    /// SUBGROUP_DELIVERY_TIMEOUT 追跡: stream_id → (FIN 受信時刻 (ms), request_id)
-    pub(super) subgroup_delivery_fin_ms: HashMap<DataStreamId, (Option<u64>, u64)>,
+    /// SUBGROUP_DELIVERY_TIMEOUT 追跡: stream_id → [`SubgroupFinTimer`]
+    ///
+    /// draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability): FIN 時点で
+    /// 知りうる値だけを保持し、tick 時に購読者値と override を再計算する。stream は FIN で
+    /// `data_streams.outgoing` から除去されるため、(group_id, subgroup_id) も保持しないと
+    /// Object Property override を引けない。
+    pub(super) subgroup_delivery_fin_ms: HashMap<DataStreamId, SubgroupFinTimer>,
     /// Datagram OBJECT_DELIVERY_TIMEOUT 追跡: (request_id, group_id, object_id) → object header 提供完了時刻 (ms)
     /// None は tick 未到達で未確定であることを示す。最初の tick で現在時刻に確定する。
     /// draft-ietf-moq-transport-23 §5.2: "For datagrams, the implementation MUST drop the datagrams

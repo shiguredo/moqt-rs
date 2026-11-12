@@ -765,9 +765,26 @@ impl Session {
             .iter()
             .filter_map(|(&(stream_id, _object_id), &header_complete_opt)| {
                 let stream = self.data_streams.outgoing.get(&stream_id)?;
-                let request_id = &stream.request_id;
-                let subscription = self.subscriptions.get(request_id)?;
-                let timeout_ms = subscription.delivery_timeouts.effective_object_ms?;
+                let request_id = stream.request_id;
+                // draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability):
+                // per-subgroup の Object Property override を反映した effective 値で判定する
+                // (stream の (group_id, subgroup_id) で override を引く)
+                let timeout_ms = match stream.subgroup_id {
+                    Some(subgroup_id) => {
+                        self.subgroup_effective_delivery_timeout(
+                            request_id,
+                            stream.group_id,
+                            subgroup_id,
+                        )
+                        .1?
+                    }
+                    None => {
+                        self.subscriptions
+                            .get(&request_id)?
+                            .delivery_timeouts
+                            .effective_object_ms?
+                    }
+                };
                 let header_complete_ms = header_complete_opt.unwrap_or(now_ms);
                 if now_ms.saturating_sub(header_complete_ms) >= timeout_ms {
                     Some(stream_id)
@@ -799,10 +816,9 @@ impl Session {
         // subgroup_delivery_fin_ms の未確定エントリを現在時刻で確定する
         // object_delivery_header_complete_ms と異なり stream は send_data_stream_closed で
         // 既に data_streams.outgoing から除去されているため、生存チェックは不要。
-        for (_stream_id, (fin_opt, _request_id)) in self.timing.subgroup_delivery_fin_ms.iter_mut()
-        {
-            if fin_opt.is_none() {
-                *fin_opt = Some(now_ms);
+        for timer in self.timing.subgroup_delivery_fin_ms.values_mut() {
+            if timer.fin_ms.is_none() {
+                timer.fin_ms = Some(now_ms);
             }
         }
         // 同一 stream_id の重複を排除する (複数 object が同時に timeout しうる)
@@ -814,6 +830,11 @@ impl Session {
                 .object_delivery_header_complete_ms
                 .retain(|&(sid, _), _| sid != stream_id);
             self.timing.subgroup_delivery_fin_ms.remove(&stream_id);
+            // 以後の再送を拒否できるよう、reset 済みであることを stream に記録する
+            // (追跡は `ResetTracking::Retained` のため残る)
+            if let Some(stream) = self.data_streams.outgoing.get_mut(&stream_id) {
+                stream.delivery_timeout_reset = true;
+            }
             self.events.push_back(SessionEvent::ResetDataStream {
                 stream_id,
                 error_code: STREAM_DELIVERY_TIMEOUT,
@@ -825,23 +846,38 @@ impl Session {
         // SUBGROUP_DELIVERY_TIMEOUT の判定
         // draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability): subgroup stream の FIN 受信から
         // SUBGROUP_DELIVERY_TIMEOUT を超過した場合、DELIVERY_TIMEOUT で stream を reset する (MUST)
-        let subgroup_timed_out: Vec<DataStreamId> = self
+        let subgroup_timed_out: Vec<(DataStreamId, u64, u64, u64)> = self
             .timing
             .subgroup_delivery_fin_ms
             .iter()
-            .filter_map(|(&stream_id, &(fin_opt, request_id))| {
-                let fin_ms = fin_opt?;
-                let subscription = self.subscriptions.get(&request_id)?;
-                let timeout_ms = subscription.delivery_timeouts.effective_subgroup_ms?;
+            .filter_map(|(&stream_id, timer)| {
+                let fin_ms = timer.fin_ms?;
+                // draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability):
+                // FIN 時点の値ではなく、tick 時点の購読者値と Object Property override から
+                // effective 値を再計算する
+                let timeout_ms = self
+                    .subgroup_effective_delivery_timeout(
+                        timer.request_id,
+                        timer.group_id,
+                        timer.subgroup_id,
+                    )
+                    .0?;
                 if now_ms.saturating_sub(fin_ms) >= timeout_ms {
-                    Some(stream_id)
+                    Some((
+                        stream_id,
+                        timer.request_id,
+                        timer.group_id,
+                        timer.subgroup_id,
+                    ))
                 } else {
                     None
                 }
             })
             .collect();
-        for stream_id in subgroup_timed_out {
+        for (stream_id, request_id, group_id, subgroup_id) in subgroup_timed_out {
             self.timing.subgroup_delivery_fin_ms.remove(&stream_id);
+            // FIN タイマーの発火で subgroup の役割を終えるため override を保持しない
+            self.remove_subgroup_override(request_id, group_id, Some(subgroup_id));
             self.events.push_back(SessionEvent::ResetDataStream {
                 stream_id,
                 error_code: STREAM_DELIVERY_TIMEOUT,

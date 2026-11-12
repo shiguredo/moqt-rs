@@ -131,6 +131,15 @@ pub enum SendRequestError {
     /// wire コードを持たない。公開 API に渡す必要はない (渡しても各レジストリの
     /// `*_INTERNAL_ERROR` に置換される)。
     LocalDatagramTimeout,
+    /// subgroup Object の再送が delivery timeout を超過したローカル drop (draft §5.2)。
+    ///
+    /// draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability): "the
+    /// implementation SHOULD check object delivery timeouts before retransmitting object data
+    /// if the underlying transport implementation allows." 超過時は Object を送信せず、
+    /// `SessionEvent::ResetDataStream` (`STREAM_DELIVERY_TIMEOUT`) を発行する。
+    /// wire コードを持たない。公開 API に渡す必要はない (渡しても各レジストリの
+    /// `*_INTERNAL_ERROR` に置換される)。
+    LocalSubgroupTimeout,
     /// セッション層由来のエラー (既存の `require_established()` 失敗等)。
     Session(SessionError),
 }
@@ -145,9 +154,10 @@ impl SendRequestError {
     /// 内部の `SessionError` を参照する (`PeerGoawayReceived` 等のローカルエラーの場合は `None`)
     pub fn as_session_error(&self) -> Option<&SessionError> {
         match self {
-            Self::PeerGoawayReceived | Self::LocalFilterMismatch | Self::LocalDatagramTimeout => {
-                None
-            }
+            Self::PeerGoawayReceived
+            | Self::LocalFilterMismatch
+            | Self::LocalDatagramTimeout
+            | Self::LocalSubgroupTimeout => None,
             Self::Session(e) => Some(e),
         }
     }
@@ -171,6 +181,12 @@ impl core::fmt::Display for SendRequestError {
             Self::LocalDatagramTimeout => {
                 write!(f, "datagram delivery timeout exceeded, dropping datagram")
             }
+            Self::LocalSubgroupTimeout => {
+                write!(
+                    f,
+                    "subgroup object delivery timeout exceeded, dropping object"
+                )
+            }
             Self::Session(e) => write!(f, "{e}"),
         }
     }
@@ -179,9 +195,10 @@ impl core::fmt::Display for SendRequestError {
 impl core::error::Error for SendRequestError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
-            Self::PeerGoawayReceived | Self::LocalFilterMismatch | Self::LocalDatagramTimeout => {
-                None
-            }
+            Self::PeerGoawayReceived
+            | Self::LocalFilterMismatch
+            | Self::LocalDatagramTimeout
+            | Self::LocalSubgroupTimeout => None,
             Self::Session(e) => Some(e),
         }
     }
