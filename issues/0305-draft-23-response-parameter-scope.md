@@ -1,8 +1,8 @@
 # 公開受信 API で応答・通知メッセージのパラメータスコープを検証する
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
-- Branch: feature/fix-response-parameter-scope
+- Completed: 2026-11-11
+- Branch: develop (CODEBASE.md の規約により develop に直接コミットする)
 - Polished: 2026-10-19
 - Refreshed: 2026-11-04
 
@@ -34,3 +34,14 @@ draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope) は "If a parameter appea
 - SUBSCRIBE_OK / PUBLISH_STATE_NOTIFY のそれぞれについて、許可外パラメータを含む手組みメッセージでセッションが `INVALID_PARAMETER` (0x305) で閉じること。ローカル終端済みの request へ遅延して届いた場合も、早期 return で素通りせず閉じること。
 - `src/session/core.rs` の `recv_stream_message` の doc が実態と一致すること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `src/session/subscription/recv.rs` の `handle_peer_subscribe_ok` の冒頭で `SUBSCRIBE_OK_ALLOWED_PARAMS` (EXPIRES / LARGEST_OBJECT) を、`handle_peer_publish_state_notify` の冒頭で `PUBLISH_STATE_NOTIFY_ALLOWED_PARAMS` (LARGEST_OBJECT / PAUSED / LOCATION_FILTER) を `MessageParameters::validate_scope` で検証するようにした。違反時は `self.fail` して draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope) の MUST に従い `INVALID_PARAMETER` (0x305) で閉じる。
+- 検証はどちらもローカル終端済みの早期 return より前に置いた。終端済み request へ遅延して届いた応答・通知でもスコープ違反を素通りさせない。
+- `src/session/core.rs` の `recv_stream_message` の doc に「引数は decode 済みメッセージであり、wire 経路の decode 層検証とは別に session 層でも §9.19.1 のスコープを検証する」旨を明記した。
+- テスト: `tests/test_session/parameter_rules.rs` に `response_parameter_scope` モジュールを追加した。
+  - `subscribe_ok_with_disallowed_parameter_closes_session`: 許可外の OBJECT_DELIVERY_TIMEOUT を含む手組み SUBSCRIBE_OK で `INVALID_PARAMETER` の `CloseSession` が 1 回だけ発行されること。
+  - `late_subscribe_ok_with_disallowed_parameter_closes_session`: `stop_sending` で Terminated にした後でも同じく閉じること (早期 return より前の検証)。
+  - `publish_state_notify_with_disallowed_parameter_closes_session`: Established subscription への許可外パラメータ付き PUBLISH_STATE_NOTIFY で同じく閉じること。
+- 検証: `cargo test -p shiguredo_moqt --test test_session` (1101 件) / `cargo clippy -p shiguredo_moqt --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通る。
