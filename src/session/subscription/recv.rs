@@ -11,9 +11,10 @@ use crate::error::{
     SESSION_UNEXPECTED_MESSAGE, STREAM_CANCELLED,
 };
 use crate::message::{
-    ErrorDetail, ErrorDetails, FETCH_UPDATE_ALLOWED_PARAMS, Publish, PublishDone,
-    PublishStateNotify, ReasonPhrase, RequestUpdate, SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe,
-    SubscribeOk, UnsupportedProperty,
+    ErrorDetail, ErrorDetails, FETCH_UPDATE_ALLOWED_PARAMS, PUBLISH_STATE_NOTIFY_ALLOWED_PARAMS,
+    Publish, PublishDone, PublishStateNotify, ReasonPhrase, RequestUpdate,
+    SUBSCRIBE_OK_ALLOWED_PARAMS, SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe, SubscribeOk,
+    UnsupportedProperty,
     common::{Location, TrackNamespace},
 };
 use crate::message_parameter::{
@@ -637,6 +638,25 @@ impl Session {
         request_id: u64,
         ok: SubscribeOk,
     ) -> Result<(), SessionError> {
+        // draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): "If a parameter appears in
+        // some other type of message, the receiving endpoint MUST close the session with
+        // INVALID_PARAMETER." SUBSCRIBE_OK が運べるのは EXPIRES と LARGEST_OBJECT である
+        // (§9.7 (SUBSCRIBE_OK))。`Session::recv_stream_message` は decode 済みメッセージを
+        // 受け取るため wire 経路の decode 層検証だけでは MUST を満たせず、session 層でも
+        // 検証する。ローカル終端済みの早期 return より前に置き、終端済み request へ遅延して
+        // 届いた応答でもスコープ違反は見逃さない。
+        if ok
+            .parameters
+            .validate_scope(SUBSCRIBE_OK_ALLOWED_PARAMS)
+            .is_err()
+        {
+            let err = SessionError::new(
+                SESSION_INVALID_PARAMETER,
+                "SUBSCRIBE_OK parameter not allowed in this context",
+            );
+            self.fail(err.clone());
+            return Err(err);
+        }
         let now_ms = self.timing.last_tick_ms;
         // ローカル終端済み (`rejected_request_ids` に記録済み) の request は送信方向を
         // reset 済みだが、peer が reset を観測する前に送った SUBSCRIBE_OK は正当に届く。
@@ -1358,6 +1378,24 @@ impl Session {
         request_id: u64,
         notify: PublishStateNotify,
     ) -> Result<(), SessionError> {
+        // draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): "If a parameter appears in
+        // some other type of message, the receiving endpoint MUST close the session with
+        // INVALID_PARAMETER." PUBLISH_STATE_NOTIFY が運べるのは LARGEST_OBJECT / PAUSED /
+        // LOCATION_FILTER である (§9.10 (PUBLISH_STATE_NOTIFY))。`recv_stream_message` は
+        // decode 済みメッセージを受け取るため、session 層でも検証する。ローカル終端済みの
+        // 早期 return より前に置き、終端済み request への遅延通知でもスコープ違反を見逃さない。
+        if notify
+            .parameters
+            .validate_scope(PUBLISH_STATE_NOTIFY_ALLOWED_PARAMS)
+            .is_err()
+        {
+            let err = SessionError::new(
+                SESSION_INVALID_PARAMETER,
+                "PUBLISH_STATE_NOTIFY parameter not allowed in this context",
+            );
+            self.fail(err.clone());
+            return Err(err);
+        }
         let Some(subscription) = self.subscriptions.get(&request_id) else {
             let err = SessionError::new(
                 SESSION_UNEXPECTED_MESSAGE,

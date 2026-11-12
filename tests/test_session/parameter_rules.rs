@@ -3894,3 +3894,131 @@ fn recv_request_update_fill_parameters_inner_scope_violation_closes_session() {
     assert_eq!(close_sessions, 1, "CloseSession が 1 回");
     assert_eq!(request_errors, 0, "REQUEST_ERROR を送らないこと");
 }
+
+/// 公開受信 API で応答・通知メッセージのパラメータスコープを検証する
+///
+/// draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): "If a parameter appears in some
+/// other type of message, the receiving endpoint MUST close the session with
+/// INVALID_PARAMETER." `recv_stream_message` は decode 済みメッセージを受け取るため、
+/// wire 経路の decode 層検証とは別に session 層でも MUST を満たす必要がある。
+mod response_parameter_scope {
+    use super::*;
+
+    /// 許可外パラメータを 1 つ持つパラメータ列を作る
+    ///
+    /// OBJECT_DELIVERY_TIMEOUT は SUBSCRIBE / PUBLISH / REQUEST_UPDATE 用であり、
+    /// SUBSCRIBE_OK / PUBLISH_STATE_NOTIFY では許可されない (§9.19.4)。
+    fn disallowed_parameters() -> MessageParameters {
+        use shiguredo_moqt::message_parameter::{
+            MessageParameter, MessageParameterValue, PARAM_OBJECT_DELIVERY_TIMEOUT,
+        };
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter {
+            param_type: PARAM_OBJECT_DELIVERY_TIMEOUT,
+            value: MessageParameterValue::VarInt(1000),
+        });
+        parameters
+    }
+
+    /// 手組み SUBSCRIBE_OK を recv_stream_message に渡して MUST close を検証する
+    fn assert_subscribe_ok_scope_violation(client: &mut Session, rid: u64, label: &str) {
+        use shiguredo_moqt::message::SubscribeOk;
+        let err = client
+            .recv_stream_message(
+                rid,
+                ControlMessage::SubscribeOk(SubscribeOk {
+                    track_alias: 1,
+                    parameters: disallowed_parameters(),
+                    track_properties: TrackProperties::new(),
+                }),
+            )
+            .expect_err(&format!("{label}: 許可外パラメータは拒否されること"));
+        assert_eq!(err.code, SESSION_INVALID_PARAMETER, "{label}");
+        assert_eq!(client.state(), SessionState::Closing, "{label}");
+        match drain_until_close(client) {
+            SessionEvent::CloseSession(err) => {
+                assert_eq!(err.code, SESSION_INVALID_PARAMETER, "{label}")
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// 許可外パラメータを含む手組み SUBSCRIBE_OK でセッションが INVALID_PARAMETER で閉じる
+    #[test]
+    fn subscribe_ok_with_disallowed_parameter_closes_session() {
+        let (mut client, mut server) = establish_pair();
+        let rid = client
+            .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, sub_msg) = take_send_request(&mut client);
+        server
+            .recv_request(sub_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+        assert_subscribe_ok_scope_violation(&mut client, rid, "SUBSCRIBE_OK + 許可外パラメータ");
+    }
+
+    /// ローカル終端済みの request へ遅延して届いた SUBSCRIBE_OK でも閉じる
+    ///
+    /// 終端済み request への応答は状態遷移せず吸収する経路だが、スコープ検証は
+    /// その早期 return より前に行うため、MUST close が素通りしない。
+    #[test]
+    fn late_subscribe_ok_with_disallowed_parameter_closes_session() {
+        let (mut client, mut server) = establish_pair();
+        let rid = client
+            .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, sub_msg) = take_send_request(&mut client);
+        server
+            .recv_request(sub_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+        // subscriber 側で cancel して Terminated にする
+        client
+            .stop_sending(rid)
+            .expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(
+            client
+                .subscription(rid)
+                .expect("テストフィクスチャの前提条件を満たす")
+                .state,
+            SubscriptionState::Terminated
+        );
+        assert_subscribe_ok_scope_violation(&mut client, rid, "終端済み SUBSCRIBE_OK");
+    }
+
+    /// 許可外パラメータを含む手組み PUBLISH_STATE_NOTIFY で INVALID_PARAMETER で閉じる
+    #[test]
+    fn publish_state_notify_with_disallowed_parameter_closes_session() {
+        use shiguredo_moqt::message::PublishStateNotify;
+        let (mut client, mut server) = establish_pair();
+        // subscriber (client) 側で subscription を Established にする
+        let rid = client
+            .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, sub_msg) = take_send_request(&mut client);
+        server
+            .recv_request(sub_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+        server
+            .send_subscribe_ok(rid, 1, MessageParameters::new(), TrackProperties::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, ok_msg) = take_send_on_stream(&mut server);
+        client
+            .recv_stream_message(rid, ok_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+
+        let err = client
+            .recv_stream_message(
+                rid,
+                ControlMessage::PublishStateNotify(PublishStateNotify {
+                    parameters: disallowed_parameters(),
+                }),
+            )
+            .expect_err("許可外パラメータは拒否されること");
+        assert_eq!(err.code, SESSION_INVALID_PARAMETER);
+        assert_eq!(client.state(), SessionState::Closing);
+        match drain_until_close(&mut client) {
+            SessionEvent::CloseSession(err) => assert_eq!(err.code, SESSION_INVALID_PARAMETER),
+            _ => unreachable!(),
+        }
+    }
+}

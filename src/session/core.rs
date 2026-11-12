@@ -1966,6 +1966,13 @@ impl Session {
     ///
     /// `request_id` は I/O 層が bidi stream に紐付けて記憶した値。
     ///
+    /// 引数は decode 済みの [`ControlMessage`] である。wire 経路では
+    /// `ControlMessage::decode` が各メッセージのパラメータスコープを検証するが、
+    /// decode 済みメッセージを直接受け取るこの API では decode 層を経ないため、
+    /// session 層の各ハンドラが同じスコープ検証を行う (draft-ietf-moq-transport-23
+    /// §9.19.1 (Parameter Scope) の MUST: 許可外のパラメータは INVALID_PARAMETER で
+    /// セッションを閉じる)。手組みのメッセージを渡しても MUST 違反が素通りしない。
+    ///
     /// REQUEST_UPDATE に含まれる AUTHORIZATION_TOKEN のうち、構造は正しいが内容が不正な
     /// もの (同一 (Token Type, Token Value) の重複) は、セッションを閉じずに REQUEST_ERROR
     /// (MALFORMED_AUTH_TOKEN) でメッセージ単位に拒否する (draft-ietf-moq-transport-23
