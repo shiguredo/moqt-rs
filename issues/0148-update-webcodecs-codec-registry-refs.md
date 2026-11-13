@@ -3,7 +3,7 @@
 - Created: 2026-09-23
 - Completed: {YYYY-MM-DD}
 - Branch: feature/update-webcodecs-codec-registry-refs
-- Polished: 2026-09-28
+- Polished: 2026-11-14
 - Updated: 2026-10-11
 
 ## 目的
@@ -12,7 +12,12 @@ MSF の codec 判定は draft-ietf-moq-msf-01 §5.2.18 (Codec) が LOC packaged 
 
 ## 現状
 
-`refs/` には moq / quic / h3 / webtrans / cbor のディレクトリに IETF draft と RFC のテキストが、`refs/` 直下にも個別の RFC (rfc8259.txt など) が保存されている。WEBCODECS-CODEC-REGISTRY のテキストは保存されておらず、`src/msf.rs` の `is_audio_codec` / `is_video_codec` のコメントには版 (`Registry Draft, 2026-02-12`) と節 (§3 / §4) を書くに留まる (`docs/msf.md` の該当記述も同じ)。コメントとドキュメントに版と節はあるがレジストリ本文が無いため、登録名の一致はリポジトリ内で検証できない。
+`refs/` には moq / quic / h3 / webtrans / cbor のディレクトリに IETF draft と RFC のテキストが、
+`refs/` 直下にも個別の RFC (rfc8259.txt など) が保存されている。WEBCODECS-CODEC-REGISTRY のテキストは
+保存されておらず、`src/msf.rs` の `is_audio_codec` / `is_video_codec` のコメントには版
+(`Registry Draft, 2026-02-12`) と節 (§3 / §4) を書くに留まる (`docs/msf.md` の該当記述も同じ)。
+コメントとドキュメントに版と節はあるがレジストリ本文が無いため、登録名の一致はリポジトリ内で
+検証できない。
 
 判定表が持つ登録名は次のとおり。
 
@@ -22,16 +27,18 @@ MSF の codec 判定は draft-ietf-moq-msf-01 §5.2.18 (Codec) が LOC packaged 
 ## 設計方針
 
 - W3C の Registry Draft (2026-02-12 版) のテキストを取得し、`refs/` 配下の新しいディレクトリ (`refs/webcodecs/`) に保存する
-  - draft-ietf-moq-msf-01 §5.2.18 の参照は "WebCodecs Codec Registry", September 2024 で、日付版を持たない living registry である。保存する版は `src/msf.rs` と `docs/msf.md` の版記述 (`Registry Draft, 2026-02-12`) に合わせる
+  - 取得元は `https://www.w3.org/TR/2026/DRY-webcodecs-codec-registry-20260212/` とする。`https://www.w3.org/TR/webcodecs-codec-registry/` は最新公開版 (2026-09-24 版) を指すため、版固定の URL を使う
+  - W3C のページは HTML で配布されるため、取得した HTML をそのまま `.txt` として保存する
+  - draft-ietf-moq-msf-01 §5.2.18 の参照は "WebCodecs Codec Registry", September 2024 で、URL は最新公開版を指す living registry であり、参照自体は版を固定していない。保存する版は `src/msf.rs` と `docs/msf.md` の版記述 (`Registry Draft, 2026-02-12`) に合わせる
   - 2026-09-28 時点の最新公開版は 2026-09-24 版であるが、§3 / §4 の登録表記は 2026-02-12 版と同一であることを確認済みである
 - ファイル名は他の refs (draft-{name}-{version}.txt / rfc{nnnn}.txt) に合わせ、版が分かる名前にする (例: `refs/webcodecs/webcodecs-codec-registry-20260212.txt`)
 - `src/msf.rs` の判定表コメントから保存先を辿れるようにする
 - 保存したテキストの登録名と現行の判定表が一致することを確認する
-- レジストリは §2 (Registration Entry Requirements) が "Existing entries cannot be deleted or deprecated." と定めるため、将来の更新時は追記差分だけを確認する運用にする
+- レジストリは §2 (Registration Entry Requirements) が "Existing entries cannot be deleted or deprecated." と定めるため、既存エントリの削除・非推奨は起きない。ただし同じ §2 は "They may be changed ..." と既存エントリの変更も認めており、codec string の拡張・common name の調整・登録仕様リンクの変更があり得るため、将来の更新時は追加だけでなく変更も含めた差分を確認する運用にする
 
 ## 完了条件
 
-- WEBCODECS-CODEC-REGISTRY のテキストが `refs/` 配下に保存されていること
+- `refs/webcodecs/` に 2026-02-12 版の WEBCODECS-CODEC-REGISTRY のテキストが保存されていること
 - `src/msf.rs` の判定表が保存したレジストリの登録名と一致することを確認し、解決方法に記録していること
 - 保存先と版が `src/msf.rs` の判定表コメントから辿れること
 - `make test` / `make clippy` / `make fmt` が通ること
