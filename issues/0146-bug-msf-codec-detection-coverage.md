@@ -3,14 +3,14 @@
 - Created: 2026-09-23
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-msf-codec-detection-coverage
-- Polished: 2026-10-08
-- Updated: 2026-10-11
+- Polished: 2026-11-14
+- Updated: 2026-11-14
 
 ## 目的
 
 draft-ietf-moq-msf-01 の §5.2.18 (Codec) は inherent codec を持つトラックに codec を、§5.2.22 (Maximum Bitrate) は audio / video トラックに bitrate を、§5.2.28 (Audio sample rate) / §5.2.29 (Channel configuration) は audio codec が指定されたトラックに samplerate / channelConfig を要求する。
 
-しかし現状の検証は WEBCODECS-CODEC-REGISTRY の登録名に一致する codec 文字列だけを種別判定に使い、`mimeType` を判定に使っていない。そのため登録外 codec と併せて、あるいは単独で `mimeType` が種別を示すトラックを素通りさせ、MUST 違反のカタログを encode / decode してしまう。`mimeType` を補助根拠に取り込んで判定し、MUST 違反を塞ぐ。
+しかし現状の codec の種別判定は WEBCODECS-CODEC-REGISTRY の登録名に一致する文字列だけを使い、`mimeType` を判定に使っていない。そのため登録外 codec と併せて、あるいは単独で `mimeType` が種別を示すトラックを素通りさせ、MUST 違反のカタログを encode / decode してしまう。`mimeType` を補助根拠に取り込んで判定し、MUST 違反を塞ぐ。
 
 ## 現状
 
@@ -23,7 +23,7 @@ draft-ietf-moq-msf-01 の §5.2.18 (Codec) は inherent codec を持つトラッ
 - `codec` が `ac-3` / `ec-3` / `alac` / `aac` / `mp4v` などレジストリ未登録の audio / video codec で、`mimeType` も `audio/` / `video/` と種別を示すトラック (role なし) が、bitrate / samplerate / channelConfig を欠く
 - `mimeType` が `video/mp4` / `audio/mp4` などで、`codec` を持たず bitrate などを欠くトラック (role なし)
 
-`pbt/tests/prop_msf.rs` のトラック生成器は codec を生成しないため、この穴は PBT でも検出されない。
+`pbt/tests/prop_msf.rs` のトラック生成器は codec を生成せず、timeline 以外では `mimeType` も生成しないため、この穴は PBT でも検出されない。
 
 一方、登録外 codec だけを手掛かりとするトラック (mimeType なし・role なし) は、実在 codec の表記と raw data トラックが任意に付けた文字列を区別できない。レジストリ登録の有無だけで判定する現行規則は `h264` / `vp9` / 短縮名などの実在 codec も判定外にしているが、無条件に audio / video とみなすと raw data トラックを誤って拒否する。どこまでを「inherent codec を持つ」とみなすかは設計判断であり、本 issue では mimeType を補助根拠にする。
 
@@ -54,5 +54,7 @@ draft-ietf-moq-msf-01 の §5.2.18 (Codec) は inherent codec を持つトラッ
 - 登録外 codec だけを持つ raw data トラック (mimeType なし) が codec に基づく要求を受けないテストが維持されていること
 - encode 経路 (`MsfCatalog` を手組みして `MsfCatalogDocument::encode`) でも同じ拒否になるテストが追加されていること
 - mimeType 由来の要求でもエラーメッセージに要求の根拠として `mimeType '<値>'` が含まれること (codec が欠如または登録外で、mimeType だけが種別の根拠になるトラックで固定する。codec 欠如時の `MUST specify codec` も mimeType を根拠として示す)
+- `mimeType` の種別判定が大文字小文字を区別しないこと (`Audio/MP4` や `VIDEO/MP4` でも audio / video として判定される) がテストで固定されていること
 - role と mimeType の判定が食い違う場合に両方の要求を満たす必要があるテストが追加されていること (例: role `video` + codec `av01` + mimeType `audio/mp4` で bitrate を与え、samplerate / channelConfig を欠けば mimeType 側の audio 要求で拒否され、両方を揃えれば受理される。role 側が mimeType 側の要求を包摂する向きでは mimeType の寄与を判別できないため使わない)
-- `docs/msf.md` の検証規則の記述が mimeType による判定と登録外 codec の扱いに追随していること- `make test` / `make clippy` / `make fmt` が通ること
+- `docs/msf.md` の検証規則の記述が mimeType による判定と登録外 codec の扱いに追随していること
+- `make test` / `make clippy` / `make fmt` が通ること
