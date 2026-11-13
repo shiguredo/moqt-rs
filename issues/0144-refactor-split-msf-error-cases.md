@@ -3,8 +3,8 @@
 - Created: 2026-09-23
 - Completed: {YYYY-MM-DD}
 - Branch: feature/refactor-split-msf-error-cases
-- Polished: 2026-09-27
-- Updated: 2026-10-10
+- Polished: 2026-11-14
+- Updated: 2026-11-14
 
 ## 目的
 
@@ -35,7 +35,7 @@ targetLatency / buffers の相互制約テーマへ、`event_timeline_missing_ev
 `media_timeline_missing_depends_rejected` / `media_timeline_wrong_mime_type_rejected` /
 `event_type_with_non_eventtimeline_rejected` / `eventtimeline_missing_depends_rejected` /
 `eventtimeline_wrong_mime_type_rejected` はカタログ基本構造と timeline の decode 検証テーマへ
-移動し、残った clone / add 系のテストだけが delta update 新構造テーマに残る。
+移動し、残った delta update の構造検証と clone / add 系のテストが delta update 新構造テーマに残る。
 
 codec / role に応じた必須フィールド節の末尾にある `parent_name_in_track_rejected` /
 `parent_namespace_in_track_rejected` は必須フィールドではなく通常トラックの禁止フィールド
