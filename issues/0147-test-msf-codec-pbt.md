@@ -3,8 +3,8 @@
 - Created: 2026-09-23
 - Completed: {YYYY-MM-DD}
 - Branch: feature/test-msf-codec-pbt
-- Polished: 2026-09-28
-- Updated: 2026-10-11
+- Polished: 2026-11-14
+- Updated: 2026-11-14
 
 ## 目的
 
@@ -27,6 +27,7 @@ MSF のカタログ検証は codec 文字列と role から audio / video を判
 
 - codec はレジストリの登録名 (完全一致形 / `名前.` 付き形 / `名前-` 付き形 (`pcm-`) / 未登録形) と `None` を混ぜて生成する
 - codec が audio と判定される場合は samplerate / channelConfig / bitrate を、video と判定される場合は bitrate を必ず生成する
+- role を設定したトラックは、codec が未登録形でも role に応じた必須フィールド (video なら bitrate、audio なら bitrate / samplerate / channelConfig) を生成する (`src/msf.rs` の `validate_media_track_fields` は `role_audio` / `role_video` を codec 判定と OR で重ねるため)
 - role は draft-ietf-moq-msf-01 §5.2.6 (Track role) の予約 role のうち audio / video の判定に関わるもの (`video` / `signlanguage` / `audio` / `audiodescription`。Table 4 の予約 role はこの 4 つ以外にもある) と `None` を混ぜる
 - role を設定したトラックには codec も必ず生成する (`src/msf.rs` の `validate_media_track_fields` は role 由来の要求でも codec の存在を必須とするため。role と codec は独立に混ぜず、生成時に組み合わせを決めてから必須フィールドを決める)
 - role と codec が食い違う組み合わせも生成し、両方の要求 (video なら codec / bitrate、audio なら codec / bitrate / samplerate / channelConfig) を満たす値を生成する
