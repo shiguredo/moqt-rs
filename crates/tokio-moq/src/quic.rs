@@ -74,7 +74,9 @@ use ngtcp2 as backend;
 pub use backend::{Connected, Connection, RecvStream, SendStream, StreamAcceptor};
 pub(crate) use backend::{close_application, connect};
 
-#[cfg(test)]
+// `peer_harness` の `TestPeerServer` が使う。`test-support` feature で harness を
+// 他クレートへ公開するビルドでは `cfg(test)` が立たないため、feature でも有効にする。
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use backend::{Server, start_server};
 
 /// peer から受信した STOP_SENDING の観測結果
@@ -245,7 +247,10 @@ pub(crate) fn is_connection_closed(error: &QuicError) -> bool {
 ///
 /// バックエンドによって TLS 実装が異なる (rustls / BoringSSL) ため、DER と PEM の
 /// 両方を渡す。各バックエンドは必要な方だけを使う。
-#[cfg(test)]
+///
+/// `peer_harness` の `TestPeerServer` が使う。`test-support` feature では `cfg(test)` が
+/// 立たないため、feature でも有効にする。
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct ServerTls {
     /// サーバー証明書 (DER)
     pub(crate) cert_der: Vec<u8>,

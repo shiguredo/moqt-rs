@@ -154,8 +154,11 @@ pub mod webtransport_h3;
 pub(crate) mod tls;
 
 // in-process の MOQT peer 試験基盤 (テスト専用)
-#[cfg(test)]
-mod peer_harness;
+//
+// この crate 自身のテストに加え、`test-support` feature を有効にした他クレートの
+// `#[cfg(test)] mod tests` からも参照する。
+#[cfg(any(test, feature = "test-support"))]
+pub mod peer_harness;
 
 // 型はサブモジュールパス (`error::...` / `transport::...` / `webtransport_h3::...` / `quic::...`) 経由で
 // 参照する。最上位再エクスポートは設けない。

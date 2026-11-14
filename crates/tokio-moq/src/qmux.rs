@@ -87,7 +87,10 @@ impl QmuxHandle {
     ///
     /// 自側の close、ピアの CONNECTION_CLOSE、下位トランスポートの終了のいずれでも解決する。
     /// close の後にドライバと受理タスクが終了したことを確かめるために使う。
-    #[cfg(test)]
+    ///
+    /// `peer_harness` の `TestPeer::wait_qmux_closed` が使う。`test-support` feature では
+    /// `cfg(test)` が立たないため、feature でも有効にする。
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn closed(&self) -> shiguredo_qmux::event::CloseReason {
         self.connection.closed().await
     }
@@ -224,7 +227,10 @@ pub(crate) fn split_connection(
 ///
 /// テストの peer は client と同じ設定を使う。ストリーム ID の parity は `Role` で決まるため、
 /// server 役は [`Role::Server`] を渡す。設定を共有するためここに置く。
-#[cfg(test)]
+///
+/// `peer_harness` の `QmuxTestPeerServer` が使う。`test-support` feature では `cfg(test)` が
+/// 立たないため、feature でも有効にする。
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn build_server_connection<T>(
     io: T,
 ) -> shiguredo_tokio_qmux::Result<Arc<shiguredo_tokio_qmux::Connection>>
@@ -487,6 +493,7 @@ mod tests {
     use shiguredo_moqt::error::STREAM_CANCELLED;
     use shiguredo_moqt::message::ControlMessage;
     use shiguredo_moqt::message::common::TrackNamespace;
+    use shiguredo_moqt::message_parameter::MessageParameters;
     use shiguredo_moqt::session::types::SessionState;
     use shiguredo_moqt::track_properties::TrackProperties;
 
@@ -692,9 +699,14 @@ mod tests {
             ControlMessage::Subscribe(subscribe) => subscribe.request_id,
             other => panic!("SUBSCRIBE として受理されること: {other:?}"),
         };
-        peer.send_subscribe_ok(subscribe_request_id, 11)
-            .await
-            .expect("SUBSCRIBE_OK を返せること");
+        peer.send_subscribe_ok(
+            subscribe_request_id,
+            11,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .await
+        .expect("SUBSCRIBE_OK を返せること");
 
         let (published, subscribed) = client_task
             .await

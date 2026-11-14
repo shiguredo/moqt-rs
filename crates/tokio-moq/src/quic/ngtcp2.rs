@@ -13,14 +13,14 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use base64ct::{Base64, Encoding};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use ngtcp2::ServerConfig;
 use ngtcp2::{
     AcceptedConnection, Client, ClientConfig, ClientConnection, ConnectionErrorKind,
@@ -29,7 +29,7 @@ use ngtcp2::{
 use shiguredo_ngtcp2_tokio as ngtcp2;
 use tokio::sync::{mpsc, oneshot};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use super::ServerTls;
 use super::{ALPN, CloseReason, QuicError, StopSendingObserved, StopSendingReceiver};
 use crate::error::{Result, TransportError};
@@ -411,7 +411,10 @@ enum Inner {
     /// クライアント接続
     Client(ClientConnection),
     /// サーバーが受理した接続 (テスト専用の QUIC サーバーだけが作る)
-    #[cfg_attr(not(test), expect(dead_code))]
+    ///
+    /// `test-support` feature で `peer_harness` を他クレートへ公開するビルドでも
+    /// `Server::accept` が使うため、そのビルドでは dead_code にならない。
+    #[cfg_attr(not(any(test, feature = "test-support")), expect(dead_code))]
     Server(AcceptedConnection),
 }
 
@@ -1060,7 +1063,7 @@ pub(crate) async fn connect(
 }
 
 /// テスト用の QUIC サーバー
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct Server {
     /// ngtcp2 のサーバー
     inner: ngtcp2::Server,
@@ -1070,7 +1073,7 @@ pub struct Server {
     key_path: std::path::PathBuf,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Server {
     /// 待ち受けているアドレスを返す
     pub(crate) fn local_addr(&self) -> SocketAddr {
@@ -1087,7 +1090,7 @@ impl Server {
                 TransportError::Quic(format!("server failed to accept a connection: {e}"))
             })?
             .ok_or_else(|| TransportError::Quic("server stopped before connection".into()))?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let remote_addr = connection.remote_addr();
         let (tx, rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
         let (stop_tx, _stop_rx) = mpsc::unbounded_channel();
@@ -1107,7 +1110,7 @@ impl Server {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for Server {
     fn drop(&mut self) {
         // 一時ファイルを残さない
@@ -1117,7 +1120,7 @@ impl Drop for Server {
 }
 
 /// テスト用の QUIC サーバーを起動する
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn start_server(tls: ServerTls, bind_addr: SocketAddr) -> Result<Server> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1155,7 +1158,7 @@ pub(crate) async fn start_server(tls: ServerTls, bind_addr: SocketAddr) -> Resul
 }
 
 /// DER を PEM 形式へ変換する
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn der_to_pem(label: &str, der: &[u8]) -> String {
     let encoded = Base64::encode_string(der);
     let mut pem = String::with_capacity(encoded.len() + 64);

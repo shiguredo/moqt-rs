@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use s2n_quic::Client;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use s2n_quic::Server as S2nServer;
 use s2n_quic::client::Connect;
 use s2n_quic::provider::event::events::{Frame, FrameReceived};
@@ -14,7 +14,7 @@ use s2n_quic::provider::tls::rustls as s2n_rustls;
 use tokio::sync::{Mutex, mpsc};
 
 use super::CloseReason;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use super::ServerTls;
 use super::{ALPN, QuicError, StopSendingObserved, StopSendingReceiver};
 use crate::error::{Result, TransportError};
@@ -131,14 +131,14 @@ impl s2n_quic::provider::event::Subscriber for ConnectionObserver {
 /// `std::sync::Mutex` で保護する。購読者は s2n-quic の駆動スレッドから同期で呼ばれ、
 /// `tokio::sync::Mutex` を await できないため、ロックを保持する区間を「Vec へ 1 件
 /// push する」だけに限って使う。
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Default)]
 struct CloseCodeRecorder {
     /// 観測した終了コード
     codes: Arc<StdMutex<Vec<u64>>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl s2n_quic::provider::event::Subscriber for CloseCodeRecorder {
     type ConnectionContext = ();
 
@@ -538,7 +538,7 @@ fn spawn_packet_diagnostics(counters: &PacketCounters) {
 }
 
 /// テスト用の QUIC サーバー
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct Server {
     /// s2n-quic のサーバー
     inner: S2nServer,
@@ -546,7 +546,7 @@ pub(crate) struct Server {
     close_codes: Arc<StdMutex<Vec<u64>>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Server {
     /// 待ち受けているアドレスを返す
     pub(crate) fn local_addr(&self) -> SocketAddr {
@@ -580,7 +580,7 @@ impl Default for PacketCounters {
 }
 
 /// テスト用の QUIC サーバーを起動する
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn start_server(tls: ServerTls, bind_addr: SocketAddr) -> Result<Server> {
     let server_tls = s2n_quic::provider::tls::rustls::Server::builder()
         .with_certificate(vec![tls.cert_der], tls.key_der)

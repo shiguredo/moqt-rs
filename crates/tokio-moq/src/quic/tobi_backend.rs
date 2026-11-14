@@ -4,11 +4,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tobi_quic::{Client, ClientTlsConfig, Connect, Connection as TobiConnection, IoConfig};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use tobi_quic::{Server as TobiServer, ServerTlsConfig};
 
 use super::CloseReason;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use super::ServerTls;
 use super::tobi;
 pub use super::tobi::RecvStream;
@@ -228,13 +228,13 @@ pub(crate) async fn connect(
 }
 
 /// テスト用の QUIC サーバー
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct Server {
     /// tobi-quic のサーバー
     inner: TobiServer,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Server {
     /// 待ち受けているアドレスを返す
     pub(crate) fn local_addr(&self) -> SocketAddr {
@@ -251,7 +251,7 @@ impl Server {
 }
 
 /// テスト用の QUIC サーバーを起動する
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn start_server(tls: ServerTls, bind_addr: SocketAddr) -> Result<Server> {
     let mut config = rustls::ServerConfig::builder()
         .with_no_client_auth()

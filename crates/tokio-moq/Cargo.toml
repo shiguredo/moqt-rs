@@ -39,6 +39,12 @@ tobi_quic = { git = "https://github.com/shiguredo/tobi-quic", branch = "main" }
 base64ct = "1.8"
 # バイト列操作
 bytes = "1.12"
+# テスト用 peer harness の自己署名証明書生成 (test-support feature で有効にする)
+#
+# peer_harness は `#[cfg(test)]` のビルドでは dev-dependencies の rcgen を使うが、
+# 他クレートが `test-support` feature 経由で harness を使うビルドでは dev-dependencies が
+# 解決されないため、同じ設定の任意依存を [dependencies] にも置く。
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs"], optional = true }
 # TLS バックエンド (QUIC と WebTransport over HTTP/2 の rustls で使う)
 rustls = "0.23"
 # QUIC 実装 (s2n-quic)。quic-s2n feature で有効にする
@@ -68,3 +74,8 @@ default = ["quic-s2n"]
 quic-ngtcp2 = ["dep:shiguredo_ngtcp2_tokio"]
 quic-s2n = ["dep:s2n-quic"]
 quic-tobi = []
+# in-process の peer harness (`peer_harness`) を他クレートへ公開する。
+#
+# `crates/moq-pub` / `crates/moq-sub` の `#[cfg(test)] mod tests` から参照するために使う。
+# 既定 off であり、本 crate は publish = false のため、テスト専用モジュールの公開例外とする。
+test-support = ["dep:rcgen"]
