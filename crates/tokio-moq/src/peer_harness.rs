@@ -1055,6 +1055,50 @@ mod tests {
     /// アプリが終端済み subscription の cleanup 状態を [`MoqtClient::subscription_cleanup_ready`]
     /// で問うた後、Session が回収済み (`Session::forget_subscription` 済み) の request id と
     /// 存在しない request id のどちらも `None` になる受け取り方を固定する。
+    /// 受理待ちをキャンセルしても、その後に届いた uni stream を失わないこと
+    ///
+    /// example の main loop は `tokio::select!` で受理待ちの future を頻繁に破棄する。
+    /// バックエンドの受理待ちがキャンセル安全でないと、キャンセル直後に到着した stream が
+    /// 失われ、次の accept が返らない。キャンセル → 到着 → 再 accept の順で固定する。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelled_uni_stream_accept_does_not_lose_the_stream() {
+        run_with_timeout(async {
+            let (mut peer, _client, mut acceptor) = connect_pair_with_acceptor().await;
+
+            // ドライバへ受理待ちを登録させたうえで future を破棄する。この時点では
+            // stream が無いため、accept は時間切れになる
+            let cancelled =
+                tokio::time::timeout(Duration::from_millis(100), acceptor.accept_recv_stream())
+                    .await;
+            assert!(
+                cancelled.is_err(),
+                "stream が無い間は accept が時間切れになること"
+            );
+
+            // キャンセル後に peer が uni stream を開く
+            let mut send = peer
+                .open_uni_send_stream()
+                .await
+                .expect("uni stream を開けること");
+            send.send(Bytes::from_static(b"cancelled-accept"))
+                .await
+                .expect("stream にデータを書けること");
+            send.finish().await.expect("stream を FIN で閉じられること");
+
+            // キャンセル後に到着した stream を次の accept で取得できる
+            let received =
+                tokio::time::timeout(Duration::from_secs(5), acceptor.accept_recv_stream())
+                    .await
+                    .expect("キャンセル後に届いた uni stream を受理できること")
+                    .expect("accept がエラーにならないこと");
+            assert!(
+                received.is_some(),
+                "キャンセル後に届いた uni stream が失われないこと"
+            );
+        })
+        .await;
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn subscription_cleanup_ready_returns_none_for_unknown_request() {
         run_with_timeout(async {

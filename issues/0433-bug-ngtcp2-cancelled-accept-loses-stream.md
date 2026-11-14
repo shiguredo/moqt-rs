@@ -1,6 +1,7 @@
 # ngtcp2 バックエンドで accept 待ちがキャンセルされると受理済みの stream が失われる
 
 - Created: 2026-11-14
+- Completed: 2026-11-14
 - Branch: develop (CODEBASE.md の規約により develop に直接コミットする)
 
 ## 目的
@@ -60,3 +61,23 @@
 - `cargo test -p moq-sub --lib --no-default-features --features quic-ngtcp2` が通ること。
 - `cargo clippy -p tokio-moq -p moq-sub --all-targets -- -D warnings` と
   `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `crates/tokio-moq/src/quic/ngtcp2.rs` のストリーム到着処理で、待ち手へ渡せなかった stream を次の
+  待ち手へ渡し、待ち手が尽きたらキューへ積むようにした。cancel 済みの receiver は待ち手のキューに
+  残るため、1 回の送信失敗で諦めずループして次の待ち手へ渡す。
+- `Command::AcceptUni` / `AcceptBidi` でキューから取り出した stream を送れなかった場合は、
+  キューの先頭へ戻す。到着済み stream の順序を保つため `push_front` を使う。
+- `send(Ok(..))` の失敗は `Err(Ok(stream))` の形でしか起きないため、`Err(Err(_))` は到達しない
+  分岐として網羅し、防御であることをコメントに残した。
+- `crates/tokio-moq/src/peer_harness.rs` に回帰テスト
+  `cancelled_uni_stream_accept_does_not_lose_the_stream` を追加した。受理待ちを
+  `tokio::time::timeout` で破棄した後に peer が uni stream を開き、次の accept で取得できることを
+  確認する。
+- 変異確認: 修正を戻した状態で、この回帰テストが `quic-ngtcp2` ビルドで
+  「キャンセル後に届いた uni stream を受理できること: Elapsed(())」で失敗することを確認した。
+  修正を戻した状態でも既定の `quic-s2n` ビルドでは成功するため、`quic-ngtcp2` ビルドでの確認が必要である。
+- 検証: `cargo test -p tokio-moq --lib` / `cargo test -p tokio-moq --lib --no-default-features --features quic-ngtcp2` /
+  `cargo clippy -p tokio-moq --all-targets -- -D warnings` / `cargo clippy -p tokio-moq --all-targets --features test-support -- -D warnings` /
+  `cargo fmt --all -- --check` が通ることを確認した。

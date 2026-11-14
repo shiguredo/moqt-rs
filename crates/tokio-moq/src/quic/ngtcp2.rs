@@ -660,10 +660,23 @@ impl DriverState {
                     let result = self.bidi_stream(stream_id);
                     match result {
                         Ok(stream) => {
-                            if let Some(waiter) = self.bidi_waiters.pop_front() {
-                                let _ = waiter.send(Ok(stream));
-                            } else {
-                                self.bidi_queue.push_back(stream);
+                            // accept 待ちの future が timeout / select! でキャンセルされると
+                            // reply が閉じ、send は stream を返して失敗する。そのまま捨てると
+                            // 到着済みの stream が失われるため、次の待ち手へ渡し、待ち手が
+                            // 尽きたらキューへ積む (受理待ちのキャンセル安全性)。キャンセル
+                            // された待ち手は先頭に残るため、1 つ失敗しただけで諦めない。
+                            let mut stream = stream;
+                            loop {
+                                let Some(waiter) = self.bidi_waiters.pop_front() else {
+                                    self.bidi_queue.push_back(stream);
+                                    break;
+                                };
+                                match waiter.send(Ok(stream)) {
+                                    Ok(()) => break,
+                                    Err(Ok(next)) => stream = next,
+                                    // send(Ok(..)) が Err(Err(..)) を返すことはない (防御)
+                                    Err(Err(_)) => break,
+                                }
                             }
                         }
                         Err(e) => {
@@ -676,10 +689,20 @@ impl DriverState {
                     let result = self.recv_stream(stream_id);
                     match result {
                         Ok(stream) => {
-                            if let Some(waiter) = self.uni_waiters.pop_front() {
-                                let _ = waiter.send(Ok(stream));
-                            } else {
-                                self.uni_queue.push_back(stream);
+                            // bidi と同じ理由で、キャンセルされた待ち手への送信に失敗した
+                            // stream は次の待ち手へ渡し、待ち手が尽きたらキューへ積む
+                            let mut stream = stream;
+                            loop {
+                                let Some(waiter) = self.uni_waiters.pop_front() else {
+                                    self.uni_queue.push_back(stream);
+                                    break;
+                                };
+                                match waiter.send(Ok(stream)) {
+                                    Ok(()) => break,
+                                    Err(Ok(next)) => stream = next,
+                                    // send(Ok(..)) が Err(Err(..)) を返すことはない (防御)
+                                    Err(Err(_)) => break,
+                                }
                             }
                         }
                         Err(e) => {
@@ -811,14 +834,26 @@ impl DriverState {
             }
             Command::AcceptUni { reply } => {
                 if let Some(stream) = self.uni_queue.pop_front() {
-                    let _ = reply.send(Ok(stream));
+                    // コマンド送信後に呼び出し側がキャンセルしていると reply が閉じている。
+                    // 取り出した stream を失わないよう、キューの先頭へ戻す
+                    match reply.send(Ok(stream)) {
+                        Ok(()) => {}
+                        Err(Ok(stream)) => self.uni_queue.push_front(stream),
+                        Err(Err(_)) => {}
+                    }
                 } else {
                     self.uni_waiters.push_back(reply);
                 }
             }
             Command::AcceptBidi { reply } => {
                 if let Some(stream) = self.bidi_queue.pop_front() {
-                    let _ = reply.send(Ok(stream));
+                    // AcceptUni と同じ理由で、キャンセルされた reply へ送信できなかった
+                    // stream はキューの先頭へ戻す
+                    match reply.send(Ok(stream)) {
+                        Ok(()) => {}
+                        Err(Ok(stream)) => self.bidi_queue.push_front(stream),
+                        Err(Err(_)) => {}
+                    }
                 } else {
                     self.bidi_waiters.push_back(reply);
                 }
