@@ -2958,8 +2958,11 @@ async fn reissue_on_side_session(
         } => {
             // 旧 request の終端は main ループが `stop_sending` で行うため、STOP_SENDING は
             // 送らない
+            // この side session には既に移行済みの track があるため、追加の再発行の応答待ちで
+            // 受信ループを長時間止めない。control GOAWAY 移行の 1 回の再購読と同じ上限を使う
+            let wait = remaining.min(MIGRATION_RESUBSCRIBE_TIMEOUT);
             let reissued = match tokio::time::timeout(
-                remaining,
+                wait,
                 reissue_request(client, *kind, *old_request_id, plan, last_locations, false),
             )
             .await
@@ -2972,7 +2975,7 @@ async fn reissue_on_side_session(
                 }
                 Err(_) => {
                     let reason =
-                        "the request re-issue did not complete within the migration deadline";
+                        "the request re-issue did not complete within the migration timeout";
                     send_migration_failed(events, url, command, reason).await;
                     return true;
                 }

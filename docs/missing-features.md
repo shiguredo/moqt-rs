@@ -408,6 +408,10 @@ session で再発行する。
   PUBLISH)。移行先 URL ごとに side session を 1 本にまとめ、複数の request を共有する。
 - side session 自身が GOAWAY / 切断を受けた場合の再移行は未対応であり、ログを残して
   その track の配送を止める (publisher はパイプラインを終了する)。
+- 共有 side session で 1 件の request の再発行に失敗した場合は、control GOAWAY の移行失敗と
+  同じく警告を出してパイプラインを終了する。
+- 共有 side session へ追加の request を再発行している間は受信ループが止まるため、応答待ちは
+  `MIGRATION_RESUBSCRIBE_TIMEOUT` (5 秒) で打ち切る。
 - 共有 side session の接続期限は、最初に移行した request の GOAWAY Timeout で固定される。
 - subscriber の FETCH は、移行時に旧 request stream を `STOP_SENDING` と `RESET_STREAM` で
   終端する。
