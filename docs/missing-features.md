@@ -85,6 +85,7 @@ C4M draft-02 の `moqt` クレームの map 化と未知キーの fail-closed、
 | `MAX_REQUEST_UPDATES` / `MAX_AUTH_TOKEN_CACHE_SIZE` | `SETUP_OPTION_*` | §9.1.7 / §9.1.3 | 既定値で実害は無いが、上限を宣言しない |
 | パディング | `send_padding_stream` / `send_padding_datagram` / `recv_padding_datagram` | §11.5 | 帯域の押し上げや MTU 探索に使えない (優先度は低い) |
 | RESET_STREAM_AT | `reset_outgoing_data_stream_at` | webtrans-http3 §4.4 | WtH3 は data stream の reset で送出できる。WtH2 / QUIC / QMux は未対応 (`Unsupported`) |
+| `wt-h3` の選択 | `Transport::WtH3` | webtrans-http3 §4.4 | s2n-quic は RESET_STREAM_AT を実装しないため、既定の s2n-quic ビルドでは `wt-h3` を選べない (`Transport::parse` / `resolve_transport` が拒否する)。s2n-quic 以外のバックエンドのビルドでは選べる |
 | `PRIOR_GROUP_ID_GAP` | `ObjectProperties::prior_group_id_gap` | §10.8 / MSF §6.1 | moq-pub は前回の Group ID を永続化しないため gap を宣言できない (SHOULD の前提を満たさない) |
 | `END_OF_GROUP` | Subgroup Header / Object Datagram のフラグ | §11.2.1 / §11.3.1 | moq-pub は常に false を送る。音声は 1 Group = 1 Object のため、終端を早期に通知できない |
 | `publishTracks` | `MsfCatalog::publish_tracks` | MSF §5.1.5 / §5.6.16 | 逆方向 track (Log / Metrics) を告知できず、QoE メトリクスの返送経路が無い |
@@ -521,7 +522,10 @@ moqt-js (HEAD `f6a171e8`) の playout のうち、次の 2 つは移植してい
 
 - `wt-h3` は data stream の reset で `RESET_STREAM_AT` を送出できる。request stream の
   cancel は `reliable_size: None` のため従来の `RESET_STREAM` を使う。`wt-h2` / QUIC /
-  QMux は Reliable Size 付き reset に未対応で `Unsupported` を返す
+  QMux は Reliable Size 付き reset に未対応で `Unsupported` を返す。ただし s2n-quic は
+  `RESET_STREAM_AT` を実装していないため、既定の s2n-quic ビルドでは `wt-h3` 自体を
+  選べない (`Transport::parse` / `resolve_transport` が拒否する)。s2n-quic 以外の
+  バックエンドのビルドでは選べる
 - `wt-h2` の reset は `WT_RESET_STREAM` capsule に依存し、リレーの対応が要る。
   また §6.2 により datagram が reliable / ordered になるため、音声を datagram で
   送る既定の遅延特性が変わる

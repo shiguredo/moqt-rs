@@ -22,9 +22,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
-default = ["quic-tobi"]
-quic-ngtcp2 = ["moq-pub/quic-ngtcp2", "moq-sub/quic-ngtcp2"]
-quic-s2n = ["moq-pub/quic-s2n", "moq-sub/quic-s2n"]
 # ネイティブ QUIC のバックエンド。ちょうど 1 つだけを有効にする。
 # テスト対象の publisher / subscriber に同じバックエンドを選ぶ。
+# wt-h3 を試すときは --no-default-features --features quic-tobi にする
+# (s2n-quic は RESET_STREAM_AT を実装しておらず wt-h3 を提供できない)。
+default = ["quic-s2n"]
+quic-ngtcp2 = ["moq-pub/quic-ngtcp2", "moq-sub/quic-ngtcp2"]
+quic-s2n = ["moq-pub/quic-s2n", "moq-sub/quic-s2n"]
 quic-tobi = ["moq-pub/quic-tobi", "moq-sub/quic-tobi"]

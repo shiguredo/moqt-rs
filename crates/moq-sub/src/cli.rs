@@ -109,16 +109,28 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
 
     // `--transport` が省略された場合は `--url` の msf fragment の `connection` を使う
     // (draft-ietf-moq-msf-01 §11.1.1)。解決の規則は `tokio_moq::resolve_transport` を参照
+    //
+    // s2n-quic バックエンドのビルドでは wt-h3 を提供しないため、ヘルプの選択肢も
+    // ビルドに合わせる。noargs の doc は &'static str しか取れないため、定数を選ぶ。
+    let transport_doc: &'static str = if tokio_moq::is_wt_h3_available() {
+        "Transport (quic | wt-h3 | wt-h2 | qmux; qmux (QMux over TCP+TLS) is \
+         experimental; wt-h2 depends on relay support for WT_RESET_STREAM capsules). \
+         If --transport is omitted, uses the 'connection' parameter of the --url MSF \
+         fragment (q: native QUIC, wt: WebTransport over HTTP/3, or wt-h2 with \
+         --transport wt-h2 for HTTP/2); otherwise defaults to quic. A conflicting \
+         --transport, or 'connection=q' with 'connection=wt', is an error"
+    } else {
+        "Transport (quic | wt-h2 | qmux; wt-h3 is not available with the s2n-quic \
+         backend because it requires RESET_STREAM_AT. qmux (QMux over TCP+TLS) is \
+         experimental; wt-h2 depends on relay support for WT_RESET_STREAM capsules). \
+         If --transport is omitted, uses the 'connection' parameter of the --url MSF \
+         fragment (q: native QUIC; wt requires --transport wt-h2 because wt-h3 is \
+         unavailable); otherwise defaults to quic. A conflicting --transport, or \
+         'connection=q' with 'connection=wt', is an error"
+    };
     let transport_opt: Option<Transport> = noargs::opt("transport")
         .ty("TYPE")
-        .doc(
-            "Transport (quic | wt-h3 | wt-h2 | qmux; qmux (QMux over TCP+TLS) is \
-             experimental; wt-h2 depends on relay support for WT_RESET_STREAM capsules). \
-             If --transport is omitted, uses the 'connection' parameter of the --url MSF \
-             fragment (q: native QUIC, wt: WebTransport over HTTP/3, or wt-h2 with \
-             --transport wt-h2 for HTTP/2); otherwise defaults to quic. A conflicting \
-             --transport, or 'connection=q' with 'connection=wt', is an error",
-        )
+        .doc(transport_doc)
         .take(&mut args)
         .present_and_then(|o| Transport::parse(o.value()))?;
     let transport = tokio_moq::resolve_transport(transport_opt, &url)
@@ -290,21 +302,32 @@ mod tests {
     ///
     /// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) の `connection` は client に
     /// 接続種別を MUST で指定する (`q` は native QUIC、`wt` は WebTransport)。`wt` は WebTransport の
-    /// 実装を指定しないため `wt-h3` を既定にする。
+    /// 実装を指定しないため `wt-h3` を既定にする。ただし s2n-quic バックエンドのビルドでは
+    /// `wt-h3` を提供しないため、そのビルドでは `connection=wt` がエラーになる。
     #[test]
     fn transport_follows_the_msf_fragment_connection() {
         let args = [
             "--url",
             "moqt://127.0.0.1:4443#msf:spam-egg--video&connection=wt",
         ];
-        let config = parse_args(&args)
-            .expect("オプションの解析に成功すること")
-            .expect("設定が返ること");
-        assert_eq!(
-            config.transport,
-            Transport::WtH3,
-            "connection=wt は WebTransport (既定 wt-h3) になること"
-        );
+        if tokio_moq::is_wt_h3_available() {
+            let config = parse_args(&args)
+                .expect("オプションの解析に成功すること")
+                .expect("設定が返ること");
+            assert_eq!(
+                config.transport,
+                Transport::WtH3,
+                "connection=wt は WebTransport (既定 wt-h3) になること"
+            );
+        } else {
+            let Err(error) = parse_args(&args) else {
+                panic!("s2n-quic バックエンドでは connection=wt の既定 wt-h3 を提供しないこと");
+            };
+            assert!(
+                format!("{error:?}").contains("RESET_STREAM_AT"),
+                "wt-h3 を提供しない理由が分かること: {error:?}"
+            );
+        }
 
         let args = [
             "--url",
@@ -391,10 +414,19 @@ mod tests {
         let Err(error) = parse_args(&args) else {
             panic!("connection=q と --transport wt-h3 はエラーになること");
         };
-        assert!(
-            format!("{error:?}").contains("connection=q"),
-            "矛盾した fragment が理由として分かること: {error:?}"
-        );
+        // s2n-quic バックエンドのビルドでは wt-h3 自体を提供しないため、
+        // fragment との矛盾より先に wt-h3 が利用できない理由を返す
+        if tokio_moq::is_wt_h3_available() {
+            assert!(
+                format!("{error:?}").contains("connection=q"),
+                "矛盾した fragment が理由として分かること: {error:?}"
+            );
+        } else {
+            assert!(
+                format!("{error:?}").contains("RESET_STREAM_AT"),
+                "wt-h3 を提供しない理由が分かること: {error:?}"
+            );
+        }
     }
 
     /// `connection=q` と `connection=wt` の同時指定はエラーにする

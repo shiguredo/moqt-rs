@@ -8,8 +8,10 @@
 //! - `quic-s2n`: s2n-quic
 //! - `quic-ngtcp2`: ngtcp2 (shiguredo_ngtcp2_tokio)
 //!
-//! WebTransport over HTTP/3 は [tobi](tobi) を直接使うため、この選択の対象外である。
+//! WebTransport over HTTP/3 は [tobi] を直接使うため、この選択の対象外である。
 //! そのため `tobi_quic` は常に依存に含まれる。
+//! ただし s2n-quic は RESET_STREAM_AT を実装しておらず wt-h3 を提供できないため、
+//! `quic-s2n` を選んだビルドでは wt-h3 を選択できないものとして扱う。
 
 use tokio::sync::mpsc;
 

@@ -5,6 +5,9 @@
 //! URL の scheme は `moqt://` に統一し、トランスポートは [`Transport`] (`--transport`) で選ぶ。
 //! `--transport` を省略した場合は `--url` の MSF fragment の `connection` で決める
 //! ([`resolve_transport`])。
+//! ネイティブ QUIC のバックエンドは cargo feature で選ぶ (既定は s2n-quic)。
+//! WebTransport over HTTP/3 は tobi-quic の実装を使うため、s2n-quic を選んだビルドでは
+//! 利用できない ([`is_wt_h3_available`] を参照する)。
 //! `--url` の `moqt://` URI は [`parse_url`] でパースし、`--namespace` と `--url` の MSF fragment
 //! からの Track Namespace の解決は [`resolve_namespace`] が担う。
 //!
@@ -157,6 +160,27 @@ mod peer_harness;
 // 型はサブモジュールパス (`error::...` / `transport::...` / `webtransport_h3::...` / `quic::...`) 経由で
 // 参照する。最上位再エクスポートは設けない。
 
+/// s2n-quic バックエンドのビルドで wt-h3 を選んだときのエラー
+///
+/// WebTransport over HTTP/3 は data stream の reset に `RESET_STREAM_AT`
+/// (draft-ietf-quic-reliable-stream-reset-11) を使う。s2n-quic は `RESET_STREAM_AT` を
+/// 実装していないため、s2n-quic をネイティブ QUIC のバックエンドに選んだビルドでは
+/// wt-h3 を提供しない。
+const WT_H3_UNAVAILABLE: &str = "transport 'wt-h3' is not available with the s2n-quic backend: \
+     WebTransport over HTTP/3 requires RESET_STREAM_AT, which s2n-quic does not implement \
+     (use --transport wt-h2, or build with --no-default-features --features quic-tobi)";
+
+/// WebTransport over HTTP/3 をこのビルドで利用できるか
+///
+/// WebTransport over HTTP/3 は data stream の reset に `RESET_STREAM_AT`
+/// (draft-ietf-quic-reliable-stream-reset-11) を使う。s2n-quic は `RESET_STREAM_AT` を
+/// 実装していないため、s2n-quic をネイティブ QUIC のバックエンドに選んだビルドでは
+/// `wt-h3` を提供しない。tobi-quic / ngtcp2 を選んだビルドでは tobi-quic の実装を使って
+/// `wt-h3` を提供する。
+pub fn is_wt_h3_available() -> bool {
+    !cfg!(feature = "quic-s2n")
+}
+
 /// トランスポート種別
 ///
 /// URL の scheme は `moqt://` に統一されており、接続経路はこの値で選ぶ。
@@ -169,6 +193,7 @@ pub enum Transport {
     /// draft-17 の `SETTINGS_WT_ENABLED` (`0x20b8933b`) だけを広告する。旧 codepoint
     /// (`0x2c7cf000`) だけを広告するサーバーとは共通版が無いため、
     /// `TransportError::InvalidState` で接続に失敗する (draft-ietf-webtrans-http3-17 §7.1)。
+    /// s2n-quic バックエンドのビルドでは提供しない ([`is_wt_h3_available`] を参照する)。
     WtH3,
     /// WebTransport over HTTP/2 (TCP+TLS 上の ALPN `h2`)
     ///
@@ -192,13 +217,23 @@ pub enum Transport {
 impl Transport {
     /// `--transport` の値からトランスポート種別を解決する
     ///
+    /// `wt-h3` は s2n-quic バックエンドのビルドでは受理しない ([`is_wt_h3_available`] を
+    /// 参照する)。
+    ///
     /// # Errors
     ///
-    /// `quic` / `wt-h3` / `wt-h2` / `qmux` 以外の値はエラーになる。
+    /// `quic` / `wt-h3` / `wt-h2` / `qmux` 以外の値と、s2n-quic バックエンドのビルドでの
+    /// `wt-h3` はエラーになる。
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
             "quic" => Ok(Self::Quic),
-            "wt-h3" => Ok(Self::WtH3),
+            "wt-h3" => {
+                if is_wt_h3_available() {
+                    Ok(Self::WtH3)
+                } else {
+                    Err(WT_H3_UNAVAILABLE.to_string())
+                }
+            }
             "wt-h2" => Ok(Self::WtH2),
             "qmux" => Ok(Self::Qmux),
             other => Err(format!(
@@ -441,7 +476,9 @@ pub fn resolve_namespace(
 /// WebTransport) を既定にし、`wt-h2` は `--transport wt-h2` を明示したときだけ使う。WebTransport の
 /// 主経路は HTTP/3 であり、`wt-h2` は relay の capsule 対応に依存する経路である
 /// (draft-ietf-moq-transport-23 §6.2 (Session establishment) は HTTP/2 上の WebTransport も
-/// 許容する)。
+/// 許容する)。ただし s2n-quic バックエンドのビルドでは `wt-h3` を提供しないため、そのビルドで
+/// `--transport` を省略して `connection=wt` を指定するとエラーになる ([`is_wt_h3_available`]
+/// を参照する)。
 ///
 /// 解決の規則は次のとおりである。
 ///
@@ -467,6 +504,8 @@ pub fn resolve_namespace(
 /// - `connection` に `q` / `wt` 以外の値がある: fragment の解釈エラー
 /// - `connection` と `--transport` が矛盾する: どちらを優先するかを決められないためエラー
 /// - `connection=q` と `connection=wt` が同時に指定されている: 両立しないためエラー
+/// - s2n-quic バックエンドのビルドで `wt-h3` を明示した、または `connection=wt` の既定として
+///   `wt-h3` が必要になった: そのビルドでは `wt-h3` を提供しないためエラー
 pub fn resolve_transport(
     explicit: Option<Transport>,
     url: &ServerUrl,
@@ -489,6 +528,11 @@ pub fn resolve_transport(
                 .to_string(),
         );
     }
+    // s2n-quic バックエンドのビルドでは wt-h3 を提供しない。`--transport wt-h3` の明示は
+    // ここで拒否し、`connection=wt` の既定として選ばれる場合は後段の分岐で拒否する。
+    if explicit == Some(Transport::WtH3) && !is_wt_h3_available() {
+        return Err(WT_H3_UNAVAILABLE.to_string());
+    }
     // fragment が要求する接続種別。`wt` は WebTransport の実装を指定しないため WebTransport と
     // して扱い、実装は `explicit` (省略時は `wt-h3`) で選ぶ
     let required = if requires_quic {
@@ -508,7 +552,18 @@ pub fn resolve_transport(
              parameter)",
             explicit.as_str()
         )),
-        (Some(MsfConnectionType::WebTransport), None) => Ok(Transport::WtH3),
+        (Some(MsfConnectionType::WebTransport), None) => {
+            if is_wt_h3_available() {
+                Ok(Transport::WtH3)
+            } else {
+                Err(
+                    "'connection=wt' in --url requires WebTransport, but wt-h3 is not \
+                     available with the s2n-quic backend (RESET_STREAM_AT is not implemented); \
+                     use --transport wt-h2"
+                        .to_string(),
+                )
+            }
+        }
         (
             Some(MsfConnectionType::WebTransport),
             Some(explicit @ (Transport::WtH3 | Transport::WtH2)),
@@ -1407,6 +1462,11 @@ pub async fn connect(
     ),
     TransportError,
 > {
+    // s2n-quic バックエンドのビルドでは wt-h3 を確立しない。CLI は Transport::parse /
+    // resolve_transport で拒否するが、ConnectParams を直接組み立てる呼び出し側にも対処する。
+    if params.transport == Transport::WtH3 && !is_wt_h3_available() {
+        return Err(TransportError::Unsupported(WT_H3_UNAVAILABLE.to_string()));
+    }
     let server_name = host_from_authority(&params.url.authority).to_string();
     let url = params.url.clone();
     let transport = params.transport;
@@ -1771,16 +1831,27 @@ mod tests {
     }
 
     /// `--transport` の値からトランスポート種別を解決する
+    ///
+    /// `wt-h3` は s2n-quic バックエンドのビルドでは受理しない。
     #[test]
     fn transport_parses_supported_values() {
         assert_eq!(
             Transport::parse("quic").expect("quic は受理されること"),
             Transport::Quic
         );
-        assert_eq!(
-            Transport::parse("wt-h3").expect("wt-h3 は受理されること"),
-            Transport::WtH3
-        );
+        if is_wt_h3_available() {
+            assert_eq!(
+                Transport::parse("wt-h3").expect("wt-h3 は受理されること"),
+                Transport::WtH3
+            );
+        } else {
+            let err =
+                Transport::parse("wt-h3").expect_err("s2n-quic バックエンドでは受理しないこと");
+            assert!(
+                err.contains("RESET_STREAM_AT"),
+                "受理しない理由が含まれること: {err}"
+            );
+        }
         assert_eq!(
             Transport::parse("wt-h2").expect("wt-h2 は受理されること"),
             Transport::WtH2
@@ -2105,19 +2176,29 @@ mod tests {
     }
 
     /// `Transport::as_str` は `Transport::parse` の逆写像である
+    ///
+    /// `wt-h3` は s2n-quic バックエンドのビルドでは受理しないため、利用できるビルドだけ
+    /// 往復を検証する。
     #[test]
     fn transport_as_str_is_the_inverse_of_parse() {
-        for transport in [
-            Transport::Quic,
-            Transport::WtH3,
-            Transport::WtH2,
-            Transport::Qmux,
-        ] {
+        for transport in [Transport::Quic, Transport::WtH2, Transport::Qmux] {
             assert_eq!(
                 Transport::parse(transport.as_str()).expect("解釈できること"),
                 transport,
                 "as_str の結果を parse すると元の値に戻ること: {}",
                 transport.as_str()
+            );
+        }
+        if is_wt_h3_available() {
+            assert_eq!(
+                Transport::parse(Transport::WtH3.as_str()).expect("解釈できること"),
+                Transport::WtH3,
+                "as_str の結果を parse すると元の値に戻ること: wt-h3"
+            );
+        } else {
+            assert!(
+                Transport::parse(Transport::WtH3.as_str()).is_err(),
+                "s2n-quic バックエンドでは wt-h3 を受理しないこと"
             );
         }
     }
@@ -2173,39 +2254,69 @@ mod tests {
             Transport::Quic,
             "整合する明示はそのまま使われること"
         );
-        // WebTransport を明示すると 2 つの MUST が両立しない
+        // WebTransport を明示すると 2 つの MUST が両立しない。ただし s2n-quic バックエンドの
+        // ビルドでは wt-h3 自体を提供しないため、その理由を優先して返す
         let error = resolve_transport(Some(Transport::WtH3), &url)
             .expect_err("connection=q と --transport wt-h3 はエラーになること");
-        assert!(
-            error.contains("connection=q"),
-            "fragment が要求する接続種別が理由として分かること: {error}"
-        );
+        if is_wt_h3_available() {
+            assert!(
+                error.contains("connection=q"),
+                "fragment が要求する接続種別が理由として分かること: {error}"
+            );
+        } else {
+            assert!(
+                error.contains("RESET_STREAM_AT"),
+                "wt-h3 を提供しない理由が分かること: {error}"
+            );
+        }
     }
 
-    /// `connection=wt` は WebTransport を要求し、既定は `wt-h3` になる
+    /// `connection=wt` は WebTransport を要求し、利用できるビルドでは既定が `wt-h3` になる
     ///
     /// `wt` は WebTransport の実装 (HTTP/3 / HTTP/2) を指定しないため、本実装は `wt-h3` を
-    /// 既定にする。
+    /// 既定にする。ただし s2n-quic バックエンドのビルドでは `wt-h3` を提供しないため、
+    /// `--transport` を省略した `connection=wt` はエラーになる。
     #[test]
     fn resolve_transport_requires_webtransport_and_defaults_to_wt_h3() {
         let url = parse_url("moqt://example.com/app#msf:moq-example--video&connection=wt")
             .expect("URL を解釈できること");
-        assert_eq!(
-            resolve_transport(None, &url).expect("接続種別を解決できること"),
-            Transport::WtH3,
-            "connection=wt の既定は wt-h3 であること"
-        );
+        if is_wt_h3_available() {
+            assert_eq!(
+                resolve_transport(None, &url).expect("接続種別を解決できること"),
+                Transport::WtH3,
+                "connection=wt の既定は wt-h3 であること"
+            );
+        } else {
+            let error = resolve_transport(None, &url).expect_err(
+                "s2n-quic バックエンドでは connection=wt の既定 wt-h3 を提供しないこと",
+            );
+            assert!(
+                error.contains("RESET_STREAM_AT"),
+                "wt-h3 を提供しない理由が分かること: {error}"
+            );
+            assert!(
+                error.contains("--transport wt-h2"),
+                "代替の指定方法が分かること: {error}"
+            );
+        }
         // WebTransport の実装は `--transport` で選べる
         assert_eq!(
             resolve_transport(Some(Transport::WtH2), &url).expect("接続種別を解決できること"),
             Transport::WtH2,
             "connection=wt と --transport wt-h2 は整合すること"
         );
-        assert_eq!(
-            resolve_transport(Some(Transport::WtH3), &url).expect("接続種別を解決できること"),
-            Transport::WtH3,
-            "connection=wt と --transport wt-h3 は整合すること"
-        );
+        if is_wt_h3_available() {
+            assert_eq!(
+                resolve_transport(Some(Transport::WtH3), &url).expect("接続種別を解決できること"),
+                Transport::WtH3,
+                "connection=wt と --transport wt-h3 は整合すること"
+            );
+        } else {
+            assert!(
+                resolve_transport(Some(Transport::WtH3), &url).is_err(),
+                "s2n-quic バックエンドでは --transport wt-h3 を拒否すること"
+            );
+        }
         // native QUIC を明示すると 2 つの MUST が両立しない
         let error = resolve_transport(Some(Transport::Quic), &url)
             .expect_err("connection=wt と --transport quic はエラーになること");
@@ -2237,11 +2348,18 @@ mod tests {
             Transport::Quic,
             "fragment が無ければ既定は native QUIC であること"
         );
-        assert_eq!(
-            resolve_transport(Some(Transport::WtH3), &url).expect("接続種別を解決できること"),
-            Transport::WtH3,
-            "fragment が無ければ明示がそのまま使われること"
-        );
+        if is_wt_h3_available() {
+            assert_eq!(
+                resolve_transport(Some(Transport::WtH3), &url).expect("接続種別を解決できること"),
+                Transport::WtH3,
+                "fragment が無ければ明示がそのまま使われること"
+            );
+        } else {
+            assert!(
+                resolve_transport(Some(Transport::WtH3), &url).is_err(),
+                "s2n-quic バックエンドでは wt-h3 を明示しても拒否すること"
+            );
+        }
     }
 
     /// `connection=q` と `connection=wt` の同時指定はエラーにする
@@ -2282,11 +2400,18 @@ mod tests {
         let url =
             parse_url("moqt://example.com/app#msf:moq-example--video&connection=wt&connection=wt")
                 .expect("URL を解釈できること");
-        assert_eq!(
-            resolve_transport(None, &url).expect("接続種別を解決できること"),
-            Transport::WtH3,
-            "connection=wt の重複は WebTransport (既定 wt-h3) になること"
-        );
+        if is_wt_h3_available() {
+            assert_eq!(
+                resolve_transport(None, &url).expect("接続種別を解決できること"),
+                Transport::WtH3,
+                "connection=wt の重複は WebTransport (既定 wt-h3) になること"
+            );
+        } else {
+            assert!(
+                resolve_transport(None, &url).is_err(),
+                "s2n-quic バックエンドでは connection=wt の重複も拒否すること"
+            );
+        }
         assert_eq!(
             resolve_transport(Some(Transport::WtH2), &url).expect("接続種別を解決できること"),
             Transport::WtH2,

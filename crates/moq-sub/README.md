@@ -18,14 +18,20 @@ publisher / subscriber の接続先となる MoQ リレーは別途用意する�
 
 ## QUIC バックエンド
 
-moq-sub は QUIC の実装に tobi-quic を採用している。ネイティブ QUIC は cargo feature で
-s2n-quic / ngtcp2-rs も選べる (`--no-default-features` と `--features quic-s2n` /
-`--features quic-ngtcp2` を組み合わせる)。
-WebTransport over HTTP/3 の QUIC 層は tobi-quic 固定である。詳細は
+moq-sub の QUIC の実装は既定で s2n-quic を使う。cargo feature で tobi-quic / ngtcp2-rs も
+選べる (`--no-default-features` と `--features quic-tobi` / `--features quic-ngtcp2` を
+組み合わせる)。
+WebTransport over HTTP/3 の QUIC 層は tobi-quic 固定であり、s2n-quic は RESET_STREAM_AT を
+実装していないため、既定の s2n-quic ビルドでは `--transport wt-h3` を選べない。使う場合は
+`--no-default-features --features quic-tobi` でビルドする。詳細は
 [tokio-moq](../tokio-moq/README.md) を参照すること。
 
 ```bash
-cargo run -p moq-sub --no-default-features --features quic-s2n -- --url moqt://127.0.0.1:4443 --namespace moq-example
+# 既定の s2n-quic
+cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
+
+# tobi-quic に切り替える
+cargo run -p moq-sub --no-default-features --features quic-tobi -- --url moqt://127.0.0.1:4443 --namespace moq-example
 ```
 
 ## 実行例
@@ -34,8 +40,8 @@ cargo run -p moq-sub --no-default-features --features quic-s2n -- --url moqt://1
 # QUIC で起動する
 cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
 
-# WebTransport over HTTP/3 で起動する
-cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --transport wt-h3
+# WebTransport over HTTP/3 で起動する (tobi-quic ビルドが必要)
+cargo run -p moq-sub --no-default-features --features quic-tobi -- --url moqt://127.0.0.1:4443 --namespace moq-example --transport wt-h3
 
 # QMux (TCP+TLS。UDP が使えない環境向け。experimental) で起動する
 cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --transport qmux
@@ -57,7 +63,7 @@ cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video'
 | オプション | デフォルト | 説明 |
 | --- | --- | --- |
 | `--url` | (必須) | 接続先 URL (`moqt://`) |
-| `--transport` | (省略時は `--url` の `msf` fragment の `connection`、無ければ `quic`) | 接続経路 (`quic` / `wt-h3` / `wt-h2` / `qmux`)。`qmux` は experimental |
+| `--transport` | (省略時は `--url` の `msf` fragment の `connection`、無ければ `quic`) | 接続経路 (`quic` / `wt-h3` / `wt-h2` / `qmux`)。`wt-h3` は s2n-quic バックエンドのビルドでは選べない。`qmux` は experimental |
 | `--cert` | | TLS CA 証明書パス |
 | `--namespace` | (省略時は `--url` の `msf` fragment) | Track Namespace (§8.8 表現。`-` が namespace フィールドの区切り) |
 | `--no-video` | | 映像トラックの購読を無効化する |
@@ -73,6 +79,7 @@ cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video'
 - `--no-play` を `--mp4` なしで指定した場合は受信したメディアを破棄する (警告ログが出る)
 
 WebTransport 経路 (`--transport wt-h3` / `--transport wt-h2`) は Extended CONNECT でセッションを確立する。
+`wt-h3` は s2n-quic バックエンドのビルドでは選べない (RESET_STREAM_AT を実装していないため)。
 `wt-h2` は reset を `WT_RESET_STREAM` capsule で行うため、MoQ リレーの capsule 対応に依存する。
 詳細は [tokio-moq](../tokio-moq/README.md) を参照すること。
 

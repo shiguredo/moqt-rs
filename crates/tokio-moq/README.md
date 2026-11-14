@@ -55,38 +55,43 @@ scheme は RFC 3986 §3.1 に従い大文字小文字を区別しない (`MOQT:/
 接続経路は `--transport` で選ぶ。`--transport` を省略した場合は `--url` の `msf` fragment の
 `connection` (`q`: native QUIC / `wt`: WebTransport) を使い、それも無ければ `quic` になる
 (draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters))。`connection=wt` の
-ときの既定は `wt-h3` (HTTP/2 にする場合は `--transport wt-h2` を明示する)。`connection` と矛盾する
-`--transport`、`connection=q` と `connection=wt` の併記、`connection=q` / `connection=wt` と
-`--transport qmux` の組み合わせはエラーになる。
+ときの既定は `wt-h3` (HTTP/2 にする場合は `--transport wt-h2` を明示する)。ただし `wt-h3` を
+提供しない s2n-quic バックエンドのビルドでは、`--transport` を省略した `connection=wt` は
+エラーになる。`connection` と矛盾する `--transport`、`connection=q` と `connection=wt` の
+併記、`connection=q` / `connection=wt` と `--transport qmux` の組み合わせはエラーになる。
 
 | `--transport` | `Transport` | 接続経路 | 備考 |
 | --- | --- | --- | --- |
 | `quic` | `Transport::Quic` | QUIC 直接接続 | ALPN は `moqt-23` |
-| `wt-h3` | `Transport::WtH3` | WebTransport over HTTP/3 | QUIC 上の ALPN は `h3` |
+| `wt-h3` | `Transport::WtH3` | WebTransport over HTTP/3 | QUIC 上の ALPN は `h3`。s2n-quic バックエンドのビルドでは選べない |
 | `wt-h2` | `Transport::WtH2` | WebTransport over HTTP/2 | TCP+TLS 上の ALPN は `h2` |
 | `qmux` | `Transport::Qmux` | QMux | TCP+TLS 上の ALPN は `moqt-23`。UDP が使えない環境向け。experimental |
 
 ### QUIC バックエンド
 
-tobi-quic を採用している。ネイティブ QUIC (`--transport quic`) の実装は cargo feature で選び、s2n-quic / ngtcp2-rs も選べる。ちょうど 1 つだけを有効にすること。
+ネイティブ QUIC (`--transport quic`) の実装は cargo feature で選ぶ。既定は s2n-quic である。
+tobi-quic / ngtcp2-rs も選べる。ちょうど 1 つだけを有効にすること。
 
 | feature | QUIC 実装 | 備考 |
 | --- | --- | --- |
-| `quic-tobi` | tobi-quic | crates.io 未公開のため git の main を追う。この実装を採用している |
-| `quic-s2n` | s2n-quic | |
+| `quic-s2n` | s2n-quic | 既定。`RESET_STREAM_AT` を実装していないため `wt-h3` は選べない |
+| `quic-tobi` | tobi-quic | crates.io 未公開のため git の main を追う。`wt-h3` もこのビルドで使う |
 | `quic-ngtcp2` | ngtcp2-rs | `shiguredo_ngtcp2_tokio` 経由。初回ビルドで ngtcp2 本体を取得・ビルドする |
 
 ```bash
-# tobi-quic
+# 既定の s2n-quic
 cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example
 
-# s2n-quic / ngtcp2-rs に切り替える (-p の crate と依存の既定 feature を同時に外す)
-cargo run -p moq-pub --no-default-features --features quic-s2n -- --url moqt://127.0.0.1:4443 --namespace moq-example
+# tobi-quic / ngtcp2-rs に切り替える (-p の crate と依存の既定 feature を同時に外す)
+cargo run -p moq-pub --no-default-features --features quic-tobi -- --url moqt://127.0.0.1:4443 --namespace moq-example
 cargo run -p moq-sub --no-default-features --features quic-ngtcp2 -- --url moqt://127.0.0.1:4443 --namespace moq-example
 ```
 
 WebTransport over HTTP/3 (`wt-h3`) の QUIC 層は tobi-quic 固定である。s2n-quic と ngtcp2-rs は
 ネイティブ QUIC にだけ使う。このため tobi-quic はバックエンドの選択に関わらず依存に含まれる。
+s2n-quic は `RESET_STREAM_AT` を実装していないため、`quic-s2n` を選んだビルドでは `wt-h3` を
+選べない (`Transport::parse` / `resolve_transport` が拒否する)。`wt-h3` を使うときは
+`--no-default-features --features quic-tobi` でビルドする。
 
 WebTransport over HTTP/2 は draft-ietf-webtrans-http2-16 に従う。WebTransport over HTTP/3 は SETTINGS の codepoint と版選択、および `reset_stream_at` だけを draft-ietf-webtrans-http3-17 に合わせ、それ以外は draft-16 に従う。
 どちらも Extended CONNECT でセッションを確立する。MOQT のプロトコル識別子 (`MOQT_PROTOCOL` = `moqt-23`) は `WT-Available-Protocols` で通知し、サーバーが `WT-Protocol` で選択しなければ接続を失敗させる (draft-ietf-moq-transport-23 §6.2)。

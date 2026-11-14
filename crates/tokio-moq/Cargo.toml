@@ -60,9 +60,11 @@ rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs"] }
 tokio = { version = "1.54", features = ["test-util"] }
 
 [features]
-default = ["quic-tobi"]
-quic-ngtcp2 = ["dep:shiguredo_ngtcp2_tokio"]
-quic-s2n = ["dep:s2n-quic"]
 # ネイティブ QUIC のバックエンド。ちょうど 1 つだけを有効にする。
 # WebTransport over HTTP/3 は tobi-quic を直接使うため、この選択の対象外である。
+# ただし s2n-quic は RESET_STREAM_AT を実装しておらず wt-h3 を提供できないため、
+# quic-s2n を選んだビルドでは wt-h3 を選択できないものとして扱う。
+default = ["quic-s2n"]
+quic-ngtcp2 = ["dep:shiguredo_ngtcp2_tokio"]
+quic-s2n = ["dep:s2n-quic"]
 quic-tobi = []
