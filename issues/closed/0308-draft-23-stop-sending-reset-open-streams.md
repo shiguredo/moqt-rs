@@ -70,7 +70,9 @@ REQUEST_UPDATE 失敗応答で outgoing FETCH data stream を自動 reset して
 
 ## 解決方法
 
-- `src/session/core.rs` の `DataStreamState` に `auto_reset: HashMap<DataStreamId, u64>` を追加した。cancel 経路で Session が自動 reset した送信 data stream id を保持し、以後の `send_data_stream_closed` / `send_fetch_data_stream_closed` を `Ok(())` で吸収する。値は対象 stream の request id で、`forget_subscription` / `forget_fetch` で破棄する (request id の再利用時に無関係な stream の終端通知を吸収しないため)。
+- `src/session/core.rs` の `DataStreamState` に `auto_reset: HashMap<DataStreamId, u64>` を追加した。cancel 経路で Session が自動
+  reset した送信 data stream id を保持し、以後の `send_data_stream_closed` / `send_fetch_data_stream_closed` を `Ok(())` で吸収する。値は対象
+  stream の request id で、`forget_subscription` / `forget_fetch` で破棄する (request id の再利用時に無関係な stream の終端通知を吸収しないため)。
 - `src/session/data.rs` に 2 つのヘルパを追加した。
   - `reset_open_outgoing_subgroup_streams`: publisher 役 subscription の open な `data_streams.outgoing` を stream_id の昇順に列挙し、`close_outgoing_subgroup_stream` で追跡終端と subgroup tracker の reset 終端への前進を行ったうえで `ResetDataStream { error_code: STREAM_CANCELLED, reliable_size: None, tracking: Removed }` を発行する。
   - `reset_open_outgoing_fetch_streams`: publisher 役 FETCH の open な `outgoing_fetch` を除去し、`Fetch::data_stream_finished` を true にして同じ `ResetDataStream` を発行する。
@@ -91,4 +93,7 @@ REQUEST_UPDATE 失敗応答で outgoing FETCH data stream を自動 reset して
   - `fetch_stop_sending_received_resets_open_outgoing_fetch_stream`: uni data stream の STOP_SENDING 受信でも reset され、bidi → data stream の順であること。
   - `fetch_fin_does_not_reset_outgoing_fetch_stream`: FIN では自動 reset しないこと。
   - 既存の fill fetch stream の cancel テスト 3 件は、open な subgroup stream も reset されるようになったため fill stream のイベントを選んで検証する形に更新した。
-- 検証: `cargo test -p shiguredo_moqt --test test_session` (1125 件) / `cargo test -p shiguredo_moqt --lib` (133 件) / `cargo test -p tokio-moq --lib` (296 件) / `cargo test -p moq-sub --lib` (229 件) / `cargo clippy -p shiguredo_moqt -p tokio-moq -p moq-sub --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通る。
+- 検証: `cargo test -p shiguredo_moqt --test test_session` (1125 件) / `cargo test -p shiguredo_moqt --lib` (133 件) /
+  `cargo test -p tokio-moq --lib` (296 件) / `cargo test -p moq-sub --lib` (229 件) /
+  `cargo clippy -p shiguredo_moqt -p tokio-moq -p moq-sub --all-targets -- -D warnings` / `cargo fmt --all -- --check`
+  が通る。

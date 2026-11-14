@@ -78,7 +78,10 @@ request 送信 API の Full Track Name について、検証を状態遷移前�
 - `src/session/track_status.rs`:
   - `send_ok_for_track_status` の冒頭で Track Properties を検証するようにした。拒否時は `entry.response` / `terminated` / control message deadline / `SendOnStream` を変更しない。
   - `send_track_status` で Full Track Name の検証を追加した。
-- 送信 API が不正な Track Properties を拒否するようになったため、受信側の Malformed Track 処理を固定していた既存テストのフィクスチャを、wire 上の不正メッセージを直接組み立てて `recv_request` / `recv_stream_message` に渡す形へ変更した (`tests/test_session/property_duplicates.rs` / `tests/test_session/property_scope.rs`)。`tests/test_session/parameter_rules.rs` の `client_receives_unsupported_property_details_for_rejected_publish` は奇数型 0x4005 に `VarInt` を入れていた誤りを `Bytes` に直した。
+- 送信 API が不正な Track Properties を拒否するようになったため、受信側の Malformed Track 処理を固定していた既存テストのフィクスチャを、wire 上の不正メッセージを直接組み立てて
+  `recv_request` / `recv_stream_message` に渡す形へ変更した (`tests/test_session/property_duplicates.rs` /
+  `tests/test_session/property_scope.rs`)。`tests/test_session/parameter_rules.rs` の
+  `client_receives_unsupported_property_details_for_rejected_publish` は奇数型 0x4005 に `VarInt` を入れていた誤りを `Bytes` に直した。
 - テスト: `tests/test_session/send_prevalidation.rs` を追加した。
   - `fetch_ok_with_invalid_track_properties_keeps_pending`: 不正な Track Properties の FETCH_OK が `SESSION_PROTOCOL_VIOLATION` で拒否され、fetch が Pending のまま、`end_location` 未設定、`SendOnStream` 未発行であること。
   - `track_status_ok_with_invalid_track_properties_keeps_unanswered`: 同じく TRACK_STATUS_OK が拒否され、`response` が `None`、`terminated` が false、`SendOnStream` 未発行であること。

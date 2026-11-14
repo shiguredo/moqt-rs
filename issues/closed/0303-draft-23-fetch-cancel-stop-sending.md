@@ -53,8 +53,12 @@ draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection) も�
 
 ## 解決方法
 
-- `src/session/fetch.rs` の `send_fetch_stop_sending` が、bidi request stream の受信方向へ `SessionEvent::StopSendingRequestStream` を、送信方向へ `SessionEvent::ResetRequestStream` を発行するようにした。両イベントの `error_code` は `DataStreamResetReason::Cancelled.error_code()` (CANCELLED 0x1) で、発行順は受信方向 → 送信方向である。`RequestTerminated` は従来どおり発行しない。
-- `src/session/types.rs` の `SessionEvent` enum doc に、同じ cancel 処理で両方向を打ち切る場合の順序契約 (受信方向の `StopSendingRequestStream` → 送信方向の `ResetRequestStream`) を明記した。`StopSendingRequestStream` doc の発行経路を 2 経路から 3 経路に増やして `send_fetch_stop_sending` を加え、`ResetRequestStream` doc にも `send_fetch_stop_sending` と既存の記載漏れだった `fetch_stop_sending_received` を加えた。
+- `src/session/fetch.rs` の `send_fetch_stop_sending` が、bidi request stream の受信方向へ
+  `SessionEvent::StopSendingRequestStream` を、送信方向へ `SessionEvent::ResetRequestStream` を発行するようにした。両イベントの `error_code` は
+  `DataStreamResetReason::Cancelled.error_code()` (CANCELLED 0x1) で、発行順は受信方向 → 送信方向である。`RequestTerminated` は従来どおり発行しない。
+- `src/session/types.rs` の `SessionEvent` enum doc に、同じ cancel 処理で両方向を打ち切る場合の順序契約 (受信方向の `StopSendingRequestStream` →
+  送信方向の `ResetRequestStream`) を明記した。`StopSendingRequestStream` doc の発行経路を 2 経路から 3 経路に増やして `send_fetch_stop_sending`
+  を加え、`ResetRequestStream` doc にも `send_fetch_stop_sending` と既存の記載漏れだった `fetch_stop_sending_received` を加えた。
 - `src/session/fetch.rs` の `send_fetch_stop_sending` doc を、bidi の両方向を打ち切ることと §3.2.4 の MUST (bidi request stream への STOP_SENDING)、§6.4.2.3 の cancel 手順に合わせて書き直した。`src/session/data.rs` の `send_data_stream_stop_sending` doc には、通常の FETCH 応答 stream の dispatch が bidi の STOP_SENDING を伴うことを明記した。
 - `crates/tokio-moq/src/moqt_client.rs` の `SessionEvent::StopSendingRequestStream` ハンドラのコメントに、発行経路としてアプリ起点の FETCH cancel (`send_fetch_stop_sending`) を追加した。
 - データストリームが既に開いている場合の data stream への STOP_SENDING は §3.2.4 の MAY であり、新設していない。publisher 側の `fetch_stop_sending_received` が発行する `ResetRequestStream` のみの挙動も変えていない。

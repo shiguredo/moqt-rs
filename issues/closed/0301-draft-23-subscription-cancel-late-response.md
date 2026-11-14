@@ -50,8 +50,15 @@ draft-ietf-moq-transport-23 §3.1 (Subscriptions) は "The subscriber terminates
 ## 解決方法
 
 - `src/session/subscription/recv.rs` の `stop_sending` で `Session::clear_control_message_deadline` を呼び、応答待ち deadline を解除するようにした。解除しないと遅延応答を吸収しても `Session::tick` の CONTROL_MESSAGE_TIMEOUT でセッションが閉じていた。
-- `src/session/data.rs` の `is_cancelled_terminated_subscription` を `pub(super)` にして、`src/session/subscription/recv.rs` の `handle_peer_subscribe_ok` と `src/session/subscription/dispatch.rs` の `handle_err_for_subscription` から共用するようにした。キャンセル由来 `Terminated` (`publish_done` が `None`) の購読への SUBSCRIBE_OK / REQUEST_ERROR は、状態遷移も `RequestTerminated` も発行せずに吸収する。
-- `handle_peer_subscribe_ok` は状態検証の許可条件と早期 return の両方に `is_cancelled_terminated_subscription` を加えた。Track Alias 衝突検証は早期 return より前にあるため、別 Track の Established と衝突する遅延 SUBSCRIBE_OK は従来どおり `DUPLICATE_TRACK_ALIAS` で閉じる。`handle_err_for_subscription` は早期 return の条件に加えたため、`handle_peer_request_error` の既存契約どおり `RequestErrorReceived` は 1 回発行され、状態遷移と `RequestTerminated` は起きない。Redirect の検証は `handle_peer_request_error` 側で `handle_err_for_subscription` より前に行われるため、cancel 済みでも非ゼロ Connect URI は `ROLE_VIOLATION` になる。
+- `src/session/data.rs` の `is_cancelled_terminated_subscription` を `pub(super)` にして、`src/session/subscription/recv.rs` の
+  `handle_peer_subscribe_ok` と `src/session/subscription/dispatch.rs` の `handle_err_for_subscription`
+  から共用するようにした。キャンセル由来 `Terminated` (`publish_done` が `None`) の購読への SUBSCRIBE_OK / REQUEST_ERROR は、状態遷移も
+  `RequestTerminated` も発行せずに吸収する。
+- `handle_peer_subscribe_ok` は状態検証の許可条件と早期 return の両方に `is_cancelled_terminated_subscription` を加えた。Track Alias 衝突検証は早期
+  return より前にあるため、別 Track の Established と衝突する遅延 SUBSCRIBE_OK は従来どおり `DUPLICATE_TRACK_ALIAS`
+  で閉じる。`handle_err_for_subscription` は早期 return の条件に加えたため、`handle_peer_request_error` の既存契約どおり `RequestErrorReceived` は
+  1 回発行され、状態遷移と `RequestTerminated` は起きない。Redirect の検証は `handle_peer_request_error` 側で `handle_err_for_subscription`
+  より前に行われるため、cancel 済みでも非ゼロ Connect URI は `ROLE_VIOLATION` になる。
 - `rejected_request_ids` への記録は行っていない。同集合は `request_streams` に未登録の拒否 request を対象とする既存契約であり、state を持つ cancel 済み subscription を登録すると close 通知時の削除契約と齟齬が出るためである。
 - テスト: `tests/test_session/request_stream.rs` に `late_control_response_after_cancel` モジュールを追加した。
   - `late_subscribe_ok_after_cancel_is_absorbed`: Pending(Subscriber) で `stop_sending` した直後の SUBSCRIBE_OK を吸収し、Track Alias を設定せずイベントも発行しないこと。

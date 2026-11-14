@@ -17,7 +17,10 @@ draft-ietf-moq-transport-23 §9.1 (SETUP) は「Senders MUST NOT repeat the same
 - `src/parameter.rs` の `SetupOptions::decode` は AUTHORIZATION_TOKEN 以外の既知型の重複を `InvalidField` にし、未知型の重複は受理する。
   - AUTHORIZATION_TOKEN (0x03) は既知型だが重複が許可されており、この重複判定の対象外である (`known_types` に含まれない)。
 - `src/parameter.rs` の `SetupOptions::encode` / `decode` は `validate_auth_token_uniqueness` により、AUTHORIZATION_TOKEN の同一 (Token Type, Token Value) の重複を `MalformedAuthToken` にする。
-- `tests/test_parameter.rs` には 0x09 (MAX_CONTROL_MESSAGE_SIZE) の重複を encode / decode 双方で拒否する `duplicate_option_is_rejected` と、同一 (Token Type, Token Value) の重複を `MalformedAuthToken` にする `duplicate_token_type_and_value_is_malformed_auth_token` がある。ただし PATH / AUTHORITY の重複、未知型の重複受理、値の異なる Token の重複、偶数型 Bytes / 奇数型 VarInt の型不一致は未固定である。
+- `tests/test_parameter.rs` には 0x09 (MAX_CONTROL_MESSAGE_SIZE) の重複を encode / decode 双方で拒否する
+  `duplicate_option_is_rejected` と、同一 (Token Type, Token Value) の重複を `MalformedAuthToken` にする
+  `duplicate_token_type_and_value_is_malformed_auth_token` がある。ただし PATH / AUTHORITY の重複、未知型の重複受理、値の異なる Token の重複、偶数型
+  Bytes / 奇数型 VarInt の型不一致は未固定である。
 - `pbt/tests/prop_parameter.rs` の `sample_setup_options_with` は `dedup_by_key(|p| p.option_type)` で型を dedup するため、この分岐を通らない。
 - 影響: §9.1 の送信側 MUST のうち PATH / AUTHORITY と、未知型の重複受理の MUST、値の異なる Token の重複許可が未固定で、将来の変更で規約違反を検出できない。
 

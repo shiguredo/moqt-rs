@@ -37,7 +37,10 @@ draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope) は "If a parameter appea
 
 ## 解決方法
 
-- `src/session/subscription/recv.rs` の `handle_peer_subscribe_ok` の冒頭で `SUBSCRIBE_OK_ALLOWED_PARAMS` (EXPIRES / LARGEST_OBJECT) を、`handle_peer_publish_state_notify` の冒頭で `PUBLISH_STATE_NOTIFY_ALLOWED_PARAMS` (LARGEST_OBJECT / PAUSED / LOCATION_FILTER) を `MessageParameters::validate_scope` で検証するようにした。違反時は `self.fail` して draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope) の MUST に従い `INVALID_PARAMETER` (0x305) で閉じる。
+- `src/session/subscription/recv.rs` の `handle_peer_subscribe_ok` の冒頭で `SUBSCRIBE_OK_ALLOWED_PARAMS` (EXPIRES /
+  LARGEST_OBJECT) を、`handle_peer_publish_state_notify` の冒頭で `PUBLISH_STATE_NOTIFY_ALLOWED_PARAMS` (LARGEST_OBJECT /
+  PAUSED / LOCATION_FILTER) を `MessageParameters::validate_scope` で検証するようにした。違反時は `self.fail` して
+  draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope) の MUST に従い `INVALID_PARAMETER` (0x305) で閉じる。
 - 検証はどちらもローカル終端済みの早期 return より前に置いた。終端済み request へ遅延して届いた応答・通知でもスコープ違反を素通りさせない。
 - `src/session/core.rs` の `recv_stream_message` の doc に「引数は decode 済みメッセージであり、wire 経路の decode 層検証とは別に session 層でも §9.19.1 のスコープを検証する」旨を明記した。
 - テスト: `tests/test_session/parameter_rules.rs` に `response_parameter_scope` モジュールを追加した。

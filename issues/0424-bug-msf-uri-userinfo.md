@@ -17,9 +17,14 @@ library の `parse_msf_uri` でも拒否し、パスワードを保持・表示�
 
 - `parse_msf_uri` は `moqt://` の後ろを `#` / `?` / `/` で区切り、`/` より前を authority として空でないことだけを検証する。`@` を含む authority をそのまま受け付ける。実測: `moqt://user:secret@host/path#msf:ns--catalog` は `authority = "user:secret@host"` で成功する。
 - `MsfUri` の `Debug` は `authority` を表示するため、userinfo のパスワードが `{:?}` に出る。実測: `MsfUri { authority: "user:secret@host", ... }` と表示される。
-- `crates/tokio-moq/src/lib.rs` の `parse_url` は authority をそのまま `ServerUrl::authority` に保持し、userinfo を拒否しない。接続時の `authority_parts` が `authority.contains('@')` で userinfo を `"userinfo is not supported"` として拒否する。その doc は「draft-ietf-moq-transport-23 §6.1 は userinfo に言及せず、RFC 3986 §3.2.1 は受け取った reference 中の userinfo を reject する選択を許す」とする。
+- `crates/tokio-moq/src/lib.rs` の `parse_url` は authority をそのまま `ServerUrl::authority` に保持し、userinfo を拒否しない。接続時の
+  `authority_parts` が `authority.contains('@')` で userinfo を `"userinfo is not supported"` として拒否する。その doc
+  は「draft-ietf-moq-transport-23 §6.1 は userinfo に言及せず、RFC 3986 §3.2.1 は受け取った reference 中の userinfo を reject する選択を許す」とする。
 - `ServerUrl` の `Debug` は `authority` を表示するため、`parse_url` を通した `{:?}` には userinfo が残る。本 issue は library の `parse_msf_uri` を対象にし、`ServerUrl` の扱いは変えない。
-- `refs/rfc3986.txt` §3.2.1: "Use of the format "user:password" in the userinfo field is deprecated." / "Applications should not render as clear text any data after the first colon (":") character found within a userinfo subcomponent unless the data after the colon is the empty string (indicating no password)." / "Applications may choose to ignore or reject such data when it is received as part of a reference".
+- `refs/rfc3986.txt` §3.2.1: "Use of the format "user:password" in the userinfo field is deprecated." / "Applications
+  should not render as clear text any data after the first colon (":") character found within a userinfo subcomponent
+  unless the data after the colon is the empty string (indicating no password)." / "Applications may choose to ignore or
+  reject such data when it is received as part of a reference".
 - `refs/moq/draft-ietf-moq-msf-01.txt` §11.1: "Authority: Required. Contains the host and optional port (defaulting to 443)."
 
 ## 設計方針
