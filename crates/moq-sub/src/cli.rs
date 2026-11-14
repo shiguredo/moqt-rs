@@ -34,6 +34,12 @@ pub struct Config {
     pub mp4: Option<String>,
     /// 再生を行わないかどうか
     pub no_play: bool,
+    /// SUBSCRIBE_TRACKS を送るかどうか
+    ///
+    /// 有効にすると、catalog / 映像 / 音声の購読を確立したあとに namespace prefix の
+    /// SUBSCRIBE_TRACKS を送る。publisher が返す PUBLISH は受理するが、受信した Object は
+    /// 再生に使わず読み捨てる (既存の catalog 経由の購読は変わらない)。
+    pub subscribe_tracks: bool,
 }
 
 /// 音声の出力先
@@ -205,6 +211,13 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         .take(&mut args)
         .is_present();
 
+    // SUBSCRIBE_TRACKS は付加的な購読である。既定では送らず、指定したときだけ送る。
+    // publisher が返す PUBLISH は受理するが、受信した Object は再生に使わず読み捨てる。
+    let subscribe_tracks: bool = noargs::flag("subscribe-tracks")
+        .doc("Send SUBSCRIBE_TRACKS for the namespace prefix and accept the resulting PUBLISH messages (received objects are discarded; catalog-based subscriptions are unchanged)")
+        .take(&mut args)
+        .is_present();
+
     let video_enabled = !no_video;
     let audio_enabled = !no_audio;
     if !args.metadata().help_mode && !video_enabled && !audio_enabled {
@@ -230,6 +243,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         audio_min_delay_ms,
         mp4,
         no_play,
+        subscribe_tracks,
     }))
 }
 
@@ -664,5 +678,36 @@ mod tests {
                 "エラーに理由が含まれること: {err}"
             );
         }
+    }
+
+    /// `--subscribe-tracks` は既定で無効である
+    ///
+    /// 付加的な購読であり、指定しない限り publisher に namespace 単位の PUBLISH を
+    /// 要求しないことを固定する。
+    #[test]
+    fn subscribe_tracks_defaults_to_disabled() {
+        let config = parse_args(BASE_ARGS)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert!(
+            !config.subscribe_tracks,
+            "--subscribe-tracks を指定しない場合は無効であること"
+        );
+    }
+
+    /// `--subscribe-tracks` を指定すると有効になる
+    ///
+    /// 値を持たないフラグであり、指定だけで有効になることを固定する。
+    #[test]
+    fn subscribe_tracks_flag_enables_the_request() {
+        let mut args = BASE_ARGS.to_vec();
+        args.push("--subscribe-tracks");
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert!(
+            config.subscribe_tracks,
+            "--subscribe-tracks を指定した場合は有効であること"
+        );
     }
 }

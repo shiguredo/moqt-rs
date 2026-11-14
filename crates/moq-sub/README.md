@@ -72,6 +72,7 @@ cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video'
 | `--audio-min-delay-ms` | `50` | 音声の待ち時間の下限 (0〜100 ms)。到着の揺らぎと実出力の先行量から決まる自動予算の下限になる |
 | `--mp4` | | 受信した音声 / 映像を MP4 ファイルへ保存する (再エンコードせずに mux する。音声は Opus のみで、AAC-LC のトラックでは音声を録画せず警告する。既存ファイルは上書きし、音声は subgroup stream と datagram のどちらで届いても保存する) |
 | `--no-play` | | 再生を行わない (SDL を初期化せず、デコードもしない) |
+| `--subscribe-tracks` | | namespace prefix の SUBSCRIBE_TRACKS を送り、publisher からの PUBLISH を受理する。受信した Object は再生に使わず読み捨てる (catalog からの購読は変わらない) |
 
 ## 注意事項
 
@@ -86,6 +87,26 @@ WebTransport 経路 (`--transport wt-h3` / `--transport wt-h2`) は Extended CON
 QMux 経路 (`--transport qmux`) は experimental である。QMux は TCP + TLS の上で QUIC version 1 のストリームと DATAGRAM を多重化する経路で、UDP が使えない環境向けである。
 音声の datagram は経路での損失を下位の TCP が再送するため起きないが、TCP の再送で遅延が伸びる。QMux は速やかに配送できない DATAGRAM の破棄を許すため、受信側のバッファが溢れると欠落しうる。
 詳細は [tokio-moq](../tokio-moq/README.md) を参照すること。
+
+## SUBSCRIBE_TRACKS (namespace 単位の購読)
+
+`--subscribe-tracks` を指定すると、catalog / 映像 / 音声の購読を確立したあとに、`--namespace` の
+Track Namespace Prefix で SUBSCRIBE_TRACKS (`0x51`) を送る (draft-ietf-moq-transport-23 §3.6 /
+§9.17)。既定では送らない。
+
+- publisher は prefix に一致する track を `SUBSCRIBE_TRACKS_ID` (`0x36`) 付きの PUBLISH で返す。
+  moq-sub は一致する PUBLISH を PUBLISH_OK で受理する
+- 受信した PUBLISH 購読の Object は再生・録画に使わず読み捨てる。catalog が示す映像・音声の
+  再生経路は SUBSCRIBE のまま変えない
+- 既に SUBSCRIBE している Full Track Name の PUBLISH も受理して Object を捨てる。ただし
+  PUBLISH の Track Alias が既存の購読と衝突する場合は、data stream を alias だけで区別できない
+  ため `UNINTERESTED` で拒否する
+- `PUBLISH_SKIPPED` と SUBSCRIBE_TRACKS への `REQUEST_ERROR` はログに残し、既存の再生は続ける
+- session 移行 (GOAWAY) のあとは移行先で SUBSCRIBE_TRACKS を送り直す。request stream 単位の
+  GOAWAY では PUBLISH 起点の購読を再発行しない
+
+SUBSCRIBE_TRACKS に対応しない publisher は `REQUEST_ERROR` を返すため、`--subscribe-tracks` は
+その場合も警告ログだけを出して続行する。
 
 ## 再生と遅延
 

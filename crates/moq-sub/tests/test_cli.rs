@@ -39,6 +39,10 @@ fn help_prints_help_and_exits_successfully() {
             "--namespace の説明が表示されること ({flag}): {stdout}"
         );
         assert!(
+            stdout.contains("--subscribe-tracks"),
+            "--subscribe-tracks の説明が表示されること ({flag}): {stdout}"
+        );
+        assert!(
             stdout.contains("moqt://"),
             "URL の形式が表示されること ({flag}): {stdout}"
         );

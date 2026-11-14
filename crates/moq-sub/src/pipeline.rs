@@ -40,15 +40,16 @@ use shiguredo_moqt::video_decode_order::{
     VideoDecodeOrder, VideoObjectAdmission, VideoObjectPosition, prior_object_id_gap_of,
 };
 use shiguredo_moqt::{
-    message::ControlMessage, message::common::Location, message::common::TrackNamespace,
-    message_parameter::LocationFilter, message_parameter::MessageParameter,
-    message_parameter::MessageParameterValue, message_parameter::MessageParameters,
-    message_parameter::PARAM_FILL_PARAMETERS, message_parameter::PARAM_LOCATION_FILTER,
-    message_parameter::PARAM_NEW_GROUP_REQUEST, msf::MSF_CATALOG_TRACK_NAME, msf::MsfTrack,
-    name::parse_namespace, name::serialize_namespace, session::types::DataStreamId,
-    session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
-    stream::decoder::DecodedSubgroupObject, stream::decoder::FetchStreamDecoder,
-    stream::decoder::SubgroupStreamDecoder, stream::fetch::FetchHeader,
+    message::ControlMessage, message::Publish, message::common::Location,
+    message::common::TrackNamespace, message_parameter::LocationFilter,
+    message_parameter::MessageParameter, message_parameter::MessageParameterValue,
+    message_parameter::MessageParameters, message_parameter::PARAM_FILL_PARAMETERS,
+    message_parameter::PARAM_LOCATION_FILTER, message_parameter::PARAM_NEW_GROUP_REQUEST,
+    msf::MSF_CATALOG_TRACK_NAME, msf::MsfTrack, name::parse_namespace, name::serialize_namespace,
+    name::serialize_track_name, session::types::DataStreamId, session::types::SessionEvent,
+    stream::decoder::DecodedFetchEntry, stream::decoder::DecodedSubgroupObject,
+    stream::decoder::FetchStreamDecoder, stream::decoder::SubgroupStreamDecoder,
+    stream::fetch::FetchHeader,
 };
 
 use crate::catalog;
@@ -1008,6 +1009,33 @@ fn request_rejection(message: &ControlMessage) -> (u64, &'static str) {
     }
 }
 
+/// SUBSCRIBE_TRACKS の結果として届いた PUBLISH を受理するか
+///
+/// draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter) は、PUBLISH が
+/// 起因する namespace 購読の Request ID を運ぶ。自側が送った SUBSCRIBE_TRACKS の Request ID と
+/// 一致する場合だけ受理する。SUBSCRIBE_TRACKS を送っていない状態や、値が一致しない PUBLISH は
+/// 従来どおり不要な PUBLISH として拒否する。
+fn accepts_subscribe_tracks_publish(publish: &Publish, tracks_request_id: Option<u64>) -> bool {
+    match tracks_request_id {
+        Some(request_id) => publish.parameters.subscribe_tracks_id() == Some(request_id),
+        None => false,
+    }
+}
+
+/// 既に SUBSCRIBE している Full Track Name の PUBLISH か
+///
+/// `subscribed` は catalog / 映像 / 音声で購読している Full Track Name の一覧である。
+/// 同じ Track を SUBSCRIBE と PUBLISH の両方で購読すると同じ Object を 2 系統で受け取るため、
+/// 重複を判別して Object を捨てるために使う。
+fn is_already_subscribed_publish(
+    publish: &Publish,
+    subscribed: &[(TrackNamespace, Vec<u8>)],
+) -> bool {
+    subscribed.iter().any(|(namespace, track_name)| {
+        namespace == &publish.track_namespace && track_name == &publish.track_name
+    })
+}
+
 /// session で共有する保留バッファ
 ///
 /// Track Alias 未確立の Subgroup ストリームを保持するバッファは、session (run) スコープで
@@ -1167,6 +1195,12 @@ enum TrackKind {
     /// 読み出した Object を main ループへ渡し、`CatalogState` を所有する main ループが
     /// MSF の配置規則で適用する。
     Catalog,
+    /// SUBSCRIBE_TRACKS の結果として受理した PUBLISH の購読
+    ///
+    /// この example は catalog が示す映像・音声だけを再生するため、namespace prefix の
+    /// 購読で増えた track の Object は再生・録画に使わない。alias の解決と stream の会計は
+    /// Session に任せ、受信した Object は読み捨てる。
+    Discard,
 }
 
 /// PUBLISH_DONE の status code から決める購読の disposition
@@ -1264,6 +1298,12 @@ fn plan_for_migration(
         exclude_kinds.insert(*kind);
     }
     for (request_id, (kind, disposition)) in pending {
+        // SUBSCRIBE_TRACKS の結果として受理した PUBLISH は移行先で張り直さない。
+        // track の恒久終了として記録すると媒体トラックの終了判定に混ざるため、
+        // 計画からは外すだけにする (移行成功時に publish_done_pending ごと破棄される)
+        if *kind == TrackKind::Discard {
+            continue;
+        }
         match disposition {
             PublishDoneDisposition::TrackEnded | PublishDoneDisposition::Error => {
                 // 新たに恒久終了扱いにする track (既に恒久終了済みなら 2 つ目以降の
@@ -1440,6 +1480,8 @@ impl LastReceivedLocations {
             TrackKind::Catalog => self.catalog,
             TrackKind::Video => self.video,
             TrackKind::Audio => self.audio,
+            // SUBSCRIBE_TRACKS 由来の購読は再開位置を使わない
+            TrackKind::Discard => None,
         }
     }
 
@@ -1451,6 +1493,8 @@ impl LastReceivedLocations {
             TrackKind::Catalog => &mut self.catalog,
             TrackKind::Video => &mut self.video,
             TrackKind::Audio => &mut self.audio,
+            // 購読の再開に使わない track は位置を記録しない
+            TrackKind::Discard => return,
         };
         *slot = Some(match *slot {
             Some(current) => current.max(location),
@@ -1698,7 +1742,7 @@ fn fetch_target_of(kind: TrackKind) -> Option<FetchTarget> {
     match kind {
         TrackKind::Video => Some(FetchTarget::Video),
         TrackKind::Catalog => Some(FetchTarget::Catalog),
-        TrackKind::Audio => None,
+        TrackKind::Audio | TrackKind::Discard => None,
     }
 }
 
@@ -2211,6 +2255,12 @@ async fn reissue_request(
                 )
                 .await?
         }
+        // PUBLISH 起点の購読は publisher が開始したものであり、自側からは再発行できない
+        TrackKind::Discard => {
+            return Err(Error::Other(
+                "a PUBLISH-originated subscription cannot be re-issued".to_string(),
+            ));
+        }
     };
     Ok(ReissuedRequest {
         subscription,
@@ -2287,6 +2337,9 @@ pub async fn run(
     // `config` から move して受け取る。購読呼び出しを catalog track の namespace に変える 1 行の
     // 変更は、move 済みの値の再利用としてコンパイルエラーになる
     let namespace = config.namespace;
+    // SUBSCRIBE_TRACKS の prefix と、GOAWAY 移行後に同じ prefix で送り直すための複製。
+    // `namespace` は catalog の購読で move するため、先に複製を取っておく
+    let subscribe_tracks_namespace = namespace.clone();
     let mut data_plane = client.data_plane();
 
     // 2. タイムアウト設定
@@ -2583,6 +2636,47 @@ pub async fn run(
     };
     // Audio Config の解釈 (codec 判定) と音声デコーダの生成に使う catalog の audio codec
     let audio_codec = audio_info.as_ref().map(|a| a.codec.clone());
+
+    // SUBSCRIBE_TRACKS は catalog / 映像 / 音声の購読を確立したあとに送る。この example は
+    // catalog が示す track だけを再生するため、受理する PUBLISH は既存の購読と重複する
+    // track が中心になるが、catalog に載らない track も受理して観測できる。
+    // 付加的な購読であり、失敗しても既存の再生は止めない。
+    //
+    // 既に SUBSCRIBE している Full Track Name を PUBLISH でも購読すると同じ Object を
+    // 2 系統で受け取るため、重複判定に使う一覧をここで作る。
+    let mut subscribed_tracks: Vec<(TrackNamespace, Vec<u8>)> = vec![(
+        subscribe_tracks_namespace.clone(),
+        MSF_CATALOG_TRACK_NAME.to_vec(),
+    )];
+    if subscribe_video && let Some(info) = &video_info {
+        subscribed_tracks.push((info.namespace.clone(), info.track_name.as_bytes().to_vec()));
+    }
+    if subscribe_audio && let Some(info) = &audio_info {
+        subscribed_tracks.push((info.namespace.clone(), info.track_name.as_bytes().to_vec()));
+    }
+    let mut tracks_request_id: Option<u64> = None;
+    if config.subscribe_tracks {
+        match client
+            .subscribe_tracks(subscribe_tracks_namespace.clone(), MessageParameters::new())
+            .await
+        {
+            Ok(request_id) => {
+                tracks_request_id = Some(request_id);
+                tracing::info!(
+                    "Sent SUBSCRIBE_TRACKS: request_id={request_id}, namespace={}",
+                    serialize_namespace(&subscribe_tracks_namespace),
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to send SUBSCRIBE_TRACKS; continuing without the namespace subscription: {e}"
+                );
+            }
+        }
+    }
+    // SUBSCRIBE_TRACKS の結果として受理した PUBLISH の Request ID → Track Alias。
+    // PUBLISH_DONE の drain 完了後に alias を track_map から外すために保持する
+    let mut ignored_publish_requests: HashMap<u64, u64> = HashMap::new();
 
     // 移行 (GOAWAY) で購読を張り直すための指定と、現在の session の Request ID / alias
     //
@@ -3237,6 +3331,14 @@ pub async fn run(
                                                 "Cannot re-issue request {request_id} on a new session URI: migrating a single request requires two concurrent sessions"
                                             );
                                             Ok(false)
+                                        } else if ignored_publish_requests.contains_key(&request_id) {
+                                            // SUBSCRIBE_TRACKS の結果として受理した PUBLISH は
+                                            // publisher 起点の購読であり、自側からは再発行できない。
+                                            // 当該 request の終端は Session の期限に任せる
+                                            tracing::info!(
+                                                "Ignoring a request-scoped GOAWAY for a PUBLISH-originated subscription: request_id={request_id}"
+                                            );
+                                            Ok(false)
                                         } else {
                                             let Some(kind) = goaway_request_kind(
                                                 request_id,
@@ -3300,6 +3402,11 @@ pub async fn run(
                                                         TrackKind::Catalog => catalog_alias,
                                                         TrackKind::Video => video_alias,
                                                         TrackKind::Audio => audio_alias,
+                                                        // 再発行は catalog / 映像 / 音声だけを
+                                                        // 対象とするため通常は到達しない
+                                                        TrackKind::Discard => ignored_publish_requests
+                                                            .get(&request_id)
+                                                            .copied(),
                                                     };
                                                     let new_alias =
                                                         reissued.subscription.track_alias;
@@ -3382,6 +3489,14 @@ pub async fn run(
                                                                     last_locations
                                                                         .get(TrackKind::Audio),
                                                                 );
+                                                        }
+                                                        TrackKind::Discard => {
+                                                            // `reissue_request` は PUBLISH 起点の
+                                                            // 購読を再発行しないため到達しない。
+                                                            // 万一到達しても状態を変えない
+                                                            tracing::warn!(
+                                                                "Re-issued a PUBLISH-originated subscription unexpectedly: request_id={request_id}"
+                                                            );
                                                         }
                                                     }
                                                     // 再発行に伴う FETCH の対応表を足す。同じ
@@ -3467,6 +3582,18 @@ pub async fn run(
                                 normalize_publish_done_code(status_code),
                                 disposition,
                             );
+                            // SUBSCRIBE_TRACKS の結果として受理した購読の PUBLISH_DONE は、
+                            // 映像・音声の終了判定に使わない。Session の drain が終わるまで
+                            // alias を残し、tick で track_map から外す
+                            if ignored_publish_requests.contains_key(&request_id) {
+                                publish_done_pending
+                                    .insert(request_id, (TrackKind::Discard, disposition));
+                                tracing::info!(
+                                    "PUBLISH_DONE for a PUBLISH-originated subscription: \
+                                     request_id={request_id}, disposition={disposition:?}"
+                                );
+                                return Ok(false);
+                            }
                             match goaway_request_kind(
                                 request_id,
                                 catalog_request_id,
@@ -3578,6 +3705,11 @@ pub async fn run(
                             if video_fetch {
                                 fetch_targets.remove(&request_id);
                             }
+                            // SUBSCRIBE_TRACKS が拒否された場合は、以後に同じ
+                            // SUBSCRIBE_TRACKS_ID を持つ PUBLISH を受理しないよう対応を外す
+                            if tracks_request_id == Some(request_id) {
+                                tracks_request_id = None;
+                            }
                             tracing::warn!(
                                 "Received REQUEST_ERROR: request_id={request_id}, \
                                  video_fetch={video_fetch}, error_code={error_code:#x}, \
@@ -3609,8 +3741,102 @@ pub async fn run(
                             Ok(false)
                         }
                         Some(ClientEvent::Request(request)) => {
-                            // subscriber は relay からの要求を処理しない。PUBLISH は「不要」、
-                            // それ以外は「未対応」として拒否する。
+                            // SUBSCRIBE_TRACKS の結果として届いた PUBLISH だけは受理する。
+                            //
+                            // draft-ietf-moq-transport-23 §3.6 (Subscribing to Tracks by
+                            // Prefix) / §9.8 (PUBLISH): publisher は namespace prefix に一致
+                            // する track を PUBLISH し、購読者は PUBLISH_OK (REQUEST_OK) で
+                            // 応答する。Track Alias は PUBLISH が運ぶ値をそのまま使う。
+                            if let ControlMessage::Publish(publish) = &request.message
+                                && accepts_subscribe_tracks_publish(publish, tracks_request_id)
+                            {
+                                let alias = publish.track_alias;
+                                let namespace = publish.track_namespace.clone();
+                                let track_name = publish.track_name.clone();
+                                let duplicate = is_already_subscribed_publish(
+                                    publish,
+                                    &subscribed_tracks,
+                                );
+                                // 既存の購読と同じ alias が使われると、data stream がどちらの
+                                // 購読のものか alias だけでは区別できない。同じ track に対する
+                                // alias の共有は §3.1.3 が許可しているため、既存の再生経路を
+                                // 壊さないよう、この PUBLISH は受理しない
+                                let alias_taken = track_map
+                                    .read()
+                                    .expect("track_map lock must not be poisoned")
+                                    .contains_key(&alias);
+                                if alias_taken {
+                                    tracing::warn!(
+                                        "Rejecting a PUBLISH that reuses an existing track alias: \
+                                         request_id={}, namespace={}, track={}, alias={alias}",
+                                        request.request_id,
+                                        serialize_namespace(&namespace),
+                                        serialize_track_name(&track_name),
+                                    );
+                                    client
+                                        .send_request_error(
+                                            request.request_id,
+                                            shiguredo_moqt::error::REQUEST_UNINTERESTED,
+                                            "track alias is already used by another subscription",
+                                        )
+                                        .await?;
+                                    return Ok(false);
+                                }
+                                // PUBLISH_OK を送る前に alias を登録する。publisher は
+                                // PUBLISH_OK の直後に data stream を開きうるため、登録が
+                                // 遅れると未知 alias として保留されてしまう
+                                let datagram_map = {
+                                    let mut map = track_map
+                                        .write()
+                                        .expect("track_map lock must not be poisoned");
+                                    map.insert(alias, TrackKind::Discard);
+                                    Arc::new(map.clone())
+                                };
+                                match client.send_request_ok(request.request_id).await {
+                                    Ok(()) => {
+                                        ignored_publish_requests.insert(request.request_id, alias);
+                                        // datagram 受信タスクの alias 表も差し替える
+                                        let _ = datagram_session_tx.send((
+                                            client.handle(),
+                                            data_plane.clone(),
+                                            datagram_map,
+                                        ));
+                                        tracing::info!(
+                                            "Accepted PUBLISH for SUBSCRIBE_TRACKS: request_id={}, \
+                                             namespace={}, track={}, alias={alias}, \
+                                             duplicate={duplicate}",
+                                            request.request_id,
+                                            serialize_namespace(&namespace),
+                                            serialize_track_name(&track_name),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        // 受理に失敗した PUBLISH の alias を残すと、届いた
+                                        // stream を読み捨てる対象として保持し続けるため、
+                                        // 登録を取り消す
+                                        let datagram_map = {
+                                            let mut map = track_map
+                                                .write()
+                                                .expect("track_map lock must not be poisoned");
+                                            map.remove(&alias);
+                                            Arc::new(map.clone())
+                                        };
+                                        let _ = datagram_session_tx.send((
+                                            client.handle(),
+                                            data_plane.clone(),
+                                            datagram_map,
+                                        ));
+                                        tracing::warn!(
+                                            "Failed to accept PUBLISH for SUBSCRIBE_TRACKS: \
+                                             request_id={}, {e}",
+                                            request.request_id,
+                                        );
+                                    }
+                                }
+                                return Ok(false);
+                            }
+                            // subscriber は上記以外の peer request を処理しない。PUBLISH は
+                            // 「不要」、それ以外は「未対応」として拒否する。
                             let (code, reason) = request_rejection(&request.message);
                             tracing::warn!(
                                 "Rejecting unexpected peer request: request_id={} code={code:#x}",
@@ -3638,6 +3864,22 @@ pub async fn run(
                                     update.request_id
                                 );
                             }
+                            Ok(false)
+                        }
+                        Some(ClientEvent::Session(SessionEvent::PublishSkippedReceived {
+                            request_id,
+                            track_namespace,
+                            track_name,
+                        })) => {
+                            // draft-ietf-moq-transport-23 §9.18 (PUBLISH_SKIPPED):
+                            // SUBSCRIBE_TRACKS に一致したが購読を作らなかった track である。
+                            // 状態は変えず、観測できるようにログだけ残す
+                            tracing::info!(
+                                "Received PUBLISH_SKIPPED: request_id={request_id}, \
+                                 namespace={}, track={}",
+                                serialize_namespace(&track_namespace),
+                                serialize_track_name(&track_name),
+                            );
                             Ok(false)
                         }
                         _ => Ok(false),
@@ -3887,6 +4129,35 @@ pub async fn run(
                             "Migrated the session to {}",
                             config.url.authority
                         );
+                        // SUBSCRIBE_TRACKS は session 単位の namespace 要求であり、移行先で
+                        // 張り直す必要がある。PUBLISH 起点の購読と Request ID は旧 session の
+                        // ものなので破棄する (track_map は上の差し替えで catalog / 映像 / 音声
+                        // だけになっている)
+                        ignored_publish_requests.clear();
+                        tracks_request_id = None;
+                        if config.subscribe_tracks {
+                            match client
+                                .subscribe_tracks(
+                                    subscribe_tracks_namespace.clone(),
+                                    MessageParameters::new(),
+                                )
+                                .await
+                            {
+                                Ok(request_id) => {
+                                    tracks_request_id = Some(request_id);
+                                    tracing::info!(
+                                        "Re-sent SUBSCRIBE_TRACKS on the migrated session: \
+                                         request_id={request_id}"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to re-send SUBSCRIBE_TRACKS on the migrated \
+                                         session: {e}"
+                                    );
+                                }
+                            }
+                        }
                     }
                     Ok(Err(failure)) => {
                         // 期限超過・再試行不能なエラーである。旧 session はまだ生きており、
@@ -4066,6 +4337,9 @@ pub async fn run(
                         TrackKind::Catalog => catalog_alias,
                         TrackKind::Video => video_alias,
                         TrackKind::Audio => audio_alias,
+                        TrackKind::Discard => {
+                            ignored_publish_requests.get(&request_id).copied()
+                        }
                     };
                     // track_map と datagram 受信タスクの alias 表の両方から該当 alias を
                     // 除去する。catalog は fill fetch stream が Request ID で振り分けられる
@@ -4128,6 +4402,15 @@ pub async fn run(
                                 );
                             }
                         },
+                        TrackKind::Discard => {
+                            // 映像・音声の終了判定には使わない。後続の PUBLISH_DONE を
+                            // 別の購読として扱わないよう、対応表から外す
+                            ignored_publish_requests.remove(&request_id);
+                            tracing::info!(
+                                "PUBLISH-originated subscription ended: \
+                                 request_id={request_id}, disposition={disposition:?}"
+                            );
+                        }
                     }
                     // 全 media track が恒久的に終了し、移行待ちも無ければ pipeline を終える
                     // (catalog だけ残っていても media が無ければ終了する。catalog の
@@ -4153,6 +4436,42 @@ pub async fn run(
                             break 'main;
                         }
                     }
+                }
+                // SUBSCRIBE_TRACKS 由来の購読は PUBLISH_DONE だけでなく、publisher による
+                // request stream の reset でも終端しうる。PUBLISH_DONE の drain 待ちに載って
+                // いるものは上のループが扱うため、それ以外で Session の回収が済んだ購読の
+                // alias を track_map から外す
+                let ended_discard: Vec<u64> = ignored_publish_requests
+                    .iter()
+                    .filter(|(request_id, _)| !publish_done_pending.contains_key(request_id))
+                    .filter(|(request_id, _)| {
+                        matches!(
+                            client.subscription_cleanup_ready(**request_id),
+                            Some(true) | None
+                        )
+                    })
+                    .map(|(request_id, _)| *request_id)
+                    .collect();
+                if !ended_discard.is_empty() {
+                    let datagram_map = {
+                        let mut map = track_map
+                            .write()
+                            .expect("track_map lock must not be poisoned");
+                        for request_id in &ended_discard {
+                            if let Some(alias) = ignored_publish_requests.remove(request_id) {
+                                map.remove(&alias);
+                            }
+                        }
+                        Arc::new(map.clone())
+                    };
+                    let _ = datagram_session_tx.send((
+                        client.handle(),
+                        data_plane.clone(),
+                        datagram_map,
+                    ));
+                    tracing::info!(
+                        "Removed the ended PUBLISH-originated subscriptions: request_ids={ended_discard:?}"
+                    );
                 }
             }
             _ = shutdown_monitor.recv() => {
@@ -6185,6 +6504,15 @@ async fn handle_stream_body(
                         }
                     }
                 }
+                Some(TrackKind::Discard) => {
+                    // SUBSCRIBE_TRACKS の結果として受理した購読である。Session への header 登録と
+                    // stream の会計は済んでいるため、Object を読み捨てて会計だけ閉じる
+                    tracing::debug!(
+                        "Stream #{stream_num}: discarding objects for a PUBLISH-originated subscription: alias={}",
+                        header.track_alias,
+                    );
+                    let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
+                }
                 None => {
                     tracing::warn!(
                         "Stream #{stream_num}: unknown track alias={}",
@@ -7381,6 +7709,8 @@ fn plan_datagram<'a>(raw: &'a [u8], track_map: &HashMap<u64, TrackKind>) -> Data
         Some(TrackKind::Video | TrackKind::Catalog) => DatagramAction::Unsupported {
             track_alias: datagram.track_alias,
         },
+        // SUBSCRIBE_TRACKS 由来の購読は再生・録画に使わない
+        Some(TrackKind::Discard) => DatagramAction::Ignore,
         // 未知の alias は Session が Accepted にしないため到達しない
         None => DatagramAction::Ignore,
     }
@@ -9788,6 +10118,18 @@ mod tests {
         assert!(
             resolve.is_empty(),
             "既に恒久終了済みの entry は解消対象外とすること"
+        );
+
+        // SUBSCRIBE_TRACKS 由来の購読 (Discard) は移行先で張り直さないため、plan にも
+        // 恒久終了化の対象にも載せない (媒体トラックの終了判定に混ざらないこと)
+        let mut pending = HashMap::new();
+        pending.insert(9, (TrackKind::Discard, PublishDoneDisposition::TrackEnded));
+        let (plan, resolve) = plan_for_migration(&base, &empty, &pending);
+        assert!(plan.catalog_namespace.is_some(), "catalog は維持すること");
+        assert!(plan.video.is_some(), "video は維持すること");
+        assert!(
+            resolve.is_empty(),
+            "PUBLISH 起点の購読は恒久終了化しないこと"
         );
     }
 
@@ -13174,6 +13516,119 @@ mod tests {
                     object_id: 0,
                 }),
                 "解除後に「最後に受信した位置」を記録すること"
+            );
+        }
+    }
+
+    /// SUBSCRIBE_TRACKS 由来の PUBLISH の受理判定を固定する
+    mod subscribe_tracks_publish_tests {
+        use super::*;
+        use shiguredo_moqt::message::Publish;
+        use shiguredo_moqt::message_parameter::PARAM_SUBSCRIBE_TRACKS_ID;
+        use shiguredo_moqt::track_properties::TrackProperties;
+
+        /// PUBLISH を組み立てる
+        ///
+        /// `subscribe_tracks_id` が `Some` のときだけ SUBSCRIBE_TRACKS_ID (0x36) を載せる。
+        /// 値 `None` は「SUBSCRIBE_TRACKS に起因しない PUBLISH」を表す。
+        fn publish(subscribe_tracks_id: Option<u64>) -> Publish {
+            let mut parameters = MessageParameters::new();
+            if let Some(value) = subscribe_tracks_id {
+                parameters.push(MessageParameter {
+                    param_type: PARAM_SUBSCRIBE_TRACKS_ID,
+                    value: MessageParameterValue::VarInt(value),
+                });
+            }
+            Publish {
+                request_id: 5,
+                track_namespace: TrackNamespace::new(vec![b"live".to_vec()])
+                    .expect("テスト用の namespace を作れること"),
+                track_name: b"video".to_vec(),
+                track_alias: 3,
+                parameters,
+                track_properties: TrackProperties::new(),
+            }
+        }
+
+        /// 送信した SUBSCRIBE_TRACKS の Request ID と一致する PUBLISH を受理すること
+        #[test]
+        fn matching_subscribe_tracks_id_is_accepted() {
+            assert!(
+                accepts_subscribe_tracks_publish(&publish(Some(9)), Some(9)),
+                "SUBSCRIBE_TRACKS_ID が送信した Request ID と一致する PUBLISH は受理すること"
+            );
+        }
+
+        /// Request ID が一致しない PUBLISH は受理しないこと
+        #[test]
+        fn different_subscribe_tracks_id_is_rejected() {
+            assert!(
+                !accepts_subscribe_tracks_publish(&publish(Some(10)), Some(9)),
+                "SUBSCRIBE_TRACKS_ID が一致しない PUBLISH は拒否すること"
+            );
+        }
+
+        /// SUBSCRIBE_TRACKS を送っていない状態では PUBLISH を受理しないこと
+        #[test]
+        fn publish_is_rejected_without_a_tracks_request() {
+            assert!(
+                !accepts_subscribe_tracks_publish(&publish(Some(9)), None),
+                "SUBSCRIBE_TRACKS を送っていない状態では PUBLISH を拒否すること"
+            );
+        }
+
+        /// SUBSCRIBE_TRACKS_ID を持たない PUBLISH は受理しないこと
+        #[test]
+        fn publish_without_subscribe_tracks_id_is_rejected() {
+            assert!(
+                !accepts_subscribe_tracks_publish(&publish(None), Some(9)),
+                "SUBSCRIBE_TRACKS_ID を持たない PUBLISH は拒否すること"
+            );
+        }
+
+        /// SUBSCRIBE 済みの Full Track Name を重複として判定すること
+        #[test]
+        fn subscribed_full_track_name_is_a_duplicate() {
+            let target = publish(Some(9));
+            let subscribed = vec![
+                (
+                    TrackNamespace::new(vec![b"live".to_vec()])
+                        .expect("テスト用の namespace を作れること"),
+                    b"video".to_vec(),
+                ),
+                (
+                    TrackNamespace::new(vec![b"live".to_vec()])
+                        .expect("テスト用の namespace を作れること"),
+                    b"audio".to_vec(),
+                ),
+            ];
+            assert!(
+                is_already_subscribed_publish(&target, &subscribed),
+                "namespace と track 名の両方が一致する PUBLISH は重複と判定すること"
+            );
+        }
+
+        /// track 名だけが一致しても、namespace が違えば重複ではないこと
+        #[test]
+        fn different_namespace_is_not_a_duplicate() {
+            let target = publish(Some(9));
+            let subscribed = vec![(
+                TrackNamespace::new(vec![b"other".to_vec()])
+                    .expect("テスト用の namespace を作れること"),
+                b"video".to_vec(),
+            )];
+            assert!(
+                !is_already_subscribed_publish(&target, &subscribed),
+                "namespace が異なる PUBLISH は重複と判定しないこと"
+            );
+        }
+
+        /// 購読一覧が空なら重複ではないこと
+        #[test]
+        fn empty_subscriptions_have_no_duplicate() {
+            assert!(
+                !is_already_subscribed_publish(&publish(Some(9)), &[]),
+                "購読一覧が空のときは重複と判定しないこと"
             );
         }
     }

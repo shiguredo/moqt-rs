@@ -2,7 +2,8 @@
 
 調査日: 2026-10-14 (develop の f91baf3 時点)。
 
-最終更新: 2026-11-14 (namespace 発見・告知の 6 メッセージを実装済みとして対象外リストから外した)。
+最終更新: 2026-11-14 (namespace 発見・告知の 6 メッセージを実装済みとして対象外リストから外し、
+moq-sub の `--subscribe-tracks` を反映した)。
 
 対象仕様は `refs/moq/` の MOQT `draft-ietf-moq-transport-23`、LOC `draft-ietf-moq-loc-05`、
 MSF `draft-ietf-moq-msf-01`、C4M `draft-ietf-moq-c4m-02` である。
@@ -278,12 +279,17 @@ transport 層の `send_request_ok` も Track Properties を渡せない
 
 ### 5.7.1 moq-sub の peer request 拒否方針
 
-moq-sub は peer request を処理しない。PUBLISH は「不要」として `UNINTERESTED` (0x20)、
-SUBSCRIBE / FETCH / TRACK_STATUS は `NOT_SUPPORTED` (0x3) で拒否する
-(`crates/moq-sub/src/pipeline.rs`)。PUBLISH の拒否時は、当該 subscription に属する
-open な publisher 起点 data stream を破棄対象へ移し、
-`SessionEvent::StopSendingDataStream` (`STREAM_CANCELLED`) を発行する
-(`src/session/subscription/dispatch.rs`)。STOP_SENDING フレームの送出は I/O 層が行う。
+moq-sub は `--subscribe-tracks` を指定したときだけ、自側が送った SUBSCRIBE_TRACKS の
+Request ID に一致する `SUBSCRIBE_TRACKS_ID` (0x36) を持つ PUBLISH を PUBLISH_OK で受理する
+(`crates/moq-sub/src/pipeline.rs`)。受理した購読の Object は再生・録画に使わず、subgroup stream と
+datagram の両方で読み捨てる。既存の購読と同じ Track Alias を持つ PUBLISH は、alias だけでは
+購読を区別できないため `UNINTERESTED` (0x20) で拒否する。
+
+それ以外の PUBLISH は「不要」として `UNINTERESTED`、SUBSCRIBE / FETCH / TRACK_STATUS は
+`NOT_SUPPORTED` (0x3) で拒否する。PUBLISH の拒否時は、当該 subscription に属する open な
+publisher 起点 data stream を破棄対象へ移し、`SessionEvent::StopSendingDataStream`
+(`STREAM_CANCELLED`) を発行する (`src/session/subscription/dispatch.rs`)。STOP_SENDING フレームの
+送出は I/O 層が行う。
 
 ### 5.8 メディアの FETCH に応答しない
 
