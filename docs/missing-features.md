@@ -404,12 +404,13 @@ session で再発行する。
 残る制約:
 
 - request stream GOAWAY の非空 URI による単一 request 移行は、移行対象の request だけを専用タスクの
-  side session で扱う方式で対応している (subscriber は SUBSCRIBE、publisher は PUBLISH)。
-  subscriber は同時に 1 request の移行に限り、publisher は track ごとに side session を
-  確立する。同一の移行先 URL を指す複数 request を 1 つの side session に共有することは
-  未対応である。
-- FETCH の request 単位移行は未対応である。FETCH の Request ID と元の range / パラメータを
-  追跡し、side session で再発行する必要がある。
+  side session で扱う方式で対応している (subscriber は SUBSCRIBE と FETCH、publisher は
+  PUBLISH)。移行先 URL ごとに side session を 1 本にまとめ、複数の request を共有する。
+- side session 自身が GOAWAY / 切断を受けた場合の再移行は未対応であり、ログを残して
+  その track の配送を止める (publisher はパイプラインを終了する)。
+- 共有 side session の接続期限は、最初に移行した request の GOAWAY Timeout で固定される。
+- subscriber の FETCH は旧 request stream を `STOP_SENDING` で閉じられないため、peer の
+  timeout reset に委ねる (tokio-moq が FETCH 用の停止 API を公開していない)。
 - subscriber は移行後の catalog 購読で届く fill fetch stream を `CatalogState` へ適用する。
   publisher が fill に応答しない場合は次の catalog publish まで完全な catalog が届かない
   (外部要因)。

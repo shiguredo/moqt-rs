@@ -11,12 +11,12 @@ crates 配下の `moq-pub` / `moq-sub` の単一 session 前提を複数 session
 この設計の全体を `SessionHandle` 化する方式ではなく、移行対象の request だけを専用タスクの
 side session で扱う方式を実装した。現在の実装は次のとおり。
 
-- subscriber: catalog / video / audio の SUBSCRIBE を side session へ移行する。同時に
-  移行できる request は 1 本だけである。
-- publisher: video / audio / catalog の PUBLISH を side session へ移行する。track ごとに
-  side session を確立する。
-- 未対応: §3.5 の同一移行先 URL を指す複数 request の 1 session 共有、§3.7 の FETCH の
-  request 単位移行。
+- subscriber: catalog / video / audio の SUBSCRIBE と FETCH を side session へ移行する。
+  移行先 URL ごとに side session を 1 本にまとめ、複数の request を共有する。
+- publisher: video / audio / catalog の PUBLISH を side session へ移行する。同じく
+  移行先 URL ごとに 1 本の side session を共有する。
+- 未対応: side session 自身が GOAWAY / 切断を受けた場合の再移行。`SessionHandle` 化による
+  全 session の統一的な管理 (§3.1〜§3.3) は採用していない。
 
 ## 1. 前提と現状
 
