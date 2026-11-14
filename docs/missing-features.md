@@ -33,8 +33,7 @@ relay による namespace の集約・forwarding) は本稿の対象外とする
    FETCH (要求側 API は transport 層で削除済み)、TRACK_STATUS、Media / Event Timeline、
    MSF の変数置換、パディング、`publishTracks`、Audio Level、`END_OF_GROUP`、
    Range Filters を有効にする `MAX_FILTER_RANGES` など。
-3. **アプリ機能として欠けているもの**: request stream GOAWAY の非空 URI による個別 request
-   移行 (2 session の併走が必要)、REQUEST_ERROR の REDIRECT 追随、トラック選択と切替、
+3. **アプリ機能として欠けているもの**: REQUEST_ERROR の REDIRECT 追随、トラック選択と切替、
    シーク / 巻き戻し、ライブ中の track 追加への追随、配信終了のシグナリング、統計表示。
 4. **MUST 未達・仕様違反になりうる箇所**: Object 側 `IMMUTABLE_PROPERTIES` 内側の Audio Level /
    Video Frame Marking 違反の `MALFORMED_KEY_VALUE` によるセッション終了が未対応 (§8.3)、
@@ -404,9 +403,13 @@ session で再発行する。
 
 残る制約:
 
-- request stream GOAWAY の非空 URI による単一 request 移行は未対応である。指定 URI の session を
-  別に確立し、track 単位に data plane / datagram / alias / peer request を振り分ける設計が必要に
-  なる。現状は移行せず warn ログを残す。
+- request stream GOAWAY の非空 URI による単一 request 移行は、移行対象の request だけを専用タスクの
+  side session で扱う方式で対応している (subscriber は SUBSCRIBE、publisher は PUBLISH)。
+  subscriber は同時に 1 request の移行に限り、publisher は track ごとに side session を
+  確立する。同一の移行先 URL を指す複数 request を 1 つの side session に共有することは
+  未対応である。
+- FETCH の request 単位移行は未対応である。FETCH の Request ID と元の range / パラメータを
+  追跡し、side session で再発行する必要がある。
 - subscriber は移行後の catalog 購読で届く fill fetch stream を `CatalogState` へ適用する。
   publisher が fill に応答しない場合は次の catalog publish まで完全な catalog が届かない
   (外部要因)。
@@ -590,7 +593,8 @@ moqt-js (HEAD `f6a171e8`) の playout のうち、次の 2 つは移植してい
 
 利用者に直接見える欠落から順に並べる。
 
-1. request stream GOAWAY の非空 URI による単一 request 移行 (6.6) — 2 session の併走が必要
+1. request stream GOAWAY の同一移行先 URL を指す複数 request の session 共有と、FETCH の
+   request 単位移行 (6.6) — side session を URL 単位で共有し、FETCH の要求を追跡する必要がある
 2. メディアの FETCH 不在 (5.8 / 6.1) — シーク、巻き戻し、欠落回収ができない
 3. 配信終了のシグナリング (5.1) — 正常終了・VOD 化・恒久終了を伝えられない (MSF §11.3)
 4. authInfo と変数置換 (6.4) — 認可付き配信が example 同士でも成立しない

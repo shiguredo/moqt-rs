@@ -1062,6 +1062,18 @@ where
     Err(last.expect("resolve_socket_addrs must return at least one address"))
 }
 
+/// 2 つの URL が同じ session を指すか
+///
+/// GOAWAY の New Session URI が現在の URL と同じかどうかの判定に使う。`ServerUrl` は
+/// 全体の `PartialEq` を持たないため、session を決める authority / path / fragment を比較する。
+/// c4m の認可トークンは同じ URL なら同じ値であり、比較しない (別の値なら
+/// [`migration_target`] が移行先の URL から解決する)。
+pub fn same_session_url(current: &ServerUrl, target: &ServerUrl) -> bool {
+    current.authority == target.authority
+        && current.path == target.path
+        && current.fragment == target.fragment
+}
+
 /// GOAWAY の New Session URI から移行先を決める
 ///
 /// draft-ietf-moq-transport-23 §9.2 (GOAWAY) / §6.6.1 (Graceful Session Migration) に従う。
@@ -1069,8 +1081,8 @@ where
 /// - control stream の GOAWAY (`on_request_stream` が `None`) は session 全体を移行する
 ///   ([`MigrationScope::Session`])。
 /// - request stream の GOAWAY (`on_request_stream` が `Some`) は当該 request だけを移行する
-///   対象として返す ([`MigrationScope::Request`])。request 単位の移行は 2 session の併走が
-///   必要なため、呼び出し側が対応可否を決める。URI が不正な場合は session を維持できるよう
+///   対象として返す ([`MigrationScope::Request`])。request 単位の移行は呼び出し側が
+///   side session を確立して行う。URI が不正な場合は session を維持できるよう
 ///   `Ok(None)` にする。
 /// - `new_session_uri` が空のときは現在の URL を再利用する (空 URI は request stream の
 ///   GOAWAY でも「現在の session で再発行する」ことを意味する)。
@@ -1086,14 +1098,6 @@ where
 ///
 /// control stream の GOAWAY で `new_session_uri` が UTF-8 でない場合と、[`parse_url`] が
 /// 解釈できない場合に [`TransportError`] になる。
-/// 2 つの URL が同じ session を指すか
-///
-/// GOAWAY の New Session URI が現在の URL と同じかどうかの判定に使う。接続に影響する
-/// authority / path / fragment を比べる。
-pub fn same_session_url(a: &ServerUrl, b: &ServerUrl) -> bool {
-    a.authority == b.authority && a.path == b.path && a.fragment == b.fragment
-}
-
 pub fn migration_target(
     new_session_uri: &[u8],
     on_request_stream: Option<u64>,

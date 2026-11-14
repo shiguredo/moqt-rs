@@ -2431,8 +2431,8 @@ enum RequestMigrationStep {
     Event(std::result::Result<Option<ClientEvent>, TransportError>),
     /// side session が data stream を受理した結果
     Accepted(std::result::Result<Option<transport::RecvStream>, TransportError>),
-    /// side session の datagram 受信結果
-    Datagrams(std::result::Result<Vec<Vec<u8>>, TransportError>),
+    /// side session の datagram 受信結果 (受信タスクが終了したら `None`)
+    Datagrams(Option<std::result::Result<Vec<Vec<u8>>, TransportError>>),
     /// 100 ms 周期の tick
     Tick,
 }
@@ -2465,7 +2465,7 @@ fn spawn_request_migration(
 /// 次の順に進む。
 ///
 /// 1. 移行先の session を [`tokio_moq::connect_with_retry`] で確立する。接続の設定・
-///    期限・指数的な再試行は control GOAWAY の移行 ([`migrate_to_target`]) と同じである。
+///    接続は期限まで指数的に再試行する。request の再発行は 1 回だけ試す。
 /// 2. main ループと同じタイムアウトを設定する。
 /// 3. 移行対象の request だけを [`reissue_request`] で再発行する。旧 request の終端は
 ///    main ループが `stop_sending` で行うため、STOP_SENDING は送らない。
@@ -2603,12 +2603,12 @@ async fn run_request_migration(
     );
 
     // 移行後の side session で受ける data stream の Track Alias は、再発行した購読の
-    // SUBSCRIBE_OK が返した alias だけである。移行対象の購読 1 本だけを扱うため、
-    // FETCH 応答の対応表は持たない。再発行に伴って発行した映像の FETCH 応答 stream は
-    // 配送先が無いものとして読み捨てられる (live の購読は継続する)。
+    // SUBSCRIBE_OK が返した alias だけである。移行対象の購読 1 本だけを扱うが、再発行に
+    // 伴って発行した映像の FETCH 応答と catalog の fill fetch stream は、同じ side session の
+    // Request ID なので配送先をそのまま使える。
     let mut track_map: HashMap<u64, TrackKind> = HashMap::new();
     track_map.insert(reissued.subscription.track_alias, kind);
-    let fetch_targets: HashMap<u64, FetchTarget> = HashMap::new();
+    let fetch_targets = reissued.fetch_targets;
     let data_plane = client.data_plane();
     // datagram の受信には handle を直接使う (client を借用しないため select の腕に置ける)
     let handle = client.handle();
@@ -2634,6 +2634,29 @@ async fn run_request_migration(
     // ため、ここが止まると side session の進行も止まる。
     let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(100));
     tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // datagram の受信は専用タスクへ分ける。100 ms の tick と同じ `select!` で
+    // `handle.recv_datagrams()` を待つと、tick のたびに future が捨てられ、
+    // ngtcp2 の driver が受け取り待ちの datagram を破棄してしまう
+    let (datagram_tx, mut datagram_rx) =
+        tokio::sync::mpsc::channel::<std::result::Result<Vec<Vec<u8>>, TransportError>>(8);
+    let datagram_task = (kind == TrackKind::Audio).then(|| {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            loop {
+                match handle.recv_datagrams().await {
+                    Ok(batch) => {
+                        if datagram_tx.send(Ok(batch)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = datagram_tx.send(Err(e)).await;
+                        break;
+                    }
+                }
+            }
+        })
+    });
     let mut join_set = tokio::task::JoinSet::new();
     let mut pending_streams: std::collections::VecDeque<transport::RecvStream> =
         std::collections::VecDeque::new();
@@ -2694,7 +2717,7 @@ async fn run_request_migration(
             }
             // 移行対象が Audio のときだけ音声 datagram を受ける。音声以外の track が
             // 移行対象のときは datagram を配送しない
-            received = handle.recv_datagrams(), if kind == TrackKind::Audio => {
+            received = datagram_rx.recv(), if kind == TrackKind::Audio => {
                 RequestMigrationStep::Datagrams(received)
             }
             _ = tick_interval.tick() => RequestMigrationStep::Tick,
@@ -2773,7 +2796,11 @@ async fn run_request_migration(
                     break 'receive;
                 }
             },
-            RequestMigrationStep::Datagrams(received) => match received {
+            RequestMigrationStep::Datagrams(None) => {
+                // datagram 受信タスクが終了した (side session の終了など)
+                break 'receive;
+            }
+            RequestMigrationStep::Datagrams(Some(received)) => match received {
                 Ok(datagrams) => {
                     let batch_len = datagrams.len();
                     for raw in datagrams {
@@ -2880,7 +2907,11 @@ async fn run_request_migration(
             }
         }
     }
-    // ここで join_set が drop され、side session の stream task も打ち切られる
+    // datagram の受信タスクを止める。join_set が drop され、side session の
+    // stream task も打ち切られる
+    if let Some(task) = datagram_task {
+        task.abort();
+    }
 }
 
 /// パイプラインを実行する
@@ -4029,6 +4060,18 @@ pub async fn run(
                                                         Instant::now(),
                                                         timeout,
                                                     );
+                                                    // 移行先 URI の msf fragment の connection が
+                                                    // 現在の接続経路と矛盾する場合は移行しない
+                                                    // (draft-ietf-moq-msf-01 §11.1.1)
+                                                    if let Err(e) = tokio_moq::resolve_transport(
+                                                        Some(config.transport),
+                                                        &target.url,
+                                                    ) {
+                                                        tracing::warn!(
+                                                            "GOAWAY migration target conflicts with the current transport: {e}"
+                                                        );
+                                                        return Ok(false);
+                                                    }
                                                     // side session の世代は旧 session より新しく
                                                     // する。Audio Config の検証済み世代と比べ、
                                                     // side session で最初に届いた Audio Config を

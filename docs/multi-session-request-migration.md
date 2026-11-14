@@ -6,6 +6,18 @@ request stream GOAWAY の非空 New Session URI
 移行を実装するための設計である。設計 issue の成果物として、
 crates 配下の `moq-pub` / `moq-sub` の単一 session 前提を複数 session 併走へ拡張する方法を決定する。
 
+## 0. 実装状況
+
+この設計の全体を `SessionHandle` 化する方式ではなく、移行対象の request だけを専用タスクの
+side session で扱う方式を実装した。現在の実装は次のとおり。
+
+- subscriber: catalog / video / audio の SUBSCRIBE を side session へ移行する。同時に
+  移行できる request は 1 本だけである。
+- publisher: video / audio / catalog の PUBLISH を side session へ移行する。track ごとに
+  side session を確立する。
+- 未対応: §3.5 の同一移行先 URL を指す複数 request の 1 session 共有、§3.7 の FETCH の
+  request 単位移行。
+
 ## 1. 前提と現状
 
 ### 1.1 仕様

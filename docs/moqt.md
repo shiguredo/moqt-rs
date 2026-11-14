@@ -326,9 +326,11 @@ End of Unknown Range (`0x10C`、§11.4.2 (End of Range)) で示して残りの�
   移行中に届いた catalog を fill fetch stream から `CatalogState` へ適用し、音声は最後に受信した
   Location から再開します。publisher は移行先の c4m が変わったとき catalog の authInfo を
   再構築します。request stream の GOAWAY は session を維持し、空 URI (subscriber は現在と同じ
-  URL を含む) なら当該 request を再発行します。非空 URI の単一 request 移行は 2 session の
-  併走が必要なため未対応です。New Session URI が空なら現在の URI を再利用します。認可トークンは
-  同一 origin のときだけ引き継ぎます (draft-ietf-moq-msf-01 §11.4.4)。
+  URL を含む) なら当該 request を再発行します。非空 URI で現在の URL と異なる場合は、移行対象の
+  request だけを専用タスクで確立した side session で受信 / 送信し、旧 session は他の request と
+  data plane の処理を続けます。subscriber は catalog / video / audio の SUBSCRIBE、publisher は
+  video / audio / catalog の PUBLISH を移行できます。New Session URI が空なら現在の URI を
+  再利用します。認可トークンは同一 origin のときだけ引き継ぎます (draft-ietf-moq-msf-01 §11.4.4)。
 
 送信側の運用手順:
 

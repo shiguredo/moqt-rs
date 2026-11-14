@@ -2109,8 +2109,21 @@ pub async fn run(
                                                 );
                                                 return Ok(false);
                                             }
+                                            // 移行先 URI の msf fragment の connection が
+                                            // 現在の接続経路と矛盾する場合は移行しない
+                                            // (draft-ietf-moq-msf-01 §11.1.1)
+                                            if let Err(e) = tokio_moq::resolve_transport(
+                                                Some(config.transport),
+                                                &target.url,
+                                            ) {
+                                                tracing::warn!(
+                                                    "GOAWAY migration target conflicts with the current transport: {e}"
+                                                );
+                                                return Ok(false);
+                                            }
                                             // 期限は GOAWAY の Timeout (0 はローカル既定値)。
-                                            // 接続と PUBLISH の再発行は期限まで再試行される
+                                            // 接続は期限まで再試行されるが、PUBLISH の再発行は
+                                            // 1 回だけ試す
                                             let deadline = MigrationDeadline::after_goaway(
                                                 Instant::now(),
                                                 timeout,
@@ -2727,6 +2740,17 @@ pub async fn run(
                             "Migrated the {kind:?} PUBLISH to another session: old_request_id={old_request_id}, new_request_id={new_request_id}, track_alias={new_track_alias}"
                         );
                     }
+                    RequestMigrationEvent::Ended { kind } => {
+                        tracing::warn!(
+                            "The request migration side session ended: kind={kind:?}; stop sending the track"
+                        );
+                        match kind {
+                            PublishTrack::Video => video_publish_target = None,
+                            PublishTrack::Audio => audio_publish_target = None,
+                            PublishTrack::Catalog => catalog_publish_target = None,
+                            PublishTrack::Unknown => {}
+                        }
+                    }
                     RequestMigrationEvent::Failed {
                         kind,
                         old_request_id,
@@ -3105,8 +3129,9 @@ enum GoawayAction {
 /// draft-ietf-moq-transport-23 §9.2 (GOAWAY): "Upon receiving a GOAWAY on a request stream,
 /// the endpoint SHOULD re-issue that specific request on a session at the specified URI (or
 /// the current session if no URI is provided), and close the old request stream using the
-/// appropriate mechanism"。URI が空なら現在の session で再発行し、非空なら別 session が要る。
-/// draft 由来の規則であり将来の draft 改版で変わる可能性がある。
+/// appropriate mechanism"。New Session URI が空か現在の URL と同じなら現在の session で
+/// 再発行し、別の URL なら side session を確立して移行する。draft 由来の規則であり将来の
+/// draft 改版で変わる可能性がある。
 fn goaway_action(scope: MigrationScope, same_session: bool) -> GoawayAction {
     match scope {
         MigrationScope::Session => GoawayAction::MigrateSession,
@@ -3703,6 +3728,11 @@ enum RequestMigrationEvent {
         /// side session で観測したイベント
         event: SessionEvent,
     },
+    /// side session が終了した。移行済みの track はもう送れない
+    Ended {
+        /// side session を失った track 種別
+        kind: PublishTrack,
+    },
 }
 
 /// request 単位移行タスクへ渡す要求
@@ -4002,7 +4032,10 @@ async fn run_request_migration(
                     "Rejecting an unexpected data stream on the request migration side session: kind={kind:?}, stream_id={}",
                     stream.stream_id()
                 );
-                if let Err(e) = stream.stop_sending(REQUEST_NOT_SUPPORTED).await {
+                // data stream の reset code は §12.5 の CANCELLED を使う
+                // (REQUEST_NOT_SUPPORTED は §12.3 の session 終了コードであり、
+                // stream reset では SESSION_CLOSED の意味になる)
+                if let Err(e) = stream.stop_sending(0x1).await {
                     tracing::debug!(
                         "Failed to stop an unexpected data stream on the request migration side session: {e}"
                     );
@@ -4033,6 +4066,9 @@ async fn run_request_migration(
             }
         }
     }
+    // side session を失ったことを main ループへ伝える。移行済みの track への送信を
+    // 止められるようにするためである
+    let _ = events.send(RequestMigrationEvent::Ended { kind }).await;
 }
 
 /// macOS 以外で H.264 / H.265 のエンコーダを指定したときのエラーを作る
