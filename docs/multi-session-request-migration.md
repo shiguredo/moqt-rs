@@ -38,10 +38,11 @@ using the appropriate mechanism (e.g. FIN, stream reset, or PUBLISH_DONE)" を S
   `MigratedSession` を返し、main ループの `migration_outcome` 分岐が `client` / `data_plane` を差し替える。
   `spawn_old_session_close` は旧 session の PUBLISH を PUBLISH_DONE で終端して NO_ERROR で閉じる。
 - request stream GOAWAY の現状は publisher と subscriber で異なる。
-  - moq-pub の `goaway_action` は、空 URI なら現在の session で当該 PUBLISH を再発行し、非空 URI は
-    `IgnoreRequestScope` として警告して移行しない。
-  - moq-sub は `migration_target` と `same_session_url` を使い、移行先 URL が現在の URL と同じなら現在の
-    session で当該 request (`goaway_request_kind` / `reissue_request`) を再発行する。別 URL のときは移行しない。
+  - 設計当時は、moq-pub の `goaway_action` が空 URI のときだけ現在の session で PUBLISH を再発行し、
+    非空 URI は移行しない実装だった。現在は `same_session_url` で同一 URL を判定し、別 URL なら
+    side session へ移行する。
+  - 設計当時は、moq-sub も移行先 URL が現在の URL と同じときだけ現在の session で再発行していた。
+    現在は `goaway_request_kind` で対象を解決し、別 URL なら side session へ移行する。
 - moq-sub は Track Alias の対応表 `track_map` (alias → TrackKind) と `media_fetch_targets` (fetch request ID →
   TrackKind) を持ち、stream task は 1 つの `DataPlaneHandle` とこれらの表を共有する。moq-pub は両表を持たず、
   固定 alias (`VIDEO_TRACK_ALIAS` / `AUDIO_TRACK_ALIAS`) と `PublisherSession` の request ID、`data_plane` を

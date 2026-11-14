@@ -1066,8 +1066,8 @@ where
 ///
 /// GOAWAY の New Session URI が現在の URL と同じかどうかの判定に使う。`ServerUrl` は
 /// 全体の `PartialEq` を持たないため、session を決める authority / path / fragment を比較する。
-/// c4m の認可トークンは同じ URL なら同じ値であり、比較しない (別の値なら
-/// [`migration_target`] が移行先の URL から解決する)。
+/// fragment には c4m の認可トークンも含まれるため、トークンだけが異なる URL は同一 session
+/// とみなさない (別 origin / 別トークンは [`migration_target`] が移行先として解決する)。
 pub fn same_session_url(current: &ServerUrl, target: &ServerUrl) -> bool {
     current.authority == target.authority
         && current.path == target.path
@@ -1117,8 +1117,8 @@ pub fn migration_target(
         Ok(uri) => uri,
         Err(e) => {
             if on_request_stream.is_some() {
-                // request 単位移行は未対応である。URI が壊れていても session を維持し、
-                // 該当 request の終端は Session の deadline に任せる。
+                // request 単位移行では移行先を決められない。URI が壊れていても session を
+                // 維持し、該当 request の終端は peer / Session の deadline に任せる。
                 return Ok(None);
             }
             return Err(TransportError::Internal(format!(

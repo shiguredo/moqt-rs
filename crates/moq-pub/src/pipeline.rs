@@ -2741,15 +2741,15 @@ pub async fn run(
                         );
                     }
                     RequestMigrationEvent::Ended { kind } => {
+                        // side session を失った track は main session へは戻せない。
+                        // `*_publish_target` を `None` にすると「未移行」の意味になり、
+                        // main session の別 request の id で送信してしまうため、
+                        // control GOAWAY の移行失敗と同じくパイプラインを終了する
                         tracing::warn!(
-                            "The request migration side session ended: kind={kind:?}; stop sending the track"
+                            "The request migration side session ended: kind={kind:?}; ending the pipeline"
                         );
-                        match kind {
-                            PublishTrack::Video => video_publish_target = None,
-                            PublishTrack::Audio => audio_publish_target = None,
-                            PublishTrack::Catalog => catalog_publish_target = None,
-                            PublishTrack::Unknown => {}
-                        }
+                        session_ended = true;
+                        break 'main;
                     }
                     RequestMigrationEvent::Failed {
                         kind,
@@ -4033,8 +4033,8 @@ async fn run_request_migration(
                     stream.stream_id()
                 );
                 // data stream の reset code は §12.5 の CANCELLED を使う
-                // (REQUEST_NOT_SUPPORTED は §12.3 の session 終了コードであり、
-                // stream reset では SESSION_CLOSED の意味になる)
+                // (REQUEST_NOT_SUPPORTED は §12.3 の REQUEST_ERROR コードであり、
+                // §12.5 の 0x3 は SESSION_CLOSED を意味する)
                 if let Err(e) = stream.stop_sending(0x1).await {
                     tracing::debug!(
                         "Failed to stop an unexpected data stream on the request migration side session: {e}"

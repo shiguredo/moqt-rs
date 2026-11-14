@@ -2645,6 +2645,13 @@ async fn run_request_migration(
             loop {
                 match handle.recv_datagrams().await {
                     Ok(batch) => {
+                        // WebTransport の受信はバッファが空でも即座に空のバッチを返す。
+                        // 空バッチを送ると consumer が 10 ms sleep を繰り返し、実際の
+                        // datagram の配送が遅れるため、ここで休めてから次回へ進む
+                        if batch.is_empty() {
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                            continue;
+                        }
                         if datagram_tx.send(Ok(batch)).await.is_err() {
                             break;
                         }
