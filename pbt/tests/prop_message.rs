@@ -6,8 +6,12 @@ use shiguredo_moqt::{
     message::ErrorDetails,
     message::Fetch,
     message::Goaway,
+    message::Namespace,
+    message::NamespaceDone,
     message::Publish,
     message::PublishDone,
+    message::PublishNamespace,
+    message::PublishSkipped,
     message::PublishStateNotify,
     message::ReasonPhrase,
     message::Redirect,
@@ -16,7 +20,9 @@ use shiguredo_moqt::{
     message::RequestUpdate,
     message::Setup,
     message::Subscribe,
+    message::SubscribeNamespace,
     message::SubscribeOk,
+    message::SubscribeTracks,
     message::TrackStatus,
     message::UnsupportedProperty,
     message::common::Location,
@@ -384,6 +390,28 @@ const FETCH_OK_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LARGEST_OBJECT];
 const PUBLISH_STATE_NOTIFY_PARAMS: &[u64] =
     &[PARAM_PAUSED, PARAM_LOCATION_FILTER, PARAM_LARGEST_OBJECT];
 const TRACK_STATUS_PARAMS: &[u64] = &[PARAM_AUTHORIZATION_TOKEN, PARAM_INCLUDE_PROPERTIES];
+// draft-ietf-moq-transport-23 §9.13 / §9.14: "The only parameter that can appear ... is
+// AUTHORIZATION_TOKEN."
+const PUBLISH_NAMESPACE_PARAMS: &[u64] = &[PARAM_AUTHORIZATION_TOKEN];
+const SUBSCRIBE_NAMESPACE_PARAMS: &[u64] = &[PARAM_AUTHORIZATION_TOKEN];
+// draft-ietf-moq-transport-23 §9.17 の 14 種。`src/message.rs::SUBSCRIBE_TRACKS_ALLOWED_PARAMS`
+// と一致させること。
+const SUBSCRIBE_TRACKS_PARAMS: &[u64] = &[
+    PARAM_OBJECT_DELIVERY_TIMEOUT,
+    PARAM_AUTHORIZATION_TOKEN,
+    PARAM_SUBGROUP_DELIVERY_TIMEOUT,
+    PARAM_PAUSED,
+    PARAM_SUBSCRIBER_PRIORITY,
+    PARAM_LOCATION_FILTER,
+    PARAM_GROUP_ORDER,
+    PARAM_FILL_PARAMETERS,
+    PARAM_SUBGROUP_FILTER,
+    PARAM_OBJECTID_FILTER,
+    PARAM_PRIORITY_FILTER,
+    PARAM_OBJECT_PROPERTY_FILTER,
+    PARAM_TRACK_PROPERTY_FILTER,
+    PARAM_INCLUDE_PROPERTIES,
+];
 
 // ─── メッセージ生成 ──────────────────────────────────────────
 
@@ -407,9 +435,9 @@ fn sample_unsupported_property_type(ctx: &mut noprop::TestCaseContext) -> u64 {
     }
 }
 
-/// 任意の ControlMessage を生成する (15 ブランチを等確率で選ぶ)
+/// 任意の ControlMessage を生成する (21 ブランチを等確率で選ぶ)
 fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
-    match noprop::sample_weighted_index(ctx, &[1u32; 15]) {
+    match noprop::sample_weighted_index(ctx, &[1u32; 21]) {
         // Setup
         0 => ControlMessage::Setup(Setup {
             options: sample_setup_options_with(ctx, &SETUP_SAMPLING_SMALL),
@@ -510,10 +538,42 @@ fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
         13 => ControlMessage::PublishStateNotify(PublishStateNotify {
             parameters: sample_scoped_parameters(ctx, PUBLISH_STATE_NOTIFY_PARAMS),
         }),
+        // PUBLISH_NAMESPACE (draft-ietf-moq-transport-23 §9.13)
+        15 => ControlMessage::PublishNamespace(PublishNamespace {
+            request_id: sample_request_id(ctx),
+            track_namespace: sample_namespace_prefix(ctx),
+            parameters: sample_scoped_parameters(ctx, PUBLISH_NAMESPACE_PARAMS),
+        }),
+        // SUBSCRIBE_NAMESPACE (draft-ietf-moq-transport-23 §9.14)
+        16 => ControlMessage::SubscribeNamespace(SubscribeNamespace {
+            request_id: sample_request_id(ctx),
+            track_namespace: sample_namespace_prefix(ctx),
+            parameters: sample_scoped_parameters(ctx, SUBSCRIBE_NAMESPACE_PARAMS),
+        }),
+        // SUBSCRIBE_TRACKS (draft-ietf-moq-transport-23 §9.17)
+        17 => ControlMessage::SubscribeTracks(SubscribeTracks {
+            request_id: sample_request_id(ctx),
+            track_namespace: sample_namespace_prefix(ctx),
+            parameters: sample_scoped_parameters(ctx, SUBSCRIBE_TRACKS_PARAMS),
+        }),
+        // NAMESPACE (draft-ietf-moq-transport-23 §9.15): パラメータは許可されない
+        18 => ControlMessage::Namespace(Namespace {
+            track_namespace_suffix: sample_namespace_prefix(ctx),
+            parameters: MessageParameters::new(),
+        }),
+        // NAMESPACE_DONE (draft-ietf-moq-transport-23 §9.16)
+        19 => ControlMessage::NamespaceDone(NamespaceDone {
+            track_namespace_suffix: sample_namespace_prefix(ctx),
+        }),
+        // PUBLISH_SKIPPED (draft-ietf-moq-transport-23 §9.18)
+        20 => ControlMessage::PublishSkipped(PublishSkipped {
+            track_namespace_suffix: sample_namespace_prefix(ctx),
+            track_name: sample_nonempty_bytes(ctx, 50),
+        }),
         // RequestError (UNSUPPORTED_EXTENSION: UNSUPPORTED_PROPERTY Detail を 0〜4 個持つ)
         // draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY) は複数インスタンスを
         // 明示的に許可するため、同じ Property Type の重複も生成しうる。
-        _ => {
+        14 => {
             let count = noprop::sample_usize_in(ctx, 0..=4);
             let mut details = ErrorDetails::new();
             for _ in 0..count {
@@ -528,6 +588,7 @@ fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
                 error_details: details,
             })
         }
+        _ => unreachable!("sample_weighted_index returns a valid branch"),
     }
 }
 

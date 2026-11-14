@@ -22,6 +22,7 @@
 use crate::{
     error::MessageError,
     message::common::{Location, TrackNamespace},
+    track_properties::TrackProperties,
     varint,
 };
 use alloc::vec::Vec;
@@ -74,7 +75,8 @@ pub const PARAM_INCLUDE_PROPERTIES: u64 = 0x35;
 ///
 /// SUBSCRIBE_TRACKS の結果として送る PUBLISH にだけ出現し、値は元の SUBSCRIBE_TRACKS の
 /// Request ID である (draft-ietf-moq-transport-23 §3.6 (Subscribing to Tracks by Prefix))。
-/// 本ライブラリは SUBSCRIBE_TRACKS 自体を実装しないため、受信側で対応する要求を照合しない。
+/// 受信側は対応する SUBSCRIBE_TRACKS を自側が送っている場合に、prefix との一致や重複
+/// PUBLISH を検証する。
 /// 節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 pub const PARAM_SUBSCRIBE_TRACKS_ID: u64 = 0x36;
 
@@ -1365,7 +1367,38 @@ impl MessageParameters {
             .collect()
     }
 
-    /// SUBSCRIBE_TRACKS の Parameters から resulting PUBLISH に載せる
+    /// TRACK_PROPERTY_FILTER (0x29) を Track Properties に対して評価する
+    ///
+    /// draft-ietf-moq-transport-23 §3.6.1 (Filtering SUBSCRIBE_TRACKS): "Range Filters
+    /// Section 3.3.2 can be used in SUBSCRIBE_TRACKS to filter Tracks in a namespace using the
+    /// Track Property Filter." フィルタが無い場合はすべての Track を通す。Range を持たない
+    /// インスタンス (Length=0 の削除指示) はフィルタとして機能しないため評価対象から外す。
+    ///
+    /// §3.3.2 (Range Filters) の SetID の扱いは Object の Range Filter と同じであり、
+    /// 同じ SetID の Set はすべて満たす必要があり、いずれかの SetID を満たせば通す。
+    /// Property を持たない Track は条件を満たせない (AND が落ちる)。
+    /// 節番号・規則は draft 由来であり将来 draft 改版で変わる可能性がある。
+    pub fn track_property_filter_passes(&self, track_properties: &TrackProperties) -> bool {
+        let sets = self.range_filter_sets(PARAM_TRACK_PROPERTY_FILTER);
+        if sets.is_empty() {
+            return true;
+        }
+        let mut set_ids: Vec<u8> = sets.iter().map(|set| set.set_id).collect();
+        set_ids.sort_unstable();
+        set_ids.dedup();
+        set_ids.into_iter().any(|set_id| {
+            sets.iter()
+                .filter(|set| set.set_id == set_id)
+                .all(|set| match set.property_type {
+                    Some(property_type) => track_properties
+                        .find_varint(property_type)
+                        .is_some_and(|value| set.contains(value)),
+                    None => false,
+                })
+        })
+    }
+
+    /// SUBSCRIBE_TRACKS の Parameters から resulting PUBLISH に載せる    /// SUBSCRIBE_TRACKS の Parameters から resulting PUBLISH に載せる
     /// initial subscription parameters を導出する
     ///
     /// draft-ietf-moq-transport-23 §3.6.2 (Parameters on SUBSCRIBE_TRACKS):

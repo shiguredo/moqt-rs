@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 /// 外側 scope と同様、request_id 発行・状態更新より前に検証し、不正 inner の
 /// 送出と孤児状態 (登録済みだが I/O 層 encode で失敗する) を防ぐ。
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
-pub(super) fn validate_outgoing_fill_parameters(
+pub(crate) fn validate_outgoing_fill_parameters(
     parameters: &MessageParameters,
 ) -> Result<(), SessionError> {
     let Some(fill) = parameters.fill_parameters() else {

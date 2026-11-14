@@ -307,6 +307,12 @@ End of Unknown Range (`0x10C`、§11.4.2 (End of Range)) を示したうえで�
 | `CloseSession(SessionError)` | 接続を閉じる |
 | `RequestUpdateReceived { request_id, parameters }` | REQUEST_UPDATE 受信 |
 | `PublishStateNotifyReceived { request_id, parameters }` | PUBLISH_STATE_NOTIFY 受信 |
+| `PublishNamespaceReceived { request_id, track_namespace, parameters }` | PUBLISH_NAMESPACE 受信 (subscriber 側。REQUEST_OK / REQUEST_ERROR で応答する) |
+| `SubscribeNamespaceReceived { request_id, track_namespace, parameters }` | SUBSCRIBE_NAMESPACE 受信 (publisher 側。`send_namespace` / `send_namespace_done` で発見結果を返す) |
+| `SubscribeTracksReceived { request_id, track_namespace, parameters }` | SUBSCRIBE_TRACKS 受信 (publisher 側。`send_publish` に SUBSCRIBE_TRACKS_ID を載せるか `send_publish_skipped` で返す) |
+| `NamespaceReceived { request_id, track_namespace, parameters }` | NAMESPACE 受信。`track_namespace` は要求の prefix と suffix を結合した完全な名前空間 |
+| `NamespaceDoneReceived { request_id, track_namespace }` | NAMESPACE_DONE 受信 (prefix 更新による暗黙の終了を含む) |
+| `PublishSkippedReceived { request_id, track_namespace, track_name }` | PUBLISH_SKIPPED 受信 |
 | `RequestOkReceived { request_id, request_kind, parameters }` | REQUEST_OK 受信 (TRACK_STATUS_OK が未知の Mandatory Track Property を含む場合は発行せず `TrackStatusUnsupported` を発行する)。TRACK_STATUS_OK の EXPIRES は `parameters.expires()` と `TrackStatusEntry::expires_ms()` の双方で参照できる |
 | `TrackStatusUnsupported { request_id, unsupported_property_types }` | TRACK_STATUS_OK が未知の Mandatory Track Property を含む (draft-ietf-moq-transport-23 §3.7)。`unsupported_property_types` は昇順・重複なしの Property Type 一覧。entry は `TrackStatusResponse::Unsupported` になり、応答タイマーは解除される |
 | `FetchOkReceived { request_id, end_location, expires_ms }` | FETCH_OK 受信。`expires_ms` は FETCH_OK の EXPIRES (不在と 0 は `None`) であり、`Session::fetch(request_id)` の `Fetch::expires_ms` とも同じ値になる |
@@ -318,7 +324,7 @@ End of Unknown Range (`0x10C`、§11.4.2 (End of Range)) を示したうえで�
 | `SendPaddingStream { length }` | 指定長のパディングストリームを送る |
 | `SendPaddingDatagram { length }` | 指定長のパディングデータグラムを送る |
 | `ResetDataStream { stream_id, error_code, reliable_size }` | data stream を reset する |
-| `StopSendingDataStream { stream_id, error_code }` | 受信 data stream に STOP_SENDING を送る (subgroup stream の DATA_STREAM_TIMEOUT、subscriber 役 subscription への REQUEST_ERROR 送信 (§9.8)、または `forget_subscription` による購読状態の削除 (§9.9)。`error_code` は `STREAM_CANCELLED`。除去した stream への遅延到着は保持期間の間 no-op。`forget_subscription` では移管先の無い open な subgroup stream と fill fetch stream が対象で、stream_id の昇順に発行する) |
+| `StopSendingDataStream { stream_id, error_code }` | 受信 data stream に STOP_SENDING を送る (DATA_STREAM_TIMEOUT / REQUEST_ERROR (§9.8) / forget_subscription (§9.9))。error_code は STREAM_CANCELLED。forget_subscription は移管先の無い open な subgroup stream と fill fetch stream を stream_id 昇順に送る |
 | `OpenFillFetchStream { request_id, subscription_request_id, start, end }` | fill fetch stream を開く。`request_id` は FETCH_HEADER の起因 Request ID、`subscription_request_id` は fill 対象購読、`start` / `end` は解決済み range。FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE の処理と PUBLISH の送信で発火する |
 | `ResetRequestStream { request_id, error_code }` | request stream の送信方向を reset する |
 | `StopSendingRequestStream { request_id, error_code }` | request stream の受信方向に STOP_SENDING を送る |
@@ -495,6 +501,40 @@ fn send_fetch_ok(
     track_properties: TrackProperties,
 ) -> Result<(), SessionError>
 
+// namespace 発見・告知 (draft-ietf-moq-transport-23 §4)
+fn send_publish_namespace(
+    &mut self,
+    track_namespace: TrackNamespace,
+    parameters: MessageParameters,
+) -> Result<u64, SendRequestError>
+fn send_subscribe_namespace(
+    &mut self,
+    track_namespace: TrackNamespace,
+    parameters: MessageParameters,
+) -> Result<u64, SendRequestError>
+fn send_subscribe_tracks(
+    &mut self,
+    track_namespace: TrackNamespace,
+    parameters: MessageParameters,
+) -> Result<u64, SendRequestError>
+fn send_namespace(
+    &mut self,
+    request_id: u64,
+    track_namespace_suffix: TrackNamespace,
+    parameters: MessageParameters,
+) -> Result<(), SessionError>
+fn send_namespace_done(
+    &mut self,
+    request_id: u64,
+    track_namespace_suffix: TrackNamespace,
+) -> Result<(), SessionError>
+fn send_publish_skipped(
+    &mut self,
+    request_id: u64,
+    track_namespace_suffix: TrackNamespace,
+    track_name: Vec<u8>,
+) -> Result<(), SessionError>
+
 // TRACK_STATUS
 fn send_track_status(
     &mut self,
@@ -545,6 +585,14 @@ fn send_fetch_object(
     &mut self,
     stream_id: DataStreamId,
     location: &Location,
+) -> Result<(), SendRequestError>
+fn send_fetch_object_with_context(
+    &mut self,
+    stream_id: DataStreamId,
+    location: &Location,
+    subgroup_id: Option<u64>,
+    publisher_priority: u8,
+    properties_bytes: Option<&[u8]>,
 ) -> Result<(), SendRequestError>
 fn send_fetch_end_of_range(&mut self, stream_id: DataStreamId) -> Result<(), SessionError>
 fn send_fetch_data_stream_closed(&mut self, stream_id: DataStreamId) -> Result<(), SessionError>
@@ -907,10 +955,12 @@ fn subscribe_tracks_id(&self) -> Option<u64>                // 0x36
 | `PARAM_SUBSCRIBE_TRACKS_ID` | `0x36` |
 
 `SUBSCRIBE_TRACKS_ID` (0x36) は PUBLISH でのみ出現できる varint で、SUBSCRIBE_TRACKS の
-Request ID を運ぶ。本ライブラリは SUBSCRIBE_TRACKS を実装しないため、受信側は値を
-`Subscription::subscribe_tracks_id` に相関情報として保持するだけで、対応する要求の有無を
-検証せずに通常の PUBLISH の検証と受理判断へ進む。送信側は SUBSCRIBE_TRACKS 起因の PUBLISH に
-だけ指定し、`MessageParameters::resulting_publish_parameters` はこの型を引き継がない。
+Request ID を運ぶ。受信側は値を `Subscription::subscribe_tracks_id` に相関情報として保持する。
+自側が対応する SUBSCRIBE_TRACKS を送っていれば、prefix との一致・同じ track の重複 PUBLISH・
+PUBLISH_SKIPPED 後の PUBLISH を検証する (§3.6 / §9.5.2 / §9.18)。対応する要求が無い PUBLISH は
+通常の検証と受理判断へ進む。`MessageParameters::resulting_publish_parameters` はこの型を
+引き継がない。`MessageParameters::track_property_filter_passes` で TRACK_PROPERTY_FILTER を
+Track Properties に対して評価できる。
 
 `AuthorizationToken` は `Delete` / `Register` / `UseAlias` / `UseValue` の variant を持つ。各メソッドは `pub(crate)` のため、利用側は variant を直接構築して `MessageParameterValue` に格納する。
 

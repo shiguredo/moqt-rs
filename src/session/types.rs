@@ -9,7 +9,7 @@ use crate::message::{
 };
 use crate::message_parameter::{LocationFilter, MessageParameters, RangeFilterSet};
 use crate::track_properties::TrackProperties;
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeSet, VecDeque};
 use alloc::vec::Vec;
 use hashbrown::HashMap;
 
@@ -290,6 +290,75 @@ pub enum SessionEvent {
         request_id: u64,
         /// 受信したパラメータ
         parameters: MessageParameters,
+    },
+    /// peer から PUBLISH_NAMESPACE を受信した (draft-ietf-moq-transport-23 §9.13)
+    ///
+    /// subscriber 側で発行する。アプリは [`crate::session::core::Session::send_request_ok`]
+    /// または `send_request_error` で 1 通だけ応答する (MUST)。
+    PublishNamespaceReceived {
+        /// 対象 request の Request ID
+        request_id: u64,
+        /// 告知された namespace の prefix
+        track_namespace: TrackNamespace,
+        /// 要求のパラメータ
+        parameters: MessageParameters,
+    },
+    /// peer から SUBSCRIBE_NAMESPACE を受信した (draft-ietf-moq-transport-23 §9.14)
+    ///
+    /// publisher 側で発行する。アプリは REQUEST_OK で応答したあと、
+    /// [`crate::session::core::Session::send_namespace`] /
+    /// [`crate::session::core::Session::send_namespace_done`] で発見した namespace を通知する。
+    SubscribeNamespaceReceived {
+        /// 対象 request の Request ID
+        request_id: u64,
+        /// 要求された namespace の prefix
+        track_namespace: TrackNamespace,
+        /// 要求のパラメータ
+        parameters: MessageParameters,
+    },
+    /// peer から SUBSCRIBE_TRACKS を受信した (draft-ietf-moq-transport-23 §9.17)
+    ///
+    /// publisher 側で発行する。アプリは REQUEST_OK で応答したあと、一致する track ごとに
+    /// `send_publish` (PUBLISH のパラメータに SUBSCRIBE_TRACKS_ID を載せる) を呼ぶか、
+    /// [`crate::session::core::Session::send_publish_skipped`] で購読を作らないことを通知する。
+    SubscribeTracksReceived {
+        /// 対象 request の Request ID
+        request_id: u64,
+        /// 要求された namespace の prefix
+        track_namespace: TrackNamespace,
+        /// 要求のパラメータ (resulting PUBLISH の initial subscription parameters を含む)
+        parameters: MessageParameters,
+    },
+    /// peer から NAMESPACE を受信した (draft-ietf-moq-transport-23 §9.15)
+    ///
+    /// SUBSCRIBE_NAMESPACE の response stream で届く。`track_namespace` は要求の prefix と
+    /// 受信した suffix を結合した完全な namespace である。
+    NamespaceReceived {
+        /// 対象 SUBSCRIBE_NAMESPACE の Request ID
+        request_id: u64,
+        /// 発見した完全な namespace
+        track_namespace: TrackNamespace,
+        /// namespace のパラメータ
+        parameters: MessageParameters,
+    },
+    /// peer から NAMESPACE_DONE を受信した (draft-ietf-moq-transport-23 §9.16)
+    NamespaceDoneReceived {
+        /// 対象 SUBSCRIBE_NAMESPACE の Request ID
+        request_id: u64,
+        /// 終了した完全な namespace
+        track_namespace: TrackNamespace,
+    },
+    /// peer から PUBLISH_SKIPPED を受信した (draft-ietf-moq-transport-23 §9.18)
+    ///
+    /// SUBSCRIBE_TRACKS の response stream で届く。`track_namespace` は要求の prefix と
+    /// 受信した suffix を結合した完全な namespace である。
+    PublishSkippedReceived {
+        /// 対象 SUBSCRIBE_TRACKS の Request ID
+        request_id: u64,
+        /// 購読を作らなかった track の完全な namespace
+        track_namespace: TrackNamespace,
+        /// 購読を作らなかった track の名前
+        track_name: Vec<u8>,
     },
     /// peer からの REQUEST_OK を受信した (draft §9.3 (REQUEST_OK): PUBLISH_OK は REQUEST_OK に統一)
     ///
@@ -875,14 +944,9 @@ pub enum FetchHeaderAcceptance {
 /// (draft-ietf-moq-transport-23 §6.3 (Session initialization))
 ///
 /// §6.3 は bidi request stream の先頭メッセージを 7 種類 (TRACK_STATUS / SUBSCRIBE / PUBLISH /
-/// FETCH / PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) に限る。本実装が
-/// 受理するのはこのうち以下の 4 種類である (残り 3 種類は `Session::recv_request` が
-/// `REQUEST_ERROR` (NOT_SUPPORTED、control GOAWAY を送信済みなら GOING_AWAY、`.` 単独または
-/// `.session` の Track Namespace Prefix なら DOES_NOT_EXIST) で拒否する。
-/// `SUBSCRIBE_TRACKS` は Range Filter を載せられるため、§3.3.2 に違反する場合は
-/// `INVALID_FILTER` で拒否する。`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` は Range Filter を
-/// 許可しないため、載っていた場合は §9.19.1 (Parameter Scope) 違反でセッションを閉じる)。
-/// `request_id` からどの種別で開始されたかを逆引きする用途に使う。
+/// FETCH / PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) に限り、本実装は
+/// 7 種類すべてを扱う。`request_id` からどの種別で開始されたかを逆引きする用途に使う。
+/// 節番号・規則は draft 由来であり将来 draft 改版で変わる可能性がある。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RequestKind {
     /// SUBSCRIBE で開始
@@ -893,6 +957,12 @@ pub enum RequestKind {
     Fetch,
     /// TRACK_STATUS で開始
     TrackStatus,
+    /// PUBLISH_NAMESPACE で開始
+    PublishNamespace,
+    /// SUBSCRIBE_NAMESPACE で開始
+    SubscribeNamespace,
+    /// SUBSCRIBE_TRACKS で開始
+    SubscribeTracks,
 }
 
 /// bidi request stream の終端原因 (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))
@@ -933,6 +1003,98 @@ pub(crate) fn terminationreason_from_end(end: RequestStreamEnd) -> TerminationRe
             TerminationReason::PeerStreamReset { error_code }
         }
     }
+}
+
+/// namespace 発見・告知 request の状態
+///
+/// draft-ietf-moq-transport-23 §6.4.2.1 (Request ID) の request は Pending から始まり、
+/// REQUEST_OK で Established、REQUEST_ERROR / cancel / stream 終端で Terminated になる。
+/// PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS の 3 種で共有する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamespaceRequestState {
+    /// 要求を送信済み、または受信して応答待ち
+    Pending,
+    /// REQUEST_OK を送受信済み
+    Established,
+    /// 終端済み (REQUEST_ERROR / FIN / RESET_STREAM / cancel)
+    Terminated,
+}
+
+/// PUBLISH_NAMESPACE request の状態 (draft-ietf-moq-transport-23 §9.13 (PUBLISH_NAMESPACE))
+///
+/// `my_role` が Publisher なら requester (告知する側)、Subscriber なら responder
+/// (告知を受けて応答する側) である。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PublishNamespaceRequest {
+    /// request stream を開始した Request ID
+    pub request_id: u64,
+    /// 自側の役割 (requester は Publisher、responder は Subscriber)
+    pub my_role: TrackRole,
+    /// 告知された namespace の prefix
+    pub track_namespace: TrackNamespace,
+    /// 要求のパラメータ
+    pub parameters: MessageParameters,
+    /// request の状態
+    pub state: NamespaceRequestState,
+}
+
+/// SUBSCRIBE_NAMESPACE request の状態 (draft-ietf-moq-transport-23 §9.14 (SUBSCRIBE_NAMESPACE))
+///
+/// `my_role` が Subscriber なら requester (発見を要求する側)、Publisher なら responder
+/// (発見結果を返す側) である。
+#[derive(Debug, Clone, PartialEq)]
+pub struct NamespaceSubscription {
+    /// request stream を開始した Request ID
+    pub request_id: u64,
+    /// 自側の役割 (requester は Subscriber、responder は Publisher)
+    pub my_role: TrackRole,
+    /// 要求された namespace の prefix
+    pub track_namespace: TrackNamespace,
+    /// 要求のパラメータ (REQUEST_UPDATE で更新した prefix もここに反映する)
+    pub parameters: MessageParameters,
+    /// request の状態
+    pub state: NamespaceRequestState,
+    /// requester 側で受信済みの完全な namespace (prefix + suffix)
+    ///
+    /// draft §9.16 (NAMESPACE_DONE): "The publisher MUST NOT send NAMESPACE_DONE for a namespace
+    /// suffix before the corresponding NAMESPACE." の受信側検証と、prefix 更新時の暗黙
+    /// NAMESPACE_DONE (§9.5.2) に使う。
+    pub received_namespaces: BTreeSet<Vec<Vec<u8>>>,
+    /// responder 側で送信済みの suffix
+    ///
+    /// NAMESPACE を送る前の NAMESPACE_DONE を API で拒否するために使う。
+    pub sent_suffixes: BTreeSet<Vec<Vec<u8>>>,
+}
+
+/// SUBSCRIBE_TRACKS request の状態 (draft-ietf-moq-transport-23 §9.17 (SUBSCRIBE_TRACKS))
+///
+/// `my_role` が Subscriber なら requester (購読を要求する側)、Publisher なら responder
+/// (PUBLISH / PUBLISH_SKIPPED を返す側) である。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackSubscription {
+    /// request stream を開始した Request ID
+    pub request_id: u64,
+    /// 自側の役割 (requester は Subscriber、responder は Publisher)
+    pub my_role: TrackRole,
+    /// 要求された namespace の prefix
+    pub track_namespace: TrackNamespace,
+    /// 要求のパラメータ (REQUEST_UPDATE で更新した prefix もここに反映する)
+    pub parameters: MessageParameters,
+    /// request の状態
+    pub state: NamespaceRequestState,
+    /// requester 側で PUBLISH を受信済みの track ((完全な Track Namespace, track name))
+    ///
+    /// draft §9.5.2 (Updating Namespace Subscriptions): publisher は同じ SUBSCRIBE_TRACKS に
+    /// 対して同じ track の PUBLISH を 2 回送ってはならない。同じく §3.6.3 (Skipped Tracks):
+    /// PUBLISH_SKIPPED を送った track には PUBLISH を送ってはならない。受信側で両者を
+    /// PROTOCOL_VIOLATION として検出するために使う。
+    pub received_published: BTreeSet<(Vec<Vec<u8>>, Vec<u8>)>,
+    /// requester 側で PUBLISH_SKIPPED を受信済みの track ((完全な Track Namespace, track name))
+    pub received_skipped: BTreeSet<(Vec<Vec<u8>>, Vec<u8>)>,
+    /// responder 側で PUBLISH を送信済みの track ((完全な Track Namespace, track name))
+    pub sent_published: BTreeSet<(Vec<Vec<u8>>, Vec<u8>)>,
+    /// responder 側で PUBLISH_SKIPPED を送信済みの track ((完全な Track Namespace, track name))
+    pub sent_skipped: BTreeSet<(Vec<Vec<u8>>, Vec<u8>)>,
 }
 
 /// request が終端した原因 (draft-ietf-moq-transport-23 §3.1 (Subscriptions) / §6.4.2.3 (Request Cancellation and Rejection) / §9.2 (GOAWAY) / §12.1 (Malformed Tracks))
@@ -1714,9 +1876,9 @@ pub struct Subscription {
     /// PUBLISH の SUBSCRIBE_TRACKS_ID パラメータの値をそのまま保持する。
     /// draft-ietf-moq-transport-23 §3.6 (Subscribing to Tracks by Prefix) は
     /// SUBSCRIBE_TRACKS の結果として送る PUBLISH にこの値を載せると定める。
-    /// 本ライブラリは SUBSCRIBE_TRACKS 自体を実装せず、対応する namespace 要求との照合状態も
-    /// 持たないため、値はアプリケーションが相関を取るための情報に限られる。対応する要求が
-    /// 無い PUBLISH でも値は保持し、受理・拒否は通常の PUBLISH の判断として行う。
+    /// 対応する SUBSCRIBE_TRACKS を自側が送っていれば、prefix の一致・同じ track の重複
+    /// PUBLISH・PUBLISH_SKIPPED 後の PUBLISH を Session が検証する (§3.6 / §9.5.2 / §9.18)。
+    /// 対応する要求が無い PUBLISH でも値は保持し、受理・拒否は通常の PUBLISH の判断として行う。
     /// 自側が publisher の場合は `send_publish` に渡した値が入る。省略時は `None`。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub subscribe_tracks_id: Option<u64>,
@@ -2218,6 +2380,12 @@ pub struct Fetch {
     /// peer が FETCH で指定した値。`Some(0)` のとき FETCH_OK の Track Properties を
     /// 空にする。`None` (省略時) は default 1 として扱い従来どおり含める。
     pub include_properties: Option<u8>,
+    /// FETCH 要求で指定された Object 系 Range Filter (draft-ietf-moq-transport-23 §3.3.2)
+    ///
+    /// publisher 側は応答 Object がすべてのフィルタを通ることを検証する (§3.3.3 の MUST)。
+    /// [`Session::send_fetch_object_with_context`](crate::session::core::Session::send_fetch_object_with_context)
+    /// が評価に使う。subscriber 側も要求内容の対称性のため保持する。
+    pub range_filters: SubscriptionRangeFilters,
     /// FETCH に Range Filter (0x25-0x29) が含まれていたか
     ///
     /// draft-ietf-moq-transport-23 §3.2.2 (Gaps in a Fetch Stream): "Unless the request

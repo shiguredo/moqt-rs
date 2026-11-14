@@ -2126,6 +2126,36 @@ impl Session {
         stream_id: DataStreamId,
         location: &Location,
     ) -> Result<(), SendRequestError> {
+        self.send_fetch_object_with_context(
+            stream_id,
+            location,
+            None,
+            PUBLISHER_PRIORITY_DEFAULT,
+            None,
+        )
+    }
+
+    /// FETCH 応答 Object を、Range Filter の評価に必要な文脈付きで送信する
+    ///
+    /// draft-ietf-moq-transport-23 §3.3.3 (Combining Filters): "The publisher MUST forward
+    /// only objects that pass all filters." FETCH 要求に Range Filter (SUBGROUP_FILTER /
+    /// OBJECTID_FILTER / PRIORITY_FILTER / OBJECT_PROPERTY_FILTER) が含まれる場合、本 API は
+    /// [`Location`] に加えて Subgroup ID / Publisher Priority / Object Properties を使って
+    /// Pass を判定し、通らない Object を [`SendRequestError::LocalFilterMismatch`] で拒否する。
+    ///
+    /// `subgroup_id` が `None` の場合は SUBGROUP_FILTER を評価しない (datagram と同じ扱い。
+    /// fetch Object の Subgroup ID は省略可能であり、省略時は Subgroup に属さない)。
+    /// `properties_bytes` は Object Properties の生バイト列 (Properties Length を除く
+    /// プロパティ本体) で、[`ObjectProperties`] として解釈する。
+    /// フィルタが無い場合は従来の [`send_fetch_object`](Self::send_fetch_object) と同じ検証だけを行う。
+    pub fn send_fetch_object_with_context(
+        &mut self,
+        stream_id: DataStreamId,
+        location: &Location,
+        subgroup_id: Option<u64>,
+        publisher_priority: u8,
+        properties_bytes: Option<&[u8]>,
+    ) -> Result<(), SendRequestError> {
         self.require_established()?;
         if let Some(stream) = self.data_streams.outgoing_fill.get(&stream_id) {
             if let Some((start, end)) = stream.range.as_ref()
@@ -2163,6 +2193,27 @@ impl Session {
             && location > end
         {
             return Err(SendRequestError::LocalFilterMismatch);
+        }
+        // draft-ietf-moq-transport-23 §3.3.3 (Combining Filters): "The publisher MUST forward
+        // only objects that pass all filters." Location Filter に加えて Object 系 Range Filter
+        // を評価する。Object Properties のデコードに失敗した場合は OBJECT_PROPERTY_FILTER を
+        // 満たせないものとして扱う (フィルタが無ければ影響しない)。
+        if !fetch.range_filters.is_empty() {
+            let object_properties = properties_bytes
+                .and_then(|bytes| ObjectProperties::decode(bytes).ok().map(|(props, _)| props));
+            let input = ObjectFilterInput {
+                location: *location,
+                subgroup_id,
+                publisher_priority,
+                properties_bytes,
+            };
+            if !super::subscription::validation::range_filters_pass(
+                &fetch.range_filters,
+                &input,
+                object_properties.as_ref(),
+            ) {
+                return Err(SendRequestError::LocalFilterMismatch);
+            }
         }
         Ok(())
     }

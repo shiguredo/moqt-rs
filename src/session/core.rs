@@ -21,9 +21,8 @@ use alloc::vec::Vec;
 use hashbrown::{HashMap, HashSet};
 
 use crate::error::{
-    MessageError, PUBLISH_DONE_UPDATE_FAILED, REQUEST_DOES_NOT_EXIST, REQUEST_INTERNAL_ERROR,
-    REQUEST_INVALID_FILTER, REQUEST_MALFORMED_AUTH_TOKEN, REQUEST_REDIRECT,
-    SESSION_AUTH_TOKEN_CACHE_OVERFLOW, SESSION_CLOSED_CONTROL_STREAM,
+    MessageError, PUBLISH_DONE_UPDATE_FAILED, REQUEST_INTERNAL_ERROR, REQUEST_MALFORMED_AUTH_TOKEN,
+    REQUEST_REDIRECT, SESSION_AUTH_TOKEN_CACHE_OVERFLOW, SESSION_CLOSED_CONTROL_STREAM,
     SESSION_FIELD_LENGTH_EXCEEDED, SESSION_INTERNAL_ERROR, SESSION_INVALID_AUTHORITY,
     SESSION_INVALID_FIELD, SESSION_INVALID_PARAMETER, SESSION_INVALID_PATH,
     SESSION_INVALID_STREAM_HEADER, SESSION_MALFORMED_AUTHORITY, SESSION_MALFORMED_MESSAGE,
@@ -34,7 +33,6 @@ use crate::message::{
     ControlMessage, ErrorDetails, FETCH_OK_ALLOWED_PARAMS, PublishDone,
     REQUEST_UPDATE_OK_ALLOWED_PARAMS, ReasonPhrase, RequestError, RequestOk, Setup,
     TRACK_STATUS_OK_ALLOWED_PARAMS, common::Location, common::TrackNamespace,
-    unsupported_request_allowed_params,
 };
 use crate::message_parameter::{
     AuthorizationToken, MessageParameters, validate_auth_token_uniqueness,
@@ -46,7 +44,6 @@ use crate::parameter::{
 };
 use crate::subgroup_tracker::SubgroupTracker;
 use crate::track_properties::TrackProperties;
-use crate::varint;
 
 use crate::stream::SETUP_STREAM_TYPE;
 
@@ -55,10 +52,11 @@ use super::data::{IncomingDataStream, OutgoingDataStream};
 use super::request_id::{RequestIdGenerator, RequestIdTracker};
 use super::subscription::dispatch::SubscriptionOkResponse;
 use super::types::{
-    DataStreamId, DeadlineTimer, Fetch, PeerControlMessageSizeLimit, PeerGoawayInfo,
-    RecvRequestError, RequestKind, RequestStreamEnd, ResetTracking, Role, SendRequestError,
-    SessionError, SessionEvent, SessionState, Subscription, SubscriptionInitiator,
-    SubscriptionState, TerminationReason, TrackRole, TrackStatusEntry, Transport,
+    DataStreamId, DeadlineTimer, Fetch, NamespaceRequestState, NamespaceSubscription,
+    PeerControlMessageSizeLimit, PeerGoawayInfo, PublishNamespaceRequest, RecvRequestError,
+    RequestKind, RequestStreamEnd, ResetTracking, Role, SendRequestError, SessionError,
+    SessionEvent, SessionState, Subscription, SubscriptionInitiator, SubscriptionState,
+    TerminationReason, TrackRole, TrackStatusEntry, TrackSubscription, Transport,
 };
 
 /// STOP_SENDING を受けた outgoing Subgroup の識別子 (`(track_alias, group_id, subgroup_id)`)
@@ -455,6 +453,12 @@ pub struct Session {
     pub(super) fetches: HashMap<u64, Fetch>,
     /// TRACK_STATUS の管理
     pub(super) track_status_requests: HashMap<u64, TrackStatusEntry>,
+    /// PUBLISH_NAMESPACE の管理 (draft-ietf-moq-transport-23 §9.13)
+    pub(super) publish_namespaces: HashMap<u64, PublishNamespaceRequest>,
+    /// SUBSCRIBE_NAMESPACE の管理 (draft-ietf-moq-transport-23 §9.14)
+    pub(super) namespace_subscriptions: HashMap<u64, NamespaceSubscription>,
+    /// SUBSCRIBE_TRACKS の管理 (draft-ietf-moq-transport-23 §9.17)
+    pub(super) track_subscriptions: HashMap<u64, TrackSubscription>,
     pub(super) data_streams: DataStreamState,
     /// peer の REQUEST_ERROR で終端した fetch の request ID を、遅延 data stream の許容対象として
     /// 保持する集合
@@ -687,6 +691,9 @@ pub(super) enum RequestTable {
     Subscription,
     Fetch,
     TrackStatus,
+    PublishNamespace,
+    NamespaceSubscription,
+    TrackSubscription,
 }
 
 impl RequestTable {
@@ -698,6 +705,9 @@ impl RequestTable {
             RequestKind::Subscribe | RequestKind::Publish => Self::Subscription,
             RequestKind::Fetch => Self::Fetch,
             RequestKind::TrackStatus => Self::TrackStatus,
+            RequestKind::PublishNamespace => Self::PublishNamespace,
+            RequestKind::SubscribeNamespace => Self::NamespaceSubscription,
+            RequestKind::SubscribeTracks => Self::TrackSubscription,
         }
     }
 }
@@ -770,6 +780,9 @@ impl Session {
             },
             fetches: HashMap::new(),
             track_status_requests: HashMap::new(),
+            publish_namespaces: HashMap::new(),
+            namespace_subscriptions: HashMap::new(),
+            track_subscriptions: HashMap::new(),
             data_streams: DataStreamState {
                 incoming: HashMap::new(),
                 outgoing: HashMap::new(),
@@ -854,6 +867,16 @@ impl Session {
     /// `reset_outgoing_data_stream` に `DataStreamResetReason::ExpiredAuthToken`
     /// (コードは `STREAM_EXPIRED_AUTH_TOKEN`) を渡す。
     /// 詳細は [`AuthTokenCache`] の doc を参照。
+    /// peer が SETUP で送ったオプションを返す (SETUP 未受信なら `None`)
+    ///
+    /// draft-ietf-moq-transport-23 §6.3.2 (Extension Negotiation): 拡張は SETUP の
+    /// Option でネゴシエートする。アプリは本 API と [`SetupOptions::iter`] で peer が
+    /// 広告した拡張を判定できる。値の解釈はアプリの責務であり、本 API は受信した
+    /// オプションをそのまま返す。
+    pub fn peer_setup_options(&self) -> Option<&SetupOptions> {
+        self.setup.peer.as_ref().map(|setup| &setup.options)
+    }
+
     pub fn peer_auth_token_cache(&self) -> &AuthTokenCache {
         &self.auth.peer_token_cache
     }
@@ -1298,7 +1321,7 @@ impl Session {
         // draft §9.19.1 (Parameter Scope) / §9.19.15 (FILL PARAMETERS Parameter):
         // メッセージ型ごとの許可パラメータと FILL_PARAMETERS の内側スコープを検証する。
         // これらはセッション終了の MUST であり、AUTH_TOKEN 一意性や GOAWAY 拒否などの
-        // メッセージ単位の reject より先に処理する (未対応 request と同じ順序)。
+        // メッセージ単位の reject より先に処理する (namespace 系 request と同じ順序)。
         // draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope) / §9.19.15 (FILL PARAMETERS
         // Parameter): 許可されないパラメータは INVALID_PARAMETER (0x305) で閉じる (MUST)。
         if parameters.validate_scope(allowed_params).is_err() {
@@ -1359,8 +1382,8 @@ impl Session {
     /// draft-ietf-moq-transport-23 §6.3 (Session initialization): request stream の開始メッセージ
     /// として許されるのは SUBSCRIBE / PUBLISH / FETCH / PUBLISH_NAMESPACE /
     /// SUBSCRIBE_NAMESPACE / TRACK_STATUS / SUBSCRIBE_TRACKS の 7 種類のいずれかである。
-    /// 本実装が受理するのはこのうち SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS の 4 種類で
-    /// あり、残り 3 種類は relay 専用機能の削除 (namespace 発見・告知機構) により扱わない。
+    /// 本実装は 7 種類すべてを受理する。namespace 発見・告知の 3 種類は relay 専用ではなく
+    /// client / server の endpoint 同士でも使う request である (§4 (Namespace Discovery))。
     ///
     /// 構造は正しいが内容が不正な AUTHORIZATION_TOKEN (同一 (Token Type, Token Value) の
     /// 重複) を含む request は、セッションを閉じずに REQUEST_ERROR (MALFORMED_AUTH_TOKEN) で
@@ -1370,9 +1393,7 @@ impl Session {
     ///
     /// draft-ietf-moq-transport-23 §6.4.2.1 (Request ID): peer の Request ID の parity 違反と
     /// 重複を検証し、違反時は `INVALID_REQUEST_ID` でセッションを `Closing` に遷移させる
-    /// (検証は各ハンドラ先頭の `accept_peer_request` が 1 メッセージにつき 1 回行う。未対応
-    /// request は同関数を通さず、`handle_unsupported_request` が `validate_peer_request_id` を
-    /// 直接呼ぶ)。
+    /// (検証は各ハンドラ先頭の `accept_peer_request` が 1 メッセージにつき 1 回行う)。
     /// 仕様がセッション終了を MUST とするのは parity 違反と重複の 2 条件だけであり、
     /// 未到達 Request ID の保持数に上限は設けない。
     ///
@@ -1382,23 +1403,17 @@ impl Session {
     /// buffer して後で再投入するか、その bidi stream だけを RESET_STREAM で
     /// 閉じるかを選べる。将来 draft が変更される可能性がある。
     ///
-    /// 上記 7 種類のうち本実装が扱わない 3 種類 (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE /
-    /// SUBSCRIBE_TRACKS) は本体を解析したうえで `REQUEST_ERROR` (NOT_SUPPORTED、control
-    /// GOAWAY を送信済みなら GOING_AWAY、`.` 単独または `.session` の Track Namespace Prefix
-    /// なら DOES_NOT_EXIST、Range Filter が §3.3.2 に違反するなら INVALID_FILTER) を積んで
-    /// session を維持する
-    /// (draft §1.6 (Modularity): "Limited endpoints SHOULD respond to any unsupported messages
-    /// with the appropriate NOT_SUPPORTED error code, rather than ignoring them."
-    /// 予約名前空間の拒否は draft §2.4.3 (Reserved Namespaces) / §6.5 (Session-Level Tracks
-    /// and Namespaces) の MUST)。
-    /// 本体の解析に失敗した場合 (フレーミング違反 / Track Namespace の書式不正)、許可されない
-    /// パラメータを含む場合 (draft §9.19.1 (Parameter Scope))、REGISTER が token cache の上限や
-    /// alias 重複に触れる場合は、原因に応じた終了コード
+    /// 7 種類以外の message type (draft §6.3 (Session initialization) 違反) と、応答専用の
+    /// メッセージ (NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED) を先頭に置いた場合は
+    /// `UNEXPECTED_MESSAGE` で session を closing に遷移させる。
+    ///
+    /// PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS は、本体の解析に失敗した
+    /// 場合、許可されないパラメータを含む場合 (§9.19.1 (Parameter Scope))、REGISTER が
+    /// token cache の上限や alias 重複に触れる場合に、原因に応じた終了コード
     /// (`INVALID_TRACK_NAMESPACE` / `MALFORMED_KEY_VALUE` / `INVALID_PARAMETER` /
     /// `AUTH_TOKEN_CACHE_OVERFLOW` / `DUPLICATE_AUTH_TOKEN_ALIAS` など) で session を
-    /// closing に遷移させる。7 種類以外の message type
-    /// (draft §6.3 (Session initialization) 違反) は `UNEXPECTED_MESSAGE` で session を
-    /// closing に遷移させる。
+    /// closing に遷移させる。予約名前空間 (`.` 単独 / `.session`) と Range Filter の違反は
+    /// `REQUEST_ERROR` でメッセージ単位に拒否し、セッションを維持する。
     ///
     /// draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): メッセージ型ごとに許可された
     /// パラメータ以外の受信は INVALID_PARAMETER でセッションを閉じる MUST。§9.19.15
@@ -1406,9 +1421,8 @@ impl Session {
     /// `ControlMessage::decode` が検証するが、本 API は decode 済みの `ControlMessage` を
     /// 直接受け取るため、decode を通らない手組みメッセージでは session 層が検証する。
     ///
-    /// 本 API が扱う初回 request メッセージは SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS /
-    /// 未対応 request である。REQUEST_UPDATE などは `Session::recv_stream_message` 経由で受信し、
-    /// それぞれの context 別検証に従う。
+    /// 本 API が扱う初回 request メッセージは 7 種類すべてである。REQUEST_UPDATE などは
+    /// `Session::recv_stream_message` 経由で受信し、それぞれの context 別検証に従う。
     pub fn recv_request(&mut self, msg: ControlMessage) -> Result<(), RecvRequestError> {
         if self.state != SessionState::Established {
             // draft §6.3 (Session initialization): SETUP 完了前の前置到着は session を落とさない。
@@ -1423,12 +1437,14 @@ impl Session {
             ControlMessage::TrackStatus(track_status) => {
                 self.handle_peer_track_status(track_status)?;
             }
-            ControlMessage::Unsupported {
-                type_id,
-                request_id,
-                body,
-            } => {
-                self.handle_unsupported_request(type_id, request_id, &body)?;
+            ControlMessage::PublishNamespace(msg) => {
+                self.handle_peer_publish_namespace(msg)?;
+            }
+            ControlMessage::SubscribeNamespace(msg) => {
+                self.handle_peer_subscribe_namespace(msg)?;
+            }
+            ControlMessage::SubscribeTracks(msg) => {
+                self.handle_peer_subscribe_tracks(msg)?;
             }
             _ => {
                 // draft-ietf-moq-transport-23 §6.3 (Session initialization): bidi stream の
@@ -1442,183 +1458,6 @@ impl Session {
                 return Err(RecvRequestError::Session(err));
             }
         }
-        Ok(())
-    }
-
-    /// 定義済みだが本ライブラリが実装しない request を受信したときの処理
-    ///
-    /// draft-ietf-moq-transport-23 §1.6 (Modularity): "Limited endpoints SHOULD respond to any
-    /// unsupported messages with the appropriate NOT_SUPPORTED error code, rather than ignoring
-    /// them." §9 の Table 5 に定義済みの request 型 (PUBLISH_NAMESPACE /
-    /// SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) は `REQUEST_ERROR` (NOT_SUPPORTED、control
-    /// GOAWAY を送信済みなら GOING_AWAY、`.` 単独または `.session` の Track Namespace Prefix
-    /// なら DOES_NOT_EXIST、Range Filter が §3.3.2 に違反するなら INVALID_FILTER) で拒否し、
-    /// セッションは維持する。本体の解析失敗や REGISTER の適用失敗は原因に応じた終了コードで
-    /// セッションを閉じる。
-    ///
-    /// 要求として届く 3 種は本体を解析しないまま拒否できない。拒否しても §8.9
-    /// (Authorization Token Compression) の REGISTER 適用 MUST と §9.19.1 (Parameter Scope) の
-    /// スコープ検証 MUST は成立し、不正な本体は原因に応じた終了コードでセッションを閉じる
-    /// 必要がある。そのため次の順序で処理する
-    /// (セッション終了を招く検証を先に置き、メッセージ単位の reject のうち MUST の
-    /// MALFORMED_AUTH_TOKEN / INVALID_FILTER / DOES_NOT_EXIST を MUST でない GOING_AWAY (MAY) /
-    /// NOT_SUPPORTED (SHOULD) より先に置く。`accept_peer_request` と同じ整理)。
-    ///
-    /// 1. Request ID の parity と重複 (`validate_peer_request_id`)
-    /// 2. 本体の解析 (`decode_unsupported_request_body`)。失敗は原因に応じた終了コードで
-    ///    セッションを閉じる (REQUEST_ERROR は送らない)
-    /// 3. 本体の Request ID とメッセージの Request ID の一致 (不一致は MALFORMED_MESSAGE で
-    ///    セッションを閉じる)
-    /// 4. パラメータのスコープ検証 (draft §9.19.1 (Parameter Scope) の MUST。違反は
-    ///    INVALID_PARAMETER でセッションを閉じる)
-    /// 5. AUTHORIZATION_TOKEN の一意性 (draft §8.9 の MUST。alias 解決後の (Token Type,
-    ///    Token Value) の重複を対象とする。違反は REGISTER を適用したうえで REQUEST_ERROR
-    ///    (MALFORMED_AUTH_TOKEN) を返し、セッションは維持する。alias を解決できない
-    ///    USE_ALIAS は判定対象から外し、未登録 alias の扱いは現行どおり 7. 以降の拒否経路に
-    ///    委ねる)
-    /// 6. REGISTER の token cache への適用 (draft §8.9 の MUST。拒否の場合も適用する)
-    /// 7. Range Filter の検証 (draft §3.3.2 (Range Filters) / §9.1.6 (MAX FILTER RANGES) の
-    ///    MUST。重複と MAX_FILTER_RANGES 超過は REQUEST_ERROR (INVALID_FILTER) で拒否し、
-    ///    セッションは維持する。subscription を作らないため 1 メッセージ内の検証に限る)
-    /// 8. 予約・セッション名前空間の検証 (draft §2.4.3 (Reserved Namespaces) / §6.5
-    ///    (Session-Level Tracks and Namespaces) の MUST。`.` 単独または `.session` の Track
-    ///    Namespace Prefix は REQUEST_ERROR (DOES_NOT_EXIST) で拒否し、セッションは維持する)
-    /// 9. REQUEST_GOING_AWAY (control GOAWAY 送信済み) または REQUEST_NOT_SUPPORTED
-    ///
-    /// 応答専用の型 (NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED) は応答先の request を
-    /// 持たないため `UNEXPECTED_MESSAGE` でセッションを閉じる。公開 enum を手組みして
-    /// 応答専用の型に Request ID を付けた場合も同じ扱いにする。
-    /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
-    fn handle_unsupported_request(
-        &mut self,
-        type_id: u64,
-        request_id: Option<u64>,
-        body: &[u8],
-    ) -> Result<(), SessionError> {
-        // 応答専用の型 (NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED) が request stream の
-        // 先頭に来るのは §6.3 (Session initialization) の 7 種に反する (Table 5 で "First" を
-        // 持たない)。公開 enum を手組みして Request ID を付けた場合も同じ扱いにする。
-        let (Some(request_id), Some(allowed_params)) =
-            (request_id, unsupported_request_allowed_params(type_id))
-        else {
-            // draft-ietf-moq-transport-23 §6.3 (Session initialization): request stream の
-            // 先頭に置けないメッセージ型は UNEXPECTED_MESSAGE (0x303)。
-            let err = SessionError::new(
-                SESSION_UNEXPECTED_MESSAGE,
-                "control message type cannot start a request stream",
-            );
-            self.fail(err.clone());
-            return Err(err);
-        };
-        // draft §6.4.2.1 (Request ID): parity と重複は他の request と同じく検証する
-        self.validate_peer_request_id(request_id)?;
-        let (body_request_id, track_namespace, parameters) =
-            match decode_unsupported_request_body(body) {
-                Ok(parsed) => parsed,
-                Err(err) => {
-                    let err = session_error_from_request_body(err);
-                    self.fail(err.clone());
-                    return Err(err);
-                }
-            };
-        // 本体の先頭の Request ID はメッセージ decode が取り出した値と一致しなければならない。
-        // `ControlMessage::decode` を通った場合は同じバイト列に由来するため必ず一致する。
-        if body_request_id != request_id {
-            // 本体の Request ID がメッセージの Request ID と食い違う直列化は、制御メッセージ
-            // として解析できないため MALFORMED_MESSAGE (0x300)
-            // (draft-ietf-moq-transport-23 §9 (Control Messages))。
-            let err = SessionError::new(
-                SESSION_MALFORMED_MESSAGE,
-                "unsupported request body has a different request id",
-            );
-            self.fail(err.clone());
-            return Err(err);
-        }
-        // draft §9.19.1 (Parameter Scope): メッセージ型ごとに許可されるパラメータ以外の受信は
-        // INVALID_PARAMETER で閉じる (MUST)。NOT_SUPPORTED の判断は変えない。
-        if parameters.validate_scope(allowed_params).is_err() {
-            // draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): INVALID_PARAMETER (0x305)。
-            let err = SessionError::new(
-                SESSION_INVALID_PARAMETER,
-                "parameter is not allowed in the unsupported request",
-            );
-            self.fail(err.clone());
-            return Err(err);
-        }
-        // draft §8.9 (Authorization Token Compression): 構造は正しいが内容が不正なトークン
-        // (alias 解決後の (Token Type, Token Value) の重複) は REQUEST_ERROR
-        // (MALFORMED_AUTH_TOKEN) でメッセージ単位に拒否する。未対応 request として受理しない
-        // ため USE_ALIAS を適用しないが、一意性の判定には alias 解決後の値を用いる。alias を
-        // 解決できない USE_ALIAS は判定対象から外し、未登録 alias の扱いは現行どおり後続の
-        // Range Filter (INVALID_FILTER) / 予約・セッション名前空間 (DOES_NOT_EXIST) /
-        // GOING_AWAY / NOT_SUPPORTED の拒否経路に委ねる。
-        // REGISTER の MUST (失敗したメッセージでも alias を登録する) を先に適用する。
-        if self
-            .validate_peer_message_auth_token_uniqueness(&parameters)
-            .is_err()
-        {
-            self.apply_peer_message_auth_token_registers_only(&parameters)?;
-            self.emit_request_error(
-                request_id,
-                REQUEST_MALFORMED_AUTH_TOKEN,
-                "malformed AUTHORIZATION_TOKEN",
-            );
-            return Ok(());
-        }
-        // draft §8.9 (Authorization Token Compression) の REGISTER MUST をメッセージ単位の拒否
-        // (Range Filter の INVALID_FILTER、予約名前空間の DOES_NOT_EXIST、GOING_AWAY、
-        // NOT_SUPPORTED) より先に適用する。
-        // MUST の対象は REGISTER のみ (DELETE / USE_ALIAS / USE_VALUE は failed request の
-        // パラメータとして触らない)。REGISTER 適用中に session error が発生した場合は
-        // session error 優先で Err を返し、REQUEST_ERROR は発行しない。
-        self.apply_peer_message_auth_token_registers_only(&parameters)?;
-        // draft-ietf-moq-transport-23 §3.3.2 (Range Filters) / §9.1.6 (MAX FILTER RANGES):
-        // 重複と MAX_FILTER_RANGES の超過は REQUEST_ERROR (INVALID_FILTER) でメッセージ単位に
-        // 拒否する (MUST)。未対応 request は subscription を作らないため、累積ではなく
-        // 1 メッセージ内 (FILL_PARAMETERS の内側を含む) の検証に限る。スコープ検証 (§9.19.1)
-        // を先に通しているため、Range Filter を許可しない PUBLISH_NAMESPACE /
-        // SUBSCRIBE_NAMESPACE はここへ到達しない (§9.13 / §9.14 は AUTHORIZATION_TOKEN のみを
-        // 許可する)。INVALID_FILTER は MUST のため GOING_AWAY (MAY) / NOT_SUPPORTED (SHOULD)
-        // より優先する。
-        if let Err(reason) = self.check_incoming_range_filters(&parameters) {
-            self.emit_request_error(request_id, REQUEST_INVALID_FILTER, reason);
-            return Ok(());
-        }
-        // draft-ietf-moq-transport-23 §2.4.3 (Reserved Namespaces): 先頭フィールドが `.` 単独の
-        // 予約名前空間への request は REQUEST_ERROR (DOES_NOT_EXIST) で拒否する (MUST)。
-        // draft-ietf-moq-transport-23 §6.5 (Session-Level Tracks and Namespaces): 未認識の
-        // セッション名前空間 (`.session`) への request も同じコードで拒否する (MUST)。
-        // どちらもメッセージ単位の拒否であり、セッションは維持する。§8.9 の REGISTER 適用 MUST
-        // ("even if the message fails for other reasons") を満たすため、この検証は適用の後ろに
-        // 置く。DOES_NOT_EXIST は MUST のため、GOING_AWAY (MAY) / NOT_SUPPORTED (SHOULD) より
-        // 優先する。`.foo` などその他の `.` 始まりの予約名前空間への request は、§2.4.3 第 1
-        // 段落が Application へ渡すことを MUST とするが、本実装には未対応 request を
-        // Application へ渡す経路が無いため、従来どおり NOT_SUPPORTED で拒否する。
-        if track_namespace.is_single_period() {
-            self.emit_request_error(
-                request_id,
-                REQUEST_DOES_NOT_EXIST,
-                "reserved single-period namespace",
-            );
-            return Ok(());
-        }
-        if track_namespace.is_session_level() {
-            self.emit_request_error(
-                request_id,
-                REQUEST_DOES_NOT_EXIST,
-                "session-level namespace does not exist",
-            );
-            return Ok(());
-        }
-        // draft §9.2 (GOAWAY): control GOAWAY を送信済みなら GOING_AWAY を優先する。
-        let error_code = if self.goaway.local_sent {
-            crate::error::REQUEST_GOING_AWAY
-        } else {
-            crate::error::REQUEST_NOT_SUPPORTED
-        };
-        // request_streams に登録しないため、後続の終端通知は
-        // `rejected_request_ids` の no-op 経路で吸収される (`emit_request_error` が記録する)
-        self.emit_request_error(request_id, error_code, "control message not supported");
         Ok(())
     }
 
@@ -1723,6 +1562,15 @@ impl Session {
             RequestTable::Subscription => self.close_subscription_on_stream_end(request_id, end),
             RequestTable::Fetch => self.close_fetch_on_stream_end(request_id, end),
             RequestTable::TrackStatus => self.close_track_status_on_stream_end(request_id, end),
+            RequestTable::PublishNamespace => {
+                self.close_publish_namespace_on_stream_end(request_id, end)
+            }
+            RequestTable::NamespaceSubscription => {
+                self.close_namespace_subscription_on_stream_end(request_id, end)
+            }
+            RequestTable::TrackSubscription => {
+                self.close_track_subscription_on_stream_end(request_id, end)
+            }
         };
         let reason = match reason_result {
             Ok(reason) => reason,
@@ -1790,6 +1638,15 @@ impl Session {
         // 残っていないが、最終メッセージ送信後に届いた更新をアプリが応答していない場合の
         // 取りこぼしを残さない (draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE))。
         self.release_request_update_state(request_id);
+        // namespace 系 request は state を Terminated に揃える (subscription / fetch /
+        // track_status は個別の終端経路で遷移済み)。
+        if let Some(entry) = self.publish_namespaces.get_mut(&request_id) {
+            entry.state = NamespaceRequestState::Terminated;
+        } else if let Some(entry) = self.namespace_subscriptions.get_mut(&request_id) {
+            entry.state = NamespaceRequestState::Terminated;
+        } else if let Some(entry) = self.track_subscriptions.get_mut(&request_id) {
+            entry.state = NamespaceRequestState::Terminated;
+        }
         self.events.push_back(SessionEvent::RequestTerminated {
             request_id,
             kind,
@@ -1850,6 +1707,21 @@ impl Session {
                 .track_status_requests
                 .get(&request_id)
                 .is_some_and(|e| e.my_role == TrackRole::Subscriber),
+            // PUBLISH_NAMESPACE は publisher が要求を開始する (§9.13)
+            RequestTable::PublishNamespace => self
+                .publish_namespaces
+                .get(&request_id)
+                .is_some_and(|e| e.my_role == TrackRole::Publisher),
+            // SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS は subscriber が要求を開始する
+            // (§9.14 / §9.17)
+            RequestTable::NamespaceSubscription => self
+                .namespace_subscriptions
+                .get(&request_id)
+                .is_some_and(|e| e.my_role == TrackRole::Subscriber),
+            RequestTable::TrackSubscription => self
+                .track_subscriptions
+                .get(&request_id)
+                .is_some_and(|e| e.my_role == TrackRole::Subscriber),
         }
     }
 
@@ -1876,7 +1748,17 @@ impl Session {
         if let Some(fetch) = self.fetches.get(&request_id) {
             return Some(fetch.my_role == TrackRole::Publisher);
         }
-        self.track_status_requests
+        if let Some(entry) = self.track_status_requests.get(&request_id) {
+            return Some(entry.my_role == TrackRole::Publisher);
+        }
+        // namespace 系は要求種別ごとに initiator の役割が異なる
+        if let Some(entry) = self.publish_namespaces.get(&request_id) {
+            return Some(entry.my_role == TrackRole::Subscriber);
+        }
+        if let Some(entry) = self.namespace_subscriptions.get(&request_id) {
+            return Some(entry.my_role == TrackRole::Publisher);
+        }
+        self.track_subscriptions
             .get(&request_id)
             .map(|entry| entry.my_role == TrackRole::Publisher)
     }
@@ -2038,9 +1920,11 @@ impl Session {
                 }),
                 _ => false,
             },
-            RequestTable::Fetch | RequestTable::TrackStatus => {
-                !self.is_local_requester(request_id, kind)
-            }
+            RequestTable::Fetch
+            | RequestTable::TrackStatus
+            | RequestTable::PublishNamespace
+            | RequestTable::NamespaceSubscription
+            | RequestTable::TrackSubscription => !self.is_local_requester(request_id, kind),
         }
     }
 
@@ -2092,7 +1976,7 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        match msg {
+        let result = match msg {
             ControlMessage::SubscribeOk(ok) => self.handle_peer_subscribe_ok(request_id, ok),
             ControlMessage::RequestError(err) => self.handle_peer_request_error(request_id, err),
             ControlMessage::RequestUpdate(update) => {
@@ -2117,11 +2001,15 @@ impl Session {
                 Err(err)
             }
             ControlMessage::Goaway(g) => self.handle_peer_goaway_on_request_stream(request_id, g),
-            // `ControlMessage::Unsupported` もここに落ちる。Table 5 で "First" を持つ型
-            // (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) が 2 通目以降に
-            // 届くのは同表の注記 ("Messages marked \"First\" MUST be the first message on a new
+            ControlMessage::Namespace(m) => self.handle_peer_namespace(request_id, m),
+            ControlMessage::NamespaceDone(m) => self.handle_peer_namespace_done(request_id, m),
+            ControlMessage::PublishSkipped(m) => self.handle_peer_publish_skipped(request_id, m),
+            // ここに落ちるのは、request stream 上で受信してはならない型である。Table 5 で
+            // "First" を持つ型 (SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS /
+            // PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) が 2 通目以降に
+            // 届くのは同表の注記 ("Messages marked "First" MUST be the first message on a new
             // request stream.") に反し、応答専用の型 (NAMESPACE / NAMESPACE_DONE /
-            // PUBLISH_SKIPPED) は応答先の request を持たないため、いずれも PROTOCOL_VIOLATION
+            // PUBLISH_SKIPPED) は応答先の request を持たないため、いずれも UNEXPECTED_MESSAGE
             // でセッションを閉じる。
             _ => {
                 // draft-ietf-moq-transport-23 §9 Table 5 の "First" を持つ型と、応答専用の型を
@@ -2133,7 +2021,13 @@ impl Session {
                 self.fail(err.clone());
                 Err(err)
             }
+        };
+        // 受信メッセージの検証違反はセッション終了を伴う。各ハンドラは原因の分類だけを
+        // 返し、`fail` の呼び出しをここへ集約する (`fail` は Closing 以降 no-op)。
+        if let Err(err) = &result {
+            self.fail(err.clone());
         }
+        result
     }
 
     /// REQUEST_OK を送信する
@@ -2204,6 +2098,12 @@ impl Session {
                 REQUEST_UPDATE_OK_ALLOWED_PARAMS,
                 "REQUEST_OK (request_update for fetch) parameter not allowed",
             )),
+            Some(RequestTable::PublishNamespace)
+            | Some(RequestTable::NamespaceSubscription)
+            | Some(RequestTable::TrackSubscription) => Some((
+                crate::message::NAMESPACE_REQUEST_OK_ALLOWED_PARAMS,
+                "REQUEST_OK parameter not allowed in this namespace request context",
+            )),
             Some(RequestTable::Subscription) => None,
             None => unreachable!("table.is_none() checked above"),
         };
@@ -2231,6 +2131,11 @@ impl Session {
                 }
             }
             Some(RequestTable::Fetch) => self.send_ok_for_fetch(request_id, &mut parameters)?,
+            Some(RequestTable::PublishNamespace)
+            | Some(RequestTable::NamespaceSubscription)
+            | Some(RequestTable::TrackSubscription) => {
+                self.send_ok_for_namespace_request(request_id)?;
+            }
             Some(RequestTable::TrackStatus) => {
                 track_properties =
                     self.send_ok_for_track_status(request_id, &mut parameters, track_properties)?;
@@ -2366,6 +2271,15 @@ impl Session {
             Some(RequestTable::TrackStatus) => {
                 self.send_err_for_track_status(request_id)?;
             }
+            Some(RequestTable::PublishNamespace) => {
+                self.send_err_for_publish_namespace(request_id)?;
+            }
+            Some(RequestTable::NamespaceSubscription) => {
+                self.send_err_for_namespace_subscription(request_id)?;
+            }
+            Some(RequestTable::TrackSubscription) => {
+                self.send_err_for_subscribe_tracks(request_id)?;
+            }
             None => {
                 return Err(SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
@@ -2488,6 +2402,15 @@ impl Session {
             Some(RequestTable::Subscription) => self.handle_err_for_subscription(request_id),
             Some(RequestTable::Fetch) => self.handle_err_for_fetch(request_id),
             Some(RequestTable::TrackStatus) => self.handle_err_for_track_status(request_id),
+            Some(RequestTable::PublishNamespace) => {
+                self.handle_err_for_publish_namespace(request_id)
+            }
+            Some(RequestTable::NamespaceSubscription) => {
+                self.handle_err_for_subscribe_namespace(request_id)
+            }
+            Some(RequestTable::TrackSubscription) => {
+                self.handle_err_for_subscribe_tracks(request_id)
+            }
             None => {
                 // 応答先の request を持たない REQUEST_ERROR は
                 // UNEXPECTED_MESSAGE (0x303) (draft-ietf-moq-transport-23 §12.2)。
@@ -2579,6 +2502,12 @@ impl Session {
                 REQUEST_UPDATE_OK_ALLOWED_PARAMS,
                 "REQUEST_OK (request_update for fetch) parameter not allowed in this context",
             )),
+            Some(RequestTable::PublishNamespace)
+            | Some(RequestTable::NamespaceSubscription)
+            | Some(RequestTable::TrackSubscription) => Some((
+                crate::message::NAMESPACE_REQUEST_OK_ALLOWED_PARAMS,
+                "REQUEST_OK parameter not allowed in this namespace request context",
+            )),
             Some(RequestTable::Subscription) | None => None,
         };
         if let Some((allowed, message)) = context_allowed
@@ -2603,6 +2532,15 @@ impl Session {
             Some(RequestTable::TrackStatus) => {
                 self.handle_ok_for_track_status(request_id, &ok.parameters, &ok.track_properties)
             }
+            Some(RequestTable::PublishNamespace) => {
+                self.handle_ok_for_publish_namespace(request_id)
+            }
+            Some(RequestTable::NamespaceSubscription) => {
+                self.handle_ok_for_subscribe_namespace(request_id)
+            }
+            Some(RequestTable::TrackSubscription) => {
+                self.handle_ok_for_subscribe_tracks(request_id)
+            }
             None => {
                 // 応答先の request を持たない REQUEST_OK は UNEXPECTED_MESSAGE (0x303)。
                 let err = SessionError::new(
@@ -2623,6 +2561,12 @@ impl Session {
             Some(RequestTable::Fetch)
         } else if self.track_status_requests.contains_key(&request_id) {
             Some(RequestTable::TrackStatus)
+        } else if self.publish_namespaces.contains_key(&request_id) {
+            Some(RequestTable::PublishNamespace)
+        } else if self.namespace_subscriptions.contains_key(&request_id) {
+            Some(RequestTable::NamespaceSubscription)
+        } else if self.track_subscriptions.contains_key(&request_id) {
+            Some(RequestTable::TrackSubscription)
         } else {
             None
         }
@@ -2835,9 +2779,9 @@ impl Session {
     ///
     /// 違反時は拒否理由 (`&'static str`) を返す。REQUEST_ERROR の送出と後始末は呼び出し元が行う
     /// (REQUEST_UPDATE の Range Filter 拒否は role によって終端方法が異なるため、
-    /// 呼び出し元が subscription の文脈を知っている必要がある)。未対応 request の拒否経路
-    /// (`Session::recv_request` の `handle_unsupported_request`) からも呼ばれ、違反は
-    /// `INVALID_FILTER` で拒否される。
+    /// 呼び出し元が subscription の文脈を知っている必要がある)。namespace 系 request の
+    /// 受信経路 (`Session::recv_request` の `handle_peer_subscribe_tracks`) からも呼ばれ、
+    /// 違反は `INVALID_FILTER` で拒否される。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     pub(super) fn check_incoming_range_filters(
         &self,
@@ -3331,60 +3275,6 @@ impl Session {
         }
         Ok(())
     }
-}
-
-/// 未対応 request の本体を解析して Request ID、Track Namespace Prefix、パラメータを取り出す
-///
-/// draft-ietf-moq-transport-23 §9.13 (PUBLISH_NAMESPACE) / §9.14 (SUBSCRIBE_NAMESPACE) /
-/// draft-ietf-moq-transport-23 §9.17 (SUBSCRIBE_TRACKS) の 3 種は共通して
-/// Request ID (vi64) → Track Namespace Prefix → Number of Parameters → Parameters の順に
-/// 直列化する。`ControlMessage::Unsupported` は本体を生バイト列で保持するだけなので、
-/// 3 種の構造を知るセッション層が本関数で解析する。
-///
-/// Request ID はメッセージ decode が取り出した値と一致することを呼び出し側が確認する
-/// (公開 enum を手組みして食い違わせた場合は PROTOCOL_VIOLATION)。
-/// Track Namespace Prefix も返すため、呼び出し側は draft §2.4.3 (Reserved Namespaces) /
-/// §6.5 (Session-Level Tracks and Namespaces) の `.` 単独または `.session` の Track Namespace
-/// Prefix の検証に使える。
-/// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
-///
-/// # Errors
-///
-/// - Request ID / Track Namespace / パラメータのデコード失敗: 各デコーダのエラー
-///   (Track Namespace の書式不正は `ProtocolViolation`、KVP の宣言長が残りバッファを超える
-///   場合は `MalformedKeyValue`)
-/// - パラメータブロックを読み切ったあとに余剰バイトがある (draft-ietf-moq-transport-23 §9
-///   (Control Messages) の Length の不一致): `MalformedMessage`
-fn decode_unsupported_request_body(
-    body: &[u8],
-) -> Result<(u64, TrackNamespace, MessageParameters), MessageError> {
-    let mut pos = 0;
-    let (request_id, n) = varint::decode(body)?;
-    pos += n;
-    let track_namespace = TrackNamespace::decode_from(body, &mut pos)?;
-    let (parameters, consumed) = MessageParameters::decode(&body[pos..])?;
-    if pos + consumed != body.len() {
-        return Err(MessageError::MalformedMessage(
-            "unsupported request has trailing bytes after parameters",
-        ));
-    }
-    Ok((request_id, track_namespace, parameters))
-}
-
-/// 未対応 request の本体解析エラーをセッション終了コードへ写す
-///
-/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の分類に従い、
-/// [`MessageError::session_termination_code`] が返す最も具体的なコードを使う。
-/// 例: KVP の直列化不整合は MALFORMED_KEY_VALUE、Track Namespace の構造違反は
-/// INVALID_TRACK_NAMESPACE、パラメータ違反は INVALID_PARAMETER、本文長不一致は
-/// MALFORMED_MESSAGE になる。セッション終了を伴わない variant は
-/// `PROTOCOL_VIOLATION` にフォールバックする。
-///
-/// `MalformedAuthToken` は SETUP の decode だけが返すため本経路には届かないが、
-/// 届いた場合も MALFORMED_AUTH_TOKEN に写る (汎用の分類より原因を保つ)。
-/// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
-fn session_error_from_request_body(err: MessageError) -> SessionError {
-    session_error_from_message(&err, SESSION_PROTOCOL_VIOLATION)
 }
 
 /// codec のエラーをセッション終了コードへ写す共通ヘルパー

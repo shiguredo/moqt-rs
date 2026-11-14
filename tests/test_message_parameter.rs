@@ -2964,3 +2964,93 @@ mod authorization_token_errors {
         );
     }
 }
+
+/// TRACK_PROPERTY_FILTER (0x29) の Track 単位の評価
+///
+/// draft-ietf-moq-transport-23 §3.6.1 (Filtering SUBSCRIBE_TRACKS): "Range Filters Section
+/// 3.3.2 can be used in SUBSCRIBE_TRACKS to filter Tracks in a namespace using the Track
+/// Property Filter."
+mod track_property_filter_evaluation {
+    use super::*;
+    use shiguredo_moqt::message_parameter::PARAM_TRACK_PROPERTY_FILTER;
+    use shiguredo_moqt::track_properties::{TrackProperties, TrackProperty, TrackPropertyValue};
+    use shiguredo_moqt::varint;
+
+    /// SetID | Property Type | Start の 1 Range (open-ended) を組み立てる
+    fn filter_bytes(set_id: u8, property_type: u64, start: u64) -> Vec<u8> {
+        let mut bytes = vec![set_id];
+        varint::encode(property_type, &mut bytes);
+        varint::encode(start, &mut bytes);
+        bytes
+    }
+
+    fn parameters_with_filter(set_id: u8, property_type: u64, start: u64) -> MessageParameters {
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter {
+            param_type: PARAM_TRACK_PROPERTY_FILTER,
+            value: MessageParameterValue::LengthPrefixed(filter_bytes(
+                set_id,
+                property_type,
+                start,
+            )),
+        });
+        parameters
+    }
+
+    fn track_with(property_type: u64, value: u64) -> TrackProperties {
+        let mut properties = TrackProperties::new();
+        properties.push(TrackProperty {
+            prop_type: property_type,
+            value: TrackPropertyValue::VarInt(value),
+        });
+        properties
+    }
+
+    /// フィルタが無ければすべての Track を通す
+    #[test]
+    fn no_filter_passes_every_track() {
+        let parameters = MessageParameters::new();
+        assert!(
+            parameters.track_property_filter_passes(&TrackProperties::new()),
+            "フィルタが無い場合は通すこと"
+        );
+    }
+
+    /// Property の値が範囲内なら通り、範囲外なら落ちる
+    #[test]
+    fn range_is_inclusive() {
+        // Property Type 0x02 (OBJECT_DELIVERY_TIMEOUT) を 5 以上に制限する
+        let parameters = parameters_with_filter(0, 0x02, 5);
+        assert!(parameters.track_property_filter_passes(&track_with(0x02, 5)));
+        assert!(parameters.track_property_filter_passes(&track_with(0x02, 9)));
+        assert!(!parameters.track_property_filter_passes(&track_with(0x02, 4)));
+    }
+
+    /// Property を持たない Track は条件を満たせない (AND が落ちる)
+    #[test]
+    fn missing_property_fails() {
+        let parameters = parameters_with_filter(0, 0x02, 5);
+        assert!(
+            !parameters.track_property_filter_passes(&track_with(0x04, 9)),
+            "Property が無ければ落とすこと"
+        );
+        assert!(
+            !parameters.track_property_filter_passes(&TrackProperties::new()),
+            "Track Properties が空なら落とすこと"
+        );
+    }
+
+    /// Range を持たないフィルタ (Length=0) はフィルタとして機能しない
+    #[test]
+    fn empty_filter_passes() {
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter {
+            param_type: PARAM_TRACK_PROPERTY_FILTER,
+            value: MessageParameterValue::LengthPrefixed(Vec::new()),
+        });
+        assert!(
+            parameters.track_property_filter_passes(&TrackProperties::new()),
+            "空のフィルタは通すこと"
+        );
+    }
+}

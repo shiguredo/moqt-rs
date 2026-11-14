@@ -308,17 +308,18 @@ impl Session {
     /// draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter): `parameters` に
     /// SUBSCRIBE_TRACKS_ID (0x36) を載せられるのは、SUBSCRIBE_TRACKS の結果として送る
     /// PUBLISH だけであり、値は元の SUBSCRIBE_TRACKS の Request ID でなければならない。
-    /// 本ライブラリは SUBSCRIBE_TRACKS 自体を実装しないため、対応する namespace 要求の
-    /// 存在は検証しない。パラメータ型が PUBLISH のスコープ内にあることだけを検証し、
-    /// 値の符号化はメッセージのエンコード時に検証する。SUBSCRIBE_TRACKS 起因ではない
-    /// PUBLISH に指定してはならない。
+    /// 対応する SUBSCRIBE_TRACKS を自側が受けている場合、その要求の prefix と一致する
+    /// こと、同じ track の PUBLISH を重複させないこと、PUBLISH_SKIPPED を送った track では
+    /// ないことを送信前に検証する (§9.5.2 / §9.18)。対応する要求が無い場合は、パラメータ型が
+    /// PUBLISH のスコープ内にあることだけを検証する (要求の照合はアプリの責務)。
+    /// SUBSCRIBE_TRACKS 起因ではない PUBLISH に指定してはならない。
     pub fn send_publish(
         &mut self,
         track_namespace: TrackNamespace,
         track_name: Vec<u8>,
         track_alias: u64,
         mut parameters: MessageParameters,
-        track_properties: TrackProperties,
+        mut track_properties: TrackProperties,
     ) -> Result<u64, SendRequestError> {
         self.require_established()?;
         self.check_peer_goaway()?;
@@ -558,6 +559,29 @@ impl Session {
                 group_id,
                 object_id,
             });
+        // draft-ietf-moq-transport-23 §9.18 (PUBLISH_SKIPPED) / §9.5.2 (Updating Namespace
+        // Subscriptions): SUBSCRIBE_TRACKS の結果として PUBLISH を送る場合、PUBLISH_SKIPPED を
+        // 送った track への PUBLISH と、同じ track の重複 PUBLISH を拒否する。対応する
+        // SUBSCRIBE_TRACKS が無い場合は §9.19.21 の契約をアプリの責務として受理する。
+        if let Err(err) = self.record_outgoing_subscribe_tracks_publish(
+            &parameters,
+            &track_namespace,
+            &track_name,
+        ) {
+            self.fail(err.clone());
+            return Err(err.into());
+        }
+        // draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter): SUBSCRIBE_TRACKS
+        // が INCLUDE_PROPERTIES=0 を指定した場合、resulting PUBLISH の Track Properties は
+        // 存在するが空にする SHOULD。指定が無い場合はアプリが渡した値を使う。
+        if let Some(request_id) = parameters.subscribe_tracks_id()
+            && self
+                .track_subscriptions
+                .get(&request_id)
+                .is_some_and(|entry| entry.parameters.include_properties() == Some(0))
+        {
+            track_properties = TrackProperties::new();
+        }
         let msg = ControlMessage::Publish(Publish {
             request_id,
             track_namespace,
@@ -828,7 +852,13 @@ impl Session {
                 FETCH_UPDATE_ALLOWED_PARAMS,
                 "REQUEST_UPDATE (fetch) parameter not allowed in this context",
             )),
-            Some(RequestTable::TrackStatus) | None => {
+            Some(RequestTable::NamespaceSubscription) | Some(RequestTable::TrackSubscription) => {
+                Some((
+                    crate::message::NAMESPACE_UPDATE_ALLOWED_PARAMS,
+                    "REQUEST_UPDATE (namespace subscription) parameter not allowed in this context",
+                ))
+            }
+            Some(RequestTable::PublishNamespace) | Some(RequestTable::TrackStatus) | None => {
                 return Err(SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
                     "request_update not allowed for this request id",
@@ -846,7 +876,13 @@ impl Session {
                 self.send_update_for_subscription(request_id, &parameters)?
             }
             Some(RequestTable::Fetch) => self.send_update_for_fetch(request_id, &parameters)?,
-            Some(RequestTable::TrackStatus) | None => {
+            Some(RequestTable::NamespaceSubscription) => {
+                self.send_update_for_namespace_subscription(request_id, &parameters)?
+            }
+            Some(RequestTable::TrackSubscription) => {
+                self.send_update_for_track_subscription(request_id, &parameters)?
+            }
+            Some(RequestTable::PublishNamespace) | Some(RequestTable::TrackStatus) | None => {
                 return Err(SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
                     "request_update not allowed for this request id",

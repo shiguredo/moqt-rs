@@ -9,8 +9,9 @@
 //! または WebTransport session) に対応する。
 //!
 //! 本モジュールが扱うのは、この endpoint から見た peer との protocol state であり、
-//! publisher / subscriber の endpoint が直接使う範囲に限定する。relay が担う
-//! namespace 発見・告知と forwarding は対象外である。
+//! publisher / subscriber の endpoint が直接使う範囲に限定する。namespace 発見・告知
+//! (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) は endpoint 同士でも
+//! 使うため実装するが、relay の forwarding (§7) は対象外である。
 //!
 //! [`crate::session::types::Role`] は `Transport Session` における endpoint の役割 (`Client` / `Server`)
 //! を表し、[`crate::session::types::TrackRole`] は各 request / track における protocol role
@@ -73,6 +74,7 @@
 //! - `subscription`: SUBSCRIBE / PUBLISH / REQUEST_UPDATE / PUBLISH_DONE /
 //!   STOP_SENDING 関連
 //! - `fetch`: FETCH 関連
+//! - `namespace`: namespace 発見・告知 (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS)
 //! - `track_status`: TRACK_STATUS 関連
 //! - `track_history`: peer publisher から観測した Track 単位の Object 存在・不存在履歴
 //! - `goaway`: GOAWAY / tick 関連
@@ -82,6 +84,7 @@ pub mod core;
 pub mod data;
 pub mod fetch;
 pub mod goaway;
+pub mod namespace;
 pub mod request_id;
 pub mod subscription;
 pub(crate) mod track_history;

@@ -184,7 +184,7 @@ pub struct ObjectFilterInput<'a> {
 /// draft-ietf-moq-transport-23 §3.3.2 (Range Filters): "Filter parameters with the same SetID
 /// are AND'd; distinct SetIDs are OR'd. The final result is SetID=0 OR SetID=1 OR ... SetID=255,
 /// where each SetID=i is the AND of all filter parameters carrying that SetID."
-fn range_filters_pass(
+pub(crate) fn range_filters_pass(
     filters: &SubscriptionRangeFilters,
     input: &ObjectFilterInput<'_>,
     object_properties: Option<&ObjectProperties>,

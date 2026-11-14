@@ -13,6 +13,8 @@ mod after_fin;
 mod fill;
 #[path = "fetch/nonexistence.rs"]
 mod nonexistence;
+#[path = "fetch/range_filters.rs"]
+mod range_filters;
 #[path = "fetch/request_update.rs"]
 mod request_update;
 #[path = "fetch/unified.rs"]

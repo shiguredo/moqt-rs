@@ -372,6 +372,7 @@ impl Session {
             group_order: parameters.group_order(),
             // 自側は subscriber のため FETCH_OK を送らず、INCLUDE_PROPERTIES の保持は不要
             include_properties: None,
+            range_filters: super::subscription::validation::extract_range_filters(&parameters),
             has_range_filters: parameters.has_range_filters(),
         };
         if let Some(order) = fetch.group_order {
@@ -1008,6 +1009,10 @@ impl Session {
             // draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
             // peer が FETCH で指定した値を保持し、FETCH_OK 送信時に参照する
             include_properties,
+            // publisher 役は応答 Object の Pass 判定に使う (§3.3.3 の MUST)。
+            range_filters: super::subscription::validation::extract_range_filters(
+                &fetch.parameters,
+            ),
             // publisher 役は応答を送る側であり、受信側の暗黙 gap 判定には使わない。
             // 要求内容の対称性のため保持する。
             has_range_filters: fetch.parameters.has_range_filters(),

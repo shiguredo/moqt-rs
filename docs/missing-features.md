@@ -2,8 +2,7 @@
 
 調査日: 2026-10-14 (develop の f91baf3 時点)。
 
-最終更新: 2026-11-04 (対象仕様を MOQT draft-23 / LOC draft-05 / C4M draft-02 に更新し、
-節番号とパラメータ名を追随させた)。
+最終更新: 2026-11-14 (namespace 発見・告知の 6 メッセージを実装済みとして対象外リストから外した)。
 
 対象仕様は `refs/moq/` の MOQT `draft-ietf-moq-transport-23`、LOC `draft-ietf-moq-loc-05`、
 MSF `draft-ietf-moq-msf-01`、C4M `draft-ietf-moq-c4m-02` である。
@@ -11,9 +10,12 @@ MSF `draft-ietf-moq-msf-01`、C4M `draft-ietf-moq-c4m-02` である。
 `crates/tokio-moq` (transport 層)。
 
 `CODEBASE.md` の「クライアントとサーバーのみで MoQ リレーには対応しないこと」により、
-MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUBSCRIBE_TRACKS` /
-`NAMESPACE` / `NAMESPACE_DONE` / `PUBLISH_SKIPPED`、§7 全体、§3.2.3 Relay Fetch Handling、
-§7.5.1 / §7.7.1 Relay Switchover、namespace 発見・forwarding) は本稿の対象外とする。
+relay の転送 (`§7` 全体、§3.2.3 Relay Fetch Handling、§7.5.1 / §7.7.1 Relay Switchover、
+relay による namespace の集約・forwarding) は本稿の対象外とする。namespace 発見・告知の
+6 メッセージ (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUBSCRIBE_TRACKS` /
+`NAMESPACE` / `NAMESPACE_DONE` / `PUBLISH_SKIPPED`) は client / server の endpoint 同士でも
+使うため実装済みであり、本稿の「足りていない機能」には含めない (`docs/moqt.md` の
+「namespace 発見・告知」を参照)。
 `docs/moqt.md` / `docs/msf.md` / `docs/loc.md` / `docs/c4m.md` の「未対応」や「残る制約」に
 書かれている内容も既知として扱い、重複して数え上げない。
 
@@ -193,14 +195,12 @@ open な送信 stream を Session が reset する (`Session::reset_open_outgoin
 `send_data_stream_closed` / `send_fetch_data_stream_closed` は `Ok(())` で吸収し、
 未知の stream id は従来どおり `SESSION_PROTOCOL_VIOLATION` になる。
 
-### 4.8 peer の SETUP を API から読めない (§6.3.2 / §9.1.5、ライブラリ)
+### 4.8 peer の SETUP を API から読む (§6.3.2 / §9.1.5、ライブラリ)
 
-`SetupState { local, peer }` は `pub(super)` で (`src/session/core.rs:67-71`)、
-公開されているのは `peer_auth_token_cache` など一部だけである。
-`SetupOptions` にも `MOQT_IMPLEMENTATION` の getter が無い (`src/parameter.rs:591-635`)。
-アプリは peer が宣言した拡張 (Setup Option) を判定できず、§6.3.2 の
-拡張ネゴシエーションを行えない。example のラッパーも SETUP を消費して捨てる
-(`crates/tokio-moq/src/moqt_client.rs:1350`) ため上位アプリからも見えない。
+解消済み。`Session::peer_setup_options()` が peer の `SetupOptions` を返し、
+`SetupOptions::iter` / `moqt_implementation` / `max_filter_ranges` /
+`max_request_updates` で拡張を判定できる。example のラッパーは peer の SETUP を
+読み捨てるが、ライブラリ API としての拡張ネゴシエーションは可能になった。
 
 ## 5. publisher (moq-pub) に足りない機能
 

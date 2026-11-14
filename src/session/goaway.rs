@@ -399,6 +399,36 @@ impl Session {
                 }
                 RequestKind::TrackStatus
             }
+            RequestTable::PublishNamespace => {
+                let entry = self
+                    .publish_namespaces
+                    .get(&request_id)
+                    .expect("locate_request guarantees key presence");
+                if entry.state == super::types::NamespaceRequestState::Terminated {
+                    return None;
+                }
+                RequestKind::PublishNamespace
+            }
+            RequestTable::NamespaceSubscription => {
+                let entry = self
+                    .namespace_subscriptions
+                    .get(&request_id)
+                    .expect("locate_request guarantees key presence");
+                if entry.state == super::types::NamespaceRequestState::Terminated {
+                    return None;
+                }
+                RequestKind::SubscribeNamespace
+            }
+            RequestTable::TrackSubscription => {
+                let entry = self
+                    .track_subscriptions
+                    .get(&request_id)
+                    .expect("locate_request guarantees key presence");
+                if entry.state == super::types::NamespaceRequestState::Terminated {
+                    return None;
+                }
+                RequestKind::SubscribeTracks
+            }
         };
         if let Some(subscription) = self.subscriptions.get_mut(&request_id) {
             subscription.state = SubscriptionState::Terminated;
@@ -411,6 +441,12 @@ impl Session {
             // 判定は成立するため、`response` は変更しない。送れなかった応答の成否を `response`
             // に書くと、アプリが「応答を送れた」ものとして扱ってしまう。
             entry.terminated = true;
+        } else if let Some(entry) = self.publish_namespaces.get_mut(&request_id) {
+            entry.state = super::types::NamespaceRequestState::Terminated;
+        } else if let Some(entry) = self.namespace_subscriptions.get_mut(&request_id) {
+            entry.state = super::types::NamespaceRequestState::Terminated;
+        } else if let Some(entry) = self.track_subscriptions.get_mut(&request_id) {
+            entry.state = super::types::NamespaceRequestState::Terminated;
         }
         // 以後の close 通知を no-op で吸収できるよう、未終端の request_streams entry を
         // 除去して rejected_request_ids に登録する (`terminate_malformed_track` と同じ手順)

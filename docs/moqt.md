@@ -82,21 +82,23 @@
     要求範囲 (FETCH_OK の応答範囲の終端を含む) で検証する (`send_fetch_object` が範囲外を
     `LocalFilterMismatch` で拒否する)。End of Range は Object ではないため `send_fetch_end_of_range`
     を使い、Location 検証の対象外とする。
-  - FETCH 応答に対する Range Filters (§3.3.2 の Subgroup / Object ID / Priority / Object Property) の
-    評価は未対応である (Location Filter のみ。FETCH Object の送信 API に Subgroup ID / Priority /
-    Properties を渡す設計が必要)
+  - FETCH 応答に対する Range Filters (§3.3.2 の Subgroup / Object ID / Priority / Object Property) は
+    `send_fetch_object_with_context` が Subgroup ID / Publisher Priority / Object Properties の
+    文脈付きで評価し、通らない Object を `LocalFilterMismatch` で拒否する (§3.3.3 の MUST)。
+    文脈を渡さない `send_fetch_object` は Subgroup ID なし・既定 Priority・Properties なしとして
+    同じ判定を行う
 - New Group Request
 - Range Filters (Subgroup / ObjectID / Priority / Object Property / Track Property)
   - codec と MAX_FILTER_RANGES / 重複 / 構造の検証
   - session 層で Object の forward 判定 (`object_passes_filters` / `header_passes_filters`)
-  - TRACK_PROPERTY_FILTER は PUBLISH の選別を行わない。draft-23 §3.6.2 (Parameters on
-    SUBSCRIBE_TRACKS) は TRACK_PROPERTY_FILTER を SUBSCRIBE_TRACKS 自身に適用するが、本ライブラリは
-    MoQ リレー専用機能 (SUBSCRIBE_TRACKS) を対象外としているため、選別の対象が存在しない
-    (draft から削除された仕様ではない)
+  - TRACK_PROPERTY_FILTER は SUBSCRIBE_TRACKS の Track 選別に使える
+    (`MessageParameters::track_property_filter_passes`)。draft-23 §3.6.1 (Filtering
+    SUBSCRIBE_TRACKS) / §3.6.2 (Parameters on SUBSCRIBE_TRACKS) に従う
 - Subscribe Tracks ID (PUBLISH のみ。SUBSCRIBE_TRACKS の Request ID を相関情報として `Subscription`
-  に保持する。本ライブラリは SUBSCRIBE_TRACKS を実装しないため、対応する namespace 要求の有無は
-  検証せず、要求が無い PUBLISH でも通常の検証と受理判断へ進む。SUBSCRIBE_TRACKS 起因の PUBLISH に
-  だけ載せる契約であり、`resulting_publish_parameters` でも引き継がない)
+  に保持する。対応する SUBSCRIBE_TRACKS を自側が送っていれば、prefix との一致・同じ track の
+  重複 PUBLISH・PUBLISH_SKIPPED 後の PUBLISH を検証する。対応する要求が無い PUBLISH は、従来
+  どおり値を保持するだけで通常の検証と受理判断へ進む。`resulting_publish_parameters` は
+  this ID を引き継がない)
 - Subscriber Priority
 - Track Namespace Prefix
 
@@ -130,80 +132,70 @@
 - セッション終了 / REQUEST_ERROR / PUBLISH_DONE / Stream Reset のエラーコード (`error` モジュール)。
   セッション終了コードの分類は後述の「セッション終了コードの分類」を参照
 
-## 未対応
+## namespace 発見・告知
 
-MoQ リレーが担う機能は本ライブラリの対象外である (`CODEBASE.md` の「クライアントとサーバーのみで
-MoQ リレーには対応しないこと」)。そのため MoQ リレー専用の以下のメッセージは実装しない。
+draft-ietf-moq-transport-23 §4 (Namespace Discovery) の 6 種を実装する。relay の forwarding
+(§7) は実装しないが、これらは client / server の endpoint 同士でも使う request である。
 
-- `PUBLISH_NAMESPACE` (`0x06`)
-- `NAMESPACE` (`0x08`)
-- `NAMESPACE_DONE` (`0x0E`)
-- `PUBLISH_SKIPPED` (`0x0F`)
-- `SUBSCRIBE_NAMESPACE` (`0x50`)
-- `SUBSCRIBE_TRACKS` (`0x51`)
+| メッセージ | 型 | 送る側 | 受ける側 |
+| --- | --- | --- | --- |
+| `PUBLISH_NAMESPACE` | `0x06` | publisher | subscriber |
+| `SUBSCRIBE_NAMESPACE` | `0x50` | subscriber | publisher |
+| `SUBSCRIBE_TRACKS` | `0x51` | subscriber | publisher |
+| `NAMESPACE` / `NAMESPACE_DONE` | `0x08` / `0x0E` | publisher | subscriber |
+| `PUBLISH_SKIPPED` | `0x0F` | publisher | subscriber |
 
-request stream の先頭として届く 3 種 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` /
-`SUBSCRIBE_TRACKS`) は §9 Table 5 に定義済みの request であるため、未知のメッセージ種別とは
-扱わない。`ControlMessage::Unsupported` として受理し、本体を共通構造 (Request ID →
-Track Namespace Prefix → Number of Parameters → Parameters) に従って解析したうえで、
-`REQUEST_ERROR` の `NOT_SUPPORTED` (`0x3`、`.` 単独または `.session` なら `DOES_NOT_EXIST`
-(`0x10`)、Range Filter が §3.3.2 に違反するなら `INVALID_FILTER` (`0x36`)) と送信方向の FIN で
-拒否する (§1.6 (Modularity) の SHOULD、§2.4.3 (Reserved Namespaces) / §6.5 (Session-Level
-Tracks and Namespaces) / §3.3.2 (Range Filters) の拒否は MUST)。セッションは維持する。拒否
-コードの優先順は `MALFORMED_AUTH_TOKEN` > `INVALID_FILTER` > `DOES_NOT_EXIST` > `GOING_AWAY`
-(自側が control GOAWAY を送信済み) > `NOT_SUPPORTED` である (§8.9 のメッセージ拒否は MUST、
-§3.3.2 / §2.4.3 / §6.5 の拒否は MUST、§9.2 の GOAWAY 拒否は MAY、§1.6 の NOT_SUPPORTED は
-SHOULD)。
+`NAMESPACE` / `NAMESPACE_DONE` / `PUBLISH_SKIPPED` は応答専用であり、request stream の先頭に
+置くと `UNEXPECTED_MESSAGE` (`0x303`) でセッションを閉じる。§9 Table 5 に無い型も
+`MessageError::InvalidMessageType` (セッション終了コードは `UNEXPECTED_MESSAGE`) で拒否する。
 
-本体を解析するため、拒否する場合でも次の検証は適用される。
+### API と状態
 
-- §3.3.2 (Range Filters) / §9.1.6 (MAX FILTER RANGES): 同一 (Parameter Type, SetID,
-  Property Type) の Range Filter の重複と、自側 `MAX_FILTER_RANGES` を超える Range 総数は
-  `INVALID_FILTER` (`0x36`) でメッセージ単位に拒否する (MUST)。FILL_PARAMETERS の内側の
-  Range Filter も検証する。未対応 request は subscription を作らないため、1 メッセージ内の
-  検証に限る
-- §2.4.3 (Reserved Namespaces) / §6.5 (Session-Level Tracks and Namespaces): 先頭フィールドが
-  `.` 単独または `.session` の Track Namespace Prefix を持つ request は `DOES_NOT_EXIST`
-  (`0x10`) でメッセージ単位に拒否する (MUST)。`.foo` などその他の `.` 始まりの予約名前空間への
-  request は、§2.4.3 第 1 段落が未認識の予約名前空間を Application へ渡すことを MUST とするが、
-  本ライブラリには未対応 request を Application へ渡す経路が無いため `NOT_SUPPORTED` のまま
-  とする
+3 種の request は `Pending` → `Established` → `Terminated` の状態を持ち、
+`Session::publish_namespace_request` / `namespace_subscription` / `track_subscription` で参照、
+`forget_publish_namespace` / `forget_namespace_subscription` / `forget_track_subscription` で
+回収する。要求の送信 API は `send_publish_namespace` / `send_subscribe_namespace` /
+`send_subscribe_tracks` であり、REQUEST_OK を受けると `Established` になる。
+応答側は `send_request_ok` / `send_request_error` で応答する。
+
+応答 stream への送信は `send_namespace` / `send_namespace_done` / `send_publish_skipped` である。
+受信側は `SessionEvent::NamespaceReceived` / `NamespaceDoneReceived` / `PublishSkippedReceived`
+で完全な Track Namespace (prefix と suffix の結合) を受け取る。request stream の開始メッセージは
+`SessionEvent::PublishNamespaceReceived` / `SubscribeNamespaceReceived` / `SubscribeTracksReceived`
+でアプリへ渡す。
+
+### 検証
+
 - §9.19.1 (Parameter Scope): メッセージ型ごとに許可されないパラメータの受信は
   `INVALID_PARAMETER` (`0x305`) でセッションを閉じる。`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` が
   許可するのは AUTHORIZATION_TOKEN のみ。`SUBSCRIBE_TRACKS` は §9.17 (SUBSCRIBE_TRACKS) が
-  列挙する 14 種 (OBJECT_DELIVERY_TIMEOUT / AUTHORIZATION_TOKEN / SUBGROUP_DELIVERY_TIMEOUT /
-  PAUSED / SUBSCRIBER_PRIORITY / LOCATION_FILTER / GROUP_ORDER / FILL_PARAMETERS /
-  SUBGROUP_FILTER / OBJECTID_FILTER / PRIORITY_FILTER / OBJECT_PROPERTY_FILTER /
-  TRACK_PROPERTY_FILTER / INCLUDE_PROPERTIES) をそのまま採る。§3.6.2 (Parameters on
-  SUBSCRIBE_TRACKS) は単一 Track の SUBSCRIBE にだけ意味を持つ RENDEZVOUS_TIMEOUT /
-  NEW_GROUP_REQUEST を SUBSCRIBE_TRACKS に載せられないと定めるため、SUBSCRIBE の許可集合との
-  和集合にはしない。2 型は `INVALID_PARAMETER` で拒否し、セッション終了を伴う検証は
-  §8.9 (Authorization Token Compression) の REGISTER 適用より先に評価するため、同じ
-  メッセージの REGISTER も token cache へ残さない
+  列挙する 14 種をそのまま採る。§3.6.2 (Parameters on SUBSCRIBE_TRACKS) は単一 Track の
+  SUBSCRIBE にだけ意味を持つ RENDEZVOUS_TIMEOUT / NEW_GROUP_REQUEST を SUBSCRIBE_TRACKS に
+  載せられないと定めるため、SUBSCRIBE の許可集合との和集合にはしない。`NAMESPACE` は §9.15 が
+  許可パラメータを列挙しないため空集合として扱う
+- §3.3.2 (Range Filters) / §9.1.6 (MAX FILTER RANGES): 重複と `MAX_FILTER_RANGES` 超過は
+  `INVALID_FILTER` (`0x36`) でメッセージ単位に拒否する。SUBSCRIBE_TRACKS の
+  `TRACK_PROPERTY_FILTER` は `MessageParameters::track_property_filter_passes` で Track
+  Properties に対して評価できる
+- §2.4.3 (Reserved Namespaces) / §6.5 (Session-Level Tracks and Namespaces): `.` 単独または
+  `.session` の prefix への request は `DOES_NOT_EXIST` (`0x10`) でメッセージ単位に拒否する
+- §4.2 (Subscribing to Namespaces): `NAMESPACE_DONE` を対応する `NAMESPACE` より先に受信したら
+  `UNEXPECTED_MESSAGE` でセッションを閉じる
+- §3.6.3 (Skipped Tracks) / §9.5.2 (Updating Namespace Subscriptions): `PUBLISH_SKIPPED` を
+  送った (受けた) track への PUBLISH と、同じ SUBSCRIBE_TRACKS に対する同じ track の重複
+  PUBLISH を `PROTOCOL_VIOLATION` で拒否する
+- §9.5.2: `SUBSCRIBE_NAMESPACE` / `SUBSCRIBE_TRACKS` は REQUEST_UPDATE の
+  `TRACK_NAMESPACE_PREFIX` で prefix を更新できる。`SUBSCRIBE_NAMESPACE` では新しい prefix に
+  一致しなくなった namespace を暗黙の `NAMESPACE_DONE` として通知する
 - §8.9 (Authorization Token Compression): Alias Type REGISTER のトークンは拒否する場合も
   token cache へ登録し (MUST)、(Token Type, Token Value) の重複は alias 解決後まで含めて判定し
-  `REQUEST_ERROR` の `MALFORMED_AUTH_TOKEN` でメッセージ単位に拒否する。alias は peer の
-  token cache とメッセージ内の先行 REGISTER / DELETE から解決する。解決できない alias は
-  一意性の判定対象から外し、未登録 alias の扱いは経路ごとの現行挙動のまま変えない。
-  DELETE / USE_ALIAS / USE_VALUE は失敗するメッセージのパラメータとして適用しない
-- 本体が共通構造に従わない場合は原因に応じたコード (`INVALID_TRACK_NAMESPACE` /
-  `MALFORMED_KEY_VALUE` / `INVALID_PARAMETER` / `MALFORMED_MESSAGE` /
-  `DELTA_ENCODING_OVERFLOW` / `FIELD_LENGTH_EXCEEDED`) でセッションを閉じる
-- REGISTER の適用自体が失敗した場合はセッションを閉じる (`DUPLICATE_AUTH_TOKEN_ALIAS`:
-  登録済み alias の再登録、`AUTH_TOKEN_CACHE_OVERFLOW`: 自側が宣言した
-  `MAX_AUTH_TOKEN_CACHE_SIZE` を超える登録。REQUEST_ERROR は送らない)
+  `REQUEST_ERROR` の `MALFORMED_AUTH_TOKEN` でメッセージ単位に拒否する
 
-応答専用の 3 種 (`NAMESPACE` / `NAMESPACE_DONE` / `PUBLISH_SKIPPED`) は応答先の request を
-持たず Table 5 で "First" を持たないため、request stream の先頭および 2 通目以降のいずれでも
-`UNEXPECTED_MESSAGE` (`0x303`) でセッションを閉じる。§9 Table 5 に無い型も
-`MessageError::InvalidMessageType` (セッション終了コードは `UNEXPECTED_MESSAGE`) で拒否する。
-
-MoQ リレー専用の `RENDEZVOUS_TIMEOUT` (`0x04`) は §9.19.6 (RENDEZVOUS TIMEOUT Parameter) と
-§16.7 (Message Parameters) の Table 14 に定義済みのため、SUBSCRIBE への出現は受理する。
-ただし本ライブラリは MoQ リレーを実装しないため値を解釈せず、`Subscription` にも保持しない。
-アプリは decode 済みの `MessageParameters` から読める。SUBSCRIBE_TRACKS へは載せられない
-(§3.6.2) ため、受信すると `INVALID_PARAMETER` でセッションを閉じる。`NEW_GROUP_REQUEST`
-(`0x32`) も同じ扱いである (§9.19.19)。
+`RENDEZVOUS_TIMEOUT` (`0x04`) は §9.19.6 (RENDEZVOUS TIMEOUT Parameter) と §16.7 (Message
+Parameters) の Table 14 に定義済みのため、SUBSCRIBE への出現は受理する。本ライブラリは値を
+解釈せず、`Subscription` にも保持しない。アプリは decode 済みの `MessageParameters` から読める。
+SUBSCRIBE_TRACKS へは載せられない (§3.6.2) ため、受信すると `INVALID_PARAMETER` でセッションを
+閉じる。`NEW_GROUP_REQUEST` (`0x32`) も同じ扱いである (§9.19.19)。
 
 ## モジュール構成
 

@@ -6,12 +6,73 @@
 use shiguredo_moqt::decoder::MessageDecoder;
 use shiguredo_moqt::error::MessageError;
 use shiguredo_moqt::message::ControlMessage;
-use shiguredo_moqt::parameter::DEFAULT_MAX_CONTROL_MESSAGE_SIZE;
+use shiguredo_moqt::parameter::{DEFAULT_MAX_CONTROL_MESSAGE_SIZE, SetupOption, SetupOptionValue};
 use shiguredo_moqt::{message::Setup, parameter::SetupOptions, varint};
 
 /// 制御メッセージの受信上限を既定値にしたデコーダーを作る
 fn decoder() -> MessageDecoder {
     MessageDecoder::new(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+}
+
+/// 本文長が `body_len` バイトになる SETUP メッセージを組み立てる
+///
+/// 本文長の境界条件 (受信上限ちょうど・超過) を検証するテスト用に、任意長の本文を持つ
+/// 正当な SETUP を作る。SETUP の本文は Setup Options の並びであり、長さ付きバイト列の
+/// オプション (奇数型) を 1 つ置くことで任意長に調整できる。
+fn setup_frame_with_body_len(body_len: u64) -> Vec<u8> {
+    // Setup Option の値長は 65,535 バイトまでである (§8.3 Key-Value-Pair Structure)。
+    // それより長い本文は、型の異なるオプションに分割して作る。
+    let max_value_len = 65_535usize;
+    let mut value_lens = vec![(body_len as usize).min(max_value_len)];
+    for _ in 0..32 {
+        let mut options = SetupOptions::new();
+        for (i, len) in value_lens.iter().enumerate() {
+            options.push(SetupOption {
+                // 奇数型は長さ付きバイト列であり、型をずらして重複を避ける
+                option_type: 0x11 + (i as u64) * 2,
+                value: SetupOptionValue::Bytes(vec![0u8; *len]),
+            });
+        }
+        let encoded = ControlMessage::Setup(Setup { options })
+            // 組み立て途中は目的長を超えることがあるため、十分な上限で encode する
+            .encode(body_len + 65_536)
+            .expect("任意長の本文を持つ SETUP を encode できること");
+        // ヘッダは Type (0x2F00 は 2 バイト) + Length (vi64) である。vi64 は先頭の 1 の個数で
+        // 符号化長を表す (0 個 = 1 バイト、n 個 = n+1 バイト)。
+        let leading = encoded[2].leading_ones() as usize;
+        let length_len = leading + 1;
+        let actual = encoded.len() - 2 - length_len;
+        if actual as u64 == body_len {
+            return encoded;
+        }
+        if (actual as u64) < body_len {
+            // 増やす: 末尾のオプションに足し、入りきらなければオプションを追加する
+            let diff = (body_len - actual as u64) as usize;
+            let last = value_lens.len() - 1;
+            if value_lens[last] + diff <= max_value_len {
+                value_lens[last] += diff;
+            } else {
+                let room = max_value_len - value_lens[last];
+                value_lens[last] = max_value_len;
+                value_lens.push(diff - room);
+            }
+        } else {
+            // 減らす: 末尾から削る
+            let mut diff = (actual as u64 - body_len) as usize;
+            while diff > 0 {
+                let last = value_lens.len() - 1;
+                let take = diff.min(value_lens[last]);
+                value_lens[last] -= take;
+                diff -= take;
+                if value_lens[last] == 0 && value_lens.len() > 1 {
+                    value_lens.pop();
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    panic!("本文長 {body_len} の SETUP を組み立てられなかった");
 }
 
 /// SETUP メッセージのエンコード済みバイト列を作る
@@ -210,19 +271,14 @@ fn test_declared_length_over_limit_is_rejected_without_body() {
 /// 境界値 (上限と同じ長さ) は正当であるため、本文が揃うまでは Ok(None)、揃えば成功する。
 #[test]
 fn test_declared_length_at_limit_waits_for_body() {
-    // SETUP の空の Setup Options は本文長 0 なので、上限ちょうどの本文を作るには
-    // Unsupported メッセージで任意長の本文を宣言する
+    // SETUP の本文を上限ちょうどの長さにする
     let limit = DEFAULT_MAX_CONTROL_MESSAGE_SIZE;
-    let body = vec![0u8; limit as usize];
-    let message = ControlMessage::Unsupported {
-        type_id: 0x06,
-        request_id: None,
-        body,
-    };
-    let encoded = message
-        .encode(limit)
-        .expect("上限ちょうどの本文は encode できる");
-    assert_eq!(encoded.len(), 1 + 3 + limit as usize); // type(1) + length(3) + body
+    let encoded = setup_frame_with_body_len(limit);
+    assert_eq!(
+        encoded.len(),
+        2 + 3 + limit as usize,
+        "type(2) + length(3) + body"
+    );
 
     let mut decoder = decoder();
     // ヘッダ + 本文の先頭だけを入れる
@@ -252,14 +308,7 @@ fn test_declared_length_at_limit_waits_for_body() {
 /// (draft-ietf-moq-transport-23 §15.5 (Resource Exhaustion))。
 #[test]
 fn test_non_default_receive_limit_accepts_larger_body() {
-    let message = ControlMessage::Unsupported {
-        type_id: 0x06,
-        request_id: None,
-        body: vec![0u8; 70_000],
-    };
-    let encoded = message
-        .encode(1_000_000)
-        .expect("受信上限 1,000,000 の encode は成功する");
+    let encoded = setup_frame_with_body_len(70_000);
 
     let mut large = MessageDecoder::new(1_000_000);
     large.push(&encoded);
@@ -267,7 +316,7 @@ fn test_non_default_receive_limit_accepts_larger_body() {
         .try_decode_message()
         .expect("上限内の本文はデコードできること");
     assert!(
-        matches!(result, Some(ControlMessage::Unsupported { .. })),
+        matches!(result, Some(ControlMessage::Setup(_))),
         "既定値より大きい上限では 70,000 バイトの本文を受理すること: {result:?}"
     );
 

@@ -961,3 +961,55 @@ fn valid_ipv6_authority_accepted() {
         assert_eq!(server.state(), SessionState::Established);
     }
 }
+
+/// peer が SETUP で送ったオプションを読み取れる (拡張ネゴシエーション)
+///
+/// draft-ietf-moq-transport-23 §6.3.2 (Extension Negotiation): 拡張は SETUP の Option で
+/// ネゴシエートする。アプリは `Session::peer_setup_options` から peer の宣言を読める。
+#[test]
+fn peer_setup_options_are_readable() {
+    let client_options = SetupOptions::new();
+    let mut server_options = SetupOptions::new();
+    server_options.push(SetupOption {
+        option_type: shiguredo_moqt::parameter::SETUP_OPTION_MOQT_IMPLEMENTATION,
+        value: SetupOptionValue::Bytes(b"peer-impl".to_vec()),
+    });
+    server_options.push(SetupOption {
+        option_type: shiguredo_moqt::parameter::SETUP_OPTION_MAX_FILTER_RANGES,
+        value: SetupOptionValue::VarInt(16),
+    });
+    let mut client = Session::new_client(Transport::Quic, client_options)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let mut server = Session::new_server(Transport::Quic, server_options)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let client_setup = take_send_control(&mut client);
+    let server_setup = take_send_control(&mut server);
+    server
+        .recv_control(client_setup)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_control(server_setup)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let peer = client
+        .peer_setup_options()
+        .expect("SETUP 受信後は peer のオプションを読めること");
+    assert_eq!(
+        peer.moqt_implementation(),
+        Some(b"peer-impl".as_slice()),
+        "peer の MOQT_IMPLEMENTATION を読めること"
+    );
+    assert_eq!(
+        peer.max_filter_ranges(),
+        Some(16),
+        "peer の MAX_FILTER_RANGES を読めること"
+    );
+    // client 自身はオプションを送っていないため、server 側から見ても空である
+    assert!(
+        server
+            .peer_setup_options()
+            .expect("SETUP 受信後は読めること")
+            .is_empty(),
+        "client のオプションは空であること"
+    );
+}

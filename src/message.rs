@@ -50,7 +50,7 @@ const MSG_FETCH: u64 = 0x16;
 const MSG_PUBLISH: u64 = 0x1D;
 const MSG_PUBLISH_STATE_NOTIFY: u64 = 0x22;
 const MSG_SETUP: u64 = 0x2F00; // src/stream.rs の SETUP_STREAM_TYPE と同じ値 (異なる名前空間)
-// relay 専用の namespace 発見・告知機構 (本ライブラリは実装しないが Table 5 に定義済み)
+// namespace 発見・告知機構 (draft-ietf-moq-transport-23 §4 Namespace Discovery)
 const MSG_PUBLISH_NAMESPACE: u64 = 0x06;
 const MSG_NAMESPACE: u64 = 0x08;
 const MSG_NAMESPACE_DONE: u64 = 0x0E;
@@ -203,11 +203,11 @@ const REQUEST_UPDATE_ALLOWED_PARAMS: &[u64] = &[
 /// draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter) は
 /// SUBSCRIBE_TRACKS_ID を「SUBSCRIBE_TRACKS の結果として送る PUBLISH にだけ出現する」と
 /// 定める。値は元の SUBSCRIBE_TRACKS の Request ID である (§3.6 (Subscribing to Tracks by
-/// Prefix))。本ライブラリは SUBSCRIBE_TRACKS 自体を実装せず、要求との照合状態も持たない。
-/// 受信側は値を関連付け情報として保持するだけで、対応する要求が見つからないことを理由に
-/// PUBLISH を拒否したりセッションを閉じたりせず、通常の PUBLISH の検証とアプリケーションに
-/// よる受理・拒否判断へ進む。送信側は SUBSCRIBE_TRACKS 起因の PUBLISH にだけ指定する
-/// (`Session::send_publish` の doc 参照)。
+/// Prefix))。受信側は値を関連付け情報として保持し、対応する SUBSCRIBE_TRACKS を自側が
+/// 送っていれば prefix の一致・同じ track の重複 PUBLISH・PUBLISH_SKIPPED 後の PUBLISH を
+/// 検証する (§3.6 / §9.5.2 / §9.18)。対応する要求が見つからないことを理由に PUBLISH を
+/// 拒否したりセッションを閉じたりはせず、通常の PUBLISH の検証と受理判断へ進む。送信側は
+/// SUBSCRIBE_TRACKS 起因の PUBLISH にだけ指定する (`Session::send_publish` の doc 参照)。
 ///
 /// draft-ietf-moq-transport-23 §3.6.2 (Parameters on SUBSCRIBE_TRACKS):
 /// SUBSCRIBE_TRACKS 由来の PUBLISH には SUBSCRIBE_TRACKS の Parameters が
@@ -291,25 +291,23 @@ pub(crate) const FETCH_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LARGES
 pub(crate) const TRACK_STATUS_ALLOWED_PARAMS: &[u64] =
     &[PARAM_AUTHORIZATION_TOKEN, PARAM_INCLUDE_PROPERTIES];
 
-// ─── 未対応 request の許可パラメータ集合 ─────────────────────────
+// ─── namespace 発見・告知 request の許可パラメータ集合 ───────────────
 //
-// 本ライブラリが実装しない 3 種の request も、本体を解析してパラメータのスコープを検証する。
 // draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): "If a parameter appears in some other
 // type of message, the receiving endpoint MUST close the session with INVALID_PARAMETER."
-// 未対応 request でもパラメータを解析する以上、この MUST は適用される。各集合は各メッセージ節が
-// 列挙する許可パラメータから導出している (将来 draft 改版で変わりうる)。
+// 各集合は各メッセージ節が列挙する許可パラメータから導出している (将来 draft 改版で変わりうる)。
 
 /// PUBLISH_NAMESPACE で許可されるパラメータ型
 ///
 /// draft-ietf-moq-transport-23 §9.13 (PUBLISH_NAMESPACE): "The only parameter that can appear
 /// in a PUBLISH_NAMESPACE is AUTHORIZATION_TOKEN."
-const PUBLISH_NAMESPACE_ALLOWED_PARAMS: &[u64] = &[PARAM_AUTHORIZATION_TOKEN];
+pub(crate) const PUBLISH_NAMESPACE_ALLOWED_PARAMS: &[u64] = &[PARAM_AUTHORIZATION_TOKEN];
 
 /// SUBSCRIBE_NAMESPACE で許可されるパラメータ型
 ///
 /// draft-ietf-moq-transport-23 §9.14 (SUBSCRIBE_NAMESPACE): "The only parameter that can
 /// appear in a SUBSCRIBE_NAMESPACE is AUTHORIZATION_TOKEN."
-const SUBSCRIBE_NAMESPACE_ALLOWED_PARAMS: &[u64] = &[PARAM_AUTHORIZATION_TOKEN];
+pub(crate) const SUBSCRIBE_NAMESPACE_ALLOWED_PARAMS: &[u64] = &[PARAM_AUTHORIZATION_TOKEN];
 
 /// SUBSCRIBE_TRACKS で許可されるパラメータ型
 ///
@@ -331,7 +329,7 @@ const SUBSCRIBE_NAMESPACE_ALLOWED_PARAMS: &[u64] = &[PARAM_AUTHORIZATION_TOKEN];
 /// 許可されないパラメータの受信は §9.19.1 (Parameter Scope) の MUST により
 /// INVALID_PARAMETER でセッションを閉じる。節番号・規則は draft 由来であり将来 draft 改定で
 /// 変わる可能性がある。
-const SUBSCRIBE_TRACKS_ALLOWED_PARAMS: &[u64] = &[
+pub(crate) const SUBSCRIBE_TRACKS_ALLOWED_PARAMS: &[u64] = &[
     PARAM_OBJECT_DELIVERY_TIMEOUT,
     PARAM_AUTHORIZATION_TOKEN,
     PARAM_SUBGROUP_DELIVERY_TIMEOUT,
@@ -348,20 +346,29 @@ const SUBSCRIBE_TRACKS_ALLOWED_PARAMS: &[u64] = &[
     PARAM_INCLUDE_PROPERTIES,
 ];
 
-/// 未対応 request の型 ID から、そのメッセージで許可されるパラメータ集合を返す
+/// SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS の REQUEST_UPDATE で許可されるパラメータ型
 ///
-/// 対象は `ControlMessage::Unsupported` が request として保持する 3 種
-/// ([`UNSUPPORTED_MESSAGE_TYPES_WITH_REQUEST_ID`] と同じ集合。型を追加するときは双方を
-/// 更新すること) だけであり、応答専用の型 (NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED) と
-/// 定義外の型には `None` を返す。
-pub(crate) fn unsupported_request_allowed_params(type_id: u64) -> Option<&'static [u64]> {
-    match type_id {
-        MSG_PUBLISH_NAMESPACE => Some(PUBLISH_NAMESPACE_ALLOWED_PARAMS),
-        MSG_SUBSCRIBE_NAMESPACE => Some(SUBSCRIBE_NAMESPACE_ALLOWED_PARAMS),
-        MSG_SUBSCRIBE_TRACKS => Some(SUBSCRIBE_TRACKS_ALLOWED_PARAMS),
-        _ => None,
-    }
-}
+/// draft-ietf-moq-transport-23 §9.5.2 (Updating Namespace Subscriptions): Track Namespace
+/// Prefix の更新は TRACK_NAMESPACE_PREFIX (§9.19.20) で行う。AUTHORIZATION_TOKEN (§9.19.2)
+/// は REQUEST_UPDATE に出現できる。それ以外の subscription 向けパラメータは namespace
+/// 単位の購読には定義されていない。
+pub(crate) const NAMESPACE_UPDATE_ALLOWED_PARAMS: &[u64] =
+    &[PARAM_AUTHORIZATION_TOKEN, PARAM_TRACK_NAMESPACE_PREFIX];
+
+/// PUBLISH_NAMESPACE_OK / SUBSCRIBE_NAMESPACE_OK / SUBSCRIBE_TRACKS_OK で許可される
+/// パラメータ型
+///
+/// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): "PUBLISH_NAMESPACE_OK: EXPIRES" /
+/// "SUBSCRIBE_NAMESPACE_OK: EXPIRES" / "SUBSCRIBE_TRACKS_OK: EXPIRES"。
+pub(crate) const NAMESPACE_REQUEST_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES];
+
+/// NAMESPACE で許可されるパラメータ型
+///
+/// draft-ietf-moq-transport-23 §9.15 (NAMESPACE) は Parameters を "Section 9.19 で定義する"
+/// とするだけで明示リストを持たない。§9.19 の各 Parameter 節も NAMESPACE を出現先に
+/// 挙げていないため、§9.19.1 (Parameter Scope) の MUST に従い空集合として検証する。
+/// 将来 draft が NAMESPACE 用のパラメータを追加した場合は、この集合を更新する。
+pub(crate) const NAMESPACE_ALLOWED_PARAMS: &[u64] = &[];
 
 // ─── 共通型 ──────────────────────────────────────────────────
 //
@@ -1470,31 +1477,266 @@ impl TrackStatus {
     }
 }
 
-// ─── ControlMessage ──────────────────────────────────────────
+// ─── namespace 発見・告知系メッセージ ──────────────────────────
+//
+// draft-ietf-moq-transport-23 §4 (Namespace Discovery) の 6 種を扱う。
+// PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS は request stream の先頭に
+// 置く request であり、NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED はその応答 stream に
+// 置くメッセージである。節番号・規則は draft 由来であり将来 draft 改版で変わる可能性がある。
 
-/// 本ライブラリが実装しない定義済み request メッセージ型 (draft-ietf-moq-transport-23 §9 Table 5)
+/// PUBLISH_NAMESPACE メッセージ (draft-ietf-moq-transport-23 §9.13 (PUBLISH_NAMESPACE))
 ///
-/// relay 専用の namespace 発見・告知機構のうち、request stream の先頭として届く型と
-/// その応答の型である。request として届くのは先頭 3 種 (PUBLISH_NAMESPACE /
-/// SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) で、残り 3 種は応答専用である。
-pub(crate) const UNSUPPORTED_MESSAGE_TYPES: &[u64] = &[
-    MSG_PUBLISH_NAMESPACE,
-    MSG_SUBSCRIBE_NAMESPACE,
-    MSG_SUBSCRIBE_TRACKS,
-    MSG_NAMESPACE,
-    MSG_NAMESPACE_DONE,
-    MSG_PUBLISH_SKIPPED,
-];
+/// publisher が subscriber へ、Track Namespace Prefix に一致する namespace の track を
+/// 配信できることを告知する request である。応答は REQUEST_OK (PUBLISH_NAMESPACE_OK) か
+/// REQUEST_ERROR (PUBLISH_NAMESPACE_ERROR) であり、同一 prefix の重複した告知も許される
+/// (§4.1 (Publishing Namespaces))。取消は request stream の cancel で行う。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PublishNamespace {
+    /// 告知を識別する Request ID (draft-ietf-moq-transport-23 §9.13)
+    pub request_id: u64,
+    /// 告知する namespace の prefix (draft-ietf-moq-transport-23 §9.13)
+    pub track_namespace: TrackNamespace,
+    /// 告知に付随するメッセージ パラメータ (draft-ietf-moq-transport-23 §9.13)
+    pub parameters: MessageParameters,
+}
 
-/// `UNSUPPORTED_MESSAGE_TYPES` のうち本体が Request ID (vi64) で始まる型
+impl PublishNamespace {
+    /// 自身のペイロードを `buf` に追記する (type_id は ControlMessage 側が持つ)
+    pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
+        // draft-ietf-moq-transport-23 §9.13: PUBLISH_NAMESPACE が運べるパラメータは
+        // AUTHORIZATION_TOKEN だけである
+        self.parameters
+            .validate_scope(PUBLISH_NAMESPACE_ALLOWED_PARAMS)?;
+        encode_request_id_and_namespace(self.request_id, &self.track_namespace, buf)?;
+        self.parameters.encode(buf)?;
+        Ok(())
+    }
+
+    /// `payload` 先頭から自身を構築し `(Self, 消費バイト数)` を返す
+    pub(crate) fn decode_message_body(payload: &[u8]) -> Result<(Self, usize), MessageError> {
+        let mut pos = 0;
+        let (request_id, track_namespace) = decode_request_id_and_namespace(payload, &mut pos)?;
+        let (parameters, n) = MessageParameters::decode(&payload[pos..])?;
+        pos += n;
+        // draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): 許可されないパラメータの
+        // 受信は INVALID_PARAMETER でセッションを閉じる (MUST)
+        parameters.validate_scope(PUBLISH_NAMESPACE_ALLOWED_PARAMS)?;
+        Ok((
+            Self {
+                request_id,
+                track_namespace,
+                parameters,
+            },
+            pos,
+        ))
+    }
+}
+
+/// SUBSCRIBE_NAMESPACE メッセージ (draft-ietf-moq-transport-23 §9.14 (SUBSCRIBE_NAMESPACE))
 ///
-/// 許可パラメータ集合の対応表 ([`unsupported_request_allowed_params`]) と同じ集合である。
-/// 型を追加するときは双方を更新すること。
-pub(crate) const UNSUPPORTED_MESSAGE_TYPES_WITH_REQUEST_ID: &[u64] = &[
-    MSG_PUBLISH_NAMESPACE,
-    MSG_SUBSCRIBE_NAMESPACE,
-    MSG_SUBSCRIBE_TRACKS,
-];
+/// subscriber が publisher へ、Track Namespace Prefix に一致する namespace の発見を
+/// 要求する request である。応答の REQUEST_OK (SUBSCRIBE_NAMESPACE_OK) のあと、
+/// publisher は同じ response stream に NAMESPACE / NAMESPACE_DONE を送る。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubscribeNamespace {
+    /// 発見要求を識別する Request ID (draft-ietf-moq-transport-23 §9.14)
+    pub request_id: u64,
+    /// 発見する namespace の prefix (draft-ietf-moq-transport-23 §9.14)
+    pub track_namespace: TrackNamespace,
+    /// 発見要求に付随するメッセージ パラメータ (draft-ietf-moq-transport-23 §9.14)
+    pub parameters: MessageParameters,
+}
+
+impl SubscribeNamespace {
+    /// 自身のペイロードを `buf` に追記する (type_id は ControlMessage 側が持つ)
+    pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
+        // draft-ietf-moq-transport-23 §9.14: SUBSCRIBE_NAMESPACE が運べるパラメータは
+        // AUTHORIZATION_TOKEN だけである
+        self.parameters
+            .validate_scope(SUBSCRIBE_NAMESPACE_ALLOWED_PARAMS)?;
+        encode_request_id_and_namespace(self.request_id, &self.track_namespace, buf)?;
+        self.parameters.encode(buf)?;
+        Ok(())
+    }
+
+    /// `payload` 先頭から自身を構築し `(Self, 消費バイト数)` を返す
+    pub(crate) fn decode_message_body(payload: &[u8]) -> Result<(Self, usize), MessageError> {
+        let mut pos = 0;
+        let (request_id, track_namespace) = decode_request_id_and_namespace(payload, &mut pos)?;
+        let (parameters, n) = MessageParameters::decode(&payload[pos..])?;
+        pos += n;
+        parameters.validate_scope(SUBSCRIBE_NAMESPACE_ALLOWED_PARAMS)?;
+        Ok((
+            Self {
+                request_id,
+                track_namespace,
+                parameters,
+            },
+            pos,
+        ))
+    }
+}
+
+/// SUBSCRIBE_TRACKS メッセージ (draft-ietf-moq-transport-23 §9.17 (SUBSCRIBE_TRACKS))
+///
+/// subscriber が publisher へ、Track Namespace Prefix に一致する track の購読を
+/// 要求する request である。応答の REQUEST_OK (SUBSCRIBE_TRACKS_OK) のあと、publisher は
+/// 一致する track ごとに新しい request stream で PUBLISH を送り、購読を作れない track は
+/// 同じ response stream に PUBLISH_SKIPPED で通知する (§3.6 (Subscribing to Tracks by
+/// Prefix))。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubscribeTracks {
+    /// 購読要求を識別する Request ID (draft-ietf-moq-transport-23 §9.17)
+    pub request_id: u64,
+    /// 購読する namespace の prefix (draft-ietf-moq-transport-23 §9.17)
+    pub track_namespace: TrackNamespace,
+    /// 購読要求に付随するメッセージ パラメータ (draft-ietf-moq-transport-23 §9.17)
+    pub parameters: MessageParameters,
+}
+
+impl SubscribeTracks {
+    /// 自身のペイロードを `buf` に追記する (type_id は ControlMessage 側が持つ)
+    pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
+        // draft-ietf-moq-transport-23 §9.17: 14 種の明示リストだけを許可する
+        self.parameters
+            .validate_scope(SUBSCRIBE_TRACKS_ALLOWED_PARAMS)?;
+        encode_request_id_and_namespace(self.request_id, &self.track_namespace, buf)?;
+        self.parameters.encode(buf)?;
+        Ok(())
+    }
+
+    /// `payload` 先頭から自身を構築し `(Self, 消費バイト数)` を返す
+    pub(crate) fn decode_message_body(payload: &[u8]) -> Result<(Self, usize), MessageError> {
+        let mut pos = 0;
+        let (request_id, track_namespace) = decode_request_id_and_namespace(payload, &mut pos)?;
+        let (parameters, n) = MessageParameters::decode(&payload[pos..])?;
+        pos += n;
+        parameters.validate_scope(SUBSCRIBE_TRACKS_ALLOWED_PARAMS)?;
+        Ok((
+            Self {
+                request_id,
+                track_namespace,
+                parameters,
+            },
+            pos,
+        ))
+    }
+}
+
+/// NAMESPACE メッセージ (draft-ietf-moq-transport-23 §9.15 (NAMESPACE))
+///
+/// publisher が SUBSCRIBE_NAMESPACE の response stream に置く。発見した namespace の
+/// Track Namespace Suffix (要求の prefix の後ろの部分) を運ぶ。Parameter が変化した
+/// namespace は、更新後の Parameter で改めて送る (§9.15)。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Namespace {
+    /// 発見した namespace の suffix (要求の Track Namespace Prefix の後ろの部分)
+    pub track_namespace_suffix: TrackNamespace,
+    /// namespace に付随するメッセージ パラメータ (draft-ietf-moq-transport-23 §9.15)
+    pub parameters: MessageParameters,
+}
+
+impl Namespace {
+    /// 自身のペイロードを `buf` に追記する (type_id は ControlMessage 側が持つ)
+    pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
+        // draft-ietf-moq-transport-23 §9.15 は Parameters を "Section 9.19 で定義する" と
+        // するだけで明示リストを持たない。§9.19 の各 Parameter 節も NAMESPACE を出現先に
+        // 挙げていないため、§9.19.1 (Parameter Scope) の MUST に従い空集合として検証する。
+        // 将来 draft が NAMESPACE 用のパラメータを追加した場合は、この集合を更新する。
+        self.parameters.validate_scope(NAMESPACE_ALLOWED_PARAMS)?;
+        self.track_namespace_suffix.encode_to(buf)?;
+        self.parameters.encode(buf)?;
+        Ok(())
+    }
+
+    /// `payload` 先頭から自身を構築し `(Self, 消費バイト数)` を返す
+    pub(crate) fn decode_message_body(payload: &[u8]) -> Result<(Self, usize), MessageError> {
+        let mut pos = 0;
+        let track_namespace_suffix = TrackNamespace::decode_from(payload, &mut pos)?;
+        let (parameters, n) = MessageParameters::decode(&payload[pos..])?;
+        pos += n;
+        parameters.validate_scope(NAMESPACE_ALLOWED_PARAMS)?;
+        Ok((
+            Self {
+                track_namespace_suffix,
+                parameters,
+            },
+            pos,
+        ))
+    }
+}
+
+/// NAMESPACE_DONE メッセージ (draft-ietf-moq-transport-23 §9.16 (NAMESPACE_DONE))
+///
+/// publisher が SUBSCRIBE_NAMESPACE の response stream に置く。publisher がその namespace
+/// で新しい購読の受付をやめることを示す。対応する NAMESPACE より先に送ってはならない
+/// (MUST NOT)。本メッセージはパラメータを持たない。
+#[derive(Debug, Clone, PartialEq)]
+pub struct NamespaceDone {
+    /// 終了する namespace の suffix (要求の Track Namespace Prefix の後ろの部分)
+    pub track_namespace_suffix: TrackNamespace,
+}
+
+impl NamespaceDone {
+    /// 自身のペイロードを `buf` に追記する (type_id は ControlMessage 側が持つ)
+    pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
+        self.track_namespace_suffix.encode_to(buf)
+    }
+
+    /// `payload` 先頭から自身を構築し `(Self, 消費バイト数)` を返す
+    pub(crate) fn decode_message_body(payload: &[u8]) -> Result<(Self, usize), MessageError> {
+        let mut pos = 0;
+        let track_namespace_suffix = TrackNamespace::decode_from(payload, &mut pos)?;
+        Ok((
+            Self {
+                track_namespace_suffix,
+            },
+            pos,
+        ))
+    }
+}
+
+/// PUBLISH_SKIPPED メッセージ (draft-ietf-moq-transport-23 §9.18 (PUBLISH_SKIPPED))
+///
+/// SUBSCRIBE_TRACKS の response stream に置く。publisher が PUBLISH を送らずに購読を
+/// 作らなかった track を通知する。PUBLISH_SKIPPED を送った track には、その
+/// SUBSCRIBE_TRACKS に対して以後 PUBLISH を送ってはならない (MUST NOT、§3.6.3
+/// (Skipped Tracks))。本メッセージはパラメータを持たない。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PublishSkipped {
+    /// 購読を作らなかった track の namespace suffix (要求の prefix の後ろの部分)
+    pub track_namespace_suffix: TrackNamespace,
+    /// 購読を作らなかった track の名前
+    pub track_name: Vec<u8>,
+}
+
+impl PublishSkipped {
+    /// 自身のペイロードを `buf` に追記する (type_id は ControlMessage 側が持つ)
+    pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
+        // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は送出しない
+        validate_track_name(&self.track_name)?;
+        self.track_namespace_suffix.encode_to(buf)?;
+        encode_track_name(&self.track_name, buf);
+        Ok(())
+    }
+
+    /// `payload` 先頭から自身を構築し `(Self, 消費バイト数)` を返す
+    pub(crate) fn decode_message_body(payload: &[u8]) -> Result<(Self, usize), MessageError> {
+        let mut pos = 0;
+        let track_namespace_suffix = TrackNamespace::decode_from(payload, &mut pos)?;
+        let track_name = decode_track_name(payload, &mut pos)?;
+        // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は
+        // PROTOCOL_VIOLATION
+        validate_track_name(&track_name)?;
+        Ok((
+            Self {
+                track_namespace_suffix,
+                track_name,
+            },
+            pos,
+        ))
+    }
+}
 
 /// MOQT コントロールメッセージの列挙型
 #[derive(Debug, Clone, PartialEq)]
@@ -1523,36 +1765,18 @@ pub enum ControlMessage {
     Fetch(Fetch),
     /// TRACK_STATUS メッセージ (draft-ietf-moq-transport-23 §9.12 (TRACK_STATUS))
     TrackStatus(TrackStatus),
-    /// 定義済みだが本ライブラリが実装しない制御メッセージ
-    ///
-    /// draft-ietf-moq-transport-23 §1.6 (Modularity): "Limited endpoints SHOULD respond to any
-    /// unsupported messages with the appropriate NOT_SUPPORTED error code, rather than ignoring
-    /// them." §9 の Table 5 に定義済みの型であって本ライブラリが扱わないものを、型 ID と
-    /// 本体の生バイト列のまま保持する。Table 5 に無い型は従来どおり
-    /// `MessageError::InvalidMessageType` で拒否する。
-    ///
-    /// 対象は relay 専用の namespace 発見・告知機構 (CODEBASE.md の方針で実装しない) の
-    /// PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS と、その応答である
-    /// NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED である。
-    ///
-    /// 本体は生バイト列のまま保持するが、request として届く 3 種は
-    /// [`crate::session::core::Session::recv_request`] が本体を解析し、パラメータのスコープ検証
-    /// (draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope))、`.` 単独または `.session` の
-    /// Track Namespace Prefix の検証 (§2.4.3 (Reserved Namespaces) / §6.5 (Session-Level
-    /// Tracks and Namespaces))、Range Filter の検証 (§3.3.2 (Range Filters) / §9.1.6
-    /// (MAX FILTER RANGES))、AUTHORIZATION_TOKEN の適用 (§8.9 (Authorization Token
-    /// Compression)) を行う。
-    /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
-    Unsupported {
-        /// 制御メッセージ型 ID (draft-ietf-moq-transport-23 §9 Table 5)
-        type_id: u64,
-        /// 本体が Request ID (vi64) で始まる型 (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE /
-        /// SUBSCRIBE_TRACKS) のときだけ `Some`。応答専用の型 (NAMESPACE / NAMESPACE_DONE /
-        /// PUBLISH_SKIPPED) は Request ID を持たないため `None`
-        request_id: Option<u64>,
-        /// Length の後ろの生バイト列 (Request ID を含む)
-        body: Vec<u8>,
-    },
+    /// PUBLISH_NAMESPACE メッセージ (draft-ietf-moq-transport-23 §9.13 (PUBLISH_NAMESPACE))
+    PublishNamespace(PublishNamespace),
+    /// SUBSCRIBE_NAMESPACE メッセージ (draft-ietf-moq-transport-23 §9.14 (SUBSCRIBE_NAMESPACE))
+    SubscribeNamespace(SubscribeNamespace),
+    /// SUBSCRIBE_TRACKS メッセージ (draft-ietf-moq-transport-23 §9.17 (SUBSCRIBE_TRACKS))
+    SubscribeTracks(SubscribeTracks),
+    /// NAMESPACE メッセージ (draft-ietf-moq-transport-23 §9.15 (NAMESPACE))
+    Namespace(Namespace),
+    /// NAMESPACE_DONE メッセージ (draft-ietf-moq-transport-23 §9.16 (NAMESPACE_DONE))
+    NamespaceDone(NamespaceDone),
+    /// PUBLISH_SKIPPED メッセージ (draft-ietf-moq-transport-23 §9.18 (PUBLISH_SKIPPED))
+    PublishSkipped(PublishSkipped),
 }
 
 impl ControlMessage {
@@ -1701,10 +1925,29 @@ impl ControlMessage {
                 m.encode_message_body(&mut payload)?;
                 MSG_TRACK_STATUS
             }
-            Self::Unsupported { type_id, body, .. } => {
-                // decode で保持した本体をそのまま書き戻す (Request ID を含む)
-                payload.extend_from_slice(body);
-                *type_id
+            Self::PublishNamespace(m) => {
+                m.encode_message_body(&mut payload)?;
+                MSG_PUBLISH_NAMESPACE
+            }
+            Self::SubscribeNamespace(m) => {
+                m.encode_message_body(&mut payload)?;
+                MSG_SUBSCRIBE_NAMESPACE
+            }
+            Self::SubscribeTracks(m) => {
+                m.encode_message_body(&mut payload)?;
+                MSG_SUBSCRIBE_TRACKS
+            }
+            Self::Namespace(m) => {
+                m.encode_message_body(&mut payload)?;
+                MSG_NAMESPACE
+            }
+            Self::NamespaceDone(m) => {
+                m.encode_message_body(&mut payload)?;
+                MSG_NAMESPACE_DONE
+            }
+            Self::PublishSkipped(m) => {
+                m.encode_message_body(&mut payload)?;
+                MSG_PUBLISH_SKIPPED
             }
         };
         Ok((type_id, payload))
@@ -1764,30 +2007,29 @@ impl ControlMessage {
                 let (m, n) = TrackStatus::decode_message_body(payload)?;
                 (Self::TrackStatus(m), n)
             }
-            // draft-ietf-moq-transport-23 §1.6 (Modularity) の SHOULD に従い、§9 Table 5 に
-            // 定義済みで本ライブラリが実装しない型は、未知型として拒否せず NOT_SUPPORTED で
-            // 応答できるようにする。
-            // 本体は解析せず生バイト列のまま保持する。
-            id if UNSUPPORTED_MESSAGE_TYPES.contains(&id) => {
-                let request_id = if UNSUPPORTED_MESSAGE_TYPES_WITH_REQUEST_ID.contains(&id) {
-                    if payload.is_empty() {
-                        return Err(MessageError::ProtocolViolation(
-                            "unsupported request message has no request id",
-                        ));
-                    }
-                    let (rid, _) = varint::decode(payload)?;
-                    Some(rid)
-                } else {
-                    None
-                };
-                (
-                    Self::Unsupported {
-                        type_id: id,
-                        request_id,
-                        body: payload.to_vec(),
-                    },
-                    payload.len(),
-                )
+            MSG_PUBLISH_NAMESPACE => {
+                let (m, n) = PublishNamespace::decode_message_body(payload)?;
+                (Self::PublishNamespace(m), n)
+            }
+            MSG_SUBSCRIBE_NAMESPACE => {
+                let (m, n) = SubscribeNamespace::decode_message_body(payload)?;
+                (Self::SubscribeNamespace(m), n)
+            }
+            MSG_SUBSCRIBE_TRACKS => {
+                let (m, n) = SubscribeTracks::decode_message_body(payload)?;
+                (Self::SubscribeTracks(m), n)
+            }
+            MSG_NAMESPACE => {
+                let (m, n) = Namespace::decode_message_body(payload)?;
+                (Self::Namespace(m), n)
+            }
+            MSG_NAMESPACE_DONE => {
+                let (m, n) = NamespaceDone::decode_message_body(payload)?;
+                (Self::NamespaceDone(m), n)
+            }
+            MSG_PUBLISH_SKIPPED => {
+                let (m, n) = PublishSkipped::decode_message_body(payload)?;
+                (Self::PublishSkipped(m), n)
             }
             _ => return Err(MessageError::InvalidMessageType(type_id)),
         };
@@ -1895,27 +2137,5 @@ mod tests {
             actual, expected,
             "PUBLISH の許可集合が §9.8 の明示リストと一致すること"
         );
-    }
-
-    /// 許可パラメータ集合の対応表が Request ID を持つ未対応 request の集合と一致すること
-    ///
-    /// 2 つの定数は同じ 3 型を列挙しており、片方だけを更新すると NOT_SUPPORTED のはずが
-    /// PROTOCOL_VIOLATION になる等、無言で挙動が変わる。対応表の一致を固定する。
-    #[test]
-    fn unsupported_request_allowed_params_covers_request_types() {
-        for type_id in UNSUPPORTED_MESSAGE_TYPES_WITH_REQUEST_ID {
-            assert!(
-                unsupported_request_allowed_params(*type_id).is_some(),
-                "request 型 {type_id:#x} の許可パラメータ集合が無い"
-            );
-        }
-        for type_id in UNSUPPORTED_MESSAGE_TYPES {
-            let is_request = UNSUPPORTED_MESSAGE_TYPES_WITH_REQUEST_ID.contains(type_id);
-            assert_eq!(
-                unsupported_request_allowed_params(*type_id).is_some(),
-                is_request,
-                "型 {type_id:#x} の request 判定が対応表と一致しない"
-            );
-        }
     }
 }

@@ -559,37 +559,3 @@ fn api_mid_object_fin_maps_to_truncated_object() {
         "途中終端は TRUNCATED_OBJECT (0x203) であること"
     );
 }
-
-/// 不正な Track Namespace を Session API へ直接渡しても同じ分類になること
-///
-/// wire 経路 (`ControlMessage::decode`) では codec が INVALID_TRACK_NAMESPACE を返すが、
-/// decode 済みのメッセージを直接組み立てた場合は Session 層が同じ検証を行う
-/// (draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure))。
-#[test]
-fn api_invalid_track_namespace_maps_to_invalid_track_namespace() {
-    let (_, mut server) = establish_pair();
-    let mut payload = Vec::new();
-    shiguredo_moqt::varint::encode(0, &mut payload); // Request ID
-    shiguredo_moqt::varint::encode(1, &mut payload); // Track Namespace フィールド数
-    shiguredo_moqt::varint::encode(0, &mut payload); // フィールド長 0 (構造違反)
-    shiguredo_moqt::varint::encode(3, &mut payload); // Track Name 長
-    payload.extend_from_slice(b"cam");
-    shiguredo_moqt::varint::encode(0, &mut payload); // Parameters 数
-    let message = ControlMessage::Unsupported {
-        type_id: 0x06,
-        request_id: Some(0),
-        body: payload,
-    };
-    let err = server
-        .recv_request(message)
-        .expect_err("空の Track Namespace Field は拒否されること");
-    match err {
-        shiguredo_moqt::session::types::RecvRequestError::Session(err) => {
-            assert_eq!(
-                err.code, SESSION_INVALID_TRACK_NAMESPACE,
-                "Track Namespace の構造違反は INVALID_TRACK_NAMESPACE (0x302) であること"
-            );
-        }
-        other => panic!("想定外の結果: {other:?}"),
-    }
-}

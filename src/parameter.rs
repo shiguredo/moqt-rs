@@ -716,6 +716,22 @@ impl SetupOptions {
         self.find_bytes(SETUP_OPTION_AUTHORITY)
     }
 
+    /// SETUP Option: MOQT_IMPLEMENTATION (type 0x07) の実装名を返す
+    ///
+    /// draft-ietf-moq-transport-23 §9.1.5 (MOQT IMPLEMENTATION): 実装名とメジャーバージョンを
+    /// 表す文字列である。未指定なら `None`。
+    pub fn moqt_implementation(&self) -> Option<&[u8]> {
+        self.0.iter().find_map(|option| {
+            if option.option_type == SETUP_OPTION_MOQT_IMPLEMENTATION
+                && let SetupOptionValue::Bytes(bytes) = &option.value
+            {
+                Some(bytes.as_slice())
+            } else {
+                None
+            }
+        })
+    }
+
     /// SETUP Option: MAX_REQUEST_UPDATES (type 0x08, draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES))
     ///
     /// デフォルト値 0 は無制限を意味する。

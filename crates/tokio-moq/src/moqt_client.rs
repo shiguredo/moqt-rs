@@ -19,8 +19,9 @@ use tokio::sync::{Mutex as TokioMutex, Notify, mpsc, oneshot, watch};
 
 use shiguredo_moqt::decoder::MessageDecoder;
 use shiguredo_moqt::session::types::{
-    DatagramAcceptance, FetchHeaderAcceptance, FetchState, RecvDataStreamError, RecvRequestError,
-    SendRequestError, SubscriptionState, TrackDataAcceptance,
+    DatagramAcceptance, FetchHeaderAcceptance, FetchState, NamespaceRequestState,
+    RecvDataStreamError, RecvRequestError, SendRequestError, SubscriptionState,
+    TrackDataAcceptance,
 };
 use shiguredo_moqt::stream::decoder::DecodedFetchEntry;
 use shiguredo_moqt::stream::encode_control_stream_setup;
@@ -1291,6 +1292,14 @@ fn is_notable_event(event: &SessionEvent) -> bool {
             // (REQUEST_ERROR))。Retry Interval と Error Details (REDIRECT を含む) は再試行や
             // 代替の判断材料であり、FETCH の拒否は他の経路では観測できないため、アプリへ届ける
             | SessionEvent::RequestErrorReceived { .. }
+            // namespace 発見・告知系の受信イベントは、アプリが応答や購読の判断に使う
+            // (draft-ietf-moq-transport-23 §4 (Namespace Discovery))
+            | SessionEvent::PublishNamespaceReceived { .. }
+            | SessionEvent::SubscribeNamespaceReceived { .. }
+            | SessionEvent::SubscribeTracksReceived { .. }
+            | SessionEvent::NamespaceReceived { .. }
+            | SessionEvent::NamespaceDoneReceived { .. }
+            | SessionEvent::PublishSkippedReceived { .. }
     )
 }
 
@@ -1496,10 +1505,10 @@ fn spawn_peer_bidi_accept_task(
                 // 7 種類判定と、未対応 request の拒否 / 7 種類以外のセッション終了は Session が
                 // 持つため、それ以外はアプリへ渡さず Session に判定させる
                 let Some(request_id) = request_id_of(&first) else {
-                    // 拒否するストリームでは Session が request を受理しないため、STOP_SENDING の
-                    // 依頼は来ない。応答 (REQUEST_ERROR) を書く送信半だけを main ループへ渡し、
-                    // 受信半は終端まで読む (drop すると peer へ STOP_SENDING が届く)
-                    let rejected_request_id = unsupported_request_id(&first);
+                    // request stream の先頭に置けないメッセージ (応答専用の NAMESPACE /
+                    // NAMESPACE_DONE / PUBLISH_SKIPPED など) である。Session に判定させるため
+                    // 送信半ごと main ループへ渡し、受信半は終端まで読む (drop すると peer へ
+                    // STOP_SENDING が届く)
                     if tx
                         .send(BidiMessage::PeerRequestRejected {
                             message: first,
@@ -1510,7 +1519,7 @@ fn spawn_peer_bidi_accept_task(
                     {
                         return;
                     }
-                    read_rejected_request_stream(stream, tx, rejected_request_id).await;
+                    read_rejected_request_stream(stream, tx, None).await;
                     return;
                 };
                 let (stop_tx, mut stop_rx) = mpsc::channel::<StopSendingCommand>(1);
@@ -1597,31 +1606,21 @@ async fn read_rejected_request_stream(
     }
 }
 
-/// 本実装が扱う request の開始メッセージから Request ID を取り出す
+/// request の開始メッセージから Request ID を取り出す
 ///
 /// draft-ietf-moq-transport-23 §6.3 (Session initialization) は bidi request stream の先頭
 /// メッセージを 7 種類 (SUBSCRIBE / PUBLISH / FETCH / PUBLISH_NAMESPACE /
-/// SUBSCRIBE_NAMESPACE / TRACK_STATUS / SUBSCRIBE_TRACKS) に限る。本実装がアプリへ渡すのは
-/// このうち SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS の 4 種類であり、それ以外は
-/// `Session::recv_request` に判定させる (未対応の 3 種類は拒否、7 種類以外はセッション終了)。
+/// SUBSCRIBE_NAMESPACE / TRACK_STATUS / SUBSCRIBE_TRACKS) に限る。7 種類すべてがアプリへ
+/// 渡す request であり、それ以外のメッセージは応答専用か未定義である。
 fn request_id_of(message: &ControlMessage) -> Option<u64> {
     match message {
         ControlMessage::Subscribe(m) => Some(m.request_id),
         ControlMessage::Publish(m) => Some(m.request_id),
         ControlMessage::Fetch(m) => Some(m.request_id),
         ControlMessage::TrackStatus(m) => Some(m.request_id),
-        _ => None,
-    }
-}
-
-/// アプリへ渡さない先頭メッセージから Request ID を取り出す
-///
-/// `ControlMessage::Unsupported` のうち、本実装が扱わない request (PUBLISH_NAMESPACE /
-/// SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) だけが Request ID を持つ。応答専用の型
-/// (NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED) は持たないため `None` になる。
-fn unsupported_request_id(message: &ControlMessage) -> Option<u64> {
-    match message {
-        ControlMessage::Unsupported { request_id, .. } => *request_id,
+        ControlMessage::PublishNamespace(m) => Some(m.request_id),
+        ControlMessage::SubscribeNamespace(m) => Some(m.request_id),
+        ControlMessage::SubscribeTracks(m) => Some(m.request_id),
         _ => None,
     }
 }
@@ -2287,6 +2286,189 @@ impl MoqtClient {
     ) -> Result<SubscribeResult> {
         self.subscribe_track_inner(namespace, track_name, parameters)
             .await
+    }
+
+    /// peer が SETUP で送ったオプションを返す (SETUP 未受信なら `None`)
+    ///
+    /// draft-ietf-moq-transport-23 §6.3.2 (Extension Negotiation): 拡張は SETUP の Option で
+    /// ネゴシエートする。ライブラリの `SetupOptions` を clone して返すため、呼び出し側は
+    /// `iter` / `moqt_implementation` などで peer の宣言を読める。
+    pub fn peer_setup_options(&self) -> Option<shiguredo_moqt::parameter::SetupOptions> {
+        lock_session(&self.session).peer_setup_options().cloned()
+    }
+
+    /// PUBLISH_NAMESPACE を発行し、REQUEST_OK または REQUEST_ERROR が返るまで待つ
+    ///
+    /// draft-ietf-moq-transport-23 §9.13 (PUBLISH_NAMESPACE): publisher が subscriber へ、
+    /// Track Namespace Prefix に一致する namespace の track を配信できることを告知する。
+    /// 拒否 (`REQUEST_ERROR`) は [`TransportError::Internal`] として返す。
+    pub async fn publish_namespace(
+        &mut self,
+        track_namespace: TrackNamespace,
+        parameters: MessageParameters,
+    ) -> Result<u64> {
+        let request_id = {
+            let mut session = lock_session(&self.session);
+            session
+                .send_publish_namespace(track_namespace, parameters)
+                .map_err(|e| TransportError::Internal(format!("send_publish_namespace: {e}")))?
+        };
+        self.drain_events().await?;
+        tracing::info!("Sent PUBLISH_NAMESPACE (request_id={request_id})");
+        self.wait_namespace_request_resolved(request_id).await?;
+        Ok(request_id)
+    }
+
+    /// SUBSCRIBE_NAMESPACE を発行し、REQUEST_OK または REQUEST_ERROR が返るまで待つ
+    ///
+    /// draft-ietf-moq-transport-23 §9.14 (SUBSCRIBE_NAMESPACE): 要求の受理後は
+    /// [`ClientEvent::Session`] の `NamespaceReceived` / `NamespaceDoneReceived` で
+    /// 発見した namespace が届く。
+    pub async fn subscribe_namespace(
+        &mut self,
+        track_namespace: TrackNamespace,
+        parameters: MessageParameters,
+    ) -> Result<u64> {
+        let request_id = {
+            let mut session = lock_session(&self.session);
+            session
+                .send_subscribe_namespace(track_namespace, parameters)
+                .map_err(|e| TransportError::Internal(format!("send_subscribe_namespace: {e}")))?
+        };
+        self.drain_events().await?;
+        tracing::info!("Sent SUBSCRIBE_NAMESPACE (request_id={request_id})");
+        self.wait_namespace_request_resolved(request_id).await?;
+        Ok(request_id)
+    }
+
+    /// SUBSCRIBE_TRACKS を発行し、REQUEST_OK または REQUEST_ERROR が返るまで待つ
+    ///
+    /// draft-ietf-moq-transport-23 §9.17 (SUBSCRIBE_TRACKS): 要求の受理後は、一致する
+    /// track ごとに PUBLISH が `ClientEvent::Request` として届き、購読を作れない track は
+    /// `PublishSkippedReceived` で届く。
+    pub async fn subscribe_tracks(
+        &mut self,
+        track_namespace: TrackNamespace,
+        parameters: MessageParameters,
+    ) -> Result<u64> {
+        let request_id = {
+            let mut session = lock_session(&self.session);
+            session
+                .send_subscribe_tracks(track_namespace, parameters)
+                .map_err(|e| TransportError::Internal(format!("send_subscribe_tracks: {e}")))?
+        };
+        self.drain_events().await?;
+        tracing::info!("Sent SUBSCRIBE_TRACKS (request_id={request_id})");
+        self.wait_namespace_request_resolved(request_id).await?;
+        Ok(request_id)
+    }
+
+    /// SUBSCRIBE_NAMESPACE の response stream に NAMESPACE を送信する (publisher 側)
+    ///
+    /// `track_namespace` は要求の prefix の後ろに付く suffix である。
+    pub async fn send_namespace(
+        &mut self,
+        subscription_request_id: u64,
+        track_namespace_suffix: TrackNamespace,
+        parameters: MessageParameters,
+    ) -> Result<()> {
+        {
+            let mut session = lock_session(&self.session);
+            session
+                .send_namespace(subscription_request_id, track_namespace_suffix, parameters)
+                .map_err(|e| TransportError::Internal(format!("send_namespace: {e}")))?;
+        }
+        self.drain_events().await
+    }
+
+    /// SUBSCRIBE_NAMESPACE の response stream に NAMESPACE_DONE を送信する (publisher 側)
+    pub async fn send_namespace_done(
+        &mut self,
+        subscription_request_id: u64,
+        track_namespace_suffix: TrackNamespace,
+    ) -> Result<()> {
+        {
+            let mut session = lock_session(&self.session);
+            session
+                .send_namespace_done(subscription_request_id, track_namespace_suffix)
+                .map_err(|e| TransportError::Internal(format!("send_namespace_done: {e}")))?;
+        }
+        self.drain_events().await
+    }
+
+    /// SUBSCRIBE_TRACKS の response stream に PUBLISH_SKIPPED を送信する (publisher 側)
+    ///
+    /// `track_namespace_suffix` は要求の prefix の後ろに付く suffix である。
+    pub async fn send_publish_skipped(
+        &mut self,
+        subscription_request_id: u64,
+        track_namespace_suffix: TrackNamespace,
+        track_name: Vec<u8>,
+    ) -> Result<()> {
+        {
+            let mut session = lock_session(&self.session);
+            session
+                .send_publish_skipped(subscription_request_id, track_namespace_suffix, track_name)
+                .map_err(|e| TransportError::Internal(format!("send_publish_skipped: {e}")))?;
+        }
+        self.drain_events().await
+    }
+
+    /// namespace 系 request の応答待ち
+    ///
+    /// `wait_subscription_resolved` と同じ待ち方で、Session の state が Established /
+    /// Terminated のどちらになるまで駆動する。
+    async fn wait_namespace_request_resolved(&mut self, request_id: u64) -> Result<()> {
+        loop {
+            self.tick_now();
+            self.drain_events().await?;
+            let (established, terminated) = {
+                let session = lock_session(&self.session);
+                if session.state() != SessionState::Established {
+                    return Err(TransportError::Internal(
+                        "session closed while waiting for a request response".to_string(),
+                    ));
+                }
+                let state = session
+                    .publish_namespace_request(request_id)
+                    .map(|entry| entry.state)
+                    .or_else(|| {
+                        session
+                            .namespace_subscription(request_id)
+                            .map(|entry| entry.state)
+                    })
+                    .or_else(|| {
+                        session
+                            .track_subscription(request_id)
+                            .map(|entry| entry.state)
+                    });
+                match state {
+                    Some(NamespaceRequestState::Established) => (true, false),
+                    Some(NamespaceRequestState::Terminated) => (false, true),
+                    _ => (false, false),
+                }
+            };
+            if established {
+                return Ok(());
+            }
+            if terminated {
+                let detail = self
+                    .request_errors
+                    .get(&request_id)
+                    .map(|(code, reason)| {
+                        format!(": code={code} reason={}", crate::sanitize_for_log(reason))
+                    })
+                    .unwrap_or_default();
+                return Err(TransportError::Internal(format!(
+                    "request {request_id} rejected{detail}"
+                )));
+            }
+            if let Ok(result) =
+                tokio::time::timeout(Duration::from_millis(50), self.pump_once()).await
+            {
+                result?;
+            }
+        }
     }
 
     /// 自側が持つ購読の track 名を返す (publisher 側)
@@ -3117,38 +3299,25 @@ impl MoqtClient {
                         self.drain_events().await?;
                     }
                     BidiMessage::PeerRequestRejected { message, send } => {
-                        // 本実装が扱わない先頭メッセージの受理。§6.3 (Session initialization) の
-                        // 7 種類判定と、未対応 request の拒否 (REQUEST_ERROR) / 7 種類以外の
-                        // セッション終了 (PROTOCOL_VIOLATION) の決定は Session が持つ。
-                        // アプリへは渡さない (未対応 request にアプリが応答すると
-                        // send_request_error が未登録の Request ID を拒否して致命終了する)。
-                        let rejected_request_id = unsupported_request_id(&message);
+                        // request stream の先頭に置けないメッセージの受理。§6.3
+                        // (Session initialization) の 7 種類判定と、7 種類以外のセッション
+                        // 終了 (UNEXPECTED_MESSAGE) の決定は Session が持つ。アプリへは渡さない
+                        // (アプリが応答すると send_request_error が未登録の Request ID を拒否して
+                        // 致命終了する)。
+                        let _send = send;
                         let accepted = {
                             let mut session = lock_session(&self.session);
                             session.recv_request(message)
                         };
                         match accepted {
                             Ok(()) => {
-                                // Ok になるのは Request ID を持つ未対応 request (3 種類) だけである。
-                                // Session が積んだ REQUEST_ERROR (FIN 付き) を書けるよう、
-                                // drain_events より先に送信半を登録する (台帳に無いと SendOnStream が
-                                // Skip され、応答が捨てられて peer から見て無応答になる)。
-                                // 送信半は FIN 付きの送信で台帳から外れる。
-                                if let Some(request_id) = rejected_request_id {
-                                    tracing::info!(
-                                        "Rejected unsupported peer request: request_id={request_id}"
-                                    );
-                                    self.bidi_sends.insert(request_id, send);
-                                }
+                                // 7 種類の request はすべて request_id_of が Some を返すため、
+                                // ここへ来て受理されることはない (防御)。
                                 self.drain_events().await?;
                             }
                             Err(RecvRequestError::Session(_)) => {
                                 // Session は closing に遷移して CloseSession を積んでいる。
                                 // 終了コード付きで閉じるため drain_events に処理させる
-                                // (TransportError::Internal に写して ? で伝播させると
-                                // drain_events を飛ばし、終了コードが peer に届かない)。
-                                // 未対応の 3 種類でも parity 違反・Request ID 重複のときは
-                                // INVALID_REQUEST_ID で closing になる。
                                 self.drain_events().await?;
                             }
                             Err(e) => {
@@ -3601,7 +3770,13 @@ impl MoqtClient {
                 // Properties))。I/O 層で行うことは無く、未対応の型はアプリが Track を
                 // 利用しない判断に使う
                 | SessionEvent::TrackStatusUnsupported { .. }
-                | SessionEvent::FetchOkReceived { .. }) => {
+                | SessionEvent::FetchOkReceived { .. }
+                | SessionEvent::PublishNamespaceReceived { .. }
+                | SessionEvent::SubscribeNamespaceReceived { .. }
+                | SessionEvent::SubscribeTracksReceived { .. }
+                | SessionEvent::NamespaceReceived { .. }
+                | SessionEvent::NamespaceDoneReceived { .. }
+                | SessionEvent::PublishSkippedReceived { .. }) => {
                     // アプリ (`next_event`) が観測する notable イベント。ここで捨てると
                     // `take_notable_event` が取り出せない
                     // (配送キューへ積むのはこの drain だけ)。

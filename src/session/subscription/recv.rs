@@ -51,6 +51,32 @@ impl Session {
     /// session 層はイベントを発行しない (QUIC STOP_SENDING は I/O 層が実行済み)。
     pub fn stop_sending(&mut self, request_id: u64) -> Result<(), SessionError> {
         self.require_established()?;
+        // namespace 系の request は subscription ではないため、request stream の cancel として
+        // 別に扱う (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))。
+        // 要求側・応答側のどちらからも cancel できる。
+        if !self.subscriptions.contains_key(&request_id) {
+            let cancelled = if let Some(entry) = self.publish_namespaces.get_mut(&request_id) {
+                entry.state = super::super::types::NamespaceRequestState::Terminated;
+                true
+            } else if let Some(entry) = self.namespace_subscriptions.get_mut(&request_id) {
+                entry.state = super::super::types::NamespaceRequestState::Terminated;
+                true
+            } else if let Some(entry) = self.track_subscriptions.get_mut(&request_id) {
+                entry.state = super::super::types::NamespaceRequestState::Terminated;
+                true
+            } else {
+                false
+            };
+            if cancelled {
+                self.clear_control_message_deadline(request_id);
+                self.release_request_update_state(request_id);
+                return Ok(());
+            }
+            return Err(SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "request not found for stop_sending",
+            ));
+        }
         let subscription = self.subscriptions.get_mut(&request_id).ok_or_else(|| {
             SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
@@ -523,9 +549,18 @@ impl Session {
         let subscriber_priority = publish.parameters.subscriber_priority();
         // draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter):
         // SUBSCRIBE_TRACKS 起因の PUBLISH を識別する Request ID を相関情報として保持する。
-        // 本ライブラリは SUBSCRIBE_TRACKS を実装せず要求との照合状態も持たないため、
-        // 対応する要求が無い PUBLISH でも値を保持するだけで拒否せず、通常の PUBLISH の
-        // 検証とアプリケーションによる受理・拒否判断へ進む。
+        // 対応する SUBSCRIBE_TRACKS を自側が送っていれば、その要求の prefix と一致すること、
+        // 同じ track の PUBLISH が重複しないこと、PUBLISH_SKIPPED を送った track ではないことを
+        // 検証する (§3.6 / §9.5.2 / §9.18)。対応する要求が無い PUBLISH は、従来どおり値を
+        // 保持するだけで拒否せず、通常の PUBLISH の検証と受理判断へ進む。
+        if let Err(err) = self.validate_incoming_subscribe_tracks_publish(
+            &publish.parameters,
+            &publish.track_namespace,
+            &publish.track_name,
+        ) {
+            self.fail(err.clone());
+            return Err(err);
+        }
         let subscribe_tracks_id = publish.parameters.subscribe_tracks_id();
         // delivery timeout の Parameters は状態に保持しない。§8 の規則
         // (publisher は Track Property、subscriber は SUBSCRIBE / REQUEST_UPDATE の
@@ -913,6 +948,30 @@ impl Session {
                     "REQUEST_UPDATE (fetch) parameter not allowed in this context",
                 )
             }
+            Some(t @ RequestTable::NamespaceSubscription) => {
+                self.validate_namespace_request_update(request_id)?;
+                (
+                    t,
+                    crate::message::NAMESPACE_UPDATE_ALLOWED_PARAMS,
+                    "REQUEST_UPDATE (subscribe_namespace) parameter not allowed in this context",
+                )
+            }
+            Some(t @ RequestTable::TrackSubscription) => {
+                self.validate_track_subscription_update(request_id)?;
+                (
+                    t,
+                    crate::message::NAMESPACE_UPDATE_ALLOWED_PARAMS,
+                    "REQUEST_UPDATE (subscribe_tracks) parameter not allowed in this context",
+                )
+            }
+            Some(RequestTable::PublishNamespace) => {
+                let err = SessionError::new(
+                    SESSION_UNEXPECTED_MESSAGE,
+                    "REQUEST_UPDATE received for PUBLISH_NAMESPACE",
+                );
+                self.fail(err.clone());
+                return Err(err);
+            }
             Some(RequestTable::TrackStatus) | None => {
                 let err = SessionError::new(
                     SESSION_UNEXPECTED_MESSAGE,
@@ -1024,8 +1083,19 @@ impl Session {
             RequestTable::Fetch => {
                 self.handle_update_for_fetch(request_id, update.parameters, locally_terminated)
             }
-            // 上の検証で TRACK_STATUS は UNEXPECTED_MESSAGE としてセッション終了済み (防御)
-            RequestTable::TrackStatus => {
+            RequestTable::NamespaceSubscription => self.handle_update_for_namespace_subscription(
+                request_id,
+                update.parameters,
+                locally_terminated,
+            ),
+            RequestTable::TrackSubscription => self.handle_update_for_track_subscription(
+                request_id,
+                update.parameters,
+                locally_terminated,
+            ),
+            // 上の検証で PUBLISH_NAMESPACE / TRACK_STATUS は UNEXPECTED_MESSAGE として
+            // セッション終了済み (防御)
+            RequestTable::TrackStatus | RequestTable::PublishNamespace => {
                 let err = SessionError::new(
                     SESSION_UNEXPECTED_MESSAGE,
                     "REQUEST_UPDATE received for unknown or unsupported request id",
@@ -1107,6 +1177,16 @@ impl Session {
                     .expect("request update rejection reason must be <= 1024 bytes"),
                 ErrorDetails::new(),
             ),
+            Some(RequestTable::NamespaceSubscription) | Some(RequestTable::TrackSubscription) => {
+                self.send_request_error(
+                    request_id,
+                    error_code,
+                    0,
+                    ReasonPhrase::new(reason)
+                        .expect("request update rejection reason must be <= 1024 bytes"),
+                    ErrorDetails::new(),
+                )
+            }
             Some(RequestTable::Subscription) => {
                 // 先行する未応答グループがあれば、拒否をキューへ積んで OK の後ろに回す
                 let has_pending = self
@@ -1124,7 +1204,7 @@ impl Session {
             // draft §9.5 (REQUEST_UPDATE): 更新できない request への受信は
             // UNEXPECTED_MESSAGE で閉じる。呼び出し元の request 種別判定
             // (`locate_request`) で検出済み (防御)
-            Some(RequestTable::TrackStatus) | None => {
+            Some(RequestTable::TrackStatus) | Some(RequestTable::PublishNamespace) | None => {
                 let err = SessionError::new(
                     SESSION_UNEXPECTED_MESSAGE,
                     "REQUEST_UPDATE received for unknown or unsupported request id",

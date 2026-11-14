@@ -1626,44 +1626,55 @@ mod error_cases {
         assert_eq!(count, 1, "0x04 が decode 後も残ること");
     }
 
-    /// Table 5 に定義済みで本ライブラリが実装しない型は Unsupported として decode できる
+    /// namespace 発見・告知系の 6 メッセージは encode / decode で往復できる
     ///
-    /// draft-ietf-moq-transport-23 §1.6 (Modularity): "Limited endpoints SHOULD respond to any
-    /// unsupported messages with the appropriate NOT_SUPPORTED error code, rather than ignoring
-    /// them." decode した本体を encode で再構成できることも固定する。
+    /// draft-ietf-moq-transport-23 §9.13-§9.18 の 6 種を、最小のフィールドで往復させる。
+    /// 応答専用の 3 種は Request ID を持たない。
     #[test]
-    fn unsupported_control_messages_roundtrip() {
-        // request として届く型 (本体が Request ID で始まる)
-        for (type_id, request_id) in [
-            (0x06u64, Some(3u64)), // PUBLISH_NAMESPACE
-            (0x50, Some(5)),       // SUBSCRIBE_NAMESPACE
-            (0x51, Some(7)),       // SUBSCRIBE_TRACKS
-        ] {
-            let original = ControlMessage::Unsupported {
-                type_id,
-                request_id,
-                // 本体は Request ID (vi64) で始まる生バイト列。decode は本体先頭の varint を
-                // request_id として読むため、body の先頭を request_id と一致させる
-                body: vec![request_id.expect("request_id は Some") as u8],
-            };
+    fn namespace_control_messages_roundtrip() {
+        use shiguredo_moqt::message::{
+            Namespace, NamespaceDone, PublishNamespace, PublishSkipped, SubscribeNamespace,
+            SubscribeTracks,
+        };
+
+        let prefix = TrackNamespace::new(vec![b"example".to_vec()]).expect("正当な prefix である");
+        let suffix = TrackNamespace::new(vec![b"video".to_vec()]).expect("正当な suffix である");
+
+        let messages = [
+            ControlMessage::PublishNamespace(PublishNamespace {
+                request_id: 2,
+                track_namespace: prefix.clone(),
+                parameters: MessageParameters::new(),
+            }),
+            ControlMessage::SubscribeNamespace(SubscribeNamespace {
+                request_id: 4,
+                track_namespace: prefix.clone(),
+                parameters: MessageParameters::new(),
+            }),
+            ControlMessage::SubscribeTracks(SubscribeTracks {
+                request_id: 6,
+                track_namespace: prefix.clone(),
+                parameters: MessageParameters::new(),
+            }),
+            ControlMessage::Namespace(Namespace {
+                track_namespace_suffix: suffix.clone(),
+                parameters: MessageParameters::new(),
+            }),
+            ControlMessage::NamespaceDone(NamespaceDone {
+                track_namespace_suffix: suffix.clone(),
+            }),
+            ControlMessage::PublishSkipped(PublishSkipped {
+                track_namespace_suffix: suffix,
+                track_name: b"video".to_vec(),
+            }),
+        ];
+        for original in messages {
             let bytes = original
                 .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
                 .expect("encode できること");
-            let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
-            assert_eq!(decoded, original, "roundtrip で一致すること: {type_id:#x}");
-        }
-        // 応答専用の型 (Request ID を持たない)
-        for type_id in [0x08u64, 0x0E, 0x0F] {
-            let original = ControlMessage::Unsupported {
-                type_id,
-                request_id: None,
-                body: vec![0x01, 0x02],
-            };
-            let bytes = original
-                .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
-                .expect("encode できること");
-            let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
-            assert_eq!(decoded, original, "roundtrip で一致すること: {type_id:#x}");
+            let (decoded, consumed) = ControlMessage::decode(&bytes).expect("decode できること");
+            assert_eq!(consumed, bytes.len(), "フレーム全体を消費すること");
+            assert_eq!(decoded, original, "roundtrip で一致すること");
         }
     }
 
@@ -2034,30 +2045,19 @@ mod publish {
             ),
             "PUBLISH_STATE_NOTIFY に載った SUBSCRIBE_TRACKS_ID の decode は拒否されること"
         );
-        // SUBSCRIBE_TRACKS (0x51) は本ライブラリが実装しない request であり、codec は本体を
-        // 解析せず `Unsupported` として保持する (§1.6 (Modularity) の SHOULD)。§9.19.1
-        // (Parameter Scope) の MUST 検証はセッション層 (`handle_unsupported_request`) が
-        // 行うため、ここでは decode が生バイト列をそのまま保つことだけを固定する。
+        // SUBSCRIBE_TRACKS (0x51) は §9.17 の 14 種だけを許可し、SUBSCRIBE_TRACKS_ID
+        // (0x36) は PUBLISH 専用であるため decode で拒否される (§9.19.1 Parameter Scope)。
         // 本体は Request ID = 0、Track Namespace Prefix: count=1 / "live"、
         // Parameters: count=1 / delta=0x36 / 値=300 (0x81 0x2C)
         let subscribe_tracks = vec![
             0x51, 0x0B, 0x00, 0x01, 0x04, 0x6C, 0x69, 0x76, 0x65, 0x01, 0x36, 0x81, 0x2C,
         ];
-        let (decoded, consumed) = ControlMessage::decode(&subscribe_tracks)
-            .expect("SUBSCRIBE_TRACKS は未対応型として decode できること");
-        assert_eq!(
-            consumed,
-            subscribe_tracks.len(),
-            "SUBSCRIBE_TRACKS のフレーム全体を消費すること"
-        );
-        assert_eq!(
-            decoded,
-            ControlMessage::Unsupported {
-                type_id: 0x51,
-                request_id: Some(0),
-                body: subscribe_tracks[2..].to_vec(),
-            },
-            "SUBSCRIBE_TRACKS は本体を解析せず Unsupported として保持されること"
+        assert!(
+            matches!(
+                ControlMessage::decode(&subscribe_tracks),
+                Err(MessageError::InvalidParameter)
+            ),
+            "SUBSCRIBE_TRACKS に載った SUBSCRIBE_TRACKS_ID の decode は拒否されること"
         );
     }
 }

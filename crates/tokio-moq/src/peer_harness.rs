@@ -31,6 +31,7 @@ use bytes::Bytes;
 
 use shiguredo_moqt::message::ControlMessage;
 use shiguredo_moqt::message::Setup;
+use shiguredo_moqt::message::SubscribeNamespace;
 use shiguredo_moqt::message::common::Location;
 use shiguredo_moqt::message_parameter::MessageParameters;
 use shiguredo_moqt::parameter::{
@@ -68,9 +69,8 @@ fn fetch_ok_parameters(largest_object: Option<Location>) -> MessageParameters {
 
 // 以下の 3 つは `moqt_client` の対応する private 関数と同じ処理を含む。テスト専用の都合で
 // 通常ビルド対象の可視性を広げないため (`shiguredo-rust` の「テストのために private な API を
-// 無理矢理公開しないこと」)、あえて重複させている。`request_stream_id` は
-// `moqt_client::request_id_of` に加えて `ControlMessage::Unsupported` の Request ID も扱う
-// (未対応 request の応答を読むために必要)。
+// 無理矢理公開しないこと」)、あえて重複させている。`request_stream_id` は Table 5 の
+// request stream 先頭に置ける 7 種類すべての Request ID を扱う。
 
 /// 初期イベントとして積まれた SETUP を取り出す
 ///
@@ -106,16 +106,17 @@ async fn send_control_stream_setup(
 /// 先頭メッセージから request stream の Request ID を取り出す
 ///
 /// draft-ietf-moq-transport-23 §6.3 (Session initialization) は request stream の先頭に
-/// 7 種類のメッセージを許す。本 example が request として扱う 4 種類 (SUBSCRIBE / PUBLISH /
-/// FETCH / TRACK_STATUS) はそれぞれの構造体が Request ID を持ち、本実装が扱わない 3 種類は
-/// `ControlMessage::Unsupported` が持つ。応答専用の型は持たないため `None` になる。
+/// 7 種類のメッセージを許す。7 種類はすべて Request ID を持ち、応答専用の型は持たないため
+/// `None` になる。
 fn request_stream_id(message: &ControlMessage) -> Option<u64> {
     match message {
         ControlMessage::Subscribe(m) => Some(m.request_id),
         ControlMessage::Publish(m) => Some(m.request_id),
         ControlMessage::Fetch(m) => Some(m.request_id),
         ControlMessage::TrackStatus(m) => Some(m.request_id),
-        ControlMessage::Unsupported { request_id, .. } => *request_id,
+        ControlMessage::PublishNamespace(m) => Some(m.request_id),
+        ControlMessage::SubscribeNamespace(m) => Some(m.request_id),
+        ControlMessage::SubscribeTracks(m) => Some(m.request_id),
         _ => None,
     }
 }
@@ -872,10 +873,10 @@ mod tests {
     use std::time::Duration;
 
     use shiguredo_moqt::error::{
-        REQUEST_NOT_SUPPORTED, SESSION_CLOSED_CONTROL_STREAM, SESSION_FIELD_LENGTH_EXCEEDED,
-        SESSION_INVALID_FIELD, SESSION_INVALID_PATH, SESSION_INVALID_REQUEST_ID,
-        SESSION_INVALID_STREAM_HEADER, SESSION_MALFORMED_AUTH_TOKEN, SESSION_MALFORMED_KEY_VALUE,
-        SESSION_ROLE_VIOLATION, SESSION_UNEXPECTED_MESSAGE,
+        SESSION_CLOSED_CONTROL_STREAM, SESSION_FIELD_LENGTH_EXCEEDED, SESSION_INVALID_FIELD,
+        SESSION_INVALID_PATH, SESSION_INVALID_REQUEST_ID, SESSION_INVALID_STREAM_HEADER,
+        SESSION_MALFORMED_AUTH_TOKEN, SESSION_MALFORMED_KEY_VALUE, SESSION_ROLE_VIOLATION,
+        SESSION_UNEXPECTED_MESSAGE,
     };
     use shiguredo_moqt::message::RequestOk;
     use shiguredo_moqt::message::Subscribe;
@@ -886,9 +887,6 @@ mod tests {
 
     use super::*;
     use crate::moqt_client::{ClientEvent, MoqtClient};
-
-    /// PUBLISH_NAMESPACE の制御メッセージ型 ID (draft-ietf-moq-transport-23 §9 Table 5)
-    const PUBLISH_NAMESPACE_TYPE_ID: u64 = 0x6;
 
     /// 基盤を使うテストの上限時間 (ハングを失敗として観測する)
     const TEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1301,86 +1299,49 @@ mod tests {
         .await;
     }
 
-    /// peer が本実装の扱わない request を先頭に送ると拒否され、セッションが維持される
+    /// peer が送った namespace 系 request はアプリへ渡される
     ///
-    /// アプリへ要求が渡らないこと (二重応答を避けること) も確認する。
+    /// draft-ietf-moq-transport-23 §6.3 (Session initialization): SUBSCRIBE_NAMESPACE などの
+    /// namespace 系 request も bidi request stream の先頭に置ける。I/O 層が拒否せず、
+    /// アプリが応答できるように `ClientEvent::Request` で配送することを確認する。
     #[tokio::test(flavor = "multi_thread")]
-    async fn unsupported_request_start_message_is_rejected_and_session_is_kept() {
+    async fn namespace_request_start_message_is_delivered_to_application() {
         run_with_timeout(async {
             let (mut peer, client) = connect_pair().await;
 
-            // PUBLISH_NAMESPACE を先頭に送る。body は 3 種類の共通構造
-            // (Request ID → Track Namespace Prefix → Number of Parameters) に従う
-            // (draft-ietf-moq-transport-23 §9.13 (PUBLISH_NAMESPACE) /
-            // §8.7 (Track Namespace Structure))
             let request_id = peer.next_request_id().expect("Request ID を採番できること");
-            let mut body = Vec::new();
-            shiguredo_moqt::varint::encode(request_id, &mut body);
-            // 空の Track Namespace Prefix (フィールド数 0)
-            shiguredo_moqt::varint::encode(0, &mut body);
-            // パラメータ数 0
-            shiguredo_moqt::varint::encode(0, &mut body);
-            let message = ControlMessage::Unsupported {
-                type_id: PUBLISH_NAMESPACE_TYPE_ID,
-                request_id: Some(request_id),
-                body,
-            };
+            let message = ControlMessage::SubscribeNamespace(SubscribeNamespace {
+                request_id,
+                track_namespace: TrackNamespace::new(vec![b"live".to_vec()])
+                    .expect("名前空間を作れること"),
+                parameters: MessageParameters::new(),
+            });
             peer.send_request_start(message)
                 .await
                 .expect("request stream を開けること");
 
-            // client の main ループを回す。peer が開いた stream の先頭メッセージは accept task
-            // から main ループへ渡されるため、駆動しないと Session が処理しない。
-            // アプリへ要求が渡っていれば、この next_event が直ちに Request を返す
-            let drive = tokio::spawn(async move {
-                let mut client = client;
-                client.next_event().await
-            });
-
-            // peer は REQUEST_ERROR (NOT_SUPPORTED) を受け取る
-            let response = peer
-                .recv_response(request_id)
-                .await
-                .expect("応答を読めること");
-            match response {
-                ControlMessage::RequestError(error) => {
+            // アプリへ要求が渡る
+            let mut client = client;
+            match client.next_event().await.expect("イベントを取得できること") {
+                Some(ClientEvent::Request(request)) => {
+                    assert_eq!(request.request_id, request_id, "request がアプリへ渡ること");
                     assert_eq!(
-                        error.error_code, REQUEST_NOT_SUPPORTED,
-                        "NOT_SUPPORTED で拒否されること"
+                        request.message,
+                        ControlMessage::SubscribeNamespace(SubscribeNamespace {
+                            request_id,
+                            track_namespace: TrackNamespace::new(vec![b"live".to_vec()])
+                                .expect("名前空間を作れること"),
+                            parameters: MessageParameters::new(),
+                        }),
+                        "受信したメッセージが元の SUBSCRIBE_NAMESPACE と一致すること"
                     );
                 }
-                other => panic!("REQUEST_ERROR が届くこと: {other:?}"),
+                other => panic!("Request が届くこと: {other:?}"),
             }
 
-            // アプリへ要求は渡らない (渡っていれば next_event が先に完了している)
-            assert!(!drive.is_finished(), "アプリへ request が渡らないこと");
-
-            // 拒否したストリームを終端しても session は維持される
             peer.finish_request_stream(request_id)
                 .await
                 .expect("request stream を終端できること");
-
-            // 拒否のあとも通常の request が受理されることで session の維持を確かめる
-            let next_request_id = peer.next_request_id().expect("Request ID を採番できること");
-            let next_message = ControlMessage::Subscribe(Subscribe {
-                request_id: next_request_id,
-                track_namespace: TrackNamespace::new(vec![b"live".to_vec()])
-                    .expect("名前空間を作れること"),
-                track_name: b"video".to_vec(),
-                parameters: MessageParameters::new(),
-            });
-            peer.send_request_start(next_message)
-                .await
-                .expect("request stream を開けること");
-            match drive.await.expect("駆動タスクが終了すること") {
-                Ok(Some(ClientEvent::Request(request))) => {
-                    assert_eq!(
-                        request.request_id, next_request_id,
-                        "拒否のあとも request が受理されること"
-                    );
-                }
-                other => panic!("拒否のあとも request が受理されること: {other:?}"),
-            }
         })
         .await;
     }
@@ -1423,18 +1384,19 @@ mod tests {
     /// 生の Setup Options を載せた SETUP を control stream の先頭に書くバイト列
     ///
     /// `ControlMessage::Setup` は `SetupOptions` の型付き API しか受け付けないため、型では
-    /// 表現できない不正な Setup Options は `ControlMessage::Unsupported` で書き出す (encode は
-    /// type varint + vi64 長 + body であり SETUP と同じ書式になる)。body は
+    /// 表現できない不正な Setup Options は、control stream の prefix と SETUP の message type
+    /// (どちらも 0x2F00) + vi64 長 + body を生バイト列で書き出す。body は
     /// draft-ietf-moq-transport-23 §9.1 (SETUP) の「カウントプレフィックスなしのデルタ
     /// エンコードされた KVP」である。
     fn setup_head(body: Vec<u8>) -> Vec<u8> {
-        let message = ControlMessage::Unsupported {
-            type_id: shiguredo_moqt::stream::SETUP_STREAM_TYPE,
-            request_id: None,
-            body,
-        };
-        shiguredo_moqt::stream::encode_control_stream_setup(&message, MAX_CONTROL_MESSAGE_SIZE)
-            .expect("SETUP のバイト列を組み立てられること")
+        let mut buf = Vec::new();
+        // control stream の stream type prefix
+        shiguredo_moqt::varint::encode(shiguredo_moqt::stream::SETUP_STREAM_TYPE, &mut buf);
+        // 先頭メッセージ (SETUP) の message type
+        shiguredo_moqt::varint::encode(shiguredo_moqt::stream::SETUP_STREAM_TYPE, &mut buf);
+        shiguredo_moqt::varint::encode(body.len() as u64, &mut buf);
+        buf.extend_from_slice(&body);
+        buf
     }
 
     /// peer と client を接続し、client の SETUP 交換を開始した状態にする
