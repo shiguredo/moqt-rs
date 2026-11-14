@@ -1,7 +1,7 @@
 # draft-23 の client/server 向け低レイヤー API を完成させる
 
 - Created: 2026-11-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-14
 - Branch: develop (CODEBASE.md の規約により develop に直接コミットする)
 - Polished: {YYYY-MM-DD}
 
@@ -46,3 +46,11 @@ FETCH 応答の Object 系 Range Filter は評価していない。
   `PUBLISH_SKIPPED` と PUBLISH の相関がテストで検証されている。
 - FETCH 応答の Object 系 Range Filter がテストで検証されている。
 - `cargo fmt` / `cargo clippy` / `cargo test` が通る。
+
+## 解決方法
+
+- `src/message.rs` に 6 メッセージの型と encode / decode を追加し、`ControlMessage::Unsupported` と未対応 request の拒否経路を削除した。
+- `src/session/namespace.rs` を追加し、namespace 系 request の状態遷移、REQUEST_OK / REQUEST_ERROR、応答 stream の NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED、REQUEST_UPDATE の `TRACK_NAMESPACE_PREFIX` 更新、SUBSCRIBE_TRACKS と PUBLISH の相関検証を実装した。`SessionEvent` と `MoqtClient` の送信 API も追加した。
+- `Fetch` に Object 系 Range Filter を保持し、`send_fetch_object_with_context` で Subgroup ID / Publisher Priority / Object Properties を評価するようにした。
+- `tests/test_session/namespace.rs` / `tests/test_session/fetch/range_filters.rs` / codec と PBT のテストを追加し、docs と SKILL.md を更新した。
+- `cargo fmt --all`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test -p shiguredo_moqt -p tokio-moq -p pbt` (3538 件) が通ることを確認した。
