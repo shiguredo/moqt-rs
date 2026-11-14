@@ -3015,6 +3015,32 @@ impl MoqtClient {
     /// `tokio::time::sleep(std::time::Duration::from_millis(100)).await` を一時的に入れて、
     /// GOAWAY / close の前に STOP_SENDING を flush させ、peer (publisher / relay) 側で
     /// 当該 bidi request stream が RESET_STREAM で停止することを `RUST_LOG=debug` のログで観測する。
+    /// FETCH の bidi request stream を STOP_SENDING と RESET_STREAM で終端する
+    ///
+    /// draft-ietf-moq-transport-23 §3.2.4 (Fetch State Management) は、FETCH を取り消す
+    /// subscriber に bidi request stream への STOP_SENDING を MUST で求める。
+    /// draft 由来の仕様であり将来変更されうる。
+    pub async fn stop_fetch_sending(&mut self, request_id: u64) -> Result<()> {
+        {
+            let mut session = lock_session(&self.session);
+            session
+                .send_fetch_stop_sending(request_id)
+                .map_err(|e| TransportError::Internal(format!("send_fetch_stop_sending: {e}")))?;
+        }
+        self.drain_events().await?;
+        // 送信方向が開いたままなら RESET_STREAM で打ち切る (§6.4.2.3 と同じ扱い)
+        let error_code = DataStreamResetReason::Cancelled.error_code();
+        if let Some(mut send) = self.bidi_sends.remove(&request_id)
+            && let Err(e) = send.reset(error_code, None).await
+        {
+            tracing::warn!(
+                "Failed to reset the FETCH bidi request stream (request_id={request_id}): {e}"
+            );
+        }
+        self.closed_request_streams.insert(request_id);
+        Ok(())
+    }
+
     pub async fn stop_sending(&mut self, request_id: u64) -> Result<()> {
         {
             let mut session = lock_session(&self.session);

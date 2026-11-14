@@ -409,8 +409,8 @@ session で再発行する。
 - side session 自身が GOAWAY / 切断を受けた場合の再移行は未対応であり、ログを残して
   その track の配送を止める (publisher はパイプラインを終了する)。
 - 共有 side session の接続期限は、最初に移行した request の GOAWAY Timeout で固定される。
-- subscriber の FETCH は旧 request stream を `STOP_SENDING` で閉じられないため、peer の
-  timeout reset に委ねる (tokio-moq が FETCH 用の停止 API を公開していない)。
+- subscriber の FETCH は、移行時に旧 request stream を `STOP_SENDING` と `RESET_STREAM` で
+  終端する。
 - subscriber は移行後の catalog 購読で届く fill fetch stream を `CatalogState` へ適用する。
   publisher が fill に応答しない場合は次の catalog publish まで完全な catalog が届かない
   (外部要因)。

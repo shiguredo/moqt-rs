@@ -2452,20 +2452,17 @@ async fn reissue_request(
     })
 }
 
-/// FETCH の旧 request stream を可能な範囲で終端する
+/// FETCH の旧 request stream を STOP_SENDING と RESET_STREAM で終端する
 ///
-/// `MoqtClient` の公開 API にある [`MoqtClient::stop_sending`] は subscription 用であり、
-/// FETCH の request stream は `Session` の状態機械に拒否される
-/// (`Session::send_fetch_stop_sending` は公開されていない)。呼び出しが拒否された場合は
-/// GOAWAY を送った peer が request stream の期限で reset するため、セッションは閉じずに
-/// debug ログへ留める。新しい session での再発行は旧 request stream の終端を待たない。
-/// draft-ietf-moq-transport-23 §9.2 (GOAWAY) は draft 由来の仕様であり、将来変更されうる。
+/// draft-ietf-moq-transport-23 §3.2.4 (Fetch State Management) は、FETCH を取り消す
+/// subscriber に bidi request stream への STOP_SENDING を MUST で求める。終端に失敗しても
+/// セッションは閉じず、新しい session での再発行は旧 request stream の終端を待たない。
+/// draft 由来の仕様であり将来変更されうる。
 async fn stop_fetch_request_stream(client: &mut MoqtClient, old_request_id: u64) {
-    if let Err(e) = client.stop_sending(old_request_id).await {
-        tracing::debug!(
-            "Could not terminate the FETCH request stream with STOP_SENDING \
-             (the public client API only cancels subscriptions); \
-             the peer resets it at the GOAWAY deadline: request_id={old_request_id}, error={e}"
+    if let Err(e) = client.stop_fetch_sending(old_request_id).await {
+        tracing::warn!(
+            "Could not terminate the FETCH request stream with STOP_SENDING: \
+             request_id={old_request_id}, error={e}"
         );
     }
 }
