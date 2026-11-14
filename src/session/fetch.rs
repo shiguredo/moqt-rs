@@ -650,7 +650,7 @@ impl Session {
     /// 「送信方向は `RESET_STREAM`、受信方向は `STOP_SENDING`」で打ち切る。両イベントの
     /// `error_code` は §12.5 (Stream Reset Error Codes) の CANCELLED (0x1) を使う。
     /// 発行順は受信方向の `StopSendingRequestStream` → 送信方向の `ResetRequestStream`
-    /// である ([`SessionEvent`](crate::session::types::SessionEvent) の順序契約を参照)。
+    /// である ([`SessionEvent`] の順序契約を参照)。
     ///
     /// state は `Terminated` に遷移する。`RequestTerminated` は発行しない (cancel の
     /// 完了は bidi request stream の終端通知 `recv_request_stream_closed` が伝える)。
