@@ -450,8 +450,14 @@ fn subgroup_object_location(header: &SubgroupHeader, object: &DecodedSubgroupObj
 struct AudioDelivery<'a> {
     /// デコード済み音声フレームの送り先
     audio_tx: &'a std::sync::mpsc::Sender<DecodedAudioFrame>,
-    /// Audio Config (OpusHead) を処理済みかどうか (購読で 1 つ共有する)
-    audio_config_handled: &'a std::sync::atomic::AtomicBool,
+    /// Audio Config の処理 (Opus は検証、AAC は非解釈) を試みた session の世代
+    /// (購読で 1 つ共有する)
+    ///
+    /// 移行のたびに main ループが session の世代を進める。自分が読む session の世代が
+    /// これより新しければ、その session で最初に届いた Audio Config として処理する。
+    audio_config_validated_generation: &'a std::sync::atomic::AtomicU64,
+    /// この配送経路が読む session の世代
+    session_generation: u64,
     /// catalog の codec が Opus かどうか (Audio Config の中身は codec 依存のため)
     is_opus_codec: bool,
     /// catalog が宣言したサンプルレート (Audio Config の検証に使う)
@@ -476,6 +482,19 @@ struct AudioDelivery<'a> {
     /// 再生経路の TIMESTAMP が巻き戻らないようにする。状態は datagram 経路と
     /// subgroup stream 経路で共有する。
     delivery_order: &'a std::sync::Mutex<AudioDeliveryOrder>,
+}
+
+/// この Audio Config を処理すべきか
+///
+/// 処理を試みた session の世代を単調非減少に記録し、自分の session の世代がそれより新しければ
+/// true を返す。`fetch_max` は更新前の値を返すため、移行前の session の Object が後から
+/// 届いても、移行後の session の記録を巻き戻さない。
+fn claim_audio_config_generation(
+    audio_config_validated_generation: &std::sync::atomic::AtomicU64,
+    session_generation: u64,
+) -> bool {
+    audio_config_validated_generation.fetch_max(session_generation, Ordering::AcqRel)
+        < session_generation
 }
 
 impl AudioDelivery<'_> {
@@ -507,8 +526,8 @@ impl AudioDelivery<'_> {
         payload: &[u8],
         decoder: Option<&mut AudioDecoder>,
     ) -> bool {
-        // 書式違反は配送の有無や処理済みフラグに関わらず毎 Object で検出するため、
-        // ここでは常に抽出する (検証は下の swap で 1 回に絞る)
+        // 書式違反は配送の有無や検証済み世代に関わらず毎 Object で検出するため、
+        // ここでは常に抽出する (検証は下の世代判定で session ごとに 1 回に絞る)
         let audio_config = match extract_audio_config(properties_bytes) {
             Ok(config) => config,
             Err(e) => return skip_object_on_properties_error(self.termination_tx, &e),
@@ -560,11 +579,16 @@ impl AudioDelivery<'_> {
                 payload,
             );
         }
-        // Audio Config (OpusHead) を含む Object を受信した最初の 1 回のみ検証する
-        // (途中参加で OpusHead を受信しない場合はスキップされる)。subgroup stream と
-        // datagram のどちらで届いても 1 回で済むよう、フラグは購読で共有する
+        // Audio Config (OpusHead) を含む Object を受信した session ごとに、最初の 1 回だけ
+        // 処理する (途中参加で OpusHead を受信しない場合はスキップされる)。subgroup stream と
+        // datagram のどちらで届いても 1 回で済むよう、状態は購読で共有する。
+        // 処理済みの世代と自分の session の世代を比べるため、移行前の session の Object が
+        // 後から届いても、移行後の session の処理状態を巻き戻さない。
         if let Some(config_bytes) = audio_config.as_deref()
-            && !self.audio_config_handled.swap(true, Ordering::AcqRel)
+            && claim_audio_config_generation(
+                self.audio_config_validated_generation,
+                self.session_generation,
+            )
         {
             if self.is_opus_codec {
                 match parse_opus_head(config_bytes) {
@@ -1115,7 +1139,8 @@ fn spawn_stream_task(
     video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
     group_switch: &std::sync::Arc<SharedGroupSwitchGate>,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
-    audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    audio_config_validated_generation: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    session_generation: u64,
     audio_catch_up: &std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
     audio_delivery_order: &std::sync::Arc<std::sync::Mutex<AudioDeliveryOrder>>,
     last_received_locations: &std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
@@ -1139,7 +1164,8 @@ fn spawn_stream_task(
     // 呼んでも、新しい世代の判定に影響しないようにするためである
     let group_switch = GroupSwitchHandle::new(std::sync::Arc::clone(group_switch));
     let audio_decoder = audio_decoder.cloned();
-    let audio_config_handled = std::sync::Arc::clone(audio_config_handled);
+    let audio_config_validated_generation =
+        std::sync::Arc::clone(audio_config_validated_generation);
     let audio_catch_up = std::sync::Arc::clone(audio_catch_up);
     let audio_delivery_order = std::sync::Arc::clone(audio_delivery_order);
     let last_received_locations = std::sync::Arc::clone(last_received_locations);
@@ -1167,7 +1193,8 @@ fn spawn_stream_task(
             &video_delivery_order,
             &group_switch,
             audio_decoder.as_ref(),
-            &audio_config_handled,
+            &audio_config_validated_generation,
+            session_generation,
             &audio_catch_up,
             &audio_delivery_order,
             &last_received_locations,
@@ -2713,7 +2740,7 @@ pub async fn run(
     // 音声は 1 object = 1 subgroup stream で届く (LOC draft-ietf-moq-loc-05 §4.1)。
     // stream ごとにデコーダを作り直すと 20 ms ごとにデコーダ状態が失われ、
     // フレーム境界で波形が不連続になってノイズになる。
-    // subscription で 1 つのデコーダを共有し、Audio Config の処理済みフラグも共有する。
+    // subscription で 1 つのデコーダを共有し、Audio Config の検証済み世代も共有する。
     // 録画中はデコーダが使えなくても録画を続けるため、警告に留める。
     //
     // デコーダは録画のセットアップより先に作る。AAC は AudioToolbox の出力がステレオ固定で
@@ -2804,7 +2831,11 @@ pub async fn run(
     // stream task は `Arc<Mutex<...>>` でデコーダを共有する
     let audio_decoder =
         audio_decoder.map(|decoder| std::sync::Arc::new(tokio::sync::Mutex::new(decoder)));
-    let audio_config_handled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // session の世代。移行のたびに進め、Audio Config の検証済み世代と比べる。
+    // 1 から始め、検証済み世代は 0 (未検証) から始めることで、最初の Audio Config を処理する
+    let mut session_generation: u64 = 1;
+    let audio_config_validated_generation =
+        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     // 受信側の追いつきの状態。ストリーム経路と datagram 経路で共有する
     let audio_catch_up = Arc::new(std::sync::Mutex::new(AudioReceiveCatchUp::new()));
     // 音声の購読境界と送出順の状態。datagram 経路と subgroup stream 経路で共有する
@@ -2888,13 +2919,17 @@ pub async fn run(
     // stream task と datagram task、main ループ (catalog) が共有する
     let last_received_locations: Arc<std::sync::Mutex<LastReceivedLocations>> =
         Arc::new(std::sync::Mutex::new(LastReceivedLocations::default()));
+    // 最後の値は session 移行のたびに進む epoch である。datagram 受信タスクは、届いた
+    // Object をどの session のものとして Audio Config の検証状態に反映するかをこの値で決める。
     let (datagram_session_tx, mut datagram_session_rx) = tokio::sync::watch::channel((
         client.handle(),
         data_plane.clone(),
         Arc::clone(&datagram_track_map),
+        session_generation,
     ));
     let audio_decoder_for_datagram = audio_decoder.clone();
-    let audio_config_handled_for_datagram = Arc::clone(&audio_config_handled);
+    let audio_config_validated_generation_for_datagram =
+        Arc::clone(&audio_config_validated_generation);
     let audio_codec_for_datagram = audio_codec.clone();
     let recorder_for_datagram = recorder_sender.clone();
     let termination_tx_for_datagram = termination_tx.clone();
@@ -2907,26 +2942,17 @@ pub async fn run(
         // 購読した audio track でしか届かないため、catalog の値はここで確定できる
         // (audio track を購読していなければ audio_params は None だが、その場合
         //  track_map に Audio が入らないため配送経路には来ない)。
-        let delivery = AudioDelivery {
-            audio_tx: &audio_tx_for_datagram,
-            audio_config_handled: &audio_config_handled_for_datagram,
-            is_opus_codec: audio_codec_for_datagram
-                .as_deref()
-                .is_some_and(decoder::is_opus_codec),
-            catalog_sample_rate: audio_params.map_or(0, |(sample_rate, _)| sample_rate),
-            catalog_channels: audio_params.map_or(0, |(_, channels)| channels),
-            recorder: recorder_for_datagram.as_ref(),
-            termination_tx: &termination_tx_for_datagram,
-            catch_up: audio_catch_up_for_datagram.as_ref(),
-            delivery_order: audio_delivery_order_for_datagram.as_ref(),
-        };
         // メディアとして扱えないトラックの datagram を 1 回だけ記録するための alias
         let mut unsupported_aliases: HashSet<u64> = HashSet::new();
         // 最初の datagram を受け取ったことを 1 回だけ記録する。届いていないのか、届いて
         // いるのに配送経路へ流れていないのかを切り分けるために出す
         let mut datagram_received = false;
-        let (mut handle_for_datagram, mut data_plane_for_datagram, mut track_map_for_datagram) =
-            datagram_session_rx.borrow_and_update().clone();
+        let (
+            mut handle_for_datagram,
+            mut data_plane_for_datagram,
+            mut track_map_for_datagram,
+            mut generation_for_datagram,
+        ) = datagram_session_rx.borrow_and_update().clone();
         // `recv_datagrams` は transport から datagram を取り出した後に await しないため
         // (`StreamHandle::recv_datagrams`)、select が `changed()` を選んで future を捨てても
         // 取り出し済みの datagram は失われない。新 session の datagram は新 handle 側に残る
@@ -2939,10 +2965,12 @@ pub async fn run(
                         // 受信タスクは `run` の終了時に abort されるため、通常はここへ来ない
                         break 'receive;
                     }
-                    let (handle, data_plane, map) = datagram_session_rx.borrow_and_update().clone();
+                    let (handle, data_plane, map, epoch) =
+                        datagram_session_rx.borrow_and_update().clone();
                     handle_for_datagram = handle;
                     data_plane_for_datagram = data_plane;
                     track_map_for_datagram = map;
+                    generation_for_datagram = epoch;
                     tracing::info!("Datagram receive task switched to the migrated session");
                     continue 'receive;
                 }
@@ -2965,10 +2993,12 @@ pub async fn run(
                     if datagram_session_rx.changed().await.is_err() {
                         break 'receive;
                     }
-                    let (handle, data_plane, map) = datagram_session_rx.borrow_and_update().clone();
+                    let (handle, data_plane, map, epoch) =
+                        datagram_session_rx.borrow_and_update().clone();
                     handle_for_datagram = handle;
                     data_plane_for_datagram = data_plane;
                     track_map_for_datagram = map;
+                    generation_for_datagram = epoch;
                     tracing::info!(
                         "Datagram receive task switched to the migrated session after a receive error"
                     );
@@ -3010,6 +3040,23 @@ pub async fn run(
                 let action = plan_datagram(&raw, &track_map_for_datagram);
                 match action {
                     DatagramAction::DeliverAudio { datagram, payload } => {
+                        // session の世代 は切り替えのたびに変わるため、配送のたびに作る
+                        let delivery = AudioDelivery {
+                            audio_tx: &audio_tx_for_datagram,
+                            audio_config_validated_generation:
+                                &audio_config_validated_generation_for_datagram,
+                            session_generation: generation_for_datagram,
+                            is_opus_codec: audio_codec_for_datagram
+                                .as_deref()
+                                .is_some_and(decoder::is_opus_codec),
+                            catalog_sample_rate: audio_params
+                                .map_or(0, |(sample_rate, _)| sample_rate),
+                            catalog_channels: audio_params.map_or(0, |(_, channels)| channels),
+                            recorder: recorder_for_datagram.as_ref(),
+                            termination_tx: &termination_tx_for_datagram,
+                            catch_up: audio_catch_up_for_datagram.as_ref(),
+                            delivery_order: audio_delivery_order_for_datagram.as_ref(),
+                        };
                         // デコーダは subscription で 1 つを共有する。stream task と同じく
                         // デコードが終わるまでロックを保持する
                         let mut decoder = match audio_decoder_for_datagram.as_ref() {
@@ -3135,7 +3182,8 @@ pub async fn run(
                 &video_delivery_order,
                 &group_switch,
                 audio_decoder.as_ref(),
-                &audio_config_handled,
+                &audio_config_validated_generation,
+                session_generation,
                 &audio_catch_up,
                 &audio_delivery_order,
                 &last_received_locations,
@@ -3520,6 +3568,7 @@ pub async fn run(
                                                         client.handle(),
                                                         data_plane.clone(),
                                                         datagram_map,
+                                                        session_generation,
                                                     ));
                                                     // 再発行後の request の active と pending 管理
                                                     active_requests.remove(&request_id);
@@ -3800,6 +3849,7 @@ pub async fn run(
                                             client.handle(),
                                             data_plane.clone(),
                                             datagram_map,
+                                            session_generation,
                                         ));
                                         tracing::info!(
                                             "Accepted PUBLISH for SUBSCRIBE_TRACKS: request_id={}, \
@@ -3825,6 +3875,7 @@ pub async fn run(
                                             client.handle(),
                                             data_plane.clone(),
                                             datagram_map,
+                                            session_generation,
                                         ));
                                         tracing::warn!(
                                             "Failed to accept PUBLISH for SUBSCRIBE_TRACKS: \
@@ -4050,10 +4101,18 @@ pub async fn run(
                         // datagram 受信タスクには、旧 session を閉じる前に新しい handle /
                         // data_plane / alias 表を渡す。閉じた後だと旧接続の受信エラーでタスクが
                         // 終了してしまう
+                        // 新しい session の世代 を進める。Audio Config の検証済み世代 と
+                        // 比べることで、移行前の session の遅延 Object が新しい session の
+                        // 検証状態を進めないようにする
+                        let new_generation = {
+                            session_generation = session_generation.saturating_add(1);
+                            session_generation
+                        };
                         let _ = datagram_session_tx.send((
                             outcome.client.handle(),
                             outcome.data_plane.clone(),
                             datagram_map,
+                            new_generation,
                         ));
                         // 旧 session は STOP_SENDING を送ってから NO_ERROR で閉じる (§6.6.1 /
                         // §9.2)。GOAWAY の Timeout は待たず、main ループを塞がないよう別タスクで
@@ -4356,6 +4415,7 @@ pub async fn run(
                             client.handle(),
                             data_plane.clone(),
                             Arc::new(map_for_datagram),
+                            session_generation,
                         ));
                     }
                     match kind {
@@ -4468,6 +4528,7 @@ pub async fn run(
                         client.handle(),
                         data_plane.clone(),
                         datagram_map,
+                        session_generation,
                     ));
                     tracing::info!(
                         "Removed the ended PUBLISH-originated subscriptions: request_ids={ended_discard:?}"
@@ -5957,7 +6018,8 @@ async fn handle_incoming_stream(
     video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
     group_switch: &GroupSwitchHandle,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
-    audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    audio_config_validated_generation: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    session_generation: u64,
     audio_catch_up: &std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
     audio_delivery_order: &std::sync::Arc<std::sync::Mutex<AudioDeliveryOrder>>,
     last_received_locations: &std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
@@ -5989,7 +6051,8 @@ async fn handle_incoming_stream(
         video_delivery_order,
         group_switch,
         audio_decoder,
-        audio_config_handled,
+        audio_config_validated_generation,
+        session_generation,
         audio_catch_up,
         audio_delivery_order,
         last_received_locations,
@@ -6063,7 +6126,8 @@ async fn handle_stream_body(
     video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
     group_switch: &GroupSwitchHandle,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
-    audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    audio_config_validated_generation: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    session_generation: u64,
     audio_catch_up: &std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
     audio_delivery_order: &std::sync::Arc<std::sync::Mutex<AudioDeliveryOrder>>,
     last_received_locations: &std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
@@ -6433,7 +6497,7 @@ async fn handle_stream_body(
                     // catalog の codec が opus の場合のみ OpusHead として解釈する。AAC (mp4a.*) の
                     // Audio Config は AudioSpecificConfig であり、AudioToolbox のデコーダは
                     // 入力のサンプルレートとチャンネル数だけで構成できるため解釈しない。
-                    // 処理済みフラグは subscription で共有する: decode_audio_stream は
+                    // 検証済み世代は subscription で共有する: decode_audio_stream は
                     // subgroup stream ごとに呼ばれるが、OpusHead はセッションで 1 回しか
                     // 送られないため、共有しないと 2 本目以降の stream が OpusHead を
                     // 待ち続けて音声が途切れる。datagram 配送の音声とも共有する。
@@ -6446,7 +6510,8 @@ async fn handle_stream_body(
                         decoder.as_deref_mut(),
                         &AudioDelivery {
                             audio_tx,
-                            audio_config_handled,
+                            audio_config_validated_generation,
+                            session_generation,
                             is_opus_codec: audio_codec.is_some_and(decoder::is_opus_codec),
                             catalog_sample_rate: sample_rate,
                             catalog_channels: channels,
@@ -10799,10 +10864,12 @@ mod tests {
     ///
     /// catalog は 48 kHz / 1ch の Opus を宣言しているものとする。`recorder` が `None` のときは
     /// 録画しない。`delivery_order` は購読で共有する送出順の状態であり、呼び出し側が
-    /// `AudioDelivery` より長く保持する。
+    /// `AudioDelivery` より長く保持する。`session_generation` はこの配送経路が読む session の
+    /// 世代であり、`audio_config_validated_generation` と比べて Audio Config の処理可否を決める。
     fn test_audio_delivery<'a>(
         audio_tx: &'a std::sync::mpsc::Sender<DecodedAudioFrame>,
-        audio_config_handled: &'a std::sync::atomic::AtomicBool,
+        audio_config_validated_generation: &'a std::sync::atomic::AtomicU64,
+        session_generation: u64,
         termination_tx: &'a tokio::sync::mpsc::Sender<SessionError>,
         catch_up: &'a std::sync::Mutex<AudioReceiveCatchUp>,
         delivery_order: &'a std::sync::Mutex<AudioDeliveryOrder>,
@@ -10810,7 +10877,8 @@ mod tests {
     ) -> AudioDelivery<'a> {
         AudioDelivery {
             audio_tx,
-            audio_config_handled,
+            audio_config_validated_generation,
+            session_generation,
             is_opus_codec: true,
             catalog_sample_rate: 48_000,
             catalog_channels: 1,
@@ -10848,13 +10916,14 @@ mod tests {
         );
 
         let (audio_tx, audio_rx) = std::sync::mpsc::channel();
-        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let audio_config_validated_generation = std::sync::atomic::AtomicU64::new(0);
         let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
         let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
         let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
         let delivery = test_audio_delivery(
             &audio_tx,
-            &audio_config_handled,
+            &audio_config_validated_generation,
+            1,
             &termination_tx,
             &catch_up,
             &delivery_order,
@@ -10909,9 +10978,10 @@ mod tests {
             frame.decoded_us,
             now_us,
         );
-        assert!(
-            audio_config_handled.load(Ordering::Acquire),
-            "Audio Config を処理済みとして記録すること"
+        assert_eq!(
+            audio_config_validated_generation.load(Ordering::Acquire),
+            1,
+            "Audio Config を検証済みとして記録すること"
         );
         assert!(
             termination_rx.try_recv().is_err(),
@@ -11088,13 +11158,14 @@ mod tests {
     #[tokio::test]
     async fn audio_delivery_requests_session_termination_on_malformed_loc_properties() {
         let (audio_tx, audio_rx) = std::sync::mpsc::channel();
-        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let audio_config_validated_generation = std::sync::atomic::AtomicU64::new(0);
         let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
         let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
         let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
         let delivery = test_audio_delivery(
             &audio_tx,
-            &audio_config_handled,
+            &audio_config_validated_generation,
+            1,
             &termination_tx,
             &catch_up,
             &delivery_order,
@@ -11151,13 +11222,14 @@ mod tests {
     #[tokio::test]
     async fn audio_delivery_does_not_request_session_termination_on_malformed_track() {
         let (audio_tx, audio_rx) = std::sync::mpsc::channel();
-        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let audio_config_validated_generation = std::sync::atomic::AtomicU64::new(0);
         let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
         let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
         let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
         let delivery = test_audio_delivery(
             &audio_tx,
-            &audio_config_handled,
+            &audio_config_validated_generation,
+            1,
             &termination_tx,
             &catch_up,
             &delivery_order,
@@ -11192,13 +11264,14 @@ mod tests {
     #[tokio::test]
     async fn audio_delivery_accepts_unknown_duplicate_loc_properties() {
         let (audio_tx, audio_rx) = std::sync::mpsc::channel();
-        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let audio_config_validated_generation = std::sync::atomic::AtomicU64::new(0);
         let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
         let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
         let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
         let delivery = test_audio_delivery(
             &audio_tx,
-            &audio_config_handled,
+            &audio_config_validated_generation,
+            1,
             &termination_tx,
             &catch_up,
             &delivery_order,
@@ -11327,13 +11400,14 @@ mod tests {
         let packet = encode_opus_silence(48_000, 1);
         let properties = audio_loc_properties(960, 48_000, Some(&opus_head(48_000, 1)));
         let (audio_tx, _audio_rx) = std::sync::mpsc::channel();
-        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let audio_config_validated_generation = std::sync::atomic::AtomicU64::new(0);
         let (termination_tx, _termination_rx) = tokio::sync::mpsc::channel(1);
         let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
         let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
         let delivery = test_audio_delivery(
             &audio_tx,
-            &audio_config_handled,
+            &audio_config_validated_generation,
+            1,
             &termination_tx,
             &catch_up,
             &delivery_order,
@@ -11440,13 +11514,14 @@ mod tests {
 
         let packet = encode_opus_silence(48_000, 1);
         let (audio_tx, audio_rx) = std::sync::mpsc::channel();
-        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let audio_config_validated_generation = std::sync::atomic::AtomicU64::new(0);
         let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
         let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
         let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
         let delivery = test_audio_delivery(
             &audio_tx,
-            &audio_config_handled,
+            &audio_config_validated_generation,
+            1,
             &termination_tx,
             &catch_up,
             &delivery_order,
@@ -11720,13 +11795,14 @@ mod tests {
     async fn audio_delivery_does_not_send_objects_older_than_the_delivered_one() {
         let packet = encode_opus_silence(48_000, 1);
         let (audio_tx, audio_rx) = std::sync::mpsc::channel();
-        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let audio_config_validated_generation = std::sync::atomic::AtomicU64::new(0);
         let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
         let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
         let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
         let delivery = test_audio_delivery(
             &audio_tx,
-            &audio_config_handled,
+            &audio_config_validated_generation,
+            1,
             &termination_tx,
             &catch_up,
             &delivery_order,
@@ -11909,7 +11985,7 @@ mod tests {
     async fn audio_delivery_does_not_send_objects_before_the_subscription_boundary() {
         let packet = encode_opus_silence(48_000, 1);
         let (audio_tx, audio_rx) = std::sync::mpsc::channel();
-        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let audio_config_validated_generation = std::sync::atomic::AtomicU64::new(0);
         let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
         let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
         let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
@@ -11923,7 +11999,8 @@ mod tests {
             }));
         let delivery = test_audio_delivery(
             &audio_tx,
-            &audio_config_handled,
+            &audio_config_validated_generation,
+            1,
             &termination_tx,
             &catch_up,
             &delivery_order,
@@ -12087,13 +12164,14 @@ mod tests {
     async fn audio_delivery_passes_the_input_lag_to_the_catch_up() {
         let packet = encode_opus_silence(48_000, 1);
         let (audio_tx, audio_rx) = std::sync::mpsc::channel();
-        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let audio_config_validated_generation = std::sync::atomic::AtomicU64::new(0);
         let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
         let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
         let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
         let delivery = test_audio_delivery(
             &audio_tx,
-            &audio_config_handled,
+            &audio_config_validated_generation,
+            1,
             &termination_tx,
             &catch_up,
             &delivery_order,
@@ -12188,14 +12266,15 @@ mod tests {
     async fn audio_delivery_sends_objects_when_there_is_no_boundary() {
         let packet = encode_opus_silence(48_000, 1);
         let (audio_tx, audio_rx) = std::sync::mpsc::channel();
-        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let audio_config_validated_generation = std::sync::atomic::AtomicU64::new(0);
         let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
         let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
         // 境界を設定しない (Largest Object が告知されなかった購読)
         let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
         let delivery = test_audio_delivery(
             &audio_tx,
-            &audio_config_handled,
+            &audio_config_validated_generation,
+            1,
             &termination_tx,
             &catch_up,
             &delivery_order,
@@ -12246,7 +12325,7 @@ mod tests {
             .expect("LOC プロパティを encode できること");
 
         let (audio_tx, audio_rx) = std::sync::mpsc::channel();
-        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let audio_config_validated_generation = std::sync::atomic::AtomicU64::new(0);
         let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
         let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
         let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
@@ -12259,7 +12338,8 @@ mod tests {
             }));
         let delivery = test_audio_delivery(
             &audio_tx,
-            &audio_config_handled,
+            &audio_config_validated_generation,
+            1,
             &termination_tx,
             &catch_up,
             &delivery_order,
@@ -12278,9 +12358,10 @@ mod tests {
             .await;
 
         assert!(deliver, "境界以下の音声でも配送を継続すること");
-        assert!(
-            audio_config_handled.load(Ordering::Acquire),
-            "境界以下の音声でも Audio Config を処理済みとして記録すること"
+        assert_eq!(
+            audio_config_validated_generation.load(Ordering::Acquire),
+            1,
+            "境界以下の音声でも Audio Config を検証済みとして記録すること"
         );
         assert!(
             audio_rx.try_recv().is_err(),
@@ -12329,7 +12410,7 @@ mod tests {
         let live_payload = b"live";
 
         let (audio_tx, _audio_rx) = std::sync::mpsc::channel();
-        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let audio_config_validated_generation = std::sync::atomic::AtomicU64::new(0);
         let (termination_tx, _termination_rx) = tokio::sync::mpsc::channel(1);
         let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
         let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
@@ -12342,7 +12423,8 @@ mod tests {
             }));
         let delivery = test_audio_delivery(
             &audio_tx,
-            &audio_config_handled,
+            &audio_config_validated_generation,
+            1,
             &termination_tx,
             &catch_up,
             &delivery_order,
@@ -12479,13 +12561,14 @@ mod tests {
     async fn audio_delivery_drops_reordered_live_objects_after_the_boundary() {
         let packet = encode_opus_silence(48_000, 1);
         let (audio_tx, audio_rx) = std::sync::mpsc::channel();
-        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let audio_config_validated_generation = std::sync::atomic::AtomicU64::new(0);
         let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
         let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
         let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(Some(loc(100, 0))));
         let delivery = test_audio_delivery(
             &audio_tx,
-            &audio_config_handled,
+            &audio_config_validated_generation,
+            1,
             &termination_tx,
             &catch_up,
             &delivery_order,
@@ -13629,6 +13712,125 @@ mod tests {
             assert!(
                 !is_already_subscribed_publish(&publish(Some(9)), &[]),
                 "購読一覧が空のときは重複と判定しないこと"
+            );
+        }
+    }
+
+    /// 移行をまたぐ Audio Config の処理を session の世代で固定する
+    mod audio_config_generation_tests {
+        use super::*;
+
+        /// 同じ世代では 1 回だけ処理し、新しい世代では処理し直すこと
+        ///
+        /// `fetch_max` の戻り値で判定するため、低い世代の遅延配送が高い世代の記録を
+        /// 巻き戻さないことも同時に固定する。
+        #[test]
+        fn claim_audio_config_generation_is_monotonic() {
+            let validated = std::sync::atomic::AtomicU64::new(0);
+            assert!(
+                claim_audio_config_generation(&validated, 1),
+                "最初の session の Audio Config は処理すること"
+            );
+            assert!(
+                !claim_audio_config_generation(&validated, 1),
+                "同じ session の Audio Config は 1 回だけ処理すること"
+            );
+            assert!(
+                claim_audio_config_generation(&validated, 2),
+                "移行後の session の Audio Config は処理し直すこと"
+            );
+            assert!(
+                !claim_audio_config_generation(&validated, 1),
+                "旧 session の Audio Config で検証済み世代を巻き戻さないこと"
+            );
+            assert!(
+                !claim_audio_config_generation(&validated, 2),
+                "移行後の session の Audio Config は 1 回だけ処理すること"
+            );
+        }
+
+        /// 旧 session の Audio Config が移行後の session の記録を巻き戻さないこと
+        ///
+        /// 配送経路から `AudioDelivery::deliver` を通しても、旧世代の遅延 Object が
+        /// 検証済み世代を進めないことを確認する。移行分岐から世代を進める配線は統合テストで
+        /// 確認する。
+        #[tokio::test]
+        async fn old_session_audio_config_does_not_validate_the_new_generation() {
+            let (audio_tx, _audio_rx) = std::sync::mpsc::channel();
+            let audio_config_validated_generation = std::sync::atomic::AtomicU64::new(0);
+            let (termination_tx, _termination_rx) = tokio::sync::mpsc::channel(1);
+            let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
+            let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
+            let packet = encode_opus_silence(48_000, 1);
+            let properties = audio_loc_properties(960, 48_000, Some(&opus_head(48_000, 1)));
+            let properties_bytes = properties
+                .encode()
+                .expect("LOC プロパティを encode できること");
+
+            // 世代 1 の session で Audio Config を処理する
+            let delivery = test_audio_delivery(
+                &audio_tx,
+                &audio_config_validated_generation,
+                1,
+                &termination_tx,
+                &catch_up,
+                &delivery_order,
+                None,
+            );
+            assert!(
+                delivery
+                    .deliver(Some(loc(0, 0)), Some(&properties_bytes), &packet, None)
+                    .await,
+                "Audio Config 付きの音声 Object は配送を継続すること"
+            );
+            assert_eq!(
+                audio_config_validated_generation.load(Ordering::Acquire),
+                1,
+                "世代 1 の Audio Config を処理済みとして記録すること"
+            );
+
+            // 新しい session (世代 2) の Audio Config を処理し直す
+            let migrated = test_audio_delivery(
+                &audio_tx,
+                &audio_config_validated_generation,
+                2,
+                &termination_tx,
+                &catch_up,
+                &delivery_order,
+                None,
+            );
+            assert!(
+                migrated
+                    .deliver(Some(loc(1, 0)), Some(&properties_bytes), &packet, None)
+                    .await,
+                "移行後の Audio Config 付き Object も配送を継続すること"
+            );
+            assert_eq!(
+                audio_config_validated_generation.load(Ordering::Acquire),
+                2,
+                "移行後の session の Audio Config を処理済みとして記録すること"
+            );
+
+            // 移行後に旧 session (世代 1) の遅延 Object が届いても記録は巻き戻らない
+            let stale = test_audio_delivery(
+                &audio_tx,
+                &audio_config_validated_generation,
+                1,
+                &termination_tx,
+                &catch_up,
+                &delivery_order,
+                None,
+            );
+            assert!(
+                stale
+                    .deliver(Some(loc(2, 0)), Some(&properties_bytes), &packet, None)
+                    .await,
+                "旧 session の Audio Config 付き Object も配送を継続すること"
+            );
+            assert_eq!(
+                audio_config_validated_generation.load(Ordering::Acquire),
+                2,
+                "旧 session の Audio Config で検証済み世代を巻き戻さないこと"
             );
         }
     }
