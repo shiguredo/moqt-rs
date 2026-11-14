@@ -1,8 +1,8 @@
 # GOAWAY 移行後に Audio Config の送信・検証状態をリセットする
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
-- Branch: feature/fix-goaway-audio-config-reset
+- Completed: 2026-11-14
+- Branch: develop
 - Polished: 2026-10-20
 
 ## 目的
@@ -49,3 +49,20 @@ pipeline 全体の GOAWAY 移行テストは 0338 の統合テスト基盤で扱
 - 移行成功後に subscriber の `audio_config_handled` が false になり、移行後に受信した Audio Config が検証対象になること。
 - リセット処理が `#[cfg(test)]` の単体テストで固定されていること。pipeline 全体の GOAWAY 移行テストは 0338 の統合テスト基盤で扱う (本 issue の完了条件には含めない)。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+移行先の session で Audio Config を検証し直すようにした。
+
+- `crates/moq-sub/src/pipeline.rs` の `AudioDelivery` に session の世代 (`session_generation`) と
+  処理済み世代 (`audio_config_validated_generation`) を持たせ、`claim_audio_config_generation` で
+  「自分の session の世代が処理済み世代より新しければ処理する」と判定する。`fetch_max` で単調に
+  記録するため、移行前の session の遅延 Object が後から届いても処理済み世代を巻き戻さない。
+- 移行成功時に main ループが `session_generation` を進める。subgroup stream の task は spawn 時の
+  世代を、datagram 受信タスクは watch で受け取った世代を使う。
+- `#[cfg(test)]` の `audio_config_generation_tests` で、同じ世代では 1 回だけ処理すること、
+  移行後の世代では処理し直すこと、旧世代の遅延配送が処理済み世代を巻き戻さないことを固定した。
+- publisher 側の `audio_config_sent` は `crates/moq-pub/src/pipeline.rs` の control GOAWAY 移行と
+  request 単位移行の経路で既に false に戻されており、本 issue では変更していない。
+- `cargo test -p moq-sub --lib` (240 件) / `cargo clippy -p moq-sub --all-targets -- -D warnings` /
+  `cargo fmt --all -- --check` が通ることを確認した。
