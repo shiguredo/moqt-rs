@@ -1,7 +1,7 @@
 # request stream GOAWAY の非空 New Session URI で個別 request を移行する
 
 - Created: 2026-10-25
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-14
 - Branch: develop
 - Polished: 2026-11-14
 - Refreshed: 2026-11-04
@@ -123,3 +123,29 @@ publisher は空 URI のときだけ現在の session で PUBLISH を再発行�
   request stream GOAWAY での PUBLISH 再発行、同一移行先 URL を指す複数 request の session 共有、移行期限切れでの
   main ループ終了、FETCH の再発行、request 単位移行後の Audio Config 再送を完了条件として追加する。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+request stream GOAWAY の非空 New Session URI による request 単位移行を、移行対象の request だけを
+専用タスクの side session で扱う方式で実装した。
+
+- publisher は New Session URI が現在の URL と同じなら現在の session で PUBLISH を再発行する
+  (`goaway_action` と `same_session_url`)。別 URL なら side session を確立して PUBLISH を移行する。
+- subscriber は catalog / video / audio の SUBSCRIBE と FETCH を side session へ移行する。FETCH は
+  namespace / track name / range パラメータを保持し、移行先で再発行する。旧 FETCH の request stream は
+  STOP_SENDING と RESET_STREAM で終端する。
+- side session は移行先 URL ごとに 1 本にまとめ、複数の request を共有する。旧 session は維持し、
+  移行した request だけを STOP_SENDING / PUBLISH_DONE で終端する。
+- 移行中の Object は既存の `VideoDeliveryOrder` / `AudioDeliveryOrder` / `LastReceivedLocations` で
+  重複を排除する。Audio Config は session の世代で検証し直す。
+- 期限内に移行できない場合は control GOAWAY の移行失敗と同じ警告を出して main ループを終了する。
+- docs/moqt.md / docs/missing-features.md / docs/multi-session-request-migration.md を実装に合わせて更新した。
+- 純粋関数の単体テストを追加した。pipeline 全体を 2 session で駆動する統合テストは 0338 に委ねる。
+
+残る制約:
+
+- side session 自身が GOAWAY / 切断を受けた場合の再移行は未対応である。
+- 共有 side session の接続期限は、最初に移行した request の GOAWAY Timeout で固定される。
+
+検証: `cargo test -p moq-sub --lib` (243 件) / `cargo test -p moq-pub --lib` (237 件) /
+`cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ることを確認した。
