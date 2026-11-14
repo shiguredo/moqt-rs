@@ -2435,6 +2435,8 @@ enum RequestMigrationStep {
     Datagrams(Option<std::result::Result<Vec<Vec<u8>>, TransportError>>),
     /// 100 ms 周期の tick
     Tick,
+    /// side session で検出した書式違反による終了依頼
+    Termination(SessionError),
 }
 
 /// request 単位移行タスクを起動する
@@ -2632,6 +2634,11 @@ async fn run_request_migration(
     // tick の周期は main ループと同じ 100 ms にする。`MoqtClient` の tick は session の
     // タイマー (control message timeout / data stream timeout / GOAWAY deadline) を進める
     // ため、ここが止まると side session の進行も止まる。
+    //
+    // side session の stream task が検出した書式違反は、この side session を閉じる。
+    // main session の終了依頼チャネルへ流すと、違反していない main session を閉じてしまう
+    let (side_termination_tx, mut side_termination_rx) =
+        tokio::sync::mpsc::channel::<SessionError>(1);
     let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(100));
     tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // datagram の受信は専用タスクへ分ける。100 ms の tick と同じ `select!` で
@@ -2705,7 +2712,7 @@ async fn run_request_migration(
                 &shared.audio_catch_up,
                 &shared.audio_delivery_order,
                 &shared.last_received_locations,
-                &shared.termination_tx,
+                &side_termination_tx,
                 &shared.catalog_tx,
                 &shared.pending_subgroups,
                 shared.playback,
@@ -2727,6 +2734,10 @@ async fn run_request_migration(
             received = datagram_rx.recv(), if kind == TrackKind::Audio => {
                 RequestMigrationStep::Datagrams(received)
             }
+            termination = side_termination_rx.recv() => match termination {
+                Some(termination) => RequestMigrationStep::Termination(termination),
+                None => break 'receive,
+            },
             _ = tick_interval.tick() => RequestMigrationStep::Tick,
         };
         match step {
@@ -2911,6 +2922,11 @@ async fn run_request_migration(
             RequestMigrationStep::Tick => {
                 // main ループと同じく、session のタイマーを進める
                 client.tick_now();
+            }
+            RequestMigrationStep::Termination(termination) => {
+                // side session で見つけた書式違反は side session を閉じる
+                close_session(&mut client, termination).await;
+                break 'receive;
             }
         }
     }
@@ -4083,8 +4099,13 @@ pub async fn run(
                                                     // する。Audio Config の検証済み世代と比べ、
                                                     // side session で最初に届いた Audio Config を
                                                     // 処理させる
-                                                    let side_generation =
+                                                    // session の世代は 1 本のカウンタから
+                                                    // 払い出す。side session と全 session 移行で
+                                                    // 同じ値を再利用すると Audio Config の
+                                                    // 検証済み世代が衝突する
+                                                    session_generation =
                                                         session_generation.saturating_add(1);
+                                                    let side_generation = session_generation;
                                                     let (task, receiver) = spawn_request_migration(
                                                         &task_monitor,
                                                         RequestMigrationRequest {
