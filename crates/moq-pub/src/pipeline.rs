@@ -1992,9 +1992,9 @@ pub async fn run(
                                                 video_request_id,
                                                 audio_request_id,
                                                 catalog_request_id,
-                                                video_publish_target.as_ref(),
-                                                audio_publish_target.as_ref(),
-                                                catalog_publish_target.as_ref(),
+                                                video_publish_target.as_ref().map(|target| target.old_request_id),
+                                                audio_publish_target.as_ref().map(|target| target.old_request_id),
+                                                catalog_publish_target.as_ref().map(|target| target.old_request_id),
                                             );
                                             if track_migrated(
                                                 kind,
@@ -2099,9 +2099,9 @@ pub async fn run(
                                                 video_request_id,
                                                 audio_request_id,
                                                 catalog_request_id,
-                                                video_publish_target.as_ref(),
-                                                audio_publish_target.as_ref(),
-                                                catalog_publish_target.as_ref(),
+                                                video_publish_target.as_ref().map(|target| target.old_request_id),
+                                                audio_publish_target.as_ref().map(|target| target.old_request_id),
+                                                catalog_publish_target.as_ref().map(|target| target.old_request_id),
                                             );
                                             if kind == PublishTrack::Unknown {
                                                 tracing::warn!(
@@ -3271,27 +3271,15 @@ fn publish_track_for_main_goaway(
     video_request_id: Option<u64>,
     audio_request_id: Option<u64>,
     catalog_request_id: u64,
-    video_publish_target: Option<&PublishTarget>,
-    audio_publish_target: Option<&PublishTarget>,
-    catalog_publish_target: Option<&PublishTarget>,
+    video_old_request_id: Option<u64>,
+    audio_old_request_id: Option<u64>,
+    catalog_old_request_id: Option<u64>,
 ) -> PublishTrack {
-    let video_request_id = match video_publish_target {
-        Some(target) => Some(target.old_request_id),
-        None => video_request_id,
-    };
-    let audio_request_id = match audio_publish_target {
-        Some(target) => Some(target.old_request_id),
-        None => audio_request_id,
-    };
-    let catalog_request_id = match catalog_publish_target {
-        Some(target) => target.old_request_id,
-        None => catalog_request_id,
-    };
     publish_track_for_request(
         request_id,
-        video_request_id,
-        audio_request_id,
-        catalog_request_id,
+        video_old_request_id.or(video_request_id),
+        audio_old_request_id.or(audio_request_id),
+        catalog_old_request_id.unwrap_or(catalog_request_id),
     )
 }
 
@@ -5925,6 +5913,39 @@ mod tests {
     /// request id から再発行する track を引く判断を固定する
     mod publish_track_tests {
         use super::*;
+
+        /// main session の GOAWAY を移行前の request id で解決すること
+        ///
+        /// 移行済みの track は main ループの request id が side session のものに
+        /// 差し替わっているため、旧 session の GOAWAY は移行前の id で照合する。
+        /// 未移行の track は現在の main session の id で照合する。
+        #[test]
+        fn main_goaway_resolves_tracks_from_the_old_request_ids() {
+            // 映像だけ移行済み (旧 id 2、side session の id は 0)
+            assert_eq!(
+                publish_track_for_main_goaway(2, Some(0), Some(1), 3, Some(2), None, None),
+                PublishTrack::Video,
+                "移行済みの映像は移行前の request id で解決すること"
+            );
+            // 未移行の音声は main session の現在の id で解決する
+            assert_eq!(
+                publish_track_for_main_goaway(1, Some(0), Some(1), 3, Some(2), None, None),
+                PublishTrack::Audio,
+                "未移行の音声は現在の request id で解決すること"
+            );
+            // 全 track 移行済みでも旧 id で解決する
+            assert_eq!(
+                publish_track_for_main_goaway(3, Some(0), Some(1), 2, Some(4), Some(5), Some(3)),
+                PublishTrack::Catalog,
+                "移行済みのカタログは移行前の request id で解決すること"
+            );
+            // 旧 id と現在の id が数値で衝突しても、移行済みの track を優先する
+            assert_eq!(
+                publish_track_for_main_goaway(2, Some(2), Some(1), 3, Some(2), None, None),
+                PublishTrack::Video,
+                "旧 id と現在の id が衝突しても移行前の id を優先すること"
+            );
+        }
 
         /// 映像 / 音声 / カタログの request id をそれぞれの track として引くこと
         #[test]
