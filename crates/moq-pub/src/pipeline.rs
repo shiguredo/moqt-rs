@@ -4,7 +4,7 @@
 //! sans-I/O な `shiguredo_moqt::session::core::Session` を駆動する
 //! [`tokio_moq::moqt_client::MoqtClient`] と結線する。
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use shiguredo_audio_device::AudioFrameOwned;
@@ -174,12 +174,19 @@ const MIGRATION_LIMIT_WINDOW: Duration = Duration::from_secs(600);
 /// 時間窓内で許す移行回数
 const MAX_MIGRATIONS_PER_WINDOW: usize = 5;
 
-/// request 単位移行タスクから main ループへ送るイベントのチャネル容量
+/// URL ごとの side session タスクから main ループへ送るイベントのチャネル容量
 ///
 /// side session の session イベントは 1 本の session から順に届き、Object の送信経路のように
 /// まとめて届くことはない。詰まった場合は side session の受信を止めて main ループの処理を
 /// 待つため、小さな容量で十分である。
 const REQUEST_MIGRATION_EVENT_CHANNEL_SIZE: usize = 32;
+
+/// URL ごとに共有する side session へ送るコマンドのチャネル容量
+///
+/// 移行できる track は映像 / 音声 / カタログの 3 本だけであり、同時に溜まるコマンドも
+/// その本数に収まる。session の確立中に 2 本目以降のコマンドが届いても捨てないよう、
+/// 全 track 分を格納できる容量にする。
+const REQUEST_MIGRATION_COMMAND_CHANNEL_SIZE: usize = 4;
 
 /// 移行の PUBLISH 失敗後に接続からやり直すときの初回待ち時間
 const MIGRATION_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(100);
@@ -1162,12 +1169,16 @@ pub async fn run(
     let mut migration_rx: Option<oneshot::Receiver<MigrationTaskResult>> = None;
     // 進行中の移行タスク。run の終了時に打ち切る
     let mut migration_task: Option<tokio::task::JoinHandle<()>> = None;
-    // request stream の GOAWAY で別 URL の session へ PUBLISH を移すタスクのイベント受信口。
-    // 送信側 (`request_migration_tx`) は main ループが保持し続けるため、受信は常に待てる
+    // request stream の GOAWAY で別 URL の session へ PUBLISH を移す side session から
+    // イベントを受け取るチャネル。送信側 (`request_migration_tx`) は main ループが保持し
+    // 続けるため、受信は常に待てる
     let (request_migration_tx, mut request_migration_rx) =
         mpsc::channel::<RequestMigrationEvent>(REQUEST_MIGRATION_EVENT_CHANNEL_SIZE);
-    // 進行中の request 単位移行のタスク。run の終了時に打ち切る
+    // 進行中の request 単位移行 side session のタスク。run の終了時に打ち切る
     let mut request_migration_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    // 移行先 URL ごとの side session。同じ移行先 URL を指す複数の PUBLISH は 1 本の
+    // side session を共有し、2 本目以降は slot が持つチャネルへ PUBLISH の再発行を依頼する
+    let mut request_migration_sessions: HashMap<String, SideSessionSlot> = HashMap::new();
     // 確立処理中の track。同じ track の移行を二重に開始しないために持つ
     let mut migrating_tracks: Vec<PublishTrack> = Vec::new();
     // request 単位移行で side session へ PUBLISH を移した track の送出先。移行していない
@@ -1973,14 +1984,17 @@ pub async fn run(
                                             }
                                             // request 単位移行で side session へ PUBLISH を移した
                                             // track は、main ループが持つ request id が side
-                                            // session のものになっている。旧 session の request
-                                            // id と数値が一致しても別の request であるため、
-                                            // 再発行の対象から外す
-                                            let kind = publish_track_for_request(
+                                            // session のものになっている。旧 session の GOAWAY
+                                            // は移行前の request id で届くため、移行済みの
+                                            // track は `PublishTarget` が保持する旧 id で照合する
+                                            let kind = publish_track_for_main_goaway(
                                                 request_id,
                                                 video_request_id,
                                                 audio_request_id,
                                                 catalog_request_id,
+                                                video_publish_target.as_ref(),
+                                                audio_publish_target.as_ref(),
+                                                catalog_publish_target.as_ref(),
                                             );
                                             if track_migrated(
                                                 kind,
@@ -2068,7 +2082,9 @@ pub async fn run(
                                             // する。この example の main ループは 1 つの
                                             // `MoqtClient` しか所有できないため、専用タスクが
                                             // side session を確立して PUBLISH を張り、main ループ
-                                            // がその session へ Object を送る (§9.2)
+                                            // がその session へ Object を送る (§9.2)。同じ移行先
+                                            // URL を指す複数の PUBLISH は 1 本の side session を
+                                            // 共有する
                                             if migration_rx.is_some() {
                                                 // session 全体の移行が進行中なら、その移行先で
                                                 // 全 track を張り直す。drain 中の session で
@@ -2078,11 +2094,14 @@ pub async fn run(
                                                 );
                                                 return Ok(false);
                                             }
-                                            let kind = publish_track_for_request(
+                                            let kind = publish_track_for_main_goaway(
                                                 request_id,
                                                 video_request_id,
                                                 audio_request_id,
                                                 catalog_request_id,
+                                                video_publish_target.as_ref(),
+                                                audio_publish_target.as_ref(),
+                                                catalog_publish_target.as_ref(),
                                             );
                                             if kind == PublishTrack::Unknown {
                                                 tracing::warn!(
@@ -2128,24 +2147,55 @@ pub async fn run(
                                                 Instant::now(),
                                                 timeout,
                                             );
-                                            tracing::info!(
-                                                "Starting a background request migration to {}: kind={kind:?}, request_id={request_id}, timeout={timeout}ms, local_default={}",
-                                                target.url.authority,
-                                                deadline.uses_local_default(),
-                                            );
-                                            let task = spawn_request_migration(
-                                                &task_monitor,
-                                                RequestMigrationRequest {
-                                                    url: target.url,
-                                                    kind,
-                                                    old_request_id: request_id,
-                                                    deadline,
-                                                    config: config.clone(),
-                                                    namespace: namespace.clone(),
-                                                },
-                                                request_migration_tx.clone(),
-                                            );
-                                            request_migration_tasks.push(task);
+                                            let command = SideSessionCommand::Publish {
+                                                kind,
+                                                old_request_id: request_id,
+                                                deadline,
+                                            };
+                                            // 同じ移行先 URL の side session が既にあれば、その
+                                            // session で PUBLISH を再発行する。1 本の side session
+                                            // を同じ URL を指す複数の track で共有する
+                                            let key = side_session_key(&target.url);
+                                            let existing = request_migration_sessions
+                                                .get(&key)
+                                                .map(|slot| slot.commands.clone());
+                                            if let Some(commands) = existing {
+                                                // 受信側のタスクが既に終了している場合は送信に
+                                                // 失敗する。Ended の到着を待たずに終了経路へ進む
+                                                if commands.send(command).await.is_err() {
+                                                    tracing::warn!(
+                                                        "Failed to send a PUBLISH migration command to the existing side session: authority={}, kind={kind:?}",
+                                                        target.url.authority
+                                                    );
+                                                    request_migration_sessions.remove(&key);
+                                                    return Ok(true);
+                                                }
+                                                tracing::info!(
+                                                    "Requested the {kind:?} PUBLISH migration on the existing side session: authority={}, request_id={request_id}",
+                                                    target.url.authority
+                                                );
+                                            } else {
+                                                tracing::info!(
+                                                    "Starting a background request migration to {}: kind={kind:?}, request_id={request_id}, timeout={timeout}ms, local_default={}",
+                                                    target.url.authority,
+                                                    deadline.uses_local_default(),
+                                                );
+                                                let (task, commands) = spawn_request_migration(
+                                                    &task_monitor,
+                                                    RequestMigrationRequest {
+                                                        url: target.url,
+                                                        config: config.clone(),
+                                                        namespace: namespace.clone(),
+                                                    },
+                                                    command,
+                                                    request_migration_tx.clone(),
+                                                );
+                                                request_migration_tasks.push(task);
+                                                request_migration_sessions.insert(
+                                                    key,
+                                                    SideSessionSlot { commands },
+                                                );
+                                            }
                                             migrating_tracks.push(kind);
                                             // 新 session の PUBLISH が成立するまで旧 session の
                                             // 配信を止めない (§7.7.1)
@@ -2482,6 +2532,9 @@ pub async fn run(
                             // 打ち切ったタスクが送信済みのイベントを捨てる。移行先の session の
                             // request id を古い side session のものへ差し替えないためである
                             while request_migration_rx.try_recv().is_ok() {}
+                            // URL ごとの side session の slot も破棄する。全 track を新しい
+                            // session で張り直すため、side session はもう使わない
+                            request_migration_sessions.clear();
                             // request 単位移行で旧 session の PUBLISH を既に終端した track は、
                             // 旧 session の終了処理でも PUBLISH_DONE を送らない。main ループが
                             // 持つ request id は side session のものになっており、旧 session の
@@ -2642,6 +2695,7 @@ pub async fn run(
             Some(event) = request_migration_rx.recv() => {
                 match event {
                     RequestMigrationEvent::Migrated {
+                        url,
                         kind,
                         old_request_id,
                         new_request_id,
@@ -2677,6 +2731,7 @@ pub async fn run(
                                 // data plane から作り直す
                                 gop_tracker.request_new_group();
                                 video_publish_target = Some(PublishTarget {
+                                    old_request_id,
                                     handle: migrated_handle,
                                     data_plane: migrated_data_plane,
                                 });
@@ -2689,6 +2744,7 @@ pub async fn run(
                                 // 載せ直す
                                 audio_config_sent = false;
                                 audio_publish_target = Some(PublishTarget {
+                                    old_request_id,
                                     handle: migrated_handle,
                                     data_plane: migrated_data_plane,
                                 });
@@ -2702,6 +2758,7 @@ pub async fn run(
                                 .await;
                                 catalog_request_id = new_request_id;
                                 catalog_publish_target = Some(PublishTarget {
+                                    old_request_id,
                                     handle: migrated_handle,
                                     data_plane: migrated_data_plane,
                                 });
@@ -2737,34 +2794,40 @@ pub async fn run(
                         }
                         migrating_tracks.retain(|track| *track != kind);
                         tracing::info!(
-                            "Migrated the {kind:?} PUBLISH to another session: old_request_id={old_request_id}, new_request_id={new_request_id}, track_alias={new_track_alias}"
+                            "Migrated the {kind:?} PUBLISH to another session: authority={}, old_request_id={old_request_id}, new_request_id={new_request_id}, track_alias={new_track_alias}",
+                            url.authority
                         );
                     }
-                    RequestMigrationEvent::Ended { kind } => {
-                        // side session を失った track は main session へは戻せない。
-                        // `*_publish_target` を `None` にすると「未移行」の意味になり、
-                        // main session の別 request の id で送信してしまうため、
-                        // control GOAWAY の移行失敗と同じくパイプラインを終了する
+                    RequestMigrationEvent::Ended { url } => {
+                        // side session を共有するすべての track が送れなくなる。対象 URL の
+                        // slot を削除し、パイプラインを終了する。`*_publish_target` を
+                        // `None` にすると「未移行」の意味になり、main session の別 request
+                        // の id で送信してしまうため、control GOAWAY の移行失敗と同じく
+                        // パイプラインを終了する扱いにする
+                        request_migration_sessions.remove(&side_session_key(&url));
                         tracing::warn!(
-                            "The request migration side session ended: kind={kind:?}; ending the pipeline"
+                            "The request migration side session ended: authority={}; ending the pipeline",
+                            url.authority
                         );
                         session_ended = true;
                         break 'main;
                     }
                     RequestMigrationEvent::Failed {
+                        url,
                         kind,
                         old_request_id,
                         reason,
                     } => {
-                        // 期限切れ・接続失敗・再発行失敗である。control GOAWAY の移行失敗と
+                        // 1 本の PUBLISH の再発行失敗である。control GOAWAY の移行失敗と
                         // 同じく警告を出し、旧 session の終了経路へ進む
                         tracing::warn!(
-                            "Failed to migrate the {kind:?} PUBLISH to another session: request_id={old_request_id}: {reason}"
+                            "Failed to migrate the {kind:?} PUBLISH to another session: authority={}, request_id={old_request_id}: {reason}",
+                            url.authority
                         );
                         session_ended = true;
                         break 'main;
                     }
-                    RequestMigrationEvent::SessionEvent { kind, event } => {
+                    RequestMigrationEvent::SessionEvent { url, event } => {
                         // 移行済みの PUBLISH について side session で観測したイベントを
                         // ログに残す。side session の後始末は main ループが所有する
                         // `MoqtClient` では行えないため、記録だけに留める
@@ -2776,7 +2839,8 @@ pub async fn run(
                                 reason,
                             } => {
                                 tracing::info!(
-                                    "Received PUBLISH_DONE on the migrated {kind:?} track: request_id={request_id}, status_code={status_code}, stream_count={stream_count}, reason={}",
+                                    "Received PUBLISH_DONE on the request migration side session: authority={}, request_id={request_id}, status_code={status_code}, stream_count={stream_count}, reason={}",
+                                    url.authority,
                                     reason.as_str(),
                                 );
                             }
@@ -2788,7 +2852,8 @@ pub async fn run(
                                 ..
                             } => {
                                 tracing::warn!(
-                                    "Received REQUEST_ERROR on the migrated {kind:?} track: request_id={request_id}, error_code={error_code:#x}, retry_interval={retry_interval}, reason={}",
+                                    "Received REQUEST_ERROR on the request migration side session: authority={}, request_id={request_id}, error_code={error_code:#x}, retry_interval={retry_interval}, reason={}",
+                                    url.authority,
                                     reason.as_str(),
                                 );
                             }
@@ -2800,20 +2865,23 @@ pub async fn run(
                                 // side session の GOAWAY はさらに移行しない。移行対象の
                                 // 購読は relay が管理するため、ログだけ残す
                                 tracing::warn!(
-                                    "Received GOAWAY on the request migration side session: kind={kind:?}, timeout={timeout}, on_request_stream={on_request_stream:?}, new_session_uri_len={}",
+                                    "Received GOAWAY on the request migration side session: authority={}, timeout={timeout}, on_request_stream={on_request_stream:?}, new_session_uri_len={}",
+                                    url.authority,
                                     new_session_uri.len(),
                                 );
                             }
                             SessionEvent::CloseSession(err) => {
                                 tracing::warn!(
-                                    "The request migration side session closed: kind={kind:?}, {:#x} {}",
+                                    "The request migration side session closed: authority={}, {:#x} {}",
+                                    url.authority,
                                     err.code,
                                     err.reason,
                                 );
                             }
                             other => {
                                 tracing::debug!(
-                                    "Ignoring a session event on the request migration side session: kind={kind:?}, event={other:?}"
+                                    "Ignoring a session event on the request migration side session: authority={}, event={other:?}",
+                                    url.authority,
                                 );
                             }
                         }
@@ -3100,6 +3168,9 @@ pub async fn run(
         let _ = task.await;
         tracing::debug!("Aborted the request migration task");
     }
+    // URL ごとの side session の slot も破棄する。main ループはこれ以降 side session へ
+    // PUBLISH の再発行を依頼しない
+    request_migration_sessions.clear();
 
     tracing::info!("Pipeline stopped");
     mp4_reader_result.and(reencode_result)
@@ -3120,7 +3191,8 @@ enum GoawayAction {
     RepublishRequest(u64),
     /// request stream の GOAWAY で、New Session URI が別の URL を指している
     ///
-    /// 当該 PUBLISH だけを専用タスクが確立した side session で再発行する。
+    /// 当該 PUBLISH だけを専用タスクが確立した side session で再発行する。同じ移行先 URL を
+    /// 指す複数の PUBLISH は 1 本の side session を共有する。
     MigrateRequest(u64),
 }
 
@@ -3160,9 +3232,14 @@ enum PublishTrack {
 
 /// request id がどの PUBLISH に対応するかを返す
 ///
-/// request stream の GOAWAY は送信済みの PUBLISH の request id で通知されるため、
-/// 再発行する track をこの対応で決める。request id は session 内で一意であり、
-/// 映像 / 音声 / カタログの PUBLISH が同じ id を持つことはない。
+/// GOAWAY は送信済みの PUBLISH の request id で通知されるため、再発行する track をこの
+/// 対応で決める。request id は session 内で一意であり、映像 / 音声 / カタログの PUBLISH が
+/// 同じ id を持つことはない。
+///
+/// 渡す request id は **main session のもの**でなければならない。request 単位移行で
+/// side session へ PUBLISH を移した track は main ループが持つ `*_request_id` が side
+/// session のものに差し替わっているため、GOAWAY の照合には
+/// [`publish_track_for_main_goaway`] を使う。
 fn publish_track_for_request(
     request_id: u64,
     video_request_id: Option<u64>,
@@ -3178,6 +3255,44 @@ fn publish_track_for_request(
     } else {
         PublishTrack::Unknown
     }
+}
+
+/// main session の GOAWAY の request id から track を引く
+///
+/// request 単位移行で side session へ PUBLISH を移した track は、main ループが持つ
+/// `*_request_id` が side session の id に差し替わっている。main session の GOAWAY は
+/// 移行前の request id で届くため、移行済みの track は [`PublishTarget::old_request_id`]
+/// で照合し、移行していない track は `*_request_id` (そのまま main session の id) で
+/// 照合する。side session の request id は session ごとに 0 から採番されるため、未移行の
+/// track の request id と数値が一致しうる。この区別をしないと、未移行の track の GOAWAY
+/// を移行済みの別 track のものと取り違える。
+fn publish_track_for_main_goaway(
+    request_id: u64,
+    video_request_id: Option<u64>,
+    audio_request_id: Option<u64>,
+    catalog_request_id: u64,
+    video_publish_target: Option<&PublishTarget>,
+    audio_publish_target: Option<&PublishTarget>,
+    catalog_publish_target: Option<&PublishTarget>,
+) -> PublishTrack {
+    let video_request_id = match video_publish_target {
+        Some(target) => Some(target.old_request_id),
+        None => video_request_id,
+    };
+    let audio_request_id = match audio_publish_target {
+        Some(target) => Some(target.old_request_id),
+        None => audio_request_id,
+    };
+    let catalog_request_id = match catalog_publish_target {
+        Some(target) => target.old_request_id,
+        None => catalog_request_id,
+    };
+    publish_track_for_request(
+        request_id,
+        video_request_id,
+        audio_request_id,
+        catalog_request_id,
+    )
 }
 
 /// track の固定 Track Alias を返す
@@ -3196,12 +3311,9 @@ fn track_alias(kind: PublishTrack) -> Option<u64> {
 /// track が request 単位移行で side session へ PUBLISH を移しているか
 ///
 /// 移行した track は main ループが持つ request id が side session のものになっており、
-/// 旧 session の request id とは対応しない。旧 session の GOAWAY を照合するときは、
-/// この判定で移行済みの track を対象から外す。
-///
-/// side session では PUBLISH が最初の request であるため、その id は必ず 0 になる。旧 session
-/// の id 0 は最初の PUBLISH (映像を配信していれば映像) であり、[`publish_track_for_request`]
-/// も同じ順に照合するため、数値が一致しても別の track を取り違えることはない。
+/// 旧 session の request id とは対応しない。main session の GOAWAY を照合するときは
+/// [`publish_track_for_main_goaway`] が [`PublishTarget::old_request_id`] で旧 id を引く
+/// ため、この判定で移行済みの track を対象から外す。
 fn track_migrated(
     kind: PublishTrack,
     video_migrated: bool,
@@ -3216,12 +3328,34 @@ fn track_migrated(
     }
 }
 
+/// 同じ side session を共有する移行先 URL のキーを作る
+///
+/// 1 本の side session を共有できるのは、接続先が同じ URL の PUBLISH だけである。
+/// [`tokio_moq::same_session_url`] と同じく authority・path・fragment で識別する。
+/// fragment まで含めるのは、MSF fragment が track の namespace と認可トークン (c4m) を
+/// 変えうるためである。path は空か `/` で始まるため、authority との境界は曖昧にならない。
+///
+/// この文字列はログに出さない。fragment には認可トークンが含まれうるためである。
+fn side_session_key(url: &ServerUrl) -> String {
+    let fragment = match &url.fragment {
+        Some(fragment) => format!("{}:{}", fragment.fragment_type, fragment.value),
+        None => String::new(),
+    };
+    format!("{}{}#{}", url.authority, url.path, fragment)
+}
+
 /// PUBLISH した track の Object を送る session のハンドル一式
 ///
 /// request stream の GOAWAY で別 URL の session へ PUBLISH を移した track は、main ループが
 /// 持つ session ではなく side session の handle / data plane で Object を送る。移行していない
 /// track は `None` であり、main ループが持つ handle / data plane を使う。
 struct PublishTarget {
+    /// 移行前の main session の request id
+    ///
+    /// main ループが持つ `*_request_id` は移行後に side session の id へ差し替わる。
+    /// main session の GOAWAY を照合するときはこの id を使う
+    /// ([`publish_track_for_main_goaway`])。
+    old_request_id: u64,
     /// side session でストリームを開くハンドル
     handle: StreamHandle,
     /// side session の Session を駆動するハンドル
@@ -3689,16 +3823,49 @@ async fn republish_request_on_current_session(
     Ok(kind)
 }
 
-/// request stream の GOAWAY で別 URL の session へ PUBLISH を移すタスクのイベント
+/// URL ごとに共有する side session へ送るコマンド
 ///
-/// side session の確立と PUBLISH の再発行の結果と、移行後に side session で観測した session
+/// main ループは移行先 URL ごとに 1 本の side session を確立し、同じ URL を指す複数の
+/// PUBLISH の移行要求をこのコマンドでまとめて送る。[`SideSessionCommand::Publish`] を
+/// 受けたタスクは、確立済みの side session で PUBLISH を再発行する。
+#[derive(Debug, Clone, Copy)]
+enum SideSessionCommand {
+    /// 移行対象の PUBLISH を side session で再発行する
+    Publish {
+        /// 移行する track 種別
+        kind: PublishTrack,
+        /// 旧 session の request id (PUBLISH_DONE による終端は main ループが行う)
+        old_request_id: u64,
+        /// この PUBLISH の移行期限 (GOAWAY の Timeout から作る)
+        deadline: MigrationDeadline,
+    },
+}
+
+/// 移行先 URL ごとの side session
+///
+/// 同じ URL を指す複数の PUBLISH は、ここが持つコマンド送信チャネルで 1 本の side
+/// session を共有する。main ループは送信に失敗したときと side session の終了を観測した
+/// ときに slot を削除する。
+struct SideSessionSlot {
+    /// side session へ PUBLISH の再発行を依頼するチャネル
+    commands: mpsc::Sender<SideSessionCommand>,
+}
+
+/// URL ごとに共有する request 移行 side session から main ループへ送るイベント
+///
+/// side session の確立と PUBLISH の再発行の結果と、side session で観測した session
 /// イベントを main ループへ渡す。main ループは `MoqtClient` を 1 つだけ所有するため、
 /// 移行対象の PUBLISH は専用タスクが確立した side session で扱う
 /// (draft-ietf-moq-transport-23 §9.2 (GOAWAY) の "re-issue that specific request on a
 /// session at the specified URI"。draft 由来の仕様であり将来変更されうる)。
+///
+/// 同じ移行先 URL の PUBLISH は 1 本の side session を共有するため、どの side session の
+/// イベントかを `url` で識別する。
 enum RequestMigrationEvent {
     /// side session の確立と PUBLISH の再発行に成功した
     Migrated {
+        /// 移行先の URL (side session を共有する単位)
+        url: ServerUrl,
         /// 移行した track 種別
         kind: PublishTrack,
         /// 旧 session の request id (main ループが PUBLISH_DONE で終端する)
@@ -3712,8 +3879,12 @@ enum RequestMigrationEvent {
         /// side session のストリーム開設用ハンドル
         handle: StreamHandle,
     },
-    /// 期限切れ・接続失敗・再発行失敗
+    /// 1 本の PUBLISH の再発行失敗 (期限切れ・接続失敗・再発行の失敗)
+    ///
+    /// session 全体の終了 ([`Self::Ended`]) と区別する。
     Failed {
+        /// 移行先の URL (side session を共有する単位)
+        url: ServerUrl,
         /// 移行できなかった track 種別
         kind: PublishTrack,
         /// 移行できなかった旧 session の request id
@@ -3722,78 +3893,91 @@ enum RequestMigrationEvent {
         reason: String,
     },
     /// side session で観測した session イベント (PUBLISH_DONE / REQUEST_ERROR / GOAWAY / close)
+    ///
+    /// 1 本の side session は複数の track を扱う。PUBLISH_DONE / REQUEST_ERROR は request id を
+    /// 持つためどの track のものか分かるが、session 全体のイベント (GOAWAY / close) は track に
+    /// 紐づかない。そのためここでは track 種別を持たない。
     SessionEvent {
-        /// 移行した track 種別
-        kind: PublishTrack,
+        /// イベントの発生元の side session の URL
+        url: ServerUrl,
         /// side session で観測したイベント
         event: SessionEvent,
     },
-    /// side session が終了した。移行済みの track はもう送れない
+    /// side session が終了した。その session を共有する移行済みの track はもう送れない
     Ended {
-        /// side session を失った track 種別
-        kind: PublishTrack,
+        /// 終了した side session の URL
+        url: ServerUrl,
     },
 }
 
-/// request 単位移行タスクへ渡す要求
+/// URL ごとに共有する request 移行 side session を確立するための要求
 struct RequestMigrationRequest {
     /// 移行先の URL (GOAWAY の New Session URI)
     url: ServerUrl,
-    /// 移行対象の track 種別
-    kind: PublishTrack,
-    /// 旧 session の request id (PUBLISH_DONE による終端は main ループが行う)
-    old_request_id: u64,
-    /// 移行期限 (GOAWAY の Timeout から作る)
-    deadline: MigrationDeadline,
     /// 接続と PUBLISH に使う設定 (main ループの設定を複製する)
     config: Config,
     /// 送信する namespace
     namespace: TrackNamespace,
 }
 
-/// request 単位移行タスクの `tokio::select!` が返す「何が起きたか」
+/// side session タスクの `tokio::select!` が返す「何が起きたか」
 ///
 /// `MoqtClient` はタスクが 1 つだけ所有するため、`select!` の腕では `client` を借用する
 /// future だけを待ち、結果を受けて `client` を使う処理は `select!` の外で行う。その
 /// 受け渡しに使う。腕ごとに完了した事実だけを持ち、判定は select の後で行う。
-enum RequestMigrationStep {
+enum SideSessionStep {
     /// `MoqtClient::next_event` の結果
     Event(std::result::Result<Option<ClientEvent>, TransportError>),
     /// side session が data stream を受理した結果
     Accepted(std::result::Result<Option<transport::RecvStream>, TransportError>),
+    /// main ループからの PUBLISH 再発行要求 (チャネルが閉じたら `None`)
+    Command(Option<SideSessionCommand>),
     /// 100 ms 周期の tick
     Tick,
 }
 
-/// request 単位移行タスクを起動する
+/// URL ごとに共有する request 移行 side session を起動する
 ///
-/// タスクは移行に成功した後も side session の受信を続けるため、main ループは JoinHandle を
-/// 保持し、run の終了時に abort する (session 全体の移行が成功したときも、移行先の session
-/// が全 track を張り直すため abort する)。イベントは複数のタスクで共有するチャネルへ送る。
+/// タスクは移行に成功した後も side session の受信を続け、同じ URL を指す 2 本目以降の
+/// PUBLISH をコマンドで受け取って同じ session で再発行する。main ループは JoinHandle を
+/// 保持し、run の終了時と session 全体の移行成功時に abort する (session 全体の移行が
+/// 成功したときは、移行先の session が全 track を張り直すため abort する)。イベントは
+/// 複数のタスクで共有するチャネルへ送る。
+///
+/// 戻り値のコマンド送信チャネルは main ループが URL ごとの [`SideSessionSlot`] に保持する。
 fn spawn_request_migration(
     task_monitor: &tokio_metrics::TaskMonitor,
     request: RequestMigrationRequest,
+    initial: SideSessionCommand,
     events: mpsc::Sender<RequestMigrationEvent>,
-) -> tokio::task::JoinHandle<()> {
+) -> (
+    tokio::task::JoinHandle<()>,
+    mpsc::Sender<SideSessionCommand>,
+) {
+    let (commands_tx, commands_rx) =
+        mpsc::channel::<SideSessionCommand>(REQUEST_MIGRATION_COMMAND_CHANNEL_SIZE);
     let connect_monitor = task_monitor.clone();
     let instrument_monitor = task_monitor.clone();
-    tokio::spawn(instrument_monitor.instrument(async move {
-        run_request_migration(request, connect_monitor, events).await;
-    }))
+    let handle = tokio::spawn(instrument_monitor.instrument(async move {
+        run_request_migration(request, initial, commands_rx, connect_monitor, events).await;
+    }));
+    (handle, commands_tx)
 }
 
-/// 移行の失敗を main ループへ通知する
+/// 1 本の PUBLISH の再発行失敗を main ループへ通知する
 ///
 /// main ループが既に終了している場合 (移行結果を読む者がいない) は通知できないが、
 /// side session はこのタスクの終了で閉じるため、失敗を捨ててよい。
 async fn send_request_migration_failure(
     events: &mpsc::Sender<RequestMigrationEvent>,
+    url: &ServerUrl,
     kind: PublishTrack,
     old_request_id: u64,
     reason: String,
 ) {
     let _ = events
         .send(RequestMigrationEvent::Failed {
+            url: url.clone(),
             kind,
             old_request_id,
             reason,
@@ -3801,90 +3985,47 @@ async fn send_request_migration_failure(
         .await;
 }
 
-/// request 単位移行タスクの本体
+/// side session で 1 本の PUBLISH を再発行し、成功を main ループへ通知する
 ///
-/// 次の順に進む。
-///
-/// 1. 移行先の session を [`connect_with_retry`] で確立する。接続の設定・期限・指数的な
-///    再試行は control GOAWAY の移行 ([`establish_publisher_session_with_retry`]) と同じで
-///    ある。
-/// 2. main ループと同じタイムアウトを設定する。
-/// 3. 移行対象の PUBLISH だけを再発行する。期限が残っていなければ接続を閉じて失敗にする。
-/// 4. 成功を `Migrated` として main ループへ通知し、side session の受信ループを回す。
-/// 5. 受信ループでは session イベントの転送と 100 ms 周期の tick を行い、peer request は
-///    REQUEST_NOT_SUPPORTED で拒否する。この example は side session で peer の要求を
-///    処理しない (移行した PUBLISH の購読は relay が管理する)。
-///
-/// 期限 ([`MigrationDeadline`]) は GOAWAY の Timeout から作る。期限内に接続と再発行を
-/// 終えられなければ `Failed` を送って終了し、main ループは control GOAWAY の移行失敗と
-/// 同じ終了経路へ進む。移行に成功した後の期限は旧 session を peer が閉じる時刻であり、
-/// side session の寿命ではないため `Failed` にしない。
-///
-/// draft-ietf-moq-transport-23 §9.2 (GOAWAY) は draft 由来の仕様であり、将来変更されうる。
-async fn run_request_migration(
-    request: RequestMigrationRequest,
-    task_monitor: tokio_metrics::TaskMonitor,
-    events: mpsc::Sender<RequestMigrationEvent>,
-) {
-    let kind = request.kind;
-    let old_request_id = request.old_request_id;
+/// 期限が残っていなければ PUBLISH の応答を待たずに失敗として扱う。期限の途中で応答待ちを
+/// 打ち切る場合も、session を放置すると peer が timeout まで資源を保持するため NO_ERROR で
+/// 閉じる。1 本の PUBLISH の失敗は session 全体の終了ではないため
+/// [`RequestMigrationEvent::Failed`] で報告し、戻り値 `false` で呼び出し側に side session を
+/// 終えさせる (失敗した track の PUBLISH はもう送れない)。
+async fn reissue_publish_on_side_session(
+    client: &mut MoqtClient,
+    request: &RequestMigrationRequest,
+    events: &mpsc::Sender<RequestMigrationEvent>,
+    command: SideSessionCommand,
+) -> bool {
+    let SideSessionCommand::Publish {
+        kind,
+        old_request_id,
+        deadline,
+    } = command;
 
-    // 1. 移行先の session を確立する
-    //
-    // 接続の失敗は connect_with_retry が期限内で再試行済みであるため、ここでは再試行しない
-    // (同じ設定で失敗し続けるだけになる)。認可トークンの引き継ぎは migration_target が
-    // 済ませている (同一 origin のときだけ引き継ぐ)。
-    let params = publisher_connect_params(&request.config, &request.url);
-    let connected = tokio_moq::connect_with_retry(
-        &params,
-        request.deadline,
-        RetryPolicy::default(),
-        &task_monitor,
-    )
-    .await;
-    let (mut client, mut recv_acceptor) = match connected {
-        Ok(connected) => connected,
-        Err(e) => {
-            send_request_migration_failure(
-                &events,
-                kind,
-                old_request_id,
-                format!("failed to connect to the migration target: {e}"),
-            )
-            .await;
-            return;
-        }
-    };
-
-    // 2. main ループと同じタイムアウトを設定する
-    configure_publisher_session(&mut client);
-
-    // 3. 移行対象の PUBLISH だけを再発行する
-    //
-    // 期限が残っていなければ、PUBLISH の応答を待たずに失敗として扱う。期限の途中で応答待ちを
-    // 打ち切る場合も、確立済みの session を放置すると peer が timeout まで資源を保持するため
-    // NO_ERROR で閉じる。
-    let remaining = request.deadline.remaining();
+    let remaining = deadline.remaining();
     if remaining.is_zero() {
-        close_session_after_failed_publish(&mut client).await;
+        close_session_after_failed_publish(client).await;
         send_request_migration_failure(
-            &events,
+            events,
+            &request.url,
             kind,
             old_request_id,
             "the migration deadline expired before re-issuing the PUBLISH".to_string(),
         )
         .await;
-        return;
+        return false;
     }
     let published = tokio::time::timeout(remaining, async {
         match kind {
             PublishTrack::Video => {
-                publish_video_track(&mut client, &request.config, &request.namespace).await
+                publish_video_track(client, &request.config, &request.namespace).await
             }
             PublishTrack::Audio => {
-                publish_audio_track(&mut client, &request.config, &request.namespace).await
+                publish_audio_track(client, &request.config, &request.namespace).await
             }
-            PublishTrack::Catalog => publish_catalog_track(&mut client, &request.namespace).await,
+            PublishTrack::Catalog => publish_catalog_track(client, &request.namespace).await,
             // 移行の対象は PUBLISH した track だけである。main ループは Unknown を
             // 移行に回さないため到達しない
             PublishTrack::Unknown => Err(Error::Other(
@@ -3896,49 +4037,52 @@ async fn run_request_migration(
     let new_request_id = match published {
         Ok(Ok(new_request_id)) => new_request_id,
         Ok(Err(e)) => {
-            close_session_after_failed_publish(&mut client).await;
+            close_session_after_failed_publish(client).await;
             send_request_migration_failure(
-                &events,
+                events,
+                &request.url,
                 kind,
                 old_request_id,
                 format!("failed to re-issue the PUBLISH on the new session: {e}"),
             )
             .await;
-            return;
+            return false;
         }
         Err(_) => {
-            close_session_after_failed_publish(&mut client).await;
+            close_session_after_failed_publish(client).await;
             send_request_migration_failure(
-                &events,
+                events,
+                &request.url,
                 kind,
                 old_request_id,
                 "the PUBLISH re-issue did not complete within the migration deadline".to_string(),
             )
             .await;
-            return;
+            return false;
         }
     };
     let Some(new_track_alias) = track_alias(kind) else {
         // Unknown は上の PUBLISH で Failed になるため到達しない
-        close_session_after_failed_publish(&mut client).await;
+        close_session_after_failed_publish(client).await;
         send_request_migration_failure(
-            &events,
+            events,
+            &request.url,
             kind,
             old_request_id,
             "the migrated PUBLISH has no track alias".to_string(),
         )
         .await;
-        return;
+        return false;
     };
     let data_plane = client.data_plane();
     let handle = client.handle();
     tracing::info!(
-        "Established the request migration side session: kind={kind:?}, old_request_id={old_request_id}, new_request_id={new_request_id}, track_alias={new_track_alias}"
+        "Re-issued the PUBLISH on the request migration side session: authority={}, kind={kind:?}, old_request_id={old_request_id}, new_request_id={new_request_id}, track_alias={new_track_alias}",
+        request.url.authority
     );
-
-    // 4. 成功を main ループへ通知する
-    if events
+    events
         .send(RequestMigrationEvent::Migrated {
+            url: request.url.clone(),
             kind,
             old_request_id,
             new_request_id,
@@ -3947,13 +4091,91 @@ async fn run_request_migration(
             handle,
         })
         .await
-        .is_err()
-    {
-        // main ループが先に終了した。side session はこのタスクの終了で閉じる
+        .is_ok()
+}
+
+/// URL ごとに共有する request 移行 side session タスクの本体
+///
+/// 次の順に進む。
+///
+/// 1. 移行先の session を [`connect_with_retry`] で確立する。接続の設定・期限・指数的な
+///    再試行は control GOAWAY の移行 ([`establish_publisher_session_with_retry`]) と同じで
+///    ある。期限は最初の PUBLISH の移行期限 (GOAWAY の Timeout) を使う。
+/// 2. main ループと同じタイムアウトを設定する。
+/// 3. 最初の PUBLISH を再発行する。期限が残っていなければ接続を閉じて失敗にする。
+/// 4. 成功を `Migrated` として main ループへ通知し、side session の受信ループを回す。
+/// 5. 受信ループでは同じ URL を指す追加の PUBLISH をコマンドで受け取り、同じ session で
+///    再発行する。session イベントの転送と 100 ms 周期の tick も行い、peer request は
+///    REQUEST_NOT_SUPPORTED で拒否する。この example は side session で peer の要求を
+///    処理しない (移行した PUBLISH の購読は relay が管理する)。
+///
+/// 1 本の PUBLISH の再発行失敗 (`Failed`) と session 全体の終了 (`Ended`) を区別して
+/// main ループへ通知する。session が終了した場合は、その session を共有する移行済みの
+/// track がすべて送れなくなるため `Ended` を送る。期限 ([`MigrationDeadline`]) は GOAWAY の
+/// Timeout から作る。期限内に接続と再発行を終えられなければ `Failed` を送って終了し、
+/// main ループは control GOAWAY の移行失敗と同じ終了経路へ進む。移行に成功した後の期限は
+/// 旧 session を peer が閉じる時刻であり、side session の寿命ではないため `Failed` にしない。
+///
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY) は draft 由来の仕様であり、将来変更されうる。
+async fn run_request_migration(
+    request: RequestMigrationRequest,
+    initial: SideSessionCommand,
+    mut commands: mpsc::Receiver<SideSessionCommand>,
+    task_monitor: tokio_metrics::TaskMonitor,
+    events: mpsc::Sender<RequestMigrationEvent>,
+) {
+    // 1. 移行先の session を確立する
+    //
+    // 接続の失敗は connect_with_retry が期限内で再試行済みであるため、ここでは再試行しない
+    // (同じ設定で失敗し続けるだけになる)。認可トークンの引き継ぎは migration_target が
+    // 済ませている (同一 origin のときだけ引き継ぐ)。
+    //
+    // 期限は最初の PUBLISH のものを使う。同じ URL の 2 本目以降の GOAWAY は、確立済みの
+    // session にコマンドとして届くため、ここでの接続期限には影響しない。
+    let SideSessionCommand::Publish { deadline, .. } = initial;
+    let params = publisher_connect_params(&request.config, &request.url);
+    let connected =
+        tokio_moq::connect_with_retry(&params, deadline, RetryPolicy::default(), &task_monitor)
+            .await;
+    let (mut client, mut recv_acceptor) = match connected {
+        Ok(connected) => connected,
+        Err(e) => {
+            // 接続できなかった。この session で移行する最初の PUBLISH を Failed として
+            // 報告する。待ち行列に残ったコマンドの track も移行できないが、main ループは
+            // Failed を受けてパイプラインを終了するため、個別には報告しない
+            let SideSessionCommand::Publish {
+                kind,
+                old_request_id,
+                ..
+            } = initial;
+            send_request_migration_failure(
+                &events,
+                &request.url,
+                kind,
+                old_request_id,
+                format!("failed to connect to the migration target: {e}"),
+            )
+            .await;
+            return;
+        }
+    };
+    tracing::info!(
+        "Established the request migration side session: authority={}",
+        request.url.authority
+    );
+
+    // 2. main ループと同じタイムアウトを設定する
+    configure_publisher_session(&mut client);
+
+    // 3. 最初の PUBLISH を再発行する
+    //
+    // 失敗は Failed として報告済みである。session を確立できていても移行先として使え
+    // ないため、Ended は送らずにこのタスクを終える
+    if !reissue_publish_on_side_session(&mut client, &request, &events, initial).await {
         return;
     }
 
-    // 5. side session の受信ループ
+    // 4. side session の受信ループ
     //
     // tick の周期は main ループと同じ 100 ms にする。`MoqtClient` の tick は session の
     // タイマー (control message timeout / data stream timeout / GOAWAY deadline) を進める
@@ -3962,74 +4184,89 @@ async fn run_request_migration(
     tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     'receive: loop {
         let step = tokio::select! {
-            event = client.next_event() => RequestMigrationStep::Event(event),
+            event = client.next_event() => SideSessionStep::Event(event),
             accepted = recv_acceptor.accept_recv_stream() => {
-                RequestMigrationStep::Accepted(accepted)
+                SideSessionStep::Accepted(accepted)
             }
-            _ = tick_interval.tick() => RequestMigrationStep::Tick,
+            command = commands.recv() => SideSessionStep::Command(command),
+            _ = tick_interval.tick() => SideSessionStep::Tick,
         };
         match step {
-            RequestMigrationStep::Event(Ok(Some(ClientEvent::Session(event)))) => {
+            SideSessionStep::Event(Ok(Some(ClientEvent::Session(event)))) => {
                 // PUBLISH_DONE / REQUEST_ERROR / GOAWAY / close は main ループへ渡す。
                 // main ループが先に終了した場合は移行結果を読む者がいないため、side
                 // session の受信を終える
                 if events
-                    .send(RequestMigrationEvent::SessionEvent { kind, event })
+                    .send(RequestMigrationEvent::SessionEvent {
+                        url: request.url.clone(),
+                        event,
+                    })
                     .await
                     .is_err()
                 {
                     break 'receive;
                 }
             }
-            RequestMigrationStep::Event(Ok(Some(ClientEvent::Request(request)))) => {
+            SideSessionStep::Event(Ok(Some(ClientEvent::Request(peer_request)))) => {
                 // side session では main ループと同じく peer request を処理しない。応答を
                 // 返さないと peer の control message timeout を招くため拒否する
                 tracing::warn!(
-                    "Rejecting an unexpected peer request on the request migration side session: kind={kind:?}, request_id={}",
-                    request.request_id
+                    "Rejecting an unexpected peer request on the request migration side session: authority={}, request_id={}",
+                    request.url.authority,
+                    peer_request.request_id
                 );
                 if let Err(e) = client
                     .send_request_error(
-                        request.request_id,
+                        peer_request.request_id,
                         REQUEST_NOT_SUPPORTED,
                         "publisher does not serve requests on the request migration side session",
                     )
                     .await
                 {
                     tracing::warn!(
-                        "Failed to reject a peer request on the request migration side session: {e}"
+                        "Failed to reject a peer request on the request migration side session: authority={}, {e}",
+                        request.url.authority
                     );
                     break 'receive;
                 }
             }
-            RequestMigrationStep::Event(Ok(Some(ClientEvent::RequestUpdate(update)))) => {
+            SideSessionStep::Event(Ok(Some(ClientEvent::RequestUpdate(update)))) => {
                 // draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): 受信側は必ず 1 通の
                 // REQUEST_OK / REQUEST_ERROR で応答する MUST
                 tracing::info!(
-                    "Received REQUEST_UPDATE on the request migration side session: kind={kind:?}, request_id={}",
+                    "Received REQUEST_UPDATE on the request migration side session: authority={}, request_id={}",
+                    request.url.authority,
                     update.request_id
                 );
                 if let Err(e) = client.send_request_ok(update.request_id).await {
                     tracing::warn!(
-                        "Failed to send REQUEST_OK on the request migration side session: {e}"
+                        "Failed to send REQUEST_OK on the request migration side session: authority={}, {e}",
+                        request.url.authority
                     );
                     break 'receive;
                 }
             }
-            RequestMigrationStep::Event(Ok(None)) => {
-                tracing::info!("The request migration side session ended: kind={kind:?}");
+            SideSessionStep::Event(Ok(None)) => {
+                tracing::info!(
+                    "The request migration side session ended: authority={}",
+                    request.url.authority
+                );
                 break 'receive;
             }
-            RequestMigrationStep::Event(Err(e)) => {
-                tracing::warn!("Request migration side session event error: kind={kind:?}, {e}");
+            SideSessionStep::Event(Err(e)) => {
+                tracing::warn!(
+                    "Request migration side session event error: authority={}, {e}",
+                    request.url.authority
+                );
                 break 'receive;
             }
-            RequestMigrationStep::Accepted(Ok(Some(mut stream))) => {
+            SideSessionStep::Accepted(Ok(Some(mut stream))) => {
                 // この example は side session で data stream を処理しない。受け取ったまま
                 // 放置すると peer が flow control で待ち続けるため、未対応を表すコードで
                 // 拒否する
                 tracing::warn!(
-                    "Rejecting an unexpected data stream on the request migration side session: kind={kind:?}, stream_id={}",
+                    "Rejecting an unexpected data stream on the request migration side session: authority={}, stream_id={}",
+                    request.url.authority,
                     stream.stream_id()
                 );
                 // data stream の reset code は §12.5 の CANCELLED を使う
@@ -4037,38 +4274,64 @@ async fn run_request_migration(
                 // §12.5 の 0x3 は SESSION_CLOSED を意味する)
                 if let Err(e) = stream.stop_sending(0x1).await {
                     tracing::debug!(
-                        "Failed to stop an unexpected data stream on the request migration side session: {e}"
+                        "Failed to stop an unexpected data stream on the request migration side session: authority={}, {e}",
+                        request.url.authority
                     );
                 }
             }
-            RequestMigrationStep::Accepted(Ok(None)) => {
+            SideSessionStep::Accepted(Ok(None)) => {
                 tracing::info!(
-                    "No more data streams on the request migration side session: kind={kind:?}"
+                    "No more data streams on the request migration side session: authority={}",
+                    request.url.authority
                 );
                 break 'receive;
             }
-            RequestMigrationStep::Accepted(Err(e)) => {
+            SideSessionStep::Accepted(Err(e)) => {
                 // セッション終了と接続クローズは期待される終了であるため info に揃える
                 if is_connection_closed(&e) {
                     tracing::info!(
-                        "Request migration side session closed by transport: kind={kind:?}, {e}"
+                        "Request migration side session closed by transport: authority={}, {e}",
+                        request.url.authority
                     );
                 } else {
                     tracing::warn!(
-                        "Failed to accept a data stream on the request migration side session: {e}"
+                        "Failed to accept a data stream on the request migration side session: authority={}, {e}",
+                        request.url.authority
                     );
                 }
                 break 'receive;
             }
-            RequestMigrationStep::Tick => {
+            SideSessionStep::Tick => {
                 // main ループと同じく、session のタイマーを進める
                 client.tick_now();
             }
+            SideSessionStep::Command(Some(command)) => {
+                // 同じ移行先 URL を指す 2 本目以降の PUBLISH は、確立済みの session で
+                // 再発行する。1 本の再発行の失敗は Failed として報告済みであり、session
+                // 全体の終了ではないため Ended は送らない。main ループは Failed を受けて
+                // パイプラインを終了するため、このタスクもここで終える
+                if !reissue_publish_on_side_session(&mut client, &request, &events, command).await {
+                    return;
+                }
+            }
+            SideSessionStep::Command(None) => {
+                // main ループが slot を破棄した (run の終了)。新しい PUBLISH の依頼は
+                // 来ないため side session を終える
+                tracing::debug!(
+                    "The request migration command channel closed: authority={}",
+                    request.url.authority
+                );
+                break 'receive;
+            }
         }
     }
-    // side session を失ったことを main ループへ伝える。移行済みの track への送信を
-    // 止められるようにするためである
-    let _ = events.send(RequestMigrationEvent::Ended { kind }).await;
+    // side session を失ったことを main ループへ伝える。この session を共有する移行済みの
+    // track はすべて送れなくなるためである
+    let _ = events
+        .send(RequestMigrationEvent::Ended {
+            url: request.url.clone(),
+        })
+        .await;
 }
 
 /// macOS 以外で H.264 / H.265 のエンコーダを指定したときのエラーを作る
@@ -5647,7 +5910,8 @@ mod tests {
         ///
         /// draft-ietf-moq-transport-23 §9.2 (GOAWAY) は、New Session URI が指定された場合は
         /// その session で当該 request を再発行することを SHOULD とする。main ループは
-        /// 専用タスクが確立した side session で当該 PUBLISH だけを再発行する。
+        /// 専用タスクが確立した side session で当該 PUBLISH だけを再発行する。同じ移行先
+        /// URL を指す複数の PUBLISH は 1 本の side session を共有する。
         #[test]
         fn request_stream_goaway_for_another_session_migrates_the_request() {
             assert_eq!(
@@ -5753,6 +6017,63 @@ mod tests {
             assert!(
                 !track_migrated(PublishTrack::Unknown, true, true, true),
                 "Unknown は移行済みと判定しないこと"
+            );
+        }
+    }
+
+    /// 同じ side session を共有する移行先 URL のキーを固定する
+    ///
+    /// 同じ URL を指す PUBLISH は 1 本の side session を共有し、URL が違えば別の session を
+    /// 使う。キーは接続先を決める authority・path と、認可トークン (c4m) を含みうる
+    /// fragment から作る。
+    mod side_session_key_tests {
+        use super::*;
+
+        /// テスト用の URL をパースする
+        fn url(text: &str) -> ServerUrl {
+            tokio_moq::parse_url(text).expect("テスト用の URL をパースできること")
+        }
+
+        /// authority・path・fragment が同じ URL は同じキーになること
+        #[test]
+        fn same_target_url_shares_the_key() {
+            assert_eq!(
+                side_session_key(&url("moqt://relay.example:443/live#msf:moq-example--video")),
+                side_session_key(&url("moqt://relay.example:443/live#msf:moq-example--video")),
+                "同じ移行先 URL は同じ side session を共有すること"
+            );
+        }
+
+        /// fragment が違う URL は別のキーになること
+        ///
+        /// MSF fragment は track の namespace と認可トークン (c4m) を変えうるため、
+        /// authority と path が同じでも fragment が違えば別の side session にする。
+        #[test]
+        fn different_fragment_uses_another_key() {
+            assert_ne!(
+                side_session_key(&url("moqt://relay.example:443/live#msf:moq-example--video")),
+                side_session_key(&url("moqt://relay.example:443/live#msf:moq-example--audio")),
+                "fragment が違う URL は別の side session にすること"
+            );
+            assert_ne!(
+                side_session_key(&url("moqt://relay.example:443/live#msf:moq-example--video")),
+                side_session_key(&url("moqt://relay.example:443/live")),
+                "fragment の有無でも別の side session にすること"
+            );
+        }
+
+        /// authority または path が違う URL は別のキーになること
+        #[test]
+        fn different_authority_or_path_uses_another_key() {
+            assert_ne!(
+                side_session_key(&url("moqt://relay.example:443/live")),
+                side_session_key(&url("moqt://other.example:443/live")),
+                "authority が違う URL は別の side session にすること"
+            );
+            assert_ne!(
+                side_session_key(&url("moqt://relay.example:443/live")),
+                side_session_key(&url("moqt://relay.example:443/other")),
+                "path が違う URL は別の side session にすること"
             );
         }
     }
