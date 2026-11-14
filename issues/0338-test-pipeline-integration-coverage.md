@@ -1,8 +1,8 @@
 # example pipeline と e2e の統合経路、FETCH の fuzz をテストする
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
-- Branch: feature/test-pipeline-integration-coverage
+- Completed: 2026-11-14
+- Branch: develop (CODEBASE.md の規約により develop に直接コミットする)
 - Polished: 2026-11-14
 - Refreshed: 2026-11-04
 
@@ -116,3 +116,115 @@ library の tests / PBT / fuzz は厚いが、example の pipeline 統合経路 
 - e2e テストを追加した場合、`MOQT_E2E_URL` を設定した `cargo test -p e2e-tests -- --ignored` が通ること (CI の E2E Test で確認する)。
 - 各テストについて、対応する実装を 1 箇所ずつ壊してテストが落ちることを確認していること。確認した変異と結果は issue の解決方法に記録する。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+example の pipeline 統合経路を実 peer (実 QUIC 接続の `TestPeer` / `TestPeerServer`) で駆動するテストと、
+FETCH の fuzz 経路を追加した。
+
+### テスト基盤
+
+- `crates/tokio-moq/src/lib.rs` の `peer_harness` を
+  `#[cfg(any(test, feature = "test-support"))] pub mod peer_harness;` に変え、`[features] test-support =
+  ["dep:rcgen"]` と optional な `rcgen` を追加した。`crates/moq-pub` / `crates/moq-sub` の
+  `[dev-dependencies]` は `default-features = false` を付けて `test-support` を有効にする
+  (付けないと tokio-moq の既定 `quic-s2n` が有効になり、`quic-tobi` / `quic-ngtcp2` のテストビルドが
+  `compile_error!` に当たる)。`peer_harness` の内側の `mod tests` には `#[cfg(test)]` を付けた。
+- `TestPeer` に次の API を追加した。`send_goaway_on_request_stream` / `recv_request_stream_message`
+  (`RequestStreamRead::{Message, Closed}`) / `send_publish_done` / `recv_uni_data_stream_end`
+  (FIN と RESET_STREAM を区別して返す) / `note_published_object` (publisher 役 subscription の
+  LARGEST_OBJECT を Session に記録する。wire には送らない)。
+- `send_subscribe_ok` に `MessageParameters` と `TrackProperties` を渡せるようにした。
+- `recv_request_start` は、Session がメッセージ単位で自動拒否した request (REQUEST_ERROR を積んで
+  `recv_request` が `Ok` を返す場合) を検出して Err を返すようにした。拒否を受理と取り違えるテストを防ぐ。
+- 他クレートのテストから使わない API は `#[cfg(test)] pub(crate)` に戻し、test-support で公開する範囲を
+  必要なものに限った。
+
+### moq-pub の統合テスト (15 件)
+
+`crates/moq-pub/src/pipeline.rs` の `mod peer_integration_tests` に、SUBSCRIBE の受理と未知 track の拒否、
+別 namespace の拒否、`NEW_GROUP_REQUEST` の受理条件 (live capture は受理、MP4 パススルーは不受理)、
+フィルタ付き / PAUSED 購読のフィルタと RESET、catalog と media の FETCH 応答、`serve_fetch_entries` の
+entry 順序と FIN、`--input-mp4` の `PROP_TIMESCALE` と PTS 間隔、request stream GOAWAY (同一 URL の再発行 /
+別 URL の side session 移行と旧 session の継続 / 同一移行先 URL の session 共有 / 期限切れでの終了と
+NO_ERROR の close と警告ログ / Audio Config の再送) を追加した。
+
+### moq-sub の統合テスト (16 件)
+
+`crates/moq-sub/src/pipeline.rs` の `mod peer_harness_integration_tests` に、`receive_catalog` の fill /
+subgroup 経路と delta 適用、`CATALOG_TIMEOUT`、fill の request ID 不一致・デコード失敗・RESET での継続、
+不正 delta の拒否、別 alias の読み捨て、`resubscribe_tracks` の FILL_PARAMETERS と REQUEST_UPDATE と
+映像だけの FETCH、session 移行の音声連続性と重複排除、request 単位移行の音声連続性、`run` の
+catalog 取得から shutdown まで、FETCH の side session 再発行と旧 stream の終端、FETCH 移行失敗の
+警告と購読継続、side session 移行後の音声が 1 度だけ届くこと、audio の PUBLISH_DONE(TRACK_ENDED) 後も
+映像が継続することを追加した。
+
+### fuzz
+
+`fuzz/fuzz_targets/fuzz_session.rs` に、`SendFetch` の request_id を保持し、
+`RecvFetchResponse` (REQUEST_OK + FETCH_HEADER) / `RecvFetchEntry` / `ServeFetch` (server role で
+FETCH を受けて `send_fetch_ok` / `send_fetch_header` / `send_fetch_object` /
+`send_fetch_data_stream_closed` を呼ぶ) を追加した。FETCH の成功経路は入力バイト列の decode に
+依存せず決定的に踏む。
+
+### 変異確認
+
+各テストについて、対応する実装を 1 箇所だけ壊してテストが落ちることを確認した (確認後に復元した)。
+
+| 対象 | 壊した箇所 | 結果 |
+| --- | --- | --- |
+| moq-pub | SUBSCRIBE の受理条件から `config.input_mp4.is_none()` を削除 | 検出 (MP4 パススルーで NEW_GROUP_REQUEST を受理) |
+| moq-pub | `published_track` の namespace 照合を削除 | 検出 |
+| moq-pub | `SubgroupWriter` の Skip 判定を無効化 | 検出 |
+| moq-pub | `catalog_fetch_response` の InvalidRange 判定を削除 | 検出 |
+| moq-pub | `serve_media_fetch` の range filter 拒否を無効化 | 検出 |
+| moq-pub | `serve_fetch_entries` の Non-Existent を Unknown で書く | 検出 |
+| moq-pub | `serve_fetch_entries` を `finish` ではなく `reset` で閉じる | 検出 |
+| moq-pub | MP4 パススルーの `video_timescale` を None にする | 検出 |
+| moq-pub | 同一 URL 再発行で `audio_config_sent = false` を削除 | 検出 |
+| moq-pub | 別 URL 移行 (`Migrated`) で `audio_config_sent = false` を削除 | 検出 |
+| moq-pub | side session 共有を無効化して毎回接続する | 検出 |
+| moq-pub | `run` の後始末を `close(0)` から `close(0x1)` に変える | 検出 |
+| moq-pub | 移行期限切れの警告ログを削除 | 検出 |
+| moq-pub | `GopTracker::request_new_group` を no-op にする | 検出 |
+| moq-sub | `receive_catalog` の fill / subgroup の `apply_catalog_object` 呼び出しを削除 | 検出 |
+| moq-sub | `CATALOG_TIMEOUT` を 100 ms に短縮 | 検出 |
+| moq-sub | `read_catalog_fetch_stream` の request ID 照合を削除 | 検出 |
+| moq-sub | fill の読み取り失敗を `receive_catalog` から伝播させる | 検出 |
+| moq-sub | `apply_catalog_object` の Err を握りつぶす | 検出 |
+| moq-sub | `read_catalog_subgroup_stream` の alias 判定を無効化 | 検出 |
+| moq-sub | catalog 購読から FILL_PARAMETERS を削除 | 検出 |
+| moq-sub | 再購読の Absolute Start を削除 | 検出 |
+| moq-sub | 再発行の STOP_SENDING を送らない | 検出 |
+| moq-sub | `run` で audio を購読しない | 検出 |
+| moq-sub | `note_published_object` の呼び出しを削除 (FETCH が自動拒否される) | 検出 |
+| moq-sub | FETCH 再発行でパラメータを渡さない | 検出 |
+| moq-sub | 移行成功後の旧 FETCH stream の終端を削除 | 検出 |
+| moq-sub | FETCH 移行失敗で `break 'main` する | 検出 |
+| moq-sub | FETCH 移行失敗の警告ログを削除 | 検出 |
+| moq-sub | `AudioDeliveryOrder::is_duplicate` を無効化 | 検出 |
+| moq-sub | audio の PUBLISH_DONE を全 media 終了として扱う | 検出 |
+| tokio-moq | `recv_request_start` の自動拒否検出を無効化 | 検出 |
+
+### 検証
+
+- `cargo test -p moq-pub --lib` (253 件) / `cargo test -p moq-sub --lib` (259 件) /
+  `cargo test -p tokio-moq --lib` (297 件)
+- `cargo test -p moq-pub -p moq-sub --lib --no-default-features --features quic-tobi` /
+  `quic-ngtcp2` の統合テスト (15 件 / 16 件)
+- `cargo +nightly fuzz build fuzz_session` / `cargo +nightly fuzz run fuzz_session -- -max_total_time=30`
+  (516976 runs、クラッシュなし)
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo clippy -p tokio-moq --all-targets --features test-support -- -D warnings` /
+  `cargo fmt --all -- --check`
+
+### 残る制約
+
+- e2e は追加していない。real relay が request stream GOAWAY を送れることを確認できていないため、移行は
+  peer_harness の統合テストだけで検証している。
+- 配信中で Object を 1 件も cache に入れていない track への FETCH の応答は 0427 の範囲であり、
+  テストを追加していない。
+- `receive_catalog` は制御メッセージを処理しないため、fill fetch への REQUEST_ERROR は本 issue の
+  テスト対象外である (`run` の `RequestErrorReceived` 経路で扱う)。
+- ngtcp2 バックエンドの並列実行で、稀に受信待ちがタイムアウトすることがある (34 回中 2 回)。
+  `--test-threads=1` では安定する。ngtcp2 の受信経路の残課題として切り分けが必要である。
