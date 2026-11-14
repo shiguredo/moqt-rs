@@ -183,10 +183,13 @@ Idle
 
 | 種別 | 再発行 | 旧 request の終端 | 備考 |
 | --- | --- | --- | --- |
-| SUBSCRIBE | catalog は FILL_PARAMETERS 付きで再購読する。video / audio は LOCATION_FILTER (Absolute Start) だけで再購読し、FILL_PARAMETERS は載せない。video は SUBSCRIBE_OK の LARGEST_OBJECT までを FETCH で補う | 送信方向を RESET_STREAM、受信方向を STOP_SENDING で終端する | 再購読の fill range / Absolute Start は session をまたいで共有する last_locations から決める。再発行した catalog 購読の fill fetch stream は catalog として適用する |
+| SUBSCRIBE | catalog は FILL_PARAMETERS 付き、video / audio は LOCATION_FILTER (Absolute Start) だけで再購読する | 送信方向を RESET_STREAM、受信方向を STOP_SENDING で終端する | 再購読のパラメータは session をまたいで共有する last_locations から決める |
 | FETCH | 新 session で同じ range / パラメータを送る | 送信方向を RESET_STREAM、受信方向を STOP_SENDING で終端する。応答 data stream は終端通知する | 応答 data stream は新 session 側で `fetch_owner` に登録する |
 | PUBLISH | 新 session で同じ track / properties を送る | PUBLISH_DONE (GOING_AWAY) | 新 session で PUBLISH_OK を受けるまで旧 session で Object を送り続ける。切替後は旧 session の incoming を停止する |
 
+- catalog の再購読は FILL_PARAMETERS を載せ、再発行した catalog 購読の fill fetch stream は catalog として
+  適用する。video / audio の再購読に FILL_PARAMETERS は載せない。video は SUBSCRIBE_OK の
+  LARGEST_OBJECT までを FETCH で補う。
 - 認可トークンは control GOAWAY 移行と同じ規則で引き継ぐ (同一 origin のときだけ引き継ぎ、別 origin では
   再取得する)。移行先 URL は `migration_target` で解決する。
 - catalog の FILL_PARAMETERS は再購読する時点で最後に受信した位置から組み立てる。video / audio の
