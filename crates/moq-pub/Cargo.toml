@@ -51,6 +51,13 @@ tracing = "0.1"
 # ログのフィルタリングと購読
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[dev-dependencies]
+# in-process の peer harness (実 QUIC 接続で peer 役を駆動する) を統合テストから使う。
+# default-features = false は必須である。省略すると tokio-moq の既定 quic-s2n が有効になり、
+# --no-default-features --features quic-tobi / quic-ngtcp2 のテストビルドで
+# crates/tokio-moq/src/quic.rs の compile_error! に当たる
+tokio-moq = { path = "../tokio-moq", default-features = false, features = ["test-support"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # AAC-LC エンコーダ (Apple Audio Toolbox)
 # 2026.1.0 は 1 回の AudioConverterFillComplexBuffer で同じパケットを再入力する不具合があり、

@@ -15780,4 +15780,2503 @@ mod tests {
             );
         }
     }
+
+    /// peer harness を実 QUIC 接続で駆動する統合テスト
+    ///
+    /// pipeline の private 関数 (`receive_catalog` / `resubscribe_tracks` / `run`) を
+    /// クレート内から直接呼ぶ。peer 役は `tokio_moq::peer_harness` の `TestPeer` が
+    /// sans-I/O の `Session` と、選択した QUIC バックエンド (既定は s2n-quic) の実サーバーで
+    /// 駆動する (モック / スタブは使わない)。
+    /// 待ち合わせはすべて `tokio::time::timeout` とイベント待ちで上限を設け、`sleep` で
+    /// タイミングを合わせない。
+    ///
+    /// run を駆動する async テストはそれぞれ独立した multi_thread runtime を作る。テストが
+    /// 並列に走ると、runtime ごとの既定 worker 数 (CPU 数) が積み上がって CPU が過剰に分割
+    /// され、QUIC バックエンド (特に ngtcp2) の受信が数秒遅延することがあった。そのため
+    /// これらのテストは `worker_threads` を 2 に抑える (同期テスト `#[test]` には runtime が
+    /// 無いため関係しない)。
+    mod peer_harness_integration_tests {
+        use super::*;
+
+        use std::net::SocketAddr;
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        use shiguredo_moqt::message::Subscribe;
+        use shiguredo_moqt::stream::encoder::{FetchObjectInput, FetchStreamEncoder};
+        use shiguredo_moqt::track_properties::TrackProperties;
+        use tokio_moq::Transport;
+        use tokio_moq::moqt_client::MoqtClient;
+        use tokio_moq::peer_harness::{RequestStreamRead, TestPeer, TestPeerServer};
+        use tokio_moq::transport::StreamAcceptor;
+
+        /// 統合テスト全体の上限時間 (ハングを失敗として観測する)
+        ///
+        /// 内側の待ち合わせ (イベント待ち 8 秒を最大 3 回、shutdown と join は 10 秒ずつ) の
+        /// 合計より十分に大きくし、ハング時は内側の待ち合わせで意図した assert に落ちるように
+        /// する。
+        const HARNESS_TEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+        /// イベント・フレーム・ログを待つ上限時間
+        const EVENT_WAIT_TIMEOUT: Duration = Duration::from_secs(8);
+
+        /// shutdown と run タスクの join を待つ上限時間
+        const FINISH_TIMEOUT: Duration = Duration::from_secs(10);
+
+        /// テスト本体を上限時間で実行する
+        async fn run_with_timeout(future: impl std::future::Future<Output = ()>) {
+            tokio::time::timeout(HARNESS_TEST_TIMEOUT, future)
+                .await
+                .expect("統合テストが上限時間以内に完了すること");
+        }
+
+        /// テスト用の Track Namespace (draft-ietf-moq-transport-23 §8.8 表現で `moq-example`)
+        fn test_track_namespace() -> TrackNamespace {
+            TrackNamespace::new(vec![b"moq-example".to_vec()])
+                .expect("テスト用の namespace を作れること")
+        }
+
+        /// テスト用サーバーのアドレスを MOQT URL にする
+        fn moqt_url_for(addr: SocketAddr) -> tokio_moq::ServerUrl {
+            tokio_moq::parse_url(&format!("moqt://{addr}/"))
+                .expect("テスト用の URL をパースできること")
+        }
+
+        /// GOAWAY の New Session URI にする (実サーバーのアドレスを指す)
+        fn new_session_uri(addr: SocketAddr) -> Vec<u8> {
+            format!("moqt://{addr}/").into_bytes()
+        }
+
+        /// 音声トラックだけを持つ独立した MSF カタログの JSON
+        ///
+        /// 必須フィールド (`version` / `tracks` / `name` / `packaging` / `isLive`) と、
+        /// moq-sub が音声トラックを選ぶために必要な `codec` / `samplerate` /
+        /// `channelConfig` だけを持つ最小のカタログである。
+        fn audio_catalog_json() -> Vec<u8> {
+            br#"{"version":"draft-01","tracks":[{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":64000,"samplerate":48000,"channelConfig":"1"}]}"#.to_vec()
+        }
+
+        /// 映像と音声を持つ独立した MSF カタログの JSON
+        ///
+        /// `width` / `height` は映像の解像度であり、テストが送る VP8 キーフレームの
+        /// 解像度に合わせる。
+        fn video_and_audio_catalog_json(width: u64, height: u64) -> Vec<u8> {
+            format!(
+                r#"{{"version":"draft-01","tracks":[{{"name":"video","packaging":"loc","isLive":true,"codec":"vp8","bitrate":500000,"width":{width},"height":{height},"framerate":30}},{{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":64000,"samplerate":48000,"channelConfig":"1"}}]}}"#
+            )
+            .into_bytes()
+        }
+
+        /// 同じ Group の delta カタログの JSON (track を 1 つ追加する)
+        ///
+        /// delta update は version を持ってはならない (draft-ietf-moq-msf-01 §5.3)。
+        fn catalog_delta_json(track_name: &str) -> Vec<u8> {
+            format!(
+                r#"{{"deltaUpdate":[{{"op":"add","tracks":[{{"name":"{track_name}","packaging":"loc","isLive":true}}]}}]}}"#
+            )
+            .into_bytes()
+        }
+
+        /// テスト用サーバーを立て、client を接続して SETUP 交換まで終える
+        ///
+        /// client の接続と peer の受理は並行に進める (どちらも相手の SETUP を待つため、
+        /// 直列に await すると停止する)。
+        async fn connect_pair() -> (TestPeer, MoqtClient, StreamAcceptor) {
+            let mut server = TestPeerServer::start()
+                .await
+                .expect("テスト用サーバーを起動できること");
+            let url = moqt_url_for(server.local_addr());
+            let task_monitor = tokio_metrics::TaskMonitor::new();
+            let params = tokio_moq::ConnectParams {
+                url: &url,
+                transport: Transport::Quic,
+                cert: None,
+                impl_name: "moq-sub-test",
+                receive_datagrams: true,
+                datagram_max_size: None,
+            };
+            let (connected, peer) =
+                tokio::join!(tokio_moq::connect(&params, &task_monitor), async {
+                    let mut peer = server
+                        .accept()
+                        .await
+                        .expect("client の接続を受理できること");
+                    peer.establish().await.expect("SETUP を交換できること");
+                    peer
+                },);
+            let (client, acceptor) = connected.expect("client を確立できること");
+            (peer, client, acceptor)
+        }
+
+        /// client の SUBSCRIBE を peer が受理し、SUBSCRIBE_OK を返す
+        ///
+        /// client は SUBSCRIBE_OK を受けるまで解決しないため、購読と受理を並行に進める。
+        async fn subscribe_with_peer(
+            client: &mut MoqtClient,
+            peer: &mut TestPeer,
+            target: &SubscribeTarget,
+            parameters: MessageParameters,
+            alias: u64,
+            ok_parameters: MessageParameters,
+        ) -> SubscribeResult {
+            let (subscribed, ()) = tokio::join!(
+                client.subscribe_track_with_parameters(
+                    target.namespace.clone(),
+                    target.track_name.clone(),
+                    parameters,
+                ),
+                async {
+                    let message = peer
+                        .recv_request_start()
+                        .await
+                        .expect("SUBSCRIBE の request stream を受理できること");
+                    let ControlMessage::Subscribe(subscribe) = message else {
+                        panic!("SUBSCRIBE が request stream の先頭に届くこと: {message:?}");
+                    };
+                    peer.send_subscribe_ok(
+                        subscribe.request_id,
+                        alias,
+                        ok_parameters,
+                        TrackProperties::new(),
+                    )
+                    .await
+                    .expect("SUBSCRIBE_OK を送れること");
+                },
+            );
+            subscribed.expect("SUBSCRIBE を確立できること")
+        }
+
+        /// catalog track の購読を FILL_PARAMETERS 付きで確立する
+        async fn subscribe_catalog_with_peer(
+            client: &mut MoqtClient,
+            peer: &mut TestPeer,
+            alias: u64,
+        ) -> SubscribeResult {
+            subscribe_with_peer(
+                client,
+                peer,
+                &SubscribeTarget {
+                    namespace: test_track_namespace(),
+                    track_name: MSF_CATALOG_TRACK_NAME.to_vec(),
+                },
+                catalog_subscribe_parameters(),
+                alias,
+                MessageParameters::new(),
+            )
+            .await
+        }
+
+        /// peer が client の SUBSCRIBE を受理し、SUBSCRIBE_OK を返す
+        async fn accept_subscription(
+            peer: &mut TestPeer,
+            alias: u64,
+            ok_parameters: MessageParameters,
+        ) -> Subscribe {
+            let message = peer
+                .recv_request_start()
+                .await
+                .expect("SUBSCRIBE の request stream を受理できること");
+            let ControlMessage::Subscribe(subscribe) = message else {
+                panic!("SUBSCRIBE が request stream の先頭に届くこと: {message:?}");
+            };
+            peer.send_subscribe_ok(
+                subscribe.request_id,
+                alias,
+                ok_parameters,
+                TrackProperties::new(),
+            )
+            .await
+            .expect("SUBSCRIBE_OK を送れること");
+            subscribe
+        }
+
+        /// client が受理した data stream を読み始められる状態にする
+        ///
+        /// stream type を読み、`DataPlaneHandle::recv_data_stream_type` で Session へ登録する。
+        /// 登録しないと FETCH_HEADER / SUBGROUP_HEADER の受理が Session で拒否される。
+        async fn accept_data_stream(
+            acceptor: &mut StreamAcceptor,
+            data_plane: &DataPlaneHandle,
+        ) -> (DataStreamId, transport::RecvStream, Vec<u8>) {
+            let mut stream = acceptor
+                .accept_recv_stream()
+                .await
+                .expect("data stream の受理が失敗しないこと")
+                .expect("data stream が届くこと");
+            let mut buf = Vec::new();
+            let (stream_type_id, _) = match stream_reader::peek_stream_type(&mut stream, &mut buf)
+                .await
+                .expect("stream type を読めること")
+            {
+                StreamRead::Value(value) => value,
+                StreamRead::Closed(end) => panic!("stream type の前に終端しないこと: {end:?}"),
+            };
+            let stream_id = DataStreamId(stream.stream_id());
+            data_plane
+                .recv_data_stream_type(stream_id, stream_type_id)
+                .expect("stream type を Session へ登録できること");
+            (stream_id, stream, buf)
+        }
+
+        /// fill fetch stream としてカタログ Object を書き、FIN で閉じる
+        ///
+        /// fill fetch stream の FETCH_HEADER は起因 SUBSCRIBE の Request ID を運ぶ
+        /// (draft-ietf-moq-transport-23 §3.4 (Fill Semantics))。
+        async fn send_catalog_fill_fetch_stream(
+            peer: &mut TestPeer,
+            request_id: u64,
+            objects: &[(Location, Vec<u8>)],
+        ) {
+            let mut stream = peer
+                .open_uni_send_stream()
+                .await
+                .expect("fill fetch stream を開けること");
+            let mut encoder = FetchStreamEncoder::new(request_id);
+            let mut buf = encoder.encode_header();
+            for (location, payload) in objects {
+                encoder
+                    .encode_object(
+                        &FetchObjectInput {
+                            group_id: location.group_id,
+                            subgroup_id: 0,
+                            object_id: location.object_id,
+                            publisher_priority: 128,
+                            has_properties: false,
+                            is_datagram_origin: false,
+                            payload_length: payload.len() as u64,
+                        },
+                        None,
+                        &mut buf,
+                    )
+                    .expect("fill の Object を encode できること");
+                buf.extend_from_slice(payload);
+            }
+            stream
+                .send(Bytes::from(buf))
+                .await
+                .expect("fill fetch stream を送れること");
+            stream
+                .finish()
+                .await
+                .expect("fill fetch stream を FIN できること");
+        }
+
+        /// FETCH_HEADER だけを書いて FIN する fill fetch stream
+        ///
+        /// request ID の不一致を `read_catalog_fetch_stream` に検出させるために使う。
+        async fn send_fill_fetch_header_only(peer: &mut TestPeer, request_id: u64) {
+            let mut stream = peer
+                .open_uni_send_stream()
+                .await
+                .expect("fill fetch stream を開けること");
+            let header = FetchStreamEncoder::new(request_id).encode_header();
+            stream
+                .send(Bytes::from(header))
+                .await
+                .expect("FETCH_HEADER を送れること");
+            stream
+                .finish()
+                .await
+                .expect("fill fetch stream を FIN できること");
+        }
+
+        /// stream type だけを書いてすぐ RESET_STREAM する fill fetch stream
+        ///
+        /// RESET_STREAM は draft-ietf-moq-transport-23 §12.5 (Stream Reset Error Codes) の
+        /// CANCELLED を使う。RESET_STREAM は未配送のデータを破棄しうるため (RFC 9000 §3.2)、
+        /// client からは stream type の前の終端として観測されうる。`receive_catalog` がこの
+        /// stream を警告なしで読み捨てて次の stream を待つことの確認に使う。
+        async fn reset_fill_fetch_stream_after_type(peer: &mut TestPeer) {
+            let mut stream = peer
+                .open_uni_send_stream()
+                .await
+                .expect("fill fetch stream を開けること");
+            let mut buf = Vec::new();
+            shiguredo_moqt::varint::encode(shiguredo_moqt::stream::FETCH_HEADER_TYPE, &mut buf);
+            stream
+                .send(Bytes::from(buf))
+                .await
+                .expect("stream type を送れること");
+            stream
+                .reset(STREAM_CANCELLED, None)
+                .await
+                .expect("fill fetch stream を RESET_STREAM できること");
+        }
+
+        /// subgroup stream としてカタログ Object を書き、FIN で閉じる
+        ///
+        /// 1 本の subgroup stream は同一 Group の Object だけを持つため、Object ID は昇順に
+        /// 並べて渡す。Properties は持たない (カタログ Object は payload の JSON だけでよい)。
+        async fn send_catalog_subgroup_stream(
+            peer: &mut TestPeer,
+            track_alias: u64,
+            objects: &[(Location, Vec<u8>)],
+        ) {
+            let first = objects
+                .first()
+                .expect("カタログ Object が 1 件以上あること");
+            let header = SubgroupHeader {
+                track_alias,
+                group_id: first.0.group_id,
+                subgroup_id: SubgroupIdMode::Zero,
+                publisher_priority: Some(128),
+                has_properties: false,
+                end_of_group: false,
+                first_object: true,
+            };
+            let mut buf = header.encode();
+            let mut previous_object_id: Option<u64> = None;
+            for (location, payload) in objects {
+                assert_eq!(
+                    location.group_id, header.group_id,
+                    "1 本の subgroup stream の Object は同じ Group であること"
+                );
+                let object_id_delta = match previous_object_id {
+                    None => location.object_id,
+                    Some(previous) => location
+                        .object_id
+                        .saturating_sub(previous.saturating_add(1)),
+                };
+                let object = SubgroupObject {
+                    object_id_delta,
+                    payload_length: payload.len() as u64,
+                    status: None,
+                };
+                object
+                    .encode(false, None, &mut buf)
+                    .expect("subgroup の Object を encode できること");
+                buf.extend_from_slice(payload);
+                previous_object_id = Some(location.object_id);
+            }
+            let mut stream = peer
+                .open_uni_send_stream()
+                .await
+                .expect("subgroup stream を開けること");
+            stream
+                .send(Bytes::from(buf))
+                .await
+                .expect("subgroup stream を送れること");
+            stream
+                .finish()
+                .await
+                .expect("subgroup stream を FIN できること");
+        }
+
+        /// 音声 Object 1 つを subgroup stream で送る
+        ///
+        /// 音声は 1 Object = 1 Group = 1 Subgroup stream で届く (draft-ietf-moq-loc-05 §4.1)。
+        /// harness の datagram 送信 API (`TestPeer::send_datagram`) は test-support ビルドでは
+        /// 公開されていないため、音声は subgroup stream で届ける。LOC Properties は
+        /// TIMESTAMP と TIMESCALE だけを持ち、
+        /// Properties Length varint を含む形で Object に載せる
+        /// (draft-ietf-moq-transport-23 §11.1.2 (Object Properties))。
+        async fn send_audio_subgroup_stream(
+            peer: &mut TestPeer,
+            track_alias: u64,
+            group_id: u64,
+            object_id: u64,
+            timestamp: u64,
+            packet: &[u8],
+        ) {
+            let header = SubgroupHeader {
+                track_alias,
+                group_id,
+                subgroup_id: SubgroupIdMode::Zero,
+                publisher_priority: Some(128),
+                has_properties: true,
+                end_of_group: true,
+                first_object: true,
+            };
+            let properties = audio_loc_properties(timestamp, 48_000, None)
+                .encode()
+                .expect("音声の LOC プロパティを encode できること");
+            let object = SubgroupObject {
+                object_id_delta: object_id,
+                payload_length: packet.len() as u64,
+                status: None,
+            };
+            let mut buf = header.encode();
+            object
+                .encode(true, Some(&properties), &mut buf)
+                .expect("音声の Subgroup Object を encode できること");
+            buf.extend_from_slice(packet);
+            let mut stream = peer
+                .open_uni_send_stream()
+                .await
+                .expect("音声の subgroup stream を開けること");
+            stream
+                .send(Bytes::from(buf))
+                .await
+                .expect("音声の subgroup stream を送れること");
+            stream
+                .finish()
+                .await
+                .expect("音声の subgroup stream を FIN できること");
+        }
+
+        /// 音声 Object を 1 本の subgroup stream にまとめて送る
+        ///
+        /// 1 本の subgroup stream は同一 Group の Object だけを持ち、呼び出し側が並べた順に
+        /// 届く。重複 Object の再送のように、到着順が検証結果を左右する場面で使う。
+        /// 各要素は `(object_id, timestamp, payload)` で、timestamp の Timescale は 48 kHz。
+        async fn send_audio_subgroup_objects(
+            peer: &mut TestPeer,
+            track_alias: u64,
+            group_id: u64,
+            objects: &[(u64, u64, Vec<u8>)],
+        ) {
+            let header = SubgroupHeader {
+                track_alias,
+                group_id,
+                subgroup_id: SubgroupIdMode::Zero,
+                publisher_priority: Some(128),
+                has_properties: true,
+                end_of_group: true,
+                first_object: true,
+            };
+            let mut buf = header.encode();
+            let mut previous_object_id: Option<u64> = None;
+            for (object_id, timestamp, packet) in objects {
+                let properties = audio_loc_properties(*timestamp, 48_000, None)
+                    .encode()
+                    .expect("音声の LOC プロパティを encode できること");
+                let object_id_delta = match previous_object_id {
+                    None => *object_id,
+                    Some(previous) => object_id.saturating_sub(previous.saturating_add(1)),
+                };
+                let object = SubgroupObject {
+                    object_id_delta,
+                    payload_length: packet.len() as u64,
+                    status: None,
+                };
+                object
+                    .encode(true, Some(&properties), &mut buf)
+                    .expect("音声の Subgroup Object を encode できること");
+                buf.extend_from_slice(packet);
+                previous_object_id = Some(*object_id);
+            }
+            let mut stream = peer
+                .open_uni_send_stream()
+                .await
+                .expect("音声の subgroup stream を開けること");
+            stream
+                .send(Bytes::from(buf))
+                .await
+                .expect("音声の subgroup stream を送れること");
+            stream
+                .finish()
+                .await
+                .expect("音声の subgroup stream を FIN できること");
+        }
+
+        /// テストから run のログを待つための tracing layer
+        ///
+        /// run は非同期タスクとして動くため、thread-local の subscriber では
+        /// イベントを取りこぼす。テストプロセスで 1 度だけグローバルに設定し、待ちたい
+        /// テストだけが [`subscribe_run_logs`] で受信する。
+        ///
+        /// run のログ文言は本番のログ契約としてテストが内部状態の同期に使う。並列実行する
+        /// 他のテストのログで受信バッファが溢れないよう、pipeline の INFO 以上だけを通す。
+        struct RunLogLayer {
+            /// 受信したログメッセージの配信
+            tx: tokio::sync::broadcast::Sender<String>,
+        }
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RunLogLayer {
+            fn enabled(
+                &self,
+                metadata: &tracing::Metadata<'_>,
+                _context: tracing_subscriber::layer::Context<'_, S>,
+            ) -> bool {
+                metadata.target().starts_with("moq_sub::pipeline")
+                    && matches!(
+                        *metadata.level(),
+                        tracing::Level::ERROR | tracing::Level::WARN | tracing::Level::INFO
+                    )
+            }
+
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _context: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                #[derive(Default)]
+                struct MessageVisitor {
+                    message: String,
+                }
+
+                impl tracing::field::Visit for MessageVisitor {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "message" {
+                            self.message = format!("{value:?}");
+                        }
+                    }
+
+                    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                        if field.name() == "message" {
+                            self.message = value.to_string();
+                        }
+                    }
+                }
+
+                let mut visitor = MessageVisitor::default();
+                event.record(&mut visitor);
+                let _ = self.tx.send(visitor.message);
+            }
+        }
+
+        /// run のログ購読を作る
+        ///
+        /// テストプロセスで 1 度だけ購読を設定する。全テストのログが流れるため、
+        /// 待つ側は目的のメッセージだけを選ぶ。
+        fn subscribe_run_logs() -> tokio::sync::broadcast::Receiver<String> {
+            use std::sync::OnceLock;
+
+            use tracing_subscriber::layer::SubscriberExt;
+
+            static LOG_BUS: OnceLock<tokio::sync::broadcast::Sender<String>> = OnceLock::new();
+            let tx = LOG_BUS.get_or_init(|| {
+                // 並列テストの INFO ログを十分に保持できる容量にする
+                let (tx, _) = tokio::sync::broadcast::channel(16_384);
+                let subscriber =
+                    tracing_subscriber::registry().with(RunLogLayer { tx: tx.clone() });
+                tracing::subscriber::set_global_default(subscriber)
+                    .expect("テスト用の tracing subscriber を設定できること");
+                tx
+            });
+            tx.subscribe()
+        }
+
+        /// 指定した文字列を含むログが届くまで待つ (上限付き)
+        ///
+        /// run の内部状態が進んだことをログで観測するための同期に使う。ログメッセージは
+        /// run の内部状態の契約として固定する。
+        async fn wait_for_log(
+            receiver: &mut tokio::sync::broadcast::Receiver<String>,
+            needle: &str,
+        ) {
+            let wait = tokio::time::timeout(EVENT_WAIT_TIMEOUT, async {
+                loop {
+                    match receiver.recv().await {
+                        Ok(message) if message.contains(needle) => return,
+                        Ok(_) => continue,
+                        // 容量超過で取りこぼした場合は、次のメッセージを待つ。pipeline の
+                        // INFO 以上に絞り、容量を十分に取っているため通常は起きない
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            panic!("ログ購読が閉じないこと")
+                        }
+                    }
+                }
+            })
+            .await;
+            assert!(wait.is_ok(), "上限時間内にログ {needle:?} が届くこと");
+        }
+
+        /// テスト用の VP8 キーフレームを 1 フレームエンコードする
+        ///
+        /// run の映像受信経路 (Subgroup stream → 復号 → frame_tx) を通すため、本物の
+        /// libvpx エンコーダで単色でない I420 をキーフレームとしてエンコードする
+        /// (モック / スタブは使わない)。
+        fn encode_vp8_keyframe(width: usize, height: usize) -> Vec<u8> {
+            use std::num::NonZeroUsize;
+
+            use shiguredo_libvpx::{
+                CodecConfig, EncodeOptions, Encoder, EncoderConfig, ImageData, ImageFormat,
+                Vp8Config,
+            };
+
+            let mut config = EncoderConfig::new(
+                width,
+                height,
+                ImageFormat::I420,
+                CodecConfig::Vp8(Vp8Config::default()),
+            );
+            config.keyframe_interval = NonZeroUsize::new(1);
+            config.lag_in_frames = NonZeroUsize::new(1);
+            let mut encoder =
+                Encoder::new(config).expect("テスト用の VP8 エンコーダを生成できること");
+            let mut y = vec![0u8; width * height];
+            for row in 0..height {
+                for col in 0..width {
+                    y[row * width + col] = ((row + col) % 200) as u8;
+                }
+            }
+            let u = vec![96u8; width / 2 * (height / 2)];
+            let v = vec![160u8; width / 2 * (height / 2)];
+            let image = ImageData::I420 {
+                y: &y,
+                u: &u,
+                v: &v,
+            };
+            encoder
+                .encode(
+                    &image,
+                    &EncodeOptions {
+                        force_keyframe: true,
+                    },
+                )
+                .expect("VP8 のキーフレームをエンコードできること");
+            encoder
+                .next_frame()
+                .expect("エンコード結果が得られること")
+                .data()
+                .to_vec()
+        }
+
+        /// 映像 Object の LOC Properties を組み立てる
+        ///
+        /// TIMESTAMP / TIMESCALE に加えて VIDEO_FRAME_MARKING の I ビットを立て、
+        /// キーフレームであることを publisher が告知する。Video Frame Marking は
+        /// draft-ietf-moq-loc-05 §2.3.2.2 (Video Frame Marking) が定め、RFC 9626
+        /// §3.2 (Short Extension for Non-Scalable Streams) の 1 octet 形式
+        /// `|S|E|I|D|0 0 0 0|` を使う (I ビットは 0x20)。
+        /// Object Properties への載せ方は draft-ietf-moq-transport-23 §11.1.2。
+        fn video_loc_properties(timestamp: u64, timescale: u64) -> LocProperties {
+            let mut props = LocProperties::new();
+            props.push(shiguredo_moqt::loc::LocProperty {
+                prop_id: PROP_TIMESTAMP,
+                value: LocPropertyValue::VarInt(timestamp),
+            });
+            props.push(shiguredo_moqt::loc::LocProperty {
+                prop_id: PROP_TIMESCALE,
+                value: LocPropertyValue::VarInt(timescale),
+            });
+            // 1 octet の |S|E|I|D|0 0 0 0| で、I ビット (0x20) が独立フレーム (キーフレーム)
+            props.push(shiguredo_moqt::loc::LocProperty {
+                prop_id: PROP_VIDEO_FRAME_MARKING,
+                value: LocPropertyValue::Bytes(vec![0xE0]),
+            });
+            props
+        }
+
+        /// 映像 Object 1 つを subgroup stream で送る
+        ///
+        /// 映像は 1 Group = 1 Subgroup stream で届く (draft-ietf-moq-loc-05 §4.2)。
+        async fn send_video_subgroup_stream(
+            peer: &mut TestPeer,
+            track_alias: u64,
+            group_id: u64,
+            object_id: u64,
+            timestamp: u64,
+            packet: &[u8],
+        ) {
+            let header = SubgroupHeader {
+                track_alias,
+                group_id,
+                subgroup_id: SubgroupIdMode::Zero,
+                publisher_priority: Some(128),
+                has_properties: true,
+                end_of_group: true,
+                first_object: true,
+            };
+            let properties = video_loc_properties(timestamp, 90_000)
+                .encode()
+                .expect("映像の LOC プロパティを encode できること");
+            let object = SubgroupObject {
+                object_id_delta: object_id,
+                payload_length: packet.len() as u64,
+                status: None,
+            };
+            let mut buf = header.encode();
+            object
+                .encode(true, Some(&properties), &mut buf)
+                .expect("映像の Subgroup Object を encode できること");
+            buf.extend_from_slice(packet);
+            let mut stream = peer
+                .open_uni_send_stream()
+                .await
+                .expect("映像の subgroup stream を開けること");
+            stream
+                .send(Bytes::from(buf))
+                .await
+                .expect("映像の subgroup stream を送れること");
+            stream
+                .finish()
+                .await
+                .expect("映像の subgroup stream を FIN できること");
+        }
+
+        /// 音声の再生を行うテスト用 Config (映像の購読も有効にした設定)
+        ///
+        /// 映像の購読を無効にすると catalog の映像 track を無視する挙動まで変わるため、
+        /// テストの catalog が音声だけでも `video_enabled` は有効のままにする。
+        fn test_audio_config(addr: SocketAddr) -> Config {
+            Config {
+                url: moqt_url_for(addr),
+                transport: Transport::Quic,
+                cert: None,
+                namespace: test_track_namespace(),
+                video_enabled: true,
+                audio_enabled: true,
+                audio_output_device: crate::cli::AudioOutputDevice::None,
+                audio_min_delay_ms: 50,
+                mp4: None,
+                no_play: false,
+                subscribe_tracks: false,
+            }
+        }
+
+        /// デコード済み音声フレームの受信器 (blocking な std チャネルを非同期テストから待つ)
+        type SharedAudioReceiver =
+            std::sync::Arc<Mutex<std::sync::mpsc::Receiver<DecodedAudioFrame>>>;
+
+        /// デコード済み映像フレームの受信器 (blocking な std チャネルを非同期テストから待つ)
+        type SharedVideoReceiver =
+            std::sync::Arc<Mutex<std::sync::mpsc::Receiver<DecodedVideoFrame>>>;
+
+        /// run を drive するテスト用の束
+        struct RunningPipeline {
+            /// run のタスク
+            handle: tokio::task::JoinHandle<Result<()>>,
+            /// graceful shutdown の制御
+            shutdown: tokio_utils::ShutdownController,
+            /// デコード済み音声フレームの受信器
+            audio_rx: SharedAudioReceiver,
+            /// デコード済み映像フレームの受信器
+            frame_rx: SharedVideoReceiver,
+            /// 再生側の終了通知の送信側
+            ///
+            /// この sender を drop すると run の `player_stop` が成立して pipeline が
+            /// 終了するため、テストが終わるまで保持する。
+            _player_stop: tokio::sync::oneshot::Sender<()>,
+        }
+
+        impl RunningPipeline {
+            /// テスト用サーバーのアドレスへ接続する run を起動する
+            fn start(addr: SocketAddr) -> Self {
+                let (frame_tx, frame_rx) = std::sync::mpsc::channel();
+                let (audio_tx, audio_rx) = std::sync::mpsc::channel();
+                let (player_stop_tx, player_stop_rx) = tokio::sync::oneshot::channel();
+                let shutdown = tokio_utils::ShutdownController::new();
+                let shutdown_monitor = shutdown.subscribe();
+                let task_monitor = tokio_metrics::TaskMonitor::new();
+                let config = test_audio_config(addr);
+                let handle = tokio::spawn(async move {
+                    run(
+                        config,
+                        frame_tx,
+                        audio_tx,
+                        task_monitor,
+                        shutdown_monitor,
+                        std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
+                        std::sync::Arc::new(std::sync::atomic::AtomicI64::new(-1)),
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                        player_stop_rx,
+                    )
+                    .await
+                });
+                Self {
+                    handle,
+                    shutdown,
+                    audio_rx: std::sync::Arc::new(Mutex::new(audio_rx)),
+                    frame_rx: std::sync::Arc::new(Mutex::new(frame_rx)),
+                    _player_stop: player_stop_tx,
+                }
+            }
+
+            /// デコード済み音声フレームを 1 つ待つ (上限付き)
+            async fn next_audio(&self) -> DecodedAudioFrame {
+                let audio_rx = std::sync::Arc::clone(&self.audio_rx);
+                tokio::task::spawn_blocking(move || {
+                    audio_rx
+                        .lock()
+                        .expect("音声フレームの受信器ロックが poison されていないこと")
+                        .recv_timeout(EVENT_WAIT_TIMEOUT)
+                        .expect("上限時間内にデコード済み音声フレームが届くこと")
+                })
+                .await
+                .expect("音声フレーム待ちの blocking タスクが panic しないこと")
+            }
+
+            /// デコード済み映像フレームを 1 つ待つ (上限付き)
+            async fn next_video(&self) -> DecodedVideoFrame {
+                let frame_rx = std::sync::Arc::clone(&self.frame_rx);
+                tokio::task::spawn_blocking(move || {
+                    frame_rx
+                        .lock()
+                        .expect("映像フレームの受信器ロックが poison されていないこと")
+                        .recv_timeout(EVENT_WAIT_TIMEOUT)
+                        .expect("上限時間内にデコード済み映像フレームが届くこと")
+                })
+                .await
+                .expect("映像フレーム待ちの blocking タスクが panic しないこと")
+            }
+
+            /// shutdown を要求し、run の終了を待つ
+            async fn finish(self) -> Result<()> {
+                tokio::time::timeout(FINISH_TIMEOUT, self.shutdown.shutdown())
+                    .await
+                    .expect("上限時間内に graceful shutdown が完了すること");
+                tokio::time::timeout(FINISH_TIMEOUT, self.handle)
+                    .await
+                    .expect("上限時間内に run が終了すること")
+                    .expect("run のタスクが panic しないこと")
+            }
+        }
+
+        /// 残っている音声フレームをすべて取り出す
+        ///
+        /// run の終了後は audio チャネルの送信側が drop されるため、これ以上フレームが
+        /// 届かないことを `try_recv` で確定できる。
+        fn drain_audio(audio_rx: &SharedAudioReceiver) -> Vec<DecodedAudioFrame> {
+            let audio_rx = audio_rx
+                .lock()
+                .expect("音声フレームの受信器ロックが poison されていないこと");
+            let mut frames = Vec::new();
+            while let Ok(frame) = audio_rx.try_recv() {
+                frames.push(frame);
+            }
+            frames
+        }
+
+        /// `receive_catalog` が fill fetch stream の独立カタログと delta を適用すること
+        ///
+        /// fill fetch stream は購読より前に publish された独立カタログを運び
+        /// (draft-ietf-moq-transport-23 §3.4 (Fill Semantics))、同じ Group の Object ID 1
+        /// 以降は MSF の delta update である (draft-ietf-moq-msf-01 §5 (Catalog))。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn receive_catalog_applies_the_fill_fetch_catalog_and_delta() {
+            run_with_timeout(async {
+                let (mut peer, mut client, mut acceptor) = connect_pair().await;
+                let subscribed = subscribe_catalog_with_peer(&mut client, &mut peer, 7).await;
+                let data_plane = client.data_plane();
+                send_catalog_fill_fetch_stream(
+                    &mut peer,
+                    subscribed.request_id,
+                    &[
+                        (
+                            Location {
+                                group_id: 100,
+                                object_id: 0,
+                            },
+                            audio_catalog_json(),
+                        ),
+                        (
+                            Location {
+                                group_id: 100,
+                                object_id: 1,
+                            },
+                            catalog_delta_json("slides"),
+                        ),
+                    ],
+                )
+                .await;
+
+                let resolution = tokio::time::timeout(
+                    CATALOG_TIMEOUT + Duration::from_secs(2),
+                    receive_catalog(
+                        &mut acceptor,
+                        &data_plane,
+                        subscribed.request_id,
+                        subscribed.track_alias,
+                        test_track_namespace(),
+                    ),
+                )
+                .await
+                .expect("上限時間内に catalog を解決すること")
+                .expect("fill fetch stream から catalog を取得できること");
+                let catalog = resolution
+                    .state
+                    .catalog()
+                    .expect("catalog が適用されていること");
+                assert_eq!(
+                    catalog::track_names(catalog),
+                    "audio, slides",
+                    "独立カタログと delta の両方を適用すること"
+                );
+            })
+            .await;
+        }
+
+        /// `receive_catalog` が購読 (subgroup stream) の独立カタログと delta を適用すること
+        ///
+        /// fill fetch stream が届かない場合 (publisher が fill に未対応など) は、購読で
+        /// 再 publish される独立カタログと delta だけで解決する。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn receive_catalog_applies_the_subgroup_catalog_and_delta() {
+            run_with_timeout(async {
+                let (mut peer, mut client, mut acceptor) = connect_pair().await;
+                let subscribed = subscribe_catalog_with_peer(&mut client, &mut peer, 7).await;
+                let data_plane = client.data_plane();
+                send_catalog_subgroup_stream(
+                    &mut peer,
+                    subscribed.track_alias,
+                    &[
+                        (
+                            Location {
+                                group_id: 100,
+                                object_id: 0,
+                            },
+                            audio_catalog_json(),
+                        ),
+                        (
+                            Location {
+                                group_id: 100,
+                                object_id: 1,
+                            },
+                            catalog_delta_json("slides"),
+                        ),
+                    ],
+                )
+                .await;
+
+                let resolution = tokio::time::timeout(
+                    CATALOG_TIMEOUT + Duration::from_secs(2),
+                    receive_catalog(
+                        &mut acceptor,
+                        &data_plane,
+                        subscribed.request_id,
+                        subscribed.track_alias,
+                        test_track_namespace(),
+                    ),
+                )
+                .await
+                .expect("上限時間内に catalog を解決すること")
+                .expect("subgroup stream から catalog を取得できること");
+                let catalog = resolution
+                    .state
+                    .catalog()
+                    .expect("catalog が適用されていること");
+                assert_eq!(
+                    catalog::track_names(catalog),
+                    "audio, slides",
+                    "購読の独立カタログと delta の両方を適用すること"
+                );
+            })
+            .await;
+        }
+
+        /// `CATALOG_TIMEOUT` までに catalog が決まらない場合だけ `receive_catalog` が Err になること
+        ///
+        /// 期限より前に終わらない (短い期限に変える退行を検出する) ことと、期限切れの理由が
+        /// エラーに残ることを併せて確認する。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn receive_catalog_returns_an_error_when_no_catalog_arrives_before_the_timeout() {
+            run_with_timeout(async {
+                let (mut peer, mut client, mut acceptor) = connect_pair().await;
+                let subscribed = subscribe_catalog_with_peer(&mut client, &mut peer, 7).await;
+                let data_plane = client.data_plane();
+                // peer は data stream を 1 本も開かない。catalog は決まらない
+                let started = Instant::now();
+                let resolution = tokio::time::timeout(
+                    CATALOG_TIMEOUT + Duration::from_secs(2),
+                    receive_catalog(
+                        &mut acceptor,
+                        &data_plane,
+                        subscribed.request_id,
+                        subscribed.track_alias,
+                        test_track_namespace(),
+                    ),
+                )
+                .await
+                .expect("上限時間内に終了すること");
+                let error = match resolution {
+                    Ok(_) => panic!("catalog が届かないため Err になること"),
+                    Err(error) => error,
+                };
+                // CATALOG_TIMEOUT は 5 秒固定である。期限を短くする退行を検出できるよう、
+                // 定数ではなく期待する値 (5 秒) を直接固定する
+                assert!(
+                    started.elapsed() >= Duration::from_secs(4),
+                    "CATALOG_TIMEOUT (5 秒) まで待ってから Err にすること: elapsed={:?}",
+                    started.elapsed()
+                );
+                // エラー文言は契約として固定する
+                assert!(
+                    error
+                        .to_string()
+                        .contains("catalog did not arrive within 5000ms"),
+                    "5 秒の期限切れが分かるエラーであること: {error}"
+                );
+            })
+            .await;
+        }
+
+        /// `read_catalog_fetch_stream` が request ID 不一致・デコード失敗・RESET を Err にすること
+        ///
+        /// `receive_catalog` はこれらの Err を警告に変えて購読で届く catalog を待つため、
+        /// 関数自身は失敗を Err で返す契約であることを固定する。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn read_catalog_fetch_stream_reports_mismatch_decode_failure_and_reset() {
+            run_with_timeout(async {
+                let (mut peer, mut client, mut acceptor) = connect_pair().await;
+                let catalog = subscribe_catalog_with_peer(&mut client, &mut peer, 7).await;
+                // request ID 不一致を作るため、別の購読 (映像) の Request ID を使う
+                let video = subscribe_with_peer(
+                    &mut client,
+                    &mut peer,
+                    &SubscribeTarget {
+                        namespace: test_track_namespace(),
+                        track_name: b"video".to_vec(),
+                    },
+                    video_subscribe_parameters(None),
+                    8,
+                    MessageParameters::new(),
+                )
+                .await;
+                let data_plane = client.data_plane();
+
+                // (1) request ID の不一致
+                send_fill_fetch_header_only(&mut peer, video.request_id).await;
+                let (stream_id, mut stream, buf) =
+                    accept_data_stream(&mut acceptor, &data_plane).await;
+                let error = read_catalog_fetch_stream(
+                    &mut stream,
+                    &data_plane,
+                    stream_id,
+                    &buf,
+                    catalog.request_id,
+                )
+                .await
+                .expect_err("request ID が一致しない fill は Err になること");
+                // エラー文言は契約として固定する
+                assert!(
+                    error.to_string().contains("unexpected fetch request_id"),
+                    "request ID の不一致が分かるエラーであること: {error}"
+                );
+
+                // (2) カタログとしてデコードできない payload
+                send_catalog_fill_fetch_stream(
+                    &mut peer,
+                    catalog.request_id,
+                    &[(
+                        Location {
+                            group_id: 100,
+                            object_id: 0,
+                        },
+                        b"not a catalog".to_vec(),
+                    )],
+                )
+                .await;
+                let (stream_id, mut stream, buf) =
+                    accept_data_stream(&mut acceptor, &data_plane).await;
+                let error = read_catalog_fetch_stream(
+                    &mut stream,
+                    &data_plane,
+                    stream_id,
+                    &buf,
+                    catalog.request_id,
+                )
+                .await
+                .expect_err("カタログでない payload は Err になること");
+                assert!(
+                    error.to_string().contains("failed to parse MSF catalog"),
+                    "デコード失敗が分かるエラーであること: {error}"
+                );
+
+                // (3) FETCH_HEADER の途中での RESET_STREAM
+                //
+                // stream type を client に読ませてから RESET_STREAM する必要があるため、
+                // peer はいったん stream を開いたまま type だけを送り、client が type を
+                // 読んだ後に reset する。RESET_STREAM は未配送のデータを破棄しうるため
+                // (RFC 9000 §3.2)、type を送った直後に reset すると client からは type の
+                // 前の終端に見えうる。
+                let mut fill_stream = peer
+                    .open_uni_send_stream()
+                    .await
+                    .expect("fill fetch stream を開けること");
+                // FETCH_HEADER の type だけを送る
+                // (draft-ietf-moq-transport-23 §11.4.1 (Fetch Header))
+                let mut stream_type = Vec::new();
+                shiguredo_moqt::varint::encode(
+                    shiguredo_moqt::stream::FETCH_HEADER_TYPE,
+                    &mut stream_type,
+                );
+                fill_stream
+                    .send(Bytes::from(stream_type))
+                    .await
+                    .expect("stream type だけを送れること");
+                let (stream_id, mut stream, buf) =
+                    accept_data_stream(&mut acceptor, &data_plane).await;
+                fill_stream
+                    .reset(STREAM_CANCELLED, None)
+                    .await
+                    .expect("FETCH_HEADER の前で RESET_STREAM できること");
+                let error = read_catalog_fetch_stream(
+                    &mut stream,
+                    &data_plane,
+                    stream_id,
+                    &buf,
+                    catalog.request_id,
+                )
+                .await
+                .expect_err("FETCH_HEADER の前の RESET_STREAM は Err になること");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("stream closed before fetch header"),
+                    "RESET_STREAM による途中断端が分かるエラーであること: {error}"
+                );
+            })
+            .await;
+        }
+
+        /// fill fetch stream が失敗しても `receive_catalog` が購読の catalog を待つこと
+        ///
+        /// request ID 不一致・デコード失敗・RESET をすべて先に送り、catalog を送らずに
+        /// `receive_catalog` を呼ぶ。どれも購読の失敗ではないため、`receive_catalog` は警告に
+        /// 留めて購読で届く catalog を待ち続け、CATALOG_TIMEOUT で期限切れの Err を返す。
+        /// 失敗を Err に伝播させる退行は期限より前に別のエラーで返るため、待ち時間と
+        /// エラー文言で検出できる。その後に購読側の catalog を送り、同じ購読で解決できる
+        /// ことまで確認する。
+        ///
+        /// 内部エラー文字列は、警告ログと原因の切り分けのための契約として固定する。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn receive_catalog_continues_after_a_failed_fill_fetch_stream() {
+            run_with_timeout(async {
+                let (mut peer, mut client, mut acceptor) = connect_pair().await;
+                let catalog = subscribe_catalog_with_peer(&mut client, &mut peer, 7).await;
+                // request ID 不一致の相手として使う別購読
+                let video = subscribe_with_peer(
+                    &mut client,
+                    &mut peer,
+                    &SubscribeTarget {
+                        namespace: test_track_namespace(),
+                        track_name: b"video".to_vec(),
+                    },
+                    video_subscribe_parameters(None),
+                    8,
+                    MessageParameters::new(),
+                )
+                .await;
+                let data_plane = client.data_plane();
+
+                // 1. FETCH_HEADER の Request ID が購読のものと一致しない
+                send_fill_fetch_header_only(&mut peer, video.request_id).await;
+                // 2. カタログとしてデコードできない payload
+                send_catalog_fill_fetch_stream(
+                    &mut peer,
+                    catalog.request_id,
+                    &[(
+                        Location {
+                            group_id: 100,
+                            object_id: 0,
+                        },
+                        b"not a catalog".to_vec(),
+                    )],
+                )
+                .await;
+                // 3. FETCH_HEADER の途中での RESET_STREAM
+                reset_fill_fetch_stream_after_type(&mut peer).await;
+
+                // 3 本の fill fetch stream の失敗をすべて処理したうえで catalog を待ち続け、
+                // 期限切れの Err になること。どれかを Err に伝播させると期限より前に返る
+                let started = Instant::now();
+                let resolution = tokio::time::timeout(
+                    CATALOG_TIMEOUT + Duration::from_secs(2),
+                    receive_catalog(
+                        &mut acceptor,
+                        &data_plane,
+                        catalog.request_id,
+                        catalog.track_alias,
+                        test_track_namespace(),
+                    ),
+                )
+                .await
+                .expect("上限時間内に終了すること");
+                let error = match resolution {
+                    Ok(_) => panic!("catalog が届かないため Err になること"),
+                    Err(error) => error,
+                };
+                assert!(
+                    started.elapsed() >= Duration::from_secs(4),
+                    "fill の失敗を Err にせず CATALOG_TIMEOUT (5 秒) まで待つこと: elapsed={:?}",
+                    started.elapsed()
+                );
+                assert!(
+                    error
+                        .to_string()
+                        .contains("catalog did not arrive within 5000ms"),
+                    "fill の失敗ではなく期限切れが分かるエラーであること: {error}"
+                );
+
+                // 購読側で完全な catalog を届ける。警告に留めた購読は生きたままなので、
+                // 同じ client の receive_catalog でもう一度解決できる
+                send_catalog_subgroup_stream(
+                    &mut peer,
+                    catalog.track_alias,
+                    &[(
+                        Location {
+                            group_id: 100,
+                            object_id: 0,
+                        },
+                        audio_catalog_json(),
+                    )],
+                )
+                .await;
+                let resolution = tokio::time::timeout(
+                    CATALOG_TIMEOUT,
+                    receive_catalog(
+                        &mut acceptor,
+                        &data_plane,
+                        catalog.request_id,
+                        catalog.track_alias,
+                        test_track_namespace(),
+                    ),
+                )
+                .await
+                .expect("上限時間内に catalog を解決すること")
+                .expect("購読側の catalog で解決できること");
+                assert_eq!(
+                    catalog::track_names(resolution.state.catalog().expect("catalog があること")),
+                    "audio",
+                    "fill の失敗後も購読側の catalog が適用されること"
+                );
+            })
+            .await;
+        }
+
+        /// `apply_catalog_object` が MSF の不変条件に反する delta を Err にすること
+        ///
+        /// 同じ (namespace, name) の track を add する delta は track の一意性 MUST に反する
+        /// ため、カタログを変更せず Err を返す (draft-ietf-moq-msf-01 §5.2.3)。
+        #[test]
+        fn apply_catalog_object_rejects_an_invalid_delta() {
+            let mut state = catalog::CatalogState::new("moq-example");
+            let full = catalog::CatalogObject::decode(
+                Location {
+                    group_id: 100,
+                    object_id: 0,
+                },
+                &audio_catalog_json(),
+            )
+            .expect("独立カタログをデコードできること");
+            apply_catalog_object(&mut state, &full).expect("独立カタログを適用できること");
+            let invalid = catalog::CatalogObject::decode(
+                Location {
+                    group_id: 100,
+                    object_id: 1,
+                },
+                &catalog_delta_json("audio"),
+            )
+            .expect("delta をデコードできること");
+            let error = apply_catalog_object(&mut state, &invalid)
+                .expect_err("同じ track を add する delta は Err になること");
+            // エラー文言は契約として固定する
+            assert!(
+                error.to_string().contains("already exists"),
+                "track の重複が分かるエラーであること: {error}"
+            );
+            assert_eq!(
+                catalog::track_names(state.catalog().expect("catalog が残っていること")),
+                "audio",
+                "適用に失敗した delta でカタログを変えないこと"
+            );
+        }
+
+        /// `read_catalog_subgroup_stream` が catalog alias 以外の subgroup stream を
+        /// 読み捨てること
+        ///
+        /// catalog track 以外の alias の stream は catalog の Object ではない
+        /// (`read_catalog_subgroup_stream` の alias 判定)。中身を適用しないことを、別の
+        /// track 名を持つ偽カタログと本物のカタログを並べて確認する。
+        ///
+        /// 2 本の stream の到着順は保証されないため、先に送った偽カタログの stream を client 側で
+        /// 受理して読み切ってから本物を送る。これにより、本物の stream が先に処理されて
+        /// alias 判定を踏まない経路を排除する。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn read_catalog_subgroup_stream_discards_another_alias() {
+            run_with_timeout(async {
+                let (mut peer, mut client, mut acceptor) = connect_pair().await;
+                let catalog = subscribe_catalog_with_peer(&mut client, &mut peer, 7).await;
+                // 別 alias の stream を「登録済みの alias」にするため、映像も購読しておく。
+                // 未知 alias の stream は Session が受理しないため、alias の判定だけを
+                // 検証できない
+                let video = subscribe_with_peer(
+                    &mut client,
+                    &mut peer,
+                    &SubscribeTarget {
+                        namespace: test_track_namespace(),
+                        track_name: b"video".to_vec(),
+                    },
+                    video_subscribe_parameters(None),
+                    8,
+                    MessageParameters::new(),
+                )
+                .await;
+                let data_plane = client.data_plane();
+                let spurious_catalog = br#"{"version":"draft-01","tracks":[{"name":"spurious","packaging":"loc","isLive":true}]}"#.to_vec();
+                send_catalog_subgroup_stream(
+                    &mut peer,
+                    video.track_alias,
+                    &[(
+                        Location {
+                            group_id: 100,
+                            object_id: 0,
+                        },
+                        spurious_catalog,
+                    )],
+                )
+                .await;
+
+                // 偽カタログの stream を受理して読み切る。catalog alias ではないため
+                // Object を 1 つも返さず、Session は stream の終端を会計できる
+                let (stream_id, mut stream, buf) =
+                    accept_data_stream(&mut acceptor, &data_plane).await;
+                let discarded = read_catalog_subgroup_stream(
+                    &mut stream,
+                    &data_plane,
+                    stream_id,
+                    &buf,
+                    catalog.track_alias,
+                )
+                .await
+                .expect("別 alias の subgroup stream は Err にせず読み捨てること");
+                assert!(
+                    discarded.is_empty(),
+                    "別 alias の subgroup stream から catalog Object を取り出さないこと"
+                );
+
+                // 本物の catalog を送り、receive_catalog が解決すること
+                send_catalog_subgroup_stream(
+                    &mut peer,
+                    catalog.track_alias,
+                    &[(
+                        Location {
+                            group_id: 100,
+                            object_id: 0,
+                        },
+                        audio_catalog_json(),
+                    )],
+                )
+                .await;
+                let resolution = tokio::time::timeout(
+                    CATALOG_TIMEOUT + Duration::from_secs(2),
+                    receive_catalog(
+                        &mut acceptor,
+                        &data_plane,
+                        catalog.request_id,
+                        catalog.track_alias,
+                        test_track_namespace(),
+                    ),
+                )
+                .await
+                .expect("上限時間内に catalog を解決すること")
+                .expect("catalog alias の stream から catalog を取得できること");
+                assert_eq!(
+                    catalog::track_names(resolution.state.catalog().expect("catalog があること")),
+                    "audio",
+                    "別 alias の subgroup stream は読み捨てること"
+                );
+            })
+            .await;
+        }
+
+        /// `resubscribe_tracks` が移行先で catalog / 映像 / 音声を張り直すこと
+        ///
+        /// 次の 3 点を固定する。
+        ///
+        /// - catalog は FILL_PARAMETERS 付きで購読する (移行中に更新された完全な catalog を
+        ///   fill で受け直すため。draft-ietf-moq-transport-23 §3.4 / §3.5)
+        /// - 映像は購読後に SUBSCRIBER_PRIORITY の REQUEST_UPDATE を送り、直近 Group の
+        ///   FETCH を発行する (起動時と同じ手順)
+        /// - 映像 / 音声の購読に FILL_PARAMETERS は載せず、音声の明示 FETCH は発行しない
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn resubscribe_tracks_establishes_catalog_video_and_audio() {
+            run_with_timeout(async {
+                let (mut peer, mut client, _acceptor) = connect_pair().await;
+                let plan = ResubscribePlan {
+                    catalog_namespace: Some(test_track_namespace()),
+                    video: Some(SubscribeTarget {
+                        namespace: test_track_namespace(),
+                        track_name: b"video".to_vec(),
+                    }),
+                    audio: Some(SubscribeTarget {
+                        namespace: test_track_namespace(),
+                        track_name: b"audio".to_vec(),
+                    }),
+                };
+                let last_locations = LastReceivedLocations {
+                    catalog: None,
+                    video: Some(Location {
+                        group_id: 5,
+                        object_id: 2,
+                    }),
+                    audio: Some(Location {
+                        group_id: 7,
+                        object_id: 0,
+                    }),
+                };
+                // SUBSCRIBE_OK の LARGEST_OBJECT を (6, 3) にして、直近 4 Group の FETCH を
+                // 発行させる。映像の再開位置は最後に受信した (5, 2)
+                let mut video_ok_parameters = MessageParameters::new();
+                video_ok_parameters.set_largest_object(6, 3);
+                let (resubscribed, (catalog_request_id, video_fetch_request_id)) = tokio::join!(
+                    resubscribe_tracks(&mut client, &plan, &last_locations),
+                    async {
+                        // catalog 購読: FILL_PARAMETERS 付きで Next Object から
+                        let catalog =
+                            accept_subscription(&mut peer, 11, MessageParameters::new()).await;
+                        assert!(
+                            catalog.parameters.fill_parameters().is_some(),
+                            "移行先の catalog 購読に FILL_PARAMETERS を載せること"
+                        );
+                        assert_eq!(
+                            catalog
+                                .parameters
+                                .location_filter_typed()
+                                .expect("catalog の LOCATION_FILTER を読めること"),
+                            Some(LocationFilter::NextObject),
+                            "catalog の購読は Next Object から始めること"
+                        );
+
+                        // 映像購読: FILL_PARAMETERS なし・最後の位置から Absolute Start
+                        let video = accept_subscription(&mut peer, 12, video_ok_parameters).await;
+                        // SUBSCRIBE_OK の LARGEST_OBJECT (6, 3) で FETCH を発行させるが、
+                        // publisher が Object を publish 済みでない track への FETCH は
+                        // Session が INVALID_RANGE で自動拒否する。FETCH を受理させるため、
+                        // SUBSCRIBE_OK の直後に publish 済みの Location を記録する
+                        peer.note_published_object(video.request_id, 6, 3)
+                            .expect("映像の publish 済み Location を記録できること");
+                        assert!(
+                            video.parameters.fill_parameters().is_none(),
+                            "映像の購読に FILL_PARAMETERS を載せないこと"
+                        );
+                        assert_eq!(
+                            video
+                                .parameters
+                                .location_filter_typed()
+                                .expect("映像の LOCATION_FILTER を読めること"),
+                            Some(LocationFilter::AbsoluteStart {
+                                start: Location {
+                                    group_id: 5,
+                                    object_id: 2,
+                                },
+                            }),
+                            "映像の再購読は最後に受信した位置から始めること"
+                        );
+                        assert_eq!(
+                            video.parameters.new_group_request(),
+                            Some(0),
+                            "映像の購読で新しい Group を要求すること"
+                        );
+
+                        // REQUEST_UPDATE (SUBSCRIBER_PRIORITY=192) を request stream で観測する
+                        let update = peer
+                            .recv_request_stream_message(video.request_id)
+                            .await
+                            .expect("映像の request stream を読めること");
+                        match update {
+                            RequestStreamRead::Message(ControlMessage::RequestUpdate(update)) => {
+                                assert_ne!(
+                                    update.request_id, video.request_id,
+                                    "REQUEST_UPDATE は購読とは別の Request ID を消費すること"
+                                );
+                                assert_eq!(
+                                    update.parameters.subscriber_priority(),
+                                    Some(192),
+                                    "映像の SUBSCRIBER_PRIORITY を 192 に更新すること"
+                                );
+                            }
+                            other => panic!("REQUEST_UPDATE が届くこと: {other:?}"),
+                        }
+
+                        // 映像にだけ直近 Group の FETCH が発行される
+                        let message = peer
+                            .recv_request_start()
+                            .await
+                            .expect("FETCH の request stream を受理できること");
+                        let ControlMessage::Fetch(fetch) = message else {
+                            panic!("FETCH が request stream の先頭に届くこと: {message:?}");
+                        };
+                        assert_eq!(
+                            fetch.track_namespace,
+                            test_track_namespace(),
+                            "FETCH の namespace が映像の購読と同じであること"
+                        );
+                        assert_eq!(
+                            fetch.track_name,
+                            b"video".to_vec(),
+                            "FETCH の track 名が映像であること (音声の明示 FETCH は無い)"
+                        );
+                        assert_eq!(
+                            fetch
+                                .parameters
+                                .location_filter_typed()
+                                .expect("FETCH の LOCATION_FILTER を読めること"),
+                            Some(LocationFilter::AbsoluteRangeWithEnd {
+                                start: Location {
+                                    group_id: 3,
+                                    object_id: 0,
+                                },
+                                end_group_delta: 3,
+                                end_object: 3,
+                            }),
+                            "Largest Object (6, 3) を含む直近 4 Group を要求すること"
+                        );
+                        let video_fetch_request_id = fetch.request_id;
+
+                        // 音声購読: FILL_PARAMETERS なし・最後の位置から Absolute Start
+                        let audio =
+                            accept_subscription(&mut peer, 13, MessageParameters::new()).await;
+                        assert!(
+                            audio.parameters.fill_parameters().is_none(),
+                            "音声の購読に FILL_PARAMETERS を載せないこと"
+                        );
+                        assert_eq!(
+                            audio
+                                .parameters
+                                .location_filter_typed()
+                                .expect("音声の LOCATION_FILTER を読めること"),
+                            Some(LocationFilter::AbsoluteStart {
+                                start: Location {
+                                    group_id: 7,
+                                    object_id: 0,
+                                },
+                            }),
+                            "音声の再購読は最後に受信した位置から始めること"
+                        );
+                        (catalog.request_id, video_fetch_request_id)
+                    },
+                );
+                let resubscribed = resubscribed.expect("移行先の購読を張り直せること");
+                assert_eq!(
+                    resubscribed.catalog.as_ref().map(|sub| sub.track_alias),
+                    Some(11),
+                    "catalog の購読を張り直すこと"
+                );
+                assert_eq!(
+                    resubscribed.video.as_ref().map(|sub| sub.track_alias),
+                    Some(12),
+                    "映像の購読を張り直すこと"
+                );
+                assert_eq!(
+                    resubscribed.audio.as_ref().map(|sub| sub.track_alias),
+                    Some(13),
+                    "音声の購読を張り直すこと"
+                );
+                assert_eq!(
+                    resubscribed.fetch_requests.len(),
+                    1,
+                    "発行した FETCH は映像の 1 本だけであること (音声の明示 FETCH は無い)"
+                );
+                assert_eq!(
+                    resubscribed
+                        .fetch_requests
+                        .get(&video_fetch_request_id)
+                        .map(|request| request.target.track_name.clone()),
+                    Some(b"video".to_vec()),
+                    "FETCH の再発行指定が映像を指すこと"
+                );
+                assert_eq!(
+                    resubscribed.fetch_targets.get(&video_fetch_request_id),
+                    Some(&FetchTarget::Video),
+                    "映像の FETCH 応答の配送先を返すこと"
+                );
+                assert_eq!(
+                    resubscribed.fetch_targets.get(&catalog_request_id),
+                    Some(&FetchTarget::Catalog),
+                    "catalog 購読の fill fetch stream をカタログとして適用する対応を返すこと"
+                );
+            })
+            .await;
+        }
+
+        /// `run` が catalog 取得から購読確立、shutdown までを完了すること
+        ///
+        /// 音声 1 Object の受信経路は既存のテスト用 Opus データ (無音 20 ms フレーム) で
+        /// 確認する。shutdown では GOAWAY を送った後に NO_ERROR (0) で接続を閉じる。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn run_completes_from_catalog_to_shutdown_with_an_audio_object() {
+            run_with_timeout(async {
+                let mut server = TestPeerServer::start()
+                    .await
+                    .expect("テスト用サーバーを起動できること");
+                let pipeline = RunningPipeline::start(server.local_addr());
+                let packet = encode_opus_silence(48_000, 1);
+                let peer = tokio::spawn(async move {
+                    let mut peer = server
+                        .accept()
+                        .await
+                        .expect("client の接続を受理できること");
+                    peer.establish().await.expect("SETUP を交換できること");
+                    // catalog を購読させ、fill fetch stream で完全なカタログを届ける
+                    let catalog = accept_subscription(&mut peer, 7, MessageParameters::new()).await;
+                    send_catalog_fill_fetch_stream(
+                        &mut peer,
+                        catalog.request_id,
+                        &[(
+                            Location {
+                                group_id: 0,
+                                object_id: 0,
+                            },
+                            audio_catalog_json(),
+                        )],
+                    )
+                    .await;
+                    // 音声を購読させ、音声 Object を 1 つ届ける
+                    let _audio = accept_subscription(&mut peer, 9, MessageParameters::new()).await;
+                    send_audio_subgroup_stream(&mut peer, 9, 0, 0, 0, &packet).await;
+                    peer.recv_close_code()
+                        .await
+                        .expect("shutdown の CONNECTION_CLOSE を観測できること")
+                });
+                let frame = pipeline.next_audio().await;
+                assert_eq!(
+                    frame.pts_us, 0,
+                    "音声 Object の TIMESTAMP がフレームの PTS になること"
+                );
+                assert_eq!(
+                    frame.sample_rate, 48_000,
+                    "catalog のサンプルレートで復号すること"
+                );
+                let audio_rx = std::sync::Arc::clone(&pipeline.audio_rx);
+                pipeline.finish().await.expect("run が正常終了すること");
+                assert!(
+                    drain_audio(&audio_rx).is_empty(),
+                    "届いた音声 Object が 1 つだけであること"
+                );
+                assert_eq!(
+                    peer.await.expect("peer のタスクが panic しないこと"),
+                    0,
+                    "shutdown は NO_ERROR (0) で接続を閉じること"
+                );
+            })
+            .await;
+        }
+
+        /// GOAWAY による session 移行の前後で音声が欠落せず、同じ Object が二重に流れないこと
+        ///
+        /// 旧 session が最後に配送した位置を、移行先の音声購読が Location Filter の
+        /// Absolute Start にして取り直す (draft-ietf-moq-transport-23 §3.3.1 / §9.19.9)。
+        /// 同じ位置の Object は `AudioDeliveryOrder` が重複として捨て、その次の Object が
+        /// live として続く。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn run_migrates_the_audio_session_without_gaps_or_duplicates() {
+            run_with_timeout(async {
+                let mut server1 = TestPeerServer::start()
+                    .await
+                    .expect("移行元のサーバーを起動できること");
+                let mut server2 = TestPeerServer::start()
+                    .await
+                    .expect("移行先のサーバーを起動できること");
+                let peer2_uri = new_session_uri(server2.local_addr());
+                let pipeline = RunningPipeline::start(server1.local_addr());
+                // 移行を始める指示 (旧 session の音声をテストが観測してから送る)
+                let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel::<()>();
+                // 移行先の peer をテストの終了まで保持する指示
+                let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+
+                let peer2 = tokio::spawn(async move {
+                    let mut peer = server2
+                        .accept()
+                        .await
+                        .expect("移行先の接続を受理できること");
+                    peer.establish()
+                        .await
+                        .expect("移行先で SETUP を交換できること");
+                    let packet = encode_opus_silence(48_000, 1);
+                    // catalog は FILL_PARAMETERS 付きで張り直される
+                    let catalog =
+                        accept_subscription(&mut peer, 21, MessageParameters::new()).await;
+                    assert!(
+                        catalog.parameters.fill_parameters().is_some(),
+                        "移行先の catalog 購読に FILL_PARAMETERS が載ること"
+                    );
+                    // 音声は旧 session の最後の位置から再購読される
+                    let audio = accept_subscription(&mut peer, 22, MessageParameters::new()).await;
+                    assert_eq!(
+                        audio
+                            .parameters
+                            .location_filter_typed()
+                            .expect("音声の LOCATION_FILTER を読めること"),
+                        Some(LocationFilter::AbsoluteStart {
+                            start: Location {
+                                group_id: 0,
+                                object_id: 0,
+                            },
+                        }),
+                        "音声の再購読は最後に受信した位置から始めること"
+                    );
+                    // 移行中に取りこぼした同じ Object と、その次の live の Object を送る
+                    send_audio_subgroup_stream(&mut peer, 22, 0, 0, 0, &packet).await;
+                    send_audio_subgroup_stream(&mut peer, 22, 1, 0, 960, &packet).await;
+                    release_rx.await.expect("テストから終了指示が届くこと");
+                });
+
+                let peer1 = tokio::spawn(async move {
+                    let mut peer = server1
+                        .accept()
+                        .await
+                        .expect("移行元の接続を受理できること");
+                    peer.establish()
+                        .await
+                        .expect("移行元で SETUP を交換できること");
+                    let packet = encode_opus_silence(48_000, 1);
+                    let catalog = accept_subscription(&mut peer, 7, MessageParameters::new()).await;
+                    send_catalog_fill_fetch_stream(
+                        &mut peer,
+                        catalog.request_id,
+                        &[(
+                            Location {
+                                group_id: 0,
+                                object_id: 0,
+                            },
+                            audio_catalog_json(),
+                        )],
+                    )
+                    .await;
+                    let _audio = accept_subscription(&mut peer, 9, MessageParameters::new()).await;
+                    send_audio_subgroup_stream(&mut peer, 9, 0, 0, 0, &packet).await;
+                    proceed_rx
+                        .await
+                        .expect("テストから GOAWAY の指示が届くこと");
+                    peer.send_goaway(peer2_uri, 5000)
+                        .await
+                        .expect("移行先を指す GOAWAY を送れること");
+                    peer.recv_close_code()
+                        .await
+                        .expect("旧 session の終了コードを観測できること")
+                });
+
+                let first = pipeline.next_audio().await;
+                assert_eq!(first.pts_us, 0, "移行前の音声が届くこと");
+                proceed_tx.send(()).expect("GOAWAY を指示できること");
+                let migrated = pipeline.next_audio().await;
+                assert_eq!(
+                    migrated.pts_us, 20_000,
+                    "移行中に取りこぼした音声の次の live の音声が続くこと"
+                );
+                // 旧 session の close は run の移行後処理が行うため、shutdown で打ち切られる前に
+                // 待つ。待ってから shutdown することで「旧 session が NO_ERROR で閉じる」ことと
+                // 「移行先の音声が届く」ことを競合なく確認できる
+                assert_eq!(
+                    tokio::time::timeout(EVENT_WAIT_TIMEOUT, peer1)
+                        .await
+                        .expect("旧 session の close が上限時間内に完了すること")
+                        .expect("peer1 のタスクが panic しないこと"),
+                    0,
+                    "旧 session は NO_ERROR (0) で閉じること"
+                );
+                let audio_rx = std::sync::Arc::clone(&pipeline.audio_rx);
+                pipeline.finish().await.expect("run が正常終了すること");
+                assert!(
+                    drain_audio(&audio_rx).is_empty(),
+                    "同じ Object が二重に流れないこと"
+                );
+                release_tx.send(()).expect("peer2 を終了できること");
+                peer2.await.expect("peer2 のタスクが panic しないこと");
+            })
+            .await;
+        }
+
+        /// request stream 単位の再発行の前後で音声が連続すること
+        ///
+        /// request stream 上の GOAWAY を受けた moq-sub は、旧購読に STOP_SENDING を送ってから
+        /// 同じ session に再購読する (`reissue_request`。draft-ietf-moq-transport-23 §9.2 /
+        /// §6.4.2.3)。再購読は最後に受信した位置から始まり、同じ Object は重複として捨てられ、
+        /// 次の Object が続く。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn run_reissues_the_audio_request_stream_without_gaps() {
+            run_with_timeout(async {
+                let mut server = TestPeerServer::start()
+                    .await
+                    .expect("テスト用サーバーを起動できること");
+                let pipeline = RunningPipeline::start(server.local_addr());
+                let packet = encode_opus_silence(48_000, 1);
+                let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel::<()>();
+                let peer = tokio::spawn(async move {
+                    let mut peer = server
+                        .accept()
+                        .await
+                        .expect("client の接続を受理できること");
+                    peer.establish().await.expect("SETUP を交換できること");
+                    let catalog = accept_subscription(&mut peer, 7, MessageParameters::new()).await;
+                    send_catalog_fill_fetch_stream(
+                        &mut peer,
+                        catalog.request_id,
+                        &[(
+                            Location {
+                                group_id: 0,
+                                object_id: 0,
+                            },
+                            audio_catalog_json(),
+                        )],
+                    )
+                    .await;
+                    let audio = accept_subscription(&mut peer, 9, MessageParameters::new()).await;
+                    send_audio_subgroup_stream(&mut peer, 9, 0, 0, 0, &packet).await;
+                    proceed_rx.await.expect("テストから再発行の指示が届くこと");
+                    // 音声の request stream に GOAWAY を送り、request 単位移行を起こす
+                    peer.send_goaway_on_request_stream(audio.request_id, Vec::new(), 5000)
+                        .await
+                        .expect("request stream に GOAWAY を送れること");
+                    // 旧購読は STOP_SENDING で終端される
+                    let ended = tokio::time::timeout(
+                        EVENT_WAIT_TIMEOUT,
+                        peer.recv_request_stream_message(audio.request_id),
+                    )
+                    .await
+                    .expect("旧音声 request stream が上限時間内に終端されること");
+                    match ended {
+                        Ok(RequestStreamRead::Closed(RequestStreamEnd::Reset {
+                            error_code,
+                            ..
+                        })) => {
+                            assert_eq!(
+                                error_code,
+                                Some(STREAM_CANCELLED),
+                                "STOP_SENDING は CANCELLED で終端すること"
+                            );
+                        }
+                        Ok(other) => {
+                            panic!("旧音声 request stream が RESET で終端されること: {other:?}")
+                        }
+                        Err(error) => {
+                            panic!("旧音声 request stream を読めること: {error}")
+                        }
+                    }
+                    // 同じ session に最後の位置から再購読される
+                    let reissued =
+                        accept_subscription(&mut peer, 9, MessageParameters::new()).await;
+                    assert!(
+                        reissued.parameters.fill_parameters().is_none(),
+                        "音声の再購読に FILL_PARAMETERS を載せないこと"
+                    );
+                    assert_eq!(
+                        reissued
+                            .parameters
+                            .location_filter_typed()
+                            .expect("音声の LOCATION_FILTER を読めること"),
+                        Some(LocationFilter::AbsoluteStart {
+                            start: Location {
+                                group_id: 0,
+                                object_id: 0,
+                            },
+                        }),
+                        "音声の再購読は最後に受信した位置から始めること"
+                    );
+                    // 境界の位置の Object と、その次の Object を送る
+                    send_audio_subgroup_stream(&mut peer, 9, 0, 0, 0, &packet).await;
+                    send_audio_subgroup_stream(&mut peer, 9, 1, 0, 960, &packet).await;
+                    peer.recv_close_code()
+                        .await
+                        .expect("shutdown の CONNECTION_CLOSE を観測できること")
+                });
+                let first = pipeline.next_audio().await;
+                assert_eq!(first.pts_us, 0, "再発行前の音声が届くこと");
+                proceed_tx.send(()).expect("再発行を指示できること");
+                let reissued = pipeline.next_audio().await;
+                assert_eq!(
+                    reissued.pts_us, 20_000,
+                    "再発行の境界の次の音声が続くこと (同じ Object は二重に流れない)"
+                );
+                let audio_rx = std::sync::Arc::clone(&pipeline.audio_rx);
+                pipeline.finish().await.expect("run が正常終了すること");
+                assert!(
+                    drain_audio(&audio_rx).is_empty(),
+                    "同じ Object が二重に流れないこと"
+                );
+                assert_eq!(
+                    peer.await.expect("peer のタスクが panic しないこと"),
+                    0,
+                    "shutdown は NO_ERROR (0) で接続を閉じること"
+                );
+            })
+            .await;
+        }
+
+        /// FETCH の request stream GOAWAY で同じ FETCH が移行先の session に再発行されること
+        ///
+        /// request 単位の移行先が別 URL の場合、moq-sub は専用の side session を確立し、
+        /// 元の FETCH と同じ namespace / track name / メッセージパラメータで発行し直す
+        /// (draft-ietf-moq-transport-23 §9.2 (GOAWAY) の "re-issue that specific request on a
+        /// session at the specified URI")。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn run_reissues_a_fetch_on_the_migration_side_session() {
+            run_with_timeout(async {
+                let mut server1 = TestPeerServer::start()
+                    .await
+                    .expect("移行元のサーバーを起動できること");
+                let mut server2 = TestPeerServer::start()
+                    .await
+                    .expect("移行先のサーバーを起動できること");
+                let peer2_uri = new_session_uri(server2.local_addr());
+                let pipeline = RunningPipeline::start(server1.local_addr());
+
+                let peer2 = tokio::spawn(async move {
+                    let mut peer = server2
+                        .accept()
+                        .await
+                        .expect("移行先の接続を受理できること");
+                    peer.establish()
+                        .await
+                        .expect("移行先で SETUP を交換できること");
+                    peer.recv_request_start()
+                        .await
+                        .expect("移行先で FETCH を受理できること")
+                });
+                let peer1 = tokio::spawn(async move {
+                    let mut peer = server1
+                        .accept()
+                        .await
+                        .expect("移行元の接続を受理できること");
+                    peer.establish()
+                        .await
+                        .expect("移行元で SETUP を交換できること");
+                    let catalog = accept_subscription(&mut peer, 7, MessageParameters::new()).await;
+                    send_catalog_fill_fetch_stream(
+                        &mut peer,
+                        catalog.request_id,
+                        &[(
+                            Location {
+                                group_id: 0,
+                                object_id: 0,
+                            },
+                            video_and_audio_catalog_json(640, 480),
+                        )],
+                    )
+                    .await;
+                    // SUBSCRIBE_OK の LARGEST_OBJECT で映像の FETCH を発行させる
+                    let mut video_ok_parameters = MessageParameters::new();
+                    video_ok_parameters.set_largest_object(2, 0);
+                    let video = accept_subscription(&mut peer, 8, video_ok_parameters).await;
+                    // publisher が Object を publish 済みでない track への FETCH は
+                    // INVALID_RANGE で拒否されるため、FETCH を受理させる前に publish 済みの
+                    // Location を記録する
+                    peer.note_published_object(video.request_id, 2, 0)
+                        .expect("映像の publish 済み Location を記録できること");
+                    // 映像の REQUEST_UPDATE を読み捨てたあと、FETCH を受理する
+                    let _update = peer
+                        .recv_request_stream_message(video.request_id)
+                        .await
+                        .expect("映像の REQUEST_UPDATE を読めること");
+                    let message = peer
+                        .recv_request_start()
+                        .await
+                        .expect("映像の FETCH を受理できること");
+                    let ControlMessage::Fetch(fetch) = message else {
+                        panic!("FETCH が request stream の先頭に届くこと: {message:?}");
+                    };
+                    let _audio = accept_subscription(&mut peer, 9, MessageParameters::new()).await;
+                    // FETCH の request stream に別 URL を指す GOAWAY を送る
+                    peer.send_goaway_on_request_stream(fetch.request_id, peer2_uri, 5000)
+                        .await
+                        .expect("FETCH の request stream に GOAWAY を送れること");
+                    // 移行に成功すると main ループが旧 FETCH request stream を
+                    // STOP_SENDING で終端する (stop_fetch_request_stream)
+                    let ended = tokio::time::timeout(
+                        EVENT_WAIT_TIMEOUT,
+                        peer.recv_request_stream_message(fetch.request_id),
+                    )
+                    .await
+                    .expect("旧 FETCH request stream が上限時間内に終端されること");
+                    match ended {
+                        Ok(RequestStreamRead::Closed(RequestStreamEnd::Reset {
+                            error_code,
+                            ..
+                        })) => {
+                            assert_eq!(
+                                error_code,
+                                Some(STREAM_CANCELLED),
+                                "旧 request stream は CANCELLED で終端されること"
+                            );
+                        }
+                        Ok(other) => {
+                            panic!("旧 FETCH request stream が RESET で終端されること: {other:?}")
+                        }
+                        Err(error) => panic!("旧 FETCH request stream を読めること: {error}"),
+                    }
+                    let code = peer
+                        .recv_close_code()
+                        .await
+                        .expect("shutdown の CONNECTION_CLOSE を観測できること");
+                    (ControlMessage::Fetch(fetch), code)
+                });
+
+                // 移行先の side session が FETCH を受理するまで待つ
+                let migrated = tokio::time::timeout(EVENT_WAIT_TIMEOUT, peer2)
+                    .await
+                    .expect("上限時間内に移行先の session を確立できること")
+                    .expect("peer2 のタスクが panic しないこと");
+                let audio_rx = std::sync::Arc::clone(&pipeline.audio_rx);
+                pipeline.finish().await.expect("run が正常終了すること");
+                assert!(
+                    drain_audio(&audio_rx).is_empty(),
+                    "音声 Object は届いていないこと"
+                );
+                let (original, code) = peer1.await.expect("peer1 のタスクが panic しないこと");
+                assert_eq!(code, 0, "shutdown は NO_ERROR (0) で接続を閉じること");
+                let ControlMessage::Fetch(original) = original else {
+                    panic!("移行元でも FETCH が受理されていること");
+                };
+                let ControlMessage::Fetch(migrated) = migrated else {
+                    panic!("移行先でも FETCH が受理されていること");
+                };
+                assert_eq!(
+                    migrated.track_namespace, original.track_namespace,
+                    "移行先の FETCH が同じ namespace を指すこと"
+                );
+                assert_eq!(
+                    migrated.track_name, original.track_name,
+                    "移行先の FETCH が同じ track name を指すこと"
+                );
+                assert_eq!(
+                    migrated.parameters, original.parameters,
+                    "移行先の FETCH が同じメッセージパラメータ (要求 range) を持つこと"
+                );
+            })
+            .await;
+        }
+
+        /// FETCH の移行に失敗した場合は警告して購読を続け、main ループを終了しないこと
+        ///
+        /// 移行先が MOQT の ALPN を広告しないため接続できない場合を再現する。FETCH は
+        /// 欠落した Group を補う補助であり、移行の失敗で live の購読を止めない。移行失敗の
+        /// 観測には、警告ログ (文言は run の契約として固定する)、旧 FETCH の RESET 終端、
+        /// その後に届く音声 Object の受信を使う。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn run_continues_the_subscription_after_a_failed_fetch_migration() {
+            run_with_timeout(async {
+                // 警告ログを待つため、pipeline の起動前に購読を設定する
+                let mut run_logs = subscribe_run_logs();
+                let mut server = TestPeerServer::start()
+                    .await
+                    .expect("移行元のサーバーを起動できること");
+                // ALPN を広告しないサーバーは client のハンドシェイクを失敗させる。
+                // 接続を受理する必要はない (server の background driver がハンドシェイクを
+                // 進め、client 側の ALPN 検証が失敗する)。accept を待つと ALPN 不一致が
+                // server の accept エラーとして返らずテストが止まるため、待たない
+                let failing_server = TestPeerServer::start_with_alpn(&[])
+                    .await
+                    .expect("ALPN を広告しないサーバーを起動できること");
+                let failing_uri = new_session_uri(failing_server.local_addr());
+                let pipeline = RunningPipeline::start(server.local_addr());
+                let packet = encode_opus_silence(48_000, 1);
+                let peer = tokio::spawn(async move {
+                    let mut peer = server.accept().await.expect("移行元の接続を受理できること");
+                    peer.establish()
+                        .await
+                        .expect("移行元で SETUP を交換できること");
+                    let catalog = accept_subscription(&mut peer, 7, MessageParameters::new()).await;
+                    send_catalog_fill_fetch_stream(
+                        &mut peer,
+                        catalog.request_id,
+                        &[(
+                            Location {
+                                group_id: 0,
+                                object_id: 0,
+                            },
+                            video_and_audio_catalog_json(640, 480),
+                        )],
+                    )
+                    .await;
+                    let mut video_ok_parameters = MessageParameters::new();
+                    video_ok_parameters.set_largest_object(2, 0);
+                    let video = accept_subscription(&mut peer, 8, video_ok_parameters).await;
+                    // publisher が Object を publish 済みでない track への FETCH は
+                    // INVALID_RANGE で拒否されるため、FETCH を受理させる前に publish 済みの
+                    // Location を記録する
+                    peer.note_published_object(video.request_id, 2, 0)
+                        .expect("映像の publish 済み Location を記録できること");
+                    let _update = peer
+                        .recv_request_stream_message(video.request_id)
+                        .await
+                        .expect("映像の REQUEST_UPDATE を読めること");
+                    let message = peer
+                        .recv_request_start()
+                        .await
+                        .expect("映像の FETCH を受理できること");
+                    let ControlMessage::Fetch(fetch) = message else {
+                        panic!("FETCH が request stream の先頭に届くこと: {message:?}");
+                    };
+                    let _audio = accept_subscription(&mut peer, 9, MessageParameters::new()).await;
+                    // 移行先は接続できない。期限切れを短くして失敗を確定させる
+                    peer.send_goaway_on_request_stream(fetch.request_id, failing_uri, 500)
+                        .await
+                        .expect("FETCH の request stream に GOAWAY を送れること");
+                    let ended = tokio::time::timeout(
+                        EVENT_WAIT_TIMEOUT,
+                        peer.recv_request_stream_message(fetch.request_id),
+                    )
+                    .await
+                    .expect("FETCH の移行失敗後に旧 request stream が終端されること");
+                    match ended {
+                        Ok(RequestStreamRead::Closed(RequestStreamEnd::Reset {
+                            error_code,
+                            ..
+                        })) => {
+                            assert_eq!(
+                                error_code,
+                                Some(STREAM_CANCELLED),
+                                "旧 request stream は CANCELLED で終端されること"
+                            );
+                        }
+                        Ok(other) => {
+                            panic!("旧 FETCH request stream が RESET で終端されること: {other:?}")
+                        }
+                        Err(error) => panic!("旧 FETCH request stream を読めること: {error}"),
+                    }
+                    // 購読は続くため、音声 Object を届けて受信できる
+                    send_audio_subgroup_stream(&mut peer, 9, 0, 0, 0, &packet).await;
+                    peer.recv_close_code()
+                        .await
+                        .expect("shutdown の CONNECTION_CLOSE を観測できること")
+                });
+
+                // FETCH の移行失敗は警告ログで観測できる。警告文言は run の内部状態の
+                // 契約として固定する
+                wait_for_log(&mut run_logs, "Failed to migrate the FETCH request").await;
+                let frame = pipeline.next_audio().await;
+                assert_eq!(
+                    frame.pts_us, 0,
+                    "FETCH の移行に失敗しても音声の購読が続くこと"
+                );
+                let audio_rx = std::sync::Arc::clone(&pipeline.audio_rx);
+                pipeline.finish().await.expect("run が正常終了すること");
+                assert!(
+                    drain_audio(&audio_rx).is_empty(),
+                    "届いた音声 Object が 1 つだけであること"
+                );
+                assert_eq!(
+                    peer.await.expect("peer のタスクが panic しないこと"),
+                    0,
+                    "shutdown は NO_ERROR (0) で接続を閉じること"
+                );
+            })
+            .await;
+        }
+
+        /// 別 URL の side session へ音声の request を移行した後、音声 Object が音声チャネルへ
+        /// 1 度だけ流れること
+        ///
+        /// request stream 単位の移行では、移行先の side session が音声だけを購読し直し
+        /// (draft-ietf-moq-transport-23 §9.2)、`AudioDeliveryOrder` が境界の位置の Object
+        /// (再送) を重複として捨てる。再送と次の Object は同じ subgroup stream に載せ、
+        /// Object の到着順に依存せず重複判定を検証する。メイン session は shutdown まで
+        /// 維持され、NO_ERROR (0) で閉じる。
+        ///
+        /// このテストが観測するのは、side session の音声だけが音声チャネルへ 1 度ずつ届くことと、
+        /// メイン session が shutdown で NO_ERROR (0) で閉じることである。メイン session の
+        /// 受信継続そのものは別の test (session 移行) が観測する。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn run_migrates_the_audio_request_to_a_side_session_without_duplicates() {
+            run_with_timeout(async {
+                let mut server1 = TestPeerServer::start()
+                    .await
+                    .expect("移行元のサーバーを起動できること");
+                let mut server2 = TestPeerServer::start()
+                    .await
+                    .expect("移行先のサーバーを起動できること");
+                let peer2_uri = new_session_uri(server2.local_addr());
+                let pipeline = RunningPipeline::start(server1.local_addr());
+                let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel::<()>();
+                let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+
+                let peer2 = tokio::spawn(async move {
+                    let mut peer = server2
+                        .accept()
+                        .await
+                        .expect("移行先の接続を受理できること");
+                    peer.establish()
+                        .await
+                        .expect("移行先で SETUP を交換できること");
+                    let packet = encode_opus_silence(48_000, 1);
+                    // 音声の購読だけが移行する
+                    let audio = accept_subscription(&mut peer, 29, MessageParameters::new()).await;
+                    assert!(
+                        audio.parameters.fill_parameters().is_none(),
+                        "音声の再購読に FILL_PARAMETERS を載せないこと"
+                    );
+                    assert_eq!(
+                        audio
+                            .parameters
+                            .location_filter_typed()
+                            .expect("音声の LOCATION_FILTER を読めること"),
+                        Some(LocationFilter::AbsoluteStart {
+                            start: Location {
+                                group_id: 0,
+                                object_id: 0,
+                            },
+                        }),
+                        "音声の再購読は最後に受信した位置から始めること"
+                    );
+                    // 境界の位置の Object (0,0) の再送と、その次の Object (0,1) を 1 本の
+                    // subgroup stream に載せる。Object の到着順を固定し、重複判定を
+                    // 無効化する退行 (再送が音声チャネルへ流れる) を確実に検出するためである
+                    send_audio_subgroup_objects(
+                        &mut peer,
+                        29,
+                        0,
+                        &[(0, 0, packet.clone()), (1, 960, packet)],
+                    )
+                    .await;
+                    release_rx.await.expect("テストから終了指示が届くこと");
+                });
+
+                let peer1 = tokio::spawn(async move {
+                    let mut peer = server1
+                        .accept()
+                        .await
+                        .expect("移行元の接続を受理できること");
+                    peer.establish()
+                        .await
+                        .expect("移行元で SETUP を交換できること");
+                    let packet = encode_opus_silence(48_000, 1);
+                    let catalog = accept_subscription(&mut peer, 7, MessageParameters::new()).await;
+                    send_catalog_fill_fetch_stream(
+                        &mut peer,
+                        catalog.request_id,
+                        &[(
+                            Location {
+                                group_id: 0,
+                                object_id: 0,
+                            },
+                            audio_catalog_json(),
+                        )],
+                    )
+                    .await;
+                    let audio = accept_subscription(&mut peer, 9, MessageParameters::new()).await;
+                    send_audio_subgroup_stream(&mut peer, 9, 0, 0, 0, &packet).await;
+                    proceed_rx.await.expect("テストから移行の指示が届くこと");
+                    peer.send_goaway_on_request_stream(audio.request_id, peer2_uri, 5000)
+                        .await
+                        .expect("音声の request stream に GOAWAY を送れること");
+                    let ended = tokio::time::timeout(
+                        EVENT_WAIT_TIMEOUT,
+                        peer.recv_request_stream_message(audio.request_id),
+                    )
+                    .await
+                    .expect("旧音声 request stream が上限時間内に終端されること");
+                    match ended {
+                        Ok(RequestStreamRead::Closed(RequestStreamEnd::Reset {
+                            error_code,
+                            ..
+                        })) => {
+                            assert_eq!(
+                                error_code,
+                                Some(STREAM_CANCELLED),
+                                "旧 request stream は CANCELLED で終端されること"
+                            );
+                        }
+                        Ok(other) => {
+                            panic!("旧音声 request stream が RESET で終端されること: {other:?}")
+                        }
+                        Err(error) => panic!("旧音声 request stream を読めること: {error}"),
+                    }
+                    peer.recv_close_code()
+                        .await
+                        .expect("メイン session の終了コードを観測できること")
+                });
+
+                let first = pipeline.next_audio().await;
+                assert_eq!(first.pts_us, 0, "移行前の音声が届くこと");
+                proceed_tx.send(()).expect("移行を指示できること");
+                let migrated = pipeline.next_audio().await;
+                assert_eq!(
+                    migrated.pts_us, 20_000,
+                    "side session の音声が音声チャネルへ 1 度だけ流れること"
+                );
+                let audio_rx = std::sync::Arc::clone(&pipeline.audio_rx);
+                pipeline.finish().await.expect("run が正常終了すること");
+                assert!(
+                    drain_audio(&audio_rx).is_empty(),
+                    "同じ Object が二重に流れないこと"
+                );
+                assert_eq!(
+                    peer1.await.expect("peer1 のタスクが panic しないこと"),
+                    0,
+                    "メイン session は NO_ERROR (0) で閉じること"
+                );
+                release_tx.send(()).expect("peer2 を終了できること");
+                peer2.await.expect("peer2 のタスクが panic しないこと");
+            })
+            .await;
+        }
+
+        /// 移行先の catalog / audio の PUBLISH_DONE (TRACK_ENDED) 後も video の受信が続くこと
+        ///
+        /// GOAWAY で別サーバーの session へ移行し、移行先が catalog と audio の SUBSCRIBE に
+        /// PUBLISH_DONE(TRACK_ENDED) を送る (video には送らない)。PUBLISH_DONE は subscription
+        /// 単位の終端であり (draft-ietf-moq-transport-23 §9.9)、catalog / audio の終了だけでは
+        /// 全 media track が終了したことにならないため pipeline を終えない。その後も video の
+        /// Object が復号されて frame_tx へ届くことを確認する。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn run_continues_video_after_audio_publish_done_on_the_migration_destination() {
+            run_with_timeout(async {
+                let mut server1 = TestPeerServer::start()
+                    .await
+                    .expect("移行元のサーバーを起動できること");
+                let mut server2 = TestPeerServer::start()
+                    .await
+                    .expect("移行先のサーバーを起動できること");
+                let peer2_uri = new_session_uri(server2.local_addr());
+                // audio の永続終了が tick で処理されたことをログで観測し、その後に video の
+                // Object を送る。PUBLISH_DONE の処理と video stream の到着順に依存せず、
+                // 「PUBLISH_DONE の後も pipeline が生きている」ことを確かめるためである
+                let mut run_logs = subscribe_run_logs();
+                let (video_tx, video_rx) = tokio::sync::oneshot::channel::<()>();
+                let pipeline = RunningPipeline::start(server1.local_addr());
+                let keyframe = encode_vp8_keyframe(64, 48);
+
+                let peer2 = tokio::spawn(async move {
+                    let mut peer = server2
+                        .accept()
+                        .await
+                        .expect("移行先の接続を受理できること");
+                    peer.establish()
+                        .await
+                        .expect("移行先で SETUP を交換できること");
+                    // 移行先での張り直しは catalog → 映像 → 音声の順である
+                    let catalog =
+                        accept_subscription(&mut peer, 21, MessageParameters::new()).await;
+                    assert!(
+                        catalog.parameters.fill_parameters().is_some(),
+                        "移行先の catalog 購読に FILL_PARAMETERS が載ること"
+                    );
+                    // catalog の購読だけを PUBLISH_DONE(TRACK_ENDED) で終端しても
+                    // video / audio の購読は止まらない
+                    peer.send_publish_done(catalog.request_id, PUBLISH_DONE_TRACK_ENDED, 0)
+                        .await
+                        .expect("catalog の PUBLISH_DONE を送れること");
+                    let _video = accept_subscription(&mut peer, 22, MessageParameters::new()).await;
+                    let audio = accept_subscription(&mut peer, 23, MessageParameters::new()).await;
+                    // audio の購読だけを PUBLISH_DONE(TRACK_ENDED) で終端する
+                    peer.send_publish_done(audio.request_id, PUBLISH_DONE_TRACK_ENDED, 0)
+                        .await
+                        .expect("audio の PUBLISH_DONE を送れること");
+                    // audio の終了が処理されたことをテストがログで観測してから、video の
+                    // Object を届ける
+                    video_rx
+                        .await
+                        .expect("テストから映像 Object 送信の指示が届くこと");
+                    send_video_subgroup_stream(&mut peer, 22, 0, 0, 0, &keyframe).await;
+                    peer.recv_close_code()
+                        .await
+                        .expect("shutdown の CONNECTION_CLOSE を観測できること")
+                });
+
+                let peer1 = tokio::spawn(async move {
+                    let mut peer = server1
+                        .accept()
+                        .await
+                        .expect("移行元の接続を受理できること");
+                    peer.establish()
+                        .await
+                        .expect("移行元で SETUP を交換できること");
+                    let catalog = accept_subscription(&mut peer, 7, MessageParameters::new()).await;
+                    send_catalog_fill_fetch_stream(
+                        &mut peer,
+                        catalog.request_id,
+                        &[(
+                            Location {
+                                group_id: 0,
+                                object_id: 0,
+                            },
+                            video_and_audio_catalog_json(64, 48),
+                        )],
+                    )
+                    .await;
+                    let _video = accept_subscription(&mut peer, 8, MessageParameters::new()).await;
+                    let _audio = accept_subscription(&mut peer, 9, MessageParameters::new()).await;
+                    peer.send_goaway(peer2_uri, 5000)
+                        .await
+                        .expect("移行先を指す GOAWAY を送れること");
+                    peer.recv_close_code()
+                        .await
+                        .expect("旧 session の終了コードを観測できること")
+                });
+
+                // audio の永続終了が処理されたことを待つ。ログメッセージは run の内部状態の
+                // 契約として固定する
+                wait_for_log(
+                    &mut run_logs,
+                    "Track ended permanently by PUBLISH_DONE: kind=Audio",
+                )
+                .await;
+                video_tx
+                    .send(())
+                    .expect("映像 Object の送信を指示できること");
+
+                // audio の PUBLISH_DONE の後に届いた video Object が復号されて frame_tx へ
+                // 流れること。run が audio の終了だけで止まっていればフレームは届かない
+                let frame = pipeline.next_video().await;
+                assert_eq!(frame.width, 64, "catalog の解像度で映像が復号されること");
+                assert_eq!(frame.height, 48, "catalog の解像度で映像が復号されること");
+                assert_eq!(
+                    frame.timestamp_us,
+                    Some(0),
+                    "映像 Object の TIMESTAMP がフレームの PTS になること"
+                );
+                // 旧 session の close は run の移行後処理が行うため、shutdown で打ち切られる前に
+                // 待つ
+                assert_eq!(
+                    tokio::time::timeout(EVENT_WAIT_TIMEOUT, peer1)
+                        .await
+                        .expect("旧 session の close が上限時間内に完了すること")
+                        .expect("peer1 のタスクが panic しないこと"),
+                    0,
+                    "旧 session は NO_ERROR (0) で閉じること"
+                );
+                pipeline
+                    .finish()
+                    .await
+                    .expect("catalog / audio の PUBLISH_DONE 後も run が正常終了すること");
+                assert_eq!(
+                    peer2.await.expect("peer2 のタスクが panic しないこと"),
+                    0,
+                    "移行先の session は NO_ERROR (0) で閉じること"
+                );
+            })
+            .await;
+        }
+
+        /// Session が自動拒否した request を `recv_request_start` が Err として返すこと
+        ///
+        /// publisher が Object を publish していない track への FETCH は Session が
+        /// REQUEST_ERROR (INVALID_RANGE) を積み、`Session::recv_request` 自体は Ok を返す
+        /// (自動拒否)。拒否された request は Session が応答を送るため、テスト側が応答しては
+        /// ならない。ハーネスは Session の追跡表を見て自動拒否を Err として報告する。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn recv_request_start_reports_an_automatically_rejected_request() {
+            run_with_timeout(async {
+                let (mut peer, mut client, _acceptor) = connect_pair().await;
+                // publisher 役の subscription を作る。Object は publish しない
+                let _video = subscribe_with_peer(
+                    &mut client,
+                    &mut peer,
+                    &SubscribeTarget {
+                        namespace: test_track_namespace(),
+                        track_name: b"video".to_vec(),
+                    },
+                    video_subscribe_parameters(None),
+                    8,
+                    MessageParameters::new(),
+                )
+                .await;
+                client
+                    .fetch(
+                        test_track_namespace(),
+                        b"video".to_vec(),
+                        fetch_range_parameters(
+                            Location {
+                                group_id: 0,
+                                object_id: 0,
+                            },
+                            Location {
+                                group_id: 2,
+                                object_id: 0,
+                            },
+                        ),
+                    )
+                    .await
+                    .expect("FETCH を発行できること");
+                // エラー文言は契約として固定する
+                let error = peer
+                    .recv_request_start()
+                    .await
+                    .expect_err("Session の自動拒否を Err として返すこと");
+                assert!(
+                    error.to_string().contains("rejected by the session"),
+                    "自動拒否が分かるエラーであること: {error}"
+                );
+            })
+            .await;
+        }
+    }
 }

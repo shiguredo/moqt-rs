@@ -131,6 +131,6 @@ cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video&c4m=
 
 ## テスト
 
-`peer_harness` (テスト専用、`#[cfg(test)]`) が tobi-quic のサーバーを 127.0.0.1 に立て、in-process で MOQT peer を駆動する。モックやスタブは使わず、ライブラリの公開 API だけを使う。対象は QUIC 直接接続と QMux である。
+`peer_harness` はテスト専用の in-process ハーネスである。`test-support` feature を有効にすると、他クレート (`moq-pub` / `moq-sub`) の統合テストから `tokio_moq::peer_harness` を参照できる。ハーネスはビルドで選んだ QUIC バックエンドのサーバーを 127.0.0.1 に立て、in-process で MOQT peer を駆動する。モックやスタブは使わず、ライブラリの公開 API だけを使う。対象は QUIC 直接接続と QMux である。
 
-QMux は `QmuxTestPeerServer` が TCP + TLS (ALPN `moqt-23`) を 127.0.0.1 に立て、`qmux` モジュールのテストが SETUP の交換、PUBLISH / SUBSCRIBE、subgroup stream と datagram の往復、ピアの STOP_SENDING の観測を実行で検証する。
+QMux のハーネス (`QmuxTestPeerServer` / `TestPeer::wait_qmux_closed` など) はこの crate 自身の `#[cfg(test)]` テスト専用で、他クレートからは参照できない。`QmuxTestPeerServer` が TCP + TLS (ALPN `moqt-23`) を 127.0.0.1 に立て、`qmux` モジュールのテストが SETUP の交換、PUBLISH / SUBSCRIBE、subgroup stream と datagram の往復、ピアの STOP_SENDING の観測を実行で検証する。

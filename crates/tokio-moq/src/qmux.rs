@@ -88,9 +88,9 @@ impl QmuxHandle {
     /// 自側の close、ピアの CONNECTION_CLOSE、下位トランスポートの終了のいずれでも解決する。
     /// close の後にドライバと受理タスクが終了したことを確かめるために使う。
     ///
-    /// `peer_harness` の `TestPeer::wait_qmux_closed` が使う。`test-support` feature では
-    /// `cfg(test)` が立たないため、feature でも有効にする。
-    #[cfg(any(test, feature = "test-support"))]
+    /// `peer_harness` の `TestPeer::wait_qmux_closed` とこのモジュールのテストが使う。
+    /// どちらも `cfg(test)` のビルドでだけ現れるため、テストビルドに限定する。
+    #[cfg(test)]
     pub(crate) async fn closed(&self) -> shiguredo_qmux::event::CloseReason {
         self.connection.closed().await
     }
@@ -228,9 +228,9 @@ pub(crate) fn split_connection(
 /// テストの peer は client と同じ設定を使う。ストリーム ID の parity は `Role` で決まるため、
 /// server 役は [`Role::Server`] を渡す。設定を共有するためここに置く。
 ///
-/// `peer_harness` の `QmuxTestPeerServer` が使う。`test-support` feature では `cfg(test)` が
-/// 立たないため、feature でも有効にする。
-#[cfg(any(test, feature = "test-support"))]
+/// `peer_harness` の `QmuxTestPeerServer` が使う。`QmuxTestPeerServer` は `cfg(test)` の
+/// ビルドにだけ現れるため、テストビルドに限定する。
+#[cfg(test)]
 pub(crate) fn build_server_connection<T>(
     io: T,
 ) -> shiguredo_tokio_qmux::Result<Arc<shiguredo_tokio_qmux::Connection>>

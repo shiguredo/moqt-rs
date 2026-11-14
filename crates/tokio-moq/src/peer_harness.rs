@@ -1,8 +1,9 @@
 //! MOQT peer (サーバー役) の in-process 試験基盤
 //!
 //! example の I/O 経路 (ハンドシェイク、peer 起点 request stream への送信、client 起点 request
-//! stream の受理) を実行で検証するためのテスト専用モジュールである。tobi-quic のサーバーを
-//! 127.0.0.1 で立て、sans-I/O な `Session` を `Session::new_server` で駆動する。モック /
+//! stream の受理) を実行で検証するためのテスト専用モジュールである。ビルドで選んだ QUIC
+//! バックエンドのサーバーを 127.0.0.1 で立て、sans-I/O な `Session` を `Session::new_server`
+//! で駆動する。モック /
 //! スタブは使わない。
 //!
 //! ライブラリと example の公開 API だけを使う (`MoqtClient` の private な内部状態には依存
@@ -10,8 +11,23 @@
 //! `crates/moq-sub`) の `#[cfg(test)] mod tests` から参照できる。feature を有効にしない
 //! ビルドでは、この crate 自身のテストからのみ使う。
 //!
+//! `test-support` feature で他クレートへ公開するのは、example の公開 API だけを使った検証に
+//! 必要な API である (接続確立、request stream の受理と応答、peer 起点 request stream への
+//! 送信、応答の読み出し、uni data stream の内容と終端の読み出し、request stream GOAWAY /
+//! PUBLISH_DONE の送信、終了コードの観測など)。次の能力はこの crate のテストからのみ使う
+//! (`#[cfg(test)] pub(crate)`)。
+//!
+//! - SETUP の差し替え (`send_setup` / `send_control_stream_head` / `finish_control_stream`)
+//! - 確立済み control stream への追加 control message の送信 (`send_control_message`)
+//! - peer 起点 request stream への任意メッセージの先頭送信 (`send_opened_request_message`)
+//! - request stream の FIN (`finish_request_stream`)、FETCH_OK / REQUEST_ERROR の応答書き出し
+//!   (`send_fetch_ok` / `send_request_error`)、Session の状態取得 (`session_state`)
+//! - datagram の送受信 (`send_datagram` / `recv_datagrams`)
+//! - QMux 接続のテストサーバー (`QmuxTestPeerServer`) と QMux の close 観測
+//!   (`wait_qmux_closed`)
+//!
 //! 対象は QUIC 直接接続 (`MoqtClient::establish_quic`) と QMux (`MoqtClient::establish_qmux`)
-//! である。QMux は TCP + TLS を待ち受ける [`QmuxTestPeerServer`] を使う。WebTransport over
+//! である。QMux は TCP + TLS を待ち受ける `QmuxTestPeerServer` を使う。WebTransport over
 //! HTTP/3 / HTTP/2 のハーネスは必要になった時点で別途追加する。
 //!
 //! 提供するのは SETUP 交換 (送る SETUP の差し替え、SETUP を送らない control stream の終端を
@@ -19,7 +35,8 @@
 //! メッセージ送信、peer 起点 request stream に届く応答の読み出し、peer が開いた request stream への
 //! 追加メッセージの送信、client 起点 request stream の受理と REQUEST_OK / SUBSCRIBE_OK /
 //! PUBLISH_DONE による応答、client 起点 request stream への request stream GOAWAY の送信、
-//! client 起点 request stream の後続メッセージ / 終端の読み出し、client が送る終了コード
+//! client 起点 request stream の後続メッセージ / 終端の読み出し、client が開いた uni data
+//! stream の内容と終端種別 (FIN / RESET_STREAM) の読み出し、client が送る終了コード
 //! (CONNECTION_CLOSE) の観測である。次は提供しない (必要になった時点で拡張する)。
 //!
 //! - peer が送る STOP_SENDING の観測 (QMux 経路は `QmuxTestPeerServer` と `qmux` モジュールの
@@ -32,14 +49,16 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use shiguredo_moqt::message::ControlMessage;
+#[cfg(test)]
 use shiguredo_moqt::message::Setup;
+#[cfg(test)]
 use shiguredo_moqt::message::common::Location;
 use shiguredo_moqt::message_parameter::MessageParameters;
 use shiguredo_moqt::parameter::{DEFAULT_MAX_CONTROL_MESSAGE_SIZE, SetupOptions};
 use shiguredo_moqt::session::core::Session;
-use shiguredo_moqt::session::types::{
-    RequestStreamEnd, SessionEvent, SessionState, Transport as MoqtTransport,
-};
+#[cfg(test)]
+use shiguredo_moqt::session::types::SessionState;
+use shiguredo_moqt::session::types::{RequestStreamEnd, SessionEvent, Transport as MoqtTransport};
 use shiguredo_moqt::stream::encode_control_stream_setup;
 use shiguredo_moqt::track_properties::TrackProperties;
 
@@ -60,6 +79,7 @@ const MAX_CONTROL_MESSAGE_SIZE: u64 = DEFAULT_MAX_CONTROL_MESSAGE_SIZE;
 /// LARGEST_OBJECT である。要求が End を省略している場合の応答範囲の終端は Largest Object
 /// なので (§3.2 (Fetch) / §9.19.9 (LOCATION FILTER Parameter))、把握している値を
 /// LARGEST_OBJECT として渡す。
+#[cfg(test)]
 fn fetch_ok_parameters(largest_object: Option<Location>) -> MessageParameters {
     let mut parameters = MessageParameters::new();
     if let Some(largest) = largest_object {
@@ -203,7 +223,8 @@ impl TestPeerServer {
 /// TCP を 127.0.0.1 で待ち受け、TLS (ALPN は [`crate::MOQT_PROTOCOL`]) で受理してから
 /// `shiguredo_tokio_qmux::Connection` を作る。QMux 自体はハンドシェイクを持たないため、接続が
 /// 確立した時点でクライアントの制御ストリームを受理できる。
-pub struct QmuxTestPeerServer {
+#[cfg(test)]
+pub(crate) struct QmuxTestPeerServer {
     /// client の接続を待ち受ける TCP リスナー
     listener: tokio::net::TcpListener,
     /// TLS の受理器 (server 証明書は自己署名)
@@ -212,9 +233,10 @@ pub struct QmuxTestPeerServer {
     local_addr: SocketAddr,
 }
 
+#[cfg(test)]
 impl QmuxTestPeerServer {
     /// 127.0.0.1 で待ち受けるテスト用の QMux サーバーを立てる
-    pub async fn start() -> Result<Self> {
+    pub(crate) async fn start() -> Result<Self> {
         let certified =
             rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).map_err(|e| {
                 TransportError::Internal(format!("failed to generate certificate: {e}"))
@@ -247,12 +269,12 @@ impl QmuxTestPeerServer {
     }
 
     /// 待ち受けているアドレス
-    pub fn local_addr(&self) -> SocketAddr {
+    pub(crate) fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
 
     /// client の接続を 1 つ受理し、QMux 接続を確立する
-    pub async fn accept(&mut self) -> Result<TestPeer> {
+    pub(crate) async fn accept(&mut self) -> Result<TestPeer> {
         let (tcp, _) = self
             .listener
             .accept()
@@ -300,6 +322,17 @@ struct OpenedRequest {
     /// 先頭メッセージの Request ID (先頭メッセージが request でない場合は `None`)
     request_id: Option<u64>,
     /// 送信半 (drop すると RESET_STREAM が peer へ届くため保持する)
+    ///
+    /// 送信半を読む API (`send_opened_request_message` / `finish_request_stream`) は
+    /// `cfg(test)` にだけ現れるため、`test-support` を有効にした非テストビルドでは
+    /// 読み出しだけが無くなる。フィールド自体は寿命のために保持する。
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "送信半の drop で RESET_STREAM を送らないため保持する"
+        )
+    )]
     send: SendStream,
     /// 応答を読む reader
     reader: ControlStream,
@@ -338,6 +371,7 @@ impl TestPeer {
     ///
     /// QUIC 経路と違い、ストリームの受理は接続を共有した別タスクが行い、その結果が
     /// `uni_rx` / `bi_rx` に流れる ([`crate::qmux::split_connection`])。
+    #[cfg(test)]
     fn new_qmux(session: crate::qmux::QmuxSession) -> Result<Self> {
         let crate::qmux::QmuxSession {
             handle,
@@ -471,15 +505,45 @@ impl TestPeer {
     /// datagram を 1 つ送る
     ///
     /// 音声の OBJECT_DATAGRAM が QMux 経由で届くことを検証するテストが使う。
-    pub async fn send_datagram(&self, data: &[u8]) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) async fn send_datagram(&self, data: &[u8]) -> Result<()> {
         self.handle.send_datagram(data).await
     }
 
     /// datagram を 1 つ以上受信する
     ///
     /// 1 件届くまで待ち、到着済みをまとめて返す (`StreamHandle::recv_datagrams` と同じ契約)。
-    pub async fn recv_datagrams(&self) -> Result<Vec<Vec<u8>>> {
+    #[cfg(test)]
+    pub(crate) async fn recv_datagrams(&self) -> Result<Vec<Vec<u8>>> {
         self.handle.recv_datagrams().await
+    }
+
+    /// 自側 (publisher) が track に Object を 1 つ publish したことを Session に記録する
+    ///
+    /// wire には送らない。FETCH を受ける publisher は、publisher 役の subscription が
+    /// 存在する track について「Object を publish していない」場合に FETCH を INVALID_RANGE で
+    /// 拒否する (draft-ietf-moq-transport-23 §3.2 (Fetch))。したがって FETCH を受理させる
+    /// テストは、購読の確立後にこのメソッドで publish 済みの Location を記録してから
+    /// [`Self::recv_request_start`] を呼ぶ。publisher 役の subscription が存在しない track の
+    /// FETCH はこの判定を通らずアプリへ渡る。
+    ///
+    /// 記録は `Session::send_object_datagram` が行う。このハーネスは Session が積む
+    /// datagram 送信イベントを transport へ書き出さないため、wire には何も送られない
+    /// (バックエンドが datagram に対応しているかどうかには依存しない)。
+    ///
+    /// # Errors
+    ///
+    /// Session が確立していない、受理していない request、publisher 役でない購読、
+    /// 確立前の購読を指定した場合は [`TransportError`] になる。
+    pub fn note_published_object(
+        &mut self,
+        request_id: u64,
+        group_id: u64,
+        object_id: u64,
+    ) -> Result<()> {
+        self.session
+            .send_object_datagram(request_id, group_id, object_id, None, None, false)
+            .map_err(|e| TransportError::Internal(format!("send_object_datagram: {e}")))
     }
 
     /// peer が開いた request stream に届いたメッセージを 1 つ読む
@@ -508,6 +572,10 @@ impl TestPeer {
     ///
     /// 受理したメッセージは `Session::recv_request` へ渡す。返り値はテストが内容を確認する
     /// ために返す。
+    ///
+    /// Session がメッセージ単位の拒否をした場合 (REQUEST_ERROR をイベントとして積み、
+    /// `recv_request` 自体は `Ok` を返す場合) は `TransportError::Internal` を返す。
+    /// 拒否された request は Session が応答を送るため、テスト側が応答してはならない。
     pub async fn recv_request_start(&mut self) -> Result<ControlMessage> {
         let (send, recv) = self
             .bidi_acceptor
@@ -533,6 +601,26 @@ impl TestPeer {
         self.session
             .recv_request(message.clone())
             .map_err(|e| TransportError::Internal(format!("failed to accept request: {e}")))?;
+        // メッセージ単位の拒否 (REQUEST_ERROR) は Session が積んで `recv_request` は Ok を
+        // 返す。拒否された request は Session が応答を送るため、アプリ (テスト) が応答しては
+        // ならない。追跡表に載っていなければ拒否とみなす
+        let tracked = match &message {
+            ControlMessage::Subscribe(subscribe) => {
+                self.session.subscription(subscribe.request_id).is_some()
+            }
+            // PUBLISH も subscriber 役の subscription として追跡される
+            ControlMessage::Publish(publish) => {
+                self.session.subscription(publish.request_id).is_some()
+            }
+            ControlMessage::Fetch(fetch) => self.session.fetch(fetch.request_id).is_some(),
+            // 他の request 種別は本ハーネスの利用側で使っていないため、従来どおり受理として扱う
+            _ => true,
+        };
+        if !tracked {
+            return Err(TransportError::Internal(format!(
+                "request stream start was rejected by the session: {message:?}"
+            )));
+        }
         self.accepted_requests.push(AcceptedRequest {
             request_id,
             send,
@@ -656,10 +744,22 @@ impl TestPeer {
     /// ため、既存の応答書き出し (`flush_queued_response`) と同じ手順で該当する request stream
     /// へ書き出す。
     ///
+    /// [`Self::open_uni_send_stream`] で直接開いた uni stream は Session の
+    /// `published_count` に入らない。そのため、そのような stream を送った track では
+    /// Session が追跡する `stream_count` と実際に開いた数が一致せず、正しい `stream_count` を
+    /// このメソッドへ渡せない (Session は追跡値との一致、または 2^64 - 1 (unknown) を要求する)。
+    /// stream 数を一致させたい場合は `DataPlaneHandle` 経由で Object を送る。
+    ///
     /// # Errors
     ///
-    /// 受理していない request、publisher 役でない subscription、未終端の outgoing data stream が
-    /// ある場合は [`TransportError`] になる。
+    /// 次の場合は [`TransportError`] になる。
+    ///
+    /// - Session が確立していない
+    /// - 受理していない request (subscription が見つからない)
+    /// - publisher 役でない subscription、または PUBLISH_DONE を送れない状態
+    /// - 未終端の outgoing data stream が残っている
+    /// - `stream_count` が Session の追跡値と一致しない (0 本のときは 0 に限る。
+    ///   1 本以上のときは正確な値か 2^64 - 1 (unknown) のいずれか)
     pub async fn send_publish_done(
         &mut self,
         request_id: u64,
@@ -676,11 +776,12 @@ impl TestPeer {
 
     /// 受理した FETCH に初回成功応答 (REQUEST_OK、別名 FETCH_OK) で応答する
     ///
-    /// draft-ietf-moq-transport-23 §3.2 (Fetch) / §3.2.2 (Gaps in a Fetch Stream):
-    /// 応答範囲の終端は LARGEST_OBJECT が要求範囲内ならその値、そうでなければ要求で明示した
+    /// draft-ietf-moq-transport-23 §3.2 (Fetch): 応答範囲の終端は LARGEST_OBJECT が
+    /// 要求範囲内ならその値、そうでなければ要求で明示した
     /// End Location になる。テストの要求は End を省略することが多いため、把握している
     /// Largest Object を LARGEST_OBJECT として渡せるようにする。
-    pub async fn send_fetch_ok(
+    #[cfg(test)]
+    pub(crate) async fn send_fetch_ok(
         &mut self,
         request_id: u64,
         largest_object: Option<Location>,
@@ -700,7 +801,8 @@ impl TestPeer {
     /// `Session::send_request_error` は応答を `SessionEvent::SendOnStream` として積むため、該当する
     /// request stream へ書き出す。`error_code` は wire に載るコードを使うこと (LOCAL 系のコードは
     /// Session が INTERNAL_ERROR に置き換える)。
-    pub async fn send_request_error(
+    #[cfg(test)]
+    pub(crate) async fn send_request_error(
         &mut self,
         request_id: u64,
         error_code: u64,
@@ -781,8 +883,16 @@ impl TestPeer {
     ///
     /// # Errors
     ///
-    /// 受理していない request への送信、request の sender としての送信、request stream への
-    /// GOAWAY の 2 回目の送信は [`TransportError`] になる。
+    /// 次の場合は [`TransportError`] になる。
+    ///
+    /// - Session が確立していない
+    /// - 受理していない (Session が追跡していない) request への送信
+    /// - request の sender (requester) としての送信
+    /// - 同じ request stream への GOAWAY の 2 回目の送信
+    /// - `new_session_uri` が 8192 バイトを超える場合
+    ///
+    /// `new_session_uri` の形式 (scheme や UTF-8) は Session では検証されない。移行先として
+    /// 解釈するのは受信側 (`tokio_moq::migration_target`) の責務である。
     pub async fn send_goaway_on_request_stream(
         &mut self,
         request_id: u64,
@@ -801,7 +911,8 @@ impl TestPeer {
     /// 2 通目の SETUP など、本来送られない control message を再現するために使う。
     /// 新しい uni stream を開く [`TestPeer::send_setup`] / [`TestPeer::send_control_stream_head`]
     /// は既存の control stream を FIN するため、この用途には使えない。
-    pub async fn send_control_message(&mut self, message: ControlMessage) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) async fn send_control_message(&mut self, message: ControlMessage) -> Result<()> {
         let control_send = self
             .control_send
             .as_mut()
@@ -816,7 +927,8 @@ impl TestPeer {
     ///
     /// `Session` の状態機械を経由せず wire を直接書く。確立後の request stream に届く
     /// 不正なメッセージ (Table 5 で "First" を持つ型の 2 通目など) を再現するために使う。
-    pub async fn send_opened_request_message(
+    #[cfg(test)]
+    pub(crate) async fn send_opened_request_message(
         &mut self,
         request_id: u64,
         message: ControlMessage,
@@ -838,7 +950,8 @@ impl TestPeer {
     /// peer が開いた request stream の送信方向を FIN で閉じる
     ///
     /// example が拒否した request のストリーム終端を通知する経路を確かめるために使う。
-    pub async fn finish_request_stream(&mut self, request_id: u64) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) async fn finish_request_stream(&mut self, request_id: u64) -> Result<()> {
         let request = self
             .opened_requests
             .iter_mut()
@@ -850,20 +963,46 @@ impl TestPeer {
         Ok(())
     }
 
-    /// client が開いた uni data stream を受理し、FIN まで読む
+    /// client が開いた uni data stream を受理し、終端まで読む
     ///
     /// FETCH 応答や subgroup stream の内容を、client が書いたバイト列のまま取り出す。
+    /// 終端種別 (FIN / RESET_STREAM) も確認する場合は
+    /// [`Self::recv_uni_data_stream_end`] を使う。
     pub async fn recv_uni_data_stream(&mut self) -> Result<Vec<u8>> {
+        Ok(self.recv_uni_data_stream_end().await?.0)
+    }
+
+    /// client が開いた uni data stream を受理し、終端まで読んで内容と終端種別を返す
+    ///
+    /// FETCH 応答や subgroup stream の内容を client が書いたバイト列のまま取り出し、
+    /// 終端が FIN だったか RESET_STREAM だったかを [`RequestStreamEnd`] で返す。
+    /// FIN を確認するテスト (FETCH 応答を最後まで書いて閉じたことの検証など) はこちらを使う。
+    /// 終端種別を区別する必要が無い場合は [`Self::recv_uni_data_stream`] を使える。
+    ///
+    /// RESET_STREAM はエラーではなく [`RequestStreamEnd::Reset`] として返る。この場合、
+    /// `RESET_STREAM` を受けるまでに読めたバイト列 (空のこともある) が第 1 要素になる。
+    ///
+    /// # Errors
+    ///
+    /// - 接続が終了している、または test peer の data stream acceptor が閉じている場合
+    /// - 受信した stream の読み取りに失敗した場合 (RESET_STREAM 以外の transport エラー)
+    ///
+    /// Session の状態 (確立前など) や subscription の `stream_count` は、この読み出し API
+    /// では検証しない。`stream_count` の不一致は PUBLISH_DONE を送る
+    /// [`Self::send_publish_done`] の呼び出し時点で Session が検出する。
+    pub async fn recv_uni_data_stream_end(&mut self) -> Result<(Vec<u8>, RequestStreamEnd)> {
         let mut stream = self
             .recv_acceptor
             .accept_recv_stream()
             .await?
             .ok_or_else(|| TransportError::Internal("data stream acceptor closed".into()))?;
         let mut buf = Vec::new();
-        while let crate::transport::RecvChunk::Data(data) = stream.receive_chunk().await? {
-            buf.extend_from_slice(&data);
+        loop {
+            match stream.receive_chunk().await? {
+                crate::transport::RecvChunk::Data(data) => buf.extend_from_slice(&data),
+                crate::transport::RecvChunk::End(end) => return Ok((buf, end)),
+            }
         }
-        Ok(buf)
     }
 
     /// 自側の次の Request ID を採番する (server 役は奇数)
@@ -872,7 +1011,8 @@ impl TestPeer {
     }
 
     /// サーバー側 session の状態
-    pub fn session_state(&self) -> SessionState {
+    #[cfg(test)]
+    pub(crate) fn session_state(&self) -> SessionState {
         self.session.state()
     }
 
@@ -885,7 +1025,8 @@ impl TestPeer {
     ///
     /// 受け取った側は先頭の varint を stream type として読むため、空のバイト列を送ると
     /// stream type を読む前に終端する (FIN は [`Self::finish_control_stream`] で送る)。
-    pub async fn send_control_stream_head(&mut self, head: Vec<u8>) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) async fn send_control_stream_head(&mut self, head: Vec<u8>) -> Result<()> {
         let mut control_send = self.handle.open_send_stream().await?;
         if !head.is_empty() {
             control_send.send(Bytes::from(head)).await?;
@@ -895,7 +1036,8 @@ impl TestPeer {
     }
 
     /// 自側 control stream の送信方向を FIN で終端する
-    pub async fn finish_control_stream(&mut self) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) async fn finish_control_stream(&mut self) -> Result<()> {
         let mut control_send = self
             .control_send
             .take()
@@ -909,7 +1051,8 @@ impl TestPeer {
     /// ハーネスの session は `SetupOptions::new()` のままにする (server 役の SETUP に PATH を
     /// 渡すと `Session::new_server` が `INVALID_PATH` で拒否するため)。送る SETUP だけを
     /// 差し替えて、client の検証失敗を再現する。
-    pub async fn send_setup(&mut self, options: &SetupOptions) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) async fn send_setup(&mut self, options: &SetupOptions) -> Result<()> {
         let setup = ControlMessage::Setup(Setup {
             options: options.clone(),
         });
@@ -923,7 +1066,8 @@ impl TestPeer {
     /// QMux 経路以外では `None` を返す。QMux の接続終了は `Connection::closed` で観測でき、
     /// ピアが CONNECTION_CLOSE を受けた場合は `CloseReason::Peer`、下位トランスポートの
     /// 終了の場合は `CloseReason::PeerShutdown` などになる。
-    pub async fn wait_qmux_closed(&self) -> Option<shiguredo_qmux::event::CloseReason> {
+    #[cfg(test)]
+    pub(crate) async fn wait_qmux_closed(&self) -> Option<shiguredo_qmux::event::CloseReason> {
         match &self.handle {
             StreamHandle::Qmux(handle) => Some(handle.closed().await),
             _ => None,
@@ -1014,8 +1158,6 @@ mod tests {
 
         // 接続と受理は並行に進める。tobi-quic のサーバーは `accept()` の poll で
         // ハンドシェイクを進めるため、client の `connect()` を先に待つと停止する
-        // 接続と受理は並行に進める。tobi-quic のサーバーは `accept()` の poll で
-        // ハンドシェイクを進めるため、client の `connect()` を先に待つと停止する
         let (connection, peer) = tokio::join!(
             crate::quic::connect(addr, "localhost", None),
             server.accept(),
@@ -1055,6 +1197,21 @@ mod tests {
     /// アプリが終端済み subscription の cleanup 状態を [`MoqtClient::subscription_cleanup_ready`]
     /// で問うた後、Session が回収済み (`Session::forget_subscription` 済み) の request id と
     /// 存在しない request id のどちらも `None` になる受け取り方を固定する。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn subscription_cleanup_ready_returns_none_for_unknown_request() {
+        run_with_timeout(async {
+            let (_peer, client) = connect_pair().await;
+            // 購読していない session なので、どの request id も未知である。Session 側の
+            // request id は 0 始まりの採番のため、測定には想定外の大きな値も含める
+            assert_eq!(
+                client.subscription_cleanup_ready(u64::MAX),
+                None,
+                "未知の request id は None を返すこと"
+            );
+        })
+        .await;
+    }
+
     /// 受理待ちをキャンセルしても、その後に届いた uni stream を失わないこと
     ///
     /// example の main loop は `tokio::select!` で受理待ちの future を頻繁に破棄する。
@@ -1094,21 +1251,6 @@ mod tests {
             assert!(
                 received.is_some(),
                 "キャンセル後に届いた uni stream が失われないこと"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn subscription_cleanup_ready_returns_none_for_unknown_request() {
-        run_with_timeout(async {
-            let (_peer, client) = connect_pair().await;
-            // 購読していない session なので、どの request id も未知である。Session 側の
-            // request id は 0 始まりの採番のため、測定には想定外の大きな値も含める
-            assert_eq!(
-                client.subscription_cleanup_ready(u64::MAX),
-                None,
-                "未知の request id は None を返すこと"
             );
         })
         .await;

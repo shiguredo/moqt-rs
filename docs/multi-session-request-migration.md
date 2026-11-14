@@ -48,9 +48,9 @@ using the appropriate mechanism (e.g. FIN, stream reset, or PUBLISH_DONE)" を S
   固定 alias (`VIDEO_TRACK_ALIAS` / `AUDIO_TRACK_ALIAS`) と `PublisherSession` の request ID、`data_plane` を
   共有する。
 - `crates/tokio-moq/src/peer_harness.rs` の `goaway_migration_switches_to_the_new_session` は 2 つの
-  `TestPeerServer` / `TestPeer` / `MoqtClient` を同時に保持して control GOAWAY 移行を検証済みである。ただし
-  `peer_harness` は `#[cfg(test)]` モジュールであり、moq-pub / moq-sub のテストからは参照できない
-  (test-support feature 化は別途計画中)。2 session を同時に駆動する補助 API は無い。
+  `TestPeerServer` / `TestPeer` / `MoqtClient` を同時に保持して control GOAWAY 移行を検証済みである。
+  `peer_harness` は `test-support` feature で公開しており、moq-pub / moq-sub の統合テストからも参照できる
+  (既定 off、`tokio-moq` は `publish = false`)。example の統合テストはこの feature を使って 2 session を駆動する。
 
 ## 2. 制約
 
@@ -183,16 +183,19 @@ Idle
 
 | 種別 | 再発行 | 旧 request の終端 | 備考 |
 | --- | --- | --- | --- |
-| SUBSCRIBE | 新 session で同じ namespace / track / パラメータ (FILL_PARAMETERS を含む) を送る | bidi stream を FIN (未完了なら RESET_STREAM) | 新 session で `OpenFillFetchStream` が発行され得る。fill range は新 session の subscription で再計算する |
-| FETCH | 新 session で同じ range / パラメータを送る | bidi stream を FIN / RESET_STREAM、data stream は終端通知 | 応答 data stream は新 session 側で `fetch_owner` に登録する |
+| SUBSCRIBE | catalog は FILL_PARAMETERS 付きで再購読する。video / audio は LOCATION_FILTER (Absolute Start) だけで再購読し、FILL_PARAMETERS は載せない。video は SUBSCRIBE_OK の LARGEST_OBJECT までを FETCH で補う | 送信方向を RESET_STREAM、受信方向を STOP_SENDING で終端する | 再購読の fill range / Absolute Start は session をまたいで共有する last_locations から決める。再発行した catalog 購読の fill fetch stream は catalog として適用する |
+| FETCH | 新 session で同じ range / パラメータを送る | 送信方向を RESET_STREAM、受信方向を STOP_SENDING で終端する。応答 data stream は終端通知する | 応答 data stream は新 session 側で `fetch_owner` に登録する |
 | PUBLISH | 新 session で同じ track / properties を送る | PUBLISH_DONE (GOING_AWAY) | 新 session で PUBLISH_OK を受けるまで旧 session で Object を送り続ける。切替後は旧 session の incoming を停止する |
 
 - 認可トークンは control GOAWAY 移行と同じ規則で引き継ぐ (同一 origin のときだけ引き継ぎ、別 origin では
   再取得する)。移行先 URL は `migration_target` で解決する。
-- FILL_PARAMETERS 内のパラメータは subscription 状態として保持しない (§9.19.15) ため、再発行時に
-  `RequestOwner` が保持する元の要求パラメータから再構成する。
-- 旧 session で移行対象 request を破棄するときは、forget_subscription 時の STOP_SENDING の既存挙動と
-  二重に STOP_SENDING を発行しないよう、Session 側の終端通知の順序を確認する。
+- catalog の FILL_PARAMETERS は再購読する時点で最後に受信した位置から組み立てる。video / audio の
+  LOCATION_FILTER (Absolute Start) も同じ last_locations から作る。FILL_PARAMETERS 内のパラメータは
+  subscription 状態として保持しない (§9.19.15)。
+- 同じ session での再発行では、旧 request stream を RESET_STREAM (送信方向) / STOP_SENDING
+  (受信方向) で終端してから新しい request を発行する。別 URL の side session へ移した SUBSCRIBE は
+  side session タスクから旧 session の request を終端できないため、移行完了後に旧 session を閉じる
+  ときの STOP_SENDING で回収する。
 
 ### 3.8 失敗時
 
@@ -212,12 +215,9 @@ Idle
 
 ### 3.10 テスト
 
-- `peer_harness` は既に 2 つの `TestPeerServer` / `MoqtClient` を同時に保持する control GOAWAY 移行テストを
-  持つため、2 session の同時駆動自体は可能である。ただし `#[cfg(test)]` のため moq-pub / moq-sub から参照
-  できず、2 session を同時に駆動する補助 API は無い。テストは次のいずれかで実装する。
-  - test-support feature の計画を先行して実装し、`peer_harness` を crates のテストから使う。
-  - moq-pub / moq-sub の `#[cfg(test)]` 内に、`peer_harness` と同じ構成の 2 session 補助を置く。
-  どちらを採るかは test-support feature の進捗で決める (実装タスクの依存として明記する)。
+- `peer_harness` は 2 つの `TestPeerServer` / `MoqtClient` を同時に保持する control GOAWAY 移行テストを持つ。
+  `test-support` feature で moq-pub / moq-sub の `#[cfg(test)]` から参照できるようにしたため、example の
+  統合テストは 2 session を同時に駆動して移行を検証する。test-support を先行する案を採用した。
 - 検証項目:
   1. 非空 URI の request stream GOAWAY で指定 URI の session が確立され、当該 request だけが再発行される
   2. 旧 session の他の request と data plane (Object 送受信) が継続する
@@ -232,17 +232,33 @@ Idle
 
 ## 4. 実装タスク分割
 
-1. `crates/tokio-moq` に session task / `SessionHandle` / `SessionCommand` / イベント集約の共通基盤を追加する。
-   対象: `crates/tokio-moq/src/` (新モジュール。`lib.rs` からの公開を検討する)。
-2. 2 session を同時に駆動するテスト補助を用意する。test-support feature を先行するか、example 内の test 補助かを
-   決めて実装する。対象: `crates/tokio-moq/src/peer_harness.rs` または test-support 実装。
-3. moq-sub の main ループを `SessionHandle` ベースへ変更し、request 単位 GOAWAY の状態機械と data plane
-   ルーティングを実装する。対象: `crates/moq-sub/src/pipeline.rs`。
-4. moq-pub の main ループを `SessionHandle` ベースへ変更し、PUBLISH の request 単位移行と旧 session の
-   PUBLISH_DONE を実装する。対象: `crates/moq-pub/src/pipeline.rs`。
-5. 移行中の重複排除 (watermark) と catalog / decode order の共有状態を実装する。対象: 両 example。
-6. docs (`docs/moqt.md` / `docs/missing-features.md`) を実装に合わせて更新する。
-7. テスト (移行成功・同一 URL・失敗・重複排除) を追加する。
+現行実装は §0 のとおり、全体を `SessionHandle` 化する方式ではなく、移行対象の request だけを
+URL ごとの side session の専用タスクで扱う方式である。実装済みのタスクは次のとおり。
+
+1. `crates/tokio-moq` に request stream GOAWAY の観測と、side session での再発行に必要な client API を
+   用意する。`SessionEvent::GoawayReceived { on_request_stream: Some(..) }` を example が扱えるようにし、
+   `subscribe_track_with_parameters` / `fetch` / `stop_sending` を side session でも使えるようにする。
+   対象: `crates/tokio-moq/src/`。実装済み。
+2. 2 session を同時に駆動するテスト補助を用意する。test-support feature を先行する方針を採用した。
+   対象: `crates/tokio-moq/src/peer_harness.rs`。実装済み。
+3. moq-sub の main ループに request 単位 GOAWAY の移行タスクを追加する。catalog は FILL_PARAMETERS、
+   video / audio は Absolute Start で再購読し、video は LARGEST_OBJECT までを FETCH で補う。
+   audio / video の delivery order と last_locations は session をまたいで共有する。
+   対象: `crates/moq-sub/src/pipeline.rs`。実装済み。
+4. moq-pub の main ループに PUBLISH の request 単位移行を追加する。PUBLISH_DONE (GOING_AWAY) で旧
+   subscription を終端し、新 session で PUBLISH_OK を受けるまで旧 session の Object 送信を続ける。
+   対象: `crates/moq-pub/src/pipeline.rs`。実装済み。
+5. 移行中の重複排除 (`AudioDeliveryOrder` / `VideoDecodeOrder`) と catalog / decode order の共有状態を
+   実装する。対象: 両 example。実装済み。
+6. docs を実装に合わせて更新する。この文書と `docs/missing-features.md` は side session 方式に更新済み
+   である。`docs/moqt.md` は session 層の request stream GOAWAY の記述を持つ。
+7. テスト (移行成功・同一 URL・失敗・重複排除) を peer_harness の実 peer 統合テストとして追加する。
+   対象: `crates/moq-sub/src/pipeline.rs` / `crates/moq-pub/src/pipeline.rs`。実装済み。
+
+未対応 (今後の課題):
+
+- side session 自身が GOAWAY / 切断を受けた場合の再移行。
+- 全 session を統一管理する `SessionHandle` 化 (§3.1〜§3.3)。現行方式では採用していない。
 
 ## 5. 実装時の受入基準
 
