@@ -2002,12 +2002,24 @@ fn goaway_request_target(
 /// [`tokio_moq::same_session_url`] と同じ比較対象をすべて含む可読な URL 表現にする。
 /// fragment の type と value は `:` で連結するが、`:` は RFC 3986 §3.5 の fragment の
 /// 文字集合に含まれるため、type と value の組が異なればキーも異なる。
+///
+/// fragment には c4m の認可トークンが含まれうるため、キーには fragment のハッシュだけを
+/// 入れ、ログに出してもトークンが漏れないようにする。同じ fragment なら同じキーになり、
+/// 異なる fragment (別トラック、別トークン) は別のキーになる。
 fn side_session_url_key(url: &tokio_moq::ServerUrl) -> String {
+    use std::hash::{Hash, Hasher};
     match &url.fragment {
-        Some(fragment) => format!(
-            "moqt://{}{}#{}:{}",
-            url.authority, url.path, fragment.fragment_type, fragment.value
-        ),
+        Some(fragment) => {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            fragment.fragment_type.hash(&mut hasher);
+            fragment.value.hash(&mut hasher);
+            format!(
+                "moqt://{}{}#{:016x}",
+                url.authority,
+                url.path,
+                hasher.finish()
+            )
+        }
         None => format!("moqt://{}{}", url.authority, url.path),
     }
 }
@@ -10500,10 +10512,17 @@ mod tests {
             side_session_url_key(&same),
             "同じ接続先は同じキーになること"
         );
-        assert_eq!(
+        assert!(
+            !side_session_url_key(&base).contains("moq-example--video"),
+            "fragment の値をキーに含めないこと (c4m の認可トークンをログに出さない)"
+        );
+        let other_fragment =
+            tokio_moq::parse_url("moqt://relay.example:443/live#msf:moq-example--audio")
+                .expect("別 fragment の URL をパースできること");
+        assert_ne!(
             side_session_url_key(&base),
-            "moqt://relay.example:443/live#msf:moq-example--video",
-            "ログにそのまま出せる URL 表現になること"
+            side_session_url_key(&other_fragment),
+            "fragment が異なる URL は別の side session にすること"
         );
         let other_path =
             tokio_moq::parse_url("moqt://relay.example:443/other#msf:moq-example--video")
