@@ -26,6 +26,7 @@ library の tests / PBT / fuzz は厚いが、example の pipeline 統合経路 
 - `peer_harness` は `crates/tokio-moq/src/lib.rs` の `#[cfg(test)] mod peer_harness;` であり、`crates/moq-pub` / `crates/moq-sub` / `e2e-tests` から参照できない。`TestPeer` などの型とメソッドも `pub(crate)` である。
 - 影響: 0339 / 0340 の example 改修 (pipeline 分割、decoder 共通化) を安全に進められない。
 - 依存: 0330 (受信 SUBSCRIBE の Object / PUBLISH_DONE)、0333 (PUBLISH_DONE の track 単位処理) の実装後に着手する。これらの挙動を固定するテストは、各 issue の実装後に追加する。
+  0375 (request stream GOAWAY の request 単位移行) のテストは 0375 の実装後に追加する。
   0332 (MP4 の PROP_TIMESCALE) は解決済みである。0335 (GOAWAY 移行後の Audio Config リセット) のうち publisher 側の `audio_config_sent` のリセットは
   60244e5e で実装済みであり (`crates/moq-pub/src/pipeline.rs`)、publisher 側の再送の確認は 0335 を待たない。
 
@@ -65,6 +66,13 @@ library の tests / PBT / fuzz は厚いが、example の pipeline 統合経路 
   - 2 つの `TestPeerServer` を立て、移行元から `send_goaway` で移行先を指定する。移行先で再購読と FETCH が行われることを確認する。
   - 移行後に publisher が最初の音声 Object に Audio Config を載せ直すことを確認する。subscriber 側の `audio_config_handled` のリセットは 0335 の扱いに従う。
   - 移行先の harness が audio の SUBSCRIBE にだけ PUBLISH_DONE(TRACK_ENDED) を送り、video の受信が継続することを確認する (0333 の実装後)。
+- request stream GOAWAY による request 単位移行を検証する (0375 の実装後)。
+  - publisher が非空 URI の同一 URL の request stream GOAWAY で、現在の session に PUBLISH を再発行すること。
+  - publisher が別 URL の request stream GOAWAY で新しい session に PUBLISH を移行し、旧 session の他の track の送信が続くこと。
+  - 同一の移行先 URL を指す複数 request が 1 つの新 session を共有すること。
+  - 移行期限切れで main ループが終了し、Session が閉じないこと。
+  - FETCH の request stream GOAWAY で、同じ namespace / track name / パラメータの FETCH が新 session で再発行されること。
+  - request 単位移行後に、最初にフィルタを通過する音声 Object に Audio Config が載り、subscriber が検証すること。
 - e2e は real relay でしか検証できない経路に限定する。
   - 既存の live 3 本はそのまま維持する。
   - relay が GOAWAY を送れる場合だけ、GOAWAY 移行の e2e を追加する。送れない場合は peer_harness のテストだけで検証する。
@@ -77,7 +85,7 @@ library の tests / PBT / fuzz は厚いが、example の pipeline 統合経路 
 
 ## 完了条件
 
-- 上記の peer_harness 統合テストが追加され、`cargo test --workspace` が通ること。
+- 上記の peer_harness 統合テスト (request stream GOAWAY 移行の 6 項目を含む) が追加され、`cargo test --workspace` が通ること。
 - `fuzz_session` の変更が `cargo +nightly fuzz build fuzz_session` でビルドでき、`cargo +nightly fuzz run fuzz_session -- -max_total_time=30` が通ること。
 - e2e テストを追加した場合、`MOQT_E2E_URL` を設定した `cargo test -p e2e-tests -- --ignored` が通ること (CI の E2E Test で確認する)。
 - 各テストについて、対応する実装を 1 箇所ずつ壊してテストが落ちることを確認していること。確認した変異と結果は issue の解決方法に記録する。
