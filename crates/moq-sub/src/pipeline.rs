@@ -798,6 +798,13 @@ const MIGRATION_RESUBSCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::
 /// stream task が待つ (送信側の backpressure)。数 Object ぶんの余裕を持たせる。
 const CATALOG_CHANNEL_SIZE: usize = 8;
 
+/// request 単位移行タスクが main ループへイベントを渡すチャネルの容量
+///
+/// 流れるのは移行の結果と、移行後に side session で観測した session イベントだけであり、
+/// まとめて届くことはない。詰まった場合は side session の受信を止めて main ループの処理を
+/// 待つため、小さな容量で十分である。
+const REQUEST_MIGRATION_EVENT_CHANNEL_SIZE: usize = 32;
+
 /// 同時に処理する data stream 数の上限
 ///
 /// 音声は 1 object = 1 stream、映像は 1 group = 1 stream で届く。制限しないと
@@ -912,6 +919,30 @@ fn stop_sending_targets(
         targets.push((TrackKind::Catalog, rid));
     }
     targets
+}
+
+/// 全 media track が恒久的に終了し、移行待ちも無いか
+///
+/// catalog だけが残っていても media が無ければパイプラインを終える (catalog の終了では
+/// media が終了した扱いにしない)。media の移行待ち (`migration_pending_tracks` の Video /
+/// Audio) がある間は、移行先で再開する可能性があるため終えない。catalog が GoingAway で
+/// `migration_pending_tracks` に載っていても、この判定には影響しない。
+///
+/// 購読していない track (`subscribe_video` / `subscribe_audio` が偽) は、終了を待たずに
+/// 終了済みとして扱う。
+fn all_media_tracks_ended(
+    subscribe_video: bool,
+    subscribe_audio: bool,
+    permanently_ended_tracks: &HashSet<TrackKind>,
+    migration_pending_tracks: &HashSet<TrackKind>,
+) -> bool {
+    let video_done = permanently_ended_tracks.contains(&TrackKind::Video);
+    let audio_done = permanently_ended_tracks.contains(&TrackKind::Audio);
+    let media_done = (video_done || !subscribe_video) && (audio_done || !subscribe_audio);
+    let media_migration_pending = migration_pending_tracks
+        .iter()
+        .any(|kind| matches!(kind, TrackKind::Video | TrackKind::Audio));
+    media_done && !media_migration_pending
 }
 
 /// 正常終了の後始末で GOAWAY と正常 close (`close(0, "")`) を送るか
@@ -2185,8 +2216,8 @@ struct ReissuedRequest {
 ///
 /// draft-ietf-moq-transport-23 §9.2 (GOAWAY): request stream 上の GOAWAY は当該 request
 /// だけの移行であり、session は維持する。New Session URI が空 (現在の URI の再利用) の
-/// 場合だけ、同じ session で購読を再発行する。別 URI への request 単位移行は 2 session の
-/// 併走が必要になるため行わない (呼び出し側が判定する)。
+/// 場合は同じ session で購読を再発行する。別 URI への移行は、専用タスクが確立した side
+/// session でこの関数を呼ぶ (経路の判定は呼び出し側が行う)。
 ///
 /// 旧 request stream は STOP_SENDING で閉じる (§6.4.2.3 (Request Cancellation and
 /// Rejection))。ただし発行済みの購読が既に Terminated の場合 (PUBLISH_DONE の
@@ -2280,6 +2311,576 @@ async fn reissue_request(
         subscription,
         fetch_targets,
     })
+}
+
+/// request stream の GOAWAY で別 URL の session へ移行する request を扱うタスクのイベント
+///
+/// side session の確立と request の再発行の結果と、移行後に side session で観測した session
+/// イベントを main ループへ渡す。main ループは `MoqtClient` を 1 つだけ所有するため、
+/// 移行対象の request は専用タスクが確立した side session で受信する
+/// (draft-ietf-moq-transport-23 §9.2 (GOAWAY) の "re-issue that specific request on a
+/// session at the specified URI"。draft 由来の仕様であり将来変更されうる)。
+#[derive(Debug)]
+enum RequestMigrationEvent {
+    /// side session の確立と request の再発行に成功した
+    Migrated {
+        /// 移行した track 種別
+        kind: TrackKind,
+        /// 旧 session の request の Request ID (main ループが STOP_SENDING で終端する)
+        old_request_id: u64,
+        /// side session で再発行した request の Request ID
+        new_request_id: u64,
+    },
+    /// 期限切れ・接続失敗・再発行失敗
+    Failed {
+        /// 移行できなかった track 種別
+        kind: TrackKind,
+        /// 移行できなかった旧 session の Request ID
+        old_request_id: u64,
+        /// ログに出す失敗の説明
+        reason: String,
+    },
+    /// side session で観測した session イベント (PUBLISH_DONE / REQUEST_ERROR / GOAWAY / close)
+    SessionEvent {
+        /// 移行した track 種別
+        kind: TrackKind,
+        /// side session で観測したイベント
+        event: SessionEvent,
+    },
+}
+
+/// request 単位移行タスクへ渡す要求
+struct RequestMigrationRequest {
+    /// 移行先の URL (GOAWAY の New Session URI)
+    url: tokio_moq::ServerUrl,
+    /// 接続経路 (現在の接続と同じものを使う)
+    transport: Transport,
+    /// TLS の CA 証明書パス (現在の接続と同じものを使う)
+    cert: Option<String>,
+    /// 移行期限 (GOAWAY の Timeout から作る)
+    deadline: MigrationDeadline,
+    /// 移行対象の track 種別
+    kind: TrackKind,
+    /// 旧 session の request の Request ID (終端は main ループが行う)
+    old_request_id: u64,
+    /// 再発行する購読の指定
+    plan: ResubscribePlan,
+    /// 再購読の Location Filter に使う、track ごとの最後の Location
+    last_locations: LastReceivedLocations,
+}
+
+/// request 単位移行タスクへ渡す共有状態
+///
+/// main ループが所有する状態をタスクへ clone して渡す。`MoqtClient` は side session を
+/// 確立するタスクが 1 つだけ所有し、main ループは旧 session の `MoqtClient` を所有し続ける。
+struct RequestMigrationShared {
+    /// デコード済み映像フレームの送り先 (main ループと同じプレイヤーへ渡す)
+    frame_tx: std::sync::mpsc::Sender<DecodedVideoFrame>,
+    /// デコード済み音声フレームの送り先 (main ループと同じプレイヤーへ渡す)
+    audio_tx: std::sync::mpsc::Sender<DecodedAudioFrame>,
+    /// catalog の更新を main ループへ渡すチャネル (state は main ループが所有する)
+    catalog_tx: tokio::sync::mpsc::Sender<catalog::CatalogObject>,
+    /// 書式違反によるセッション終了を main ループへ依頼するチャネル
+    termination_tx: tokio::sync::mpsc::Sender<SessionError>,
+    /// 音声デコーダ (購読で 1 つ共有する)
+    audio_decoder: Option<std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
+    /// 映像の復号順の判定状態 (購読で 1 つ共有する)
+    video_decode_order: std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
+    /// 映像の購読境界と送出順の判定状態 (購読で 1 つ共有する)
+    video_delivery_order: std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
+    /// 表示待ちの映像フレーム数 (受信側が増やし、表示側が減らす)
+    display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    /// Group の切り替え gate (購読で 1 つ共有する)
+    group_switch: std::sync::Arc<SharedGroupSwitchGate>,
+    /// 受信側の音声の追いつき (購読で 1 つ共有する)
+    audio_catch_up: std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
+    /// 音声の購読境界と送出順の判定 (購読で 1 つ共有する)
+    audio_delivery_order: std::sync::Arc<std::sync::Mutex<AudioDeliveryOrder>>,
+    /// track ごとに最後に受信した Object の位置 (再購読の Location Filter に使う)
+    last_received_locations: std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
+    /// Audio Config の処理を試みた session の世代 (購読で 1 つ共有する)
+    audio_config_validated_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// side session の世代
+    ///
+    /// side session は旧 session より新しい世代にして、side session で最初に届いた
+    /// Audio Config を処理させる (`Audio Config の検証済み世代` と比べる)。
+    generation: u64,
+    /// Track Alias 未確立の Subgroup ストリームの保留バッファ (main ループと共有する)
+    pending_subgroups: SharedPendingSubgroupBuffer,
+    /// 録画先 (`--mp4` 指定時のみ)
+    recorder: Option<RecorderSender>,
+    /// 再生するか
+    playback: bool,
+    /// 映像の codec (catalog の値)
+    video_codec: Option<String>,
+    /// 音声の codec (catalog の値)
+    audio_codec: Option<String>,
+    /// 音声のサンプルレートとチャンネル数 (catalog の値)
+    audio_params: Option<(u32, u8)>,
+    /// data stream の同時処理枠 (main ループと共有する)
+    stream_slots: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+/// request 単位移行タスクの `tokio::select!` が返す「何が起きたか」
+///
+/// `MoqtClient` はタスクが 1 つだけ所有するため、`select!` の腕では `client` を借用する
+/// future だけを待ち、結果を受けて `client` を使う処理は `select!` の外で行う。その
+/// 受け渡しに使う。腕ごとに完了した事実だけを持ち、判定は select の後で行う。
+enum RequestMigrationStep {
+    /// `MoqtClient::next_event` の結果
+    Event(std::result::Result<Option<ClientEvent>, TransportError>),
+    /// side session が data stream を受理した結果
+    Accepted(std::result::Result<Option<transport::RecvStream>, TransportError>),
+    /// side session の datagram 受信結果
+    Datagrams(std::result::Result<Vec<Vec<u8>>, TransportError>),
+    /// 100 ms 周期の tick
+    Tick,
+}
+
+/// request 単位移行タスクを起動する
+///
+/// 戻り値はタスクのハンドルとイベントの受信器である。main ループはイベントの受信器を
+/// `select!` で待ち、`Migrated` / `Failed` / `SessionEvent` に応じて状態を更新する。
+/// タスクは移行に成功した後も side session の受信を続けるため、main ループの終了時
+/// (または control GOAWAY による session 移行の成功時) に abort する。
+fn spawn_request_migration(
+    task_monitor: &tokio_metrics::TaskMonitor,
+    request: RequestMigrationRequest,
+    shared: RequestMigrationShared,
+) -> (
+    tokio::task::JoinHandle<()>,
+    tokio::sync::mpsc::Receiver<RequestMigrationEvent>,
+) {
+    let connect_monitor = task_monitor.clone();
+    let instrument_monitor = task_monitor.clone();
+    let (tx, rx) = tokio::sync::mpsc::channel(REQUEST_MIGRATION_EVENT_CHANNEL_SIZE);
+    let handle = tokio::spawn(instrument_monitor.instrument(async move {
+        run_request_migration(request, shared, connect_monitor, tx).await;
+    }));
+    (handle, rx)
+}
+
+/// request 単位移行タスクの本体
+///
+/// 次の順に進む。
+///
+/// 1. 移行先の session を [`tokio_moq::connect_with_retry`] で確立する。接続の設定・
+///    期限・指数的な再試行は control GOAWAY の移行 ([`migrate_to_target`]) と同じである。
+/// 2. main ループと同じタイムアウトを設定する。
+/// 3. 移行対象の request だけを [`reissue_request`] で再発行する。旧 request の終端は
+///    main ループが `stop_sending` で行うため、STOP_SENDING は送らない。
+/// 4. 成功を `Migrated` として main ループへ通知し、side session の受信ループを回す。
+/// 5. 受信ループでは session イベントの転送、data stream の処理、音声 datagram の配送、
+///    100 ms 周期の tick を行う。
+///
+/// `MoqtClient` をこのタスクが 1 つだけ所有するため、`tokio::select!` の腕では「何が
+/// 起きたか」だけを返し、`client` を使う処理は `select!` の外で行う。
+///
+/// 期限 ([`MigrationDeadline`]) は GOAWAY の Timeout から作る。期限内に接続と再発行を
+/// 終えられなければ `Failed` を送って終了し、main ループは control GOAWAY の移行失敗と
+/// 同じ終了経路へ進む。移行に成功した後の期限は、旧 session を peer が閉じる時刻で
+/// あり、side session の寿命ではないため `Failed` にしない。
+///
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY) は draft 由来の仕様であり、将来変更され
+/// うる。
+async fn run_request_migration(
+    request: RequestMigrationRequest,
+    shared: RequestMigrationShared,
+    task_monitor: tokio_metrics::TaskMonitor,
+    events: tokio::sync::mpsc::Sender<RequestMigrationEvent>,
+) {
+    let kind = request.kind;
+    let old_request_id = request.old_request_id;
+
+    // 1. 移行先の session を確立する
+    //
+    // 接続の失敗は connect_with_retry が期限内で再試行済みであるため、ここでは再試行しない
+    // (同じ設定で失敗し続けるだけになる)。認可トークンの引き継ぎは migration_target が
+    // 済ませている (同一 origin のときだけ引き継ぐ)。
+    let params = tokio_moq::ConnectParams {
+        url: &request.url,
+        transport: request.transport,
+        cert: request.cert.as_deref(),
+        impl_name: "moq-sub",
+        // subscriber は WebTransport 経路で datagram を継続受信する
+        receive_datagrams: true,
+        // subscriber は datagram を送らない
+        datagram_max_size: None,
+    };
+    let (mut client, mut recv_acceptor) = match tokio_moq::connect_with_retry(
+        &params,
+        request.deadline,
+        RetryPolicy::default(),
+        &task_monitor,
+    )
+    .await
+    {
+        Ok(connected) => connected,
+        Err(e) => {
+            let reason = format!("failed to connect to the migration target: {e}");
+            let _ = events
+                .send(RequestMigrationEvent::Failed {
+                    kind,
+                    old_request_id,
+                    reason,
+                })
+                .await;
+            return;
+        }
+    };
+
+    // 2. main ループと同じタイムアウトを設定する
+    client.set_control_message_timeout_ms(Some(30000));
+    client.set_data_stream_timeout_ms(Some(30000));
+
+    // 3. 移行対象の request だけを再発行する
+    //
+    // 旧 request の終端は main ループが `stop_sending` で行うため、STOP_SENDING は送らない。
+    // 期限が残っていなければ、購読の応答を待たずに失敗として扱う。
+    let remaining = request.deadline.remaining();
+    if remaining.is_zero() {
+        close_abandoned_migration_session(&mut client).await;
+        let reason = "the migration deadline expired before re-issuing the request".to_string();
+        let _ = events
+            .send(RequestMigrationEvent::Failed {
+                kind,
+                old_request_id,
+                reason,
+            })
+            .await;
+        return;
+    }
+    let reissued = match tokio::time::timeout(
+        remaining,
+        reissue_request(
+            &mut client,
+            kind,
+            old_request_id,
+            &request.plan,
+            &request.last_locations,
+            false,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(reissued)) => reissued,
+        Ok(Err(e)) => {
+            close_abandoned_migration_session(&mut client).await;
+            let reason = format!("failed to re-issue the request on the new session: {e}");
+            let _ = events
+                .send(RequestMigrationEvent::Failed {
+                    kind,
+                    old_request_id,
+                    reason,
+                })
+                .await;
+            return;
+        }
+        // 期限を過ぎた再発行は、購読の確立途中で打ち切る。確立済みの session は peer が
+        // timeout まで資源を保持するため、NO_ERROR で閉じる
+        Err(_) => {
+            close_abandoned_migration_session(&mut client).await;
+            let reason =
+                "the request re-issue did not complete within the migration deadline".to_string();
+            let _ = events
+                .send(RequestMigrationEvent::Failed {
+                    kind,
+                    old_request_id,
+                    reason,
+                })
+                .await;
+            return;
+        }
+    };
+    let new_request_id = reissued.subscription.request_id;
+    tracing::info!(
+        "Established the request migration side session: kind={kind:?}, \
+         old_request_id={old_request_id}, new_request_id={new_request_id}, \
+         alias={}, fetch_requests={}, last_location={:?}",
+        reissued.subscription.track_alias,
+        reissued.fetch_targets.len(),
+        request.last_locations.get(kind),
+    );
+
+    // 移行後の side session で受ける data stream の Track Alias は、再発行した購読の
+    // SUBSCRIBE_OK が返した alias だけである。移行対象の購読 1 本だけを扱うため、
+    // FETCH 応答の対応表は持たない。再発行に伴って発行した映像の FETCH 応答 stream は
+    // 配送先が無いものとして読み捨てられる (live の購読は継続する)。
+    let mut track_map: HashMap<u64, TrackKind> = HashMap::new();
+    track_map.insert(reissued.subscription.track_alias, kind);
+    let fetch_targets: HashMap<u64, FetchTarget> = HashMap::new();
+    let data_plane = client.data_plane();
+    // datagram の受信には handle を直接使う (client を借用しないため select の腕に置ける)
+    let handle = client.handle();
+
+    // 4. 成功を main ループへ通知する
+    if events
+        .send(RequestMigrationEvent::Migrated {
+            kind,
+            old_request_id,
+            new_request_id,
+        })
+        .await
+        .is_err()
+    {
+        // main ループが先に終了した。side session はこのタスクの終了で閉じる
+        return;
+    }
+
+    // 5. side session の受信ループ
+    //
+    // tick の周期は main ループと同じ 100 ms にする。`MoqtClient` の tick は session の
+    // タイマー (control message timeout / data stream timeout / GOAWAY deadline) を進める
+    // ため、ここが止まると side session の進行も止まる。
+    let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(100));
+    tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut join_set = tokio::task::JoinSet::new();
+    let mut pending_streams: std::collections::VecDeque<transport::RecvStream> =
+        std::collections::VecDeque::new();
+    let mut stream_num: u64 = 0;
+    // メディアとして扱えないトラックの datagram を 1 回だけ記録するための alias
+    let mut unsupported_aliases: HashSet<u64> = HashSet::new();
+    'receive: loop {
+        // 空いた枠のぶんだけ待機中の stream を処理へ回す。permit は使った分だけ取るので、
+        // 枠が無いときは 1 つも取らずにすぐ抜ける (main ループと同じ手順)
+        while let Ok(permit) = std::sync::Arc::clone(&shared.stream_slots).try_acquire_owned() {
+            let Some(stream) = pending_streams.pop_front() else {
+                // 枠を余分に取ってしまったので返す
+                drop(permit);
+                break;
+            };
+            stream_num += 1;
+            spawn_stream_task(
+                &mut join_set,
+                &task_monitor,
+                stream,
+                permit,
+                &shared.stream_slots,
+                stream_num,
+                &track_map,
+                &fetch_targets,
+                &data_plane,
+                &shared.frame_tx,
+                &shared.audio_tx,
+                shared.video_codec.as_deref(),
+                shared.audio_codec.as_deref(),
+                shared.audio_params,
+                &shared.display_backlog,
+                &shared.video_decode_order,
+                &shared.video_delivery_order,
+                &shared.group_switch,
+                shared.audio_decoder.as_ref(),
+                &shared.audio_config_validated_generation,
+                shared.generation,
+                &shared.audio_catch_up,
+                &shared.audio_delivery_order,
+                &shared.last_received_locations,
+                &shared.termination_tx,
+                &shared.catalog_tx,
+                &shared.pending_subgroups,
+                shared.playback,
+                shared.recorder.as_ref(),
+            );
+        }
+
+        // 水が多すぎるときは accept を止める。select の分岐に入らなければ接続が stream を
+        // 保持する (main ループと同じ)
+        let accepting = pending_streams.len() < MAX_CONCURRENT_STREAMS * 4;
+
+        let step = tokio::select! {
+            event = client.next_event() => RequestMigrationStep::Event(event),
+            accepted = recv_acceptor.accept_recv_stream(), if accepting => {
+                RequestMigrationStep::Accepted(accepted)
+            }
+            // 移行対象が Audio のときだけ音声 datagram を受ける。音声以外の track が
+            // 移行対象のときは datagram を配送しない
+            received = handle.recv_datagrams(), if kind == TrackKind::Audio => {
+                RequestMigrationStep::Datagrams(received)
+            }
+            _ = tick_interval.tick() => RequestMigrationStep::Tick,
+        };
+        match step {
+            RequestMigrationStep::Event(received) => match received {
+                Ok(Some(ClientEvent::Session(event))) => {
+                    // PUBLISH_DONE / REQUEST_ERROR / GOAWAY / close は main ループへ渡す。
+                    // main ループが先に終了した場合は移行結果を読む者がいないため、
+                    // side session の受信を終える
+                    if events
+                        .send(RequestMigrationEvent::SessionEvent { kind, event })
+                        .await
+                        .is_err()
+                    {
+                        break 'receive;
+                    }
+                }
+                // side session では main ループと同じく peer request を処理しない。応答を
+                // 返さないと peer の control message timeout を招くため拒否する
+                Ok(Some(ClientEvent::Request(request))) => {
+                    let (code, reason) = request_rejection(&request.message);
+                    tracing::warn!(
+                        "Rejecting unexpected peer request on the request migration side session: \
+                         request_id={} code={code:#x}",
+                        request.request_id
+                    );
+                    if let Err(e) = client
+                        .send_request_error(request.request_id, code, reason)
+                        .await
+                    {
+                        tracing::warn!(
+                            "Failed to reject a peer request on the request migration side session: {e}"
+                        );
+                        break 'receive;
+                    }
+                }
+                // REQUEST_UPDATE は必ず 1 通の REQUEST_OK / REQUEST_ERROR で応答する MUST
+                Ok(Some(ClientEvent::RequestUpdate(update))) => {
+                    tracing::info!(
+                        "Received REQUEST_UPDATE on the request migration side session: \
+                         request_id={}",
+                        update.request_id
+                    );
+                    if let Err(e) = client.send_request_ok(update.request_id).await {
+                        tracing::warn!(
+                            "Failed to send REQUEST_OK on the request migration side session: {e}"
+                        );
+                        break 'receive;
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("The request migration side session ended");
+                    break 'receive;
+                }
+                Err(e) => {
+                    tracing::warn!("Request migration side session event error: {e}");
+                    break 'receive;
+                }
+            },
+            RequestMigrationStep::Accepted(received) => match received {
+                Ok(Some(stream)) => pending_streams.push_back(stream),
+                Ok(None) => {
+                    tracing::info!("No more data streams on the request migration side session");
+                    break 'receive;
+                }
+                Err(e) => {
+                    // セッション終了と接続クローズは期待される終了であるため info に揃える
+                    if matches!(e, TransportError::ConnectionClosed) {
+                        tracing::info!("Request migration side session closed by transport: {e}");
+                    } else {
+                        tracing::warn!(
+                            "Failed to accept a data stream on the request migration side session: {e}"
+                        );
+                    }
+                    break 'receive;
+                }
+            },
+            RequestMigrationStep::Datagrams(received) => match received {
+                Ok(datagrams) => {
+                    let batch_len = datagrams.len();
+                    for raw in datagrams {
+                        // type 分岐と wire の書式検証は Session が行う (main ループと同じ)
+                        let acceptance = match data_plane.recv_datagram(&raw) {
+                            Ok(acceptance) => acceptance,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to process a datagram on the request migration side \
+                                     session: {e}"
+                                );
+                                continue;
+                            }
+                        };
+                        let DatagramAcceptance::Object(TrackDataAcceptance::Accepted) = acceptance
+                        else {
+                            continue;
+                        };
+                        match plan_datagram(&raw, &track_map) {
+                            DatagramAction::DeliverAudio { datagram, payload } => {
+                                // 音声の配送経路は main ループの datagram タスクと同じ状態を
+                                // 共有する。session の世代は side session のものを渡す
+                                let delivery = AudioDelivery {
+                                    audio_tx: &shared.audio_tx,
+                                    audio_config_validated_generation: &shared
+                                        .audio_config_validated_generation,
+                                    session_generation: shared.generation,
+                                    is_opus_codec: shared
+                                        .audio_codec
+                                        .as_deref()
+                                        .is_some_and(decoder::is_opus_codec),
+                                    catalog_sample_rate: shared
+                                        .audio_params
+                                        .map_or(0, |(sample_rate, _)| sample_rate),
+                                    catalog_channels: shared
+                                        .audio_params
+                                        .map_or(0, |(_, channels)| channels),
+                                    recorder: shared.recorder.as_ref(),
+                                    termination_tx: &shared.termination_tx,
+                                    catch_up: shared.audio_catch_up.as_ref(),
+                                    delivery_order: shared.audio_delivery_order.as_ref(),
+                                };
+                                // デコーダは購読で 1 つを共有する (main ループと同じ)
+                                let mut decoder = match shared.audio_decoder.as_ref() {
+                                    Some(decoder) => Some(decoder.lock().await),
+                                    None => None,
+                                };
+                                // 移行後の再購読で使う「最後に受信した位置」を記録する
+                                let location = datagram_object_location(&datagram);
+                                record_last_location(
+                                    &shared.last_received_locations,
+                                    TrackKind::Audio,
+                                    location,
+                                );
+                                if !delivery
+                                    .deliver(
+                                        Some(location),
+                                        datagram.properties_data.as_deref(),
+                                        payload,
+                                        decoder.as_deref_mut(),
+                                    )
+                                    .await
+                                {
+                                    // LOC Properties の書式違反でセッション終了を依頼したか、
+                                    // 再生側が終了した。main ループの終了経路に任せる
+                                    break 'receive;
+                                }
+                            }
+                            // 移行対象が Audio のとき、他の alias の datagram は届かない。
+                            // 届いた場合は 1 回だけ記録する
+                            DatagramAction::Unsupported { track_alias } => {
+                                if unsupported_aliases.insert(track_alias) {
+                                    tracing::warn!(
+                                        "Ignoring media delivered as a datagram on an unsupported \
+                                         track of the request migration side session: \
+                                         alias={track_alias}"
+                                    );
+                                }
+                            }
+                            DatagramAction::Ignore => {}
+                        }
+                    }
+                    // 空のバッチのときだけ受信ループを休める (main ループと同じ)
+                    if should_sleep_after_datagram_batch(batch_len) {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                }
+                Err(e) => {
+                    if matches!(e, TransportError::ConnectionClosed) {
+                        tracing::info!(
+                            "Request migration side session datagram receive stopped: {e}"
+                        );
+                    } else {
+                        tracing::warn!(
+                            "Request migration side session datagram receive error: {e}"
+                        );
+                    }
+                    break 'receive;
+                }
+            },
+            RequestMigrationStep::Tick => {
+                // main ループと同じく、session のタイマーを進める
+                client.tick_now();
+            }
+        }
+    }
+    // ここで join_set が drop され、side session の stream task も打ち切られる
 }
 
 /// パイプラインを実行する
@@ -3128,6 +3729,18 @@ pub async fn run(
     let mut migration_limiter = MigrationLimiter::new(MIGRATION_LIMIT_WINDOW, MIGRATION_LIMIT_MAX);
     // 移行後に旧 session を終了するタスク。run の終了時に打ち切る
     let mut old_session_closers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
+    // request 単位の移行 (別 URL の request stream GOAWAY) の状態
+    //
+    // 当該 request だけを専用タスクが確立した side session で受信し、移行の結果と side
+    // session のイベントは mpsc で main ループへ返す。移行は 1 本ずつ行い、
+    // `request_migration_in_progress` が真の間は 2 本目の side session を作らない。
+    // 移行に成功した後も side session の受信を続けるため、真のままにする。
+    let mut request_migration_rx: Option<tokio::sync::mpsc::Receiver<RequestMigrationEvent>> = None;
+    let mut request_migration_in_progress = false;
+    // 進行中の request 単位移行タスク。run の終了時と、session 全体の移行に成功した
+    // ときに打ち切る
+    let mut request_migration_task: Option<tokio::task::JoinHandle<()>> = None;
     // WebTransport の drain (WT_DRAIN_SESSION / HTTP/3 GOAWAY) を観測する。
     // QUIC 直接接続と QMux では drain の通知が無いため `None` になる
     let mut wt_session_state_rx: Option<tokio::sync::watch::Receiver<WtSessionState>> =
@@ -3359,13 +3972,6 @@ pub async fn run(
                                                 "Ignoring a request-scoped GOAWAY received while a migration is in progress: request_id={request_id}"
                                             );
                                             Ok(false)
-                                        } else if !same_session_url(&target.url, &config.url) {
-                                            // 別 URI への request 単位移行は 2 session の併走が
-                                            // 必要になるため行わない。session も移行しない
-                                            tracing::warn!(
-                                                "Cannot re-issue request {request_id} on a new session URI: migrating a single request requires two concurrent sessions"
-                                            );
-                                            Ok(false)
                                         } else if ignored_publish_requests.contains_key(&request_id) {
                                             // SUBSCRIBE_TRACKS の結果として受理した PUBLISH は
                                             // publisher 起点の購読であり、自側からは再発行できない。
@@ -3401,6 +4007,104 @@ pub async fn run(
                                                     &permanently_ended_tracks,
                                                 )
                                             {
+                                                // 移行先が別 URL の場合は、当該 request だけを
+                                                // 専用タスクが確立した side session で受信する。
+                                                // 旧 session はそのまま維持し、他の request と
+                                                // data plane の受信を続ける (§9.2)
+                                                if !same_session_url(&target.url, &config.url) {
+                                                    // 移行は 1 本ずつ行う。進行中の移行がある間は
+                                                    // 2 本目の side session を作らない
+                                                    if request_migration_in_progress {
+                                                        tracing::debug!(
+                                                            "Ignoring a request-scoped GOAWAY for a new session URI while a request migration is in progress: request_id={request_id}"
+                                                        );
+                                                        return Ok(false);
+                                                    }
+                                                    let last_locations = *last_received_locations
+                                                        .lock()
+                                                        .expect(
+                                                            "last locations lock is not poisoned",
+                                                        );
+                                                    let deadline = MigrationDeadline::after_goaway(
+                                                        Instant::now(),
+                                                        timeout,
+                                                    );
+                                                    // side session の世代は旧 session より新しく
+                                                    // する。Audio Config の検証済み世代と比べ、
+                                                    // side session で最初に届いた Audio Config を
+                                                    // 処理させる
+                                                    let side_generation =
+                                                        session_generation.saturating_add(1);
+                                                    let (task, receiver) = spawn_request_migration(
+                                                        &task_monitor,
+                                                        RequestMigrationRequest {
+                                                            url: target.url,
+                                                            transport: config.transport,
+                                                            cert: config.cert.clone(),
+                                                            deadline,
+                                                            kind,
+                                                            old_request_id: request_id,
+                                                            plan: resubscribe_plan.clone(),
+                                                            last_locations,
+                                                        },
+                                                        RequestMigrationShared {
+                                                            frame_tx: frame_tx.clone(),
+                                                            audio_tx: audio_tx.clone(),
+                                                            catalog_tx: catalog_tx.clone(),
+                                                            termination_tx: termination_tx.clone(),
+                                                            audio_decoder: audio_decoder.clone(),
+                                                            video_decode_order:
+                                                                std::sync::Arc::clone(
+                                                                    &video_decode_order,
+                                                                ),
+                                                            video_delivery_order:
+                                                                std::sync::Arc::clone(
+                                                                    &video_delivery_order,
+                                                                ),
+                                                            display_backlog: std::sync::Arc::clone(
+                                                                &display_backlog,
+                                                            ),
+                                                            group_switch: std::sync::Arc::clone(
+                                                                &group_switch,
+                                                            ),
+                                                            audio_catch_up: std::sync::Arc::clone(
+                                                                &audio_catch_up,
+                                                            ),
+                                                            audio_delivery_order: std::sync::Arc::clone(
+                                                                &audio_delivery_order,
+                                                            ),
+                                                            last_received_locations:
+                                                                std::sync::Arc::clone(
+                                                                    &last_received_locations,
+                                                                ),
+                                                            audio_config_validated_generation:
+                                                                std::sync::Arc::clone(
+                                                                    &audio_config_validated_generation,
+                                                                ),
+                                                            generation: side_generation,
+                                                            pending_subgroups: std::sync::Arc::clone(
+                                                                &pending_subgroups,
+                                                            ),
+                                                            recorder: recorder_sender.clone(),
+                                                            playback,
+                                                            video_codec: video_codec.clone(),
+                                                            audio_codec: audio_codec.clone(),
+                                                            audio_params,
+                                                            stream_slots: std::sync::Arc::clone(
+                                                                &stream_slots,
+                                                            ),
+                                                        },
+                                                    );
+                                                    request_migration_task = Some(task);
+                                                    request_migration_rx = Some(receiver);
+                                                    request_migration_in_progress = true;
+                                                    tracing::info!(
+                                                        "Started a request migration to a new session: kind={kind:?}, request_id={request_id}, timeout={timeout}ms, local_default={}, last_location={:?}",
+                                                        deadline.uses_local_default(),
+                                                        last_locations.get(kind),
+                                                    );
+                                                    return Ok(false);
+                                                }
                                                 tracing::info!(
                                                     "Re-issuing the {kind:?} request after a request-scoped GOAWAY: request_id={request_id}"
                                                 );
@@ -3988,6 +4692,18 @@ pub async fn run(
                 migration_task = None;
                 match result {
                     Ok(Ok(outcome)) => {
+                        // request 単位移行の side session が残っていれば止める。移行先の
+                        // session は全 track を張り直すため、同じ track を 2 つの session から
+                        // 受信しないようにする
+                        if let Some(handle) = request_migration_task.take() {
+                            handle.abort();
+                            let _ = handle.await;
+                            tracing::info!(
+                                "Stopped the request migration side session after a full session migration"
+                            );
+                        }
+                        request_migration_rx = None;
+                        request_migration_in_progress = false;
                         // 旧 session の stream task を止める。abort したあとに回収することで、
                         // 切替のあと旧 data_plane しか持たない task が sink へ書かないことを
                         // 保証する (§6.6.1 の移行をアプリへ透過にするため)
@@ -4221,6 +4937,230 @@ pub async fn run(
                         // 旧 session の終了経路へ進む
                         tracing::warn!("The migration task ended without a result");
                         break 'main;
+                    }
+                }
+            }
+            event = async {
+                // request 単位移行の side session からのイベント。移行していないときは
+                // 発火しない。移行に成功した後も side session のイベントを受け続ける
+                match request_migration_rx.as_mut() {
+                    Some(rx) => rx.recv().await.ok_or(()),
+                    None => std::future::pending().await,
+                }
+            }, if request_migration_in_progress => {
+                match event {
+                    Ok(RequestMigrationEvent::Migrated {
+                        kind,
+                        old_request_id,
+                        new_request_id,
+                    }) => {
+                        // 旧 session の request stream を閉じる (§9.2 の "close the old
+                        // request stream using the appropriate mechanism")。購読が既に
+                        // Terminated の場合は状態機械に拒否されるが、移行自体は成功して
+                        // いるため警告に留める
+                        if let Err(e) = client.stop_sending(old_request_id).await {
+                            tracing::warn!(
+                                "Failed to send STOP_SENDING for the migrated request {old_request_id}: {e}"
+                            );
+                        }
+                        // 旧 alias を外す。以後の Object は side session が配送する
+                        let old_alias = match kind {
+                            TrackKind::Catalog => catalog_alias.take(),
+                            TrackKind::Video => video_alias.take(),
+                            TrackKind::Audio => audio_alias.take(),
+                            // 移行は catalog / 映像 / 音声だけを対象とするため到達しない
+                            TrackKind::Discard => None,
+                        };
+                        {
+                            let mut map = track_map
+                                .write()
+                                .expect("track_map lock must not be poisoned");
+                            if let Some(alias) = old_alias {
+                                map.remove(&alias);
+                            }
+                        }
+                        // 以後その track は side session が配送するため、main ループの
+                        // 再発行・期限処理の対象から外す。request id を `None` にすると
+                        // `goaway_request_kind` の照合対象からも外れる
+                        match kind {
+                            TrackKind::Catalog => catalog_request_id = None,
+                            TrackKind::Video => video_request_id = None,
+                            TrackKind::Audio => audio_request_id = None,
+                            TrackKind::Discard => {}
+                        }
+                        active_requests.remove(&old_request_id);
+                        // 移行の開始から成功までの間に旧 session で PUBLISH_DONE を
+                        // 受けていた場合は disposition を引き継ぐ。track の恒久終了を
+                        // 移行成功で失わないようにするためである
+                        let pending_disposition = publish_done_pending
+                            .remove(&old_request_id)
+                            .map(|(_, disposition)| disposition);
+                        migration_pending_tracks.remove(&kind);
+                        fetch_targets.retain(|_, target| {
+                            Some(*target) != fetch_target_of(kind)
+                        });
+                        match pending_disposition {
+                            Some(
+                                PublishDoneDisposition::TrackEnded
+                                | PublishDoneDisposition::Error,
+                            ) => {
+                                tracing::warn!(
+                                    "The {kind:?} track ended permanently during the request migration"
+                                );
+                                permanently_ended_tracks.insert(kind);
+                                if all_media_tracks_ended(
+                                    subscribe_video,
+                                    subscribe_audio,
+                                    &permanently_ended_tracks,
+                                    &migration_pending_tracks,
+                                ) {
+                                    tracing::info!(
+                                        "All media tracks ended permanently: ending the pipeline"
+                                    );
+                                    peer_ended = true;
+                                    break 'main;
+                                }
+                            }
+                            Some(PublishDoneDisposition::GoingAway) | None => {}
+                        }
+                        // datagram 受信タスクへ新しい alias 表を渡す。旧 session の遅延した
+                        // datagram を移行後の track として配送しないためである
+                        let datagram_map = Arc::new(
+                            track_map
+                                .read()
+                                .expect("track_map lock must not be poisoned")
+                                .clone(),
+                        );
+                        let _ = datagram_session_tx.send((
+                            client.handle(),
+                            data_plane.clone(),
+                            datagram_map,
+                            session_generation,
+                        ));
+                        tracing::info!(
+                            "Migrated the {kind:?} request to the new session: \
+                             old_request_id={old_request_id}, new_request_id={new_request_id}"
+                        );
+                    }
+                    Ok(RequestMigrationEvent::Failed {
+                        kind,
+                        old_request_id,
+                        reason,
+                    }) => {
+                        // 期限切れ・接続失敗・再発行失敗である。control GOAWAY の移行失敗と
+                        // 同じく警告を出し、旧 session の終了経路へ進む
+                        tracing::warn!(
+                            "Failed to migrate the {kind:?} request to a new session: \
+                             request_id={old_request_id}: {reason}"
+                        );
+                        break 'main;
+                    }
+                    Ok(RequestMigrationEvent::SessionEvent { kind, event }) => {
+                        match event {
+                            SessionEvent::PublishDoneReceived {
+                                request_id,
+                                status_code,
+                                stream_count,
+                                ..
+                            } => {
+                                // 移行済みの購読の終端である。main ループの PUBLISH_DONE と
+                                // 同じ分類でログに残し、恒久終了だけ状態へ反映する。
+                                // side session の購読の cleanup は main ループが所有する
+                                // `MoqtClient` では観測できないため、drain 完了は待たない
+                                let disposition = publish_done_disposition(
+                                    normalize_publish_done_code(status_code),
+                                );
+                                tracing::info!(
+                                    "Received PUBLISH_DONE on the migrated {kind:?} \
+                                     subscription: request_id={request_id}, \
+                                     status_code={status_code}, \
+                                     normalized_status_code={}, \
+                                     stream_count={stream_count}, \
+                                     disposition={disposition:?}",
+                                    normalize_publish_done_code(status_code),
+                                );
+                                match disposition {
+                                    PublishDoneDisposition::TrackEnded
+                                    | PublishDoneDisposition::Error => {
+                                        permanently_ended_tracks.insert(kind);
+                                        // 全 media track が終了したら pipeline を終える
+                                        // (main ループの tick の終了判定と同じ規則)
+                                        if matches!(kind, TrackKind::Video | TrackKind::Audio)
+                                            && all_media_tracks_ended(
+                                                subscribe_video,
+                                                subscribe_audio,
+                                                &permanently_ended_tracks,
+                                                &migration_pending_tracks,
+                                            )
+                                        {
+                                            tracing::info!(
+                                                "All media tracks ended permanently: ending the pipeline"
+                                            );
+                                            peer_ended = true;
+                                            break 'main;
+                                        }
+                                    }
+                                    PublishDoneDisposition::GoingAway => {
+                                        // request stream の GOAWAY は受けるが、side session の
+                                        // 購読をさらに移行する経路は持たない
+                                        tracing::info!(
+                                            "The migrated {kind:?} track is going away on the side session"
+                                        );
+                                    }
+                                }
+                            }
+                            SessionEvent::RequestErrorReceived {
+                                request_id,
+                                error_code,
+                                retry_interval,
+                                reason,
+                                ..
+                            } => {
+                                tracing::warn!(
+                                    "Received REQUEST_ERROR on the migrated {kind:?} \
+                                     subscription: request_id={request_id}, \
+                                     error_code={error_code:#x}, \
+                                     retry_interval={retry_interval}, reason={}",
+                                    reason.as_str(),
+                                );
+                            }
+                            SessionEvent::GoawayReceived {
+                                new_session_uri,
+                                timeout,
+                                on_request_stream,
+                            } => {
+                                tracing::warn!(
+                                    "Received GOAWAY on the request migration side session: \
+                                     timeout={timeout}, \
+                                     on_request_stream={on_request_stream:?}, \
+                                     new_session_uri_len={}",
+                                    new_session_uri.len(),
+                                );
+                            }
+                            SessionEvent::CloseSession(err) => {
+                                tracing::warn!(
+                                    "The request migration side session closed: {:#x} {}",
+                                    err.code,
+                                    err.reason,
+                                );
+                            }
+                            other => {
+                                tracing::debug!(
+                                    "Ignoring a session event on the request migration side session: {other:?}"
+                                );
+                            }
+                        }
+                    }
+                    Err(()) => {
+                        // 移行タスクがイベントを送らずに終了した (side session の close や
+                        // accept の終了)。移行済みの track は配送されなくなるが、他の track の
+                        // 受信は続ける
+                        request_migration_in_progress = false;
+                        request_migration_rx = None;
+                        request_migration_task = None;
+                        tracing::warn!(
+                            "The request migration task ended; the migrated track is no longer delivered"
+                        );
                     }
                 }
             }
@@ -4460,28 +5400,19 @@ pub async fn run(
                         }
                     }
                     // 全 media track が恒久的に終了し、移行待ちも無ければ pipeline を終える
-                    // (catalog だけ残っていても media が無ければ終了する。catalog の
-                    // 終了では media が終了した扱いにしない)
-                    if matches!(kind, TrackKind::Video | TrackKind::Audio) {
-                        let video_done = permanently_ended_tracks.contains(&TrackKind::Video);
-                        let audio_done = permanently_ended_tracks.contains(&TrackKind::Audio);
-                        let media_done = (video_done || !subscribe_video)
-                            && (audio_done || !subscribe_audio);
-                        // media の移行待ちのみを判定に使う (catalog が GoingAway で
-                        // `migration_pending_tracks` に載っていても、catalog の移行待ちは
-                        // media の終了判定に影響しない)
-                        let media_migration_pending = migration_pending_tracks
-                            .iter()
-                            .any(|kind| {
-                                matches!(kind, TrackKind::Video | TrackKind::Audio)
-                            });
-                        if media_done && !media_migration_pending {
-                            tracing::info!(
-                                "All media tracks ended permanently: ending the pipeline"
-                            );
-                            peer_ended = true;
-                            break 'main;
-                        }
+                    if matches!(kind, TrackKind::Video | TrackKind::Audio)
+                        && all_media_tracks_ended(
+                            subscribe_video,
+                            subscribe_audio,
+                            &permanently_ended_tracks,
+                            &migration_pending_tracks,
+                        )
+                    {
+                        tracing::info!(
+                            "All media tracks ended permanently: ending the pipeline"
+                        );
+                        peer_ended = true;
+                        break 'main;
                     }
                 }
                 // SUBSCRIBE_TRACKS 由来の購読は PUBLISH_DONE だけでなく、publisher による
@@ -4541,6 +5472,13 @@ pub async fn run(
         handle.abort();
         let _ = handle.await;
         tracing::debug!("Aborted the in-flight migration task");
+    }
+    // request 単位移行の side session も打ち切る。side session の `MoqtClient` はタスクの
+    // 終了で drop され、transport が閉じる
+    if let Some(handle) = request_migration_task.take() {
+        handle.abort();
+        let _ = handle.await;
+        tracing::debug!("Aborted the in-flight request migration task");
     }
     // 旧 session の終了タスクは best-effort である。run の終了を待たせないよう打ち切る
     // (旧 session の transport は `MoqtClient` の drop で閉じる)
@@ -8689,7 +9627,7 @@ mod tests {
     /// 空 URI の request stream GOAWAY だけ現在の session で再発行すること
     ///
     /// `migration_target` は空 URI のとき現在の URL をそのまま返す。URL が同じなら同じ
-    /// session で再発行でき、違えば 2 session の併走が必要になるため移行しない。
+    /// session で再発行し、違えば専用タスクが確立した side session へ移行する。
     #[test]
     fn same_session_url_compares_authority_path_and_fragment() {
         let current = tokio_moq::parse_url("moqt://relay.example:443/live#msf:moq-example--video")
@@ -10086,6 +11024,57 @@ mod tests {
             targets,
             vec![(TrackKind::Catalog, 3)],
             "購読していない track は対象外とすること"
+        );
+    }
+
+    /// 全 media track の終了判定が購読の有無・移行待ち・catalog を正しく扱うこと
+    ///
+    /// 移行済み track の PUBLISH_DONE と main ループの tick の両方から使う判定である。
+    /// media の移行待ちがある間は終えない。catalog の恒久終了と移行待ちは media の判定に
+    /// 影響しない。購読していない track は終了済みとして扱う。
+    #[test]
+    fn all_media_tracks_ended_requires_both_media_tracks_without_migration() {
+        let none: HashSet<TrackKind> = HashSet::new();
+
+        // 両方を購読していて両方が恒久終了したら終える
+        let mut ended = HashSet::new();
+        ended.insert(TrackKind::Video);
+        ended.insert(TrackKind::Audio);
+        assert!(
+            all_media_tracks_ended(true, true, &ended, &none),
+            "両方の media track が恒久終了したら終えること"
+        );
+
+        // 片方だけでは終えない
+        let mut video_only = HashSet::new();
+        video_only.insert(TrackKind::Video);
+        assert!(
+            !all_media_tracks_ended(true, true, &video_only, &none),
+            "片方の media track が残っている間は終えないこと"
+        );
+
+        // media の移行待ちがある間は終えない
+        let mut pending = HashSet::new();
+        pending.insert(TrackKind::Audio);
+        assert!(
+            !all_media_tracks_ended(true, true, &ended, &pending),
+            "media の移行待ちがある間は終えないこと"
+        );
+
+        // catalog の恒久終了と移行待ちは media の判定に影響しない
+        let mut catalog = HashSet::new();
+        catalog.insert(TrackKind::Catalog);
+        assert!(
+            all_media_tracks_ended(true, true, &ended, &catalog),
+            "catalog の状態は media の終了判定に影響しないこと"
+        );
+
+        // 購読していない track は終了済みとして扱う (音声だけの購読)
+        let mut audio_only = HashSet::new();
+        audio_only.insert(TrackKind::Audio);
+        assert!(
+            all_media_tracks_ended(false, true, &audio_only, &none),
+            "購読していない映像を待たずに終えること"
         );
     }
 
