@@ -1886,7 +1886,10 @@ pub async fn run(
                                 // 維持し、当該 request の終端は peer の reset に任せる
                                 Ok(None) => Ok(false),
                                 Ok(Some(target)) => {
-                                    match goaway_action(target.scope, new_session_uri.is_empty()) {
+                                    match goaway_action(
+                                        target.scope,
+                                        tokio_moq::same_session_url(&target.url, &config.url),
+                                    ) {
                                         GoawayAction::RepublishRequest(request_id) => {
                                             // draft-ietf-moq-transport-23 §9.2 (GOAWAY): 空の
                                             // New Session URI は「現在の session で当該 request を
@@ -2679,11 +2682,11 @@ enum GoawayAction {
 /// the current session if no URI is provided), and close the old request stream using the
 /// appropriate mechanism"。URI が空なら現在の session で再発行し、非空なら別 session が要る。
 /// draft 由来の規則であり将来の draft 改版で変わる可能性がある。
-fn goaway_action(scope: MigrationScope, new_session_uri_is_empty: bool) -> GoawayAction {
+fn goaway_action(scope: MigrationScope, same_session: bool) -> GoawayAction {
     match scope {
         MigrationScope::Session => GoawayAction::MigrateSession,
         MigrationScope::Request(request_id) => {
-            if new_session_uri_is_empty {
+            if same_session {
                 GoawayAction::RepublishRequest(request_id)
             } else {
                 GoawayAction::IgnoreRequestScope(request_id)
@@ -4669,12 +4672,13 @@ mod tests {
             );
         }
 
-        /// request stream の GOAWAY で URI が空なら現在の session で再発行すること
+        /// request stream の GOAWAY が現在の session を指すなら再発行すること
         ///
         /// draft-ietf-moq-transport-23 §9.2 (GOAWAY) は、URI が無い場合は「現在の session」で
-        /// 当該 request を再発行することを求める。
+        /// 当該 request を再発行することを求める。URI が現在の URL と同じ場合も session は
+        /// 変わらないため、同じく再発行する。
         #[test]
-        fn request_stream_goaway_without_a_uri_republishes_the_request() {
+        fn request_stream_goaway_for_the_current_session_republishes_the_request() {
             assert_eq!(
                 goaway_action(MigrationScope::Request(7), true),
                 GoawayAction::RepublishRequest(7),
@@ -4682,12 +4686,12 @@ mod tests {
             );
         }
 
-        /// request stream の GOAWAY に URI がある場合は移行しないこと
+        /// request stream の GOAWAY が別の session を指す場合は移行しないこと
         ///
         /// 1 つの request だけを別 session へ移すには 2 session の併走が必要であり、
         /// この example は 1 session しか持たないため移行しない (§9.2)。
         #[test]
-        fn request_stream_goaway_with_a_uri_is_ignored() {
+        fn request_stream_goaway_for_another_session_is_ignored() {
             assert_eq!(
                 goaway_action(MigrationScope::Request(7), false),
                 GoawayAction::IgnoreRequestScope(7),

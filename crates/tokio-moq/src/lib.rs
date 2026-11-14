@@ -1086,6 +1086,14 @@ where
 ///
 /// control stream の GOAWAY で `new_session_uri` が UTF-8 でない場合と、[`parse_url`] が
 /// 解釈できない場合に [`TransportError`] になる。
+/// 2 つの URL が同じ session を指すか
+///
+/// GOAWAY の New Session URI が現在の URL と同じかどうかの判定に使う。接続に影響する
+/// authority / path / fragment を比べる。
+pub fn same_session_url(a: &ServerUrl, b: &ServerUrl) -> bool {
+    a.authority == b.authority && a.path == b.path && a.fragment == b.fragment
+}
+
 pub fn migration_target(
     new_session_uri: &[u8],
     on_request_stream: Option<u64>,

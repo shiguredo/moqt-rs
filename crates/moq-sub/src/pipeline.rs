@@ -818,6 +818,7 @@ use tokio_moq::moqt_client::{
     ClientEvent, DataPlaneHandle, FetchHeaderRegistration, FetchHeaderResolution, MoqtClient,
     StreamRead, SubscribeResult,
 };
+use tokio_moq::same_session_url;
 use tokio_moq::transport;
 use tokio_moq::webtransport::WtSessionState;
 
@@ -1835,20 +1836,6 @@ async fn fetch_recent_video_groups(
 /// 時刻を守らない並べ方にする (プレイヤーの `AudioPlayoutAssembly::set_audio_only`)。
 fn is_audio_only_subscription(subscribe_video: bool, subscribe_audio: bool) -> bool {
     subscribe_audio && !subscribe_video
-}
-
-/// 2 つの接続先が同じ session を指すか
-///
-/// request stream の GOAWAY は「New Session URI が空なら現在の session で再発行する」
-/// (draft-ietf-moq-transport-23 §9.2 (GOAWAY)。draft 由来の仕様であり将来変更されうる)。
-/// `migration_target` は空 URI のとき現在の URL をそのまま返すため、同じ URL かどうかで
-/// 「同一 session での再発行」を判定できる。`ServerUrl` は全体の `PartialEq` を持たないため、
-/// session を決める authority / path / fragment を比較する (c4m の認可トークンは同じ URL なら
-/// 同じ値であり、比較しない)。
-/// 同一 origin の判定ではなく URL 全体の一致を見るのは、path が違えば別の relay の
-/// 別 session であり、request 1 本のために 2 session を併走させる必要があるためである。
-fn same_session_url(a: &tokio_moq::ServerUrl, b: &tokio_moq::ServerUrl) -> bool {
-    a.authority == b.authority && a.path == b.path && a.fragment == b.fragment
 }
 
 /// request stream の GOAWAY が対象とする track 種別を、現在の Request ID から決める
