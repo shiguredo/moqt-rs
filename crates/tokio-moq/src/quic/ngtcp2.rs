@@ -52,6 +52,10 @@ pub struct Connected {
     close_record: Arc<StdMutex<Option<CloseReason>>>,
     /// 接続先のアドレス
     remote_addr: SocketAddr,
+    /// ピア起動の単方向ストリームの待ち行列 (ドライバと受理側で共有する)
+    uni_incoming: Arc<StreamQueue<RecvStream>>,
+    /// ピア起動の双方向ストリームの待ち行列 (ドライバと受理側で共有する)
+    bidi_incoming: Arc<StreamQueue<(SendStream, RecvStream)>>,
 }
 
 impl Connected {
@@ -62,7 +66,11 @@ impl Connected {
                 tx: self.tx.clone(),
                 close_record: Arc::clone(&self.close_record),
             },
-            StreamAcceptor { tx: self.tx },
+            StreamAcceptor {
+                _keepalive: self.tx,
+                uni_incoming: self.uni_incoming,
+                bidi_incoming: self.bidi_incoming,
+            },
         )
     }
 
@@ -293,31 +301,38 @@ impl RecvStream {
 /// ストリームを受理する側のハンドル
 #[derive(Debug)]
 pub struct StreamAcceptor {
-    /// 操作を依頼するチャネル
-    tx: mpsc::Sender<Command>,
+    /// 接続のドライバを生かしておくための送信側
+    ///
+    /// 受理だけを行う利用者が接続ハンドルを drop しても、ピア起動ストリームの
+    /// 受理を続けられるようにする (ドライバは送信側がすべて落ちると終了する)。
+    _keepalive: mpsc::Sender<Command>,
+    /// ピア起動の単方向ストリームを受け取る待ち行列
+    uni_incoming: Arc<StreamQueue<RecvStream>>,
+    /// ピア起動の双方向ストリームを受け取る待ち行列
+    bidi_incoming: Arc<StreamQueue<(SendStream, RecvStream)>>,
 }
 
 impl StreamAcceptor {
     /// ピア起動の単方向ストリームを 1 つ受理する
+    ///
+    /// `select!` でこの future が破棄されても、受理済みのストリームは失われない。
     pub(crate) async fn accept_receive_stream(&self) -> std::result::Result<RecvStream, QuicError> {
-        let (reply, response) = oneshot::channel();
-        self.tx
-            .send(Command::AcceptUni { reply })
+        self.uni_incoming
+            .recv()
             .await
-            .map_err(|_| QuicError::ConnectionClosed)?;
-        response.await.map_err(|_| QuicError::ConnectionClosed)?
+            .ok_or(QuicError::ConnectionClosed)
     }
 
     /// ピア起動の双方向ストリームを 1 つ受理する
+    ///
+    /// `accept_receive_stream` と同じく、future が破棄されてもストリームは失われない。
     pub(crate) async fn accept_bidirectional_stream(
         &self,
     ) -> std::result::Result<(SendStream, RecvStream), QuicError> {
-        let (reply, response) = oneshot::channel();
-        self.tx
-            .send(Command::AcceptBidi { reply })
+        self.bidi_incoming
+            .recv()
             .await
-            .map_err(|_| QuicError::ConnectionClosed)?;
-        response.await.map_err(|_| QuicError::ConnectionClosed)?
+            .ok_or(QuicError::ConnectionClosed)
     }
 }
 
@@ -379,16 +394,6 @@ enum Command {
         /// 結果を返す
         reply: oneshot::Sender<std::result::Result<Vec<u8>, QuicError>>,
     },
-    /// 単方向ストリームを受理する
-    AcceptUni {
-        /// 結果を返す
-        reply: oneshot::Sender<std::result::Result<RecvStream, QuicError>>,
-    },
-    /// 双方向ストリームを受理する
-    AcceptBidi {
-        /// 結果を返す
-        reply: oneshot::Sender<std::result::Result<(SendStream, RecvStream), QuicError>>,
-    },
     /// 接続をアプリケーションエラーで閉じる
     Close {
         /// アプリケーションエラーコード
@@ -396,6 +401,102 @@ enum Command {
         /// 結果を返す
         reply: oneshot::Sender<std::result::Result<(), QuicError>>,
     },
+}
+
+/// ピアが開いたストリームをドライバからアプリへ引き渡す待ち行列
+///
+/// oneshot で 1 つの待ち手へ直接渡すと、受け取り側の future が `select!` で捨てられた
+/// ときに受理済みのストリームが失われる。`oneshot::Sender::send` は receiver が生きて
+/// いれば成功するが、その直後に receiver が drop されると値も捨てられるためである。
+/// ストリームはキューに残したまま、アプリが取り出した時点で初めてキューから消すことで、
+/// future のキャンセルで失わない。
+///
+/// 通知は起床の合図に過ぎず、ストリームの有無はキューが持つ。通知を取りこぼしても、
+/// 次の確認でキューから取り出せる。
+#[derive(Debug)]
+struct StreamQueue<T> {
+    /// キューと閉鎖状態
+    state: StdMutex<StreamQueueState<T>>,
+    /// ストリームが積まれたこと、または接続が閉じたことを知らせる
+    notify: tokio::sync::Notify,
+}
+
+/// 待ち行列の中身
+#[derive(Debug)]
+struct StreamQueueState<T> {
+    /// 未取り出しのストリーム
+    values: VecDeque<T>,
+    /// 接続が閉じたか
+    closed: bool,
+}
+
+impl<T> StreamQueue<T> {
+    /// 空の待ち行列を作る
+    fn new() -> Self {
+        Self {
+            state: StdMutex::new(StreamQueueState {
+                values: VecDeque::new(),
+                closed: false,
+            }),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// ストリームを積んで待ち手を起こす
+    fn push(&self, value: T) {
+        self.state
+            .lock()
+            .expect("the stream queue lock is not poisoned")
+            .values
+            .push_back(value);
+        self.notify.notify_waiters();
+    }
+
+    /// 接続の終了を記録して待ち手を起こす
+    fn close(&self) {
+        self.state
+            .lock()
+            .expect("the stream queue lock is not poisoned")
+            .closed = true;
+        self.notify.notify_waiters();
+    }
+
+    /// 積まれているストリームを取り出す
+    fn pop(&self) -> Option<T> {
+        self.state
+            .lock()
+            .expect("the stream queue lock is not poisoned")
+            .values
+            .pop_front()
+    }
+
+    /// 接続が閉じたかを返す
+    fn is_closed(&self) -> bool {
+        self.state
+            .lock()
+            .expect("the stream queue lock is not poisoned")
+            .closed
+    }
+
+    /// ストリームが積まれるか接続が閉じるまで待つ
+    ///
+    /// cancel safe である。この future を破棄してもキューからは何も取り出さない。
+    async fn recv(&self) -> Option<T> {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            // キューを確認する前に待ち手として登録する。確認した直後に push されても
+            // `notify_waiters` で起こされる
+            notified.as_mut().enable();
+            if let Some(value) = self.pop() {
+                return Some(value);
+            }
+            if self.is_closed() {
+                return None;
+            }
+            notified.await;
+        }
+    }
 }
 
 /// ドライバが待つ入力
@@ -531,15 +632,10 @@ struct DriverState {
     tx: mpsc::WeakSender<Command>,
     /// ストリームごとの受信イベントの送信側
     recv_txs: HashMap<StreamId, mpsc::UnboundedSender<RecvEvent>>,
-    /// 受理待ちの単方向ストリーム
-    uni_queue: VecDeque<RecvStream>,
-    /// 受理待ちの双方向ストリーム
-    bidi_queue: VecDeque<(SendStream, RecvStream)>,
-    /// 単方向ストリームの受理待ち
-    uni_waiters: VecDeque<oneshot::Sender<std::result::Result<RecvStream, QuicError>>>,
-    /// 双方向ストリームの受理待ち
-    bidi_waiters:
-        VecDeque<oneshot::Sender<std::result::Result<(SendStream, RecvStream), QuicError>>>,
+    /// 受理待ちの単方向ストリーム (アプリと共有する)
+    uni_incoming: Arc<StreamQueue<RecvStream>>,
+    /// 受理待ちの双方向ストリーム (アプリと共有する)
+    bidi_incoming: Arc<StreamQueue<(SendStream, RecvStream)>>,
     /// 単方向ストリームの open 待ち (枠が空くのを待つ)
     open_send_waiters: VecDeque<oneshot::Sender<std::result::Result<SendStream, QuicError>>>,
     /// 双方向ストリームの open 待ち
@@ -565,14 +661,14 @@ impl DriverState {
         tx: mpsc::WeakSender<Command>,
         stop_tx: mpsc::UnboundedSender<StopSendingObserved>,
         close_record: Arc<StdMutex<Option<CloseReason>>>,
+        uni_incoming: Arc<StreamQueue<RecvStream>>,
+        bidi_incoming: Arc<StreamQueue<(SendStream, RecvStream)>>,
     ) -> Self {
         Self {
             tx,
             recv_txs: HashMap::new(),
-            uni_queue: VecDeque::new(),
-            bidi_queue: VecDeque::new(),
-            uni_waiters: VecDeque::new(),
-            bidi_waiters: VecDeque::new(),
+            uni_incoming,
+            bidi_incoming,
             open_send_waiters: VecDeque::new(),
             open_bidi_waiters: VecDeque::new(),
             datagram_queue: VecDeque::new(),
@@ -656,61 +752,14 @@ impl DriverState {
             | ConnectionEvent::MaxStreamsBidi { .. }
             | ConnectionEvent::MaxStreamsUni { .. } => {}
             ConnectionEvent::StreamOpened { stream_id } => {
+                // ハンドルを作れないのは接続が閉じた場合だけである。その場合も
+                // 以後の `recv_event` が終了を返すため、ここでは積むだけにする
                 if is_bidirectional(stream_id) {
-                    let result = self.bidi_stream(stream_id);
-                    match result {
-                        Ok(stream) => {
-                            // accept 待ちの future が timeout / select! でキャンセルされると
-                            // reply が閉じ、send は stream を返して失敗する。そのまま捨てると
-                            // 到着済みの stream が失われるため、次の待ち手へ渡し、待ち手が
-                            // 尽きたらキューへ積む (受理待ちのキャンセル安全性)。キャンセル
-                            // された待ち手は先頭に残るため、1 つ失敗しただけで諦めない。
-                            let mut stream = stream;
-                            loop {
-                                let Some(waiter) = self.bidi_waiters.pop_front() else {
-                                    self.bidi_queue.push_back(stream);
-                                    break;
-                                };
-                                match waiter.send(Ok(stream)) {
-                                    Ok(()) => break,
-                                    Err(Ok(next)) => stream = next,
-                                    // send(Ok(..)) が Err(Err(..)) を返すことはない (防御)
-                                    Err(Err(_)) => break,
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            if let Some(waiter) = self.bidi_waiters.pop_front() {
-                                let _ = waiter.send(Err(e));
-                            }
-                        }
+                    if let Ok(stream) = self.bidi_stream(stream_id) {
+                        self.bidi_incoming.push(stream);
                     }
-                } else {
-                    let result = self.recv_stream(stream_id);
-                    match result {
-                        Ok(stream) => {
-                            // bidi と同じ理由で、キャンセルされた待ち手への送信に失敗した
-                            // stream は次の待ち手へ渡し、待ち手が尽きたらキューへ積む
-                            let mut stream = stream;
-                            loop {
-                                let Some(waiter) = self.uni_waiters.pop_front() else {
-                                    self.uni_queue.push_back(stream);
-                                    break;
-                                };
-                                match waiter.send(Ok(stream)) {
-                                    Ok(()) => break,
-                                    Err(Ok(next)) => stream = next,
-                                    // send(Ok(..)) が Err(Err(..)) を返すことはない (防御)
-                                    Err(Err(_)) => break,
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            if let Some(waiter) = self.uni_waiters.pop_front() {
-                                let _ = waiter.send(Err(e));
-                            }
-                        }
-                    }
+                } else if let Ok(stream) = self.recv_stream(stream_id) {
+                    self.uni_incoming.push(stream);
                 }
             }
             ConnectionEvent::StreamData {
@@ -832,32 +881,6 @@ impl DriverState {
                     self.datagram_waiters.push_back(reply);
                 }
             }
-            Command::AcceptUni { reply } => {
-                if let Some(stream) = self.uni_queue.pop_front() {
-                    // コマンド送信後に呼び出し側がキャンセルしていると reply が閉じている。
-                    // 取り出した stream を失わないよう、キューの先頭へ戻す
-                    match reply.send(Ok(stream)) {
-                        Ok(()) => {}
-                        Err(Ok(stream)) => self.uni_queue.push_front(stream),
-                        Err(Err(_)) => {}
-                    }
-                } else {
-                    self.uni_waiters.push_back(reply);
-                }
-            }
-            Command::AcceptBidi { reply } => {
-                if let Some(stream) = self.bidi_queue.pop_front() {
-                    // AcceptUni と同じ理由で、キャンセルされた reply へ送信できなかった
-                    // stream はキューの先頭へ戻す
-                    match reply.send(Ok(stream)) {
-                        Ok(()) => {}
-                        Err(Ok(stream)) => self.bidi_queue.push_front(stream),
-                        Err(Err(_)) => {}
-                    }
-                } else {
-                    self.bidi_waiters.push_back(reply);
-                }
-            }
             Command::Close { code, reply } => {
                 let result = conn.close(code, &[]).await.map_err(map_error);
                 self.mark_closed(Some(CloseReason::Application { code }));
@@ -884,12 +907,10 @@ impl DriverState {
     /// 待機中の呼び出し元をすべて接続終了で終わらせる
     fn finish(&mut self) {
         let error = QuicError::ConnectionClosed;
-        for waiter in self.uni_waiters.drain(..) {
-            let _ = waiter.send(Err(error.clone()));
-        }
-        for waiter in self.bidi_waiters.drain(..) {
-            let _ = waiter.send(Err(error.clone()));
-        }
+        // 受理待ちのアプリへ接続終了を知らせる。積まれたストリームはアプリが
+        // 取り出せるが、取り出したあとの読み出しは接続終了で失敗する
+        self.uni_incoming.close();
+        self.bidi_incoming.close();
         for waiter in self.open_send_waiters.drain(..) {
             let _ = waiter.send(Err(error.clone()));
         }
@@ -900,8 +921,6 @@ impl DriverState {
             let _ = waiter.send(Err(error.clone()));
         }
         self.recv_txs.clear();
-        self.uni_queue.clear();
-        self.bidi_queue.clear();
         self.datagram_queue.clear();
         let mut record = self
             .close_record
@@ -920,11 +939,13 @@ fn spawn_driver(
     tx: mpsc::WeakSender<Command>,
     stop_tx: mpsc::UnboundedSender<StopSendingObserved>,
     close_record: Arc<StdMutex<Option<CloseReason>>>,
+    uni_incoming: Arc<StreamQueue<RecvStream>>,
+    bidi_incoming: Arc<StreamQueue<(SendStream, RecvStream)>>,
 ) {
     tokio::spawn(async move {
         let mut conn = conn;
         let mut rx = rx;
-        let mut state = DriverState::new(tx, stop_tx, close_record);
+        let mut state = DriverState::new(tx, stop_tx, close_record, uni_incoming, bidi_incoming);
         let mut last_diag = Instant::now();
         loop {
             state.retry_open_waiters(&mut conn);
@@ -1078,12 +1099,16 @@ pub(crate) async fn connect(
     let (tx, rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
     let (stop_tx, stop_rx) = mpsc::unbounded_channel();
     let close_record = Arc::new(StdMutex::new(None));
+    let uni_incoming = Arc::new(StreamQueue::new());
+    let bidi_incoming = Arc::new(StreamQueue::new());
     spawn_driver(
         Inner::Client(connection),
         rx,
         tx.downgrade(),
         stop_tx,
         Arc::clone(&close_record),
+        Arc::clone(&uni_incoming),
+        Arc::clone(&bidi_incoming),
     );
 
     tracing::info!("Connected to {socket_addr}");
@@ -1092,6 +1117,8 @@ pub(crate) async fn connect(
             tx,
             close_record,
             remote_addr,
+            uni_incoming,
+            bidi_incoming,
         },
         stop_rx,
     ))
@@ -1130,17 +1157,23 @@ impl Server {
         let (tx, rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
         let (stop_tx, _stop_rx) = mpsc::unbounded_channel();
         let close_record = Arc::new(StdMutex::new(None));
+        let uni_incoming = Arc::new(StreamQueue::new());
+        let bidi_incoming = Arc::new(StreamQueue::new());
         spawn_driver(
             Inner::Server(connection),
             rx,
             tx.downgrade(),
             stop_tx,
             Arc::clone(&close_record),
+            Arc::clone(&uni_incoming),
+            Arc::clone(&bidi_incoming),
         );
         Ok(Connected {
             tx,
             close_record,
             remote_addr,
+            uni_incoming,
+            bidi_incoming,
         })
     }
 }
@@ -1208,4 +1241,93 @@ fn der_to_pem(label: &str, der: &[u8]) -> String {
     pem.push_str(label);
     pem.push_str("-----\n");
     pem
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// 待ち手が破棄されても、その後に積まれたストリームが失われないこと
+    ///
+    /// 受理待ちの future は `select!` / `timeout` で頻繁に破棄される。破棄のたびに
+    /// キューから何か取り出していれば、そのストリームは永久に失われる。
+    #[tokio::test]
+    async fn cancelled_waiter_does_not_consume_a_stream() {
+        let queue: StreamQueue<u64> = StreamQueue::new();
+
+        // 待ち手を作って破棄する
+        let cancelled = tokio::time::timeout(Duration::from_millis(10), queue.recv()).await;
+        assert!(
+            cancelled.is_err(),
+            "積まれる前の受理待ちは時間切れになること"
+        );
+
+        // 破棄後に積まれた値は取り出せる
+        queue.push(1);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), queue.recv())
+                .await
+                .expect("破棄後に積まれた値を取り出せること"),
+            Some(1),
+            "破棄された待ち手が値を消費していないこと"
+        );
+    }
+
+    /// 積まれた順に取り出せること
+    #[tokio::test]
+    async fn queue_preserves_order() {
+        let queue: StreamQueue<u64> = StreamQueue::new();
+        queue.push(1);
+        queue.push(2);
+        queue.push(3);
+        for expected in [1, 2, 3] {
+            assert_eq!(
+                queue.recv().await,
+                Some(expected),
+                "積まれた順に取り出せること"
+            );
+        }
+    }
+
+    /// 接続が閉じたら、待ち手は接続終了として終わること
+    #[tokio::test]
+    async fn close_wakes_the_waiter() {
+        let queue: StreamQueue<u64> = StreamQueue::new();
+        let recv = queue.recv();
+        tokio::pin!(recv);
+
+        // 待ち手を登録してから閉じる
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), recv.as_mut())
+                .await
+                .is_err(),
+            "閉じる前の受理待ちは時間切れになること"
+        );
+        queue.close();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), queue.recv())
+                .await
+                .expect("閉鎖で受理待ちが終わること"),
+            None,
+            "接続終了として None を返すこと"
+        );
+    }
+
+    /// 閉鎖後に積まれていた値は取り出してから終わること
+    ///
+    /// 閉鎖の直前に受理した stream を捨てると、ピアが送ったデータを読む機会を失う。
+    #[tokio::test]
+    async fn close_keeps_queued_streams() {
+        let queue: StreamQueue<u64> = StreamQueue::new();
+        queue.push(7);
+        queue.close();
+        assert_eq!(
+            queue.recv().await,
+            Some(7),
+            "閉鎖後も積まれていた値を取り出せること"
+        );
+        assert_eq!(queue.recv().await, None, "取り出した後は接続終了になること");
+    }
 }

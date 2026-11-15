@@ -1135,6 +1135,18 @@ mod tests {
             .expect("上限時間以内に完了すること");
     }
 
+    /// future を 1 回だけ poll する
+    ///
+    /// 待ち手の登録だけを行い、起こされても再 poll しない状態を作るために使う。
+    /// 起こされないよう noop waker を渡す。
+    fn poll_once<F: std::future::Future>(
+        future: std::pin::Pin<&mut F>,
+    ) -> std::task::Poll<F::Output> {
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+        future.poll(&mut context)
+    }
+
     /// peer と client を接続し、SETUP 交換まで進める
     ///
     /// client の接続とハンドシェイクは peer のハンドシェイクと並行して進める (どちらも相手の
@@ -1252,6 +1264,48 @@ mod tests {
                 received.is_some(),
                 "キャンセル後に届いた uni stream が失われないこと"
             );
+        })
+        .await;
+    }
+
+    /// 受理待ちが保留のまま破棄されても、引き渡し済みの stream を失わないこと
+    ///
+    /// 受理待ちの future を 1 回だけ poll して待ち手として登録し、ドライバが stream を
+    /// 引き渡したあとに値を受け取らず破棄する。oneshot で直接渡していると、oneshot に
+    /// 格納されたストリームごと破棄され、以降のデータも読めなくなる。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_a_pending_accept_does_not_lose_the_delivered_stream() {
+        run_with_timeout(async {
+            let (mut peer, _client, mut acceptor) = connect_pair_with_acceptor().await;
+
+            // 受理待ちを 1 回だけ poll して待ち手として登録し、保留のまま保持する
+            let mut accept = Box::pin(acceptor.accept_recv_stream());
+            assert!(
+                poll_once(accept.as_mut()).is_pending(),
+                "stream が無い間は受理待ちが完了しないこと"
+            );
+
+            // peer が uni stream を開く。ドライバは登録済みの待ち手へ引き渡す
+            let mut send = peer
+                .open_uni_send_stream()
+                .await
+                .expect("uni stream を開けること");
+            send.send(Bytes::from_static(b"pending-accept"))
+                .await
+                .expect("stream にデータを書けること");
+            send.finish().await.expect("stream を FIN で閉じられること");
+
+            // 引き渡しが起きるまで待ってから、値を受け取らずに受理待ちを破棄する
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            drop(accept);
+
+            // 失われていなければ、次の受理で取り出せる
+            let received =
+                tokio::time::timeout(Duration::from_secs(5), acceptor.accept_recv_stream())
+                    .await
+                    .expect("引き渡し済みの stream が失われていないこと")
+                    .expect("受理がエラーにならないこと");
+            assert!(received.is_some(), "受理した stream を取り出せること");
         })
         .await;
     }
