@@ -1603,9 +1603,9 @@ checksum = "cf0af704514ba7e8e9e2221af2b27af7f7e7d412acdad4aea2ad82ea86a6ed41"
 
 [[package]]
 name = "shiguredo_ngtcp2"
-version = "2026.1.0-canary.4"
+version = "2026.1.0-canary.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c161a87bead0ef06239af97d295a89694d6f9ee9bcf894e1e742421675f80e5"
+checksum = "fee628ffc375ee6e461af08e865d143a12ac08d01bad5ea79c723c36faac55f3"
 dependencies = [
  "aws-lc-rs",
  "libc",
@@ -1614,9 +1614,9 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_ngtcp2_sys"
-version = "2026.1.0-canary.4"
+version = "2026.1.0-canary.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fccbd54446b35fdec5392f39dd0821f50684f454258a56f7e535f74138e55209"
+checksum = "35aedcb399ea28e322e1ac9397e5bc973d89a00017f63b91565f3c2e7ca9bda5"
 dependencies = [
  "aws-lc-sys",
  "libc",
@@ -1626,9 +1626,9 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_ngtcp2_tokio"
-version = "2026.1.0-canary.4"
+version = "2026.1.0-canary.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a171e2204b06cd8cbafbd4a7687ac851bd217c3aa734025938966722855606cc"
+checksum = "8a0942fa316708cff6ec91546eea42c56ded34248e383b40c57a5a0c38de7c6f"
 dependencies = [
  "libc",
  "shiguredo_ngtcp2",

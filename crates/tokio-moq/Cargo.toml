@@ -16,7 +16,7 @@ shiguredo_http3 = "2026.1.0-canary.14"
 # MOQT 本体 (ローカル参照)
 shiguredo_moqt = { path = "../../" }
 # QUIC 実装 (ngtcp2)。quic-ngtcp2 feature で有効にする
-shiguredo_ngtcp2_tokio = { version = "2026.1.0-canary.4", optional = true }
+shiguredo_ngtcp2_tokio = { version = "2026.1.0-canary.5", optional = true }
 # QMux (draft-ietf-quic-qmux-02) の Sans I/O 実装
 #
 # qmux-rs は当面タグを打つ予定が無く、crates.io にも公開されていない (shiguredo_tokio_qmux は
