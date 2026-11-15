@@ -4,8 +4,8 @@
 //!
 //! QUIC の実装は cargo feature で選ぶ。3 つから 1 つだけを有効にすること。
 //!
-//! - `quic-tobi` (既定): tobi-quic
-//! - `quic-s2n`: s2n-quic
+//! - `quic-s2n` (既定): s2n-quic
+//! - `quic-tobi`: tobi-quic
 //! - `quic-ngtcp2`: ngtcp2 (shiguredo_ngtcp2_tokio)
 //!
 //! WebTransport over HTTP/3 は [tobi] を直接使うため、この選択の対象外である。
