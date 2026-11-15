@@ -40,7 +40,19 @@ pub struct Config {
     /// SUBSCRIBE_TRACKS を送る。publisher が返す PUBLISH は受理するが、受信した Object は
     /// 再生に使わず読み捨てる (既存の catalog 経由の購読は変わらない)。
     pub subscribe_tracks: bool,
+    /// SUBSCRIBE に載せる RENDEZVOUS_TIMEOUT (ミリ秒)
+    ///
+    /// publisher がまだ居ない Track への購読を relay が保持する時間である
+    /// (draft-ietf-moq-transport-23 §9.19.6 (RENDEZVOUS TIMEOUT Parameter))。0 は
+    /// 「待たない」であり、relay は publisher が居なければ即座に DOES_NOT_EXIST を返す。
+    /// この example は既定で 10 秒待ち、publisher の起動が購読より遅れても購読を失わない。
+    pub rendezvous_timeout_ms: u64,
 }
+
+/// SUBSCRIBE に載せる RENDEZVOUS_TIMEOUT の上限 (ミリ秒)
+///
+/// 制御メッセージの応答待ち (30 秒) と競合しないよう、上限を 25 秒にする。
+const MAX_RENDEZVOUS_TIMEOUT_MS: u64 = 25_000;
 
 /// 音声の出力先
 ///
@@ -218,6 +230,28 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         .take(&mut args)
         .is_present();
 
+    // publisher がまだ居ない場合に relay へ購読を保持してもらう時間。0 は待たない。
+    // 制御メッセージの応答待ち (30 秒) より短い上限にし、制御タイムアウトと競合させない
+    let rendezvous_timeout_ms: u64 = noargs::opt("rendezvous-timeout-ms")
+        .ty("MS")
+        .doc("Rendezvous timeout in milliseconds for SUBSCRIBE (0-25000, default 10000): how long the relay holds a subscription while no publisher is available (draft-ietf-moq-transport-23 Section 9.19.6)")
+        .default("10000")
+        .take(&mut args)
+        .then(|o| {
+            let value: u64 = o.value().parse().map_err(|_| {
+                format!(
+                    "--rendezvous-timeout-ms must be an integer: {}",
+                    o.value()
+                )
+            })?;
+            if value > MAX_RENDEZVOUS_TIMEOUT_MS {
+                return Err(format!(
+                    "--rendezvous-timeout-ms must be between 0 and {MAX_RENDEZVOUS_TIMEOUT_MS}"
+                ));
+            }
+            Ok(value)
+        })?;
+
     let video_enabled = !no_video;
     let audio_enabled = !no_audio;
     if !args.metadata().help_mode && !video_enabled && !audio_enabled {
@@ -244,6 +278,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         mp4,
         no_play,
         subscribe_tracks,
+        rendezvous_timeout_ms,
     }))
 }
 
@@ -709,5 +744,61 @@ mod tests {
             config.subscribe_tracks,
             "--subscribe-tracks を指定した場合は有効であること"
         );
+    }
+
+    /// RENDEZVOUS_TIMEOUT は既定で 10 秒である
+    ///
+    /// publisher の起動が購読より遅れても relay が購読を保持できるよう、既定で 0 では
+    /// なく 10 秒を指定することを固定する。
+    #[test]
+    fn rendezvous_timeout_defaults_to_10_seconds() {
+        let config = parse_args(BASE_ARGS)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            config.rendezvous_timeout_ms, 10_000,
+            "RENDEZVOUS_TIMEOUT の既定値が 10 秒であること"
+        );
+    }
+
+    /// `--rendezvous-timeout-ms` は 0 以上 25 秒以下を受け付ける
+    ///
+    /// 0 (待たない) と上限を受理し、上限を超える値は制御メッセージの応答待ちと競合する
+    /// ためエラーにすることを固定する。
+    #[test]
+    fn rendezvous_timeout_parses_the_bounds() {
+        for (value, expected) in [("0", 0), ("25000", MAX_RENDEZVOUS_TIMEOUT_MS)] {
+            let mut args = BASE_ARGS.to_vec();
+            args.push("--rendezvous-timeout-ms");
+            args.push(value);
+            let config = parse_args(&args)
+                .expect("オプションの解析に成功すること")
+                .expect("設定が返ること");
+            assert_eq!(
+                config.rendezvous_timeout_ms, expected,
+                "--rendezvous-timeout-ms {value} がそのまま設定されること"
+            );
+        }
+    }
+
+    /// `--rendezvous-timeout-ms` は整数以外と上限超過を拒否する
+    ///
+    /// 値域外の指定を黙って丸めず、起動時にエラーにすることを固定する。
+    #[test]
+    fn rendezvous_timeout_rejects_invalid_values() {
+        for value in ["-1", "not-a-number", "25001"] {
+            let mut args = BASE_ARGS.to_vec();
+            args.push("--rendezvous-timeout-ms");
+            args.push(value);
+            let err = match parse_args(&args) {
+                Ok(_) => panic!("--rendezvous-timeout-ms {value} を受理しないこと"),
+                Err(err) => err,
+            };
+            let message = format!("{err:?}");
+            assert!(
+                message.contains("--rendezvous-timeout-ms"),
+                "エラーにオプション名が含まれること: {message}"
+            );
+        }
     }
 }

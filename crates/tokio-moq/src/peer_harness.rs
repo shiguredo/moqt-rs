@@ -713,6 +713,29 @@ impl TestPeer {
         Ok(())
     }
 
+    /// 受理した FETCH に FETCH_OK で応答する (応答パラメータを指定する版)
+    ///
+    /// [`TestPeer::send_request_ok`] は REQUEST_UPDATE_OK などの汎用の OK を送るため、
+    /// FETCH の初回応答 (`FETCH_OK`) には使えない (Session は `send_fetch_ok` を要求する)。
+    /// 本メソッドは [`TestPeer::send_request_ok`] と同じ手順で、`Session::send_fetch_ok` が
+    /// 積んだ応答を該当する request stream へ書き出す。
+    ///
+    /// # Errors
+    ///
+    /// Session が確立していない、受理していない FETCH、publisher 役でない、応答範囲の
+    /// 終端を確定できない場合は [`TransportError`] になる。
+    pub async fn send_fetch_ok_with_parameters(
+        &mut self,
+        request_id: u64,
+        parameters: MessageParameters,
+        track_properties: TrackProperties,
+    ) -> Result<()> {
+        self.session
+            .send_fetch_ok(request_id, parameters, track_properties)
+            .map_err(|e| TransportError::Internal(format!("send_fetch_ok: {e}")))?;
+        self.flush_queued_response(request_id).await
+    }
+
     /// 受理した SUBSCRIBE に SUBSCRIBE_OK で応答する
     ///
     /// [`TestPeer::send_request_ok`] と同じ手順で応答を書き出す。SUBSCRIBE_OK は

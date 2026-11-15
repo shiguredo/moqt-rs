@@ -54,6 +54,9 @@ cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --au
 
 # MSF fragment から Track Namespace を取る (`--namespace` を省略)
 cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video'
+
+# publisher の起動を 20 秒待つ (relay が RENDEZVOUS_TIMEOUT に対応している場合)
+cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --rendezvous-timeout-ms 20000
 ```
 
 ## CLI オプション
@@ -73,6 +76,24 @@ cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video'
 | `--mp4` | | 受信した音声 / 映像を MP4 ファイルへ保存する (再エンコードせずに mux する。音声は Opus のみで、AAC-LC のトラックでは音声を録画せず警告する。既存ファイルは上書きし、音声は subgroup stream と datagram のどちらで届いても保存する) |
 | `--no-play` | | 再生を行わない (SDL を初期化せず、デコードもしない) |
 | `--subscribe-tracks` | | namespace prefix の SUBSCRIBE_TRACKS を送り、publisher からの PUBLISH を受理する。受信した Object は再生に使わず読み捨てる (catalog からの購読は変わらない) |
+| `--rendezvous-timeout-ms` | `10000` | SUBSCRIBE に載せる `RENDEZVOUS_TIMEOUT` (0〜25000 ms)。publisher がまだ居ない track への購読を relay が保持する時間 (draft-ietf-moq-transport-23 §9.19.6)。0 は待たずに `DOES_NOT_EXIST` を返させる指定であり、既定の 10 秒は publisher の起動が購読より遅れる場合に備える |
+
+## publisher の起動待ち (RENDEZVOUS_TIMEOUT)
+
+moq-sub は catalog / 映像 / 音声の SUBSCRIBE に `RENDEZVOUS_TIMEOUT` (`0x04`) を載せる
+(draft-ietf-moq-transport-23 §9.19.6)。publisher がまだ居ない track への購読を relay が
+保持する時間であり、publisher の起動が subscriber の接続より遅れても、relay は
+`SUBSCRIBE_OK` を返すまで購読を保持できる。既定は 10 秒で、`--rendezvous-timeout-ms` で
+0〜25 秒に変更できる。
+
+- 0 は「待たない」であり、relay が publisher 不在を検出した時点で `DOES_NOT_EXIST` を返す
+- 制御メッセージの応答待ち (`CONTROL_MESSAGE_TIMEOUT`) は 30 秒であるため、上限を 25 秒にして
+  期限の競合を避ける
+- セッション移行後の再購読と request stream 単位の再発行でも同じ値を載せる
+- `SUBSCRIBE_TRACKS` には載せない。`RENDEZVOUS_TIMEOUT` は単一 Track の SUBSCRIBE にだけ
+  意味を持ち、`SUBSCRIBE_TRACKS` には載せられない (§3.6.2 (Parameters on SUBSCRIBE_TRACKS))
+- relay が `RENDEZVOUS_TIMEOUT` に対応しない場合も、従来どおり publisher の有無がそのまま
+  結果になる (relay は要求より短い待ち時間を使ってよい)
 
 ## 注意事項
 

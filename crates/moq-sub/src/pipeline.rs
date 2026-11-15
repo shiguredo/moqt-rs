@@ -45,11 +45,11 @@ use shiguredo_moqt::{
     message_parameter::MessageParameter, message_parameter::MessageParameterValue,
     message_parameter::MessageParameters, message_parameter::PARAM_FILL_PARAMETERS,
     message_parameter::PARAM_LOCATION_FILTER, message_parameter::PARAM_NEW_GROUP_REQUEST,
-    msf::MSF_CATALOG_TRACK_NAME, msf::MsfTrack, name::parse_namespace, name::serialize_namespace,
-    name::serialize_track_name, session::types::DataStreamId, session::types::SessionEvent,
-    stream::decoder::DecodedFetchEntry, stream::decoder::DecodedSubgroupObject,
-    stream::decoder::FetchStreamDecoder, stream::decoder::SubgroupStreamDecoder,
-    stream::fetch::FetchHeader,
+    message_parameter::PARAM_RENDEZVOUS_TIMEOUT, msf::MSF_CATALOG_TRACK_NAME, msf::MsfTrack,
+    name::parse_namespace, name::serialize_namespace, name::serialize_track_name,
+    session::types::DataStreamId, session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
+    stream::decoder::DecodedSubgroupObject, stream::decoder::FetchStreamDecoder,
+    stream::decoder::SubgroupStreamDecoder, stream::fetch::FetchHeader,
 };
 
 use crate::catalog;
@@ -1328,6 +1328,11 @@ struct ResubscribePlan {
     video: Option<SubscribeTarget>,
     /// 音声トラック (購読する場合)
     audio: Option<SubscribeTarget>,
+    /// 張り直す SUBSCRIBE に載せる RENDEZVOUS_TIMEOUT (ミリ秒)
+    ///
+    /// publisher が一時的に居なくなった場合に relay が購読を保持する時間である。
+    /// 起動時と同じ値を移行先・再発行先でも使う (draft-ietf-moq-transport-23 §9.19.6)。
+    rendezvous_timeout_ms: u64,
 }
 
 /// 購読する track の指定
@@ -1440,6 +1445,7 @@ fn plan_for_migration(
         } else {
             base.audio.clone()
         },
+        rendezvous_timeout_ms: base.rendezvous_timeout_ms,
     };
     (plan, resolve_as_ended)
 }
@@ -1663,7 +1669,10 @@ async fn resubscribe_tracks(
                 .subscribe_track_with_parameters(
                     namespace.clone(),
                     MSF_CATALOG_TRACK_NAME.to_vec(),
-                    catalog_subscribe_parameters(),
+                    with_rendezvous_timeout(
+                        catalog_subscribe_parameters(),
+                        plan.rendezvous_timeout_ms,
+                    ),
                 )
                 .await?;
             tracing::info!(
@@ -1691,7 +1700,10 @@ async fn resubscribe_tracks(
                 .subscribe_track_with_parameters(
                     target.namespace.clone(),
                     target.track_name.clone(),
-                    video_subscribe_parameters(last_locations.get(TrackKind::Video)),
+                    with_rendezvous_timeout(
+                        video_subscribe_parameters(last_locations.get(TrackKind::Video)),
+                        plan.rendezvous_timeout_ms,
+                    ),
                 )
                 .await?;
             tracing::info!(
@@ -1730,7 +1742,10 @@ async fn resubscribe_tracks(
                 .subscribe_track_with_parameters(
                     target.namespace.clone(),
                     target.track_name.clone(),
-                    audio_subscribe_parameters(last_locations.get(TrackKind::Audio)),
+                    with_rendezvous_timeout(
+                        audio_subscribe_parameters(last_locations.get(TrackKind::Audio)),
+                        plan.rendezvous_timeout_ms,
+                    ),
                 )
                 .await?;
             tracing::info!(
@@ -1802,6 +1817,26 @@ fn audio_subscribe_parameters(last: Option<Location>) -> MessageParameters {
             }),
         });
     }
+    parameters
+}
+
+/// SUBSCRIBE のメッセージパラメータへ RENDEZVOUS_TIMEOUT を追加する
+///
+/// draft-ietf-moq-transport-23 §9.19.6 (RENDEZVOUS TIMEOUT Parameter): relay が
+/// publisher の居ない Track への購読を保持する時間 (ミリ秒) を指定する。パラメータが
+/// 無い場合の既定は 0 であり、relay は publisher が居なければ即座に
+/// DOES_NOT_EXIST を返すため、publisher の起動が購読より遅れると購読を失う。
+///
+/// このパラメータは単一 Track の SUBSCRIBE にだけ意味を持つため、SUBSCRIBE_TRACKS には
+/// 載せない (§3.6.2 (Parameters on SUBSCRIBE_TRACKS))。
+fn with_rendezvous_timeout(
+    mut parameters: MessageParameters,
+    rendezvous_timeout_ms: u64,
+) -> MessageParameters {
+    parameters.push(MessageParameter {
+        param_type: PARAM_RENDEZVOUS_TIMEOUT,
+        value: MessageParameterValue::VarInt(rendezvous_timeout_ms),
+    });
     parameters
 }
 
@@ -2386,7 +2421,10 @@ async fn reissue_request(
                 .subscribe_track_with_parameters(
                     namespace.clone(),
                     MSF_CATALOG_TRACK_NAME.to_vec(),
-                    catalog_subscribe_parameters(),
+                    with_rendezvous_timeout(
+                        catalog_subscribe_parameters(),
+                        plan.rendezvous_timeout_ms,
+                    ),
                 )
                 .await?;
             // 再発行した catalog 購読の fill fetch stream をカタログとして適用するため、
@@ -2404,7 +2442,10 @@ async fn reissue_request(
                 .subscribe_track_with_parameters(
                     target.namespace.clone(),
                     target.track_name.clone(),
-                    video_subscribe_parameters(last_locations.get(TrackKind::Video)),
+                    with_rendezvous_timeout(
+                        video_subscribe_parameters(last_locations.get(TrackKind::Video)),
+                        plan.rendezvous_timeout_ms,
+                    ),
                 )
                 .await?;
             // 起動時・移行時と同じく SUBSCRIBER_PRIORITY を送る
@@ -2434,7 +2475,10 @@ async fn reissue_request(
                 .subscribe_track_with_parameters(
                     target.namespace.clone(),
                     target.track_name.clone(),
-                    audio_subscribe_parameters(last_locations.get(TrackKind::Audio)),
+                    with_rendezvous_timeout(
+                        audio_subscribe_parameters(last_locations.get(TrackKind::Audio)),
+                        plan.rendezvous_timeout_ms,
+                    ),
                 )
                 .await?
         }
@@ -3655,7 +3699,8 @@ pub async fn run(
     // 指定しない (draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization))。
     // 移行 (GOAWAY) で catalog を張り直すときに使う namespace
     let catalog_namespace_for_migration = namespace.clone();
-    let catalog_params = catalog_subscribe_parameters();
+    let catalog_params =
+        with_rendezvous_timeout(catalog_subscribe_parameters(), config.rendezvous_timeout_ms);
     let catalog_sub = client
         .subscribe_track_with_parameters(
             namespace.clone(),
@@ -3825,7 +3870,10 @@ pub async fn run(
                 v.namespace.clone(),
                 v.track_name.as_bytes().to_vec(),
                 // 起動時は前の session が無いため Location Filter を載せない
-                video_subscribe_parameters(None),
+                with_rendezvous_timeout(
+                    video_subscribe_parameters(None),
+                    config.rendezvous_timeout_ms,
+                ),
             )
             .await?;
         tracing::info!(
@@ -3901,7 +3949,10 @@ pub async fn run(
                 a.namespace.clone(),
                 a.track_name.as_bytes().to_vec(),
                 // 起動時は前の session が無く、パイプラインが載せるパラメータは無い
-                audio_subscribe_parameters(None),
+                with_rendezvous_timeout(
+                    audio_subscribe_parameters(None),
+                    config.rendezvous_timeout_ms,
+                ),
             )
             .await?;
         tracing::info!(
@@ -3996,6 +4047,7 @@ pub async fn run(
                 namespace: info.namespace.clone(),
                 track_name: info.track_name.as_bytes().to_vec(),
             }),
+        rendezvous_timeout_ms: config.rendezvous_timeout_ms,
     };
     // 現在の catalog 購読の request id と alias。恒久終了後に session 移行で張り直さない
     // 場合は旧 session の値が新 session の request id (0 から採番) と衝突するため、
@@ -12064,6 +12116,7 @@ mod tests {
                 track_name: b"video".to_vec(),
             }),
             audio: None,
+            rendezvous_timeout_ms: 10_000,
         };
 
         // 終了待ちが無ければ base の plan がそのまま使われる
@@ -15803,6 +15856,7 @@ mod tests {
         use std::time::Duration;
 
         use shiguredo_moqt::message::Subscribe;
+        use shiguredo_moqt::message_parameter::PARAM_SUBSCRIBE_TRACKS_ID;
         use shiguredo_moqt::stream::encoder::{FetchObjectInput, FetchStreamEncoder};
         use shiguredo_moqt::track_properties::TrackProperties;
         use tokio_moq::Transport;
@@ -15834,6 +15888,23 @@ mod tests {
         fn test_track_namespace() -> TrackNamespace {
             TrackNamespace::new(vec![b"moq-example".to_vec()])
                 .expect("テスト用の namespace を作れること")
+        }
+
+        /// SUBSCRIBE の RENDEZVOUS_TIMEOUT (0x04) の値を読む
+        ///
+        /// library は 0x04 を解釈せずアクセサを持たないため、生のパラメータ列から varint を
+        /// 取り出す。値が別のエンコーディングで届いた場合はテストの前提が壊れているため panic する。
+        fn rendezvous_timeout_of(parameters: &MessageParameters) -> Option<u64> {
+            parameters
+                .as_slice()
+                .iter()
+                .find(|parameter| parameter.param_type == PARAM_RENDEZVOUS_TIMEOUT)
+                .map(|parameter| match parameter.value {
+                    MessageParameterValue::VarInt(value) => value,
+                    ref value => {
+                        panic!("RENDEZVOUS_TIMEOUT は varint で届くこと: {value:?}")
+                    }
+                })
         }
 
         /// テスト用サーバーのアドレスを MOQT URL にする
@@ -16059,6 +16130,55 @@ mod tests {
                 .finish()
                 .await
                 .expect("fill fetch stream を FIN できること");
+        }
+
+        /// メディア FETCH 応答 stream として映像 Object を 1 つ書き、FIN で閉じる
+        ///
+        /// `request_id` は自側が受理した FETCH の Request ID である。Properties は
+        /// FetchStreamEncoder の契約に従い Properties Length を含む形で渡す
+        /// (draft-ietf-moq-transport-23 §11.4.2 (Fetch Object)).
+        async fn send_video_fetch_stream(
+            peer: &mut TestPeer,
+            request_id: u64,
+            location: Location,
+            timestamp: u64,
+            packet: &[u8],
+        ) {
+            let mut stream = peer
+                .open_uni_send_stream()
+                .await
+                .expect("映像の FETCH 応答 stream を開けること");
+            let mut encoder = FetchStreamEncoder::new(request_id);
+            let mut buf = encoder.encode_header();
+            // LocProperties::encode は Properties Length varint を含むため、そのまま渡す
+            // (FetchStreamEncoder::encode_object の properties_data と同じ契約)
+            let properties = video_loc_properties(timestamp, 90_000)
+                .encode()
+                .expect("映像の LOC プロパティを encode できること");
+            encoder
+                .encode_object(
+                    &FetchObjectInput {
+                        group_id: location.group_id,
+                        subgroup_id: 0,
+                        object_id: location.object_id,
+                        publisher_priority: 128,
+                        has_properties: true,
+                        is_datagram_origin: false,
+                        payload_length: packet.len() as u64,
+                    },
+                    Some(&properties),
+                    &mut buf,
+                )
+                .expect("FETCH 応答の映像 Object を encode できること");
+            buf.extend_from_slice(packet);
+            stream
+                .send(Bytes::from(buf))
+                .await
+                .expect("映像の FETCH 応答 stream を送れること");
+            stream
+                .finish()
+                .await
+                .expect("映像の FETCH 応答 stream を FIN できること");
         }
 
         /// FETCH_HEADER だけを書いて FIN する fill fetch stream
@@ -16359,11 +16479,14 @@ mod tests {
             receiver: &mut tokio::sync::broadcast::Receiver<String>,
             needle: &str,
         ) {
+            // 失敗したときに、待っていた間に流れたログから原因を追えるようにする。
+            // needle に一致したログは返す必要がないため保持しない
+            let mut received: Vec<String> = Vec::new();
             let wait = tokio::time::timeout(EVENT_WAIT_TIMEOUT, async {
                 loop {
                     match receiver.recv().await {
                         Ok(message) if message.contains(needle) => return,
-                        Ok(_) => continue,
+                        Ok(message) => received.push(message),
                         // 容量超過で取りこぼした場合は、次のメッセージを待つ。pipeline の
                         // INFO 以上に絞り、容量を十分に取っているため通常は起きない
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -16374,7 +16497,10 @@ mod tests {
                 }
             })
             .await;
-            assert!(wait.is_ok(), "上限時間内にログ {needle:?} が届くこと");
+            assert!(
+                wait.is_ok(),
+                "上限時間内にログ {needle:?} が届くこと; 受信したログ: {received:#?}"
+            );
         }
 
         /// テスト用の VP8 キーフレームを 1 フレームエンコードする
@@ -16518,6 +16644,7 @@ mod tests {
                 mp4: None,
                 no_play: false,
                 subscribe_tracks: false,
+                rendezvous_timeout_ms: 10_000,
             }
         }
 
@@ -16556,13 +16683,20 @@ mod tests {
         impl RunningPipeline {
             /// テスト用サーバーのアドレスへ接続する run を起動する
             fn start(addr: SocketAddr) -> Self {
+                Self::start_with_config(test_audio_config(addr))
+            }
+
+            /// 指定した設定で run を起動する
+            ///
+            /// `--subscribe-tracks` や RENDEZVOUS_TIMEOUT のように、CLI のフラグで変わる
+            /// 設定をテストから有効にするために使う。
+            fn start_with_config(config: Config) -> Self {
                 let (frame_tx, frame_rx) = std::sync::mpsc::channel();
                 let (audio_tx, audio_rx) = std::sync::mpsc::channel();
                 let (player_stop_tx, player_stop_rx) = tokio::sync::oneshot::channel();
                 let shutdown = tokio_utils::ShutdownController::new();
                 let shutdown_monitor = shutdown.subscribe();
                 let task_monitor = tokio_metrics::TaskMonitor::new();
-                let config = test_audio_config(addr);
                 let handle = tokio::spawn(async move {
                     run(
                         config,
@@ -17197,6 +17331,7 @@ mod tests {
                         namespace: test_track_namespace(),
                         track_name: b"audio".to_vec(),
                     }),
+                    rendezvous_timeout_ms: 10_000,
                 };
                 let last_locations = LastReceivedLocations {
                     catalog: None,
@@ -17224,6 +17359,11 @@ mod tests {
                             "移行先の catalog 購読に FILL_PARAMETERS を載せること"
                         );
                         assert_eq!(
+                            rendezvous_timeout_of(&catalog.parameters),
+                            Some(10_000),
+                            "移行先の catalog 購読にも RENDEZVOUS_TIMEOUT を載せること"
+                        );
+                        assert_eq!(
                             catalog
                                 .parameters
                                 .location_filter_typed()
@@ -17243,6 +17383,11 @@ mod tests {
                         assert!(
                             video.parameters.fill_parameters().is_none(),
                             "映像の購読に FILL_PARAMETERS を載せないこと"
+                        );
+                        assert_eq!(
+                            rendezvous_timeout_of(&video.parameters),
+                            Some(10_000),
+                            "移行先の映像購読にも RENDEZVOUS_TIMEOUT を載せること"
                         );
                         assert_eq!(
                             video
@@ -17326,6 +17471,11 @@ mod tests {
                             "音声の購読に FILL_PARAMETERS を載せないこと"
                         );
                         assert_eq!(
+                            rendezvous_timeout_of(&audio.parameters),
+                            Some(10_000),
+                            "移行先の音声購読にも RENDEZVOUS_TIMEOUT を載せること"
+                        );
+                        assert_eq!(
                             audio
                                 .parameters
                                 .location_filter_typed()
@@ -17379,6 +17529,281 @@ mod tests {
                     resubscribed.fetch_targets.get(&catalog_request_id),
                     Some(&FetchTarget::Catalog),
                     "catalog 購読の fill fetch stream をカタログとして適用する対応を返すこと"
+                );
+            })
+            .await;
+        }
+
+        /// `--subscribe-tracks` で SUBSCRIBE_TRACKS を送り、relay が返す PUBLISH を
+        /// PUBLISH_OK で受理すること
+        ///
+        /// 次の 4 点を固定する。
+        ///
+        /// - catalog / 映像 / 音声の SUBSCRIBE に RENDEZVOUS_TIMEOUT (0x04) が載る
+        /// - SUBSCRIBE_TRACKS には RENDEZVOUS_TIMEOUT を載せない (§3.6.2)
+        /// - SUBSCRIBE_TRACKS_ID が一致する PUBLISH に PUBLISH_OK を返す
+        /// - 受理した PUBLISH の alias で届く Object を読み捨て、既存の音声購読は継続する
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn run_accepts_a_publish_for_subscribe_tracks() {
+            run_with_timeout(async {
+                // run の受理ログを取り逃さないよう、pipeline の起動前に購読する
+                let mut run_logs = subscribe_run_logs();
+                let mut server = TestPeerServer::start()
+                    .await
+                    .expect("テスト用サーバーを起動できること");
+                let mut config = test_audio_config(server.local_addr());
+                config.subscribe_tracks = true;
+                // 既定値と区別できる値にして、設定が SUBSCRIBE まで届くことを確かめる
+                config.rendezvous_timeout_ms = 12_345;
+                let pipeline = RunningPipeline::start_with_config(config);
+                let packet = encode_opus_silence(48_000, 1);
+                let peer = tokio::spawn(async move {
+                    let mut peer = server.accept().await.expect("接続を受理できること");
+                    peer.establish().await.expect("SETUP を交換できること");
+
+                    // catalog 購読: RENDEZVOUS_TIMEOUT を載せ、fill fetch stream で
+                    // video / audio を含む独立カタログを届ける
+                    let catalog = accept_subscription(&mut peer, 7, MessageParameters::new()).await;
+                    assert_eq!(
+                        rendezvous_timeout_of(&catalog.parameters),
+                        Some(12_345),
+                        "catalog の SUBSCRIBE に RENDEZVOUS_TIMEOUT を載せること"
+                    );
+                    send_catalog_fill_fetch_stream(
+                        &mut peer,
+                        catalog.request_id,
+                        &[(
+                            Location {
+                                group_id: 0,
+                                object_id: 0,
+                            },
+                            video_and_audio_catalog_json(640, 480),
+                        )],
+                    )
+                    .await;
+
+                    // 映像購読: SUBSCRIBE_OK のあとに REQUEST_UPDATE が届く
+                    let video = accept_subscription(&mut peer, 8, MessageParameters::new()).await;
+                    assert_eq!(
+                        rendezvous_timeout_of(&video.parameters),
+                        Some(12_345),
+                        "映像の SUBSCRIBE に RENDEZVOUS_TIMEOUT を載せること"
+                    );
+                    let update = peer
+                        .recv_request_stream_message(video.request_id)
+                        .await
+                        .expect("映像の REQUEST_UPDATE を読めること");
+                    assert!(
+                        matches!(update, RequestStreamRead::Message(_)),
+                        "映像の request stream に REQUEST_UPDATE が届くこと: {update:?}"
+                    );
+
+                    // 音声購読
+                    let audio = accept_subscription(&mut peer, 9, MessageParameters::new()).await;
+                    assert_eq!(
+                        rendezvous_timeout_of(&audio.parameters),
+                        Some(12_345),
+                        "音声の SUBSCRIBE に RENDEZVOUS_TIMEOUT を載せること"
+                    );
+
+                    // SUBSCRIBE_TRACKS は catalog / 映像 / 音声のあとに届く
+                    let message = peer
+                        .recv_request_start()
+                        .await
+                        .expect("SUBSCRIBE_TRACKS を受理できること");
+                    let ControlMessage::SubscribeTracks(tracks) = message else {
+                        panic!("SUBSCRIBE_TRACKS が request stream の先頭に届くこと: {message:?}");
+                    };
+                    assert_eq!(
+                        tracks.track_namespace,
+                        test_track_namespace(),
+                        "SUBSCRIBE_TRACKS の prefix が --namespace と同じであること"
+                    );
+                    assert_eq!(
+                        rendezvous_timeout_of(&tracks.parameters),
+                        None,
+                        "SUBSCRIBE_TRACKS に RENDEZVOUS_TIMEOUT を載せないこと"
+                    );
+                    peer.send_request_ok(tracks.request_id)
+                        .await
+                        .expect("SUBSCRIBE_TRACKS_OK を返せること");
+
+                    // relay は SUBSCRIBE_TRACKS_ID に要求の Request ID を載せた PUBLISH を返す
+                    let publish_request_id = peer
+                        .next_request_id()
+                        .expect("PUBLISH の Request ID を採番できること");
+                    let mut publish_parameters = MessageParameters::new();
+                    publish_parameters.push(MessageParameter {
+                        param_type: PARAM_SUBSCRIBE_TRACKS_ID,
+                        value: MessageParameterValue::VarInt(tracks.request_id),
+                    });
+                    peer.send_request_start(ControlMessage::Publish(Publish {
+                        request_id: publish_request_id,
+                        track_namespace: test_track_namespace(),
+                        track_name: b"extra".to_vec(),
+                        track_alias: 42,
+                        parameters: publish_parameters,
+                        track_properties: TrackProperties::new(),
+                    }))
+                    .await
+                    .expect("PUBLISH を送れること");
+                    let response = peer
+                        .recv_response(publish_request_id)
+                        .await
+                        .expect("PUBLISH への応答を読めること");
+                    assert!(
+                        matches!(response, ControlMessage::RequestOk(_)),
+                        "PUBLISH が PUBLISH_OK (REQUEST_OK) で受理されること: {response:?}"
+                    );
+
+                    // 受理した alias 42 の Object は読み捨てられる。既存の音声購読 (alias 9) は
+                    // 継続することを、同じ接続で音声 Object を届けて確かめる
+                    send_audio_subgroup_stream(&mut peer, 42, 0, 0, 0, &packet).await;
+                    send_audio_subgroup_stream(&mut peer, 9, 0, 0, 0, &packet).await;
+
+                    peer.recv_close_code()
+                        .await
+                        .expect("shutdown の CONNECTION_CLOSE を観測できること")
+                });
+
+                wait_for_log(&mut run_logs, "Accepted PUBLISH for SUBSCRIBE_TRACKS").await;
+                let frame = pipeline.next_audio().await;
+                assert_eq!(
+                    frame.pts_us, 0,
+                    "受理した PUBLISH は読み捨て、既存の音声購読は継続すること"
+                );
+                let audio_rx = std::sync::Arc::clone(&pipeline.audio_rx);
+                pipeline.finish().await.expect("run が正常終了すること");
+                assert!(
+                    drain_audio(&audio_rx).is_empty(),
+                    "届いた音声 Object が 1 つだけであること"
+                );
+                assert_eq!(
+                    peer.await.expect("peer のタスクが panic しないこと"),
+                    0,
+                    "shutdown は NO_ERROR (0) で接続を閉じること"
+                );
+            })
+            .await;
+        }
+
+        /// 起動時に発行した映像 FETCH の応答 stream を読み、cache の Object を配送経路へ
+        /// 流すこと
+        ///
+        /// SUBSCRIBE_OK の Largest Object (1, 0) から直近 4 Group を要求する。relay は
+        /// 要求範囲の先頭 (0, 0) を FETCH 応答で返し、moq-sub は購読境界 (1, 0) 以下として
+        /// 表示はしないが復号と配送判定まで通す。境界以下として落ちたことが
+        /// "Video delivery counters: before_boundary=1" のログで観測できる。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn run_consumes_a_video_fetch_response_from_the_relay_cache() {
+            run_with_timeout(async {
+                let mut run_logs = subscribe_run_logs();
+                let mut server = TestPeerServer::start()
+                    .await
+                    .expect("テスト用サーバーを起動できること");
+                let pipeline = RunningPipeline::start(server.local_addr());
+                let packet = encode_vp8_keyframe(640, 480);
+                let peer = tokio::spawn(async move {
+                    let mut peer = server.accept().await.expect("接続を受理できること");
+                    peer.establish().await.expect("SETUP を交換できること");
+
+                    let catalog = accept_subscription(&mut peer, 7, MessageParameters::new()).await;
+                    send_catalog_fill_fetch_stream(
+                        &mut peer,
+                        catalog.request_id,
+                        &[(
+                            Location {
+                                group_id: 0,
+                                object_id: 0,
+                            },
+                            video_and_audio_catalog_json(640, 480),
+                        )],
+                    )
+                    .await;
+
+                    // Largest Object を (1, 0) にして直近 4 Group の FETCH を発行させる
+                    let mut video_ok_parameters = MessageParameters::new();
+                    video_ok_parameters.set_largest_object(1, 0);
+                    let video = accept_subscription(&mut peer, 8, video_ok_parameters).await;
+                    // 発行済みの Location を記録しないと Session が FETCH を INVALID_RANGE で
+                    // 自動拒否するため、FETCH を受理する前に記録する
+                    peer.note_published_object(video.request_id, 1, 0)
+                        .expect("映像の publish 済み Location を記録できること");
+                    let update = peer
+                        .recv_request_stream_message(video.request_id)
+                        .await
+                        .expect("映像の REQUEST_UPDATE を読めること");
+                    assert!(
+                        matches!(update, RequestStreamRead::Message(_)),
+                        "映像の request stream に REQUEST_UPDATE が届くこと: {update:?}"
+                    );
+
+                    let message = peer
+                        .recv_request_start()
+                        .await
+                        .expect("映像の FETCH を受理できること");
+                    let ControlMessage::Fetch(fetch) = message else {
+                        panic!("FETCH が request stream の先頭に届くこと: {message:?}");
+                    };
+                    assert_eq!(
+                        fetch
+                            .parameters
+                            .location_filter_typed()
+                            .expect("FETCH の LOCATION_FILTER を読めること"),
+                        Some(LocationFilter::AbsoluteRangeWithEnd {
+                            start: Location {
+                                group_id: 0,
+                                object_id: 0,
+                            },
+                            end_group_delta: 1,
+                            end_object: 0,
+                        }),
+                        "Largest Object (1, 0) を含む直近 4 Group を要求すること"
+                    );
+                    peer.send_fetch_ok_with_parameters(
+                        fetch.request_id,
+                        MessageParameters::new(),
+                        TrackProperties::new(),
+                    )
+                    .await
+                    .expect("FETCH_OK を返せること");
+                    // cache から取得した Group 0 のキーフレームを FETCH 応答で返す
+                    send_video_fetch_stream(
+                        &mut peer,
+                        fetch.request_id,
+                        Location {
+                            group_id: 0,
+                            object_id: 0,
+                        },
+                        0,
+                        &packet,
+                    )
+                    .await;
+
+                    let audio = accept_subscription(&mut peer, 9, MessageParameters::new()).await;
+                    assert_eq!(
+                        audio.track_name,
+                        b"audio".to_vec(),
+                        "音声の購読が FETCH の後も確立すること"
+                    );
+                    peer.recv_close_code()
+                        .await
+                        .expect("shutdown の CONNECTION_CLOSE を観測できること")
+                });
+
+                // FETCH 応答の Object が復号と配送判定まで届いたことを、購読境界以下として
+                // 落ちた累計のログで観測する
+                wait_for_log(&mut run_logs, "Video delivery counters: before_boundary=1").await;
+                let audio_rx = std::sync::Arc::clone(&pipeline.audio_rx);
+                pipeline.finish().await.expect("run が正常終了すること");
+                assert!(
+                    drain_audio(&audio_rx).is_empty(),
+                    "音声 Object は届いていないこと"
+                );
+                assert_eq!(
+                    peer.await.expect("peer のタスクが panic しないこと"),
+                    0,
+                    "shutdown は NO_ERROR (0) で接続を閉じること"
                 );
             })
             .await;

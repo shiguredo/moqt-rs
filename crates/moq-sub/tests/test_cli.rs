@@ -43,6 +43,10 @@ fn help_prints_help_and_exits_successfully() {
             "--subscribe-tracks の説明が表示されること ({flag}): {stdout}"
         );
         assert!(
+            stdout.contains("--rendezvous-timeout-ms"),
+            "--rendezvous-timeout-ms の説明が表示されること ({flag}): {stdout}"
+        );
+        assert!(
             stdout.contains("moqt://"),
             "URL の形式が表示されること ({flag}): {stdout}"
         );
