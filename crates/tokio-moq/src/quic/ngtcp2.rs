@@ -52,12 +52,8 @@ pub struct Connected {
     close_record: Arc<StdMutex<Option<CloseReason>>>,
     /// 接続先のアドレス
     remote_addr: SocketAddr,
-    /// ピア起動の単方向ストリームの待ち行列 (ドライバと受理側で共有する)
-    uni_incoming: Arc<StreamQueue<RecvStream>>,
-    /// ピア起動の双方向ストリームの待ち行列 (ドライバと受理側で共有する)
-    bidi_incoming: Arc<StreamQueue<(SendStream, RecvStream)>>,
-    /// 受信済み datagram の待ち行列 (ドライバと受信側で共有する)
-    datagram_incoming: Arc<StreamQueue<Vec<u8>>>,
+    /// ドライバとアプリで共有する受信待ち行列
+    queues: IncomingQueues,
 }
 
 impl Connected {
@@ -67,12 +63,12 @@ impl Connected {
             Connection {
                 tx: self.tx.clone(),
                 close_record: Arc::clone(&self.close_record),
-                datagram_incoming: self.datagram_incoming,
+                datagram_incoming: Arc::clone(&self.queues.datagram),
             },
             StreamAcceptor {
                 _keepalive: self.tx,
-                uni_incoming: self.uni_incoming,
-                bidi_incoming: self.bidi_incoming,
+                uni_incoming: Arc::clone(&self.queues.uni),
+                bidi_incoming: Arc::clone(&self.queues.bidi),
             },
         )
     }
@@ -499,6 +495,31 @@ impl<T> StreamQueue<T> {
     }
 }
 
+/// ドライバとアプリで共有する受信待ち行列
+///
+/// ピアが開いたストリーム (単方向 / 双方向) と受信済み datagram を、ドライバが積み
+/// アプリが取り出す。いずれも future の破棄で失わない。
+#[derive(Debug, Clone)]
+struct IncomingQueues {
+    /// ピア起動の単方向ストリーム
+    uni: Arc<StreamQueue<RecvStream>>,
+    /// ピア起動の双方向ストリーム
+    bidi: Arc<StreamQueue<(SendStream, RecvStream)>>,
+    /// 受信済み datagram
+    datagram: Arc<StreamQueue<Vec<u8>>>,
+}
+
+impl IncomingQueues {
+    /// 空の待ち行列を作る
+    fn new() -> Self {
+        Self {
+            uni: Arc::new(StreamQueue::new()),
+            bidi: Arc::new(StreamQueue::new()),
+            datagram: Arc::new(StreamQueue::new()),
+        }
+    }
+}
+
 /// ドライバが待つ入力
 enum Wake {
     /// 接続のイベント
@@ -632,17 +653,13 @@ struct DriverState {
     tx: mpsc::WeakSender<Command>,
     /// ストリームごとの受信イベントの送信側
     recv_txs: HashMap<StreamId, mpsc::UnboundedSender<RecvEvent>>,
-    /// 受理待ちの単方向ストリーム (アプリと共有する)
-    uni_incoming: Arc<StreamQueue<RecvStream>>,
-    /// 受理待ちの双方向ストリーム (アプリと共有する)
-    bidi_incoming: Arc<StreamQueue<(SendStream, RecvStream)>>,
+    /// ドライバとアプリで共有する受信待ち行列
+    queues: IncomingQueues,
     /// 単方向ストリームの open 待ち (枠が空くのを待つ)
     open_send_waiters: VecDeque<oneshot::Sender<std::result::Result<SendStream, QuicError>>>,
     /// 双方向ストリームの open 待ち
     open_bidi_waiters:
         VecDeque<oneshot::Sender<std::result::Result<(SendStream, RecvStream), QuicError>>>,
-    /// 受信済み datagram の待ち行列 (アプリと共有する)
-    datagram_incoming: Arc<StreamQueue<Vec<u8>>>,
     /// ピアが STOP_SENDING で載せたコード (送信 API のエラーに付ける)
     stop_codes: HashMap<StreamId, u64>,
     /// peer の STOP_SENDING を流す先
@@ -659,18 +676,14 @@ impl DriverState {
         tx: mpsc::WeakSender<Command>,
         stop_tx: mpsc::UnboundedSender<StopSendingObserved>,
         close_record: Arc<StdMutex<Option<CloseReason>>>,
-        uni_incoming: Arc<StreamQueue<RecvStream>>,
-        bidi_incoming: Arc<StreamQueue<(SendStream, RecvStream)>>,
-        datagram_incoming: Arc<StreamQueue<Vec<u8>>>,
+        queues: IncomingQueues,
     ) -> Self {
         Self {
             tx,
             recv_txs: HashMap::new(),
-            uni_incoming,
-            bidi_incoming,
+            queues,
             open_send_waiters: VecDeque::new(),
             open_bidi_waiters: VecDeque::new(),
-            datagram_incoming,
             stop_codes: HashMap::new(),
             stop_tx,
             close_record,
@@ -771,10 +784,10 @@ impl DriverState {
                 // 以後の `recv_event` が終了を返すため、ここでは積むだけにする
                 if is_bidirectional(stream_id) {
                     if let Ok(stream) = self.bidi_stream(stream_id) {
-                        self.bidi_incoming.push(stream);
+                        self.queues.bidi.push(stream);
                     }
                 } else if let Ok(stream) = self.recv_stream(stream_id) {
-                    self.uni_incoming.push(stream);
+                    self.queues.uni.push(stream);
                 }
             }
             ConnectionEvent::StreamData {
@@ -821,7 +834,7 @@ impl DriverState {
                 self.recv_txs.remove(&stream_id);
             }
             ConnectionEvent::Datagram { data } => {
-                self.datagram_incoming.push(data);
+                self.queues.datagram.push(data);
             }
             ConnectionEvent::ConnectionClosed {
                 error_code, kind, ..
@@ -913,15 +926,15 @@ impl DriverState {
         let error = QuicError::ConnectionClosed;
         // 受理待ちのアプリへ接続終了を知らせる。積まれたストリームはアプリが
         // 取り出せるが、取り出したあとの読み出しは接続終了で失敗する
-        self.uni_incoming.close();
-        self.bidi_incoming.close();
+        self.queues.uni.close();
+        self.queues.bidi.close();
         for waiter in self.open_send_waiters.drain(..) {
             let _ = waiter.send(Err(error.clone()));
         }
         for waiter in self.open_bidi_waiters.drain(..) {
             let _ = waiter.send(Err(error.clone()));
         }
-        self.datagram_incoming.close();
+        self.queues.datagram.close();
         self.recv_txs.clear();
 
         let mut record = self
@@ -941,21 +954,12 @@ fn spawn_driver(
     tx: mpsc::WeakSender<Command>,
     stop_tx: mpsc::UnboundedSender<StopSendingObserved>,
     close_record: Arc<StdMutex<Option<CloseReason>>>,
-    uni_incoming: Arc<StreamQueue<RecvStream>>,
-    bidi_incoming: Arc<StreamQueue<(SendStream, RecvStream)>>,
-    datagram_incoming: Arc<StreamQueue<Vec<u8>>>,
+    queues: IncomingQueues,
 ) {
     tokio::spawn(async move {
         let mut conn = conn;
         let mut rx = rx;
-        let mut state = DriverState::new(
-            tx,
-            stop_tx,
-            close_record,
-            uni_incoming,
-            bidi_incoming,
-            datagram_incoming,
-        );
+        let mut state = DriverState::new(tx, stop_tx, close_record, queues);
         let mut last_diag = Instant::now();
         loop {
             state.retry_open_waiters(&mut conn);
@@ -1109,18 +1113,14 @@ pub(crate) async fn connect(
     let (tx, rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
     let (stop_tx, stop_rx) = mpsc::unbounded_channel();
     let close_record = Arc::new(StdMutex::new(None));
-    let uni_incoming = Arc::new(StreamQueue::new());
-    let bidi_incoming = Arc::new(StreamQueue::new());
-    let datagram_incoming = Arc::new(StreamQueue::new());
+    let queues = IncomingQueues::new();
     spawn_driver(
         Inner::Client(connection),
         rx,
         tx.downgrade(),
         stop_tx,
         Arc::clone(&close_record),
-        Arc::clone(&uni_incoming),
-        Arc::clone(&bidi_incoming),
-        Arc::clone(&datagram_incoming),
+        queues.clone(),
     );
 
     tracing::info!("Connected to {socket_addr}");
@@ -1129,9 +1129,7 @@ pub(crate) async fn connect(
             tx,
             close_record,
             remote_addr,
-            uni_incoming,
-            bidi_incoming,
-            datagram_incoming,
+            queues,
         },
         stop_rx,
     ))
@@ -1170,26 +1168,20 @@ impl Server {
         let (tx, rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
         let (stop_tx, _stop_rx) = mpsc::unbounded_channel();
         let close_record = Arc::new(StdMutex::new(None));
-        let uni_incoming = Arc::new(StreamQueue::new());
-        let bidi_incoming = Arc::new(StreamQueue::new());
-        let datagram_incoming = Arc::new(StreamQueue::new());
+        let queues = IncomingQueues::new();
         spawn_driver(
             Inner::Server(connection),
             rx,
             tx.downgrade(),
             stop_tx,
             Arc::clone(&close_record),
-            Arc::clone(&uni_incoming),
-            Arc::clone(&bidi_incoming),
-            Arc::clone(&datagram_incoming),
+            queues.clone(),
         );
         Ok(Connected {
             tx,
             close_record,
             remote_addr,
-            uni_incoming,
-            bidi_incoming,
-            datagram_incoming,
+            queues,
         })
     }
 }

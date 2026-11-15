@@ -1315,10 +1315,14 @@ mod tests {
     /// open の待ち手へ結果を渡せない場合、開いたストリームを閉じないとピアが広告した
     /// `MAX_STREAMS` の枠を消費したまま残る。ピア側でストリームが RESET_STREAM として
     /// 観測できることを確認する。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    ///
+    /// この閉じる処理は ngtcp2 バックエンドのドライバが行うため、ngtcp2 ビルドでだけ検証する。
+    /// 単一スレッドの runtime を使い、1 回目の poll ではドライバが動かないことを保証する。
+    #[cfg(feature = "quic-ngtcp2")]
+    #[tokio::test(flavor = "current_thread")]
     async fn cancelled_open_closes_the_stream() {
         run_with_timeout(async {
-            let (mut peer, _client, mut acceptor) = connect_pair_with_acceptor().await;
+            let (peer, _client, mut acceptor) = connect_pair_with_acceptor().await;
 
             // open 待ちを 1 回だけ poll してコマンドを送らせ、結果を受け取らずに破棄する。
             // ドライバは待ち手へ渡せないため、開いたストリームを閉じる
@@ -1369,7 +1373,11 @@ mod tests {
     /// datagram の受信待ちを 1 回だけ poll して待ち手として登録し、ドライバが datagram を
     /// 引き渡したあとに値を受け取らず破棄する。oneshot で直接渡していると、oneshot に
     /// 格納された datagram ごと破棄される。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    ///
+    /// 待ち行列で受け渡すのは ngtcp2 バックエンドのため、ngtcp2 ビルドでだけ検証する。
+    /// 単一スレッドの runtime を使い、1 回目の poll ではドライバが動かないことを保証する。
+    #[cfg(feature = "quic-ngtcp2")]
+    #[tokio::test(flavor = "current_thread")]
     async fn dropping_a_pending_datagram_receive_does_not_lose_the_datagram() {
         run_with_timeout(async {
             let (peer, client, _acceptor) = connect_pair_with_acceptor().await;
