@@ -56,6 +56,8 @@ pub struct Connected {
     uni_incoming: Arc<StreamQueue<RecvStream>>,
     /// ピア起動の双方向ストリームの待ち行列 (ドライバと受理側で共有する)
     bidi_incoming: Arc<StreamQueue<(SendStream, RecvStream)>>,
+    /// 受信済み datagram の待ち行列 (ドライバと受信側で共有する)
+    datagram_incoming: Arc<StreamQueue<Vec<u8>>>,
 }
 
 impl Connected {
@@ -65,6 +67,7 @@ impl Connected {
             Connection {
                 tx: self.tx.clone(),
                 close_record: Arc::clone(&self.close_record),
+                datagram_incoming: self.datagram_incoming,
             },
             StreamAcceptor {
                 _keepalive: self.tx,
@@ -87,6 +90,8 @@ pub struct Connection {
     tx: mpsc::Sender<Command>,
     /// 接続の終了理由 (ドライバが書き込む)
     close_record: Arc<StdMutex<Option<CloseReason>>>,
+    /// 受信済み datagram の待ち行列 (ドライバと共有する)
+    datagram_incoming: Arc<StreamQueue<Vec<u8>>>,
 }
 
 impl Connection {
@@ -128,13 +133,13 @@ impl Connection {
     }
 
     /// datagram を 1 つ受信する
+    ///
+    /// `select!` でこの future が破棄されても、受信済みの datagram は失われない。
     pub(crate) async fn receive_datagram(&self) -> std::result::Result<Vec<u8>, QuicError> {
-        let (reply, response) = oneshot::channel();
-        self.tx
-            .send(Command::ReceiveDatagram { reply })
+        self.datagram_incoming
+            .recv()
             .await
-            .map_err(|_| QuicError::ConnectionClosed)?;
-        response.await.map_err(|_| QuicError::ConnectionClosed)?
+            .ok_or(QuicError::ConnectionClosed)
     }
 
     /// 接続が終了するまで待ち、終了理由を返す
@@ -389,11 +394,6 @@ enum Command {
         /// 結果を返す
         reply: oneshot::Sender<std::result::Result<(), QuicError>>,
     },
-    /// datagram を 1 つ受け取る
-    ReceiveDatagram {
-        /// 結果を返す
-        reply: oneshot::Sender<std::result::Result<Vec<u8>, QuicError>>,
-    },
     /// 接続をアプリケーションエラーで閉じる
     Close {
         /// アプリケーションエラーコード
@@ -641,10 +641,8 @@ struct DriverState {
     /// 双方向ストリームの open 待ち
     open_bidi_waiters:
         VecDeque<oneshot::Sender<std::result::Result<(SendStream, RecvStream), QuicError>>>,
-    /// 受信済みで未取得の datagram
-    datagram_queue: VecDeque<Vec<u8>>,
-    /// datagram の受信待ち
-    datagram_waiters: VecDeque<oneshot::Sender<std::result::Result<Vec<u8>, QuicError>>>,
+    /// 受信済み datagram の待ち行列 (アプリと共有する)
+    datagram_incoming: Arc<StreamQueue<Vec<u8>>>,
     /// ピアが STOP_SENDING で載せたコード (送信 API のエラーに付ける)
     stop_codes: HashMap<StreamId, u64>,
     /// peer の STOP_SENDING を流す先
@@ -663,6 +661,7 @@ impl DriverState {
         close_record: Arc<StdMutex<Option<CloseReason>>>,
         uni_incoming: Arc<StreamQueue<RecvStream>>,
         bidi_incoming: Arc<StreamQueue<(SendStream, RecvStream)>>,
+        datagram_incoming: Arc<StreamQueue<Vec<u8>>>,
     ) -> Self {
         Self {
             tx,
@@ -671,8 +670,7 @@ impl DriverState {
             bidi_incoming,
             open_send_waiters: VecDeque::new(),
             open_bidi_waiters: VecDeque::new(),
-            datagram_queue: VecDeque::new(),
-            datagram_waiters: VecDeque::new(),
+            datagram_incoming,
             stop_codes: HashMap::new(),
             stop_tx,
             close_record,
@@ -823,11 +821,7 @@ impl DriverState {
                 self.recv_txs.remove(&stream_id);
             }
             ConnectionEvent::Datagram { data } => {
-                if let Some(waiter) = self.datagram_waiters.pop_front() {
-                    let _ = waiter.send(Ok(data));
-                } else {
-                    self.datagram_queue.push_back(data);
-                }
+                self.datagram_incoming.push(data);
             }
             ConnectionEvent::ConnectionClosed {
                 error_code, kind, ..
@@ -891,13 +885,6 @@ impl DriverState {
                 let result = conn.send_datagram(&data).await.map_err(map_error);
                 let _ = reply.send(result);
             }
-            Command::ReceiveDatagram { reply } => {
-                if let Some(data) = self.datagram_queue.pop_front() {
-                    let _ = reply.send(Ok(data));
-                } else {
-                    self.datagram_waiters.push_back(reply);
-                }
-            }
             Command::Close { code, reply } => {
                 let result = conn.close(code, &[]).await.map_err(map_error);
                 self.mark_closed(Some(CloseReason::Application { code }));
@@ -934,11 +921,9 @@ impl DriverState {
         for waiter in self.open_bidi_waiters.drain(..) {
             let _ = waiter.send(Err(error.clone()));
         }
-        for waiter in self.datagram_waiters.drain(..) {
-            let _ = waiter.send(Err(error.clone()));
-        }
+        self.datagram_incoming.close();
         self.recv_txs.clear();
-        self.datagram_queue.clear();
+
         let mut record = self
             .close_record
             .lock()
@@ -958,11 +943,19 @@ fn spawn_driver(
     close_record: Arc<StdMutex<Option<CloseReason>>>,
     uni_incoming: Arc<StreamQueue<RecvStream>>,
     bidi_incoming: Arc<StreamQueue<(SendStream, RecvStream)>>,
+    datagram_incoming: Arc<StreamQueue<Vec<u8>>>,
 ) {
     tokio::spawn(async move {
         let mut conn = conn;
         let mut rx = rx;
-        let mut state = DriverState::new(tx, stop_tx, close_record, uni_incoming, bidi_incoming);
+        let mut state = DriverState::new(
+            tx,
+            stop_tx,
+            close_record,
+            uni_incoming,
+            bidi_incoming,
+            datagram_incoming,
+        );
         let mut last_diag = Instant::now();
         loop {
             state.retry_open_waiters(&mut conn);
@@ -1118,6 +1111,7 @@ pub(crate) async fn connect(
     let close_record = Arc::new(StdMutex::new(None));
     let uni_incoming = Arc::new(StreamQueue::new());
     let bidi_incoming = Arc::new(StreamQueue::new());
+    let datagram_incoming = Arc::new(StreamQueue::new());
     spawn_driver(
         Inner::Client(connection),
         rx,
@@ -1126,6 +1120,7 @@ pub(crate) async fn connect(
         Arc::clone(&close_record),
         Arc::clone(&uni_incoming),
         Arc::clone(&bidi_incoming),
+        Arc::clone(&datagram_incoming),
     );
 
     tracing::info!("Connected to {socket_addr}");
@@ -1136,6 +1131,7 @@ pub(crate) async fn connect(
             remote_addr,
             uni_incoming,
             bidi_incoming,
+            datagram_incoming,
         },
         stop_rx,
     ))
@@ -1176,6 +1172,7 @@ impl Server {
         let close_record = Arc::new(StdMutex::new(None));
         let uni_incoming = Arc::new(StreamQueue::new());
         let bidi_incoming = Arc::new(StreamQueue::new());
+        let datagram_incoming = Arc::new(StreamQueue::new());
         spawn_driver(
             Inner::Server(connection),
             rx,
@@ -1184,6 +1181,7 @@ impl Server {
             Arc::clone(&close_record),
             Arc::clone(&uni_incoming),
             Arc::clone(&bidi_incoming),
+            Arc::clone(&datagram_incoming),
         );
         Ok(Connected {
             tx,
@@ -1191,6 +1189,7 @@ impl Server {
             remote_addr,
             uni_incoming,
             bidi_incoming,
+            datagram_incoming,
         })
     }
 }

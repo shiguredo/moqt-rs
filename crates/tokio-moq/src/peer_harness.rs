@@ -1364,6 +1364,47 @@ mod tests {
         .await;
     }
 
+    /// 受信待ちが保留のまま破棄されても、受信済みの datagram を失わないこと
+    ///
+    /// datagram の受信待ちを 1 回だけ poll して待ち手として登録し、ドライバが datagram を
+    /// 引き渡したあとに値を受け取らず破棄する。oneshot で直接渡していると、oneshot に
+    /// 格納された datagram ごと破棄される。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_a_pending_datagram_receive_does_not_lose_the_datagram() {
+        run_with_timeout(async {
+            let (peer, client, _acceptor) = connect_pair_with_acceptor().await;
+            let handle = client.handle();
+
+            // 受信待ちを 1 回だけ poll して待ち手として登録し、保留のまま保持する
+            let mut receive = Box::pin(handle.recv_datagrams());
+            assert!(
+                poll_once(receive.as_mut()).is_pending(),
+                "datagram が無い間は受信待ちが完了しないこと"
+            );
+
+            // peer が datagram を送る。ドライバは登録済みの待ち手へ引き渡す
+            peer.send_datagram(b"pending-datagram")
+                .await
+                .expect("datagram を送れること");
+
+            // 引き渡しが起きるまで待ってから、値を受け取らずに受信待ちを破棄する
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            drop(receive);
+
+            // 失われていなければ、次の受信で取り出せる
+            let datagrams = tokio::time::timeout(Duration::from_secs(5), handle.recv_datagrams())
+                .await
+                .expect("引き渡し済みの datagram が失われていないこと")
+                .expect("datagram を受信できること");
+            assert_eq!(
+                datagrams,
+                vec![b"pending-datagram".to_vec()],
+                "引き渡し済みの datagram が取り出せること"
+            );
+        })
+        .await;
+    }
+
     /// peer が SETUP を送ってハンドシェイクが完了し、peer 起点 request stream の先頭に
     /// 送ったメッセージを example が受理する
     ///
