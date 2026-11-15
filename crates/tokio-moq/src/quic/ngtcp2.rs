@@ -717,6 +717,10 @@ impl DriverState {
     }
 
     /// 枠が空いたストリームの open を再試行する
+    ///
+    /// 開いたストリームを待ち手へ渡せない場合 (呼び出し側の future が既に破棄されている
+    /// 場合) は、その場で閉じる。`SendStream` は drop で終端しないため、閉じずに捨てると
+    /// ピアが広告した `MAX_STREAMS` の枠を消費したまま残る。
     fn retry_open_waiters(&mut self, conn: &mut Inner) {
         while !self.open_send_waiters.is_empty() && conn.streams_uni_left() > 0 {
             let Some(waiter) = self.open_send_waiters.pop_front() else {
@@ -726,7 +730,12 @@ impl DriverState {
                 Ok(id) => self.send_stream(id),
                 Err(e) => Err(map_stream_error(e, None)),
             };
-            let _ = waiter.send(result);
+            if let Err(Ok(stream)) = waiter.send(result) {
+                // アプリは 1 バイトも書いていないため NO_ERROR で閉じる
+                if let Err(e) = conn.reset_stream(stream.id, 0) {
+                    tracing::warn!("Failed to reset an unused outgoing stream: {e}");
+                }
+            }
         }
         while !self.open_bidi_waiters.is_empty() && conn.streams_bidi_left() > 0 {
             let Some(waiter) = self.open_bidi_waiters.pop_front() else {
@@ -736,7 +745,15 @@ impl DriverState {
                 Ok(id) => self.bidi_stream(id),
                 Err(e) => Err(map_stream_error(e, None)),
             };
-            let _ = waiter.send(result);
+            if let Err(Ok((send, recv))) = waiter.send(result) {
+                // 単方向と同じ理由で閉じる。受信方向も止めないとピアが送り続ける
+                if let Err(e) = conn.reset_stream(send.id, 0) {
+                    tracing::warn!("Failed to reset an unused outgoing stream: {e}");
+                }
+                if let Err(e) = conn.stop_sending(recv.id, 0) {
+                    tracing::warn!("Failed to stop an unused incoming stream: {e}");
+                }
+            }
         }
     }
 
