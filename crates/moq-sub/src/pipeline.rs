@@ -16522,10 +16522,17 @@ mod tests {
         }
 
         /// デコード済み音声フレームの受信器 (blocking な std チャネルを非同期テストから待つ)
+        ///
+        /// `std::sync::mpsc::Receiver` は `Sync` ではないため、`spawn_blocking` での待機と
+        /// 残りの取り出しを同じ受信器で行うにはロックが要る。チャネルを分けると
+        /// 「run が送ったフレーム」と「テストが待つフレーム」が別経路になり、待ち合わせの
+        /// 意味が変わってしまう。ロックは `recv_timeout` / `try_recv` の間だけ保持する。
         type SharedAudioReceiver =
             std::sync::Arc<Mutex<std::sync::mpsc::Receiver<DecodedAudioFrame>>>;
 
         /// デコード済み映像フレームの受信器 (blocking な std チャネルを非同期テストから待つ)
+        ///
+        /// 音声と同じ理由でロックを使う。ロックは `recv_timeout` / `try_recv` の間だけ保持する。
         type SharedVideoReceiver =
             std::sync::Arc<Mutex<std::sync::mpsc::Receiver<DecodedVideoFrame>>>;
 

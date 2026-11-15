@@ -412,6 +412,12 @@ enum Command {
 #[derive(Debug)]
 struct StreamQueue<T> {
     /// キューと閉鎖状態
+    ///
+    /// チャネル (mpsc) ではなくロックで保護したキューを使う。受理待ちの future が
+    /// 破棄されても値を残す必要があるため、受信器を future に持たせられない。
+    /// 受信器を `Arc` で共有する構成にしても、複数の待ち手が同じ受信器を取り合う
+    /// ことになり結局はロックが要る。ロックは push / pop / 閉鎖状態の読み書きの
+    /// 間だけ保持し、await をまたがない。
     state: StdMutex<StreamQueueState<T>>,
     /// ストリームが積まれたこと、または接続が閉じたことを知らせる
     notify: tokio::sync::Notify,
