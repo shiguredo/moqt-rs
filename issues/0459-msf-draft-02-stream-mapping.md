@@ -19,22 +19,27 @@ draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) は、LOC packaging �
 ## 現状
 
 - `crates/moq-pub` の `SubgroupWriter::build_header` は `SubgroupIdMode::Zero` を使い、1 Group 内の全 Object を 1 Subgroup に載せる `group` モード固定である。
-- `crates/moq-sub` の `decode_video_stream` は 1 Subgroup 内の複数 Object を処理できるが、`object` モードのように 1 Object ごとに Subgroup が分かれる受信経路の検証がない。
-- `VideoDecodeOrder::admit` は同じ Group で `object_id` が飛んだ delta を `prior_object_id_gap` の範囲外なら捨てる。`object` モードでは Subgroup 間の到着順が保証されないため、後続 Object の取りこぼしが起きうる。
-- カタログに `packagingMetadata` がなく、`streamMapping` を通知できない。フィールド自体は別 issue で追加する。
-- v02 §4.1.1 は、モードにかかわらず sample から Object、GOP から Group への対応は変えないと定める。
+- `crates/moq-pub/src/cli.rs` の `Config` と `crates/moq-pub/src/catalog.rs` の `VideoTrackParams` にモード指定がなく、`build_catalog` も `packagingMetadata` を出力しない。
+- `crates/moq-sub` は 1 Group を 1 Subgroup stream として受信する前提で、stream ごとに復号器を作る (`deliver_video_object` / `wait_until_video_deliverable` の doc)。object モードでは 1 Group が複数の Subgroup stream に分かれるため、この前提では delta の参照フレームを共有できない。
+- `VideoDecodeOrder` の module doc も「1 Group の Object を 1 本の Subgroup で送る publisher を前提とする」としている。
+- `src/subgroup_tracker.rs` は同じ `(track_alias, group_id, subgroup_id)` の再オープンを `ProtocolViolation` にする。`SubgroupIdMode::Zero` のまま object モードで複数の Subgroup を開くと衝突する。
+- カタログに `packagingMetadata` がなく、`streamMapping` を通知できない。フィールド自体は 0444 が追加する。
 
 ## 設計方針
 
-- `streamMapping` の enum (`Group` / `Object`) を追加し、既定値を `Group` とする。値の解釈は `packagingMetadata` の accessor に載せる。
-- publisher は `object` モードを選べるようにし、1 Object ごとに Subgroup を作る送信経路を追加する。既定は `group` のままにして既存挙動を変えない。
-- subscriber は `streamMapping` を読み、`object` モードでは Subgroup をまたいだ Object の並びを Object ID 順に処理できるようにする。`VideoDecodeOrder` の gap 判定は、`object` モードで到着順の入れ替わりを正しく扱えるようにする。
+- 0444 の後に実施する。0444 が追加する `packaging_metadata_value` を使い、`MsfTrack::stream_mapping() -> StreamMapping` の型付き accessor を追加する。`packagingMetadata` がない場合と `streamMapping` キーがない場合は `Group` を返す。`streamMapping` の値が `group` / `object` 以外の場合は `MessageError::InvalidCatalog` にする。
+- publisher は `Config` または `VideoTrackParams` からモードを選べるようにし、`build_catalog` が `packagingMetadata` に `streamMapping=group` または `streamMapping=object` を出力する。
+- publisher は `object` モードのとき、1 Object ごとに Subgroup を作り、Subgroup ID が衝突しない方式 (`SubgroupIdMode::FirstObjectId` または `Explicit(object_id)`) を使う。`SubgroupIdMode::Zero` のまま複数 Subgroup を開かない。
+- subscriber は `stream_mapping()` を読み、`object` モードでは Group 内の複数 Subgroup を同じ Group として扱う。Group 単位で復号器を共有し、Group 内の Object を Object ID 順に並べ替えるバッファを追加して、同一復号器へ直列に流す。`VideoDecodeOrder` の gap 判定は、Group 内の到着順の入れ替わりを許容するように変更する。
 - `group` モードの既存の送受信挙動は変えない。
 
 ## 完了条件
 
-- `"packagingMetadata": "streamMapping=object"` の track を `crates/moq-pub` が `object` モードで送信し、各 Object がそれぞれの Subgroup に載ること。
-- `"streamMapping=group"` と `packagingMetadata` なしの track が従来どおり 1 Subgroup に載ること。
-- `crates/moq-sub` が両モードを受信でき、Object ID 順に復号できること。
-- `object` モードで Subgroup の到着順が入れ替わっても、Object の取りこぼしがないこと。
+- `packagingMetadata` がない track、`streamMapping` キーがない track、`streamMapping=group` の track が `StreamMapping::Group` になること。
+- `streamMapping` の不正値が `MessageError::InvalidCatalog` で拒否されること。
+- `crates/moq-pub` が `Config` / `VideoTrackParams` の指定に従ってモードを選び、カタログに `packagingMetadata` を出力すること。
+- `object` モードで、各 Object がそれぞれの Subgroup に載り、Subgroup ID が衝突しないこと。
+- `crates/moq-sub` が両モードを受信でき、`object` モードでは Group 内の複数 Subgroup を Object ID 順に並べ替えて同一の復号器に流すこと。
+- `object` モードで Subgroup の到着順が入れ替わっても、Object を取りこぼさずに復号できること。
+- `group` モードの既存挙動が変わらないこと。
 - 上記を `crates/moq-pub` と `crates/moq-sub` のテストで固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
