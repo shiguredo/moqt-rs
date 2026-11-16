@@ -217,7 +217,13 @@ pub(crate) async fn connect(
         .await
         .map_err(|e| TransportError::Quic(format!("connection failed: {e}")))?;
 
-    let selected = connection.application_protocol().await;
+    // tobi-quic は「ALPN 未確定 (None)」と「ドライバータスク停止などで取得できない
+    // (Err)」を区別して返す。取得できない場合は接続が使えない状態なので、
+    // 交渉失敗として扱わず取得失敗として返す
+    let selected = connection
+        .application_protocol()
+        .await
+        .map_err(|e| TransportError::Quic(format!("failed to read the negotiated ALPN: {e}")))?;
     super::verify_alpn(selected.as_deref())?;
 
     tobi::spawn_packet_diagnostics(&connection);
