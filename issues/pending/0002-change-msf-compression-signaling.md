@@ -5,7 +5,7 @@
 - Model: Opus 4.7
 - Branch: feature/change-msf-compression-signaling
 - Polished: 2026-07-22
-- Updated: 2026-09-09
+- Updated: 2026-11-16
 
 ## pending にした理由
 
@@ -20,6 +20,12 @@ MSF_COMPRESSION の Track Property ID が IANA 未割当 (Table 14 で TBD) で�
 - peer が Track Property と Object Property を同一 track で両方送ってきた場合は protocol violation として拒否する。
 
 IANA 割当と Object Property ID の仕様確定後に、本 issue を `issues/` へ戻して対応する。
+
+## reopened にする理由
+
+draft-ietf-moq-msf-02 §12.1.1 と §12.1.2 は、MSF_COMPRESSION の Track Property と Object Property の type をいずれも 0x78 に確定した。§14.3 は 0x78 を [MOQT] §8.4 の application-specific range とし、IANA の割当を要求しないと明記している。§12.1.1 は property を載せるメッセージに FETCH_OK を加えた。
+
+pending にした理由 (Property ID が TBD で wire 実装の根拠がない) は解消した。reopened にして、本文の節番号と要件を draft-02 に同期させてから対応する。
 
 ## 目的
 
