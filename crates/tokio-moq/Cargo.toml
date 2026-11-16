@@ -25,14 +25,6 @@ shiguredo_ngtcp2_tokio = { version = "2026.1.0-canary.5", optional = true }
 shiguredo_qmux = { git = "https://github.com/shiguredo/qmux-rs", rev = "aedb7001415a9387c6b01d25624316a4aad50521" }
 # QMux の tokio ラッパー
 shiguredo_tokio_qmux = { git = "https://github.com/shiguredo/qmux-rs", rev = "aedb7001415a9387c6b01d25624316a4aad50521" }
-# QUIC 実装 (tobi-quic)
-#
-# crates.io に公開されていないため git で参照する。このリポジトリの main は
-# 公開のたびに 1 コミットへ作り直される (履歴を積まない) ため、rev ではなく
-# branch を指定する。ネイティブ QUIC のバックエンドと WebTransport over HTTP/3 の
-# QUIC 層の両方で使うため、常に依存に含める。
-tobi_quic = { git = "https://github.com/shiguredo/tobi-quic", branch = "main" }
-
 # 外部クレート
 
 # Base64 デコード (MSF fragment の c4m パラメータ)
@@ -65,11 +57,26 @@ rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs"] }
 # full は通常依存で有効なため、ここでは足りない feature だけを足す
 tokio = { version = "1.54", features = ["test-util"] }
 
+# QUIC 実装 (tobi-quic)
+#
+# crates.io に公開されていないため git で参照する。このリポジトリの main は
+# 公開のたびに 1 コミットへ作り直される (履歴を積まない) ため、rev ではなく
+# branch を指定する。
+#
+# tobi-quic は Unix 系のソケット API (libc の pktinfo / CMSG / UDP_GRO) を直接使うため
+# Windows ではビルドできない。Windows ビルドでは依存に含めず、tobi-quic を使う
+# ネイティブ QUIC のバックエンド (quic-tobi) と WebTransport over HTTP/3 (wt-h3) を
+# 提供しない。Windows 以外ではどちらの経路でも使うため、常に依存に含める。
+[target."cfg(not(windows))".dependencies]
+tobi_quic = { git = "https://github.com/shiguredo/tobi-quic", branch = "main" }
+
 [features]
 # ネイティブ QUIC のバックエンド。ちょうど 1 つだけを有効にする。
+# tobi-quic を使う quic-tobi は Windows 非対応である。Windows ビルドでは quic-s2n か
+# quic-ngtcp2 を選ぶこと (quic-tobi を選ぶとコンパイルエラーになる)。
 # WebTransport over HTTP/3 は tobi-quic を直接使うため、この選択の対象外である。
 # ただし s2n-quic は RESET_STREAM_AT を実装しておらず wt-h3 を提供できないため、
-# quic-s2n を選んだビルドでは wt-h3 を選択できないものとして扱う。
+# quic-s2n を選んだビルドと Windows ビルドでは wt-h3 を選択できないものとして扱う。
 default = ["quic-s2n"]
 quic-ngtcp2 = ["dep:shiguredo_ngtcp2_tokio"]
 quic-s2n = ["dep:s2n-quic"]

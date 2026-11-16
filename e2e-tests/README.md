@@ -34,7 +34,8 @@ test publish_and_subscribe_roundtrip ... ok
 
 既定のビルドは s2n-quic である。WebTransport over HTTP/3 (`wt-h3`) を試すときは
 `--no-default-features --features quic-tobi` を付ける。s2n-quic は RESET_STREAM_AT を
-実装していないため、既定のビルドでは `--transport wt-h3` がエラーになる。
+実装していないため、既定のビルドでは `--transport wt-h3` がエラーになる。tobi-quic は
+Windows 非対応のため、Windows では `wt-h3` を試せない。
 
 ```console
 $ MOQT_E2E_TRANSPORT=wt-h3 MOQT_E2E_URL=moqt://<HOST>/ \

@@ -18,6 +18,9 @@ use tokio::sync::watch;
 use crate::error::TransportError;
 use crate::webtransport::{MoqtCloseCode, WtSessionState, moqt_close_code, wait_until_terminated};
 use crate::webtransport_h2::{WtH2RecvStream, WtH2SendStream, WtH2Session};
+// WebTransport over HTTP/3 は tobi-quic を使うため、tobi-quic 非対応の Windows では
+// webtransport_h3 をコンパイルしない。それに合わせて以下の WtH3 variant も Windows では持たない。
+#[cfg(not(windows))]
 use crate::webtransport_h3::{WtRecvStream, WtSendStream, WtSession};
 
 /// 受信ストリームから取り出した 1 要素
@@ -29,6 +32,8 @@ pub enum RecvChunk {
 /// 送信ストリーム
 pub enum SendStream {
     Quic(crate::quic::SendStream),
+    /// WebTransport over HTTP/3 の送信ストリーム (Windows ビルドでは持たない)
+    #[cfg(not(windows))]
     WtH3(WtSendStream),
     WtH2(WtH2SendStream),
     /// QMux (draft-ietf-quic-qmux-02)
@@ -42,6 +47,7 @@ impl SendStream {
             SendStream::Quic(s) => s.send_all(&data).await.map_err(|e| {
                 TransportError::from_send_error(e, |e| TransportError::Quic(format!("{e}")))
             }),
+            #[cfg(not(windows))]
             SendStream::WtH3(s) => s.send(&data).await,
             SendStream::WtH2(s) => s.send(&data).await,
             SendStream::Qmux(s) => {
@@ -59,6 +65,7 @@ impl SendStream {
     pub fn stream_id(&self) -> u64 {
         match self {
             SendStream::Quic(s) => s.id(),
+            #[cfg(not(windows))]
             SendStream::WtH3(s) => s.stream_id(),
             SendStream::WtH2(s) => s.stream_id(),
             SendStream::Qmux(s) => s.id().as_u64(),
@@ -74,6 +81,7 @@ impl SendStream {
             SendStream::Quic(s) => s.finish().await.map_err(|e| {
                 TransportError::from_send_error(e, |e| TransportError::Quic(format!("{e}")))
             }),
+            #[cfg(not(windows))]
             SendStream::WtH3(s) => s.finish().await,
             SendStream::WtH2(s) => s.finish().await,
             SendStream::Qmux(s) => s.finish().await.map_err(TransportError::from_qmux),
@@ -98,6 +106,7 @@ impl SendStream {
                     TransportError::from_send_error(e, |e| TransportError::Quic(format!("{e}")))
                 })
             }
+            #[cfg(not(windows))]
             SendStream::WtH3(s) => s.reset(error_code, reliable_size).await,
             SendStream::WtH2(s) => s.reset(error_code, reliable_size).await,
             SendStream::Qmux(s) => {
@@ -127,6 +136,8 @@ fn reject_reliable_size(reliable_size: Option<u64>) -> Result<(), TransportError
 pub enum RecvStream {
     /// QUIC 直接接続の受信ストリーム
     Quic(crate::quic::RecvStream),
+    /// WebTransport over HTTP/3 の受信ストリーム (Windows ビルドでは持たない)
+    #[cfg(not(windows))]
     WtH3(WtRecvStream),
     WtH2(WtH2RecvStream),
     /// QMux (draft-ietf-quic-qmux-02)
@@ -173,6 +184,7 @@ impl RecvStream {
                 }
                 Err(e) => Err(TransportError::Quic(format!("{e}"))),
             },
+            #[cfg(not(windows))]
             RecvStream::WtH3(s) => match s.recv_chunk().await? {
                 crate::webtransport_h3::RecvChunk::Data(data) => {
                     Ok(RecvChunk::Data(Bytes::from(data)))
@@ -220,6 +232,7 @@ impl RecvStream {
                 .stop_sending(error_code)
                 .await
                 .map_err(|e| TransportError::Quic(format!("{e}"))),
+            #[cfg(not(windows))]
             RecvStream::WtH3(s) => s.stop_sending(error_code).await,
             RecvStream::WtH2(s) => s.stop_sending(error_code),
             RecvStream::Qmux { stream, .. } => stream
@@ -233,6 +246,7 @@ impl RecvStream {
     pub fn stream_id(&self) -> u64 {
         match self {
             RecvStream::Quic(stream) => stream.id(),
+            #[cfg(not(windows))]
             RecvStream::WtH3(s) => s.stream_id(),
             RecvStream::WtH2(s) => s.stream_id(),
             RecvStream::Qmux { stream, .. } => stream.id().as_u64(),
@@ -248,6 +262,9 @@ pub(crate) enum StopSendingTransport {
     /// QUIC 直接接続 (`moqt://`)。QUIC の code space を共有する
     Quic,
     /// WebTransport over HTTP/3。HTTP/3 の code space を共有する
+    ///
+    /// Windows ビルドでは WebTransport over HTTP/3 自体を提供しないため持たない。
+    #[cfg(not(windows))]
     WtH3,
     /// WebTransport over HTTP/2。capsule がアプリケーションエラーコードを直接運ぶため
     /// remap しない (draft-ietf-webtrans-http2-16 §6.3)
@@ -277,6 +294,7 @@ pub(crate) fn remap_stop_sending_error_code(
         StopSendingTransport::Quic | StopSendingTransport::WtH2 | StopSendingTransport::Qmux => {
             Some(wire_code)
         }
+        #[cfg(not(windows))]
         StopSendingTransport::WtH3 => crate::webtransport_h3::wt_stop_sending_error_code(wire_code),
     }
 }
@@ -301,6 +319,8 @@ pub enum StreamHandle {
     /// いずれのバックエンドのハンドルも Clone 可能であり、複数タスクから同じ接続を
     /// 操作できる。
     Quic(crate::quic::Connection),
+    /// WebTransport over HTTP/3 の接続ハンドル (Windows ビルドでは持たない)
+    #[cfg(not(windows))]
     WtH3(Arc<Mutex<WtSession>>),
     WtH2(Arc<Mutex<WtH2Session>>),
     /// QMux (draft-ietf-quic-qmux-02)
@@ -323,6 +343,7 @@ impl StreamHandle {
                     .map_err(|e| TransportError::Quic(format!("{e}")))?;
                 Ok(SendStream::Quic(stream))
             }
+            #[cfg(not(windows))]
             StreamHandle::WtH3(session) => {
                 let mut session = session.lock().await;
                 let stream = session.open_uni_stream().await?;
@@ -352,6 +373,10 @@ impl StreamHandle {
     /// 受信して自ら状態を更新するため、どちらも何もしない
     /// (draft-ietf-webtrans-http2-16 §6.3)。QMux も h3 層を持たないため何もしない
     /// (QMux 自身がストリーム状態を管理する)。
+    ///
+    /// Windows ビルドでは h3 層自体が無いため、引数を使わない。`#[expect]` は Windows
+    /// ビルドでだけ付ける。
+    #[cfg_attr(windows, expect(unused_variables))]
     pub(crate) async fn notify_received_stop_sending(
         &self,
         stream_id: u64,
@@ -359,6 +384,7 @@ impl StreamHandle {
     ) -> Result<(), TransportError> {
         match self {
             StreamHandle::Quic(_) | StreamHandle::WtH2(_) | StreamHandle::Qmux(_) => Ok(()),
+            #[cfg(not(windows))]
             StreamHandle::WtH3(session) => {
                 let mut session = session.lock().await;
                 session.notify_received_stop_sending(stream_id, error_code)
@@ -378,6 +404,7 @@ impl StreamHandle {
     fn stop_sending_transport(&self) -> StopSendingTransport {
         match self {
             StreamHandle::Quic(_) => StopSendingTransport::Quic,
+            #[cfg(not(windows))]
             StreamHandle::WtH3(_) => StopSendingTransport::WtH3,
             StreamHandle::WtH2(_) => StopSendingTransport::WtH2,
             StreamHandle::Qmux(_) => StopSendingTransport::Qmux,
@@ -398,6 +425,7 @@ impl StreamHandle {
                     .map_err(|e| TransportError::Quic(format!("{e}")))?;
                 Ok((SendStream::Quic(send), RecvStream::new_quic(recv)))
             }
+            #[cfg(not(windows))]
             StreamHandle::WtH3(session) => {
                 let mut session = session.lock().await;
                 let wt_bi = session.open_bi_stream().await?;
@@ -434,6 +462,7 @@ impl StreamHandle {
                 crate::quic::close_application(handle, code).await?;
                 Ok(())
             }
+            #[cfg(not(windows))]
             StreamHandle::WtH3(session) => {
                 let code = moqt_close_code(code);
                 let mut session = session.lock().await;
@@ -488,6 +517,7 @@ impl StreamHandle {
                     .await
                     .map_err(|e| TransportError::Quic(format!("datagram send error: {e}")))
             }
+            #[cfg(not(windows))]
             StreamHandle::WtH3(session) => {
                 let session = session.lock().await;
                 session.send_datagram(data).await
@@ -529,6 +559,7 @@ impl StreamHandle {
                     Err(e) => Err(TransportError::Quic(format!("datagram receive error: {e}"))),
                 }
             }
+            #[cfg(not(windows))]
             StreamHandle::WtH3(session) => {
                 let session = session.lock().await;
                 session.take_buffered_datagrams()
@@ -561,6 +592,8 @@ pub enum StreamAcceptor {
     /// 単方向と双方向の受理を別のタスクから同時に待つため `Arc` で共有する。
     /// 各バックエンドは `&self` で受理できるよう内部で排他する。
     Quic(Arc<crate::quic::StreamAcceptor>),
+    /// WebTransport over HTTP/3 のストリーム受理 (Windows ビルドでは持たない)
+    #[cfg(not(windows))]
     WtH3 {
         /// ストリームを開く側で使う session。accept ではロックを取らない
         session: Arc<Mutex<WtSession>>,
@@ -602,6 +635,7 @@ impl StreamAcceptor {
                 Err(e) if crate::quic::is_connection_closed(&e) => Ok(None),
                 Err(e) => Err(TransportError::Quic(format!("{e}"))),
             },
+            #[cfg(not(windows))]
             StreamAcceptor::WtH3 {
                 session: _session,
                 uni_rx,
@@ -659,6 +693,8 @@ impl StreamAcceptor {
 pub enum BidiStreamAcceptor {
     /// QUIC 直接接続の双方向ストリーム受理 (`StreamAcceptor` と実体を共有する)
     Quic(Arc<crate::quic::StreamAcceptor>),
+    /// WebTransport over HTTP/3 の双方向ストリーム受理 (Windows ビルドでは持たない)
+    #[cfg(not(windows))]
     WtH3 {
         /// ストリームを開く側で使う session。accept ではロックを取らない
         session: Arc<Mutex<WtSession>>,
@@ -709,6 +745,7 @@ impl BidiStreamAcceptor {
                     Err(e) => Err(TransportError::Quic(format!("{e}"))),
                 }
             }
+            #[cfg(not(windows))]
             BidiStreamAcceptor::WtH3 {
                 session: _session,
                 bi_rx,
@@ -796,6 +833,9 @@ mod tests {
     }
 
     /// WebTransport over HTTP/3 は §4.4 の remap を行い、できない値はコード無しになる
+    ///
+    /// Windows ビルドでは WebTransport over HTTP/3 を提供しないため実行しない。
+    #[cfg(not(windows))]
     #[test]
     fn remap_stop_sending_error_code_remaps_webtransport_codes() {
         use shiguredo_http3::webtransport::ApplicationErrorCode;

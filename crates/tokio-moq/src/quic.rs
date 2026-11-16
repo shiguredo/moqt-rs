@@ -8,10 +8,11 @@
 //! - `quic-tobi`: tobi-quic
 //! - `quic-ngtcp2`: ngtcp2 (shiguredo_ngtcp2_tokio)
 //!
-//! WebTransport over HTTP/3 は [tobi] を直接使うため、この選択の対象外である。
-//! そのため `tobi_quic` は常に依存に含まれる。
-//! ただし s2n-quic は RESET_STREAM_AT を実装しておらず wt-h3 を提供できないため、
-//! `quic-s2n` を選んだビルドでは wt-h3 を選択できないものとして扱う。
+//! WebTransport over HTTP/3 は `tobi` を直接使うため、この選択の対象外である。
+//! そのため `tobi_quic` は Windows 以外のビルドでは常に依存に含まれる。
+//! tobi-quic は Windows 非対応のため、Windows ビルドでは `quic-tobi` と wt-h3 を提供しない。
+//! また s2n-quic は RESET_STREAM_AT を実装しておらず wt-h3 を提供できないため、
+//! `quic-s2n` を選んだビルドでも wt-h3 を選択できないものとして扱う。
 
 use tokio::sync::mpsc;
 
@@ -41,17 +42,32 @@ pub(crate) const ALPN: &[u8] = crate::MOQT_PROTOCOL.as_bytes();
 )))]
 compile_error!("exactly one QUIC backend must be selected: quic-tobi / quic-s2n / quic-ngtcp2");
 
+/// tobi-quic をネイティブ QUIC のバックエンドに選んだ Windows ビルドは拒否する
+///
+/// tobi-quic は Windows 非対応であり、Windows ビルドでは依存に含まれない。
+/// `quic-tobi` を選んだままビルドすると `tobi_quic` を参照するコードが消えるため、
+/// 何が問題なのか分かるようにここで止める。
+#[cfg(all(windows, feature = "quic-tobi"))]
+compile_error!(
+    "the quic-tobi backend is not available on Windows: tobi-quic does not support Windows \
+     (select the quic-s2n or quic-ngtcp2 backend instead)"
+);
+
 /// tobi-quic を使うヘルパー
 ///
-/// WebTransport over HTTP/3 は常に tobi-quic で接続するため、このモジュールは
-/// ネイティブ QUIC のバックエンドに関わらず常にコンパイルされる。
+/// WebTransport over HTTP/3 と `quic-tobi` バックエンドが使う。tobi-quic は Windows
+/// 非対応のため、Windows ビルドではコンパイルしない。
+#[cfg(not(windows))]
 pub(crate) mod tobi;
 
-/// tobi-quic の qlog 出力。tobi-quic を使う経路 (native QUIC / WebTransport over
-/// HTTP/3) から使う。
+/// tobi-quic の qlog 出力
+///
+/// tobi-quic を使う経路 (native QUIC / WebTransport over HTTP/3) から使う。
+/// tobi-quic は Windows 非対応のため、Windows ビルドではコンパイルしない。
+#[cfg(not(windows))]
 pub(crate) mod qlog;
 
-#[cfg(feature = "quic-tobi")]
+#[cfg(all(feature = "quic-tobi", not(windows)))]
 mod tobi_backend;
 
 #[cfg(feature = "quic-s2n")]
@@ -60,7 +76,7 @@ mod s2n;
 #[cfg(feature = "quic-ngtcp2")]
 mod ngtcp2;
 
-#[cfg(feature = "quic-tobi")]
+#[cfg(all(feature = "quic-tobi", not(windows)))]
 use tobi_backend as backend;
 
 #[cfg(feature = "quic-s2n")]
@@ -157,6 +173,10 @@ impl From<QuicError> for TransportError {
     }
 }
 
+/// tobi-quic のエラーを共通の QUIC エラーへ写す
+///
+/// Windows ビルドでは tobi-quic を依存に含めないため、この impl もコンパイルしない。
+#[cfg(not(windows))]
 impl From<tobi_quic::Error> for QuicError {
     fn from(e: tobi_quic::Error) -> Self {
         match e {

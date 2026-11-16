@@ -1104,7 +1104,9 @@ impl TestPeer {
     pub async fn recv_close_code(&mut self) -> Result<u64> {
         let connection = match &self.handle {
             StreamHandle::Quic(connection) => connection,
-            StreamHandle::WtH3(_) | StreamHandle::WtH2(_) | StreamHandle::Qmux(_) => {
+            // WebTransport (h3 / h2) と QMux は接続の終了コードをこの API では観測しない。
+            // Windows ビルドでは WtH3 variant 自体が無いため、ワイルドカードで受ける
+            _ => {
                 return Err(TransportError::Internal(
                     "recv_close_code is only available for the QUIC transport".into(),
                 ));

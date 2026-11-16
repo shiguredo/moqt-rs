@@ -19,8 +19,10 @@ moq-pub の QUIC の実装は既定で s2n-quic を使う。cargo feature で to
 組み合わせる)。
 WebTransport over HTTP/3 の QUIC 層は tobi-quic 固定であり、s2n-quic は RESET_STREAM_AT を
 実装していないため、既定の s2n-quic ビルドでは `--transport wt-h3` を選べない。使う場合は
-`--no-default-features --features quic-tobi` でビルドする。詳細は
-[tokio-moq](../tokio-moq/README.md) を参照すること。
+`--no-default-features --features quic-tobi` でビルドする。
+tobi-quic は Windows 非対応のため、Windows ビルドでは tobi-quic を依存に含めず、`quic-tobi` と
+`--transport wt-h3` を提供しない。Windows ビルドでは `quic-s2n` / `quic-ngtcp2` のバックエンドと
+`quic` / `wt-h2` / `qmux` の経路を使う。詳細は [tokio-moq](../tokio-moq/README.md) を参照すること。
 
 ```bash
 # 既定の s2n-quic
@@ -61,7 +63,7 @@ cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video' --f
 | オプション | デフォルト | 説明 |
 | --- | --- | --- |
 | `--url` | (必須) | 接続先 URL (`moqt://`) |
-| `--transport` | (省略時は `--url` の `msf` fragment の `connection`、無ければ `quic`) | 接続経路 (`quic` / `wt-h3` / `wt-h2` / `qmux`)。`wt-h3` は s2n-quic バックエンドのビルドでは選べない。`qmux` は experimental |
+| `--transport` | (省略時は `--url` の `msf` fragment の `connection`、無ければ `quic`) | 接続経路 (`quic` / `wt-h3` / `wt-h2` / `qmux`)。`wt-h3` は s2n-quic バックエンドのビルドと Windows ビルドでは選べない。`qmux` は experimental |
 | `--cert` | | TLS CA 証明書パス |
 | `--device-id` | | カメラデバイス ID |
 | `--width` | `1280` | 映像幅 (px) |
@@ -116,7 +118,7 @@ cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video' --f
   - `--audio-device-id`
 
 WebTransport 経路 (`--transport wt-h3` / `--transport wt-h2`) は Extended CONNECT でセッションを確立する。
-`wt-h3` は s2n-quic バックエンドのビルドでは選べない (RESET_STREAM_AT を実装していないため)。
+`wt-h3` は s2n-quic バックエンドのビルドと Windows ビルドでは選べない (s2n-quic は RESET_STREAM_AT を実装しておらず、tobi-quic は Windows 非対応であるため)。
 `wt-h2` は reset を `WT_RESET_STREAM` capsule で行うため、MoQ リレーの capsule 対応に依存する。
 詳細は [tokio-moq](../tokio-moq/README.md) を参照すること。
 

@@ -73,6 +73,8 @@ shiguredo_video_toolbox = "2026.2.0-canary.4"
 # ネイティブ QUIC のバックエンド。ちょうど 1 つだけを有効にする。
 # s2n-quic は RESET_STREAM_AT を実装しておらず wt-h3 を提供できないため、
 # quic-s2n を選んだビルドでは wt-h3 を選択できないものとして扱う。
+# quic-tobi は tobi-quic を使うため Windows 非対応である。Windows ビルドでは
+# quic-s2n / quic-ngtcp2 のいずれかを選ぶこと (quic-tobi を選ぶとコンパイルエラーになる)。
 default = ["quic-s2n"]
 quic-ngtcp2 = ["tokio-moq/quic-ngtcp2"]
 quic-s2n = ["tokio-moq/quic-s2n"]

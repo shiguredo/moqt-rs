@@ -4,6 +4,8 @@
 
 QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux の接続確立と、Sans I/O な `shiguredo_moqt::session::core::Session` を Tokio の I/O と結線する `MoqtClient` を提供する。`--url` と `--transport` の解釈もこのクレートが担う。
 
+tobi-quic は Windows 非対応のため、Windows ビルドでは tobi-quic を依存に含めず、WebTransport over HTTP/3 (`wt-h3`) と `quic-tobi` バックエンドを提供しない。Windows ビルドで選べるネイティブ QUIC のバックエンドは `quic-s2n` / `quic-ngtcp2` であり、接続経路は `quic` / `wt-h2` / `qmux` になる。
+
 ## 提供する範囲
 
 - URL の解釈と接続パラメータの解決
@@ -11,9 +13,12 @@ QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux の接続確�
   - `resolve_transport`：`--transport` の指定と `msf` fragment の `connection` から `Transport` を解決する
   - `resolve_namespace`：`--namespace` の指定と `msf` fragment の track-identifier から Track Namespace を解決する
   - `ServerUrl`：authority / path / fragment / MSF fragment の解釈結果 / C4M 認可トークン (`c4m_tokens`) を保持する
-- 接続確立：`quic` / `webtransport_h3` / `webtransport_h2` / `qmux` の各モジュールが TLS とハンドシェイクを行う
+- 接続確立：`quic` / `webtransport_h3` / `webtransport_h2` / `qmux` の各モジュールが TLS とハンドシェイクを行う (`webtransport_h3` は Windows ビルドでは提供しない)
 - `transport`：4 経路を統一的に扱う `SendStream` / `RecvStream` / `StreamHandle` / `StreamAcceptor` / `BidiStreamAcceptor`
-- `moqt_client::MoqtClient`：control stream と bidi request stream を駆動する。`establish_quic` / `establish_wt` (wt-h3) / `establish_wt_h2` / `establish_qmux` (qmux) で確立し、`publish_track` / `subscribe_track` / `send_subscribe_ok` / `send_request_error` / `next_event` / `tick` などで MOQT メッセージをやり取りする
+- `moqt_client::MoqtClient`：control stream と bidi request stream を駆動する。`establish_quic` /
+  `establish_wt` (wt-h3) / `establish_wt_h2` / `establish_qmux` (qmux) で確立し、`publish_track` /
+  `subscribe_track` / `send_subscribe_ok` / `send_request_error` / `next_event` / `tick` などで
+  MOQT メッセージをやり取りする (`establish_wt` は Windows ビルドでは提供しない)
 - `moqt_client::DataPlaneHandle`：subgroup stream (`send_subgroup_header` / `send_subgroup_object`) と datagram (`send_object_datagram` / `recv_datagram`) を `Session` へ通知する
 - `error::TransportError`：4 経路と MOQT メッセージのエラーを 1 つに統一する
 - `metrics`：`tokio-metrics` のタスクメトリクスを一定間隔でログ出力するヘルパー
@@ -56,14 +61,14 @@ scheme は RFC 3986 §3.1 に従い大文字小文字を区別しない (`MOQT:/
 `connection` (`q`: native QUIC / `wt`: WebTransport) を使い、それも無ければ `quic` になる
 (draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters))。`connection=wt` の
 ときの既定は `wt-h3` (HTTP/2 にする場合は `--transport wt-h2` を明示する)。ただし `wt-h3` を
-提供しない s2n-quic バックエンドのビルドでは、`--transport` を省略した `connection=wt` は
+提供しないビルド (s2n-quic バックエンド / Windows) では、`--transport` を省略した `connection=wt` は
 エラーになる。`connection` と矛盾する `--transport`、`connection=q` と `connection=wt` の
 併記、`connection=q` / `connection=wt` と `--transport qmux` の組み合わせはエラーになる。
 
 | `--transport` | `Transport` | 接続経路 | 備考 |
 | --- | --- | --- | --- |
 | `quic` | `Transport::Quic` | QUIC 直接接続 | ALPN は `moqt-23` |
-| `wt-h3` | `Transport::WtH3` | WebTransport over HTTP/3 | QUIC 上の ALPN は `h3`。s2n-quic バックエンドのビルドでは選べない |
+| `wt-h3` | `Transport::WtH3` | WebTransport over HTTP/3 | QUIC 上の ALPN は `h3`。s2n-quic バックエンドのビルドと Windows ビルドでは選べない |
 | `wt-h2` | `Transport::WtH2` | WebTransport over HTTP/2 | TCP+TLS 上の ALPN は `h2` |
 | `qmux` | `Transport::Qmux` | QMux | TCP+TLS 上の ALPN は `moqt-23`。UDP が使えない環境向け。experimental |
 
@@ -75,7 +80,7 @@ tobi-quic / ngtcp2-rs も選べる。ちょうど 1 つだけを有効にする�
 | feature | QUIC 実装 | 備考 |
 | --- | --- | --- |
 | `quic-s2n` | s2n-quic | 既定。`RESET_STREAM_AT` を実装していないため `wt-h3` は選べない |
-| `quic-tobi` | tobi-quic | crates.io 未公開のため git の main を追う。`wt-h3` もこのビルドで使う |
+| `quic-tobi` | tobi-quic | crates.io 未公開のため git の main を追う。`wt-h3` もこのビルドで使う。Windows では選べない |
 | `quic-ngtcp2` | ngtcp2-rs | `shiguredo_ngtcp2_tokio` 経由。初回ビルドで ngtcp2 本体を取得・ビルドする |
 
 ```bash
@@ -88,10 +93,12 @@ cargo run -p moq-sub --no-default-features --features quic-ngtcp2 -- --url moqt:
 ```
 
 WebTransport over HTTP/3 (`wt-h3`) の QUIC 層は tobi-quic 固定である。s2n-quic と ngtcp2-rs は
-ネイティブ QUIC にだけ使う。このため tobi-quic はバックエンドの選択に関わらず依存に含まれる。
-s2n-quic は `RESET_STREAM_AT` を実装していないため、`quic-s2n` を選んだビルドでは `wt-h3` を
-選べない (`Transport::parse` / `resolve_transport` が拒否する)。`wt-h3` を使うときは
-`--no-default-features --features quic-tobi` でビルドする。
+ネイティブ QUIC にだけ使う。このため tobi-quic は Windows 以外のビルドではバックエンドの選択に
+関わらず依存に含まれる。s2n-quic は `RESET_STREAM_AT` を実装していないため、`quic-s2n` を選んだ
+ビルドでは `wt-h3` を選べない (`Transport::parse` / `resolve_transport` が拒否する)。`wt-h3` を
+使うときは `--no-default-features --features quic-tobi` でビルドする。
+tobi-quic は Windows 非対応のため、Windows ビルドでは tobi-quic を依存に含めず、`quic-tobi` と
+`wt-h3` を提供しない (`quic-tobi` を選ぶとコンパイルエラーになる)。
 
 WebTransport over HTTP/2 は draft-ietf-webtrans-http2-16 に従う。WebTransport over HTTP/3 は SETTINGS の codepoint と版選択、および `reset_stream_at` だけを draft-ietf-webtrans-http3-17 に合わせ、それ以外は draft-16 に従う。
 どちらも Extended CONNECT でセッションを確立する。MOQT のプロトコル識別子 (`MOQT_PROTOCOL` = `moqt-23`) は `WT-Available-Protocols` で通知し、サーバーが `WT-Protocol` で選択しなければ接続を失敗させる (draft-ietf-moq-transport-23 §6.2)。

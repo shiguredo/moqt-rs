@@ -49,6 +49,9 @@ use crate::transport::{
     BidiStreamAcceptor, RecvChunk, RecvStream, SendStream, StreamAcceptor, StreamHandle,
 };
 use crate::webtransport_h2::WtH2Session;
+// WebTransport over HTTP/3 は tobi-quic を使うため、tobi-quic 非対応の Windows では
+// webtransport_h3 をコンパイルしない。establish_wt も Windows では持たない。
+#[cfg(not(windows))]
 use crate::webtransport_h3::WtSession;
 
 /// デフォルトの Subscriber Priority
@@ -1860,6 +1863,9 @@ impl MoqtClient {
     /// 戻り値の [`StreamAcceptor`] は data stream を受信する側 (subscriber) が使う。
     /// peer 起動の request stream は MoqtClient 内部の受理タスクが受け取るため、
     /// publisher も本 API を使える。
+    ///
+    /// Windows ビルドでは WebTransport over HTTP/3 を提供しないため、この API も持たない。
+    #[cfg(not(windows))]
     pub async fn establish_wt(
         wt_session: WtSession,
         impl_name: &str,
