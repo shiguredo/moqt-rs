@@ -2,7 +2,7 @@
 
 - Created: 2026-11-16
 - Completed: {YYYY-MM-DD}
-- Branch: feature/change-msf-event-index-keys-uppercase
+- Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
 ## 目的

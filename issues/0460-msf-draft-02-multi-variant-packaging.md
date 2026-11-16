@@ -2,7 +2,7 @@
 
 - Created: 2026-11-16
 - Completed: {YYYY-MM-DD}
-- Branch: feature/add-msf-multi-variant-packaging
+- Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
 ## 目的

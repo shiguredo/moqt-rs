@@ -3,7 +3,7 @@
 - Priority: Medium
 - Created: 2026-06-30
 - Model: Opus 4.7
-- Branch: feature/change-msf-compression-signaling
+- Branch: feature/update-msf-draft-02
 - Polished: 2026-07-22
 - Updated: 2026-11-16
 
