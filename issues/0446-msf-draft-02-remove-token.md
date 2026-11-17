@@ -1,7 +1,7 @@
 # MSF カタログから track-level token フィールドを削除する
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -37,3 +37,12 @@ draft-ietf-moq-msf-02 は track-level の `token` フィールドを削除した
 - `src/msf.rs`、`tests/test_msf`、`pbt/tests/prop_msf.rs`、`docs/msf.md` に track-level `token` を参照するコード・テスト・記述が残っていないこと。
 - `pbt/tests/prop_msf.rs` の `sample_token_like` が削除され、`cargo test --workspace` がコンパイルエラーなく通ること。
 - `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `MsfTrack` / `MsfCloneTrack` / `TrackJsonParts` / `CommonTrackFields` から track-level の `token` を削除した。encode は `"token"` を出力せず、`MsfCloneTrack::into_track` も継承しない。公開型からのフィールド削除は破壊的変更である。
+- v02 のカタログに `"token"` が現れた場合は未知フィールドとして無視し、解釈も認可への利用もしない。`authInfo` は従来どおり解釈する。
+- `pbt/tests/prop_msf.rs` から `token` と `sample_token_like` を削除した。`tests/test_msf/track_fields.rs` の token テストを「未知フィールドとして無視される」テストに変更し、`encode_decode_roundtrip.rs` と `debug_redaction.rs` の track-level token 参照を削除した。
+- `docs/msf.md` のフィールド一覧から `token` を削除した。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
