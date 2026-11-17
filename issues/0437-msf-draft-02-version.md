@@ -1,7 +1,7 @@
 # MSF_VERSION を draft-02 に更新する
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: 2026-11-16
 
@@ -39,3 +39,13 @@
 - `rg 'draft-01' src/msf.rs tests/test_msf crates/moq-sub/src/catalog.rs crates/moq-sub/src/pipeline.rs README.md` の結果が、draft-01 の拒否を確認するテストだけになること。
 - `README.md` と `skills/shiguredo-moqt/SKILL.md` の MSF の版表記と URL が draft-02 になっていること (C4M の draft-01 に関する記述は変更しない)。
 - 上記を `tests/test_msf` の 6 ファイルで固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `MSF_VERSION` を `"draft-02"` に更新した。完全カタログは `draft-02` だけを受理し、`draft-01` と `draft-03` を `InvalidCatalogVersion` で拒否することをテストで固定した。
+- delta update は version を持たないため version ゲートの対象外であることを、コメントとテストで明示した。
+- カタログ JSON の version リテラルを `src/msf.rs`、`tests/test_msf`、`crates/moq-sub/src/catalog.rs` / `pipeline.rs`、`README.md` の decode 例で `draft-02` に更新した。`MsfCatalog::new` と moq-pub の `build_catalog` は `MSF_VERSION` を参照しているため自動的に draft-02 になる。
+- `README.md` の仕様リンクと版表記、`skills/shiguredo-moqt/SKILL.md` の MSF 版表記を draft-02 に更新した。C4M の draft-01 に関する記述は変更していない。
+- `rg 'draft-01' src/msf.rs tests/test_msf crates/moq-sub/src/catalog.rs crates/moq-sub/src/pipeline.rs README.md` が draft-01 の拒否テストだけになることを確認した。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
