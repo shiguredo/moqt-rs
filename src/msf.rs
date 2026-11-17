@@ -2617,6 +2617,18 @@ impl MsfEventTimeline {
         Ok(nojson::Json(self).to_string().into_bytes())
     }
 
+    /// header data 付きで JSON バイト列からデコードする
+    ///
+    /// draft-ietf-moq-msf-02 §8.1 (Event Timeline header data): header data は
+    /// MSF_EVENT_TIMELINE_HEADER Track property (0x7B) で運ばれ、その解釈は eventType が
+    /// 定義する。library は eventType を知らないため header を解釈せず、entry 列の decode
+    /// だけを行う。header の有無と必須性の判定は呼び出し側が行う。property が無い場合は
+    /// 「header data なし」であり、この関数は失敗しない。
+    pub fn decode_with_header(buf: &[u8], header: &[u8]) -> Result<Self, MessageError> {
+        let _ = header;
+        Self::decode(buf)
+    }
+
     /// JSON バイト列からデコードする
     ///
     /// # Errors

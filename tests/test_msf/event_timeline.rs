@@ -396,3 +396,14 @@ fn v02_index_keys_and_any_data_roundtrip() {
     assert!(!text.contains("\"l\":"));
     assert!(!text.contains("\"m\":"));
 }
+
+/// header data 付き decode が entry 列を返し、header の有無で失敗しないこと
+#[test]
+fn decode_with_header_does_not_interpret_header() {
+    let json = br#"[{"T":1000,"data":{}}]"#;
+    let with_header = MsfEventTimeline::decode_with_header(json, b"header")
+        .expect("header data 付きでも decode できること");
+    let without_header =
+        MsfEventTimeline::decode_with_header(json, b"").expect("header なしでも decode できること");
+    assert_eq!(with_header, without_header);
+}

@@ -2786,6 +2786,9 @@ fn fetch_ok_with_out_of_scope_parameter_keeps_fetch_pending() {
 fn fetch_ok_with_expires_is_accepted_and_stored() {
     use shiguredo_moqt::message::common::Location;
     use shiguredo_moqt::session::types::FetchState;
+    use shiguredo_moqt::track_properties::{
+        PROP_MSF_EVENT_TIMELINE_HEADER, TrackProperty, TrackPropertyValue,
+    };
     let (mut client, mut server) = establish_pair();
     let rid = client
         .send_fetch(
@@ -2812,11 +2815,16 @@ fn fetch_ok_with_expires_is_accepted_and_stored() {
         group_id: 5,
         object_id: 0,
     };
+    let mut properties = TrackProperties::new();
+    properties.push(TrackProperty {
+        prop_type: PROP_MSF_EVENT_TIMELINE_HEADER,
+        value: TrackPropertyValue::Bytes(b"header".to_vec()),
+    });
     server
         .send_fetch_ok(
             rid,
             fetch_ok_params_with(Some(end), expires_params(30_000)),
-            TrackProperties::new(),
+            properties,
         )
         .expect("FETCH_OK の EXPIRES は送信できること");
     let (stream_rid, ok_msg) = take_send_on_stream(&mut server);
@@ -2839,6 +2847,15 @@ fn fetch_ok_with_expires_is_accepted_and_stored() {
         server.fetch(rid).expect("fetch が存在する").state,
         FetchState::Established
     );
+    assert_eq!(
+        server
+            .fetch(rid)
+            .expect("fetch が存在する")
+            .track_properties
+            .event_timeline_header(),
+        Some(&b"header"[..]),
+        "publisher 側が送信した Track Properties を保持すること"
+    );
 
     client
         .recv_stream_message(rid, ok_msg)
@@ -2850,6 +2867,11 @@ fn fetch_ok_with_expires_is_accepted_and_stored() {
         "subscriber 側は受信した EXPIRES を保持すること"
     );
     assert_eq!(fetch.end_location, Some(end));
+    assert_eq!(
+        fetch.track_properties.event_timeline_header(),
+        Some(&b"header"[..]),
+        "subscriber 側が受信した Track Properties を保持すること"
+    );
     assert_eq!(client.state(), SessionState::Established);
 
     // 受信イベントからも EXPIRES を参照できること

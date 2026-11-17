@@ -364,6 +364,7 @@ impl Session {
             end_location: None,
             // 初回応答 (受信側) または FETCH_OK 送信時に設定する
             expires_ms: None,
+            track_properties: TrackProperties::new(),
             response_received: false,
             data_stream_finished: false,
             local_cancel_sent: false,
@@ -546,6 +547,7 @@ impl Session {
         } else {
             track_properties
         };
+        fetch.track_properties = track_properties.clone();
         let msg = ControlMessage::RequestOk(RequestOk {
             parameters,
             track_properties,
@@ -1000,6 +1002,7 @@ impl Session {
             end_location: None,
             // 初回応答 (受信側) または FETCH_OK 送信時に設定する
             expires_ms: None,
+            track_properties: TrackProperties::new(),
             response_received: false,
             data_stream_finished: false,
             local_cancel_sent: false,
@@ -1288,6 +1291,7 @@ impl Session {
         // sender が request を終了するまでの時間である。期限タイマーは起動せず、利用側が
         // 期限を判断できるように値だけを保持する。0 (期限なし) と不在は `None` に正規化する。
         fetch.expires_ms = ok.parameters.expires();
+        fetch.track_properties = ok.track_properties.clone();
         // FETCH_OK 受信をアプリへ能動通知する (FIN 前後どちらの到着もここに至る)。
         // 応答範囲の終端と EXPIRES は `fetch()` ポーリングでも参照できるが、
         // イベント駆動のために載せる。

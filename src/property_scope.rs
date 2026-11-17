@@ -80,6 +80,8 @@ pub(crate) fn known_property_scope(prop_type: u64) -> Option<PropertyScope> {
         // draft-ietf-moq-transport-23 §16.8 Table 16 / draft-ietf-moq-loc-05 §6.1:
         // Track と Object の両方
         PROP_TIMESCALE | PROP_VIDEO_CONFIG | PROP_AUDIO_CONFIG => Some(PropertyScope::Both),
+        // draft-ietf-moq-msf-02 §12.3.1: MSF_EVENT_TIMELINE_HEADER は Track のみ
+        crate::track_properties::PROP_MSF_EVENT_TIMELINE_HEADER => Some(PropertyScope::Track),
         // draft-ietf-moq-loc-05 §6.1 Table 1: Track と Object の両方。LOC の他の 6 型は
         // transport-23 §16.8 Table 16 にも載るが、0x11 は同 Table 1 だけに載る。
         PROP_CODEC_STRING => Some(PropertyScope::Both),

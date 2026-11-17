@@ -3,7 +3,7 @@ use shiguredo_moqt::loc::PROP_CODEC_STRING;
 use shiguredo_moqt::object_properties::{ObjectProperties, ObjectProperty, ObjectPropertyValue};
 use shiguredo_moqt::track_properties::{
     PROP_DEFAULT_PUBLISHER_GROUP_ORDER, PROP_DEFAULT_PUBLISHER_PRIORITY, PROP_DYNAMIC_GROUPS,
-    PROP_IMMUTABLE_PROPERTIES, PROP_MAX_CACHE_DURATION,
+    PROP_IMMUTABLE_PROPERTIES, PROP_MAX_CACHE_DURATION, PROP_MSF_EVENT_TIMELINE_HEADER,
 };
 
 /// Track 専用の既知 Property の型
@@ -16,6 +16,7 @@ const TRACK_ONLY_TYPES: &[u64] = &[
     PROP_DEFAULT_PUBLISHER_PRIORITY,
     PROP_DEFAULT_PUBLISHER_GROUP_ORDER,
     PROP_DYNAMIC_GROUPS,
+    PROP_MSF_EVENT_TIMELINE_HEADER,
 ];
 
 /// ユニークな prop_type と対応する値のペアを生成する

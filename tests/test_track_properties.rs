@@ -1748,3 +1748,36 @@ mod property_multiplicity {
         );
     }
 }
+
+/// MSF_EVENT_TIMELINE_HEADER (0x7B) の accessor と多重拒否
+#[test]
+fn msf_event_timeline_header_accessor_and_multiplicity() {
+    use shiguredo_moqt::track_properties::PROP_MSF_EVENT_TIMELINE_HEADER;
+
+    let mut props = TrackProperties::new();
+    props.push(TrackProperty {
+        prop_type: PROP_MSF_EVENT_TIMELINE_HEADER,
+        value: TrackPropertyValue::Bytes(b"header".to_vec()),
+    });
+    assert_eq!(
+        props.event_timeline_header(),
+        Some(&b"header"[..]),
+        "0x7B の生バイト列を取得できること"
+    );
+    props
+        .validate_scope()
+        .expect("Track scope として受理すること");
+    props.validate_multiplicity().expect("1 件なら受理すること");
+
+    props.push(TrackProperty {
+        prop_type: PROP_MSF_EVENT_TIMELINE_HEADER,
+        value: TrackPropertyValue::Bytes(b"duplicate".to_vec()),
+    });
+    assert!(
+        matches!(
+            props.validate_multiplicity(),
+            Err(MessageError::MalformedTrack(_))
+        ),
+        "0x7B の重複を malformed Track として拒否すること"
+    );
+}
