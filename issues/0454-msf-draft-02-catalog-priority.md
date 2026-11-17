@@ -1,7 +1,7 @@
 # MSF カタログトラックの優先度を media より高くする
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -34,3 +34,13 @@ draft-ietf-moq-msf-02 Appendix A.1.3 は、カタログトラックが記述す�
 - media の publisher priority (128) と subscriber priority の既存の値が変わらないこと。
 - カタログの全送信経路が同じ定数を参照していること。
 - 上記を `crates/moq-pub` と `crates/moq-sub` のテストで固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `crates/moq-pub` に `CATALOG_PUBLISHER_PRIORITY = 64` を追加し、`publish_catalog_object` のリテラル 128 を置き換えた。media の `DEFAULT_PUBLISHER_PRIORITY` (128) は変えていない。
+- `MoqtClient::send_fetch_response` / `send_fill_fetch_response` に `publisher_priority: u8` 引数を追加し、moq-pub のカタログ FETCH / fill fetch 経路が `CATALOG_PUBLISHER_PRIORITY` を渡すようにした。カタログの全送信経路が同じ定数を参照する。
+- `crates/moq-sub` に `CATALOG_SUBSCRIBER_PRIORITY = 64` を追加し、`catalog_subscribe_parameters` が `SUBSCRIBER_PRIORITY` を載せるようにした。
+- `MoqtClient::subscribe_track_inner` は、呼び出し側が `SUBSCRIBER_PRIORITY` を指定していれば上書きせず、未指定時だけ既定値 128 を追加するようにした。
+- `crates/moq-pub` / `crates/moq-sub` / `crates/tokio-moq` に priority のテストを追加し、`docs/msf.md` にカタログ優先度を追記した。media の既存 priority は変えていない。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
