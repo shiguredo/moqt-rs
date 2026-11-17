@@ -1,7 +1,7 @@
 # Timeline 用カタログ要件を v02 に合わせる
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -45,3 +45,13 @@ draft-ietf-moq-msf-02 §7.2 (Media Timeline Catalog requirements) と §8.3 (Eve
 - `MsfCatalog` と `MsfEventTimeline` を受け取る検証 API が公開されていること。
 - renderGroup の一部だけが一致する場合を catalog から判定しないことを doc に明記すること。
 - 上記を `tests/test_msf/catalog_decode.rs`、`tests/test_msf/delta_apply.rs`、`tests/test_msf/event_timeline.rs` で固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- media timeline / event timeline の `mimeType == "application/json"` 必須を削除した。media timeline の `depends` 非空は維持し、event timeline の `depends` 必須を削除した。
+- `validate_media_timeline_dependencies` を追加し、renderGroup の全 track を個別名で列挙して renderGroup を参照しない場合と、renderGroup 参照と所属 track の個別名参照が併存する場合を拒否する。renderGroup の一部だけが対象という判定は catalog からできないため publisher の責務であることを doc に明記した。
+- `validate_event_timeline_depends(catalog, timeline)` を公開 API として追加した。`MsfEventIndex::MediaPtsMs` の entry がある場合に、catalog 内の event timeline track が media timeline track を `depends` に持つことを検証する。複数 event timeline の対応付けは呼び出し側の責務である。
+- full decode / full encode / delta 適用後の 3 入口から media timeline の検証を呼ぶようにした。
+- `tests/test_msf/catalog_decode.rs` / `event_timeline.rs` / `encode_decode_roundtrip.rs` / `delta_apply.rs` に、mimeType なしの受理、renderGroup 規則違反の拒否、MediaPtsMs の depends 検証を追加した。既存の mimeType 拒否テストを受理テストへ更新し、`pbt/tests/prop_msf.rs` の media timeline 生成器を renderGroup 参照規則に合わせた。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
