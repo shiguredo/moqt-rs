@@ -52,7 +52,7 @@ fn invalid_utf8_rejected() {
 
 #[test]
 fn spec_example() {
-    // draft-ietf-moq-msf-01 §7.1 (Media Timeline track payload) の例
+    // draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload) の例
     let json = b"[[0,[0,0],1759924158381],[2002,[1,0],1759924160383],[4004,[2,0],1759924162385]]";
     let tl = MsfMediaTimeline::decode(json).expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(tl.0.len(), 3);

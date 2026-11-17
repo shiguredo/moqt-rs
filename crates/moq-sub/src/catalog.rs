@@ -1,6 +1,6 @@
 //! MSF カタログの購読状態
 //!
-//! catalog track を SUBSCRIBE して受信した Object を、draft-ietf-moq-msf-01 §5 (Catalog) の
+//! catalog track を SUBSCRIBE して受信した Object を、draft-ietf-moq-msf-02 §5 (Catalog) の
 //! 配置規則で適用する状態を持つ。
 //!
 //! - 各 Group の最初の Object (Object ID 0) は独立した完全なカタログ (MUST)
@@ -96,7 +96,7 @@ impl CatalogState {
     pub(crate) fn apply(&mut self, object: &CatalogObject) -> Result<CatalogApplyOutcome> {
         let location = object.location;
         // 最新 Group の最初の Object より前の catalog update は無視する
-        // (draft-ietf-moq-msf-01 §5 (Catalog))
+        // (draft-ietf-moq-msf-02 §5 (Catalog))
         if let Some(latest) = self.latest_group
             && location.group_id < latest
         {
@@ -200,7 +200,7 @@ mod tests {
 
     /// テストで使う delta カタログの JSON (track を 1 つ追加する)
     ///
-    /// delta update は version を持ってはならない (draft-ietf-moq-msf-01 §5.3 (Delta updates))。
+    /// delta update は version を持ってはならない (draft-ietf-moq-msf-02 §5.3 (Delta updates))。
     fn delta_json(add_track: &str) -> Vec<u8> {
         format!(
             r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"add","tracks":[{{"name":"{add_track}","packaging":"loc","isLive":true}}]}}]}}"#
@@ -210,7 +210,7 @@ mod tests {
 
     /// 独立したカタログが最新 Group になり、置き換えとして扱われること
     ///
-    /// draft-ietf-moq-msf-01 §5 (Catalog): 各 Group の最初の Object (Object ID 0) は
+    /// draft-ietf-moq-msf-02 §5 (Catalog): 各 Group の最初の Object (Object ID 0) は
     /// 独立した完全なカタログ。
     #[test]
     fn apply_full_replaces_the_catalog() {
@@ -236,7 +236,7 @@ mod tests {
 
     /// 同じ Group の Object ID >= 1 が delta として適用されること
     ///
-    /// draft-ietf-moq-msf-01 §5 (Catalog): 同じ Group の以降の Object は delta update。
+    /// draft-ietf-moq-msf-02 §5 (Catalog): 同じ Group の以降の Object は delta update。
     #[test]
     fn apply_delta_updates_the_catalog() {
         let mut state = CatalogState::new(test_namespace());
@@ -309,7 +309,7 @@ mod tests {
 
     /// 最新 Group より前の Group の Full が無視されること
     ///
-    /// draft-ietf-moq-msf-01 §5 (Catalog): 最新 Group の最初の Object より前の
+    /// draft-ietf-moq-msf-02 §5 (Catalog): 最新 Group の最初の Object より前の
     /// catalog update は無視する (MUST)。
     #[test]
     fn apply_full_from_an_older_group_is_ignored() {
@@ -407,7 +407,7 @@ mod tests {
 
     /// namespace を宣言した track を持つ Full カタログの JSON
     ///
-    /// 引数は (namespace, track 名) の並び。draft-ietf-moq-msf-01 §5.6.1 (Time-aligned
+    /// 引数は (namespace, track 名) の並び。draft-ietf-moq-msf-02 §5.6.1 (Time-aligned
     /// Audio/Video Tracks with single quality) が track に `namespace` を宣言する形の例である
     /// (同節の値は §11.1.2 の符号化形ではないため、構造だけを参考にする)。
     fn full_json_with_tracks(tracks: &[(&str, &str)]) -> Vec<u8> {
@@ -425,7 +425,7 @@ mod tests {
 
     /// namespace を省略した remove の delta の JSON
     ///
-    /// draft-ietf-moq-msf-01 §5.6.5 (Delta update removing tracks) の例も track の namespace を
+    /// draft-ietf-moq-msf-02 §5.6.5 (Delta update removing tracks) の例も track の namespace を
     /// 省略する (同節の例が持つ `generatedAt` は省略する)。
     fn delta_remove_json(tracks: &[&str]) -> Vec<u8> {
         let tracks_json = tracks
@@ -440,7 +440,7 @@ mod tests {
     /// namespace を省略した clone の delta の JSON
     ///
     /// `parentNamespace` を省略すると親の namespace は catalog の namespace と仮定される
-    /// (draft-ietf-moq-msf-01 §5.2.34 (Parent namespace))。
+    /// (draft-ietf-moq-msf-02 §5.2.35 (Parent namespace))。
     fn delta_clone_json(name: &str, parent_name: &str) -> Vec<u8> {
         format!(
             r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"{name}","parentName":"{parent_name}"}}]}}]}}"#
@@ -450,7 +450,7 @@ mod tests {
 
     /// namespace を省略した remove が catalog track の namespace を継承すること
     ///
-    /// draft-ietf-moq-msf-01 §5.2.2 (Track namespace) は、track が namespace を宣言しない場合は
+    /// draft-ietf-moq-msf-02 §5.2.2 (Track namespace) は、track が namespace を宣言しない場合は
     /// catalog track の namespace を継承する MUST を定める。§5.6.5 の remove は track の
     /// namespace を省略するため、継承先を解決できないと削除対象を引き当てられず失敗する。
     #[test]
@@ -526,7 +526,7 @@ mod tests {
 
     /// namespace を省略した add が catalog track の namespace を継承して重複を検出すること
     ///
-    /// draft-ietf-moq-msf-01 §5.2.3 (Track name) は (namespace, name) が一意であることを MUST と
+    /// draft-ietf-moq-msf-02 §5.2.3 (Track name) は (namespace, name) が一意であることを MUST と
     /// する。namespace を省略した add も catalog track の namespace を継承するため (§5.2.2)、
     /// 同じ名前の track は重複として拒否する。
     #[test]

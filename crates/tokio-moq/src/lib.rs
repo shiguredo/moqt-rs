@@ -104,7 +104,7 @@ pub fn build_setup_options(
         value: SetupOptionValue::Bytes(impl_name.as_bytes().to_vec()),
     });
     for token_value in cat_tokens {
-        // draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) の cat は
+        // draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) の cat は
         // C4M の認可トークンであり、SETUP の AUTHORIZATION_TOKEN として送る。
         options.push(SetupOption {
             option_type: SETUP_OPTION_AUTHORIZATION_TOKEN,
@@ -304,7 +304,7 @@ pub struct ServerUrl {
     pub fragment: Option<MoqtFragment>,
     /// MSF fragment (`#msf:...`) の解釈結果
     ///
-    /// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の
+    /// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の
     /// `msf-fragment-value = track-identifier [ "&" parameter-list ]` をパースした結果で、
     /// track-identifier が示す namespace と track name、パラメータ列を保持する。
     ///
@@ -314,7 +314,7 @@ pub struct ServerUrl {
     pub msf: Option<MsfFragment>,
     /// MSF fragment の `cat` パラメータから取り出した C4M 認可トークン (出現順)
     ///
-    /// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) は `cat` を
+    /// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) は `cat` を
     /// "A base64 encoded C4M token" と定め、draft-ietf-moq-c4m-02 §2 / §5 は
     /// トークンを URL に埋め込むときの Base64 エンコードを定める。
     /// Base64 をデコードしたバイト列が MOQT の AUTHORIZATION_TOKEN
@@ -396,7 +396,7 @@ pub fn parse_url(url: &str) -> Result<ServerUrl, String> {
         Some(fragment) => Some(parse_moqt_fragment(url, fragment)?),
         None => None,
     };
-    // draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation): fragment type
+    // draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation): fragment type
     // "msf" の value は MSF の track-identifier とパラメータ列である。moq-pub / moq-sub が解釈するのは
     // track-identifier が示す namespace、予約パラメータ cat の認可トークン、予約パラメータ
     // connection の接続種別 ([`resolve_transport`]) である。
@@ -421,7 +421,7 @@ pub fn parse_url(url: &str) -> Result<ServerUrl, String> {
 impl ServerUrl {
     /// MSF fragment の track-identifier が示す Track Namespace を返す
     ///
-    /// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の
+    /// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の
     /// track-identifier を §11.1.2 (MSF Namespace-Name String Encoding) としてパースした
     /// namespace である。`msf` fragment が無い場合と `msf` 以外の fragment の場合は `None`。
     pub fn msf_namespace(&self) -> Option<&TrackNamespace> {
@@ -433,7 +433,7 @@ impl ServerUrl {
 ///
 /// `explicit` が `Some` のときは draft-ietf-moq-transport-23 §8.8 (Representing Namespace and
 /// Track Names) の表現としてパースする。`None` のときは `--url` の `msf` fragment
-/// (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation)) の track-identifier が
+/// (draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation)) の track-identifier が
 /// 示す namespace を使う。moq-pub / moq-sub が共通で使う。
 ///
 /// 解決した namespace は 1 つ以上のフィールドを持つ必要がある。moq-pub / moq-sub が扱う catalog と
@@ -476,7 +476,7 @@ pub fn resolve_namespace(
 
 /// URL の `connection` と `--transport` から接続種別を解決する
 ///
-/// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) の予約パラメータ `connection`
+/// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) の予約パラメータ `connection`
 /// は、client に接続種別を MUST で指定する (`q` は native QUIC、`wt` は WebTransport)。`wt` は
 /// WebTransport の実装 (HTTP/3 / HTTP/2) を指定しないため、本実装は `wt-h3` (HTTP/3 上の
 /// WebTransport) を既定にし、`wt-h2` は `--transport wt-h2` を明示したときだけ使う。WebTransport の
@@ -528,7 +528,7 @@ pub fn resolve_transport(
     }
     if requires_quic && requires_webtransport {
         return Err(
-            "'connection=q' and 'connection=wt' cannot be used together: draft-ietf-moq-msf-01 \
+            "'connection=q' and 'connection=wt' cannot be used together: draft-ietf-moq-msf-02 \
              §11.1.1 mandates a native QUIC connection for 'q' and a WebTransport connection for \
              'wt' (remove one of them from --url)"
                 .to_string(),
@@ -553,7 +553,7 @@ pub fn resolve_transport(
         (Some(MsfConnectionType::Quic), None) => Ok(Transport::Quic),
         (Some(MsfConnectionType::Quic), Some(Transport::Quic)) => Ok(Transport::Quic),
         (Some(MsfConnectionType::Quic), Some(explicit)) => Err(format!(
-            "--transport {} conflicts with 'connection=q' in --url: draft-ietf-moq-msf-01 \
+            "--transport {} conflicts with 'connection=q' in --url: draft-ietf-moq-msf-02 \
              §11.1.1 mandates a native QUIC connection (remove --transport or the 'connection' \
              parameter)",
             explicit.as_str()
@@ -575,7 +575,7 @@ pub fn resolve_transport(
             Some(explicit @ (Transport::WtH3 | Transport::WtH2)),
         ) => Ok(explicit),
         (Some(MsfConnectionType::WebTransport), Some(explicit)) => Err(format!(
-            "--transport {} conflicts with 'connection=wt' in --url: draft-ietf-moq-msf-01 \
+            "--transport {} conflicts with 'connection=wt' in --url: draft-ietf-moq-msf-02 \
              §11.1.1 mandates a WebTransport connection (use --transport wt-h3 or wt-h2)",
             explicit.as_str()
         )),
@@ -658,7 +658,7 @@ fn is_fragment_type(fragment_type: &str) -> bool {
 
 /// `msf` fragment の value を MSF fragment としてパースする
 ///
-/// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の
+/// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の
 /// `msf-fragment-value = track-identifier [ "&" parameter-list ]` に従い、value 全体を
 /// [`parse_msf_fragment`] で検証する。MSF fragment の形式が不正な場合は [`parse_url`] の
 /// エラーとして扱う (moq-pub / moq-sub が解釈すると宣言した fragment type の値は、黙って無視せず
@@ -675,7 +675,7 @@ fn parse_msf_value(url: &str, fragment_value: &str) -> Result<MsfFragment, Strin
 
 /// パース済みの `msf` fragment から `cat` パラメータの認可トークンを取り出す
 ///
-/// 予約パラメータ `cat` を読む (draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters))。
+/// 予約パラメータ `cat` を読む (draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters))。
 ///
 /// 各 `cat` の値は RFC 3986 §2.1 (Percent-Encoding) の `%XX` をデコードしてから
 /// Base64 としてデコードする。得られたバイト列が MOQT の AUTHORIZATION_TOKEN
@@ -700,7 +700,7 @@ fn parse_cat_tokens(url: &str, msf: &MsfFragment) -> Result<Vec<Vec<u8>>, String
 
 /// `cat` パラメータの値を認可トークンのバイト列へデコードする
 ///
-/// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) は `cat` を
+/// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) は `cat` を
 /// "A base64 encoded C4M token" と定める。RFC 4648 は §4 の Base64 と §5 の
 /// base64url を定義しており、draft-ietf-moq-c4m-02 §2 / §5 はどちらを使うかを指定しないため、
 /// 両方とパディングの有無を受理する (library の `CatToken::decode` が URL 埋め込みの
@@ -1096,7 +1096,7 @@ pub fn same_session_url(current: &ServerUrl, target: &ServerUrl) -> bool {
 ///   **現在の URL と同じ origin (host / port) のときだけ** 引き継ぐ。別 origin へ
 ///   credential を送らないためである。移行先が自前の `cat` を持つ場合はそちらを優先する。
 ///
-/// 移行先 URI の `connection` (draft-ietf-moq-msf-01 §11.1.1) と msf の track-identifier は
+/// 移行先 URI の `connection` (draft-ietf-moq-msf-02 §11.1.1) と msf の track-identifier は
 /// ここでは解釈しない。接続経路は呼び出し側が [`resolve_transport`] で現在の解決結果と
 /// 矛盾しないことを確認し、track 名は購読 / 配信の張り直しで使う既存の指定をそのまま使う。
 ///
@@ -1145,7 +1145,7 @@ pub fn migration_target(
         }
     };
     // 認可トークンは同一 origin のときだけ引き継ぐ。別 origin へ送ると credential の
-    // 漏洩になるため、移行先で再取得する (draft-ietf-moq-msf-01 §11.4.4)。
+    // 漏洩になるため、移行先で再取得する (draft-ietf-moq-msf-02 §11.5.4)。
     if target.cat_tokens.is_empty() && same_origin(&target, current) {
         target.cat_tokens = current.cat_tokens.clone();
     }
@@ -2223,7 +2223,7 @@ mod tests {
 
     /// `connection=q` / `connection=wt` と `--transport qmux` は矛盾する
     ///
-    /// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) の `q` は native QUIC、
+    /// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) の `q` は native QUIC、
     /// `wt` は WebTransport を MUST で要求する。QMux はどちらでもないため、fragment が
     /// 接続種別を指定しているときは `--transport qmux` を受け付けない
     /// (どちらを優先するかを決められないため)。
@@ -2255,7 +2255,7 @@ mod tests {
 
     /// `connection=q` は native QUIC を要求する
     ///
-    /// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) は `connection` で接続種別を
+    /// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) は `connection` で接続種別を
     /// MUST で指定する。`q` は native QUIC である。
     #[test]
     fn resolve_transport_requires_native_quic() {

@@ -1658,7 +1658,7 @@ fn authorization_parameter(token: &AuthorizationToken) -> MessageParameter {
 /// 受け取ったパラメータに、渡された C4M 認可トークンを AUTHORIZATION_TOKEN (0x03)
 /// として追加したパラメータを返す
 ///
-/// draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization): track に紐づくトークンは、
+/// draft-ietf-moq-msf-02 §11.5.3 (Presenting Authorization): track に紐づくトークンは、
 /// その track に関係する AUTHORIZATION TOKEN パラメータを受け付けるすべての制御
 /// メッセージ (subscriber は SUBSCRIBE / SUBSCRIBE_NAMESPACE / FETCH / REQUEST_UPDATE)
 /// へ MUST 付与する。
@@ -1666,7 +1666,7 @@ fn authorization_parameter(token: &AuthorizationToken) -> MessageParameter {
 ///
 /// 本 client (`MoqtClient`) は catalog を解析しないため、送信時点で track とトークンの
 /// 対応を決められない (end subscriber は catalog を解析して認可要件を知る。
-/// draft-ietf-moq-msf-01 §11.4.1 (Authorization)。authInfo の解釈は §5.2.42、
+/// draft-ietf-moq-msf-02 §11.5.1 (Authorization)。authInfo の解釈は §5.2.42、
 /// URI fragment からのトークン配送は §5.2.43)。C4M の `moqt` クレームでアクションごとに
 /// 選別すると、クレームをデコードできないトークンや対象のアクションを認可しないトークンが
 /// 落ちて MUST の付与漏れになるため、保持しているトークンをすべて載せる。
@@ -1677,7 +1677,7 @@ fn authorization_parameter(token: &AuthorizationToken) -> MessageParameter {
 /// 載せると制御メッセージが拒否されうる。あわせて draft-ietf-moq-transport-23 §8.9
 /// (Authorization Token Compression) の MUST (整形だが内容が不正なトークンを含むメッセージは
 /// MALFORMED_AUTH_TOKEN で拒否) の対象にもなりうる。付与漏れ
-/// (draft-ietf-moq-msf-01 §11.4.3 の MUST) を避ける側に倒す。
+/// (draft-ietf-moq-msf-02 §11.5.3 の MUST) を避ける側に倒す。
 ///
 /// PUBLISH (`publish_track`) / SUBSCRIBE (`subscribe_track_inner`) / FETCH (`fetch`) /
 /// REQUEST_UPDATE (`send_request_update`) は本関数の単一経路でトークンを付与する。
@@ -2556,7 +2556,7 @@ impl MoqtClient {
     ///
     /// track に紐づく C4M 認可トークンは、SUBSCRIBE / REQUEST_UPDATE と同じく
     /// AUTHORIZATION_TOKEN (0x03) としてすべて付与する
-    /// (draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization))。
+    /// (draft-ietf-moq-msf-02 §11.5.3 (Presenting Authorization))。
     ///
     /// # Errors
     ///
@@ -3092,7 +3092,7 @@ impl MoqtClient {
     /// SUBSCRIBE / PUBLISH と同じ C4M 認可トークンを AUTHORIZATION_TOKEN (0x03) として
     /// 載せる。更新対象の track に紐づくトークンは、SUBSCRIBE などの元の要求だけで
     /// なく REQUEST_UPDATE にも付与しなければならない
-    /// (draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization))。
+    /// (draft-ietf-moq-msf-02 §11.5.3 (Presenting Authorization))。
     pub async fn send_request_update(
         &mut self,
         request_id: u64,
@@ -4251,7 +4251,7 @@ mod tests {
 
     /// 送信経路のアクションを認可しない有効な C4M トークンでも選別せずに付与すること
     ///
-    /// draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization): track に紐づくトークンは
+    /// draft-ietf-moq-msf-02 §11.5.3 (Presenting Authorization): track に紐づくトークンは
     /// AUTHORIZATION TOKEN パラメータを受け付ける制御メッセージへ MUST 付与する。
     /// C4M の `moqt` クレーム (draft-ietf-moq-c4m-02 §2.1) がメッセージのアクションを
     /// 認可しないトークンでも、client 側で選別すると付与漏れになるため選別しない。

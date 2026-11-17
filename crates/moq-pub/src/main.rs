@@ -4,7 +4,7 @@
 //! `--input-mp4` を指定した場合はカメラ / マイクを使わず、MP4 ファイルの映像トラックを
 //! 再エンコードせずに PUBLISH する。`--input-mp4-reencode` を指定した場合は MP4 ファイルの
 //! 映像 / 音声をデコードして再エンコードして PUBLISH する。
-//! draft-ietf-moq-transport-23、draft-ietf-moq-loc-05、draft-ietf-moq-msf-01 に準拠。
+//! draft-ietf-moq-transport-23、draft-ietf-moq-loc-05、draft-ietf-moq-msf-02 に準拠。
 //!
 //! 使い方:
 //!   cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --fake-capture-device
@@ -14,7 +14,7 @@
 //! namespace を使う。どちらにも無い場合はエラーになる。
 //!
 //! `--transport` を省略した場合は `--url` の `msf` fragment の `connection` を使う
-//! (draft-ietf-moq-msf-01 §11.1.1)。どちらにも無い場合は `quic` になる。`connection` と矛盾する
+//! (draft-ietf-moq-msf-02 §11.1.1)。どちらにも無い場合は `quic` になる。`connection` と矛盾する
 //! `--transport` はエラーになる。
 //!
 //! パイプライン本体は lib ターゲット (`lib.rs`) にあり、このバイナリは tracing の初期化、

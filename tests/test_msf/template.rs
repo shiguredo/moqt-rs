@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn template_roundtrip() {
-    // draft-ietf-moq-msf-01 §5.6.10 準拠例の template が roundtrip すること
+    // draft-ietf-moq-msf-02 §5.6.10 準拠例の template が roundtrip すること
     let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[0,2002,[0,0],[1,0],1759924158381,2002]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc.clone() else {

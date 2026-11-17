@@ -46,7 +46,7 @@ pub mod media_clock;
 pub mod message;
 /// メッセージ パラメータ群 (draft-ietf-moq-transport-23 §9.19 (Control Message Parameters))
 pub mod message_parameter;
-/// MOQT Streaming Format のカタログとタイムラインのコーデック (draft-ietf-moq-msf-01)
+/// MOQT Streaming Format のカタログとタイムラインのコーデック (draft-ietf-moq-msf-02)
 pub mod msf;
 pub mod name;
 pub mod object_properties;

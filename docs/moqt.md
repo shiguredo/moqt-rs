@@ -330,7 +330,7 @@ End of Unknown Range (`0x10C`、§11.4.2 (End of Range)) で示して残りの�
   request だけを専用タスクで確立した side session で受信 / 送信し、旧 session は他の request と
   data plane の処理を続けます。subscriber は catalog / video / audio の SUBSCRIBE、publisher は
   video / audio / catalog の PUBLISH を移行できます。New Session URI が空なら現在の URI を
-  再利用します。認可トークンは同一 origin のときだけ引き継ぎます (draft-ietf-moq-msf-01 §11.4.4)。
+  再利用します。認可トークンは同一 origin のときだけ引き継ぎます (draft-ietf-moq-msf-02 §11.5.4)。
 
 送信側の運用手順:
 

@@ -3,7 +3,7 @@
 //! 映像は 1 Group = 1 unidirectional stream で送り、Group はキーフレームで始まる
 //! (draft-ietf-moq-loc-05 §4.2)。Group 長をフレーム数で指定すると、実時間長が fps に
 //! よって変わり (fps 5 で 12 秒 / fps 120 で 0.5 秒)、MSF カタログへ宣言する
-//! `maxGopDuration` / `maxGroupDuration` (draft-ietf-moq-msf-01 §5.2.24 / §5.2.25) も
+//! `maxGopDuration` / `maxGroupDuration` (draft-ietf-moq-msf-02 §5.2.25 / §5.2.26) も
 //! fps ごとの値になってしまう。そこで映像のキーフレーム間隔 (= Group 長) は時間
 //! (`--gop-duration`) で指定し、直前のキーフレームからその時間が経過した入力フレームで
 //! キーフレームを強制する。
@@ -186,7 +186,7 @@ pub(crate) fn keyframe_interval_frames(fps: u32, gop_duration_ms: u32) -> u32 {
 /// 時間ベースの判定は入力フレームの Timestamp の差分で行うため、境界の直後にフレームが
 /// 無いと次の入力まで Group が伸びる。宣言は公称 fps のカデンスで生じる最大値に合わせて
 /// 1 フレーム分を足す。Group は 1 キーフレーム間隔 = 1 GOP であるため、両方に同じ値を
-/// 載せる (draft-ietf-moq-msf-01 §5.2.24 (Maximum GOP Duration) /
+/// 載せる (draft-ietf-moq-msf-02 §5.2.25 (Maximum GOP Duration) /
 /// §5.2.25 (Maximum Group Duration))。
 ///
 /// 入力のゆらぎが 1 フレームの切り上げ分を超える場合や、capture が止まってフレームが

@@ -54,7 +54,7 @@ fn parse_connection_parameter() {
 
 /// connection パラメータの複数指定は出現順にすべて返ること
 ///
-/// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) の union 規則は値域を対象とした
+/// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) の union 規則は値域を対象とした
 /// もので `connection` には適用しない。`q` と `wt` のように両立しない組み合わせの扱いは呼び出し側
 /// が決めるため、ここでは検証せずすべて返す。
 #[test]
@@ -302,7 +302,7 @@ fn parse_fragment_invalid_rejected() {
     ));
 }
 
-/// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation): scheme は
+/// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation): scheme は
 /// case-insensitive のため `MOQT://` も受理されること
 #[test]
 fn parse_uri_scheme_case_insensitive() {
@@ -332,7 +332,7 @@ fn parse_location_range_end_before_start_rejected() {
     ));
 }
 
-/// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters): location-range は
+/// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters): location-range は
 /// 終端省略時に dash も省略する MUST のため、末尾ダッシュは reject されること
 #[test]
 fn parse_location_range_trailing_dash_rejected() {
@@ -399,7 +399,7 @@ fn parse_uri_invalid_rejected() {
 
 /// track-identifier の `%XX` (RFC 3986 §2.1 (Percent-Encoding)) をデータバイトへデコードすること
 ///
-/// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の ABNF は
+/// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の ABNF は
 /// `track-identifier = 1*( pchar-no-amp / "/" )` であり、`pchar-no-amp` は `pct-encoded` を含む。
 /// `?` は同節が `%3F` として percent-encode することを求める。
 #[test]

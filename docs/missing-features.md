@@ -6,7 +6,7 @@
 moq-sub の `--subscribe-tracks` を反映した)。
 
 対象仕様は `refs/moq/` の MOQT `draft-ietf-moq-transport-23`、LOC `draft-ietf-moq-loc-05`、
-MSF `draft-ietf-moq-msf-01`、C4M `draft-ietf-moq-c4m-02` である。
+MSF `draft-ietf-moq-msf-02`、C4M `draft-ietf-moq-c4m-02` である。
 対象コードは `src/` (ライブラリ)、`crates/moq-pub`、`crates/moq-sub`、
 `crates/tokio-moq` (transport 層)。
 
@@ -39,7 +39,7 @@ relay による namespace の集約・forwarding) は本稿の対象外とする
    Video Frame Marking 違反の `MALFORMED_KEY_VALUE` によるセッション終了が未対応 (§8.3)、
    `isLive=false` の `targetLatency` (MSF §5.2.8)、
    catalog 更新をまたいだ
-   `isLive` の False → True (MSF §5.2.7)、`connectionURI` の検証と新規接続 (MSF §5.2.37)、
+   `isLive` の False → True (MSF §5.2.8)、`connectionURI` の検証と新規接続 (MSF §5.2.37)、
    range パラメータの union (MSF §11.1.1)、`initDataList` の配置 (§5.1.7)、
    STOP_SENDING 受信時の open stream の reset (§3.1.2 / §3.2.4)。
 
@@ -152,9 +152,9 @@ moq-sub は `targetLatency` を無条件に再生遅延へ反映する
 (`crates/moq-sub/src/pipeline.rs:727-743`、`2150-2175`)。
 `is_live` は example から参照されていない (grep で 0 件)。VOD のトラックで不要な遅延を入れる。
 
-### 4.3 catalog 更新をまたいだ `isLive` の False → True を拒否しない (MSF §5.2.7、moq-sub)
+### 4.3 catalog 更新をまたいだ `isLive` の False → True を拒否しない (MSF §5.2.8、moq-sub)
 
-MSF §5.2.7 は「A True value MUST never follow a False value.」と定める。
+MSF §5.2.8 は「A True value MUST never follow a False value.」と定める。
 ライブラリは同一 catalog 内の delta 再追加では検証する (`src/msf.rs:1537` 付近の
 `validate_readded_track`) が、moq-sub は独立カタログ (Full) を受けるたびに
 直前のカタログを捨てて丸ごと差し替える (`crates/moq-sub/src/catalog.rs:118-130`)。
@@ -217,8 +217,8 @@ moq-pub は終了時に `PUBLISH_DONE(GOING_AWAY = 0x4)` を送るだけであ�
 example から使われず、catalog は `is_complete: false` / `isLive: true` 固定で
 `trackDuration` も設定しない (`crates/moq-pub/src/catalog.rs:154-205`)。
 購読側は配信が正常終了したことを判別できない。
-なお MSF §11.3 は `SUBSCRIBE_DONE` と書くが、MOQT は draft-13 以降 `PUBLISH_DONE` に
-改名している (コードは `src/error.rs:258` の `PUBLISH_DONE_TRACK_ENDED = 0x2`)。
+MSF v02 §11.4 は `PUBLISH_DONE` を使う (v01 §11.3 の `SUBSCRIBE_DONE` から改名されている)。
+コードは `src/error.rs:258` の `PUBLISH_DONE_TRACK_ENDED = 0x2` を使う。
 
 ### 5.2 PUBLISH に Message Parameters を載せられない
 
@@ -591,7 +591,7 @@ moqt-js (HEAD `f6a171e8`) の playout のうち、次の 2 つは移植してい
 - `crates/moq-sub/README.md:76` は「moq-pub は `--audio-datagram` でこの配送を選べる」と
   書くが、そのようなフラグは無い (既定が datagram で、subgroup にするのが `--audio-subgroup`)。
   `crates/moq-sub/src/pipeline.rs:4775` のコメントも同じ
-- MSF §11.3 は `SUBSCRIBE_DONE` と書くが、MOQT は draft-13 以降 `PUBLISH_DONE` に改名している。
+- MSF v02 §11.4 は `PUBLISH_DONE` を使う (v01 §11.3 の `SUBSCRIBE_DONE` から改名されている)。
   実装は改名後に追従している
 
 ## 9. 優先度の目安

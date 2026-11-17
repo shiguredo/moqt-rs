@@ -1,6 +1,6 @@
 //! `MsfCatalog::apply_delta` の PBT
 //!
-//! draft-ietf-moq-msf-01 §5.1.6 (Delta update): 操作は配列順に適用される。
+//! draft-ietf-moq-msf-02 §5.1.6 (Delta update): 操作は配列順に適用される。
 //! 任意のカタログに対して「一意な名前の add」→「同じ名前の remove」を適用すると、
 //! トラック集合が元に戻る (add / remove が可逆) ことを検証する。
 

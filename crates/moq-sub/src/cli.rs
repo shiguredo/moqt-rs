@@ -126,7 +126,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         })?;
 
     // `--transport` が省略された場合は `--url` の msf fragment の `connection` を使う
-    // (draft-ietf-moq-msf-01 §11.1.1)。解決の規則は `tokio_moq::resolve_transport` を参照
+    // (draft-ietf-moq-msf-02 §11.1.1)。解決の規則は `tokio_moq::resolve_transport` を参照
     //
     // s2n-quic バックエンドのビルドでは wt-h3 を提供しないため、ヘルプの選択肢も
     // ビルドに合わせる。noargs の doc は &'static str しか取れないため、定数を選ぶ。
@@ -161,7 +161,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         .present_and_then(|o| Ok::<_, std::convert::Infallible>(o.value().to_string()))?;
 
     // `--namespace` は省略可能で、省略した場合は `--url` の msf fragment
-    // (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation)) の
+    // (draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation)) の
     // track-identifier が示す namespace を使う。どちらにも無い場合はエラーになる。
     let namespace_opt = noargs::opt("namespace")
         .ty("NS")
@@ -349,7 +349,7 @@ mod tests {
 
     /// `--transport` を省略した場合は `--url` の `msf` fragment の `connection` を使う
     ///
-    /// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) の `connection` は client に
+    /// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) の `connection` は client に
     /// 接続種別を MUST で指定する (`q` は native QUIC、`wt` は WebTransport)。`wt` は WebTransport の
     /// 実装を指定しないため `wt-h3` を既定にする。ただし s2n-quic バックエンドのビルドでは
     /// `wt-h3` を提供しないため、そのビルドでは `connection=wt` がエラーになる。

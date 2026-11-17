@@ -131,19 +131,19 @@ const AUDIO_SAMPLE_RATE: u32 = 48_000;
 const AUDIO_CHANNELS: u8 = 1;
 /// MSF channelConfig (mono)
 ///
-/// draft-ietf-moq-msf-01 §5.2.29 (Channel configuration) では string 表現。一次資料の例では "2" を使用。
+/// draft-ietf-moq-msf-02 §5.2.30 (Channel configuration) では string 表現。一次資料の例では "2" を使用。
 const AUDIO_CHANNEL_CONFIG: &str = "1";
 /// 音声トラック名
 pub(crate) const AUDIO_TRACK_NAME: &str = "audio";
 /// カタログのレンダーグループ
 ///
 /// 音声と映像を同時に再生させるため、両トラックに同じ値を載せる
-/// (draft-ietf-moq-msf-01 §5.2.11 (Render group))。
+/// (draft-ietf-moq-msf-02 §5.2.12 (Render group))。
 const CATALOG_RENDER_GROUP: u64 = 1;
 
 /// カタログを送り直す間隔
 ///
-/// draft-ietf-moq-msf-01 §5 (Catalog) は、配信網の cache から落ちうる時間が過ぎたときに
+/// draft-ietf-moq-msf-02 §5 (Catalog) は、配信網の cache から落ちうる時間が過ぎたときに
 /// カタログを publish し直すことを SHOULD とする。後から購読を始めた相手は relay の cache に
 /// 残っているカタログを FETCH で取得するため、cache から落ちる前に新しい Group で送り直す。
 /// relay の cache が既定で保持する時間 (10 分程度) より十分短く、かつ送り直しの負荷が
@@ -373,7 +373,7 @@ fn accepted_new_group_request(
 ///
 /// 起動時と GOAWAY 移行後の双方で同じ入力から MSF カタログを組み立てる。移行先の `cat` が
 /// 変わったときは authInfo を載せ替える必要があるため
-/// (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))、エンコーダ / MP4 リーダーへの参照では
+/// (draft-ietf-moq-msf-02 §5.2.42 (Authorization Info))、エンコーダ / MP4 リーダーへの参照では
 /// なく、組み立てに必要な値だけを所有して保持する。
 struct CatalogContext {
     /// Track Namespace の draft-ietf-moq-msf-02 §5.2.2 (Track namespace) の `/` 区切り表現
@@ -491,7 +491,7 @@ fn catalog_params<'a>(
 /// 移行先の C4M トークンが変わったか
 ///
 /// 移行先 URL の `cat` が変わると、catalog の track に載せる authInfo を作り直す必要がある
-/// (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))。authInfo は現在トークンの有無だけを
+/// (draft-ietf-moq-msf-02 §5.2.42 (Authorization Info))。authInfo は現在トークンの有無だけを
 /// 見るため値の変化では JSON は変わらないが、将来 authInfo が値を参照する変更に備えて
 /// 並びも含めて比較する。
 fn cat_tokens_changed(previous: &[Vec<u8>], next: &[Vec<u8>]) -> bool {
@@ -972,7 +972,7 @@ pub async fn run(
 
     // 5. MSF カタログを送信する
     //
-    // カタログの Group ID は 0 に固定しない。draft-ietf-moq-msf-01 §6.1 (Group numbering) は
+    // カタログの Group ID は 0 に固定しない。draft-ietf-moq-msf-02 §6.1 (Group numbering) は
     // Track の Group ID を一意で単調増加とする MUST を課し、publisher の再起動時には
     // 以前 publish したどの Group ID よりも大きい値から始める MUST を課す。同じ Track 名で
     // 配信し直しても Group ID が衝突しないよう、Unix epoch ミリ秒から払い出す。
@@ -1111,7 +1111,7 @@ pub async fn run(
 
     // 7. データループ
     let start = Instant::now();
-    // 映像 / 音声の Group ID も 0 に固定しない (draft-ietf-moq-msf-01 §6.1 (Group numbering))。
+    // 映像 / 音声の Group ID も 0 に固定しない (draft-ietf-moq-msf-02 §6.1 (Group numbering))。
     // 再起動時に以前の Group ID を下回らないよう、カタログと同じ規則で払い出す。
     let mut video_group_id: u64 = group_id::allocate_initial_group_id()?;
     // 直前に開始した映像 Group の ID。NEW_GROUP_REQUEST (§9.19.19) の値が未来の Group を
@@ -2037,7 +2037,7 @@ pub async fn run(
                                                 Ok(PublishTrack::Catalog) => {
                                                     // カタログは購読を新しく張り直すため、Object を
                                                     // 次の Group で送り直す
-                                                    // (draft-ietf-moq-msf-01 §5 (Catalog) /
+                                                    // (draft-ietf-moq-msf-02 §5 (Catalog) /
                                                     // §6.1 (Group numbering))
                                                     let sink = catalog_sink(
                                                         &client,
@@ -2135,7 +2135,7 @@ pub async fn run(
                                             }
                                             // 移行先 URI の msf fragment の connection が
                                             // 現在の接続経路と矛盾する場合は移行しない
-                                            // (draft-ietf-moq-msf-01 §11.1.1)
+                                            // (draft-ietf-moq-msf-02 §11.1.1)
                                             if let Err(e) = tokio_moq::resolve_transport(
                                                 Some(config.transport),
                                                 &target.url,
@@ -2222,7 +2222,7 @@ pub async fn run(
                                                 return Ok(true);
                                             }
                                             // 移行先 URI の msf fragment の connection が現在の接続経路と
-                                            // 矛盾しないかを確認する (draft-ietf-moq-msf-01 §11.1.1)。
+                                            // 矛盾しないかを確認する (draft-ietf-moq-msf-02 §11.1.1)。
                                             // 矛盾する場合は移行せず、従来どおり終了する
                                             if let Err(e) = tokio_moq::resolve_transport(
                                                 Some(config.transport),
@@ -2326,7 +2326,7 @@ pub async fn run(
                                     ended: false,
                                 });
                                 // カタログの購読は、受理した時点で現在のカタログ Object を
-                                // 新しい Group で送り直す (draft-ietf-moq-msf-01 §5: 独立した
+                                // 新しい Group で送り直す (draft-ietf-moq-msf-02 §5: 独立した
                                 // カタログは新しい Group の先頭に置く MUST)。次の定周期の
                                 // republish を待つと購読直後の相手にカタログが届かない
                                 if accepted.track == PublishedTrack::Catalog
@@ -2574,7 +2574,7 @@ pub async fn run(
                                 new_catalog_request_id,
                             );
                             // 移行先の cat が変わると catalog の track の authInfo を載せ替える
-                            // 必要がある (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))。
+                            // 必要がある (draft-ietf-moq-msf-02 §5.2.42 (Authorization Info))。
                             // `config.url` を新しい URL に更新する前に比較する
                             if cat_tokens_changed(&config.url.cat_tokens, &url.cat_tokens) {
                                 match catalog_context.json(&url.cat_tokens) {
@@ -2658,7 +2658,7 @@ pub async fn run(
                                 config.url.authority
                             );
                             // 新しい session でカタログを次の Group で送り直す
-                            // (draft-ietf-moq-msf-01 §5 (Catalog) / §6.1 (Group numbering))
+                            // (draft-ietf-moq-msf-02 §5 (Catalog) / §6.1 (Group numbering))
                             if let Err(e) = republish_catalog_at_next_group(
                                 &client,
                                 catalog_sink(
@@ -2769,7 +2769,7 @@ pub async fn run(
                                     data_plane: migrated_data_plane,
                                 });
                                 // 新しい session でカタログを次の Group で送り直す
-                                // (draft-ietf-moq-msf-01 §5 (Catalog) /
+                                // (draft-ietf-moq-msf-02 §5 (Catalog) /
                                 // §6.1 (Group numbering))
                                 let sink = catalog_sink(
                                     &client,
@@ -2982,7 +2982,7 @@ pub async fn run(
             }
             _ = catalog_republish_interval.tick() => {
                 // 独立したカタログを新しい Group の先頭に置き直す
-                // (draft-ietf-moq-msf-01 §5 (Catalog) / §6.1 (Group numbering))。
+                // (draft-ietf-moq-msf-02 §5 (Catalog) / §6.1 (Group numbering))。
                 // relay の cache から落ちる前に送り直すことで、配信開始後に購読を始めた相手も
                 // cache のカタログを FETCH で取得できる。
                 let outcome = republish_catalog_at_next_group(
@@ -3618,7 +3618,7 @@ async fn wait_wt_session_change(
 
 /// カタログを指定 Group で送り直す
 ///
-/// draft-ietf-moq-msf-01 §5 (Catalog): 独立したカタログは新しい Group の先頭 (Object 0) に
+/// draft-ietf-moq-msf-02 §5 (Catalog): 独立したカタログは新しい Group の先頭 (Object 0) に
 /// 置く。JSON は起動時に組み立てたものを再利用する (MAX_CACHE_DURATION などの告知値は
 /// 接続先が変わっても同じである)。
 ///
@@ -3681,7 +3681,7 @@ async fn republish_catalog_at_group(
 ///
 /// Group ID は送信の成否によらず先に進める。同じ Location を 2 度送ると購読側で重複として
 /// 扱われ、失敗した Group を再送すると同じ Group の Object が二重に登録されうるためである
-/// (draft-ietf-moq-msf-01 §6.1 (Group numbering))。
+/// (draft-ietf-moq-msf-02 §6.1 (Group numbering))。
 #[expect(
     clippy::too_many_arguments,
     reason = "main ループが持つ catalog 送出の状態と受信 SUBSCRIBE の一覧を渡すため"
@@ -5661,7 +5661,7 @@ mod tests {
 
         /// 同一 origin の New Session URI で cat が無いときは元のトークンを引き継ぐこと
         ///
-        /// draft-ietf-moq-msf-01 §11.4.3 は track に紐づくトークンを同じ track の制御
+        /// draft-ietf-moq-msf-02 §11.5.3 は track に紐づくトークンを同じ track の制御
         /// メッセージへ載せる MUST を課すため、移行先でも載せ続ける必要がある。
         #[test]
         fn same_origin_uri_without_cat_carries_the_tokens_over() {
@@ -5684,7 +5684,7 @@ mod tests {
         /// 別 origin の New Session URI には cat を引き継がないこと
         ///
         /// 移行先が別ホストのときは認可トークンを送らない。移行先で別途取得する
-        /// (draft-ietf-moq-msf-01 §11.4.4)。
+        /// (draft-ietf-moq-msf-02 §11.5.4)。
         #[test]
         fn different_origin_uri_does_not_carry_tokens() {
             let current = current_url();
@@ -6116,7 +6116,7 @@ mod tests {
 
     /// 移行先の C4M トークンに合わせてカタログ JSON を組み立て直す判断を固定する
     ///
-    /// draft-ietf-moq-msf-01 §5.2.42 (Authorization Info): 移行先 URL の `cat` が変わると
+    /// draft-ietf-moq-msf-02 §5.2.42 (Authorization Info): 移行先 URL の `cat` が変わると
     /// catalog の track に載せる authInfo も変わる。
     mod catalog_rebuild_tests {
         use super::*;

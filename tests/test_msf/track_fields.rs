@@ -173,7 +173,7 @@ fn packaging_values() {
 
 #[test]
 fn target_latency_ignored_when_is_live_false() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): isLive=false なら targetLatency は無視される
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency): isLive=false なら targetLatency は無視される
     let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":false,"targetLatency":500}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
@@ -184,7 +184,7 @@ fn target_latency_ignored_when_is_live_false() {
 
 #[test]
 fn buffers_decoded() {
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): buffers は {target, min, max} の object
+    // draft-ietf-moq-msf-02 §5.2.10 (Buffers): buffers は {target, min, max} の object
     let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"buffers":{"target":1000,"min":500,"max":2000}}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
@@ -200,7 +200,7 @@ fn buffers_decoded() {
 
 #[test]
 fn buffers_unknown_keys_ignored() {
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): 未知 key は無視する
+    // draft-ietf-moq-msf-02 §5.2.10 (Buffers): 未知 key は無視する
     let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"buffers":{"target":1000,"unknown":42}}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
@@ -216,7 +216,7 @@ fn buffers_unknown_keys_ignored() {
 
 #[test]
 fn buffers_ignored_when_is_live_false() {
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): isLive=false なら buffers は無視される
+    // draft-ietf-moq-msf-02 §5.2.10 (Buffers): isLive=false なら buffers は無視される
     let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":false,"buffers":{"target":1000}}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
@@ -227,7 +227,7 @@ fn buffers_ignored_when_is_live_false() {
 
 #[test]
 fn avg_bitrate_decoded() {
-    // draft-ietf-moq-msf-01 §5.2.23 (Average Bitrate): avgBitrate
+    // draft-ietf-moq-msf-02 §5.2.24 (Average Bitrate): avgBitrate
     let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"bitrate":5000000,"avgBitrate":3000000}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
@@ -239,7 +239,7 @@ fn avg_bitrate_decoded() {
 
 #[test]
 fn max_durations_decoded() {
-    // draft-ietf-moq-msf-01 §5.2.24 (Maximum GOP Duration) / §5.2.25 (Maximum Group Duration)
+    // draft-ietf-moq-msf-02 §5.2.25 (Maximum GOP Duration) / §5.2.26 (Maximum Group Duration)
     let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"maxGopDuration":2000,"maxGroupDuration":4000}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
@@ -329,7 +329,7 @@ fn connection_uri_wrong_type_rejected_and_token_ignored() {
 
 #[test]
 fn max_durations_decoded_in_clone() {
-    // draft-ietf-moq-msf-01 §5.2.24 (Maximum GOP Duration) / §5.2.25 (Maximum Group Duration):
+    // draft-ietf-moq-msf-02 §5.2.25 (Maximum GOP Duration) / §5.2.26 (Maximum Group Duration):
     // clone 経路でもワイヤキー名でデコードされること
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","maxGopDuration":2000,"maxGroupDuration":4000}]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");

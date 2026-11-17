@@ -71,7 +71,7 @@ fn roundtrip() -> noprop::TestResult {
 
 /// `%XX` で全バイトをエスケープした track-identifier が元のバイト列へ戻ること
 ///
-/// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の track-identifier は
+/// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の track-identifier は
 /// RFC 3986 §2.1 (Percent-Encoding) の `pct-encoded` を含む。track name の全バイトを `%XX`
 /// (小文字 hex) で表した入力が、任意のバイト列について元のバイト列へデコードされることを
 /// 検証する (`-` / `.` / `%` も `%XX` 表記なので構造と解釈が衝突しない)。

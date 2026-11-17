@@ -27,7 +27,7 @@ fn full_catalog_with_all_root_fields() {
 
 #[test]
 fn full_catalog_unknown_fields_ignored() {
-    // パーサは未知フィールドを無視する (draft-ietf-moq-msf-01 §5 (Catalog))
+    // パーサは未知フィールドを無視する (draft-ietf-moq-msf-02 §5 (Catalog))
     let json = br#"{"version":"draft-01","tracks":[],"unknownField":42,"another":"value"}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     assert!(matches!(doc, MsfCatalogDocument::Full(_)));
@@ -35,7 +35,7 @@ fn full_catalog_unknown_fields_ignored() {
 
 #[test]
 fn unknown_packaging_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.4 (Packaging): 許容値は loc / mediatimeline / eventtimeline / moqlog / moqmetrics のみ
+    // draft-ietf-moq-msf-02 §5.2.4 (Packaging): 許容値は loc / mediatimeline / eventtimeline / moqlog / moqmetrics のみ
     let json =
         br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"custom","isLive":true}]}"#;
     assert!(matches!(
@@ -46,7 +46,7 @@ fn unknown_packaging_rejected() {
 
 #[test]
 fn moqlog_packaging_accepted() {
-    // draft-ietf-moq-msf-01 §5.2.4 (Packaging): moqlog は許容値
+    // draft-ietf-moq-msf-02 §5.2.4 (Packaging): moqlog は許容値
     let json =
         br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"moqlog","isLive":true}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
@@ -58,7 +58,7 @@ fn moqlog_packaging_accepted() {
 
 #[test]
 fn moqmetrics_packaging_accepted() {
-    // draft-ietf-moq-msf-01 §5.2.4 (Packaging): moqmetrics は許容値
+    // draft-ietf-moq-msf-02 §5.2.4 (Packaging): moqmetrics は許容値
     let json =
         br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"moqmetrics","isLive":true}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
@@ -86,7 +86,7 @@ fn delta_minimal() {
 
 #[test]
 fn remove_tracks_extra_field_rejected() {
-    // draft-ietf-moq-msf-01 §5.1.6 (Delta update): remove operation の track object に name/namespace 以外は禁止
+    // draft-ietf-moq-msf-02 §5.1.6 (Delta update): remove operation の track object に name/namespace 以外は禁止
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"remove","tracks":[{"name":"x","packaging":"loc"}]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
@@ -96,7 +96,7 @@ fn remove_tracks_extra_field_rejected() {
 
 #[test]
 fn delta_update_non_array_rejected() {
-    // draft-ietf-moq-msf-01 §5.1.6 (Delta update): deltaUpdate は operation object の配列
+    // draft-ietf-moq-msf-02 §5.1.6 (Delta update): deltaUpdate は operation object の配列
     let json = br#"{"generatedAt":1,"deltaUpdate":false,"version":"draft-01","tracks":[]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
@@ -106,7 +106,7 @@ fn delta_update_non_array_rejected() {
 
 #[test]
 fn duplicate_track_name_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.3 (Track name): track name は namespace ごとに一意
+    // draft-ietf-moq-msf-02 §5.2.3 (Track name): track name は namespace ごとに一意
     let json = br#"{"version":"draft-01","tracks":[
             {"name":"audio","packaging":"loc","isLive":true},
             {"name":"audio","packaging":"loc","isLive":true}
@@ -130,7 +130,7 @@ fn same_name_different_namespace_allowed() {
 
 #[test]
 fn is_complete_false_rejected() {
-    // draft-ietf-moq-msf-01 §5.1.3 (Is Complete): isComplete が FALSE ならフィールド自体を含めてはならない
+    // draft-ietf-moq-msf-02 §5.1.3 (Is Complete): isComplete が FALSE ならフィールド自体を含めてはならない
     let json = br#"{"version":"draft-01","isComplete":false,"tracks":[]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
@@ -140,7 +140,7 @@ fn is_complete_false_rejected() {
 
 #[test]
 fn clone_track_minimal_rfc_example() {
-    // draft-ietf-moq-msf-01 §5.1.6 (Delta update): packaging/isLive 省略の clone track
+    // draft-ietf-moq-msf-02 §5.1.6 (Delta update): packaging/isLive 省略の clone track
     let json = br#"{
             "generatedAt": 1,
             "deltaUpdate": [
@@ -219,7 +219,7 @@ fn clone_track_missing_parent_name_rejected() {
 
 /// packaging=eventtimeline で eventType を省略した clone は受理されること
 ///
-/// draft-ietf-moq-msf-01 §5.1.6 (Delta update): "The cloned track inherits all attributes
+/// draft-ietf-moq-msf-02 §5.1.6 (Delta update): "The cloned track inherits all attributes
 /// from the parent except the Track Name which MUST be new. Attributes redefined in the
 /// track object override inherited values." 親が eventtimeline (親は §5.2.5 の必須により
 /// eventType を持つ) ならば正当な継承表現であり、decode 時点では親の属性を知らないため

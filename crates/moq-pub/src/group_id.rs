@@ -1,6 +1,6 @@
 //! Group ID の採番
 //!
-//! draft-ietf-moq-msf-01 §6.1 (Group numbering) に基づき、配信開始時の Group ID を
+//! draft-ietf-moq-msf-02 §6.1 (Group numbering) に基づき、配信開始時の Group ID を
 //! Unix epoch ミリ秒から払い出す。publisher が再起動したときに以前 publish した
 //! どの Group ID よりも大きい値から始めなければならない (MUST) ため、同一プロセス内でも
 //! 前回の割当てを必ず上回る値にする。
@@ -22,7 +22,7 @@ static LAST_INITIAL_GROUP_ID: AtomicU64 = AtomicU64::new(0);
 
 /// 配信開始時の Group ID を払い出す
 ///
-/// draft-ietf-moq-msf-01 §6.1 (Group numbering):
+/// draft-ietf-moq-msf-02 §6.1 (Group numbering):
 /// "Group IDs for a track MUST be unique and MUST increase monotonically." /
 /// "When a publisher restarts (e.g., after connectivity loss or encoder restart), it MUST
 /// ensure the new starting Group ID is greater than any previously published Group ID for
@@ -56,7 +56,7 @@ fn next_initial_group_id(candidate: u64, last: &AtomicU64) -> u64 {
 
 /// カタログを送り直すときの次の Group ID
 ///
-/// draft-ietf-moq-msf-01 §6.1 (Group numbering): "Within a continuous publishing session,
+/// draft-ietf-moq-msf-02 §6.1 (Group numbering): "Within a continuous publishing session,
 /// each subsequent Group ID SHOULD increase by 1."。また、独立したカタログは新しい Group の
 /// 先頭に置かなければならない (§5 (Catalog))。
 pub fn next_group_id(current: u64) -> u64 {
@@ -97,7 +97,7 @@ mod tests {
     /// 候補値が前回値以下のときは前回 + 1 を返すこと
     ///
     /// 短時間の停止と再開、または壁時計の巻き戻しで、再開時の開始 Group ID が前回の
-    /// 割当てを下回らないようにする (draft-ietf-moq-msf-01 §6.1 の MUST)。
+    /// 割当てを下回らないようにする (draft-ietf-moq-msf-02 §6.1 の MUST)。
     #[test]
     fn next_initial_group_id_stays_above_the_previous_value() {
         let last = AtomicU64::new(1_000);
@@ -131,7 +131,7 @@ mod tests {
 
     /// カタログの送り直しは Group ID を 1 進めること
     ///
-    /// draft-ietf-moq-msf-01 §6.1 (Group numbering) は連続した配信で次の Group ID を 1 進める
+    /// draft-ietf-moq-msf-02 §6.1 (Group numbering) は連続した配信で次の Group ID を 1 進める
     /// ことを SHOULD とする。同じ Location を 2 度送ると購読側で重複として扱われるため、
     /// 送り直しでは必ず進める。
     #[test]

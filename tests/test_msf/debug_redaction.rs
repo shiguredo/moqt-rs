@@ -1,6 +1,6 @@
 //! MSF の公開型の `Debug` が機密値を伏せることのテスト
 //!
-//! token (§5.2.37)、trackBaseKey (§5.2.41)、authInfo (§5.2.42。変数置換による token の混入は
+//! trackBaseKey (§5.2.41)、authInfo (§5.2.42。変数置換による token の混入は
 //! §5.2.43)、token を含み得る URI
 //! (connectionURI の §5.2.37、fragment パラメータの §11.1.1 / §11.4.2、query) の値を、
 //! 文字列としても十進のバイト列としても出さず、長さだけを表示することを固定する。

@@ -202,7 +202,7 @@ enum PercentEncoding {
 
 /// RFC 3986 §2.1 の `pct-encoded` 以外で、URI 層が生のままデータとして許す ASCII バイト
 ///
-/// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の `pchar-no-amp / "/"`
+/// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の `pchar-no-amp / "/"`
 /// から、リテラル (`a-z` / `A-Z` / `0-9` / `_`) と、本層で意味を持つ `.` (エスケープ開始) /
 /// `-` (フィールド区切り) / `%` (pct-encoded 開始) を除いたものである。`unreserved` の
 /// `~`、`sub-delims-no-amp`、`:`、`@`、`/` が該当する。
@@ -300,7 +300,7 @@ pub fn parse_name(s: &str) -> Result<(TrackNamespace, Vec<u8>), NameParseError> 
 
 /// MSF URI の track-identifier 用に、URI 層の `%XX` もデータバイトとして受理してパースする
 ///
-/// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の `track-identifier`
+/// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の `track-identifier`
 /// は `pchar-no-amp / "/"` であり、RFC 3986 §2.1 (Percent-Encoding) の `pct-encoded` を
 /// 含む。`?` は同節が `%3F` として percent-encode することを求めるため、`%3F` は
 /// 0x3F (`?`) のデータバイトになる。構造 (フィールド区切りの `-` のラン) は生の文字列で

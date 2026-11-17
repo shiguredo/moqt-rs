@@ -26,7 +26,7 @@ fn version_99() {
 
 #[test]
 fn version_not_string() {
-    // draft-ietf-moq-msf-01 §5.1.1 (MSF version): version は JSON Type: String
+    // draft-ietf-moq-msf-02 §5.1.1 (MSF version): version は JSON Type: String
     assert!(matches!(
         MsfCatalogDocument::decode(b"{\"version\":1,\"tracks\":[]}"),
         Err(MessageError::InvalidCatalog(_))
@@ -61,7 +61,7 @@ fn track_missing_packaging() {
 
 #[test]
 fn track_missing_is_live() {
-    // draft-ietf-moq-msf-01 §5.2.7 (Is Live): isLive は必須
+    // draft-ietf-moq-msf-02 §5.2.8 (Is Live): isLive は必須
     let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc"}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
@@ -154,7 +154,7 @@ fn depends_entry_not_string_or_integer() {
 
 #[test]
 fn render_group_different_target_latency_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 同一 renderGroup 内の isLive=true トラックが宣言した targetLatency は一致必須 (省略は比較対象外)
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency): 同一 renderGroup 内の isLive=true トラックが宣言した targetLatency は一致必須 (省略は比較対象外)
     let json = br#"{"version":"draft-01","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500},
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":1000}
@@ -167,7 +167,7 @@ fn render_group_different_target_latency_rejected() {
 
 #[test]
 fn alt_group_different_target_latency_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 同一 altGroup 内の isLive=true トラックが宣言した targetLatency は一致必須 (省略は比較対象外)
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency): 同一 altGroup 内の isLive=true トラックが宣言した targetLatency は一致必須 (省略は比較対象外)
     let json = br#"{"version":"draft-01","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"altGroup":2,"targetLatency":500},
             {"name":"b","packaging":"loc","isLive":true,"altGroup":2,"targetLatency":1000}
@@ -189,7 +189,7 @@ fn render_group_same_target_latency_accepted() {
 
 #[test]
 fn render_group_target_latency_omitted_accepted() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): フィールドが無く isLive=true なら
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency): フィールドが無く isLive=true なら
     // player が遅延を選んでよい (MAY)。省略は宣言値との不一致として拒否しない
     let json = br#"{"version":"draft-01","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500},
@@ -200,7 +200,7 @@ fn render_group_target_latency_omitted_accepted() {
 
 #[test]
 fn alt_group_target_latency_omitted_accepted() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): altGroup でも省略は不一致としない
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency): altGroup でも省略は不一致としない
     let json = br#"{"version":"draft-01","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"altGroup":2,"targetLatency":500},
             {"name":"b","packaging":"loc","isLive":true,"altGroup":2}
@@ -211,7 +211,7 @@ fn alt_group_target_latency_omitted_accepted() {
 
 #[test]
 fn render_group_target_latency_and_buffers_split_accepted() {
-    // draft-ietf-moq-msf-01 §5.2.8 / §5.2.9: 省略を比較対象外とするため、同一 group で
+    // draft-ietf-moq-msf-02 §5.2.9 / §5.2.10: 省略を比較対象外とするため、同一 group で
     // 一方が targetLatency のみ、他方が buffers のみを宣言する構成も受理される (本実装の解釈)
     let json = br#"{"version":"draft-01","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500},
@@ -223,7 +223,7 @@ fn render_group_target_latency_and_buffers_split_accepted() {
 
 #[test]
 fn render_group_omitted_between_different_target_latency_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 省略トラックを挟んでも
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency): 省略トラックを挟んでも
     // 宣言された 2 値の不一致は検出すること
     let json = br#"{"version":"draft-01","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500},
@@ -530,7 +530,7 @@ fn lang_invalid_in_clone_track() {
 
 #[test]
 fn target_latency_and_buffers_together_rejected_when_is_live_true() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers):
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency) / §5.2.10 (Buffers):
     // isLive=true の同一 track に targetLatency と buffers は共存できない
     let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"targetLatency":500,"buffers":{"target":1000}}]}"#;
     assert!(matches!(
@@ -542,7 +542,7 @@ fn target_latency_and_buffers_together_rejected_when_is_live_true() {
 
 #[test]
 fn target_latency_and_buffers_together_rejected_when_is_live_false() {
-    // draft-ietf-moq-msf-01 §5.2.8 / §5.2.9: isLive=false でも共存は reject されること
+    // draft-ietf-moq-msf-02 §5.2.9 / §5.2.10: isLive=false でも共存は reject されること
     // (本実装では presence 違反を優先する選択とする)
     let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":false,"targetLatency":500,"buffers":{"target":1000}}]}"#;
     assert!(matches!(
@@ -554,7 +554,7 @@ fn target_latency_and_buffers_together_rejected_when_is_live_false() {
 
 #[test]
 fn target_latency_or_buffers_alone_ignored_when_is_live_false() {
-    // draft-ietf-moq-msf-01 §5.2.8 / §5.2.9: 単独存在時は isLive=false で無視されること
+    // draft-ietf-moq-msf-02 §5.2.9 / §5.2.10: 単独存在時は isLive=false で無視されること
     // (両単独とも確認する)
     for (name, json) in [
         (
@@ -577,7 +577,7 @@ fn target_latency_or_buffers_alone_ignored_when_is_live_false() {
 
 #[test]
 fn clone_target_latency_or_buffers_alone_ignored_when_is_live_false() {
-    // draft-ietf-moq-msf-01 §5.2.8 / §5.2.9: clone の単独存在時も isLive=false で無視されること
+    // draft-ietf-moq-msf-02 §5.2.9 / §5.2.10: clone の単独存在時も isLive=false で無視されること
     // (両単独とも確認する)
     for (name, json, field) in [
         (
@@ -608,7 +608,7 @@ fn clone_target_latency_or_buffers_alone_ignored_when_is_live_false() {
 
 #[test]
 fn target_latency_and_buffers_together_rejected_in_clone() {
-    // draft-ietf-moq-msf-01 §5.2.8 / §5.2.9: clone でも共存は reject されること
+    // draft-ietf-moq-msf-02 §5.2.9 / §5.2.10: clone でも共存は reject されること
     // (isLive 省略時を含む。理由文字列まで固定する)
     for (name, json) in [
         (
@@ -633,7 +633,7 @@ fn target_latency_and_buffers_together_rejected_in_clone() {
 
 #[test]
 fn render_group_different_buffers_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): 同一 renderGroup 内の isLive=true トラックが宣言した buffers は一致必須 (省略は比較対象外)
+    // draft-ietf-moq-msf-02 §5.2.10 (Buffers): 同一 renderGroup 内の isLive=true トラックが宣言した buffers は一致必須 (省略は比較対象外)
     let json = br#"{"version":"draft-01","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":500}},
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":1000}}
@@ -655,7 +655,7 @@ fn render_group_same_buffers_accepted() {
 
 #[test]
 fn render_group_buffers_omitted_accepted() {
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): フィールドが無く isLive=true なら
+    // draft-ietf-moq-msf-02 §5.2.10 (Buffers): フィールドが無く isLive=true なら
     // player がバッファを選んでよい (MAY)。省略は宣言値との不一致として拒否しない
     let json = br#"{"version":"draft-01","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":500}},
@@ -666,7 +666,7 @@ fn render_group_buffers_omitted_accepted() {
 
 #[test]
 fn alt_group_buffers_omitted_accepted() {
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): altGroup でも省略は不一致としない
+    // draft-ietf-moq-msf-02 §5.2.10 (Buffers): altGroup でも省略は不一致としない
     let json = br#"{"version":"draft-01","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"altGroup":2,"buffers":{"target":500}},
             {"name":"b","packaging":"loc","isLive":true,"altGroup":2}
@@ -676,7 +676,7 @@ fn alt_group_buffers_omitted_accepted() {
 
 #[test]
 fn render_group_omitted_between_different_buffers_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): 省略トラックを挟んでも
+    // draft-ietf-moq-msf-02 §5.2.10 (Buffers): 省略トラックを挟んでも
     // 宣言された 2 値の不一致は検出すること
     let json = br#"{"version":"draft-01","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":500}},
@@ -719,7 +719,7 @@ fn render_group_mixed_live_ignored_for_target_latency() {
 
 #[test]
 fn init_data_list_duplicate_id_rejected() {
-    // draft-ietf-moq-msf-01 §5.1.7 (Initialization Data List): id は catalog 内で一意
+    // draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List): id は catalog 内で一意
     let json = br#"{"version":"draft-01","tracks":[],"initDataList":[
             {"id":"init1","type":"inline","data":"AAEC"},
             {"id":"init1","type":"inline","data":"AAED"}
@@ -741,7 +741,7 @@ fn init_data_list_unknown_type_rejected() {
 
 #[test]
 fn init_ref_missing_id_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.13 (Initialization reference): initRef は
+    // draft-ietf-moq-msf-02 §5.2.14 (Initialization reference): initRef は
     // initDataList の id を指すため、一致する id が無ければ reject される
     let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"initRef":"missing"}]}"#;
     assert!(matches!(
@@ -761,7 +761,7 @@ fn init_ref_matching_id_accepted() {
 
 #[test]
 fn delta_update_empty_array_rejected() {
-    // draft-ietf-moq-msf-01 §5.3 (Delta updates): 少なくとも 1 つの操作が必要
+    // draft-ietf-moq-msf-02 §5.3 (Delta updates): 少なくとも 1 つの操作が必要
     let json = br#"{"generatedAt":1,"deltaUpdate":[]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
@@ -780,7 +780,7 @@ fn delta_update_unknown_op_rejected() {
 
 #[test]
 fn delta_update_contains_version_rejected() {
-    // draft-ietf-moq-msf-01 §5.3 (Delta updates): delta update に version は含めない
+    // draft-ietf-moq-msf-02 §5.3 (Delta updates): delta update に version は含めない
     let json =
         br#"{"generatedAt":1,"deltaUpdate":[{"op":"add","tracks":[]}],"version":"draft-01"}"#;
     assert!(matches!(
@@ -791,7 +791,7 @@ fn delta_update_contains_version_rejected() {
 
 #[test]
 fn delta_update_contains_tracks_rejected() {
-    // draft-ietf-moq-msf-01 §5.3 (Delta updates): delta update に tracks は含めない
+    // draft-ietf-moq-msf-02 §5.3 (Delta updates): delta update に tracks は含めない
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"add","tracks":[]}],"tracks":[]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
@@ -858,7 +858,7 @@ fn buffers_non_number_value_rejected() {
 
 #[test]
 fn alt_group_different_buffers_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): 同一 altGroup 内の isLive=true トラックが宣言した buffers は一致必須 (省略は比較対象外)
+    // draft-ietf-moq-msf-02 §5.2.10 (Buffers): 同一 altGroup 内の isLive=true トラックが宣言した buffers は一致必須 (省略は比較対象外)
     let json = br#"{"version":"draft-01","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"altGroup":1,"buffers":{"target":500}},
             {"name":"b","packaging":"loc","isLive":true,"altGroup":1,"buffers":{"target":1000}}
@@ -871,7 +871,7 @@ fn alt_group_different_buffers_rejected() {
 
 #[test]
 fn clone_track_target_latency_and_buffers_together_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.8 / §5.2.9: clone の isLive:true 共存も reject されること
+    // draft-ietf-moq-msf-02 §5.2.9 / §5.2.10: clone の isLive:true 共存も reject されること
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","isLive":true,"targetLatency":500,"buffers":{"target":1000}}]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
@@ -882,7 +882,7 @@ fn clone_track_target_latency_and_buffers_together_rejected() {
 
 #[test]
 fn add_target_latency_and_buffers_together_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.8 / §5.2.9: delta add 経路の共存も reject されること
+    // draft-ietf-moq-msf-02 §5.2.9 / §5.2.10: delta add 経路の共存も reject されること
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"add","tracks":[{"name":"t","packaging":"loc","isLive":false,"targetLatency":500,"buffers":{"target":1000}}]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
@@ -973,7 +973,7 @@ fn eventtimeline_arbitrary_mime_type_accepted() {
 
 // ─── codec / role に応じた必須フィールド ──────────────────────────────────────
 
-/// role="video" は codec 必須 (draft-ietf-moq-msf-01 §5.2.18 (Codec))
+/// role="video" は codec 必須 (draft-ietf-moq-msf-02 §5.2.19 (Codec))
 #[test]
 fn video_role_missing_codec_rejected() {
     let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"video","framerate":30,"bitrate":1000}]}"#;
@@ -986,7 +986,7 @@ fn video_role_missing_codec_rejected() {
     );
 }
 
-/// role="video" は bitrate 必須 (draft-ietf-moq-msf-01 §5.2.22 (Maximum Bitrate))
+/// role="video" は bitrate 必須 (draft-ietf-moq-msf-02 §5.2.23 (Maximum Bitrate))
 #[test]
 fn video_role_missing_bitrate_rejected() {
     let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"av01"}]}"#;
@@ -1001,7 +1001,7 @@ fn video_role_missing_bitrate_rejected() {
 
 /// role="audiodescription" は audio として扱い samplerate / channelConfig を要求する
 ///
-/// draft-ietf-moq-msf-01 §5.2.6 Table 4 は `audiodescription` を
+/// draft-ietf-moq-msf-02 §5.2.7 Table 10 は `audiodescription` を
 /// "An audio description for visually impaired users" と定める。
 #[test]
 fn audiodescription_role_requires_audio_fields_rejected() {
@@ -1025,7 +1025,7 @@ fn audiodescription_role_requires_audio_fields_rejected() {
 
 /// role="signlanguage" は visual track のため video として扱い codec / bitrate を要求する
 ///
-/// draft-ietf-moq-msf-01 §5.2.6 Table 4 は `signlanguage` を
+/// draft-ietf-moq-msf-02 §5.2.7 Table 10 は `signlanguage` を
 /// "A visual track for hearing impaired users." と定める。codec には登録外の文字列を使い、
 /// codec 由来ではなく role 由来の要求であることを固定する。
 #[test]
@@ -1083,7 +1083,7 @@ fn media_role_with_required_fields_accepted() {
 
 /// codec も role も無いトラックは種別を判定できないため codec / bitrate を要求しない
 ///
-/// draft-ietf-moq-msf-01 §5.2.18 (Codec) の
+/// draft-ietf-moq-msf-02 §5.2.19 (Codec) の
 /// "It is not required for raw data tracks or event streams." と整合する。
 #[test]
 fn missing_role_does_not_require_media_fields() {
@@ -1166,7 +1166,7 @@ fn codec_video_missing_bitrate_rejected() {
 
 /// レジストリの登録名だけの codec `av01` も video と判定して bitrate を要求する
 ///
-/// draft-ietf-moq-msf-01 §5.6.2 のカタログ例は `"codec":"av01"` を使う。
+/// draft-ietf-moq-msf-02 §5.6.2 のカタログ例は `"codec":"av01"` を使う。
 #[test]
 fn registry_name_only_video_codec_missing_bitrate_rejected() {
     let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"codec":"av01"}]}"#;
@@ -1453,7 +1453,7 @@ fn registry_name_only_video_codec_missing_bitrate_rejected_on_encode() {
 /// role も codec も無いトラックを持つカタログは encode 経路でも受理される
 ///
 /// codec に基づく要求は codec を持つトラックにのみ課されるため、raw data トラックは
-/// bitrate を要求しない (draft-ietf-moq-msf-01 §5.2.18 (Codec))。
+/// bitrate を要求しない (draft-ietf-moq-msf-02 §5.2.19 (Codec))。
 #[test]
 fn raw_track_without_codec_accepted_on_encode() {
     let doc = MsfCatalogDocument::Full(MsfCatalog {
@@ -1468,7 +1468,7 @@ fn raw_track_without_codec_accepted_on_encode() {
 
 /// 通常トラックに parentName が含まれると不正カタログとして拒否される
 ///
-/// draft-ietf-moq-msf-01 §5.2.33 (Parent name): "This field MUST only be included
+/// draft-ietf-moq-msf-02 §5.2.34 (Parent name): "This field MUST only be included
 /// inside a clone operation in a delta update Section 5.1.6."
 #[test]
 fn parent_name_in_track_rejected() {
@@ -1482,7 +1482,7 @@ fn parent_name_in_track_rejected() {
 
 /// 通常トラックに parentNamespace が含まれると不正カタログとして拒否される
 ///
-/// draft-ietf-moq-msf-01 §5.2.34 (Parent namespace): "This field MUST only be included
+/// draft-ietf-moq-msf-02 §5.2.35 (Parent namespace): "This field MUST only be included
 /// inside a clone operation in a delta update Section 5.1.6." `parentName` と対称。
 #[test]
 fn parent_namespace_in_track_rejected() {
@@ -1510,7 +1510,7 @@ fn framerate_infinity_rejected() {
 
 /// 手組みの非 UTF-8 value_raw は encode で拒否され、panic しない
 ///
-/// draft-ietf-moq-msf-01 §5.2.42 (Authorization Info)
+/// draft-ietf-moq-msf-02 §5.2.42 (Authorization Info)
 #[test]
 fn auth_info_non_utf8_value_rejected_on_encode() {
     let mut track = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
@@ -1535,7 +1535,7 @@ fn auth_info_non_utf8_value_rejected_on_encode() {
 
 /// publishTracks 側の手組み不正 value_raw も encode で拒否され、panic しない
 ///
-/// draft-ietf-moq-msf-01 §5.1.5 (Publish tracks) / §5.2.42 (Authorization Info)
+/// draft-ietf-moq-msf-02 §5.1.5 (Publish tracks) / §5.2.42 (Authorization Info)
 #[test]
 fn auth_info_non_utf8_value_in_publish_tracks_rejected_on_encode() {
     let mut track = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
@@ -1560,7 +1560,7 @@ fn auth_info_non_utf8_value_in_publish_tracks_rejected_on_encode() {
 
 /// 手組みの非 JSON 値 value_raw は encode で拒否される
 ///
-/// draft-ietf-moq-msf-01 §5.2.42 (Authorization Info): 値は単独の JSON 値
+/// draft-ietf-moq-msf-02 §5.2.42 (Authorization Info): 値は単独の JSON 値
 #[test]
 fn auth_info_non_json_value_rejected_on_encode() {
     let mut track = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
@@ -1605,7 +1605,7 @@ fn full_doc(
 /// tracks 内の (namespace, name) 重複は encode でも拒否されること
 #[test]
 fn encode_full_duplicate_name_within_tracks_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.3 (Track name)
+    // draft-ietf-moq-msf-02 §5.2.3 (Track name)
     let a = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     let b = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     assert!(matches!(
@@ -1617,7 +1617,7 @@ fn encode_full_duplicate_name_within_tracks_rejected() {
 /// tracks と publishTracks をまたぐ (namespace, name) 重複は encode でも拒否されること
 #[test]
 fn encode_full_duplicate_name_across_tracks_and_publish_tracks_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.3 (Track name): "Within the catalog"
+    // draft-ietf-moq-msf-02 §5.2.3 (Track name): "Within the catalog"
     let a = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     let b = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     assert!(matches!(
@@ -1629,7 +1629,7 @@ fn encode_full_duplicate_name_across_tracks_and_publish_tracks_rejected() {
 /// initDataList の id 重複は encode でも拒否されること
 #[test]
 fn encode_full_duplicate_init_data_list_id_rejected() {
-    // draft-ietf-moq-msf-01 §5.1.7 (Initialization Data List)
+    // draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List)
     let entry = || MsfInitData {
         id: "init1".to_string(),
         kind: MsfInitDataKind::Inline,
@@ -1644,7 +1644,7 @@ fn encode_full_duplicate_init_data_list_id_rejected() {
 /// 一致しない initRef は encode でも拒否されること
 #[test]
 fn encode_full_missing_init_ref_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.13 (Initialization reference)
+    // draft-ietf-moq-msf-02 §5.2.14 (Initialization reference)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.init_ref = Some("missing".to_string());
     assert!(matches!(
@@ -1656,7 +1656,7 @@ fn encode_full_missing_init_ref_rejected() {
 /// targetLatency と buffers の共存は encode でも拒否されること
 #[test]
 fn encode_full_target_latency_and_buffers_together_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers)
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency) / §5.2.10 (Buffers)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.target_latency = Some(500);
     track.buffers = Some(MsfBuffers {
@@ -1674,7 +1674,7 @@ fn encode_full_target_latency_and_buffers_together_rejected() {
 /// 同一 renderGroup の targetLatency 不一致は encode でも拒否されること
 #[test]
 fn encode_full_group_target_latency_mismatch_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency)
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency)
     let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
     a.render_group = Some(1);
     a.target_latency = Some(500);
@@ -1690,7 +1690,7 @@ fn encode_full_group_target_latency_mismatch_rejected() {
 /// publishTracks 内の同一 altGroup の buffers 不一致は encode でも拒否されること
 #[test]
 fn encode_full_publish_tracks_group_buffers_mismatch_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers)
+    // draft-ietf-moq-msf-02 §5.2.10 (Buffers)
     let mut a = MsfTrack::new("a".to_string(), MsfPackaging::MoqLog, true);
     a.alt_group = Some(1);
     a.buffers = Some(MsfBuffers {
@@ -1714,7 +1714,7 @@ fn encode_full_publish_tracks_group_buffers_mismatch_rejected() {
 /// 同一 renderGroup で片方だけ targetLatency を宣言した手組みカタログは encode でも受理されること
 #[test]
 fn encode_full_group_target_latency_omitted_accepted() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 省略は player の裁量 (MAY) であり不一致ではない
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency): 省略は player の裁量 (MAY) であり不一致ではない
     let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
     a.render_group = Some(1);
     a.target_latency = Some(500);
@@ -1728,7 +1728,7 @@ fn encode_full_group_target_latency_omitted_accepted() {
 /// 同一 renderGroup で片方だけ buffers を宣言した手組みカタログは encode でも受理されること
 #[test]
 fn encode_full_group_buffers_omitted_accepted() {
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): 省略は player の裁量 (MAY) であり不一致ではない
+    // draft-ietf-moq-msf-02 §5.2.10 (Buffers): 省略は player の裁量 (MAY) であり不一致ではない
     let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
     a.render_group = Some(1);
     a.buffers = Some(MsfBuffers {
@@ -1746,7 +1746,7 @@ fn encode_full_group_buffers_omitted_accepted() {
 /// 同一 altGroup で片方だけ buffers を宣言した手組みカタログは encode でも受理されること
 #[test]
 fn encode_full_alt_group_buffers_omitted_accepted() {
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): altGroup でも省略は不一致としない
+    // draft-ietf-moq-msf-02 §5.2.10 (Buffers): altGroup でも省略は不一致としない
     let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
     a.alt_group = Some(2);
     a.buffers = Some(MsfBuffers {
@@ -1764,7 +1764,7 @@ fn encode_full_alt_group_buffers_omitted_accepted() {
 /// 同一 altGroup で片方だけ targetLatency を宣言した手組みカタログは encode でも受理されること
 #[test]
 fn encode_full_alt_group_target_latency_omitted_accepted() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): altGroup でも省略は不一致としない
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency): altGroup でも省略は不一致としない
     let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
     a.alt_group = Some(2);
     a.target_latency = Some(500);
@@ -1873,7 +1873,7 @@ fn encode_full_without_group_different_target_latency_accepted() {
 /// publishTracks 内で片方だけ targetLatency を宣言した手組みカタログは encode でも受理されること
 #[test]
 fn encode_full_publish_tracks_group_target_latency_omitted_accepted() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): tracks と publishTracks は分離して検証するが
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency): tracks と publishTracks は分離して検証するが
     // 省略を比較対象外とする規則は publishTracks 側にも適用される
     let mut a = MsfTrack::new("a".to_string(), MsfPackaging::MoqLog, true);
     a.render_group = Some(1);
@@ -1888,7 +1888,7 @@ fn encode_full_publish_tracks_group_target_latency_omitted_accepted() {
 /// 省略トラックを挟んでも宣言された targetLatency の不一致は encode でも拒否されること
 #[test]
 fn encode_full_group_omitted_between_different_target_latency_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency)
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency)
     let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
     a.render_group = Some(1);
     a.target_latency = Some(500);
@@ -1906,7 +1906,7 @@ fn encode_full_group_omitted_between_different_target_latency_rejected() {
 /// 省略トラックを挟んでも宣言された buffers の不一致は encode でも拒否されること
 #[test]
 fn encode_full_group_omitted_between_different_buffers_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers)
+    // draft-ietf-moq-msf-02 §5.2.10 (Buffers)
     let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
     a.render_group = Some(1);
     a.buffers = Some(MsfBuffers {
@@ -1932,7 +1932,7 @@ fn encode_full_group_omitted_between_different_buffers_rejected() {
 /// isLive=false のトラックの targetLatency は手組みカタログの encode でも比較対象外であること
 #[test]
 fn encode_full_group_target_latency_is_live_false_ignored() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): isLive=false では targetLatency は無視される。
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency): isLive=false では targetLatency は無視される。
     // decode 経路は decode_track が isLive=false の値を None に正規化するため、
     // 正規化を通らない手組みの MsfCatalog で除外そのものを固定する
     let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
@@ -1949,7 +1949,7 @@ fn encode_full_group_target_latency_is_live_false_ignored() {
 /// isLive=false のトラックの buffers は手組みカタログの encode でも比較対象外であること
 #[test]
 fn encode_full_group_buffers_is_live_false_ignored() {
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): isLive=false では buffers は無視される
+    // draft-ietf-moq-msf-02 §5.2.10 (Buffers): isLive=false では buffers は無視される
     let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
     a.render_group = Some(1);
     a.buffers = Some(MsfBuffers {
@@ -1972,7 +1972,7 @@ fn encode_full_group_buffers_is_live_false_ignored() {
 /// 非 eventtimeline での eventType は encode でも拒否されること
 #[test]
 fn encode_full_event_type_with_non_eventtimeline_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.5 (Event timeline type)
+    // draft-ietf-moq-msf-02 §5.2.6 (Event timeline type)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.event_type = Some("x".to_string());
     assert!(matches!(
@@ -1984,7 +1984,7 @@ fn encode_full_event_type_with_non_eventtimeline_rejected() {
 /// eventtimeline で eventType が無い場合は encode でも拒否されること
 #[test]
 fn encode_full_event_timeline_missing_event_type_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.5 (Event timeline type)
+    // draft-ietf-moq-msf-02 §5.2.6 (Event timeline type)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::EventTimeline, true);
     track.depends = vec![MsfDependency::TrackName("v".to_string())];
     track.mime_type = Some("application/json".to_string());
@@ -1997,7 +1997,7 @@ fn encode_full_event_timeline_missing_event_type_rejected() {
 /// mediatimeline で depends が無い場合は encode でも拒否されること
 #[test]
 fn encode_full_media_timeline_missing_depends_rejected() {
-    // draft-ietf-moq-msf-01 §7.2 (Media Timeline Catalog requirements)
+    // draft-ietf-moq-msf-02 §7.2 (Media Timeline Catalog requirements)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::MediaTimeline, true);
     track.mime_type = Some("application/json".to_string());
     assert!(matches!(
@@ -2035,7 +2035,7 @@ fn encode_full_secure_objects_incomplete_rejected() {
 /// 不正な lang は encode でも拒否されること
 #[test]
 fn encode_full_invalid_lang_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.32 (Language)
+    // draft-ietf-moq-msf-02 §5.2.33 (Language)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.lang = Some("1".to_string());
     assert!(matches!(
@@ -2047,7 +2047,7 @@ fn encode_full_invalid_lang_rejected() {
 /// irregular タグは encode でも受理され、decode で同じ値に戻ること
 #[test]
 fn encode_full_irregular_lang_roundtrip() {
-    // draft-ietf-moq-msf-01 §5.2.32 (Language)
+    // draft-ietf-moq-msf-02 §5.2.33 (Language)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.lang = Some("i-klingon".to_string());
     let bytes = full_doc(vec![track], vec![], vec![])
@@ -2067,7 +2067,7 @@ fn encode_full_irregular_lang_roundtrip() {
 /// 通常トラックの parentName は encode でも拒否されること
 #[test]
 fn encode_full_parent_name_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.33 (Parent name)
+    // draft-ietf-moq-msf-02 §5.2.34 (Parent name)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.parent_name = Some("p".to_string());
     assert!(matches!(
@@ -2079,7 +2079,7 @@ fn encode_full_parent_name_rejected() {
 /// isLive=true の trackDuration は encode でも拒否されること
 #[test]
 fn encode_full_track_duration_when_is_live_true_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.35 (Track duration)
+    // draft-ietf-moq-msf-02 §5.2.36 (Track duration)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.track_duration = Some(1000);
     assert!(matches!(
@@ -2093,7 +2093,7 @@ fn encode_full_track_duration_when_is_live_true_rejected() {
 /// 空の operations は encode でも拒否されること
 #[test]
 fn encode_delta_empty_operations_rejected() {
-    // draft-ietf-moq-msf-01 §5.3 (Delta updates)
+    // draft-ietf-moq-msf-02 §5.3 (Delta updates)
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
         generated_at: 1,
         operations: Vec::new(),
@@ -2104,7 +2104,7 @@ fn encode_delta_empty_operations_rejected() {
 /// delta add の不正トラックは encode でも拒否されること
 #[test]
 fn encode_delta_add_invalid_track_rejected() {
-    // draft-ietf-moq-msf-01 §7.2 (Media Timeline Catalog requirements): depends 必須
+    // draft-ietf-moq-msf-02 §7.2 (Media Timeline Catalog requirements): depends 必須
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::MediaTimeline, true);
     track.mime_type = Some("application/json".to_string());
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
@@ -2119,7 +2119,7 @@ fn encode_delta_add_invalid_track_rejected() {
 /// delta clone の targetLatency / buffers 共存は encode でも拒否されること
 #[test]
 fn encode_delta_clone_target_latency_and_buffers_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers)
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency) / §5.2.10 (Buffers)
     let mut clone = MsfCloneTrack::new("c".to_string(), "p".to_string());
     clone.target_latency = Some(500);
     clone.buffers = Some(MsfBuffers {
@@ -2143,7 +2143,7 @@ fn encode_delta_clone_target_latency_and_buffers_rejected() {
 /// delta clone の isLive=true + trackDuration は encode でも拒否されること
 #[test]
 fn encode_delta_clone_track_duration_when_is_live_true_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.35 (Track duration)
+    // draft-ietf-moq-msf-02 §5.2.36 (Track duration)
     let mut clone = MsfCloneTrack::new("c".to_string(), "p".to_string());
     clone.is_live = Some(true);
     clone.track_duration = Some(1000);
@@ -2159,7 +2159,7 @@ fn encode_delta_clone_track_duration_when_is_live_true_rejected() {
 /// delta clone の非 eventtimeline packaging + eventType は encode でも拒否されること
 #[test]
 fn encode_delta_clone_event_type_with_non_eventtimeline_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.5 (Event timeline type)
+    // draft-ietf-moq-msf-02 §5.2.6 (Event timeline type)
     let mut clone = MsfCloneTrack::new("c".to_string(), "p".to_string());
     clone.packaging = Some(MsfPackaging::Loc);
     clone.event_type = Some("x".to_string());
@@ -2175,7 +2175,7 @@ fn encode_delta_clone_event_type_with_non_eventtimeline_rejected() {
 /// delta clone の不正 lang は encode でも拒否されること
 #[test]
 fn encode_delta_clone_invalid_lang_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.32 (Language)
+    // draft-ietf-moq-msf-02 §5.2.33 (Language)
     let mut clone = MsfCloneTrack::new("c".to_string(), "p".to_string());
     clone.lang = Some("1".to_string());
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
@@ -2190,7 +2190,7 @@ fn encode_delta_clone_invalid_lang_rejected() {
 /// delta add / clone の irregular タグは encode でも受理され、decode で同じ値に戻ること
 #[test]
 fn encode_delta_irregular_lang_roundtrip() {
-    // draft-ietf-moq-msf-01 §5.2.32 (Language)
+    // draft-ietf-moq-msf-02 §5.2.33 (Language)
     let mut add = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
     add.lang = Some("i-klingon".to_string());
     let mut clone = MsfCloneTrack::new("c".to_string(), "p".to_string());

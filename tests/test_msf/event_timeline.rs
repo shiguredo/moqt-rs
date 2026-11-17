@@ -22,7 +22,7 @@ fn wallclock_index() {
 
 #[test]
 fn data_object_with_nested_values() {
-    // draft-ietf-moq-msf-01 §8.1 (Event Timeline data format): data は Object でなければならない
+    // draft-ietf-moq-msf-02 §8.1 (Event Timeline data format): data は Object でなければならない
     let json = br#"[{"L":[0,0],"data":{"lat":47.1812,"lon":8.4592}}]"#;
     let tl = MsfEventTimeline::decode(json).expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(tl.0[0].index, MsfEventIndex::Location(0, 0));

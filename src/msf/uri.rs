@@ -1,4 +1,4 @@
-//! MSF URI と fragment のパース (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation))
+//! MSF URI と fragment のパース (draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation))
 //!
 //! `moqt://` URI の fragment 部 (`msf:...`) をパースし、MSF namespace-name 文字列を
 //! [`crate::name::parse_name_with_percent_encoding`] で namespace / track name へ分解する。
@@ -14,7 +14,7 @@
 use crate::{error::MessageError, message::common::TrackNamespace, name};
 use alloc::{format, string::String, string::ToString, vec::Vec};
 
-/// MSF URI の fragment (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation))
+/// MSF URI の fragment (draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation))
 ///
 /// `msf:` に続く track-identifier と、`&` 区切りのパラメータ列を保持する。
 #[derive(Debug, Clone, PartialEq)]
@@ -27,7 +27,7 @@ pub struct MsfFragment {
     pub parameters: Vec<MsfFragmentParameter>,
 }
 
-/// MSF fragment の 1 パラメータ (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation))
+/// MSF fragment の 1 パラメータ (draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation))
 ///
 /// 値は token を含み得る (§11.1.1 の `cat`、§11.4.2)。パラメータ名は配備ごとに決まり、名前で
 /// 機密かどうかを判別できないため、`Debug` ではすべての値を伏せ、`value_bytes` として長さだけを
@@ -51,7 +51,7 @@ impl core::fmt::Debug for MsfFragmentParameter {
     }
 }
 
-/// connection パラメータが要求する接続種別 (draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters))
+/// connection パラメータが要求する接続種別 (draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters))
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MsfConnectionType {
     /// `q`: Native QUIC 接続を必須とする
@@ -60,7 +60,7 @@ pub enum MsfConnectionType {
     WebTransport,
 }
 
-/// wallclock-range / mediatime-range の範囲 (draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters))
+/// wallclock-range / mediatime-range の範囲 (draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters))
 ///
 /// 両端は inclusive。`end_ms` が `None` の場合は open range を表す。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,7 +71,7 @@ pub struct MsfTimeRange {
     pub end_ms: Option<u64>,
 }
 
-/// location-range の終端 (draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters))
+/// location-range の終端 (draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters))
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MsfLocationRangeEnd {
     /// 終端 Group ID
@@ -80,7 +80,7 @@ pub struct MsfLocationRangeEnd {
     pub object_id: Option<u64>,
 }
 
-/// location-range の範囲 (draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters))
+/// location-range の範囲 (draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters))
 ///
 /// 両端は inclusive。`end` が `None` の場合は open range を表す。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,7 +93,7 @@ pub struct MsfLocationRange {
     pub end: Option<MsfLocationRangeEnd>,
 }
 
-/// パース済みの MSF URI (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation))
+/// パース済みの MSF URI (draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation))
 ///
 /// fragment 以外の要素は接続確立に使う付随情報として保持する。
 ///
@@ -219,7 +219,7 @@ impl MsfFragment {
 
 /// MSF URI 全体をパースする
 ///
-/// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の
+/// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の
 /// `msf-uri = "moqt://" authority path-abempty [ "?" query ] "#" msf-fragment` に従う。
 /// 同節は scheme を case-insensitive と規定するため、`MOQT://` なども受理する。
 ///
@@ -228,7 +228,7 @@ impl MsfFragment {
 /// - `moqt://` scheme でない / `#` が無い / authority が空: `InvalidCatalog`
 /// - fragment が `msf:` で始まらない / 形式不正: `InvalidCatalog`
 pub fn parse_msf_uri(uri: &str) -> Result<MsfUri, MessageError> {
-    // draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation):
+    // draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation):
     // "Scheme: This case-insensitive scheme defines the underlying transport."
     // バイト境界を跨ぐ slice で panic しないよう get で前方一致を確認する。
     const SCHEME: &str = "moqt://";
@@ -267,7 +267,7 @@ pub fn parse_msf_uri(uri: &str) -> Result<MsfUri, MessageError> {
 
 /// `#` 以降の fragment (`msf:...`) をパースする
 ///
-/// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の ABNF に従う。
+/// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の ABNF に従う。
 /// track-identifier は §11.1 (URL construction and interpretation) の `pchar-no-amp / "/"` を
 /// §11.1.2 (MSF Namespace-Name String Encoding) の表現として
 /// [`crate::name::parse_name_with_percent_encoding`] で分解する。URI 層の `%XX`
@@ -299,7 +299,7 @@ pub fn parse_msf_fragment(fragment: &str) -> Result<MsfFragment, MessageError> {
         ));
     }
     validate_pchar_no_amp(track_identifier, true)?;
-    // draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation): track-identifier は
+    // draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation): track-identifier は
     // `pchar-no-amp / "/"` であり、RFC 3986 §2.1 (Percent-Encoding) の `pct-encoded` を含む。
     // `%XX` をデータバイトとしてデコードする (`?` は `%3F` として現れる)。
     let (namespace, track_name) = name::parse_name_with_percent_encoding(track_identifier)
@@ -340,7 +340,7 @@ pub fn parse_msf_fragment(fragment: &str) -> Result<MsfFragment, MessageError> {
 
 /// `pchar-no-amp` (任意で `/` を含む) の文字種を検証する
 ///
-/// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の ABNF に従う。
+/// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の ABNF に従う。
 fn validate_pchar_no_amp(value: &str, allow_slash: bool) -> Result<(), MessageError> {
     let bytes = value.as_bytes();
     let mut i = 0;
@@ -412,7 +412,7 @@ fn parse_time_range(value: &str) -> Result<MsfTimeRange, MessageError> {
 
 /// location-range の値を範囲へ変換する
 ///
-/// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters): location-range は
+/// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters): location-range は
 /// "The '.' dot and '-' dash separators MUST be omitted when the second value is omitted."
 /// のため、末尾ダッシュ (`5-`) は open range として受理しない。
 fn parse_location_range(value: &str) -> Result<MsfLocationRange, MessageError> {

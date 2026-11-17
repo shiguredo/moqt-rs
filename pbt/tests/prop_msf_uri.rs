@@ -1,4 +1,4 @@
-//! draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation): MSF URI fragment の
+//! draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation): MSF URI fragment の
 //! パースの property-based test。
 
 use pbt::common::test_runner;

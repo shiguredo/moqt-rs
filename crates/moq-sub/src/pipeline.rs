@@ -841,7 +841,7 @@ use tokio_moq::webtransport::WtSessionState;
 struct VideoTrackInfo {
     /// 購読に使う namespace
     ///
-    /// draft-ietf-moq-msf-01 §5.2.2 (Track namespace) は track が宣言した namespace が
+    /// draft-ietf-moq-msf-02 §5.2.2 (Track namespace) は track が宣言した namespace が
     /// catalog track の namespace を上書きすると定めるため、宣言があればそれを使う。
     namespace: TrackNamespace,
     track_name: String,
@@ -1280,7 +1280,7 @@ enum TrackKind {
     /// カタログトラック
     ///
     /// 購読は LARGEST_OBJECT の取得と、以後に配られるカタログ (独立カタログと delta) の
-    /// 受信に使う (draft-ietf-moq-msf-01 §5 (Catalog))。購読で届くカタログは、stream task が
+    /// 受信に使う (draft-ietf-moq-msf-02 §5 (Catalog))。購読で届くカタログは、stream task が
     /// 読み出した Object を main ループへ渡し、`CatalogState` を所有する main ループが
     /// MSF の配置規則で適用する。
     Catalog,
@@ -1634,7 +1634,7 @@ fn record_last_location(
 
 /// 移行先の session で購読を張り直す
 ///
-/// catalog は FILL_PARAMETERS 付き SUBSCRIBE で張り直す (draft-ietf-moq-msf-01 §5 (Catalog)
+/// catalog は FILL_PARAMETERS 付き SUBSCRIBE で張り直す (draft-ietf-moq-msf-02 §5 (Catalog)
 /// が catalog の取得に求める経路)。映像は SUBSCRIBE のあとに SUBSCRIBER_PRIORITY の
 /// REQUEST_UPDATE を送る (起動時と同じ手順)。音声は SUBSCRIBE だけである。
 /// 映像だけ、購読のあとに直近 Group の FETCH を発行する (起動時と同じ手順)。音声の明示
@@ -1647,7 +1647,7 @@ fn record_last_location(
 /// いない) はフィルタを載せず、起動時と同じ「購読後の live のみ」になる。
 ///
 /// catalog だけは位置を使わない。catalog は「最新の完全なカタログと、それに続く delta」を
-/// 状態へ適用し続ける必要があり (draft-ietf-moq-msf-01 §5 (Catalog))、移行中に更新が
+/// 状態へ適用し続ける必要があり (draft-ietf-moq-msf-02 §5 (Catalog))、移行中に更新が
 /// 抜けた場合に delta だけを再開すると状態が壊れる。起動時と同じ Next Object の購読に
 /// 戻し、移行後に publish される次のカタログ (独立カタログまたは delta) を受け直す。
 /// なお移行後の fill fetch stream は受信ループの stream task が読み捨てるため (起動時の
@@ -1714,7 +1714,7 @@ async fn resubscribe_tracks(
                 last_locations.get(TrackKind::Video),
             );
             // 起動時と同じく SUBSCRIBER_PRIORITY を送る。C4M 認可トークンは
-            // `MoqtClient::send_request_update` が付ける (draft-ietf-moq-msf-01 §11.4.3)
+            // `MoqtClient::send_request_update` が付ける (draft-ietf-moq-msf-02 §11.5.3)
             let mut params = shiguredo_moqt::message_parameter::MessageParameters::new();
             params.push(shiguredo_moqt::message_parameter::MessageParameter {
                 param_type: shiguredo_moqt::message_parameter::PARAM_SUBSCRIBER_PRIORITY,
@@ -3681,7 +3681,7 @@ pub async fn run(
     // 3. カタログを FILL_PARAMETERS 付き SUBSCRIBE で取得する
     //
     // MSF は catalog の取得に "SUBSCRIBE with a Joining FETCH (offset = 0)" を MUST とする
-    // (draft-ietf-moq-msf-01 §5 (Catalog))。Joining FETCH は draft-20 で削除され
+    // (draft-ietf-moq-msf-02 §5 (Catalog))。Joining FETCH は draft-20 で削除され
     // (draft-ietf-moq-transport-23 Appendix A.4 の "Since draft-ietf-moq-transport-19" に記録)、
     // §3.5 (Joining an Ongoing Track) が示す購読パターンに置き換わった:
     //
@@ -3693,11 +3693,11 @@ pub async fn run(
     //    `CatalogState` へ到着順に適用する
     //
     // Group ID を 0 と仮定してはならない。publisher は再起動時に以前 publish したどの
-    // Group ID よりも大きい値から始める MUST があり (draft-ietf-moq-msf-01 §6.1
+    // Group ID よりも大きい値から始める MUST があり (draft-ietf-moq-msf-02 §6.1
     // (Group numbering))、Unix epoch ミリ秒を開始値にする実装が一般的である。
     //
     // C4M 認可トークンは `MoqtClient` が URL の C4M トークンをすべて付けるため、ここでは
-    // 指定しない (draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization))。
+    // 指定しない (draft-ietf-moq-msf-02 §11.5.3 (Presenting Authorization))。
     // 移行 (GOAWAY) で catalog を張り直すときに使う namespace
     let catalog_namespace_for_migration = namespace.clone();
     let catalog_params =
@@ -3799,7 +3799,7 @@ pub async fn run(
     // カタログの targetLatency をプレイヤーへ渡す。プレイヤーは時間軸の表示の遅れの下限として
     // 反映する。対象は実際に購読する track の render group に属する track に限る
     // (別の render group の宣言値を購読中の track に適用しない。
-    // draft-ietf-moq-msf-01 §5.2.8 は同じ render group の track が同一の targetLatency を
+    // draft-ietf-moq-msf-02 §5.2.9 は同じ render group の track が同一の targetLatency を
     // 持つことを MUST とする)
     let subscribed_latencies = subscribed_track_latencies(
         video_latency,
@@ -3891,7 +3891,7 @@ pub async fn run(
         // REQUEST_UPDATE で video subscription の subscriber priority を変更するサンプル
         //
         // C4M 認可トークンは `MoqtClient::send_request_update` が付けるため、ここでは
-        // 指定しない (draft-ietf-moq-msf-01 §11.4.3)。SUBSCRIBE と同じトークンを
+        // 指定しない (draft-ietf-moq-msf-02 §11.5.3)。SUBSCRIBE と同じトークンを
         // REQUEST_UPDATE にも MUST 付与する。
         let mut params = shiguredo_moqt::message_parameter::MessageParameters::new();
         params.push(shiguredo_moqt::message_parameter::MessageParameter {
@@ -4563,7 +4563,7 @@ pub async fn run(
             }
             Some(object) = catalog_rx.recv() => {
                 // 購読で届いた catalog の更新を MSF の配置規則で適用する
-                // (draft-ietf-moq-msf-01 §5 (Catalog))。起動時に解決したトラックは
+                // (draft-ietf-moq-msf-02 §5 (Catalog))。起動時に解決したトラックは
                 // 変更しないが、カタログの状態は購読が続く限り最新に保つ
                 // 移行後の再購読の Location Filter に使うため、配送した catalog Object の
                 // 位置も記録する
@@ -4633,7 +4633,7 @@ pub async fn run(
                                         }
                                         // 移行先 URI の msf fragment の connection が現在の
                                         // 接続経路と矛盾する場合は移行しない
-                                        // (draft-ietf-moq-msf-01 §11.1.1)
+                                        // (draft-ietf-moq-msf-02 §11.1.1)
                                         if let Err(e) = tokio_moq::resolve_transport(
                                             Some(config.transport),
                                             &target.url,
@@ -4743,7 +4743,7 @@ pub async fn run(
                                             !same_session_url(&target.url, &config.url);
                                         // 移行先 URI の msf fragment の connection が現在の
                                         // 接続経路と矛盾する場合は移行しない
-                                        // (draft-ietf-moq-msf-01 §11.1.1)
+                                        // (draft-ietf-moq-msf-02 §11.1.1)
                                         if new_session_url
                                             && let Err(e) = tokio_moq::resolve_transport(
                                                 Some(config.transport),
@@ -7147,7 +7147,7 @@ fn catalog_subscribe_parameters() -> MessageParameters {
 /// `CATALOG_TIMEOUT` より後になると期限切れで終了する (MSF は fill を伴う購読を MUST と
 /// するため、本 example は fill 非対応の publisher を対象にしない)。
 ///
-/// これにより draft-ietf-moq-msf-01 §5 (Catalog) が求める「最新の完全なカタログと、
+/// これにより draft-ietf-moq-msf-02 §5 (Catalog) が求める「最新の完全なカタログと、
 /// それに続く delta update」を 1 つの状態 [`catalog::CatalogState`] へまとめて適用できる。
 async fn receive_catalog(
     recv_acceptor: &mut transport::StreamAcceptor,
@@ -7302,7 +7302,7 @@ async fn receive_catalog(
         })
     });
     // 音声トラックは本 example がデコードできる codec (opus / mp4a.* (AAC)) から選ぶ。
-    // codec の文字列は draft-ietf-moq-msf-01 §5.2.18 (Codec) が定める RFC 6381 の表記である。
+    // codec の文字列は draft-ietf-moq-msf-02 §5.2.19 (Codec) が定める RFC 6381 の表記である。
     // デコードできない codec を購読すると、録画中でも再生時にデコーダを生成できずに失敗する。
     let audio_track = catalog.tracks.iter().find(|t| {
         t.codec
@@ -7664,7 +7664,7 @@ async fn read_catalog_payload(
 
 /// 受信した catalog Object を状態へ適用し、結果をログに出す
 ///
-/// draft-ietf-moq-msf-01 §5 (Catalog) の配置規則の判定は [`catalog::CatalogState::apply`]
+/// draft-ietf-moq-msf-02 §5 (Catalog) の配置規則の判定は [`catalog::CatalogState::apply`]
 /// が行う。適用しなかった Object は理由付きで debug に出す。
 fn apply_catalog_object(
     state: &mut catalog::CatalogState,
@@ -7724,7 +7724,7 @@ fn subscribed_track_latencies(
 /// カタログの track から、購読する track の `targetLatency` (ミリ秒) を求める
 ///
 /// 対象は購読する track の `renderGroup` に属する track に限る。`renderGroup` は
-/// 「一緒に描画される track の集合」であり (draft-ietf-moq-msf-01 §5.2.11)、同じ group の
+/// 「一緒に描画される track の集合」であり (draft-ietf-moq-msf-02 §5.2.12)、同じ group の
 /// track は同じ `targetLatency` を持たなければならない (§5.2.8 の MUST)。購読する group が
 /// 複数あるときは、時間軸が持てる値が 1 つだけであるため最大値をすべての購読 track に掛ける
 /// (track ごとの値の適用は本 example の範囲外)。
@@ -8153,7 +8153,7 @@ async fn handle_stream_body(
                         FetchStreamAction::DeliverCatalog => {
                             // fill fetch stream で届く完全な catalog を、購読で届く catalog と
                             // 同じ `CatalogState` へ適用するため main ループへ渡す
-                            // (draft-ietf-moq-msf-01 §5 (Catalog))。移行後に catalog 購読を
+                            // (draft-ietf-moq-msf-02 §5 (Catalog))。移行後に catalog 購読を
                             // 張り直すと、移行中に更新された catalog が fill で届く
                             match read_catalog_fetch_objects(
                                 stream,
@@ -10845,7 +10845,7 @@ mod tests {
 
     /// namespace を宣言した track は宣言された namespace を購読に使う
     ///
-    /// draft-ietf-moq-msf-01 §5.2.2 (Track namespace) は track が宣言した namespace が継承した
+    /// draft-ietf-moq-msf-02 §5.2.2 (Track namespace) は track が宣言した namespace が継承した
     /// namespace を上書きすると定める。MOQT の購読は Full Track Name に対して行うため
     /// (draft-ietf-moq-transport-23 §2.4.1 (Track Naming))、catalog track の namespace を使うと
     /// 別の track を購読するか DOES_NOT_EXIST になる。
@@ -10865,7 +10865,7 @@ mod tests {
 
     /// namespace を宣言しない track は catalog track の namespace を継承する
     ///
-    /// draft-ietf-moq-msf-01 §5.2.2 (Track namespace) は宣言が無い場合に catalog track の
+    /// draft-ietf-moq-msf-02 §5.2.2 (Track namespace) は宣言が無い場合に catalog track の
     /// namespace を継承する MUST を定める。
     #[test]
     fn video_track_info_inherits_catalog_namespace() {
@@ -15962,7 +15962,7 @@ mod tests {
 
         /// 同じ Group の delta カタログの JSON (track を 1 つ追加する)
         ///
-        /// delta update は version を持ってはならない (draft-ietf-moq-msf-01 §5.3)。
+        /// delta update は version を持ってはならない (draft-ietf-moq-msf-02 §5.3)。
         fn catalog_delta_json(track_name: &str) -> Vec<u8> {
             format!(
                 r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"add","tracks":[{{"name":"{track_name}","packaging":"loc","isLive":true}}]}}]}}"#
@@ -16801,7 +16801,7 @@ mod tests {
         ///
         /// fill fetch stream は購読より前に publish された独立カタログを運び
         /// (draft-ietf-moq-transport-23 §3.4 (Fill Semantics))、同じ Group の Object ID 1
-        /// 以降は MSF の delta update である (draft-ietf-moq-msf-01 §5 (Catalog))。
+        /// 以降は MSF の delta update である (draft-ietf-moq-msf-02 §5 (Catalog))。
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn receive_catalog_applies_the_fill_fetch_catalog_and_delta() {
             run_with_timeout(async {
@@ -17197,7 +17197,7 @@ mod tests {
         /// `apply_catalog_object` が MSF の不変条件に反する delta を Err にすること
         ///
         /// 同じ (namespace, name) の track を add する delta は track の一意性 MUST に反する
-        /// ため、カタログを変更せず Err を返す (draft-ietf-moq-msf-01 §5.2.3)。
+        /// ため、カタログを変更せず Err を返す (draft-ietf-moq-msf-02 §5.2.3)。
         #[test]
         fn apply_catalog_object_rejects_an_invalid_delta() {
             let mut state = catalog::CatalogState::new(test_track_namespace());

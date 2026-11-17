@@ -12,7 +12,7 @@ use shiguredo_moqt::msf::{
 
 /// 有効な lang 文字列を生成する
 ///
-/// draft-ietf-moq-msf-01 §5.2.32 (Language): BCP 47 言語タグ。
+/// draft-ietf-moq-msf-02 §5.2.33 (Language): BCP 47 言語タグ。
 /// primary 2〜3 文字 + 任意個の `-` 区切り英数字サブタグを基本とし、
 /// 1/8 の重みで RFC 5646 §2.1 (Syntax) の grandfathered タグ
 /// (`i-klingon` のように primary subtag が 1 文字の irregular タグを含む) を返す。
@@ -67,7 +67,7 @@ fn sample_name(ctx: &mut noprop::TestCaseContext) -> String {
 
 /// MsfPackaging を生成する
 ///
-/// draft-ietf-moq-msf-01 §5.2.4 (Packaging): 許容値は loc / mediatimeline / eventtimeline / moqlog / moqmetrics
+/// draft-ietf-moq-msf-02 §5.2.4 (Packaging): 許容値は loc / mediatimeline / eventtimeline / moqlog / moqmetrics
 fn sample_packaging(ctx: &mut noprop::TestCaseContext) -> MsfPackaging {
     noprop::sample_choice(
         ctx,
@@ -180,7 +180,7 @@ fn sample_track(ctx: &mut noprop::TestCaseContext) -> MsfTrack {
     t.template = sample_template(ctx);
 
     // 生成器は正規形 (isLive=false なら None) を作る。encode 側も decode の正規化に合わせるため
-    // (draft-ietf-moq-msf-01 §5.2.8 / §5.2.9 は受信側の無視規則)、roundtrip が成立する
+    // (draft-ietf-moq-msf-02 §5.2.9 / §5.2.10 は受信側の無視規則)、roundtrip が成立する
     t.target_latency = if is_live {
         target_latency.map(|v| v as u64)
     } else {
@@ -258,7 +258,7 @@ fn sample_catalog_namespace(ctx: &mut noprop::TestCaseContext) -> String {
 
 /// clone operation 用トラックを生成する (parentName 必須)
 ///
-/// draft-ietf-moq-msf-01 §5.1.6 (Delta update): clone track は親の属性を継承し、
+/// draft-ietf-moq-msf-02 §5.1.6 (Delta update): clone track は親の属性を継承し、
 /// 再定義された属性のみ上書きする。packaging/isLive は省略可。
 fn sample_clone_track(ctx: &mut noprop::TestCaseContext) -> MsfCloneTrack {
     let name = sample_name(ctx);
@@ -622,7 +622,7 @@ fn rewrite_dependencies(
 
 /// Full catalog の encode → decode ラウンドトリップ
 ///
-/// - トラック名は catalog 通して (tracks / publishTracks) namespace ごとに一意でなければならない (draft-ietf-moq-msf-01 §5.2.3 (Track name))
+/// - トラック名は catalog 通して (tracks / publishTracks) namespace ごとに一意でなければならない (draft-ietf-moq-msf-02 §5.2.3 (Track name))
 /// - isComplete: false はエンコード時に省略され、デコードで false に戻る
 #[test]
 fn full_catalog_roundtrip() -> noprop::TestResult {
@@ -703,7 +703,7 @@ fn full_catalog_is_complete_roundtrip() -> noprop::TestResult {
 /// Delta update の encode → decode ラウンドトリップ
 ///
 /// add_tracks/remove_tracks/clone_tracks のうち少なくとも 1 つは非空にする
-/// (draft-ietf-moq-msf-01 §5.3 (Delta updates))。
+/// (draft-ietf-moq-msf-02 §5.3 (Delta updates))。
 #[test]
 fn delta_roundtrip() -> noprop::TestResult {
     // 3 操作すべてが空 (1/64 の確率) はデルタとして無効なため reject する

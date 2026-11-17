@@ -233,7 +233,7 @@ fn is_complete_emitted_when_true() {
 
 /// isLive=false の MsfTrack は targetLatency / buffers をエンコードしないこと
 ///
-/// draft-ietf-moq-msf-01 §5.2.8 / §5.2.9: isLive=false なら両フィールドは無視される。
+/// draft-ietf-moq-msf-02 §5.2.9 / §5.2.10: isLive=false なら両フィールドは無視される。
 /// decode 側は None に正規化するため、encode 側も出力しないことで往復を一致させる。
 #[test]
 fn target_latency_and_buffers_not_emitted_when_is_live_false() {
@@ -352,7 +352,7 @@ fn clone_track_roundtrip_all_fields() {
             tracks: vec![MsfCloneTrack {
                 name: "clone".to_string(),
                 parent_name: "original".to_string(),
-                // draft-ietf-moq-msf-01 §5.2.34 (Parent namespace):
+                // draft-ietf-moq-msf-02 §5.2.35 (Parent namespace):
                 // parentNamespace 付き clone の roundtrip を検証する
                 parent_namespace: Some("parent-ns".to_string()),
                 packaging: Some(MsfPackaging::EventTimeline),
@@ -596,7 +596,7 @@ fn clone_depends_none_omitted() {
 
 #[test]
 fn publish_tracks_roundtrip() {
-    // draft-ietf-moq-msf-01 §5.6.16 を適用した例 (version を draft-01 化 ・ isLive 補完 ・
+    // draft-ietf-moq-msf-02 §5.6.16 を適用した例 (version を draft-01 化 ・ isLive 補完 ・
     // token / connectionURI 除外 ・ %resourceId% は文字列として保持。
     // token / connectionURI なし版の roundtrip (あり版は connection_uri_token_roundtrip) 。
     // 仕様例の track 名と namespace の MUST 形式 (§9.2 / §10.2) の妥当性検証は対象外とし、

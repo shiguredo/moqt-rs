@@ -1,7 +1,7 @@
 //! MSF カタログの生成と送信
 //!
 //! video / audio track の情報から MSF カタログを組み立て、catalog track に送信する。
-//! draft-ietf-moq-msf-01 §5 (Catalog) に準拠する。
+//! draft-ietf-moq-msf-02 §5 (Catalog) に準拠する。
 
 use shiguredo_moqt::loc::LocProperties;
 use shiguredo_moqt::message::common::Location;
@@ -16,18 +16,18 @@ use crate::stream_writer::SubgroupWriter;
 use tokio_moq::moqt_client::{DataPlaneHandle, ObjectFilterOutcome};
 use tokio_moq::transport;
 
-/// 映像トラックの role (draft-ietf-moq-msf-01 §5.2.6 (Track role) Table 4)
+/// 映像トラックの role (draft-ietf-moq-msf-02 §5.2.7 (Track role) Table 10)
 const MSF_ROLE_VIDEO: &str = "video";
 
-/// 音声トラックの role (draft-ietf-moq-msf-01 §5.2.6 (Track role) Table 4)
+/// 音声トラックの role (draft-ietf-moq-msf-02 §5.2.7 (Track role) Table 10)
 const MSF_ROLE_AUDIO: &str = "audio";
 
-/// C4M (CAT) の認可 scheme 名 (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info) Table 7)
+/// C4M (CAT) の認可 scheme 名 (draft-ietf-moq-msf-02 §5.2.42 (Authorization Info) Table 10)
 const MSF_AUTH_SCHEME_CAT: &str = "cat";
 
 /// 視聴側の URI の予約 fragment パラメータ `cat` を指す変数参照
 ///
-/// draft-ietf-moq-msf-01 §5.2.43 (Token Delivery via URI) / §5.4 (Variable Substitution)。
+/// draft-ietf-moq-msf-02 §5.2.43 (Token Delivery via URI) / §5.4 (Variable Substitution)。
 /// `authInfo` の値は scheme 固有の JSON 値であるため、JSON 文字列として持つ。
 /// `%cat%` の end-to-end な解決は、moq-sub に変数置換の呼び出し経路が無いため本実装の
 /// 範囲外である (catalog は未解決の参照を載せたまま送る)。
@@ -48,7 +48,7 @@ pub struct VideoTrackParams<'a> {
     ///
     /// `maxGopDuration` と `maxGroupDuration` の両方に同じ値を載せる。この publisher は
     /// Group を 1 キーフレーム間隔で進めるため、Group = 1 GOP が成り立つ
-    /// (draft-ietf-moq-msf-01 §5.2.24 (Maximum GOP Duration) / §5.2.25 (Maximum Group
+    /// (draft-ietf-moq-msf-02 §5.2.25 (Maximum GOP Duration) / §5.2.26 (Maximum Group
     /// Duration))。Group 長を宣言しない経路 (MP4 パススルーは MP4 のキーフレームで
     /// Group が進む) では `None` とし、どちらのフィールドも載せない。
     pub max_group_duration_ms: Option<u64>,
@@ -63,7 +63,7 @@ pub struct AudioTrackParams<'a> {
     /// サンプリングレート Hz
     pub samplerate: u32,
     /// MSF channelConfig (mono = "1", stereo = "2")
-    /// draft-ietf-moq-msf-01 §5.2.29 (Channel configuration)
+    /// draft-ietf-moq-msf-02 §5.2.30 (Channel configuration)
     pub channel_config: &'a str,
     /// kbps
     pub bitrate: u32,
@@ -72,17 +72,17 @@ pub struct AudioTrackParams<'a> {
 /// publisher が音声・映像の両トラックへ共通で載せる同期用のメタデータ
 ///
 /// 音声と映像を同じ時間軸で再生するため、両トラックへ同じ値を載せる。
-/// draft-ietf-moq-msf-01 §5.2.8 (Target latency) は同じ render group のトラックに
+/// draft-ietf-moq-msf-02 §5.2.9 (Target latency) は同じ render group のトラックに
 /// 同一の targetLatency を MUST で求める。
 #[derive(Debug, Clone, Copy)]
 pub struct CatalogSyncParams {
     /// レンダーグループ
     ///
-    /// 同じ値を持つトラックは同時に再生する (draft-ietf-moq-msf-01 §5.2.11)。
+    /// 同じ値を持つトラックは同時に再生する (draft-ietf-moq-msf-02 §5.2.12)。
     pub render_group: u64,
     /// ターゲットレイテンシ (ms)
     ///
-    /// 符号化した時刻から表示するまでのずれ (draft-ietf-moq-msf-01 §5.2.8)。
+    /// 符号化した時刻から表示するまでのずれ (draft-ietf-moq-msf-02 §5.2.9)。
     pub target_latency_ms: u64,
 }
 
@@ -94,7 +94,7 @@ pub struct CatalogParams<'a> {
     pub catalog_alias: u64,
     /// カタログ最初の Object を載せる Group ID
     ///
-    /// draft-ietf-moq-msf-01 §6.1 (Group numbering): Track の Group ID は一意で単調増加が
+    /// draft-ietf-moq-msf-02 §6.1 (Group numbering): Track の Group ID は一意で単調増加が
     /// MUST であり、publisher が再起動したときは以前に publish したどの Group ID よりも
     /// 大きい値から始めなければならない。Group ID を 0 に固定してはならない。
     pub group_id: u64,
@@ -109,7 +109,7 @@ pub struct CatalogParams<'a> {
     /// URL の MSF fragment の `cat` から取り出した C4M 認可トークン
     ///
     /// SETUP の AUTHORIZATION TOKEN (0x03) として送るトークンであり、空でないときは
-    /// 映像 / 音声の track に authInfo を載せる (draft-ietf-moq-msf-01 §5.2.42)。
+    /// 映像 / 音声の track に authInfo を載せる (draft-ietf-moq-msf-02 §5.2.42)。
     pub cat_tokens: &'a [Vec<u8>],
     pub video: Option<VideoTrackParams<'a>>,
     pub audio: Option<AudioTrackParams<'a>>,
@@ -117,7 +117,7 @@ pub struct CatalogParams<'a> {
 
 /// SETUP に載せる C4M 認可トークンから、catalog の track に載せる authInfo を決める
 ///
-/// draft-ietf-moq-msf-01 §5.2.42 (Authorization Info) / §11.4.1 (Discovering Authorization
+/// draft-ietf-moq-msf-02 §5.2.42 (Authorization Info) / §11.5.1 (Discovering Authorization
 /// Requirements): authInfo の存在は「この track の購読には認可トークンが必要」という
 /// 視聴側へのシグナルであり、視聴側はこれを見てトークンの提示を決める。
 ///
@@ -143,8 +143,8 @@ fn auth_info_for_cat_tokens(cat_tokens: &[Vec<u8>]) -> Option<Vec<MsfAuthInfo>> 
 /// video / audio のいずれも指定されない場合は、トラックを 1 つも持たないカタログになるため
 /// 構築せずにエラーを返す。
 /// `auth_info` は track 単位のフィールドのため、載せるときは全ての track に同じ値を載せる
-/// (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))。
-/// draft-ietf-moq-msf-01 §5 (Catalog)
+/// (draft-ietf-moq-msf-02 §5.2.42 (Authorization Info))。
+/// draft-ietf-moq-msf-02 §5 (Catalog)
 fn build_catalog(
     video: Option<&VideoTrackParams<'_>>,
     audio: Option<&AudioTrackParams<'_>>,
@@ -156,7 +156,7 @@ fn build_catalog(
     if let Some(v) = video {
         let mut track = MsfTrack::new(v.track_name.to_string(), MsfPackaging::Loc, true);
         track.namespace = Some(v.namespace.to_string());
-        // draft-ietf-moq-msf-01 §5.2.6 (Track role) Table 4 の予約 role を載せる。
+        // draft-ietf-moq-msf-02 §5.2.7 (Track role) Table 10 の予約 role を載せる。
         // 受信側は codec だけでなく role からも content の種別を判定できる
         track.role = Some(MSF_ROLE_VIDEO.to_string());
         track.codec = Some(v.codec.to_string());
@@ -177,7 +177,7 @@ fn build_catalog(
     if let Some(a) = audio {
         let mut track = MsfTrack::new(a.track_name.to_string(), MsfPackaging::Loc, true);
         track.namespace = Some(a.namespace.to_string());
-        // draft-ietf-moq-msf-01 §5.2.6 (Track role) Table 4 の予約 role を載せる。
+        // draft-ietf-moq-msf-02 §5.2.7 (Track role) Table 10 の予約 role を載せる。
         // 受信側は codec だけでなく role からも content の種別を判定できる
         track.role = Some(MSF_ROLE_AUDIO.to_string());
         track.codec = Some(a.codec.to_string());
@@ -211,10 +211,10 @@ fn build_catalog(
 ///
 /// track の authInfo は渡した C4M 認可トークンから作るため、GOAWAY 移行で移行先の `cat` が
 /// 変わったときは新しいトークンで呼び直す
-/// (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info) / §5.2.43 (Token Delivery via URI))。
+/// (draft-ietf-moq-msf-02 §5.2.42 (Authorization Info) / §5.2.43 (Token Delivery via URI))。
 /// 送信は行わない (送信は [`send_catalog`] / [`publish_catalog_object`] が担う)。
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
-/// draft-ietf-moq-msf-01 §5 (Catalog)
+/// draft-ietf-moq-msf-02 §5 (Catalog)
 pub fn build_catalog_json(
     video: Option<&VideoTrackParams<'_>>,
     audio: Option<&AudioTrackParams<'_>>,
@@ -235,8 +235,8 @@ pub fn build_catalog_json(
 /// FETCH を転送してきた場合、publisher は同じバイト列を FETCH 応答として返すため、
 /// 呼び出し側で保持する。
 /// C4M 認可トークンで接続する配信は、映像 / 音声の track に authInfo を載せ、
-/// 視聴側に同じ方式のトークンの提示を求める (draft-ietf-moq-msf-01 §5.2.42)。
-/// draft-ietf-moq-msf-01 §5 (Catalog)
+/// 視聴側に同じ方式のトークンの提示を求める (draft-ietf-moq-msf-02 §5.2.42)。
+/// draft-ietf-moq-msf-02 §5 (Catalog)
 pub async fn send_catalog(params: CatalogParams<'_>) -> Result<Vec<u8>> {
     // 組み立ては `build_catalog_json` に任せ、移行後の再構築と同じ経路を通す
     let catalog_json = build_catalog_json(
@@ -285,10 +285,10 @@ pub(crate) const CATALOG_PUBLISHER_PRIORITY: u8 = 64;
 
 /// MSF カタログの JSON を 1 Object (Object ID 0) として Group に送信する
 ///
-/// draft-ietf-moq-msf-01 §5 (Catalog): 各 Group の最初の Object (Object ID 0) は独立した
+/// draft-ietf-moq-msf-02 §5 (Catalog): 各 Group の最初の Object (Object ID 0) は独立した
 /// 完全なカタログでなければならず、独立した更新は新しい Group の先頭に置く。カタログの
 /// 送り直しは新しい Group ID でこの関数を呼ぶ。
-/// draft-ietf-moq-msf-01 §5 (Catalog) は「配信網の cache から落ちうる時間が過ぎたら
+/// draft-ietf-moq-msf-02 §5 (Catalog) は「配信網の cache から落ちうる時間が過ぎたら
 /// publish し直す」を SHOULD とするため、呼び出し側が間隔を決める。
 ///
 /// 戻り値は購読フィルタの評価結果である。`ObjectFilterOutcome::Skip` はどの購読にも
@@ -305,7 +305,7 @@ pub async fn publish_catalog_object(
     start_location: Option<Location>,
 ) -> Result<ObjectFilterOutcome> {
     // カタログを Subgroup Stream として送信する。Subgroup ID は 0 でなければならない
-    // (draft-ietf-moq-msf-01 §5: すべてのカタログ更新は MOQT sub-group 0 に置く MUST)
+    // (draft-ietf-moq-msf-02 §5: すべてのカタログ更新は MOQT sub-group 0 に置く MUST)
     let mut writer = SubgroupWriter::new(
         handle,
         data_plane,
@@ -401,7 +401,7 @@ mod tests {
     ///
     /// codec 文字列が audio / video と判定されること自体は、library 側の登録名テストで
     /// `av01.0.08M.08` / `opus` を含めて固定している。
-    /// draft-ietf-moq-msf-01 §5.2.18 (Codec) / §5.2.22 (Maximum Bitrate)
+    /// draft-ietf-moq-msf-02 §5.2.19 (Codec) / §5.2.23 (Maximum Bitrate)
     #[test]
     fn publisher_catalog_tracks_encode() {
         let video = VideoTrackParams {
@@ -432,7 +432,7 @@ mod tests {
     /// 音声と映像の renderGroup / targetLatency が同一値で載り、encode / decode を往復できること
     ///
     /// 受信側は同じ render group のトラックを同時に再生し、targetLatency ぶん遅らせて表示する。
-    /// draft-ietf-moq-msf-01 §5.2.8 (Target latency) は同じ render group のトラックに同一の
+    /// draft-ietf-moq-msf-02 §5.2.9 (Target latency) は同じ render group のトラックに同一の
     /// targetLatency を MUST で求める。§5.2.11 (Render group) は同じ値のトラックを
     /// 同時に再生する SHOULD を定める。
     #[test]
@@ -504,7 +504,7 @@ mod tests {
     /// Group は 1 キーフレーム間隔 = 1 GOP であるため、両方に同じ値を載せる。値は
     /// 時間ベースの判定が境界の 1 フレームぶん遅れ得ることを見込んだ Group 長 + 1 フレーム
     /// (30 fps / 2000 ms なら 2034 ms) である。Group 長を宣言できない経路ではどちらも
-    /// 載せない。draft-ietf-moq-msf-01 §5.2.24 (Maximum GOP Duration) /
+    /// 載せない。draft-ietf-moq-msf-02 §5.2.25 (Maximum GOP Duration) /
     /// §5.2.25 (Maximum Group Duration)
     #[test]
     fn publisher_catalog_sets_max_gop_and_group_duration() {
@@ -585,7 +585,7 @@ mod tests {
     /// publisher が載せる role が §5.2.6 Table 4 の予約 role であること
     ///
     /// 受信側は codec だけでなく role からも content の種別を判定できる。
-    /// draft-ietf-moq-msf-01 §5.2.6 (Track role)
+    /// draft-ietf-moq-msf-02 §5.2.7 (Track role)
     #[test]
     fn publisher_catalog_sets_reserved_track_roles() {
         let video = VideoTrackParams {
@@ -694,7 +694,7 @@ mod tests {
     /// C4M トークンがあるときだけ CAT の authInfo を組み立てること
     ///
     /// 値はトークンそのものではなく、視聴側の URI の `cat` を指す変数参照にする
-    /// (draft-ietf-moq-msf-01 §5.2.42 / §5.2.43)。
+    /// (draft-ietf-moq-msf-02 §5.2.42 / §5.2.43)。
     #[test]
     fn auth_info_is_built_only_for_cat_tokens() {
         assert!(
@@ -718,7 +718,7 @@ mod tests {
     /// カタログ JSON の組み立てが C4M トークンの有無で authInfo を出し分けること
     ///
     /// 移行先の cat が変わったときに、同じ track 情報から authInfo を載せ替えた JSON を
-    /// 組み立てられることを固定する (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))。
+    /// 組み立てられることを固定する (draft-ietf-moq-msf-02 §5.2.42 (Authorization Info))。
     #[test]
     fn build_catalog_json_reflects_cat_tokens() {
         let audio = AudioTrackParams {
@@ -775,7 +775,7 @@ mod tests {
 
     /// C4M トークンで接続する配信が映像 / 音声の両トラックに authInfo を載せること
     ///
-    /// 視聴側は authInfo の存在で track の認可要否を判断する (draft-ietf-moq-msf-01
+    /// 視聴側は authInfo の存在で track の認可要否を判断する (draft-ietf-moq-msf-02
     /// §5.2.42 / §11.4.1)。authInfo は track 単位のフィールドのため両トラックに載せる。
     #[test]
     fn publisher_catalog_sets_auth_info_on_both_tracks_for_c4m() {

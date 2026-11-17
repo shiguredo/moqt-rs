@@ -9,7 +9,7 @@ fn loc_track(name: &str, namespace: Option<&str>) -> MsfTrack {
 
 #[test]
 fn apply_delta_add_appends_track() {
-    // draft-ietf-moq-msf-01 §5.1.6 (Delta update): add は新規トラックを追加する
+    // draft-ietf-moq-msf-02 §5.1.6 (Delta update): add は新規トラックを追加する
     let mut catalog = MsfCatalog::new();
     let delta = MsfDeltaUpdate {
         generated_at: 1000,
@@ -43,7 +43,7 @@ fn apply_delta_add_duplicate_rejected() {
     ));
 }
 
-/// draft-ietf-moq-msf-01 §5.2.35 (Track duration): isLive=true なら trackDuration は禁止。
+/// draft-ietf-moq-msf-02 §5.2.36 (Track duration): isLive=true なら trackDuration は禁止。
 /// add 経路でも encode 時まで待たず apply_delta 時点で拒否する。
 #[test]
 fn apply_delta_add_is_live_with_track_duration_rejected() {
@@ -67,7 +67,7 @@ fn apply_delta_add_is_live_with_track_duration_rejected() {
     );
 }
 
-/// draft-ietf-moq-msf-01 §5.2.18 (Codec): video トラックは codec が必須。
+/// draft-ietf-moq-msf-02 §5.2.19 (Codec): video トラックは codec が必須。
 /// add 経路でも encode 時まで待たず apply_delta 時点で拒否する。
 #[test]
 fn apply_delta_add_video_without_codec_rejected() {
@@ -90,7 +90,7 @@ fn apply_delta_add_video_without_codec_rejected() {
     );
 }
 
-/// draft-ietf-moq-msf-01 §5.2.28 (Audio sample rate): codec から audio と判定したトラックは
+/// draft-ietf-moq-msf-02 §5.2.29 (Audio sample rate): codec から audio と判定したトラックは
 /// role が無くても samplerate が必須。add 経路でも encode 時まで待たず apply_delta 時点で
 /// 拒否する。
 #[test]
@@ -120,7 +120,7 @@ fn apply_delta_add_codec_audio_without_samplerate_rejected() {
 
 #[test]
 fn apply_delta_remove_deletes_track() {
-    // draft-ietf-moq-msf-01 §5.1.6 (Delta update): remove は既存トラックを削除する
+    // draft-ietf-moq-msf-02 §5.1.6 (Delta update): remove は既存トラックを削除する
     let mut catalog = MsfCatalog::new();
     catalog.tracks.push(loc_track("v", None));
     let delta = MsfDeltaUpdate {
@@ -153,7 +153,7 @@ fn apply_delta_remove_missing_rejected() {
 
 #[test]
 fn apply_delta_clone_inherits_and_overrides() {
-    // draft-ietf-moq-msf-01 §5.1.6 (Delta update): clone は親の属性を継承し、
+    // draft-ietf-moq-msf-02 §5.1.6 (Delta update): clone は親の属性を継承し、
     // 再定義された属性で上書きする
     let mut parent = loc_track("v", None);
     parent.codec = Some("av01".to_string());
@@ -225,7 +225,7 @@ fn apply_delta_clone_added_audio_codec_without_samplerate_rejected() {
 
 #[test]
 fn apply_delta_clone_uses_parent_namespace() {
-    // draft-ietf-moq-msf-01 §5.2.34 (Parent namespace): parentNamespace で親を特定する
+    // draft-ietf-moq-msf-02 §5.2.35 (Parent namespace): parentNamespace で親を特定する
     let mut catalog = MsfCatalog::new();
     catalog.tracks.push(loc_track("v", Some("other-ns")));
     let mut clone = MsfCloneTrack::new("v2".to_string(), "v".to_string());
@@ -262,7 +262,7 @@ fn apply_delta_clone_missing_parent_rejected() {
 
 #[test]
 fn apply_delta_clone_is_live_false_drops_inherited_latency() {
-    // draft-ietf-moq-msf-01 §5.2.8 / §5.2.9: isLive=false なら targetLatency / buffers は無視される
+    // draft-ietf-moq-msf-02 §5.2.9 / §5.2.10: isLive=false なら targetLatency / buffers は無視される
     let mut parent = loc_track("v", None);
     parent.target_latency = Some(500);
     parent.buffers = Some(MsfBuffers {
@@ -293,7 +293,7 @@ fn apply_delta_clone_is_live_false_drops_inherited_latency() {
 
 #[test]
 fn apply_delta_clone_event_timeline_without_event_type_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.5 (Event timeline type): eventtimeline なら eventType 必須
+    // draft-ietf-moq-msf-02 §5.2.6 (Event timeline type): eventtimeline なら eventType 必須
     let mut catalog = MsfCatalog::new();
     catalog.tracks.push(loc_track("v", None));
     let mut clone = MsfCloneTrack::new("e".to_string(), "v".to_string());
@@ -314,7 +314,7 @@ fn apply_delta_clone_event_timeline_without_event_type_rejected() {
 
 #[test]
 fn apply_delta_group_latency_mismatch_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 同一 renderGroup の宣言された targetLatency は一致 (省略は比較対象外)
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency): 同一 renderGroup の宣言された targetLatency は一致 (省略は比較対象外)
     let mut first = loc_track("v1", None);
     first.render_group = Some(1);
     first.target_latency = Some(500);
@@ -338,7 +338,7 @@ fn apply_delta_group_latency_mismatch_rejected() {
 /// 同一 renderGroup で片方だけ targetLatency を宣言した delta 適用は受理されること
 #[test]
 fn apply_delta_group_target_latency_omitted_accepted() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): フィールドが無く isLive=true なら
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency): フィールドが無く isLive=true なら
     // player が遅延を選んでよい (MAY)。delta 適用後の検証でも省略は不一致としない
     let mut first = loc_track("v1", None);
     first.render_group = Some(1);
@@ -361,7 +361,7 @@ fn apply_delta_group_target_latency_omitted_accepted() {
 /// 同一 renderGroup で片方だけ buffers を宣言した delta 適用は受理されること
 #[test]
 fn apply_delta_group_buffers_omitted_accepted() {
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): フィールドが無く isLive=true なら
+    // draft-ietf-moq-msf-02 §5.2.10 (Buffers): フィールドが無く isLive=true なら
     // player がバッファを選んでよい (MAY)。delta 適用後の検証でも省略は不一致としない
     let mut first = loc_track("v1", None);
     first.render_group = Some(1);
@@ -388,7 +388,7 @@ fn apply_delta_group_buffers_omitted_accepted() {
 /// 省略トラックを挟んでも宣言された targetLatency の不一致は delta 適用後の検証で拒否されること
 #[test]
 fn apply_delta_group_omitted_between_different_target_latency_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 省略トラックを挟んでも
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency): 省略トラックを挟んでも
     // 宣言された 2 値の不一致は delta 適用後の検証で検出すること
     let mut first = loc_track("v1", None);
     first.render_group = Some(1);
@@ -416,7 +416,7 @@ fn apply_delta_group_omitted_between_different_target_latency_rejected() {
 /// 省略トラックを挟んでも宣言された buffers の不一致は delta 適用後の検証で拒否されること
 #[test]
 fn apply_delta_group_omitted_between_different_buffers_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): 省略トラックを挟んでも
+    // draft-ietf-moq-msf-02 §5.2.10 (Buffers): 省略トラックを挟んでも
     // 宣言された 2 値の不一致は delta 適用後の検証で検出すること
     let mut first = loc_track("v1", None);
     first.render_group = Some(1);
@@ -452,7 +452,7 @@ fn apply_delta_group_omitted_between_different_buffers_rejected() {
 /// 同一 altGroup で片方だけ targetLatency を宣言した delta 適用は受理されること
 #[test]
 fn apply_delta_alt_group_target_latency_omitted_accepted() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): delta 適用後の検証でも
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency): delta 適用後の検証でも
     // altGroup の省略は不一致としない
     let mut first = loc_track("v1", None);
     first.alt_group = Some(2);
@@ -475,7 +475,7 @@ fn apply_delta_alt_group_target_latency_omitted_accepted() {
 /// 同一 altGroup で片方だけ buffers を宣言した delta 適用は受理されること
 #[test]
 fn apply_delta_alt_group_buffers_omitted_accepted() {
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): delta 適用後の検証でも
+    // draft-ietf-moq-msf-02 §5.2.10 (Buffers): delta 適用後の検証でも
     // altGroup の省略は不一致としない
     let mut first = loc_track("v1", None);
     first.alt_group = Some(2);
@@ -502,7 +502,7 @@ fn apply_delta_alt_group_buffers_omitted_accepted() {
 /// altGroup でも省略トラックを挟んだ宣言値の不一致は delta 適用後の検証で拒否されること
 #[test]
 fn apply_delta_alt_group_omitted_between_different_buffers_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): altGroup でも省略トラックを挟んだ
+    // draft-ietf-moq-msf-02 §5.2.10 (Buffers): altGroup でも省略トラックを挟んだ
     // 宣言値の不一致は delta 適用後の検証で検出すること
     let mut first = loc_track("v1", None);
     first.alt_group = Some(2);
@@ -538,7 +538,7 @@ fn apply_delta_alt_group_omitted_between_different_buffers_rejected() {
 /// altGroup でも省略トラックを挟んだ targetLatency の不一致は delta 適用後の検証で拒否されること
 #[test]
 fn apply_delta_alt_group_omitted_between_different_target_latency_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): altGroup でも省略トラックを挟んだ
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency): altGroup でも省略トラックを挟んだ
     // 宣言値の不一致は delta 適用後の検証で検出すること
     let mut first = loc_track("v1", None);
     first.alt_group = Some(2);
@@ -566,7 +566,7 @@ fn apply_delta_alt_group_omitted_between_different_target_latency_rejected() {
 /// clone が親から継承した宣言値を別 group へ持ち込み衝突する場合、delta 適用後の検証で拒否されること
 #[test]
 fn apply_delta_clone_inherited_group_conflict_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 適用前のカタログは正当であり、
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency): 適用前のカタログは正当であり、
     // clone が親から継承した targetLatency を renderGroup 1 に持ち込むことで初めて衝突する
     let mut parent = loc_track("v1", None);
     parent.target_latency = Some(500);
@@ -592,7 +592,7 @@ fn apply_delta_clone_inherited_group_conflict_rejected() {
 
 #[test]
 fn apply_delta_clone_inherited_target_latency_and_buffers_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers):
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency) / §5.2.10 (Buffers):
     // 親の targetLatency と clone の buffers が継承解決後に共存するため reject される
     let mut parent = loc_track("v", None);
     parent.target_latency = Some(500);
@@ -619,7 +619,7 @@ fn apply_delta_clone_inherited_target_latency_and_buffers_rejected() {
 
 #[test]
 fn apply_delta_clone_inherited_buffers_and_target_latency_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers):
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency) / §5.2.10 (Buffers):
     // 親の buffers と clone の targetLatency が継承解決後に共存するため reject される
     let mut parent = loc_track("v", None);
     parent.buffers = Some(MsfBuffers {
@@ -646,7 +646,7 @@ fn apply_delta_clone_inherited_buffers_and_target_latency_rejected() {
 
 #[test]
 fn apply_delta_clone_is_live_false_avoids_coexistence() {
-    // draft-ietf-moq-msf-01 §5.2.8 / §5.2.9: isLive=false なら双方とも無視され共存しない
+    // draft-ietf-moq-msf-02 §5.2.9 / §5.2.10: isLive=false なら双方とも無視され共存しない
     let mut parent = loc_track("v", None);
     parent.target_latency = Some(500);
     let mut catalog = MsfCatalog::new();
@@ -678,7 +678,7 @@ fn apply_delta_clone_is_live_false_avoids_coexistence() {
 
 #[test]
 fn apply_delta_add_colliding_with_publish_track_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.3 (Track name): tracks と publishTracks をまたいでも一意
+    // draft-ietf-moq-msf-02 §5.2.3 (Track name): tracks と publishTracks をまたいでも一意
     let mut catalog = MsfCatalog::new();
     catalog.publish_tracks.push(loc_track("v", Some("ns")));
     let delta = MsfDeltaUpdate {
@@ -695,7 +695,7 @@ fn apply_delta_add_colliding_with_publish_track_rejected() {
 
 #[test]
 fn apply_delta_clone_colliding_with_publish_track_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.3 (Track name): clone も publishTracks との一意性検査対象
+    // draft-ietf-moq-msf-02 §5.2.3 (Track name): clone も publishTracks との一意性検査対象
     let mut catalog = MsfCatalog::new();
     catalog.tracks.push(loc_track("v", None));
     catalog.publish_tracks.push(loc_track("v2", None));
@@ -714,7 +714,7 @@ fn apply_delta_clone_colliding_with_publish_track_rejected() {
 
 #[test]
 fn apply_delta_add_missing_init_ref_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.13 (Initialization reference): initRef は initDataList の id を指す
+    // draft-ietf-moq-msf-02 §5.2.14 (Initialization reference): initRef は initDataList の id を指す
     let mut catalog = MsfCatalog::new();
     let mut track = loc_track("v", None);
     track.init_ref = Some("missing".to_string());
@@ -754,7 +754,7 @@ fn apply_delta_add_matching_init_ref_accepted() {
 
 #[test]
 fn apply_delta_add_on_complete_catalog_rejected() {
-    // draft-ietf-moq-msf-01 §5.1.3 (Is Complete): 完了済みカタログへトラックを追加できない
+    // draft-ietf-moq-msf-02 §5.1.3 (Is Complete): 完了済みカタログへトラックを追加できない
     let mut catalog = MsfCatalog::new();
     catalog.is_complete = true;
     let delta = MsfDeltaUpdate {
@@ -771,7 +771,7 @@ fn apply_delta_add_on_complete_catalog_rejected() {
 
 #[test]
 fn apply_delta_clone_on_complete_catalog_rejected() {
-    // draft-ietf-moq-msf-01 §5.1.3 (Is Complete): clone による追加も拒否される
+    // draft-ietf-moq-msf-02 §5.1.3 (Is Complete): clone による追加も拒否される
     let mut catalog = MsfCatalog::new();
     catalog.is_complete = true;
     catalog.tracks.push(loc_track("v", None));
@@ -790,7 +790,7 @@ fn apply_delta_clone_on_complete_catalog_rejected() {
 
 #[test]
 fn apply_delta_remove_on_complete_catalog_allowed() {
-    // draft-ietf-moq-msf-01 §5.1.3 (Is Complete) は追加を禁じるのみで削除は禁じない
+    // draft-ietf-moq-msf-02 §5.1.3 (Is Complete) は追加を禁じるのみで削除は禁じない
     let mut catalog = MsfCatalog::new();
     catalog.is_complete = true;
     catalog.tracks.push(loc_track("v", None));
@@ -808,7 +808,7 @@ fn apply_delta_remove_on_complete_catalog_allowed() {
 
 #[test]
 fn apply_delta_operations_applied_in_order() {
-    // draft-ietf-moq-msf-01 §5.3 (Delta updates): 操作は配列順に適用される
+    // draft-ietf-moq-msf-02 §5.3 (Delta updates): 操作は配列順に適用される
     let mut catalog = MsfCatalog::new();
     let delta = MsfDeltaUpdate {
         generated_at: 1,
@@ -893,7 +893,7 @@ fn apply_delta_add_batch_with_duplicate_name_rejected_without_partial_apply() {
 
 /// clone の継承解決結果でも lang (BCP 47) を検証する
 ///
-/// draft-ietf-moq-msf-01 §5.2.32 (Language): 継承した lang が不正な場合は
+/// draft-ietf-moq-msf-02 §5.2.33 (Language): 継承した lang が不正な場合は
 /// encode 時まで待たず apply_delta 時点で拒否する。
 #[test]
 fn apply_delta_clone_invalid_lang_rejected() {
@@ -1026,7 +1026,7 @@ fn video_track_omitted_ns(name: &str) -> MsfTrack {
 
 /// remove → add で属性を変更した delta update は拒否される
 ///
-/// draft-ietf-moq-msf-01 §5.3 (Delta updates): "The tuple of Track Namespace and Track Name
+/// draft-ietf-moq-msf-02 §5.3 (Delta updates): "The tuple of Track Namespace and Track Name
 /// defines a fixed set of Track attributes which MUST NOT be modified after being declared.
 /// To modify any attribute, a new track with a different Namespace|Name tuple is created by
 /// Adding or Cloning and then the old track is removed."
@@ -1207,7 +1207,7 @@ fn apply_delta_readd_with_same_attributes_succeeds() {
 
 /// isLive=false のトラックは targetLatency の有無だけが異なる再追加を受理する
 ///
-/// draft-ietf-moq-msf-01 §5.2.8 (Target latency) は isLive=false のとき targetLatency を
+/// draft-ietf-moq-msf-02 §5.2.9 (Target latency) は isLive=false のとき targetLatency を
 /// 無視するため、比較の両辺で isLive=false なら targetLatency を `None` とみなす。
 #[test]
 fn apply_delta_readd_is_live_false_ignores_target_latency() {
@@ -1240,7 +1240,7 @@ fn apply_delta_readd_is_live_false_ignores_target_latency() {
 
 /// namespace を省略したトラックでも、継承した namespace で再追加の属性変更を検出する
 ///
-/// draft-ietf-moq-msf-01 §5.2.2 (Track namespace): namespace 省略時はカタログの namespace を
+/// draft-ietf-moq-msf-02 §5.2.2 (Track namespace): namespace 省略時はカタログの namespace を
 /// 継承する。履歴のキーも同じ規則で解決しないと照合が外れる。
 /// namespace を省略したトラックでも、継承した namespace で再追加できる
 #[test]
@@ -1344,7 +1344,7 @@ fn apply_delta_readd_with_different_namespace_representation_succeeds() {
 
 /// isLive=false のトラックは buffers の有無だけが異なる再追加を受理する
 ///
-/// draft-ietf-moq-msf-01 §5.2.9 (Buffers) は isLive=false のとき buffers を無視するため、
+/// draft-ietf-moq-msf-02 §5.2.10 (Buffers) は isLive=false のとき buffers を無視するため、
 /// 比較の両辺で isLive=false なら buffers を `None` とみなす。
 #[test]
 fn apply_delta_readd_is_live_false_ignores_buffers() {
