@@ -1,7 +1,7 @@
 # MSF カタログの packaging 値に catalog を追加する
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -32,3 +32,12 @@ draft-ietf-moq-msf-02 §5.2.4 (Packaging) は packaging の許容値に `"catalo
 - 既存の許容値 (`loc` / `mediatimeline` / `eventtimeline` / `moqlog` / `moqmetrics`) の挙動が変わらないこと。
 - 未知の packaging 値が引き続き `MessageError::InvalidCatalog` で拒否されること。
 - 上記を `tests/test_msf/catalog_decode.rs` と `tests/test_msf/encode_decode_roundtrip.rs` で固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `MsfPackaging` に `Catalog` を追加し、`from_packaging_str` / `as_str` の両方向で `"catalog"` を扱うようにした。doc の許容値一覧も v02 §5.2.4 の Table 5 に合わせた。
+- `catalog` packaging の track に media 向けの必須フィールドを要求しないことを、既存の検証経路のまま確認した。
+- `tests/test_msf/catalog_decode.rs` に `catalog_packaging_accepted` を、`tests/test_msf/encode_decode_roundtrip.rs` に `catalog_packaging_roundtrip` を追加した。`tests/test_msf/track_fields.rs` の packaging 一覧と `pbt/tests/prop_msf.rs` の packaging 生成器にも `Catalog` を追加した。
+- 既存の許容値と未知 packaging の拒否挙動は変えていない。`docs/msf.md` の packaging 一覧を更新した。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
