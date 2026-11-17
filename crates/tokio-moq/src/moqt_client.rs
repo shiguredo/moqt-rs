@@ -54,6 +54,24 @@ use crate::webtransport_h3::WtSession;
 /// デフォルトの Subscriber Priority
 const DEFAULT_SUBSCRIBER_PRIORITY: u8 = 128;
 
+/// SUBSCRIBER_PRIORITY が未指定なら既定値を追加する
+///
+/// draft-ietf-moq-transport-23 §9.19.7 (SUBSCRIBER PRIORITY Parameter)。呼び出し側が
+/// 明示した値を上書きせず、重複したパラメータも追加しない。
+fn with_default_subscriber_priority(mut parameters: MessageParameters) -> MessageParameters {
+    if !parameters
+        .as_slice()
+        .iter()
+        .any(|parameter| parameter.param_type == PARAM_SUBSCRIBER_PRIORITY)
+    {
+        parameters.push(MessageParameter {
+            param_type: PARAM_SUBSCRIBER_PRIORITY,
+            value: MessageParameterValue::Uint8(DEFAULT_SUBSCRIBER_PRIORITY),
+        });
+    }
+    parameters
+}
+
 /// オブジェクト送信前のフィルタ評価の結果
 ///
 /// draft-ietf-moq-transport-23 §3.3.3 (Combining Filters): "The publisher MUST forward only
@@ -2493,10 +2511,9 @@ impl MoqtClient {
         // C4M の AUTHORIZATION_TOKEN を追加する。呼び出し側が渡した LOCATION_FILTER などは
         // そのまま残す (draft-ietf-moq-transport-23 §9.19.2 (AUTHORIZATION TOKEN Parameter))
         parameters = with_auth_parameters(parameters, &self.auth_tokens);
-        parameters.push(MessageParameter {
-            param_type: PARAM_SUBSCRIBER_PRIORITY,
-            value: MessageParameterValue::Uint8(DEFAULT_SUBSCRIBER_PRIORITY),
-        });
+        // 呼び出し側が SUBSCRIBER_PRIORITY を指定していればそれを優先し、既定値は
+        // 指定が無い場合だけ追加する (draft-ietf-moq-transport-23 §9.19.7)
+        parameters = with_default_subscriber_priority(parameters);
         let request_id = {
             let mut session = lock_session(&self.session);
             session
@@ -2754,6 +2771,7 @@ impl MoqtClient {
         object_id: u64,
         payload: &[u8],
         properties_data: Option<&[u8]>,
+        publisher_priority: u8,
     ) -> Result<()> {
         let data_plane = self.data_plane();
         let mut stream = self.handle.open_send_stream().await?;
@@ -2772,7 +2790,7 @@ impl MoqtClient {
             object_id: Some(object_id),
             // 最初の Object は prior Object を持たないため Publisher Priority を明示する
             // (draft-ietf-moq-transport-23 §11.4.1.1 (Flags))
-            publisher_priority: Some(128),
+            publisher_priority: Some(publisher_priority),
             has_properties: properties_data.is_some(),
             is_datagram_origin: false,
             payload_length: payload.len() as u64,
@@ -2839,6 +2857,7 @@ impl MoqtClient {
         group_id: u64,
         object_id: u64,
         payload: &[u8],
+        publisher_priority: u8,
     ) -> Result<()> {
         let data_plane = self.data_plane();
         let mut stream = self.handle.open_send_stream().await?;
@@ -2863,7 +2882,7 @@ impl MoqtClient {
             subgroup_id: FetchSubgroupIdMode::Zero,
             object_id: Some(object_id),
             // 最初の Object は prior Object を持たないため Publisher Priority を明示する
-            publisher_priority: Some(128),
+            publisher_priority: Some(publisher_priority),
             has_properties: false,
             is_datagram_origin: false,
             payload_length: payload.len() as u64,
@@ -4174,6 +4193,31 @@ mod tests {
             parameters.as_slice()[0].param_type,
             PARAM_SUBSCRIBER_PRIORITY,
             "呼び出し側のパラメータだけになること"
+        );
+    }
+
+    /// SUBSCRIBER_PRIORITY は明示値を保持し、未指定時だけ既定値を追加すること
+    #[test]
+    fn with_default_subscriber_priority_preserves_explicit_value() {
+        let mut explicit = MessageParameters::new();
+        explicit.push(MessageParameter {
+            param_type: PARAM_SUBSCRIBER_PRIORITY,
+            value: MessageParameterValue::Uint8(192),
+        });
+        let parameters = with_default_subscriber_priority(explicit);
+        assert_eq!(parameters.len(), 1, "明示値を重複追加しないこと");
+        assert_eq!(
+            parameters.as_slice()[0].value,
+            MessageParameterValue::Uint8(192),
+            "明示値を上書きしないこと"
+        );
+
+        let parameters = with_default_subscriber_priority(MessageParameters::new());
+        assert_eq!(parameters.len(), 1, "未指定時は既定値を追加すること");
+        assert_eq!(
+            parameters.as_slice()[0].value,
+            MessageParameterValue::Uint8(DEFAULT_SUBSCRIBER_PRIORITY),
+            "既定値 128 を追加すること"
         );
     }
 

@@ -2386,6 +2386,7 @@ pub async fn run(
                                             location.group_id,
                                             location.object_id,
                                             &catalog_json,
+                                            catalog::CATALOG_PUBLISHER_PRIORITY,
                                         )
                                         .await
                                     {
@@ -4692,6 +4693,7 @@ async fn serve_peer_request(
                                 catalog.location.object_id,
                                 catalog.json,
                                 None,
+                                catalog::CATALOG_PUBLISHER_PRIORITY,
                             )
                             .await?;
                         tracing::info!(

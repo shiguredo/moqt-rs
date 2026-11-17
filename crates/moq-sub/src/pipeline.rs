@@ -45,9 +45,10 @@ use shiguredo_moqt::{
     message_parameter::MessageParameter, message_parameter::MessageParameterValue,
     message_parameter::MessageParameters, message_parameter::PARAM_FILL_PARAMETERS,
     message_parameter::PARAM_LOCATION_FILTER, message_parameter::PARAM_NEW_GROUP_REQUEST,
-    message_parameter::PARAM_RENDEZVOUS_TIMEOUT, msf::MSF_CATALOG_TRACK_NAME, msf::MsfTrack,
-    msf::parse_catalog_namespace, name::serialize_namespace, name::serialize_track_name,
-    session::types::DataStreamId, session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
+    message_parameter::PARAM_RENDEZVOUS_TIMEOUT, message_parameter::PARAM_SUBSCRIBER_PRIORITY,
+    msf::MSF_CATALOG_TRACK_NAME, msf::MsfTrack, msf::parse_catalog_namespace,
+    name::serialize_namespace, name::serialize_track_name, session::types::DataStreamId,
+    session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
     stream::decoder::DecodedSubgroupObject, stream::decoder::FetchStreamDecoder,
     stream::decoder::SubgroupStreamDecoder, stream::fetch::FetchHeader,
 };
@@ -7089,6 +7090,13 @@ struct SelectedTrackLatency {
 /// 独立したカタログが届くまで待つ。待ち続けないよう上限を設ける。
 const CATALOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// カタログ購読の SUBSCRIBER_PRIORITY
+///
+/// draft-ietf-moq-msf-02 Appendix A.1.3: 購読者はカタログ購読に他の同時購読より高い
+/// subscriber priority を使うこと (SHOULD)。MOQT §5.1 は値が小さいほど優先度が高いため、
+/// media の既定値 128 より小さい 64 を使う。
+const CATALOG_SUBSCRIBER_PRIORITY: u8 = 64;
+
 /// カタログ購読のメッセージパラメータを組み立てる
 ///
 /// draft-ietf-moq-transport-23 §3.5 (Joining an Ongoing Track) の購読パターンに従い、
@@ -7099,6 +7107,10 @@ const CATALOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// 独立カタログが fill range に入らない。
 fn catalog_subscribe_parameters() -> MessageParameters {
     let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_SUBSCRIBER_PRIORITY,
+        value: MessageParameterValue::Uint8(CATALOG_SUBSCRIBER_PRIORITY),
+    });
     parameters.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
         value: MessageParameterValue::LocationFilter(LocationFilter::NextObject),
@@ -12536,6 +12548,18 @@ mod tests {
                 .expect("内側の LOCATION_FILTER を読めること"),
             LocationFilterUpdate::Set(LocationFilter::RelativeGroup { start_group: 1 }),
             "fill range は現在 Group の先頭からにすること"
+        );
+        let priority = parameters
+            .as_slice()
+            .iter()
+            .find(|parameter| parameter.param_type == PARAM_SUBSCRIBER_PRIORITY)
+            .expect("SUBSCRIBER_PRIORITY を持つこと");
+        let MessageParameterValue::Uint8(priority) = priority.value else {
+            panic!("SUBSCRIBER_PRIORITY は Uint8 であること");
+        };
+        assert!(
+            priority < 128,
+            "カタログ購読の priority は media の既定値より小さく (高く) すること: {priority}"
         );
     }
 

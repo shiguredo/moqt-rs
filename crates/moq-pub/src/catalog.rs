@@ -276,6 +276,13 @@ pub async fn send_catalog(params: CatalogParams<'_>) -> Result<Vec<u8>> {
     Ok(catalog_json)
 }
 
+/// カタログトラックの publisher priority
+///
+/// draft-ietf-moq-msf-02 Appendix A.1.3: カタログトラックは記述する track より高い
+/// publisher priority を持つこと (SHOULD)。MOQT §5.1 は値が小さいほど優先度が高いため、
+/// media の既定値 128 より小さい 64 を使う。カタログの全送信経路がこの定数を参照する。
+pub(crate) const CATALOG_PUBLISHER_PRIORITY: u8 = 64;
+
 /// MSF カタログの JSON を 1 Object (Object ID 0) として Group に送信する
 ///
 /// draft-ietf-moq-msf-01 §5 (Catalog): 各 Group の最初の Object (Object ID 0) は独立した
@@ -305,7 +312,7 @@ pub async fn publish_catalog_object(
         catalog_request_id,
         catalog_alias,
         group_id,
-        128,
+        CATALOG_PUBLISHER_PRIORITY,
         false,
         start_location,
     )
@@ -1063,6 +1070,16 @@ mod tests {
             catalog.tracks[0].namespace.as_deref(),
             Some("customer/ライブ"),
             "Track Namespace の各 field が '/' 区切りで載ること"
+        );
+    }
+
+    /// カタログの publisher priority が media の既定値 128 より高いこと
+    #[test]
+    fn catalog_publisher_priority_is_higher_than_media() {
+        let priority = std::hint::black_box(CATALOG_PUBLISHER_PRIORITY);
+        assert!(
+            priority < 128,
+            "カタログの priority は media の既定値より小さく (高く) すること"
         );
     }
 }

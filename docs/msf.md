@@ -42,6 +42,7 @@
   - 両 timeline とも mimeType の値を要求しない。renderGroup の一部だけが対象という判定は catalog からできないため publisher の責務である
   - 削除用 `MsfRemoveTrack`
   - `MsfInitData` / `MsfBuffers` / `MsfPackaging` (loc / mediatimeline / eventtimeline / moqlog / moqmetrics / catalog)
+- 優先度: カタログの publisher priority は 64、カタログ購読の SUBSCRIBER_PRIORITY は 64 とし、media の既定値 128 より高くする (Appendix A.1.3 の SHOULD)
 - 検証規則
   - targetLatency / buffers のグループ内一致 (宣言値のみ。isLive=false は無視)
   - isComplete=false 禁止
