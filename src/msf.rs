@@ -645,7 +645,7 @@ pub struct MsfTrack {
     pub render_group: Option<u64>,
     /// オルタネートグループ (draft-ietf-moq-msf-01 §5.2.12 (Alternate group))
     pub alt_group: Option<u64>,
-    /// アクセス可能ウィンドウ (draft-ietf-moq-msf-02 §5.2.45 (Accessible Window Time)) [ms]
+    /// アクセス可能ウィンドウ (draft-ietf-moq-msf-02 §5.2.45 (Accessible Window Time)) ミリ秒
     ///
     /// 同じ altGroup の track は、すべて値を持たないか、すべて同じ値を持たなければならない。
     pub accessible_window_time: Option<u64>,
@@ -856,7 +856,7 @@ impl MsfTrack {
     ///
     /// draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata): `;` 区切りの `key=value` を
     /// 先頭から探し、最初に現れた key の値を返す。未知の key は `None` になる。
-    /// 構文は decode / encode 時に [`validate_packaging_metadata`] で検証済みである。
+    /// 構文は decode / encode 時に `validate_packaging_metadata` で検証済みである。
     /// `streamMapping` の値の解釈と、キーがない場合の既定 `group` は 0459 が扱う。
     pub fn packaging_metadata_value(&self, key: &str) -> Option<&str> {
         self.packaging_metadata
@@ -1194,7 +1194,7 @@ pub struct MsfCloneTrack {
     pub render_group: Option<u64>,
     /// オルタネートグループ (draft-ietf-moq-msf-01 §5.2.12 (Alternate group))
     pub alt_group: Option<u64>,
-    /// アクセス可能ウィンドウ (draft-ietf-moq-msf-02 §5.2.45 (Accessible Window Time)) [ms]
+    /// アクセス可能ウィンドウ (draft-ietf-moq-msf-02 §5.2.45 (Accessible Window Time)) ミリ秒
     ///
     /// 同じ altGroup の track は、すべて値を持たないか、すべて同じ値を持たなければならない。
     pub accessible_window_time: Option<u64>,
