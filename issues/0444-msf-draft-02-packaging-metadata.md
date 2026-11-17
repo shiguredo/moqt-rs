@@ -1,7 +1,7 @@
 # MSF カタログに packagingMetadata を追加する
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -38,3 +38,13 @@ draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata) は、packaging 固有のメ�
 - `MsfCloneTrack` の `packagingMetadata` が、明示値があれば上書き、なければ親から継承されること。
 - `streamMapping` の既定 `group` の解釈は 0459 の完了条件で固定されることを doc に明記すること。
 - 上記を `tests/test_msf/catalog_decode.rs` と `tests/test_msf/encode_decode_roundtrip.rs` で固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `MsfTrack` / `MsfCloneTrack` に `packaging_metadata: Option<String>` を追加し、`packagingMetadata` の decode / encode と clone の継承・上書きを実装した。
+- `validate_packaging_metadata` で `;` 区切りの `key=value` を検証する。空要素、`=` を含まない要素、空の key / value、whitespace・`=`・`;` を含む key / value を `InvalidCatalog` で拒否する。未知の key は構文検証だけ行って保持する。
+- `MsfTrack::packaging_metadata_value(&self, key: &str)` を追加し、同じ key が複数ある場合は最初の値を返すようにした。`streamMapping` の値の解釈と既定 `group` は 0459 が扱うことを doc に明記した。
+- decode の共通フィールド抽出と encode 前の `validate_full_track` / `validate_clone_track_fragment` の両方で構文検証を行う。
+- `pbt/tests/prop_msf.rs` の通常 track / clone に有効な packagingMetadata を生成させ、`tests/test_msf/catalog_decode.rs` / `encode_decode_roundtrip.rs` / `delta_apply.rs` に accessor、最初の出現、未知 key、不正値、encode 拒否、clone の継承・上書きを追加した。`docs/msf.md` と `skills/shiguredo-moqt/SKILL.md` も更新した。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
