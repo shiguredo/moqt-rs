@@ -1,7 +1,7 @@
 # MSF カタログの depends に renderGroup 参照を追加する
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -45,3 +45,13 @@ draft-ietf-moq-msf-02 §5.2.15 (Dependencies) は、`depends` の要素に track
 - `publishTracks` の track の `depends` も検証され、通常の track が publish track を、publish track が通常の track を参照できること。
 - 既存 fixture と PBT の生成器が更新され、`cargo test --workspace` が通ること。
 - 上記を `tests/test_msf/catalog_decode.rs`、`tests/test_msf/encode_decode_roundtrip.rs`、`tests/test_msf/delta_apply.rs`、`tests/test_msf/track_fields.rs`、`pbt/tests/prop_msf.rs` で固定し、`cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `MsfDependency::TrackName(String)` / `MsfDependency::RenderGroup(u64)` を追加し、`MsfTrack.depends` と `MsfCloneTrack.depends` を `Vec<MsfDependency>` に変更した。`DisplayJson` で String / Number を出し分ける。
+- `depends` の decode で String と整数 Number を受理し、bool / object / 浮動小数を `InvalidCatalog` で拒否するようにした。Track Name は §5.2.3 / §11.2 の写像規則で検証する。
+- `validate_catalog_dependencies` を追加し、tracks / publishTracks の両方を対象に、String が依存元以外の track にちょうど 1 つ一致すること、Number がカタログ内の renderGroup に一致することを検証する。自己参照、同名複数、未解決参照を拒否する。
+- full decode、full encode、delta 適用後の 3 入口から検証を呼ぶようにした。
+- `pbt/tests/prop_msf.rs` はカタログ生成後に実在する track name / renderGroup へ depends を差し替える生成器に変更した。既存 fixture を実在する参照に更新し、`catalog_decode` / `encode_decode_roundtrip` / `delta_apply` / `track_fields` に解決成功・失敗のテストを追加した。`docs/msf.md` と `skills/shiguredo-moqt/SKILL.md` も更新した。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
