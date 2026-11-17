@@ -2535,11 +2535,11 @@ pub fn validate_media_timeline_format(
 /// イベントタイムラインのインデックス参照 (draft-ietf-moq-msf-01 §8.1 (Event Timeline data format))
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MsfEventIndex {
-    /// 'l': MOQT Location [group_id, object_id]
+    /// 'L': MOQT Location [group_id, object_id]
     Location(u64, u64),
-    /// 't': ウォールクロック ms
+    /// 'T': ウォールクロック ms
     WallclockMs(u64),
-    /// 'm': メディア PTS ms
+    /// 'M': メディア PTS ms
     MediaPtsMs(u64),
 }
 
@@ -2560,7 +2560,7 @@ impl DisplayJson for MsfEventTimelineEntry {
                     let g = *g;
                     let o = *o;
                     f.member(
-                        "l",
+                        "L",
                         nojson::array(|f| {
                             f.element(g)?;
                             f.element(o)
@@ -2568,10 +2568,10 @@ impl DisplayJson for MsfEventTimelineEntry {
                     )?;
                 }
                 MsfEventIndex::WallclockMs(t) => {
-                    f.member("t", *t)?;
+                    f.member("T", *t)?;
                 }
                 MsfEventIndex::MediaPtsMs(m) => {
-                    f.member("m", *m)?;
+                    f.member("M", *m)?;
                 }
             }
             f.member("data", RawJsonBytes(&self.data_raw))
@@ -4447,51 +4447,47 @@ fn decode_media_entry(
 fn decode_event_entry(
     val: nojson::RawJsonValue<'_, '_>,
 ) -> Result<MsfEventTimelineEntry, MessageError> {
-    // draft-ietf-moq-msf-01 §8.1 (Event Timeline data format): index は t/l/m のうち 1 つだけ
-    let has_l = val.to_member("l")?.optional().is_some();
-    let has_t = val.to_member("t")?.optional().is_some();
-    let has_m = val.to_member("m")?.optional().is_some();
+    // draft-ietf-moq-msf-02 §8.2 (Event Timeline data format): index は T/L/M のうち 1 つだけ
+    let has_l = val.to_member("L")?.optional().is_some();
+    let has_t = val.to_member("T")?.optional().is_some();
+    let has_m = val.to_member("M")?.optional().is_some();
     let index_count = has_l as u8 + has_t as u8 + has_m as u8;
     if index_count == 0 {
         return Err(MessageError::InvalidCatalog(
-            "event record missing index field ('t', 'l', or 'm')".to_string(),
+            "event record missing index field ('T', 'L', or 'M')".to_string(),
         ));
     }
     if index_count > 1 {
         return Err(MessageError::InvalidCatalog(
-            "event record MUST have only one of 't', 'l', or 'm'".to_string(),
+            "event record MUST have only one of 'T', 'L', or 'M'".to_string(),
         ));
     }
 
-    let index = if let Some(l_v) = val.to_member("l")?.optional() {
+    let index = if let Some(l_v) = val.to_member("L")?.optional() {
         let mut iter = l_v.to_array()?;
         let g_v = iter.next().ok_or_else(|| {
-            MessageError::InvalidCatalog("event 'l': missing group_id".to_string())
+            MessageError::InvalidCatalog("event 'L': missing group_id".to_string())
         })?;
         let o_v = iter.next().ok_or_else(|| {
-            MessageError::InvalidCatalog("event 'l' must have exactly 2 elements".to_string())
+            MessageError::InvalidCatalog("event 'L' must have exactly 2 elements".to_string())
         })?;
         if iter.next().is_some() {
             return Err(MessageError::InvalidCatalog(
-                "event 'l' has more than 2 elements".to_string(),
+                "event 'L' has more than 2 elements".to_string(),
             ));
         }
         MsfEventIndex::Location(parse_u64(g_v)?, parse_u64(o_v)?)
-    } else if let Some(t_v) = val.to_member("t")?.optional() {
+    } else if let Some(t_v) = val.to_member("T")?.optional() {
         MsfEventIndex::WallclockMs(parse_u64(t_v)?)
     } else {
         // has_m は true (上で index_count == 1 を保証済み)
-        let m_v = val.to_member("m")?.required()?;
+        let m_v = val.to_member("M")?.required()?;
         MsfEventIndex::MediaPtsMs(parse_u64(m_v)?)
     };
 
     let data_v = val.to_member("data")?.required()?;
-    // draft-ietf-moq-msf-01 §8.1 (Event Timeline data format): data は Object でなければならない
-    // この仕様は将来変更される可能性がある。
-    // to_object() で型チェックだけ行い、生 JSON として保持する
-    let _ = data_v.to_object().map_err(|_| {
-        MessageError::InvalidCatalog("event data MUST be a JSON object".to_string())
-    })?;
+    // draft-ietf-moq-msf-02 §8.2 (Event Timeline data format): data は任意の JSON 値。
+    // 生 JSON のまま保持し、encode 時に再正規化しない。
     let data_raw = data_v.as_raw_str().as_bytes().to_vec();
 
     Ok(MsfEventTimelineEntry { index, data_raw })
@@ -4525,11 +4521,7 @@ fn validate_event_data_raw(data_raw: &[u8]) -> Result<(), MessageError> {
     let text = core::str::from_utf8(data_raw).map_err(|_| {
         MessageError::InvalidCatalog("event timeline is not valid UTF-8".to_string())
     })?;
-    let raw = nojson::RawJson::parse(text)?;
-    let val = raw.value();
-    let _ = val.to_object().map_err(|_| {
-        MessageError::InvalidCatalog("event data MUST be a JSON object".to_string())
-    })?;
+    let _ = nojson::RawJson::parse(text)?;
     Ok(())
 }
 

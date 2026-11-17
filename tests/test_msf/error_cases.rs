@@ -130,7 +130,7 @@ fn event_timeline_missing_index() {
 #[test]
 fn event_timeline_missing_data() {
     assert!(matches!(
-        MsfEventTimeline::decode(br#"[{"t":1000}]"#),
+        MsfEventTimeline::decode(br#"[{"T":1000}]"#),
         Err(MessageError::InvalidCatalog(_))
     ));
 }

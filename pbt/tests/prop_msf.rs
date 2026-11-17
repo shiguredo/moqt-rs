@@ -512,14 +512,19 @@ fn sample_event_index(ctx: &mut noprop::TestCaseContext) -> MsfEventIndex {
 
 /// MsfEventTimelineEntry を生成する
 ///
-/// draft-ietf-moq-msf-01 §8.1 (Event Timeline data format): data は JSON Object でなければならない。
+/// draft-ietf-moq-msf-02 §8.2 (Event Timeline data format): data は任意の JSON 値。
 fn sample_event_timeline_entry(ctx: &mut noprop::TestCaseContext) -> MsfEventTimelineEntry {
     let index = sample_event_index(ctx);
-    let data_raw = if noprop::sample_bool(ctx) {
-        let v = noprop::sample_u32(ctx);
-        format!(r#"{{"v":{v}}}"#).into_bytes()
-    } else {
-        b"{}".to_vec()
+    let data_raw = match noprop::sample_usize_in(ctx, 0..=5) {
+        0 => {
+            let v = noprop::sample_u32(ctx);
+            format!(r#"{{"v":{v}}}"#).into_bytes()
+        }
+        1 => b"{}".to_vec(),
+        2 => b"[1,2,3]".to_vec(),
+        3 => br#""text""#.to_vec(),
+        4 => b"42".to_vec(),
+        _ => b"null".to_vec(),
     };
     MsfEventTimelineEntry { index, data_raw }
 }
