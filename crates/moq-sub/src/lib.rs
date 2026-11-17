@@ -16,6 +16,7 @@ pub mod cli;
 pub mod error;
 pub(crate) mod group_switch;
 pub mod pipeline;
+pub mod track_switch;
 
 // 呼び出し側がチャネルの型として必要とするため、クレート直下へ再公開する
 pub use decoder::{DecodedAudioFrame, DecodedVideoFrame, TimestampKind};
