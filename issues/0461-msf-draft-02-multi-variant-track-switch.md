@@ -1,7 +1,7 @@
 # MSF multi-variant fast track switching を購読側に実装する
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -46,3 +46,13 @@ draft-ietf-moq-msf-02 §6.3 (Multi-Variant Fast Track Switching) は、keyframe 
 - 切り替え後も Object ID 0 から受信し、旧 track の購読が解除されること。
 - 0460 の後に実施することを issue に明記すること。
 - 上記を `crates/moq-sub` のテストで固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `crates/moq-sub/src/track_switch.rs` を追加した。`select_initial_variant` は帯域と `keyframeSpacing` から初期購読先を選び、帯域内に候補が無い場合は `bitrate` 最小、帯域不明時は `keyframeSpacing` 最小を選ぶ。`keyframeSpacing` が None または 0 の track は候補から除外する。
+- `switch_target` で §6.3 の `(G - G0) * S + N` が `T` で割り切れるかを判定し、target の Group ID を `G0 + ((G - G0) * S + N) / T`、Object ID を 0 として返す。G0 が source と target で異なる場合、S / T が None または 0 の場合は切り替え不可とする。
+- `TrackSwitchState::switch_to` は valid switch point で `SwitchAction` を返す。action は旧購読の解除、target の受信開始位置、decoder 再初期化を含み、invalid 時は状態を変えない。
+- `tests` を `track_switch` モジュール内に置き、G0 が 0 でないケース、G0 不一致、S / T の None / 0、帯域あり・なしの初期選択、switch 成功・失敗、decoder 再初期化を固定した。`docs/msf.md` に API の役割を追記した。
+- 実際の SUBSCRIBE / UNSUBSCRIBE と decoder の再初期化は、返された `SwitchAction` に従って呼び出し側が行う。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
