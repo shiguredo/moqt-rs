@@ -1,7 +1,7 @@
 # MSF カタログの (packaging, role) 別必須フィールドを v02 に合わせる
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -37,3 +37,12 @@ draft-ietf-moq-msf-02 §5.2.4.1 (Required fields per packaging and track type) �
 - `(loc, data)` の最小 track (`codec` / `bitrate` / `framerate` / `lang` なし) が受理されること。
 - カスタム role (例: `"foo"`) の track が、追加必須フィールドなしで受理されること。
 - 上記を `tests/test_msf/catalog_decode.rs`、`tests/test_msf/encode_decode_roundtrip.rs`、`tests/test_msf/error_cases.rs` で固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `src/msf.rs` の `validate_media_track_fields` に draft-ietf-moq-msf-02 §5.2.4.1 Table 6 の (packaging, role) 別必須フィールドを追加した。`loc` / `video` と `loc` / `signlanguage` に `framerate`、`loc` / `audiodescription` に `lang` を要求する。
+- 既存の codec 由来の Conditional MUST (`bitrate` §5.2.23、`samplerate` §5.2.29、`channelConfig` §5.2.30) はそのまま残し、role 省略時や codec と role の判定が食い違う場合も両方の要求を適用する。
+- Table 6 にない `(loc, data)` とカスタム role は追加必須フィールドを要求しないことをテストで固定した。
+- `tests/test_msf/error_cases.rs` の既存 fixture に `framerate` / `lang` を追加し、`framerate` / `lang` 欠如の拒否テスト、`data` / カスタム role の受理テスト、encode 経路の framerate 欠如テストを追加した。`tests/test_msf/encode_decode_roundtrip.rs` に Table 6 の必須フィールドを持つ track の往復テストを追加した。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
