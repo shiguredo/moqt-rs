@@ -103,6 +103,28 @@ fn sample_buffers(ctx: &mut noprop::TestCaseContext) -> Option<MsfBuffers> {
     })
 }
 
+/// packagingMetadata を生成する (None:Some = 1:1)
+///
+/// draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata): `;` 区切りの `key=value`。
+/// 既知の `streamMapping` と未知の key を混ぜ、先頭優先の解釈も往復させる。
+fn sample_packaging_metadata(ctx: &mut noprop::TestCaseContext) -> Option<String> {
+    if !noprop::sample_bool(ctx) {
+        return None;
+    }
+    Some(
+        noprop::sample_choice(
+            ctx,
+            &[
+                "streamMapping=group",
+                "streamMapping=object",
+                "unknown=value;streamMapping=group",
+                "a=b;c=d;a=first",
+            ],
+        )
+        .to_string(),
+    )
+}
+
 /// 通常トラック (tracks / publishTracks / addTracks 用) を生成する
 ///
 /// - parentName は含めない (tracks/addTracks では禁止)
@@ -128,6 +150,7 @@ fn sample_track(ctx: &mut noprop::TestCaseContext) -> MsfTrack {
     let lang = sample_lang(ctx);
 
     let mut t = MsfTrack::new(name, packaging, is_live);
+    t.packaging_metadata = sample_packaging_metadata(ctx);
     // v02 の `/` 区切り namespace を一定確率で明示し、継承と明示の両方を往復させる
     if noprop::sample_bool(ctx) {
         t.namespace = Some(sample_catalog_namespace(ctx));
@@ -271,6 +294,7 @@ fn sample_clone_track(ctx: &mut noprop::TestCaseContext) -> MsfCloneTrack {
         parent_name: parent,
         parent_namespace,
         packaging: if include_pkg { Some(pkg) } else { None },
+        packaging_metadata: sample_packaging_metadata(ctx),
         is_live: if include_live { Some(is_live) } else { None },
         namespace: None,
         event_type: None,

@@ -592,6 +592,11 @@ pub struct MsfTrack {
     pub namespace: Option<String>,
     /// パッケージングタイプ (draft-ietf-moq-msf-01 §5.2.4 (Packaging)) - 必須
     pub packaging: MsfPackaging,
+    /// パッケージング固有メタデータ (draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata))
+    ///
+    /// `;` 区切りの `key=value`。key / value に whitespace・`=`・`;` は含められない。
+    /// `streamMapping` の値解釈と既定値 `group` は 0459 が扱う。
+    pub packaging_metadata: Option<String>,
     /// イベントタイムラインタイプ (draft-ietf-moq-msf-01 §5.2.5 (Event timeline type)) - packaging=eventtimeline の場合必須
     pub event_type: Option<String>,
     /// トラックロール (draft-ietf-moq-msf-01 §5.2.6 (Track role))
@@ -681,6 +686,7 @@ impl core::fmt::Debug for MsfTrack {
             name,
             namespace,
             packaging,
+            packaging_metadata,
             event_type,
             role,
             is_live,
@@ -724,6 +730,7 @@ impl core::fmt::Debug for MsfTrack {
             .field("name", name)
             .field("namespace", namespace)
             .field("packaging", packaging)
+            .field("packaging_metadata", packaging_metadata)
             .field("event_type", event_type)
             .field("role", role)
             .field("is_live", is_live)
@@ -772,6 +779,7 @@ impl MsfTrack {
         Self {
             name,
             packaging,
+            packaging_metadata: None,
             namespace: None,
             event_type: None,
             role: None,
@@ -813,6 +821,21 @@ impl MsfTrack {
             accessibility: Vec::new(),
         }
     }
+
+    /// packagingMetadata の指定 key の値を返す
+    ///
+    /// draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata): `;` 区切りの `key=value` を
+    /// 先頭から探し、最初に現れた key の値を返す。未知の key は `None` になる。
+    /// 構文は decode / encode 時に [`validate_packaging_metadata`] で検証済みである。
+    /// `streamMapping` の値の解釈と、キーがない場合の既定 `group` は 0459 が扱う。
+    pub fn packaging_metadata_value(&self, key: &str) -> Option<&str> {
+        self.packaging_metadata
+            .as_deref()?
+            .split(';')
+            .filter_map(|element| element.split_once('='))
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| value)
+    }
 }
 
 /// MsfTrack / MsfCloneTrack の JSON メンバー書き出しを共通化するための参照束
@@ -830,6 +853,7 @@ impl MsfTrack {
 struct TrackJsonParts<'a> {
     name: &'a str,
     packaging: Option<&'a str>,
+    packaging_metadata: Option<&'a str>,
     parent_name: Option<&'a str>,
     parent_namespace: Option<&'a str>,
     namespace: Option<&'a str>,
@@ -889,6 +913,9 @@ fn write_track_json(
     }
     if let Some(v) = p.packaging {
         f.member("packaging", v)?;
+    }
+    if let Some(v) = p.packaging_metadata {
+        f.member("packagingMetadata", v)?;
     }
     if let Some(v) = p.namespace {
         f.member("namespace", v)?;
@@ -1033,6 +1060,7 @@ impl DisplayJson for MsfTrack {
                 &TrackJsonParts {
                     name: &self.name,
                     packaging: Some(self.packaging.as_str()),
+                    packaging_metadata: self.packaging_metadata.as_deref(),
                     parent_name: self.parent_name.as_deref(),
                     parent_namespace: None,
                     namespace: self.namespace.as_deref(),
@@ -1111,6 +1139,10 @@ pub struct MsfCloneTrack {
     pub parent_namespace: Option<String>,
     /// パッケージングタイプ (draft-ietf-moq-msf-01 §5.2.4 (Packaging)) - 省略時は親から継承
     pub packaging: Option<MsfPackaging>,
+    /// パッケージング固有メタデータ (draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata))
+    ///
+    /// `;` 区切りの `key=value`。`None` のときは親トラックから継承する。
+    pub packaging_metadata: Option<String>,
     /// トラックネームスペース (draft-ietf-moq-msf-02 §5.2.2 (Track namespace))
     ///
     /// `/` 区切りの JSON 文字列で、1 〜 32 個の非空 field を持ち、NUL を含まない。
@@ -1204,6 +1236,7 @@ impl core::fmt::Debug for MsfCloneTrack {
             parent_name,
             parent_namespace,
             packaging,
+            packaging_metadata,
             namespace,
             event_type,
             role,
@@ -1248,6 +1281,7 @@ impl core::fmt::Debug for MsfCloneTrack {
             .field("parent_name", parent_name)
             .field("parent_namespace", parent_namespace)
             .field("packaging", packaging)
+            .field("packaging_metadata", packaging_metadata)
             .field("namespace", namespace)
             .field("event_type", event_type)
             .field("role", role)
@@ -1301,6 +1335,7 @@ impl MsfCloneTrack {
             parent_name,
             parent_namespace: None,
             packaging: None,
+            packaging_metadata: None,
             namespace: None,
             event_type: None,
             role: None,
@@ -1351,6 +1386,7 @@ impl DisplayJson for MsfCloneTrack {
                 &TrackJsonParts {
                     name: &self.name,
                     packaging: self.packaging.as_ref().map(|p| p.as_str()),
+                    packaging_metadata: self.packaging_metadata.as_deref(),
                     parent_name: Some(self.parent_name.as_str()),
                     parent_namespace: self.parent_namespace.as_deref(),
                     namespace: self.namespace.as_deref(),
@@ -1417,6 +1453,9 @@ impl MsfCloneTrack {
     pub fn into_track(self, parent: &MsfTrack) -> Result<MsfTrack, MessageError> {
         // draft-ietf-moq-msf-01 §5.1.6 (Delta update): 再定義が無い属性は親から継承する
         let packaging = self.packaging.unwrap_or(parent.packaging);
+        let packaging_metadata = self
+            .packaging_metadata
+            .or_else(|| parent.packaging_metadata.clone());
         let event_type = self.event_type.or_else(|| parent.event_type.clone());
         let role = self.role.or_else(|| parent.role.clone());
         let is_live = self.is_live.unwrap_or(parent.is_live);
@@ -1547,6 +1586,7 @@ impl MsfCloneTrack {
             name: self.name,
             namespace,
             packaging,
+            packaging_metadata,
             event_type,
             role,
             is_live,
@@ -2808,6 +2848,58 @@ fn validate_event_type_not_set_when_not_event_timeline(
     Ok(())
 }
 
+/// packagingMetadata の構文を検証する
+///
+/// draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata): `;` 区切りの `key=value` で、key と
+/// value は case-sensitive、whitespace・`=`・`;` を含んではならない (MUST NOT)。空要素、
+/// `=` を含まない要素、空の key / value も不正とする。未知の key は呼び出し側で無視する。
+fn validate_packaging_metadata(value: &str) -> Result<(), MessageError> {
+    if value.is_empty() {
+        return Err(MessageError::InvalidCatalog(
+            "packagingMetadata MUST NOT be empty".to_string(),
+        ));
+    }
+    for element in value.split(';') {
+        if element.is_empty() {
+            return Err(MessageError::InvalidCatalog(
+                "packagingMetadata MUST NOT contain an empty element".to_string(),
+            ));
+        }
+        let Some((key, value)) = element.split_once('=') else {
+            return Err(MessageError::InvalidCatalog(
+                "packagingMetadata element MUST be 'key=value'".to_string(),
+            ));
+        };
+        if key.is_empty() {
+            return Err(MessageError::InvalidCatalog(
+                "packagingMetadata key MUST NOT be empty".to_string(),
+            ));
+        }
+        if value.is_empty() {
+            return Err(MessageError::InvalidCatalog(
+                "packagingMetadata value MUST NOT be empty".to_string(),
+            ));
+        }
+        if key
+            .chars()
+            .any(|c| c.is_whitespace() || c == '=' || c == ';')
+        {
+            return Err(MessageError::InvalidCatalog(
+                "packagingMetadata key MUST NOT contain whitespace, '=' or ';'".to_string(),
+            ));
+        }
+        if value
+            .chars()
+            .any(|c| c.is_whitespace() || c == '=' || c == ';')
+        {
+            return Err(MessageError::InvalidCatalog(
+                "packagingMetadata value MUST NOT contain whitespace, '=' or ';'".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// 完全カタログのトラック 1 件が満たすべき MUST を検証する (encode 前 / delta add 適用前の検証用)
 ///
 /// `decode_track` の構造体ベース検証と同等の規則を、手組みの `MsfTrack` に対しても
@@ -2825,6 +2917,9 @@ fn validate_event_type_not_set_when_not_event_timeline(
 fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
     // draft-ietf-moq-msf-02 §5.2.2 (Track namespace) / §5.2.3 (Track name) / §11.2:
     // 手組みの値も decode と同じ写像規則で検証する。
+    if let Some(ref metadata) = track.packaging_metadata {
+        validate_packaging_metadata(metadata)?;
+    }
     let name = catalog_track_name_bytes(&track.name)?;
     let namespace = match track.namespace.as_deref() {
         Some(value) => Some(parse_catalog_namespace(value)?),
@@ -2926,6 +3021,9 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
 fn validate_clone_track_fragment(track: &MsfCloneTrack) -> Result<(), MessageError> {
     // draft-ietf-moq-msf-02 §5.2.2 (Track namespace) / §5.2.3 (Track name) /
     // §5.2.34 (Parent name) / §5.2.35 (Parent namespace) / §11.2: decode と同じ写像規則。
+    if let Some(ref metadata) = track.packaging_metadata {
+        validate_packaging_metadata(metadata)?;
+    }
     let name = catalog_track_name_bytes(&track.name)?;
     let parent_name = catalog_track_name_bytes(&track.parent_name)?;
     let namespace = match track.namespace.as_deref() {
@@ -3249,6 +3347,7 @@ struct CommonTrackFields {
     accessibility: Option<Vec<MsfAccessibility>>,
     parent_name: Option<String>,
     parent_namespace: Option<String>,
+    packaging_metadata: Option<String>,
 }
 
 /// track / cloneTracks 共通フィールドを抽出する
@@ -3259,6 +3358,7 @@ fn decode_common_track_fields(
 ) -> Result<CommonTrackFields, MessageError> {
     let fields = CommonTrackFields {
         namespace: val.to_member("namespace")?.map(|v| v.try_into())?,
+        packaging_metadata: val.to_member("packagingMetadata")?.map(|v| v.try_into())?,
         event_type: val.to_member("eventType")?.map(|v| v.try_into())?,
         role: val.to_member("role")?.map(|v| v.try_into())?,
         target_latency: val.to_member("targetLatency")?.map(parse_u64)?,
@@ -3324,6 +3424,9 @@ fn decode_common_track_fields(
     if let Some(ref lang) = fields.lang {
         validate_lang_tag(lang)?;
     }
+    if let Some(ref metadata) = fields.packaging_metadata {
+        validate_packaging_metadata(metadata)?;
+    }
     // draft-ietf-moq-msf-02 §5.2.2 (Track namespace) / §5.2.35 (Parent namespace) /
     // §5.2.15 (Dependencies) / §11.2: 共通フィールドの写像規則をここでまとめて検証する。
     // clone の parentNamespace は本関数を通るため、MsfTrack 側の配置制約より先に
@@ -3369,6 +3472,7 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
     let f = decode_common_track_fields(val)?;
     let CommonTrackFields {
         namespace,
+        packaging_metadata,
         event_type,
         role,
         target_latency,
@@ -3522,6 +3626,7 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
     let track = MsfTrack {
         name,
         packaging,
+        packaging_metadata,
         namespace,
         event_type,
         role,
@@ -3742,6 +3847,7 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
     let f = decode_common_track_fields(val)?;
     let CommonTrackFields {
         namespace,
+        packaging_metadata,
         event_type,
         role,
         target_latency,
@@ -3836,6 +3942,7 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
         parent_name,
         parent_namespace,
         packaging,
+        packaging_metadata,
         namespace,
         event_type,
         role,

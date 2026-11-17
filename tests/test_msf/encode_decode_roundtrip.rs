@@ -150,6 +150,7 @@ fn delta_all_operations() {
                     parent_name: "original".to_string(),
                     parent_namespace: None,
                     packaging: Some(MsfPackaging::Loc),
+                    packaging_metadata: None,
                     is_live: Some(true),
                     namespace: None,
                     event_type: None,
@@ -353,6 +354,7 @@ fn clone_track_roundtrip_all_fields() {
                 // parentNamespace 付き clone の roundtrip を検証する
                 parent_namespace: Some("parent-ns".to_string()),
                 packaging: Some(MsfPackaging::EventTimeline),
+                packaging_metadata: None,
                 namespace: Some("ns".to_string()),
                 event_type: Some("com.example.cue".to_string()),
                 role: Some("caption".to_string()),
@@ -423,6 +425,7 @@ fn clone_track_roundtrip_with_target_latency() {
                 parent_name: "original".to_string(),
                 parent_namespace: None,
                 packaging: Some(MsfPackaging::Loc),
+                packaging_metadata: None,
                 namespace: None,
                 event_type: None,
                 role: None,
@@ -480,6 +483,7 @@ fn clone_track_roundtrip_with_track_duration() {
                 parent_name: "original".to_string(),
                 parent_namespace: None,
                 packaging: Some(MsfPackaging::Loc),
+                packaging_metadata: None,
                 namespace: None,
                 event_type: None,
                 role: None,
@@ -1210,6 +1214,7 @@ fn accessibility_empty_some_roundtrip() {
         parent_name: "p".to_string(),
         parent_namespace: None,
         packaging: None,
+        packaging_metadata: None,
         is_live: None,
         namespace: None,
         event_type: None,
@@ -1281,6 +1286,7 @@ fn accessibility_clone_none_omitted() {
                 parent_name: "p".to_string(),
                 parent_namespace: None,
                 packaging: None,
+                packaging_metadata: None,
                 is_live: None,
                 namespace: None,
                 event_type: None,
@@ -1886,4 +1892,66 @@ fn table_6_required_fields_roundtrip() {
     let decoded =
         MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc, "decode / encode が往復すること");
+}
+
+/// packagingMetadata が encode / decode を往復すること
+#[test]
+fn packaging_metadata_roundtrip() {
+    let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
+    track.packaging_metadata = Some("streamMapping=object;key=value".to_string());
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![track],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    let encoded = doc
+        .encode()
+        .expect("packagingMetadata を encode できること");
+    let text = String::from_utf8(encoded.clone()).expect("JSON は UTF-8 であること");
+    assert!(
+        text.contains(r#""packagingMetadata":"streamMapping=object;key=value""#),
+        "JSON に packagingMetadata を出力すること: {text}"
+    );
+    let decoded =
+        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(decoded, doc, "decode / encode が往復すること");
+}
+
+/// 手組みの不正な packagingMetadata を encode しないこと
+#[test]
+fn encode_rejects_invalid_packaging_metadata() {
+    for metadata in ["", "a=b;;c=d", "key", "=value", "key=", "a b=c", "a=b=c"] {
+        let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
+        track.packaging_metadata = Some(metadata.to_string());
+        let doc = MsfCatalogDocument::Full(MsfCatalog {
+            version: MSF_VERSION.to_string(),
+            generated_at: None,
+            is_complete: false,
+            tracks: vec![track],
+            publish_tracks: Vec::new(),
+            removed_tracks: Default::default(),
+            init_data_list: Vec::new(),
+        });
+        assert!(
+            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            "不正な packagingMetadata {metadata:?} を encode しないこと"
+        );
+    }
+
+    let mut clone = MsfCloneTrack::new("c".to_string(), "p".to_string());
+    clone.packaging_metadata = Some("a=b;;c=d".to_string());
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "clone の不正な packagingMetadata を encode しないこと"
+    );
 }

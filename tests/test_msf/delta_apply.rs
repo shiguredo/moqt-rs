@@ -1658,3 +1658,39 @@ fn apply_delta_clone_both_namespaces_omitted_checks_inherited_catalog_namespace(
     );
     assert_eq!(catalog.tracks.len(), 1, "拒否時は track が増えないこと");
 }
+
+/// clone の packagingMetadata が明示値で上書きされ、省略時は親から継承されること
+///
+/// draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata) / §5.1.6 (Delta update): clone は
+/// 親の全属性を継承し、再定義された属性だけを上書きする。
+#[test]
+fn apply_delta_clone_inherits_or_overrides_packaging_metadata() {
+    let mut catalog = MsfCatalog::new();
+    let mut parent = loc_track("parent", None);
+    parent.packaging_metadata = Some("streamMapping=object".to_string());
+    catalog.tracks.push(parent);
+
+    let mut inherited = MsfCloneTrack::new("inherited".to_string(), "parent".to_string());
+    inherited.packaging_metadata = None;
+    let mut overridden = MsfCloneTrack::new("overridden".to_string(), "parent".to_string());
+    overridden.packaging_metadata = Some("streamMapping=group".to_string());
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![inherited, overridden],
+        }],
+    };
+    catalog
+        .apply_delta(&delta, None)
+        .expect("packagingMetadata の継承と上書きを適用できること");
+    assert_eq!(
+        catalog.tracks[1].packaging_metadata.as_deref(),
+        Some("streamMapping=object"),
+        "clone が省略した packagingMetadata は親から継承すること"
+    );
+    assert_eq!(
+        catalog.tracks[2].packaging_metadata.as_deref(),
+        Some("streamMapping=group"),
+        "clone が明示した packagingMetadata は親を上書きすること"
+    );
+}

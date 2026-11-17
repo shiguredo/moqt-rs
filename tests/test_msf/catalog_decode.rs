@@ -782,3 +782,66 @@ fn catalog_packaging_accepted() {
     };
     assert_eq!(cat.tracks[0].packaging, MsfPackaging::Catalog);
 }
+
+/// packagingMetadata の構文と accessor を固定すること
+///
+/// draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata): `;` 区切りの `key=value` で、
+/// 同じ key は最初の出現を使い、未知の key は無視する。
+#[test]
+fn packaging_metadata_accessor_uses_first_occurrence() {
+    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"packagingMetadata":"streamMapping=object;unknown=x;streamMapping=first"}]}"#;
+    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let MsfCatalogDocument::Full(catalog) = doc else {
+        panic!("Full が期待された");
+    };
+    let track = &catalog.tracks[0];
+    assert_eq!(
+        track.packaging_metadata.as_deref(),
+        Some("streamMapping=object;unknown=x;streamMapping=first"),
+        "wire の値をそのまま保持すること"
+    );
+    assert_eq!(
+        track.packaging_metadata_value("streamMapping"),
+        Some("object"),
+        "同じ key は最初の出現を使うこと"
+    );
+    assert_eq!(
+        track.packaging_metadata_value("unknown"),
+        Some("x"),
+        "未知の key も accessor では取得できること"
+    );
+    assert_eq!(
+        track.packaging_metadata_value("missing"),
+        None,
+        "存在しない key は None になること"
+    );
+}
+
+/// 不正な packagingMetadata を decode で拒否すること
+#[test]
+fn invalid_packaging_metadata_rejected() {
+    for metadata in [
+        "", "a=b;;c=d", "key", "=value", "key=", "a b=c", "a=b c", "a=b=c", "a=b;c",
+    ] {
+        let json = format!(
+            r#"{{"version":"draft-01","tracks":[{{"name":"t","packaging":"loc","isLive":true,"packagingMetadata":"{metadata}"}}]}}"#
+        );
+        assert!(
+            matches!(
+                MsfCatalogDocument::decode(json.as_bytes()),
+                Err(MessageError::InvalidCatalog(_))
+            ),
+            "不正な packagingMetadata {metadata:?} を拒否すること"
+        );
+    }
+
+    // clone でも同じ構文検証を行う
+    let json = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","packagingMetadata":"a=b;;c=d"}]}]}"#;
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(json),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "clone の不正な packagingMetadata を拒否すること"
+    );
+}
