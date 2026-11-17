@@ -595,10 +595,9 @@ impl DisplayJson for MsfDependency {
 
 /// MSF トラックオブジェクト (draft-ietf-moq-msf-01 §5.2 (Track Object Fields))
 ///
-/// `Debug` は機密値を伏せる。`token` (§5.2.37 の認証トークン)、`track_base_key` (§5.2.41 の
-/// 鍵材料)、`connection_uri` (§11.4.2 のとおり token パラメータを含み得る endpoint URI) は、
-/// 値の代わりにバイト長を `Option<usize>` で表示する。`auth_info` は [`MsfAuthInfo`] の
-/// `Debug` で値を伏せる。
+/// `Debug` は機密値を伏せる。`track_base_key` (§5.2.41 の鍵材料) と `connection_uri`
+/// (§11.4.2 のとおり token パラメータを含み得る endpoint URI) は、値の代わりにバイト長を
+/// `Option<usize>` で表示する。`auth_info` は [`MsfAuthInfo`] の `Debug` で値を伏せる。
 #[derive(Clone, PartialEq)]
 pub struct MsfTrack {
     /// トラック名 (draft-ietf-moq-msf-02 §5.2.3 (Track name)) - 必須
@@ -684,8 +683,6 @@ pub struct MsfTrack {
     pub track_duration: Option<u64>,
     /// 接続先 URI (draft-ietf-moq-msf-01 §5.2.36 (Connection URI))
     pub connection_uri: Option<String>,
-    /// 認証トークン (draft-ietf-moq-msf-01 §5.2.37 (Token))
-    pub token: Option<String>,
     /// 暗号化方式 (draft-ietf-moq-msf-01 §5.2.38 (Encryption Scheme))
     pub encryption_scheme: Option<String>,
     /// 暗号スイート (draft-ietf-moq-msf-01 §5.2.39 (Cipher Suite))
@@ -739,7 +736,6 @@ impl core::fmt::Debug for MsfTrack {
             parent_name,
             track_duration,
             connection_uri,
-            token,
             encryption_scheme,
             cipher_suite,
             key_id,
@@ -783,7 +779,6 @@ impl core::fmt::Debug for MsfTrack {
             .field("parent_name", parent_name)
             .field("track_duration", track_duration)
             .field("connection_uri", &connection_uri.as_ref().map(String::len))
-            .field("token", &token.as_ref().map(String::len))
             .field("encryption_scheme", encryption_scheme)
             .field("cipher_suite", cipher_suite)
             .field("key_id", key_id)
@@ -833,7 +828,6 @@ impl MsfTrack {
             parent_name: None,
             track_duration: None,
             connection_uri: None,
-            token: None,
             encryption_scheme: None,
             cipher_suite: None,
             key_id: None,
@@ -908,7 +902,6 @@ struct TrackJsonParts<'a> {
     lang: Option<&'a str>,
     track_duration: Option<u64>,
     connection_uri: Option<&'a str>,
-    token: Option<&'a str>,
     encryption_scheme: Option<&'a str>,
     cipher_suite: Option<&'a str>,
     key_id: Option<&'a str>,
@@ -1044,9 +1037,6 @@ fn write_track_json(
     if let Some(v) = p.connection_uri {
         f.member("connectionUri", v)?;
     }
-    if let Some(v) = p.token {
-        f.member("token", v)?;
-    }
     if let Some(v) = p.encryption_scheme {
         f.member("encryptionScheme", v)?;
     }
@@ -1112,7 +1102,6 @@ impl DisplayJson for MsfTrack {
                     lang: self.lang.as_deref(),
                     track_duration: self.track_duration,
                     connection_uri: self.connection_uri.as_deref(),
-                    token: self.token.as_deref(),
                     encryption_scheme: self.encryption_scheme.as_deref(),
                     cipher_suite: self.cipher_suite.as_deref(),
                     key_id: self.key_id.as_deref(),
@@ -1133,10 +1122,9 @@ impl DisplayJson for MsfTrack {
 /// Track Name は新規でなければならない。
 /// この仕様は将来変更される可能性がある。
 ///
-/// `Debug` は機密値を伏せる。`token` (§5.2.37 の認証トークン)、`track_base_key` (§5.2.41 の
-/// 鍵材料)、`connection_uri` (§11.4.2 のとおり token パラメータを含み得る endpoint URI) は、
-/// 値の代わりにバイト長を `Option<usize>` で表示する。`auth_info` は [`MsfAuthInfo`] の
-/// `Debug` で値を伏せる。
+/// `Debug` は機密値を伏せる。`track_base_key` (§5.2.41 の鍵材料) と `connection_uri`
+/// (§11.4.2 のとおり token パラメータを含み得る endpoint URI) は、値の代わりにバイト長を
+/// `Option<usize>` で表示する。`auth_info` は [`MsfAuthInfo`] の `Debug` で値を伏せる。
 #[derive(Clone, PartialEq)]
 pub struct MsfCloneTrack {
     /// トラック名 (draft-ietf-moq-msf-02 §5.2.3 (Track name)) - 必須、新規でなければならない
@@ -1230,8 +1218,6 @@ pub struct MsfCloneTrack {
     pub track_duration: Option<u64>,
     /// 接続先 URI (draft-ietf-moq-msf-01 §5.2.36 (Connection URI))
     pub connection_uri: Option<String>,
-    /// 認証トークン (draft-ietf-moq-msf-01 §5.2.37 (Token))
-    pub token: Option<String>,
     /// 暗号化方式 (draft-ietf-moq-msf-01 §5.2.38 (Encryption Scheme))
     pub encryption_scheme: Option<String>,
     /// 暗号スイート (draft-ietf-moq-msf-01 §5.2.39 (Cipher Suite))
@@ -1286,7 +1272,6 @@ impl core::fmt::Debug for MsfCloneTrack {
             lang,
             track_duration,
             connection_uri,
-            token,
             encryption_scheme,
             cipher_suite,
             key_id,
@@ -1331,7 +1316,6 @@ impl core::fmt::Debug for MsfCloneTrack {
             .field("lang", lang)
             .field("track_duration", track_duration)
             .field("connection_uri", &connection_uri.as_ref().map(String::len))
-            .field("token", &token.as_ref().map(String::len))
             .field("encryption_scheme", encryption_scheme)
             .field("cipher_suite", cipher_suite)
             .field("key_id", key_id)
@@ -1385,7 +1369,6 @@ impl MsfCloneTrack {
             lang: None,
             track_duration: None,
             connection_uri: None,
-            token: None,
             encryption_scheme: None,
             cipher_suite: None,
             key_id: None,
@@ -1438,7 +1421,6 @@ impl DisplayJson for MsfCloneTrack {
                     lang: self.lang.as_deref(),
                     track_duration: self.track_duration,
                     connection_uri: self.connection_uri.as_deref(),
-                    token: self.token.as_deref(),
                     encryption_scheme: self.encryption_scheme.as_deref(),
                     cipher_suite: self.cipher_suite.as_deref(),
                     key_id: self.key_id.as_deref(),
@@ -1506,7 +1488,6 @@ impl MsfCloneTrack {
         let connection_uri = self
             .connection_uri
             .or_else(|| parent.connection_uri.clone());
-        let token = self.token.or_else(|| parent.token.clone());
         let encryption_scheme = self
             .encryption_scheme
             .or_else(|| parent.encryption_scheme.clone());
@@ -1618,7 +1599,6 @@ impl MsfCloneTrack {
             parent_name: None,
             track_duration,
             connection_uri,
-            token,
             encryption_scheme,
             cipher_suite,
             key_id,
@@ -3524,7 +3504,6 @@ struct CommonTrackFields {
     lang: Option<String>,
     track_duration: Option<u64>,
     connection_uri: Option<String>,
-    token: Option<String>,
     encryption_scheme: Option<String>,
     cipher_suite: Option<String>,
     key_id: Option<String>,
@@ -3583,7 +3562,6 @@ fn decode_common_track_fields(
         // URI 形式検証は行わない (§5.2.36 の妥当性 MUST を含め、接続確立時の振る舞いは
         // catalog decode の責務外とし transport 層に委ねる)。
         connection_uri: val.to_member("connectionUri")?.map(|v| v.try_into())?,
-        token: val.to_member("token")?.map(|v| v.try_into())?,
         encryption_scheme: val.to_member("encryptionScheme")?.map(|v| v.try_into())?,
         cipher_suite: val.to_member("cipherSuite")?.map(|v| v.try_into())?,
         key_id: val.to_member("keyId")?.map(|v| v.try_into())?,
@@ -3703,7 +3681,6 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
         parent_namespace,
         track_duration,
         connection_uri,
-        token,
         encryption_scheme,
         cipher_suite,
         key_id,
@@ -3839,7 +3816,6 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
         parent_name,
         track_duration,
         connection_uri,
-        token,
         encryption_scheme,
         cipher_suite,
         key_id,
@@ -4057,7 +4033,6 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
         lang,
         track_duration,
         connection_uri,
-        token,
         encryption_scheme,
         cipher_suite,
         key_id,
@@ -4154,7 +4129,6 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
         lang,
         track_duration,
         connection_uri,
-        token,
         encryption_scheme,
         cipher_suite,
         key_id,

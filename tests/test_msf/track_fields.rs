@@ -250,11 +250,17 @@ fn max_durations_decoded() {
 }
 
 #[test]
-fn connection_uri_token_decoded() {
-    // draft-ietf-moq-msf-01 §5.6.16 のリテラル由来: connectionUri / token がデコードされること
-    // (token 値は打切りダミーとし、実在し得る認証情報を使わない)
+fn connection_uri_decoded_and_token_ignored() {
+    // draft-ietf-moq-msf-02 Appendix A.1.3: track-level token は削除されたため、
+    // v01 のカタログに token が現れても未知フィールドとして無視する
     let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"moqlog","isLive":true,"namespace":"%resourceId%","role":"log","connectionUri":"moqt://logs.example.com:4443","token":"DUMMY-TOKEN"}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let encoded = doc.encode().expect("token を無視して encode できること");
+    let text = String::from_utf8(encoded).expect("JSON は UTF-8 であること");
+    assert!(
+        !text.contains("\"token\""),
+        "token を再出力しないこと: {text}"
+    );
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -262,11 +268,10 @@ fn connection_uri_token_decoded() {
         cat.tracks[0].connection_uri.as_deref(),
         Some("moqt://logs.example.com:4443")
     );
-    assert_eq!(cat.tracks[0].token.as_deref(), Some("DUMMY-TOKEN"));
 }
 
 #[test]
-fn connection_uri_token_decoded_in_clone() {
+fn connection_uri_decoded_and_token_ignored_in_clone() {
     // clone 経路でもワイヤキー名でデコードされること
     let json = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","connectionUri":"moqt://logs.example.com:4443","token":"DUMMY-TOKEN"}]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
@@ -280,7 +285,6 @@ fn connection_uri_token_decoded_in_clone() {
         tracks[0].connection_uri.as_deref(),
         Some("moqt://logs.example.com:4443")
     );
-    assert_eq!(tracks[0].token.as_deref(), Some("DUMMY-TOKEN"));
 }
 
 #[test]
@@ -309,18 +313,18 @@ fn connection_uri_invalid_value_accepted_in_clone() {
 }
 
 #[test]
-fn connection_uri_token_wrong_type_rejected() {
-    // connectionUri / token の非文字列型は reject されること
+fn connection_uri_wrong_type_rejected_and_token_ignored() {
+    // connectionUri の非文字列型は reject し、削除済みの token は未知フィールドとして無視する
     let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"moqlog","isLive":true,"connectionUri":4443}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
     ));
     let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"moqlog","isLive":true,"token":{}}]}"#;
-    assert!(matches!(
-        MsfCatalogDocument::decode(json),
-        Err(MessageError::InvalidCatalog(_))
-    ));
+    assert!(
+        MsfCatalogDocument::decode(json).is_ok(),
+        "削除済みの token は未知フィールドとして無視すること"
+    );
 }
 
 #[test]

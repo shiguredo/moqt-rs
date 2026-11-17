@@ -8,8 +8,6 @@
 use super::*;
 use shiguredo_moqt::msf::uri::parse_msf_uri;
 
-/// テストで使う bearer token のダミー値
-const TOKEN: &str = "dummy-track-token";
 /// テストで使う trackBaseKey のダミー値
 const TRACK_BASE_KEY: &str = "dummy-base-key";
 /// テストで使う authInfo の scheme 固有値 (生 JSON) のダミー値
@@ -44,7 +42,6 @@ fn secret_auth_info() -> MsfAuthInfo {
 fn secret_track(name: &str) -> MsfTrack {
     let mut track = MsfTrack::new(name.to_string(), MsfPackaging::Loc, true);
     track.codec = Some("avc1.42E01E".to_string());
-    track.token = Some(TOKEN.to_string());
     track.track_base_key = Some(TRACK_BASE_KEY.to_string());
     track.connection_uri = Some(CONNECTION_URI.to_string());
     track.auth_info = Some(vec![secret_auth_info()]);
@@ -55,7 +52,6 @@ fn secret_track(name: &str) -> MsfTrack {
 fn secret_clone_track() -> MsfCloneTrack {
     let mut track = MsfCloneTrack::new("video-clone".to_string(), "video".to_string());
     track.codec = Some("avc1.640028".to_string());
-    track.token = Some(TOKEN.to_string());
     track.track_base_key = Some(TRACK_BASE_KEY.to_string());
     track.connection_uri = Some(CONNECTION_URI.to_string());
     track.auth_info = Some(vec![secret_auth_info()]);
@@ -64,7 +60,6 @@ fn secret_clone_track() -> MsfCloneTrack {
 
 /// トラックの全機密値が伏せられ、長さと非機密フィールドが表示されることを確認する
 fn assert_track_redacted(debug: &str, context: &str) {
-    assert_hidden(debug, TOKEN, context);
     assert_hidden(debug, TRACK_BASE_KEY, context);
     assert_hidden(debug, CONNECTION_URI, context);
     assert_hidden(debug, "dummy-auth-value", context);
@@ -73,10 +68,6 @@ fn assert_track_redacted(debug: &str, context: &str) {
         "{context}: authInfo の生 JSON をバイト列として出さないこと"
     );
     // 伏せたフィールドは長さを表示する
-    assert!(
-        debug.contains(&format!("token: Some({})", TOKEN.len())),
-        "{context}: token の長さを表示すること: {debug}"
-    );
     assert!(
         debug.contains(&format!("track_base_key: Some({})", TRACK_BASE_KEY.len())),
         "{context}: track_base_key の長さを表示すること: {debug}"
@@ -120,10 +111,6 @@ fn track_debug_hides_secrets() {
 fn track_debug_shows_none_for_absent_secrets() {
     let track = MsfTrack::new("audio".to_string(), MsfPackaging::Loc, true);
     let debug = format!("{track:?}");
-    assert!(
-        debug.contains("token: None"),
-        "token が無ければ None を表示すること"
-    );
     assert!(
         debug.contains("track_base_key: None"),
         "track_base_key が無ければ None を表示すること"

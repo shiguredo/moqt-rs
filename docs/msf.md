@@ -27,7 +27,7 @@
   - Codec：codec / mimeType
   - Video：width / height / displayWidth / displayHeight / framerate / timescale / bitrate / avgBitrate / temporalId / spatialId
   - Audio：samplerate / channelConfig
-  - 保護 / アクセシビリティ：connectionUri / token / encryptionScheme / cipherSuite / keyId / trackBaseKey / authInfo / accessibility
+  - 保護 / アクセシビリティ：connectionUri / encryptionScheme / cipherSuite / keyId / trackBaseKey / authInfo / accessibility
 - 名前の変換 API
   - `parse_catalog_namespace`：`/` 区切りのカタログ namespace を `TrackNamespace` に写像する
   - `serialize_catalog_namespace`：`TrackNamespace` を `/` 区切りのカタログ namespace に写像する (UTF-8 でない field・NUL・`/` を含む field は表現できない)

@@ -202,15 +202,10 @@ fn sample_track(ctx: &mut noprop::TestCaseContext) -> MsfTrack {
     t.avg_bitrate = avg_bitrate.map(|v| v as u64);
     t.max_gop_duration = max_gop_duration.map(|v| v as u64);
     t.max_group_duration = max_group_duration.map(|v| v as u64);
-    // connectionUri / token は任意文字列を受理するため、現実形状 (URI ・トークン) の生成にする
+    // connectionUri は任意文字列を受理するため、現実形状 (URI) の生成にする
     // (JSON エスケープ要文字の頑健性は sample_catalog_namespace の field で担保)
     t.connection_uri = if noprop::sample_bool(ctx) {
         Some(sample_uri_like(ctx))
-    } else {
-        None
-    };
-    t.token = if noprop::sample_bool(ctx) {
-        Some(sample_token_like(ctx))
     } else {
         None
     };
@@ -330,11 +325,6 @@ fn sample_clone_track(ctx: &mut noprop::TestCaseContext) -> MsfCloneTrack {
         } else {
             None
         },
-        token: if noprop::sample_bool(ctx) {
-            Some(sample_token_like(ctx))
-        } else {
-            None
-        },
         encryption_scheme: if encrypted {
             Some("moq-secure-objects".to_string())
         } else {
@@ -370,22 +360,6 @@ fn sample_uri_like(ctx: &mut noprop::TestCaseContext) -> String {
     let host = sample_name(ctx);
     let port = noprop::sample_u32(ctx) % 65536;
     format!("moqt://{host}.example.com:{port}")
-}
-
-/// トークンらしい文字列を生成する (`.` 区切りの Base64 系。JWT 形式に寄せている)
-fn sample_token_like(ctx: &mut noprop::TestCaseContext) -> String {
-    let part = |ctx: &mut noprop::TestCaseContext| {
-        let len = noprop::sample_usize_in(ctx, 1..=16);
-        (0..len)
-            .map(|_| {
-                noprop::sample_choice(
-                    ctx,
-                    b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_=+/",
-                ) as char
-            })
-            .collect::<String>()
-    };
-    format!("{}.{}.{}", part(ctx), part(ctx), part(ctx))
 }
 
 /// authInfo を生成する (None:Some = 3:1 の重み。値は string / object / 数値等を混ぜる)

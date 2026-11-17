@@ -16,7 +16,6 @@ fn full_catalog_with_all_fields() {
     track.max_gop_duration = Some(2000);
     track.max_group_duration = Some(4000);
     track.connection_uri = Some("moqt://example.com:4443".to_string());
-    track.token = Some("DUMMY-TOKEN".to_string());
     track.encryption_scheme = Some("moq-secure-objects".to_string());
     track.cipher_suite = Some("aes-128-gcm-sha256".to_string());
     track.key_id = Some("key-1".to_string());
@@ -184,7 +183,6 @@ fn delta_all_operations() {
                     lang: None,
                     track_duration: None,
                     connection_uri: None,
-                    token: None,
                     encryption_scheme: None,
                     cipher_suite: None,
                     key_id: None,
@@ -393,7 +391,6 @@ fn clone_track_roundtrip_all_fields() {
                 max_gop_duration: Some(2000),
                 max_group_duration: Some(4000),
                 connection_uri: Some("moqt://logs.example.com:4443".to_string()),
-                token: Some("DUMMY-TOKEN".to_string()),
                 encryption_scheme: Some("moq-secure-objects".to_string()),
                 cipher_suite: Some("aes-128-gcm-sha256".to_string()),
                 key_id: Some("key-2024-q1".to_string()),
@@ -459,7 +456,6 @@ fn clone_track_roundtrip_with_target_latency() {
                 lang: None,
                 track_duration: None,
                 connection_uri: None,
-                token: None,
                 encryption_scheme: None,
                 cipher_suite: None,
                 key_id: None,
@@ -517,7 +513,6 @@ fn clone_track_roundtrip_with_track_duration() {
                 lang: None,
                 track_duration: Some(60_000),
                 connection_uri: None,
-                token: None,
                 encryption_scheme: None,
                 cipher_suite: None,
                 key_id: None,
@@ -705,14 +700,12 @@ fn publish_tracks_key_order() {
 }
 
 #[test]
-fn connection_uri_token_roundtrip() {
-    // §5.6.16 を適用した完全版 (token / connectionUri 付き) が roundtrip すること
-    // token 値は打切りダミーとし、実在し得る認証情報を使わない
+fn connection_uri_roundtrip() {
+    // §5.6.16 を適用した完全版 (connectionUri 付き) が roundtrip すること
     let mut metrics = MsfTrack::new("metrics".to_string(), MsfPackaging::MoqMetrics, true);
     metrics.namespace = Some("%resourceId%".to_string());
     metrics.role = Some("metrics".to_string());
     metrics.connection_uri = Some("moqt://logs.example.com:4443".to_string());
-    metrics.token = Some("DUMMY-TOKEN".to_string());
 
     let doc = MsfCatalogDocument::Full(MsfCatalog {
         version: MSF_VERSION.to_string(),
@@ -1248,7 +1241,6 @@ fn accessibility_empty_some_roundtrip() {
         lang: None,
         track_duration: None,
         connection_uri: None,
-        token: None,
         encryption_scheme: None,
         cipher_suite: None,
         key_id: None,
@@ -1320,7 +1312,6 @@ fn accessibility_clone_none_omitted() {
                 lang: None,
                 track_duration: None,
                 connection_uri: None,
-                token: None,
                 encryption_scheme: None,
                 cipher_suite: None,
                 key_id: None,
