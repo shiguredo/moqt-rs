@@ -80,7 +80,7 @@ fn full_catalog_with_max_durations_absent() {
 fn full_catalog_with_init_data_list_and_buffers() {
     let mut track = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
     track.init_ref = Some("init1".to_string());
-    track.depends = vec!["audio".to_string()];
+    track.depends = vec![MsfDependency::TrackName("audio".to_string())];
     track.temporal_id = Some(1);
     track.spatial_id = Some(0);
     track.buffers = Some(MsfBuffers {
@@ -89,11 +89,12 @@ fn full_catalog_with_init_data_list_and_buffers() {
         max: Some(2000),
     });
 
+    let audio = MsfTrack::new("audio".to_string(), MsfPackaging::Loc, true);
     let doc = MsfCatalogDocument::Full(MsfCatalog {
         version: MSF_VERSION.to_string(),
         generated_at: None,
         is_complete: true,
-        tracks: vec![track],
+        tracks: vec![track, audio],
         publish_tracks: Vec::new(),
         removed_tracks: Default::default(),
         init_data_list: vec![MsfInitData {
@@ -111,15 +112,16 @@ fn full_catalog_with_init_data_list_and_buffers() {
 #[test]
 fn full_catalog_with_media_timeline_track() {
     let mut track = MsfTrack::new("timeline".to_string(), MsfPackaging::MediaTimeline, true);
-    track.depends = vec!["video".to_string()];
+    track.depends = vec![MsfDependency::TrackName("video".to_string())];
     track.mime_type = Some("application/json".to_string());
     track.timescale = Some(1_000);
 
+    let video = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
     let doc = MsfCatalogDocument::Full(MsfCatalog {
         version: MSF_VERSION.to_string(),
         generated_at: None,
         is_complete: false,
-        tracks: vec![track],
+        tracks: vec![track, video],
         publish_tracks: Vec::new(),
         removed_tracks: Default::default(),
         init_data_list: Vec::new(),
@@ -369,7 +371,7 @@ fn clone_track_roundtrip_all_fields() {
                 render_group: Some(1),
                 alt_group: Some(2),
                 init_ref: Some("init1".to_string()),
-                depends: Some(vec!["original".to_string()]),
+                depends: Some(vec![MsfDependency::TrackName("original".to_string())]),
                 template: Some(MsfTemplate {
                     start_media_time: 0,
                     delta_media_time: 2002,
@@ -1542,7 +1544,7 @@ fn encode_rejects_invalid_clone_and_remove_names() {
     // clone の depends 要素が空 / NUL
     for dependency in ["", "a\u{0}b"] {
         let mut clone = MsfCloneTrack::new("child".to_string(), "parent".to_string());
-        clone.depends = Some(vec![dependency.to_string()]);
+        clone.depends = Some(vec![MsfDependency::TrackName(dependency.to_string())]);
         let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
             generated_at: None,
             operations: vec![MsfDeltaOperation::Clone {
@@ -1597,7 +1599,7 @@ fn encode_rejects_invalid_clone_and_remove_names() {
     // full track の depends 要素が空 / NUL
     for dependency in ["", "a\u{0}b"] {
         let mut track = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
-        track.depends = vec![dependency.to_string()];
+        track.depends = vec![MsfDependency::TrackName(dependency.to_string())];
         let doc = MsfCatalogDocument::Full(MsfCatalog {
             version: MSF_VERSION.to_string(),
             generated_at: None,
@@ -1954,4 +1956,21 @@ fn encode_rejects_invalid_packaging_metadata() {
         matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
         "clone の不正な packagingMetadata を encode しないこと"
     );
+}
+
+/// 手組みの未解決 depends を encode しないこと
+#[test]
+fn encode_rejects_unresolved_depends() {
+    let mut track = MsfTrack::new("x".to_string(), MsfPackaging::Loc, true);
+    track.depends = vec![MsfDependency::TrackName("missing".to_string())];
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![track],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
 }

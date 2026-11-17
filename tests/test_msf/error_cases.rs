@@ -136,13 +136,20 @@ fn event_timeline_missing_data() {
 }
 
 #[test]
-fn depends_entry_not_string() {
-    let json =
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"depends":[1,2]}]}"#;
-    assert!(matches!(
-        MsfCatalogDocument::decode(json),
-        Err(MessageError::InvalidCatalog(_))
-    ));
+fn depends_entry_not_string_or_integer() {
+    // draft-ietf-moq-msf-02 §5.2.15 (Dependencies): 要素は String または整数 Number
+    for element in ["true", r#"{"a":1}"#, "1.5"] {
+        let json = format!(
+            r#"{{"version":"draft-01","tracks":[{{"name":"t","packaging":"loc","isLive":true,"depends":[{element}]}}]}}"#
+        );
+        assert!(
+            matches!(
+                MsfCatalogDocument::decode(json.as_bytes()),
+                Err(MessageError::InvalidCatalog(_))
+            ),
+            "depends の {element} 要素を拒否すること"
+        );
+    }
 }
 
 #[test]
@@ -1984,7 +1991,7 @@ fn encode_full_event_type_with_non_eventtimeline_rejected() {
 fn encode_full_event_timeline_missing_event_type_rejected() {
     // draft-ietf-moq-msf-01 §5.2.5 (Event timeline type)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::EventTimeline, true);
-    track.depends = vec!["v".to_string()];
+    track.depends = vec![MsfDependency::TrackName("v".to_string())];
     track.mime_type = Some("application/json".to_string());
     assert!(matches!(
         full_doc(vec![track], vec![], vec![]).encode(),

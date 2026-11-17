@@ -845,3 +845,91 @@ fn invalid_packaging_metadata_rejected() {
         "clone の不正な packagingMetadata を拒否すること"
     );
 }
+
+/// depends の track name / renderGroup 参照が解決されること
+#[test]
+fn depends_resolution_accepts_track_name_and_render_group() {
+    let json = br#"{"version":"draft-01","tracks":[
+        {"name":"video","packaging":"loc","isLive":true,"renderGroup":1},
+        {"name":"timeline","packaging":"mediatimeline","isLive":true,"depends":["video",1],"mimeType":"application/json"}
+    ]}"#;
+    let doc = MsfCatalogDocument::decode(json).expect("依存先が実在するため受理されること");
+    let MsfCatalogDocument::Full(catalog) = doc else {
+        panic!("Full が期待された");
+    };
+    assert_eq!(
+        catalog.tracks[1].depends,
+        vec![
+            MsfDependency::TrackName("video".to_string()),
+            MsfDependency::RenderGroup(1)
+        ]
+    );
+}
+
+/// 存在しない track name / renderGroup への依存が拒否されること
+#[test]
+fn depends_resolution_rejects_unresolved_references() {
+    for depends in [r#"["missing"]"#, "[7]"] {
+        let json = format!(
+            r#"{{"version":"draft-01","tracks":[{{"name":"x","packaging":"loc","isLive":true,"depends":{depends}}}]}}"#
+        );
+        assert!(
+            matches!(
+                MsfCatalogDocument::decode(json.as_bytes()),
+                Err(MessageError::InvalidCatalog(_))
+            ),
+            "未解決の depends {depends} を拒否すること"
+        );
+    }
+}
+
+/// 自己参照と同名 track への依存が拒否されること
+#[test]
+fn depends_resolution_rejects_self_and_ambiguous_names() {
+    let self_ref = br#"{"version":"draft-01","tracks":[{"name":"x","packaging":"loc","isLive":true,"depends":["x"]}]}"#;
+    assert!(matches!(
+        MsfCatalogDocument::decode(self_ref),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+
+    // namespace が違えば track name の一意性は満たすが、depends の String は 2 件に一致する
+    let ambiguous = br#"{"version":"draft-01","tracks":[
+        {"name":"dup","namespace":"a","packaging":"loc","isLive":true},
+        {"name":"dup","namespace":"b","packaging":"loc","isLive":true},
+        {"name":"x","packaging":"loc","isLive":true,"depends":["dup"]}
+    ]}"#;
+    assert!(matches!(
+        MsfCatalogDocument::decode(ambiguous),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+/// 複数の track が同じ renderGroup を共有していても 1 つのグループとして解決されること
+#[test]
+fn depends_resolution_accepts_shared_render_group() {
+    let json = br#"{"version":"draft-01","tracks":[
+        {"name":"a","packaging":"loc","isLive":true,"renderGroup":5},
+        {"name":"b","packaging":"loc","isLive":true,"renderGroup":5},
+        {"name":"c","packaging":"loc","isLive":true,"depends":[5]}
+    ]}"#;
+    assert!(
+        MsfCatalogDocument::decode(json).is_ok(),
+        "同じ renderGroup を共有する track への依存を受理すること"
+    );
+}
+
+/// tracks と publishTracks が相互に依存できること
+#[test]
+fn depends_resolution_allows_publish_tracks_cross_reference() {
+    let json = br#"{"version":"draft-01","tracks":[
+        {"name":"normal","packaging":"loc","isLive":true,"depends":["published"]}
+    ],"publishTracks":[
+        {"name":"published","packaging":"loc","isLive":true,"depends":["normal"]}
+    ]}"#;
+    let doc = MsfCatalogDocument::decode(json).expect("相互参照を受理すること");
+    let encoded = doc.encode().expect("encode できること");
+    assert_eq!(
+        MsfCatalogDocument::decode(&encoded).expect("roundtrip できること"),
+        doc
+    );
+}

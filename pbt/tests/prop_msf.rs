@@ -1,11 +1,11 @@
 use pbt::common::test_runner;
 use shiguredo_moqt::msf::{
     MSF_VERSION, MsfAccessibility, MsfAuthInfo, MsfBuffers, MsfCatalog, MsfCatalogDocument,
-    MsfCloneTrack, MsfDeltaOperation, MsfDeltaUpdate, MsfEventIndex, MsfEventTimeline,
-    MsfEventTimelineEntry, MsfInitData, MsfInitDataKind, MsfMediaTimeline, MsfMediaTimelineEntry,
-    MsfPackaging, MsfRemoveTrack, MsfTemplate, MsfTrack, TimelineEncodingOptions,
-    decode_event_timeline, decode_media_timeline, encode_event_timeline, encode_media_timeline,
-    parse_catalog_namespace, serialize_catalog_namespace,
+    MsfCloneTrack, MsfDeltaOperation, MsfDeltaUpdate, MsfDependency, MsfEventIndex,
+    MsfEventTimeline, MsfEventTimelineEntry, MsfInitData, MsfInitDataKind, MsfMediaTimeline,
+    MsfMediaTimelineEntry, MsfPackaging, MsfRemoveTrack, MsfTemplate, MsfTrack,
+    TimelineEncodingOptions, decode_event_timeline, decode_media_timeline, encode_event_timeline,
+    encode_media_timeline, parse_catalog_namespace, serialize_catalog_namespace,
 };
 
 // ─── 生成ヘルパー ─────────────────────────────────────────────────────────────
@@ -145,7 +145,7 @@ fn sample_track(ctx: &mut noprop::TestCaseContext) -> MsfTrack {
     let max_group_duration = sample_optional_u32(ctx);
     let depends_count = noprop::sample_usize_in(ctx, 0..=3);
     let depends_raw = (0..depends_count)
-        .map(|_| sample_name(ctx))
+        .map(|_| MsfDependency::TrackName(sample_name(ctx)))
         .collect::<Vec<_>>();
     let lang = sample_lang(ctx);
 
@@ -168,7 +168,7 @@ fn sample_track(ctx: &mut noprop::TestCaseContext) -> MsfTrack {
     );
     if is_timeline {
         t.depends = if depends_raw.is_empty() {
-            vec!["default".to_string()]
+            vec![MsfDependency::TrackName("default".to_string())]
         } else {
             depends_raw
         };
@@ -551,6 +551,78 @@ fn sample_event_timeline_entry(ctx: &mut noprop::TestCaseContext) -> MsfEventTim
 
 // ─── PBT ─────────────────────────────────────────────────────────────────────
 
+/// depends を、生成済みカタログ内で解決できる track name / renderGroup に置き換える
+///
+/// draft-ietf-moq-msf-02 §5.2.15 (Dependencies): track name は依存元以外の track に
+/// ちょうど 1 つ一致し、renderGroup はカタログ内に存在しなければならない。PBT の生成器は
+/// 独立に track を作るため、カタログ全体ができた後に参照先を実在する値へ差し替える。
+/// timeline は depends 非空が必須のため、候補が無ければ専用の renderGroup を足す。
+fn rewrite_dependencies(
+    tracks: &mut [MsfTrack],
+    publish_tracks: &mut [MsfTrack],
+    ctx: &mut noprop::TestCaseContext,
+) {
+    let all_names = tracks
+        .iter()
+        .chain(publish_tracks.iter())
+        .map(|track| track.name.clone())
+        .collect::<Vec<_>>();
+    let render_groups = tracks
+        .iter()
+        .chain(publish_tracks.iter())
+        .filter_map(|track| track.render_group)
+        .collect::<Vec<_>>();
+
+    let rewrite_one = |source: &mut MsfTrack, ctx: &mut noprop::TestCaseContext| {
+        let source_name = source.name.clone();
+        let valid_names = all_names
+            .iter()
+            .filter(|name| {
+                name.as_str() != source_name
+                    && all_names
+                        .iter()
+                        .filter(|candidate| *candidate == *name)
+                        .count()
+                        == 1
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let is_timeline = matches!(
+            source.packaging,
+            MsfPackaging::MediaTimeline | MsfPackaging::EventTimeline
+        );
+        let count = noprop::sample_usize_in(ctx, if is_timeline { 1..=2 } else { 0..=2 });
+        let mut depends = Vec::new();
+        for _ in 0..count {
+            if !valid_names.is_empty() && (render_groups.is_empty() || noprop::sample_bool(ctx)) {
+                depends.push(MsfDependency::TrackName(
+                    noprop::sample_choice(ctx, &valid_names).clone(),
+                ));
+            } else if !render_groups.is_empty() {
+                depends.push(MsfDependency::RenderGroup(noprop::sample_choice(
+                    ctx,
+                    &render_groups,
+                )));
+            }
+        }
+        if is_timeline && depends.is_empty() {
+            // 既存の renderGroup と衝突しない値を足し、そのグループへの依存にする
+            let fresh = render_groups.iter().max().map_or(0, |max| max + 1);
+            source.render_group = Some(fresh);
+            depends.push(MsfDependency::RenderGroup(fresh));
+        }
+        source.depends = depends;
+    };
+
+    for track in tracks.iter_mut() {
+        rewrite_one(track, ctx);
+    }
+    for track in publish_tracks.iter_mut() {
+        rewrite_one(track, ctx);
+    }
+}
+
 /// Full catalog の encode → decode ラウンドトリップ
 ///
 /// - トラック名は catalog 通して (tracks / publishTracks) namespace ごとに一意でなければならない (draft-ietf-moq-msf-01 §5.2.3 (Track name))
@@ -578,10 +650,12 @@ fn full_catalog_roundtrip() -> noprop::TestResult {
 
         // publish_tracks も tracks と同じ (namespace, name) 重複排除を適用する (seen を共有)
         let publish_count = noprop::sample_usize_in(ctx, 0..=2);
-        let publish_tracks: Vec<_> = (0..publish_count)
+        let mut publish_tracks: Vec<_> = (0..publish_count)
             .map(|_| sample_track(ctx))
             .filter(|t| seen.insert((t.namespace.clone(), t.name.clone())))
             .collect();
+        let mut unique_tracks = unique_tracks;
+        rewrite_dependencies(&mut unique_tracks, &mut publish_tracks, ctx);
         let doc = MsfCatalogDocument::Full(MsfCatalog {
             version: MSF_VERSION.to_string(),
             generated_at,

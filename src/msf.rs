@@ -572,6 +572,27 @@ impl DisplayJson for MsfAccessibility {
     }
 }
 
+/// MSF の depends 要素 (draft-ietf-moq-msf-02 §5.2.15 (Dependencies))
+///
+/// track name (JSON String) と renderGroup (JSON Number) のいずれかを表す。
+/// この型への変更は公開 API の破壊的変更である。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MsfDependency {
+    /// 依存先の Track Name
+    TrackName(String),
+    /// 依存先の renderGroup 識別子
+    RenderGroup(u64),
+}
+
+impl DisplayJson for MsfDependency {
+    fn fmt(&self, f: &mut JsonFormatter<'_, '_>) -> core::fmt::Result {
+        match self {
+            Self::TrackName(value) => f.value(value.as_str()),
+            Self::RenderGroup(value) => f.value(*value),
+        }
+    }
+}
+
 /// MSF トラックオブジェクト (draft-ietf-moq-msf-01 §5.2 (Track Object Fields))
 ///
 /// `Debug` は機密値を伏せる。`token` (§5.2.37 の認証トークン)、`track_base_key` (§5.2.41 の
@@ -619,8 +640,8 @@ pub struct MsfTrack {
     pub alt_group: Option<u64>,
     /// 初期化データ参照 (draft-ietf-moq-msf-01 §5.2.13 (Initialization reference))
     pub init_ref: Option<String>,
-    /// 依存トラック名配列 (draft-ietf-moq-msf-01 §5.2.14 (Dependencies))
-    pub depends: Vec<String>,
+    /// 依存トラック / renderGroup 配列 (draft-ietf-moq-msf-02 §5.2.15 (Dependencies))
+    pub depends: Vec<MsfDependency>,
     /// メディアタイムラインテンプレート (draft-ietf-moq-msf-01 §5.2.15 (Template))
     pub template: Option<MsfTemplate>,
     /// テンポラル ID (draft-ietf-moq-msf-01 §5.2.16 (Temporal ID))
@@ -866,7 +887,7 @@ struct TrackJsonParts<'a> {
     render_group: Option<u64>,
     alt_group: Option<u64>,
     init_ref: Option<&'a str>,
-    depends: Option<&'a [String]>,
+    depends: Option<&'a [MsfDependency]>,
     template: Option<&'a MsfTemplate>,
     temporal_id: Option<u64>,
     spatial_id: Option<u64>,
@@ -955,10 +976,7 @@ fn write_track_json(
     if let Some(deps) = p.depends
         && (p.is_clone || !deps.is_empty())
     {
-        f.member(
-            "depends",
-            nojson::array(|f| f.elements(deps.iter().map(|s| s.as_str()))),
-        )?;
+        f.member("depends", nojson::array(|f| f.elements(deps.iter())))?;
     }
     if let Some(v) = p.template {
         f.member("template", v)?;
@@ -1170,8 +1188,8 @@ pub struct MsfCloneTrack {
     pub alt_group: Option<u64>,
     /// 初期化データ参照 (draft-ietf-moq-msf-01 §5.2.13 (Initialization reference))
     pub init_ref: Option<String>,
-    /// 依存トラック名配列 (draft-ietf-moq-msf-01 §5.2.14 (Dependencies)) - None は親から継承
-    pub depends: Option<Vec<String>>,
+    /// 依存トラック / renderGroup 配列 (draft-ietf-moq-msf-02 §5.2.15 (Dependencies)) - None は親から継承
+    pub depends: Option<Vec<MsfDependency>>,
     /// メディアタイムラインテンプレート (draft-ietf-moq-msf-01 §5.2.15 (Template)) - None は親から継承
     pub template: Option<MsfTemplate>,
     /// テンポラル ID (draft-ietf-moq-msf-01 §5.2.16 (Temporal ID))
@@ -2074,6 +2092,8 @@ impl MsfCatalog {
         // draft-ietf-moq-msf-01 §5.2.13 (Initialization reference): 適用後の tracks /
         // publishTracks の initRef が initDataList の id を指すこと。
         validate_init_refs(&self.tracks, &self.publish_tracks, &self.init_data_list)?;
+        // draft-ietf-moq-msf-02 §5.2.15 (Dependencies): 適用後の catalog 全体で解決できること
+        validate_catalog_dependencies(&self.tracks, &self.publish_tracks)?;
         // draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers):
         // 同一 renderGroup / altGroup 内の isLive=true トラックが宣言した値は一致しなければならない (MUST)。
         // 省略は player の裁量 (MAY) のため比較しない。この仕様は将来変更される可能性がある。
@@ -2848,6 +2868,62 @@ fn validate_event_type_not_set_when_not_event_timeline(
     Ok(())
 }
 
+/// depends 要素の形を検証する
+///
+/// Track Name は §5.2.3 / §11.2 の写像規則、renderGroup は Number であることを確認する。
+/// 参照先がカタログ内に解決できるかは [`validate_catalog_dependencies`] が検査する。
+fn validate_dependency_shape(dependency: &MsfDependency) -> Result<(), MessageError> {
+    if let MsfDependency::TrackName(name) = dependency {
+        catalog_track_name_bytes(name)?;
+    }
+    Ok(())
+}
+
+/// カタログ全体の depends 解決を検証する
+///
+/// draft-ietf-moq-msf-02 §5.2.15 (Dependencies): String 要素は依存元以外の track object の
+/// Track Name にちょうど 1 つ一致し、Number 要素はカタログ内の renderGroup に一致しなければ
+/// ならない。tracks と publishTracks の双方を対象とし、相互参照も許可する。
+fn validate_catalog_dependencies(
+    tracks: &[MsfTrack],
+    publish_tracks: &[MsfTrack],
+) -> Result<(), MessageError> {
+    for source in tracks.iter().chain(publish_tracks.iter()) {
+        for dependency in &source.depends {
+            match dependency {
+                MsfDependency::TrackName(name) => {
+                    let matches = tracks
+                        .iter()
+                        .chain(publish_tracks.iter())
+                        .filter(|candidate| {
+                            !core::ptr::eq(*candidate, source) && candidate.name == name.as_str()
+                        })
+                        .count();
+                    if matches != 1 {
+                        return Err(MessageError::InvalidCatalog(format!(
+                            "track '{}' depends on track name '{}' which MUST match exactly one other track (matched {matches})",
+                            source.name, name
+                        )));
+                    }
+                }
+                MsfDependency::RenderGroup(render_group) => {
+                    if !tracks
+                        .iter()
+                        .chain(publish_tracks.iter())
+                        .any(|candidate| candidate.render_group == Some(*render_group))
+                    {
+                        return Err(MessageError::InvalidCatalog(format!(
+                            "track '{}' depends on renderGroup {render_group} which does not exist in the catalog",
+                            source.name
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// packagingMetadata の構文を検証する
 ///
 /// draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata): `;` 区切りの `key=value` で、key と
@@ -2928,7 +3004,7 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
     // draft-ietf-moq-transport-23 §8.7: Full Track Name は 4,096 バイト以下
     validate_catalog_full_track_name(namespace.as_ref(), &name)?;
     for dependency in &track.depends {
-        catalog_track_name_bytes(dependency)?;
+        validate_dependency_shape(dependency)?;
     }
 
     // draft-ietf-moq-msf-01 §5.2.33 (Parent name): clone 操作内でのみ許可される
@@ -3042,7 +3118,7 @@ fn validate_clone_track_fragment(track: &MsfCloneTrack) -> Result<(), MessageErr
     validate_catalog_full_track_name(parent_namespace.as_ref(), &parent_name)?;
     if let Some(ref depends) = track.depends {
         for dependency in depends {
-            catalog_track_name_bytes(dependency)?;
+            validate_dependency_shape(dependency)?;
         }
     }
 
@@ -3086,6 +3162,7 @@ fn validate_full_catalog_for_encode(catalog: &MsfCatalog) -> Result<(), MessageE
     for track in catalog.tracks.iter().chain(catalog.publish_tracks.iter()) {
         validate_full_track(track)?;
     }
+    validate_catalog_dependencies(&catalog.tracks, &catalog.publish_tracks)?;
     // tracks と publishTracks は方向が異なるため group 検証は分離する
     // (draft-ietf-moq-msf-01 §5.1.5 の reverse direction による本実装の解釈)
     validate_group_target_latency(&catalog.tracks, "renderGroup", |t| t.render_group)?;
@@ -3210,6 +3287,9 @@ fn decode_full_catalog(
     validate_group_buffers(&tracks, "altGroup", |t| t.alt_group)?;
     validate_group_buffers(&publish_tracks, "renderGroup", |t| t.render_group)?;
     validate_group_buffers(&publish_tracks, "altGroup", |t| t.alt_group)?;
+
+    // draft-ietf-moq-msf-02 §5.2.15 (Dependencies): 参照先が解決できること
+    validate_catalog_dependencies(&tracks, &publish_tracks)?;
 
     let catalog = MsfCatalog {
         version,
@@ -3343,7 +3423,7 @@ struct CommonTrackFields {
     key_id: Option<String>,
     track_base_key: Option<String>,
     auth_info: Option<Vec<MsfAuthInfo>>,
-    depends: Option<Vec<String>>,
+    depends: Option<Vec<MsfDependency>>,
     accessibility: Option<Vec<MsfAccessibility>>,
     parent_name: Option<String>,
     parent_namespace: Option<String>,
@@ -3410,7 +3490,19 @@ fn decode_common_track_fields(
             Some(arr_v) => Some(
                 arr_v
                     .to_array()?
-                    .map(|v| -> Result<String, MessageError> { v.try_into().map_err(Into::into) })
+                    .map(|v| -> Result<MsfDependency, MessageError> {
+                        match v.kind() {
+                            nojson::JsonValueKind::String => {
+                                Ok(MsfDependency::TrackName(v.try_into()?))
+                            }
+                            nojson::JsonValueKind::Integer => {
+                                Ok(MsfDependency::RenderGroup(parse_u64(v)?))
+                            }
+                            _ => Err(MessageError::InvalidCatalog(
+                                "depends element MUST be a string or an integer".to_string(),
+                            )),
+                        }
+                    })
                     .collect::<Result<Vec<_>, _>>()?,
             ),
         },
@@ -3439,7 +3531,7 @@ fn decode_common_track_fields(
     }
     if let Some(ref depends) = fields.depends {
         for dependency in depends {
-            catalog_track_name_bytes(dependency)?;
+            validate_dependency_shape(dependency)?;
         }
     }
     Ok(fields)

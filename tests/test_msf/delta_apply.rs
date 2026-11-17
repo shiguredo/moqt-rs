@@ -299,7 +299,7 @@ fn apply_delta_clone_event_timeline_without_event_type_rejected() {
     let mut clone = MsfCloneTrack::new("e".to_string(), "v".to_string());
     clone.packaging = Some(MsfPackaging::EventTimeline);
     clone.mime_type = Some("application/json".to_string());
-    clone.depends = Some(vec!["v".to_string()]);
+    clone.depends = Some(vec![MsfDependency::TrackName("v".to_string())]);
     let delta = MsfDeltaUpdate {
         generated_at: None,
         operations: vec![MsfDeltaOperation::Clone {
@@ -1693,4 +1693,23 @@ fn apply_delta_clone_inherits_or_overrides_packaging_metadata() {
         Some("streamMapping=group"),
         "clone が明示した packagingMetadata は親を上書きすること"
     );
+}
+
+/// delta 適用後に未解決の depends が残る場合は拒否されること
+#[test]
+fn apply_delta_rejects_unresolved_depends() {
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(loc_track("existing", None));
+    let mut added = loc_track("added", None);
+    added.depends = vec![MsfDependency::TrackName("missing".to_string())];
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![added],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
 }

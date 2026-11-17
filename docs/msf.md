@@ -20,6 +20,7 @@
 - Track (`MsfTrack`)：Codec / Video / Audio は draft 上の論理的な分類で、実体は単一の `MsfTrack` のフィールド
   - 共通：name / namespace / packaging / packagingMetadata / eventType / role / isLive / label / lang / targetLatency / buffers / trackDuration / renderGroup / altGroup / initRef / depends / parentName / template / maxGopDuration / maxGroupDuration
   - `packagingMetadata` は `;` 区切りの `key=value`。key / value の whitespace・`=`・`;`、空要素、空の key / value を拒否する (§5.2.5)。`packaging_metadata_value(key)` で最初の出現を取得する
+  - `depends` は track name (JSON String) または renderGroup (JSON Number) の配列 (§5.2.15)。String は依存元以外の track にちょうど 1 つ、Number はカタログ内の renderGroup に一致しなければならず、未解決・同名複数・自己参照を拒否する。公開型は `MsfDependency` で、`Vec<String>` からの破壊的変更である
   - `name` は空文字列と NUL を拒否する (§5.2.3 / §11.2.1)。`depends` の String 要素、`parentName`、`parentNamespace` も同じ写像規則で検証する
   - `namespace` は draft-ietf-moq-msf-02 §5.2.2 の `/` 区切り文字列。各 field は UTF-8 で、空文字列・空 field・NUL・32 fields 超・4096 バイト超・先頭や末尾や連続する `/` を拒否する
   - namespace と name の合計 (Full Track Name) は 4,096 バイト以下でなければならない (draft-ietf-moq-transport-23 §8.7)。namespace が省略され継承先が不明な場合は name 単体だけを検証する

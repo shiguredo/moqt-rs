@@ -102,12 +102,18 @@ fn all_optional_number_fields() {
 fn depends_array() {
     let json = br#"{"version":"draft-01","tracks":[{
             "name":"hd","packaging":"loc","isLive":true,"depends":["sd","md"]
-        }]}"#;
+        },{"name":"sd","packaging":"loc","isLive":true},{"name":"md","packaging":"loc","isLive":true}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
-    assert_eq!(cat.tracks[0].depends, vec!["sd", "md"]);
+    assert_eq!(
+        cat.tracks[0].depends,
+        vec![
+            MsfDependency::TrackName("sd".to_string()),
+            MsfDependency::TrackName("md".to_string())
+        ]
+    );
 }
 
 #[test]
@@ -121,7 +127,7 @@ fn packaging_values() {
     assert_eq!(cat.tracks[0].packaging, MsfPackaging::Loc);
 
     // mediatimeline は depends と mimeType=application/json が必須
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"mediatimeline","isLive":true,"depends":["video"],"mimeType":"application/json"}]}"#;
+    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"mediatimeline","isLive":true,"depends":["video"],"mimeType":"application/json"},{"name":"video","packaging":"loc","isLive":true}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -129,7 +135,7 @@ fn packaging_values() {
     assert_eq!(cat.tracks[0].packaging, MsfPackaging::MediaTimeline);
 
     // eventtimeline は eventType, depends, mimeType=application/json が必須
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"eventtimeline","isLive":true,"eventType":"com.example.cue","depends":["video"],"mimeType":"application/json"}]}"#;
+    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"eventtimeline","isLive":true,"eventType":"com.example.cue","depends":["video"],"mimeType":"application/json"},{"name":"video","packaging":"loc","isLive":true}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");

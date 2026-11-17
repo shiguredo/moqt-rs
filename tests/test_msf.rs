@@ -3,12 +3,12 @@ use shiguredo_moqt::{
     message::common::TrackNamespace,
     msf::{
         MSF_VERSION, MsfAuthInfo, MsfBuffers, MsfCatalog, MsfCatalogDocument, MsfCloneTrack,
-        MsfDeltaOperation, MsfDeltaUpdate, MsfEventIndex, MsfEventTimeline, MsfEventTimelineEntry,
-        MsfInitData, MsfInitDataKind, MsfMediaTimeline, MsfMediaTimelineEntry, MsfPackaging,
-        MsfRemoveTrack, MsfTemplate, MsfTrack, TimelineEncodingOptions, decode_event_timeline,
-        decode_media_timeline, encode_event_timeline, encode_media_timeline,
-        parse_catalog_namespace, parse_fragment_pairs, resolve_catalog_variables,
-        serialize_catalog_namespace,
+        MsfDeltaOperation, MsfDeltaUpdate, MsfDependency, MsfEventIndex, MsfEventTimeline,
+        MsfEventTimelineEntry, MsfInitData, MsfInitDataKind, MsfMediaTimeline,
+        MsfMediaTimelineEntry, MsfPackaging, MsfRemoveTrack, MsfTemplate, MsfTrack,
+        TimelineEncodingOptions, decode_event_timeline, decode_media_timeline,
+        encode_event_timeline, encode_media_timeline, parse_catalog_namespace,
+        parse_fragment_pairs, resolve_catalog_variables, serialize_catalog_namespace,
     },
 };
 
