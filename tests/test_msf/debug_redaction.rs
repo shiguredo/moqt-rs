@@ -181,7 +181,7 @@ fn container_debug_hides_track_secrets() {
     // removed_tracks は Debug に含まれる (MsfCatalog の doc) が、値は MsfTrack の Debug で伏せる
     catalog
         .removed_tracks
-        .insert((None, "removed".to_string()), secret_track("removed"));
+        .insert((None, b"removed".to_vec()), secret_track("removed"));
 
     let debug = format!("{catalog:?}");
     assert_track_redacted(&debug, "MsfCatalog");

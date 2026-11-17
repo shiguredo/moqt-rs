@@ -964,4 +964,103 @@ mod tests {
             }
         );
     }
+
+    /// カタログの namespace を v02 の `/` 区切りで出力すること
+    ///
+    /// draft-ietf-moq-msf-02 §5.2.2 (Track namespace): publisher は catalog track の
+    /// namespace を `/` 区切りで書き、subscriber は同じ Track Namespace に解決する。
+    /// moq-sub が使う `parse_catalog_namespace` で往復できることを固定する。
+    #[test]
+    fn publisher_catalog_writes_v02_namespace() {
+        let video = VideoTrackParams {
+            track_name: "video",
+            namespace: "customer/livestream/123",
+            codec: "av01.0.08M.08",
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate: 5_000,
+            max_group_duration_ms: None,
+        };
+        let json = build_catalog_json(Some(&video), None, TEST_SYNC, &[])
+            .expect("v02 の namespace でカタログを組み立てられること");
+        let text = String::from_utf8(json.clone()).expect("JSON は UTF-8 であること");
+        assert!(
+            text.contains(r#""namespace":"customer/livestream/123""#),
+            "namespace を '/' 区切りで出力すること: {text}"
+        );
+
+        let decoded =
+            MsfCatalogDocument::decode(&json).expect("テストフィクスチャの前提条件を満たす");
+        let MsfCatalogDocument::Full(catalog) = decoded else {
+            panic!("publisher は Full カタログを組み立てること");
+        };
+        let namespace = shiguredo_moqt::msf::parse_catalog_namespace(
+            catalog.tracks[0]
+                .namespace
+                .as_deref()
+                .expect("namespace が出力されること"),
+        )
+        .expect("subscriber 側で解決できること");
+        assert_eq!(
+            shiguredo_moqt::name::serialize_name(&namespace, b"video"),
+            "customer-livestream-123--video",
+            "subscriber が同じ Full Track Name に解決できること"
+        );
+    }
+
+    /// カタログで表現できない namespace は encode で拒否すること
+    #[test]
+    fn publisher_catalog_rejects_unrepresentable_namespace() {
+        let audio = AudioTrackParams {
+            track_name: "audio",
+            namespace: "a//b",
+            codec: "opus",
+            samplerate: 48_000,
+            channel_config: "1",
+            bitrate: 64,
+        };
+        assert!(
+            build_catalog_json(None, Some(&audio), TEST_SYNC, &[]).is_err(),
+            "空の field を含む namespace をカタログに書かないこと"
+        );
+    }
+
+    /// MOQT の Track Namespace から v02 の `/` 区切り表現を作る経路でもカタログを組み立てられること
+    ///
+    /// publisher の実行経路は `TrackNamespace` を `serialize_catalog_namespace` で変換し、
+    /// その文字列を [`VideoTrackParams::namespace`] / [`AudioTrackParams::namespace`] へ渡す。
+    /// 変換とカタログ組み立ての組み合わせを固定する。
+    #[test]
+    fn publisher_catalog_accepts_serialized_track_namespace() {
+        let namespace = shiguredo_moqt::message::common::TrackNamespace::new(vec![
+            "customer".as_bytes().to_vec(),
+            "ライブ".as_bytes().to_vec(),
+        ])
+        .expect("テスト用 namespace を作れること");
+        let namespace_text = shiguredo_moqt::msf::serialize_catalog_namespace(&namespace)
+            .expect("カタログ形式に変換できること");
+        assert_eq!(namespace_text, "customer/ライブ");
+
+        let audio = AudioTrackParams {
+            track_name: "audio",
+            namespace: &namespace_text,
+            codec: "opus",
+            samplerate: 48_000,
+            channel_config: "1",
+            bitrate: 64,
+        };
+        let json = build_catalog_json(None, Some(&audio), TEST_SYNC, &[])
+            .expect("変換した namespace でカタログを組み立てられること");
+        let decoded =
+            MsfCatalogDocument::decode(&json).expect("テストフィクスチャの前提条件を満たす");
+        let MsfCatalogDocument::Full(catalog) = decoded else {
+            panic!("publisher は Full カタログを組み立てること");
+        };
+        assert_eq!(
+            catalog.tracks[0].namespace.as_deref(),
+            Some("customer/ライブ"),
+            "Track Namespace の各 field が '/' 区切りで載ること"
+        );
+    }
 }

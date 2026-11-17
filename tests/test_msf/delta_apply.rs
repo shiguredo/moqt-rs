@@ -18,7 +18,7 @@ fn apply_delta_add_appends_track() {
         }],
     };
     catalog
-        .apply_delta(&delta, Some("catalog-ns"))
+        .apply_delta(&delta, Some(&test_catalog_namespace("catalog-ns")))
         .expect("add は成功する");
     assert_eq!(catalog.tracks.len(), 1);
     assert_eq!(catalog.tracks[0].name, "v");
@@ -130,7 +130,7 @@ fn apply_delta_remove_deletes_track() {
         }],
     };
     catalog
-        .apply_delta(&delta, Some("catalog-ns"))
+        .apply_delta(&delta, Some(&test_catalog_namespace("catalog-ns")))
         .expect("remove は成功する");
     assert!(catalog.tracks.is_empty());
 }
@@ -172,7 +172,7 @@ fn apply_delta_clone_inherits_and_overrides() {
         }],
     };
     catalog
-        .apply_delta(&delta, Some("catalog-ns"))
+        .apply_delta(&delta, Some(&test_catalog_namespace("catalog-ns")))
         .expect("clone は成功する");
     let cloned = catalog
         .tracks
@@ -207,7 +207,8 @@ fn apply_delta_clone_added_audio_codec_without_samplerate_rejected() {
             tracks: vec![clone],
         }],
     };
-    let Err(MessageError::InvalidCatalog(reason)) = catalog.apply_delta(&delta, Some("catalog-ns"))
+    let Err(MessageError::InvalidCatalog(reason)) =
+        catalog.apply_delta(&delta, Some(&test_catalog_namespace("catalog-ns")))
     else {
         panic!("codec 由来の samplerate 欠如は InvalidCatalog であること");
     };
@@ -237,7 +238,7 @@ fn apply_delta_clone_uses_parent_namespace() {
         }],
     };
     catalog
-        .apply_delta(&delta, Some("catalog-ns"))
+        .apply_delta(&delta, Some(&test_catalog_namespace("catalog-ns")))
         .expect("clone は成功する");
     assert!(catalog.tracks.iter().any(|t| t.name == "v2"));
 }
@@ -687,7 +688,7 @@ fn apply_delta_add_colliding_with_publish_track_rejected() {
         }],
     };
     assert!(matches!(
-        catalog.apply_delta(&delta, Some("catalog-ns")),
+        catalog.apply_delta(&delta, Some(&test_catalog_namespace("catalog-ns"))),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -912,7 +913,7 @@ fn apply_delta_clone_invalid_lang_rejected() {
     };
     // namespace は親と同じ "ns" を渡し、親が見つからないエラーと区別する
     assert!(matches!(
-        catalog.apply_delta(&delta, Some("ns")),
+        catalog.apply_delta(&delta, Some(&test_catalog_namespace("ns"))),
         Err(MessageError::InvalidCatalog(reason)) if reason.contains("invalid language tag")
     ));
 }
@@ -934,7 +935,7 @@ fn apply_delta_clone_inherited_invalid_lang_rejected() {
         }],
     };
     assert!(matches!(
-        catalog.apply_delta(&delta, Some("ns")),
+        catalog.apply_delta(&delta, Some(&test_catalog_namespace("ns"))),
         Err(MessageError::InvalidCatalog(reason)) if reason.contains("invalid language tag")
     ));
 }
@@ -961,7 +962,7 @@ fn apply_delta_is_atomic_when_later_operation_fails() {
     };
     let before = catalog.clone();
     assert!(matches!(
-        catalog.apply_delta(&delta, Some("ns")),
+        catalog.apply_delta(&delta, Some(&test_catalog_namespace("ns"))),
         Err(MessageError::InvalidCatalog(_))
     ));
     assert_eq!(
@@ -987,7 +988,7 @@ fn apply_delta_applies_all_operations_on_success() {
         ],
     };
     catalog
-        .apply_delta(&delta, Some("ns"))
+        .apply_delta(&delta, Some(&test_catalog_namespace("ns")))
         .expect("有効な delta は成功する");
     assert_eq!(catalog.generated_at, Some(2000));
     assert_eq!(catalog.tracks.len(), 3);
@@ -1296,7 +1297,9 @@ fn apply_delta_readd_attribute_change_with_inherited_namespace_rejected() {
             },
         ],
     };
-    let Err(MessageError::InvalidCatalog(reason)) = catalog.apply_delta(&delta, Some("cns")) else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        catalog.apply_delta(&delta, Some(&test_catalog_namespace("cns")))
+    else {
         panic!("継承した namespace でも属性変更を検出すること");
     };
     assert!(
@@ -1331,7 +1334,9 @@ fn apply_delta_readd_with_explicit_namespace_matches_inherited() {
             },
         ],
     };
-    let Err(MessageError::InvalidCatalog(reason)) = catalog.apply_delta(&delta, Some("cns")) else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        catalog.apply_delta(&delta, Some(&test_catalog_namespace("cns")))
+    else {
         panic!("省略形と明示形は同じ tuple として扱うこと");
     };
     assert!(
@@ -1361,7 +1366,7 @@ fn apply_delta_readd_with_different_namespace_representation_succeeds() {
         ],
     };
     catalog
-        .apply_delta(&delta, Some("cns"))
+        .apply_delta(&delta, Some(&test_catalog_namespace("cns")))
         .expect("明示形から省略形への再追加は成功する");
     assert_eq!(catalog.tracks.len(), 1);
     assert_eq!(catalog.tracks[0].codec.as_deref(), Some("av01"));
@@ -1381,7 +1386,7 @@ fn apply_delta_readd_with_different_namespace_representation_succeeds() {
         ],
     };
     catalog
-        .apply_delta(&delta, Some("cns"))
+        .apply_delta(&delta, Some(&test_catalog_namespace("cns")))
         .expect("省略形から明示形への再追加は成功する");
     assert_eq!(catalog.tracks.len(), 1);
     assert_eq!(catalog.tracks[0].codec.as_deref(), Some("av01"));
@@ -1424,4 +1429,232 @@ fn apply_delta_readd_is_live_false_ignores_buffers() {
         catalog.tracks[0].buffers.as_ref().and_then(|b| b.target),
         Some(100)
     );
+}
+
+/// 多フィールドのカタログ namespace を継承した remove が同じ Full Track Name を解決すること
+///
+/// draft-ietf-moq-msf-02 §5.2.2 (Track namespace) / §11.2.2 (Comparing names): namespace の
+/// 比較は `/` 区切り文字列ではなく、写像後の Track Namespace のバイト値で行う。
+#[test]
+fn apply_delta_remove_inherits_multi_field_catalog_namespace() {
+    let mut catalog = MsfCatalog::new();
+    catalog
+        .tracks
+        .push(loc_track("video", Some("customer/livestream/123")));
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Remove {
+            tracks: vec![MsfRemoveTrack::new("video".to_string())],
+        }],
+    };
+    catalog
+        .apply_delta(
+            &delta,
+            Some(&test_catalog_namespace("customer/livestream/123")),
+        )
+        .expect("継承した multi-field namespace で remove できること");
+    assert!(catalog.tracks.is_empty(), "track が削除されること");
+}
+
+/// 省略 namespace を継承した add が明示 namespace の同名 track と重複すること
+#[test]
+fn apply_delta_add_duplicates_explicit_namespace_track() {
+    let mut catalog = MsfCatalog::new();
+    catalog
+        .tracks
+        .push(loc_track("video", Some("customer/livestream/123")));
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            // namespace を省略すると catalog track の namespace を継承する
+            tracks: vec![loc_track("video", None)],
+        }],
+    };
+    assert!(
+        matches!(
+            catalog.apply_delta(
+                &delta,
+                Some(&test_catalog_namespace("customer/livestream/123")),
+            ),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "継承を解決すると同じ Full Track Name になるため重複として拒否すること"
+    );
+    assert_eq!(catalog.tracks.len(), 1, "拒否時は track が増えないこと");
+}
+
+/// namespace が異なる同名 track の add は別の Full Track Name として受理すること
+#[test]
+fn apply_delta_add_same_name_different_multi_field_namespace() {
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(loc_track("video", None));
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![loc_track("video", Some("customer/livestream/456"))],
+        }],
+    };
+    catalog
+        .apply_delta(
+            &delta,
+            Some(&test_catalog_namespace("customer/livestream/123")),
+        )
+        .expect("namespace が異なる同名 track は受理されること");
+    assert_eq!(catalog.tracks.len(), 2);
+}
+
+/// 省略 namespace を継承した clone が multi-field namespace の親を解決すること
+#[test]
+fn apply_delta_clone_inherits_multi_field_catalog_namespace() {
+    let mut catalog = MsfCatalog::new();
+    catalog
+        .tracks
+        .push(loc_track("video", Some("customer/livestream/123")));
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![MsfCloneTrack::new(
+                "video-hd".to_string(),
+                "video".to_string(),
+            )],
+        }],
+    };
+    catalog
+        .apply_delta(
+            &delta,
+            Some(&test_catalog_namespace("customer/livestream/123")),
+        )
+        .expect("継承した multi-field namespace で clone できること");
+    assert_eq!(catalog.tracks.len(), 2);
+    assert_eq!(
+        catalog.tracks[1].namespace.as_deref(),
+        Some("customer/livestream/123")
+    );
+}
+
+/// clone が namespace を省略したときに親トラックの namespace を継承すること
+///
+/// draft-ietf-moq-msf-02 §5.1.6 (Delta update): "The cloned track inherits all attributes from
+/// the parent except the Track Name which MUST be new." namespace も属性であり、clone 自身が
+/// namespace を宣言しない場合は親の namespace を継承する (§5.2.2 の catalog track 継承より
+/// clone 固有の規則を優先する)。
+#[test]
+fn apply_delta_clone_inherits_parent_namespace() {
+    let mut catalog = MsfCatalog::new();
+    catalog
+        .tracks
+        .push(loc_track("video", Some("parent/group/1")));
+    let mut clone = MsfCloneTrack::new("video-hd".to_string(), "video".to_string());
+    clone.parent_namespace = Some("parent/group/1".to_string());
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    };
+    catalog
+        .apply_delta(&delta, Some(&test_catalog_namespace("catalog/group/1")))
+        .expect("親 namespace を継承した clone を適用できること");
+    assert_eq!(
+        catalog.tracks[1].namespace.as_deref(),
+        Some("parent/group/1"),
+        "clone は catalog track ではなく親トラックの namespace を継承すること"
+    );
+}
+
+/// add する track の Full Track Name が 4,096 バイトを超える場合に拒否すること
+///
+/// draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): namespace と name の合計が
+/// 上限を超える track はカタログ不正として拒否する。
+#[test]
+fn apply_delta_add_rejects_overlong_full_track_name() {
+    let mut catalog = MsfCatalog::new();
+    let mut track = loc_track("b", Some(&"a".repeat(4096)));
+    track.name = "b".to_string();
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![track],
+        }],
+    };
+    assert!(
+        matches!(
+            catalog.apply_delta(&delta, None),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "add の Full Track Name 4,097 バイトを拒否すること"
+    );
+    assert!(catalog.tracks.is_empty(), "拒否時は track が増えないこと");
+}
+
+/// 継承する catalog namespace と name の合計が 4,096 バイトを超える場合に拒否すること
+#[test]
+fn apply_delta_rejects_overlong_inherited_catalog_namespace() {
+    let base = test_catalog_namespace(&"a".repeat(4096));
+    let mut catalog = MsfCatalog::new();
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![loc_track("b", None)],
+        }],
+    };
+    assert!(
+        matches!(
+            catalog.apply_delta(&delta, Some(&base)),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "継承した catalog namespace との合計 4,097 バイトを拒否すること"
+    );
+    assert!(catalog.tracks.is_empty(), "拒否時は track が増えないこと");
+}
+
+/// clone が親 namespace を継承した結果が 4,096 バイトを超える場合に拒否すること
+#[test]
+fn apply_delta_clone_rejects_overlong_inherited_parent_namespace() {
+    let parent_namespace = "a".repeat(4095);
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(loc_track("p", Some(&parent_namespace)));
+    let mut clone = MsfCloneTrack::new("bb".to_string(), "p".to_string());
+    clone.parent_namespace = Some(parent_namespace);
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    };
+    assert!(
+        matches!(
+            catalog.apply_delta(&delta, None),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "clone の実効 Full Track Name 4,097 バイトを拒否すること"
+    );
+    assert_eq!(catalog.tracks.len(), 1, "拒否時は track が増えないこと");
+}
+
+/// clone の namespace と parentNamespace を両方省略した場合に、継承する catalog namespace で
+/// Full Track Name の長さを検証すること
+///
+/// encode / decode は catalog namespace を知らないため name 単体までしか検証できないが、
+/// apply は実際の catalog namespace を解決して最終検証する。
+#[test]
+fn apply_delta_clone_both_namespaces_omitted_checks_inherited_catalog_namespace() {
+    let base = test_catalog_namespace(&"a".repeat(4095));
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(loc_track("p", None));
+    let clone = MsfCloneTrack::new("bb".to_string(), "p".to_string());
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    };
+    assert!(
+        matches!(
+            catalog.apply_delta(&delta, Some(&base)),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "継承した catalog namespace との合計 4,097 バイトを拒否すること"
+    );
+    assert_eq!(catalog.tracks.len(), 1, "拒否時は track が増えないこと");
 }

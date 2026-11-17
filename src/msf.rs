@@ -11,6 +11,7 @@
 //! カタログトラックのトラック名は "catalog" でなければならない (draft-ietf-moq-msf-01 §5 (Catalog))。
 
 use crate::error::MessageError;
+use crate::message::common::{MAX_TRACK_NAME_LENGTH, TrackNamespace, validate_full_track_name};
 use alloc::{
     format,
     string::{String, ToString},
@@ -33,6 +34,145 @@ pub const MSF_VERSION: &str = "draft-01";
 /// "The catalog track MUST have a case-sensitive Track Name of 'catalog'."
 /// この仕様は将来変更される可能性がある。
 pub const MSF_CATALOG_TRACK_NAME: &[u8] = b"catalog";
+
+/// カタログの namespace 文字列を MOQT の Track Namespace に変換する
+///
+/// draft-ietf-moq-msf-02 §5.2.2 (Track namespace): カタログの `namespace` は JSON 文字列で、
+/// `/` (U+002F) が Track Namespace Field の区切りである。JSON デコード後の文字列を `/` で
+/// 分割した各 substring が、順に Track Namespace Field の UTF-8 バイト列になる
+/// (§11.2.1 (Producing bytes from a JSON string))。
+///
+/// 1 〜 32 fields、各 field は非空、全体で 4,096 バイト以下でなければならない (§5.2.2 /
+/// draft-ietf-moq-transport-23 §8.7)。空文字列、先頭・末尾・連続する `/`、33 fields 以上、
+/// NUL を含む文字列は `InvalidCatalog` にする。この仕様は将来変更される可能性がある。
+///
+/// # Errors
+///
+/// - 空文字列 / 空の field / 33 fields 以上 / NUL を含む: `InvalidCatalog`
+/// - 4,096 バイトを超える: `InvalidCatalog`
+pub fn parse_catalog_namespace(value: &str) -> Result<TrackNamespace, MessageError> {
+    if value.is_empty() {
+        return Err(MessageError::InvalidCatalog(
+            "namespace MUST NOT be empty".to_string(),
+        ));
+    }
+    // §11.2.1: NUL はカタログの名前に含めてはならない (MUST NOT)
+    if value.contains('\0') {
+        return Err(MessageError::InvalidCatalog(
+            "namespace MUST NOT contain U+0000".to_string(),
+        ));
+    }
+    // `/` で分割した各 substring が Track Namespace Field になる。境界の空 substring や
+    // 33 fields 以上は §5.2.2 の MUST 違反であり、`TrackNamespace::new` に渡す前に明示的に
+    // 拒否して、MOQT の INVALID_TRACK_NAMESPACE ではなくカタログ不正として扱う
+    let fields = value
+        .split('/')
+        .map(|field| field.as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    if fields.len() > 32 {
+        return Err(MessageError::InvalidCatalog(
+            "namespace MUST contain at most 32 fields".to_string(),
+        ));
+    }
+    if fields.iter().any(Vec::is_empty) {
+        return Err(MessageError::InvalidCatalog(
+            "namespace field MUST NOT be empty".to_string(),
+        ));
+    }
+    TrackNamespace::new(fields)
+        .map_err(|_| MessageError::InvalidCatalog("namespace exceeds 4096 bytes".to_string()))
+}
+
+/// MOQT の Track Namespace をカタログの namespace 文字列に変換する
+///
+/// draft-ietf-moq-msf-02 §5.2.2 (Track namespace): 各 Track Namespace Field を UTF-8 として
+/// `/` で連結する。カタログは名前を JSON 文字列でしか表現できないため、UTF-8 でない field
+/// (§11.2.3 (Consuming names received from MOQT) の写像は部分関数)、NUL を含む field
+/// (§11.2.1)、`/` を含む field (§5.2.2 の区切り規則) は表現できず `InvalidCatalog` になる。
+/// この仕様は将来変更される可能性がある。
+///
+/// # Errors
+///
+/// - field が 0 個: `InvalidCatalog`
+/// - UTF-8 でない field / NUL を含む field / `/` を含む field: `InvalidCatalog`
+pub fn serialize_catalog_namespace(namespace: &TrackNamespace) -> Result<String, MessageError> {
+    if namespace.fields().is_empty() {
+        return Err(MessageError::InvalidCatalog(
+            "namespace MUST contain at least one field".to_string(),
+        ));
+    }
+    let mut out = String::new();
+    for (index, field) in namespace.fields().iter().enumerate() {
+        let text = core::str::from_utf8(field).map_err(|_| {
+            MessageError::InvalidCatalog("namespace field is not valid UTF-8".to_string())
+        })?;
+        if text.contains('\0') {
+            return Err(MessageError::InvalidCatalog(
+                "namespace field MUST NOT contain U+0000".to_string(),
+            ));
+        }
+        if text.contains('/') {
+            return Err(MessageError::InvalidCatalog(
+                "namespace field MUST NOT contain '/'".to_string(),
+            ));
+        }
+        if index > 0 {
+            out.push('/');
+        }
+        out.push_str(text);
+    }
+    Ok(out)
+}
+
+/// カタログの track name 文字列を MOQT の Track Name バイト列に変換する
+///
+/// draft-ietf-moq-msf-02 §5.2.3 (Track name) / §11.2.1 (Producing bytes from a JSON string):
+/// JSON デコード済みの文字列を UTF-8 のバイト列にする。空文字列と NUL は禁止される
+/// (§5.2.3 MUST NOT / §11.2.1 MUST NOT)。JSON パーサが未対サロゲートを拒否するため、
+/// ここに到達する `String` は常に Unicode scalar value の列である。この仕様は将来変更される
+/// 可能性がある。
+///
+/// # Errors
+///
+/// - 空文字列: `InvalidCatalog`
+/// - NUL を含む: `InvalidCatalog`
+pub fn catalog_track_name_bytes(name: &str) -> Result<Vec<u8>, MessageError> {
+    if name.is_empty() {
+        return Err(MessageError::InvalidCatalog(
+            "track name MUST NOT be empty".to_string(),
+        ));
+    }
+    if name.contains('\0') {
+        return Err(MessageError::InvalidCatalog(
+            "track name MUST NOT contain U+0000".to_string(),
+        ));
+    }
+    Ok(name.as_bytes().to_vec())
+}
+
+/// カタログの Full Track Name が MOQT の長さ制約を満たすことを検証する
+///
+/// draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の長さは
+/// Track Namespace の全 field の長さと Track Name の長さの合計で、上限は 4,096 バイトである。
+/// 超過はカタログ不正 (`InvalidCatalog`) として扱い、購読要求の構築時に初めて
+/// `FieldLengthExceeded` になる状態を避ける。
+///
+/// `namespace` が `None` の場合は継承先が不明なため、Track Name 単体の長さだけを検証する。
+/// 長さの計算と上限定数は [`crate::message::common::validate_full_track_name`] と共有する。
+fn validate_catalog_full_track_name(
+    namespace: Option<&TrackNamespace>,
+    name: &[u8],
+) -> Result<(), MessageError> {
+    match namespace {
+        Some(namespace) => validate_full_track_name(namespace, name).map_err(|error| {
+            MessageError::InvalidCatalog(format!("full track name exceeds 4096 bytes: {error}"))
+        }),
+        None if name.len() > MAX_TRACK_NAME_LENGTH => Err(MessageError::InvalidCatalog(
+            "full track name exceeds 4096 bytes".to_string(),
+        )),
+        None => Ok(()),
+    }
+}
 
 /// nojson のパースエラーを MessageError に変換する
 impl From<nojson::JsonParseError> for MessageError {
@@ -432,9 +572,15 @@ impl DisplayJson for MsfAccessibility {
 /// `Debug` で値を伏せる。
 #[derive(Clone, PartialEq)]
 pub struct MsfTrack {
-    /// トラック名 (draft-ietf-moq-msf-01 §5.2.3 (Track name)) - 必須
+    /// トラック名 (draft-ietf-moq-msf-02 §5.2.3 (Track name)) - 必須
+    ///
+    /// 空文字列は禁止され (§5.2.3 (Track name))、NUL は禁止される
+    /// (§11.2.1 (Producing bytes from a JSON string))。
     pub name: String,
-    /// トラックネームスペース (draft-ietf-moq-msf-01 §5.2.2 (Track namespace))
+    /// トラックネームスペース (draft-ietf-moq-msf-02 §5.2.2 (Track namespace))
+    ///
+    /// `/` 区切りの JSON 文字列で、1 〜 32 個の非空 field を持ち、NUL を含まない。
+    /// `None` のときはカタログトラックの MOQT Track Namespace を継承する。
     pub namespace: Option<String>,
     /// パッケージングタイプ (draft-ietf-moq-msf-01 §5.2.4 (Packaging)) - 必須
     pub packaging: MsfPackaging,
@@ -939,18 +1085,28 @@ impl DisplayJson for MsfTrack {
 /// `Debug` で値を伏せる。
 #[derive(Clone, PartialEq)]
 pub struct MsfCloneTrack {
-    /// トラック名 (draft-ietf-moq-msf-01 §5.2.3 (Track name)) - 必須、新規でなければならない
-    pub name: String,
-    /// 親トラック名 (draft-ietf-moq-msf-01 §5.2.33 (Parent name)) - 必須
-    pub parent_name: String,
-    /// 親トラックネームスペース (draft-ietf-moq-msf-01 §5.2.34 (Parent namespace))
+    /// トラック名 (draft-ietf-moq-msf-02 §5.2.3 (Track name)) - 必須、新規でなければならない
     ///
+    /// 空文字列は禁止され (§5.2.3 (Track name))、NUL は禁止される
+    /// (§11.2.1 (Producing bytes from a JSON string))。
+    pub name: String,
+    /// 親トラック名 (draft-ietf-moq-msf-02 §5.2.34 (Parent name)) - 必須
+    ///
+    /// 空文字列は禁止され (§5.2.3 (Track name))、NUL は禁止される
+    /// (§11.2.1 (Producing bytes from a JSON string))。
+    pub parent_name: String,
+    /// 親トラックネームスペース (draft-ietf-moq-msf-02 §5.2.35 (Parent namespace))
+    ///
+    /// `/` 区切りの JSON 文字列で、1 〜 32 個の非空 field を持ち、NUL を含まない。
     /// `None` のときはカタログのネームスペースが親のネームスペースと仮定される。
     /// この仕様は将来変更される可能性がある。
     pub parent_namespace: Option<String>,
     /// パッケージングタイプ (draft-ietf-moq-msf-01 §5.2.4 (Packaging)) - 省略時は親から継承
     pub packaging: Option<MsfPackaging>,
-    /// トラックネームスペース (draft-ietf-moq-msf-01 §5.2.2 (Track namespace))
+    /// トラックネームスペース (draft-ietf-moq-msf-02 §5.2.2 (Track namespace))
+    ///
+    /// `/` 区切りの JSON 文字列で、1 〜 32 個の非空 field を持ち、NUL を含まない。
+    /// `None` のときは clone の親トラックの namespace を継承する (§5.1.6 (Delta update))。
     pub namespace: Option<String>,
     /// イベントタイムラインタイプ (draft-ietf-moq-msf-01 §5.2.5 (Event timeline type))
     pub event_type: Option<String>,
@@ -1437,8 +1593,14 @@ impl MsfCloneTrack {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MsfRemoveTrack {
     /// トラック名 (必須)
+    ///
+    /// 空文字列と NUL は禁止される (draft-ietf-moq-msf-02 §5.2.3 / §11.2.1)。
     pub name: String,
     /// トラックネームスペース
+    ///
+    /// `/` 区切りの JSON 文字列で、1 〜 32 個の非空 field を持ち、NUL を含まない。
+    /// `None` のときはカタログトラックの MOQT Track Namespace を継承する
+    /// (draft-ietf-moq-msf-02 §5.2.2)。
     pub namespace: Option<String>,
 }
 
@@ -1488,14 +1650,18 @@ pub struct MsfCatalog {
     pub publish_tracks: Vec<MsfTrack>,
     /// 初期化データ一覧 (draft-ietf-moq-msf-01 §5.1.7 (Initialization Data List))
     pub init_data_list: Vec<MsfInitData>,
-    /// 削除済みトラックの履歴 (キーは解決済みの (namespace, name))
+    /// 削除済みトラックの履歴 (キーは解決済みの (Track Namespace, Track Name バイト列))
     ///
     /// draft-ietf-moq-msf-01 §5.3 (Delta updates): "The tuple of Track Namespace and Track Name
     /// defines a fixed set of Track attributes which MUST NOT be modified after being declared."
     /// を delta update の適用時に検査するための内部状態である。JSON には出力せず、
-    /// デコード直後は空になる。同じ (namespace, name) が再追加されても削除前の属性を
+    /// デコード直後は空になる。同じ Full Track Name が再追加されても削除前の属性を
     /// 保持し続ける (削除しても消えないため、remove した tuple の数だけ単調増加する)。
-    pub removed_tracks: hashbrown::HashMap<(Option<String>, String), MsfTrack>,
+    ///
+    /// キーは draft-ietf-moq-msf-02 §11.2 (Mapping catalog strings to MOQT byte values) に従い、
+    /// カタログ文字列ではなく MOQT のバイト値へ変換した後の値で比較する。基準 namespace が
+    /// 不明な場合は Track Namespace を `None` のまま保持する。
+    pub removed_tracks: hashbrown::HashMap<(Option<TrackNamespace>, Vec<u8>), MsfTrack>,
 }
 
 impl MsfCatalog {
@@ -1564,8 +1730,12 @@ impl MsfCatalog {
     /// 適用される。clone は親トラックの属性を継承し、再定義された属性で上書きする。
     /// この仕様は将来変更される可能性がある。
     ///
-    /// `catalog_namespace` はカタログトラック自身のネームスペースであり、トラックが
-    /// namespace を省略した場合の継承先 (§5.2.2 (Track namespace)) として使う。
+    /// `catalog_namespace` はカタログトラック自身の MOQT Track Namespace である。clone 以外の
+    /// track が namespace を省略した場合の継承先 (§5.2.2 (Track namespace)) と、clone の
+    /// `parentNamespace` を省略した場合の親の探索に使う (§5.2.35 (Parent namespace))。
+    /// clone 自身の namespace を省略した場合は §5.1.6 (Delta update) により親トラックの
+    /// namespace を継承する。JSON の namespace 文字列は v02 の `/` 区切り表現であり、比較は
+    /// §11.2 の写像後のバイト値で行う。
     ///
     /// # Errors
     ///
@@ -1573,6 +1743,8 @@ impl MsfCatalog {
     ///   (draft-ietf-moq-msf-01 §5.1.3 (Is Complete))
     /// - add / clone のトラック名が既存と重複する: `InvalidCatalog`
     /// - add するトラックが §5.2 の各フィールド / §4.3.3 / §7.2 / §8.2 / §5.2.33 の MUST に違反する: `InvalidCatalog`
+    /// - namespace / track name が §5.2.2 / §5.2.3 / §11.2 の制約に違反する: `InvalidCatalog`
+    /// - Full Track Name が 4,096 バイトを超える (draft-ietf-moq-transport-23 §8.7): `InvalidCatalog`
     /// - remove / clone の対象トラックが見つからない: `InvalidCatalog`
     /// - clone の継承結果がトラックの制約に違反する: `InvalidCatalog`
     /// - 適用後のカタログがグループ内で宣言された targetLatency / buffers の一致
@@ -1580,9 +1752,9 @@ impl MsfCatalog {
     ///   (省略されたトラックは player の裁量 (MAY) のため比較対象外、`isLive=false` は無視)
     /// - 適用後の initRef が initDataList の id を指さない: `InvalidCatalog`
     ///   (§5.2.13 (Initialization reference))
-    /// - 削除済みの同じ (namespace, name) を再追加し、属性が変わる: `InvalidCatalog`
+    /// - 削除済みの同じ Full Track Name を再追加し、属性が変わる: `InvalidCatalog`
     ///   (§5.3 (Delta updates) の属性不変)
-    /// - 削除済みの同じ (namespace, name) を `isLive=false` から `true` で再追加する: `InvalidCatalog`
+    /// - 削除済みの同じ Full Track Name を `isLive=false` から `true` で再追加する: `InvalidCatalog`
     ///   (§5.2.7 (Is Live))
     ///
     /// 失敗時はカタログを変更しない。操作は複製に対して配列順に適用し、全操作と
@@ -1590,7 +1762,7 @@ impl MsfCatalog {
     pub fn apply_delta(
         &mut self,
         delta: &MsfDeltaUpdate,
-        catalog_namespace: Option<&str>,
+        catalog_namespace: Option<&TrackNamespace>,
     ) -> Result<(), MessageError> {
         // 失敗時にカタログを不変に保つため、複製へ適用してから差し替える
         let mut working = self.clone();
@@ -1604,7 +1776,7 @@ impl MsfCatalog {
     fn apply_delta_in_place(
         &mut self,
         delta: &MsfDeltaUpdate,
-        catalog_namespace: Option<&str>,
+        catalog_namespace: Option<&TrackNamespace>,
     ) -> Result<(), MessageError> {
         for op in &delta.operations {
             match op {
@@ -1624,12 +1796,12 @@ impl MsfCatalog {
                         validate_full_track(track)?;
                     }
                     // 2) 既存トラックおよびバッチ内の重複を全件検出してから追加する
-                    let mut batch_keys: Vec<(Option<String>, String)> =
+                    let mut batch_keys: Vec<(Option<TrackNamespace>, Vec<u8>)> =
                         Vec::with_capacity(tracks.len());
                     for track in tracks {
-                        let key = Self::track_key(track, catalog_namespace);
+                        let key = Self::track_key(track, catalog_namespace)?;
                         if self
-                            .find_track_index(key.0.as_deref(), &track.name, catalog_namespace)
+                            .find_track_index(key.0.as_ref(), &key.1, catalog_namespace)?
                             .is_some()
                             || batch_keys.contains(&key)
                         {
@@ -1640,7 +1812,7 @@ impl MsfCatalog {
                         }
                         batch_keys.push(key);
                     }
-                    // 3) 削除済みの同じ (namespace, name) があれば属性変更と isLive の逆行を検査する
+                    // 3) 削除済みの同じ Full Track Name があれば属性変更と isLive の逆行を検査する
                     for track in tracks {
                         self.validate_readded_track(track, catalog_namespace, ReaddOperation::Add)?;
                     }
@@ -1651,9 +1823,14 @@ impl MsfCatalog {
                 }
                 MsfDeltaOperation::Remove { tracks } => {
                     for r in tracks {
-                        let ns = r.namespace.as_deref().or(catalog_namespace);
+                        // remove の namespace も省略時はカタログトラックの namespace を継承する
+                        let ns = match r.namespace.as_deref() {
+                            Some(value) => Some(parse_catalog_namespace(value)?),
+                            None => catalog_namespace.cloned(),
+                        };
+                        let name = catalog_track_name_bytes(&r.name)?;
                         let idx = self
-                            .find_track_index(ns, &r.name, catalog_namespace)
+                            .find_track_index(ns.as_ref(), &name, catalog_namespace)?
                             .ok_or_else(|| {
                                 MessageError::InvalidCatalog(format!(
                                     "delta remove: track '{}' not found",
@@ -1662,13 +1839,13 @@ impl MsfCatalog {
                             })?;
                         let removed = self.tracks.remove(idx);
                         // draft-ietf-moq-msf-01 §5.3 (Delta updates): 削除した Track の属性を
-                        // 履歴として残し、同じ (namespace, name) の再追加で属性変更と
+                        // 履歴として残し、同じ Full Track Name の再追加で属性変更と
                         // isLive の逆行を検出できるようにする。`or_insert` により、同じ
                         // tuple が既に履歴にある場合は最初に削除されたときの属性を保持し続ける
                         // (§5.3 が求める「宣言時の属性」を保持する側に倒す。apply_delta 経由で
                         // 再追加される限り直近の削除で上書きしても検証結果は変わらないが、
                         // 履歴の値は公開フィールドとして観測できるため差が生じる)。
-                        let key = Self::track_key(&removed, catalog_namespace);
+                        let key = Self::track_key(&removed, catalog_namespace)?;
                         self.removed_tracks.entry(key).or_insert(removed);
                     }
                 }
@@ -1682,9 +1859,13 @@ impl MsfCatalog {
                         ));
                     }
                     for clone in tracks {
-                        let parent_ns = clone.parent_namespace.as_deref().or(catalog_namespace);
+                        let parent_ns = match clone.parent_namespace.as_deref() {
+                            Some(value) => Some(parse_catalog_namespace(value)?),
+                            None => catalog_namespace.cloned(),
+                        };
+                        let parent_name = catalog_track_name_bytes(&clone.parent_name)?;
                         let idx = self
-                            .find_track_index(parent_ns, &clone.parent_name, catalog_namespace)
+                            .find_track_index(parent_ns.as_ref(), &parent_name, catalog_namespace)?
                             .ok_or_else(|| {
                                 MessageError::InvalidCatalog(format!(
                                     "delta clone: parent track '{}' not found",
@@ -1693,9 +1874,9 @@ impl MsfCatalog {
                             })?;
                         let parent = self.tracks[idx].clone();
                         let new_track = clone.clone().into_track(&parent)?;
-                        let new_ns = new_track.namespace.as_deref().or(catalog_namespace);
+                        let key = Self::track_key(&new_track, catalog_namespace)?;
                         if self
-                            .find_track_index(new_ns, &new_track.name, catalog_namespace)
+                            .find_track_index(key.0.as_ref(), &key.1, catalog_namespace)?
                             .is_some()
                         {
                             return Err(MessageError::InvalidCatalog(format!(
@@ -1720,22 +1901,23 @@ impl MsfCatalog {
         self.validate_after_delta(catalog_namespace)
     }
 
-    /// トラックの (解決済み namespace, name) キーを作る
+    /// トラックの (解決済み Track Namespace, Track Name バイト列) キーを作る
     ///
     /// namespace 省略時はカタログの namespace を継承したものとして解決する
-    /// (draft-ietf-moq-msf-01 §5.2.2 (Track namespace))。
-    fn track_key(track: &MsfTrack, catalog_namespace: Option<&str>) -> (Option<String>, String) {
-        (
-            track
-                .namespace
-                .as_deref()
-                .or(catalog_namespace)
-                .map(str::to_string),
-            track.name.clone(),
-        )
+    /// (draft-ietf-moq-msf-02 §5.2.2 (Track namespace))。比較は §11.2 の写像後のバイト値で
+    /// 行い、JSON 文字列表現の違い (エスケープの有無など) に依存しない。
+    fn track_key(
+        track: &MsfTrack,
+        catalog_namespace: Option<&TrackNamespace>,
+    ) -> Result<(Option<TrackNamespace>, Vec<u8>), MessageError> {
+        let namespace = match track.namespace.as_deref() {
+            Some(value) => Some(parse_catalog_namespace(value)?),
+            None => catalog_namespace.cloned(),
+        };
+        Ok((namespace, catalog_track_name_bytes(&track.name)?))
     }
 
-    /// 削除済みの同じ (namespace, name) に再追加されるトラックを検証する
+    /// 削除済みの同じ Full Track Name に再追加されるトラックを検証する
     ///
     /// draft-ietf-moq-msf-01 §5.3 (Delta updates): "The tuple of Track Namespace and Track Name
     /// defines a fixed set of Track attributes which MUST NOT be modified after being declared.
@@ -1747,10 +1929,10 @@ impl MsfCatalog {
     fn validate_readded_track(
         &self,
         track: &MsfTrack,
-        catalog_namespace: Option<&str>,
+        catalog_namespace: Option<&TrackNamespace>,
         operation: ReaddOperation,
     ) -> Result<(), MessageError> {
-        let key = Self::track_key(track, catalog_namespace);
+        let key = Self::track_key(track, catalog_namespace)?;
         let Some(previous) = self.removed_tracks.get(&key) else {
             return Ok(());
         };
@@ -1773,37 +1955,74 @@ impl MsfCatalog {
         Ok(())
     }
 
-    /// namespace / name が一致するトラックの index を返す
+    /// Full Track Name が一致するトラックの index を返す
     ///
-    /// `namespace` が `None` の場合はカタログの namespace を継承したものとして比較する
-    /// (draft-ietf-moq-msf-01 §5.2.2 (Track namespace))。
+    /// `namespace` / `name` は解決済みの MOQT のバイト値であり、カタログの JSON 文字列では
+    /// 比較しない (draft-ietf-moq-msf-02 §11.2.2 (Comparing names))。`namespace` が `None` の
+    /// 場合はカタログの namespace も不明な状態を表し、namespace を省略したトラックだけが
+    /// 一致する。
     fn find_track_index(
         &self,
-        namespace: Option<&str>,
-        name: &str,
-        catalog_namespace: Option<&str>,
-    ) -> Option<usize> {
-        self.tracks.iter().position(|t| {
-            t.name == name && t.namespace.as_deref().or(catalog_namespace) == namespace
-        })
+        namespace: Option<&TrackNamespace>,
+        name: &[u8],
+        catalog_namespace: Option<&TrackNamespace>,
+    ) -> Result<Option<usize>, MessageError> {
+        for (index, track) in self.tracks.iter().enumerate() {
+            let track_namespace = match track.namespace.as_deref() {
+                Some(value) => Some(parse_catalog_namespace(value)?),
+                None => catalog_namespace.cloned(),
+            };
+            if track_namespace.as_ref() == namespace
+                && catalog_track_name_bytes(&track.name)? == name
+            {
+                return Ok(Some(index));
+            }
+        }
+        Ok(None)
     }
 
-    /// デルタ適用後のカタログが満たすべき制約を再検証する
-    fn validate_after_delta(&self, catalog_namespace: Option<&str>) -> Result<(), MessageError> {
-        // draft-ietf-moq-msf-01 §5.2.3 (Track name): track name は namespace ごとに一意。
-        // "Within the catalog" のため tracks と publishTracks をまたいで検査する。
-        // namespace 省略時はカタログの namespace を継承したものとして解決して比較する。
-        let mut seen: hashbrown::HashSet<(Option<&str>, &str)> = hashbrown::HashSet::new();
-        for t in self.tracks.iter().chain(self.publish_tracks.iter()) {
-            let ns = t.namespace.as_deref().or(catalog_namespace);
-            if !seen.insert((ns, t.name.as_str())) {
+    /// カタログ内の Full Track Name の一意性を検証する
+    ///
+    /// draft-ietf-moq-msf-02 §5.2.3 (Track name): "Within a catalog, the combination of Track
+    /// Namespace and Track Name (the Full Track Name) MUST be unique." 比較は §11.2 の写像後の
+    /// バイト値で行う。`catalog_namespace` を渡すと、namespace を省略したトラックが継承する
+    /// カタログトラックの namespace を解決したうえで比較する。`None` の場合は継承先が不明な
+    /// ため、省略したトラック同士だけを同じ namespace として比較する。
+    /// この仕様は将来変更される可能性がある。
+    ///
+    /// # Errors
+    ///
+    /// - Full Track Name が重複する: `InvalidCatalog`
+    /// - namespace / track name が §5.2.2 / §5.2.3 / §11.2 の制約に違反する: `InvalidCatalog`
+    /// - Full Track Name が 4,096 バイトを超える (draft-ietf-moq-transport-23 §8.7): `InvalidCatalog`
+    pub fn validate_track_names(
+        &self,
+        catalog_namespace: Option<&TrackNamespace>,
+    ) -> Result<(), MessageError> {
+        let mut seen: hashbrown::HashSet<(Option<TrackNamespace>, Vec<u8>)> =
+            hashbrown::HashSet::new();
+        for track in self.tracks.iter().chain(self.publish_tracks.iter()) {
+            let key = Self::track_key(track, catalog_namespace)?;
+            validate_catalog_full_track_name(key.0.as_ref(), &key.1)?;
+            if !seen.insert(key) {
                 return Err(MessageError::InvalidCatalog(format!(
                     "duplicate track name '{}' in namespace '{}'",
-                    t.name,
-                    ns.unwrap_or("(inherited)")
+                    track.name,
+                    track.namespace.as_deref().unwrap_or("(inherited)")
                 )));
             }
         }
+        Ok(())
+    }
+
+    /// デルタ適用後のカタログが満たすべき制約を再検証する
+    fn validate_after_delta(
+        &self,
+        catalog_namespace: Option<&TrackNamespace>,
+    ) -> Result<(), MessageError> {
+        // draft-ietf-moq-msf-02 §5.2.3 (Track name): Full Track Name は catalog 全体で一意。
+        // "Within the catalog" のため tracks と publishTracks をまたいで検査する。
+        self.validate_track_names(catalog_namespace)?;
         // draft-ietf-moq-msf-01 §5.2.13 (Initialization reference): 適用後の tracks /
         // publishTracks の initRef が initDataList の id を指すこと。
         validate_init_refs(&self.tracks, &self.publish_tracks, &self.init_data_list)?;
@@ -2047,6 +2266,11 @@ impl MsfCatalogDocument {
     /// - `authInfo` の値が UTF-8 でない / 単独の JSON 値でない: `InvalidCatalog`
     /// - 完全カタログが MUST に違反する (一意性、initRef 参照、フィールド整合など): `InvalidCatalog`
     /// - デルタ更新が空の operations を持つなど MUST に違反する: `InvalidCatalog`
+    ///
+    /// 完全カタログ / delta はカタログトラックの namespace を受け取らないため、namespace を
+    /// 省略した track が継承する catalog namespace を含む Full Track Name の長さは、継承先が
+    /// 不明な範囲 (Track Name 単体) でしか検証できない。継承を解決した完全な検証は受信側の
+    /// [`MsfCatalog::validate_track_names`] が担う。
     pub fn encode(&self) -> Result<Vec<u8>, MessageError> {
         for info in self.auth_infos() {
             validate_auth_info_value_raw(&info.value_raw)?;
@@ -2501,27 +2725,6 @@ fn validate_init_data_list_unique(init_data_list: &[MsfInitData]) -> Result<(), 
     Ok(())
 }
 
-/// tracks / publishTracks をまたいだ (namespace, name) の一意性を検証する
-///
-/// draft-ietf-moq-msf-01 §5.2.3 (Track name): "Within the catalog, track names MUST be
-/// unique per namespace." のため、catalog 全体で検査する。
-fn validate_track_name_uniqueness(
-    tracks: &[MsfTrack],
-    publish_tracks: &[MsfTrack],
-) -> Result<(), MessageError> {
-    let mut seen: hashbrown::HashSet<(Option<&str>, &str)> = hashbrown::HashSet::new();
-    for t in tracks.iter().chain(publish_tracks.iter()) {
-        if !seen.insert((t.namespace.as_deref(), t.name.as_str())) {
-            return Err(MessageError::InvalidCatalog(format!(
-                "duplicate track name '{}' in namespace '{}'",
-                t.name,
-                t.namespace.as_deref().unwrap_or("(inherited)")
-            )));
-        }
-    }
-    Ok(())
-}
-
 /// tracks / publishTracks の initRef が initDataList の id を指すことを検証する
 ///
 /// draft-ietf-moq-msf-01 §5.2.13 (Initialization reference): initRef は initDataList の
@@ -2593,6 +2796,19 @@ fn validate_event_type_not_set_when_not_event_timeline(
 /// - §5.2.18 (Codec) / §5.2.22 (Maximum Bitrate) / §5.2.28 (Audio sample rate) /
 ///   §5.2.29 (Channel configuration)
 fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
+    // draft-ietf-moq-msf-02 §5.2.2 (Track namespace) / §5.2.3 (Track name) / §11.2:
+    // 手組みの値も decode と同じ写像規則で検証する。
+    let name = catalog_track_name_bytes(&track.name)?;
+    let namespace = match track.namespace.as_deref() {
+        Some(value) => Some(parse_catalog_namespace(value)?),
+        None => None,
+    };
+    // draft-ietf-moq-transport-23 §8.7: Full Track Name は 4,096 バイト以下
+    validate_catalog_full_track_name(namespace.as_ref(), &name)?;
+    for dependency in &track.depends {
+        catalog_track_name_bytes(dependency)?;
+    }
+
     // draft-ietf-moq-msf-01 §5.2.33 (Parent name): clone 操作内でのみ許可される
     if track.parent_name.is_some() {
         return Err(MessageError::InvalidCatalog(
@@ -2681,6 +2897,30 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
 /// - §5.2.8 (Target latency) / §5.2.9 (Buffers)
 /// - §5.2.32 (Language) / §5.2.35 (Track duration)
 fn validate_clone_track_fragment(track: &MsfCloneTrack) -> Result<(), MessageError> {
+    // draft-ietf-moq-msf-02 §5.2.2 (Track namespace) / §5.2.3 (Track name) /
+    // §5.2.34 (Parent name) / §5.2.35 (Parent namespace) / §11.2: decode と同じ写像規則。
+    let name = catalog_track_name_bytes(&track.name)?;
+    let parent_name = catalog_track_name_bytes(&track.parent_name)?;
+    let namespace = match track.namespace.as_deref() {
+        Some(value) => Some(parse_catalog_namespace(value)?),
+        None => None,
+    };
+    let parent_namespace = match track.parent_namespace.as_deref() {
+        Some(value) => Some(parse_catalog_namespace(value)?),
+        None => None,
+    };
+    // draft-ietf-moq-transport-23 §8.7: clone 自身と親の Full Track Name の長さ制限。
+    // clone が namespace を宣言しない場合は親の namespace を継承する (§5.1.6) ため、
+    // parentNamespace を clone 自身の実効 namespace としても使う。
+    let effective_namespace = namespace.as_ref().or(parent_namespace.as_ref());
+    validate_catalog_full_track_name(effective_namespace, &name)?;
+    validate_catalog_full_track_name(parent_namespace.as_ref(), &parent_name)?;
+    if let Some(ref depends) = track.depends {
+        for dependency in depends {
+            catalog_track_name_bytes(dependency)?;
+        }
+    }
+
     // packaging を明示して非 eventtimeline とした場合は eventType を禁止する
     // (packaging 省略 + eventType ありは親からの継承で正当化され得るため受理する)
     validate_event_type_not_set_when_not_event_timeline(
@@ -2715,7 +2955,9 @@ fn validate_full_catalog_for_encode(catalog: &MsfCatalog) -> Result<(), MessageE
         &catalog.publish_tracks,
         &catalog.init_data_list,
     )?;
-    validate_track_name_uniqueness(&catalog.tracks, &catalog.publish_tracks)?;
+    // 完全カタログの encode はカタログトラックの namespace を受け取らないため、継承先を
+    // 解決しない検証になる (decode と同じ範囲)。
+    catalog.validate_track_names(None)?;
     for track in catalog.tracks.iter().chain(catalog.publish_tracks.iter()) {
         validate_full_track(track)?;
     }
@@ -2755,7 +2997,18 @@ fn validate_delta_for_encode(delta: &MsfDeltaUpdate) -> Result<(), MessageError>
                     validate_clone_track_fragment(track)?;
                 }
             }
-            MsfDeltaOperation::Remove { .. } => {}
+            MsfDeltaOperation::Remove { tracks } => {
+                // remove の track 参照も name / namespace の写像規則と Full Track Name の
+                // 長さ制限を満たす必要がある
+                for track in tracks {
+                    let name = catalog_track_name_bytes(&track.name)?;
+                    let namespace = match track.namespace.as_deref() {
+                        Some(value) => Some(parse_catalog_namespace(value)?),
+                        None => None,
+                    };
+                    validate_catalog_full_track_name(namespace.as_ref(), &name)?;
+                }
+            }
         }
     }
     Ok(())
@@ -2813,18 +3066,6 @@ fn decode_full_catalog(
     // 基底カタログの id を継承し得るためここでは検証しない)。
     validate_init_refs(&tracks, &publish_tracks, &init_data_list)?;
 
-    // draft-ietf-moq-msf-01 §5.2.3 (Track name): track name は namespace ごとに一意でなければならない
-    // この仕様は将来変更される可能性がある。
-    //
-    // 注意: ここではカタログトラックの namespace が不明なため、JSON 上の値での部分的なチェックのみ行う。
-    // namespace 省略 (None) と明示指定が実質同じ namespace になるケースの検出はできない
-    // (カタログトラックの namespace が判明するのはカタログトラック自体の受信後であり、
-    // デコード単体では判定不能)。
-    //
-    // draft-ietf-moq-msf-01 §5.2.3 (Track name) の一意性は catalog 全体 ("Within the catalog") の規定のため、
-    // tracks と publishTracks を通して検査する。
-    validate_track_name_uniqueness(&tracks, &publish_tracks)?;
-
     // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 同一 renderGroup / altGroup 内で
     // isLive=true かつ targetLatency を宣言したトラック同士の値は一致しなければならない (MUST)
     // この仕様は将来変更される可能性がある。
@@ -2845,7 +3086,7 @@ fn decode_full_catalog(
     validate_group_buffers(&publish_tracks, "renderGroup", |t| t.render_group)?;
     validate_group_buffers(&publish_tracks, "altGroup", |t| t.alt_group)?;
 
-    Ok(MsfCatalog {
+    let catalog = MsfCatalog {
         version,
         generated_at,
         is_complete,
@@ -2853,7 +3094,14 @@ fn decode_full_catalog(
         publish_tracks,
         init_data_list,
         removed_tracks: hashbrown::HashMap::new(),
-    })
+    };
+    // draft-ietf-moq-msf-02 §5.2.3 (Track name): Full Track Name は catalog 内で一意でなければ
+    // ならない。カタログトラックの namespace はデコード単体では不明なため、ここでは継承先を
+    // 渡さずに検証する (継承を解決した完全な検証は受信側が
+    // [`MsfCatalog::validate_track_names`] に基準 namespace を渡して行う)。
+    // tracks と publishTracks を通して検査する。
+    catalog.validate_track_names(None)?;
+    Ok(catalog)
 }
 
 fn decode_delta(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfDeltaUpdate, MessageError> {
@@ -3049,6 +3297,21 @@ fn decode_common_track_fields(
     if let Some(ref lang) = fields.lang {
         validate_lang_tag(lang)?;
     }
+    // draft-ietf-moq-msf-02 §5.2.2 (Track namespace) / §5.2.35 (Parent namespace) /
+    // §5.2.15 (Dependencies) / §11.2: 共通フィールドの写像規則をここでまとめて検証する。
+    // clone の parentNamespace は本関数を通るため、MsfTrack 側の配置制約より先に
+    // 構文不正として拒否される。
+    if let Some(ref namespace) = fields.namespace {
+        parse_catalog_namespace(namespace)?;
+    }
+    if let Some(ref parent_namespace) = fields.parent_namespace {
+        parse_catalog_namespace(parent_namespace)?;
+    }
+    if let Some(ref depends) = fields.depends {
+        for dependency in depends {
+            catalog_track_name_bytes(dependency)?;
+        }
+    }
     Ok(fields)
 }
 
@@ -3071,6 +3334,8 @@ fn reject_coexisting_target_latency_buffers(
 
 fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageError> {
     let name: String = val.to_member("name")?.required()?.try_into()?;
+    // draft-ietf-moq-msf-02 §5.2.3 (Track name): 空文字と NUL は禁止
+    let name_bytes = catalog_track_name_bytes(&name)?;
     let packaging_str: String = val.to_member("packaging")?.required()?.try_into()?;
     let packaging = MsfPackaging::from_packaging_str(&packaging_str)?;
 
@@ -3118,6 +3383,12 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
     } = f;
     let depends = depends.unwrap_or_default();
     let accessibility = accessibility.unwrap_or_default();
+    // draft-ietf-moq-transport-23 §8.7: Full Track Name の長さ制限
+    let parsed_namespace = match namespace.as_deref() {
+        Some(value) => Some(parse_catalog_namespace(value)?),
+        None => None,
+    };
+    validate_catalog_full_track_name(parsed_namespace.as_ref(), &name_bytes)?;
 
     // draft-ietf-moq-msf-01 §5.2.5 (Event timeline type): eventtimeline なら eventType 必須、それ以外では禁止
     let is_event_timeline = matches!(packaging, MsfPackaging::EventTimeline);
@@ -3398,7 +3669,14 @@ fn decode_remove_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfRemoveTra
         }
     }
     let name: String = val.to_member("name")?.required()?.try_into()?;
+    // draft-ietf-moq-msf-02 §5.2.3 (Track name): 空文字と NUL は禁止
+    let name_bytes = catalog_track_name_bytes(&name)?;
     let namespace: Option<String> = val.to_member("namespace")?.map(|v| v.try_into())?;
+    let parsed_namespace = match namespace.as_deref() {
+        Some(value) => Some(parse_catalog_namespace(value)?),
+        None => None,
+    };
+    validate_catalog_full_track_name(parsed_namespace.as_ref(), &name_bytes)?;
     Ok(MsfRemoveTrack { name, namespace })
 }
 
@@ -3409,6 +3687,8 @@ fn decode_remove_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfRemoveTra
 /// この仕様は将来変更される可能性がある。
 fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack, MessageError> {
     let name: String = val.to_member("name")?.required()?.try_into()?;
+    // draft-ietf-moq-msf-02 §5.2.3 (Track name): 空文字と NUL は禁止
+    let name_bytes = catalog_track_name_bytes(&name)?;
 
     // draft-ietf-moq-msf-01 §5.1.6 (Delta update): cloneTracks 内では parentName 必須
     let parent_name: String = val
@@ -3416,6 +3696,8 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
         .required()?
         .try_into()
         .map_err(|e: nojson::JsonParseError| MessageError::InvalidCatalog(e.to_string()))?;
+    // draft-ietf-moq-msf-02 §5.2.34 (Parent name): track name と同じ写像規則
+    let parent_name_bytes = catalog_track_name_bytes(&parent_name)?;
 
     // draft-ietf-moq-msf-01 §5.2.34 (Parent namespace): 省略時はカタログのネームスペースが
     // 親のネームスペースと仮定される。この仕様は将来変更される可能性がある。
@@ -3504,6 +3786,23 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
             "trackDuration MUST NOT be included when isLive is true".to_string(),
         ));
     }
+
+    // draft-ietf-moq-transport-23 §8.7: clone 自身と親の Full Track Name の長さ制限。
+    // clone が namespace を宣言しない場合は親の namespace を継承する (§5.1.6) ため、
+    // parentNamespace を clone 自身の実効 namespace としても使う。
+    let parsed_namespace = match namespace.as_deref() {
+        Some(value) => Some(parse_catalog_namespace(value)?),
+        None => None,
+    };
+    let parsed_parent_namespace = match parent_namespace.as_deref() {
+        Some(value) => Some(parse_catalog_namespace(value)?),
+        None => None,
+    };
+    let effective_namespace = parsed_namespace
+        .as_ref()
+        .or(parsed_parent_namespace.as_ref());
+    validate_catalog_full_track_name(effective_namespace, &name_bytes)?;
+    validate_catalog_full_track_name(parsed_parent_namespace.as_ref(), &parent_name_bytes)?;
 
     Ok(MsfCloneTrack {
         name,

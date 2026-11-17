@@ -237,3 +237,533 @@ fn clone_track_eventtimeline_without_event_type_accepted() {
     assert_eq!(tracks[0].packaging, Some(MsfPackaging::EventTimeline));
     assert_eq!(tracks[0].event_type, None);
 }
+
+/// v02 の `/` 区切り namespace が MOQT の Track Namespace に写像され、
+/// §8.8 の URL 形式と往復一致すること
+///
+/// draft-ietf-moq-msf-02 §5.2.2 (Track namespace) / §11.2.4 (Relationship to the serialized
+/// form): カタログ文字列をまずバイト列へ写像し、そのバイト列に MOQT の直列化を適用する。
+#[test]
+fn catalog_namespace_roundtrips_through_url_form() {
+    let namespace = parse_catalog_namespace("customer/livestream/123")
+        .expect("v02 の namespace として解決できること");
+    assert_eq!(
+        namespace.fields(),
+        &[
+            b"customer".to_vec(),
+            b"livestream".to_vec(),
+            b"123".to_vec(),
+        ],
+        "各 substring が順に Track Namespace Field になること"
+    );
+
+    let url = shiguredo_moqt::name::serialize_name(&namespace, b"catalog");
+    assert_eq!(
+        url, "customer-livestream-123--catalog",
+        "バイト値に §8.8 の直列化を適用すること"
+    );
+    let (parsed, track_name) =
+        shiguredo_moqt::name::parse_name(&url).expect("URL 形式として解決できること");
+    assert_eq!(parsed, namespace, "URL 形式から同じ namespace に戻ること");
+    assert_eq!(track_name, b"catalog", "track name が一致すること");
+}
+
+/// 不正なカタログ namespace を拒否すること
+///
+/// draft-ietf-moq-msf-02 §5.2.2 (Track namespace): 1 〜 32 fields、各 field 非空、全体 4096
+/// バイト以下。先頭・末尾・連続する `/` は空 field になるため不正。
+#[test]
+fn invalid_catalog_namespace_rejected() {
+    for value in ["", "a//b", "/a", "a/", "a\0b"] {
+        assert!(
+            matches!(
+                parse_catalog_namespace(value),
+                Err(MessageError::InvalidCatalog(_))
+            ),
+            "不正な namespace {value:?} を拒否すること"
+        );
+    }
+
+    let too_many_fields = (0..33).map(|_| "a").collect::<Vec<_>>().join("/");
+    assert!(
+        matches!(
+            parse_catalog_namespace(&too_many_fields),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "33 fields の namespace を拒否すること"
+    );
+
+    let exactly_32 = (0..32).map(|_| "a").collect::<Vec<_>>().join("/");
+    assert!(
+        parse_catalog_namespace(&exactly_32).is_ok(),
+        "32 fields の namespace は受理すること"
+    );
+
+    let too_long = "a".repeat(4097);
+    assert!(
+        matches!(
+            parse_catalog_namespace(&too_long),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "4097 バイトの namespace を拒否すること"
+    );
+}
+
+/// 不正な track name を decode で拒否すること
+#[test]
+fn invalid_catalog_track_name_rejected() {
+    for json in [
+        br#"{"version":"draft-01","tracks":[{"name":"","packaging":"loc","isLive":true}]}"#
+            .as_slice(),
+        br#"{"version":"draft-01","tracks":[{"name":"a\u0000b","packaging":"loc","isLive":true}]}"#
+            .as_slice(),
+    ] {
+        assert!(
+            matches!(
+                MsfCatalogDocument::decode(json),
+                Err(MessageError::InvalidCatalog(_))
+            ),
+            "不正な track name を持つカタログを拒否すること: {}",
+            String::from_utf8_lossy(json)
+        );
+    }
+
+    let empty_parent =
+        br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":""}]}]}"#;
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(empty_parent),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "空の parentName を拒否すること"
+    );
+
+    let empty_remove = br#"{"deltaUpdate":[{"op":"remove","tracks":[{"name":""}]}]}"#;
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(empty_remove),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "空の removeTracks name を拒否すること"
+    );
+}
+
+/// depends の String 要素も track name の写像規則で検証すること
+#[test]
+fn depends_elements_use_track_name_mapping() {
+    let empty = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"depends":[""]}]}"#;
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(empty),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "空の depends 要素を拒否すること"
+    );
+
+    let nul = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"depends":["a\u0000b"]}]}"#;
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(nul),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "NUL を含む depends 要素を拒否すること"
+    );
+}
+
+/// Full Track Name の一意性が継承 namespace を解決して判定されること
+///
+/// draft-ietf-moq-msf-02 §5.2.3 (Track name): 一意性は明示 namespace と省略 namespace を
+/// 解決した後の Full Track Name で判定する。
+#[test]
+fn track_name_uniqueness_resolves_inherited_namespace() {
+    let mut catalog = MsfCatalog::new();
+    let mut explicit = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
+    explicit.namespace = Some("customer/livestream/123".to_string());
+    let omitted = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
+    catalog.tracks.push(explicit.clone());
+    catalog.tracks.push(omitted.clone());
+
+    let base = parse_catalog_namespace("customer/livestream/123")
+        .expect("テスト用 namespace を解決できること");
+    assert!(
+        matches!(
+            catalog.validate_track_names(Some(&base)),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "継承を解決すると同じ Full Track Name になるため拒否すること"
+    );
+
+    let mut different = MsfCatalog::new();
+    different.tracks.push(explicit);
+    let mut other_namespace = omitted;
+    other_namespace.namespace = Some("customer/livestream/456".to_string());
+    different.tracks.push(other_namespace);
+    assert!(
+        different.validate_track_names(Some(&base)).is_ok(),
+        "namespace が異なる同名 track は別の Full Track Name として受理すること"
+    );
+}
+
+/// カタログ文書の先頭 BOM と未対サロゲートを拒否すること
+///
+/// draft-ietf-moq-msf-02 §11.2.1 (Producing bytes from a JSON string): カタログ文書は BOM で
+/// 始まってはならず、名前に未対サロゲートを含めてはならない。
+#[test]
+fn bom_and_unpaired_surrogate_rejected() {
+    let mut with_bom = vec![0xef, 0xbb, 0xbf];
+    with_bom.extend_from_slice(br#"{"version":"draft-01","tracks":[]}"#);
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(&with_bom),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "先頭 BOM 付きのカタログを拒否すること"
+    );
+
+    let surrogate =
+        br#"{"version":"draft-01","tracks":[{"name":"a\uDEADb","packaging":"loc","isLive":true}]}"#;
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(surrogate),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "未対サロゲートを含む name を拒否すること"
+    );
+}
+
+/// 名前中の U+FEFF は BOM ではなく通常の文字として受理すること
+#[test]
+fn zero_width_no_break_space_in_name_accepted() {
+    let json = "{\"version\":\"draft-01\",\"tracks\":[{\"name\":\"a\u{feff}b\",\"packaging\":\"loc\",\"isLive\":true}]}";
+    let doc =
+        MsfCatalogDocument::decode(json.as_bytes()).expect("名前中の U+FEFF は受理されること");
+    let MsfCatalogDocument::Full(catalog) = doc else {
+        panic!("Full が期待された");
+    };
+    assert_eq!(catalog.tracks[0].name, "a\u{feff}b");
+}
+
+/// clone / remove / publishTracks の名前・namespace を decode で拒否すること
+///
+/// draft-ietf-moq-msf-02 §5.2.2 / §5.2.3 / §5.2.34 / §5.2.35 / §11.2: track object の
+/// 種類によらず、名前と namespace は同じ写像規則で検証する。
+#[test]
+fn clone_and_remove_invalid_names_rejected() {
+    for json in [
+        // clone 自身の name が空 / NUL
+        br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"","parentName":"p"}]}]}"#.as_slice(),
+        br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"a\u0000b","parentName":"p"}]}]}"#
+            .as_slice(),
+        // parentName が NUL
+        br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"a\u0000b"}]}]}"#
+            .as_slice(),
+        // parentNamespace が空 field / NUL
+        br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","parentNamespace":"a//b"}]}]}"#.as_slice(),
+        br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","parentNamespace":"a\u0000b"}]}]}"#.as_slice(),
+        // clone 自身の namespace が空 field
+        br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","namespace":"a//b"}]}]}"#.as_slice(),
+        // clone の depends 要素が空 / NUL
+        br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","depends":[""]}]}]}"#.as_slice(),
+        br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","depends":["a\u0000b"]}]}]}"#.as_slice(),
+        // remove の name が NUL / namespace が空 field
+        br#"{"deltaUpdate":[{"op":"remove","tracks":[{"name":"a\u0000b"}]}]}"#.as_slice(),
+        br#"{"deltaUpdate":[{"op":"remove","tracks":[{"name":"x","namespace":"a//b"}]}]}"#.as_slice(),
+        // publishTracks の name が空 / namespace が空 field
+        br#"{"version":"draft-01","tracks":[],"publishTracks":[{"name":"","packaging":"loc","isLive":true}]}"#.as_slice(),
+        br#"{"version":"draft-01","tracks":[],"publishTracks":[{"name":"p","namespace":"a//b","packaging":"loc","isLive":true}]}"#.as_slice(),
+    ] {
+        assert!(
+            matches!(
+                MsfCatalogDocument::decode(json),
+                Err(MessageError::InvalidCatalog(_))
+            ),
+            "不正な名前または namespace を拒否すること: {}",
+            String::from_utf8_lossy(json)
+        );
+    }
+}
+
+/// JSON エスケープの有無が同じ Full Track Name に写像されること
+///
+/// draft-ietf-moq-msf-02 §11.2.1 (Producing bytes from a JSON string): エスケープは JSON の
+/// パース時に解決され、写像は Unicode scalar value の UTF-8 符号化で行う。`"café"` と
+/// `"caf\u00e9"` は同じバイト列になる。
+#[test]
+fn escaped_and_literal_names_are_the_same_full_track_name() {
+    let json = "{\"version\":\"draft-01\",\"tracks\":[\
+            {\"name\":\"caf\u{e9}\",\"packaging\":\"loc\",\"isLive\":true},\
+            {\"name\":\"caf\\u00e9\",\"packaging\":\"loc\",\"isLive\":true}\
+        ]}";
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(json.as_bytes()),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "エスケープ表記が違っても同じ Full Track Name は重複として拒否すること"
+    );
+}
+
+/// Unicode 正規化をしないこと
+///
+/// draft-ietf-moq-msf-02 §11.2.1: NFC / NFD / NFKC / NFKD などの正規化は行わない。
+/// `"café"` (U+00E9) と `"cafe\u0301"` (U+0065 U+0301) は異なる Track Name である。
+#[test]
+fn unicode_normalization_is_not_applied() {
+    let json = "{\"version\":\"draft-01\",\"tracks\":[\
+            {\"name\":\"caf\u{e9}\",\"packaging\":\"loc\",\"isLive\":true},\
+            {\"name\":\"cafe\\u0301\",\"packaging\":\"loc\",\"isLive\":true}\
+        ]}";
+    let doc = MsfCatalogDocument::decode(json.as_bytes())
+        .expect("正規化しないため 2 つの異なる Track Name として受理されること");
+    let MsfCatalogDocument::Full(catalog) = doc else {
+        panic!("Full が期待された");
+    };
+    assert_eq!(catalog.tracks.len(), 2);
+    assert_eq!(catalog.tracks[0].name, "café");
+    assert_eq!(catalog.tracks[1].name, "cafe\u{0301}");
+}
+
+/// 単一 field の `-` を namespaces の区切りとして解釈しないこと
+///
+/// draft-ietf-moq-msf-02 §5.2.2: v02 で区切りは `/` だけであり、`-` は field の内容である。
+#[test]
+fn hyphen_is_not_a_namespace_delimiter() {
+    let namespace =
+        parse_catalog_namespace("a-b").expect("単一 field の namespace として解決できること");
+    assert_eq!(namespace.fields(), &[b"a-b".to_vec()]);
+    assert_eq!(
+        serialize_catalog_namespace(&namespace).expect("カタログ形式に戻せること"),
+        "a-b"
+    );
+}
+
+/// namespace 単体と Full Track Name の 4,096 バイト境界を検証すること
+///
+/// draft-ietf-moq-msf-02 §5.2.2 (Track namespace) / draft-ietf-moq-transport-23 §8.7
+/// (Track Namespace Structure): namespace は 4,096 バイト以下、Full Track Name も 4,096
+/// バイト以下である。
+#[test]
+fn namespace_and_full_track_name_length_boundaries() {
+    // namespace 単体は 4,096 バイトちょうどまで受理する
+    let max_namespace = "a".repeat(4096);
+    assert!(
+        parse_catalog_namespace(&max_namespace).is_ok(),
+        "4,096 バイトの namespace は単体では受理すること"
+    );
+
+    // namespace 4,095 バイト + name 1 バイト = Full Track Name 4,096 バイトちょうど
+    let namespace = "a".repeat(4095);
+    let ok_json = format!(
+        r#"{{"version":"draft-01","tracks":[{{"name":"b","namespace":"{namespace}","packaging":"loc","isLive":true}}]}}"#
+    );
+    assert!(
+        MsfCatalogDocument::decode(ok_json.as_bytes()).is_ok(),
+        "Full Track Name 4,096 バイトちょうどは受理すること"
+    );
+
+    // namespace 4,096 バイト + name 1 バイト = 4,097 バイトは拒否する
+    let too_long_json = format!(
+        r#"{{"version":"draft-01","tracks":[{{"name":"b","namespace":"{max_namespace}","packaging":"loc","isLive":true}}]}}"#
+    );
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(too_long_json.as_bytes()),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "Full Track Name 4,097 バイトは拒否すること"
+    );
+
+    // namespace を省略しても、name 単体が 4,096 バイトを超えれば拒否する
+    let long_name = "a".repeat(4097);
+    let long_name_json = format!(
+        r#"{{"version":"draft-01","tracks":[{{"name":"{long_name}","packaging":"loc","isLive":true}}]}}"#
+    );
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(long_name_json.as_bytes()),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "4,097 バイトの Track Name は拒否すること"
+    );
+}
+
+/// delta の add / clone / remove でも Full Track Name の長さ制限を検証すること
+///
+/// draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name は 4,096
+/// バイト以下。完全カタログだけでなく delta の各操作でも同じ制約を適用する。
+#[test]
+fn delta_operations_reject_overlong_full_track_names() {
+    let namespace = "a".repeat(4096);
+
+    let add = format!(
+        r#"{{"deltaUpdate":[{{"op":"add","tracks":[{{"name":"b","namespace":"{namespace}","packaging":"loc","isLive":true}}]}}]}}"#
+    );
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(add.as_bytes()),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "delta add の Full Track Name 4,097 バイトを拒否すること"
+    );
+
+    let clone = format!(
+        r#"{{"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"b","parentName":"p","namespace":"{namespace}"}}]}}]}}"#
+    );
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(clone.as_bytes()),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "delta clone の Full Track Name 4,097 バイトを拒否すること"
+    );
+
+    let long_parent_name = "p".repeat(4097);
+    let clone_parent = format!(
+        r#"{{"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"b","parentName":"{long_parent_name}"}}]}}]}}"#
+    );
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(clone_parent.as_bytes()),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "delta clone の parentName 4,097 バイトを拒否すること"
+    );
+
+    // clone 自身の namespace を省略し parentNamespace を継承する場合、clone の Full Track Name は
+    // parentNamespace + clone name になる。親は 4,096 バイトちょうど、clone は超過する。
+    let parent_namespace = "a".repeat(4095);
+    let clone_inheriting = format!(
+        r#"{{"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"bb","parentName":"p","parentNamespace":"{parent_namespace}"}}]}}]}}"#
+    );
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(clone_inheriting.as_bytes()),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "clone が親 namespace を継承した Full Track Name 4,097 バイトを拒否すること"
+    );
+
+    let remove = format!(
+        r#"{{"deltaUpdate":[{{"op":"remove","tracks":[{{"name":"b","namespace":"{namespace}"}}]}}]}}"#
+    );
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(remove.as_bytes()),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "delta remove の Full Track Name 4,097 バイトを拒否すること"
+    );
+}
+
+/// decode 経由でも各不正な namespace を拒否すること
+///
+/// `parse_catalog_namespace` の直接テストだけでなく、track object の `namespace` として
+/// decode したときにも同じ拒否になることを表駆動で固定する。
+#[test]
+fn decode_rejects_each_invalid_namespace_form() {
+    let mut cases = vec![
+        String::new(),
+        "/a".to_string(),
+        "a/".to_string(),
+        "a//b".to_string(),
+        "a\\u0000b".to_string(),
+        (0..33).map(|_| "a").collect::<Vec<_>>().join("/"),
+        "a".repeat(4097),
+    ];
+    // JSON の \u0000 は Rust の文字列ではバックスラッシュを残したままにする
+    cases.push("a\\u0000b".to_string());
+    for namespace in cases {
+        let json = format!(
+            r#"{{"version":"draft-01","tracks":[{{"name":"t","namespace":"{namespace}","packaging":"loc","isLive":true}}]}}"#
+        );
+        assert!(
+            matches!(
+                MsfCatalogDocument::decode(json.as_bytes()),
+                Err(MessageError::InvalidCatalog(_))
+            ),
+            "decode で不正な namespace {namespace:?} を拒否すること"
+        );
+    }
+}
+
+/// delta でも Full Track Name 4,096 バイトちょうどは受理し、4,097 バイトは拒否すること
+#[test]
+fn delta_full_track_name_boundaries() {
+    let ok_name = "a".repeat(4096);
+    let too_long_name = "a".repeat(4097);
+
+    // add: namespace を省略した name 単体
+    let add_ok = format!(
+        r#"{{"deltaUpdate":[{{"op":"add","tracks":[{{"name":"{ok_name}","packaging":"loc","isLive":true}}]}}]}}"#
+    );
+    assert!(
+        MsfCatalogDocument::decode(add_ok.as_bytes()).is_ok(),
+        "add の name 単体 4,096 バイトは受理すること"
+    );
+    let add_ng = format!(
+        r#"{{"deltaUpdate":[{{"op":"add","tracks":[{{"name":"{too_long_name}","packaging":"loc","isLive":true}}]}}]}}"#
+    );
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(add_ng.as_bytes()),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "add の name 単体 4,097 バイトを拒否すること"
+    );
+
+    // clone: 自身の name 単体 (parentName は 1 バイト)
+    let clone_ok = format!(
+        r#"{{"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"{ok_name}","parentName":"p"}}]}}]}}"#
+    );
+    assert!(
+        MsfCatalogDocument::decode(clone_ok.as_bytes()).is_ok(),
+        "clone の name 単体 4,096 バイトは受理すること"
+    );
+    let clone_ng = format!(
+        r#"{{"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"{too_long_name}","parentName":"p"}}]}}]}}"#
+    );
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(clone_ng.as_bytes()),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "clone の name 単体 4,097 バイトを拒否すること"
+    );
+
+    // remove: name 単体
+    let remove_ok =
+        format!(r#"{{"deltaUpdate":[{{"op":"remove","tracks":[{{"name":"{ok_name}"}}]}}]}}"#);
+    assert!(
+        MsfCatalogDocument::decode(remove_ok.as_bytes()).is_ok(),
+        "remove の name 単体 4,096 バイトは受理すること"
+    );
+    let remove_ng =
+        format!(r#"{{"deltaUpdate":[{{"op":"remove","tracks":[{{"name":"{too_long_name}"}}]}}]}}"#);
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(remove_ng.as_bytes()),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "remove の name 単体 4,097 バイトを拒否すること"
+    );
+}
+
+/// clone の親 Full Track Name の長さを clone 自身とは独立に検証すること
+///
+/// parentNamespace 4,095 バイト + parentName 2 バイト = 4,097 バイトの親は不正だが、
+/// clone 自身の name 1 バイト + 継承 namespace 4,095 バイトは 4,096 バイトで正当である。
+/// 親側の検証が clone 自身の検証に吸収されないことを固定する。
+#[test]
+fn clone_parent_full_track_name_length_is_checked_separately() {
+    let parent_namespace = "a".repeat(4095);
+    let json = format!(
+        r#"{{"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"b","parentName":"pp","parentNamespace":"{parent_namespace}"}}]}}]}}"#
+    );
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(json.as_bytes()),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "親の Full Track Name 4,097 バイトを拒否すること"
+    );
+}

@@ -1142,9 +1142,26 @@ pub enum MsfCatalogDocument {
 fn apply_delta(
     &mut self,
     delta: &MsfDeltaUpdate,
-    catalog_namespace: Option<&str>,
+    catalog_namespace: Option<&TrackNamespace>,
 ) -> Result<(), MessageError>
+
+pub fn parse_catalog_namespace(value: &str) -> Result<TrackNamespace, MessageError>
+pub fn serialize_catalog_namespace(namespace: &TrackNamespace) -> Result<String, MessageError>
+pub fn catalog_track_name_bytes(name: &str) -> Result<Vec<u8>, MessageError>
+
+impl MsfCatalog {
+    pub fn validate_track_names(
+        &self,
+        catalog_namespace: Option<&TrackNamespace>,
+    ) -> Result<(), MessageError>
+}
 ```
+
+`TrackNamespace` は `shiguredo_moqt::message::common::TrackNamespace` を使う。カタログの
+`namespace` は draft-ietf-moq-msf-02 §5.2.2 の `/` 区切り表現で、MOQT の Track Namespace へ
+写像してから比較する (§11.2)。`removed_tracks` のキーも写像後の
+`(Option<TrackNamespace>, Track Name のバイト列)` である。URL 形式 (§8.8) は写像後の
+バイト列に `name::serialize_name` を適用して作る。
 
 `MsfTrack` は `name` / `namespace` / `packaging` / `codec` / `mime_type` / `width` / `height` / `framerate` / `bitrate` / `samplerate` / `channel_config` などを持つ単一構造体。Codec / Video / Audio は draft 上の論理的な分類。
 

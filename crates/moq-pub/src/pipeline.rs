@@ -25,6 +25,7 @@ use shiguredo_moqt::{
     message::common::TrackNamespace,
     message_parameter::{LocationFilter, LocationFilterContext, MessageParameters},
     msf::MSF_CATALOG_TRACK_NAME,
+    msf::serialize_catalog_namespace,
     name::serialize_namespace,
     session::types::DataStreamId,
     session::types::SessionEvent,
@@ -375,9 +376,7 @@ fn accepted_new_group_request(
 /// (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))、エンコーダ / MP4 リーダーへの参照では
 /// なく、組み立てに必要な値だけを所有して保持する。
 struct CatalogContext {
-    /// Track Namespace の §8.8 表現
-    ///
-    /// draft-ietf-moq-msf-01 §5.2.2 (Track namespace)
+    /// Track Namespace の draft-ietf-moq-msf-02 §5.2.2 (Track namespace) の `/` 区切り表現
     namespace_text: String,
     /// 映像トラック名
     track_name: String,
@@ -830,8 +829,14 @@ pub async fn run(
 
     // CLI で §8.8 表現としてパース済みの namespace をそのまま使う
     let namespace = config.namespace.clone();
-    // カタログの namespace は §8.8 の表現で書く (draft-ietf-moq-msf-01 §5.2.2 (Track namespace))
-    let namespace_text = serialize_namespace(&namespace);
+    // カタログの namespace は draft-ietf-moq-msf-02 §5.2.2 の `/` 区切りで書く。
+    // Track Namespace Field が UTF-8 でない、NUL を含む、`/` を含む場合はカタログで
+    // 表現できないため、ここで publisher の設定エラーとして拒否する。
+    let namespace_text = serialize_catalog_namespace(&namespace).map_err(|e| {
+        Error::Other(format!(
+            "catalog namespace cannot be represented in MSF: {e}"
+        ))
+    })?;
 
     // 1. 接続確立と SETUP ハンドシェイク、2. タイムアウト設定、
     // 3. PUBLISH (video / audio / catalog)

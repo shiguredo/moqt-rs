@@ -1365,3 +1365,459 @@ fn accessibility_missing_field_rejected() {
         );
     }
 }
+
+/// v02 の `/` 区切り namespace を持つ完全カタログが encode / decode を往復すること
+#[test]
+fn catalog_namespace_v02_roundtrip() {
+    let mut track = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
+    track.namespace = Some("customer/livestream/123".to_string());
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![track.clone()],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    let encoded = doc.encode().expect("v02 の namespace を encode できること");
+    let text = String::from_utf8(encoded.clone()).expect("JSON は UTF-8 であること");
+    assert!(
+        text.contains(r#""namespace":"customer/livestream/123""#),
+        "JSON に '/' 区切りの namespace を出力すること: {text}"
+    );
+
+    let decoded =
+        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(decoded, doc, "decode / encode が往復すること");
+}
+
+/// encode が decode できない名前・namespace を出力しないこと
+///
+/// `MsfCatalogDocument::encode` は `decode_full_catalog` と同じ MUST 検証を通すため、
+/// 手組みの不正値もここで拒否される。
+#[test]
+fn encode_rejects_invalid_catalog_names() {
+    // 空の track name
+    let empty_name = MsfTrack::new(String::new(), MsfPackaging::Loc, true);
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![empty_name],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "空の track name を encode しないこと"
+    );
+
+    // NUL を含む track name
+    let nul_name = MsfTrack::new("a\u{0}b".to_string(), MsfPackaging::Loc, true);
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![nul_name],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "NUL を含む track name を encode しないこと"
+    );
+
+    // 不正な namespace (空 field)
+    let mut invalid_namespace = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
+    invalid_namespace.namespace = Some("a//b".to_string());
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![invalid_namespace],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "不正な namespace を encode しないこと"
+    );
+
+    // NUL を含む namespace
+    let mut nul_namespace = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
+    nul_namespace.namespace = Some("a\u{0}b".to_string());
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![nul_namespace],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "NUL を含む namespace を encode しないこと"
+    );
+
+    // clone の空の parentName
+    let clone = MsfCloneTrack::new("child".to_string(), String::new());
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "空の parentName を encode しないこと"
+    );
+
+    // remove の空の name
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Remove {
+            tracks: vec![MsfRemoveTrack::new(String::new())],
+        }],
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "空の removeTracks name を encode しないこと"
+    );
+}
+
+/// encode が clone / remove / publishTracks の不正な名前を出力しないこと
+///
+/// `MsfCatalogDocument::encode` は decode と同じ写像規則を encode 前にも適用する
+/// (draft-ietf-moq-msf-02 §5.2.2 / §5.2.3 / §5.2.34 / §5.2.35 / §11.2)。
+#[test]
+fn encode_rejects_invalid_clone_and_remove_names() {
+    // clone 自身の name が空 / NUL
+    for name in ["", "a\u{0}b"] {
+        let clone = MsfCloneTrack::new(name.to_string(), "parent".to_string());
+        let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+            generated_at: None,
+            operations: vec![MsfDeltaOperation::Clone {
+                tracks: vec![clone],
+            }],
+        });
+        assert!(
+            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            "clone の不正な name を encode しないこと"
+        );
+    }
+
+    // clone 自身の namespace / parentNamespace が不正
+    for (namespace, parent_namespace) in [
+        (Some("a//b".to_string()), None),
+        (None, Some("a//b".to_string())),
+        (Some("a\u{0}b".to_string()), None),
+        (None, Some("a\u{0}b".to_string())),
+    ] {
+        let mut clone = MsfCloneTrack::new("child".to_string(), "parent".to_string());
+        clone.namespace = namespace;
+        clone.parent_namespace = parent_namespace;
+        let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+            generated_at: None,
+            operations: vec![MsfDeltaOperation::Clone {
+                tracks: vec![clone],
+            }],
+        });
+        assert!(
+            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            "clone の不正な namespace を encode しないこと"
+        );
+    }
+
+    // clone の depends 要素が空 / NUL
+    for dependency in ["", "a\u{0}b"] {
+        let mut clone = MsfCloneTrack::new("child".to_string(), "parent".to_string());
+        clone.depends = Some(vec![dependency.to_string()]);
+        let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+            generated_at: None,
+            operations: vec![MsfDeltaOperation::Clone {
+                tracks: vec![clone],
+            }],
+        });
+        assert!(
+            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            "clone の不正な depends 要素を encode しないこと"
+        );
+    }
+
+    // remove の name / namespace が不正
+    for (name, namespace) in [
+        ("a\u{0}b", None),
+        ("video", Some("a//b")),
+        ("video", Some("a\u{0}b")),
+    ] {
+        let mut remove = MsfRemoveTrack::new(name.to_string());
+        remove.namespace = namespace.map(str::to_string);
+        let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+            generated_at: None,
+            operations: vec![MsfDeltaOperation::Remove {
+                tracks: vec![remove],
+            }],
+        });
+        assert!(
+            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            "remove の不正な name / namespace を encode しないこと"
+        );
+    }
+
+    // publishTracks の name / namespace が不正
+    for (name, namespace) in [("", None), ("publish", Some("a//b"))] {
+        let mut track = MsfTrack::new(name.to_string(), MsfPackaging::Loc, true);
+        track.namespace = namespace.map(str::to_string);
+        let doc = MsfCatalogDocument::Full(MsfCatalog {
+            version: MSF_VERSION.to_string(),
+            generated_at: None,
+            is_complete: false,
+            tracks: Vec::new(),
+            publish_tracks: vec![track],
+            removed_tracks: Default::default(),
+            init_data_list: Vec::new(),
+        });
+        assert!(
+            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            "publishTracks の不正な name / namespace を encode しないこと"
+        );
+    }
+
+    // full track の depends 要素が空 / NUL
+    for dependency in ["", "a\u{0}b"] {
+        let mut track = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
+        track.depends = vec![dependency.to_string()];
+        let doc = MsfCatalogDocument::Full(MsfCatalog {
+            version: MSF_VERSION.to_string(),
+            generated_at: None,
+            is_complete: false,
+            tracks: vec![track],
+            publish_tracks: Vec::new(),
+            removed_tracks: Default::default(),
+            init_data_list: Vec::new(),
+        });
+        assert!(
+            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            "full track の不正な depends 要素を encode しないこと"
+        );
+    }
+}
+
+/// encode が Full Track Name 4,096 バイト超の delta を出力しないこと
+///
+/// draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の上限は
+/// 4,096 バイト。clone / remove の encode でも同じ制約を適用する。
+#[test]
+fn encode_rejects_overlong_delta_full_track_names() {
+    let namespace = "a".repeat(4096);
+
+    // clone 自身の namespace 4,096 バイト + name 1 バイト
+    let mut clone = MsfCloneTrack::new("b".to_string(), "p".to_string());
+    clone.namespace = Some(namespace.clone());
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "clone の Full Track Name 4,097 バイトを encode しないこと"
+    );
+
+    // clone の parentNamespace 4,096 バイト + parentName 1 バイト
+    let mut clone = MsfCloneTrack::new("b".to_string(), "p".to_string());
+    clone.parent_namespace = Some(namespace.clone());
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "clone の親 Full Track Name 4,097 バイトを encode しないこと"
+    );
+
+    // clone の parentName 単体 4,097 バイト
+    let clone = MsfCloneTrack::new("b".to_string(), "p".repeat(4097));
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "clone の parentName 4,097 バイトを encode しないこと"
+    );
+
+    // clone 自身の namespace を省略し parentNamespace を継承する場合の実効 namespace
+    let parent_namespace = "a".repeat(4095);
+    let mut clone = MsfCloneTrack::new("bb".to_string(), "p".to_string());
+    clone.parent_namespace = Some(parent_namespace);
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "clone が親 namespace を継承した Full Track Name 4,097 バイトを encode しないこと"
+    );
+
+    // delta add の namespace 4,096 バイト + name 1 バイト
+    let mut add_track = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
+    add_track.namespace = Some(namespace.clone());
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![add_track],
+        }],
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "delta add の Full Track Name 4,097 バイトを encode しないこと"
+    );
+
+    // remove の namespace 4,096 バイト + name 1 バイト
+    let mut remove = MsfRemoveTrack::new("b".to_string());
+    remove.namespace = Some(namespace);
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Remove {
+            tracks: vec![remove],
+        }],
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "remove の Full Track Name 4,097 バイトを encode しないこと"
+    );
+}
+
+/// `serialize_catalog_namespace` が Track Namespace を `/` 区切りへ戻すこと
+#[test]
+fn catalog_namespace_serializes_with_slashes() {
+    let namespace = TrackNamespace::new(vec![
+        b"customer".to_vec(),
+        b"livestream".to_vec(),
+        b"123".to_vec(),
+    ])
+    .expect("テスト用 namespace を作れること");
+    assert_eq!(
+        serialize_catalog_namespace(&namespace).expect("カタログ形式に変換できること"),
+        "customer/livestream/123"
+    );
+
+    let no_fields = TrackNamespace::new(Vec::new()).expect("0 fields の namespace を作れること");
+    assert!(
+        matches!(
+            serialize_catalog_namespace(&no_fields),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "0 fields の namespace はカタログで表現できないこと"
+    );
+}
+
+/// カタログで表現できない Track Namespace Field を拒否すること
+#[test]
+fn catalog_namespace_serialization_rejects_unrepresentable_fields() {
+    // `/` は区切りとして解釈されるため field 自体に含められない
+    let slash =
+        TrackNamespace::new(vec![b"a/b".to_vec()]).expect("テスト用 namespace を作れること");
+    assert!(
+        matches!(
+            serialize_catalog_namespace(&slash),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "'/' を含む field はカタログで表現できないこと"
+    );
+
+    // NUL は §11.2.1 が禁止する
+    let nul = TrackNamespace::new(vec![b"a\0b".to_vec()]).expect("テスト用 namespace を作れること");
+    assert!(
+        matches!(
+            serialize_catalog_namespace(&nul),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "NUL を含む field はカタログで表現できないこと"
+    );
+
+    // UTF-8 でないバイト列は JSON 文字列にできない
+    let invalid_utf8 =
+        TrackNamespace::new(vec![vec![0xff]]).expect("テスト用 namespace を作れること");
+    assert!(
+        matches!(
+            serialize_catalog_namespace(&invalid_utf8),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "UTF-8 でない field はカタログで表現できないこと"
+    );
+}
+
+/// encode が Full Track Name 4,096 バイトちょうどを受理すること
+#[test]
+fn encode_accepts_exact_full_track_name_boundaries() {
+    let name = "a".repeat(4096);
+
+    let mut add_track = MsfTrack::new(name.clone(), MsfPackaging::Loc, true);
+    add_track.namespace = None;
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![add_track],
+        }],
+    });
+    assert!(
+        doc.encode().is_ok(),
+        "add の name 単体 4,096 バイトを encode できること"
+    );
+
+    let clone = MsfCloneTrack::new(name.clone(), "p".to_string());
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    });
+    assert!(
+        doc.encode().is_ok(),
+        "clone の name 単体 4,096 バイトを encode できること"
+    );
+
+    let remove = MsfRemoveTrack::new(name);
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Remove {
+            tracks: vec![remove],
+        }],
+    });
+    assert!(
+        doc.encode().is_ok(),
+        "remove の name 単体 4,096 バイトを encode できること"
+    );
+}
+
+/// clone の親 Full Track Name の長さを clone 自身とは独立に encode 検証すること
+#[test]
+fn encode_rejects_clone_parent_full_track_name_overflow() {
+    let parent_namespace = "a".repeat(4095);
+    let mut clone = MsfCloneTrack::new("b".to_string(), "pp".to_string());
+    clone.parent_namespace = Some(parent_namespace);
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "親の Full Track Name 4,097 バイトを encode しないこと"
+    );
+}

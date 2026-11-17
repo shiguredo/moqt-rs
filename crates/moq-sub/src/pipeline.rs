@@ -46,7 +46,7 @@ use shiguredo_moqt::{
     message_parameter::MessageParameters, message_parameter::PARAM_FILL_PARAMETERS,
     message_parameter::PARAM_LOCATION_FILTER, message_parameter::PARAM_NEW_GROUP_REQUEST,
     message_parameter::PARAM_RENDEZVOUS_TIMEOUT, msf::MSF_CATALOG_TRACK_NAME, msf::MsfTrack,
-    name::parse_namespace, name::serialize_namespace, name::serialize_track_name,
+    msf::parse_catalog_namespace, name::serialize_namespace, name::serialize_track_name,
     session::types::DataStreamId, session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
     stream::decoder::DecodedSubgroupObject, stream::decoder::FetchStreamDecoder,
     stream::decoder::SubgroupStreamDecoder, stream::fetch::FetchHeader,
@@ -7145,9 +7145,9 @@ async fn receive_catalog(
     catalog_namespace: TrackNamespace,
 ) -> Result<CatalogResolution> {
     let deadline = tokio::time::Instant::now() + CATALOG_TIMEOUT;
-    // delta の namespace 継承は catalog JSON の `namespace` との文字列比較になるため、
-    // publisher が書く表現と同じ draft-ietf-moq-transport-23 §8.8 の表現へ直す
-    let mut state = catalog::CatalogState::new(serialize_namespace(&catalog_namespace));
+    // 継承の解決と比較は MOQT の Track Namespace のバイト値で行うため、catalog track の
+    // namespace をそのまま状態へ渡す (draft-ietf-moq-msf-02 §5.2.2 / §11.2)
+    let mut state = catalog::CatalogState::new(catalog_namespace.clone());
     while state.catalog().is_none() {
         let accepted =
             match tokio::time::timeout_at(deadline, recv_acceptor.accept_recv_stream()).await {
@@ -7752,16 +7752,14 @@ fn catalog_target_latency_ms(
 
 /// track の購読に使う namespace を解決する
 ///
-/// draft-ietf-moq-msf-01 §5.2.2 (Track namespace) は「track が宣言した namespace は継承した
+/// draft-ietf-moq-msf-02 §5.2.2 (Track namespace) は「track が宣言した namespace は継承した
 /// namespace を上書きする」と定める。宣言が無ければ catalog track の namespace を継承する
 /// (MSF の継承の規則。delta 適用時の継承は [`catalog::CatalogState`] が扱う)。
 ///
-/// 宣言された namespace は draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track
-/// Names。MSF では §11.1.2 に再掲) の表現として [`parse_namespace`] で解決する。§8.8 の形式は
-/// RECOMMENDED であり、draft-ietf-moq-msf-01 §5.2.2 (Track namespace) も catalog JSON の
-/// `namespace` を String と定めるのみで符号化を規定しない。本 example は moq-pub が書く §8.8
-/// 表現を前提とする契約であり、それ以外の表現 (MSF §5.6.1 の例のような値) を宣言したカタログでは
-/// この解決に失敗して起動できない。
+/// 宣言された namespace は draft-ietf-moq-msf-02 §5.2.2 / §11.2 (Mapping catalog strings to
+/// MOQT byte values) の `/` 区切り表現として [`parse_catalog_namespace`] で解決する。JSON
+/// デコード後の文字列を `/` で分割した各 substring が Track Namespace Field の UTF-8
+/// バイト列になる。
 ///
 /// 解決に失敗した場合はエラーにする。カタログは publisher の契約であり、本 example の契約では
 /// 解決できない namespace を publisher のバグとして扱う。黙って catalog track の namespace を
@@ -7773,11 +7771,10 @@ fn catalog_target_latency_ms(
 /// 同じ扱い)。無効化した側の解決に失敗しても example は起動しない。
 fn resolve_track_namespace(track: &MsfTrack, inherited: &TrackNamespace) -> Result<TrackNamespace> {
     let namespace = match track.namespace.as_deref() {
-        Some(declared) => parse_namespace(declared).map_err(|e| {
+        Some(declared) => parse_catalog_namespace(declared).map_err(|e| {
             Error::Other(format!(
                 "catalog media track {:?} has an invalid namespace {declared:?}: {e} \
-                 ('-' separates namespace fields; use the draft-ietf-moq-transport-23 \
-                 §8.8 form)",
+                 ('/' separates namespace fields in the draft-ietf-moq-msf-02 form)",
                 track.name
             ))
         })?,
@@ -10817,9 +10814,9 @@ mod tests {
         }
     }
 
-    /// テスト用の namespace を §8.8 表現から解決する
+    /// テスト用の namespace を v02 の `/` 区切り表現から解決する
     fn test_namespace(value: &str) -> TrackNamespace {
-        parse_namespace(value).expect("namespace を解決できること")
+        parse_catalog_namespace(value).expect("namespace を解決できること")
     }
 
     /// テスト用の track (codec と namespace だけを設定する)
@@ -10842,14 +10839,14 @@ mod tests {
     /// 別の track を購読するか DOES_NOT_EXIST になる。
     #[test]
     fn video_track_info_uses_declared_namespace() {
-        let mut track = track_with_namespace("av01.0.04M.08", Some("moq-example-video"));
+        let mut track = track_with_namespace("av01.0.04M.08", Some("moq-example/video"));
         track.width = Some(1920);
         track.height = Some(1080);
         let info = extract_video_info(&track, &test_namespace("moq-example"))
             .expect("トラック情報を取り出せること");
         assert_eq!(
             info.namespace,
-            test_namespace("moq-example-video"),
+            test_namespace("moq-example/video"),
             "宣言された namespace を使うこと"
         );
     }
@@ -10874,12 +10871,12 @@ mod tests {
 
     /// 解決できない namespace を宣言した track はエラーにする
     ///
-    /// カタログは publisher の契約であり、本 example は §8.8 (Representing Namespace and Track
-    /// Names) 表現を前提とするため、解決できない namespace を publisher のバグとして扱う。
+    /// カタログは publisher の契約であり、本 example は draft-ietf-moq-msf-02 §5.2.2 の
+    /// `/` 区切り表現を前提とするため、解決できない namespace を publisher のバグとして扱う。
     /// 黙って catalog track の namespace を継承すると別の track を購読して気づかない誤動作になる。
     #[test]
     fn video_track_info_with_invalid_namespace_is_an_error() {
-        let mut track = track_with_namespace("av01.0.04M.08", Some("moq-example--video"));
+        let mut track = track_with_namespace("av01.0.04M.08", Some("moq-example//video"));
         track.width = Some(1920);
         track.height = Some(1080);
         let error = extract_video_info(&track, &test_namespace("moq-example"))
@@ -10893,8 +10890,9 @@ mod tests {
 
     /// 空の namespace を宣言した映像 track はエラーにする
     ///
-    /// `parse_namespace` は空文字を 0 フィールドの namespace として通すが、本 example は
-    /// 1 つ以上のフィールドを持つ namespace を扱う (`tokio_moq::resolve_namespace` と同じ前提)。
+    /// draft-ietf-moq-msf-02 §5.2.2 は少なくとも 1 つの空でない field を要求するため、
+    /// 空文字は namespace として解決できない。`tokio_moq::resolve_namespace` と同じ前提で、
+    /// 1 つ以上のフィールドを持つ namespace だけを扱う。
     #[test]
     fn video_track_info_with_empty_namespace_is_an_error() {
         let mut track = track_with_namespace("av01.0.04M.08", Some(""));
@@ -10904,7 +10902,7 @@ mod tests {
             .err()
             .expect("空の namespace はエラーになること");
         assert!(
-            error.to_string().contains("empty namespace"),
+            error.to_string().contains("MUST NOT be empty"),
             "空の namespace として分かること: {error}"
         );
     }
@@ -10919,7 +10917,7 @@ mod tests {
             .err()
             .expect("空の namespace はエラーになること");
         assert!(
-            error.to_string().contains("empty namespace"),
+            error.to_string().contains("MUST NOT be empty"),
             "空の namespace として分かること: {error}"
         );
     }
@@ -10927,14 +10925,14 @@ mod tests {
     /// 音声 track でも宣言された namespace を購読に使う
     #[test]
     fn audio_track_info_uses_declared_namespace() {
-        let mut track = track_with_namespace("opus", Some("moq-example-audio"));
+        let mut track = track_with_namespace("opus", Some("moq-example/audio"));
         track.samplerate = Some(48000);
         track.channel_config = Some("2".to_string());
         let info = extract_audio_info(&track, &test_namespace("moq-example"))
             .expect("トラック情報を取り出せること");
         assert_eq!(
             info.namespace,
-            test_namespace("moq-example-audio"),
+            test_namespace("moq-example/audio"),
             "宣言された namespace を使うこと"
         );
     }
@@ -10957,7 +10955,7 @@ mod tests {
     /// 解決できない namespace を宣言した音声 track もエラーにする (映像と同じ扱い)
     #[test]
     fn audio_track_info_with_invalid_namespace_is_an_error() {
-        let mut track = track_with_namespace("opus", Some("moq-example--audio"));
+        let mut track = track_with_namespace("opus", Some("moq-example//audio"));
         track.samplerate = Some(48000);
         track.channel_config = Some("2".to_string());
         let error = extract_audio_info(&track, &test_namespace("moq-example"))
@@ -17178,7 +17176,7 @@ mod tests {
         /// ため、カタログを変更せず Err を返す (draft-ietf-moq-msf-01 §5.2.3)。
         #[test]
         fn apply_catalog_object_rejects_an_invalid_delta() {
-            let mut state = catalog::CatalogState::new("moq-example");
+            let mut state = catalog::CatalogState::new(test_track_namespace());
             let full = catalog::CatalogObject::decode(
                 Location {
                     group_id: 100,

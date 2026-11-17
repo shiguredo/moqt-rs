@@ -5,6 +5,7 @@ use shiguredo_moqt::msf::{
     MsfEventTimelineEntry, MsfInitData, MsfInitDataKind, MsfMediaTimeline, MsfMediaTimelineEntry,
     MsfPackaging, MsfRemoveTrack, MsfTemplate, MsfTrack, TimelineEncodingOptions,
     decode_event_timeline, decode_media_timeline, encode_event_timeline, encode_media_timeline,
+    parse_catalog_namespace, serialize_catalog_namespace,
 };
 
 // ─── 生成ヘルパー ─────────────────────────────────────────────────────────────
@@ -126,6 +127,10 @@ fn sample_track(ctx: &mut noprop::TestCaseContext) -> MsfTrack {
     let lang = sample_lang(ctx);
 
     let mut t = MsfTrack::new(name, packaging, is_live);
+    // v02 の `/` 区切り namespace を一定確率で明示し、継承と明示の両方を往復させる
+    if noprop::sample_bool(ctx) {
+        t.namespace = Some(sample_catalog_namespace(ctx));
+    }
 
     // eventtimeline なら eventType 必須
     if matches!(packaging, MsfPackaging::EventTimeline) {
@@ -174,7 +179,7 @@ fn sample_track(ctx: &mut noprop::TestCaseContext) -> MsfTrack {
     t.max_gop_duration = max_gop_duration.map(|v| v as u64);
     t.max_group_duration = max_group_duration.map(|v| v as u64);
     // connectionUri / token は任意文字列を受理するため、現実形状 (URI ・トークン) の生成にする
-    // (JSON エスケープ要文字の頑健性は parent_namespace の sample_string 経路で担保)
+    // (JSON エスケープ要文字の頑健性は sample_catalog_namespace の field で担保)
     t.connection_uri = if noprop::sample_bool(ctx) {
         Some(sample_uri_like(ctx))
     } else {
@@ -199,6 +204,38 @@ fn sample_track(ctx: &mut noprop::TestCaseContext) -> MsfTrack {
     t
 }
 
+/// draft-ietf-moq-msf-02 §5.2.2 の制約を満たす namespace 文字列を生成する
+///
+/// 1 〜 3 個の非空 field を `/` で連結する。field が空にならず 32 fields を超えないため、
+/// `parse_catalog_namespace` が受理する。JSON エスケープの往復も検証できるよう、ときどき
+/// 引用符・backslash・制御文字・非 ASCII を含む field を混ぜる (NUL と `/` は §5.2.2 /
+/// §11.2.1 が禁止するため含めない)。
+fn sample_catalog_namespace(ctx: &mut noprop::TestCaseContext) -> String {
+    let count = noprop::sample_usize_in(ctx, 1..=3);
+    let fields = (0..count)
+        .map(|_| {
+            if noprop::sample_ratio(ctx, noprop::Ratio::new(1, 4)) {
+                noprop::sample_choice(
+                    ctx,
+                    &[
+                        "café",
+                        "a\u{feff}b",
+                        "日本語",
+                        "a\"b",
+                        "a\\b",
+                        "a\nb",
+                        "a\u{1}b",
+                    ],
+                )
+                .to_string()
+            } else {
+                sample_name(ctx)
+            }
+        })
+        .collect::<Vec<_>>();
+    fields.join("/")
+}
+
 /// clone operation 用トラックを生成する (parentName 必須)
 ///
 /// draft-ietf-moq-msf-01 §5.1.6 (Delta update): clone track は親の属性を継承し、
@@ -220,11 +257,10 @@ fn sample_clone_track(ctx: &mut noprop::TestCaseContext) -> MsfCloneTrack {
     // (clone は欠如 reject を行わないため受理される。代表形のみで十分)
     let encrypted = noprop::sample_bool(ctx);
     let partial = noprop::sample_bool(ctx);
-    // parent_namespace はネームスペース形式の制約が無い任意文字列のため、
-    // 無制約の Option<String> で roundtrip の頑健性 (nojson のエスケープ含む) を検証する
+    // parent_namespace も draft-ietf-moq-msf-02 §5.2.2 の `/` 区切り namespace 制約を
+    // 満たす必要があるため、有効な namespace だけを生成する
     let parent_namespace = if noprop::sample_bool(ctx) {
-        let len = noprop::sample_usize_in(ctx, 0..=32);
-        Some(noprop::sample_string(ctx, len))
+        Some(sample_catalog_namespace(ctx))
     } else {
         None
     };
@@ -703,6 +739,27 @@ fn event_timeline_gzip_roundtrip() -> noprop::TestResult {
         let decoded =
             decode_event_timeline(&encoded).expect("テストフィクスチャの前提条件を満たす");
         assert_eq!(decoded, tl);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// カタログ namespace の parse / serialize 往復
+///
+/// draft-ietf-moq-msf-02 §5.2.2 / §11.2: `/` 区切りの正規形を書いた文字列は、Track Namespace
+/// に写像して戻すと同じ文字列になる。JSON エスケープを要する field も往復させる。
+#[test]
+fn catalog_namespace_roundtrip() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let value = sample_catalog_namespace(ctx);
+        let namespace =
+            parse_catalog_namespace(&value).expect("生成した namespace を解決できること");
+        assert_eq!(
+            serialize_catalog_namespace(&namespace).expect("カタログ形式に戻せること"),
+            value,
+            "parse / serialize が往復すること"
+        );
         Ok(())
     })?;
     Ok(())
