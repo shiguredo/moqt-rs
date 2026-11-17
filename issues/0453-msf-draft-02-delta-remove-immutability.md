@@ -1,7 +1,7 @@
 # MSF delta update の track 属性不変検証を撤廃する
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -37,3 +37,13 @@ draft-ietf-moq-msf-02 §5.3 (Delta updates) は、v01 の「Track Namespace と 
 - `docs/msf.md` と `apply_delta` / `removed_tracks` の doc が更新されていること。
 - 0344 の undo ログが上書き前の値を記録する前提であることが issue に明記されていること。
 - 上記を `tests/test_msf/delta_apply.rs` で固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- 再追加時の属性変更を拒否する検証を削除し、`comparable_attributes` を廃止した。`validate_readded_track` は削除時点の isLive が false で新しい isLive が true の場合だけを拒否する。
+- `removed_tracks` の挿入を `or_insert` から `insert` に変更し、削除のたびに最新の track で上書きするようにした。isLive=true → remove → false で再追加 → remove → true で再追加の順で拒否されることをテストで固定した。
+- 既存 track と同じ Full Track Name の add は引き続き拒否する。
+- 0344 の undo ログは `insert` による上書き前の値を記録する必要があるため、0344 の設計・完了条件を更新する前提であることを issue に明記した。
+- `tests/test_msf/delta_apply.rs` の属性変更拒否テストを受理テストへ更新し、履歴が最新 isLive を保持することと isLive 逆行のテストを追加した。`docs/msf.md` と `apply_delta` / `removed_tracks` の doc も更新した。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
