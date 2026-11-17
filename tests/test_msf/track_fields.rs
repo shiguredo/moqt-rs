@@ -369,3 +369,28 @@ fn legacy_connection_uri_key_is_ignored() {
         "旧 key の型違いも未知フィールドとして無視すること"
     );
 }
+
+/// streamMapping の既定と解釈
+#[test]
+fn stream_mapping_defaults_to_group_and_rejects_unknown_value() {
+    let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
+    assert_eq!(
+        track.stream_mapping().expect("既定は group"),
+        StreamMapping::Group
+    );
+    track.packaging_metadata = Some("streamMapping=group".to_string());
+    assert_eq!(
+        track.stream_mapping().expect("group を解釈できること"),
+        StreamMapping::Group
+    );
+    track.packaging_metadata = Some("streamMapping=object;other=value".to_string());
+    assert_eq!(
+        track.stream_mapping().expect("object を解釈できること"),
+        StreamMapping::Object
+    );
+    track.packaging_metadata = Some("streamMapping=unknown".to_string());
+    assert!(matches!(
+        track.stream_mapping(),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}

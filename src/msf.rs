@@ -359,6 +359,34 @@ impl MsfPackaging {
     }
 }
 
+/// LOC packaging の Object から MOQT Stream への割り当てモード
+///
+/// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) / §5.2.5 (Packaging metadata):
+/// publisher は `packagingMetadata` の `streamMapping` キーで `group` または `object` を通知する。
+/// キーがない場合は `group` と仮定する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamMapping {
+    /// 1 Group を 1 Subgroup に載せる ("group")
+    Group,
+    /// 1 Object を 1 Subgroup に載せる ("object")
+    Object,
+}
+
+impl StreamMapping {
+    /// `packagingMetadata` の `streamMapping` 値を解釈する
+    ///
+    /// 値がない場合は `Group`、`group` / `object` 以外は `InvalidCatalog`。
+    fn from_value(value: Option<&str>) -> Result<Self, MessageError> {
+        match value {
+            None | Some("group") => Ok(Self::Group),
+            Some("object") => Ok(Self::Object),
+            Some(other) => Err(MessageError::InvalidCatalog(format!(
+                "unknown streamMapping value '{other}'"
+            ))),
+        }
+    }
+}
+
 /// 初期化データの種別 (draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List))
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MsfInitDataKind {
@@ -870,6 +898,16 @@ impl MsfTrack {
             .filter_map(|element| element.split_once('='))
             .find(|(name, _)| *name == key)
             .map(|(_, value)| value)
+    }
+
+    /// LOC packaging の stream mapping を返す
+    ///
+    /// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping): `packagingMetadata` の
+    /// `streamMapping` を解釈する。キーがない場合は `Group`、`group` / `object` 以外は
+    /// `InvalidCatalog` にする。`streamMapping` は `loc` packaging 向けのキーであり、
+    /// 他の packaging では未知キーとして無視されるが、本メソッドは互換のため値を解釈する。
+    pub fn stream_mapping(&self) -> Result<StreamMapping, MessageError> {
+        StreamMapping::from_value(self.packaging_metadata_value("streamMapping"))
     }
 }
 
