@@ -1,7 +1,7 @@
 # MSF カタログに accessibleWindowTime を追加する
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -40,3 +40,14 @@ draft-ietf-moq-msf-02 §5.2.45 (Accessible Window Time) は、DVR ウィンド�
 - delta 適用後の検証でも、同じ `altGroup` の不一致が拒否されること。
 - `publishTracks` の `altGroup` も同じ規則で検証されること。
 - 上記を `tests/test_msf/catalog_decode.rs`、`tests/test_msf/encode_decode_roundtrip.rs`、`tests/test_msf/delta_apply.rs`、`tests/test_msf/error_cases.rs` で固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `MsfTrack` / `MsfCloneTrack` に `accessible_window_time: Option<u64>` を追加し、wire の `accessibleWindowTime` を decode / encode するようにした。
+- `MsfCloneTrack::into_track` で明示値があれば上書きし、なければ親から継承する。
+- `validate_alt_group_accessible_window_time` を追加し、同じ altGroup の track がすべて値を持たないか、すべて同じ値を持つことを検証する。一部だけの保持、値の不一致、isLive=false の例外を拒否する。
+- full decode / full encode / delta 適用後の 3 入口から、tracks と publishTracks をそれぞれ検証するようにした。
+- `tests/test_msf/catalog_decode.rs` / `encode_decode_roundtrip.rs` / `delta_apply.rs` に、往復、altGroup の一致・不一致、publishTracks、clone の継承・上書き、delta 適用後の拒否を追加した。
+- §7 の timeline trim と subscriber の取得制約は timeline 経路の実装に依存するため本 issue の範囲外であることを doc に明記した。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
