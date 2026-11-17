@@ -6,7 +6,7 @@
 
 - Catalog (`MsfCatalog`)
   - version / generatedAt / isComplete / tracks / publishTracks / initDataList
-  - `removed_tracks`：削除済みトラックの履歴 (JSON には出力しない内部状態。delta update の適用時に属性不変の検査へ使う。キーは解決できる場合は解決済みの `(TrackNamespace, Track Name のバイト列)`、基準 namespace が不明な場合は `None` を含む `(Option<TrackNamespace>, Track Name のバイト列)`)
+  - `removed_tracks`：削除済みトラックの履歴 (JSON には出力しない内部状態。delta update の適用時に isLive の false→true 検査へ使う。削除のたびに最新値で上書きする。キーは解決できる場合は解決済みの `(TrackNamespace, Track Name のバイト列)`、基準 namespace が不明な場合は `None` を含む `(Option<TrackNamespace>, Track Name のバイト列)`)
 - Delta Update (`MsfDeltaUpdate`)
   - deltaUpdate (operation object の配列：`op` = "add" / "remove" / "clone" / "update") / generatedAt (必須)。delta update は他の Root Catalog フィールド (`version` / `isComplete` / `tracks` / `publishTracks` / `initDataList`) を持たず、未知フィールドは無視する
   - Full / Delta の判別は `MsfCatalogDocument` が行う
@@ -16,7 +16,7 @@
   - clone 以外の track は、namespace を省略すると catalog track の MOQT Track Namespace を継承する。clone は clone 固有の規則 (§5.1.6) により、namespace を明示すればそれを使い、省略すれば親トラックの namespace を継承する。clone の parentNamespace を省略した場合は catalog namespace を親の namespace と仮定する (§5.2.35)。名前の比較はカタログの `/` 区切り文字列ではなく、§11.2 の写像後のバイト値で行う
   - add するトラックは適用時点で §5.2 各フィールドの MUST を検証し、add 操作内の全トラックを検証してから追加する
   - 適用後の Full Track Name の一意性と、宣言された targetLatency / buffers のグループ内一致を再検証する (省略は player の裁量のため比較対象外、isLive=false は無視)
-  - 削除済みの同じ Full Track Name の再追加は、属性変更と isLive の false から true への変更を拒否する (§5.3 / §5.2.7)
+  - 削除済みの同じ Full Track Name の再追加は属性変更を許可し、isLive の false から true への変更だけを拒否する (§5.2.7)。v02 は v01 の属性不変 MUST を削除した
 - カタログトラック名 (`MSF_CATALOG_TRACK_NAME` = "catalog")
 - Track (`MsfTrack`)：Codec / Video / Audio は draft 上の論理的な分類で、実体は単一の `MsfTrack` のフィールド
   - 共通：name / namespace / packaging / packagingMetadata / eventType / role / isLive / label / lang / targetLatency / buffers / trackDuration / renderGroup / altGroup / initRef / depends / parentName / template / maxGopDuration / maxGroupDuration
