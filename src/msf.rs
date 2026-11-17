@@ -359,17 +359,23 @@ impl MsfPackaging {
     }
 }
 
-/// 初期化データの種別 (draft-ietf-moq-msf-01 §5.1.7 (Initialization Data List))
+/// 初期化データの種別 (draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List))
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MsfInitDataKind {
     /// インライン Base64 ("inline")
     Inline,
+    /// Track property の type ("track-property")
+    TrackProperty,
+    /// Object property の type ("object-property")
+    ObjectProperty,
 }
 
 impl DisplayJson for MsfInitDataKind {
     fn fmt(&self, f: &mut JsonFormatter<'_, '_>) -> core::fmt::Result {
         match self {
             Self::Inline => f.value("inline"),
+            Self::TrackProperty => f.value("track-property"),
+            Self::ObjectProperty => f.value("object-property"),
         }
     }
 }
@@ -378,6 +384,8 @@ impl MsfInitDataKind {
     fn from_init_data_kind_str(s: &str) -> Result<Self, MessageError> {
         match s {
             "inline" => Ok(Self::Inline),
+            "track-property" => Ok(Self::TrackProperty),
+            "object-property" => Ok(Self::ObjectProperty),
             other => Err(MessageError::InvalidCatalog(format!(
                 "unknown initData type '{other}'"
             ))),
@@ -3306,6 +3314,9 @@ fn validate_clone_track_fragment(track: &MsfCloneTrack) -> Result<(), MessageErr
 ///
 /// `decode_full_catalog` が行う検証と同等の規則を、手組みの `MsfCatalog` にも適用する。
 fn validate_full_catalog_for_encode(catalog: &MsfCatalog) -> Result<(), MessageError> {
+    for entry in &catalog.init_data_list {
+        validate_init_data(entry)?;
+    }
     validate_init_data_list_unique(&catalog.init_data_list)?;
     validate_init_refs(
         &catalog.tracks,
@@ -3906,13 +3917,52 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
     Ok(track)
 }
 
+/// initData の data を kind に応じて検証する
+///
+/// draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List): `track-property` /
+/// `object-property` の data は property type の hex notation を持つ。仕様は文法を定めないため、
+/// 本実装は `0x` に続く 1〜16 桁の hex digit (大文字小文字を問わない) で、MOQT の property type が
+/// 表現できる 2^62 - 1 以下と定める。`inline` の Base64 検証は 0342 が担当する。
+fn validate_init_data(entry: &MsfInitData) -> Result<(), MessageError> {
+    if matches!(entry.kind, MsfInitDataKind::Inline) {
+        return Ok(());
+    }
+    let Some(hex) = entry.data.strip_prefix("0x") else {
+        return Err(MessageError::InvalidCatalog(format!(
+            "initData '{}' with property type MUST use 0x-prefixed hex notation",
+            entry.id
+        )));
+    };
+    if hex.is_empty() || hex.len() > 16 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(MessageError::InvalidCatalog(format!(
+            "initData '{}' has invalid property type hex notation",
+            entry.id
+        )));
+    }
+    let value = u64::from_str_radix(hex, 16).map_err(|_| {
+        MessageError::InvalidCatalog(format!(
+            "initData '{}' has invalid property type hex notation",
+            entry.id
+        ))
+    })?;
+    if value > (1_u64 << 62) - 1 {
+        return Err(MessageError::InvalidCatalog(format!(
+            "initData '{}' property type is out of range",
+            entry.id
+        )));
+    }
+    Ok(())
+}
+
 fn decode_init_data(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfInitData, MessageError> {
     let id: String = val.to_member("id")?.required()?.try_into()?;
     let kind_str: String = val.to_member("type")?.required()?.try_into()?;
     let kind = MsfInitDataKind::from_init_data_kind_str(&kind_str)?;
     let data: String = val.to_member("data")?.required()?.try_into()?;
+    let entry = MsfInitData { id, kind, data };
+    validate_init_data(&entry)?;
     // 未知キーは無視する
-    Ok(MsfInitData { id, kind, data })
+    Ok(entry)
 }
 
 fn decode_buffers(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfBuffers, MessageError> {

@@ -46,6 +46,7 @@
   - isComplete=false 禁止
   - timeline の depends / mimeType 必須
   - initRef の initDataList 参照整合性
+  - initDataList の type は `inline` / `track-property` / `object-property`。property 型の data は `0x` + 1〜16 桁の hex (2^62 - 1 以下) で、inline の Base64 検証は 0342 が担当する。initRef の type と property scope の整合は catalog から判定できないため検証しない
   - codec が audio / video と判定できるトラックは bitrate 必須 (audio は samplerate / channelConfig も)
   - 判定は WEBCODECS-CODEC-REGISTRY (Registry Draft, 2026-02-12) §3 / §4 の登録表記に基づく
   - role (`video` / `audio` / `audiodescription`) は codec が無い場合も従来どおり codec / bitrate (audio は samplerate / channelConfig) を要求する

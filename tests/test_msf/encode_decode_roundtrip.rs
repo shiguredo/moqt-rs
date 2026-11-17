@@ -2057,3 +2057,60 @@ fn encode_rejects_alt_group_accessible_window_time_mismatch() {
     });
     assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
 }
+
+/// track-property / object-property の initData が encode / decode を往復すること
+#[test]
+fn init_data_property_types_roundtrip() {
+    let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
+    track.init_ref = Some("init1".to_string());
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![track],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: vec![
+            MsfInitData {
+                id: "init1".to_string(),
+                kind: MsfInitDataKind::TrackProperty,
+                data: "0x0D".to_string(),
+            },
+            MsfInitData {
+                id: "init2".to_string(),
+                kind: MsfInitDataKind::ObjectProperty,
+                data: "0x78".to_string(),
+            },
+        ],
+    });
+    let encoded = doc
+        .encode()
+        .expect("property type の initData を encode できること");
+    let decoded =
+        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(decoded, doc, "decode / encode が往復すること");
+}
+
+/// 手組みの不正な property type を encode しないこと
+#[test]
+fn encode_rejects_invalid_init_data_property_type() {
+    for data in ["0D", "0x", "0xZZ", "0x4000000000000000"] {
+        let doc = MsfCatalogDocument::Full(MsfCatalog {
+            version: MSF_VERSION.to_string(),
+            generated_at: None,
+            is_complete: false,
+            tracks: Vec::new(),
+            publish_tracks: Vec::new(),
+            removed_tracks: Default::default(),
+            init_data_list: vec![MsfInitData {
+                id: "i".to_string(),
+                kind: MsfInitDataKind::TrackProperty,
+                data: data.to_string(),
+            }],
+        });
+        assert!(
+            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            "不正な hex {data:?} を encode しないこと"
+        );
+    }
+}

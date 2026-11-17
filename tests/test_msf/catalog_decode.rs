@@ -1037,3 +1037,45 @@ fn accessible_window_time_publish_tracks_alt_group_rules() {
         Err(MessageError::InvalidCatalog(_))
     ));
 }
+
+/// track-property / object-property の initData を受理すること
+#[test]
+fn init_data_property_types_accepted() {
+    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"initRef":"init1"}],"initDataList":[
+        {"id":"init1","type":"track-property","data":"0x0D"},
+        {"id":"init2","type":"object-property","data":"0x78"}
+    ]}"#;
+    let doc = MsfCatalogDocument::decode(json).expect("property type の initData を受理すること");
+    let MsfCatalogDocument::Full(cat) = doc else {
+        panic!("Full が期待された");
+    };
+    assert_eq!(cat.init_data_list[0].kind, MsfInitDataKind::TrackProperty);
+    assert_eq!(cat.init_data_list[1].kind, MsfInitDataKind::ObjectProperty);
+}
+
+/// property type の hex notation が不正なら decode で拒否すること
+#[test]
+fn init_data_property_type_invalid_hex_rejected() {
+    for data in [
+        "0D",
+        "0x",
+        "0xZZ",
+        "0x4000000000000000",
+        "0x10000000000000000",
+    ] {
+        let json = format!(
+            r#"{{"version":"draft-01","tracks":[],"initDataList":[{{"id":"i","type":"track-property","data":"{data}"}}]}}"#
+        );
+        assert!(
+            matches!(
+                MsfCatalogDocument::decode(json.as_bytes()),
+                Err(MessageError::InvalidCatalog(_))
+            ),
+            "不正な hex {data:?} を拒否すること"
+        );
+    }
+
+    // 2^62 - 1 は受理する
+    let json = br#"{"version":"draft-01","tracks":[],"initDataList":[{"id":"i","type":"track-property","data":"0x3FFFFFFFFFFFFFFF"}]}"#;
+    assert!(MsfCatalogDocument::decode(json).is_ok());
+}
