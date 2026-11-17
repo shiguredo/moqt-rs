@@ -1035,7 +1035,7 @@ fn write_track_json(
         f.member("trackDuration", v)?;
     }
     if let Some(v) = p.connection_uri {
-        f.member("connectionUri", v)?;
+        f.member("connectionURI", v)?;
     }
     if let Some(v) = p.encryption_scheme {
         f.member("encryptionScheme", v)?;
@@ -3561,7 +3561,7 @@ fn decode_common_track_fields(
         // キー綴りは §5.2.36 / §5.2.37 に定義がなく §5.6.16 の例に準拠する。
         // URI 形式検証は行わない (§5.2.36 の妥当性 MUST を含め、接続確立時の振る舞いは
         // catalog decode の責務外とし transport 層に委ねる)。
-        connection_uri: val.to_member("connectionUri")?.map(|v| v.try_into())?,
+        connection_uri: val.to_member("connectionURI")?.map(|v| v.try_into())?,
         encryption_scheme: val.to_member("encryptionScheme")?.map(|v| v.try_into())?,
         cipher_suite: val.to_member("cipherSuite")?.map(|v| v.try_into())?,
         key_id: val.to_member("keyId")?.map(|v| v.try_into())?,

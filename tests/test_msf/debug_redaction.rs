@@ -2,7 +2,7 @@
 //!
 //! token (§5.2.37)、trackBaseKey (§5.2.41)、authInfo (§5.2.42。変数置換による token の混入は
 //! §5.2.43)、token を含み得る URI
-//! (connectionUri の §5.2.36、fragment パラメータの §11.1.1 / §11.4.2、query) の値を、
+//! (connectionURI の §5.2.37、fragment パラメータの §11.1.1 / §11.4.2、query) の値を、
 //! 文字列としても十進のバイト列としても出さず、長さだけを表示することを固定する。
 
 use super::*;
@@ -12,7 +12,7 @@ use shiguredo_moqt::msf::uri::parse_msf_uri;
 const TRACK_BASE_KEY: &str = "dummy-base-key";
 /// テストで使う authInfo の scheme 固有値 (生 JSON) のダミー値
 const AUTH_VALUE_RAW: &str = "\"dummy-auth-value\"";
-/// テストで使う connectionUri のダミー値 (token パラメータを含む)
+/// テストで使う connectionURI のダミー値 (token パラメータを含む)
 const CONNECTION_URI: &str = "moqt://relay.example.com/pub?token=dummy-connection-token";
 
 /// `debug` に `secret` が文字列としても十進のバイト列としても含まれないことを確認する

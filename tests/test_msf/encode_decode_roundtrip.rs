@@ -589,8 +589,8 @@ fn clone_depends_none_omitted() {
 #[test]
 fn publish_tracks_roundtrip() {
     // draft-ietf-moq-msf-01 §5.6.16 を適用した例 (version を draft-01 化 ・ isLive 補完 ・
-    // token / connectionUri 除外 ・ %resourceId% は文字列として保持。
-    // token / connectionUri なし版の roundtrip (あり版は connection_uri_token_roundtrip) 。
+    // token / connectionURI 除外 ・ %resourceId% は文字列として保持。
+    // token / connectionURI なし版の roundtrip (あり版は connection_uri_token_roundtrip) 。
     // 仕様例の track 名と namespace の MUST 形式 (§9.2 / §10.2) の妥当性検証は対象外とし、
     // roundtrip 検証のため簡略化している) が roundtrip すること
     let mut metrics = MsfTrack::new("metrics".to_string(), MsfPackaging::MoqMetrics, true);
@@ -701,7 +701,7 @@ fn publish_tracks_key_order() {
 
 #[test]
 fn connection_uri_roundtrip() {
-    // §5.6.16 を適用した完全版 (connectionUri 付き) が roundtrip すること
+    // §5.6.16 を適用した完全版 (connectionURI 付き) が roundtrip すること
     let mut metrics = MsfTrack::new("metrics".to_string(), MsfPackaging::MoqMetrics, true);
     metrics.namespace = Some("%resourceId%".to_string());
     metrics.role = Some("metrics".to_string());

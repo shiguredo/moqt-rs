@@ -39,7 +39,7 @@ relay による namespace の集約・forwarding) は本稿の対象外とする
    Video Frame Marking 違反の `MALFORMED_KEY_VALUE` によるセッション終了が未対応 (§8.3)、
    `isLive=false` の `targetLatency` (MSF §5.2.8)、
    catalog 更新をまたいだ
-   `isLive` の False → True (MSF §5.2.7)、`connectionUri` の検証と新規接続 (MSF §5.2.36)、
+   `isLive` の False → True (MSF §5.2.7)、`connectionURI` の検証と新規接続 (MSF §5.2.37)、
    range パラメータの union (MSF §11.1.1)、`initDataList` の配置 (§5.1.7)、
    STOP_SENDING 受信時の open stream の reset (§3.1.2 / §3.2.4)。
 
@@ -162,12 +162,12 @@ MSF §5.2.7 は「A True value MUST never follow a False value.」と定める�
 カタログを受けても受理する。`isComplete` の「一度 TRUE にしたら削除できない」
 (§5.1.3) も同じ経路で検証されない。
 
-### 4.4 `connectionUri` の検証と新規接続 (MSF §5.2.36)
+### 4.4 `connectionURI` の検証と新規接続 (MSF §5.2.37)
 
-MSF §5.2.36 は `connectionUri` が「valid MOQT endpoint URI でなければならない (MUST)」とし、
+MSF §5.2.37 は `connectionURI` が「valid MOQT endpoint URI でなければならない (MUST)」とし、
 指定時は「購読者が新しい MOQT 接続を確立しなければならない (MUST)」と定める。
 ライブラリは URI 形式の検証を行わないと明記し (`src/msf.rs:2810-2813`)、
-example に `connectionUri` を参照する箇所も無い (grep で 0 件)。
+example に `connectionURI` を参照する箇所も無い (grep で 0 件)。
 publishTracks (Log / Metrics) を使う配信で壊れた URI を検出できず、
 購読側も別接続を張らない。
 
