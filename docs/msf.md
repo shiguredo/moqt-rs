@@ -8,7 +8,7 @@
   - version / generatedAt / isComplete / tracks / publishTracks / initDataList
   - `removed_tracks`：削除済みトラックの履歴 (JSON には出力しない内部状態。delta update の適用時に属性不変の検査へ使う。キーは解決できる場合は解決済みの `(TrackNamespace, Track Name のバイト列)`、基準 namespace が不明な場合は `None` を含む `(Option<TrackNamespace>, Track Name のバイト列)`)
 - Delta Update (`MsfDeltaUpdate`)
-  - deltaUpdate (operation object の配列：`op` = "add" / "remove" / "clone" / "update") / generatedAt
+  - deltaUpdate (operation object の配列：`op` = "add" / "remove" / "clone" / "update") / generatedAt (必須)。delta update は他の Root Catalog フィールド (`version` / `isComplete` / `tracks` / `publishTracks` / `initDataList`) を持たず、未知フィールドは無視する
   - Full / Delta の判別は `MsfCatalogDocument` が行う
 - Delta 適用 (`MsfCatalog::apply_delta`)
   - clone の継承解決 (`MsfCloneTrack::into_track`) と add / remove / clone / update の順次適用

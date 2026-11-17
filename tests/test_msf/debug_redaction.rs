@@ -178,7 +178,7 @@ fn container_debug_hides_track_secrets() {
     );
 
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![
             MsfDeltaOperation::Add {
                 tracks: vec![secret_track("added")],

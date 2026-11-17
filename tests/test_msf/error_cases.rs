@@ -493,12 +493,12 @@ fn lang_uppercase_privateuse_rejected() {
 /// delta add / clone 経路でも irregular タグが受理されること
 #[test]
 fn lang_irregular_in_delta_add_and_clone_accepted() {
-    let add = br#"{"deltaUpdate":[{"op":"add","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"i-klingon"}]}]}"#;
+    let add = br#"{"generatedAt":1,"deltaUpdate":[{"op":"add","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"i-klingon"}]}]}"#;
     assert!(
         MsfCatalogDocument::decode(add).is_ok(),
         "delta add の irregular タグは受理されること"
     );
-    let clone = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"a","parentName":"parent","lang":"i-klingon"}]}]}"#;
+    let clone = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"a","parentName":"parent","lang":"i-klingon"}]}]}"#;
     assert!(
         MsfCatalogDocument::decode(clone).is_ok(),
         "delta clone の irregular タグは受理されること"
@@ -508,7 +508,7 @@ fn lang_irregular_in_delta_add_and_clone_accepted() {
 /// add operation 経路でも lang バリデーションが発火することを確認する
 #[test]
 fn lang_invalid_in_add_tracks() {
-    let json = br#"{"deltaUpdate":[{"op":"add","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"1"}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"add","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"1"}]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -519,7 +519,7 @@ fn lang_invalid_in_add_tracks() {
 #[test]
 fn lang_invalid_in_clone_track() {
     let json =
-        br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"a","parentName":"parent","lang":"1"}]}]}"#;
+        br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"a","parentName":"parent","lang":"1"}]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -582,12 +582,12 @@ fn clone_target_latency_or_buffers_alone_ignored_when_is_live_false() {
     for (name, json, field) in [
         (
             "targetLatency 単独",
-            br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","isLive":false,"targetLatency":500}]}]}"#.as_slice(),
+            br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","isLive":false,"targetLatency":500}]}]}"#.as_slice(),
             "targetLatency",
         ),
         (
             "buffers 単独",
-            br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","isLive":false,"buffers":{"target":1000}}]}]}"#.as_slice(),
+            br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","isLive":false,"buffers":{"target":1000}}]}]}"#.as_slice(),
             "buffers",
         ),
     ] {
@@ -613,11 +613,11 @@ fn target_latency_and_buffers_together_rejected_in_clone() {
     for (name, json) in [
         (
             "isLive:false",
-            br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","isLive":false,"targetLatency":500,"buffers":{"target":1000}}]}]}"#.as_slice(),
+            br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","isLive":false,"targetLatency":500,"buffers":{"target":1000}}]}]}"#.as_slice(),
         ),
         (
             "isLive 省略",
-            br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","targetLatency":500,"buffers":{"target":1000}}]}]}"#.as_slice(),
+            br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","targetLatency":500,"buffers":{"target":1000}}]}]}"#.as_slice(),
         ),
     ] {
         assert!(
@@ -762,7 +762,7 @@ fn init_ref_matching_id_accepted() {
 #[test]
 fn delta_update_empty_array_rejected() {
     // draft-ietf-moq-msf-01 §5.3 (Delta updates): 少なくとも 1 つの操作が必要
-    let json = br#"{"deltaUpdate":[]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -771,7 +771,7 @@ fn delta_update_empty_array_rejected() {
 
 #[test]
 fn delta_update_unknown_op_rejected() {
-    let json = br#"{"deltaUpdate":[{"op":"unknown","tracks":[]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"unknown","tracks":[]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -781,7 +781,8 @@ fn delta_update_unknown_op_rejected() {
 #[test]
 fn delta_update_contains_version_rejected() {
     // draft-ietf-moq-msf-01 §5.3 (Delta updates): delta update に version は含めない
-    let json = br#"{"deltaUpdate":[{"op":"add","tracks":[]}],"version":"draft-01"}"#;
+    let json =
+        br#"{"generatedAt":1,"deltaUpdate":[{"op":"add","tracks":[]}],"version":"draft-01"}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -791,7 +792,7 @@ fn delta_update_contains_version_rejected() {
 #[test]
 fn delta_update_contains_tracks_rejected() {
     // draft-ietf-moq-msf-01 §5.3 (Delta updates): delta update に tracks は含めない
-    let json = br#"{"deltaUpdate":[{"op":"add","tracks":[]}],"tracks":[]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"add","tracks":[]}],"tracks":[]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -800,7 +801,7 @@ fn delta_update_contains_tracks_rejected() {
 
 #[test]
 fn delta_operation_missing_op_rejected() {
-    let json = br#"{"deltaUpdate":[{"tracks":[]}]}}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"tracks":[]}]}}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -809,7 +810,7 @@ fn delta_operation_missing_op_rejected() {
 
 #[test]
 fn delta_operation_missing_tracks_rejected() {
-    let json = br#"{"deltaUpdate":[{"op":"add"}]}}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"add"}]}}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -871,7 +872,7 @@ fn alt_group_different_buffers_rejected() {
 #[test]
 fn clone_track_target_latency_and_buffers_together_rejected() {
     // draft-ietf-moq-msf-01 §5.2.8 / §5.2.9: clone の isLive:true 共存も reject されること
-    let json = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","isLive":true,"targetLatency":500,"buffers":{"target":1000}}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","isLive":true,"targetLatency":500,"buffers":{"target":1000}}]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(reason))
@@ -882,7 +883,7 @@ fn clone_track_target_latency_and_buffers_together_rejected() {
 #[test]
 fn add_target_latency_and_buffers_together_rejected() {
     // draft-ietf-moq-msf-01 §5.2.8 / §5.2.9: delta add 経路の共存も reject されること
-    let json = br#"{"deltaUpdate":[{"op":"add","tracks":[{"name":"t","packaging":"loc","isLive":false,"targetLatency":500,"buffers":{"target":1000}}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"add","tracks":[{"name":"t","packaging":"loc","isLive":false,"targetLatency":500,"buffers":{"target":1000}}]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(reason))
@@ -893,7 +894,7 @@ fn add_target_latency_and_buffers_together_rejected() {
 #[test]
 fn clone_omitted_kept() {
     // clone の isLive 省略時は単独値を保持すること
-    let json = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","targetLatency":500}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","targetLatency":500}]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(delta) = doc else {
         panic!("Delta update がデコードされること");
@@ -906,7 +907,7 @@ fn clone_omitted_kept() {
 
 #[test]
 fn clone_track_track_duration_when_is_live_true_rejected() {
-    let json = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","isLive":true,"trackDuration":1000}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","isLive":true,"trackDuration":1000}]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -915,7 +916,7 @@ fn clone_track_track_duration_when_is_live_true_rejected() {
 
 #[test]
 fn clone_track_event_type_with_non_eventtimeline_rejected() {
-    let json = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","packaging":"loc","eventType":"x"}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","packaging":"loc","eventType":"x"}]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -2094,7 +2095,7 @@ fn encode_full_track_duration_when_is_live_true_rejected() {
 fn encode_delta_empty_operations_rejected() {
     // draft-ietf-moq-msf-01 §5.3 (Delta updates)
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: Vec::new(),
     });
     assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
@@ -2107,7 +2108,7 @@ fn encode_delta_add_invalid_track_rejected() {
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::MediaTimeline, true);
     track.mime_type = Some("application/json".to_string());
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![track],
         }],
@@ -2127,7 +2128,7 @@ fn encode_delta_clone_target_latency_and_buffers_rejected() {
         max: None,
     });
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -2147,7 +2148,7 @@ fn encode_delta_clone_track_duration_when_is_live_true_rejected() {
     clone.is_live = Some(true);
     clone.track_duration = Some(1000);
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -2163,7 +2164,7 @@ fn encode_delta_clone_event_type_with_non_eventtimeline_rejected() {
     clone.packaging = Some(MsfPackaging::Loc);
     clone.event_type = Some("x".to_string());
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -2178,7 +2179,7 @@ fn encode_delta_clone_invalid_lang_rejected() {
     let mut clone = MsfCloneTrack::new("c".to_string(), "p".to_string());
     clone.lang = Some("1".to_string());
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -2196,7 +2197,7 @@ fn encode_delta_irregular_lang_roundtrip() {
     // 大文字表記も encode / decode で正規化されずそのまま保持されることを確認する
     clone.lang = Some("I-AMI".to_string());
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![
             MsfDeltaOperation::Add { tracks: vec![add] },
             MsfDeltaOperation::Clone {

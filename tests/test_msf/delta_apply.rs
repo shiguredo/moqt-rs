@@ -12,7 +12,7 @@ fn apply_delta_add_appends_track() {
     // draft-ietf-moq-msf-01 §5.1.6 (Delta update): add は新規トラックを追加する
     let mut catalog = MsfCatalog::new();
     let delta = MsfDeltaUpdate {
-        generated_at: Some(1000),
+        generated_at: 1000,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![loc_track("v", Some("ns"))],
         }],
@@ -32,7 +32,7 @@ fn apply_delta_add_duplicate_rejected() {
     let mut catalog = MsfCatalog::new();
     catalog.tracks.push(loc_track("v", Some("ns")));
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![loc_track("v", Some("ns"))],
         }],
@@ -52,7 +52,7 @@ fn apply_delta_add_is_live_with_track_duration_rejected() {
     let mut track = loc_track("v", Some("ns"));
     track.track_duration = Some(1000);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![track],
         }],
@@ -75,7 +75,7 @@ fn apply_delta_add_video_without_codec_rejected() {
     let mut track = loc_track("v", Some("ns"));
     track.role = Some("video".to_string());
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![track],
         }],
@@ -100,7 +100,7 @@ fn apply_delta_add_codec_audio_without_samplerate_rejected() {
     track.codec = Some("opus".to_string());
     track.bitrate = Some(32_000);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![track],
         }],
@@ -124,7 +124,7 @@ fn apply_delta_remove_deletes_track() {
     let mut catalog = MsfCatalog::new();
     catalog.tracks.push(loc_track("v", None));
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Remove {
             tracks: vec![MsfRemoveTrack::new("v".to_string())],
         }],
@@ -140,7 +140,7 @@ fn apply_delta_remove_missing_rejected() {
     // 未宣言トラックの remove は reject される
     let mut catalog = MsfCatalog::new();
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Remove {
             tracks: vec![MsfRemoveTrack::new("missing".to_string())],
         }],
@@ -166,7 +166,7 @@ fn apply_delta_clone_inherits_and_overrides() {
     let mut clone = MsfCloneTrack::new("v2".to_string(), "v".to_string());
     clone.bitrate = Some(2_000_000);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -202,7 +202,7 @@ fn apply_delta_clone_added_audio_codec_without_samplerate_rejected() {
     clone.codec = Some("opus".to_string());
     clone.bitrate = Some(32_000);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -232,7 +232,7 @@ fn apply_delta_clone_uses_parent_namespace() {
     clone.parent_namespace = Some("other-ns".to_string());
     clone.namespace = Some("other-ns".to_string());
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -249,7 +249,7 @@ fn apply_delta_clone_missing_parent_rejected() {
     let mut catalog = MsfCatalog::new();
     let clone = MsfCloneTrack::new("v2".to_string(), "missing".to_string());
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -275,7 +275,7 @@ fn apply_delta_clone_is_live_false_drops_inherited_latency() {
     let mut clone = MsfCloneTrack::new("v2".to_string(), "v".to_string());
     clone.is_live = Some(false);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -301,7 +301,7 @@ fn apply_delta_clone_event_timeline_without_event_type_rejected() {
     clone.mime_type = Some("application/json".to_string());
     clone.depends = Some(vec![MsfDependency::TrackName("v".to_string())]);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -324,7 +324,7 @@ fn apply_delta_group_latency_mismatch_rejected() {
     second.render_group = Some(1);
     second.target_latency = Some(1000);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![second],
         }],
@@ -348,7 +348,7 @@ fn apply_delta_group_target_latency_omitted_accepted() {
     let mut second = loc_track("v2", None);
     second.render_group = Some(1);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![second],
         }],
@@ -375,7 +375,7 @@ fn apply_delta_group_buffers_omitted_accepted() {
     let mut second = loc_track("v2", None);
     second.render_group = Some(1);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![second],
         }],
@@ -402,7 +402,7 @@ fn apply_delta_group_omitted_between_different_target_latency_rejected() {
     third.render_group = Some(1);
     third.target_latency = Some(1000);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![third],
         }],
@@ -438,7 +438,7 @@ fn apply_delta_group_omitted_between_different_buffers_rejected() {
         max: None,
     });
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![third],
         }],
@@ -462,7 +462,7 @@ fn apply_delta_alt_group_target_latency_omitted_accepted() {
     let mut second = loc_track("v2", None);
     second.alt_group = Some(2);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![second],
         }],
@@ -489,7 +489,7 @@ fn apply_delta_alt_group_buffers_omitted_accepted() {
     let mut second = loc_track("v2", None);
     second.alt_group = Some(2);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![second],
         }],
@@ -524,7 +524,7 @@ fn apply_delta_alt_group_omitted_between_different_buffers_rejected() {
         max: None,
     });
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![third],
         }],
@@ -552,7 +552,7 @@ fn apply_delta_alt_group_omitted_between_different_target_latency_rejected() {
     third.alt_group = Some(2);
     third.target_latency = Some(1000);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![third],
         }],
@@ -579,7 +579,7 @@ fn apply_delta_clone_inherited_group_conflict_rejected() {
     let mut clone = MsfCloneTrack::new("v3".to_string(), "v1".to_string());
     clone.render_group = Some(1);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -605,7 +605,7 @@ fn apply_delta_clone_inherited_target_latency_and_buffers_rejected() {
         max: None,
     });
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -632,7 +632,7 @@ fn apply_delta_clone_inherited_buffers_and_target_latency_rejected() {
     let mut clone = MsfCloneTrack::new("v2".to_string(), "v".to_string());
     clone.target_latency = Some(500);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -659,7 +659,7 @@ fn apply_delta_clone_is_live_false_avoids_coexistence() {
         max: None,
     });
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -682,7 +682,7 @@ fn apply_delta_add_colliding_with_publish_track_rejected() {
     let mut catalog = MsfCatalog::new();
     catalog.publish_tracks.push(loc_track("v", Some("ns")));
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![loc_track("v", Some("ns"))],
         }],
@@ -701,7 +701,7 @@ fn apply_delta_clone_colliding_with_publish_track_rejected() {
     catalog.publish_tracks.push(loc_track("v2", None));
     let clone = MsfCloneTrack::new("v2".to_string(), "v".to_string());
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -719,7 +719,7 @@ fn apply_delta_add_missing_init_ref_rejected() {
     let mut track = loc_track("v", None);
     track.init_ref = Some("missing".to_string());
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![track],
         }],
@@ -742,7 +742,7 @@ fn apply_delta_add_matching_init_ref_accepted() {
     let mut track = loc_track("v", None);
     track.init_ref = Some("init1".to_string());
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![track],
         }],
@@ -758,7 +758,7 @@ fn apply_delta_add_on_complete_catalog_rejected() {
     let mut catalog = MsfCatalog::new();
     catalog.is_complete = true;
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![loc_track("v", None)],
         }],
@@ -777,7 +777,7 @@ fn apply_delta_clone_on_complete_catalog_rejected() {
     catalog.tracks.push(loc_track("v", None));
     let clone = MsfCloneTrack::new("v2".to_string(), "v".to_string());
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -795,7 +795,7 @@ fn apply_delta_remove_on_complete_catalog_allowed() {
     catalog.is_complete = true;
     catalog.tracks.push(loc_track("v", None));
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Remove {
             tracks: vec![MsfRemoveTrack::new("v".to_string())],
         }],
@@ -811,7 +811,7 @@ fn apply_delta_operations_applied_in_order() {
     // draft-ietf-moq-msf-01 §5.3 (Delta updates): 操作は配列順に適用される
     let mut catalog = MsfCatalog::new();
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![
             MsfDeltaOperation::Add {
                 tracks: vec![loc_track("v", None)],
@@ -838,7 +838,7 @@ fn apply_delta_add_batch_with_invalid_track_rejected_without_partial_apply() {
     // isLive=true (loc_track の既定) なので trackDuration は不正
     invalid.track_duration = Some(1000);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![loc_track("ok", Some("ns")), invalid],
         }],
@@ -858,7 +858,7 @@ fn apply_delta_add_batch_with_invalid_track_rejected_without_partial_apply() {
 fn apply_delta_add_multiple_tracks_appends_in_order() {
     let mut catalog = MsfCatalog::new();
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![loc_track("v1", Some("ns")), loc_track("v2", Some("ns"))],
         }],
@@ -876,7 +876,7 @@ fn apply_delta_add_multiple_tracks_appends_in_order() {
 fn apply_delta_add_batch_with_duplicate_name_rejected_without_partial_apply() {
     let mut catalog = MsfCatalog::new();
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![loc_track("v", Some("ns")), loc_track("v", Some("ns"))],
         }],
@@ -906,7 +906,7 @@ fn apply_delta_clone_invalid_lang_rejected() {
     let mut clone = MsfCloneTrack::new("v2".to_string(), "v".to_string());
     clone.lang = Some("1".to_string());
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -929,7 +929,7 @@ fn apply_delta_clone_inherited_invalid_lang_rejected() {
 
     let clone = MsfCloneTrack::new("v2".to_string(), "v".to_string());
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -947,7 +947,7 @@ fn apply_delta_clone_inherited_invalid_lang_rejected() {
 fn apply_delta_is_atomic_when_later_operation_fails() {
     let mut catalog = MsfCatalog::new();
     let delta = MsfDeltaUpdate {
-        generated_at: Some(1000),
+        generated_at: 1000,
         operations: vec![
             MsfDeltaOperation::Add {
                 tracks: vec![loc_track("v", Some("ns"))],
@@ -977,7 +977,7 @@ fn apply_delta_applies_all_operations_on_success() {
     let mut catalog = MsfCatalog::new();
     catalog.tracks.push(loc_track("v", Some("ns")));
     let delta = MsfDeltaUpdate {
-        generated_at: Some(2000),
+        generated_at: 2000,
         operations: vec![
             MsfDeltaOperation::Clone {
                 tracks: vec![MsfCloneTrack::new("v2".to_string(), "v".to_string())],
@@ -1040,7 +1040,7 @@ fn apply_delta_readd_with_changed_attribute_rejected() {
     changed.codec = Some("vp09".to_string());
     changed.label = Some("main".to_string());
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![
             MsfDeltaOperation::Remove {
                 tracks: vec![remove_ref("v", "ns")],
@@ -1082,7 +1082,7 @@ fn apply_delta_readd_omitted_target_latency_rejected() {
     let mut omitted = video_track("v", "ns");
     omitted.render_group = Some(1);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![
             MsfDeltaOperation::Remove {
                 tracks: vec![remove_ref("v", "ns")],
@@ -1115,7 +1115,7 @@ fn apply_delta_readd_by_clone_with_changed_attribute_rejected() {
     let mut clone = MsfCloneTrack::new("v".to_string(), "src".to_string());
     clone.parent_namespace = Some("ns".to_string());
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![
             MsfDeltaOperation::Remove {
                 tracks: vec![remove_ref("v", "ns")],
@@ -1149,7 +1149,7 @@ fn apply_delta_readd_with_is_live_regression_rejected() {
     let mut live = loc_track("v", Some("ns"));
     live.is_live = true;
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![
             MsfDeltaOperation::Remove {
                 tracks: vec![remove_ref("v", "ns")],
@@ -1178,7 +1178,7 @@ fn apply_delta_readd_attribute_change_across_deltas_rejected() {
 
     // 1 回目の delta: remove のみ
     let remove_delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Remove {
             tracks: vec![remove_ref("v", "ns")],
         }],
@@ -1192,7 +1192,7 @@ fn apply_delta_readd_attribute_change_across_deltas_rejected() {
     let mut changed = video_track("v", "ns");
     changed.codec = Some("vp09".to_string());
     let add_delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![changed],
         }],
@@ -1217,7 +1217,7 @@ fn apply_delta_readd_with_same_attributes_succeeds() {
     catalog.tracks.push(video_track("v", "ns"));
 
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![
             MsfDeltaOperation::Remove {
                 tracks: vec![remove_ref("v", "ns")],
@@ -1250,7 +1250,7 @@ fn apply_delta_readd_is_live_false_ignores_target_latency() {
     readded.is_live = false;
     readded.target_latency = Some(500);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![
             MsfDeltaOperation::Remove {
                 tracks: vec![remove_ref("v", "ns")],
@@ -1287,7 +1287,7 @@ fn apply_delta_readd_attribute_change_with_inherited_namespace_rejected() {
     changed.codec = Some("vp09".to_string());
     changed.bitrate = Some(1_000_000);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![
             MsfDeltaOperation::Remove {
                 tracks: vec![remove_ref("v", "cns")],
@@ -1324,7 +1324,7 @@ fn apply_delta_readd_with_explicit_namespace_matches_inherited() {
     let mut changed = video_track("v", "cns");
     changed.codec = Some("vp09".to_string());
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![
             MsfDeltaOperation::Remove {
                 tracks: vec![remove_ref("v", "cns")],
@@ -1355,7 +1355,7 @@ fn apply_delta_readd_with_different_namespace_representation_succeeds() {
     let mut catalog = MsfCatalog::new();
     catalog.tracks.push(video_track("v", "cns"));
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![
             MsfDeltaOperation::Remove {
                 tracks: vec![MsfRemoveTrack::new("v".to_string())],
@@ -1375,7 +1375,7 @@ fn apply_delta_readd_with_different_namespace_representation_succeeds() {
     let mut catalog = MsfCatalog::new();
     catalog.tracks.push(video_track_omitted_ns("v"));
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![
             MsfDeltaOperation::Remove {
                 tracks: vec![remove_ref("v", "cns")],
@@ -1411,7 +1411,7 @@ fn apply_delta_readd_is_live_false_ignores_buffers() {
         max: Some(200),
     });
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![
             MsfDeltaOperation::Remove {
                 tracks: vec![remove_ref("v", "ns")],
@@ -1442,7 +1442,7 @@ fn apply_delta_remove_inherits_multi_field_catalog_namespace() {
         .tracks
         .push(loc_track("video", Some("customer/livestream/123")));
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Remove {
             tracks: vec![MsfRemoveTrack::new("video".to_string())],
         }],
@@ -1464,7 +1464,7 @@ fn apply_delta_add_duplicates_explicit_namespace_track() {
         .tracks
         .push(loc_track("video", Some("customer/livestream/123")));
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             // namespace を省略すると catalog track の namespace を継承する
             tracks: vec![loc_track("video", None)],
@@ -1489,7 +1489,7 @@ fn apply_delta_add_same_name_different_multi_field_namespace() {
     let mut catalog = MsfCatalog::new();
     catalog.tracks.push(loc_track("video", None));
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![loc_track("video", Some("customer/livestream/456"))],
         }],
@@ -1511,7 +1511,7 @@ fn apply_delta_clone_inherits_multi_field_catalog_namespace() {
         .tracks
         .push(loc_track("video", Some("customer/livestream/123")));
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![MsfCloneTrack::new(
                 "video-hd".to_string(),
@@ -1547,7 +1547,7 @@ fn apply_delta_clone_inherits_parent_namespace() {
     let mut clone = MsfCloneTrack::new("video-hd".to_string(), "video".to_string());
     clone.parent_namespace = Some("parent/group/1".to_string());
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -1572,7 +1572,7 @@ fn apply_delta_add_rejects_overlong_full_track_name() {
     let mut track = loc_track("b", Some(&"a".repeat(4096)));
     track.name = "b".to_string();
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![track],
         }],
@@ -1593,7 +1593,7 @@ fn apply_delta_rejects_overlong_inherited_catalog_namespace() {
     let base = test_catalog_namespace(&"a".repeat(4096));
     let mut catalog = MsfCatalog::new();
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![loc_track("b", None)],
         }],
@@ -1617,7 +1617,7 @@ fn apply_delta_clone_rejects_overlong_inherited_parent_namespace() {
     let mut clone = MsfCloneTrack::new("bb".to_string(), "p".to_string());
     clone.parent_namespace = Some(parent_namespace);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -1644,7 +1644,7 @@ fn apply_delta_clone_both_namespaces_omitted_checks_inherited_catalog_namespace(
     catalog.tracks.push(loc_track("p", None));
     let clone = MsfCloneTrack::new("bb".to_string(), "p".to_string());
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -1675,7 +1675,7 @@ fn apply_delta_clone_inherits_or_overrides_packaging_metadata() {
     let mut overridden = MsfCloneTrack::new("overridden".to_string(), "parent".to_string());
     overridden.packaging_metadata = Some("streamMapping=group".to_string());
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![inherited, overridden],
         }],
@@ -1703,7 +1703,7 @@ fn apply_delta_rejects_unresolved_depends() {
     let mut added = loc_track("added", None);
     added.depends = vec![MsfDependency::TrackName("missing".to_string())];
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![added],
         }],
@@ -1732,7 +1732,7 @@ fn apply_delta_rejects_media_timeline_naming_all_render_group_tracks() {
         MsfDependency::TrackName("v2".to_string()),
     ];
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![timeline],
         }],
@@ -1758,7 +1758,7 @@ fn apply_delta_clone_inherits_or_overrides_accessible_window_time() {
     overridden.alt_group = Some(2);
     overridden.accessible_window_time = Some(120_000);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![inherited, overridden],
         }],
@@ -1791,7 +1791,7 @@ fn apply_delta_rejects_accessible_window_time_mismatch() {
     added.alt_group = Some(1);
     added.accessible_window_time = Some(120_000);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![added],
         }],
@@ -1817,7 +1817,7 @@ fn apply_delta_update_overrides_attributes() {
     update.role = Some("video".to_string());
     update.framerate = Some(30.0);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Update {
             tracks: vec![MsfUpdateTrack { track: update }],
         }],
@@ -1845,7 +1845,7 @@ fn apply_delta_update_missing_parent_rejected() {
     let mut update = MsfCloneTrack::new("missing".to_string(), "missing".to_string());
     update.label = Some("new".to_string());
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Update {
             tracks: vec![MsfUpdateTrack { track: update }],
         }],
@@ -1866,7 +1866,7 @@ fn apply_delta_update_rejects_is_live_false_to_true() {
     let mut update = MsfCloneTrack::new("v".to_string(), "v".to_string());
     update.is_live = Some(true);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Update {
             tracks: vec![MsfUpdateTrack { track: update }],
         }],
@@ -1889,7 +1889,7 @@ fn apply_delta_update_validates_merged_track() {
     missing_framerate.codec = Some("av01".to_string());
     missing_framerate.bitrate = Some(1_000);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Update {
             tracks: vec![MsfUpdateTrack {
                 track: missing_framerate,
@@ -1905,7 +1905,7 @@ fn apply_delta_update_validates_merged_track() {
     let mut with_duration = MsfCloneTrack::new("v".to_string(), "v".to_string());
     with_duration.track_duration = Some(1_000);
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Update {
             tracks: vec![MsfUpdateTrack {
                 track: with_duration,
@@ -1931,7 +1931,7 @@ fn apply_delta_update_rejects_namespace_change() {
     // 対象 track の namespace を変える意図の入力を直接は表現できない。別ケースで確認する。
     update.label = Some("new".to_string());
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Update {
             tracks: vec![MsfUpdateTrack { track: update }],
         }],
@@ -1945,7 +1945,7 @@ fn apply_delta_update_rejects_namespace_change() {
     update.namespace = Some("b".to_string());
     update.label = Some("new".to_string());
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Update {
             tracks: vec![MsfUpdateTrack { track: update }],
         }],

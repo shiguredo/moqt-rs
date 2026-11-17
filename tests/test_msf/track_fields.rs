@@ -273,7 +273,7 @@ fn connection_uri_decoded_and_token_ignored() {
 #[test]
 fn connection_uri_decoded_and_token_ignored_in_clone() {
     // clone 経路でもワイヤキー名でデコードされること
-    let json = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","connectionURI":"moqt://logs.example.com:4443","token":"DUMMY-TOKEN"}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","connectionURI":"moqt://logs.example.com:4443","token":"DUMMY-TOKEN"}]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(delta) = doc else {
         panic!("Delta update がデコードされること");
@@ -301,7 +301,7 @@ fn connection_uri_invalid_value_accepted() {
 #[test]
 fn connection_uri_invalid_value_accepted_in_clone() {
     // clone 経路でも URI として不正な文字列を受理する (形式検証は catalog decode の責務外)
-    let json = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","connectionURI":"not a uri"}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","connectionURI":"not a uri"}]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(delta) = doc else {
         panic!("Delta update がデコードされること");
@@ -331,7 +331,7 @@ fn connection_uri_wrong_type_rejected_and_token_ignored() {
 fn max_durations_decoded_in_clone() {
     // draft-ietf-moq-msf-01 §5.2.24 (Maximum GOP Duration) / §5.2.25 (Maximum Group Duration):
     // clone 経路でもワイヤキー名でデコードされること
-    let json = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","maxGopDuration":2000,"maxGroupDuration":4000}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","maxGopDuration":2000,"maxGroupDuration":4000}]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(delta) = doc else {
         panic!("Delta update がデコードされること");

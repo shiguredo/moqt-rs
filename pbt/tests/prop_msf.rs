@@ -717,11 +717,7 @@ fn delta_roundtrip() -> noprop::TestResult {
         if add_tracks.is_empty() && remove_tracks.is_empty() && clone_tracks.is_empty() {
             ctx.reject_case();
         }
-        let generated_at = if noprop::sample_bool(ctx) {
-            Some(noprop::sample_u32(ctx) as u64)
-        } else {
-            None
-        };
+        let generated_at = noprop::sample_u32(ctx) as u64;
         // 操作を add → remove → clone の順で 1 つの operation object ずつ構築する
         let mut operations = Vec::new();
         if !add_tracks.is_empty() {

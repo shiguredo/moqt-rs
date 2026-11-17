@@ -58,7 +58,7 @@ fn template_non_array_rejected() {
 #[test]
 fn template_in_clone_rejected_when_invalid() {
     // clone 経路の不正 template も reject されること
-    let json = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","template":[0,2002,[0,0],[1,0],1759924158381]}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","template":[0,2002,[0,0],[1,0],1759924158381]}]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))

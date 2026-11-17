@@ -15941,7 +15941,7 @@ mod tests {
         /// delta update は version を持ってはならない (draft-ietf-moq-msf-01 §5.3)。
         fn catalog_delta_json(track_name: &str) -> Vec<u8> {
             format!(
-                r#"{{"deltaUpdate":[{{"op":"add","tracks":[{{"name":"{track_name}","packaging":"loc","isLive":true}}]}}]}}"#
+                r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"add","tracks":[{{"name":"{track_name}","packaging":"loc","isLive":true}}]}}]}}"#
             )
             .into_bytes()
         }

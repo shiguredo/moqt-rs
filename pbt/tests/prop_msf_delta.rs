@@ -43,7 +43,7 @@ fn add_then_remove_restores_tracks() -> noprop::TestResult {
         let added = MsfTrack::new(name.clone(), MsfPackaging::Loc, true);
 
         let add = MsfDeltaUpdate {
-            generated_at: None,
+            generated_at: 1,
             operations: vec![MsfDeltaOperation::Add {
                 tracks: vec![added],
             }],
@@ -57,7 +57,7 @@ fn add_then_remove_restores_tracks() -> noprop::TestResult {
         );
 
         let remove = MsfDeltaUpdate {
-            generated_at: None,
+            generated_at: 1,
             operations: vec![MsfDeltaOperation::Remove {
                 tracks: vec![MsfRemoveTrack::new(name.clone())],
             }],

@@ -203,7 +203,7 @@ mod tests {
     /// delta update は version を持ってはならない (draft-ietf-moq-msf-01 §5.3 (Delta updates))。
     fn delta_json(add_track: &str) -> Vec<u8> {
         format!(
-            r#"{{"deltaUpdate":[{{"op":"add","tracks":[{{"name":"{add_track}","packaging":"loc","isLive":true}}]}}]}}"#
+            r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"add","tracks":[{{"name":"{add_track}","packaging":"loc","isLive":true}}]}}]}}"#
         )
         .into_bytes()
     }
@@ -433,7 +433,8 @@ mod tests {
             .map(|name| format!(r#"{{"name":"{name}"}}"#))
             .collect::<Vec<_>>()
             .join(",");
-        format!(r#"{{"deltaUpdate":[{{"op":"remove","tracks":[{tracks_json}]}}]}}"#).into_bytes()
+        format!(r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"remove","tracks":[{tracks_json}]}}]}}"#)
+            .into_bytes()
     }
 
     /// namespace を省略した clone の delta の JSON
@@ -442,7 +443,7 @@ mod tests {
     /// (draft-ietf-moq-msf-01 §5.2.34 (Parent namespace))。
     fn delta_clone_json(name: &str, parent_name: &str) -> Vec<u8> {
         format!(
-            r#"{{"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"{name}","parentName":"{parent_name}"}}]}}]}}"#
+            r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"{name}","parentName":"{parent_name}"}}]}}]}}"#
         )
         .into_bytes()
     }

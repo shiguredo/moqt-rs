@@ -1772,8 +1772,8 @@ impl DisplayJson for MsfCatalog {
     fn fmt(&self, f: &mut JsonFormatter<'_, '_>) -> core::fmt::Result {
         f.object(|f| {
             f.member("version", self.version.as_str())?;
-            if let Some(ga) = self.generated_at {
-                f.member("generatedAt", ga)?;
+            if let Some(generated_at) = self.generated_at {
+                f.member("generatedAt", generated_at)?;
             }
             if self.is_complete {
                 f.member("isComplete", true)?;
@@ -2016,9 +2016,7 @@ impl MsfCatalog {
             }
         }
         // デルタ更新の generatedAt は適用後のカタログの生成時刻として引き継ぐ
-        if let Some(generated_at) = delta.generated_at {
-            self.generated_at = Some(generated_at);
-        }
+        self.generated_at = Some(delta.generated_at);
         self.validate_after_delta(catalog_namespace)
     }
 
@@ -2251,8 +2249,10 @@ pub enum MsfDeltaOperation {
 /// この仕様は将来変更される可能性がある。
 #[derive(Debug, Clone, PartialEq)]
 pub struct MsfDeltaUpdate {
-    /// カタログ生成時刻 ms
-    pub generated_at: Option<u64>,
+    /// カタログ生成時刻 ms (draft-ietf-moq-msf-02 §5.3 (Delta updates) で必須)
+    ///
+    /// v01 の `Option<u64>` から `u64` への破壊的変更である。
+    pub generated_at: u64,
     /// 操作リスト (配列順)
     pub operations: Vec<MsfDeltaOperation>,
 }
@@ -2272,9 +2272,7 @@ impl DisplayJson for MsfDeltaUpdate {
                     Ok(())
                 }),
             )?;
-            if let Some(ga) = self.generated_at {
-                f.member("generatedAt", ga)?;
-            }
+            f.member("generatedAt", self.generated_at)?;
             Ok(())
         })
     }
@@ -3575,19 +3573,26 @@ fn decode_full_catalog(
 }
 
 fn decode_delta(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfDeltaUpdate, MessageError> {
-    // draft-ietf-moq-msf-01 §5.3 (Delta updates): delta update に version や tracks が含まれてはいけない
-    if val.to_member("version")?.optional().is_some() {
-        return Err(MessageError::InvalidCatalog(
-            "delta update MUST NOT contain 'version'".to_string(),
-        ));
-    }
-    if val.to_member("tracks")?.optional().is_some() {
-        return Err(MessageError::InvalidCatalog(
-            "delta update MUST NOT contain 'tracks'".to_string(),
-        ));
+    // draft-ietf-moq-msf-02 §5.3 (Delta updates): delta update は deltaUpdate と
+    // generatedAt だけを持ち、他の Root Catalog フィールドを含んではならない。
+    for forbidden in [
+        "version",
+        "isComplete",
+        "tracks",
+        "publishTracks",
+        "initDataList",
+    ] {
+        if val.to_member(forbidden)?.optional().is_some() {
+            return Err(MessageError::InvalidCatalog(format!(
+                "delta update MUST NOT contain '{forbidden}'"
+            )));
+        }
     }
 
-    let generated_at = val.to_member("generatedAt")?.map(parse_u64)?;
+    let generated_at_value = val.to_member("generatedAt")?.required().map_err(|_| {
+        MessageError::InvalidCatalog("delta update MUST contain 'generatedAt'".to_string())
+    })?;
+    let generated_at = parse_u64(generated_at_value)?;
 
     // draft-ietf-moq-msf-01 §5.1.6 (Delta update): deltaUpdate は operation object の配列。
     // 操作は配列順に適用される。

@@ -70,12 +70,12 @@ fn moqmetrics_packaging_accepted() {
 
 #[test]
 fn delta_minimal() {
-    let json = br#"{"deltaUpdate":[{"op":"remove","tracks":[{"name":"x"}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"remove","tracks":[{"name":"x"}]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(d) = doc else {
         panic!("Delta が期待された");
     };
-    assert_eq!(d.generated_at, None);
+    assert_eq!(d.generated_at, 1);
     assert_eq!(d.operations.len(), 1);
     let MsfDeltaOperation::Remove { tracks } = &d.operations[0] else {
         panic!("Remove が期待された");
@@ -87,7 +87,7 @@ fn delta_minimal() {
 #[test]
 fn remove_tracks_extra_field_rejected() {
     // draft-ietf-moq-msf-01 §5.1.6 (Delta update): remove operation の track object に name/namespace 以外は禁止
-    let json = br#"{"deltaUpdate":[{"op":"remove","tracks":[{"name":"x","packaging":"loc"}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"remove","tracks":[{"name":"x","packaging":"loc"}]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -97,7 +97,7 @@ fn remove_tracks_extra_field_rejected() {
 #[test]
 fn delta_update_non_array_rejected() {
     // draft-ietf-moq-msf-01 §5.1.6 (Delta update): deltaUpdate は operation object の配列
-    let json = br#"{"deltaUpdate":false,"version":"draft-01","tracks":[]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":false,"version":"draft-01","tracks":[]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -142,6 +142,7 @@ fn is_complete_false_rejected() {
 fn clone_track_minimal_rfc_example() {
     // draft-ietf-moq-msf-01 §5.1.6 (Delta update): packaging/isLive 省略の clone track
     let json = br#"{
+            "generatedAt": 1,
             "deltaUpdate": [
                 {
                     "op": "clone",
@@ -180,6 +181,7 @@ fn clone_track_minimal_rfc_example() {
 fn clone_track_with_packaging_and_is_live() {
     // packaging/isLive を明示的に指定した clone track
     let json = br#"{
+            "generatedAt": 1,
             "deltaUpdate": [
                 {
                     "op": "clone",
@@ -208,7 +210,7 @@ fn clone_track_with_packaging_and_is_live() {
 #[test]
 fn clone_track_missing_parent_name_rejected() {
     // clone operation 内で parentName がないとエラー
-    let json = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"x"}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"x"}]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -226,7 +228,7 @@ fn clone_track_missing_parent_name_rejected() {
 /// 検証対象となる。
 #[test]
 fn clone_track_eventtimeline_without_event_type_accepted() {
-    let json = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"child","parentName":"parent","packaging":"eventtimeline"}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"child","parentName":"parent","packaging":"eventtimeline"}]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(d) = doc else {
         panic!("Delta が期待された");
@@ -329,7 +331,7 @@ fn invalid_catalog_track_name_rejected() {
     }
 
     let empty_parent =
-        br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":""}]}]}"#;
+        br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":""}]}]}"#;
     assert!(
         matches!(
             MsfCatalogDocument::decode(empty_parent),
@@ -338,7 +340,8 @@ fn invalid_catalog_track_name_rejected() {
         "空の parentName を拒否すること"
     );
 
-    let empty_remove = br#"{"deltaUpdate":[{"op":"remove","tracks":[{"name":""}]}]}"#;
+    let empty_remove =
+        br#"{"generatedAt":1,"deltaUpdate":[{"op":"remove","tracks":[{"name":""}]}]}"#;
     assert!(
         matches!(
             MsfCatalogDocument::decode(empty_remove),
@@ -451,23 +454,23 @@ fn zero_width_no_break_space_in_name_accepted() {
 fn clone_and_remove_invalid_names_rejected() {
     for json in [
         // clone 自身の name が空 / NUL
-        br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"","parentName":"p"}]}]}"#.as_slice(),
-        br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"a\u0000b","parentName":"p"}]}]}"#
+        br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"","parentName":"p"}]}]}"#.as_slice(),
+        br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"a\u0000b","parentName":"p"}]}]}"#
             .as_slice(),
         // parentName が NUL
-        br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"a\u0000b"}]}]}"#
+        br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"a\u0000b"}]}]}"#
             .as_slice(),
         // parentNamespace が空 field / NUL
-        br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","parentNamespace":"a//b"}]}]}"#.as_slice(),
-        br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","parentNamespace":"a\u0000b"}]}]}"#.as_slice(),
+        br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","parentNamespace":"a//b"}]}]}"#.as_slice(),
+        br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","parentNamespace":"a\u0000b"}]}]}"#.as_slice(),
         // clone 自身の namespace が空 field
-        br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","namespace":"a//b"}]}]}"#.as_slice(),
+        br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","namespace":"a//b"}]}]}"#.as_slice(),
         // clone の depends 要素が空 / NUL
-        br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","depends":[""]}]}]}"#.as_slice(),
-        br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","depends":["a\u0000b"]}]}]}"#.as_slice(),
+        br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","depends":[""]}]}]}"#.as_slice(),
+        br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","depends":["a\u0000b"]}]}]}"#.as_slice(),
         // remove の name が NUL / namespace が空 field
-        br#"{"deltaUpdate":[{"op":"remove","tracks":[{"name":"a\u0000b"}]}]}"#.as_slice(),
-        br#"{"deltaUpdate":[{"op":"remove","tracks":[{"name":"x","namespace":"a//b"}]}]}"#.as_slice(),
+        br#"{"generatedAt":1,"deltaUpdate":[{"op":"remove","tracks":[{"name":"a\u0000b"}]}]}"#.as_slice(),
+        br#"{"generatedAt":1,"deltaUpdate":[{"op":"remove","tracks":[{"name":"x","namespace":"a//b"}]}]}"#.as_slice(),
         // publishTracks の name が空 / namespace が空 field
         br#"{"version":"draft-01","tracks":[],"publishTracks":[{"name":"","packaging":"loc","isLive":true}]}"#.as_slice(),
         br#"{"version":"draft-01","tracks":[],"publishTracks":[{"name":"p","namespace":"a//b","packaging":"loc","isLive":true}]}"#.as_slice(),
@@ -596,7 +599,7 @@ fn delta_operations_reject_overlong_full_track_names() {
     let namespace = "a".repeat(4096);
 
     let add = format!(
-        r#"{{"deltaUpdate":[{{"op":"add","tracks":[{{"name":"b","namespace":"{namespace}","packaging":"loc","isLive":true}}]}}]}}"#
+        r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"add","tracks":[{{"name":"b","namespace":"{namespace}","packaging":"loc","isLive":true}}]}}]}}"#
     );
     assert!(
         matches!(
@@ -607,7 +610,7 @@ fn delta_operations_reject_overlong_full_track_names() {
     );
 
     let clone = format!(
-        r#"{{"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"b","parentName":"p","namespace":"{namespace}"}}]}}]}}"#
+        r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"b","parentName":"p","namespace":"{namespace}"}}]}}]}}"#
     );
     assert!(
         matches!(
@@ -619,7 +622,7 @@ fn delta_operations_reject_overlong_full_track_names() {
 
     let long_parent_name = "p".repeat(4097);
     let clone_parent = format!(
-        r#"{{"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"b","parentName":"{long_parent_name}"}}]}}]}}"#
+        r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"b","parentName":"{long_parent_name}"}}]}}]}}"#
     );
     assert!(
         matches!(
@@ -633,7 +636,7 @@ fn delta_operations_reject_overlong_full_track_names() {
     // parentNamespace + clone name になる。親は 4,096 バイトちょうど、clone は超過する。
     let parent_namespace = "a".repeat(4095);
     let clone_inheriting = format!(
-        r#"{{"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"bb","parentName":"p","parentNamespace":"{parent_namespace}"}}]}}]}}"#
+        r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"bb","parentName":"p","parentNamespace":"{parent_namespace}"}}]}}]}}"#
     );
     assert!(
         matches!(
@@ -644,7 +647,7 @@ fn delta_operations_reject_overlong_full_track_names() {
     );
 
     let remove = format!(
-        r#"{{"deltaUpdate":[{{"op":"remove","tracks":[{{"name":"b","namespace":"{namespace}"}}]}}]}}"#
+        r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"remove","tracks":[{{"name":"b","namespace":"{namespace}"}}]}}]}}"#
     );
     assert!(
         matches!(
@@ -694,14 +697,14 @@ fn delta_full_track_name_boundaries() {
 
     // add: namespace を省略した name 単体
     let add_ok = format!(
-        r#"{{"deltaUpdate":[{{"op":"add","tracks":[{{"name":"{ok_name}","packaging":"loc","isLive":true}}]}}]}}"#
+        r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"add","tracks":[{{"name":"{ok_name}","packaging":"loc","isLive":true}}]}}]}}"#
     );
     assert!(
         MsfCatalogDocument::decode(add_ok.as_bytes()).is_ok(),
         "add の name 単体 4,096 バイトは受理すること"
     );
     let add_ng = format!(
-        r#"{{"deltaUpdate":[{{"op":"add","tracks":[{{"name":"{too_long_name}","packaging":"loc","isLive":true}}]}}]}}"#
+        r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"add","tracks":[{{"name":"{too_long_name}","packaging":"loc","isLive":true}}]}}]}}"#
     );
     assert!(
         matches!(
@@ -713,14 +716,14 @@ fn delta_full_track_name_boundaries() {
 
     // clone: 自身の name 単体 (parentName は 1 バイト)
     let clone_ok = format!(
-        r#"{{"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"{ok_name}","parentName":"p"}}]}}]}}"#
+        r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"{ok_name}","parentName":"p"}}]}}]}}"#
     );
     assert!(
         MsfCatalogDocument::decode(clone_ok.as_bytes()).is_ok(),
         "clone の name 単体 4,096 バイトは受理すること"
     );
     let clone_ng = format!(
-        r#"{{"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"{too_long_name}","parentName":"p"}}]}}]}}"#
+        r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"{too_long_name}","parentName":"p"}}]}}]}}"#
     );
     assert!(
         matches!(
@@ -731,14 +734,16 @@ fn delta_full_track_name_boundaries() {
     );
 
     // remove: name 単体
-    let remove_ok =
-        format!(r#"{{"deltaUpdate":[{{"op":"remove","tracks":[{{"name":"{ok_name}"}}]}}]}}"#);
+    let remove_ok = format!(
+        r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"remove","tracks":[{{"name":"{ok_name}"}}]}}]}}"#
+    );
     assert!(
         MsfCatalogDocument::decode(remove_ok.as_bytes()).is_ok(),
         "remove の name 単体 4,096 バイトは受理すること"
     );
-    let remove_ng =
-        format!(r#"{{"deltaUpdate":[{{"op":"remove","tracks":[{{"name":"{too_long_name}"}}]}}]}}"#);
+    let remove_ng = format!(
+        r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"remove","tracks":[{{"name":"{too_long_name}"}}]}}]}}"#
+    );
     assert!(
         matches!(
             MsfCatalogDocument::decode(remove_ng.as_bytes()),
@@ -757,7 +762,7 @@ fn delta_full_track_name_boundaries() {
 fn clone_parent_full_track_name_length_is_checked_separately() {
     let parent_namespace = "a".repeat(4095);
     let json = format!(
-        r#"{{"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"b","parentName":"pp","parentNamespace":"{parent_namespace}"}}]}}]}}"#
+        r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"b","parentName":"pp","parentNamespace":"{parent_namespace}"}}]}}]}}"#
     );
     assert!(
         matches!(
@@ -836,7 +841,7 @@ fn invalid_packaging_metadata_rejected() {
     }
 
     // clone でも同じ構文検証を行う
-    let json = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","packagingMetadata":"a=b;;c=d"}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","packagingMetadata":"a=b;;c=d"}]}]}"#;
     assert!(
         matches!(
             MsfCatalogDocument::decode(json),
@@ -1083,7 +1088,7 @@ fn init_data_property_type_invalid_hex_rejected() {
 /// update 操作を decode できること
 #[test]
 fn delta_update_decodes() {
-    let json = br#"{"deltaUpdate":[{"op":"update","tracks":[{"name":"v","parentName":"v","label":"new","isLive":true}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"update","tracks":[{"name":"v","parentName":"v","label":"new","isLive":true}]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("update 操作を decode できること");
     let MsfCatalogDocument::Delta(delta) = doc else {
         panic!("Delta が期待された");
@@ -1099,7 +1104,7 @@ fn delta_update_decodes() {
 /// update の name が parentName と一致しない場合は拒否されること
 #[test]
 fn delta_update_name_mismatch_rejected() {
-    let json = br#"{"deltaUpdate":[{"op":"update","tracks":[{"name":"x","parentName":"v","label":"new"}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"update","tracks":[{"name":"x","parentName":"v","label":"new"}]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -1109,9 +1114,49 @@ fn delta_update_name_mismatch_rejected() {
 /// update の namespace が parentNamespace と一致しない場合は拒否されること
 #[test]
 fn delta_update_namespace_mismatch_rejected() {
-    let json = br#"{"deltaUpdate":[{"op":"update","tracks":[{"name":"v","parentName":"v","parentNamespace":"a","namespace":"b","label":"new"}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"update","tracks":[{"name":"v","parentName":"v","parentNamespace":"a","namespace":"b","label":"new"}]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
     ));
+}
+
+/// generatedAt を持たない delta update が拒否されること
+#[test]
+fn delta_missing_generated_at_rejected() {
+    let json = br#"{"deltaUpdate":[{"op":"remove","tracks":[{"name":"x"}]}]}"#;
+    assert!(matches!(
+        MsfCatalogDocument::decode(json),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+/// delta update が他の Root Catalog フィールドを持てないこと
+#[test]
+fn delta_forbidden_root_fields_rejected() {
+    for field in [
+        r#""isComplete":true"#,
+        r#""publishTracks":[]"#,
+        r#""initDataList":[]"#,
+        r#""version":"draft-01""#,
+        r#""tracks":[]"#,
+    ] {
+        let json = format!(
+            r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"remove","tracks":[{{"name":"x"}}]}}],{field}}}"#
+        );
+        assert!(
+            matches!(
+                MsfCatalogDocument::decode(json.as_bytes()),
+                Err(MessageError::InvalidCatalog(_))
+            ),
+            "delta update の {field} を拒否すること"
+        );
+    }
+}
+
+/// delta update の未知フィールドは無視されること
+#[test]
+fn delta_unknown_root_field_accepted() {
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"remove","tracks":[{"name":"x"}]}],"custom":true}"#;
+    assert!(MsfCatalogDocument::decode(json).is_ok());
 }

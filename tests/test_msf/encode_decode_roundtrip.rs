@@ -134,7 +134,7 @@ fn full_catalog_with_media_timeline_track() {
 #[test]
 fn delta_all_operations() {
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: Some(1_700_000_000_000),
+        generated_at: 1_700_000_000_000,
         operations: vec![
             MsfDeltaOperation::Add {
                 tracks: vec![MsfTrack::new("new".to_string(), MsfPackaging::Loc, true)],
@@ -334,7 +334,7 @@ fn encode_full_catalog_with_track(track: MsfTrack) -> Vec<u8> {
 
 fn encode_delta_with_clone(clone: MsfCloneTrack) -> Vec<u8> {
     MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -346,7 +346,7 @@ fn encode_delta_with_clone(clone: MsfCloneTrack) -> Vec<u8> {
 #[test]
 fn clone_track_roundtrip_all_fields() {
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![MsfCloneTrack {
                 name: "clone".to_string(),
@@ -419,7 +419,7 @@ fn clone_track_roundtrip_all_fields() {
 #[test]
 fn clone_track_roundtrip_with_target_latency() {
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![MsfCloneTrack {
                 name: "clone".to_string(),
@@ -477,7 +477,7 @@ fn clone_track_roundtrip_with_target_latency() {
 #[test]
 fn clone_track_roundtrip_with_track_duration() {
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![MsfCloneTrack {
                 name: "clone".to_string(),
@@ -553,7 +553,7 @@ fn clone_depends_empty_some_roundtrip() {
     let mut clone = MsfCloneTrack::new("c".to_string(), "p".to_string());
     clone.depends = Some(Vec::new());
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -580,7 +580,7 @@ fn clone_depends_none_omitted() {
     // clone の None 時はキーが出力されないこと (親から継承)
     let clone = MsfCloneTrack::new("c".to_string(), "p".to_string());
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -783,7 +783,7 @@ fn encryption_signaling_roundtrip() {
 #[test]
 fn encryption_clone_partial_accepted() {
     // clone の継承時 (欠如あり) は reject されないこと (親未知のため断定不可)
-    let json = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","encryptionScheme":"moq-secure-objects"}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","encryptionScheme":"moq-secure-objects"}]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(delta) = doc else {
         panic!("Delta update がデコードされること");
@@ -1091,7 +1091,7 @@ fn auth_info_duplicate_scheme_kept_in_order() {
 #[test]
 fn auth_info_clone_roundtrip() {
     // clone 経路でも authInfo が roundtrip すること
-    let json = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","authInfo":{"cat":"%cat-token%"}}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","authInfo":{"cat":"%cat-token%"}}]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(delta) = doc else {
         panic!("Delta update がデコードされること");
@@ -1183,7 +1183,7 @@ fn accessibility_roundtrip() {
 #[test]
 fn accessibility_clone_roundtrip() {
     // clone 経路でも accessibility が roundtrip すること
-    let json = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","accessibility":[{"scheme":"urn:scte:dash:cc:cea-608:2015","value":"CC1=eng"}]}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","accessibility":[{"scheme":"urn:scte:dash:cc:cea-608:2015","value":"CC1=eng"}]}]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(delta) = doc else {
         panic!("Delta update がデコードされること");
@@ -1267,7 +1267,7 @@ fn accessibility_empty_some_roundtrip() {
         accessibility: Some(Vec::new()),
     };
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![track],
         }],
@@ -1291,7 +1291,7 @@ fn accessibility_empty_some_roundtrip() {
 fn accessibility_clone_none_omitted() {
     // clone の None 時はキーが出力されないこと
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![MsfCloneTrack {
                 name: "c".to_string(),
@@ -1485,7 +1485,7 @@ fn encode_rejects_invalid_catalog_names() {
     // clone の空の parentName
     let clone = MsfCloneTrack::new("child".to_string(), String::new());
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -1497,7 +1497,7 @@ fn encode_rejects_invalid_catalog_names() {
 
     // remove の空の name
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Remove {
             tracks: vec![MsfRemoveTrack::new(String::new())],
         }],
@@ -1518,7 +1518,7 @@ fn encode_rejects_invalid_clone_and_remove_names() {
     for name in ["", "a\u{0}b"] {
         let clone = MsfCloneTrack::new(name.to_string(), "parent".to_string());
         let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-            generated_at: None,
+            generated_at: 1,
             operations: vec![MsfDeltaOperation::Clone {
                 tracks: vec![clone],
             }],
@@ -1540,7 +1540,7 @@ fn encode_rejects_invalid_clone_and_remove_names() {
         clone.namespace = namespace;
         clone.parent_namespace = parent_namespace;
         let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-            generated_at: None,
+            generated_at: 1,
             operations: vec![MsfDeltaOperation::Clone {
                 tracks: vec![clone],
             }],
@@ -1556,7 +1556,7 @@ fn encode_rejects_invalid_clone_and_remove_names() {
         let mut clone = MsfCloneTrack::new("child".to_string(), "parent".to_string());
         clone.depends = Some(vec![MsfDependency::TrackName(dependency.to_string())]);
         let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-            generated_at: None,
+            generated_at: 1,
             operations: vec![MsfDeltaOperation::Clone {
                 tracks: vec![clone],
             }],
@@ -1576,7 +1576,7 @@ fn encode_rejects_invalid_clone_and_remove_names() {
         let mut remove = MsfRemoveTrack::new(name.to_string());
         remove.namespace = namespace.map(str::to_string);
         let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-            generated_at: None,
+            generated_at: 1,
             operations: vec![MsfDeltaOperation::Remove {
                 tracks: vec![remove],
             }],
@@ -1638,7 +1638,7 @@ fn encode_rejects_overlong_delta_full_track_names() {
     let mut clone = MsfCloneTrack::new("b".to_string(), "p".to_string());
     clone.namespace = Some(namespace.clone());
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -1652,7 +1652,7 @@ fn encode_rejects_overlong_delta_full_track_names() {
     let mut clone = MsfCloneTrack::new("b".to_string(), "p".to_string());
     clone.parent_namespace = Some(namespace.clone());
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -1665,7 +1665,7 @@ fn encode_rejects_overlong_delta_full_track_names() {
     // clone の parentName 単体 4,097 バイト
     let clone = MsfCloneTrack::new("b".to_string(), "p".repeat(4097));
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -1680,7 +1680,7 @@ fn encode_rejects_overlong_delta_full_track_names() {
     let mut clone = MsfCloneTrack::new("bb".to_string(), "p".to_string());
     clone.parent_namespace = Some(parent_namespace);
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -1694,7 +1694,7 @@ fn encode_rejects_overlong_delta_full_track_names() {
     let mut add_track = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
     add_track.namespace = Some(namespace.clone());
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![add_track],
         }],
@@ -1708,7 +1708,7 @@ fn encode_rejects_overlong_delta_full_track_names() {
     let mut remove = MsfRemoveTrack::new("b".to_string());
     remove.namespace = Some(namespace);
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Remove {
             tracks: vec![remove],
         }],
@@ -1787,7 +1787,7 @@ fn encode_accepts_exact_full_track_name_boundaries() {
     let mut add_track = MsfTrack::new(name.clone(), MsfPackaging::Loc, true);
     add_track.namespace = None;
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Add {
             tracks: vec![add_track],
         }],
@@ -1799,7 +1799,7 @@ fn encode_accepts_exact_full_track_name_boundaries() {
 
     let clone = MsfCloneTrack::new(name.clone(), "p".to_string());
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -1811,7 +1811,7 @@ fn encode_accepts_exact_full_track_name_boundaries() {
 
     let remove = MsfRemoveTrack::new(name);
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Remove {
             tracks: vec![remove],
         }],
@@ -1829,7 +1829,7 @@ fn encode_rejects_clone_parent_full_track_name_overflow() {
     let mut clone = MsfCloneTrack::new("b".to_string(), "pp".to_string());
     clone.parent_namespace = Some(parent_namespace);
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -1957,7 +1957,7 @@ fn encode_rejects_invalid_packaging_metadata() {
     let mut clone = MsfCloneTrack::new("c".to_string(), "p".to_string());
     clone.packaging_metadata = Some("a=b;;c=d".to_string());
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -2125,7 +2125,7 @@ fn delta_update_roundtrip() {
     update.framerate = Some(30.0);
     update.bitrate = Some(1_000_000);
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: Some(123),
+        generated_at: 123,
         operations: vec![MsfDeltaOperation::Update {
             tracks: vec![MsfUpdateTrack { track: update }],
         }],
@@ -2147,7 +2147,7 @@ fn encode_rejects_invalid_update() {
     let mut mismatch = MsfCloneTrack::new("x".to_string(), "v".to_string());
     mismatch.label = Some("new".to_string());
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Update {
             tracks: vec![MsfUpdateTrack { track: mismatch }],
         }],
@@ -2158,7 +2158,7 @@ fn encode_rejects_invalid_update() {
     namespace_mismatch.parent_namespace = Some("a".to_string());
     namespace_mismatch.namespace = Some("b".to_string());
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Update {
             tracks: vec![MsfUpdateTrack {
                 track: namespace_mismatch,
