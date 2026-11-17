@@ -4124,29 +4124,39 @@ pub fn decode_event_timeline(data: &[u8]) -> Result<MsfEventTimeline, MessageErr
     MsfEventTimeline::decode(&json)
 }
 
-// ─── 変数置換 (draft-ietf-moq-msf-01 §5.4 (Variable Substitution)) ─────────────
+// ─── 変数置換 (draft-ietf-moq-msf-02 §5.4 (Variable Substitution)) ─────────────
 //
 // カタログ decode の前処理として使う。decode 層自体は `%` を検証しない。
 
-/// 変数名として有効な文字か (英数字・`-`・`_`)
+/// 変数名として有効な文字か (draft-ietf-moq-msf-02 §5.4.1 (Variable Syntax))
 ///
-/// draft-ietf-moq-msf-01 §5.4.1 (Variable Syntax) に準拠。
+/// v02 は変数名の文字種を列挙していないため、fragment の `param-name` として表現できる
+/// 文字 (draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の
+/// `pchar-no-amp / "/"`) に従う。`pct-encoded` は本実装では percent-decode しないため
+/// 受理せず、`%` は変数参照の区切りと衝突するため含めない。`=` は `pchar` に含まれるが、
+/// fragment の key は最初の `=` で分割されるため key としては到達不能であり、そのような
+/// 参照は未定義参照として保持される。この仕様は将来変更される可能性がある。
 fn is_variable_name_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+    // `pchar-no-amp` の定義は `src/msf/uri.rs` と共有する (片方だけ変更すると
+    // fragment パーサと変数パーサで受理範囲が食い違うため)。
+    crate::msf::uri::is_pchar_no_amp_byte(b) || b == b'/'
 }
 
-/// 変数値として有効な文字か (英数字・`-`・`_`・`@`)
+/// 変数値として有効な文字か (draft-ietf-moq-msf-02 §5.4.1 (Variable Syntax))
 ///
-/// draft-ietf-moq-msf-01 §5.4.1 (Variable Syntax) に準拠。
+/// 英数字・`-`・`_`・`+`・`/`・`=`・`.`・`@` だけを許可する。`,` `;` `"` `'` `~` `&`
+/// などの記号は注入対策のため拒否する。この仕様は将来変更される可能性がある。
 fn is_variable_value_char(b: u8) -> bool {
-    is_variable_name_char(b) || b == b'@'
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'+' | b'/' | b'=' | b'.' | b'@')
 }
 
 /// fragment 文字列を key-value 対にパースする
 ///
-/// draft-ietf-moq-msf-01 §5.4.2 (Variable Resolution) に準拠し、`&` 区切り・
-/// `=` 分離で解釈する。`=` を含まない要素は無視する。空の変数名・変数名文字種外・
-/// 値文字種外は reject する。重複キーは両方保持する。空値は空文字列として受理する。
+/// draft-ietf-moq-msf-02 §5.4.2 (Variable Resolution) に準拠し、`&` 区切り・
+/// 最初の `=` での分離として解釈する。`=` を含まない要素は無視する。空の変数名・
+/// fragment の param-name として表現できない変数名 (`pct-encoded` を除く)・値文字種外は
+/// reject する。
+/// 重複キーは両方保持する。空値は空文字列として受理する。
 /// query (`?` 以降) は呼出層で除外し、`#` を含まない `#` 以降の fragment 全体
 /// (`msf:` 含む) を渡すこと。percent-decode は行わず、値をそのまま使う。
 /// 単独利用時は変数 fragment の検査用。`resolve_catalog_variables` と異なり
@@ -4155,7 +4165,8 @@ fn is_variable_value_char(b: u8) -> bool {
 ///
 /// # Errors
 ///
-/// - 空の変数名・変数名文字種外・値文字種外・`#` 含有: `InvalidCatalog`
+/// - 空の変数名・fragment の param-name として表現できない変数名 (`pct-encoded` を除く)・
+///   値文字種外・`#` 含有: `InvalidCatalog`
 ///
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 pub fn parse_fragment_pairs(fragment: &str) -> Result<Vec<(String, String)>, MessageError> {
@@ -4172,6 +4183,8 @@ pub fn parse_fragment_pairs(fragment: &str) -> Result<Vec<(String, String)>, Mes
         let Some((key, value)) = element.split_once('=') else {
             continue;
         };
+        // v02 は変数名の文字種を列挙しないが、fragment の param-name として表現できる
+        // 文字だけを受理する。`%` は変数参照の区切りと衝突するため拒否する。
         if key.is_empty() || !key.bytes().all(is_variable_name_char) {
             return Err(MessageError::InvalidCatalog(format!(
                 "invalid variable name '{key}'"
@@ -4190,8 +4203,8 @@ pub fn parse_fragment_pairs(fragment: &str) -> Result<Vec<(String, String)>, Mes
 /// fragment を検証なしで key-value に分割する (resolve 内部用)
 ///
 /// §11.1 の予約パラメータ等、変数以外の対を含み得るため文字種検証は行わない。
-/// `=` を含まない要素は無視する。変数名として不正な key は正規の参照と
-/// 一致しないため置換対象にならない。値文字種は置換時に検証する。
+/// `=` を含まない要素は無視する。変数参照と一致しない key は置換対象にならない。
+/// 値文字種は置換時に検証する。
 fn split_fragment_pairs_unchecked(fragment: &str) -> Vec<(String, String)> {
     fragment
         .split('&')
@@ -4202,11 +4215,13 @@ fn split_fragment_pairs_unchecked(fragment: &str) -> Vec<(String, String)> {
 
 /// catalog JSON の変数参照 (`%name%`) を解決する
 ///
-/// draft-ietf-moq-msf-01 §5.4 (Variable Substitution) に準拠する。
+/// draft-ietf-moq-msf-02 §5.4 (Variable Substitution) に準拠する。
 /// 置換は decode 前の生 JSON に対して行い、decode 層は変更しない。
 /// 未定義変数の参照は保持する (§5.4.2 に未定義時の規定がないため。decode 層は
 /// `%` を検証しないため、そのまま通過する)。閉じない `%`・空名・
-/// 変数名不正文字・リテラル `%` は reject する。呼出層が URI から `#` 以降全体
+/// fragment の param-name として表現できない名前 (`pct-encoded` を除く)・リテラル `%` は
+/// reject する。名前は `pchar` に `=` を含むが、fragment の key は最初の `=` で分割される
+/// ため key に `=` を含む参照は一致せず、未定義参照として保持される。呼出層が URI から `#` 以降全体
 /// (`msf:` 含む) を渡すこと。先頭要素 (track-identifier 等の `=` なし要素) は無視する。
 /// fragment 内の予約パラメータ等 (変数以外) は無視し、参照された値のみ文字種検証する。
 /// 重複キーは先勝ちで解決する。
@@ -4248,6 +4263,8 @@ pub fn resolve_catalog_variables(json: &[u8], fragment: &str) -> Result<Vec<u8>,
             )));
         };
         let name = &rest[..end];
+        // 変数名は fragment の param-name として表現できる文字かつ非空であること。
+        // `%` は次 `%` までを名前として切り出す本ループの構造上ここには現れない。
         if name.is_empty() || !name.iter().all(|&b| is_variable_name_char(b)) {
             return Err(MessageError::InvalidCatalog(format!(
                 "invalid variable reference at byte {pos}"

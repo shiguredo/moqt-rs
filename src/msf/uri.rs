@@ -367,7 +367,8 @@ fn validate_pchar_no_amp(value: &str, allow_slash: bool) -> Result<(), MessageEr
 /// `pchar-no-amp` の 1 バイトを判定する
 ///
 /// `unreserved` / `sub-delims-no-amp` / `:` / `@` を許可する (`&` と `?` は除外)。
-fn is_pchar_no_amp_byte(b: u8) -> bool {
+/// `src/msf.rs` の変数名検証からも使うため `pub(crate)` にする。
+pub(crate) fn is_pchar_no_amp_byte(b: u8) -> bool {
     is_unreserved(b) || is_sub_delim_no_amp(b) || b == b':' || b == b'@'
 }
 

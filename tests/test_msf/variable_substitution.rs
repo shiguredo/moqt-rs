@@ -246,3 +246,174 @@ fn resolve_invalid_percent_rejected() {
         );
     }
 }
+
+/// Base64 の `+` `/` `=` を含む値が変数として解決されること
+///
+/// draft-ietf-moq-msf-02 §5.4.1 (Variable Syntax): 変数値に許される記号は
+/// `-` `_` `+` `/` `=` `.` `@` である。Base64 のパディングと URL-safe でない文字も
+/// そのまま置換できる。
+#[test]
+fn resolve_base64_value() {
+    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"%token%"}}]}"#;
+    let resolved = resolve_catalog_variables(json, "token=eyJhbGciOi+/=.abc")
+        .expect("Base64 の値を解決できること");
+    let text = String::from_utf8(resolved).expect("JSON は UTF-8 であること");
+    assert!(
+        text.contains(r#""cat":"eyJhbGciOi+/=.abc""#),
+        "Base64 の値 (`+` `/` `=` `.`) がそのまま置換されること: {text}"
+    );
+    MsfCatalogDocument::decode(text.as_bytes()).expect("置換後のカタログを decode できること");
+}
+
+/// 変数値に禁じられた記号を拒否すること
+///
+/// draft-ietf-moq-msf-02 §5.4.1: `,` `;` `"` `'` `~` などは注入対策のため変数値に
+/// 含めてはならない。
+#[test]
+fn resolve_rejects_forbidden_value_chars() {
+    let json =
+        br#"{"version":"draft-01","tracks":[{"name":"%id%","packaging":"loc","isLive":true}]}"#;
+    for (label, value) in [
+        ("comma", "a,b"),
+        ("semicolon", "a;b"),
+        ("double quote", "a\"b"),
+        ("single quote", "a'b"),
+        ("tilde", "a~b"),
+        ("exclamation", "a!b"),
+        ("dollar", "a$b"),
+        ("left paren", "a(b"),
+        ("right paren", "a)b"),
+        ("asterisk", "a*b"),
+        ("colon", "a:b"),
+        ("question", "a?b"),
+        ("space", "a b"),
+        ("backslash", "a\\b"),
+    ] {
+        let fragment = format!("id={value}");
+        assert!(
+            matches!(
+                resolve_catalog_variables(json, &fragment),
+                Err(MessageError::InvalidCatalog(_))
+            ),
+            "{label} を含む変数値を拒否すること"
+        );
+    }
+}
+
+/// `&` が variable pair の区切りとして扱われること
+///
+/// draft-ietf-moq-msf-02 §5.4.2 (Variable Resolution): fragment は `&` 区切りの
+/// key-value 対である。値に `&` は現れない。
+#[test]
+fn ampersand_is_pair_delimiter() {
+    assert_eq!(
+        parse_fragment_pairs("id=a&b").expect("fragment をパースできること"),
+        vec![("id".to_string(), "a".to_string())],
+        "`&` の後ろは次の pair であり、値の一部にならないこと"
+    );
+
+    let json =
+        br#"{"version":"draft-01","tracks":[{"name":"%id%","packaging":"loc","isLive":true}]}"#;
+    let resolved = resolve_catalog_variables(json, "id=a&b").expect("fragment を解決できること");
+    let text = String::from_utf8(resolved).expect("JSON は UTF-8 であること");
+    assert!(
+        text.contains(r#""a""#),
+        "`id` の値が `a` になること: {text}"
+    );
+}
+
+/// `-` と `.` を含む変数名が解決されること
+///
+/// v02 は変数名の文字種を列挙しない。fragment の param-name として表現できる文字を
+/// 受理するため、`-` と `.` を含む名前も解決できる。
+#[test]
+fn resolve_hyphen_and_dot_in_name() {
+    let json = br#"{"version":"draft-01","tracks":[{"name":"%cat-token%-%a.b%","packaging":"loc","isLive":true}]}"#;
+    let resolved = resolve_catalog_variables(json, "cat-token=X&a.b=Y")
+        .expect("`-` と `.` を含む名前を解決できること");
+    let text = String::from_utf8(resolved).expect("JSON は UTF-8 であること");
+    assert!(
+        text.contains(r#""X-Y""#),
+        "両方の名前が置換されること: {text}"
+    );
+}
+
+/// `%` を含む変数名と fragment の param-name として表現できない名前を拒否すること
+#[test]
+fn fragment_pairs_reject_invalid_names() {
+    for fragment in ["a%b=x", "a b=x"] {
+        assert!(
+            matches!(
+                parse_fragment_pairs(fragment),
+                Err(MessageError::InvalidCatalog(_))
+            ),
+            "不正な変数名を含む fragment {fragment:?} を拒否すること"
+        );
+    }
+}
+
+/// pair を最初の `=` で分割すること
+///
+/// draft-ietf-moq-msf-02 §5.4.2: "Each pair is split at its first = character into a
+/// key and a value." 値に `=` を含められる。
+#[test]
+fn pair_is_split_at_the_first_equals() {
+    assert_eq!(
+        parse_fragment_pairs("k=a=b").expect("fragment をパースできること"),
+        vec![("k".to_string(), "a=b".to_string())],
+        "最初の `=` だけで分割すること"
+    );
+
+    let json =
+        br#"{"version":"draft-01","tracks":[{"name":"%k%","packaging":"loc","isLive":true}]}"#;
+    let resolved = resolve_catalog_variables(json, "k=a=b").expect("fragment を解決できること");
+    let text = String::from_utf8(resolved).expect("JSON は UTF-8 であること");
+    assert!(text.contains(r#""a=b""#), "値に `=` が残ること: {text}");
+}
+
+/// fragment の param-name として表現できる文字を `parse_fragment_pairs` が受理すること
+///
+/// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の `param-name` は
+/// `pchar-no-amp / "/"` である。`.` `+` `/` を含む key を受理する。
+#[test]
+fn fragment_pairs_accept_pchar_names() {
+    assert_eq!(
+        parse_fragment_pairs("a.b=x&c+d=y&e/f=z").expect("param-name として受理できること"),
+        vec![
+            ("a.b".to_string(), "x".to_string()),
+            ("c+d".to_string(), "y".to_string()),
+            ("e/f".to_string(), "z".to_string()),
+        ]
+    );
+}
+
+/// pct-encoded を含む変数名は percent-decode しないため拒否すること
+///
+/// `param-name` の ABNF は `pct-encoded` を許すが、本実装は fragment を percent-decode
+/// しないため、`%` を含む key は変数参照の区切りと衝突し受理できない。
+#[test]
+fn fragment_pairs_reject_pct_encoded_name() {
+    assert!(
+        matches!(
+            parse_fragment_pairs("a%20b=x"),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "pct-encoded を含む変数名を拒否すること"
+    );
+}
+
+/// `=` を含む参照名は未定義参照として保持すること
+///
+/// `pchar-no-amp` は `=` を含むが、fragment の key は最初の `=` で分割されるため key に
+/// `=` を含められない。そのような参照は未定義として元の `%name%` のまま保持する。
+#[test]
+fn resolve_name_with_equals_is_kept_undefined() {
+    let json =
+        br#"{"version":"draft-01","tracks":[{"name":"%a=b%","packaging":"loc","isLive":true}]}"#;
+    let resolved = resolve_catalog_variables(json, "a=b").expect("未定義参照として保持できること");
+    let text = String::from_utf8(resolved).expect("JSON は UTF-8 であること");
+    assert!(
+        text.contains("%a=b%"),
+        "一致する key がない参照は元のまま保持されること: {text}"
+    );
+}
