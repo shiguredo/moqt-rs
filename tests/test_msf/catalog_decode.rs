@@ -972,3 +972,13 @@ fn media_timeline_without_mime_type_accepted() {
     ]}"#;
     assert!(MsfCatalogDocument::decode(json).is_ok());
 }
+
+/// moq-secure-objects で cipherSuite が無い場合は decode で拒否されること
+#[test]
+fn secure_objects_without_cipher_suite_rejected() {
+    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"encryptionScheme":"moq-secure-objects","keyId":"key-1","trackBaseKey":"AAEC"}]}"#;
+    assert!(matches!(
+        MsfCatalogDocument::decode(json),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}

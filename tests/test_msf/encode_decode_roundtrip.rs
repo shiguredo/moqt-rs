@@ -821,14 +821,27 @@ fn encryption_orphan_field_accepted() {
 }
 
 #[test]
-fn encryption_cipher_suite_missing_rejected() {
-    // encryptionScheme 指定時の cipherSuite 欠如は scheme によらず reject されること
-    // (secure-objects 時の cipherSuite ケースと合わせて scheme 非依存を固定する)
+fn encryption_custom_scheme_without_cipher_suite_accepted() {
+    // draft-ietf-moq-msf-02 §5.2.39: cipherSuite は moq-secure-objects のときだけ必須
     let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"encryptionScheme":"com.example.custom"}]}"#;
-    assert!(matches!(
-        MsfCatalogDocument::decode(json),
-        Err(MessageError::InvalidCatalog(_))
-    ));
+    let doc = MsfCatalogDocument::decode(json).expect("custom scheme は受理されること");
+    let MsfCatalogDocument::Full(cat) = doc else {
+        panic!("Full catalog がデコードされること");
+    };
+    assert_eq!(
+        cat.tracks[0].encryption_scheme.as_deref(),
+        Some("com.example.custom")
+    );
+    assert_eq!(cat.tracks[0].cipher_suite, None);
+    let encoded = MsfCatalogDocument::Full(cat)
+        .encode()
+        .expect("cipherSuite なしの custom scheme を encode できること");
+    assert!(
+        !String::from_utf8(encoded)
+            .expect("JSON は UTF-8 であること")
+            .contains("cipherSuite"),
+        "cipherSuite が無ければ出力しないこと"
+    );
 }
 
 #[test]

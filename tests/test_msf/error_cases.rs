@@ -2007,20 +2007,20 @@ fn encode_full_media_timeline_missing_depends_rejected() {
 
 /// encryptionScheme 指定時の cipherSuite 欠如は encode でも拒否されること
 #[test]
-fn encode_full_encryption_scheme_missing_cipher_suite_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.39 (Cipher suite)
+fn encode_full_custom_scheme_without_cipher_suite_accepted() {
+    // draft-ietf-moq-msf-02 §5.2.39: cipherSuite は moq-secure-objects のときだけ必須
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.encryption_scheme = Some("com.example.custom".to_string());
-    assert!(matches!(
-        full_doc(vec![track], vec![], vec![]).encode(),
-        Err(MessageError::InvalidCatalog(_))
-    ));
+    assert!(
+        full_doc(vec![track], vec![], vec![]).encode().is_ok(),
+        "custom scheme は cipherSuite なしで encode できること"
+    );
 }
 
 /// moq-secure-objects の必須組欠如は encode でも拒否されること
 #[test]
 fn encode_full_secure_objects_incomplete_rejected() {
-    // draft-ietf-moq-msf-01 §4.3.3 (Recommended encryption scheme)
+    // draft-ietf-moq-msf-02 §4.4.3 (Recommended encryption scheme)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.encryption_scheme = Some("moq-secure-objects".to_string());
     track.cipher_suite = Some("aes-128-gcm-sha256".to_string());
@@ -2278,4 +2278,17 @@ fn encode_rejects_video_role_without_framerate() {
         reason.contains("framerate") && reason.contains("role 'video'"),
         "role 由来の framerate 要求を述べること: {reason}"
     );
+}
+
+/// moq-secure-objects で cipherSuite が無い場合は encode で拒否されること
+#[test]
+fn encode_full_secure_objects_without_cipher_suite_rejected() {
+    let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
+    track.encryption_scheme = Some("moq-secure-objects".to_string());
+    track.key_id = Some("key-1".to_string());
+    track.track_base_key = Some("AAEC".to_string());
+    assert!(matches!(
+        full_doc(vec![track], vec![], vec![]).encode(),
+        Err(MessageError::InvalidCatalog(_))
+    ));
 }

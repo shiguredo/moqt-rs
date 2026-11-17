@@ -1547,11 +1547,11 @@ impl MsfCloneTrack {
             ));
         }
 
-        // draft-ietf-moq-msf-01 §5.2.39 (Cipher suite) / §4.3.3 (Recommended encryption scheme):
-        // 暗号化 signaling の必須組
-        if encryption_scheme.is_some() && cipher_suite.is_none() {
+        // draft-ietf-moq-msf-02 §5.2.39 (Cipher suite) / §4.4.3 (Recommended encryption scheme):
+        // cipherSuite は encryptionScheme が moq-secure-objects のときだけ必須。
+        if encryption_scheme.as_deref() == Some("moq-secure-objects") && cipher_suite.is_none() {
             return Err(MessageError::InvalidCatalog(
-                "cipherSuite MUST be present when encryptionScheme is specified".to_string(),
+                "cipherSuite MUST be present with moq-secure-objects".to_string(),
             ));
         }
         if encryption_scheme.as_deref() == Some("moq-secure-objects")
@@ -3130,10 +3130,13 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
         track.event_type.as_deref(),
     )?;
 
-    // draft-ietf-moq-msf-01 §5.2.39 (Cipher suite) / §4.3.3 (Recommended encryption scheme)
-    if track.encryption_scheme.is_some() && track.cipher_suite.is_none() {
+    // draft-ietf-moq-msf-02 §5.2.39 (Cipher suite) / §4.4.3 (Recommended encryption scheme):
+    // cipherSuite は encryptionScheme が moq-secure-objects のときだけ必須。
+    if track.encryption_scheme.as_deref() == Some("moq-secure-objects")
+        && track.cipher_suite.is_none()
+    {
         return Err(MessageError::InvalidCatalog(
-            "cipherSuite MUST be present when encryptionScheme is specified".to_string(),
+            "cipherSuite MUST be present with moq-secure-objects".to_string(),
         ));
     }
     if track.encryption_scheme.as_deref() == Some("moq-secure-objects")
@@ -3732,12 +3735,12 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
     }
 
     // ─── 暗号化 signaling の必須組 ───
-    // draft-ietf-moq-msf-01 §5.2.39: encryptionScheme 指定時は scheme によらず cipherSuite が必須。
-    // draft-ietf-moq-msf-01 §4.3.3: moq-secure-objects 時は cipherSuite ・ keyId ・ trackBaseKey の 3 点が必須。
+    // draft-ietf-moq-msf-02 §5.2.39: cipherSuite は moq-secure-objects のときだけ必須。
+    // draft-ietf-moq-msf-02 §4.4.3: moq-secure-objects 時は keyId ・ trackBaseKey も必須。
     // clone (decode_clone_track) では親未知のため欠如 reject を行わない (継承で補完され得る)。
-    if encryption_scheme.is_some() && cipher_suite.is_none() {
+    if encryption_scheme.as_deref() == Some("moq-secure-objects") && cipher_suite.is_none() {
         return Err(MessageError::InvalidCatalog(
-            "cipherSuite MUST be present when encryptionScheme is specified".to_string(),
+            "cipherSuite MUST be present with moq-secure-objects".to_string(),
         ));
     }
     if encryption_scheme.as_deref() == Some("moq-secure-objects")
