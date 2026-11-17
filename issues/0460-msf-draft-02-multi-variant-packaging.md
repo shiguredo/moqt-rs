@@ -1,7 +1,7 @@
 # keyframeSpacing と multi-variant publisher packaging に対応する
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -43,3 +43,13 @@ draft-ietf-moq-msf-02 §4.3 (Packaging for multi-variant track switching) は、
 - 共通の catalog 検証 (decode / encode / delta 適用後) の挙動が変わらないこと。`altGroup` を持ち `keyframeSpacing` を持たない既存カタログが引き続き受理されること。
 - Object 境界の time-alignment が本 issue の対象外であることが doc に明記されていること。
 - 上記を `crates/moq-pub` のテストと `tests/test_msf/encode_decode_roundtrip.rs`、`tests/test_msf/delta_apply.rs` で固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `MsfTrack` / `MsfCloneTrack` に `keyframe_spacing: Option<u64>` を追加し、wire の `keyframeSpacing` を decode / encode するようにした。clone は明示値があれば上書きし、なければ親から継承する。
+- `crates/moq-pub/src/variant.rs` を追加し、`allocate_alt_group_group_ids` で alternate group の variant 群に共有開始 Group ID を割り当て、`AltGroupGroupIds::group_id` で +1 する Group ID を返すようにした。
+- `validate_multi_variant_packaging` を追加し、全 variant の `keyframeSpacing`、開始 Group ID の一致、Group ID の連番、Group 先頭のキーフレーム、1 Group 1 キーフレームを検証する。Object 境界の time-alignment は複数 variant encoder が未実装のため対象外であることを doc に明記した。
+- 共通の catalog 検証 (decode / encode / delta 適用後) には追加していない。`altGroup` だけを持ち `keyframeSpacing` を持たない既存カタログが引き続き受理されることをテストで固定した。
+- `tests/test_msf/encode_decode_roundtrip.rs` / `delta_apply.rs` に往復と clone 継承・上書きを追加し、`pbt/tests/prop_msf.rs` の生成器にも `keyframeSpacing` を追加した。`docs/msf.md` と `skills/shiguredo-moqt/SKILL.md` も更新した。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
