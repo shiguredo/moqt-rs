@@ -12,6 +12,7 @@
 pub mod cli;
 pub mod error;
 pub mod pipeline;
+pub mod variant;
 
 // パイプラインの内部実装
 mod audio_capture;

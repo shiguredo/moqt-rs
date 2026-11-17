@@ -1163,7 +1163,7 @@ impl MsfCatalog {
 `(Option<TrackNamespace>, Track Name のバイト列)` である。URL 形式 (§8.8) は写像後の
 バイト列に `name::serialize_name` を適用して作る。
 
-`MsfTrack` は `name` / `namespace` / `packaging` / `packaging_metadata` / `depends` (`MsfDependency`) / `accessible_window_time` / `codec` / `mime_type` / `width` / `height` / `framerate` / `bitrate` / `samplerate` / `channel_config` などを持つ単一構造体。Codec / Video / Audio は draft 上の論理的な分類。
+`MsfTrack` は `name` / `namespace` / `packaging` / `packaging_metadata` / `depends` (`MsfDependency`) / `accessible_window_time` / `keyframe_spacing` / `codec` / `mime_type` / `width` / `height` / `framerate` / `bitrate` / `samplerate` / `channel_config` などを持つ単一構造体。Codec / Video / Audio は draft 上の論理的な分類。
 
 ### Timeline
 

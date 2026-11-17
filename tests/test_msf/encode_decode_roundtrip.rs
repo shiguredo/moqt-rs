@@ -162,6 +162,7 @@ fn delta_all_operations() {
                     render_group: None,
                     alt_group: None,
                     accessible_window_time: None,
+                    keyframe_spacing: None,
                     init_ref: None,
                     depends: None,
                     template: None,
@@ -357,6 +358,7 @@ fn clone_track_roundtrip_all_fields() {
                 packaging: Some(MsfPackaging::EventTimeline),
                 packaging_metadata: None,
                 accessible_window_time: None,
+                keyframe_spacing: None,
                 namespace: Some("ns".to_string()),
                 event_type: Some("com.example.cue".to_string()),
                 role: Some("caption".to_string()),
@@ -437,6 +439,7 @@ fn clone_track_roundtrip_with_target_latency() {
                 render_group: None,
                 alt_group: None,
                 accessible_window_time: None,
+                keyframe_spacing: None,
                 init_ref: None,
                 depends: None,
                 template: None,
@@ -495,6 +498,7 @@ fn clone_track_roundtrip_with_track_duration() {
                 render_group: None,
                 alt_group: None,
                 accessible_window_time: None,
+                keyframe_spacing: None,
                 init_ref: None,
                 depends: None,
                 template: None,
@@ -1237,6 +1241,7 @@ fn accessibility_empty_some_roundtrip() {
         render_group: None,
         alt_group: None,
         accessible_window_time: None,
+        keyframe_spacing: None,
         init_ref: None,
         depends: None,
         template: None,
@@ -1309,6 +1314,7 @@ fn accessibility_clone_none_omitted() {
                 render_group: None,
                 alt_group: None,
                 accessible_window_time: None,
+                keyframe_spacing: None,
                 init_ref: None,
                 depends: None,
                 template: None,
@@ -2166,4 +2172,37 @@ fn encode_rejects_invalid_update() {
         }],
     });
     assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+}
+
+/// keyframeSpacing が encode / decode を往復し、altGroup だけのカタログも受理されること
+#[test]
+fn keyframe_spacing_roundtrip() {
+    let mut track = MsfTrack::new("v".to_string(), MsfPackaging::Loc, true);
+    track.alt_group = Some(1);
+    track.keyframe_spacing = Some(30);
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![track],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    let encoded = doc.encode().expect("keyframeSpacing を encode できること");
+    let text = String::from_utf8(encoded.clone()).expect("JSON は UTF-8 であること");
+    assert!(
+        text.contains(r#""keyframeSpacing":30"#),
+        "JSON に keyframeSpacing を出力すること: {text}"
+    );
+    let decoded =
+        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(decoded, doc, "decode / encode が往復すること");
+
+    // altGroup だけを持ち keyframeSpacing を持たない既存カタログは引き続き受理する
+    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"altGroup":1}]}"#;
+    assert!(
+        MsfCatalogDocument::decode(json).is_ok(),
+        "keyframeSpacing は任意であり、共通検証で要求しないこと"
+    );
 }

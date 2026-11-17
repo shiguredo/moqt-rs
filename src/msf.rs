@@ -649,6 +649,8 @@ pub struct MsfTrack {
     ///
     /// 同じ altGroup の track は、すべて値を持たないか、すべて同じ値を持たなければならない。
     pub accessible_window_time: Option<u64>,
+    /// キーフレーム間隔 (draft-ietf-moq-msf-02 §5.2.46 (Keyframe Spacing))
+    pub keyframe_spacing: Option<u64>,
     /// 初期化データ参照 (draft-ietf-moq-msf-01 §5.2.13 (Initialization reference))
     pub init_ref: Option<String>,
     /// 依存トラック / renderGroup 配列 (draft-ietf-moq-msf-02 §5.2.15 (Dependencies))
@@ -726,6 +728,7 @@ impl core::fmt::Debug for MsfTrack {
             render_group,
             alt_group,
             accessible_window_time,
+            keyframe_spacing,
             init_ref,
             depends,
             template,
@@ -770,6 +773,7 @@ impl core::fmt::Debug for MsfTrack {
             .field("render_group", render_group)
             .field("alt_group", alt_group)
             .field("accessible_window_time", accessible_window_time)
+            .field("keyframe_spacing", keyframe_spacing)
             .field("init_ref", init_ref)
             .field("depends", depends)
             .field("template", template)
@@ -820,6 +824,7 @@ impl MsfTrack {
             render_group: None,
             alt_group: None,
             accessible_window_time: None,
+            keyframe_spacing: None,
             init_ref: None,
             depends: Vec::new(),
             template: None,
@@ -896,6 +901,7 @@ struct TrackJsonParts<'a> {
     render_group: Option<u64>,
     alt_group: Option<u64>,
     accessible_window_time: Option<u64>,
+    keyframe_spacing: Option<u64>,
     init_ref: Option<&'a str>,
     depends: Option<&'a [MsfDependency]>,
     template: Option<&'a MsfTemplate>,
@@ -981,6 +987,9 @@ fn write_track_json(
     }
     if let Some(v) = p.accessible_window_time {
         f.member("accessibleWindowTime", v)?;
+    }
+    if let Some(v) = p.keyframe_spacing {
+        f.member("keyframeSpacing", v)?;
     }
     if let Some(v) = p.init_ref {
         f.member("initRef", v)?;
@@ -1100,6 +1109,7 @@ impl DisplayJson for MsfTrack {
                     render_group: self.render_group,
                     alt_group: self.alt_group,
                     accessible_window_time: self.accessible_window_time,
+                    keyframe_spacing: self.keyframe_spacing,
                     init_ref: self.init_ref.as_deref(),
                     depends: Some(self.depends.as_slice()),
                     template: self.template.as_ref(),
@@ -1198,6 +1208,8 @@ pub struct MsfCloneTrack {
     ///
     /// 同じ altGroup の track は、すべて値を持たないか、すべて同じ値を持たなければならない。
     pub accessible_window_time: Option<u64>,
+    /// キーフレーム間隔 (draft-ietf-moq-msf-02 §5.2.46 (Keyframe Spacing))
+    pub keyframe_spacing: Option<u64>,
     /// 初期化データ参照 (draft-ietf-moq-msf-01 §5.2.13 (Initialization reference))
     pub init_ref: Option<String>,
     /// 依存トラック / renderGroup 配列 (draft-ietf-moq-msf-02 §5.2.15 (Dependencies)) - None は親から継承
@@ -1275,6 +1287,7 @@ impl core::fmt::Debug for MsfCloneTrack {
             render_group,
             alt_group,
             accessible_window_time,
+            keyframe_spacing,
             init_ref,
             depends,
             template,
@@ -1320,6 +1333,7 @@ impl core::fmt::Debug for MsfCloneTrack {
             .field("render_group", render_group)
             .field("alt_group", alt_group)
             .field("accessible_window_time", accessible_window_time)
+            .field("keyframe_spacing", keyframe_spacing)
             .field("init_ref", init_ref)
             .field("depends", depends)
             .field("template", template)
@@ -1374,6 +1388,7 @@ impl MsfCloneTrack {
             render_group: None,
             alt_group: None,
             accessible_window_time: None,
+            keyframe_spacing: None,
             init_ref: None,
             depends: None,
             template: None,
@@ -1427,6 +1442,7 @@ impl DisplayJson for MsfCloneTrack {
                     render_group: self.render_group,
                     alt_group: self.alt_group,
                     accessible_window_time: self.accessible_window_time,
+                    keyframe_spacing: self.keyframe_spacing,
                     init_ref: self.init_ref.as_deref(),
                     depends: self.depends.as_deref(),
                     template: self.template.as_ref(),
@@ -1493,6 +1509,7 @@ impl MsfCloneTrack {
         let accessible_window_time = self
             .accessible_window_time
             .or(parent.accessible_window_time);
+        let keyframe_spacing = self.keyframe_spacing.or(parent.keyframe_spacing);
         let init_ref = self.init_ref.or_else(|| parent.init_ref.clone());
         let depends = self.depends.unwrap_or_else(|| parent.depends.clone());
         let template = self.template.or(parent.template);
@@ -1607,6 +1624,7 @@ impl MsfCloneTrack {
             render_group,
             alt_group,
             accessible_window_time,
+            keyframe_spacing,
             init_ref,
             depends,
             template,
@@ -3674,6 +3692,7 @@ struct CommonTrackFields {
     render_group: Option<u64>,
     alt_group: Option<u64>,
     accessible_window_time: Option<u64>,
+    keyframe_spacing: Option<u64>,
     init_ref: Option<String>,
     template: Option<MsfTemplate>,
     temporal_id: Option<u64>,
@@ -3727,6 +3746,7 @@ fn decode_common_track_fields(
         render_group: val.to_member("renderGroup")?.map(parse_u64)?,
         alt_group: val.to_member("altGroup")?.map(parse_u64)?,
         accessible_window_time: val.to_member("accessibleWindowTime")?.map(parse_u64)?,
+        keyframe_spacing: val.to_member("keyframeSpacing")?.map(parse_u64)?,
         init_ref: val.to_member("initRef")?.map(|v| v.try_into())?,
         template: match val.to_member("template")?.optional() {
             Some(v) => Some(decode_template(v)?),
@@ -3850,6 +3870,7 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
         render_group,
         alt_group,
         accessible_window_time,
+        keyframe_spacing,
         init_ref,
         depends,
         template,
@@ -3987,6 +4008,7 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
         render_group,
         alt_group,
         accessible_window_time,
+        keyframe_spacing,
         init_ref,
         depends,
         template,
@@ -4278,6 +4300,7 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
         render_group,
         alt_group,
         accessible_window_time,
+        keyframe_spacing,
         init_ref,
         depends,
         template,
@@ -4375,6 +4398,7 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
         render_group,
         alt_group,
         accessible_window_time,
+        keyframe_spacing,
         init_ref,
         depends,
         template,

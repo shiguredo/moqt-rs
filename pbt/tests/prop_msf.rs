@@ -151,6 +151,7 @@ fn sample_track(ctx: &mut noprop::TestCaseContext) -> MsfTrack {
 
     let mut t = MsfTrack::new(name, packaging, is_live);
     t.packaging_metadata = sample_packaging_metadata(ctx);
+    t.keyframe_spacing = sample_optional_u32(ctx).map(|v| v as u64);
     // v02 の `/` 区切り namespace を一定確率で明示し、継承と明示の両方を往復させる
     if noprop::sample_bool(ctx) {
         t.namespace = Some(sample_catalog_namespace(ctx));
@@ -300,6 +301,7 @@ fn sample_clone_track(ctx: &mut noprop::TestCaseContext) -> MsfCloneTrack {
         render_group: None,
         alt_group: None,
         accessible_window_time: None,
+        keyframe_spacing: sample_optional_u32(ctx).map(|v| v as u64),
         init_ref: None,
         depends: None,
         template: sample_template(ctx),

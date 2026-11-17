@@ -2004,3 +2004,36 @@ fn apply_delta_readd_is_live_regression_uses_latest_history() {
         Err(MessageError::InvalidCatalog(_))
     ));
 }
+
+/// clone が keyframeSpacing を継承 / 上書きできること
+#[test]
+fn apply_delta_clone_inherits_or_overrides_keyframe_spacing() {
+    let mut catalog = MsfCatalog::new();
+    let mut parent = loc_track("parent", None);
+    parent.keyframe_spacing = Some(30);
+    catalog.tracks.push(parent);
+
+    let mut inherited = MsfCloneTrack::new("inherited".to_string(), "parent".to_string());
+    inherited.keyframe_spacing = None;
+    let mut overridden = MsfCloneTrack::new("overridden".to_string(), "parent".to_string());
+    overridden.keyframe_spacing = Some(60);
+    let delta = MsfDeltaUpdate {
+        generated_at: 1,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![inherited, overridden],
+        }],
+    };
+    catalog
+        .apply_delta(&delta, None)
+        .expect("keyframeSpacing の継承と上書きを適用できること");
+    assert_eq!(
+        catalog.tracks[1].keyframe_spacing,
+        Some(30),
+        "clone が省略した値は親から継承すること"
+    );
+    assert_eq!(
+        catalog.tracks[2].keyframe_spacing,
+        Some(60),
+        "clone が明示した値は親を上書きすること"
+    );
+}
