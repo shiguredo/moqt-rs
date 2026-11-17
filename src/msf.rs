@@ -4,7 +4,7 @@
 //! カタログ、メディアタイムライン、イベントタイムラインの JSON エンコード/デコードを提供する。
 //!
 //! # カタログの種類
-//! - Full catalog: `{"version":"draft-01","tracks":[...]}` 形式
+//! - Full catalog: `{"version":"draft-02","tracks":[...]}` 形式
 //! - Delta update: `{"deltaUpdate":[...]}` 形式
 //!
 //! # 注意
@@ -27,7 +27,7 @@ pub mod uri;
 /// draft-ietf-moq-msf-02 §5.1.1 (MSF version): version は JSON Type: String である。
 /// IETF Internet-Draft 利用時は "draft-XX" 形式を使う。
 /// この仕様は将来変更される可能性がある。
-pub const MSF_VERSION: &str = "draft-01";
+pub const MSF_VERSION: &str = "draft-02";
 
 /// カタログトラックの Track Name (draft-ietf-moq-msf-02 §5 (Catalog))
 ///

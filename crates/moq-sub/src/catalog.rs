@@ -193,7 +193,7 @@ mod tests {
     /// 必須フィールド (version / tracks) だけを持つ最小のカタログである。
     fn full_json(version_track: &str) -> Vec<u8> {
         format!(
-            r#"{{"version":"draft-01","tracks":[{{"name":"{version_track}","packaging":"loc","isLive":true}}]}}"#
+            r#"{{"version":"draft-02","tracks":[{{"name":"{version_track}","packaging":"loc","isLive":true}}]}}"#
         )
         .into_bytes()
     }
@@ -420,7 +420,7 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join(",");
-        format!(r#"{{"version":"draft-01","tracks":[{tracks_json}]}}"#).into_bytes()
+        format!(r#"{{"version":"draft-02","tracks":[{tracks_json}]}}"#).into_bytes()
     }
 
     /// namespace を省略した remove の delta の JSON
@@ -703,7 +703,7 @@ mod tests {
         let namespace = "customer/livestream/123";
         let mut state = CatalogState::new(test_namespace_from(namespace));
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[
+            r#"{{"version":"draft-02","tracks":[
                 {{"name":"video","namespace":"{namespace}","packaging":"loc","isLive":true}},
                 {{"name":"video","packaging":"loc","isLive":true}}
             ]}}"#

@@ -36,14 +36,14 @@ fn version_not_string() {
 #[test]
 fn missing_tracks() {
     assert!(matches!(
-        MsfCatalogDocument::decode(b"{\"version\":\"draft-01\"}"),
+        MsfCatalogDocument::decode(b"{\"version\":\"draft-02\"}"),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
 
 #[test]
 fn track_missing_name() {
-    let json = br#"{"version":"draft-01","tracks":[{"packaging":"loc"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"packaging":"loc"}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -52,7 +52,7 @@ fn track_missing_name() {
 
 #[test]
 fn track_missing_packaging() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","isLive":true}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","isLive":true}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -62,7 +62,7 @@ fn track_missing_packaging() {
 #[test]
 fn track_missing_is_live() {
     // draft-ietf-moq-msf-02 §5.2.8 (Is Live): isLive は必須
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc"}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -140,7 +140,7 @@ fn depends_entry_not_string_or_integer() {
     // draft-ietf-moq-msf-02 §5.2.15 (Dependencies): 要素は String または整数 Number
     for element in ["true", r#"{"a":1}"#, "1.5"] {
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[{{"name":"t","packaging":"loc","isLive":true,"depends":[{element}]}}]}}"#
+            r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"loc","isLive":true,"depends":[{element}]}}]}}"#
         );
         assert!(
             matches!(
@@ -155,7 +155,7 @@ fn depends_entry_not_string_or_integer() {
 #[test]
 fn render_group_different_target_latency_rejected() {
     // draft-ietf-moq-msf-02 §5.2.9 (Target latency): 同一 renderGroup 内の isLive=true トラックが宣言した targetLatency は一致必須 (省略は比較対象外)
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500},
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":1000}
         ]}"#;
@@ -168,7 +168,7 @@ fn render_group_different_target_latency_rejected() {
 #[test]
 fn alt_group_different_target_latency_rejected() {
     // draft-ietf-moq-msf-02 §5.2.9 (Target latency): 同一 altGroup 内の isLive=true トラックが宣言した targetLatency は一致必須 (省略は比較対象外)
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"altGroup":2,"targetLatency":500},
             {"name":"b","packaging":"loc","isLive":true,"altGroup":2,"targetLatency":1000}
         ]}"#;
@@ -180,7 +180,7 @@ fn alt_group_different_target_latency_rejected() {
 
 #[test]
 fn render_group_same_target_latency_accepted() {
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500},
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500}
         ]}"#;
@@ -191,7 +191,7 @@ fn render_group_same_target_latency_accepted() {
 fn render_group_target_latency_omitted_accepted() {
     // draft-ietf-moq-msf-02 §5.2.9 (Target latency): フィールドが無く isLive=true なら
     // player が遅延を選んでよい (MAY)。省略は宣言値との不一致として拒否しない
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500},
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1}
         ]}"#;
@@ -201,7 +201,7 @@ fn render_group_target_latency_omitted_accepted() {
 #[test]
 fn alt_group_target_latency_omitted_accepted() {
     // draft-ietf-moq-msf-02 §5.2.9 (Target latency): altGroup でも省略は不一致としない
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"altGroup":2,"targetLatency":500},
             {"name":"b","packaging":"loc","isLive":true,"altGroup":2}
         ]}"#;
@@ -213,7 +213,7 @@ fn alt_group_target_latency_omitted_accepted() {
 fn render_group_target_latency_and_buffers_split_accepted() {
     // draft-ietf-moq-msf-02 §5.2.9 / §5.2.10: 省略を比較対象外とするため、同一 group で
     // 一方が targetLatency のみ、他方が buffers のみを宣言する構成も受理される (本実装の解釈)
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500},
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":1000}}
         ]}"#;
@@ -225,7 +225,7 @@ fn render_group_target_latency_and_buffers_split_accepted() {
 fn render_group_omitted_between_different_target_latency_rejected() {
     // draft-ietf-moq-msf-02 §5.2.9 (Target latency): 省略トラックを挟んでも
     // 宣言された 2 値の不一致は検出すること
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500},
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1},
             {"name":"c","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":1000}
@@ -241,7 +241,7 @@ fn render_group_omitted_between_different_target_latency_rejected() {
 #[test]
 fn lang_invalid_empty() {
     let json =
-        br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":""}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":""}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -252,7 +252,7 @@ fn lang_invalid_empty() {
 #[test]
 fn lang_invalid_numeric_primary() {
     let json =
-        br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"12"}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"12"}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -265,7 +265,7 @@ fn lang_invalid_numeric_primary() {
 #[test]
 fn lang_invalid_single_char() {
     let json =
-        br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"e"}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"e"}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -275,7 +275,7 @@ fn lang_invalid_single_char() {
 #[test]
 fn lang_invalid_special_chars() {
     let json =
-        br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"eng-!!"}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"eng-!!"}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -285,7 +285,7 @@ fn lang_invalid_special_chars() {
 #[test]
 fn lang_invalid_leading_dash() {
     let json =
-        br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"-en"}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"-en"}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -295,7 +295,7 @@ fn lang_invalid_leading_dash() {
 #[test]
 fn lang_invalid_trailing_dash() {
     let json =
-        br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"en-"}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"en-"}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -307,7 +307,7 @@ fn lang_invalid_trailing_dash() {
 fn lang_primary_four_to_eight_letters_accepted() {
     for lang in ["abcd", "abcde", "abcdefgh"] {
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
+            r#"{{"version":"draft-02","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
         );
         assert!(
             MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
@@ -320,7 +320,7 @@ fn lang_primary_four_to_eight_letters_accepted() {
 #[test]
 fn lang_invalid_primary_too_long() {
     let json =
-        br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"abcdefghi"}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"abcdefghi"}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -332,7 +332,7 @@ fn lang_invalid_primary_too_long() {
 fn lang_privateuse_accepted() {
     for lang in ["x-foo", "x-foo-bar", "x-1"] {
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
+            r#"{{"version":"draft-02","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
         );
         assert!(
             MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
@@ -345,7 +345,7 @@ fn lang_privateuse_accepted() {
 #[test]
 fn lang_privateuse_without_subtag_rejected() {
     let json =
-        br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"x"}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"x"}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -381,7 +381,7 @@ fn lang_irregular_tags_accepted() {
         "sgn-CH-DE",
     ] {
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
+            r#"{{"version":"draft-02","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
         );
         assert!(
             MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
@@ -397,7 +397,7 @@ fn lang_irregular_case_insensitive_accepted() {
     // primary subtag が 1 文字の `i-*` は irregular の一致判定でなければ受理されない
     for lang in ["I-AMI", "I-KLINGON", "I-Default", "I-ENOCHIAN", "I-NAVAJO"] {
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
+            r#"{{"version":"draft-02","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
         );
         assert!(
             MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
@@ -422,7 +422,7 @@ fn lang_regular_grandfathered_tags_accepted() {
         "zh-xiang",
     ] {
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
+            r#"{{"version":"draft-02","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
         );
         assert!(
             MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
@@ -448,7 +448,7 @@ fn lang_unknown_single_char_primary_rejected() {
         "I-KLINGON-X",
     ] {
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
+            r#"{{"version":"draft-02","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
         );
         assert!(
             matches!(
@@ -470,7 +470,7 @@ fn lang_unknown_single_char_primary_rejected() {
 fn lang_uppercase_privateuse_rejected() {
     for lang in ["X-FOO", "X-foo"] {
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
+            r#"{{"version":"draft-02","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
         );
         assert!(
             matches!(
@@ -483,7 +483,7 @@ fn lang_uppercase_privateuse_rejected() {
     }
     // 小文字 `x` は従来どおり受理される (対になる確認)
     let json =
-        br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"x-foo"}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"x-foo"}]}"#;
     assert!(
         MsfCatalogDocument::decode(json).is_ok(),
         "小文字 x の privateuse は受理されること"
@@ -532,7 +532,7 @@ fn lang_invalid_in_clone_track() {
 fn target_latency_and_buffers_together_rejected_when_is_live_true() {
     // draft-ietf-moq-msf-02 §5.2.9 (Target latency) / §5.2.10 (Buffers):
     // isLive=true の同一 track に targetLatency と buffers は共存できない
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"targetLatency":500,"buffers":{"target":1000}}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"targetLatency":500,"buffers":{"target":1000}}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(reason))
@@ -544,7 +544,7 @@ fn target_latency_and_buffers_together_rejected_when_is_live_true() {
 fn target_latency_and_buffers_together_rejected_when_is_live_false() {
     // draft-ietf-moq-msf-02 §5.2.9 / §5.2.10: isLive=false でも共存は reject されること
     // (本実装では presence 違反を優先する選択とする)
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":false,"targetLatency":500,"buffers":{"target":1000}}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":false,"targetLatency":500,"buffers":{"target":1000}}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(reason))
@@ -559,11 +559,11 @@ fn target_latency_or_buffers_alone_ignored_when_is_live_false() {
     for (name, json) in [
         (
             "targetLatency 単独",
-            br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":false,"targetLatency":500}]}"#.as_slice(),
+            br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":false,"targetLatency":500}]}"#.as_slice(),
         ),
         (
             "buffers 単独",
-            br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":false,"buffers":{"target":1000}}]}"#.as_slice(),
+            br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":false,"buffers":{"target":1000}}]}"#.as_slice(),
         ),
     ] {
         let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
@@ -634,7 +634,7 @@ fn target_latency_and_buffers_together_rejected_in_clone() {
 #[test]
 fn render_group_different_buffers_rejected() {
     // draft-ietf-moq-msf-02 §5.2.10 (Buffers): 同一 renderGroup 内の isLive=true トラックが宣言した buffers は一致必須 (省略は比較対象外)
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":500}},
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":1000}}
         ]}"#;
@@ -646,7 +646,7 @@ fn render_group_different_buffers_rejected() {
 
 #[test]
 fn render_group_same_buffers_accepted() {
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":500}},
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":500}}
         ]}"#;
@@ -657,7 +657,7 @@ fn render_group_same_buffers_accepted() {
 fn render_group_buffers_omitted_accepted() {
     // draft-ietf-moq-msf-02 §5.2.10 (Buffers): フィールドが無く isLive=true なら
     // player がバッファを選んでよい (MAY)。省略は宣言値との不一致として拒否しない
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":500}},
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1}
         ]}"#;
@@ -667,7 +667,7 @@ fn render_group_buffers_omitted_accepted() {
 #[test]
 fn alt_group_buffers_omitted_accepted() {
     // draft-ietf-moq-msf-02 §5.2.10 (Buffers): altGroup でも省略は不一致としない
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"altGroup":2,"buffers":{"target":500}},
             {"name":"b","packaging":"loc","isLive":true,"altGroup":2}
         ]}"#;
@@ -678,7 +678,7 @@ fn alt_group_buffers_omitted_accepted() {
 fn render_group_omitted_between_different_buffers_rejected() {
     // draft-ietf-moq-msf-02 §5.2.10 (Buffers): 省略トラックを挟んでも
     // 宣言された 2 値の不一致は検出すること
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":500}},
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1},
             {"name":"c","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":1000}}
@@ -695,7 +695,7 @@ fn render_group_mixed_live_ignored_for_buffers() {
     // 本テストだけでは isLive 除外と省略除外を区別できない。省略除外は
     // render_group_buffers_omitted_accepted、isLive 除外は
     // encode_full_group_buffers_is_live_false_ignored がそれぞれ固定する
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":500}},
             {"name":"b","packaging":"loc","isLive":false,"renderGroup":1}
         ]}"#;
@@ -708,7 +708,7 @@ fn render_group_mixed_live_ignored_for_target_latency() {
     // 本テストだけでは isLive 除外と省略除外を区別できない。省略除外は
     // render_group_target_latency_omitted_accepted、isLive 除外は
     // encode_full_group_target_latency_is_live_false_ignored がそれぞれ固定する
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500},
             {"name":"b","packaging":"loc","isLive":false,"renderGroup":1}
         ]}"#;
@@ -720,7 +720,7 @@ fn render_group_mixed_live_ignored_for_target_latency() {
 #[test]
 fn init_data_list_duplicate_id_rejected() {
     // draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List): id は catalog 内で一意
-    let json = br#"{"version":"draft-01","tracks":[],"initDataList":[
+    let json = br#"{"version":"draft-02","tracks":[],"initDataList":[
             {"id":"init1","type":"inline","data":"AAEC"},
             {"id":"init1","type":"inline","data":"AAED"}
         ]}"#;
@@ -732,7 +732,7 @@ fn init_data_list_duplicate_id_rejected() {
 
 #[test]
 fn init_data_list_unknown_type_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[],"initDataList":[{"id":"init1","type":"unknown","data":"AAEC"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[],"initDataList":[{"id":"init1","type":"unknown","data":"AAEC"}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -743,7 +743,7 @@ fn init_data_list_unknown_type_rejected() {
 fn init_ref_missing_id_rejected() {
     // draft-ietf-moq-msf-02 §5.2.14 (Initialization reference): initRef は
     // initDataList の id を指すため、一致する id が無ければ reject される
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"initRef":"missing"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"initRef":"missing"}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -753,7 +753,7 @@ fn init_ref_missing_id_rejected() {
 #[test]
 fn init_ref_matching_id_accepted() {
     // initRef が initDataList の id と一致すれば受理される
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"initRef":"init1"}],"initDataList":[{"id":"init1","type":"inline","data":"AAEC"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"initRef":"init1"}],"initDataList":[{"id":"init1","type":"inline","data":"AAEC"}]}"#;
     assert!(MsfCatalogDocument::decode(json).is_ok());
 }
 
@@ -782,7 +782,7 @@ fn delta_update_unknown_op_rejected() {
 fn delta_update_contains_version_rejected() {
     // draft-ietf-moq-msf-02 §5.3 (Delta updates): delta update に version は含めない
     let json =
-        br#"{"generatedAt":1,"deltaUpdate":[{"op":"add","tracks":[]}],"version":"draft-01"}"#;
+        br#"{"generatedAt":1,"deltaUpdate":[{"op":"add","tracks":[]}],"version":"draft-02"}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -820,7 +820,7 @@ fn delta_operation_missing_tracks_rejected() {
 #[test]
 fn init_data_list_missing_id_rejected() {
     let json =
-        br#"{"version":"draft-01","tracks":[],"initDataList":[{"type":"inline","data":"AAEC"}]}"#;
+        br#"{"version":"draft-02","tracks":[],"initDataList":[{"type":"inline","data":"AAEC"}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -830,7 +830,7 @@ fn init_data_list_missing_id_rejected() {
 #[test]
 fn init_data_list_missing_type_rejected() {
     let json =
-        br#"{"version":"draft-01","tracks":[],"initDataList":[{"id":"init1","data":"AAEC"}]}"#;
+        br#"{"version":"draft-02","tracks":[],"initDataList":[{"id":"init1","data":"AAEC"}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -840,7 +840,7 @@ fn init_data_list_missing_type_rejected() {
 #[test]
 fn init_data_list_missing_data_rejected() {
     let json =
-        br#"{"version":"draft-01","tracks":[],"initDataList":[{"id":"init1","type":"inline"}]}"#;
+        br#"{"version":"draft-02","tracks":[],"initDataList":[{"id":"init1","type":"inline"}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -849,7 +849,7 @@ fn init_data_list_missing_data_rejected() {
 
 #[test]
 fn buffers_non_number_value_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"buffers":{"target":"fast"}}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"buffers":{"target":"fast"}}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -859,7 +859,7 @@ fn buffers_non_number_value_rejected() {
 #[test]
 fn alt_group_different_buffers_rejected() {
     // draft-ietf-moq-msf-02 §5.2.10 (Buffers): 同一 altGroup 内の isLive=true トラックが宣言した buffers は一致必須 (省略は比較対象外)
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"altGroup":1,"buffers":{"target":500}},
             {"name":"b","packaging":"loc","isLive":true,"altGroup":1,"buffers":{"target":1000}}
         ]}"#;
@@ -925,7 +925,7 @@ fn clone_track_event_type_with_non_eventtimeline_rejected() {
 
 #[test]
 fn event_timeline_missing_event_type_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"eventtimeline","isLive":true}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"eventtimeline","isLive":true}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -934,7 +934,7 @@ fn event_timeline_missing_event_type_rejected() {
 
 #[test]
 fn media_timeline_missing_depends_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"mediatimeline","isLive":true,"mimeType":"application/json"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"mediatimeline","isLive":true,"mimeType":"application/json"}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -944,13 +944,13 @@ fn media_timeline_missing_depends_rejected() {
 #[test]
 fn media_timeline_arbitrary_mime_type_accepted() {
     // draft-ietf-moq-msf-02 §7.2: mimeType の値は要求しない
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"mediatimeline","isLive":true,"depends":["video"],"mimeType":"text/plain"},{"name":"video","packaging":"loc","isLive":true}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"mediatimeline","isLive":true,"depends":["video"],"mimeType":"text/plain"},{"name":"video","packaging":"loc","isLive":true}]}"#;
     assert!(MsfCatalogDocument::decode(json).is_ok());
 }
 
 #[test]
 fn event_type_with_non_eventtimeline_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"eventType":"x"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"eventType":"x"}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -960,14 +960,14 @@ fn event_type_with_non_eventtimeline_rejected() {
 #[test]
 fn eventtimeline_without_depends_accepted() {
     // draft-ietf-moq-msf-02 §8.3: depends は index が media timeline を参照する場合だけ必須
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"eventtimeline","isLive":true,"eventType":"cue","mimeType":"application/json"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"eventtimeline","isLive":true,"eventType":"cue","mimeType":"application/json"}]}"#;
     assert!(MsfCatalogDocument::decode(json).is_ok());
 }
 
 #[test]
 fn eventtimeline_arbitrary_mime_type_accepted() {
     // draft-ietf-moq-msf-02 §8.3: mimeType の値は要求しない
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"eventtimeline","isLive":true,"eventType":"cue","mimeType":"text/plain"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"eventtimeline","isLive":true,"eventType":"cue","mimeType":"text/plain"}]}"#;
     assert!(MsfCatalogDocument::decode(json).is_ok());
 }
 
@@ -976,7 +976,7 @@ fn eventtimeline_arbitrary_mime_type_accepted() {
 /// role="video" は codec 必須 (draft-ietf-moq-msf-02 §5.2.19 (Codec))
 #[test]
 fn video_role_missing_codec_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"video","framerate":30,"bitrate":1000}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"video","framerate":30,"bitrate":1000}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("role 由来の codec 欠如は InvalidCatalog であること");
     };
@@ -989,7 +989,7 @@ fn video_role_missing_codec_rejected() {
 /// role="video" は bitrate 必須 (draft-ietf-moq-msf-02 §5.2.23 (Maximum Bitrate))
 #[test]
 fn video_role_missing_bitrate_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"av01"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"av01"}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("role 由来の bitrate 欠如は InvalidCatalog であること");
     };
@@ -1005,7 +1005,7 @@ fn video_role_missing_bitrate_rejected() {
 /// "An audio description for visually impaired users" と定める。
 #[test]
 fn audiodescription_role_requires_audio_fields_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"role":"audiodescription","lang":"en","codec":"opus","bitrate":32000,"channelConfig":"2"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"role":"audiodescription","lang":"en","codec":"opus","bitrate":32000,"channelConfig":"2"}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("role 由来の samplerate 欠如は InvalidCatalog であること");
     };
@@ -1013,7 +1013,7 @@ fn audiodescription_role_requires_audio_fields_rejected() {
         reason.contains("samplerate") && reason.contains("role 'audiodescription'"),
         "role 由来の samplerate 要求を述べること: {reason}"
     );
-    let json = br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"role":"audiodescription","lang":"en","codec":"opus","bitrate":32000,"samplerate":48000}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"role":"audiodescription","lang":"en","codec":"opus","bitrate":32000,"samplerate":48000}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("role 由来の channelConfig 欠如は InvalidCatalog であること");
     };
@@ -1030,7 +1030,7 @@ fn audiodescription_role_requires_audio_fields_rejected() {
 /// codec 由来ではなく role 由来の要求であることを固定する。
 #[test]
 fn signlanguage_role_is_treated_as_video() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"signlanguage","framerate":30}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"signlanguage","framerate":30}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("role=signlanguage は codec を要求すること");
     };
@@ -1038,7 +1038,7 @@ fn signlanguage_role_is_treated_as_video() {
         reason.contains("codec") && reason.contains("role 'signlanguage'"),
         "role 由来の codec 要求を述べること: {reason}"
     );
-    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"signlanguage","framerate":30,"codec":"unregistered"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"signlanguage","framerate":30,"codec":"unregistered"}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("role=signlanguage は bitrate を要求すること");
     };
@@ -1046,7 +1046,7 @@ fn signlanguage_role_is_treated_as_video() {
         reason.contains("bitrate") && reason.contains("role 'signlanguage'"),
         "role 由来の bitrate 要求を述べること: {reason}"
     );
-    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"signlanguage","framerate":30,"codec":"unregistered","bitrate":1000}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"signlanguage","framerate":30,"codec":"unregistered","bitrate":1000}]}"#;
     assert!(
         MsfCatalogDocument::decode(json).is_ok(),
         "role=signlanguage でも必須フィールドを満たせば受理されること"
@@ -1056,7 +1056,7 @@ fn signlanguage_role_is_treated_as_video() {
 /// role="audio" は samplerate / channelConfig 必須 (§5.2.28 / §5.2.29)
 #[test]
 fn audio_role_missing_samplerate_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"role":"audio","codec":"opus","bitrate":32000,"channelConfig":"2"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"role":"audio","codec":"opus","bitrate":32000,"channelConfig":"2"}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("role 由来の samplerate 欠如は InvalidCatalog であること");
     };
@@ -1064,7 +1064,7 @@ fn audio_role_missing_samplerate_rejected() {
         reason.contains("samplerate") && reason.contains("role 'audio'"),
         "role 由来の samplerate 要求を述べること: {reason}"
     );
-    let json = br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"role":"audio","codec":"opus","bitrate":32000,"samplerate":48000}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"role":"audio","codec":"opus","bitrate":32000,"samplerate":48000}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("role 由来の channelConfig 欠如は InvalidCatalog であること");
     };
@@ -1077,7 +1077,7 @@ fn audio_role_missing_samplerate_rejected() {
 /// role="video" / "audio" が必須フィールドを満たせば受理される
 #[test]
 fn media_role_with_required_fields_accepted() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"av01","bitrate":1000},{"name":"a","packaging":"loc","isLive":true,"role":"audio","codec":"opus","bitrate":32000,"samplerate":48000,"channelConfig":"2"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"av01","bitrate":1000},{"name":"a","packaging":"loc","isLive":true,"role":"audio","codec":"opus","bitrate":32000,"samplerate":48000,"channelConfig":"2"}]}"#;
     assert!(MsfCatalogDocument::decode(json).is_ok());
 }
 
@@ -1087,7 +1087,7 @@ fn media_role_with_required_fields_accepted() {
 /// "It is not required for raw data tracks or event streams." と整合する。
 #[test]
 fn missing_role_does_not_require_media_fields() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true}]}"#;
     assert!(MsfCatalogDocument::decode(json).is_ok());
 }
 
@@ -1115,7 +1115,7 @@ fn media_role_missing_fields_rejected_on_encode() {
 /// role 省略 + codec `opus` は samplerate 必須 (§5.2.28 (Audio sample rate))
 #[test]
 fn codec_audio_missing_samplerate_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"codec":"opus","bitrate":32000,"channelConfig":"2"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"codec":"opus","bitrate":32000,"channelConfig":"2"}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("codec 由来の samplerate 欠如は InvalidCatalog であること");
     };
@@ -1128,7 +1128,7 @@ fn codec_audio_missing_samplerate_rejected() {
 /// role 省略 + codec `opus` は channelConfig 必須 (§5.2.29 (Channel configuration))
 #[test]
 fn codec_audio_missing_channel_config_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"codec":"opus","bitrate":32000,"samplerate":48000}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"codec":"opus","bitrate":32000,"samplerate":48000}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("codec 由来の channelConfig 欠如は InvalidCatalog であること");
     };
@@ -1141,7 +1141,7 @@ fn codec_audio_missing_channel_config_rejected() {
 /// role 省略 + codec `opus` は bitrate 必須 (§5.2.22 (Maximum Bitrate))
 #[test]
 fn codec_audio_missing_bitrate_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"codec":"opus","samplerate":48000,"channelConfig":"2"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"codec":"opus","samplerate":48000,"channelConfig":"2"}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("codec 由来の bitrate 欠如は InvalidCatalog であること");
     };
@@ -1154,7 +1154,7 @@ fn codec_audio_missing_bitrate_rejected() {
 /// role 省略 + codec `av01.0.08M.08` は bitrate 必須 (§5.2.22 (Maximum Bitrate))
 #[test]
 fn codec_video_missing_bitrate_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"codec":"av01.0.08M.08"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"codec":"av01.0.08M.08"}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("codec 由来の bitrate 欠如は InvalidCatalog であること");
     };
@@ -1169,7 +1169,7 @@ fn codec_video_missing_bitrate_rejected() {
 /// draft-ietf-moq-msf-02 §5.6.2 のカタログ例は `"codec":"av01"` を使う。
 #[test]
 fn registry_name_only_video_codec_missing_bitrate_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"codec":"av01"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"codec":"av01"}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("codec 由来の bitrate 欠如は InvalidCatalog であること");
     };
@@ -1182,14 +1182,14 @@ fn registry_name_only_video_codec_missing_bitrate_rejected() {
 /// role 省略 + codec `opus` で bitrate / samplerate / channelConfig を揃えれば受理される
 #[test]
 fn codec_audio_with_required_fields_accepted() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"codec":"opus","bitrate":32000,"samplerate":48000,"channelConfig":"2"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"codec":"opus","bitrate":32000,"samplerate":48000,"channelConfig":"2"}]}"#;
     assert!(MsfCatalogDocument::decode(json).is_ok());
 }
 
 /// role 省略 + codec `av01.0.08M.08` で bitrate を揃えれば受理される
 #[test]
 fn codec_video_with_required_fields_accepted() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"codec":"av01.0.08M.08","bitrate":1000}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"codec":"av01.0.08M.08","bitrate":1000}]}"#;
     assert!(MsfCatalogDocument::decode(json).is_ok());
 }
 
@@ -1198,7 +1198,7 @@ fn codec_video_with_required_fields_accepted() {
 fn unregistered_codec_does_not_require_media_fields() {
     for codec in ["opusx", "opus.2", "vp8x", "flacx"] {
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}"}}]}}"#
+            r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}"}}]}}"#
         );
         assert!(
             MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
@@ -1229,7 +1229,7 @@ fn registry_audio_codec_names_are_classified() {
     ];
     for codec in audio_codecs {
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}","bitrate":32000}}]}}"#
+            r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}","bitrate":32000}}]}}"#
         );
         let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json.as_bytes())
         else {
@@ -1267,14 +1267,14 @@ fn registry_video_codec_names_are_classified() {
     ];
     for codec in video_codecs {
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}","bitrate":1000}}]}}"#
+            r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}","bitrate":1000}}]}}"#
         );
         assert!(
             MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
             "video の登録名 '{codec}' は bitrate だけで受理されること (audio と取り違えない)"
         );
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}"}}]}}"#
+            r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}"}}]}}"#
         );
         let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json.as_bytes())
         else {
@@ -1299,7 +1299,7 @@ fn codec_separator_only_suffix_is_classified() {
     // audio 側は bitrate を与えても samplerate を欠けば拒否される (audio 判定を固定)
     for codec in ["mp4a.", "pcm-"] {
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}","bitrate":32000}}]}}"#
+            r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}","bitrate":32000}}]}}"#
         );
         let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json.as_bytes())
         else {
@@ -1313,7 +1313,7 @@ fn codec_separator_only_suffix_is_classified() {
     // video 側は bitrate だけで受理される (video 判定を固定)
     for codec in ["av01.", "avc1."] {
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}","bitrate":1000}}]}}"#
+            r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}","bitrate":1000}}]}}"#
         );
         assert!(
             MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
@@ -1331,7 +1331,7 @@ fn codec_boundary_separator_is_required() {
         "mp4ax", "pcmx", "av01x", "avc1x", "avc3x", "hev1x", "hvc1x", "vp09x",
     ] {
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}"}}]}}"#
+            r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}"}}]}}"#
         );
         assert!(
             MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
@@ -1347,7 +1347,7 @@ fn codec_boundary_separator_is_required() {
 /// 欠けば、codec を根拠に拒否される。
 #[test]
 fn role_and_codec_requirements_are_combined() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"opus","bitrate":32000}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"opus","bitrate":32000}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("samplerate 欠如は codec を根拠に拒否されること");
     };
@@ -1355,7 +1355,7 @@ fn role_and_codec_requirements_are_combined() {
         reason.contains("codec 'opus'") && reason.contains("samplerate"),
         "codec 由来の samplerate 要求を述べること: {reason}"
     );
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"opus","bitrate":32000,"samplerate":48000}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"opus","bitrate":32000,"samplerate":48000}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("channelConfig 欠如は codec を根拠に拒否されること");
     };
@@ -1364,7 +1364,7 @@ fn role_and_codec_requirements_are_combined() {
         "codec 由来の channelConfig 要求を述べること: {reason}"
     );
     // 両方の要求を満たせば受理される
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"opus","bitrate":32000,"samplerate":48000,"channelConfig":"2"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"opus","bitrate":32000,"samplerate":48000,"channelConfig":"2"}]}"#;
     assert!(
         MsfCatalogDocument::decode(json).is_ok(),
         "role と codec の要求を満たすカタログは受理されること"
@@ -1472,7 +1472,7 @@ fn raw_track_without_codec_accepted_on_encode() {
 /// inside a clone operation in a delta update Section 5.1.6."
 #[test]
 fn parent_name_in_track_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"parentName":"p"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"parentName":"p"}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(ref reason))
@@ -1486,7 +1486,7 @@ fn parent_name_in_track_rejected() {
 /// inside a clone operation in a delta update Section 5.1.6." `parentName` と対称。
 #[test]
 fn parent_namespace_in_track_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"parentNamespace":"ns"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"parentNamespace":"ns"}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(ref reason))
@@ -1499,7 +1499,7 @@ fn parent_namespace_in_track_rejected() {
 /// framerate に infinity (1e400 は f64 で infinity に丸められる) を指定すると拒否される
 #[test]
 fn framerate_infinity_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"framerate":1e400}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"framerate":1e400}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -2215,7 +2215,7 @@ fn encode_delta_irregular_lang_roundtrip() {
 fn video_and_signlanguage_roles_require_framerate() {
     for role in ["video", "signlanguage"] {
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[{{"name":"v","packaging":"loc","isLive":true,"role":"{role}","codec":"av01","bitrate":1000}}]}}"#
+            r#"{{"version":"draft-02","tracks":[{{"name":"v","packaging":"loc","isLive":true,"role":"{role}","codec":"av01","bitrate":1000}}]}}"#
         );
         let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json.as_bytes())
         else {
@@ -2231,7 +2231,7 @@ fn video_and_signlanguage_roles_require_framerate() {
 /// role="audiodescription" は Table 6 で lang を要求する
 #[test]
 fn audiodescription_role_requires_lang() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"role":"audiodescription","codec":"opus","bitrate":32000,"samplerate":48000,"channelConfig":"2"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"role":"audiodescription","codec":"opus","bitrate":32000,"samplerate":48000,"channelConfig":"2"}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("lang 欠如は InvalidCatalog であること");
     };
@@ -2244,7 +2244,7 @@ fn audiodescription_role_requires_lang() {
 /// role="data" の最小 track は追加必須フィールドを要求されない
 #[test]
 fn data_role_minimal_track_accepted() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"d","packaging":"loc","isLive":true,"role":"data"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"d","packaging":"loc","isLive":true,"role":"data"}]}"#;
     assert!(
         MsfCatalogDocument::decode(json).is_ok(),
         "data role は codec / bitrate / framerate / lang を要求しないこと"
@@ -2254,7 +2254,7 @@ fn data_role_minimal_track_accepted() {
 /// 未知のカスタム role の最小 track は追加必須フィールドを要求されない
 #[test]
 fn custom_role_minimal_track_accepted() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"x","packaging":"loc","isLive":true,"role":"foo"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"x","packaging":"loc","isLive":true,"role":"foo"}]}"#;
     assert!(
         MsfCatalogDocument::decode(json).is_ok(),
         "指定 role と衝突しないカスタム role を受理すること"

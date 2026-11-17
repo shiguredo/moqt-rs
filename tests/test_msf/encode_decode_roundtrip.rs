@@ -596,7 +596,7 @@ fn clone_depends_none_omitted() {
 
 #[test]
 fn publish_tracks_roundtrip() {
-    // draft-ietf-moq-msf-02 §5.6.16 を適用した例 (version を draft-01 化 ・ isLive 補完 ・
+    // draft-ietf-moq-msf-02 §5.6.16 を適用した例 (version を draft-02 化 ・ isLive 補完 ・
     // token / connectionURI 除外 ・ %resourceId% は文字列として保持。
     // token / connectionURI なし版の roundtrip (あり版は connection_uri_token_roundtrip) 。
     // 仕様例の track 名と namespace の MUST 形式 (§9.2 / §10.2) の妥当性検証は対象外とし、
@@ -645,7 +645,7 @@ fn publish_tracks_absent_not_emitted() {
 #[test]
 fn publish_tracks_non_array_rejected() {
     // publishTracks が配列でない場合は reject されること
-    let json = br#"{"version":"draft-01","tracks":[],"publishTracks":{}}"#;
+    let json = br#"{"version":"draft-02","tracks":[],"publishTracks":{}}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -655,7 +655,7 @@ fn publish_tracks_non_array_rejected() {
 #[test]
 fn publish_tracks_empty_array_roundtrip() {
     // 明示の空配列は受理され、再 encode でキーが消えること
-    let json = br#"{"version":"draft-01","tracks":[],"publishTracks":[]}"#;
+    let json = br#"{"version":"draft-02","tracks":[],"publishTracks":[]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let encoded = doc.encode().expect("encode に成功すること");
     assert!(!encoded.windows(15).any(|w| w == b"\"publishTracks\""));
@@ -667,7 +667,7 @@ fn publish_tracks_empty_array_roundtrip() {
 #[test]
 fn publish_tracks_duplicate_with_tracks_rejected() {
     // tracks と publishTracks の間の (namespace, name) 重複は reject されること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true}],"publishTracks":[{"name":"t","packaging":"moqlog","isLive":true}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true}],"publishTracks":[{"name":"t","packaging":"moqlog","isLive":true}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -733,7 +733,7 @@ fn connection_uri_roundtrip() {
 #[test]
 fn publish_tracks_unknown_fields_ignored() {
     // 未知フィールドは無視され受理されること (§5 の MUST ignore)
-    let json = br#"{"version":"draft-01","tracks":[],"publishTracks":[{"name":"6","packaging":"moqlog","isLive":true,"unknownFutureKey":"x","role":"log"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[],"publishTracks":[{"name":"6","packaging":"moqlog","isLive":true,"unknownFutureKey":"x","role":"log"}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -745,14 +745,14 @@ fn publish_tracks_unknown_fields_ignored() {
 #[test]
 fn group_validation_separated_between_tracks_and_publish_tracks() {
     // tracks と publishTracks で同一 group 番号・異なる値でも受理されること (分離の意図固定)
-    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":100}],"publishTracks":[{"name":"m","packaging":"moqlog","isLive":true,"renderGroup":1,"targetLatency":200}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":100}],"publishTracks":[{"name":"m","packaging":"moqlog","isLive":true,"renderGroup":1,"targetLatency":200}]}"#;
     assert!(MsfCatalogDocument::decode(json).is_ok());
 }
 
 #[test]
 fn group_validation_inside_publish_tracks_rejected() {
     // publishTracks 内部の同一 group 不一致は reject されること
-    let json = br#"{"version":"draft-01","tracks":[],"publishTracks":[{"name":"a","packaging":"moqlog","isLive":true,"renderGroup":1,"targetLatency":100},{"name":"b","packaging":"moqlog","isLive":true,"renderGroup":1,"targetLatency":200}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[],"publishTracks":[{"name":"a","packaging":"moqlog","isLive":true,"renderGroup":1,"targetLatency":100},{"name":"b","packaging":"moqlog","isLive":true,"renderGroup":1,"targetLatency":200}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -761,7 +761,7 @@ fn group_validation_inside_publish_tracks_rejected() {
 
 #[test]
 fn encryption_signaling_roundtrip() {
-    // §5.6.8 を適用した例 (version を draft-01 化) が roundtrip すること
+    // §5.6.8 を適用した例 (version を draft-02 化) が roundtrip すること
     // trackBaseKey 値は打切りダミーとし、実在し得る鍵情報を使わない
     let mut track = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
     track.encryption_scheme = Some("moq-secure-objects".to_string());
@@ -805,7 +805,7 @@ fn encryption_clone_partial_accepted() {
 #[test]
 fn encryption_orphan_field_accepted() {
     // encryptionScheme なしの cipherSuite 単独は受理され roundtrip すること (片方向 MUST のみ)
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"cipherSuite":"aes-128-gcm-sha256"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"cipherSuite":"aes-128-gcm-sha256"}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -831,7 +831,7 @@ fn encryption_orphan_field_accepted() {
 #[test]
 fn encryption_custom_scheme_without_cipher_suite_accepted() {
     // draft-ietf-moq-msf-02 §5.2.39: cipherSuite は moq-secure-objects のときだけ必須
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"encryptionScheme":"com.example.custom"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"encryptionScheme":"com.example.custom"}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("custom scheme は受理されること");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -864,7 +864,7 @@ fn encryption_secure_objects_incomplete_rejected() {
         ];
         fields.retain(|f| !f.contains(missing));
         let json = format!(
-            "{{\"version\":\"draft-01\",\"tracks\":[{{\"name\":\"t\",\"packaging\":\"loc\",\"isLive\":true,{}}}]}}",
+            "{{\"version\":\"draft-02\",\"tracks\":[{{\"name\":\"t\",\"packaging\":\"loc\",\"isLive\":true,{}}}]}}",
             fields.join(",")
         );
         assert!(
@@ -880,7 +880,7 @@ fn encryption_secure_objects_incomplete_rejected() {
 #[test]
 fn encryption_custom_scheme_accepted() {
     // 未知 scheme は任意文字列として受理されること (custom 許容。 RDNN 検証なし)
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"encryptionScheme":"com.example.custom","cipherSuite":"custom-suite"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"encryptionScheme":"com.example.custom","cipherSuite":"custom-suite"}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -909,9 +909,9 @@ fn encryption_custom_scheme_accepted() {
 
 #[test]
 fn auth_info_roundtrip() {
-    // §5.6.15 を適用した例 (version を draft-01 化、`%...%` は文字列として保持) が
+    // §5.6.15 を適用した例 (version を draft-02 化、`%...%` は文字列として保持) が
     // decode / encode で roundtrip すること。両エントリとも文字列値とする
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"%cat-token%","privacy-pass":"%pp-token%"}}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"%cat-token%","privacy-pass":"%pp-token%"}}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -954,7 +954,7 @@ fn auth_info_roundtrip() {
 #[test]
 fn auth_info_object_value_roundtrip() {
     // object 値も生 JSON として保持され roundtrip すること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":{"token":"%cat-token%"}}}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":{"token":"%cat-token%"}}}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -993,11 +993,11 @@ fn auth_info_object_value_roundtrip() {
 fn auth_info_non_object_rejected() {
     // 非 object の authInfo は reject されること
     for json in [
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":[]}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":"x"}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":null}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":0}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":true}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":[]}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":"x"}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":null}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":0}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":true}]}"#.as_slice(),
     ] {
         assert!(
             matches!(
@@ -1012,7 +1012,7 @@ fn auth_info_non_object_rejected() {
 #[test]
 fn auth_info_null_value_accepted() {
     // 値 null も受理され roundtrip すること (値位置の型は問わない)
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":null}}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":null}}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -1043,7 +1043,7 @@ fn find_auth_value_track<'a>(tracks: &'a [MsfTrack], scheme: &str) -> &'a [u8] {
 #[test]
 fn auth_info_empty_object_accepted() {
     // 空 object は空 Vec として受理され roundtrip すること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{}}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{}}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -1063,7 +1063,7 @@ fn auth_info_empty_object_accepted() {
 #[test]
 fn auth_info_duplicate_scheme_kept_in_order() {
     // 重複 scheme は順序どおりに保持されること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"a","cat":"b"}}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"a","cat":"b"}}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -1139,9 +1139,9 @@ fn find_auth<'a>(entries: &'a [MsfAuthInfo], scheme: &str) -> &'a MsfAuthInfo {
 
 #[test]
 fn accessibility_roundtrip() {
-    // §5.6.11 と §5.6.12 の記述子を併せた合成例 (version のみ draft-01 化) が decode / encode で
+    // §5.6.11 と §5.6.12 の記述子を併せた合成例 (version のみ draft-02 化) が decode / encode で
     // roundtrip すること。608 と 708 の両記述子を含む
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"scheme":"urn:scte:dash:cc:cea-608:2015","value":"CC1=eng;CC3=spa"},{"scheme":"urn:scte:dash:cc:cea-708:2015","value":"1=lang:eng;2=lang:spa;3=lang:fra"}]}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"scheme":"urn:scte:dash:cc:cea-608:2015","value":"CC1=eng;CC3=spa"},{"scheme":"urn:scte:dash:cc:cea-708:2015","value":"1=lang:eng;2=lang:spa;3=lang:fra"}]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -1354,7 +1354,7 @@ fn accessibility_clone_none_omitted() {
 #[test]
 fn accessibility_full_empty_normalized() {
     // Full の明示 [] は受理され、再 encode で省略されること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[]}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -1371,14 +1371,14 @@ fn accessibility_full_empty_normalized() {
 fn accessibility_missing_field_rejected() {
     // scheme / value の欠如・型不正は reject されること
     for json in [
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"value":"CC1=eng"}]}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"scheme":"urn:scte:dash:cc:cea-608:2015"}]}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"scheme":"x","value":0}]}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":{}}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":"x"}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":null}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[0]}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"scheme":0,"value":"x"}]}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"value":"CC1=eng"}]}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"scheme":"urn:scte:dash:cc:cea-608:2015"}]}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"scheme":"x","value":0}]}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":{}}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":"x"}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":null}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[0]}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"scheme":0,"value":"x"}]}]}"#.as_slice(),
     ] {
         assert!(
             matches!(
@@ -2200,7 +2200,7 @@ fn keyframe_spacing_roundtrip() {
     assert_eq!(decoded, doc, "decode / encode が往復すること");
 
     // altGroup だけを持ち keyframeSpacing を持たない既存カタログは引き続き受理する
-    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"altGroup":1}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"altGroup":1}]}"#;
     assert!(
         MsfCatalogDocument::decode(json).is_ok(),
         "keyframeSpacing は任意であり、共通検証で要求しないこと"

@@ -15,7 +15,7 @@ draft-ietf-moq-transport-23 に基づく Sans I/O / no_std な Media over QUIC T
 - **Session 状態機械**: 1 本の Transport Session に閉じた endpoint-local な状態管理
 - **インクリメンタルデコード**: フレーム境界に依存せず受信バッファに蓄積しながらデコード
 - **音声の再生補助**: 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期の遅延制御、時間圧縮・伸長と欠落の補間 (no_std / Sans I/O)
-- **対応仕様**: MOQT `draft-23` / LOC `draft-05` / MSF `draft-01` / C4M `draft-02`
+- **対応仕様**: MOQT `draft-23` / LOC `draft-05` / MSF `draft-02` / C4M `draft-02`
 
 ## バージョン情報
 

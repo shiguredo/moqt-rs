@@ -2,12 +2,12 @@ use super::*;
 
 #[test]
 fn full_catalog_minimal() {
-    let json = br#"{"version":"draft-01","tracks":[]}"#;
+    let json = br#"{"version":"draft-02","tracks":[]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full が期待された");
     };
-    assert_eq!(cat.version, "draft-01");
+    assert_eq!(cat.version, "draft-02");
     assert_eq!(cat.generated_at, None);
     assert!(!cat.is_complete);
     assert!(cat.tracks.is_empty());
@@ -16,7 +16,7 @@ fn full_catalog_minimal() {
 #[test]
 fn full_catalog_with_all_root_fields() {
     let json =
-        br#"{"version":"draft-01","generatedAt":1700000000000,"isComplete":true,"tracks":[]}"#;
+        br#"{"version":"draft-02","generatedAt":1700000000000,"isComplete":true,"tracks":[]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full が期待された");
@@ -28,7 +28,7 @@ fn full_catalog_with_all_root_fields() {
 #[test]
 fn full_catalog_unknown_fields_ignored() {
     // パーサは未知フィールドを無視する (draft-ietf-moq-msf-02 §5 (Catalog))
-    let json = br#"{"version":"draft-01","tracks":[],"unknownField":42,"another":"value"}"#;
+    let json = br#"{"version":"draft-02","tracks":[],"unknownField":42,"another":"value"}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     assert!(matches!(doc, MsfCatalogDocument::Full(_)));
 }
@@ -37,7 +37,7 @@ fn full_catalog_unknown_fields_ignored() {
 fn unknown_packaging_rejected() {
     // draft-ietf-moq-msf-02 §5.2.4 (Packaging): 許容値は loc / mediatimeline / eventtimeline / moqlog / moqmetrics のみ
     let json =
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"custom","isLive":true}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"custom","isLive":true}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -48,7 +48,7 @@ fn unknown_packaging_rejected() {
 fn moqlog_packaging_accepted() {
     // draft-ietf-moq-msf-02 §5.2.4 (Packaging): moqlog は許容値
     let json =
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"moqlog","isLive":true}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"moqlog","isLive":true}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full が期待された");
@@ -60,7 +60,7 @@ fn moqlog_packaging_accepted() {
 fn moqmetrics_packaging_accepted() {
     // draft-ietf-moq-msf-02 §5.2.4 (Packaging): moqmetrics は許容値
     let json =
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"moqmetrics","isLive":true}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"moqmetrics","isLive":true}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full が期待された");
@@ -97,7 +97,7 @@ fn remove_tracks_extra_field_rejected() {
 #[test]
 fn delta_update_non_array_rejected() {
     // draft-ietf-moq-msf-02 §5.1.6 (Delta update): deltaUpdate は operation object の配列
-    let json = br#"{"generatedAt":1,"deltaUpdate":false,"version":"draft-01","tracks":[]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":false,"version":"draft-02","tracks":[]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -107,7 +107,7 @@ fn delta_update_non_array_rejected() {
 #[test]
 fn duplicate_track_name_rejected() {
     // draft-ietf-moq-msf-02 §5.2.3 (Track name): track name は namespace ごとに一意
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
             {"name":"audio","packaging":"loc","isLive":true},
             {"name":"audio","packaging":"loc","isLive":true}
         ]}"#;
@@ -120,7 +120,7 @@ fn duplicate_track_name_rejected() {
 #[test]
 fn same_name_different_namespace_allowed() {
     // 異なる namespace 内の同名トラックは許容される
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
             {"name":"audio","packaging":"loc","namespace":"ns1","isLive":true},
             {"name":"audio","packaging":"loc","namespace":"ns2","isLive":true}
         ]}"#;
@@ -131,7 +131,7 @@ fn same_name_different_namespace_allowed() {
 #[test]
 fn is_complete_false_rejected() {
     // draft-ietf-moq-msf-02 §5.1.3 (Is Complete): isComplete が FALSE ならフィールド自体を含めてはならない
-    let json = br#"{"version":"draft-01","isComplete":false,"tracks":[]}"#;
+    let json = br#"{"version":"draft-02","isComplete":false,"tracks":[]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -315,9 +315,9 @@ fn invalid_catalog_namespace_rejected() {
 #[test]
 fn invalid_catalog_track_name_rejected() {
     for json in [
-        br#"{"version":"draft-01","tracks":[{"name":"","packaging":"loc","isLive":true}]}"#
+        br#"{"version":"draft-02","tracks":[{"name":"","packaging":"loc","isLive":true}]}"#
             .as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"a\u0000b","packaging":"loc","isLive":true}]}"#
+        br#"{"version":"draft-02","tracks":[{"name":"a\u0000b","packaging":"loc","isLive":true}]}"#
             .as_slice(),
     ] {
         assert!(
@@ -354,7 +354,7 @@ fn invalid_catalog_track_name_rejected() {
 /// depends の String 要素も track name の写像規則で検証すること
 #[test]
 fn depends_elements_use_track_name_mapping() {
-    let empty = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"depends":[""]}]}"#;
+    let empty = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"depends":[""]}]}"#;
     assert!(
         matches!(
             MsfCatalogDocument::decode(empty),
@@ -363,7 +363,7 @@ fn depends_elements_use_track_name_mapping() {
         "空の depends 要素を拒否すること"
     );
 
-    let nul = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"depends":["a\u0000b"]}]}"#;
+    let nul = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"depends":["a\u0000b"]}]}"#;
     assert!(
         matches!(
             MsfCatalogDocument::decode(nul),
@@ -414,7 +414,7 @@ fn track_name_uniqueness_resolves_inherited_namespace() {
 #[test]
 fn bom_and_unpaired_surrogate_rejected() {
     let mut with_bom = vec![0xef, 0xbb, 0xbf];
-    with_bom.extend_from_slice(br#"{"version":"draft-01","tracks":[]}"#);
+    with_bom.extend_from_slice(br#"{"version":"draft-02","tracks":[]}"#);
     assert!(
         matches!(
             MsfCatalogDocument::decode(&with_bom),
@@ -424,7 +424,7 @@ fn bom_and_unpaired_surrogate_rejected() {
     );
 
     let surrogate =
-        br#"{"version":"draft-01","tracks":[{"name":"a\uDEADb","packaging":"loc","isLive":true}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"a\uDEADb","packaging":"loc","isLive":true}]}"#;
     assert!(
         matches!(
             MsfCatalogDocument::decode(surrogate),
@@ -437,7 +437,7 @@ fn bom_and_unpaired_surrogate_rejected() {
 /// 名前中の U+FEFF は BOM ではなく通常の文字として受理すること
 #[test]
 fn zero_width_no_break_space_in_name_accepted() {
-    let json = "{\"version\":\"draft-01\",\"tracks\":[{\"name\":\"a\u{feff}b\",\"packaging\":\"loc\",\"isLive\":true}]}";
+    let json = "{\"version\":\"draft-02\",\"tracks\":[{\"name\":\"a\u{feff}b\",\"packaging\":\"loc\",\"isLive\":true}]}";
     let doc =
         MsfCatalogDocument::decode(json.as_bytes()).expect("名前中の U+FEFF は受理されること");
     let MsfCatalogDocument::Full(catalog) = doc else {
@@ -472,8 +472,8 @@ fn clone_and_remove_invalid_names_rejected() {
         br#"{"generatedAt":1,"deltaUpdate":[{"op":"remove","tracks":[{"name":"a\u0000b"}]}]}"#.as_slice(),
         br#"{"generatedAt":1,"deltaUpdate":[{"op":"remove","tracks":[{"name":"x","namespace":"a//b"}]}]}"#.as_slice(),
         // publishTracks の name が空 / namespace が空 field
-        br#"{"version":"draft-01","tracks":[],"publishTracks":[{"name":"","packaging":"loc","isLive":true}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[],"publishTracks":[{"name":"p","namespace":"a//b","packaging":"loc","isLive":true}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[],"publishTracks":[{"name":"","packaging":"loc","isLive":true}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[],"publishTracks":[{"name":"p","namespace":"a//b","packaging":"loc","isLive":true}]}"#.as_slice(),
     ] {
         assert!(
             matches!(
@@ -493,7 +493,7 @@ fn clone_and_remove_invalid_names_rejected() {
 /// `"caf\u00e9"` は同じバイト列になる。
 #[test]
 fn escaped_and_literal_names_are_the_same_full_track_name() {
-    let json = "{\"version\":\"draft-01\",\"tracks\":[\
+    let json = "{\"version\":\"draft-02\",\"tracks\":[\
             {\"name\":\"caf\u{e9}\",\"packaging\":\"loc\",\"isLive\":true},\
             {\"name\":\"caf\\u00e9\",\"packaging\":\"loc\",\"isLive\":true}\
         ]}";
@@ -512,7 +512,7 @@ fn escaped_and_literal_names_are_the_same_full_track_name() {
 /// `"café"` (U+00E9) と `"cafe\u0301"` (U+0065 U+0301) は異なる Track Name である。
 #[test]
 fn unicode_normalization_is_not_applied() {
-    let json = "{\"version\":\"draft-01\",\"tracks\":[\
+    let json = "{\"version\":\"draft-02\",\"tracks\":[\
             {\"name\":\"caf\u{e9}\",\"packaging\":\"loc\",\"isLive\":true},\
             {\"name\":\"cafe\\u0301\",\"packaging\":\"loc\",\"isLive\":true}\
         ]}";
@@ -557,7 +557,7 @@ fn namespace_and_full_track_name_length_boundaries() {
     // namespace 4,095 バイト + name 1 バイト = Full Track Name 4,096 バイトちょうど
     let namespace = "a".repeat(4095);
     let ok_json = format!(
-        r#"{{"version":"draft-01","tracks":[{{"name":"b","namespace":"{namespace}","packaging":"loc","isLive":true}}]}}"#
+        r#"{{"version":"draft-02","tracks":[{{"name":"b","namespace":"{namespace}","packaging":"loc","isLive":true}}]}}"#
     );
     assert!(
         MsfCatalogDocument::decode(ok_json.as_bytes()).is_ok(),
@@ -566,7 +566,7 @@ fn namespace_and_full_track_name_length_boundaries() {
 
     // namespace 4,096 バイト + name 1 バイト = 4,097 バイトは拒否する
     let too_long_json = format!(
-        r#"{{"version":"draft-01","tracks":[{{"name":"b","namespace":"{max_namespace}","packaging":"loc","isLive":true}}]}}"#
+        r#"{{"version":"draft-02","tracks":[{{"name":"b","namespace":"{max_namespace}","packaging":"loc","isLive":true}}]}}"#
     );
     assert!(
         matches!(
@@ -579,7 +579,7 @@ fn namespace_and_full_track_name_length_boundaries() {
     // namespace を省略しても、name 単体が 4,096 バイトを超えれば拒否する
     let long_name = "a".repeat(4097);
     let long_name_json = format!(
-        r#"{{"version":"draft-01","tracks":[{{"name":"{long_name}","packaging":"loc","isLive":true}}]}}"#
+        r#"{{"version":"draft-02","tracks":[{{"name":"{long_name}","packaging":"loc","isLive":true}}]}}"#
     );
     assert!(
         matches!(
@@ -677,7 +677,7 @@ fn decode_rejects_each_invalid_namespace_form() {
     cases.push("a\\u0000b".to_string());
     for namespace in cases {
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[{{"name":"t","namespace":"{namespace}","packaging":"loc","isLive":true}}]}}"#
+            r#"{{"version":"draft-02","tracks":[{{"name":"t","namespace":"{namespace}","packaging":"loc","isLive":true}}]}}"#
         );
         assert!(
             matches!(
@@ -780,7 +780,7 @@ fn clone_parent_full_track_name_length_is_checked_separately() {
 #[test]
 fn catalog_packaging_accepted() {
     let json =
-        br#"{"version":"draft-01","tracks":[{"name":"catalog","packaging":"catalog","isLive":true}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"catalog","packaging":"catalog","isLive":true}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full が期待された");
@@ -794,7 +794,7 @@ fn catalog_packaging_accepted() {
 /// 同じ key は最初の出現を使い、未知の key は無視する。
 #[test]
 fn packaging_metadata_accessor_uses_first_occurrence() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"packagingMetadata":"streamMapping=object;unknown=x;streamMapping=first"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"packagingMetadata":"streamMapping=object;unknown=x;streamMapping=first"}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(catalog) = doc else {
         panic!("Full が期待された");
@@ -829,7 +829,7 @@ fn invalid_packaging_metadata_rejected() {
         "", "a=b;;c=d", "key", "=value", "key=", "a b=c", "a=b c", "a=b=c", "a=b;c",
     ] {
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[{{"name":"t","packaging":"loc","isLive":true,"packagingMetadata":"{metadata}"}}]}}"#
+            r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"loc","isLive":true,"packagingMetadata":"{metadata}"}}]}}"#
         );
         assert!(
             matches!(
@@ -854,7 +854,7 @@ fn invalid_packaging_metadata_rejected() {
 /// depends の track name / renderGroup 参照が解決されること
 #[test]
 fn depends_resolution_accepts_track_name_and_render_group() {
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
         {"name":"video","packaging":"loc","isLive":true,"renderGroup":1},
         {"name":"audio","packaging":"loc","isLive":true},
         {"name":"timeline","packaging":"mediatimeline","isLive":true,"depends":["audio",1],"mimeType":"application/json"}
@@ -877,7 +877,7 @@ fn depends_resolution_accepts_track_name_and_render_group() {
 fn depends_resolution_rejects_unresolved_references() {
     for depends in [r#"["missing"]"#, "[7]"] {
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[{{"name":"x","packaging":"loc","isLive":true,"depends":{depends}}}]}}"#
+            r#"{{"version":"draft-02","tracks":[{{"name":"x","packaging":"loc","isLive":true,"depends":{depends}}}]}}"#
         );
         assert!(
             matches!(
@@ -892,14 +892,14 @@ fn depends_resolution_rejects_unresolved_references() {
 /// 自己参照と同名 track への依存が拒否されること
 #[test]
 fn depends_resolution_rejects_self_and_ambiguous_names() {
-    let self_ref = br#"{"version":"draft-01","tracks":[{"name":"x","packaging":"loc","isLive":true,"depends":["x"]}]}"#;
+    let self_ref = br#"{"version":"draft-02","tracks":[{"name":"x","packaging":"loc","isLive":true,"depends":["x"]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(self_ref),
         Err(MessageError::InvalidCatalog(_))
     ));
 
     // namespace が違えば track name の一意性は満たすが、depends の String は 2 件に一致する
-    let ambiguous = br#"{"version":"draft-01","tracks":[
+    let ambiguous = br#"{"version":"draft-02","tracks":[
         {"name":"dup","namespace":"a","packaging":"loc","isLive":true},
         {"name":"dup","namespace":"b","packaging":"loc","isLive":true},
         {"name":"x","packaging":"loc","isLive":true,"depends":["dup"]}
@@ -913,7 +913,7 @@ fn depends_resolution_rejects_self_and_ambiguous_names() {
 /// 複数の track が同じ renderGroup を共有していても 1 つのグループとして解決されること
 #[test]
 fn depends_resolution_accepts_shared_render_group() {
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
         {"name":"a","packaging":"loc","isLive":true,"renderGroup":5},
         {"name":"b","packaging":"loc","isLive":true,"renderGroup":5},
         {"name":"c","packaging":"loc","isLive":true,"depends":[5]}
@@ -927,7 +927,7 @@ fn depends_resolution_accepts_shared_render_group() {
 /// tracks と publishTracks が相互に依存できること
 #[test]
 fn depends_resolution_allows_publish_tracks_cross_reference() {
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
         {"name":"normal","packaging":"loc","isLive":true,"depends":["published"]}
     ],"publishTracks":[
         {"name":"published","packaging":"loc","isLive":true,"depends":["normal"]}
@@ -943,7 +943,7 @@ fn depends_resolution_allows_publish_tracks_cross_reference() {
 /// media timeline が renderGroup の全 track を個別名で列挙する場合に拒否されること
 #[test]
 fn media_timeline_all_tracks_named_without_render_group_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
         {"name":"v1","packaging":"loc","isLive":true,"renderGroup":1},
         {"name":"v2","packaging":"loc","isLive":true,"renderGroup":1},
         {"name":"timeline","packaging":"mediatimeline","isLive":true,"depends":["v1","v2"]}
@@ -957,7 +957,7 @@ fn media_timeline_all_tracks_named_without_render_group_rejected() {
 /// media timeline が renderGroup と所属 track の個別名を併記する場合に拒否されること
 #[test]
 fn media_timeline_render_group_and_member_name_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
         {"name":"v1","packaging":"loc","isLive":true,"renderGroup":1},
         {"name":"v2","packaging":"loc","isLive":true,"renderGroup":1},
         {"name":"timeline","packaging":"mediatimeline","isLive":true,"depends":[1,"v1"]}
@@ -971,7 +971,7 @@ fn media_timeline_render_group_and_member_name_rejected() {
 /// mimeType を持たない media timeline が受理されること
 #[test]
 fn media_timeline_without_mime_type_accepted() {
-    let json = br#"{"version":"draft-01","tracks":[
+    let json = br#"{"version":"draft-02","tracks":[
         {"name":"video","packaging":"loc","isLive":true},
         {"name":"timeline","packaging":"mediatimeline","isLive":true,"depends":["video"]}
     ]}"#;
@@ -981,7 +981,7 @@ fn media_timeline_without_mime_type_accepted() {
 /// moq-secure-objects で cipherSuite が無い場合は decode で拒否されること
 #[test]
 fn secure_objects_without_cipher_suite_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"encryptionScheme":"moq-secure-objects","keyId":"key-1","trackBaseKey":"AAEC"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"encryptionScheme":"moq-secure-objects","keyId":"key-1","trackBaseKey":"AAEC"}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -992,7 +992,7 @@ fn secure_objects_without_cipher_suite_rejected() {
 #[test]
 fn accessible_window_time_alt_group_rules() {
     // 同じ値なら受理
-    let same = br#"{"version":"draft-01","tracks":[
+    let same = br#"{"version":"draft-02","tracks":[
         {"name":"a","packaging":"loc","isLive":true,"altGroup":1,"accessibleWindowTime":60000},
         {"name":"b","packaging":"loc","isLive":false,"altGroup":1,"accessibleWindowTime":60000}
     ]}"#;
@@ -1003,7 +1003,7 @@ fn accessible_window_time_alt_group_rules() {
     assert_eq!(cat.tracks[0].accessible_window_time, Some(60000));
 
     // 値が異なる場合は isLive=false でも拒否
-    let different = br#"{"version":"draft-01","tracks":[
+    let different = br#"{"version":"draft-02","tracks":[
         {"name":"a","packaging":"loc","isLive":false,"altGroup":1,"accessibleWindowTime":60000},
         {"name":"b","packaging":"loc","isLive":false,"altGroup":1,"accessibleWindowTime":120000}
     ]}"#;
@@ -1013,7 +1013,7 @@ fn accessible_window_time_alt_group_rules() {
     ));
 
     // 一部だけが持つ場合は拒否
-    let partial = br#"{"version":"draft-01","tracks":[
+    let partial = br#"{"version":"draft-02","tracks":[
         {"name":"a","packaging":"loc","isLive":true,"altGroup":1,"accessibleWindowTime":60000},
         {"name":"b","packaging":"loc","isLive":true,"altGroup":1}
     ]}"#;
@@ -1023,7 +1023,7 @@ fn accessible_window_time_alt_group_rules() {
     ));
 
     // 全 track が持たない場合は受理
-    let none = br#"{"version":"draft-01","tracks":[
+    let none = br#"{"version":"draft-02","tracks":[
         {"name":"a","packaging":"loc","isLive":true,"altGroup":1},
         {"name":"b","packaging":"loc","isLive":true,"altGroup":1}
     ]}"#;
@@ -1033,7 +1033,7 @@ fn accessible_window_time_alt_group_rules() {
 /// publishTracks の altGroup にも一致規則が適用されること
 #[test]
 fn accessible_window_time_publish_tracks_alt_group_rules() {
-    let json = br#"{"version":"draft-01","tracks":[],"publishTracks":[
+    let json = br#"{"version":"draft-02","tracks":[],"publishTracks":[
         {"name":"a","packaging":"loc","isLive":true,"altGroup":1,"accessibleWindowTime":60000},
         {"name":"b","packaging":"loc","isLive":true,"altGroup":1,"accessibleWindowTime":120000}
     ]}"#;
@@ -1046,7 +1046,7 @@ fn accessible_window_time_publish_tracks_alt_group_rules() {
 /// track-property / object-property の initData を受理すること
 #[test]
 fn init_data_property_types_accepted() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"initRef":"init1"}],"initDataList":[
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"initRef":"init1"}],"initDataList":[
         {"id":"init1","type":"track-property","data":"0x0D"},
         {"id":"init2","type":"object-property","data":"0x78"}
     ]}"#;
@@ -1069,7 +1069,7 @@ fn init_data_property_type_invalid_hex_rejected() {
         "0x10000000000000000",
     ] {
         let json = format!(
-            r#"{{"version":"draft-01","tracks":[],"initDataList":[{{"id":"i","type":"track-property","data":"{data}"}}]}}"#
+            r#"{{"version":"draft-02","tracks":[],"initDataList":[{{"id":"i","type":"track-property","data":"{data}"}}]}}"#
         );
         assert!(
             matches!(
@@ -1081,7 +1081,7 @@ fn init_data_property_type_invalid_hex_rejected() {
     }
 
     // 2^62 - 1 は受理する
-    let json = br#"{"version":"draft-01","tracks":[],"initDataList":[{"id":"i","type":"track-property","data":"0x3FFFFFFFFFFFFFFF"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[],"initDataList":[{"id":"i","type":"track-property","data":"0x3FFFFFFFFFFFFFFF"}]}"#;
     assert!(MsfCatalogDocument::decode(json).is_ok());
 }
 
@@ -1138,7 +1138,7 @@ fn delta_forbidden_root_fields_rejected() {
         r#""isComplete":true"#,
         r#""publishTracks":[]"#,
         r#""initDataList":[]"#,
-        r#""version":"draft-01""#,
+        r#""version":"draft-02""#,
         r#""tracks":[]"#,
     ] {
         let json = format!(
@@ -1159,4 +1159,33 @@ fn delta_forbidden_root_fields_rejected() {
 fn delta_unknown_root_field_accepted() {
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"remove","tracks":[{"name":"x"}]}],"custom":true}"#;
     assert!(MsfCatalogDocument::decode(json).is_ok());
+}
+
+/// draft-01 の完全カタログは受理しないこと
+#[test]
+fn full_catalog_draft_01_rejected() {
+    let json = br#"{"version":"draft-01","tracks":[]}"#;
+    assert!(matches!(
+        MsfCatalogDocument::decode(json),
+        Err(MessageError::InvalidCatalogVersion(version)) if version == "draft-01"
+    ));
+}
+
+/// draft-03 の完全カタログは受理しないこと
+#[test]
+fn full_catalog_draft_03_rejected() {
+    let json = br#"{"version":"draft-03","tracks":[]}"#;
+    assert!(matches!(
+        MsfCatalogDocument::decode(json),
+        Err(MessageError::InvalidCatalogVersion(version)) if version == "draft-03"
+    ));
+}
+
+/// version を持たない delta update は version ゲートの対象外であること
+#[test]
+fn delta_without_version_is_not_version_gated() {
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"remove","tracks":[{"name":"x"}]}]}"#;
+    let doc =
+        MsfCatalogDocument::decode(json).expect("delta は version を持たなくても受理されること");
+    assert!(matches!(doc, MsfCatalogDocument::Delta(_)));
 }

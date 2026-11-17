@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn template_roundtrip() {
     // draft-ietf-moq-msf-02 §5.6.10 準拠例の template が roundtrip すること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[0,2002,[0,0],[1,0],1759924158381,2002]}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[0,2002,[0,0],[1,0],1759924158381,2002]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc.clone() else {
         panic!("Full catalog がデコードされること");
@@ -28,7 +28,7 @@ fn template_roundtrip() {
 #[test]
 fn template_too_many_elements_rejected() {
     // 要素数 7 は reject されること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[0,2002,[0,0],[1,0],1759924158381,2002,0]}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[0,2002,[0,0],[1,0],1759924158381,2002,0]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -38,7 +38,7 @@ fn template_too_many_elements_rejected() {
 #[test]
 fn template_delta_location_arity_rejected() {
     // deltaLocation の要素数 1 は reject されること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[0,2002,[0,0],[1],1759924158381,2002]}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[0,2002,[0,0],[1],1759924158381,2002]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -48,7 +48,7 @@ fn template_delta_location_arity_rejected() {
 #[test]
 fn template_non_array_rejected() {
     // template 自体が配列でない場合は reject されること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":0}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":0}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -68,7 +68,7 @@ fn template_in_clone_rejected_when_invalid() {
 #[test]
 fn template_location_non_array_rejected() {
     // startLocation が配列でない場合は reject されること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[0,2002,0,[1,0],1759924158381,2002]}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[0,2002,0,[1,0],1759924158381,2002]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -78,7 +78,7 @@ fn template_location_non_array_rejected() {
 #[test]
 fn template_location_element_type_rejected() {
     // location 要素の型違いは reject されること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[0,2002,[0,"x"],[1,0],1759924158381,2002]}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[0,2002,[0,"x"],[1,0],1759924158381,2002]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -88,7 +88,7 @@ fn template_location_element_type_rejected() {
 #[test]
 fn template_distinct_values_not_swapped() {
     // 6 要素が全て異なる値でも正しく対応すること (start / delta 取り違えの回帰検出)
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[100,2002,[5,7],[1,2],1759924158381,3003]}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[100,2002,[5,7],[1,2],1759924158381,3003]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -116,7 +116,7 @@ fn template_distinct_values_not_swapped() {
 #[test]
 fn template_wrong_element_count_rejected() {
     // 要素数 5 は reject されること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[0,2002,[0,0],[1,0],1759924158381]}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[0,2002,[0,0],[1,0],1759924158381]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -126,7 +126,7 @@ fn template_wrong_element_count_rejected() {
 #[test]
 fn template_wrong_location_arity_rejected() {
     // location の要素数 3 は reject されること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[0,2002,[0,0,0],[1,0],1759924158381,2002]}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[0,2002,[0,0,0],[1,0],1759924158381,2002]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -136,7 +136,7 @@ fn template_wrong_location_arity_rejected() {
 #[test]
 fn template_wrong_type_rejected() {
     // 要素の型違いは reject されること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[0,"2002",[0,0],[1,0],1759924158381,2002]}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[0,"2002",[0,0],[1,0],1759924158381,2002]}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))

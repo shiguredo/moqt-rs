@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn resolve_basic_substitution() {
     // `%id%` が fragment 値で置換されること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"cmcdv2-%id%","packaging":"loc","isLive":true}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"cmcdv2-%id%","packaging":"loc","isLive":true}]}"#;
     let resolved =
         resolve_catalog_variables(json, "id=bob").expect("テストフィクスチャの前提条件を満たす");
     let text = String::from_utf8(resolved).expect("テストフィクスチャの前提条件を満たす");
@@ -17,7 +17,7 @@ fn resolve_basic_substitution() {
 #[test]
 fn resolve_with_reserved_params_ignored() {
     // §11.1 形の予約パラメータ混じり fragment でも変数は解決されること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"%token%"}}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"%token%"}}]}"#;
     let resolved =
         resolve_catalog_variables(json, "msf:ns--catalog&token=abc&location-range=16.24")
             .expect("テストフィクスチャの前提条件を満たす");
@@ -29,7 +29,7 @@ fn resolve_with_reserved_params_ignored() {
 fn resolve_at_value() {
     // 値の `@` は受理され置換されること
     let json =
-        br#"{"version":"draft-01","tracks":[{"name":"%id%","packaging":"loc","isLive":true}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"%id%","packaging":"loc","isLive":true}]}"#;
     let resolved =
         resolve_catalog_variables(json, "id=a@b").expect("テストフィクスチャの前提条件を満たす");
     let text = String::from_utf8(resolved).expect("テストフィクスチャの前提条件を満たす");
@@ -38,7 +38,7 @@ fn resolve_at_value() {
 #[test]
 fn resolve_section_5_2_43_full_form() {
     // §5.2.43 例の fragment 形 (先頭の `=` なし要素付き) でも解決できること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"%token%"}}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"%token%"}}]}"#;
     let resolved = resolve_catalog_variables(json, "namespace--name&token=XYZ789")
         .expect("テストフィクスチャの前提条件を満たす");
     let text = String::from_utf8(resolved).expect("テストフィクスチャの前提条件を満たす");
@@ -49,7 +49,7 @@ fn resolve_section_5_2_43_full_form() {
 fn resolve_first_wins() {
     // 重複キーは先勝ちで解決されること
     let json =
-        br#"{"version":"draft-01","tracks":[{"name":"%id%","packaging":"loc","isLive":true}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"%id%","packaging":"loc","isLive":true}]}"#;
     let resolved =
         resolve_catalog_variables(json, "id=a&id=b").expect("テストフィクスチャの前提条件を満たす");
     let text = String::from_utf8(resolved).expect("テストフィクスチャの前提条件を満たす");
@@ -59,7 +59,7 @@ fn resolve_first_wins() {
 #[test]
 fn resolve_name_case_sensitive() {
     // 変数名の大文字小文字は区別されること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"%id%-%ID%","packaging":"loc","isLive":true}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"%id%-%ID%","packaging":"loc","isLive":true}]}"#;
     let resolved =
         resolve_catalog_variables(json, "id=a&ID=b").expect("テストフィクスチャの前提条件を満たす");
     let text = String::from_utf8(resolved).expect("テストフィクスチャの前提条件を満たす");
@@ -69,7 +69,7 @@ fn resolve_name_case_sensitive() {
 #[test]
 fn resolve_msf_prefixed_fragment() {
     // `msf:` 付き fragment 全体でも変数は解決されること (先頭要素は無視される)
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"%token%"}}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"%token%"}}]}"#;
     let resolved = resolve_catalog_variables(json, "msf:ns--catalog&token=XYZ789")
         .expect("テストフィクスチャの前提条件を満たす");
     let text = String::from_utf8(resolved).expect("テストフィクスチャの前提条件を満たす");
@@ -109,7 +109,7 @@ fn resolve_error_contains_position() {
 #[test]
 fn resolve_section_5_2_43_example() {
     // §5.2.43 例: token=XYZ789 が "cat": "%token%" に代入されること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"%token%"}}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"%token%"}}]}"#;
     let resolved = resolve_catalog_variables(json, "token=XYZ789")
         .expect("テストフィクスチャの前提条件を満たす");
     let text = String::from_utf8(resolved).expect("テストフィクスチャの前提条件を満たす");
@@ -119,7 +119,7 @@ fn resolve_section_5_2_43_example() {
 #[test]
 fn resolve_undefined_kept() {
     // 未定義変数の参照は保持されること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"%missing%","packaging":"loc","isLive":true}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"%missing%","packaging":"loc","isLive":true}]}"#;
     let resolved =
         resolve_catalog_variables(json, "id=bob").expect("テストフィクスチャの前提条件を満たす");
     let text = String::from_utf8(resolved).expect("テストフィクスチャの前提条件を満たす");
@@ -129,7 +129,7 @@ fn resolve_undefined_kept() {
 #[test]
 fn resolve_name_charset_and_case() {
     // 変数名の `-`・`_` と大文字小文字の区別
-    let json = br#"{"version":"draft-01","tracks":[{"name":"%my-id_X%-%MY-ID%","packaging":"loc","isLive":true}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"%my-id_X%-%MY-ID%","packaging":"loc","isLive":true}]}"#;
     let resolved = resolve_catalog_variables(json, "my-id_X=a&MY-ID=b")
         .expect("テストフィクスチャの前提条件を満たす");
     let text = String::from_utf8(resolved).expect("テストフィクスチャの前提条件を満たす");
@@ -140,7 +140,7 @@ fn resolve_name_charset_and_case() {
 fn resolve_multiple_variables() {
     // §5.6.14 形の複数変数同時置換 (token / id / event)。3 変数すべて置換されること
     // (§5.6.14 は authInfo の cat にトークン変数を置く例である)
-    let json = br#"{"version":"draft-01","tracks":[{"name":"%event%","namespace":"%id%","packaging":"loc","isLive":true,"authInfo":{"cat":"%token%"}}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"%event%","namespace":"%id%","packaging":"loc","isLive":true,"authInfo":{"cat":"%token%"}}]}"#;
     let resolved = resolve_catalog_variables(json, "token=1234&id=bob&event=xyz")
         .expect("テストフィクスチャの前提条件を満たす");
     let text = String::from_utf8(resolved).expect("テストフィクスチャの前提条件を満たす");
@@ -157,7 +157,7 @@ fn resolve_propagates_fragment_error() {
     // 参照される値の文字種外は resolve から伝播すること
     // (参照されない予約パラメータ等は不問とする)
     let json =
-        br#"{"version":"draft-01","tracks":[{"name":"%id%","packaging":"loc","isLive":true}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"%id%","packaging":"loc","isLive":true}]}"#;
     assert!(matches!(
         resolve_catalog_variables(json, "id=a,b"),
         Err(MessageError::InvalidCatalog(_))
@@ -218,22 +218,22 @@ fn resolve_invalid_percent_rejected() {
     for (name, json) in [
         (
             "閉じない %",
-            br#"{"version":"draft-01","tracks":[{"name":"%id","packaging":"loc","isLive":true}]}"#
+            br#"{"version":"draft-02","tracks":[{"name":"%id","packaging":"loc","isLive":true}]}"#
                 .as_slice(),
         ),
         (
             "空名",
-            br#"{"version":"draft-01","tracks":[{"name":"%%","packaging":"loc","isLive":true}]}"#
+            br#"{"version":"draft-02","tracks":[{"name":"%%","packaging":"loc","isLive":true}]}"#
                 .as_slice(),
         ),
         (
             "変数名不正文字",
-            br#"{"version":"draft-01","tracks":[{"name":"%a b%","packaging":"loc","isLive":true}]}"#
+            br#"{"version":"draft-02","tracks":[{"name":"%a b%","packaging":"loc","isLive":true}]}"#
                 .as_slice(),
         ),
         (
             "リテラル %",
-            br#"{"version":"draft-01","tracks":[{"name":"100%","packaging":"loc","isLive":true}]}"#
+            br#"{"version":"draft-02","tracks":[{"name":"100%","packaging":"loc","isLive":true}]}"#
                 .as_slice(),
         ),
     ] {
@@ -254,7 +254,7 @@ fn resolve_invalid_percent_rejected() {
 /// そのまま置換できる。
 #[test]
 fn resolve_base64_value() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"%token%"}}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"%token%"}}]}"#;
     let resolved = resolve_catalog_variables(json, "token=eyJhbGciOi+/=.abc")
         .expect("Base64 の値を解決できること");
     let text = String::from_utf8(resolved).expect("JSON は UTF-8 であること");
@@ -272,7 +272,7 @@ fn resolve_base64_value() {
 #[test]
 fn resolve_rejects_forbidden_value_chars() {
     let json =
-        br#"{"version":"draft-01","tracks":[{"name":"%id%","packaging":"loc","isLive":true}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"%id%","packaging":"loc","isLive":true}]}"#;
     for (label, value) in [
         ("comma", "a,b"),
         ("semicolon", "a;b"),
@@ -313,7 +313,7 @@ fn ampersand_is_pair_delimiter() {
     );
 
     let json =
-        br#"{"version":"draft-01","tracks":[{"name":"%id%","packaging":"loc","isLive":true}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"%id%","packaging":"loc","isLive":true}]}"#;
     let resolved = resolve_catalog_variables(json, "id=a&b").expect("fragment を解決できること");
     let text = String::from_utf8(resolved).expect("JSON は UTF-8 であること");
     assert!(
@@ -328,7 +328,7 @@ fn ampersand_is_pair_delimiter() {
 /// 受理するため、`-` と `.` を含む名前も解決できる。
 #[test]
 fn resolve_hyphen_and_dot_in_name() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"%cat-token%-%a.b%","packaging":"loc","isLive":true}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"%cat-token%-%a.b%","packaging":"loc","isLive":true}]}"#;
     let resolved = resolve_catalog_variables(json, "cat-token=X&a.b=Y")
         .expect("`-` と `.` を含む名前を解決できること");
     let text = String::from_utf8(resolved).expect("JSON は UTF-8 であること");
@@ -365,7 +365,7 @@ fn pair_is_split_at_the_first_equals() {
     );
 
     let json =
-        br#"{"version":"draft-01","tracks":[{"name":"%k%","packaging":"loc","isLive":true}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"%k%","packaging":"loc","isLive":true}]}"#;
     let resolved = resolve_catalog_variables(json, "k=a=b").expect("fragment を解決できること");
     let text = String::from_utf8(resolved).expect("JSON は UTF-8 であること");
     assert!(text.contains(r#""a=b""#), "値に `=` が残ること: {text}");
@@ -409,7 +409,7 @@ fn fragment_pairs_reject_pct_encoded_name() {
 #[test]
 fn resolve_name_with_equals_is_kept_undefined() {
     let json =
-        br#"{"version":"draft-01","tracks":[{"name":"%a=b%","packaging":"loc","isLive":true}]}"#;
+        br#"{"version":"draft-02","tracks":[{"name":"%a=b%","packaging":"loc","isLive":true}]}"#;
     let resolved = resolve_catalog_variables(json, "a=b").expect("未定義参照として保持できること");
     let text = String::from_utf8(resolved).expect("JSON は UTF-8 であること");
     assert!(

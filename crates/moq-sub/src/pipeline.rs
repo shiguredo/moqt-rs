@@ -15946,7 +15946,7 @@ mod tests {
         /// moq-sub が音声トラックを選ぶために必要な `codec` / `samplerate` /
         /// `channelConfig` だけを持つ最小のカタログである。
         fn audio_catalog_json() -> Vec<u8> {
-            br#"{"version":"draft-01","tracks":[{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":64000,"samplerate":48000,"channelConfig":"1"}]}"#.to_vec()
+            br#"{"version":"draft-02","tracks":[{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":64000,"samplerate":48000,"channelConfig":"1"}]}"#.to_vec()
         }
 
         /// 映像と音声を持つ独立した MSF カタログの JSON
@@ -15955,7 +15955,7 @@ mod tests {
         /// 解像度に合わせる。
         fn video_and_audio_catalog_json(width: u64, height: u64) -> Vec<u8> {
             format!(
-                r#"{{"version":"draft-01","tracks":[{{"name":"video","packaging":"loc","isLive":true,"codec":"vp8","bitrate":500000,"width":{width},"height":{height},"framerate":30}},{{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":64000,"samplerate":48000,"channelConfig":"1"}}]}}"#
+                r#"{{"version":"draft-02","tracks":[{{"name":"video","packaging":"loc","isLive":true,"codec":"vp8","bitrate":500000,"width":{width},"height":{height},"framerate":30}},{{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":64000,"samplerate":48000,"channelConfig":"1"}}]}}"#
             )
             .into_bytes()
         }
@@ -17263,7 +17263,7 @@ mod tests {
                 )
                 .await;
                 let data_plane = client.data_plane();
-                let spurious_catalog = br#"{"version":"draft-01","tracks":[{"name":"spurious","packaging":"loc","isLive":true}]}"#.to_vec();
+                let spurious_catalog = br#"{"version":"draft-02","tracks":[{"name":"spurious","packaging":"loc","isLive":true}]}"#.to_vec();
                 send_catalog_subgroup_stream(
                     &mut peer,
                     video.track_alias,
