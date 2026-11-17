@@ -8,10 +8,11 @@
   - version / generatedAt / isComplete / tracks / publishTracks / initDataList
   - `removed_tracks`：削除済みトラックの履歴 (JSON には出力しない内部状態。delta update の適用時に属性不変の検査へ使う。キーは解決できる場合は解決済みの `(TrackNamespace, Track Name のバイト列)`、基準 namespace が不明な場合は `None` を含む `(Option<TrackNamespace>, Track Name のバイト列)`)
 - Delta Update (`MsfDeltaUpdate`)
-  - deltaUpdate (operation object の配列：`op` = "add" / "remove" / "clone") / generatedAt
+  - deltaUpdate (operation object の配列：`op` = "add" / "remove" / "clone" / "update") / generatedAt
   - Full / Delta の判別は `MsfCatalogDocument` が行う
 - Delta 適用 (`MsfCatalog::apply_delta`)
-  - clone の継承解決 (`MsfCloneTrack::into_track`) と add / remove / clone の順次適用
+  - clone の継承解決 (`MsfCloneTrack::into_track`) と add / remove / clone / update の順次適用
+  - update は `name` = `parentName` を必須とし、`parentNamespace` 省略時は catalog namespace を使う。名前 / namespace の変更と isLive の false→true を拒否し、マージ後の track を通常の MUST で検証する (§5.1.6)。§5.6.4 の name 省略例は非規範として扱う
   - clone 以外の track は、namespace を省略すると catalog track の MOQT Track Namespace を継承する。clone は clone 固有の規則 (§5.1.6) により、namespace を明示すればそれを使い、省略すれば親トラックの namespace を継承する。clone の parentNamespace を省略した場合は catalog namespace を親の namespace と仮定する (§5.2.35)。名前の比較はカタログの `/` 区切り文字列ではなく、§11.2 の写像後のバイト値で行う
   - add するトラックは適用時点で §5.2 各フィールドの MUST を検証し、add 操作内の全トラックを検証してから追加する
   - 適用後の Full Track Name の一意性と、宣言された targetLatency / buffers のグループ内一致を再検証する (省略は player の裁量のため比較対象外、isLive=false は無視)

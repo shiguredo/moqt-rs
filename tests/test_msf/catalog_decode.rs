@@ -1079,3 +1079,39 @@ fn init_data_property_type_invalid_hex_rejected() {
     let json = br#"{"version":"draft-01","tracks":[],"initDataList":[{"id":"i","type":"track-property","data":"0x3FFFFFFFFFFFFFFF"}]}"#;
     assert!(MsfCatalogDocument::decode(json).is_ok());
 }
+
+/// update 操作を decode できること
+#[test]
+fn delta_update_decodes() {
+    let json = br#"{"deltaUpdate":[{"op":"update","tracks":[{"name":"v","parentName":"v","label":"new","isLive":true}]}]}"#;
+    let doc = MsfCatalogDocument::decode(json).expect("update 操作を decode できること");
+    let MsfCatalogDocument::Delta(delta) = doc else {
+        panic!("Delta が期待された");
+    };
+    let MsfDeltaOperation::Update { tracks } = &delta.operations[0] else {
+        panic!("Update が期待された");
+    };
+    assert_eq!(tracks[0].track.name, "v");
+    assert_eq!(tracks[0].track.parent_name, "v");
+    assert_eq!(tracks[0].track.label.as_deref(), Some("new"));
+}
+
+/// update の name が parentName と一致しない場合は拒否されること
+#[test]
+fn delta_update_name_mismatch_rejected() {
+    let json = br#"{"deltaUpdate":[{"op":"update","tracks":[{"name":"x","parentName":"v","label":"new"}]}]}"#;
+    assert!(matches!(
+        MsfCatalogDocument::decode(json),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+/// update の namespace が parentNamespace と一致しない場合は拒否されること
+#[test]
+fn delta_update_namespace_mismatch_rejected() {
+    let json = br#"{"deltaUpdate":[{"op":"update","tracks":[{"name":"v","parentName":"v","parentNamespace":"a","namespace":"b","label":"new"}]}]}"#;
+    assert!(matches!(
+        MsfCatalogDocument::decode(json),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}

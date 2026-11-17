@@ -2114,3 +2114,56 @@ fn encode_rejects_invalid_init_data_property_type() {
         );
     }
 }
+
+/// update 操作が encode / decode を往復すること
+#[test]
+fn delta_update_roundtrip() {
+    let mut update = MsfCloneTrack::new("v".to_string(), "v".to_string());
+    update.label = Some("new".to_string());
+    update.codec = Some("av01".to_string());
+    update.role = Some("video".to_string());
+    update.framerate = Some(30.0);
+    update.bitrate = Some(1_000_000);
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: Some(123),
+        operations: vec![MsfDeltaOperation::Update {
+            tracks: vec![MsfUpdateTrack { track: update }],
+        }],
+    });
+    let encoded = doc.encode().expect("update 操作を encode できること");
+    let text = String::from_utf8(encoded.clone()).expect("JSON は UTF-8 であること");
+    assert!(
+        text.contains(r#""op":"update""#),
+        "op=update を出力すること: {text}"
+    );
+    let decoded =
+        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(decoded, doc, "decode / encode が往復すること");
+}
+
+/// 手組みの不正な update を encode しないこと
+#[test]
+fn encode_rejects_invalid_update() {
+    let mut mismatch = MsfCloneTrack::new("x".to_string(), "v".to_string());
+    mismatch.label = Some("new".to_string());
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Update {
+            tracks: vec![MsfUpdateTrack { track: mismatch }],
+        }],
+    });
+    assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+
+    let mut namespace_mismatch = MsfCloneTrack::new("v".to_string(), "v".to_string());
+    namespace_mismatch.parent_namespace = Some("a".to_string());
+    namespace_mismatch.namespace = Some("b".to_string());
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Update {
+            tracks: vec![MsfUpdateTrack {
+                track: namespace_mismatch,
+            }],
+        }],
+    });
+    assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+}

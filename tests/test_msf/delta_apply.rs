@@ -1801,3 +1801,157 @@ fn apply_delta_rejects_accessible_window_time_mismatch() {
         Err(MessageError::InvalidCatalog(_))
     ));
 }
+
+/// update 操作が既存 track の属性を上書きすること
+#[test]
+fn apply_delta_update_overrides_attributes() {
+    let mut catalog = MsfCatalog::new();
+    let mut parent = loc_track("v", None);
+    parent.label = Some("old".to_string());
+    parent.codec = Some("av01".to_string());
+    parent.bitrate = Some(1_000);
+    catalog.tracks.push(parent);
+
+    let mut update = MsfCloneTrack::new("v".to_string(), "v".to_string());
+    update.label = Some("new".to_string());
+    update.role = Some("video".to_string());
+    update.framerate = Some(30.0);
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Update {
+            tracks: vec![MsfUpdateTrack { track: update }],
+        }],
+    };
+    catalog
+        .apply_delta(&delta, None)
+        .expect("update を適用できること");
+    let track = &catalog.tracks[0];
+    assert_eq!(track.label.as_deref(), Some("new"));
+    assert_eq!(track.role.as_deref(), Some("video"));
+    assert_eq!(track.framerate, Some(30.0));
+    assert_eq!(
+        track.codec.as_deref(),
+        Some("av01"),
+        "未指定の属性は継承すること"
+    );
+    assert_eq!(track.bitrate, Some(1_000), "未指定の属性は継承すること");
+}
+
+/// update の parentName が存在しない場合は拒否されること
+#[test]
+fn apply_delta_update_missing_parent_rejected() {
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(loc_track("v", None));
+    let mut update = MsfCloneTrack::new("missing".to_string(), "missing".to_string());
+    update.label = Some("new".to_string());
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Update {
+            tracks: vec![MsfUpdateTrack { track: update }],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+/// update で isLive を false から true に変更できないこと
+#[test]
+fn apply_delta_update_rejects_is_live_false_to_true() {
+    let mut catalog = MsfCatalog::new();
+    let mut parent = loc_track("v", None);
+    parent.is_live = false;
+    catalog.tracks.push(parent);
+    let mut update = MsfCloneTrack::new("v".to_string(), "v".to_string());
+    update.is_live = Some(true);
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Update {
+            tracks: vec![MsfUpdateTrack { track: update }],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+/// update のマージ結果が通常の track の MUST に反する場合は拒否されること
+#[test]
+fn apply_delta_update_validates_merged_track() {
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(loc_track("v", None));
+
+    // role=video にするのに framerate を指定しない
+    let mut missing_framerate = MsfCloneTrack::new("v".to_string(), "v".to_string());
+    missing_framerate.role = Some("video".to_string());
+    missing_framerate.codec = Some("av01".to_string());
+    missing_framerate.bitrate = Some(1_000);
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Update {
+            tracks: vec![MsfUpdateTrack {
+                track: missing_framerate,
+            }],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+
+    // isLive=true の track に trackDuration を追加する
+    let mut with_duration = MsfCloneTrack::new("v".to_string(), "v".to_string());
+    with_duration.track_duration = Some(1_000);
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Update {
+            tracks: vec![MsfUpdateTrack {
+                track: with_duration,
+            }],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+/// update の namespace が解決後の対象 namespace と一致しない場合は拒否されること
+#[test]
+fn apply_delta_update_rejects_namespace_change() {
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(loc_track("v", Some("a")));
+    let mut update = MsfCloneTrack::new("v".to_string(), "v".to_string());
+    update.parent_namespace = Some("a".to_string());
+    update.namespace = Some("a".to_string());
+    // parentNamespace と namespace は一致するが、対象 track と一致するので変更にはならない。
+    // ここでは parentNamespace は一致、namespace だけ別にするケースを作れないため、
+    // 対象 track の namespace を変える意図の入力を直接は表現できない。別ケースで確認する。
+    update.label = Some("new".to_string());
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Update {
+            tracks: vec![MsfUpdateTrack { track: update }],
+        }],
+    };
+    catalog
+        .apply_delta(&delta, None)
+        .expect("同じ namespace の update は適用できること");
+
+    // parentNamespace を省略し、namespace に別の値を指定する
+    let mut update = MsfCloneTrack::new("v".to_string(), "v".to_string());
+    update.namespace = Some("b".to_string());
+    update.label = Some("new".to_string());
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Update {
+            tracks: vec![MsfUpdateTrack { track: update }],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}

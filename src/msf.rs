@@ -1646,6 +1646,27 @@ impl MsfCloneTrack {
     }
 }
 
+/// トラックの部分更新 (delta update の update 操作用)
+///
+/// draft-ietf-moq-msf-02 §5.1.6 (Delta update): update の track object は `parentName` を
+/// MUST、`parentNamespace` を MAY で持ち、宣言した属性が既存値を上書きする。`name` は
+/// §5.2.3 の Required のため必須で、`parentName` と一致しなければならない。名前と namespace を
+/// 変更する経路は作らない。`parentNamespace` 省略時は catalog namespace を使う。
+///
+/// 内部表現は clone の track object と同じ `MsfCloneTrack` を使う。名前の一致と namespace の
+/// 一致は decode / encode / 適用時に別途検証する。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MsfUpdateTrack {
+    /// update する属性を持つ track object
+    pub track: MsfCloneTrack,
+}
+
+impl DisplayJson for MsfUpdateTrack {
+    fn fmt(&self, f: &mut JsonFormatter<'_, '_>) -> core::fmt::Result {
+        self.track.fmt(f)
+    }
+}
+
 /// removeTracks 内のトラック参照 (draft-ietf-moq-msf-01 §5.1.6 (Delta update))
 ///
 /// name と namespace のみ保持する。
@@ -1951,6 +1972,47 @@ impl MsfCatalog {
                         self.tracks.push(new_track);
                     }
                 }
+                MsfDeltaOperation::Update { tracks } => {
+                    for update in tracks {
+                        validate_update_track(&update.track)?;
+                        let parent_ns = match update.track.parent_namespace.as_deref() {
+                            Some(value) => Some(parse_catalog_namespace(value)?),
+                            None => catalog_namespace.cloned(),
+                        };
+                        let parent_name = catalog_track_name_bytes(&update.track.parent_name)?;
+                        let idx = self
+                            .find_track_index(parent_ns.as_ref(), &parent_name, catalog_namespace)?
+                            .ok_or_else(|| {
+                                MessageError::InvalidCatalog(format!(
+                                    "delta update: parent track '{}' not found",
+                                    update.track.parent_name
+                                ))
+                            })?;
+                        let parent = self.tracks[idx].clone();
+                        // namespace を明示する場合は、解決後の対象 namespace と一致すること
+                        let update_ns = match update.track.namespace.as_deref() {
+                            Some(value) => Some(parse_catalog_namespace(value)?),
+                            None => parent_ns.clone(),
+                        };
+                        if update_ns != parent_ns {
+                            return Err(MessageError::InvalidCatalog(format!(
+                                "delta update: track '{}' namespace MUST NOT change",
+                                update.track.name
+                            )));
+                        }
+                        // §5.2.7 (Is Live): False から True への変更は禁止
+                        if update.track.is_live == Some(true) && !parent.is_live {
+                            return Err(MessageError::InvalidCatalog(format!(
+                                "delta update: track '{}' isLive MUST NOT change from false to true",
+                                update.track.name
+                            )));
+                        }
+                        let merged = update.track.clone().into_track(&parent)?;
+                        // マージ後の track が通常の track と同じ MUST を満たすこと
+                        validate_full_track(&merged)?;
+                        self.tracks[idx] = merged;
+                    }
+                }
             }
         }
         // デルタ更新の generatedAt は適用後のカタログの生成時刻として引き継ぐ
@@ -2176,6 +2238,11 @@ pub enum MsfDeltaOperation {
         /// クローンするトラック定義一覧
         tracks: Vec<MsfCloneTrack>,
     },
+    /// トラックの部分更新 ("update")
+    Update {
+        /// 更新するトラック定義一覧
+        tracks: Vec<MsfUpdateTrack>,
+    },
 }
 
 /// デルタ更新 (draft-ietf-moq-msf-01 §5.1.6 (Delta update))
@@ -2253,6 +2320,18 @@ impl DisplayJson for MsfDeltaOperation {
                         }),
                     )?;
                 }
+                Self::Update { tracks } => {
+                    f.member("op", "update")?;
+                    f.member(
+                        "tracks",
+                        nojson::array(|f| {
+                            for t in tracks {
+                                f.element(t)?;
+                            }
+                            Ok(())
+                        }),
+                    )?;
+                }
             }
             Ok(())
         })
@@ -2303,6 +2382,13 @@ impl MsfCatalogDocument {
                         MsfDeltaOperation::Clone { tracks } => {
                             for track in tracks {
                                 if let Some(auth_info) = track.auth_info.as_ref() {
+                                    infos.extend(auth_info.iter());
+                                }
+                            }
+                        }
+                        MsfDeltaOperation::Update { tracks } => {
+                            for update in tracks {
+                                if let Some(auth_info) = update.track.auth_info.as_ref() {
                                     infos.extend(auth_info.iter());
                                 }
                             }
@@ -3369,6 +3455,12 @@ fn validate_delta_for_encode(delta: &MsfDeltaUpdate) -> Result<(), MessageError>
                     validate_clone_track_fragment(track)?;
                 }
             }
+            MsfDeltaOperation::Update { tracks } => {
+                for update in tracks {
+                    validate_update_track(&update.track)?;
+                    validate_clone_track_fragment(&update.track)?;
+                }
+            }
             MsfDeltaOperation::Remove { tracks } => {
                 // remove の track 参照も name / namespace の写像規則と Full Track Name の
                 // 長さ制限を満たす必要がある
@@ -3545,6 +3637,13 @@ fn decode_delta_operation(
                 .map(decode_clone_track)
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(MsfDeltaOperation::Clone { tracks })
+        }
+        "update" => {
+            let tracks = tracks_v
+                .to_array()?
+                .map(decode_update_track)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(MsfDeltaOperation::Update { tracks })
         }
         other => Err(MessageError::InvalidCatalog(format!(
             "unknown delta operation '{other}'"
@@ -4071,6 +4170,39 @@ fn decode_template(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTemplate, Mes
         start_wallclock,
         delta_wallclock,
     })
+}
+
+/// update の track object が name / parentName / namespace の制約を満たすか検証する
+///
+/// draft-ietf-moq-msf-02 §5.1.6 (Delta update): update は `parentName` を MUST とし、
+/// `name` は §5.2.3 の Required のため必須である。本実装は update で Full Track Name を
+/// 変更しないため、`name` は `parentName` と一致し、明示 namespace は `parentNamespace` と
+/// 一致しなければならない。`parentNamespace` 省略時の catalog namespace との比較は適用時に
+/// 行う。
+fn validate_update_track(track: &MsfCloneTrack) -> Result<(), MessageError> {
+    if track.name != track.parent_name {
+        return Err(MessageError::InvalidCatalog(format!(
+            "delta update: name '{}' MUST equal parentName '{}'",
+            track.name, track.parent_name
+        )));
+    }
+    if let (Some(namespace), Some(parent_namespace)) = (
+        track.namespace.as_deref(),
+        track.parent_namespace.as_deref(),
+    ) && parse_catalog_namespace(namespace)? != parse_catalog_namespace(parent_namespace)?
+    {
+        return Err(MessageError::InvalidCatalog(format!(
+            "delta update: track '{}' namespace MUST equal parentNamespace",
+            track.name
+        )));
+    }
+    Ok(())
+}
+
+fn decode_update_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfUpdateTrack, MessageError> {
+    let track = decode_clone_track(val)?;
+    validate_update_track(&track)?;
+    Ok(MsfUpdateTrack { track })
 }
 
 fn decode_remove_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfRemoveTrack, MessageError> {

@@ -1130,7 +1130,7 @@ fn example(bytes: &[u8]) -> Result<(), MessageError> {
 ```
 
 型は `MsfCatalogDocument { Full(MsfCatalog), Delta(MsfDeltaUpdate) }`、要素は `MsfCatalog` /
-`MsfDeltaOperation` / `MsfDeltaUpdate` / `MsfTrack` / `MsfCloneTrack` / `MsfRemoveTrack` /
+`MsfDeltaOperation` / `MsfDeltaUpdate` / `MsfTrack` / `MsfCloneTrack` / `MsfUpdateTrack` / `MsfRemoveTrack` /
 `MsfInitData` / `MsfBuffers` / `MsfPackaging`、定数は `MSF_CATALOG_TRACK_NAME` / `MSF_VERSION`。
 
 ```rust,ignore
