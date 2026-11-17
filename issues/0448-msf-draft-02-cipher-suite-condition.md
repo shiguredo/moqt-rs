@@ -1,7 +1,7 @@
 # MSF カタログの cipherSuite 必須条件を moq-secure-objects に限定する
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -36,3 +36,13 @@ draft-ietf-moq-msf-02 §5.2.39 (Cipher suite) は、`cipherSuite` を `encryptio
 - `encryptionScheme` なしで `cipherSuite` だけを持つカタログが受理されること (`encryption_orphan_field_accepted` を維持)。
 - `cipherSuite` の値の検証は 0342 が担当することが issue に明記されていること。
 - 上記を `tests/test_msf/catalog_decode.rs`、`tests/test_msf/encode_decode_roundtrip.rs`、`tests/test_msf/error_cases.rs` で固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `cipherSuite` の必須判定を `encryptionScheme == "moq-secure-objects"` のときだけに限定した。`validate_full_track`、`decode_track`、`MsfCloneTrack::into_track` の 3 箇所を同じ条件にそろえた。
+- `moq-secure-objects` のときの `keyId` / `trackBaseKey` 必須は維持した。
+- `encryptionScheme` なしで `cipherSuite` だけを持つカタログと、custom scheme で `cipherSuite` を持たないカタログを受理するテストに更新した。`moq-secure-objects` で `cipherSuite` を欠くカタログは decode / encode の両方で拒否するテストを追加した。
+- `cipherSuite` の値の検証は 0342 が担当するため、本 issue では追加していない。
+- 仕様参照を §5.2.39 / §4.4.3 に更新した。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
