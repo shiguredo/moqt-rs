@@ -1,7 +1,7 @@
 # MSF Media Timeline の format 排他と media time 順序を強制する
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -41,3 +41,12 @@ draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload) は、v01 の「expli
 - `pbt/tests/prop_msf.rs` の生成器が非降順の entry を生成し、roundtrip が通ること。
 - `docs/missing-features.md` と `docs/msf.md` の記述が更新されていること。
 - 上記を `tests/test_msf/media_timeline.rs`、`tests/test_msf/encode_decode_roundtrip.rs`、`pbt/tests/prop_msf.rs` で固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `MsfMediaTimeline::decode` と `encode_media_timeline` で `pts_ms` が非降順であることを検証し、違反を `InvalidCatalog` にするようにした。同値は許容する。`MsfMediaTimeline::encode` は infallible のままにし、順序検証は `encode_media_timeline` が行うことを doc に明記した。
+- `validate_media_timeline_format(track, timeline)` を追加し、`template` 属性を持つ track に explicit payload を紐付けた場合と、media time が降順の場合を拒否するようにした。§5.2.16 の cross-track の SHOULD NOT は 1 つの track と payload の組から判定できないため対象外であることを doc に明記した。
+- `pbt/tests/prop_msf.rs` の media timeline 生成器を `pts_ms` の非降順に変更した。
+- `tests/test_msf/media_timeline.rs` に降順拒否、同値受理、template 併用拒否のテストを追加した。`docs/msf.md` と `docs/missing-features.md` の v01 前提の記述を v02 に更新した。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
