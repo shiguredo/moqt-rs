@@ -1,7 +1,7 @@
 # MSF fragment の予約パラメータ c4m を cat に改名する
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -39,3 +39,15 @@ draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) の Table 12 は�
 - `crates/moq-pub/src/cli.rs`、`crates/moq-sub/src/cli.rs`、`crates/README.md`、`crates/tokio-moq/README.md` の `c4m` の案内と `c4m_tokens` の記述が `cat` / `cat_tokens` に更新されていること。
 - `%cat%` の end-to-end な解決は、`crates/moq-sub` の変数置換経路が未実装のため本 issue の完了条件に含めないことを doc に明記すること。
 - 上記を `tests/test_msf/uri.rs`、`crates/tokio-moq` のテスト、`crates/moq-pub` のカタログ生成テストで固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- MSF fragment の予約パラメータを `c4m` から `cat` に変更した。`MsfFragment::c4m_tokens` を `cat_tokens` に改名し、`parameter_values("cat")` だけを返すようにした。
+- `crates/tokio-moq` の `ServerUrl::c4m_tokens` を `cat_tokens` に改名し、内部の `parse_c4m_tokens` / `decode_c4m_token` も `parse_cat_tokens` / `decode_cat_token` に改名した。SETUP と PUBLISH / SUBSCRIBE / FETCH / REQUEST_UPDATE にトークンを載せる挙動は変えていない。
+- 旧 `c4m` は予約パラメータとして扱わず、認可トークンの供給元にしない fail-closed 方針を doc とテストで明記した。`c4m` は未知の汎用パラメータとして保持される。
+- `crates/moq-pub` の `CatalogParams::c4m_tokens` を `cat_tokens` に、`C4M_AUTH_INFO_VALUE` を `CAT_AUTH_INFO_VALUE` (`"%cat%"`) に改名し、カタログの authInfo とテストの期待値を `%cat%` に更新した。
+- `crates/moq-pub/src/cli.rs`、`crates/moq-sub/src/cli.rs`、`crates/README.md`、`crates/tokio-moq/README.md`、`docs/msf.md`、`docs/moqt.md`、`docs/missing-features.md` の `c4m` / `c4m_tokens` の案内を `cat` / `cat_tokens` に更新した。
+- `tests/test_msf/uri.rs` と `crates/tokio-moq` のテストに、`cat` の抽出、旧 `c4m` が認可トークンにならないこと、Base64 / percent-encoding の既存挙動を追加・追従した。`crates/moq-pub` のカタログ生成テストは `"%cat%"` を固定する。
+- `%cat%` の end-to-end な解決は、moq-sub に変数置換の呼び出し経路が無いため本 issue の範囲外であることを doc に明記した。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
