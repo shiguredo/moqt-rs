@@ -99,14 +99,14 @@ fn delta_of_older_group_after_newer_group_keyframe_is_stale() {
     );
 }
 
-/// Group 内で Object が欠けたら、次のキーフレームまで delta を捨てる
+/// Group 内で Object が到着順に入れ替わっても、欠けが埋まれば復号を続けられること
 ///
-/// Object 2 が届かない (損失、または reset された Subgroup の残り)。Object 3 以降は参照先が
-/// 無いため復号しない。draft-ietf-moq-transport-23 §2.1.2 は "A gap in the observed Object IDs
-/// does not by itself convey any information about the skipped Objects" とするため、欠けた
-/// Object が存在しないとは言えない。
+/// 1 Group を複数の Subgroup に分ける publisher (MSF の `streamMapping=object`) では、
+/// Object ID の昇順と到着順が一致しない (draft-ietf-moq-transport-23 §2.2 (Subgroups) は
+/// 順序を stream 内だけに保証する)。先に届いた Object 3 は参照先の Object 2 が無いため
+/// 復号しないが、Object 2 が後から届けば 2 と 3 の順に復号できること。
 #[test]
-fn delta_after_a_gap_is_missing_reference_until_the_next_keyframe() {
+fn delta_after_a_reordered_gap_is_decoded_when_the_missing_object_arrives() {
     let mut order = VideoDecodeOrder::new();
     assert_eq!(
         order.admit(&key(0, 0)),
@@ -124,14 +124,49 @@ fn delta_after_a_gap_is_missing_reference_until_the_next_keyframe() {
         "Object 2 の欠けを検出したら復号しないこと"
     );
     assert_eq!(
-        order.admit(&delta(0, 4, 0)),
-        MISSING_REFERENCE,
-        "欠落の後はキーフレームまで delta を捨てること"
+        order.last_decoded_object_id(),
+        Some(1),
+        "欠けを検出しても直前に復号した Object は保持すること"
+    );
+    assert!(
+        !order.awaiting_key_frame(),
+        "到着順の入れ替わりで欠けただけならキーフレーム待ちにしないこと"
     );
     assert_eq!(
         order.admit(&delta(0, 2, 0)),
+        DECODE,
+        "欠けを埋める Object が後から届いたら復号すること"
+    );
+    assert_eq!(
+        order.admit(&delta(0, 3, 0)),
+        DECODE,
+        "埋めた欠けの次の Object が再送されたら復号すること"
+    );
+}
+
+/// Group 内で Object が欠けたままなら、次のキーフレームまで delta を捨てる
+///
+/// Object 2 が届かない (損失、または reset された Subgroup の残り)。Object 3 以降は参照先が
+/// 無いため復号しない。draft-ietf-moq-transport-23 §2.1.2 は "A gap in the observed Object IDs
+/// does not by itself convey any information about the skipped Objects" とするため、欠けた
+/// Object が存在しないとは言えない。
+#[test]
+fn delta_after_a_permanent_gap_is_missing_reference_until_the_next_keyframe() {
+    let mut order = VideoDecodeOrder::new();
+    assert_eq!(
+        order.admit(&key(0, 0)),
+        DECODE,
+        "キーフレームから復号を始めること"
+    );
+    assert_eq!(
+        order.admit(&delta(0, 3, 0)),
         MISSING_REFERENCE,
-        "欠けた Object が後から届いても、その先を復号できるようにはならないこと"
+        "Object 1 と 2 の欠けを検出したら復号しないこと"
+    );
+    assert_eq!(
+        order.admit(&delta(0, 4, 0)),
+        MISSING_REFERENCE,
+        "欠けが解消しない間は後続の delta を捨てること"
     );
     assert_eq!(
         order.admit(&key(1, 0)),
@@ -189,13 +224,13 @@ fn prior_object_id_gap_covering_only_part_of_the_gap_is_missing_reference() {
     );
     assert_eq!(
         order.last_decoded_object_id(),
-        None,
-        "欠落を検出したら復号中の Object ID を捨てること"
+        Some(0),
+        "Object ID の欠けでは復号中の Object ID を捨てないこと"
     );
     assert_eq!(
         order.decoding_group_id(),
         Some(0),
-        "欠落を検出した Group は保持すること"
+        "欠けを検出した Group は保持すること"
     );
 }
 
@@ -303,13 +338,13 @@ fn keyframe_restarts_decoding_even_in_the_same_group() {
     );
 }
 
-/// 欠落の後に届いた同じ Group のキーフレームは、前より前の Object ID でも復号を始め直す
+/// 欠けの後に届いた同じ Group のキーフレームから復号を始め直せること
 ///
-/// キーフレームは参照を持たないため、Group の先頭が遅れて届いた場合は直前に復号した Object
-/// より前の Object ID から始め直せる (表示順はタイムスタンプで決まる)。復号を続けている間の
-/// キーフレームの再受信は、重複として捨てる。
+/// キーフレームは参照を持たないため、Group が変わらなくてもキーフレームから復号を始め直せる。
+/// ただし Group 内の到着順の入れ替わりで欠けた Object は保持しているため、直前に復号した
+/// Object 以前の Object ID を持つキーフレームは遅着として捨てる。
 #[test]
-fn keyframe_after_a_gap_restarts_from_an_earlier_object_id() {
+fn keyframe_after_a_gap_restarts_decoding() {
     let mut order = VideoDecodeOrder::new();
     assert_eq!(
         order.admit(&key(0, 0)),
@@ -327,12 +362,12 @@ fn keyframe_after_a_gap_restarts_from_an_earlier_object_id() {
         "Object 2 の欠けで復号を止めること"
     );
     assert_eq!(
-        order.admit(&key(0, 0)),
+        order.admit(&key(0, 4)),
         DECODE,
-        "遅れて届いた Group の先頭は、前より前の Object ID でも復号を始め直せること"
+        "欠けの後に届いた同じ Group のキーフレームから復号を始め直せること"
     );
     assert_eq!(
-        order.admit(&delta(0, 1, 0)),
+        order.admit(&delta(0, 5, 0)),
         DECODE,
         "始め直した後の delta は復号できること"
     );
@@ -430,16 +465,16 @@ fn accessors_report_the_state_after_each_admission() {
     assert_eq!(
         order.decoding_group_id(),
         Some(2),
-        "欠落の後も欠落を検出した Group を保持すること"
+        "欠けの後も復号中の Group を保持すること"
     );
     assert_eq!(
         order.last_decoded_object_id(),
-        None,
-        "欠落の後は復号した Object ID を捨てること"
+        Some(0),
+        "欠けの後も直前に復号した Object ID を保持すること"
     );
     assert!(
-        order.awaiting_key_frame(),
-        "欠落の後はキーフレームを待つこと"
+        !order.awaiting_key_frame(),
+        "到着順の入れ替わりで欠けただけならキーフレーム待ちにしないこと"
     );
 
     let before = (

@@ -345,24 +345,32 @@ fn branch_of(step: &Step) -> Option<Branch> {
         VideoObjectAdmission::Skip {
             reason: VideoObjectSkipReason::MissingReference,
         } => {
-            // 欠落を検出した後はキーフレームを待ち、欠落を検出した Group を保持する
-            if !step.after.awaiting_key_frame
-                || step.after.decoding_group_id != Some(position.group_id)
-            {
-                return None;
-            }
             if step
                 .before
                 .decoding_group_id
                 .is_none_or(|decoding_group_id| position.group_id > decoding_group_id)
             {
+                // 新しい Group のキーフレームより前の delta は、Group を保持して
+                // キーフレームを待つ
+                if !step.after.awaiting_key_frame
+                    || step.after.decoding_group_id != Some(position.group_id)
+                {
+                    return None;
+                }
                 Some(Branch::MissingReferenceNewGroupDelta)
-            } else if step.before.awaiting_key_frame || last_decoded_object_id.is_none() {
-                Some(Branch::MissingReferenceAwaitingKeyFrame)
-            } else if skipped.is_some_and(|skipped| skipped > position.prior_object_id_gap) {
-                Some(Branch::MissingReferenceGapExceedsPriorObjectIdGap)
             } else {
-                None
+                // 同じ Group の Object ID の欠けは状態を変えない。欠けた Object が後から
+                // 届けば復号を続けられるようにするためである
+                if step.after != step.before {
+                    return None;
+                }
+                if step.before.awaiting_key_frame || last_decoded_object_id.is_none() {
+                    Some(Branch::MissingReferenceAwaitingKeyFrame)
+                } else if skipped.is_some_and(|skipped| skipped > position.prior_object_id_gap) {
+                    Some(Branch::MissingReferenceGapExceedsPriorObjectIdGap)
+                } else {
+                    None
+                }
             }
         }
     }
@@ -537,47 +545,41 @@ fn decoded_deltas_reference_the_previously_decoded_object() -> noprop::TestResul
     Ok(())
 }
 
-/// 欠落を検出したら、キーフレームを復号するまで delta を復号しない
+/// 新しい Group のキーフレームを待っている間は delta を復号しない
 ///
-/// 参照するフレームが欠けた delta は、キーフレームで参照の連鎖を切り直すまで復号しない
+/// 購読を Group の途中から始めた場合など、新しい Group のキーフレームより前に delta が
+/// 届くと、その Group の delta はキーフレームで参照の連鎖を切り直すまで復号しない
 /// (draft-ietf-moq-transport-23 §2.1.2 (Object States): 欠けた Object ID はそれだけでは
-/// 存在しないことを示さない)。
+/// 存在しないことを示さない)。同じ Group の Object ID の欠けは、後から欠けた Object が
+/// 届けば復号を続けられる (到着順の入れ替わりを許容する)。
 #[test]
-fn missing_reference_blocks_delta_until_a_key_frame() -> noprop::TestResult {
-    // ゲート: 欠落の検出と、キーフレームでの復帰の両方が観測されること。復帰が 0 なら
-    // 「キーフレームまで」の後半を検証していない
+fn awaiting_a_key_frame_blocks_delta_until_the_key_frame() -> noprop::TestResult {
+    // ゲート: キーフレーム待ちの検出と、キーフレームでの復帰の両方が観測されること。
+    // 復帰が 0 なら「キーフレームまで」の後半を検証していない
     let blocked_count = Cell::new(0usize);
     let resumed_by_key_frame = Cell::new(0usize);
     let delta_after_resume = Cell::new(0usize);
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
         let (_, received) = sample_case(ctx);
-        let mut blocked = false;
-        let mut resumed = false;
         for step in run_received(&received) {
             match step.admission {
                 VideoObjectAdmission::Skip {
                     reason: VideoObjectSkipReason::MissingReference,
                 } => {
-                    blocked = true;
-                    blocked_count.set(blocked_count.get() + 1);
+                    if step.after.awaiting_key_frame {
+                        blocked_count.set(blocked_count.get() + 1);
+                    }
                 }
                 VideoObjectAdmission::Decode => {
-                    if step.object.position.is_key_frame {
-                        if blocked {
-                            resumed = true;
-                            resumed_by_key_frame.set(resumed_by_key_frame.get() + 1);
-                        }
-                        blocked = false;
-                    } else {
+                    if !step.object.position.is_key_frame {
                         assert!(
-                            !blocked,
-                            "欠落を検出した後はキーフレームを復号するまで delta を復号しないこと: {step:?}"
+                            !step.before.awaiting_key_frame,
+                            "キーフレーム待ちの間は delta を復号しないこと: {step:?}"
                         );
-                        if resumed {
-                            delta_after_resume.set(delta_after_resume.get() + 1);
-                            resumed = false;
-                        }
+                    }
+                    if step.object.position.is_key_frame && step.before.awaiting_key_frame {
+                        resumed_by_key_frame.set(resumed_by_key_frame.get() + 1);
                     }
                 }
                 VideoObjectAdmission::Skip {
@@ -585,11 +587,21 @@ fn missing_reference_blocks_delta_until_a_key_frame() -> noprop::TestResult {
                 } => {}
             }
         }
+        // キーフレーム待ちになった後に delta を復号した列が観測されること
+        let mut awaiting = false;
+        for step in run_received(&received) {
+            if step.after.awaiting_key_frame {
+                awaiting = true;
+            } else if awaiting && step.admission == DECODE && !step.object.position.is_key_frame {
+                delta_after_resume.set(delta_after_resume.get() + 1);
+                awaiting = false;
+            }
+        }
         Ok(())
     })?;
     assert!(
         blocked_count.get() > 0,
-        "欠落の検出が観測されなかった\n{runner}"
+        "キーフレーム待ちの検出が観測されなかった\n{runner}"
     );
     assert!(
         resumed_by_key_frame.get() > 0,

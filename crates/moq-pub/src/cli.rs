@@ -3,7 +3,7 @@
 //! noargs でオプションを定義し、[`Config`] にまとめる。
 
 use shiguredo_moqt::message::common::TrackNamespace;
-use shiguredo_moqt::msf::MSF_CATALOG_TRACK_NAME;
+use shiguredo_moqt::msf::{MSF_CATALOG_TRACK_NAME, StreamMapping};
 use tokio_moq::{ServerUrl, Transport};
 
 use crate::pipeline::AUDIO_TRACK_NAME;
@@ -143,6 +143,12 @@ pub struct Config {
     pub input_mp4: Option<String>,
     /// MP4 ファイルを再エンコードして配信する入力パス
     pub input_mp4_reencode: Option<String>,
+    /// LOC packaging の Object を MOQT Stream へ割り当てるモード
+    ///
+    /// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping): `group` は 1 Group を
+    /// 1 Subgroup にまとめ、`object` は 1 Object ごとに 1 Subgroup を開く。映像トラックの
+    /// カタログ `packagingMetadata` に `streamMapping` として載せる (§5.2.5)。
+    pub stream_mapping: StreamMapping,
 }
 
 /// `--datagram-max-size` の既定値 (bytes)
@@ -510,6 +516,24 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         .take(&mut args)
         .present_and_then(|o| Ok::<_, std::convert::Infallible>(o.value().to_string()))?;
 
+    let stream_mapping_opt = noargs::opt("stream-mapping")
+        .ty("MODE")
+        .doc(
+            "LOC to MOQT stream mapping for the video track (group = one subgroup per group, object = one subgroup per object). The mode is announced in the catalog packagingMetadata",
+        )
+        .default("group")
+        .take(&mut args);
+    let stream_mapping = stream_mapping_opt.then(|o| {
+        let value = o.value();
+        match value {
+            "group" => Ok(StreamMapping::Group),
+            "object" => Ok(StreamMapping::Object),
+            other => Err(format!(
+                "invalid --stream-mapping: {other} (expected group or object)"
+            )),
+        }
+    })?;
+
     let video_enabled = !no_video;
     // --input-mp4 は映像トラックだけを配信するため、音声トラックは常に配信しない
     let audio_enabled = !no_audio && input_mp4.is_none();
@@ -676,6 +700,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         cache_duration_ms,
         input_mp4,
         input_mp4_reencode,
+        stream_mapping,
     }))
 }
 
@@ -732,6 +757,51 @@ mod tests {
             config.transport,
             Transport::Quic,
             "既定は QUIC 直接接続であること"
+        );
+    }
+
+    /// `--stream-mapping` の既定は group である
+    ///
+    /// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) は、キーが無い場合に
+    /// `group` と仮定する MUST を定める
+    #[test]
+    fn stream_mapping_defaults_to_group() {
+        let config = parse_args(BASE_ARGS)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            config.stream_mapping,
+            StreamMapping::Group,
+            "既定は group であること"
+        );
+    }
+
+    /// `--stream-mapping object` を指定すると object モードになる
+    #[test]
+    fn stream_mapping_accepts_object() {
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--stream-mapping", "object"]);
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            config.stream_mapping,
+            StreamMapping::Object,
+            "object モードを指定できること"
+        );
+    }
+
+    /// `--stream-mapping` の不正値はエラーになる
+    #[test]
+    fn stream_mapping_rejects_an_unknown_value() {
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--stream-mapping", "spam"]);
+        let Err(error) = parse_args(&args) else {
+            panic!("不正な stream mapping はエラーになること");
+        };
+        assert!(
+            format!("{error:?}").contains("invalid --stream-mapping"),
+            "不正値であることが理由として分かること: {error:?}"
         );
     }
 

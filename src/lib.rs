@@ -71,3 +71,6 @@ pub mod varint;
 // 概要と根拠は src/video_decode_order.rs の //! ドキュメントに書く。ここに /// を置くと
 // rustdoc がモジュール内の intra-doc link をクレート直下の名前空間で解決してしまう
 pub mod video_decode_order;
+// 概要と根拠は src/video_object_reorder.rs の //! ドキュメントに書く。ここに /// を置くと
+// rustdoc がモジュール内の intra-doc link をクレート直下の名前空間で解決してしまう
+pub mod video_object_reorder;

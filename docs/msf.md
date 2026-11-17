@@ -21,6 +21,7 @@
 - Track (`MsfTrack`)：Codec / Video / Audio は draft 上の論理的な分類で、実体は単一の `MsfTrack` のフィールド
   - 共通：name / namespace / packaging / packagingMetadata / eventType / role / isLive / label / lang / targetLatency / buffers / trackDuration / renderGroup / altGroup / initRef / depends / parentName / template / maxGopDuration / maxGroupDuration
   - `packagingMetadata` は `;` 区切りの `key=value`。key / value の whitespace・`=`・`;`、空要素、空の key / value を拒否する (§5.2.5)。`packaging_metadata_value(key)` で最初の出現を取得する
+  - `streamMapping` は `group` / `object` を表し、`MsfTrack::stream_mapping()` で解釈する (§4.1.1)。キーがない場合は `group`。moq-pub は `--stream-mapping` で選択し、カタログの `packagingMetadata` に明示する。object モードは 1 Object を 1 Subgroup に載せ、subscriber は Group 内の複数 Subgroup を Object ID 順に並べ替えて同じ復号器へ流す
   - `keyframeSpacing` は keyframe 間隔 (フレーム数) を保持する (§5.2.46)。multi-variant switching の publisher 検証 API は `crates/moq-pub/src/variant.rs` にあり、全 variant の keyframeSpacing、共有開始 Group ID、Group ID の +1、Group 先頭のキーフレームと 1 Group 1 キーフレームを検証する。Object 境界の time-alignment は複数 variant encoder が未実装のため対象外である
   - `accessibleWindowTime` は DVR ウィンドウを wallclock ms で表す (§5.2.45)。同じ altGroup の track は、すべて値を持たないか、すべて同じ値を持つこと。isLive による例外はない。timeline の trim と subscriber の取得制約は timeline 経路の実装に依存するため未実装である
   - `depends` は track name (JSON String) または renderGroup (JSON Number) の配列 (§5.2.15)。String は依存元以外の track にちょうど 1 つ、Number はカタログ内の renderGroup に一致しなければならず、未解決・同名複数・自己参照を拒否する。公開型は `MsfDependency` で、`Vec<String>` からの破壊的変更である

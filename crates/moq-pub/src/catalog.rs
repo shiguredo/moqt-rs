@@ -6,9 +6,10 @@
 use shiguredo_moqt::loc::LocProperties;
 use shiguredo_moqt::message::common::Location;
 use shiguredo_moqt::message_parameter::{LocationFilter, LocationFilterContext};
+use shiguredo_moqt::stream::subgroup::SubgroupIdMode;
 use shiguredo_moqt::{
     msf::MSF_VERSION, msf::MsfAuthInfo, msf::MsfCatalog, msf::MsfCatalogDocument,
-    msf::MsfPackaging, msf::MsfTrack,
+    msf::MsfPackaging, msf::MsfTrack, msf::StreamMapping,
 };
 
 use crate::error::{Error, Result};
@@ -52,6 +53,11 @@ pub struct VideoTrackParams<'a> {
     /// Duration))。Group 長を宣言しない経路 (MP4 パススルーは MP4 のキーフレームで
     /// Group が進む) では `None` とし、どちらのフィールドも載せない。
     pub max_group_duration_ms: Option<u64>,
+    /// LOC packaging の Object を MOQT Stream へ割り当てるモード
+    ///
+    /// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) / §5.2.5 (Packaging
+    /// metadata): `packagingMetadata` の `streamMapping` キーで per-track に通知する。
+    pub stream_mapping: StreamMapping,
 }
 
 /// 音声トラックの catalog 情報
@@ -171,6 +177,10 @@ fn build_catalog(
         track.target_latency = Some(sync.target_latency_ms);
         track.render_group = Some(sync.render_group);
         track.auth_info = auth_info.map(|infos| infos.to_vec());
+        // draft-ietf-moq-msf-02 §4.1.1 / §5.2.5: LOC packaging の Object から MOQT Stream
+        // への割り当てモードを per-track に通知する。キーが無い場合は `group` と仮定される
+        // ため、`group` でも publisher が選んだモードを明示する
+        track.packaging_metadata = Some(format!("streamMapping={}", v.stream_mapping.as_str()));
         tracks.push(track);
     }
 
@@ -312,6 +322,8 @@ pub async fn publish_catalog_object(
         catalog_request_id,
         catalog_alias,
         group_id,
+        SubgroupIdMode::Zero,
+        0,
         CATALOG_PUBLISHER_PRIORITY,
         false,
         start_location,
@@ -413,6 +425,7 @@ mod tests {
             fps: 30,
             bitrate: 5_000,
             max_group_duration_ms: None,
+            stream_mapping: StreamMapping::Group,
         };
         let audio = AudioTrackParams {
             track_name: "audio",
@@ -446,6 +459,7 @@ mod tests {
             fps: 30,
             bitrate: 5_000,
             max_group_duration_ms: None,
+            stream_mapping: StreamMapping::Group,
         };
         let audio = AudioTrackParams {
             track_name: "audio",
@@ -499,6 +513,47 @@ mod tests {
         );
     }
 
+    /// 映像トラックの packagingMetadata に選択した streamMapping を載せること
+    ///
+    /// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) / §5.2.5 (Packaging
+    /// metadata): publisher が選んだモードを per-track に通知する。キーが無い場合は
+    /// `group` と仮定されるため、`group` でも明示する。
+    #[test]
+    fn catalog_announces_the_video_stream_mapping() {
+        for (mapping, expected) in [
+            (StreamMapping::Group, "streamMapping=group"),
+            (StreamMapping::Object, "streamMapping=object"),
+        ] {
+            let video = VideoTrackParams {
+                track_name: "video",
+                namespace: "ns",
+                codec: "av01.0.08M.08",
+                width: 1920,
+                height: 1080,
+                fps: 30,
+                bitrate: 5_000,
+                max_group_duration_ms: None,
+                stream_mapping: mapping,
+            };
+            let catalog = build_catalog(Some(&video), None, TEST_SYNC, None)
+                .expect("カタログを構築できること");
+            let MsfCatalogDocument::Full(full) = catalog else {
+                panic!("publisher は Full カタログを送ること");
+            };
+            let track = &full.tracks[0];
+            assert_eq!(
+                track.packaging_metadata.as_deref(),
+                Some(expected),
+                "video track の packagingMetadata に streamMapping を載せること: {mapping:?}"
+            );
+            assert_eq!(
+                track.stream_mapping(),
+                Ok(mapping),
+                "載せた値を購読側の accessor で読み戻せること"
+            );
+        }
+    }
+
     /// 映像トラックに maxGopDuration / maxGroupDuration を載せること
     ///
     /// Group は 1 キーフレーム間隔 = 1 GOP であるため、両方に同じ値を載せる。値は
@@ -517,6 +572,7 @@ mod tests {
             fps: 30,
             bitrate: 5_000,
             max_group_duration_ms: Some(2_034),
+            stream_mapping: StreamMapping::Group,
         };
         let catalog =
             build_catalog(Some(&video), None, TEST_SYNC, None).expect("カタログを構築できること");
@@ -597,6 +653,7 @@ mod tests {
             fps: 30,
             bitrate: 5_000,
             max_group_duration_ms: None,
+            stream_mapping: StreamMapping::Group,
         };
         let audio = AudioTrackParams {
             track_name: "audio",
@@ -673,6 +730,7 @@ mod tests {
                 fps: 30,
                 bitrate: 5_000,
                 max_group_duration_ms: None,
+                stream_mapping: StreamMapping::Group,
             };
             let catalog = build_catalog(Some(&video), None, TEST_SYNC, None)
                 .expect("カタログを構築できること");
@@ -788,6 +846,7 @@ mod tests {
             fps: 30,
             bitrate: 5_000,
             max_group_duration_ms: None,
+            stream_mapping: StreamMapping::Group,
         };
         let audio = AudioTrackParams {
             track_name: "audio",
@@ -990,6 +1049,7 @@ mod tests {
             fps: 30,
             bitrate: 5_000,
             max_group_duration_ms: None,
+            stream_mapping: StreamMapping::Group,
         };
         let json = build_catalog_json(Some(&video), None, TEST_SYNC, &[])
             .expect("v02 の namespace でカタログを組み立てられること");

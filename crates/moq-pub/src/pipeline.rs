@@ -25,11 +25,13 @@ use shiguredo_moqt::{
     message::common::TrackNamespace,
     message_parameter::{LocationFilter, LocationFilterContext, MessageParameters},
     msf::MSF_CATALOG_TRACK_NAME,
+    msf::StreamMapping,
     msf::serialize_catalog_namespace,
     name::serialize_namespace,
     session::types::DataStreamId,
     session::types::SessionEvent,
     stream::encoder::FetchObjectInput,
+    stream::subgroup::SubgroupIdMode,
     track_properties::{
         PROP_DYNAMIC_GROUPS, PROP_MAX_CACHE_DURATION, TrackProperties, TrackProperty,
         TrackPropertyValue,
@@ -405,6 +407,8 @@ struct CatalogVideoTrack {
     /// `maxGopDuration` / `maxGroupDuration` に同じ値を載せる。Group 長を宣言しない経路
     /// (MP4 パススルー) では `None`。
     max_group_duration_ms: Option<u64>,
+    /// LOC packaging の Object を MOQT Stream へ割り当てるモード
+    stream_mapping: StreamMapping,
 }
 
 /// カタログに載せる音声トラックの値
@@ -439,6 +443,7 @@ impl CatalogContext {
             fps: video.fps,
             bitrate: video.bitrate,
             max_group_duration_ms: video.max_group_duration_ms,
+            stream_mapping: video.stream_mapping,
         });
         let audio = self.audio.as_ref().map(|audio| catalog::AudioTrackParams {
             track_name: AUDIO_TRACK_NAME,
@@ -1008,6 +1013,7 @@ pub async fn run(
                     // 使わないため、Group 長を宣言しない。MP4 から最大キーフレーム間隔を
                     // 算出するには VideoTrackInfo に値を持たせる必要がある (本変更の範囲外)
                     max_group_duration_ms: None,
+                    stream_mapping: config.stream_mapping,
                 })
             }
             (None, Some(enc)) => Some(CatalogVideoTrack {
@@ -1022,6 +1028,7 @@ pub async fn run(
                     encode_fps,
                     config.gop_duration_ms,
                 )),
+                stream_mapping: config.stream_mapping,
             }),
             (None, None) => None,
         },
@@ -1120,6 +1127,9 @@ pub async fn run(
     let mut audio_group_id: u64 = group_id::allocate_initial_group_id()?;
     let mut audio_frame_count: u64 = 0;
     let mut current_video_writer: Option<SubgroupWriter> = None;
+    // object モードで次に送る Object の Group 内の Object ID
+    // (draft-ietf-moq-msf-02 §6.2 (Object Numbering): Group 内で 0 から 1 ずつ増やす)
+    let mut video_object_id: u64 = 0;
     // 受信 SUBSCRIBE で確立した購読の送出状態 (draft-ietf-moq-transport-23 §3.1)。
     // Track Alias は PUBLISH の固定値 (0 / 1 / 2) の次から採番する
     let mut peer_subscriptions: Vec<PeerSubscription> = Vec::new();
@@ -1333,13 +1343,15 @@ pub async fn run(
                                         peer.request_id
                                     );
                                 }
-                                if !peer.ended {
+                                if !peer.ended && config.stream_mapping == StreamMapping::Group {
                                     let writer = SubgroupWriter::new(
                                         &handle,
                                         &data_plane,
                                         peer.request_id,
                                         peer.alias,
                                         video_group_id,
+                                        SubgroupIdMode::Zero,
+                                        0,
                                         DEFAULT_PUBLISHER_PRIORITY,
                                         true,
                                         client.subscription_filter_start(peer.request_id),
@@ -1348,26 +1360,35 @@ pub async fn run(
                                     peer.writer = Some(writer);
                                 }
                             }
+                            // object モードは Object ごとに Subgroup を開くため、Group の
+                            // 開始時点では開かない。Object ID は Group の先頭から数え直す
+                            if config.stream_mapping == StreamMapping::Object {
+                                video_object_id = 0;
+                            }
                             // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
                             // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
                             // 映像ストリームには毎フレーム LOC プロパティを付与するため true を渡す
-                            current_video_writer = Some(
-                                SubgroupWriter::new(
-                                    video_handle,
-                                    video_data_plane,
-                                    video_request_id,
-                                    VIDEO_TRACK_ALIAS,
-                                    video_group_id,
-                                    DEFAULT_PUBLISHER_PRIORITY,
-                                    true,
-                                    publish_start_location(
-                                        &client,
-                                        video_publish_target.as_ref(),
+                            if config.stream_mapping == StreamMapping::Group {
+                                current_video_writer = Some(
+                                    SubgroupWriter::new(
+                                        video_handle,
+                                        video_data_plane,
                                         video_request_id,
-                                    ),
-                                )
-                                .await?,
-                            );
+                                        VIDEO_TRACK_ALIAS,
+                                        video_group_id,
+                                        SubgroupIdMode::Zero,
+                                        0,
+                                        DEFAULT_PUBLISHER_PRIORITY,
+                                        true,
+                                        publish_start_location(
+                                            &client,
+                                            video_publish_target.as_ref(),
+                                            video_request_id,
+                                        ),
+                                    )
+                                    .await?,
+                                );
+                            }
                             // 「現在の Group ID」は Session へ登録できた Group を記録する。
                             // writer の作成前に記録すると、直前の Group の終端 (peer の
                             // STOP_SENDING など) や writer の作成が失敗した場合に、送られて
@@ -1386,6 +1407,47 @@ pub async fn run(
                             video_group_id += 1;
                         }
                         let properties = build_video_loc_properties(&ef, video_timescale);
+                        // object モードでこの Object に割り当てる Group 内の Object ID。
+                        // 書き込みの成否に関わらず 1 つ消費する (同じ Object ID を別の Object に
+                        // 使わないため)
+                        let object_id = video_object_id;
+                        if config.stream_mapping == StreamMapping::Object
+                            && let Some(group_id) = started_video_group_id
+                        {
+                            // 1 Object を 1 Subgroup に載せる。Subgroup ID を最初の Object ID
+                            // から決めるモード (FirstObjectId) は Object ごとに一意になり、
+                            // Group 内で衝突しない。FIRST_OBJECT はこの Subgroup の最初の
+                            // Object が publisher によりその Subgroup に最初に公開された
+                            // Object であることを示すため true になる
+                            // (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
+                            let video_request_id =
+                                video_request_id.expect("video request_id enabled");
+                            let (video_handle, video_data_plane) = publish_sink(
+                                video_publish_target.as_ref(),
+                                &handle,
+                                &data_plane,
+                            );
+                            current_video_writer = Some(
+                                SubgroupWriter::new(
+                                    video_handle,
+                                    video_data_plane,
+                                    video_request_id,
+                                    VIDEO_TRACK_ALIAS,
+                                    group_id,
+                                    SubgroupIdMode::FirstObjectId,
+                                    object_id,
+                                    DEFAULT_PUBLISHER_PRIORITY,
+                                    true,
+                                    publish_start_location(
+                                        &client,
+                                        video_publish_target.as_ref(),
+                                        video_request_id,
+                                    ),
+                                )
+                                .await?,
+                            );
+                            video_object_id += 1;
+                        }
                         if let Some(writer) = current_video_writer.as_mut() {
                             // 保持する Location と SUBGROUP_OBJECT に載る Object ID を一致させる
                             // ため、書き込む前に writer が使う Location を取る
@@ -1403,6 +1465,21 @@ pub async fn run(
                                 )?;
                             }
                         }
+                        if config.stream_mapping == StreamMapping::Object
+                            && let Some(writer) = current_video_writer.take()
+                        {
+                            // object モードでは 1 Object を書いたら Subgroup を閉じる。
+                            // 次の Object は新しい Subgroup に載せる
+                            let video_request_id =
+                                video_request_id.expect("video request_id enabled");
+                            writer
+                                .finish(publish_start_location(
+                                    &client,
+                                    video_publish_target.as_ref(),
+                                    video_request_id,
+                                ))
+                                .await?;
+                        }
                         // 受信 SUBSCRIBE の購読にも同じ Object を送る
                         // (draft-ietf-moq-transport-23 §3.1 の "the publisher MUST send the
                         // Object once for each matching subscription")。フィルタと PAUSED は
@@ -1411,6 +1488,42 @@ pub async fn run(
                         // Pass を基準にする)。購読が reset された stream だけを捨てる
                         for peer in peer_subscriptions.iter_mut() {
                             if peer.track != PublishedTrack::Video || peer.ended {
+                                continue;
+                            }
+                            if config.stream_mapping == StreamMapping::Object
+                                && let Some(group_id) = started_video_group_id
+                            {
+                                // object モードの購読にも、この Object だけを載せる Subgroup を
+                                // 開く。PUBLISH 済みの購読と同じ Object ID と Subgroup ID に
+                                // なる (draft-ietf-moq-transport-23 §3.1 の MUST)
+                                let mut writer = SubgroupWriter::new(
+                                    &handle,
+                                    &data_plane,
+                                    peer.request_id,
+                                    peer.alias,
+                                    group_id,
+                                    SubgroupIdMode::FirstObjectId,
+                                    object_id,
+                                    DEFAULT_PUBLISHER_PRIORITY,
+                                    true,
+                                    client.subscription_filter_start(peer.request_id),
+                                )
+                                .await?;
+                                let write_result = writer.write_object(&ef.data, &properties).await;
+                                let finish_result = writer
+                                    .finish(client.subscription_filter_start(peer.request_id))
+                                    .await;
+                                if let Err(e) = write_result.and(finish_result) {
+                                    if is_peer_stream_reset(&e) {
+                                        tracing::info!(
+                                            "Peer video stream was reset by peer; dropping the subscription: request_id={}",
+                                            peer.request_id
+                                        );
+                                        peer.ended = true;
+                                    } else {
+                                        return Err(e);
+                                    }
+                                }
                                 continue;
                             }
                             let Some(writer) = peer.writer.as_mut() else {
@@ -1449,10 +1562,19 @@ pub async fn run(
                         // 禁止されるため、同じ group id (この example は subgroup id 0 固定) を
                         // 使うと `send_subgroup_header` が拒否される
                         current_video_writer = None;
-                        video_group_id += 1;
-                        tracing::info!(
-                            "Subgroup stream was reset by peer; dropping the current video group"
-                        );
+                        if config.stream_mapping == StreamMapping::Group {
+                            video_group_id += 1;
+                            tracing::info!(
+                                "Subgroup stream was reset by peer; dropping the current video group"
+                            );
+                        } else {
+                            // object モードでは Subgroup は 1 Object ごとに閉じる。peer が reset
+                            // したのはその Object だけであり、Group の残りは別の Subgroup で
+                            // 送り続けられる
+                            tracing::info!(
+                                "Subgroup stream was reset by peer; dropping the current video object"
+                            );
+                        }
                     }
                     Err(e) => {
                         // MOQT メッセージの encode / decode 失敗は終了コード付きで閉じる
@@ -1518,6 +1640,8 @@ pub async fn run(
                                 audio_request_id,
                                 AUDIO_TRACK_ALIAS,
                                 audio_group_id,
+                                SubgroupIdMode::Zero,
+                                0,
                                 DEFAULT_PUBLISHER_PRIORITY,
                                 true,
                                 publish_start_location(
@@ -1760,6 +1884,8 @@ pub async fn run(
                                 audio_request_id,
                                 AUDIO_TRACK_ALIAS,
                                 audio_group_id,
+                                SubgroupIdMode::Zero,
+                                0,
                                 DEFAULT_PUBLISHER_PRIORITY,
                                 true,
                                 publish_start_location(
@@ -1861,6 +1987,8 @@ pub async fn run(
                                     peer.request_id,
                                     peer.alias,
                                     audio_group_id,
+                                    SubgroupIdMode::Zero,
+                                    0,
                                     DEFAULT_PUBLISHER_PRIORITY,
                                     true,
                                     client.subscription_filter_start(peer.request_id),
@@ -6189,6 +6317,7 @@ mod tests {
                     fps: 30,
                     bitrate: 5_000,
                     max_group_duration_ms: Some(2_000),
+                    stream_mapping: StreamMapping::Group,
                 }),
                 audio: Some(CatalogAudioTrack {
                     codec: "opus".to_string(),
@@ -7894,6 +8023,7 @@ mod tests {
                     fps: 30,
                     bitrate: 200,
                     max_group_duration_ms: Some(u64::from(DEFAULT_GOP_DURATION_MS)),
+                    stream_mapping: StreamMapping::Group,
                 }),
                 None,
                 crate::catalog::CatalogSyncParams {
@@ -8074,6 +8204,8 @@ mod tests {
                 accepted.request_id,
                 accepted.alias,
                 group_id,
+                SubgroupIdMode::Zero,
+                0,
                 DEFAULT_PUBLISHER_PRIORITY,
                 true,
                 client.subscription_filter_start(accepted.request_id),
@@ -8115,6 +8247,51 @@ mod tests {
                 .finish()
                 .expect("FIN までに全 Object を読み切ること");
             (header.track_alias, header.group_id, objects)
+        }
+
+        /// 次の Subgroup stream を読み、ヘッダの識別子と Object の一覧を返す
+        ///
+        /// `subgroup_id` はデコードした Subgroup ID である (`FirstObjectId` は最初の
+        /// Object ID で解決される)。object モードで Subgroup ごとに 1 Object が載り、
+        /// Subgroup ID が衝突しないことを確かめるために使う。
+        async fn recv_subgroup_with_subgroup_id(
+            peer: &mut TestPeer,
+        ) -> (u64, u64, Option<u64>, Vec<DecodedSubgroupObject>) {
+            let bytes = wait_for(peer.recv_uni_data_stream())
+                .await
+                .expect("uni stream を終端まで読めること");
+            let mut decoder = SubgroupStreamDecoder::new();
+            decoder.push(&bytes);
+            let header = decoder
+                .try_decode_header()
+                .expect("SUBGROUP_HEADER を decode できること")
+                .expect("SUBGROUP_HEADER があること");
+            let mut objects = Vec::new();
+            while let Some(object) = decoder
+                .try_decode_object()
+                .expect("SUBGROUP_OBJECT を decode できること")
+            {
+                if object.payload_length > 0 {
+                    let payload = decoder
+                        .try_read_payload()
+                        .expect("Object の payload を読めること");
+                    assert_eq!(
+                        payload.len() as u64,
+                        object.payload_length,
+                        "payload の長さが宣言と一致すること"
+                    );
+                }
+                objects.push(object);
+            }
+            decoder
+                .finish()
+                .expect("FIN までに全 Object を読み切ること");
+            (
+                header.track_alias,
+                header.group_id,
+                decoder.resolved_subgroup_id(),
+                objects,
+            )
         }
 
         /// 映像の Subgroup が届くまで uni stream を読み、その Object 一覧を返す
@@ -9107,6 +9284,97 @@ mod tests {
                         "PTS の間隔が入力トラックの timescale 単位のサンプル尺と一致すること"
                     );
                 }
+
+                let result = publisher.stop().await;
+                assert!(result.is_ok(), "publisher が正常終了すること: {result:?}");
+            })
+            .await;
+        }
+
+        /// `--stream-mapping object` で映像が Object ごとに独立した Subgroup に載ること
+        ///
+        /// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping): object モードでは
+        /// 各 Object をそれぞれの Subgroup に載せる。Subgroup ID は `FirstObjectId` で
+        /// 最初の Object ID から決まるため、Group 内で衝突しない。MP4 パススルーの
+        /// 経路 (`current_video_writer` を使う送信経路) で成立することを実 stream で固定する。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn run_mp4_passthrough_with_object_stream_mapping_sends_one_object_per_subgroup() {
+            run_with_timeout(async {
+                /// 入力 MP4 の映像トラックのタイムスケール
+                const MP4_TIMESCALE: u32 = 90_000;
+                /// 入力 MP4 の 1 サンプル分の尺 (MP4_TIMESCALE 単位)
+                const SAMPLE_DURATION: u32 = 3_000;
+                /// 入力 MP4 の映像サンプル数 (最初の 1 つがキーフレーム)
+                const SAMPLE_COUNT: usize = 4;
+
+                let fixture = TempMp4::new("object-mapping");
+                let samples: Vec<(bool, u32, &[u8])> = vec![
+                    (true, SAMPLE_DURATION, AV1_CONFIG_OBUS),
+                    (false, SAMPLE_DURATION, &[0x32, 0x00]),
+                    (false, SAMPLE_DURATION, &[0x32, 0x01]),
+                    (false, SAMPLE_DURATION, &[0x32, 0x02]),
+                ];
+                write_mp4_fixture(fixture.path(), MP4_TIMESCALE, &samples);
+
+                let mut server = start_peer_server().await;
+                let url = format!("moqt://{}", server.local_addr());
+                let fixture_path = fixture
+                    .path()
+                    .to_str()
+                    .expect("一時 MP4 のパスが UTF-8 であること");
+                let config = config_for_url(
+                    &url,
+                    &["--input-mp4", fixture_path, "--stream-mapping", "object"],
+                );
+                assert_eq!(
+                    config.stream_mapping,
+                    StreamMapping::Object,
+                    "object モードが設定に反映されること"
+                );
+
+                let publisher = RunningPublisher::start(config);
+                let mut peer = accept_publisher(&mut server).await;
+                accept_initial_publishes(
+                    &mut peer,
+                    &[b"video".as_slice(), MSF_CATALOG_TRACK_NAME],
+                )
+                .await;
+
+                let mut received = Vec::new();
+                while received.len() < SAMPLE_COUNT {
+                    let (track_alias, group_id, subgroup_id, objects) =
+                        recv_subgroup_with_subgroup_id(&mut peer).await;
+                    if track_alias != VIDEO_TRACK_ALIAS {
+                        // catalog の Subgroup は読み捨てる
+                        continue;
+                    }
+                    assert_eq!(
+                        objects.len(),
+                        1,
+                        "object モードでは 1 Subgroup に 1 Object だけが載ること: group={group_id}, objects={objects:?}"
+                    );
+                    let object_id = objects[0].object_id;
+                    assert_eq!(
+                        subgroup_id,
+                        Some(object_id),
+                        "Subgroup ID が最初の Object ID で解決され、Object ID ごとに一意であること: object_id={object_id}"
+                    );
+                    received.push((group_id, object_id));
+                }
+
+                let first_group_id = received[0].0;
+                assert!(
+                    received.iter().all(|(group_id, _)| *group_id == first_group_id),
+                    "object モードでも Group 内の全 Object が同じ Group ID に載ること: received={received:?}"
+                );
+                assert_eq!(
+                    received
+                        .iter()
+                        .map(|(_, object_id)| *object_id)
+                        .collect::<Vec<_>>(),
+                    (0..SAMPLE_COUNT as u64).collect::<Vec<_>>(),
+                    "Object ID が Group 内で 0 から 1 ずつ増えること"
+                );
 
                 let result = publisher.stop().await;
                 assert!(result.is_ok(), "publisher が正常終了すること: {result:?}");

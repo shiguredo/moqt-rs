@@ -373,6 +373,17 @@ pub enum StreamMapping {
 }
 
 impl StreamMapping {
+    /// `packagingMetadata` の `streamMapping` 値として書き出す文字列を返す
+    ///
+    /// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) の許容値は
+    /// `group` / `object` である。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Group => "group",
+            Self::Object => "object",
+        }
+    }
+
     /// `packagingMetadata` の `streamMapping` 値を解釈する
     ///
     /// 値がない場合は `Group`、`group` / `object` 以外は `InvalidCatalog`。
@@ -651,7 +662,7 @@ pub struct MsfTrack {
     /// パッケージング固有メタデータ (draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata))
     ///
     /// `;` 区切りの `key=value`。key / value に whitespace・`=`・`;` は含められない。
-    /// `streamMapping` の値解釈と既定値 `group` は 0459 が扱う。
+    /// `streamMapping` の値の解釈と既定値は [`MsfTrack::stream_mapping`] が扱う。
     pub packaging_metadata: Option<String>,
     /// イベントタイムラインタイプ (draft-ietf-moq-msf-02 §5.2.6 (Event timeline type)) - packaging=eventtimeline の場合必須
     pub event_type: Option<String>,
@@ -890,7 +901,8 @@ impl MsfTrack {
     /// draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata): `;` 区切りの `key=value` を
     /// 先頭から探し、最初に現れた key の値を返す。未知の key は `None` になる。
     /// 構文は decode / encode 時に `validate_packaging_metadata` で検証済みである。
-    /// `streamMapping` の値の解釈と、キーがない場合の既定 `group` は 0459 が扱う。
+    /// `streamMapping` の値の解釈と、キーがない場合の既定 `group` は
+    /// [`MsfTrack::stream_mapping`] が扱う。
     pub fn packaging_metadata_value(&self, key: &str) -> Option<&str> {
         self.packaging_metadata
             .as_deref()?
