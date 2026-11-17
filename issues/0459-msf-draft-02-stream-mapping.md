@@ -1,7 +1,7 @@
 # MSF の LOC stream mapping (group / object) に対応する
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -43,3 +43,15 @@ draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) は、LOC packaging �
 - `object` モードで Subgroup の到着順が入れ替わっても、Object を取りこぼさずに復号できること。
 - `group` モードの既存挙動が変わらないこと。
 - 上記を `crates/moq-pub` と `crates/moq-sub` のテストで固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `MsfTrack::stream_mapping()` を追加し、`packagingMetadata` の `streamMapping=group|object` を解釈するようにした。キーがない場合は `group`、`group` / `object` 以外は `InvalidCatalog` とする (§4.1.1 / §5.2.5)。
+- moq-pub に `--stream-mapping group|object` (既定 group) を追加し、`VideoTrackParams` / `CatalogContext` / `build_catalog` へ伝播させた。カタログの `packagingMetadata` には選択したモードを `streamMapping=...` として明示する。
+- object モードでは 1 Object ごとに `SubgroupWriter` を作り、`SubgroupIdMode::FirstObjectId` で Subgroup ID を Object ID から決める。Group 内の Object ID は 0 から 1 ずつ増やし、FIRST_OBJECT は Subgroup の最初の Object で true になる。
+- カメラ / MP4 パススルー / reencode / peer 購読の共通送信経路を object モードに対応させた。group モードは従来どおり `SubgroupIdMode::Zero` で 1 Group 1 Subgroup のままである。
+- moq-sub はカタログの `stream_mapping()` を読み、object モードでは Group ごとに `VideoObjectReorderBuffer` で Object ID 順に並べ替え、購読で 1 つの復号器へ直列に流す。Group 内の複数 Subgroup の到着順が入れ替わっても、キーフレームより先に届いた delta を保留できる。
+- `VideoDecodeOrder` は同じ Group の Object ID の欠けで状態を捨てず、欠けた Object が後から届いた場合に復号を続けられるようにした。実際に欠けが解消しなければ後続も捨て、次のキーフレームで再開する。
+- `src/video_object_reorder.rs` の単体テスト、PBT、moq-pub / moq-sub の統合テストを追加した。実 peer harness で object モードのカタログを渡し、delta をキーフレームより先に送って 2 フレームが順に復号されることを確認している。`docs/msf.md` も更新した。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` が通ることを確認した。
