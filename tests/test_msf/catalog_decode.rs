@@ -851,16 +851,17 @@ fn invalid_packaging_metadata_rejected() {
 fn depends_resolution_accepts_track_name_and_render_group() {
     let json = br#"{"version":"draft-01","tracks":[
         {"name":"video","packaging":"loc","isLive":true,"renderGroup":1},
-        {"name":"timeline","packaging":"mediatimeline","isLive":true,"depends":["video",1],"mimeType":"application/json"}
+        {"name":"audio","packaging":"loc","isLive":true},
+        {"name":"timeline","packaging":"mediatimeline","isLive":true,"depends":["audio",1],"mimeType":"application/json"}
     ]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("依存先が実在するため受理されること");
     let MsfCatalogDocument::Full(catalog) = doc else {
         panic!("Full が期待された");
     };
     assert_eq!(
-        catalog.tracks[1].depends,
+        catalog.tracks[2].depends,
         vec![
-            MsfDependency::TrackName("video".to_string()),
+            MsfDependency::TrackName("audio".to_string()),
             MsfDependency::RenderGroup(1)
         ]
     );
@@ -932,4 +933,42 @@ fn depends_resolution_allows_publish_tracks_cross_reference() {
         MsfCatalogDocument::decode(&encoded).expect("roundtrip できること"),
         doc
     );
+}
+
+/// media timeline が renderGroup の全 track を個別名で列挙する場合に拒否されること
+#[test]
+fn media_timeline_all_tracks_named_without_render_group_rejected() {
+    let json = br#"{"version":"draft-01","tracks":[
+        {"name":"v1","packaging":"loc","isLive":true,"renderGroup":1},
+        {"name":"v2","packaging":"loc","isLive":true,"renderGroup":1},
+        {"name":"timeline","packaging":"mediatimeline","isLive":true,"depends":["v1","v2"]}
+    ]}"#;
+    assert!(matches!(
+        MsfCatalogDocument::decode(json),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+/// media timeline が renderGroup と所属 track の個別名を併記する場合に拒否されること
+#[test]
+fn media_timeline_render_group_and_member_name_rejected() {
+    let json = br#"{"version":"draft-01","tracks":[
+        {"name":"v1","packaging":"loc","isLive":true,"renderGroup":1},
+        {"name":"v2","packaging":"loc","isLive":true,"renderGroup":1},
+        {"name":"timeline","packaging":"mediatimeline","isLive":true,"depends":[1,"v1"]}
+    ]}"#;
+    assert!(matches!(
+        MsfCatalogDocument::decode(json),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+/// mimeType を持たない media timeline が受理されること
+#[test]
+fn media_timeline_without_mime_type_accepted() {
+    let json = br#"{"version":"draft-01","tracks":[
+        {"name":"video","packaging":"loc","isLive":true},
+        {"name":"timeline","packaging":"mediatimeline","isLive":true,"depends":["video"]}
+    ]}"#;
+    assert!(MsfCatalogDocument::decode(json).is_ok());
 }

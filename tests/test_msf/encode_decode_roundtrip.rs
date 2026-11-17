@@ -1974,3 +1974,27 @@ fn encode_rejects_unresolved_depends() {
     });
     assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
 }
+
+/// media timeline の renderGroup 参照規則違反を encode しないこと
+#[test]
+fn encode_rejects_media_timeline_naming_all_render_group_tracks() {
+    let mut v1 = MsfTrack::new("v1".to_string(), MsfPackaging::Loc, true);
+    v1.render_group = Some(1);
+    let mut v2 = MsfTrack::new("v2".to_string(), MsfPackaging::Loc, true);
+    v2.render_group = Some(1);
+    let mut timeline = MsfTrack::new("timeline".to_string(), MsfPackaging::MediaTimeline, true);
+    timeline.depends = vec![
+        MsfDependency::TrackName("v1".to_string()),
+        MsfDependency::TrackName("v2".to_string()),
+    ];
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![v1, v2, timeline],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+}

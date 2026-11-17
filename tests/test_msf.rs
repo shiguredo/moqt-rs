@@ -9,6 +9,7 @@ use shiguredo_moqt::{
         TimelineEncodingOptions, decode_event_timeline, decode_media_timeline,
         encode_event_timeline, encode_media_timeline, parse_catalog_namespace,
         parse_fragment_pairs, resolve_catalog_variables, serialize_catalog_namespace,
+        validate_event_timeline_depends,
     },
 };
 

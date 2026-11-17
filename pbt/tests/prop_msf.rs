@@ -567,11 +567,19 @@ fn rewrite_dependencies(
         .chain(publish_tracks.iter())
         .map(|track| track.name.clone())
         .collect::<Vec<_>>();
-    let render_groups = tracks
+    let mut render_groups = tracks
         .iter()
         .chain(publish_tracks.iter())
         .filter_map(|track| track.render_group)
         .collect::<Vec<_>>();
+    // media timeline が個別名を列挙した後に別の track へ renderGroup が付くと参照規則に
+    // 反するため、renderGroup が 1 つも無ければ先頭 track に作っておく
+    if render_groups.is_empty()
+        && let Some(first) = tracks.first_mut()
+    {
+        first.render_group = Some(0);
+        render_groups.push(0);
+    }
 
     let rewrite_one = |source: &mut MsfTrack, ctx: &mut noprop::TestCaseContext| {
         let source_name = source.name.clone();
@@ -588,14 +596,21 @@ fn rewrite_dependencies(
             .cloned()
             .collect::<Vec<_>>();
 
-        let is_timeline = matches!(
-            source.packaging,
-            MsfPackaging::MediaTimeline | MsfPackaging::EventTimeline
-        );
+        let is_media_timeline = source.packaging == MsfPackaging::MediaTimeline;
+        let is_timeline = is_media_timeline || source.packaging == MsfPackaging::EventTimeline;
         let count = noprop::sample_usize_in(ctx, if is_timeline { 1..=2 } else { 0..=2 });
         let mut depends = Vec::new();
         for _ in 0..count {
-            if !valid_names.is_empty() && (render_groups.is_empty() || noprop::sample_bool(ctx)) {
+            // media timeline が renderGroup を参照するときは所属 track の個別名を併記しない
+            // (draft-ietf-moq-msf-02 §7.2)。renderGroup がある場合はグループ参照だけにする。
+            if is_media_timeline && !render_groups.is_empty() {
+                depends.push(MsfDependency::RenderGroup(noprop::sample_choice(
+                    ctx,
+                    &render_groups,
+                )));
+            } else if !valid_names.is_empty()
+                && (render_groups.is_empty() || noprop::sample_bool(ctx))
+            {
                 depends.push(MsfDependency::TrackName(
                     noprop::sample_choice(ctx, &valid_names).clone(),
                 ));

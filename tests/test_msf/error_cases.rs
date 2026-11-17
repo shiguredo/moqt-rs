@@ -941,12 +941,10 @@ fn media_timeline_missing_depends_rejected() {
 }
 
 #[test]
-fn media_timeline_wrong_mime_type_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"mediatimeline","isLive":true,"depends":["video"],"mimeType":"text/plain"}]}"#;
-    assert!(matches!(
-        MsfCatalogDocument::decode(json),
-        Err(MessageError::InvalidCatalog(_))
-    ));
+fn media_timeline_arbitrary_mime_type_accepted() {
+    // draft-ietf-moq-msf-02 §7.2: mimeType の値は要求しない
+    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"mediatimeline","isLive":true,"depends":["video"],"mimeType":"text/plain"},{"name":"video","packaging":"loc","isLive":true}]}"#;
+    assert!(MsfCatalogDocument::decode(json).is_ok());
 }
 
 #[test]
@@ -959,21 +957,17 @@ fn event_type_with_non_eventtimeline_rejected() {
 }
 
 #[test]
-fn eventtimeline_missing_depends_rejected() {
+fn eventtimeline_without_depends_accepted() {
+    // draft-ietf-moq-msf-02 §8.3: depends は index が media timeline を参照する場合だけ必須
     let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"eventtimeline","isLive":true,"eventType":"cue","mimeType":"application/json"}]}"#;
-    assert!(matches!(
-        MsfCatalogDocument::decode(json),
-        Err(MessageError::InvalidCatalog(_))
-    ));
+    assert!(MsfCatalogDocument::decode(json).is_ok());
 }
 
 #[test]
-fn eventtimeline_wrong_mime_type_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"eventtimeline","isLive":true,"eventType":"cue","depends":["video"],"mimeType":"text/plain"}]}"#;
-    assert!(matches!(
-        MsfCatalogDocument::decode(json),
-        Err(MessageError::InvalidCatalog(_))
-    ));
+fn eventtimeline_arbitrary_mime_type_accepted() {
+    // draft-ietf-moq-msf-02 §8.3: mimeType の値は要求しない
+    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"eventtimeline","isLive":true,"eventType":"cue","mimeType":"text/plain"}]}"#;
+    assert!(MsfCatalogDocument::decode(json).is_ok());
 }
 
 // ─── codec / role に応じた必須フィールド ──────────────────────────────────────

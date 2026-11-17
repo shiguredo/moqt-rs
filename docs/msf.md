@@ -35,6 +35,9 @@
   - `MsfCatalog::validate_track_names`：基準 namespace を渡して Full Track Name の一意性と 4,096 バイト制限を検証する
 - 関連型
   - clone 用 `MsfCloneTrack` (parentNamespace / packagingMetadata の継承に対応)
+  - media timeline は depends 必須で、renderGroup 内の全 track が対象なら renderGroup を参照し個別名を併記しない (§7.2)
+  - event timeline の depends は index が MediaPtsMs を参照する場合だけ必須で、`validate_event_timeline_depends(catalog, timeline)` で検証する (§8.3)
+  - 両 timeline とも mimeType の値を要求しない。renderGroup の一部だけが対象という判定は catalog からできないため publisher の責務である
   - 削除用 `MsfRemoveTrack`
   - `MsfInitData` / `MsfBuffers` / `MsfPackaging` (loc / mediatimeline / eventtimeline / moqlog / moqmetrics / catalog)
 - 検証規則

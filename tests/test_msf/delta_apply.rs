@@ -1713,3 +1713,32 @@ fn apply_delta_rejects_unresolved_depends() {
         Err(MessageError::InvalidCatalog(_))
     ));
 }
+
+/// delta 適用後に media timeline の renderGroup 参照規則違反が残る場合は拒否されること
+#[test]
+fn apply_delta_rejects_media_timeline_naming_all_render_group_tracks() {
+    let mut catalog = MsfCatalog::new();
+    let mut v1 = loc_track("v1", None);
+    v1.render_group = Some(1);
+    let mut v2 = loc_track("v2", None);
+    v2.render_group = Some(1);
+    catalog.tracks.push(v1);
+    catalog.tracks.push(v2);
+
+    let mut timeline = loc_track("timeline", None);
+    timeline.packaging = MsfPackaging::MediaTimeline;
+    timeline.depends = vec![
+        MsfDependency::TrackName("v1".to_string()),
+        MsfDependency::TrackName("v2".to_string()),
+    ];
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![timeline],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}

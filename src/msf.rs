@@ -1560,29 +1560,10 @@ impl MsfCloneTrack {
         // draft-ietf-moq-msf-01 §7.2 (Media Timeline Catalog requirements) / §8.2 (Event Timeline Catalog requirements):
         // timeline は depends 必須、mimeType=application/json 必須
         let is_media_timeline = matches!(packaging, MsfPackaging::MediaTimeline);
-        if is_media_timeline {
-            if depends.is_empty() {
-                return Err(MessageError::InvalidCatalog(
-                    "mediatimeline track MUST have a 'depends' attribute".to_string(),
-                ));
-            }
-            if mime_type.as_deref() != Some("application/json") {
-                return Err(MessageError::InvalidCatalog(
-                    "mediatimeline track mimeType MUST be 'application/json'".to_string(),
-                ));
-            }
-        }
-        if is_event_timeline {
-            if depends.is_empty() {
-                return Err(MessageError::InvalidCatalog(
-                    "eventtimeline track MUST have a 'depends' attribute".to_string(),
-                ));
-            }
-            if mime_type.as_deref() != Some("application/json") {
-                return Err(MessageError::InvalidCatalog(
-                    "eventtimeline track mimeType MUST be 'application/json'".to_string(),
-                ));
-            }
+        if is_media_timeline && depends.is_empty() {
+            return Err(MessageError::InvalidCatalog(
+                "mediatimeline track MUST have a 'depends' attribute".to_string(),
+            ));
         }
 
         // draft-ietf-moq-msf-01 §5.2.39 (Cipher suite) / §4.3.3 (Recommended encryption scheme):
@@ -2094,6 +2075,7 @@ impl MsfCatalog {
         validate_init_refs(&self.tracks, &self.publish_tracks, &self.init_data_list)?;
         // draft-ietf-moq-msf-02 §5.2.15 (Dependencies): 適用後の catalog 全体で解決できること
         validate_catalog_dependencies(&self.tracks, &self.publish_tracks)?;
+        validate_media_timeline_dependencies(&self.tracks, &self.publish_tracks)?;
         // draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers):
         // 同一 renderGroup / altGroup 内の isLive=true トラックが宣言した値は一致しなければならない (MUST)。
         // 省略は player の裁量 (MAY) のため比較しない。この仕様は将来変更される可能性がある。
@@ -2924,6 +2906,147 @@ fn validate_catalog_dependencies(
     Ok(())
 }
 
+/// Media Timeline の depends が renderGroup の参照規則を満たすか検証する
+///
+/// draft-ietf-moq-msf-02 §7.2 (Media Timeline Catalog requirements): renderGroup 内の全 track が
+/// 対象なら renderGroup を参照し個別名を参照してはならず、一部だけが対象なら renderGroup を
+/// 参照せず個別名を参照しなければならない。catalog だけからは「一部だけ」を判定できないため、
+/// 全 track が個別名で列挙されている場合と、renderGroup 参照と所属 track の個別名参照が併存する
+/// 場合だけを拒否する。一部だけの判定は publisher の責務である。
+fn validate_media_timeline_dependencies(
+    tracks: &[MsfTrack],
+    publish_tracks: &[MsfTrack],
+) -> Result<(), MessageError> {
+    let all_tracks = tracks
+        .iter()
+        .chain(publish_tracks.iter())
+        .collect::<Vec<_>>();
+    let mut render_groups = Vec::new();
+    for track in &all_tracks {
+        if let Some(group) = track.render_group
+            && !render_groups.contains(&group)
+        {
+            render_groups.push(group);
+        }
+    }
+
+    for source in &all_tracks {
+        if source.packaging != MsfPackaging::MediaTimeline {
+            continue;
+        }
+        let referenced_names = source
+            .depends
+            .iter()
+            .filter_map(|dependency| match dependency {
+                MsfDependency::TrackName(name) => Some(name.as_str()),
+                MsfDependency::RenderGroup(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let referenced_groups = source
+            .depends
+            .iter()
+            .filter_map(|dependency| match dependency {
+                MsfDependency::RenderGroup(group) => Some(*group),
+                MsfDependency::TrackName(_) => None,
+            })
+            .collect::<Vec<_>>();
+
+        for group in &render_groups {
+            let members = all_tracks
+                .iter()
+                .copied()
+                .filter(|track| {
+                    track.render_group == Some(*group) && !core::ptr::eq(*track, *source)
+                })
+                .collect::<Vec<_>>();
+            if members.is_empty() {
+                continue;
+            }
+            let group_referenced = referenced_groups.contains(group);
+            let all_members_referenced = members
+                .iter()
+                .all(|track| referenced_names.contains(&track.name.as_str()));
+            if all_members_referenced && !group_referenced {
+                return Err(MessageError::InvalidCatalog(format!(
+                    "media timeline '{}' MUST reference renderGroup {group} instead of all of its tracks",
+                    source.name
+                )));
+            }
+            if group_referenced
+                && members
+                    .iter()
+                    .any(|track| referenced_names.contains(&track.name.as_str()))
+            {
+                return Err(MessageError::InvalidCatalog(format!(
+                    "media timeline '{}' MUST NOT reference individual tracks in the referenced renderGroup {group}",
+                    source.name
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Event Timeline の index が参照する Media Timeline の depends を検証する
+///
+/// draft-ietf-moq-msf-02 §8.3 (Event Timeline Catalog requirements): index が MediaPtsMs を
+/// 参照する場合、対応する Media Timeline track を event timeline の `depends` に列挙しなければ
+/// ならない。catalog だけでは event timeline payload の index と track の対応を判定できないため、
+/// 本関数は catalog 内の eventtimeline track のうち少なくとも 1 つが media timeline を参照して
+/// いることを確認する。複数の event timeline track がある場合の対応付けは呼び出し側の責務である。
+pub fn validate_event_timeline_depends(
+    catalog: &MsfCatalog,
+    timeline: &MsfEventTimeline,
+) -> Result<(), MessageError> {
+    let uses_media_pts = timeline
+        .0
+        .iter()
+        .any(|entry| matches!(entry.index, MsfEventIndex::MediaPtsMs(_)));
+    if !uses_media_pts {
+        return Ok(());
+    }
+
+    let media_tracks = catalog
+        .tracks
+        .iter()
+        .chain(catalog.publish_tracks.iter())
+        .filter(|track| track.packaging == MsfPackaging::MediaTimeline)
+        .collect::<Vec<_>>();
+    if media_tracks.is_empty() {
+        return Err(MessageError::InvalidCatalog(
+            "event timeline with MediaPtsMs index requires a media timeline track".to_string(),
+        ));
+    }
+    let media_names = media_tracks
+        .iter()
+        .map(|track| track.name.as_str())
+        .collect::<Vec<_>>();
+    let media_groups = media_tracks
+        .iter()
+        .filter_map(|track| track.render_group)
+        .collect::<Vec<_>>();
+
+    let referenced = catalog
+        .tracks
+        .iter()
+        .chain(catalog.publish_tracks.iter())
+        .filter(|track| track.packaging == MsfPackaging::EventTimeline)
+        .any(|track| {
+            track.depends.iter().any(|dependency| match dependency {
+                MsfDependency::TrackName(name) => media_names.contains(&name.as_str()),
+                MsfDependency::RenderGroup(group) => media_groups.contains(group),
+            })
+        });
+    if referenced {
+        Ok(())
+    } else {
+        Err(MessageError::InvalidCatalog(
+            "event timeline with MediaPtsMs index MUST depend on a media timeline track"
+                .to_string(),
+        ))
+    }
+}
+
 /// packagingMetadata の構文を検証する
 ///
 /// draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata): `;` 区切りの `key=value` で、key と
@@ -3051,31 +3174,13 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
         ));
     }
 
-    // draft-ietf-moq-msf-01 §7.2 (Media Timeline Catalog requirements) / §8.2 (Event Timeline Catalog requirements)
+    // draft-ietf-moq-msf-02 §7.2 (Media Timeline Catalog requirements):
+    // mediatimeline は depends 必須。mimeType の値は要求しない。
     let is_media_timeline = matches!(track.packaging, MsfPackaging::MediaTimeline);
-    if is_media_timeline {
-        if track.depends.is_empty() {
-            return Err(MessageError::InvalidCatalog(
-                "mediatimeline track MUST have a 'depends' attribute".to_string(),
-            ));
-        }
-        if track.mime_type.as_deref() != Some("application/json") {
-            return Err(MessageError::InvalidCatalog(
-                "mediatimeline track mimeType MUST be 'application/json'".to_string(),
-            ));
-        }
-    }
-    if is_event_timeline {
-        if track.depends.is_empty() {
-            return Err(MessageError::InvalidCatalog(
-                "eventtimeline track MUST have a 'depends' attribute".to_string(),
-            ));
-        }
-        if track.mime_type.as_deref() != Some("application/json") {
-            return Err(MessageError::InvalidCatalog(
-                "eventtimeline track mimeType MUST be 'application/json'".to_string(),
-            ));
-        }
+    if is_media_timeline && track.depends.is_empty() {
+        return Err(MessageError::InvalidCatalog(
+            "mediatimeline track MUST have a 'depends' attribute".to_string(),
+        ));
     }
 
     // draft-ietf-moq-msf-01 §5.2.32 (Language): BCP 47 言語タグ
@@ -3163,6 +3268,7 @@ fn validate_full_catalog_for_encode(catalog: &MsfCatalog) -> Result<(), MessageE
         validate_full_track(track)?;
     }
     validate_catalog_dependencies(&catalog.tracks, &catalog.publish_tracks)?;
+    validate_media_timeline_dependencies(&catalog.tracks, &catalog.publish_tracks)?;
     // tracks と publishTracks は方向が異なるため group 検証は分離する
     // (draft-ietf-moq-msf-01 §5.1.5 の reverse direction による本実装の解釈)
     validate_group_target_latency(&catalog.tracks, "renderGroup", |t| t.render_group)?;
@@ -3290,6 +3396,7 @@ fn decode_full_catalog(
 
     // draft-ietf-moq-msf-02 §5.2.15 (Dependencies): 参照先が解決できること
     validate_catalog_dependencies(&tracks, &publish_tracks)?;
+    validate_media_timeline_dependencies(&tracks, &publish_tracks)?;
 
     let catalog = MsfCatalog {
         version,
@@ -3687,32 +3794,13 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
     }
 
     // ─── timeline track の必須属性 ────────────────
+    // draft-ietf-moq-msf-02 §7.2 (Media Timeline Catalog requirements):
+    // mediatimeline は depends 必須。mimeType の値は要求しない。
     let is_media_timeline = matches!(packaging, MsfPackaging::MediaTimeline);
-    // draft-ietf-moq-msf-01 §7.2 (Media Timeline Catalog requirements): mediatimeline は depends 必須, mimeType=application/json 必須
-    if is_media_timeline {
-        if depends.is_empty() {
-            return Err(MessageError::InvalidCatalog(
-                "mediatimeline track MUST have a 'depends' attribute".to_string(),
-            ));
-        }
-        if mime_type.as_deref() != Some("application/json") {
-            return Err(MessageError::InvalidCatalog(
-                "mediatimeline track mimeType MUST be 'application/json'".to_string(),
-            ));
-        }
-    }
-    // draft-ietf-moq-msf-01 §8.2 (Event Timeline Catalog requirements): eventtimeline は depends 必須, mimeType=application/json 必須
-    if is_event_timeline {
-        if depends.is_empty() {
-            return Err(MessageError::InvalidCatalog(
-                "eventtimeline track MUST have a 'depends' attribute".to_string(),
-            ));
-        }
-        if mime_type.as_deref() != Some("application/json") {
-            return Err(MessageError::InvalidCatalog(
-                "eventtimeline track mimeType MUST be 'application/json'".to_string(),
-            ));
-        }
+    if is_media_timeline && depends.is_empty() {
+        return Err(MessageError::InvalidCatalog(
+            "mediatimeline track MUST have a 'depends' attribute".to_string(),
+        ));
     }
 
     let track = MsfTrack {

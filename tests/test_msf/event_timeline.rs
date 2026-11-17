@@ -346,3 +346,44 @@ fn deep_data_raw_roundtrip_at_boundary() {
         MsfEventTimeline::decode(&encoded).expect("境界内の data_raw は decode できること");
     assert_eq!(decoded, tl);
 }
+
+/// event timeline の index が MediaPtsMs を参照する場合の depends 検証
+#[test]
+fn event_timeline_depends_validation_requires_media_timeline_dependency() {
+    let mut catalog = MsfCatalog::new();
+    let media = MsfTrack::new("media".to_string(), MsfPackaging::MediaTimeline, true);
+    let mut event = MsfTrack::new("event".to_string(), MsfPackaging::EventTimeline, true);
+    event.event_type = Some("com.example.cue".to_string());
+    catalog.tracks.push(media);
+    catalog.tracks.push(event);
+
+    // MediaPtsMs を持たない timeline は depends なしでよい
+    let no_media_pts = MsfEventTimeline(vec![MsfEventTimelineEntry {
+        index: MsfEventIndex::WallclockMs(1),
+        data_raw: b"{}".to_vec(),
+    }]);
+    assert!(
+        validate_event_timeline_depends(&catalog, &no_media_pts).is_ok(),
+        "MediaPtsMs が無ければ depends を要求しないこと"
+    );
+
+    // MediaPtsMs を持つのに media timeline への依存が無ければ拒否する
+    let media_pts = MsfEventTimeline(vec![MsfEventTimelineEntry {
+        index: MsfEventIndex::MediaPtsMs(1),
+        data_raw: b"{}".to_vec(),
+    }]);
+    assert!(
+        matches!(
+            validate_event_timeline_depends(&catalog, &media_pts),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "MediaPtsMs を持つ場合は media timeline への依存を要求すること"
+    );
+
+    // media timeline track を depends に列挙すれば受理する
+    catalog.tracks[1].depends = vec![MsfDependency::TrackName("media".to_string())];
+    assert!(
+        validate_event_timeline_depends(&catalog, &media_pts).is_ok(),
+        "media timeline を depends に持つ場合は受理すること"
+    );
+}
