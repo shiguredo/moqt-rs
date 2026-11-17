@@ -1,7 +1,7 @@
 # MSF の仕様参照を draft-02 に更新する
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -40,3 +40,13 @@
 - `README.md` と `skills/shiguredo-moq/SKILL.md` は本 issue では変更しないこと (0437 の担当)。
 - コードの挙動が変わっていないこと (差分がコメント・doc・エラーメッセージ文字列・テスト・Markdown のみ)。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `src` / `crates` / `docs` / `tests` / `pbt` / `fuzz` / `Cargo.toml` の `draft-ietf-moq-msf-01` を `draft-ietf-moq-msf-02` に更新した。`rg 'draft-ietf-moq-msf-01' src crates docs tests pbt fuzz Cargo.toml` が 0 件であることを確認した。
+- v01 の文脈を持つ行について、§5.2.5〜§5.2.36 を +1、Table 3 / 4 / 5 / 6 / 7 を v02 の Table 5 / 7 / 8 / 9 / 10 に更新した。§7.5.1 は §7.4.1、§8.2 (Event Timeline Catalog requirements) は §8.3、§11.4.x は §11.5.x に更新した。
+- v02 の節タイトルと番号の対応を目視・機械照合し、`§5.2.N (Title)` の組が v02 の同じタイトルの節を指すことを確認した。track role の `§5.2.7 Table 7`、Target latency の `§5.2.9`、Connection URI の `§5.2.37`、Template Format の `§7.4.1` を確認した。
+- エラーメッセージ文字列の msf-01 引用も msf-02 に更新し、テストを追従させた。`docs/missing-features.md` の `SUBSCRIBE_DONE` の対比を v02 §11.4 の `PUBLISH_DONE` に書き直した。
+- `README.md` と `skills/shiguredo-moq/SKILL.md` の版表記は 0437 の担当のため変更していない。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
