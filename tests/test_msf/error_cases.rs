@@ -974,7 +974,7 @@ fn eventtimeline_wrong_mime_type_rejected() {
 /// role="video" は codec 必須 (draft-ietf-moq-msf-01 §5.2.18 (Codec))
 #[test]
 fn video_role_missing_codec_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"video","bitrate":1000}]}"#;
+    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"video","framerate":30,"bitrate":1000}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("role 由来の codec 欠如は InvalidCatalog であること");
     };
@@ -987,7 +987,7 @@ fn video_role_missing_codec_rejected() {
 /// role="video" は bitrate 必須 (draft-ietf-moq-msf-01 §5.2.22 (Maximum Bitrate))
 #[test]
 fn video_role_missing_bitrate_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"video","codec":"av01"}]}"#;
+    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"av01"}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("role 由来の bitrate 欠如は InvalidCatalog であること");
     };
@@ -1003,7 +1003,7 @@ fn video_role_missing_bitrate_rejected() {
 /// "An audio description for visually impaired users" と定める。
 #[test]
 fn audiodescription_role_requires_audio_fields_rejected() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"role":"audiodescription","codec":"opus","bitrate":32000,"channelConfig":"2"}]}"#;
+    let json = br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"role":"audiodescription","lang":"en","codec":"opus","bitrate":32000,"channelConfig":"2"}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("role 由来の samplerate 欠如は InvalidCatalog であること");
     };
@@ -1011,7 +1011,7 @@ fn audiodescription_role_requires_audio_fields_rejected() {
         reason.contains("samplerate") && reason.contains("role 'audiodescription'"),
         "role 由来の samplerate 要求を述べること: {reason}"
     );
-    let json = br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"role":"audiodescription","codec":"opus","bitrate":32000,"samplerate":48000}]}"#;
+    let json = br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"role":"audiodescription","lang":"en","codec":"opus","bitrate":32000,"samplerate":48000}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("role 由来の channelConfig 欠如は InvalidCatalog であること");
     };
@@ -1028,7 +1028,7 @@ fn audiodescription_role_requires_audio_fields_rejected() {
 /// codec 由来ではなく role 由来の要求であることを固定する。
 #[test]
 fn signlanguage_role_is_treated_as_video() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"signlanguage"}]}"#;
+    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"signlanguage","framerate":30}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("role=signlanguage は codec を要求すること");
     };
@@ -1036,7 +1036,7 @@ fn signlanguage_role_is_treated_as_video() {
         reason.contains("codec") && reason.contains("role 'signlanguage'"),
         "role 由来の codec 要求を述べること: {reason}"
     );
-    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"signlanguage","codec":"unregistered"}]}"#;
+    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"signlanguage","framerate":30,"codec":"unregistered"}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("role=signlanguage は bitrate を要求すること");
     };
@@ -1044,7 +1044,7 @@ fn signlanguage_role_is_treated_as_video() {
         reason.contains("bitrate") && reason.contains("role 'signlanguage'"),
         "role 由来の bitrate 要求を述べること: {reason}"
     );
-    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"signlanguage","codec":"unregistered","bitrate":1000}]}"#;
+    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"signlanguage","framerate":30,"codec":"unregistered","bitrate":1000}]}"#;
     assert!(
         MsfCatalogDocument::decode(json).is_ok(),
         "role=signlanguage でも必須フィールドを満たせば受理されること"
@@ -1075,7 +1075,7 @@ fn audio_role_missing_samplerate_rejected() {
 /// role="video" / "audio" が必須フィールドを満たせば受理される
 #[test]
 fn media_role_with_required_fields_accepted() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"video","codec":"av01","bitrate":1000},{"name":"a","packaging":"loc","isLive":true,"role":"audio","codec":"opus","bitrate":32000,"samplerate":48000,"channelConfig":"2"}]}"#;
+    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"av01","bitrate":1000},{"name":"a","packaging":"loc","isLive":true,"role":"audio","codec":"opus","bitrate":32000,"samplerate":48000,"channelConfig":"2"}]}"#;
     assert!(MsfCatalogDocument::decode(json).is_ok());
 }
 
@@ -1095,6 +1095,7 @@ fn media_role_missing_fields_rejected_on_encode() {
     let mut track = MsfTrack::new("v".to_string(), MsfPackaging::Loc, true);
     track.role = Some("video".to_string());
     track.codec = Some("av01".to_string());
+    track.framerate = Some(30.0);
     // bitrate を欠いたまま encode するとエラーになる
     let doc = MsfCatalogDocument::Full(MsfCatalog {
         tracks: vec![track],
@@ -1344,7 +1345,7 @@ fn codec_boundary_separator_is_required() {
 /// 欠けば、codec を根拠に拒否される。
 #[test]
 fn role_and_codec_requirements_are_combined() {
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"role":"video","codec":"opus","bitrate":32000}]}"#;
+    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"opus","bitrate":32000}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("samplerate 欠如は codec を根拠に拒否されること");
     };
@@ -1352,7 +1353,7 @@ fn role_and_codec_requirements_are_combined() {
         reason.contains("codec 'opus'") && reason.contains("samplerate"),
         "codec 由来の samplerate 要求を述べること: {reason}"
     );
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"role":"video","codec":"opus","bitrate":32000,"samplerate":48000}]}"#;
+    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"opus","bitrate":32000,"samplerate":48000}]}"#;
     let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
         panic!("channelConfig 欠如は codec を根拠に拒否されること");
     };
@@ -1361,7 +1362,7 @@ fn role_and_codec_requirements_are_combined() {
         "codec 由来の channelConfig 要求を述べること: {reason}"
     );
     // 両方の要求を満たせば受理される
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"role":"video","codec":"opus","bitrate":32000,"samplerate":48000,"channelConfig":"2"}]}"#;
+    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"opus","bitrate":32000,"samplerate":48000,"channelConfig":"2"}]}"#;
     assert!(
         MsfCatalogDocument::decode(json).is_ok(),
         "role と codec の要求を満たすカタログは受理されること"
@@ -2205,4 +2206,75 @@ fn encode_delta_irregular_lang_roundtrip() {
     let bytes = doc.encode().expect("irregular タグは encode できること");
     let decoded = MsfCatalogDocument::decode(&bytes).expect("encode 結果は decode できること");
     assert_eq!(decoded, doc, "encode / decode で lang が保持されること");
+}
+
+/// role="video" / "signlanguage" は Table 6 で framerate を要求する
+#[test]
+fn video_and_signlanguage_roles_require_framerate() {
+    for role in ["video", "signlanguage"] {
+        let json = format!(
+            r#"{{"version":"draft-01","tracks":[{{"name":"v","packaging":"loc","isLive":true,"role":"{role}","codec":"av01","bitrate":1000}}]}}"#
+        );
+        let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json.as_bytes())
+        else {
+            panic!("role={role} の framerate 欠如は InvalidCatalog であること");
+        };
+        assert!(
+            reason.contains("framerate") && reason.contains(role),
+            "role={role} 由来の framerate 要求を述べること: {reason}"
+        );
+    }
+}
+
+/// role="audiodescription" は Table 6 で lang を要求する
+#[test]
+fn audiodescription_role_requires_lang() {
+    let json = br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"role":"audiodescription","codec":"opus","bitrate":32000,"samplerate":48000,"channelConfig":"2"}]}"#;
+    let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
+        panic!("lang 欠如は InvalidCatalog であること");
+    };
+    assert!(
+        reason.contains("lang") && reason.contains("audiodescription"),
+        "role 由来の lang 要求を述べること: {reason}"
+    );
+}
+
+/// role="data" の最小 track は追加必須フィールドを要求されない
+#[test]
+fn data_role_minimal_track_accepted() {
+    let json = br#"{"version":"draft-01","tracks":[{"name":"d","packaging":"loc","isLive":true,"role":"data"}]}"#;
+    assert!(
+        MsfCatalogDocument::decode(json).is_ok(),
+        "data role は codec / bitrate / framerate / lang を要求しないこと"
+    );
+}
+
+/// 未知のカスタム role の最小 track は追加必須フィールドを要求されない
+#[test]
+fn custom_role_minimal_track_accepted() {
+    let json = br#"{"version":"draft-01","tracks":[{"name":"x","packaging":"loc","isLive":true,"role":"foo"}]}"#;
+    assert!(
+        MsfCatalogDocument::decode(json).is_ok(),
+        "指定 role と衝突しないカスタム role を受理すること"
+    );
+}
+
+/// encode 時にも role="video" の framerate 欠如が拒否される
+#[test]
+fn encode_rejects_video_role_without_framerate() {
+    let mut track = MsfTrack::new("v".to_string(), MsfPackaging::Loc, true);
+    track.role = Some("video".to_string());
+    track.codec = Some("av01".to_string());
+    track.bitrate = Some(1000);
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        tracks: vec![track],
+        ..MsfCatalog::new()
+    });
+    let Err(MessageError::InvalidCatalog(reason)) = doc.encode() else {
+        panic!("role 由来の framerate 欠如は InvalidCatalog であること");
+    };
+    assert!(
+        reason.contains("framerate") && reason.contains("role 'video'"),
+        "role 由来の framerate 要求を述べること: {reason}"
+    );
 }

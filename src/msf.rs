@@ -2664,6 +2664,25 @@ fn validate_media_track_fields(track: &MsfTrack) -> Result<(), MessageError> {
     let codec_audio = track.codec.as_deref().is_some_and(is_audio_codec);
     let codec_video = track.codec.as_deref().is_some_and(is_video_codec);
 
+    // draft-ietf-moq-msf-02 §5.2.4.1 (Required fields per packaging and track type) の
+    // Table 6: (packaging, role) ごとの追加必須フィールド。個別フィールドの Conditional MUST
+    // (bitrate / samplerate / channelConfig など) はこの後の codec 由来検証でも適用する。
+    if matches!(track.packaging, MsfPackaging::Loc) {
+        if matches!(role, Some("video") | Some("signlanguage")) && track.framerate.is_none() {
+            return Err(MessageError::InvalidCatalog(format!(
+                "track '{}' with role '{}' MUST specify framerate",
+                track.name,
+                role.unwrap_or("")
+            )));
+        }
+        if role == Some("audiodescription") && track.lang.is_none() {
+            return Err(MessageError::InvalidCatalog(format!(
+                "track '{}' with role 'audiodescription' MUST specify lang",
+                track.name
+            )));
+        }
+    }
+
     // role による判定と codec による判定が食い違う場合は、両方の要求を重ねて適用する
     let require_audio = role_audio || codec_audio;
     let require_video = role_video || codec_video;

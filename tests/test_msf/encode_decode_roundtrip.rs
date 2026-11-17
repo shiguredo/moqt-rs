@@ -1847,3 +1847,43 @@ fn catalog_packaging_roundtrip() {
         MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc, "decode / encode が往復すること");
 }
+
+/// §5.2.4.1 Table 6 の (packaging, role) ごとの必須フィールドを持つ track が往復すること
+#[test]
+fn table_6_required_fields_roundtrip() {
+    let mut video = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
+    video.role = Some("video".to_string());
+    video.codec = Some("av01".to_string());
+    video.bitrate = Some(1_000_000);
+    video.framerate = Some(30.0);
+
+    let mut sign = MsfTrack::new("sign".to_string(), MsfPackaging::Loc, true);
+    sign.role = Some("signlanguage".to_string());
+    sign.codec = Some("av01".to_string());
+    sign.bitrate = Some(500_000);
+    sign.framerate = Some(30.0);
+
+    let mut audio_description = MsfTrack::new("ad".to_string(), MsfPackaging::Loc, true);
+    audio_description.role = Some("audiodescription".to_string());
+    audio_description.codec = Some("opus".to_string());
+    audio_description.bitrate = Some(32_000);
+    audio_description.samplerate = Some(48_000);
+    audio_description.channel_config = Some("2".to_string());
+    audio_description.lang = Some("en".to_string());
+
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![video, sign, audio_description],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    let encoded = doc
+        .encode()
+        .expect("Table 6 の必須フィールドを encode できること");
+    let decoded =
+        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(decoded, doc, "decode / encode が往復すること");
+}

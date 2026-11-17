@@ -11,6 +11,7 @@ fn all_optional_string_fields() {
                 "isLive": false,
                 "namespace": "ns",
                 "role": "video",
+                "framerate": 30,
                 "label": "Main Camera",
                 "codec": "av01",
                 "bitrate": 1000000,
