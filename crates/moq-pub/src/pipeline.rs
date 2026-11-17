@@ -371,7 +371,7 @@ fn accepted_new_group_request(
 
 /// カタログ JSON を組み立てるための入力
 ///
-/// 起動時と GOAWAY 移行後の双方で同じ入力から MSF カタログを組み立てる。移行先の `c4m` が
+/// 起動時と GOAWAY 移行後の双方で同じ入力から MSF カタログを組み立てる。移行先の `cat` が
 /// 変わったときは authInfo を載せ替える必要があるため
 /// (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))、エンコーダ / MP4 リーダーへの参照では
 /// なく、組み立てに必要な値だけを所有して保持する。
@@ -451,13 +451,13 @@ impl CatalogContext {
         (video, audio)
     }
 
-    /// 指定した c4m トークンでカタログ JSON を組み立てる
+    /// 指定した C4M トークンでカタログ JSON を組み立てる
     ///
-    /// 移行先の `c4m` が変わったとき、この関数で authInfo を載せ替える。
+    /// 移行先の `cat` が変わったとき、この関数で authInfo を載せ替える。
     /// 送信は行わない (送信は [`catalog::send_catalog`] / [`republish_catalog_at_group`])。
-    fn json(&self, c4m_tokens: &[Vec<u8>]) -> Result<Vec<u8>> {
+    fn json(&self, cat_tokens: &[Vec<u8>]) -> Result<Vec<u8>> {
         let (video, audio) = self.track_params();
-        catalog::build_catalog_json(video.as_ref(), audio.as_ref(), self.sync, c4m_tokens)
+        catalog::build_catalog_json(video.as_ref(), audio.as_ref(), self.sync, cat_tokens)
     }
 }
 
@@ -471,7 +471,7 @@ fn catalog_params<'a>(
     catalog_request_id: u64,
     group_id: u64,
     start_location: Option<Location>,
-    c4m_tokens: &'a [Vec<u8>],
+    cat_tokens: &'a [Vec<u8>],
 ) -> catalog::CatalogParams<'a> {
     let (video, audio) = context.track_params();
     catalog::CatalogParams {
@@ -482,19 +482,19 @@ fn catalog_params<'a>(
         group_id,
         start_location,
         sync: context.sync,
-        c4m_tokens,
+        cat_tokens,
         video,
         audio,
     }
 }
 
-/// 移行先の c4m トークンが変わったか
+/// 移行先の C4M トークンが変わったか
 ///
-/// 移行先 URL の `c4m` が変わると、catalog の track に載せる authInfo を作り直す必要がある
+/// 移行先 URL の `cat` が変わると、catalog の track に載せる authInfo を作り直す必要がある
 /// (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))。authInfo は現在トークンの有無だけを
 /// 見るため値の変化では JSON は変わらないが、将来 authInfo が値を参照する変更に備えて
 /// 並びも含めて比較する。
-fn c4m_tokens_changed(previous: &[Vec<u8>], next: &[Vec<u8>]) -> bool {
+fn cat_tokens_changed(previous: &[Vec<u8>], next: &[Vec<u8>]) -> bool {
     previous != next
 }
 
@@ -985,7 +985,7 @@ pub async fn run(
         group_id: catalog_group_id,
         object_id: 0,
     };
-    // カタログの組み立てに使う入力を保持する。GOAWAY 移行で移行先の c4m が変わったときに
+    // カタログの組み立てに使う入力を保持する。GOAWAY 移行で移行先の cat が変わったときに
     // 同じ入力から authInfo を載せ替えるため、エンコーダ / MP4 リーダーではなく値を所有する
     let catalog_context = CatalogContext {
         namespace_text,
@@ -1032,7 +1032,7 @@ pub async fn run(
             bitrate: config.audio_bitrate,
         }),
     };
-    // `c4m` が指定された配信は、映像 / 音声の track に authInfo を載せる (§5.2.42)
+    // `cat` が指定された配信は、映像 / 音声の track に authInfo を載せる (§5.2.42)
     let mut catalog_json = catalog::send_catalog(catalog_params(
         &catalog_context,
         &handle,
@@ -1040,7 +1040,7 @@ pub async fn run(
         catalog_request_id,
         catalog_group_id,
         client.subscription_filter_start(catalog_request_id),
-        &config.url.c4m_tokens,
+        &config.url.cat_tokens,
     ))
     .await?;
 
@@ -2572,20 +2572,20 @@ pub async fn run(
                                 &mut catalog_request_id,
                                 new_catalog_request_id,
                             );
-                            // 移行先の c4m が変わると catalog の track の authInfo を載せ替える
+                            // 移行先の cat が変わると catalog の track の authInfo を載せ替える
                             // 必要がある (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))。
                             // `config.url` を新しい URL に更新する前に比較する
-                            if c4m_tokens_changed(&config.url.c4m_tokens, &url.c4m_tokens) {
-                                match catalog_context.json(&url.c4m_tokens) {
+                            if cat_tokens_changed(&config.url.cat_tokens, &url.cat_tokens) {
+                                match catalog_context.json(&url.cat_tokens) {
                                     Ok(rebuilt) => {
                                         catalog_json = rebuilt;
                                         tracing::info!(
-                                            "Rebuilt the MSF catalog for the migrated session's c4m tokens"
+                                            "Rebuilt the MSF catalog for the migrated session's C4M authorization tokens"
                                         );
                                     }
                                     Err(e) => {
                                         tracing::warn!(
-                                            "Failed to rebuild the MSF catalog for the migrated session's c4m tokens: {e}"
+                                            "Failed to rebuild the MSF catalog for the migrated session's C4M authorization tokens: {e}"
                                         );
                                     }
                                 }
@@ -3329,7 +3329,7 @@ fn track_migrated(
 ///
 /// 1 本の side session を共有できるのは、接続先が同じ URL の PUBLISH だけである。
 /// [`tokio_moq::same_session_url`] と同じく authority・path・fragment で識別する。
-/// fragment まで含めるのは、MSF fragment が track の namespace と認可トークン (c4m) を
+/// fragment まで含めるのは、MSF fragment が track の namespace と認可トークン (cat) を
 /// 変えうるためである。path は空か `/` で始まるため、authority との境界は曖昧にならない。
 ///
 /// この文字列はログに出さない。fragment には認可トークンが含まれうるためである。
@@ -5617,7 +5617,7 @@ mod tests {
 
         /// 現在の URL (移行前の接続先)
         fn current_url() -> ServerUrl {
-            parse_url("moqt://relay.example:443/live?token=abc#msf:moq-example--video&c4m=QUJD")
+            parse_url("moqt://relay.example:443/live?token=abc#msf:moq-example--video&cat=QUJD")
                 .expect("現在の URL をパースできること")
         }
 
@@ -5654,15 +5654,15 @@ mod tests {
             assert_eq!(target.scope, tokio_moq::MigrationScope::Session);
             assert_eq!(target.url.authority, current.authority);
             assert_eq!(target.url.path, current.path);
-            assert_eq!(target.url.c4m_tokens, current.c4m_tokens);
+            assert_eq!(target.url.cat_tokens, current.cat_tokens);
         }
 
-        /// 同一 origin の New Session URI で c4m が無いときは元のトークンを引き継ぐこと
+        /// 同一 origin の New Session URI で cat が無いときは元のトークンを引き継ぐこと
         ///
         /// draft-ietf-moq-msf-01 §11.4.3 は track に紐づくトークンを同じ track の制御
         /// メッセージへ載せる MUST を課すため、移行先でも載せ続ける必要がある。
         #[test]
-        fn same_origin_uri_without_c4m_carries_the_tokens_over() {
+        fn same_origin_uri_without_cat_carries_the_tokens_over() {
             let current = current_url();
             let target = tokio_moq::migration_target(
                 b"moqt://relay.example:443/other#msf:moq-example--video",
@@ -5674,12 +5674,12 @@ mod tests {
             assert_eq!(target.url.authority, "relay.example:443");
             assert_eq!(target.url.path, "/other");
             assert_eq!(
-                target.url.c4m_tokens, current.c4m_tokens,
-                "同一 origin なら移行先に c4m が無くても元のトークンを引き継ぐこと"
+                target.url.cat_tokens, current.cat_tokens,
+                "同一 origin なら移行先に cat が無くても元のトークンを引き継ぐこと"
             );
         }
 
-        /// 別 origin の New Session URI には c4m を引き継がないこと
+        /// 別 origin の New Session URI には cat を引き継がないこと
         ///
         /// 移行先が別ホストのときは認可トークンを送らない。移行先で別途取得する
         /// (draft-ietf-moq-msf-01 §11.4.4)。
@@ -5695,23 +5695,23 @@ mod tests {
             .expect("移行先があること");
             assert_eq!(target.url.authority, "other.example:443");
             assert!(
-                target.url.c4m_tokens.is_empty(),
+                target.url.cat_tokens.is_empty(),
                 "別 origin へ認可トークンを送らないこと"
             );
         }
 
-        /// New Session URI の fragment に c4m があるときはそちらを使うこと
+        /// New Session URI の fragment に cat があるときはそちらを使うこと
         #[test]
-        fn uri_with_c4m_uses_its_own_tokens() {
+        fn uri_with_cat_uses_its_own_tokens() {
             let current = current_url();
             let target = tokio_moq::migration_target(
-                b"moqt://other.example:443/live#msf:moq-example--video&c4m=WFla",
+                b"moqt://other.example:443/live#msf:moq-example--video&cat=WFla",
                 None,
                 &current,
             )
             .expect("判断に失敗しないこと")
             .expect("移行先があること");
-            assert_eq!(target.url.c4m_tokens, vec![b"XYZ".to_vec()]);
+            assert_eq!(target.url.cat_tokens, vec![b"XYZ".to_vec()]);
         }
 
         /// UTF-8 でない New Session URI はエラーにすること
@@ -6058,7 +6058,7 @@ mod tests {
     /// 同じ side session を共有する移行先 URL のキーを固定する
     ///
     /// 同じ URL を指す PUBLISH は 1 本の side session を共有し、URL が違えば別の session を
-    /// 使う。キーは接続先を決める authority・path と、認可トークン (c4m) を含みうる
+    /// 使う。キーは接続先を決める authority・path と、認可トークン (cat) を含みうる
     /// fragment から作る。
     mod side_session_key_tests {
         use super::*;
@@ -6080,7 +6080,7 @@ mod tests {
 
         /// fragment が違う URL は別のキーになること
         ///
-        /// MSF fragment は track の namespace と認可トークン (c4m) を変えうるため、
+        /// MSF fragment は track の namespace と認可トークン (cat) を変えうるため、
         /// authority と path が同じでも fragment が違えば別の side session にする。
         #[test]
         fn different_fragment_uses_another_key() {
@@ -6112,9 +6112,9 @@ mod tests {
         }
     }
 
-    /// 移行先の c4m トークンに合わせてカタログ JSON を組み立て直す判断を固定する
+    /// 移行先の C4M トークンに合わせてカタログ JSON を組み立て直す判断を固定する
     ///
-    /// draft-ietf-moq-msf-01 §5.2.42 (Authorization Info): 移行先 URL の `c4m` が変わると
+    /// draft-ietf-moq-msf-01 §5.2.42 (Authorization Info): 移行先 URL の `cat` が変わると
     /// catalog の track に載せる authInfo も変わる。
     mod catalog_rebuild_tests {
         use super::*;
@@ -6138,28 +6138,28 @@ mod tests {
             }
         }
 
-        /// c4m トークンの有無で authInfo が変わること
+        /// C4M トークンの有無で authInfo が変わること
         ///
-        /// 移行先の c4m が変わったとき、同じ入力から authInfo を載せ替えた JSON を
+        /// 移行先の cat が変わったとき、同じ入力から authInfo を載せ替えた JSON を
         /// 組み立てられることを固定する。
         #[test]
-        fn catalog_context_json_reflects_c4m_tokens() {
+        fn catalog_context_json_reflects_cat_tokens() {
             let context = audio_only_context();
 
-            let without_tokens = context.json(&[]).expect("c4m 無しでも組み立てられること");
+            let without_tokens = context.json(&[]).expect("cat 無しでも組み立てられること");
             let text = String::from_utf8(without_tokens).expect("UTF-8 の JSON であること");
             assert!(
                 !text.contains("authInfo"),
-                "c4m が無いときは authInfo を載せないこと: {text}"
+                "cat が無いときは authInfo を載せないこと: {text}"
             );
 
             let with_tokens = context
                 .json(&[b"publisher-token".to_vec()])
-                .expect("c4m 有りでも組み立てられること");
+                .expect("cat 有りでも組み立てられること");
             let text = String::from_utf8(with_tokens).expect("UTF-8 の JSON であること");
             assert!(
-                text.contains(r#""authInfo":{"cat":"%c4m%"}"#),
-                "c4m があるときは authInfo を載せること: {text}"
+                text.contains(r#""authInfo":{"cat":"%cat%"}"#),
+                "cat があるときは authInfo を載せること: {text}"
             );
             assert!(
                 !text.contains("publisher-token"),
@@ -6238,24 +6238,24 @@ mod tests {
             assert_eq!(audio.bitrate, 64, "音声の bitrate が渡ること");
         }
 
-        /// c4m トークンの並びが同じときだけ再構築しないこと
+        /// C4M トークンの並びが同じときだけ再構築しないこと
         #[test]
-        fn c4m_tokens_changed_compares_the_token_list() {
+        fn cat_tokens_changed_compares_the_token_list() {
             assert!(
-                !c4m_tokens_changed(&[b"abc".to_vec()], &[b"abc".to_vec()]),
+                !cat_tokens_changed(&[b"abc".to_vec()], &[b"abc".to_vec()]),
                 "同じ並びなら再構築しないこと"
             );
-            assert!(!c4m_tokens_changed(&[], &[]), "両方空なら再構築しないこと");
+            assert!(!cat_tokens_changed(&[], &[]), "両方空なら再構築しないこと");
             assert!(
-                c4m_tokens_changed(&[], &[b"abc".to_vec()]),
+                cat_tokens_changed(&[], &[b"abc".to_vec()]),
                 "トークンが増えたら再構築すること"
             );
             assert!(
-                c4m_tokens_changed(&[b"abc".to_vec()], &[]),
+                cat_tokens_changed(&[b"abc".to_vec()], &[]),
                 "トークンが消えたら再構築すること"
             );
             assert!(
-                c4m_tokens_changed(&[b"abc".to_vec()], &[b"abd".to_vec()]),
+                cat_tokens_changed(&[b"abc".to_vec()], &[b"abd".to_vec()]),
                 "トークンの値が変わったら再構築すること"
             );
         }

@@ -25,11 +25,13 @@ const MSF_ROLE_AUDIO: &str = "audio";
 /// C4M (CAT) の認可 scheme 名 (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info) Table 7)
 const MSF_AUTH_SCHEME_CAT: &str = "cat";
 
-/// 視聴側の URI の予約 fragment パラメータ `c4m` を指す変数参照
+/// 視聴側の URI の予約 fragment パラメータ `cat` を指す変数参照
 ///
 /// draft-ietf-moq-msf-01 §5.2.43 (Token Delivery via URI) / §5.4 (Variable Substitution)。
 /// `authInfo` の値は scheme 固有の JSON 値であるため、JSON 文字列として持つ。
-const C4M_AUTH_INFO_VALUE: &str = "\"%c4m%\"";
+/// `%cat%` の end-to-end な解決は、moq-sub に変数置換の呼び出し経路が無いため本実装の
+/// 範囲外である (catalog は未解決の参照を載せたまま送る)。
+const CAT_AUTH_INFO_VALUE: &str = "\"%cat%\"";
 
 /// 映像トラックの catalog 情報
 pub struct VideoTrackParams<'a> {
@@ -104,11 +106,11 @@ pub struct CatalogParams<'a> {
     pub start_location: Option<Location>,
     /// 音声・映像で共通の同期用メタデータ
     pub sync: CatalogSyncParams,
-    /// URL の MSF fragment の `c4m` から取り出した C4M 認可トークン
+    /// URL の MSF fragment の `cat` から取り出した C4M 認可トークン
     ///
     /// SETUP の AUTHORIZATION TOKEN (0x03) として送るトークンであり、空でないときは
     /// 映像 / 音声の track に authInfo を載せる (draft-ietf-moq-msf-01 §5.2.42)。
-    pub c4m_tokens: &'a [Vec<u8>],
+    pub cat_tokens: &'a [Vec<u8>],
     pub video: Option<VideoTrackParams<'a>>,
     pub audio: Option<AudioTrackParams<'a>>,
 }
@@ -119,20 +121,20 @@ pub struct CatalogParams<'a> {
 /// Requirements): authInfo の存在は「この track の購読には認可トークンが必要」という
 /// 視聴側へのシグナルであり、視聴側はこれを見てトークンの提示を決める。
 ///
-/// - C4M トークン (Token Type CAT) が指定されているときだけ `{"cat": "%c4m%"}`
-/// - 値はトークンそのものではなく、視聴側の URI の fragment の `c4m` を指す変数参照にする
+/// - C4M トークン (Token Type CAT) が指定されているときだけ `{"cat": "%cat%"}`
+/// - 値はトークンそのものではなく、視聴側の URI の fragment の `cat` を指す変数参照にする
 ///   (§5.2.43)。catalog は全ての視聴者に届き、配信者のトークンは PUBLISH の権限を含むため
 /// - トークンが無いときは `None` (authInfo を載せない)
 ///
-/// 本 example は `c4m` のトークンを常に Token Type CAT (0x01) として SETUP に載せるため
+/// 本 example は `cat` のトークンを常に Token Type CAT (0x01) として SETUP に載せるため
 /// (`tokio_moq::build_setup_options`)、ここでは有無だけを見る。
-fn auth_info_for_c4m_tokens(c4m_tokens: &[Vec<u8>]) -> Option<Vec<MsfAuthInfo>> {
-    if c4m_tokens.is_empty() {
+fn auth_info_for_cat_tokens(cat_tokens: &[Vec<u8>]) -> Option<Vec<MsfAuthInfo>> {
+    if cat_tokens.is_empty() {
         return None;
     }
     Some(vec![MsfAuthInfo {
         scheme: MSF_AUTH_SCHEME_CAT.to_string(),
-        value_raw: C4M_AUTH_INFO_VALUE.as_bytes().to_vec(),
+        value_raw: CAT_AUTH_INFO_VALUE.as_bytes().to_vec(),
     }])
 }
 
@@ -207,7 +209,7 @@ fn build_catalog(
 
 /// MSF カタログの JSON を組み立てる
 ///
-/// track の authInfo は渡した C4M 認可トークンから作るため、GOAWAY 移行で移行先の `c4m` が
+/// track の authInfo は渡した C4M 認可トークンから作るため、GOAWAY 移行で移行先の `cat` が
 /// 変わったときは新しいトークンで呼び直す
 /// (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info) / §5.2.43 (Token Delivery via URI))。
 /// 送信は行わない (送信は [`send_catalog`] / [`publish_catalog_object`] が担う)。
@@ -217,9 +219,9 @@ pub fn build_catalog_json(
     video: Option<&VideoTrackParams<'_>>,
     audio: Option<&AudioTrackParams<'_>>,
     sync: CatalogSyncParams,
-    c4m_tokens: &[Vec<u8>],
+    cat_tokens: &[Vec<u8>],
 ) -> Result<Vec<u8>> {
-    let auth_info = auth_info_for_c4m_tokens(c4m_tokens);
+    let auth_info = auth_info_for_cat_tokens(cat_tokens);
     let catalog = build_catalog(video, audio, sync, auth_info.as_deref())?;
     catalog
         .encode()
@@ -241,7 +243,7 @@ pub async fn send_catalog(params: CatalogParams<'_>) -> Result<Vec<u8>> {
         params.video.as_ref(),
         params.audio.as_ref(),
         params.sync,
-        params.c4m_tokens,
+        params.cat_tokens,
     )?;
     tracing::info!(
         "Sending MSF catalog ({} bytes): {}",
@@ -684,16 +686,16 @@ mod tests {
 
     /// C4M トークンがあるときだけ CAT の authInfo を組み立てること
     ///
-    /// 値はトークンそのものではなく、視聴側の URI の `c4m` を指す変数参照にする
+    /// 値はトークンそのものではなく、視聴側の URI の `cat` を指す変数参照にする
     /// (draft-ietf-moq-msf-01 §5.2.42 / §5.2.43)。
     #[test]
-    fn auth_info_is_built_only_for_c4m_tokens() {
+    fn auth_info_is_built_only_for_cat_tokens() {
         assert!(
-            auth_info_for_c4m_tokens(&[]).is_none(),
-            "c4m が無ければ authInfo を載せない"
+            auth_info_for_cat_tokens(&[]).is_none(),
+            "cat が無ければ authInfo を載せない"
         );
-        let auth_info = auth_info_for_c4m_tokens(&[vec![0x01, 0x02]])
-            .expect("c4m があれば authInfo を組み立てられること");
+        let auth_info = auth_info_for_cat_tokens(&[vec![0x01, 0x02]])
+            .expect("cat があれば authInfo を組み立てられること");
         assert_eq!(auth_info.len(), 1, "CAT の 1 エントリを持つこと");
         assert_eq!(
             auth_info[0].scheme, MSF_AUTH_SCHEME_CAT,
@@ -701,17 +703,17 @@ mod tests {
         );
         assert_eq!(
             auth_info[0].value_raw,
-            C4M_AUTH_INFO_VALUE.as_bytes().to_vec(),
-            "値は c4m を指す変数参照の JSON 文字列であること"
+            CAT_AUTH_INFO_VALUE.as_bytes().to_vec(),
+            "値は cat を指す変数参照の JSON 文字列であること"
         );
     }
 
-    /// カタログ JSON の組み立てが c4m トークンの有無で authInfo を出し分けること
+    /// カタログ JSON の組み立てが C4M トークンの有無で authInfo を出し分けること
     ///
-    /// 移行先の c4m が変わったときに、同じ track 情報から authInfo を載せ替えた JSON を
+    /// 移行先の cat が変わったときに、同じ track 情報から authInfo を載せ替えた JSON を
     /// 組み立てられることを固定する (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))。
     #[test]
-    fn build_catalog_json_reflects_c4m_tokens() {
+    fn build_catalog_json_reflects_cat_tokens() {
         let audio = AudioTrackParams {
             track_name: "audio",
             namespace: "ns",
@@ -721,9 +723,9 @@ mod tests {
             bitrate: 64,
         };
 
-        // c4m が無ければ authInfo を載せない
+        // cat が無ければ authInfo を載せない
         let without_tokens = build_catalog_json(None, Some(&audio), TEST_SYNC, &[])
-            .expect("c4m 無しでもカタログを組み立てられること");
+            .expect("cat 無しでもカタログを組み立てられること");
         let decoded = MsfCatalogDocument::decode(&without_tokens)
             .expect("組み立てたカタログを decode できること");
         let MsfCatalogDocument::Full(full) = decoded else {
@@ -731,13 +733,13 @@ mod tests {
         };
         assert!(
             full.tracks.iter().all(|track| track.auth_info.is_none()),
-            "c4m が無いときは authInfo を載せないこと"
+            "cat が無いときは authInfo を載せないこと"
         );
 
-        // c4m があれば authInfo を載せる
+        // cat があれば authInfo を載せる
         let tokens = vec![b"publisher-token".to_vec()];
         let with_tokens = build_catalog_json(None, Some(&audio), TEST_SYNC, &tokens)
-            .expect("c4m 有りでもカタログを組み立てられること");
+            .expect("cat 有りでもカタログを組み立てられること");
         let decoded = MsfCatalogDocument::decode(&with_tokens)
             .expect("組み立てたカタログを decode できること");
         let MsfCatalogDocument::Full(full) = decoded else {
@@ -746,21 +748,21 @@ mod tests {
         let track_auth_info = full.tracks[0]
             .auth_info
             .as_ref()
-            .expect("c4m があるときは authInfo を載せること");
+            .expect("cat があるときは authInfo を載せること");
         assert_eq!(
             track_auth_info[0].scheme, MSF_AUTH_SCHEME_CAT,
             "authInfo の scheme は §5.2.42 Table 7 の cat であること"
         );
 
-        // 配信者のトークンそのものは JSON に載せず、視聴側の c4m を指す変数参照にする
+        // 配信者のトークンそのものは JSON に載せず、視聴側の cat を指す変数参照にする
         let text = String::from_utf8(with_tokens).expect("カタログは UTF-8 の JSON であること");
         assert!(
             !text.contains("publisher-token"),
-            "c4m トークンの値をカタログへ埋め込まないこと: {text}"
+            "C4M トークンの値をカタログへ埋め込まないこと: {text}"
         );
         assert!(
-            text.contains(r#""authInfo":{"cat":"%c4m%"}"#),
-            "authInfo は c4m を指す変数参照であること: {text}"
+            text.contains(r#""authInfo":{"cat":"%cat%"}"#),
+            "authInfo は cat を指す変数参照であること: {text}"
         );
     }
 
@@ -789,7 +791,7 @@ mod tests {
             bitrate: 128,
         };
 
-        // c4m が無い場合は authInfo を載せない
+        // cat が無い場合は authInfo を載せない
         let catalog = build_catalog(Some(&video), Some(&audio), TEST_SYNC, None)
             .expect("カタログを構築できること");
         let MsfCatalogDocument::Full(full) = catalog else {
@@ -797,12 +799,12 @@ mod tests {
         };
         assert!(
             full.tracks.iter().all(|track| track.auth_info.is_none()),
-            "c4m が無いときは authInfo を載せない"
+            "cat が無いときは authInfo を載せない"
         );
 
-        // c4m がある場合は両トラックに載せ、encode / decode を往復しても保たれる
+        // cat がある場合は両トラックに載せ、encode / decode を往復しても保たれる
         let auth_info =
-            auth_info_for_c4m_tokens(&[vec![0x01, 0x02]]).expect("authInfo を組み立てる");
+            auth_info_for_cat_tokens(&[vec![0x01, 0x02]]).expect("authInfo を組み立てる");
         let catalog = build_catalog(
             Some(&video),
             Some(&audio),
@@ -831,10 +833,10 @@ mod tests {
                 track.name
             );
         }
-        // 配信者のトークンそのものではなく、視聴側の `c4m` を指す変数参照が JSON に載ること
+        // 配信者のトークンそのものではなく、視聴側の `cat` を指す変数参照が JSON に載ること
         let text = String::from_utf8(encoded).expect("カタログは UTF-8 の JSON であること");
         assert!(
-            text.contains(r#""authInfo":{"cat":"%c4m%"}"#),
+            text.contains(r#""authInfo":{"cat":"%cat%"}"#),
             "catalog の JSON に authInfo が載ること: {text}"
         );
     }

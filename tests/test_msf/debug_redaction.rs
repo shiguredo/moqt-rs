@@ -216,20 +216,20 @@ fn container_debug_hides_track_secrets() {
 #[test]
 fn uri_debug_hides_query_and_fragment_parameter_values() {
     let uri = parse_msf_uri(
-        "moqt://relay.example.com/live?auth=dummy-query-token#msf:example--video&c4m=dummy-c4m-token&token=dummy-fragment-token",
+        "moqt://relay.example.com/live?auth=dummy-query-token#msf:example--video&cat=dummy-cat-token&token=dummy-fragment-token",
     )
     .expect("テストフィクスチャの前提条件を満たす");
     let debug = format!("{uri:?}");
     for secret in [
         "dummy-query-token",
-        "dummy-c4m-token",
+        "dummy-cat-token",
         "dummy-fragment-token",
     ] {
         assert_hidden(&debug, secret, "MsfUri");
     }
     assert_hidden(
         &format!("{:?}", uri.fragment),
-        "dummy-c4m-token",
+        "dummy-cat-token",
         "MsfFragment",
     );
 
@@ -240,10 +240,10 @@ fn uri_debug_hides_query_and_fragment_parameter_values() {
     );
     assert!(
         debug.contains(&format!(
-            "MsfFragmentParameter {{ name: \"c4m\", value_bytes: {} }}",
-            "dummy-c4m-token".len()
+            "MsfFragmentParameter {{ name: \"cat\", value_bytes: {} }}",
+            "dummy-cat-token".len()
         )),
-        "c4m パラメータは名前と値の長さを表示すること: {debug}"
+        "cat パラメータは名前と値の長さを表示すること: {debug}"
     );
     assert!(
         debug.contains(&format!(

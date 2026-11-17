@@ -324,7 +324,7 @@ End of Unknown Range (`0x10C`、§11.4.2 (End of Range)) で示して残りの�
 - example の client は受信した control GOAWAY で新 session をバックグラウンドで確立し、期限付きで
   再試行しながら購読 / 配信を張り直してから旧 session を NO_ERROR で閉じます。subscriber は
   移行中に届いた catalog を fill fetch stream から `CatalogState` へ適用し、音声は最後に受信した
-  Location から再開します。publisher は移行先の c4m が変わったとき catalog の authInfo を
+  Location から再開します。publisher は移行先の cat パラメータが変わったとき catalog の authInfo を
   再構築します。request stream の GOAWAY は session を維持し、空 URI (subscriber は現在と同じ
   URL を含む) なら当該 request を再発行します。非空 URI で現在の URL と異なる場合は、移行対象の
   request だけを専用タスクで確立した side session で受信 / 送信し、旧 session は他の request と

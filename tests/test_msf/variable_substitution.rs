@@ -139,7 +139,7 @@ fn resolve_name_charset_and_case() {
 #[test]
 fn resolve_multiple_variables() {
     // §5.6.14 形の複数変数同時置換 (token / id / event)。3 変数すべて置換されること
-    // (§5.6.14 自体は track 直下 c4m を使う例だが、ここでは本実装の authInfo 形に適応する)
+    // (§5.6.14 は authInfo の cat にトークン変数を置く例である)
     let json = br#"{"version":"draft-01","tracks":[{"name":"%event%","namespace":"%id%","packaging":"loc","isLive":true,"authInfo":{"cat":"%token%"}}]}"#;
     let resolved = resolve_catalog_variables(json, "token=1234&id=bob&event=xyz")
         .expect("テストフィクスチャの前提条件を満たす");

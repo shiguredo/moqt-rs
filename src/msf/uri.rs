@@ -29,7 +29,7 @@ pub struct MsfFragment {
 
 /// MSF fragment の 1 パラメータ (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation))
 ///
-/// 値は token を含み得る (§11.1.1 の `c4m`、§11.4.2)。パラメータ名は配備ごとに決まり、名前で
+/// 値は token を含み得る (§11.1.1 の `cat`、§11.4.2)。パラメータ名は配備ごとに決まり、名前で
 /// 機密かどうかを判別できないため、`Debug` ではすべての値を伏せ、`value_bytes` として長さだけを
 /// 表示する。
 #[derive(Clone, PartialEq, Eq)]
@@ -205,11 +205,15 @@ impl MsfFragment {
             .collect()
     }
 
-    /// c4m パラメータの base64 文字列を出現順に返す
+    /// cat パラメータの base64 文字列を出現順に返す
     ///
     /// base64 のデコードや妥当性検証は行わない (利用側の責務)。
-    pub fn c4m_tokens(&self) -> Vec<&str> {
-        self.parameter_values("c4m")
+    /// draft-ietf-moq-msf-02 Appendix A.1.7 が v01 の予約パラメータ `c4m` の `cat` への改名を
+    /// 記録し、§11.1.1 (Reserved fragment parameters) の Table 12 が `cat` を予約パラメータと
+    /// して定義する。本実装は旧 `c4m` を予約パラメータとして扱わず、認可トークンの供給元に
+    /// しない (予約でないパラメータを認可に使わない fail-closed の方針)。
+    pub fn cat_tokens(&self) -> Vec<&str> {
+        self.parameter_values("cat")
     }
 }
 

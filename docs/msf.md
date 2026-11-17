@@ -59,7 +59,7 @@
 
 - MSF URI / fragment のパース (`msf::uri`)
   - `parse_msf_uri` / `parse_msf_fragment`
-  - 予約パラメータ (`connection` / `wallclock-range` / `mediatime-range` / `location-range` / `c4m`) の値型アクセサ
+  - 予約パラメータ (`connection` / `wallclock-range` / `mediatime-range` / `location-range` / `cat`) の値型アクセサ
 
 ## 未対応
 

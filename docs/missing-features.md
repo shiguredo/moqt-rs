@@ -81,7 +81,7 @@ C4M draft-02 の `moqt` クレームの map 化と未知キーの fail-closed、
 | TRACK_STATUS | `send_track_status` / `forget_track_status` | §9.12 | 購読前にトラックの存在・最新 Object を確認できない。moq-pub 側は受信しても `NOT_SUPPORTED` で拒否する |
 | Media / Event Timeline | `msf::encode_media_timeline` / `encode_event_timeline` | MSF §7 / §8 | moq-pub はタイムラインを配信せず、moq-sub も受信しない |
 | Timeline のテンプレート展開 | `MsfTemplate::resolve_entry` | MSF §7.4 | テンプレート形式の Timeline を使えない |
-| MSF の変数置換 | `msf::resolve_catalog_variables` | MSF §5.4 / §5.2.43 | moq-pub が `authInfo` に `"%c4m%"` を書くのに、moq-sub が解決しないため認可トークンの受け渡しが example 間で成立しない |
+| MSF の変数置換 | `msf::resolve_catalog_variables` | MSF §5.4 / §5.2.43 | moq-pub が `authInfo` に `"%cat%"` を書くのに、moq-sub が解決しないため認可トークンの受け渡しが example 間で成立しない |
 | MSF fragment の範囲指定 | `msf::uri` の `wallclock_ranges` / `mediatime_ranges` / `location_ranges` | MSF §11.1.1 | 範囲指定を解釈せず全期間を購読する。複数指定の union MUST も未実装 |
 | `MAX_FILTER_RANGES` の宣言 | `SETUP_OPTION_MAX_FILTER_RANGES` | §9.1.6 | 既定 0 のため、購読者は Range Filters (§3.3.2) を送ってはならない。ライブラリのフィルタ評価実装が活きない |
 | `MAX_REQUEST_UPDATES` / `MAX_AUTH_TOKEN_CACHE_SIZE` | `SETUP_OPTION_*` | §9.1.7 / §9.1.3 | 既定値で実害は無いが、上限を宣言しない |
@@ -377,8 +377,8 @@ track の追加 (§5.3 の `add` / `clone`) に追随して SUBSCRIBE を送ら�
 
 MSF §11.4.1 は「購読者は track ごとに `authInfo` を見て認可要件を判断する」と定める。
 moq-sub は `authInfo` を参照せず (grep で 0 件)、track ごとの認可要件を判定しない。
-さらに moq-pub は `authInfo` の値に `"%c4m%"` という変数参照を書く
-(`crates/moq-pub/src/catalog.rs:31`、§5.2.43) が、moq-sub は
+さらに moq-pub は `authInfo` の値に `"%cat%"` という変数参照を書く
+(`crates/moq-pub/src/catalog.rs:32`、§5.2.43) が、moq-sub は
 `MsfCatalogDocument::decode` を直接呼び (`crates/moq-sub/src/catalog.rs:32-38`)、
 `msf::resolve_catalog_variables` (§5.4) を通さない。
 このため example 同士でも認可付き配信の受け渡しが成立しない。
@@ -421,7 +421,7 @@ session で再発行する。
 - 音声は移行境界を最後に受信した Location にして Absolute Start で再購読する。移行先が同じ
   publisher の続きとして TIMESTAMP を進める前提であり、別 publisher へ移って TIMESTAMP が
   巻き戻る場合は live 音声が stale として落ちる。
-- 移行先の c4m が変わった場合、publisher は catalog の authInfo を新しいトークンで再構築する。
+- 移行先の cat パラメータが変わった場合、publisher は catalog の authInfo を新しいトークンで再構築する。
 - 移行先がまた GOAWAY を返す連鎖は `MigrationLimiter` (10 分で 5 回) で制限する。
 - transport (HTTP/3 / HTTP/2) の GOAWAY と WT_DRAIN_SESSION は `WtSessionState::Draining` として
   観測し、現在 URL への移行を開始する。QUIC / QMux は drain 通知が無いため MOQT GOAWAY 起点のみ。

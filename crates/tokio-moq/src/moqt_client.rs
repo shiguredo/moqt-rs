@@ -1175,11 +1175,11 @@ impl DataPlaneHandle {
 
 /// publisher / subscriber 共通の MOQT クライアント (Session ドライバ)
 pub struct MoqtClient {
-    /// URL の MSF fragment (`#msf:...&c4m=...`) から取り出した認可トークン
+    /// URL の MSF fragment (`#msf:...&cat=...`) から取り出した認可トークン
     ///
-    /// PUBLISH / SUBSCRIBE / REQUEST_UPDATE には [`with_auth_parameters`] が
+    /// PUBLISH / SUBSCRIBE / FETCH / REQUEST_UPDATE には [`with_auth_parameters`] が
     /// この一覧をすべて載せる。SETUP に載せる分はここではなく、`establish_*` の
-    /// `c4m_tokens` 引数から `crate::build_setup_options` が別に組み立てる。
+    /// `cat_tokens` 引数から `crate::build_setup_options` が別に組み立てる。
     auth_tokens: Vec<AuthorizationToken>,
     /// `tick` / `tick_now` の時刻起点
     ///
@@ -1663,7 +1663,7 @@ fn authorization_parameter(token: &AuthorizationToken) -> MessageParameter {
 ///
 /// PUBLISH (`publish_track`) / SUBSCRIBE (`subscribe_track_inner`) / FETCH (`fetch`) /
 /// REQUEST_UPDATE (`send_request_update`) は本関数の単一経路でトークンを付与する。
-/// 送信経路を追加するときも本関数を通すこと。なお SETUP は `establish_*` の `c4m_tokens`
+/// 送信経路を追加するときも本関数を通すこと。なお SETUP は `establish_*` の `cat_tokens`
 /// 引数から `crate::build_setup_options` が option として組み立てる別経路である。
 fn with_auth_parameters(
     mut parameters: MessageParameters,
@@ -1698,9 +1698,9 @@ impl MoqtClient {
     /// QUIC 直接接続で MOQT client を確立する
     /// (draft-ietf-moq-transport-23 §6.2 (Session establishment) / §6.3 (Session initialization))
     ///
-    /// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
+    /// `cat_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
     /// SETUP の AUTHORIZATION_TOKEN として送り、同じトークンを PUBLISH / SUBSCRIBE /
-    /// REQUEST_UPDATE の AUTHORIZATION_TOKEN としても付与する。
+    /// FETCH / REQUEST_UPDATE の AUTHORIZATION_TOKEN としても付与する。
     ///
     /// `stop_sending_rx` は [`crate::quic::connect`] が返す peer の STOP_SENDING の観測で、
     /// 該当する送信ストリームの終端として扱う。QUIC の code space のコードがそのまま流れる。
@@ -1714,7 +1714,7 @@ impl MoqtClient {
         path: &str,
         authority: &str,
         impl_name: &str,
-        c4m_tokens: &[Vec<u8>],
+        cat_tokens: &[Vec<u8>],
         task_monitor: &tokio_metrics::TaskMonitor,
     ) -> Result<(Self, StreamAcceptor)> {
         let (handle, acceptor) = connection.split();
@@ -1728,7 +1728,7 @@ impl MoqtClient {
 
         // Session を生成 (初期の SendControl(Setup) イベントが積まれる)
         let options =
-            crate::build_setup_options(Some(path), Some(authority), impl_name, c4m_tokens);
+            crate::build_setup_options(Some(path), Some(authority), impl_name, cat_tokens);
         let mut session = Session::new_client(MoqtTransport::Quic, options)?;
 
         // SETUP を取り出して送信する
@@ -1762,7 +1762,7 @@ impl MoqtClient {
                 bidi_acceptor,
                 wt_session_state: None,
             },
-            c4m_tokens,
+            cat_tokens,
             task_monitor,
         )
         .await?;
@@ -1792,7 +1792,7 @@ impl MoqtClient {
         path: &str,
         authority: &str,
         impl_name: &str,
-        c4m_tokens: &[Vec<u8>],
+        cat_tokens: &[Vec<u8>],
         task_monitor: &tokio_metrics::TaskMonitor,
     ) -> Result<(Self, StreamAcceptor)> {
         let QmuxSession {
@@ -1808,7 +1808,7 @@ impl MoqtClient {
 
         // Session を生成 (初期の SendControl(Setup) イベントが積まれる)
         let options =
-            crate::build_setup_options(Some(path), Some(authority), impl_name, c4m_tokens);
+            crate::build_setup_options(Some(path), Some(authority), impl_name, cat_tokens);
         let mut session = Session::new_client(MoqtTransport::Qmux, options)?;
 
         // SETUP を取り出して送信する
@@ -1841,7 +1841,7 @@ impl MoqtClient {
                 bidi_acceptor: BidiStreamAcceptor::Qmux { bi_rx },
                 wt_session_state: None,
             },
-            c4m_tokens,
+            cat_tokens,
             task_monitor,
         )
         .await?;
@@ -1853,9 +1853,9 @@ impl MoqtClient {
     /// draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) により
     /// WebTransport 使用時は PATH (0x01) と AUTHORITY (0x05) を送信してはならない。
     ///
-    /// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
+    /// `cat_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
     /// SETUP の AUTHORIZATION_TOKEN として送り、同じトークンを PUBLISH / SUBSCRIBE /
-    /// REQUEST_UPDATE の AUTHORIZATION_TOKEN としても付与する。
+    /// FETCH / REQUEST_UPDATE の AUTHORIZATION_TOKEN としても付与する。
     ///
     /// 戻り値の [`StreamAcceptor`] は data stream を受信する側 (subscriber) が使う。
     /// peer 起動の request stream は MoqtClient 内部の受理タスクが受け取るため、
@@ -1863,7 +1863,7 @@ impl MoqtClient {
     pub async fn establish_wt(
         wt_session: WtSession,
         impl_name: &str,
-        c4m_tokens: &[Vec<u8>],
+        cat_tokens: &[Vec<u8>],
         task_monitor: &tokio_metrics::TaskMonitor,
     ) -> Result<(Self, StreamAcceptor)> {
         let shared = Arc::new(TokioMutex::new(wt_session));
@@ -1897,7 +1897,7 @@ impl MoqtClient {
         };
         let mut control_send = SendStream::WtH3(wt_send);
 
-        let options = crate::build_setup_options(None, None, impl_name, c4m_tokens);
+        let options = crate::build_setup_options(None, None, impl_name, cat_tokens);
         let mut session = Session::new_client(MoqtTransport::WebTransport, options)?;
 
         let setup_msg = pop_send_control(&mut session)?;
@@ -1931,7 +1931,7 @@ impl MoqtClient {
                 },
                 wt_session_state: Some(session_state.clone()),
             },
-            c4m_tokens,
+            cat_tokens,
             task_monitor,
         )
         .await?;
@@ -1950,9 +1950,9 @@ impl MoqtClient {
     /// draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) により
     /// WebTransport 使用時は PATH (0x01) と AUTHORITY (0x05) を送信してはならない。
     ///
-    /// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
+    /// `cat_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
     /// SETUP の AUTHORIZATION_TOKEN として送り、同じトークンを PUBLISH / SUBSCRIBE /
-    /// REQUEST_UPDATE の AUTHORIZATION_TOKEN としても付与する。
+    /// FETCH / REQUEST_UPDATE の AUTHORIZATION_TOKEN としても付与する。
     ///
     /// 戻り値の [`StreamAcceptor`] は data stream を受信する側 (subscriber) が使う。
     /// peer 起動の request stream は MoqtClient 内部の受理タスクが受け取るため、
@@ -1960,7 +1960,7 @@ impl MoqtClient {
     pub async fn establish_wt_h2(
         wt_session: WtH2Session,
         impl_name: &str,
-        c4m_tokens: &[Vec<u8>],
+        cat_tokens: &[Vec<u8>],
         task_monitor: &tokio_metrics::TaskMonitor,
     ) -> Result<(Self, StreamAcceptor)> {
         let shared = Arc::new(TokioMutex::new(wt_session));
@@ -1972,7 +1972,7 @@ impl MoqtClient {
         };
         let mut control_send = SendStream::WtH2(wt_send);
 
-        let options = crate::build_setup_options(None, None, impl_name, c4m_tokens);
+        let options = crate::build_setup_options(None, None, impl_name, cat_tokens);
         let mut session = Session::new_client(MoqtTransport::WebTransport, options)?;
 
         let setup_msg = pop_send_control(&mut session)?;
@@ -2027,7 +2027,7 @@ impl MoqtClient {
                 },
                 wt_session_state: Some(session_state.clone()),
             },
-            c4m_tokens,
+            cat_tokens,
             task_monitor,
         )
         .await?;
@@ -2044,7 +2044,7 @@ impl MoqtClient {
     async fn finish_handshake(
         mut session: Session,
         io: HandshakeIo,
-        c4m_tokens: &[Vec<u8>],
+        cat_tokens: &[Vec<u8>],
         task_monitor: &tokio_metrics::TaskMonitor,
     ) -> Result<Self> {
         let HandshakeIo {
@@ -2126,7 +2126,7 @@ impl MoqtClient {
         let task_monitor = task_monitor.clone();
 
         Ok(Self {
-            auth_tokens: c4m_tokens
+            auth_tokens: cat_tokens
                 .iter()
                 .map(|token_value| c4m_authorization_token(token_value.as_slice()))
                 .collect(),

@@ -227,12 +227,41 @@ fn parse_multiple_ranges() {
     );
 }
 
-/// c4m パラメータがそのまま返されること
+/// cat パラメータがそのまま返されること
 #[test]
-fn parse_c4m_parameter() {
+fn parse_cat_parameter() {
+    let fragment = parse_msf_fragment("msf:ns--catalog&cat=gqhkYWxn")
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(fragment.cat_tokens(), vec!["gqhkYWxn"]);
+}
+
+/// 旧予約パラメータ `c4m` は認可トークンとして取り出さないこと
+///
+/// draft-ietf-moq-msf-02 Appendix A.1.7 が `c4m` の `cat` への改名を記録した。本実装は
+/// 予約でないパラメータを認可トークンの供給元にしない fail-closed の方針を取る。
+#[test]
+fn parse_legacy_c4m_parameter_is_not_reserved() {
     let fragment = parse_msf_fragment("msf:ns--catalog&c4m=gqhkYWxn")
         .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(fragment.c4m_tokens(), vec!["gqhkYWxn"]);
+    assert!(
+        fragment.cat_tokens().is_empty(),
+        "旧 c4m パラメータを認可トークンとして扱わないこと"
+    );
+    assert_eq!(
+        fragment.parameter_values("c4m"),
+        vec!["gqhkYWxn"],
+        "旧 c4m は未知の汎用パラメータとして保持されること"
+    );
+
+    // 旧 c4m の値が Base64 として不正でも、予約パラメータとして検証しないためエラーにならない
+    for value in ["!!!", ""] {
+        let fragment = parse_msf_fragment(&format!("msf:ns--catalog&c4m={value}"))
+            .expect("旧 c4m は汎用パラメータとして受理されること");
+        assert!(
+            fragment.cat_tokens().is_empty(),
+            "旧 c4m={value:?} を認可トークンとして扱わないこと"
+        );
+    }
 }
 
 /// 未知パラメータは無視され、parameter_values で参照できること

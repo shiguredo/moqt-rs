@@ -1199,7 +1199,7 @@ fn parse_msf_uri(uri: &str) -> Result<MsfUri, MessageError>
 fn parse_msf_fragment(fragment: &str) -> Result<MsfFragment, MessageError>
 ```
 
-`MsfFragment` は `parameter_values` / `connection_types` / `wallclock_ranges` / `mediatime_ranges` / `location_ranges` / `c4m_tokens` のアクセサを持つ。
+`MsfFragment` は `parameter_values` / `connection_types` / `wallclock_ranges` / `mediatime_ranges` / `location_ranges` / `cat_tokens` のアクセサを持つ。
 
 ## C4M (`c4m`)
 

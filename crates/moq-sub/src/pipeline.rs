@@ -2038,7 +2038,7 @@ fn goaway_request_target(
 /// fragment の type と value は `:` で連結するが、`:` は RFC 3986 §3.5 の fragment の
 /// 文字集合に含まれるため、type と value の組が異なればキーも異なる。
 ///
-/// fragment には c4m の認可トークンが含まれうるため、キーには fragment のハッシュだけを
+/// fragment には cat の認可トークンが含まれうるため、キーには fragment のハッシュだけを
 /// 入れ、ログに出してもトークンが漏れないようにする。同じ fragment なら同じキーになり、
 /// 異なる fragment (別トラック、別トークン) は別のキーになる。
 fn side_session_url_key(url: &tokio_moq::ServerUrl) -> String {
@@ -3695,7 +3695,7 @@ pub async fn run(
     // Group ID よりも大きい値から始める MUST があり (draft-ietf-moq-msf-01 §6.1
     // (Group numbering))、Unix epoch ミリ秒を開始値にする実装が一般的である。
     //
-    // C4M 認可トークンは `MoqtClient` が URL の c4m トークンをすべて付けるため、ここでは
+    // C4M 認可トークンは `MoqtClient` が URL の C4M トークンをすべて付けるため、ここでは
     // 指定しない (draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization))。
     // 移行 (GOAWAY) で catalog を張り直すときに使う namespace
     let catalog_namespace_for_migration = namespace.clone();
@@ -10563,7 +10563,7 @@ mod tests {
         );
         assert!(
             !side_session_url_key(&base).contains("moq-example--video"),
-            "fragment の値をキーに含めないこと (c4m の認可トークンをログに出さない)"
+            "fragment の値をキーに含めないこと (cat の認可トークンをログに出さない)"
         );
         let other_fragment =
             tokio_moq::parse_url("moqt://relay.example:443/live#msf:moq-example--audio")

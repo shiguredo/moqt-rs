@@ -32,12 +32,12 @@ cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
 - `qmux` は TCP + TLS 上で QUIC のストリームと DATAGRAM を多重化する経路で、TCP の再送による遅延や DATAGRAM の破棄があり得る
 - WebTransport (`wt-h3`) の QUIC 層は tobi-quic 固定である。s2n-quic は RESET_STREAM_AT を実装していないため、既定の s2n-quic ビルドでは `wt-h3` を選べない。使う場合は `--no-default-features --features quic-tobi` でビルドする
 - `--namespace` を省略すると MSF fragment の track-identifier の namespace を使う。どちらも無ければエラー
-- MSF fragment の `c4m` は SETUP と PUBLISH / SUBSCRIBE / FETCH / REQUEST_UPDATE の AUTHORIZATION_TOKEN として送信する
+- MSF fragment の `cat` は SETUP と PUBLISH / SUBSCRIBE / FETCH / REQUEST_UPDATE の AUTHORIZATION_TOKEN として送信する
 - `--cert` を省略すると TLS の証明書検証をスキップする。本番環境では必ず指定する
 
 ```bash
 # C4M トークン付き (シェルでは & を引用符で囲む)
-cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video&c4m=<base64 token>' --fake-capture-device
+cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video&cat=<base64 token>' --fake-capture-device
 ```
 
 各サンプルのオプションは [moq-pub](moq-pub/README.md) / [moq-sub](moq-sub/README.md) と `--help` で確認できます。
