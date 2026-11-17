@@ -752,9 +752,10 @@ fn media_timeline_roundtrip() -> noprop::TestResult {
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
         let entry_count = noprop::sample_usize_in(ctx, 0..=20);
-        let entries = (0..entry_count)
+        let mut entries = (0..entry_count)
             .map(|_| sample_media_timeline_entry(ctx))
-            .collect();
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.pts_ms);
         let tl = MsfMediaTimeline(entries);
         let encoded = tl.encode();
         let decoded =
@@ -793,9 +794,10 @@ fn media_timeline_gzip_roundtrip() -> noprop::TestResult {
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
         let entry_count = noprop::sample_usize_in(ctx, 0..=20);
-        let entries = (0..entry_count)
+        let mut entries = (0..entry_count)
             .map(|_| sample_media_timeline_entry(ctx))
-            .collect();
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.pts_ms);
         let tl = MsfMediaTimeline(entries);
         let encoded = encode_media_timeline(&tl, TimelineEncodingOptions { gzip: true })
             .expect("テストフィクスチャの前提条件を満たす");

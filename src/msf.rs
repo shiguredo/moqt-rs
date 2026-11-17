@@ -2471,6 +2471,7 @@ impl MsfMediaTimeline {
     ///
     /// 全フィールドが型付きで失敗する入力が存在しないため Result を返さない
     /// (`MsfEventTimeline::encode` は生バイト列 `data_raw` を持つため Result を返す)。
+    /// media time の非降順検証は呼び出し側の [`encode_media_timeline`] が行う。
     pub fn encode(&self) -> Vec<u8> {
         nojson::Json(self).to_string().into_bytes()
     }
@@ -2487,12 +2488,48 @@ impl MsfMediaTimeline {
         })?;
         let raw = nojson::RawJson::parse(text)?;
         let val = raw.value();
-        let entries = val
+        let entries: Vec<MsfMediaTimelineEntry> = val
             .to_array()?
             .map(decode_media_entry)
             .collect::<Result<_, _>>()?;
+        validate_media_time_order(&entries)?;
         Ok(Self(entries))
     }
+}
+
+/// media timeline の pts_ms が非降順であることを検証する
+///
+/// draft-ietf-moq-msf-02 §7.1.1 (Media Timeline ordering): media timeline track は media time の
+/// 順に並ばなければならない。同値は許容する。
+fn validate_media_time_order(entries: &[MsfMediaTimelineEntry]) -> Result<(), MessageError> {
+    for pair in entries.windows(2) {
+        if pair[0].pts_ms > pair[1].pts_ms {
+            return Err(MessageError::InvalidCatalog(
+                "media timeline entries MUST be in non-decreasing media time order".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// media timeline の payload 形式を検証する
+///
+/// draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload): template 属性を使う形式と
+/// explicit な媒体タイムライン payload を 1 つの document で併用してはならない (MUST NOT)。
+/// `track.template` が設定されている track に explicit payload を紐付けた場合はエラーにする。
+/// media time の非降順も併せて検証する。§5.2.16 の cross-track の SHOULD NOT は、1 つの
+/// track と payload の組からは判定できないため対象外とする。
+pub fn validate_media_timeline_format(
+    track: &MsfTrack,
+    timeline: &MsfMediaTimeline,
+) -> Result<(), MessageError> {
+    if track.template.is_some() {
+        return Err(MessageError::InvalidCatalog(
+            "a track with a template attribute MUST NOT carry an explicit media timeline"
+                .to_string(),
+        ));
+    }
+    validate_media_time_order(&timeline.0)
 }
 
 /// イベントタイムラインのインデックス参照 (draft-ietf-moq-msf-01 §8.1 (Event Timeline data format))
@@ -4602,6 +4639,7 @@ pub fn encode_media_timeline(
     timeline: &MsfMediaTimeline,
     options: TimelineEncodingOptions,
 ) -> Result<Vec<u8>, MessageError> {
+    validate_media_time_order(&timeline.0)?;
     maybe_compress_gzip(timeline.encode(), options)
 }
 

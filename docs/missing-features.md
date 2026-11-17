@@ -634,9 +634,8 @@ moqt-js (HEAD `f6a171e8`) の playout のうち、次の 2 つは移植してい
   `:323` / `:927` のコメント) を encode 前に閉じるか
 - リレー経由でない直接 subscriber の受け入れは、moq-pub が client 専用 (待ち受け API 無し) の
   ため不可。要件次第で判断が必要
-- MSF §7.1 は payload 文書が explicit 形式と template 形式の 2 つを併用してよい (MAY) と
-  するが、payload 内の template 形式を定義する節が無い (draft 側の記載不足)
-- MSF §5.1.6 の delta に `isComplete` が混ざった場合、library は黙って無視する。
-  「restricted set of fields」の解釈次第で拒否すべきか
+- MSF §7.1 は template 形式と explicit payload の併用を MUST NOT とする。library は
+  `validate_media_timeline_format` で同一 track 内の併用と media time の降順を検出するが、
+  §5.2.16 の cross-track の SHOULD NOT は判定しない
 - C4M §2.2 の `moqt-reval` を複合クレーム内に置いたトークンの well-formed 性拒否は未実装
   (composite claims の draft が `refs/` に無い)

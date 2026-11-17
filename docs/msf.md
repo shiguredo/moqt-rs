@@ -59,7 +59,7 @@
 
 ## Timeline
 
-- Media Timeline (`[[pts_ms, [group_id, object_id], wallclock_ms], ...]` 形式)
+- Media Timeline (`[[pts_ms, [group_id, object_id], wallclock_ms], ...]` 形式)。pts_ms は非降順で、`validate_media_timeline_format` が template 属性との併用を拒否する
 - Event Timeline (`{t / l / m + data}` 形式、`data` は JSON object の生バイト列)
 - Gzip 圧縮と自動展開 (`msf::TimelineEncodingOptions` / `encode_media_timeline` 等)
   - `TimelineEncodingOptions` と Timeline の encode / decode 関数は `msf` モジュール経由で利用する
