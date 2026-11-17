@@ -1,7 +1,7 @@
 # MSF delta update に update 操作を追加する
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -40,3 +40,14 @@ draft-ietf-moq-msf-02 §5.1.6 (Delta update) は、既存 track のフィール�
 - マージ後の track が `validate_full_track` に反する update (例: isLive true で trackDuration、loc / video で framerate 欠如) が拒否されること。
 - `MsfUpdateTrack` を手組みして不正な状態を作った場合に encode が `MessageError::InvalidCatalog` になること。
 - 上記を `tests/test_msf/delta_apply.rs`、`tests/test_msf/catalog_decode.rs`、`tests/test_msf/encode_decode_roundtrip.rs` で固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `MsfUpdateTrack` を追加し、内部に update の track object (`MsfCloneTrack`) を保持する。`MsfDeltaOperation::Update` と decode / encode / DisplayJson を追加した。
+- update の `name` は `parentName` と一致することを要求し、明示 `namespace` は `parentNamespace` と一致することを要求する。`parentNamespace` 省略時は catalog namespace を使い、適用時に対象 track の解決後 namespace と一致することを検証する。名前 / namespace を変更する経路は作らない。
+- 適用時は `parentName` と解決後 namespace で既存 track を探し、存在しなければ `InvalidCatalog` にする。宣言された属性だけを上書きし、`isLive` の false→true を拒否し、マージ後の track を `validate_full_track` に通す。
+- encode 時の `validate_delta_for_encode` に update 分岐を追加し、name / parentName / namespace の制約と clone と同じ fragment 検証を行う。
+- §5.6.4 の `name` 省略例は非規範として扱い、`name` 必須の判断を doc に明記した。
+- `tests/test_msf/delta_apply.rs` / `catalog_decode.rs` / `encode_decode_roundtrip.rs` に、往復、属性変更、未存在 parent、name / namespace 不一致、isLive 逆行、マージ後 MUST 違反、encode 拒否のテストを追加した。`docs/msf.md` と `skills/shiguredo-moqt/SKILL.md` も更新した。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
