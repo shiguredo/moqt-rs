@@ -161,6 +161,7 @@ fn delta_all_operations() {
                     label: None,
                     render_group: None,
                     alt_group: None,
+                    accessible_window_time: None,
                     init_ref: None,
                     depends: None,
                     template: None,
@@ -355,6 +356,7 @@ fn clone_track_roundtrip_all_fields() {
                 parent_namespace: Some("parent-ns".to_string()),
                 packaging: Some(MsfPackaging::EventTimeline),
                 packaging_metadata: None,
+                accessible_window_time: None,
                 namespace: Some("ns".to_string()),
                 event_type: Some("com.example.cue".to_string()),
                 role: Some("caption".to_string()),
@@ -434,6 +436,7 @@ fn clone_track_roundtrip_with_target_latency() {
                 label: None,
                 render_group: None,
                 alt_group: None,
+                accessible_window_time: None,
                 init_ref: None,
                 depends: None,
                 template: None,
@@ -491,6 +494,7 @@ fn clone_track_roundtrip_with_track_duration() {
                 label: None,
                 render_group: None,
                 alt_group: None,
+                accessible_window_time: None,
                 init_ref: None,
                 depends: None,
                 template: None,
@@ -1232,6 +1236,7 @@ fn accessibility_empty_some_roundtrip() {
         label: None,
         render_group: None,
         alt_group: None,
+        accessible_window_time: None,
         init_ref: None,
         depends: None,
         template: None,
@@ -1303,6 +1308,7 @@ fn accessibility_clone_none_omitted() {
                 label: None,
                 render_group: None,
                 alt_group: None,
+                accessible_window_time: None,
                 init_ref: None,
                 depends: None,
                 template: None,
@@ -1996,6 +2002,55 @@ fn encode_rejects_media_timeline_naming_all_render_group_tracks() {
         generated_at: None,
         is_complete: false,
         tracks: vec![v1, v2, timeline],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+}
+
+/// accessibleWindowTime が encode / decode を往復すること
+#[test]
+fn accessible_window_time_roundtrip() {
+    let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
+    track.alt_group = Some(1);
+    track.accessible_window_time = Some(60_000);
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![track],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    let encoded = doc
+        .encode()
+        .expect("accessibleWindowTime を encode できること");
+    let text = String::from_utf8(encoded.clone()).expect("JSON は UTF-8 であること");
+    assert!(
+        text.contains(r#""accessibleWindowTime":60000"#),
+        "JSON に accessibleWindowTime を出力すること: {text}"
+    );
+    let decoded =
+        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(decoded, doc, "decode / encode が往復すること");
+}
+
+/// 同じ altGroup で accessibleWindowTime が異なるカタログを encode しないこと
+#[test]
+fn encode_rejects_alt_group_accessible_window_time_mismatch() {
+    let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
+    a.alt_group = Some(1);
+    a.accessible_window_time = Some(60_000);
+    let mut b = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
+    b.alt_group = Some(1);
+    b.accessible_window_time = Some(120_000);
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![a, b],
         publish_tracks: Vec::new(),
         removed_tracks: Default::default(),
         init_data_list: Vec::new(),

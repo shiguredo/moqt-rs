@@ -1742,3 +1742,62 @@ fn apply_delta_rejects_media_timeline_naming_all_render_group_tracks() {
         Err(MessageError::InvalidCatalog(_))
     ));
 }
+
+/// clone が accessibleWindowTime を継承 / 上書きできること
+#[test]
+fn apply_delta_clone_inherits_or_overrides_accessible_window_time() {
+    let mut catalog = MsfCatalog::new();
+    let mut parent = loc_track("parent", None);
+    parent.alt_group = Some(1);
+    parent.accessible_window_time = Some(60_000);
+    catalog.tracks.push(parent);
+
+    let mut inherited = MsfCloneTrack::new("inherited".to_string(), "parent".to_string());
+    inherited.accessible_window_time = None;
+    let mut overridden = MsfCloneTrack::new("overridden".to_string(), "parent".to_string());
+    overridden.alt_group = Some(2);
+    overridden.accessible_window_time = Some(120_000);
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![inherited, overridden],
+        }],
+    };
+    catalog
+        .apply_delta(&delta, None)
+        .expect("accessibleWindowTime の継承と上書きを適用できること");
+    assert_eq!(
+        catalog.tracks[1].accessible_window_time,
+        Some(60_000),
+        "clone が省略した値は親から継承すること"
+    );
+    assert_eq!(
+        catalog.tracks[2].accessible_window_time,
+        Some(120_000),
+        "clone が明示した値は親を上書きすること"
+    );
+}
+
+/// delta 適用後に同じ altGroup の accessibleWindowTime が不一致なら拒否されること
+#[test]
+fn apply_delta_rejects_accessible_window_time_mismatch() {
+    let mut catalog = MsfCatalog::new();
+    let mut existing = loc_track("existing", None);
+    existing.alt_group = Some(1);
+    existing.accessible_window_time = Some(60_000);
+    catalog.tracks.push(existing);
+
+    let mut added = loc_track("added", None);
+    added.alt_group = Some(1);
+    added.accessible_window_time = Some(120_000);
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![added],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}

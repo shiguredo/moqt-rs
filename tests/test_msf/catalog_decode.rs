@@ -982,3 +982,58 @@ fn secure_objects_without_cipher_suite_rejected() {
         Err(MessageError::InvalidCatalog(_))
     ));
 }
+
+/// accessibleWindowTime の保持と altGroup 内の一致を検証すること
+#[test]
+fn accessible_window_time_alt_group_rules() {
+    // 同じ値なら受理
+    let same = br#"{"version":"draft-01","tracks":[
+        {"name":"a","packaging":"loc","isLive":true,"altGroup":1,"accessibleWindowTime":60000},
+        {"name":"b","packaging":"loc","isLive":false,"altGroup":1,"accessibleWindowTime":60000}
+    ]}"#;
+    let doc = MsfCatalogDocument::decode(same).expect("同じ altGroup の同じ値は受理されること");
+    let MsfCatalogDocument::Full(cat) = doc else {
+        panic!("Full が期待された");
+    };
+    assert_eq!(cat.tracks[0].accessible_window_time, Some(60000));
+
+    // 値が異なる場合は isLive=false でも拒否
+    let different = br#"{"version":"draft-01","tracks":[
+        {"name":"a","packaging":"loc","isLive":false,"altGroup":1,"accessibleWindowTime":60000},
+        {"name":"b","packaging":"loc","isLive":false,"altGroup":1,"accessibleWindowTime":120000}
+    ]}"#;
+    assert!(matches!(
+        MsfCatalogDocument::decode(different),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+
+    // 一部だけが持つ場合は拒否
+    let partial = br#"{"version":"draft-01","tracks":[
+        {"name":"a","packaging":"loc","isLive":true,"altGroup":1,"accessibleWindowTime":60000},
+        {"name":"b","packaging":"loc","isLive":true,"altGroup":1}
+    ]}"#;
+    assert!(matches!(
+        MsfCatalogDocument::decode(partial),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+
+    // 全 track が持たない場合は受理
+    let none = br#"{"version":"draft-01","tracks":[
+        {"name":"a","packaging":"loc","isLive":true,"altGroup":1},
+        {"name":"b","packaging":"loc","isLive":true,"altGroup":1}
+    ]}"#;
+    assert!(MsfCatalogDocument::decode(none).is_ok());
+}
+
+/// publishTracks の altGroup にも一致規則が適用されること
+#[test]
+fn accessible_window_time_publish_tracks_alt_group_rules() {
+    let json = br#"{"version":"draft-01","tracks":[],"publishTracks":[
+        {"name":"a","packaging":"loc","isLive":true,"altGroup":1,"accessibleWindowTime":60000},
+        {"name":"b","packaging":"loc","isLive":true,"altGroup":1,"accessibleWindowTime":120000}
+    ]}"#;
+    assert!(matches!(
+        MsfCatalogDocument::decode(json),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}

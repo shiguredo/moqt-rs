@@ -637,6 +637,10 @@ pub struct MsfTrack {
     pub render_group: Option<u64>,
     /// オルタネートグループ (draft-ietf-moq-msf-01 §5.2.12 (Alternate group))
     pub alt_group: Option<u64>,
+    /// アクセス可能ウィンドウ (draft-ietf-moq-msf-02 §5.2.45 (Accessible Window Time)) [ms]
+    ///
+    /// 同じ altGroup の track は、すべて値を持たないか、すべて同じ値を持たなければならない。
+    pub accessible_window_time: Option<u64>,
     /// 初期化データ参照 (draft-ietf-moq-msf-01 §5.2.13 (Initialization reference))
     pub init_ref: Option<String>,
     /// 依存トラック / renderGroup 配列 (draft-ietf-moq-msf-02 §5.2.15 (Dependencies))
@@ -713,6 +717,7 @@ impl core::fmt::Debug for MsfTrack {
             label,
             render_group,
             alt_group,
+            accessible_window_time,
             init_ref,
             depends,
             template,
@@ -756,6 +761,7 @@ impl core::fmt::Debug for MsfTrack {
             .field("label", label)
             .field("render_group", render_group)
             .field("alt_group", alt_group)
+            .field("accessible_window_time", accessible_window_time)
             .field("init_ref", init_ref)
             .field("depends", depends)
             .field("template", template)
@@ -805,6 +811,7 @@ impl MsfTrack {
             label: None,
             render_group: None,
             alt_group: None,
+            accessible_window_time: None,
             init_ref: None,
             depends: Vec::new(),
             template: None,
@@ -880,6 +887,7 @@ struct TrackJsonParts<'a> {
     label: Option<&'a str>,
     render_group: Option<u64>,
     alt_group: Option<u64>,
+    accessible_window_time: Option<u64>,
     init_ref: Option<&'a str>,
     depends: Option<&'a [MsfDependency]>,
     template: Option<&'a MsfTemplate>,
@@ -962,6 +970,9 @@ fn write_track_json(
     }
     if let Some(v) = p.alt_group {
         f.member("altGroup", v)?;
+    }
+    if let Some(v) = p.accessible_window_time {
+        f.member("accessibleWindowTime", v)?;
     }
     if let Some(v) = p.init_ref {
         f.member("initRef", v)?;
@@ -1080,6 +1091,7 @@ impl DisplayJson for MsfTrack {
                     label: self.label.as_deref(),
                     render_group: self.render_group,
                     alt_group: self.alt_group,
+                    accessible_window_time: self.accessible_window_time,
                     init_ref: self.init_ref.as_deref(),
                     depends: Some(self.depends.as_slice()),
                     template: self.template.as_ref(),
@@ -1174,6 +1186,10 @@ pub struct MsfCloneTrack {
     pub render_group: Option<u64>,
     /// オルタネートグループ (draft-ietf-moq-msf-01 §5.2.12 (Alternate group))
     pub alt_group: Option<u64>,
+    /// アクセス可能ウィンドウ (draft-ietf-moq-msf-02 §5.2.45 (Accessible Window Time)) [ms]
+    ///
+    /// 同じ altGroup の track は、すべて値を持たないか、すべて同じ値を持たなければならない。
+    pub accessible_window_time: Option<u64>,
     /// 初期化データ参照 (draft-ietf-moq-msf-01 §5.2.13 (Initialization reference))
     pub init_ref: Option<String>,
     /// 依存トラック / renderGroup 配列 (draft-ietf-moq-msf-02 §5.2.15 (Dependencies)) - None は親から継承
@@ -1250,6 +1266,7 @@ impl core::fmt::Debug for MsfCloneTrack {
             label,
             render_group,
             alt_group,
+            accessible_window_time,
             init_ref,
             depends,
             template,
@@ -1294,6 +1311,7 @@ impl core::fmt::Debug for MsfCloneTrack {
             .field("label", label)
             .field("render_group", render_group)
             .field("alt_group", alt_group)
+            .field("accessible_window_time", accessible_window_time)
             .field("init_ref", init_ref)
             .field("depends", depends)
             .field("template", template)
@@ -1347,6 +1365,7 @@ impl MsfCloneTrack {
             label: None,
             render_group: None,
             alt_group: None,
+            accessible_window_time: None,
             init_ref: None,
             depends: None,
             template: None,
@@ -1399,6 +1418,7 @@ impl DisplayJson for MsfCloneTrack {
                     label: self.label.as_deref(),
                     render_group: self.render_group,
                     alt_group: self.alt_group,
+                    accessible_window_time: self.accessible_window_time,
                     init_ref: self.init_ref.as_deref(),
                     depends: self.depends.as_deref(),
                     template: self.template.as_ref(),
@@ -1462,6 +1482,9 @@ impl MsfCloneTrack {
         let label = self.label.or_else(|| parent.label.clone());
         let render_group = self.render_group.or(parent.render_group);
         let alt_group = self.alt_group.or(parent.alt_group);
+        let accessible_window_time = self
+            .accessible_window_time
+            .or(parent.accessible_window_time);
         let init_ref = self.init_ref.or_else(|| parent.init_ref.clone());
         let depends = self.depends.unwrap_or_else(|| parent.depends.clone());
         let template = self.template.or(parent.template);
@@ -1575,6 +1598,7 @@ impl MsfCloneTrack {
             label,
             render_group,
             alt_group,
+            accessible_window_time,
             init_ref,
             depends,
             template,
@@ -2056,6 +2080,8 @@ impl MsfCatalog {
         // draft-ietf-moq-msf-02 §5.2.15 (Dependencies): 適用後の catalog 全体で解決できること
         validate_catalog_dependencies(&self.tracks, &self.publish_tracks)?;
         validate_media_timeline_dependencies(&self.tracks, &self.publish_tracks)?;
+        validate_alt_group_accessible_window_time(&self.tracks)?;
+        validate_alt_group_accessible_window_time(&self.publish_tracks)?;
         // draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers):
         // 同一 renderGroup / altGroup 内の isLive=true トラックが宣言した値は一致しなければならない (MUST)。
         // 省略は player の裁量 (MAY) のため比較しない。この仕様は将来変更される可能性がある。
@@ -2886,6 +2912,48 @@ fn validate_catalog_dependencies(
     Ok(())
 }
 
+/// 同じ altGroup の track が accessibleWindowTime を一致させることを検証する
+///
+/// draft-ietf-moq-msf-02 §5.2.45 (Accessible Window Time): 同じ alternate group の track は
+/// 同じ accessibleWindowTime を持たなければならない (MUST)。全 track が持たない場合と、
+/// 全 track が同じ値を持つ場合のどちらかだけを受理し、一部だけの保持と値の不一致を拒否する。
+/// isLive の値による例外はない。
+fn validate_alt_group_accessible_window_time(tracks: &[MsfTrack]) -> Result<(), MessageError> {
+    let mut groups = Vec::new();
+    for track in tracks {
+        if let Some(group) = track.alt_group
+            && !groups.contains(&group)
+        {
+            groups.push(group);
+        }
+    }
+    for group in groups {
+        let members = tracks
+            .iter()
+            .filter(|track| track.alt_group == Some(group))
+            .collect::<Vec<_>>();
+        let values = members
+            .iter()
+            .map(|track| track.accessible_window_time)
+            .collect::<Vec<_>>();
+        if values.iter().all(Option::is_none) {
+            continue;
+        }
+        if values.iter().any(Option::is_none) {
+            return Err(MessageError::InvalidCatalog(format!(
+                "tracks in altGroup {group} MUST all specify accessibleWindowTime or all omit it"
+            )));
+        }
+        let first = values[0];
+        if values.iter().any(|value| *value != first) {
+            return Err(MessageError::InvalidCatalog(format!(
+                "tracks in altGroup {group} MUST have the same accessibleWindowTime"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Media Timeline の depends が renderGroup の参照規則を満たすか検証する
 ///
 /// draft-ietf-moq-msf-02 §7.2 (Media Timeline Catalog requirements): renderGroup 内の全 track が
@@ -3252,6 +3320,8 @@ fn validate_full_catalog_for_encode(catalog: &MsfCatalog) -> Result<(), MessageE
     }
     validate_catalog_dependencies(&catalog.tracks, &catalog.publish_tracks)?;
     validate_media_timeline_dependencies(&catalog.tracks, &catalog.publish_tracks)?;
+    validate_alt_group_accessible_window_time(&catalog.tracks)?;
+    validate_alt_group_accessible_window_time(&catalog.publish_tracks)?;
     // tracks と publishTracks は方向が異なるため group 検証は分離する
     // (draft-ietf-moq-msf-01 §5.1.5 の reverse direction による本実装の解釈)
     validate_group_target_latency(&catalog.tracks, "renderGroup", |t| t.render_group)?;
@@ -3380,6 +3450,8 @@ fn decode_full_catalog(
     // draft-ietf-moq-msf-02 §5.2.15 (Dependencies): 参照先が解決できること
     validate_catalog_dependencies(&tracks, &publish_tracks)?;
     validate_media_timeline_dependencies(&tracks, &publish_tracks)?;
+    validate_alt_group_accessible_window_time(&tracks)?;
+    validate_alt_group_accessible_window_time(&publish_tracks)?;
 
     let catalog = MsfCatalog {
         version,
@@ -3486,6 +3558,7 @@ struct CommonTrackFields {
     label: Option<String>,
     render_group: Option<u64>,
     alt_group: Option<u64>,
+    accessible_window_time: Option<u64>,
     init_ref: Option<String>,
     template: Option<MsfTemplate>,
     temporal_id: Option<u64>,
@@ -3538,6 +3611,7 @@ fn decode_common_track_fields(
         label: val.to_member("label")?.map(|v| v.try_into())?,
         render_group: val.to_member("renderGroup")?.map(parse_u64)?,
         alt_group: val.to_member("altGroup")?.map(parse_u64)?,
+        accessible_window_time: val.to_member("accessibleWindowTime")?.map(parse_u64)?,
         init_ref: val.to_member("initRef")?.map(|v| v.try_into())?,
         template: match val.to_member("template")?.optional() {
             Some(v) => Some(decode_template(v)?),
@@ -3660,6 +3734,7 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
         label,
         render_group,
         alt_group,
+        accessible_window_time,
         init_ref,
         depends,
         template,
@@ -3796,6 +3871,7 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
         label,
         render_group,
         alt_group,
+        accessible_window_time,
         init_ref,
         depends,
         template,
@@ -4014,6 +4090,7 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
         label,
         render_group,
         alt_group,
+        accessible_window_time,
         init_ref,
         depends,
         template,
@@ -4110,6 +4187,7 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
         label,
         render_group,
         alt_group,
+        accessible_window_time,
         init_ref,
         depends,
         template,

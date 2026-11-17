@@ -299,6 +299,7 @@ fn sample_clone_track(ctx: &mut noprop::TestCaseContext) -> MsfCloneTrack {
         label: None,
         render_group: None,
         alt_group: None,
+        accessible_window_time: None,
         init_ref: None,
         depends: None,
         template: sample_template(ctx),
