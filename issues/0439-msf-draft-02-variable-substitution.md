@@ -1,7 +1,7 @@
 # MSF の変数置換の文字種を v02 に合わせる
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -38,3 +38,12 @@ draft-ietf-moq-msf-02 §5.4.1 (Variable Syntax) は変数値に使える文字�
 - 最初の `=` で分割する挙動 (`k=a=b` を key `k` / value `a=b` にする) がテストで固定されていること。
 - 既存の `resolve_name_charset_and_case` は残し、`-` `_` と大小区別のカバレッジを失わないこと。`+` `/` `=` `.` の受理は別テストで追加すること。
 - 上記を `tests/test_msf/variable_substitution.rs` で固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `src/msf.rs` の変数値の許可文字を名前の判定から独立させ、draft-ietf-moq-msf-02 §5.4.1 の列挙どおり英数字・`-`・`_`・`+`・`/`・`=`・`.`・`@` だけを受理するようにした。`,` `;` `"` `'` `~` などの記号は `InvalidCatalog` で拒否する。
+- 変数名は v02 が文字種を列挙しないため、fragment の `param-name` (`pchar-no-amp / "/"`) に緩和した。`pchar-no-amp` の判定は `src/msf/uri.rs` の `is_pchar_no_amp_byte` を `pub(crate)` にして共有し、fragment パーサと変数パーサで受理範囲がずれないようにした。`%` は変数参照の区切りと衝突するため拒否し、`pct-encoded` は percent-decode しない方針のため受理しない。
+- `&` を pair の区切り、最初の `=` を key/value の分割として維持し、テストで固定した。`=` を含む参照名は fragment key として到達不能なため未定義参照として保持することを doc とテストに明記した。
+- `tests/test_msf/variable_substitution.rs` に、Base64 の `+` `/` `=` `.` を含む値の解決、禁止記号の拒否、`&` 区切り、`-` と `.` を含む名前の解決、`%` / `pct-encoded` / 空白を含む名前の拒否、最初の `=` での分割を追加した。既存の `resolve_name_charset_and_case` は残した。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
