@@ -1,7 +1,7 @@
 # MSF Event Timeline の index key を大文字化し data を任意 JSON 値にする
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -33,3 +33,12 @@ draft-ietf-moq-msf-02 §8.2 (Event Timeline data format) は、index key を小�
 - 1 record に複数の index key を持つ場合が引き続き拒否されること。
 - `docs/msf.md` と公開 doc が `T` / `L` / `M` と任意 JSON 値になっていること。
 - 上記を `tests/test_msf` と `pbt/tests/prop_msf.rs` で固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- Event Timeline の index key を `T` / `L` / `M` に変更し、decode は大文字 key だけを読み、encode も大文字 key だけを出力するようにした。小文字 key だけの record は index 欠如として拒否する。
+- `data` の JSON Object 固定検証を削除し、任意の JSON 値を生バイト列のまま保持・出力するようにした。encode 時の `data_raw` 検証は JSON 構文の妥当性だけを見る。
+- 1 record に複数の index key を許さない検証は維持した。
+- `tests/test_msf/event_timeline.rs` / `error_cases.rs` と `pbt/tests/prop_msf.rs` を大文字 key と任意 JSON 値に更新し、§8.6 相当の往復テストを追加した。`docs/msf.md` と `MsfEventIndex` の doc も更新した。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
