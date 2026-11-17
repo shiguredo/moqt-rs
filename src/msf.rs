@@ -309,7 +309,7 @@ impl DisplayJson for RawJsonBytes<'_> {
 
 // ─── パブリック型定義 ─────────────────────────────────────────────────────────
 
-/// MSF パッケージングタイプ (draft-ietf-moq-msf-01 §5.2.4 (Packaging))
+/// MSF パッケージングタイプ (draft-ietf-moq-msf-02 §5.2.4 (Packaging))
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MsfPackaging {
     /// LOC パッケージング ("loc")
@@ -322,6 +322,11 @@ pub enum MsfPackaging {
     MoqLog,
     /// moqmetrics ("moqmetrics")
     MoqMetrics,
+    /// 別のカタログトラックを参照するカタログ ("catalog")
+    ///
+    /// draft-ietf-moq-msf-02 §5.2.4 (Packaging) の Table 5 が追加した値。トップレベルの
+    /// カタログトラックだけが Track Name "catalog" を持つ必要がある (Appendix A.1.3)。
+    Catalog,
 }
 
 impl MsfPackaging {
@@ -332,10 +337,12 @@ impl MsfPackaging {
             Self::EventTimeline => "eventtimeline",
             Self::MoqLog => "moqlog",
             Self::MoqMetrics => "moqmetrics",
+            Self::Catalog => "catalog",
         }
     }
 
-    /// draft-ietf-moq-msf-01 §5.2.4 (Packaging): 許容値は loc / mediatimeline / eventtimeline / moqlog / moqmetrics
+    /// draft-ietf-moq-msf-02 §5.2.4 (Packaging): 許容値は loc / mediatimeline /
+    /// eventtimeline / moqlog / moqmetrics / catalog
     /// この仕様は将来変更される可能性がある。
     fn from_packaging_str(s: &str) -> Result<Self, MessageError> {
         match s {
@@ -344,6 +351,7 @@ impl MsfPackaging {
             "eventtimeline" => Ok(Self::EventTimeline),
             "moqlog" => Ok(Self::MoqLog),
             "moqmetrics" => Ok(Self::MoqMetrics),
+            "catalog" => Ok(Self::Catalog),
             other => Err(MessageError::InvalidCatalog(format!(
                 "unknown packaging value '{other}'"
             ))),

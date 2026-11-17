@@ -1821,3 +1821,29 @@ fn encode_rejects_clone_parent_full_track_name_overflow() {
         "親の Full Track Name 4,097 バイトを encode しないこと"
     );
 }
+
+/// packaging 値 `catalog` が encode / decode を往復すること
+#[test]
+fn catalog_packaging_roundtrip() {
+    let track = MsfTrack::new("catalog".to_string(), MsfPackaging::Catalog, true);
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![track],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    let encoded = doc
+        .encode()
+        .expect("catalog packaging を encode できること");
+    let text = String::from_utf8(encoded.clone()).expect("JSON は UTF-8 であること");
+    assert!(
+        text.contains(r#""packaging":"catalog""#),
+        "JSON に packaging=catalog を出力すること: {text}"
+    );
+    let decoded =
+        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(decoded, doc, "decode / encode が往復すること");
+}

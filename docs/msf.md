@@ -34,7 +34,7 @@
 - 関連型
   - clone 用 `MsfCloneTrack` (parentNamespace 対応)
   - 削除用 `MsfRemoveTrack`
-  - `MsfInitData` / `MsfBuffers` / `MsfPackaging` (loc / mediatimeline / eventtimeline / moqlog / moqmetrics)
+  - `MsfInitData` / `MsfBuffers` / `MsfPackaging` (loc / mediatimeline / eventtimeline / moqlog / moqmetrics / catalog)
 - 検証規則
   - targetLatency / buffers のグループ内一致 (宣言値のみ。isLive=false は無視)
   - isComplete=false 禁止

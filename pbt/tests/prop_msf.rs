@@ -77,6 +77,7 @@ fn sample_packaging(ctx: &mut noprop::TestCaseContext) -> MsfPackaging {
             MsfPackaging::EventTimeline,
             MsfPackaging::MoqLog,
             MsfPackaging::MoqMetrics,
+            MsfPackaging::Catalog,
         ],
     )
 }

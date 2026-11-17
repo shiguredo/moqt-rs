@@ -153,6 +153,15 @@ fn packaging_values() {
         panic!("Full catalog がデコードされること");
     };
     assert_eq!(cat.tracks[0].packaging, MsfPackaging::MoqMetrics);
+
+    // catalog は別のカタログトラックを参照する packaging で、media 向けの必須フィールドを要求しない
+    let json =
+        br#"{"version":"draft-01","tracks":[{"name":"catalog2","packaging":"catalog","isLive":true}]}"#;
+    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let MsfCatalogDocument::Full(cat) = doc else {
+        panic!("Full catalog がデコードされること");
+    };
+    assert_eq!(cat.tracks[0].packaging, MsfPackaging::Catalog);
 }
 
 #[test]

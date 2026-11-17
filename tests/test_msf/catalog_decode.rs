@@ -767,3 +767,18 @@ fn clone_parent_full_track_name_length_is_checked_separately() {
         "親の Full Track Name 4,097 バイトを拒否すること"
     );
 }
+
+/// packaging 値 `catalog` を受理すること
+///
+/// draft-ietf-moq-msf-02 §5.2.4 (Packaging) の Table 5 は、別のカタログトラックを参照する
+/// カタログ用に `catalog` を追加した。media 向けの必須フィールドは要求しない。
+#[test]
+fn catalog_packaging_accepted() {
+    let json =
+        br#"{"version":"draft-01","tracks":[{"name":"catalog","packaging":"catalog","isLive":true}]}"#;
+    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let MsfCatalogDocument::Full(cat) = doc else {
+        panic!("Full が期待された");
+    };
+    assert_eq!(cat.tracks[0].packaging, MsfPackaging::Catalog);
+}
