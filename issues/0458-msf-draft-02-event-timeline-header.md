@@ -1,7 +1,7 @@
 # MSF_EVENT_TIMELINE_HEADER track property に対応する
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -36,3 +36,13 @@ draft-ietf-moq-msf-02 §8.1 (Event Timeline header data) は、Event Timeline tr
 - FETCH_OK の Track Properties が `Fetch` または `SessionEvent::FetchOkReceived` に保持され、subscriber が取得できること。
 - header data が track の寿命を通じて不変であることを doc に明記すること。
 - 上記を `src/track_properties.rs`、`src/property_scope.rs`、`src/msf.rs`、`src/session/fetch.rs` のテストで固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `PROP_MSF_EVENT_TIMELINE_HEADER = 0x7B` を追加し、`known_property_scope` に Track property として登録した。`TrackProperties::event_timeline_header()` で生バイト列を取得する。重複は既存の `validate_multiplicity` が malformed Track として拒否する。
+- `MsfEventTimeline::decode_with_header(buf, header)` を追加した。header の解釈は eventType の責務であり、library は entry 列だけを decode する。header なしでも失敗しない。
+- `Fetch` に `track_properties: TrackProperties` を追加し、FETCH_OK 受信時に `RequestOk.track_properties` を保持するようにした。publisher 側も `send_fetch_ok` で送信した値を保持する。
+- header data が track の寿命を通じて不変であることを property / accessor の doc に明記した。
+- `tests/test_track_properties.rs` / `tests/test_msf/event_timeline.rs` / `tests/test_session/parameter_rules.rs` に accessor、重複拒否、header 付き decode、FETCH_OK の保持を追加した。`pbt/tests/prop_object_properties.rs` は 0x7B を Object scope の生成から除外した。`docs/msf.md` も更新した。
+
+確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
