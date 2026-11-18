@@ -442,7 +442,7 @@ pub struct TimelineConfig {
     pub video_queue_limit: usize,
     /// 表示の遅れの上限 (ミリ秒)
     pub max_presentation_delay_ms: i64,
-    /// MSF の `targetLatency` (ミリ秒、draft-ietf-moq-msf-01 §5.2.8 (Target latency))。
+    /// MSF の `targetLatency` (ミリ秒、draft-ietf-moq-msf-02 §5.2.9 (Target latency))。
     /// 0 のときは下限にしない (moqt-js の null に相当する)
     pub target_latency_ms: i64,
     /// 音声の待ち時間の下限 (マイクロ秒)
@@ -1071,7 +1071,7 @@ impl PlayoutTimeline {
 
     /// 使う `targetLatency` を決める (ミリ秒。使わないときは 0)
     ///
-    /// 同じ render group の track は同じ値でなければならない (draft-ietf-moq-msf-01
+    /// 同じ render group の track は同じ値でなければならない (draft-ietf-moq-msf-02
     /// §5.2.8) ため、音声と映像で 1 つの値を使う。解決の規則は呼び出し側が持ち、ここへは
     /// 確定した値だけを渡す。値は同期の基準の遅延になり、2 つのトラックの表示の遅れの
     /// 下限になる。0 は「下限にしない」の意味であり、moqt-js の null に相当する。

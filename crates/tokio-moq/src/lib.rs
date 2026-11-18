@@ -68,7 +68,7 @@ pub fn sanitize_for_log(value: &str) -> String {
 /// §9.1.2 (PATH) により MUST NOT のため呼び出し側で None を渡す。
 /// §9.1.5 (MOQT IMPLEMENTATION) の `impl_name` (option type 0x07) は常に含まれる。
 ///
-/// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
+/// `cat_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
 /// 各要素を AUTHORIZATION_TOKEN (option type 0x03) として含める。空の場合は
 /// AUTHORIZATION_TOKEN を含めない。この関数はトークンのバイト列を運ぶだけで、
 /// デコード・署名検証・認可は行わない。
@@ -76,7 +76,7 @@ pub fn build_setup_options(
     path: Option<&str>,
     authority: Option<&str>,
     impl_name: &str,
-    c4m_tokens: &[Vec<u8>],
+    cat_tokens: &[Vec<u8>],
 ) -> shiguredo_moqt::parameter::SetupOptions {
     use shiguredo_moqt::{
         parameter::SETUP_OPTION_AUTHORITY, parameter::SETUP_OPTION_AUTHORIZATION_TOKEN,
@@ -103,8 +103,8 @@ pub fn build_setup_options(
         option_type: SETUP_OPTION_MOQT_IMPLEMENTATION,
         value: SetupOptionValue::Bytes(impl_name.as_bytes().to_vec()),
     });
-    for token_value in c4m_tokens {
-        // draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) の c4m は
+    for token_value in cat_tokens {
+        // draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) の cat は
         // C4M の認可トークンであり、SETUP の AUTHORIZATION_TOKEN として送る。
         options.push(SetupOption {
             option_type: SETUP_OPTION_AUTHORIZATION_TOKEN,
@@ -300,7 +300,7 @@ impl Transport {
 /// 初期状態で空で、登録済みの type かどうかは検証しない。
 /// `type` が `msf` のときだけ、[`parse_url`] が value を
 /// `shiguredo_moqt::msf::uri::parse_msf_fragment` で MSF fragment として検証し、
-/// 予約パラメータ `c4m` の認可トークンを取り出す ([`ServerUrl::c4m_tokens`])。
+/// 予約パラメータ `cat` の認可トークンを取り出す ([`ServerUrl::cat_tokens`])。
 /// 他の `type` の value は moq-pub / moq-sub が解釈しないため、構文 (§6.1.1) の検証だけを行う。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MoqtFragment {
@@ -332,11 +332,11 @@ pub struct ServerUrl {
     /// draft-ietf-moq-transport-23 §6.1.1 (Fragment Identifiers) によりサーバーへは
     /// 送信しない。接続経路 (`:path` / PATH option / SNI) では参照しない。
     /// `msf` fragment の track-identifier とパラメータの解釈結果は [`ServerUrl::msf`]、
-    /// 予約パラメータ `c4m` の認可トークンは [`ServerUrl::c4m_tokens`] に取り出している。
+    /// 予約パラメータ `cat` の認可トークンは [`ServerUrl::cat_tokens`] に取り出している。
     pub fragment: Option<MoqtFragment>,
     /// MSF fragment (`#msf:...`) の解釈結果
     ///
-    /// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の
+    /// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の
     /// `msf-fragment-value = track-identifier [ "&" parameter-list ]` をパースした結果で、
     /// track-identifier が示す namespace と track name、パラメータ列を保持する。
     ///
@@ -344,19 +344,22 @@ pub struct ServerUrl {
     /// `msf` fragment は moq-pub / moq-sub が解釈すると宣言した fragment type であり、形式が
     /// §11.1 の ABNF に一致しない場合は [`parse_url`] がエラーにする。
     pub msf: Option<MsfFragment>,
-    /// MSF fragment の `c4m` パラメータから取り出した C4M 認可トークン (出現順)
+    /// MSF fragment の `cat` パラメータから取り出した C4M 認可トークン (出現順)
     ///
-    /// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) は `c4m` を
+    /// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) は `cat` を
     /// "A base64 encoded C4M token" と定め、draft-ietf-moq-c4m-02 §2 / §5 は
     /// トークンを URL に埋め込むときの Base64 エンコードを定める。
     /// Base64 をデコードしたバイト列が MOQT の AUTHORIZATION_TOKEN
     /// (Token Type CAT) の Token Value になる (draft-ietf-moq-c4m-02 §8.2.1)。
     ///
-    /// `msf` 以外の fragment と `c4m` パラメータ無しの `msf` fragment では空。
+    /// `msf` 以外の fragment と `cat` パラメータ無しの `msf` fragment では空。
+    /// v01 の予約パラメータ `c4m` は v02 で `cat` に改名された (Appendix A.1.7)。本実装は
+    /// 旧 `c4m` を予約パラメータとして扱わず、認可トークンの供給元にしない (fail-closed
+    /// の方針)。
     /// 同一のトークンが複数回現れた場合は 1 つに畳む
     /// (draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression) は
     /// alias 解決後の (Token Type, Token Value) の重複を拒否するため)。
-    pub c4m_tokens: Vec<Vec<u8>>,
+    pub cat_tokens: Vec<Vec<u8>>,
 }
 
 /// URL をパースして authority ・ path ・ fragment ・ C4M 認可トークンを取得する
@@ -376,8 +379,8 @@ pub struct ServerUrl {
 /// と定める。この仕様は将来 draft 改訂で変更される可能性がある。
 ///
 /// `type` が `msf` の場合は value を MSF fragment (`track-identifier [ "&" parameter-list ]`)
-/// として検証し、track-identifier の解釈結果を [`ServerUrl::msf`] に、予約パラメータ `c4m` を
-/// Base64 デコードした結果を [`ServerUrl::c4m_tokens`] に入れる。MSF fragment の形式が
+/// として検証し、track-identifier の解釈結果を [`ServerUrl::msf`] に、予約パラメータ `cat` を
+/// Base64 デコードした結果を [`ServerUrl::cat_tokens`] に入れる。MSF fragment の形式が
 /// 不正な場合はエラーにする。
 ///
 /// # Errors
@@ -387,7 +390,7 @@ pub struct ServerUrl {
 /// - authority または path に空白 / 制御文字を含む: `invalid URL`
 /// - fragment が `<type>:<value>` でない / type の文字種が §6.1.1 に一致しない: `invalid moqt URI fragment`
 /// - `msf` fragment が MSF §11.1 の ABNF に一致しない: `invalid MSF fragment`
-/// - `c4m` の値が Base64 でない / 空: `invalid c4m parameter`
+/// - `cat` の値が Base64 でない / 空: `invalid cat parameter`
 pub fn parse_url(url: &str) -> Result<ServerUrl, String> {
     // RFC 3986 §3 (`URI = scheme ":" hier-part`) が scheme を `:` の前に置くことを定め、
     // §3.1 (Scheme) が比較の大文字小文字非区別を定める。エラーメッセージの生成は 1 箇所に集約する。
@@ -425,17 +428,17 @@ pub fn parse_url(url: &str) -> Result<ServerUrl, String> {
         Some(fragment) => Some(parse_moqt_fragment(url, fragment)?),
         None => None,
     };
-    // draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation): fragment type
+    // draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation): fragment type
     // "msf" の value は MSF の track-identifier とパラメータ列である。moq-pub / moq-sub が解釈するのは
-    // track-identifier が示す namespace、予約パラメータ c4m の認可トークン、予約パラメータ
+    // track-identifier が示す namespace、予約パラメータ cat の認可トークン、予約パラメータ
     // connection の接続種別 ([`resolve_transport`]) である。
     // 同じ value を 2 度パースしないよう、解釈結果を 1 度だけ作って共有する。
     let msf = match &fragment {
         Some(f) if f.fragment_type == "msf" => Some(parse_msf_value(url, &f.value)?),
         _ => None,
     };
-    let c4m_tokens = match &msf {
-        Some(msf) => parse_c4m_tokens(url, msf)?,
+    let cat_tokens = match &msf {
+        Some(msf) => parse_cat_tokens(url, msf)?,
         None => Vec::new(),
     };
     Ok(ServerUrl {
@@ -443,14 +446,14 @@ pub fn parse_url(url: &str) -> Result<ServerUrl, String> {
         path,
         fragment,
         msf,
-        c4m_tokens,
+        cat_tokens,
     })
 }
 
 impl ServerUrl {
     /// MSF fragment の track-identifier が示す Track Namespace を返す
     ///
-    /// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の
+    /// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の
     /// track-identifier を §11.1.2 (MSF Namespace-Name String Encoding) としてパースした
     /// namespace である。`msf` fragment が無い場合と `msf` 以外の fragment の場合は `None`。
     pub fn msf_namespace(&self) -> Option<&TrackNamespace> {
@@ -462,7 +465,7 @@ impl ServerUrl {
 ///
 /// `explicit` が `Some` のときは draft-ietf-moq-transport-23 §8.8 (Representing Namespace and
 /// Track Names) の表現としてパースする。`None` のときは `--url` の `msf` fragment
-/// (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation)) の track-identifier が
+/// (draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation)) の track-identifier が
 /// 示す namespace を使う。moq-pub / moq-sub が共通で使う。
 ///
 /// 解決した namespace は 1 つ以上のフィールドを持つ必要がある。moq-pub / moq-sub が扱う catalog と
@@ -505,7 +508,7 @@ pub fn resolve_namespace(
 
 /// URL の `connection` と `--transport` から接続種別を解決する
 ///
-/// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) の予約パラメータ `connection`
+/// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) の予約パラメータ `connection`
 /// は、client に接続種別を MUST で指定する (`q` は native QUIC、`wt` は WebTransport)。`wt` は
 /// WebTransport の実装 (HTTP/3 / HTTP/2) を指定しないため、本実装は `wt-h3` (HTTP/3 上の
 /// WebTransport) を既定にし、`wt-h2` は `--transport wt-h2` を明示したときだけ使う。WebTransport の
@@ -558,7 +561,7 @@ pub fn resolve_transport(
     }
     if requires_quic && requires_webtransport {
         return Err(
-            "'connection=q' and 'connection=wt' cannot be used together: draft-ietf-moq-msf-01 \
+            "'connection=q' and 'connection=wt' cannot be used together: draft-ietf-moq-msf-02 \
              §11.1.1 mandates a native QUIC connection for 'q' and a WebTransport connection for \
              'wt' (remove one of them from --url)"
                 .to_string(),
@@ -585,7 +588,7 @@ pub fn resolve_transport(
         (Some(MsfConnectionType::Quic), None) => Ok(Transport::Quic),
         (Some(MsfConnectionType::Quic), Some(Transport::Quic)) => Ok(Transport::Quic),
         (Some(MsfConnectionType::Quic), Some(explicit)) => Err(format!(
-            "--transport {} conflicts with 'connection=q' in --url: draft-ietf-moq-msf-01 \
+            "--transport {} conflicts with 'connection=q' in --url: draft-ietf-moq-msf-02 \
              §11.1.1 mandates a native QUIC connection (remove --transport or the 'connection' \
              parameter)",
             explicit.as_str()
@@ -601,7 +604,7 @@ pub fn resolve_transport(
             Some(explicit @ (Transport::WtH3 | Transport::WtH2)),
         ) => Ok(explicit),
         (Some(MsfConnectionType::WebTransport), Some(explicit)) => Err(format!(
-            "--transport {} conflicts with 'connection=wt' in --url: draft-ietf-moq-msf-01 \
+            "--transport {} conflicts with 'connection=wt' in --url: draft-ietf-moq-msf-02 \
              §11.1.1 mandates a WebTransport connection (use --transport wt-h3 or wt-h2)",
             explicit.as_str()
         )),
@@ -684,7 +687,7 @@ fn is_fragment_type(fragment_type: &str) -> bool {
 
 /// `msf` fragment の value を MSF fragment としてパースする
 ///
-/// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の
+/// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の
 /// `msf-fragment-value = track-identifier [ "&" parameter-list ]` に従い、value 全体を
 /// [`parse_msf_fragment`] で検証する。MSF fragment の形式が不正な場合は [`parse_url`] の
 /// エラーとして扱う (moq-pub / moq-sub が解釈すると宣言した fragment type の値は、黙って無視せず
@@ -699,22 +702,22 @@ fn parse_msf_value(url: &str, fragment_value: &str) -> Result<MsfFragment, Strin
         .map_err(|e| format!("invalid MSF fragment in {url}: {e}"))
 }
 
-/// パース済みの `msf` fragment から `c4m` パラメータの認可トークンを取り出す
+/// パース済みの `msf` fragment から `cat` パラメータの認可トークンを取り出す
 ///
-/// 予約パラメータ `c4m` を読む (draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters))。
+/// 予約パラメータ `cat` を読む (draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters))。
 ///
-/// 各 `c4m` の値は RFC 3986 §2.1 (Percent-Encoding) の `%XX` をデコードしてから
+/// 各 `cat` の値は RFC 3986 §2.1 (Percent-Encoding) の `%XX` をデコードしてから
 /// Base64 としてデコードする。得られたバイト列が MOQT の AUTHORIZATION_TOKEN
 /// (Token Type CAT) の Token Value になる (draft-ietf-moq-c4m-02 §8.2.1)。
 /// この関数はバイト列を取り出すだけで、トークンの検証と認可は行わない。
 ///
 /// # Errors
 ///
-/// - `c4m` の値が Base64 でない / 空: `invalid c4m parameter`
-fn parse_c4m_tokens(url: &str, msf: &MsfFragment) -> Result<Vec<Vec<u8>>, String> {
+/// - `cat` の値が Base64 でない / 空: `invalid cat parameter`
+fn parse_cat_tokens(url: &str, msf: &MsfFragment) -> Result<Vec<Vec<u8>>, String> {
     let mut tokens: Vec<Vec<u8>> = Vec::new();
-    for text in msf.c4m_tokens() {
-        let token = decode_c4m_token(url, text)?;
+    for text in msf.cat_tokens() {
+        let token = decode_cat_token(url, text)?;
         // draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression):
         // alias 解決後の (Token Type, Token Value) の重複は送れないため、同一トークンは畳む
         if !tokens.contains(&token) {
@@ -724,9 +727,9 @@ fn parse_c4m_tokens(url: &str, msf: &MsfFragment) -> Result<Vec<Vec<u8>>, String
     Ok(tokens)
 }
 
-/// `c4m` パラメータの値を認可トークンのバイト列へデコードする
+/// `cat` パラメータの値を認可トークンのバイト列へデコードする
 ///
-/// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) は `c4m` を
+/// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) は `cat` を
 /// "A base64 encoded C4M token" と定める。RFC 4648 は §4 の Base64 と §5 の
 /// base64url を定義しており、draft-ietf-moq-c4m-02 §2 / §5 はどちらを使うかを指定しないため、
 /// 両方とパディングの有無を受理する (library の `CatToken::decode` が URL 埋め込みの
@@ -734,9 +737,9 @@ fn parse_c4m_tokens(url: &str, msf: &MsfFragment) -> Result<Vec<Vec<u8>>, String
 ///
 /// # Errors
 ///
-/// - Base64 としてデコードできない / デコード結果が空: `invalid c4m parameter`
-fn decode_c4m_token(url: &str, text: &str) -> Result<Vec<u8>, String> {
-    let invalid = || format!("invalid c4m parameter in {url}: not a non-empty Base64 token");
+/// - Base64 としてデコードできない / デコード結果が空: `invalid cat parameter`
+fn decode_cat_token(url: &str, text: &str) -> Result<Vec<u8>, String> {
+    let invalid = || format!("invalid cat parameter in {url}: not a non-empty Base64 token");
     // RFC 3986 §2.1 (Percent-Encoding): MSF のパラメータ列は library が生の文字列で
     // 返すため、Base64 アルファベット外の `%XX` をここでデータバイトへ戻す。
     // Base64 のテキストは ASCII のみのため、UTF-8 でなければ Base64 として不正である。
@@ -1098,7 +1101,7 @@ where
 ///
 /// GOAWAY の New Session URI が現在の URL と同じかどうかの判定に使う。`ServerUrl` は
 /// 全体の `PartialEq` を持たないため、session を決める authority / path / fragment を比較する。
-/// fragment には c4m の認可トークンも含まれるため、トークンだけが異なる URL は同一 session
+/// fragment には cat の認可トークンも含まれるため、トークンだけが異なる URL は同一 session
 /// とみなさない (別 origin / 別トークンは [`migration_target`] が移行先として解決する)。
 pub fn same_session_url(current: &ServerUrl, target: &ServerUrl) -> bool {
     current.authority == target.authority
@@ -1118,11 +1121,11 @@ pub fn same_session_url(current: &ServerUrl, target: &ServerUrl) -> bool {
 ///   `Ok(None)` にする。
 /// - `new_session_uri` が空のときは現在の URL を再利用する (空 URI は request stream の
 ///   GOAWAY でも「現在の session で再発行する」ことを意味する)。
-/// - 非空のときは [`parse_url`] と同じ規則で解釈する。認可トークン (`c4m`) は
+/// - 非空のときは [`parse_url`] と同じ規則で解釈する。認可トークン (`cat`) は
 ///   **現在の URL と同じ origin (host / port) のときだけ** 引き継ぐ。別 origin へ
-///   credential を送らないためである。移行先が自前の `c4m` を持つ場合はそちらを優先する。
+///   credential を送らないためである。移行先が自前の `cat` を持つ場合はそちらを優先する。
 ///
-/// 移行先 URI の `connection` (draft-ietf-moq-msf-01 §11.1.1) と msf の track-identifier は
+/// 移行先 URI の `connection` (draft-ietf-moq-msf-02 §11.1.1) と msf の track-identifier は
 /// ここでは解釈しない。接続経路は呼び出し側が [`resolve_transport`] で現在の解決結果と
 /// 矛盾しないことを確認し、track 名は購読 / 配信の張り直しで使う既存の指定をそのまま使う。
 ///
@@ -1171,9 +1174,9 @@ pub fn migration_target(
         }
     };
     // 認可トークンは同一 origin のときだけ引き継ぐ。別 origin へ送ると credential の
-    // 漏洩になるため、移行先で再取得する (draft-ietf-moq-msf-01 §11.4.4)。
-    if target.c4m_tokens.is_empty() && same_origin(&target, current) {
-        target.c4m_tokens = current.c4m_tokens.clone();
+    // 漏洩になるため、移行先で再取得する (draft-ietf-moq-msf-02 §11.5.4)。
+    if target.cat_tokens.is_empty() && same_origin(&target, current) {
+        target.cat_tokens = current.cat_tokens.clone();
     }
     Ok(Some(MigrationTarget { scope, url: target }))
 }
@@ -1544,7 +1547,7 @@ pub async fn connect(
                         &url.path,
                         &authority_url,
                         &impl_name,
-                        &url.c4m_tokens,
+                        &url.cat_tokens,
                         &task_monitor,
                     )
                     .await
@@ -1570,7 +1573,7 @@ pub async fn connect(
                         crate::moqt_client::MoqtClient::establish_wt(
                             wt_session,
                             &impl_name,
-                            &url.c4m_tokens,
+                            &url.cat_tokens,
                             &task_monitor,
                         )
                         .await
@@ -1599,7 +1602,7 @@ pub async fn connect(
                     crate::moqt_client::MoqtClient::establish_wt_h2(
                         wt_session,
                         &impl_name,
-                        &url.c4m_tokens,
+                        &url.cat_tokens,
                         &task_monitor,
                     )
                     .await
@@ -1620,7 +1623,7 @@ pub async fn connect(
                         &url.path,
                         &authority_url,
                         &impl_name,
-                        &url.c4m_tokens,
+                        &url.cat_tokens,
                         &task_monitor,
                     )
                     .await?;
@@ -2164,19 +2167,19 @@ mod tests {
         );
     }
 
-    /// `msf` fragment の c4m パラメータを Base64 デコードして保持する
+    /// `msf` fragment の cat パラメータを Base64 デコードして保持する
     #[test]
-    fn parse_url_extracts_c4m_token_from_msf_fragment() {
+    fn parse_url_extracts_cat_token_from_msf_fragment() {
         let token = Base64::encode_string(&[0x01, 0x02, 0x03]);
         let url = parse_url(&format!(
-            "moqt://example.com/app#msf:moq-example--video&c4m={token}"
+            "moqt://example.com/app#msf:moq-example--video&cat={token}"
         ))
         .expect("URL のパースに成功すること");
-        assert_eq!(url.c4m_tokens, vec![vec![0x01, 0x02, 0x03]]);
+        assert_eq!(url.cat_tokens, vec![vec![0x01, 0x02, 0x03]]);
         // track-identifier の解釈結果も msf に保持される
         let fragment = url.fragment.expect("fragment が保持されること");
         assert_eq!(fragment.fragment_type, "msf");
-        assert_eq!(fragment.value, format!("moq-example--video&c4m={token}"));
+        assert_eq!(fragment.value, format!("moq-example--video&cat={token}"));
         let msf = url.msf.as_ref().expect("MSF fragment が保持されること");
         assert_eq!(
             serialize_namespace(&msf.namespace),
@@ -2263,7 +2266,7 @@ mod tests {
 
     /// `connection=q` / `connection=wt` と `--transport qmux` は矛盾する
     ///
-    /// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) の `q` は native QUIC、
+    /// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) の `q` は native QUIC、
     /// `wt` は WebTransport を MUST で要求する。QMux はどちらでもないため、fragment が
     /// 接続種別を指定しているときは `--transport qmux` を受け付けない
     /// (どちらを優先するかを決められないため)。
@@ -2295,7 +2298,7 @@ mod tests {
 
     /// `connection=q` は native QUIC を要求する
     ///
-    /// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) は `connection` で接続種別を
+    /// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) は `connection` で接続種別を
     /// MUST で指定する。`q` は native QUIC である。
     #[test]
     fn resolve_transport_requires_native_quic() {
@@ -2507,7 +2510,7 @@ mod tests {
     /// `--namespace` が無い場合は `--url` の msf fragment の namespace を使う
     #[test]
     fn resolve_namespace_falls_back_to_msf_fragment() {
-        let url = parse_url("moqt://example.com/app#msf:spam-egg--video&c4m=AQID")
+        let url = parse_url("moqt://example.com/app#msf:spam-egg--video&cat=AQID")
             .expect("URL のパースに成功すること");
         let namespace = resolve_namespace(None, &url).expect("解決に成功すること");
         assert_eq!(serialize_namespace(&namespace), "spam-egg");
@@ -2551,62 +2554,76 @@ mod tests {
         assert!(err.contains("§8.8"), "{err}");
     }
 
-    /// パディング無しの標準 Base64 と base64url も c4m として受理する
+    /// パディング無しの標準 Base64 と base64url も cat として受理する
     #[test]
-    fn parse_url_accepts_unpadded_and_url_safe_base64_for_c4m() {
+    fn parse_url_accepts_unpadded_and_url_safe_base64_for_cat() {
         let bytes = [0xfb, 0xff];
         for text in [
             Base64Unpadded::encode_string(&bytes),
             Base64UrlUnpadded::encode_string(&bytes),
         ] {
             let url = parse_url(&format!(
-                "moqt://example.com/app#msf:moq-example--video&c4m={text}"
+                "moqt://example.com/app#msf:moq-example--video&cat={text}"
             ))
             .unwrap_or_else(|e| panic!("{text} のパースに失敗した: {e}"));
-            assert_eq!(url.c4m_tokens, vec![bytes.to_vec()], "{text}");
+            assert_eq!(url.cat_tokens, vec![bytes.to_vec()], "{text}");
         }
     }
 
-    /// percent-encoding された c4m パラメータもデコードする (RFC 3986 §2.1)
+    /// percent-encoding された cat パラメータもデコードする (RFC 3986 §2.1)
     #[test]
-    fn parse_url_decodes_percent_encoded_c4m_parameter() {
+    fn parse_url_decodes_percent_encoded_cat_parameter() {
         // `%2B%2F8` は標準 Base64 の `+/8` (パディング無し) の percent-encoding
-        let url = parse_url("moqt://example.com/app#msf:moq-example--video&c4m=%2B%2F8")
+        let url = parse_url("moqt://example.com/app#msf:moq-example--video&cat=%2B%2F8")
             .expect("URL のパースに成功すること");
-        assert_eq!(url.c4m_tokens, vec![vec![0xfb, 0xff]]);
+        assert_eq!(url.cat_tokens, vec![vec![0xfb, 0xff]]);
     }
 
-    /// c4m パラメータは出現順を保ち、同一トークンは 1 つに畳む
+    /// cat パラメータは出現順を保ち、同一トークンは 1 つに畳む
     #[test]
-    fn parse_url_keeps_c4m_tokens_in_order_and_deduplicates() {
+    fn parse_url_keeps_cat_tokens_in_order_and_deduplicates() {
         let first = Base64UrlUnpadded::encode_string(&[0x01]);
         let second = Base64UrlUnpadded::encode_string(&[0x02]);
         let url = parse_url(&format!(
-            "moqt://example.com/app#msf:moq-example--video&c4m={first}&c4m={second}&c4m={first}"
+            "moqt://example.com/app#msf:moq-example--video&cat={first}&cat={second}&cat={first}"
         ))
         .expect("URL のパースに成功すること");
-        assert_eq!(url.c4m_tokens, vec![vec![0x01], vec![0x02]]);
+        assert_eq!(url.cat_tokens, vec![vec![0x01], vec![0x02]]);
     }
 
-    /// c4m パラメータが無い msf fragment でもパースできる
+    /// cat パラメータが無い msf fragment でもパースできる
     #[test]
-    fn parse_url_accepts_msf_fragment_without_c4m() {
+    fn parse_url_accepts_msf_fragment_without_cat() {
         let url = parse_url("moqt://example.com/app#msf:moq-example--video&connection=q")
             .expect("URL のパースに成功すること");
         assert!(
-            url.c4m_tokens.is_empty(),
-            "c4m 無しではトークンを保持しないこと"
+            url.cat_tokens.is_empty(),
+            "cat 無しではトークンを保持しないこと"
         );
         let fragment = url.fragment.expect("fragment が保持されること");
         assert_eq!(fragment.fragment_type, "msf");
     }
 
-    /// msf 以外の fragment type は c4m らしき値があっても解釈しない
+    /// msf 以外の fragment type は cat らしき値があっても解釈しない
     #[test]
-    fn parse_url_ignores_c4m_outside_msf_fragment() {
+    fn parse_url_ignores_cat_outside_msf_fragment() {
         let url =
-            parse_url("moqt://example.com/app#type:c4m=AQID").expect("URL のパースに成功すること");
-        assert!(url.c4m_tokens.is_empty());
+            parse_url("moqt://example.com/app#type:cat=AQID").expect("URL のパースに成功すること");
+        assert!(url.cat_tokens.is_empty());
+    }
+
+    /// 旧予約パラメータ `c4m` は認可トークンとして取り出さないこと
+    ///
+    /// draft-ietf-moq-msf-02 Appendix A.1.7 が `c4m` の `cat` への改名を記録した。予約でない
+    /// パラメータを認可トークンの供給元にしない fail-closed の方針を取る。
+    #[test]
+    fn parse_url_does_not_extract_legacy_c4m_parameter() {
+        let url = parse_url("moqt://example.com/app#msf:moq-example--video&c4m=AQID")
+            .expect("URL のパースに成功すること");
+        assert!(
+            url.cat_tokens.is_empty(),
+            "旧 c4m パラメータを認可トークンとして扱わないこと"
+        );
     }
 
     /// msf fragment が MSF §11.1 の ABNF に一致しない場合はエラーになる
@@ -2616,9 +2633,9 @@ mod tests {
             // track-identifier が無い
             "",
             // パラメータに `=` が無い
-            "moq-example--video&c4m",
+            "moq-example--video&cat",
             // `&` を含む値はパラメータ区切りとして解釈され、`=` の無いパラメータになる
-            "moq-example--video&c4m=AQ&ID",
+            "moq-example--video&cat=AQ&ID",
         ] {
             let url = format!("moqt://example.com/app#msf:{value}");
             let err = parse_url(&url).expect_err("エラーになること");
@@ -2626,26 +2643,26 @@ mod tests {
         }
     }
 
-    /// c4m の値が Base64 でない、または空の場合はエラーになる
+    /// cat の値が Base64 でない、または空の場合はエラーになる
     #[test]
-    fn parse_url_rejects_invalid_c4m_token() {
+    fn parse_url_rejects_invalid_cat_token() {
         for text in ["!!!", ""] {
-            let url = format!("moqt://example.com/app#msf:moq-example--video&c4m={text}");
+            let url = format!("moqt://example.com/app#msf:moq-example--video&cat={text}");
             let err = parse_url(&url).expect_err("エラーになること");
-            assert!(err.contains("invalid c4m parameter"), "{url}: {err}");
+            assert!(err.contains("invalid cat parameter"), "{url}: {err}");
         }
     }
 
-    /// SETUP に c4m トークンを AUTHORIZATION_TOKEN (Token Type CAT) として含める
+    /// SETUP に C4M トークンを AUTHORIZATION_TOKEN (Token Type CAT) として含める
     #[test]
     fn setup_options_include_c4m_authorization_tokens() {
-        let url = parse_url("moqt://example.com/app#msf:moq-example--video&c4m=AQID")
+        let url = parse_url("moqt://example.com/app#msf:moq-example--video&cat=AQID")
             .expect("URL のパースに成功すること");
         let options = build_setup_options(
             Some(&url.path),
             Some(&url.authority),
             "impl",
-            &url.c4m_tokens,
+            &url.cat_tokens,
         );
         assert_eq!(
             options.authorization_tokens(),
@@ -2673,9 +2690,9 @@ mod tests {
         );
     }
 
-    /// c4m トークン無しでは AUTHORIZATION_TOKEN を含めない
+    /// C4M トークン無しでは AUTHORIZATION_TOKEN を含めない
     #[test]
-    fn setup_options_omit_authorization_token_without_c4m() {
+    fn setup_options_omit_authorization_token_without_tokens() {
         let options = build_setup_options(Some("/app"), Some("example.com"), "impl", &[]);
         assert!(options.authorization_tokens().is_empty());
     }
@@ -3313,7 +3330,7 @@ mod tests {
         assert_eq!(target.scope, MigrationScope::Request(7));
         assert_eq!(target.url.authority, "other.example");
         assert!(
-            target.url.c4m_tokens.is_empty(),
+            target.url.cat_tokens.is_empty(),
             "別 origin へトークンを引き継がないこと"
         );
     }

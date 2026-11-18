@@ -54,7 +54,7 @@ fn parse_connection_parameter() {
 
 /// connection パラメータの複数指定は出現順にすべて返ること
 ///
-/// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) の union 規則は値域を対象とした
+/// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) の union 規則は値域を対象とした
 /// もので `connection` には適用しない。`q` と `wt` のように両立しない組み合わせの扱いは呼び出し側
 /// が決めるため、ここでは検証せずすべて返す。
 #[test]
@@ -227,12 +227,41 @@ fn parse_multiple_ranges() {
     );
 }
 
-/// c4m パラメータがそのまま返されること
+/// cat パラメータがそのまま返されること
 #[test]
-fn parse_c4m_parameter() {
+fn parse_cat_parameter() {
+    let fragment = parse_msf_fragment("msf:ns--catalog&cat=gqhkYWxn")
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(fragment.cat_tokens(), vec!["gqhkYWxn"]);
+}
+
+/// 旧予約パラメータ `c4m` は認可トークンとして取り出さないこと
+///
+/// draft-ietf-moq-msf-02 Appendix A.1.7 が `c4m` の `cat` への改名を記録した。本実装は
+/// 予約でないパラメータを認可トークンの供給元にしない fail-closed の方針を取る。
+#[test]
+fn parse_legacy_c4m_parameter_is_not_reserved() {
     let fragment = parse_msf_fragment("msf:ns--catalog&c4m=gqhkYWxn")
         .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(fragment.c4m_tokens(), vec!["gqhkYWxn"]);
+    assert!(
+        fragment.cat_tokens().is_empty(),
+        "旧 c4m パラメータを認可トークンとして扱わないこと"
+    );
+    assert_eq!(
+        fragment.parameter_values("c4m"),
+        vec!["gqhkYWxn"],
+        "旧 c4m は未知の汎用パラメータとして保持されること"
+    );
+
+    // 旧 c4m の値が Base64 として不正でも、予約パラメータとして検証しないためエラーにならない
+    for value in ["!!!", ""] {
+        let fragment = parse_msf_fragment(&format!("msf:ns--catalog&c4m={value}"))
+            .expect("旧 c4m は汎用パラメータとして受理されること");
+        assert!(
+            fragment.cat_tokens().is_empty(),
+            "旧 c4m={value:?} を認可トークンとして扱わないこと"
+        );
+    }
 }
 
 /// 未知パラメータは無視され、parameter_values で参照できること
@@ -273,7 +302,7 @@ fn parse_fragment_invalid_rejected() {
     ));
 }
 
-/// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation): scheme は
+/// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation): scheme は
 /// case-insensitive のため `MOQT://` も受理されること
 #[test]
 fn parse_uri_scheme_case_insensitive() {
@@ -303,7 +332,7 @@ fn parse_location_range_end_before_start_rejected() {
     ));
 }
 
-/// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters): location-range は
+/// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters): location-range は
 /// 終端省略時に dash も省略する MUST のため、末尾ダッシュは reject されること
 #[test]
 fn parse_location_range_trailing_dash_rejected() {
@@ -370,7 +399,7 @@ fn parse_uri_invalid_rejected() {
 
 /// track-identifier の `%XX` (RFC 3986 §2.1 (Percent-Encoding)) をデータバイトへデコードすること
 ///
-/// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の ABNF は
+/// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の ABNF は
 /// `track-identifier = 1*( pchar-no-amp / "/" )` であり、`pchar-no-amp` は `pct-encoded` を含む。
 /// `?` は同節が `%3F` として percent-encode することを求める。
 #[test]

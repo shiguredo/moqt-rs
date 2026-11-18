@@ -671,7 +671,7 @@ fn average_fps(sample_count: u64, duration_units: u64, timescale: u64) -> Result
 
 /// サンプルの最大ビットレート (kbps) を求める
 ///
-/// draft-ietf-moq-msf-01 §5.2.22 (Maximum Bitrate) は audio / video track への
+/// draft-ietf-moq-msf-02 §5.2.23 (Maximum Bitrate) は audio / video track への
 /// 記載を MUST とするため、1 秒幅のスライディングウィンドウ内の最大バイト数から bps を
 /// 算出する。ウィンドウはサンプルのタイムスタンプを右端とする半開区間 `(t - 1 秒, t]`
 /// で評価する (ちょうど 1 秒前のサンプルは含めない)。全尺が 1 秒未満の場合は全尺で

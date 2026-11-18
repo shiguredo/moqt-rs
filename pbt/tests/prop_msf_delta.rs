@@ -1,6 +1,6 @@
 //! `MsfCatalog::apply_delta` の PBT
 //!
-//! draft-ietf-moq-msf-01 §5.1.6 (Delta update): 操作は配列順に適用される。
+//! draft-ietf-moq-msf-02 §5.1.6 (Delta update): 操作は配列順に適用される。
 //! 任意のカタログに対して「一意な名前の add」→「同じ名前の remove」を適用すると、
 //! トラック集合が元に戻る (add / remove が可逆) ことを検証する。
 
@@ -43,7 +43,7 @@ fn add_then_remove_restores_tracks() -> noprop::TestResult {
         let added = MsfTrack::new(name.clone(), MsfPackaging::Loc, true);
 
         let add = MsfDeltaUpdate {
-            generated_at: None,
+            generated_at: 1,
             operations: vec![MsfDeltaOperation::Add {
                 tracks: vec![added],
             }],
@@ -57,7 +57,7 @@ fn add_then_remove_restores_tracks() -> noprop::TestResult {
         );
 
         let remove = MsfDeltaUpdate {
-            generated_at: None,
+            generated_at: 1,
             operations: vec![MsfDeltaOperation::Remove {
                 tracks: vec![MsfRemoveTrack::new(name.clone())],
             }],

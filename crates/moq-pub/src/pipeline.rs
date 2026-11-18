@@ -25,10 +25,13 @@ use shiguredo_moqt::{
     message::common::TrackNamespace,
     message_parameter::{LocationFilter, LocationFilterContext, MessageParameters},
     msf::MSF_CATALOG_TRACK_NAME,
+    msf::StreamMapping,
+    msf::serialize_catalog_namespace,
     name::serialize_namespace,
     session::types::DataStreamId,
     session::types::SessionEvent,
     stream::encoder::FetchObjectInput,
+    stream::subgroup::SubgroupIdMode,
     track_properties::{
         PROP_DYNAMIC_GROUPS, PROP_MAX_CACHE_DURATION, TrackProperties, TrackProperty,
         TrackPropertyValue,
@@ -130,19 +133,19 @@ const AUDIO_SAMPLE_RATE: u32 = 48_000;
 const AUDIO_CHANNELS: u8 = 1;
 /// MSF channelConfig (mono)
 ///
-/// draft-ietf-moq-msf-01 §5.2.29 (Channel configuration) では string 表現。一次資料の例では "2" を使用。
+/// draft-ietf-moq-msf-02 §5.2.30 (Channel configuration) では string 表現。一次資料の例では "2" を使用。
 const AUDIO_CHANNEL_CONFIG: &str = "1";
 /// 音声トラック名
 pub(crate) const AUDIO_TRACK_NAME: &str = "audio";
 /// カタログのレンダーグループ
 ///
 /// 音声と映像を同時に再生させるため、両トラックに同じ値を載せる
-/// (draft-ietf-moq-msf-01 §5.2.11 (Render group))。
+/// (draft-ietf-moq-msf-02 §5.2.12 (Render group))。
 const CATALOG_RENDER_GROUP: u64 = 1;
 
 /// カタログを送り直す間隔
 ///
-/// draft-ietf-moq-msf-01 §5 (Catalog) は、配信網の cache から落ちうる時間が過ぎたときに
+/// draft-ietf-moq-msf-02 §5 (Catalog) は、配信網の cache から落ちうる時間が過ぎたときに
 /// カタログを publish し直すことを SHOULD とする。後から購読を始めた相手は relay の cache に
 /// 残っているカタログを FETCH で取得するため、cache から落ちる前に新しい Group で送り直す。
 /// relay の cache が既定で保持する時間 (10 分程度) より十分短く、かつ送り直しの負荷が
@@ -370,14 +373,12 @@ fn accepted_new_group_request(
 
 /// カタログ JSON を組み立てるための入力
 ///
-/// 起動時と GOAWAY 移行後の双方で同じ入力から MSF カタログを組み立てる。移行先の `c4m` が
+/// 起動時と GOAWAY 移行後の双方で同じ入力から MSF カタログを組み立てる。移行先の `cat` が
 /// 変わったときは authInfo を載せ替える必要があるため
-/// (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))、エンコーダ / MP4 リーダーへの参照では
+/// (draft-ietf-moq-msf-02 §5.2.42 (Authorization Info))、エンコーダ / MP4 リーダーへの参照では
 /// なく、組み立てに必要な値だけを所有して保持する。
 struct CatalogContext {
-    /// Track Namespace の §8.8 表現
-    ///
-    /// draft-ietf-moq-msf-01 §5.2.2 (Track namespace)
+    /// Track Namespace の draft-ietf-moq-msf-02 §5.2.2 (Track namespace) の `/` 区切り表現
     namespace_text: String,
     /// 映像トラック名
     track_name: String,
@@ -406,6 +407,8 @@ struct CatalogVideoTrack {
     /// `maxGopDuration` / `maxGroupDuration` に同じ値を載せる。Group 長を宣言しない経路
     /// (MP4 パススルー) では `None`。
     max_group_duration_ms: Option<u64>,
+    /// LOC packaging の Object を MOQT Stream へ割り当てるモード
+    stream_mapping: StreamMapping,
 }
 
 /// カタログに載せる音声トラックの値
@@ -440,6 +443,7 @@ impl CatalogContext {
             fps: video.fps,
             bitrate: video.bitrate,
             max_group_duration_ms: video.max_group_duration_ms,
+            stream_mapping: video.stream_mapping,
         });
         let audio = self.audio.as_ref().map(|audio| catalog::AudioTrackParams {
             track_name: AUDIO_TRACK_NAME,
@@ -452,13 +456,13 @@ impl CatalogContext {
         (video, audio)
     }
 
-    /// 指定した c4m トークンでカタログ JSON を組み立てる
+    /// 指定した C4M トークンでカタログ JSON を組み立てる
     ///
-    /// 移行先の `c4m` が変わったとき、この関数で authInfo を載せ替える。
+    /// 移行先の `cat` が変わったとき、この関数で authInfo を載せ替える。
     /// 送信は行わない (送信は [`catalog::send_catalog`] / [`republish_catalog_at_group`])。
-    fn json(&self, c4m_tokens: &[Vec<u8>]) -> Result<Vec<u8>> {
+    fn json(&self, cat_tokens: &[Vec<u8>]) -> Result<Vec<u8>> {
         let (video, audio) = self.track_params();
-        catalog::build_catalog_json(video.as_ref(), audio.as_ref(), self.sync, c4m_tokens)
+        catalog::build_catalog_json(video.as_ref(), audio.as_ref(), self.sync, cat_tokens)
     }
 }
 
@@ -472,7 +476,7 @@ fn catalog_params<'a>(
     catalog_request_id: u64,
     group_id: u64,
     start_location: Option<Location>,
-    c4m_tokens: &'a [Vec<u8>],
+    cat_tokens: &'a [Vec<u8>],
 ) -> catalog::CatalogParams<'a> {
     let (video, audio) = context.track_params();
     catalog::CatalogParams {
@@ -483,19 +487,19 @@ fn catalog_params<'a>(
         group_id,
         start_location,
         sync: context.sync,
-        c4m_tokens,
+        cat_tokens,
         video,
         audio,
     }
 }
 
-/// 移行先の c4m トークンが変わったか
+/// 移行先の C4M トークンが変わったか
 ///
-/// 移行先 URL の `c4m` が変わると、catalog の track に載せる authInfo を作り直す必要がある
-/// (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))。authInfo は現在トークンの有無だけを
+/// 移行先 URL の `cat` が変わると、catalog の track に載せる authInfo を作り直す必要がある
+/// (draft-ietf-moq-msf-02 §5.2.42 (Authorization Info))。authInfo は現在トークンの有無だけを
 /// 見るため値の変化では JSON は変わらないが、将来 authInfo が値を参照する変更に備えて
 /// 並びも含めて比較する。
-fn c4m_tokens_changed(previous: &[Vec<u8>], next: &[Vec<u8>]) -> bool {
+fn cat_tokens_changed(previous: &[Vec<u8>], next: &[Vec<u8>]) -> bool {
     previous != next
 }
 
@@ -830,8 +834,14 @@ pub async fn run(
 
     // CLI で §8.8 表現としてパース済みの namespace をそのまま使う
     let namespace = config.namespace.clone();
-    // カタログの namespace は §8.8 の表現で書く (draft-ietf-moq-msf-01 §5.2.2 (Track namespace))
-    let namespace_text = serialize_namespace(&namespace);
+    // カタログの namespace は draft-ietf-moq-msf-02 §5.2.2 の `/` 区切りで書く。
+    // Track Namespace Field が UTF-8 でない、NUL を含む、`/` を含む場合はカタログで
+    // 表現できないため、ここで publisher の設定エラーとして拒否する。
+    let namespace_text = serialize_catalog_namespace(&namespace).map_err(|e| {
+        Error::Other(format!(
+            "catalog namespace cannot be represented in MSF: {e}"
+        ))
+    })?;
 
     // 1. 接続確立と SETUP ハンドシェイク、2. タイムアウト設定、
     // 3. PUBLISH (video / audio / catalog)
@@ -967,7 +977,7 @@ pub async fn run(
 
     // 5. MSF カタログを送信する
     //
-    // カタログの Group ID は 0 に固定しない。draft-ietf-moq-msf-01 §6.1 (Group numbering) は
+    // カタログの Group ID は 0 に固定しない。draft-ietf-moq-msf-02 §6.1 (Group numbering) は
     // Track の Group ID を一意で単調増加とする MUST を課し、publisher の再起動時には
     // 以前 publish したどの Group ID よりも大きい値から始める MUST を課す。同じ Track 名で
     // 配信し直しても Group ID が衝突しないよう、Unix epoch ミリ秒から払い出す。
@@ -980,7 +990,7 @@ pub async fn run(
         group_id: catalog_group_id,
         object_id: 0,
     };
-    // カタログの組み立てに使う入力を保持する。GOAWAY 移行で移行先の c4m が変わったときに
+    // カタログの組み立てに使う入力を保持する。GOAWAY 移行で移行先の cat が変わったときに
     // 同じ入力から authInfo を載せ替えるため、エンコーダ / MP4 リーダーではなく値を所有する
     let catalog_context = CatalogContext {
         namespace_text,
@@ -1003,6 +1013,7 @@ pub async fn run(
                     // 使わないため、Group 長を宣言しない。MP4 から最大キーフレーム間隔を
                     // 算出するには VideoTrackInfo に値を持たせる必要がある (本変更の範囲外)
                     max_group_duration_ms: None,
+                    stream_mapping: config.stream_mapping,
                 })
             }
             (None, Some(enc)) => Some(CatalogVideoTrack {
@@ -1017,6 +1028,7 @@ pub async fn run(
                     encode_fps,
                     config.gop_duration_ms,
                 )),
+                stream_mapping: config.stream_mapping,
             }),
             (None, None) => None,
         },
@@ -1027,7 +1039,7 @@ pub async fn run(
             bitrate: config.audio_bitrate,
         }),
     };
-    // `c4m` が指定された配信は、映像 / 音声の track に authInfo を載せる (§5.2.42)
+    // `cat` が指定された配信は、映像 / 音声の track に authInfo を載せる (§5.2.42)
     let mut catalog_json = catalog::send_catalog(catalog_params(
         &catalog_context,
         &handle,
@@ -1035,7 +1047,7 @@ pub async fn run(
         catalog_request_id,
         catalog_group_id,
         client.subscription_filter_start(catalog_request_id),
-        &config.url.c4m_tokens,
+        &config.url.cat_tokens,
     ))
     .await?;
 
@@ -1106,7 +1118,7 @@ pub async fn run(
 
     // 7. データループ
     let start = Instant::now();
-    // 映像 / 音声の Group ID も 0 に固定しない (draft-ietf-moq-msf-01 §6.1 (Group numbering))。
+    // 映像 / 音声の Group ID も 0 に固定しない (draft-ietf-moq-msf-02 §6.1 (Group numbering))。
     // 再起動時に以前の Group ID を下回らないよう、カタログと同じ規則で払い出す。
     let mut video_group_id: u64 = group_id::allocate_initial_group_id()?;
     // 直前に開始した映像 Group の ID。NEW_GROUP_REQUEST (§9.19.19) の値が未来の Group を
@@ -1115,6 +1127,9 @@ pub async fn run(
     let mut audio_group_id: u64 = group_id::allocate_initial_group_id()?;
     let mut audio_frame_count: u64 = 0;
     let mut current_video_writer: Option<SubgroupWriter> = None;
+    // object モードで次に送る Object の Group 内の Object ID
+    // (draft-ietf-moq-msf-02 §6.2 (Object Numbering): Group 内で 0 から 1 ずつ増やす)
+    let mut video_object_id: u64 = 0;
     // 受信 SUBSCRIBE で確立した購読の送出状態 (draft-ietf-moq-transport-23 §3.1)。
     // Track Alias は PUBLISH の固定値 (0 / 1 / 2) の次から採番する
     let mut peer_subscriptions: Vec<PeerSubscription> = Vec::new();
@@ -1328,13 +1343,15 @@ pub async fn run(
                                         peer.request_id
                                     );
                                 }
-                                if !peer.ended {
+                                if !peer.ended && config.stream_mapping == StreamMapping::Group {
                                     let writer = SubgroupWriter::new(
                                         &handle,
                                         &data_plane,
                                         peer.request_id,
                                         peer.alias,
                                         video_group_id,
+                                        SubgroupIdMode::Zero,
+                                        0,
                                         DEFAULT_PUBLISHER_PRIORITY,
                                         true,
                                         client.subscription_filter_start(peer.request_id),
@@ -1343,26 +1360,35 @@ pub async fn run(
                                     peer.writer = Some(writer);
                                 }
                             }
+                            // object モードは Object ごとに Subgroup を開くため、Group の
+                            // 開始時点では開かない。Object ID は Group の先頭から数え直す
+                            if config.stream_mapping == StreamMapping::Object {
+                                video_object_id = 0;
+                            }
                             // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
                             // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
                             // 映像ストリームには毎フレーム LOC プロパティを付与するため true を渡す
-                            current_video_writer = Some(
-                                SubgroupWriter::new(
-                                    video_handle,
-                                    video_data_plane,
-                                    video_request_id,
-                                    VIDEO_TRACK_ALIAS,
-                                    video_group_id,
-                                    DEFAULT_PUBLISHER_PRIORITY,
-                                    true,
-                                    publish_start_location(
-                                        &client,
-                                        video_publish_target.as_ref(),
+                            if config.stream_mapping == StreamMapping::Group {
+                                current_video_writer = Some(
+                                    SubgroupWriter::new(
+                                        video_handle,
+                                        video_data_plane,
                                         video_request_id,
-                                    ),
-                                )
-                                .await?,
-                            );
+                                        VIDEO_TRACK_ALIAS,
+                                        video_group_id,
+                                        SubgroupIdMode::Zero,
+                                        0,
+                                        DEFAULT_PUBLISHER_PRIORITY,
+                                        true,
+                                        publish_start_location(
+                                            &client,
+                                            video_publish_target.as_ref(),
+                                            video_request_id,
+                                        ),
+                                    )
+                                    .await?,
+                                );
+                            }
                             // 「現在の Group ID」は Session へ登録できた Group を記録する。
                             // writer の作成前に記録すると、直前の Group の終端 (peer の
                             // STOP_SENDING など) や writer の作成が失敗した場合に、送られて
@@ -1381,6 +1407,47 @@ pub async fn run(
                             video_group_id += 1;
                         }
                         let properties = build_video_loc_properties(&ef, video_timescale);
+                        // object モードでこの Object に割り当てる Group 内の Object ID。
+                        // 書き込みの成否に関わらず 1 つ消費する (同じ Object ID を別の Object に
+                        // 使わないため)
+                        let object_id = video_object_id;
+                        if config.stream_mapping == StreamMapping::Object
+                            && let Some(group_id) = started_video_group_id
+                        {
+                            // 1 Object を 1 Subgroup に載せる。Subgroup ID を最初の Object ID
+                            // から決めるモード (FirstObjectId) は Object ごとに一意になり、
+                            // Group 内で衝突しない。FIRST_OBJECT はこの Subgroup の最初の
+                            // Object が publisher によりその Subgroup に最初に公開された
+                            // Object であることを示すため true になる
+                            // (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
+                            let video_request_id =
+                                video_request_id.expect("video request_id enabled");
+                            let (video_handle, video_data_plane) = publish_sink(
+                                video_publish_target.as_ref(),
+                                &handle,
+                                &data_plane,
+                            );
+                            current_video_writer = Some(
+                                SubgroupWriter::new(
+                                    video_handle,
+                                    video_data_plane,
+                                    video_request_id,
+                                    VIDEO_TRACK_ALIAS,
+                                    group_id,
+                                    SubgroupIdMode::FirstObjectId,
+                                    object_id,
+                                    DEFAULT_PUBLISHER_PRIORITY,
+                                    true,
+                                    publish_start_location(
+                                        &client,
+                                        video_publish_target.as_ref(),
+                                        video_request_id,
+                                    ),
+                                )
+                                .await?,
+                            );
+                            video_object_id += 1;
+                        }
                         if let Some(writer) = current_video_writer.as_mut() {
                             // 保持する Location と SUBGROUP_OBJECT に載る Object ID を一致させる
                             // ため、書き込む前に writer が使う Location を取る
@@ -1398,6 +1465,21 @@ pub async fn run(
                                 )?;
                             }
                         }
+                        if config.stream_mapping == StreamMapping::Object
+                            && let Some(writer) = current_video_writer.take()
+                        {
+                            // object モードでは 1 Object を書いたら Subgroup を閉じる。
+                            // 次の Object は新しい Subgroup に載せる
+                            let video_request_id =
+                                video_request_id.expect("video request_id enabled");
+                            writer
+                                .finish(publish_start_location(
+                                    &client,
+                                    video_publish_target.as_ref(),
+                                    video_request_id,
+                                ))
+                                .await?;
+                        }
                         // 受信 SUBSCRIBE の購読にも同じ Object を送る
                         // (draft-ietf-moq-transport-23 §3.1 の "the publisher MUST send the
                         // Object once for each matching subscription")。フィルタと PAUSED は
@@ -1406,6 +1488,42 @@ pub async fn run(
                         // Pass を基準にする)。購読が reset された stream だけを捨てる
                         for peer in peer_subscriptions.iter_mut() {
                             if peer.track != PublishedTrack::Video || peer.ended {
+                                continue;
+                            }
+                            if config.stream_mapping == StreamMapping::Object
+                                && let Some(group_id) = started_video_group_id
+                            {
+                                // object モードの購読にも、この Object だけを載せる Subgroup を
+                                // 開く。PUBLISH 済みの購読と同じ Object ID と Subgroup ID に
+                                // なる (draft-ietf-moq-transport-23 §3.1 の MUST)
+                                let mut writer = SubgroupWriter::new(
+                                    &handle,
+                                    &data_plane,
+                                    peer.request_id,
+                                    peer.alias,
+                                    group_id,
+                                    SubgroupIdMode::FirstObjectId,
+                                    object_id,
+                                    DEFAULT_PUBLISHER_PRIORITY,
+                                    true,
+                                    client.subscription_filter_start(peer.request_id),
+                                )
+                                .await?;
+                                let write_result = writer.write_object(&ef.data, &properties).await;
+                                let finish_result = writer
+                                    .finish(client.subscription_filter_start(peer.request_id))
+                                    .await;
+                                if let Err(e) = write_result.and(finish_result) {
+                                    if is_peer_stream_reset(&e) {
+                                        tracing::info!(
+                                            "Peer video stream was reset by peer; dropping the subscription: request_id={}",
+                                            peer.request_id
+                                        );
+                                        peer.ended = true;
+                                    } else {
+                                        return Err(e);
+                                    }
+                                }
                                 continue;
                             }
                             let Some(writer) = peer.writer.as_mut() else {
@@ -1444,10 +1562,19 @@ pub async fn run(
                         // 禁止されるため、同じ group id (この example は subgroup id 0 固定) を
                         // 使うと `send_subgroup_header` が拒否される
                         current_video_writer = None;
-                        video_group_id += 1;
-                        tracing::info!(
-                            "Subgroup stream was reset by peer; dropping the current video group"
-                        );
+                        if config.stream_mapping == StreamMapping::Group {
+                            video_group_id += 1;
+                            tracing::info!(
+                                "Subgroup stream was reset by peer; dropping the current video group"
+                            );
+                        } else {
+                            // object モードでは Subgroup は 1 Object ごとに閉じる。peer が reset
+                            // したのはその Object だけであり、Group の残りは別の Subgroup で
+                            // 送り続けられる
+                            tracing::info!(
+                                "Subgroup stream was reset by peer; dropping the current video object"
+                            );
+                        }
                     }
                     Err(e) => {
                         // MOQT メッセージの encode / decode 失敗は終了コード付きで閉じる
@@ -1513,6 +1640,8 @@ pub async fn run(
                                 audio_request_id,
                                 AUDIO_TRACK_ALIAS,
                                 audio_group_id,
+                                SubgroupIdMode::Zero,
+                                0,
                                 DEFAULT_PUBLISHER_PRIORITY,
                                 true,
                                 publish_start_location(
@@ -1755,6 +1884,8 @@ pub async fn run(
                                 audio_request_id,
                                 AUDIO_TRACK_ALIAS,
                                 audio_group_id,
+                                SubgroupIdMode::Zero,
+                                0,
                                 DEFAULT_PUBLISHER_PRIORITY,
                                 true,
                                 publish_start_location(
@@ -1856,6 +1987,8 @@ pub async fn run(
                                     peer.request_id,
                                     peer.alias,
                                     audio_group_id,
+                                    SubgroupIdMode::Zero,
+                                    0,
                                     DEFAULT_PUBLISHER_PRIORITY,
                                     true,
                                     client.subscription_filter_start(peer.request_id),
@@ -2032,7 +2165,7 @@ pub async fn run(
                                                 Ok(PublishTrack::Catalog) => {
                                                     // カタログは購読を新しく張り直すため、Object を
                                                     // 次の Group で送り直す
-                                                    // (draft-ietf-moq-msf-01 §5 (Catalog) /
+                                                    // (draft-ietf-moq-msf-02 §5 (Catalog) /
                                                     // §6.1 (Group numbering))
                                                     let sink = catalog_sink(
                                                         &client,
@@ -2130,7 +2263,7 @@ pub async fn run(
                                             }
                                             // 移行先 URI の msf fragment の connection が
                                             // 現在の接続経路と矛盾する場合は移行しない
-                                            // (draft-ietf-moq-msf-01 §11.1.1)
+                                            // (draft-ietf-moq-msf-02 §11.1.1)
                                             if let Err(e) = tokio_moq::resolve_transport(
                                                 Some(config.transport),
                                                 &target.url,
@@ -2217,7 +2350,7 @@ pub async fn run(
                                                 return Ok(true);
                                             }
                                             // 移行先 URI の msf fragment の connection が現在の接続経路と
-                                            // 矛盾しないかを確認する (draft-ietf-moq-msf-01 §11.1.1)。
+                                            // 矛盾しないかを確認する (draft-ietf-moq-msf-02 §11.1.1)。
                                             // 矛盾する場合は移行せず、従来どおり終了する
                                             if let Err(e) = tokio_moq::resolve_transport(
                                                 Some(config.transport),
@@ -2321,7 +2454,7 @@ pub async fn run(
                                     ended: false,
                                 });
                                 // カタログの購読は、受理した時点で現在のカタログ Object を
-                                // 新しい Group で送り直す (draft-ietf-moq-msf-01 §5: 独立した
+                                // 新しい Group で送り直す (draft-ietf-moq-msf-02 §5: 独立した
                                 // カタログは新しい Group の先頭に置く MUST)。次の定周期の
                                 // republish を待つと購読直後の相手にカタログが届かない
                                 if accepted.track == PublishedTrack::Catalog
@@ -2381,6 +2514,7 @@ pub async fn run(
                                             location.group_id,
                                             location.object_id,
                                             &catalog_json,
+                                            catalog::CATALOG_PUBLISHER_PRIORITY,
                                         )
                                         .await
                                     {
@@ -2567,20 +2701,20 @@ pub async fn run(
                                 &mut catalog_request_id,
                                 new_catalog_request_id,
                             );
-                            // 移行先の c4m が変わると catalog の track の authInfo を載せ替える
-                            // 必要がある (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))。
+                            // 移行先の cat が変わると catalog の track の authInfo を載せ替える
+                            // 必要がある (draft-ietf-moq-msf-02 §5.2.42 (Authorization Info))。
                             // `config.url` を新しい URL に更新する前に比較する
-                            if c4m_tokens_changed(&config.url.c4m_tokens, &url.c4m_tokens) {
-                                match catalog_context.json(&url.c4m_tokens) {
+                            if cat_tokens_changed(&config.url.cat_tokens, &url.cat_tokens) {
+                                match catalog_context.json(&url.cat_tokens) {
                                     Ok(rebuilt) => {
                                         catalog_json = rebuilt;
                                         tracing::info!(
-                                            "Rebuilt the MSF catalog for the migrated session's c4m tokens"
+                                            "Rebuilt the MSF catalog for the migrated session's C4M authorization tokens"
                                         );
                                     }
                                     Err(e) => {
                                         tracing::warn!(
-                                            "Failed to rebuild the MSF catalog for the migrated session's c4m tokens: {e}"
+                                            "Failed to rebuild the MSF catalog for the migrated session's C4M authorization tokens: {e}"
                                         );
                                     }
                                 }
@@ -2652,7 +2786,7 @@ pub async fn run(
                                 config.url.authority
                             );
                             // 新しい session でカタログを次の Group で送り直す
-                            // (draft-ietf-moq-msf-01 §5 (Catalog) / §6.1 (Group numbering))
+                            // (draft-ietf-moq-msf-02 §5 (Catalog) / §6.1 (Group numbering))
                             if let Err(e) = republish_catalog_at_next_group(
                                 &client,
                                 catalog_sink(
@@ -2763,7 +2897,7 @@ pub async fn run(
                                     data_plane: migrated_data_plane,
                                 });
                                 // 新しい session でカタログを次の Group で送り直す
-                                // (draft-ietf-moq-msf-01 §5 (Catalog) /
+                                // (draft-ietf-moq-msf-02 §5 (Catalog) /
                                 // §6.1 (Group numbering))
                                 let sink = catalog_sink(
                                     &client,
@@ -2976,7 +3110,7 @@ pub async fn run(
             }
             _ = catalog_republish_interval.tick() => {
                 // 独立したカタログを新しい Group の先頭に置き直す
-                // (draft-ietf-moq-msf-01 §5 (Catalog) / §6.1 (Group numbering))。
+                // (draft-ietf-moq-msf-02 §5 (Catalog) / §6.1 (Group numbering))。
                 // relay の cache から落ちる前に送り直すことで、配信開始後に購読を始めた相手も
                 // cache のカタログを FETCH で取得できる。
                 let outcome = republish_catalog_at_next_group(
@@ -3324,7 +3458,7 @@ fn track_migrated(
 ///
 /// 1 本の side session を共有できるのは、接続先が同じ URL の PUBLISH だけである。
 /// [`tokio_moq::same_session_url`] と同じく authority・path・fragment で識別する。
-/// fragment まで含めるのは、MSF fragment が track の namespace と認可トークン (c4m) を
+/// fragment まで含めるのは、MSF fragment が track の namespace と認可トークン (cat) を
 /// 変えうるためである。path は空か `/` で始まるため、authority との境界は曖昧にならない。
 ///
 /// この文字列はログに出さない。fragment には認可トークンが含まれうるためである。
@@ -3612,7 +3746,7 @@ async fn wait_wt_session_change(
 
 /// カタログを指定 Group で送り直す
 ///
-/// draft-ietf-moq-msf-01 §5 (Catalog): 独立したカタログは新しい Group の先頭 (Object 0) に
+/// draft-ietf-moq-msf-02 §5 (Catalog): 独立したカタログは新しい Group の先頭 (Object 0) に
 /// 置く。JSON は起動時に組み立てたものを再利用する (MAX_CACHE_DURATION などの告知値は
 /// 接続先が変わっても同じである)。
 ///
@@ -3675,7 +3809,7 @@ async fn republish_catalog_at_group(
 ///
 /// Group ID は送信の成否によらず先に進める。同じ Location を 2 度送ると購読側で重複として
 /// 扱われ、失敗した Group を再送すると同じ Group の Object が二重に登録されうるためである
-/// (draft-ietf-moq-msf-01 §6.1 (Group numbering))。
+/// (draft-ietf-moq-msf-02 §6.1 (Group numbering))。
 #[expect(
     clippy::too_many_arguments,
     reason = "main ループが持つ catalog 送出の状態と受信 SUBSCRIBE の一覧を渡すため"
@@ -4687,6 +4821,7 @@ async fn serve_peer_request(
                                 catalog.location.object_id,
                                 catalog.json,
                                 None,
+                                catalog::CATALOG_PUBLISHER_PRIORITY,
                             )
                             .await?;
                         tracing::info!(
@@ -5612,7 +5747,7 @@ mod tests {
 
         /// 現在の URL (移行前の接続先)
         fn current_url() -> ServerUrl {
-            parse_url("moqt://relay.example:443/live?token=abc#msf:moq-example--video&c4m=QUJD")
+            parse_url("moqt://relay.example:443/live?token=abc#msf:moq-example--video&cat=QUJD")
                 .expect("現在の URL をパースできること")
         }
 
@@ -5649,15 +5784,15 @@ mod tests {
             assert_eq!(target.scope, tokio_moq::MigrationScope::Session);
             assert_eq!(target.url.authority, current.authority);
             assert_eq!(target.url.path, current.path);
-            assert_eq!(target.url.c4m_tokens, current.c4m_tokens);
+            assert_eq!(target.url.cat_tokens, current.cat_tokens);
         }
 
-        /// 同一 origin の New Session URI で c4m が無いときは元のトークンを引き継ぐこと
+        /// 同一 origin の New Session URI で cat が無いときは元のトークンを引き継ぐこと
         ///
-        /// draft-ietf-moq-msf-01 §11.4.3 は track に紐づくトークンを同じ track の制御
+        /// draft-ietf-moq-msf-02 §11.5.3 は track に紐づくトークンを同じ track の制御
         /// メッセージへ載せる MUST を課すため、移行先でも載せ続ける必要がある。
         #[test]
-        fn same_origin_uri_without_c4m_carries_the_tokens_over() {
+        fn same_origin_uri_without_cat_carries_the_tokens_over() {
             let current = current_url();
             let target = tokio_moq::migration_target(
                 b"moqt://relay.example:443/other#msf:moq-example--video",
@@ -5669,15 +5804,15 @@ mod tests {
             assert_eq!(target.url.authority, "relay.example:443");
             assert_eq!(target.url.path, "/other");
             assert_eq!(
-                target.url.c4m_tokens, current.c4m_tokens,
-                "同一 origin なら移行先に c4m が無くても元のトークンを引き継ぐこと"
+                target.url.cat_tokens, current.cat_tokens,
+                "同一 origin なら移行先に cat が無くても元のトークンを引き継ぐこと"
             );
         }
 
-        /// 別 origin の New Session URI には c4m を引き継がないこと
+        /// 別 origin の New Session URI には cat を引き継がないこと
         ///
         /// 移行先が別ホストのときは認可トークンを送らない。移行先で別途取得する
-        /// (draft-ietf-moq-msf-01 §11.4.4)。
+        /// (draft-ietf-moq-msf-02 §11.5.4)。
         #[test]
         fn different_origin_uri_does_not_carry_tokens() {
             let current = current_url();
@@ -5690,23 +5825,23 @@ mod tests {
             .expect("移行先があること");
             assert_eq!(target.url.authority, "other.example:443");
             assert!(
-                target.url.c4m_tokens.is_empty(),
+                target.url.cat_tokens.is_empty(),
                 "別 origin へ認可トークンを送らないこと"
             );
         }
 
-        /// New Session URI の fragment に c4m があるときはそちらを使うこと
+        /// New Session URI の fragment に cat があるときはそちらを使うこと
         #[test]
-        fn uri_with_c4m_uses_its_own_tokens() {
+        fn uri_with_cat_uses_its_own_tokens() {
             let current = current_url();
             let target = tokio_moq::migration_target(
-                b"moqt://other.example:443/live#msf:moq-example--video&c4m=WFla",
+                b"moqt://other.example:443/live#msf:moq-example--video&cat=WFla",
                 None,
                 &current,
             )
             .expect("判断に失敗しないこと")
             .expect("移行先があること");
-            assert_eq!(target.url.c4m_tokens, vec![b"XYZ".to_vec()]);
+            assert_eq!(target.url.cat_tokens, vec![b"XYZ".to_vec()]);
         }
 
         /// UTF-8 でない New Session URI はエラーにすること
@@ -6053,7 +6188,7 @@ mod tests {
     /// 同じ side session を共有する移行先 URL のキーを固定する
     ///
     /// 同じ URL を指す PUBLISH は 1 本の side session を共有し、URL が違えば別の session を
-    /// 使う。キーは接続先を決める authority・path と、認可トークン (c4m) を含みうる
+    /// 使う。キーは接続先を決める authority・path と、認可トークン (cat) を含みうる
     /// fragment から作る。
     mod side_session_key_tests {
         use super::*;
@@ -6075,7 +6210,7 @@ mod tests {
 
         /// fragment が違う URL は別のキーになること
         ///
-        /// MSF fragment は track の namespace と認可トークン (c4m) を変えうるため、
+        /// MSF fragment は track の namespace と認可トークン (cat) を変えうるため、
         /// authority と path が同じでも fragment が違えば別の side session にする。
         #[test]
         fn different_fragment_uses_another_key() {
@@ -6107,9 +6242,9 @@ mod tests {
         }
     }
 
-    /// 移行先の c4m トークンに合わせてカタログ JSON を組み立て直す判断を固定する
+    /// 移行先の C4M トークンに合わせてカタログ JSON を組み立て直す判断を固定する
     ///
-    /// draft-ietf-moq-msf-01 §5.2.42 (Authorization Info): 移行先 URL の `c4m` が変わると
+    /// draft-ietf-moq-msf-02 §5.2.42 (Authorization Info): 移行先 URL の `cat` が変わると
     /// catalog の track に載せる authInfo も変わる。
     mod catalog_rebuild_tests {
         use super::*;
@@ -6133,28 +6268,28 @@ mod tests {
             }
         }
 
-        /// c4m トークンの有無で authInfo が変わること
+        /// C4M トークンの有無で authInfo が変わること
         ///
-        /// 移行先の c4m が変わったとき、同じ入力から authInfo を載せ替えた JSON を
+        /// 移行先の cat が変わったとき、同じ入力から authInfo を載せ替えた JSON を
         /// 組み立てられることを固定する。
         #[test]
-        fn catalog_context_json_reflects_c4m_tokens() {
+        fn catalog_context_json_reflects_cat_tokens() {
             let context = audio_only_context();
 
-            let without_tokens = context.json(&[]).expect("c4m 無しでも組み立てられること");
+            let without_tokens = context.json(&[]).expect("cat 無しでも組み立てられること");
             let text = String::from_utf8(without_tokens).expect("UTF-8 の JSON であること");
             assert!(
                 !text.contains("authInfo"),
-                "c4m が無いときは authInfo を載せないこと: {text}"
+                "cat が無いときは authInfo を載せないこと: {text}"
             );
 
             let with_tokens = context
                 .json(&[b"publisher-token".to_vec()])
-                .expect("c4m 有りでも組み立てられること");
+                .expect("cat 有りでも組み立てられること");
             let text = String::from_utf8(with_tokens).expect("UTF-8 の JSON であること");
             assert!(
-                text.contains(r#""authInfo":{"cat":"%c4m%"}"#),
-                "c4m があるときは authInfo を載せること: {text}"
+                text.contains(r#""authInfo":{"cat":"%cat%"}"#),
+                "cat があるときは authInfo を載せること: {text}"
             );
             assert!(
                 !text.contains("publisher-token"),
@@ -6182,6 +6317,7 @@ mod tests {
                     fps: 30,
                     bitrate: 5_000,
                     max_group_duration_ms: Some(2_000),
+                    stream_mapping: StreamMapping::Group,
                 }),
                 audio: Some(CatalogAudioTrack {
                     codec: "opus".to_string(),
@@ -6233,24 +6369,24 @@ mod tests {
             assert_eq!(audio.bitrate, 64, "音声の bitrate が渡ること");
         }
 
-        /// c4m トークンの並びが同じときだけ再構築しないこと
+        /// C4M トークンの並びが同じときだけ再構築しないこと
         #[test]
-        fn c4m_tokens_changed_compares_the_token_list() {
+        fn cat_tokens_changed_compares_the_token_list() {
             assert!(
-                !c4m_tokens_changed(&[b"abc".to_vec()], &[b"abc".to_vec()]),
+                !cat_tokens_changed(&[b"abc".to_vec()], &[b"abc".to_vec()]),
                 "同じ並びなら再構築しないこと"
             );
-            assert!(!c4m_tokens_changed(&[], &[]), "両方空なら再構築しないこと");
+            assert!(!cat_tokens_changed(&[], &[]), "両方空なら再構築しないこと");
             assert!(
-                c4m_tokens_changed(&[], &[b"abc".to_vec()]),
+                cat_tokens_changed(&[], &[b"abc".to_vec()]),
                 "トークンが増えたら再構築すること"
             );
             assert!(
-                c4m_tokens_changed(&[b"abc".to_vec()], &[]),
+                cat_tokens_changed(&[b"abc".to_vec()], &[]),
                 "トークンが消えたら再構築すること"
             );
             assert!(
-                c4m_tokens_changed(&[b"abc".to_vec()], &[b"abd".to_vec()]),
+                cat_tokens_changed(&[b"abc".to_vec()], &[b"abd".to_vec()]),
                 "トークンの値が変わったら再構築すること"
             );
         }
@@ -7887,6 +8023,7 @@ mod tests {
                     fps: 30,
                     bitrate: 200,
                     max_group_duration_ms: Some(u64::from(DEFAULT_GOP_DURATION_MS)),
+                    stream_mapping: StreamMapping::Group,
                 }),
                 None,
                 crate::catalog::CatalogSyncParams {
@@ -8067,6 +8204,8 @@ mod tests {
                 accepted.request_id,
                 accepted.alias,
                 group_id,
+                SubgroupIdMode::Zero,
+                0,
                 DEFAULT_PUBLISHER_PRIORITY,
                 true,
                 client.subscription_filter_start(accepted.request_id),
@@ -8108,6 +8247,51 @@ mod tests {
                 .finish()
                 .expect("FIN までに全 Object を読み切ること");
             (header.track_alias, header.group_id, objects)
+        }
+
+        /// 次の Subgroup stream を読み、ヘッダの識別子と Object の一覧を返す
+        ///
+        /// `subgroup_id` はデコードした Subgroup ID である (`FirstObjectId` は最初の
+        /// Object ID で解決される)。object モードで Subgroup ごとに 1 Object が載り、
+        /// Subgroup ID が衝突しないことを確かめるために使う。
+        async fn recv_subgroup_with_subgroup_id(
+            peer: &mut TestPeer,
+        ) -> (u64, u64, Option<u64>, Vec<DecodedSubgroupObject>) {
+            let bytes = wait_for(peer.recv_uni_data_stream())
+                .await
+                .expect("uni stream を終端まで読めること");
+            let mut decoder = SubgroupStreamDecoder::new();
+            decoder.push(&bytes);
+            let header = decoder
+                .try_decode_header()
+                .expect("SUBGROUP_HEADER を decode できること")
+                .expect("SUBGROUP_HEADER があること");
+            let mut objects = Vec::new();
+            while let Some(object) = decoder
+                .try_decode_object()
+                .expect("SUBGROUP_OBJECT を decode できること")
+            {
+                if object.payload_length > 0 {
+                    let payload = decoder
+                        .try_read_payload()
+                        .expect("Object の payload を読めること");
+                    assert_eq!(
+                        payload.len() as u64,
+                        object.payload_length,
+                        "payload の長さが宣言と一致すること"
+                    );
+                }
+                objects.push(object);
+            }
+            decoder
+                .finish()
+                .expect("FIN までに全 Object を読み切ること");
+            (
+                header.track_alias,
+                header.group_id,
+                decoder.resolved_subgroup_id(),
+                objects,
+            )
         }
 
         /// 映像の Subgroup が届くまで uni stream を読み、その Object 一覧を返す
@@ -9100,6 +9284,97 @@ mod tests {
                         "PTS の間隔が入力トラックの timescale 単位のサンプル尺と一致すること"
                     );
                 }
+
+                let result = publisher.stop().await;
+                assert!(result.is_ok(), "publisher が正常終了すること: {result:?}");
+            })
+            .await;
+        }
+
+        /// `--stream-mapping object` で映像が Object ごとに独立した Subgroup に載ること
+        ///
+        /// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping): object モードでは
+        /// 各 Object をそれぞれの Subgroup に載せる。Subgroup ID は `FirstObjectId` で
+        /// 最初の Object ID から決まるため、Group 内で衝突しない。MP4 パススルーの
+        /// 経路 (`current_video_writer` を使う送信経路) で成立することを実 stream で固定する。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn run_mp4_passthrough_with_object_stream_mapping_sends_one_object_per_subgroup() {
+            run_with_timeout(async {
+                /// 入力 MP4 の映像トラックのタイムスケール
+                const MP4_TIMESCALE: u32 = 90_000;
+                /// 入力 MP4 の 1 サンプル分の尺 (MP4_TIMESCALE 単位)
+                const SAMPLE_DURATION: u32 = 3_000;
+                /// 入力 MP4 の映像サンプル数 (最初の 1 つがキーフレーム)
+                const SAMPLE_COUNT: usize = 4;
+
+                let fixture = TempMp4::new("object-mapping");
+                let samples: Vec<(bool, u32, &[u8])> = vec![
+                    (true, SAMPLE_DURATION, AV1_CONFIG_OBUS),
+                    (false, SAMPLE_DURATION, &[0x32, 0x00]),
+                    (false, SAMPLE_DURATION, &[0x32, 0x01]),
+                    (false, SAMPLE_DURATION, &[0x32, 0x02]),
+                ];
+                write_mp4_fixture(fixture.path(), MP4_TIMESCALE, &samples);
+
+                let mut server = start_peer_server().await;
+                let url = format!("moqt://{}", server.local_addr());
+                let fixture_path = fixture
+                    .path()
+                    .to_str()
+                    .expect("一時 MP4 のパスが UTF-8 であること");
+                let config = config_for_url(
+                    &url,
+                    &["--input-mp4", fixture_path, "--stream-mapping", "object"],
+                );
+                assert_eq!(
+                    config.stream_mapping,
+                    StreamMapping::Object,
+                    "object モードが設定に反映されること"
+                );
+
+                let publisher = RunningPublisher::start(config);
+                let mut peer = accept_publisher(&mut server).await;
+                accept_initial_publishes(
+                    &mut peer,
+                    &[b"video".as_slice(), MSF_CATALOG_TRACK_NAME],
+                )
+                .await;
+
+                let mut received = Vec::new();
+                while received.len() < SAMPLE_COUNT {
+                    let (track_alias, group_id, subgroup_id, objects) =
+                        recv_subgroup_with_subgroup_id(&mut peer).await;
+                    if track_alias != VIDEO_TRACK_ALIAS {
+                        // catalog の Subgroup は読み捨てる
+                        continue;
+                    }
+                    assert_eq!(
+                        objects.len(),
+                        1,
+                        "object モードでは 1 Subgroup に 1 Object だけが載ること: group={group_id}, objects={objects:?}"
+                    );
+                    let object_id = objects[0].object_id;
+                    assert_eq!(
+                        subgroup_id,
+                        Some(object_id),
+                        "Subgroup ID が最初の Object ID で解決され、Object ID ごとに一意であること: object_id={object_id}"
+                    );
+                    received.push((group_id, object_id));
+                }
+
+                let first_group_id = received[0].0;
+                assert!(
+                    received.iter().all(|(group_id, _)| *group_id == first_group_id),
+                    "object モードでも Group 内の全 Object が同じ Group ID に載ること: received={received:?}"
+                );
+                assert_eq!(
+                    received
+                        .iter()
+                        .map(|(_, object_id)| *object_id)
+                        .collect::<Vec<_>>(),
+                    (0..SAMPLE_COUNT as u64).collect::<Vec<_>>(),
+                    "Object ID が Group 内で 0 から 1 ずつ増えること"
+                );
 
                 let result = publisher.stop().await;
                 assert!(result.is_ok(), "publisher が正常終了すること: {result:?}");

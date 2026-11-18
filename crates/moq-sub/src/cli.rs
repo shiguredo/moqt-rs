@@ -111,7 +111,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
 
     let url: ServerUrl = noargs::opt("url")
         .ty("URL")
-        .doc("Server URL (moqt://host[:port]/path; '#msf:ns--track&c4m=BASE64' sends a C4M token in SETUP)")
+        .doc("Server URL (moqt://host[:port]/path; '#msf:ns--track&cat=BASE64' sends a C4M token in SETUP)")
         // 必須オプションは help モードでも Opt::None になり `then()` が MissingOpt を返すため、
         // ヘルプ表示のための例を与えて help モードでも先へ進めるようにする (通常の実行では
         // 例は使われず、`--url` の省略は従来どおり MissingOpt になる)
@@ -126,7 +126,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         })?;
 
     // `--transport` が省略された場合は `--url` の msf fragment の `connection` を使う
-    // (draft-ietf-moq-msf-01 §11.1.1)。解決の規則は `tokio_moq::resolve_transport` を参照
+    // (draft-ietf-moq-msf-02 §11.1.1)。解決の規則は `tokio_moq::resolve_transport` を参照
     //
     // wt-h3 を提供しないビルドではヘルプの選択肢もビルドに合わせる。理由はビルドで異なる
     // (s2n-quic は RESET_STREAM_AT 未実装、Windows は tobi-quic 非対応) ため、Windows を先に
@@ -170,7 +170,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         .present_and_then(|o| Ok::<_, std::convert::Infallible>(o.value().to_string()))?;
 
     // `--namespace` は省略可能で、省略した場合は `--url` の msf fragment
-    // (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation)) の
+    // (draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation)) の
     // track-identifier が示す namespace を使う。どちらにも無い場合はエラーになる。
     let namespace_opt = noargs::opt("namespace")
         .ty("NS")
@@ -358,7 +358,7 @@ mod tests {
 
     /// `--transport` を省略した場合は `--url` の `msf` fragment の `connection` を使う
     ///
-    /// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) の `connection` は client に
+    /// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) の `connection` は client に
     /// 接続種別を MUST で指定する (`q` は native QUIC、`wt` は WebTransport)。`wt` は WebTransport の
     /// 実装を指定しないため `wt-h3` を既定にする。ただし `wt-h3` を提供しないビルドでは
     /// `connection=wt` がエラーになる。

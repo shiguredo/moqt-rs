@@ -47,7 +47,7 @@ MOQT のクライアントやサーバーを実装する場合に利用できま
 - 対応仕様
   - [Media over QUIC Transport](https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-23) `draft-23`
   - [Low Overhead Container](https://datatracker.ietf.org/doc/html/draft-ietf-moq-loc-05) `draft-05`
-  - [MOQT Streaming Format](https://datatracker.ietf.org/doc/html/draft-ietf-moq-msf-01) `draft-01`
+  - [MOQT Streaming Format](https://datatracker.ietf.org/doc/html/draft-ietf-moq-msf-02) `draft-02`
   - [Authorization scheme for MOQT using Common Access Tokens](https://datatracker.ietf.org/doc/html/draft-ietf-moq-c4m-02) `draft-02`
 
 ## 使い方
@@ -181,7 +181,7 @@ use shiguredo_moqt::msf::MsfCatalogDocument;
 
 fn main() -> Result<(), MessageError> {
     // 受信したカタログの JSON。配信するトラックの一覧などを含む
-    let json: &[u8] = br#"{"version": "draft-01", "tracks": []}"#;
+    let json: &[u8] = br#"{"version": "draft-02", "tracks": []}"#;
 
     // 全体カタログと差分更新を自動で判別してデコードする
     let doc = MsfCatalogDocument::decode(json)?;

@@ -52,7 +52,7 @@ fn invalid_utf8_rejected() {
 
 #[test]
 fn spec_example() {
-    // draft-ietf-moq-msf-01 §7.1 (Media Timeline track payload) の例
+    // draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload) の例
     let json = b"[[0,[0,0],1759924158381],[2002,[1,0],1759924160383],[4004,[2,0],1759924162385]]";
     let tl = MsfMediaTimeline::decode(json).expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(tl.0.len(), 3);
@@ -64,4 +64,73 @@ fn spec_example() {
     let re_decoded =
         MsfMediaTimeline::decode(&re_encoded).expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(re_decoded, tl);
+}
+
+/// pts_ms が降順の media timeline を decode / encode で拒否すること
+#[test]
+fn media_timeline_rejects_descending_media_time() {
+    let json = br#"[[2000,[1,0],0],[1000,[1,1],0]]"#;
+    assert!(matches!(
+        MsfMediaTimeline::decode(json),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+
+    let timeline = MsfMediaTimeline(vec![
+        MsfMediaTimelineEntry {
+            pts_ms: 2000,
+            group_id: 1,
+            object_id: 0,
+            wallclock_ms: 0,
+        },
+        MsfMediaTimelineEntry {
+            pts_ms: 1000,
+            group_id: 1,
+            object_id: 1,
+            wallclock_ms: 0,
+        },
+    ]);
+    assert!(matches!(
+        encode_media_timeline(&timeline, TimelineEncodingOptions { gzip: false }),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+/// pts_ms が同値なら非降順として受理すること
+#[test]
+fn media_timeline_accepts_equal_media_time() {
+    let json = br#"[[1000,[1,0],0],[1000,[1,1],0]]"#;
+    let timeline = MsfMediaTimeline::decode(json).expect("同値は非降順として受理すること");
+    assert_eq!(timeline.0.len(), 2);
+}
+
+/// template 属性と explicit payload の併用を拒否すること
+#[test]
+fn media_timeline_format_rejects_template_with_explicit_payload() {
+    let mut track = MsfTrack::new("timeline".to_string(), MsfPackaging::MediaTimeline, true);
+    track.template = Some(MsfTemplate {
+        start_media_time: 0,
+        delta_media_time: 1000,
+        start_group_id: 0,
+        start_object_id: 0,
+        delta_group_id: 1,
+        delta_object_id: 1,
+        start_wallclock: 0,
+        delta_wallclock: 0,
+    });
+    let timeline = MsfMediaTimeline(vec![MsfMediaTimelineEntry {
+        pts_ms: 0,
+        group_id: 1,
+        object_id: 0,
+        wallclock_ms: 0,
+    }]);
+    assert!(matches!(
+        validate_media_timeline_format(&track, &timeline),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+
+    track.template = None;
+    assert!(
+        validate_media_timeline_format(&track, &timeline).is_ok(),
+        "template が無ければ explicit payload を受理すること"
+    );
 }

@@ -46,7 +46,7 @@ pub mod media_clock;
 pub mod message;
 /// メッセージ パラメータ群 (draft-ietf-moq-transport-23 §9.19 (Control Message Parameters))
 pub mod message_parameter;
-/// MOQT Streaming Format のカタログとタイムラインのコーデック (draft-ietf-moq-msf-01)
+/// MOQT Streaming Format のカタログとタイムラインのコーデック (draft-ietf-moq-msf-02)
 pub mod msf;
 pub mod name;
 pub mod object_properties;
@@ -71,3 +71,6 @@ pub mod varint;
 // 概要と根拠は src/video_decode_order.rs の //! ドキュメントに書く。ここに /// を置くと
 // rustdoc がモジュール内の intra-doc link をクレート直下の名前空間で解決してしまう
 pub mod video_decode_order;
+// 概要と根拠は src/video_object_reorder.rs の //! ドキュメントに書く。ここに /// を置くと
+// rustdoc がモジュール内の intra-doc link をクレート直下の名前空間で解決してしまう
+pub mod video_object_reorder;

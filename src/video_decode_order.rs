@@ -17,16 +17,20 @@
 //! - 間の Object ID が欠けている場合は、Prior Object ID Gap (§10.9 (Prior Object ID Gap))
 //!   がその分の Object の非存在を示すときに限り連続とみなす。§2.1.2 は "A gap in the
 //!   observed Object IDs does not by itself convey any information about the skipped
-//!   Objects" とするため、示されない欠けは欠落として扱い、次のキーフレームまで delta を
-//!   捨てる
-//! - 欠落の後でキーフレームを待っている間も、欠落を検出した Group を保持する。それより
-//!   古い Group の Object を古いとして捨てるためである
+//!   Objects" とするため、示されない欠けは欠落として扱い、その Object は捨てる
+//! - 欠けを検出しても Group と直前に復号した Object は保持する。同じ Group の複数の Subgroup
+//!   が到着順に入れ替わって届く場合 (§2.2 (Subgroups): 順序が保証されるのは stream 内だけ)、
+//!   欠けた Object が後から届けばその Object から復号を続けられる。欠けが解消しなければ
+//!   後続の周辺の Object も同じ判定で捨て、次のキーフレームで復号を始め直す
+//! - 新しい Group のキーフレームを待っている間も、その Group を保持する。それより古い
+//!   Group の Object を古いとして捨てるためである
 //!
-//! 1 Group の Object を 1 本の Subgroup で送る publisher を前提とする (draft-ietf-moq-transport-23
-//! §2.2 (Subgroups): "A subgroup is a sequence of one or more objects from the same group in
-//! ascending order by Object ID.")。1 Group を複数の Subgroup に分ける publisher の Object ID の
-//! 飛びも欠落として扱う。どの Object を参照しているかを受信側は判断できないため、崩れた映像
-//! ではなくキーフレーム待ちに倒す。
+//! 1 Group の Object を 1 本の Subgroup で送る publisher では、Group 内の到着順は
+//! Subgroup 内の順序と一致する。1 Group を複数の Subgroup に分ける publisher (MSF の
+//! `streamMapping=object`) では Group 内の到着順が入れ替わりうるため、`object` モードの
+//! 受信側は [`crate::video_object_reorder::VideoObjectReorderBuffer`] で Object ID 順に
+//! 並べ替えてから本判定へ渡す。本判定の欠けの扱いは、並べ替えが間に合わなかった場合でも
+//! 順序の入れ替わりを欠落と誤認して以降の delta を捨て続けないようにするためのものである。
 //!
 //! 判定に使うのは Object の位置と種別だけで、時刻も I/O も扱わない (sans I/O)。購読
 //! (decoder) ごとに [`VideoDecodeOrder`] を 1 つ持ち、decoder を作り直したら
@@ -43,7 +47,11 @@ pub enum VideoObjectSkipReason {
     /// 復号中の Group より古い Group の Object、または直前に復号した Object 以前の
     /// Object ID (重複か遅着)
     Stale,
-    /// 参照するフレームが欠けているため、キーフレームを待っている
+    /// 参照するフレームが欠けているため復号しない
+    ///
+    /// 新しい Group のキーフレームより前に届いた delta か、同じ Group で Object ID が
+    /// 飛んだ delta である。前者はキーフレームが届くまで、後者は欠けた Object が後から
+    /// 届くまで、この Group の delta は復号しない。
     MissingReference,
 }
 
@@ -113,8 +121,10 @@ impl VideoDecodeOrder {
     /// - [`VideoObjectAdmission::Decode`] — 復号してよい。状態は「この Object を復号した」へ進む
     /// - [`VideoObjectAdmission::Skip`] — 復号しない。理由は [`VideoObjectSkipReason`]
     ///   - `Stale` は状態を変えない
-    ///   - `MissingReference` はキーフレームを待つ Group を保持するために状態を進める
-    ///     (古い Group の Object を古いとして捨て続けるため)
+    ///   - キーフレームより前の delta による `MissingReference` は、キーフレームを待つ Group
+    ///     を保持するために状態を進める (古い Group の Object を古いとして捨て続けるため)
+    ///   - Object ID の欠けによる `MissingReference` は状態を変えない。欠けた Object が
+    ///     後から届けば復号を続けられるようにするためである
     pub fn admit(&mut self, position: &VideoObjectPosition) -> VideoObjectAdmission {
         let VideoObjectPosition {
             group_id,
@@ -182,7 +192,13 @@ impl VideoDecodeOrder {
             .saturating_sub(last_decoded_object_id)
             .saturating_sub(1);
         if skipped > prior_object_id_gap {
-            self.await_missing_reference(group_id);
+            // 欠けた Object を参照している可能性があるため、この Object は復号しない。
+            // ただし Group と直前に復号した Object は保持する。1 Group を複数の Subgroup に
+            // 分ける publisher では欠けた Object が後から届くことがあり
+            // (draft-ietf-moq-transport-23 §2.2 (Subgroups): 順序が保証されるのは
+            // stream 内だけ)、そのときに欠けを埋めて復号を続けられるようにするためである。
+            // 欠けが解消しなければ、後続の Object も同じ判定で捨てられ、次のキーフレームで
+            // 復号を始め直す
             return VideoObjectAdmission::Skip {
                 reason: VideoObjectSkipReason::MissingReference,
             };
@@ -205,21 +221,22 @@ impl VideoDecodeOrder {
 
     /// 復号中の Group。復号を始めていなければ `None`
     ///
-    /// 欠落の後でキーフレームを待っている間も、欠落を検出した Group を返す。
+    /// 新しい Group のキーフレームを待っている間も、その Group を返す。
     pub fn decoding_group_id(&self) -> Option<u64> {
         self.decoding_group_id
     }
 
     /// 復号中の Group で最後に復号した Object ID
     ///
-    /// 復号を始めていないときと、キーフレームを待っているときは `None`。
+    /// 復号を始めていないときと、新しい Group のキーフレームを待っているときは `None`。
     pub fn last_decoded_object_id(&self) -> Option<u64> {
         self.last_decoded_object_id
     }
 
     /// キーフレームを待っているかどうか
     ///
-    /// 復号の開始前と、欠落を検出した後は `true`。`true` の間はキーフレーム以外を通さない。
+    /// 復号の開始前と、キーフレームより前の delta を検出した後は `true`。`true` の間は
+    /// キーフレーム以外を通さない。同じ Group の Object ID の欠けでは `true` にしない。
     pub fn awaiting_key_frame(&self) -> bool {
         self.awaiting_key_frame
     }
@@ -231,7 +248,7 @@ impl VideoDecodeOrder {
         self.awaiting_key_frame = false;
     }
 
-    /// 欠落を検出した Group で、キーフレームを待つ
+    /// 新しい Group のキーフレームを受けていない delta を検出した Group で、キーフレームを待つ
     fn await_missing_reference(&mut self, group_id: u64) {
         self.decoding_group_id = Some(group_id);
         self.last_decoded_object_id = None;

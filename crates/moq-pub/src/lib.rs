@@ -6,12 +6,13 @@
 //! 呼び出し側は [`cli::Config`] を組み立て、[`pipeline::run`] に
 //! `tokio_metrics::TaskMonitor` と `tokio_utils::ShutdownMonitor` を渡して起動する。
 //!
-//! draft-ietf-moq-transport-23、draft-ietf-moq-loc-05、draft-ietf-moq-msf-01 に準拠。
+//! draft-ietf-moq-transport-23、draft-ietf-moq-loc-05、draft-ietf-moq-msf-02 に準拠。
 
 // 呼び出し側が設定を組み立ててパイプラインを起動するために公開する
 pub mod cli;
 pub mod error;
 pub mod pipeline;
+pub mod variant;
 
 // パイプラインの内部実装
 mod audio_capture;

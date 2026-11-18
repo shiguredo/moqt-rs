@@ -57,6 +57,24 @@ use crate::webtransport_h3::WtSession;
 /// デフォルトの Subscriber Priority
 const DEFAULT_SUBSCRIBER_PRIORITY: u8 = 128;
 
+/// SUBSCRIBER_PRIORITY が未指定なら既定値を追加する
+///
+/// draft-ietf-moq-transport-23 §9.19.7 (SUBSCRIBER PRIORITY Parameter)。呼び出し側が
+/// 明示した値を上書きせず、重複したパラメータも追加しない。
+fn with_default_subscriber_priority(mut parameters: MessageParameters) -> MessageParameters {
+    if !parameters
+        .as_slice()
+        .iter()
+        .any(|parameter| parameter.param_type == PARAM_SUBSCRIBER_PRIORITY)
+    {
+        parameters.push(MessageParameter {
+            param_type: PARAM_SUBSCRIBER_PRIORITY,
+            value: MessageParameterValue::Uint8(DEFAULT_SUBSCRIBER_PRIORITY),
+        });
+    }
+    parameters
+}
+
 /// オブジェクト送信前のフィルタ評価の結果
 ///
 /// draft-ietf-moq-transport-23 §3.3.3 (Combining Filters): "The publisher MUST forward only
@@ -1178,11 +1196,11 @@ impl DataPlaneHandle {
 
 /// publisher / subscriber 共通の MOQT クライアント (Session ドライバ)
 pub struct MoqtClient {
-    /// URL の MSF fragment (`#msf:...&c4m=...`) から取り出した認可トークン
+    /// URL の MSF fragment (`#msf:...&cat=...`) から取り出した認可トークン
     ///
-    /// PUBLISH / SUBSCRIBE / REQUEST_UPDATE には [`with_auth_parameters`] が
+    /// PUBLISH / SUBSCRIBE / FETCH / REQUEST_UPDATE には [`with_auth_parameters`] が
     /// この一覧をすべて載せる。SETUP に載せる分はここではなく、`establish_*` の
-    /// `c4m_tokens` 引数から `crate::build_setup_options` が別に組み立てる。
+    /// `cat_tokens` 引数から `crate::build_setup_options` が別に組み立てる。
     auth_tokens: Vec<AuthorizationToken>,
     /// `tick` / `tick_now` の時刻起点
     ///
@@ -1643,7 +1661,7 @@ fn authorization_parameter(token: &AuthorizationToken) -> MessageParameter {
 /// 受け取ったパラメータに、渡された C4M 認可トークンを AUTHORIZATION_TOKEN (0x03)
 /// として追加したパラメータを返す
 ///
-/// draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization): track に紐づくトークンは、
+/// draft-ietf-moq-msf-02 §11.5.3 (Presenting Authorization): track に紐づくトークンは、
 /// その track に関係する AUTHORIZATION TOKEN パラメータを受け付けるすべての制御
 /// メッセージ (subscriber は SUBSCRIBE / SUBSCRIBE_NAMESPACE / FETCH / REQUEST_UPDATE)
 /// へ MUST 付与する。
@@ -1651,7 +1669,7 @@ fn authorization_parameter(token: &AuthorizationToken) -> MessageParameter {
 ///
 /// 本 client (`MoqtClient`) は catalog を解析しないため、送信時点で track とトークンの
 /// 対応を決められない (end subscriber は catalog を解析して認可要件を知る。
-/// draft-ietf-moq-msf-01 §11.4.1 (Authorization)。authInfo の解釈は §5.2.42、
+/// draft-ietf-moq-msf-02 §11.5.1 (Authorization)。authInfo の解釈は §5.2.42、
 /// URI fragment からのトークン配送は §5.2.43)。C4M の `moqt` クレームでアクションごとに
 /// 選別すると、クレームをデコードできないトークンや対象のアクションを認可しないトークンが
 /// 落ちて MUST の付与漏れになるため、保持しているトークンをすべて載せる。
@@ -1662,11 +1680,11 @@ fn authorization_parameter(token: &AuthorizationToken) -> MessageParameter {
 /// 載せると制御メッセージが拒否されうる。あわせて draft-ietf-moq-transport-23 §8.9
 /// (Authorization Token Compression) の MUST (整形だが内容が不正なトークンを含むメッセージは
 /// MALFORMED_AUTH_TOKEN で拒否) の対象にもなりうる。付与漏れ
-/// (draft-ietf-moq-msf-01 §11.4.3 の MUST) を避ける側に倒す。
+/// (draft-ietf-moq-msf-02 §11.5.3 の MUST) を避ける側に倒す。
 ///
 /// PUBLISH (`publish_track`) / SUBSCRIBE (`subscribe_track_inner`) / FETCH (`fetch`) /
 /// REQUEST_UPDATE (`send_request_update`) は本関数の単一経路でトークンを付与する。
-/// 送信経路を追加するときも本関数を通すこと。なお SETUP は `establish_*` の `c4m_tokens`
+/// 送信経路を追加するときも本関数を通すこと。なお SETUP は `establish_*` の `cat_tokens`
 /// 引数から `crate::build_setup_options` が option として組み立てる別経路である。
 fn with_auth_parameters(
     mut parameters: MessageParameters,
@@ -1701,9 +1719,9 @@ impl MoqtClient {
     /// QUIC 直接接続で MOQT client を確立する
     /// (draft-ietf-moq-transport-23 §6.2 (Session establishment) / §6.3 (Session initialization))
     ///
-    /// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
+    /// `cat_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
     /// SETUP の AUTHORIZATION_TOKEN として送り、同じトークンを PUBLISH / SUBSCRIBE /
-    /// REQUEST_UPDATE の AUTHORIZATION_TOKEN としても付与する。
+    /// FETCH / REQUEST_UPDATE の AUTHORIZATION_TOKEN としても付与する。
     ///
     /// `stop_sending_rx` は [`crate::quic::connect`] が返す peer の STOP_SENDING の観測で、
     /// 該当する送信ストリームの終端として扱う。QUIC の code space のコードがそのまま流れる。
@@ -1717,7 +1735,7 @@ impl MoqtClient {
         path: &str,
         authority: &str,
         impl_name: &str,
-        c4m_tokens: &[Vec<u8>],
+        cat_tokens: &[Vec<u8>],
         task_monitor: &tokio_metrics::TaskMonitor,
     ) -> Result<(Self, StreamAcceptor)> {
         let (handle, acceptor) = connection.split();
@@ -1731,7 +1749,7 @@ impl MoqtClient {
 
         // Session を生成 (初期の SendControl(Setup) イベントが積まれる)
         let options =
-            crate::build_setup_options(Some(path), Some(authority), impl_name, c4m_tokens);
+            crate::build_setup_options(Some(path), Some(authority), impl_name, cat_tokens);
         let mut session = Session::new_client(MoqtTransport::Quic, options)?;
 
         // SETUP を取り出して送信する
@@ -1765,7 +1783,7 @@ impl MoqtClient {
                 bidi_acceptor,
                 wt_session_state: None,
             },
-            c4m_tokens,
+            cat_tokens,
             task_monitor,
         )
         .await?;
@@ -1795,7 +1813,7 @@ impl MoqtClient {
         path: &str,
         authority: &str,
         impl_name: &str,
-        c4m_tokens: &[Vec<u8>],
+        cat_tokens: &[Vec<u8>],
         task_monitor: &tokio_metrics::TaskMonitor,
     ) -> Result<(Self, StreamAcceptor)> {
         let QmuxSession {
@@ -1811,7 +1829,7 @@ impl MoqtClient {
 
         // Session を生成 (初期の SendControl(Setup) イベントが積まれる)
         let options =
-            crate::build_setup_options(Some(path), Some(authority), impl_name, c4m_tokens);
+            crate::build_setup_options(Some(path), Some(authority), impl_name, cat_tokens);
         let mut session = Session::new_client(MoqtTransport::Qmux, options)?;
 
         // SETUP を取り出して送信する
@@ -1844,7 +1862,7 @@ impl MoqtClient {
                 bidi_acceptor: BidiStreamAcceptor::Qmux { bi_rx },
                 wt_session_state: None,
             },
-            c4m_tokens,
+            cat_tokens,
             task_monitor,
         )
         .await?;
@@ -1856,9 +1874,9 @@ impl MoqtClient {
     /// draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) により
     /// WebTransport 使用時は PATH (0x01) と AUTHORITY (0x05) を送信してはならない。
     ///
-    /// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
+    /// `cat_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
     /// SETUP の AUTHORIZATION_TOKEN として送り、同じトークンを PUBLISH / SUBSCRIBE /
-    /// REQUEST_UPDATE の AUTHORIZATION_TOKEN としても付与する。
+    /// FETCH / REQUEST_UPDATE の AUTHORIZATION_TOKEN としても付与する。
     ///
     /// 戻り値の [`StreamAcceptor`] は data stream を受信する側 (subscriber) が使う。
     /// peer 起動の request stream は MoqtClient 内部の受理タスクが受け取るため、
@@ -1869,7 +1887,7 @@ impl MoqtClient {
     pub async fn establish_wt(
         wt_session: WtSession,
         impl_name: &str,
-        c4m_tokens: &[Vec<u8>],
+        cat_tokens: &[Vec<u8>],
         task_monitor: &tokio_metrics::TaskMonitor,
     ) -> Result<(Self, StreamAcceptor)> {
         let shared = Arc::new(TokioMutex::new(wt_session));
@@ -1903,7 +1921,7 @@ impl MoqtClient {
         };
         let mut control_send = SendStream::WtH3(wt_send);
 
-        let options = crate::build_setup_options(None, None, impl_name, c4m_tokens);
+        let options = crate::build_setup_options(None, None, impl_name, cat_tokens);
         let mut session = Session::new_client(MoqtTransport::WebTransport, options)?;
 
         let setup_msg = pop_send_control(&mut session)?;
@@ -1937,7 +1955,7 @@ impl MoqtClient {
                 },
                 wt_session_state: Some(session_state.clone()),
             },
-            c4m_tokens,
+            cat_tokens,
             task_monitor,
         )
         .await?;
@@ -1956,9 +1974,9 @@ impl MoqtClient {
     /// draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) により
     /// WebTransport 使用時は PATH (0x01) と AUTHORITY (0x05) を送信してはならない。
     ///
-    /// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
+    /// `cat_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
     /// SETUP の AUTHORIZATION_TOKEN として送り、同じトークンを PUBLISH / SUBSCRIBE /
-    /// REQUEST_UPDATE の AUTHORIZATION_TOKEN としても付与する。
+    /// FETCH / REQUEST_UPDATE の AUTHORIZATION_TOKEN としても付与する。
     ///
     /// 戻り値の [`StreamAcceptor`] は data stream を受信する側 (subscriber) が使う。
     /// peer 起動の request stream は MoqtClient 内部の受理タスクが受け取るため、
@@ -1966,7 +1984,7 @@ impl MoqtClient {
     pub async fn establish_wt_h2(
         wt_session: WtH2Session,
         impl_name: &str,
-        c4m_tokens: &[Vec<u8>],
+        cat_tokens: &[Vec<u8>],
         task_monitor: &tokio_metrics::TaskMonitor,
     ) -> Result<(Self, StreamAcceptor)> {
         let shared = Arc::new(TokioMutex::new(wt_session));
@@ -1978,7 +1996,7 @@ impl MoqtClient {
         };
         let mut control_send = SendStream::WtH2(wt_send);
 
-        let options = crate::build_setup_options(None, None, impl_name, c4m_tokens);
+        let options = crate::build_setup_options(None, None, impl_name, cat_tokens);
         let mut session = Session::new_client(MoqtTransport::WebTransport, options)?;
 
         let setup_msg = pop_send_control(&mut session)?;
@@ -2033,7 +2051,7 @@ impl MoqtClient {
                 },
                 wt_session_state: Some(session_state.clone()),
             },
-            c4m_tokens,
+            cat_tokens,
             task_monitor,
         )
         .await?;
@@ -2050,7 +2068,7 @@ impl MoqtClient {
     async fn finish_handshake(
         mut session: Session,
         io: HandshakeIo,
-        c4m_tokens: &[Vec<u8>],
+        cat_tokens: &[Vec<u8>],
         task_monitor: &tokio_metrics::TaskMonitor,
     ) -> Result<Self> {
         let HandshakeIo {
@@ -2132,7 +2150,7 @@ impl MoqtClient {
         let task_monitor = task_monitor.clone();
 
         Ok(Self {
-            auth_tokens: c4m_tokens
+            auth_tokens: cat_tokens
                 .iter()
                 .map(|token_value| c4m_authorization_token(token_value.as_slice()))
                 .collect(),
@@ -2499,10 +2517,9 @@ impl MoqtClient {
         // C4M の AUTHORIZATION_TOKEN を追加する。呼び出し側が渡した LOCATION_FILTER などは
         // そのまま残す (draft-ietf-moq-transport-23 §9.19.2 (AUTHORIZATION TOKEN Parameter))
         parameters = with_auth_parameters(parameters, &self.auth_tokens);
-        parameters.push(MessageParameter {
-            param_type: PARAM_SUBSCRIBER_PRIORITY,
-            value: MessageParameterValue::Uint8(DEFAULT_SUBSCRIBER_PRIORITY),
-        });
+        // 呼び出し側が SUBSCRIBER_PRIORITY を指定していればそれを優先し、既定値は
+        // 指定が無い場合だけ追加する (draft-ietf-moq-transport-23 §9.19.7)
+        parameters = with_default_subscriber_priority(parameters);
         let request_id = {
             let mut session = lock_session(&self.session);
             session
@@ -2545,7 +2562,7 @@ impl MoqtClient {
     ///
     /// track に紐づく C4M 認可トークンは、SUBSCRIBE / REQUEST_UPDATE と同じく
     /// AUTHORIZATION_TOKEN (0x03) としてすべて付与する
-    /// (draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization))。
+    /// (draft-ietf-moq-msf-02 §11.5.3 (Presenting Authorization))。
     ///
     /// # Errors
     ///
@@ -2760,6 +2777,7 @@ impl MoqtClient {
         object_id: u64,
         payload: &[u8],
         properties_data: Option<&[u8]>,
+        publisher_priority: u8,
     ) -> Result<()> {
         let data_plane = self.data_plane();
         let mut stream = self.handle.open_send_stream().await?;
@@ -2778,7 +2796,7 @@ impl MoqtClient {
             object_id: Some(object_id),
             // 最初の Object は prior Object を持たないため Publisher Priority を明示する
             // (draft-ietf-moq-transport-23 §11.4.1.1 (Flags))
-            publisher_priority: Some(128),
+            publisher_priority: Some(publisher_priority),
             has_properties: properties_data.is_some(),
             is_datagram_origin: false,
             payload_length: payload.len() as u64,
@@ -2845,6 +2863,7 @@ impl MoqtClient {
         group_id: u64,
         object_id: u64,
         payload: &[u8],
+        publisher_priority: u8,
     ) -> Result<()> {
         let data_plane = self.data_plane();
         let mut stream = self.handle.open_send_stream().await?;
@@ -2869,7 +2888,7 @@ impl MoqtClient {
             subgroup_id: FetchSubgroupIdMode::Zero,
             object_id: Some(object_id),
             // 最初の Object は prior Object を持たないため Publisher Priority を明示する
-            publisher_priority: Some(128),
+            publisher_priority: Some(publisher_priority),
             has_properties: false,
             is_datagram_origin: false,
             payload_length: payload.len() as u64,
@@ -3079,7 +3098,7 @@ impl MoqtClient {
     /// SUBSCRIBE / PUBLISH と同じ C4M 認可トークンを AUTHORIZATION_TOKEN (0x03) として
     /// 載せる。更新対象の track に紐づくトークンは、SUBSCRIBE などの元の要求だけで
     /// なく REQUEST_UPDATE にも付与しなければならない
-    /// (draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization))。
+    /// (draft-ietf-moq-msf-02 §11.5.3 (Presenting Authorization))。
     pub async fn send_request_update(
         &mut self,
         request_id: u64,
@@ -4183,6 +4202,31 @@ mod tests {
         );
     }
 
+    /// SUBSCRIBER_PRIORITY は明示値を保持し、未指定時だけ既定値を追加すること
+    #[test]
+    fn with_default_subscriber_priority_preserves_explicit_value() {
+        let mut explicit = MessageParameters::new();
+        explicit.push(MessageParameter {
+            param_type: PARAM_SUBSCRIBER_PRIORITY,
+            value: MessageParameterValue::Uint8(192),
+        });
+        let parameters = with_default_subscriber_priority(explicit);
+        assert_eq!(parameters.len(), 1, "明示値を重複追加しないこと");
+        assert_eq!(
+            parameters.as_slice()[0].value,
+            MessageParameterValue::Uint8(192),
+            "明示値を上書きしないこと"
+        );
+
+        let parameters = with_default_subscriber_priority(MessageParameters::new());
+        assert_eq!(parameters.len(), 1, "未指定時は既定値を追加すること");
+        assert_eq!(
+            parameters.as_slice()[0].value,
+            MessageParameterValue::Uint8(DEFAULT_SUBSCRIBER_PRIORITY),
+            "既定値 128 を追加すること"
+        );
+    }
+
     /// `moqt` クレームを 1 つ持つ C4M トークンを compact 形式で組み立てる
     ///
     /// 署名検証は行わないため署名は任意のバイト列でよい。ヘッダの `alg` は
@@ -4213,7 +4257,7 @@ mod tests {
 
     /// 送信経路のアクションを認可しない有効な C4M トークンでも選別せずに付与すること
     ///
-    /// draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization): track に紐づくトークンは
+    /// draft-ietf-moq-msf-02 §11.5.3 (Presenting Authorization): track に紐づくトークンは
     /// AUTHORIZATION TOKEN パラメータを受け付ける制御メッセージへ MUST 付与する。
     /// C4M の `moqt` クレーム (draft-ietf-moq-c4m-02 §2.1) がメッセージのアクションを
     /// 認可しないトークンでも、client 側で選別すると付与漏れになるため選別しない。

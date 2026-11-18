@@ -3,7 +3,7 @@
 //! noargs でオプションを定義し、[`Config`] にまとめる。
 
 use shiguredo_moqt::message::common::TrackNamespace;
-use shiguredo_moqt::msf::MSF_CATALOG_TRACK_NAME;
+use shiguredo_moqt::msf::{MSF_CATALOG_TRACK_NAME, StreamMapping};
 use tokio_moq::{ServerUrl, Transport};
 
 use crate::pipeline::AUDIO_TRACK_NAME;
@@ -88,7 +88,7 @@ pub struct Config {
     /// (Group はキーフレームで始まる、draft-ietf-moq-loc-05 §4.2)。フレーム数で
     /// 指定すると実時間長が fps に依存するため、時間で指定する。
     /// MSF カタログの `maxGopDuration` / `maxGroupDuration` の基になる
-    /// (draft-ietf-moq-msf-01 §5.2.24 / §5.2.25)。
+    /// (draft-ietf-moq-msf-02 §5.2.25 / §5.2.26)。
     pub gop_duration_ms: u32,
     /// Track Namespace (draft-ietf-moq-transport-23 §8.8 表現をパースしたもの)
     pub namespace: TrackNamespace,
@@ -130,7 +130,7 @@ pub struct Config {
     /// MSF カタログのターゲットレイテンシ (ms)
     ///
     /// 受信側が符号化時刻からどれだけ遅らせて表示するかを示す
-    /// (draft-ietf-moq-msf-01 §5.2.8)。音声と映像で同じ値を使う。
+    /// (draft-ietf-moq-msf-02 §5.2.9)。音声と映像で同じ値を使う。
     pub target_latency_ms: u32,
     /// publish した Object を保持する時間窓 (ms)
     ///
@@ -143,6 +143,12 @@ pub struct Config {
     pub input_mp4: Option<String>,
     /// MP4 ファイルを再エンコードして配信する入力パス
     pub input_mp4_reencode: Option<String>,
+    /// LOC packaging の Object を MOQT Stream へ割り当てるモード
+    ///
+    /// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping): `group` は 1 Group を
+    /// 1 Subgroup にまとめ、`object` は 1 Object ごとに 1 Subgroup を開く。映像トラックの
+    /// カタログ `packagingMetadata` に `streamMapping` として載せる (§5.2.5)。
+    pub stream_mapping: StreamMapping,
 }
 
 /// `--datagram-max-size` の既定値 (bytes)
@@ -157,7 +163,7 @@ pub(crate) const DEFAULT_DATAGRAM_MAX_SIZE: usize = 1160;
 /// `--target-latency` の既定値 (ms)
 ///
 /// live 配信の example としての値。音声と映像で同じ値を使うため、カタログの
-/// `targetLatency` にも同じ値を載せる (draft-ietf-moq-msf-01 §5.2.8)。
+/// `targetLatency` にも同じ値を載せる (draft-ietf-moq-msf-02 §5.2.9)。
 pub(crate) const DEFAULT_TARGET_LATENCY_MS: u32 = 200;
 
 /// `--gop-duration` の既定値 (ms)
@@ -240,7 +246,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
 
     let url: ServerUrl = noargs::opt("url")
         .ty("URL")
-        .doc("Server URL (moqt://host[:port]/path; '#msf:ns--track&c4m=BASE64' sends a C4M token in SETUP)")
+        .doc("Server URL (moqt://host[:port]/path; '#msf:ns--track&cat=BASE64' sends a C4M token in SETUP)")
         // 必須オプションは help モードでも Opt::None になり `then()` が MissingOpt を返すため、
         // ヘルプ表示のための例を与えて help モードでも先へ進めるようにする (通常の実行では
         // 例は使われず、`--url` の省略は従来どおり MissingOpt になる)
@@ -255,7 +261,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         })?;
 
     // `--transport` が省略された場合は `--url` の msf fragment の `connection` を使う
-    // (draft-ietf-moq-msf-01 §11.1.1)。解決の規則は `tokio_moq::resolve_transport` を参照
+    // (draft-ietf-moq-msf-02 §11.1.1)。解決の規則は `tokio_moq::resolve_transport` を参照
     //
     // wt-h3 を提供しないビルドではヘルプの選択肢もビルドに合わせる。理由はビルドで異なる
     // (s2n-quic は RESET_STREAM_AT 未実装、Windows は tobi-quic 非対応) ため、Windows を先に
@@ -348,7 +354,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     })?;
 
     // `--namespace` は省略可能で、省略した場合は `--url` の msf fragment
-    // (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation)) の
+    // (draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation)) の
     // track-identifier が示す namespace を使う。どちらにも無い場合はエラーになる。
     let namespace_opt = noargs::opt("namespace")
         .ty("NS")
@@ -519,6 +525,24 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         .take(&mut args)
         .present_and_then(|o| Ok::<_, std::convert::Infallible>(o.value().to_string()))?;
 
+    let stream_mapping_opt = noargs::opt("stream-mapping")
+        .ty("MODE")
+        .doc(
+            "LOC to MOQT stream mapping for the video track (group = one subgroup per group, object = one subgroup per object). The mode is announced in the catalog packagingMetadata",
+        )
+        .default("group")
+        .take(&mut args);
+    let stream_mapping = stream_mapping_opt.then(|o| {
+        let value = o.value();
+        match value {
+            "group" => Ok(StreamMapping::Group),
+            "object" => Ok(StreamMapping::Object),
+            other => Err(format!(
+                "invalid --stream-mapping: {other} (expected group or object)"
+            )),
+        }
+    })?;
+
     let video_enabled = !no_video;
     // --input-mp4 は映像トラックだけを配信するため、音声トラックは常に配信しない
     let audio_enabled = !no_audio && input_mp4.is_none();
@@ -685,6 +709,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         cache_duration_ms,
         input_mp4,
         input_mp4_reencode,
+        stream_mapping,
     }))
 }
 
@@ -744,9 +769,54 @@ mod tests {
         );
     }
 
+    /// `--stream-mapping` の既定は group である
+    ///
+    /// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) は、キーが無い場合に
+    /// `group` と仮定する MUST を定める
+    #[test]
+    fn stream_mapping_defaults_to_group() {
+        let config = parse_args(BASE_ARGS)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            config.stream_mapping,
+            StreamMapping::Group,
+            "既定は group であること"
+        );
+    }
+
+    /// `--stream-mapping object` を指定すると object モードになる
+    #[test]
+    fn stream_mapping_accepts_object() {
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--stream-mapping", "object"]);
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            config.stream_mapping,
+            StreamMapping::Object,
+            "object モードを指定できること"
+        );
+    }
+
+    /// `--stream-mapping` の不正値はエラーになる
+    #[test]
+    fn stream_mapping_rejects_an_unknown_value() {
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--stream-mapping", "spam"]);
+        let Err(error) = parse_args(&args) else {
+            panic!("不正な stream mapping はエラーになること");
+        };
+        assert!(
+            format!("{error:?}").contains("invalid --stream-mapping"),
+            "不正値であることが理由として分かること: {error:?}"
+        );
+    }
+
     /// `--transport` を省略した場合は `--url` の `msf` fragment の `connection` を使う
     ///
-    /// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) の `connection` は client に
+    /// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) の `connection` は client に
     /// 接続種別を MUST で指定する (`q` は native QUIC、`wt` は WebTransport)。`wt` は WebTransport の
     /// 実装を指定しないため `wt-h3` を既定にする。ただし `wt-h3` を提供しないビルドでは
     /// `connection=wt` がエラーになる。
@@ -1109,7 +1179,7 @@ mod tests {
     /// `--target-latency` は既定値を使い、指定で上書き、数値でない値はエラーになる
     ///
     /// 既定の 200 ms は live 配信の example としての値である。受信側はこの値ぶん
-    /// 遅らせて表示し、音声と映像で同じ値を使う (draft-ietf-moq-msf-01 §5.2.8)。
+    /// 遅らせて表示し、音声と映像で同じ値を使う (draft-ietf-moq-msf-02 §5.2.9)。
     #[test]
     fn target_latency_is_configurable() {
         let config = parse_args(BASE_ARGS)

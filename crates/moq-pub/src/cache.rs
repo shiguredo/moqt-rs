@@ -6,7 +6,7 @@
 //!
 //! 期限切れの判定は Object を保持した時刻 (publisher の壁時計、[`Instant`]) で行う。Group ID は
 //! 配信開始時に Unix epoch ミリ秒から払い出し、以降は 1 ずつ進むため
-//! (draft-ietf-moq-msf-01 §6.1 (Group numbering))、Group ID から経過時間は復元できない。
+//! (draft-ietf-moq-msf-02 §6.1 (Group numbering))、Group ID から経過時間は復元できない。
 //! 保持量の上限は時間窓だけで決める。Group 数やバイト数の上限を別に設けると、トラックごとに
 //! 実際に保持できる時間が変わり (音声は 1 Object = 1 Group で 20 ms 間隔)、
 //! draft-ietf-moq-transport-23 §10.3 (MAX CACHE DURATION) が示す「保持から配れる時間」と

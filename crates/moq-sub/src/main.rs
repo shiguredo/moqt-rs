@@ -3,7 +3,7 @@
 //! リレーサーバーに接続し、指定トラックを SUBSCRIBE してデータを受信・デコード・再生する。
 //! `--mp4` を指定すると受信した映像 / 音声を MP4 ファイルへ保存し、`--no-play` を併せて
 //! 指定すると再生せずに受信と保存だけを行う。
-//! draft-ietf-moq-transport-23、draft-ietf-moq-loc-05、draft-ietf-moq-msf-01 に準拠。
+//! draft-ietf-moq-transport-23、draft-ietf-moq-loc-05、draft-ietf-moq-msf-02 に準拠。
 //!
 //! 使い方:
 //!   cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
@@ -14,7 +14,7 @@
 //! namespace を使う。どちらにも無い場合はエラーになる。
 //!
 //! `--transport` を省略した場合は `--url` の `msf` fragment の `connection` を使う
-//! (draft-ietf-moq-msf-01 §11.1.1)。どちらにも無い場合は `quic` になる。`connection` と矛盾する
+//! (draft-ietf-moq-msf-02 §11.1.1)。どちらにも無い場合は `quic` になる。`connection` と矛盾する
 //! `--transport` はエラーになる。
 //!
 //! 受信とデコードの本体は lib ターゲット (`lib.rs`) にあり、このバイナリは tracing の初期化、

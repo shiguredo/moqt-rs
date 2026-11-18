@@ -15,7 +15,7 @@ draft-ietf-moq-transport-23 に基づく Sans I/O / no_std な Media over QUIC T
 - **Session 状態機械**: 1 本の Transport Session に閉じた endpoint-local な状態管理
 - **インクリメンタルデコード**: フレーム境界に依存せず受信バッファに蓄積しながらデコード
 - **音声の再生補助**: 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期の遅延制御、時間圧縮・伸長と欠落の補間 (no_std / Sans I/O)
-- **対応仕様**: MOQT `draft-23` / LOC `draft-05` / MSF `draft-01` / C4M `draft-02`
+- **対応仕様**: MOQT `draft-23` / LOC `draft-05` / MSF `draft-02` / C4M `draft-02`
 
 ## バージョン情報
 
@@ -1130,7 +1130,7 @@ fn example(bytes: &[u8]) -> Result<(), MessageError> {
 ```
 
 型は `MsfCatalogDocument { Full(MsfCatalog), Delta(MsfDeltaUpdate) }`、要素は `MsfCatalog` /
-`MsfDeltaOperation` / `MsfDeltaUpdate` / `MsfTrack` / `MsfCloneTrack` / `MsfRemoveTrack` /
+`MsfDeltaOperation` / `MsfDeltaUpdate` / `MsfTrack` / `MsfCloneTrack` / `MsfUpdateTrack` / `MsfRemoveTrack` /
 `MsfInitData` / `MsfBuffers` / `MsfPackaging`、定数は `MSF_CATALOG_TRACK_NAME` / `MSF_VERSION`。
 
 ```rust,ignore
@@ -1142,11 +1142,28 @@ pub enum MsfCatalogDocument {
 fn apply_delta(
     &mut self,
     delta: &MsfDeltaUpdate,
-    catalog_namespace: Option<&str>,
+    catalog_namespace: Option<&TrackNamespace>,
 ) -> Result<(), MessageError>
+
+pub fn parse_catalog_namespace(value: &str) -> Result<TrackNamespace, MessageError>
+pub fn serialize_catalog_namespace(namespace: &TrackNamespace) -> Result<String, MessageError>
+pub fn catalog_track_name_bytes(name: &str) -> Result<Vec<u8>, MessageError>
+
+impl MsfCatalog {
+    pub fn validate_track_names(
+        &self,
+        catalog_namespace: Option<&TrackNamespace>,
+    ) -> Result<(), MessageError>
+}
 ```
 
-`MsfTrack` は `name` / `namespace` / `packaging` / `codec` / `mime_type` / `width` / `height` / `framerate` / `bitrate` / `samplerate` / `channel_config` などを持つ単一構造体。Codec / Video / Audio は draft 上の論理的な分類。
+`TrackNamespace` は `shiguredo_moqt::message::common::TrackNamespace` を使う。カタログの
+`namespace` は draft-ietf-moq-msf-02 §5.2.2 の `/` 区切り表現で、MOQT の Track Namespace へ
+写像してから比較する (§11.2)。`removed_tracks` のキーも写像後の
+`(Option<TrackNamespace>, Track Name のバイト列)` である。URL 形式 (§8.8) は写像後の
+バイト列に `name::serialize_name` を適用して作る。
+
+`MsfTrack` は `name` / `namespace` / `packaging` / `packaging_metadata` / `depends` (`MsfDependency`) / `accessible_window_time` / `keyframe_spacing` / `codec` / `mime_type` / `width` / `height` / `framerate` / `bitrate` / `samplerate` / `channel_config` などを持つ単一構造体。Codec / Video / Audio は draft 上の論理的な分類。
 
 ### Timeline
 
@@ -1182,7 +1199,7 @@ fn parse_msf_uri(uri: &str) -> Result<MsfUri, MessageError>
 fn parse_msf_fragment(fragment: &str) -> Result<MsfFragment, MessageError>
 ```
 
-`MsfFragment` は `parameter_values` / `connection_types` / `wallclock_ranges` / `mediatime_ranges` / `location_ranges` / `c4m_tokens` のアクセサを持つ。
+`MsfFragment` は `parameter_values` / `connection_types` / `wallclock_ranges` / `mediatime_ranges` / `location_ranges` / `cat_tokens` のアクセサを持つ。
 
 ## C4M (`c4m`)
 

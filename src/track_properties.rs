@@ -60,6 +60,13 @@ pub const PROP_DEFAULT_PUBLISHER_PRIORITY: u64 = 0x0E;
 pub const PROP_DEFAULT_PUBLISHER_GROUP_ORDER: u64 = 0x22;
 /// DYNAMIC_GROUPS (Property Type 0x30)
 pub const PROP_DYNAMIC_GROUPS: u64 = 0x30;
+/// MSF_EVENT_TIMELINE_HEADER (Property Type 0x7B, draft-ietf-moq-msf-02 §12.3.1)
+///
+/// Event Timeline track の header data を運ぶ Track property。値は eventType が定義する
+/// 任意のバイト列で、track の寿命を通じて不変である。0x78〜0x7F は MOQT §8.4 の
+/// application-specific range である。
+pub const PROP_MSF_EVENT_TIMELINE_HEADER: u64 = 0x7B;
+
 /// IMMUTABLE_PROPERTIES (Property Type 0x0B, draft-ietf-moq-transport-23 §10.7 (Immutable Properties))
 ///
 /// 奇数型だが値は「入れ子の Track Property Key-Value-Pair 列」。Original Publisher のみが
@@ -462,6 +469,16 @@ impl TrackProperties {
             TrackPropertyValueRef::VarInt(_) => None,
             TrackPropertyValueRef::Bytes(b) => Some(b),
         }
+    }
+
+    /// MSF Event Timeline の header data を返す
+    ///
+    /// draft-ietf-moq-msf-02 §12.3.1 (MSF_EVENT_TIMELINE_HEADER Track property): property type
+    /// 0x7B の生バイト列を返す。値の解釈は event timeline の eventType が定義する。
+    /// property が無い場合は header data なしとして `None` を返す。track の寿命を通じて
+    /// 不変であり、publisher は PUBLISH / SUBSCRIBE_OK / FETCH_OK に含める。
+    pub fn event_timeline_header(&self) -> Option<&[u8]> {
+        self.find_bytes(PROP_MSF_EVENT_TIMELINE_HEADER)
     }
 
     /// Codec String (Property Type 0x11) を UTF-8 文字列として返す

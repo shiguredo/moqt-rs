@@ -245,7 +245,7 @@ fn parse_name_rejects_percent_encoding() {
 
 /// `parse_name_with_percent_encoding` は `%XX` をデータバイトとして受理すること
 ///
-/// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の track-identifier は
+/// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の track-identifier は
 /// `pct-encoded` を含む。`.` + hex の規則 (`UppercaseHex` / `RedundantEncoding`) は
 /// `%XX` には適用せず、素の `.` エスケープには従来どおり適用する。
 #[test]

@@ -1,17 +1,18 @@
 use pbt::common::test_runner;
 use shiguredo_moqt::msf::{
     MSF_VERSION, MsfAccessibility, MsfAuthInfo, MsfBuffers, MsfCatalog, MsfCatalogDocument,
-    MsfCloneTrack, MsfDeltaOperation, MsfDeltaUpdate, MsfEventIndex, MsfEventTimeline,
-    MsfEventTimelineEntry, MsfInitData, MsfInitDataKind, MsfMediaTimeline, MsfMediaTimelineEntry,
-    MsfPackaging, MsfRemoveTrack, MsfTemplate, MsfTrack, TimelineEncodingOptions,
-    decode_event_timeline, decode_media_timeline, encode_event_timeline, encode_media_timeline,
+    MsfCloneTrack, MsfDeltaOperation, MsfDeltaUpdate, MsfDependency, MsfEventIndex,
+    MsfEventTimeline, MsfEventTimelineEntry, MsfInitData, MsfInitDataKind, MsfMediaTimeline,
+    MsfMediaTimelineEntry, MsfPackaging, MsfRemoveTrack, MsfTemplate, MsfTrack,
+    TimelineEncodingOptions, decode_event_timeline, decode_media_timeline, encode_event_timeline,
+    encode_media_timeline, parse_catalog_namespace, serialize_catalog_namespace,
 };
 
 // ─── 生成ヘルパー ─────────────────────────────────────────────────────────────
 
 /// 有効な lang 文字列を生成する
 ///
-/// draft-ietf-moq-msf-01 §5.2.32 (Language): BCP 47 言語タグ。
+/// draft-ietf-moq-msf-02 §5.2.33 (Language): BCP 47 言語タグ。
 /// primary 2〜3 文字 + 任意個の `-` 区切り英数字サブタグを基本とし、
 /// 1/8 の重みで RFC 5646 §2.1 (Syntax) の grandfathered タグ
 /// (`i-klingon` のように primary subtag が 1 文字の irregular タグを含む) を返す。
@@ -66,7 +67,7 @@ fn sample_name(ctx: &mut noprop::TestCaseContext) -> String {
 
 /// MsfPackaging を生成する
 ///
-/// draft-ietf-moq-msf-01 §5.2.4 (Packaging): 許容値は loc / mediatimeline / eventtimeline / moqlog / moqmetrics
+/// draft-ietf-moq-msf-02 §5.2.4 (Packaging): 許容値は loc / mediatimeline / eventtimeline / moqlog / moqmetrics
 fn sample_packaging(ctx: &mut noprop::TestCaseContext) -> MsfPackaging {
     noprop::sample_choice(
         ctx,
@@ -76,6 +77,7 @@ fn sample_packaging(ctx: &mut noprop::TestCaseContext) -> MsfPackaging {
             MsfPackaging::EventTimeline,
             MsfPackaging::MoqLog,
             MsfPackaging::MoqMetrics,
+            MsfPackaging::Catalog,
         ],
     )
 }
@@ -101,6 +103,28 @@ fn sample_buffers(ctx: &mut noprop::TestCaseContext) -> Option<MsfBuffers> {
     })
 }
 
+/// packagingMetadata を生成する (None:Some = 1:1)
+///
+/// draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata): `;` 区切りの `key=value`。
+/// 既知の `streamMapping` と未知の key を混ぜ、先頭優先の解釈も往復させる。
+fn sample_packaging_metadata(ctx: &mut noprop::TestCaseContext) -> Option<String> {
+    if !noprop::sample_bool(ctx) {
+        return None;
+    }
+    Some(
+        noprop::sample_choice(
+            ctx,
+            &[
+                "streamMapping=group",
+                "streamMapping=object",
+                "unknown=value;streamMapping=group",
+                "a=b;c=d;a=first",
+            ],
+        )
+        .to_string(),
+    )
+}
+
 /// 通常トラック (tracks / publishTracks / addTracks 用) を生成する
 ///
 /// - parentName は含めない (tracks/addTracks では禁止)
@@ -121,11 +145,17 @@ fn sample_track(ctx: &mut noprop::TestCaseContext) -> MsfTrack {
     let max_group_duration = sample_optional_u32(ctx);
     let depends_count = noprop::sample_usize_in(ctx, 0..=3);
     let depends_raw = (0..depends_count)
-        .map(|_| sample_name(ctx))
+        .map(|_| MsfDependency::TrackName(sample_name(ctx)))
         .collect::<Vec<_>>();
     let lang = sample_lang(ctx);
 
     let mut t = MsfTrack::new(name, packaging, is_live);
+    t.packaging_metadata = sample_packaging_metadata(ctx);
+    t.keyframe_spacing = sample_optional_u32(ctx).map(|v| v as u64);
+    // v02 の `/` 区切り namespace を一定確率で明示し、継承と明示の両方を往復させる
+    if noprop::sample_bool(ctx) {
+        t.namespace = Some(sample_catalog_namespace(ctx));
+    }
 
     // eventtimeline なら eventType 必須
     if matches!(packaging, MsfPackaging::EventTimeline) {
@@ -139,7 +169,7 @@ fn sample_track(ctx: &mut noprop::TestCaseContext) -> MsfTrack {
     );
     if is_timeline {
         t.depends = if depends_raw.is_empty() {
-            vec!["default".to_string()]
+            vec![MsfDependency::TrackName("default".to_string())]
         } else {
             depends_raw
         };
@@ -150,7 +180,7 @@ fn sample_track(ctx: &mut noprop::TestCaseContext) -> MsfTrack {
     t.template = sample_template(ctx);
 
     // 生成器は正規形 (isLive=false なら None) を作る。encode 側も decode の正規化に合わせるため
-    // (draft-ietf-moq-msf-01 §5.2.8 / §5.2.9 は受信側の無視規則)、roundtrip が成立する
+    // (draft-ietf-moq-msf-02 §5.2.9 / §5.2.10 は受信側の無視規則)、roundtrip が成立する
     t.target_latency = if is_live {
         target_latency.map(|v| v as u64)
     } else {
@@ -173,15 +203,10 @@ fn sample_track(ctx: &mut noprop::TestCaseContext) -> MsfTrack {
     t.avg_bitrate = avg_bitrate.map(|v| v as u64);
     t.max_gop_duration = max_gop_duration.map(|v| v as u64);
     t.max_group_duration = max_group_duration.map(|v| v as u64);
-    // connectionUri / token は任意文字列を受理するため、現実形状 (URI ・トークン) の生成にする
-    // (JSON エスケープ要文字の頑健性は parent_namespace の sample_string 経路で担保)
+    // connectionURI は任意文字列を受理するため、現実形状 (URI) の生成にする
+    // (JSON エスケープ要文字の頑健性は sample_catalog_namespace の field で担保)
     t.connection_uri = if noprop::sample_bool(ctx) {
         Some(sample_uri_like(ctx))
-    } else {
-        None
-    };
-    t.token = if noprop::sample_bool(ctx) {
-        Some(sample_token_like(ctx))
     } else {
         None
     };
@@ -199,9 +224,41 @@ fn sample_track(ctx: &mut noprop::TestCaseContext) -> MsfTrack {
     t
 }
 
+/// draft-ietf-moq-msf-02 §5.2.2 の制約を満たす namespace 文字列を生成する
+///
+/// 1 〜 3 個の非空 field を `/` で連結する。field が空にならず 32 fields を超えないため、
+/// `parse_catalog_namespace` が受理する。JSON エスケープの往復も検証できるよう、ときどき
+/// 引用符・backslash・制御文字・非 ASCII を含む field を混ぜる (NUL と `/` は §5.2.2 /
+/// §11.2.1 が禁止するため含めない)。
+fn sample_catalog_namespace(ctx: &mut noprop::TestCaseContext) -> String {
+    let count = noprop::sample_usize_in(ctx, 1..=3);
+    let fields = (0..count)
+        .map(|_| {
+            if noprop::sample_ratio(ctx, noprop::Ratio::new(1, 4)) {
+                noprop::sample_choice(
+                    ctx,
+                    &[
+                        "café",
+                        "a\u{feff}b",
+                        "日本語",
+                        "a\"b",
+                        "a\\b",
+                        "a\nb",
+                        "a\u{1}b",
+                    ],
+                )
+                .to_string()
+            } else {
+                sample_name(ctx)
+            }
+        })
+        .collect::<Vec<_>>();
+    fields.join("/")
+}
+
 /// clone operation 用トラックを生成する (parentName 必須)
 ///
-/// draft-ietf-moq-msf-01 §5.1.6 (Delta update): clone track は親の属性を継承し、
+/// draft-ietf-moq-msf-02 §5.1.6 (Delta update): clone track は親の属性を継承し、
 /// 再定義された属性のみ上書きする。packaging/isLive は省略可。
 fn sample_clone_track(ctx: &mut noprop::TestCaseContext) -> MsfCloneTrack {
     let name = sample_name(ctx);
@@ -220,11 +277,10 @@ fn sample_clone_track(ctx: &mut noprop::TestCaseContext) -> MsfCloneTrack {
     // (clone は欠如 reject を行わないため受理される。代表形のみで十分)
     let encrypted = noprop::sample_bool(ctx);
     let partial = noprop::sample_bool(ctx);
-    // parent_namespace はネームスペース形式の制約が無い任意文字列のため、
-    // 無制約の Option<String> で roundtrip の頑健性 (nojson のエスケープ含む) を検証する
+    // parent_namespace も draft-ietf-moq-msf-02 §5.2.2 の `/` 区切り namespace 制約を
+    // 満たす必要があるため、有効な namespace だけを生成する
     let parent_namespace = if noprop::sample_bool(ctx) {
-        let len = noprop::sample_usize_in(ctx, 0..=32);
-        Some(noprop::sample_string(ctx, len))
+        Some(sample_catalog_namespace(ctx))
     } else {
         None
     };
@@ -234,6 +290,7 @@ fn sample_clone_track(ctx: &mut noprop::TestCaseContext) -> MsfCloneTrack {
         parent_name: parent,
         parent_namespace,
         packaging: if include_pkg { Some(pkg) } else { None },
+        packaging_metadata: sample_packaging_metadata(ctx),
         is_live: if include_live { Some(is_live) } else { None },
         namespace: None,
         event_type: None,
@@ -243,6 +300,8 @@ fn sample_clone_track(ctx: &mut noprop::TestCaseContext) -> MsfCloneTrack {
         label: None,
         render_group: None,
         alt_group: None,
+        accessible_window_time: None,
+        keyframe_spacing: sample_optional_u32(ctx).map(|v| v as u64),
         init_ref: None,
         depends: None,
         template: sample_template(ctx),
@@ -266,11 +325,6 @@ fn sample_clone_track(ctx: &mut noprop::TestCaseContext) -> MsfCloneTrack {
         track_duration: None,
         connection_uri: if noprop::sample_bool(ctx) {
             Some(sample_uri_like(ctx))
-        } else {
-            None
-        },
-        token: if noprop::sample_bool(ctx) {
-            Some(sample_token_like(ctx))
         } else {
             None
         },
@@ -309,22 +363,6 @@ fn sample_uri_like(ctx: &mut noprop::TestCaseContext) -> String {
     let host = sample_name(ctx);
     let port = noprop::sample_u32(ctx) % 65536;
     format!("moqt://{host}.example.com:{port}")
-}
-
-/// トークンらしい文字列を生成する (`.` 区切りの Base64 系。JWT 形式に寄せている)
-fn sample_token_like(ctx: &mut noprop::TestCaseContext) -> String {
-    let part = |ctx: &mut noprop::TestCaseContext| {
-        let len = noprop::sample_usize_in(ctx, 1..=16);
-        (0..len)
-            .map(|_| {
-                noprop::sample_choice(
-                    ctx,
-                    b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_=+/",
-                ) as char
-            })
-            .collect::<String>()
-    };
-    format!("{}.{}.{}", part(ctx), part(ctx), part(ctx))
 }
 
 /// authInfo を生成する (None:Some = 3:1 の重み。値は string / object / 数値等を混ぜる)
@@ -476,23 +514,115 @@ fn sample_event_index(ctx: &mut noprop::TestCaseContext) -> MsfEventIndex {
 
 /// MsfEventTimelineEntry を生成する
 ///
-/// draft-ietf-moq-msf-01 §8.1 (Event Timeline data format): data は JSON Object でなければならない。
+/// draft-ietf-moq-msf-02 §8.2 (Event Timeline data format): data は任意の JSON 値。
 fn sample_event_timeline_entry(ctx: &mut noprop::TestCaseContext) -> MsfEventTimelineEntry {
     let index = sample_event_index(ctx);
-    let data_raw = if noprop::sample_bool(ctx) {
-        let v = noprop::sample_u32(ctx);
-        format!(r#"{{"v":{v}}}"#).into_bytes()
-    } else {
-        b"{}".to_vec()
+    let data_raw = match noprop::sample_usize_in(ctx, 0..=5) {
+        0 => {
+            let v = noprop::sample_u32(ctx);
+            format!(r#"{{"v":{v}}}"#).into_bytes()
+        }
+        1 => b"{}".to_vec(),
+        2 => b"[1,2,3]".to_vec(),
+        3 => br#""text""#.to_vec(),
+        4 => b"42".to_vec(),
+        _ => b"null".to_vec(),
     };
     MsfEventTimelineEntry { index, data_raw }
 }
 
 // ─── PBT ─────────────────────────────────────────────────────────────────────
 
+/// depends を、生成済みカタログ内で解決できる track name / renderGroup に置き換える
+///
+/// draft-ietf-moq-msf-02 §5.2.15 (Dependencies): track name は依存元以外の track に
+/// ちょうど 1 つ一致し、renderGroup はカタログ内に存在しなければならない。PBT の生成器は
+/// 独立に track を作るため、カタログ全体ができた後に参照先を実在する値へ差し替える。
+/// timeline は depends 非空が必須のため、候補が無ければ専用の renderGroup を足す。
+fn rewrite_dependencies(
+    tracks: &mut [MsfTrack],
+    publish_tracks: &mut [MsfTrack],
+    ctx: &mut noprop::TestCaseContext,
+) {
+    let all_names = tracks
+        .iter()
+        .chain(publish_tracks.iter())
+        .map(|track| track.name.clone())
+        .collect::<Vec<_>>();
+    let mut render_groups = tracks
+        .iter()
+        .chain(publish_tracks.iter())
+        .filter_map(|track| track.render_group)
+        .collect::<Vec<_>>();
+    // media timeline が個別名を列挙した後に別の track へ renderGroup が付くと参照規則に
+    // 反するため、renderGroup が 1 つも無ければ先頭 track に作っておく
+    if render_groups.is_empty()
+        && let Some(first) = tracks.first_mut()
+    {
+        first.render_group = Some(0);
+        render_groups.push(0);
+    }
+
+    let rewrite_one = |source: &mut MsfTrack, ctx: &mut noprop::TestCaseContext| {
+        let source_name = source.name.clone();
+        let valid_names = all_names
+            .iter()
+            .filter(|name| {
+                name.as_str() != source_name
+                    && all_names
+                        .iter()
+                        .filter(|candidate| *candidate == *name)
+                        .count()
+                        == 1
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let is_media_timeline = source.packaging == MsfPackaging::MediaTimeline;
+        let is_timeline = is_media_timeline || source.packaging == MsfPackaging::EventTimeline;
+        let count = noprop::sample_usize_in(ctx, if is_timeline { 1..=2 } else { 0..=2 });
+        let mut depends = Vec::new();
+        for _ in 0..count {
+            // media timeline が renderGroup を参照するときは所属 track の個別名を併記しない
+            // (draft-ietf-moq-msf-02 §7.2)。renderGroup がある場合はグループ参照だけにする。
+            if is_media_timeline && !render_groups.is_empty() {
+                depends.push(MsfDependency::RenderGroup(noprop::sample_choice(
+                    ctx,
+                    &render_groups,
+                )));
+            } else if !valid_names.is_empty()
+                && (render_groups.is_empty() || noprop::sample_bool(ctx))
+            {
+                depends.push(MsfDependency::TrackName(
+                    noprop::sample_choice(ctx, &valid_names).clone(),
+                ));
+            } else if !render_groups.is_empty() {
+                depends.push(MsfDependency::RenderGroup(noprop::sample_choice(
+                    ctx,
+                    &render_groups,
+                )));
+            }
+        }
+        if is_timeline && depends.is_empty() {
+            // 既存の renderGroup と衝突しない値を足し、そのグループへの依存にする
+            let fresh = render_groups.iter().max().map_or(0, |max| max + 1);
+            source.render_group = Some(fresh);
+            depends.push(MsfDependency::RenderGroup(fresh));
+        }
+        source.depends = depends;
+    };
+
+    for track in tracks.iter_mut() {
+        rewrite_one(track, ctx);
+    }
+    for track in publish_tracks.iter_mut() {
+        rewrite_one(track, ctx);
+    }
+}
+
 /// Full catalog の encode → decode ラウンドトリップ
 ///
-/// - トラック名は catalog 通して (tracks / publishTracks) namespace ごとに一意でなければならない (draft-ietf-moq-msf-01 §5.2.3 (Track name))
+/// - トラック名は catalog 通して (tracks / publishTracks) namespace ごとに一意でなければならない (draft-ietf-moq-msf-02 §5.2.3 (Track name))
 /// - isComplete: false はエンコード時に省略され、デコードで false に戻る
 #[test]
 fn full_catalog_roundtrip() -> noprop::TestResult {
@@ -517,10 +647,12 @@ fn full_catalog_roundtrip() -> noprop::TestResult {
 
         // publish_tracks も tracks と同じ (namespace, name) 重複排除を適用する (seen を共有)
         let publish_count = noprop::sample_usize_in(ctx, 0..=2);
-        let publish_tracks: Vec<_> = (0..publish_count)
+        let mut publish_tracks: Vec<_> = (0..publish_count)
             .map(|_| sample_track(ctx))
             .filter(|t| seen.insert((t.namespace.clone(), t.name.clone())))
             .collect();
+        let mut unique_tracks = unique_tracks;
+        rewrite_dependencies(&mut unique_tracks, &mut publish_tracks, ctx);
         let doc = MsfCatalogDocument::Full(MsfCatalog {
             version: MSF_VERSION.to_string(),
             generated_at,
@@ -571,7 +703,7 @@ fn full_catalog_is_complete_roundtrip() -> noprop::TestResult {
 /// Delta update の encode → decode ラウンドトリップ
 ///
 /// add_tracks/remove_tracks/clone_tracks のうち少なくとも 1 つは非空にする
-/// (draft-ietf-moq-msf-01 §5.3 (Delta updates))。
+/// (draft-ietf-moq-msf-02 §5.3 (Delta updates))。
 #[test]
 fn delta_roundtrip() -> noprop::TestResult {
     // 3 操作すべてが空 (1/64 の確率) はデルタとして無効なため reject する
@@ -592,11 +724,7 @@ fn delta_roundtrip() -> noprop::TestResult {
         if add_tracks.is_empty() && remove_tracks.is_empty() && clone_tracks.is_empty() {
             ctx.reject_case();
         }
-        let generated_at = if noprop::sample_bool(ctx) {
-            Some(noprop::sample_u32(ctx) as u64)
-        } else {
-            None
-        };
+        let generated_at = noprop::sample_u32(ctx) as u64;
         // 操作を add → remove → clone の順で 1 つの operation object ずつ構築する
         let mut operations = Vec::new();
         if !add_tracks.is_empty() {
@@ -631,9 +759,10 @@ fn media_timeline_roundtrip() -> noprop::TestResult {
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
         let entry_count = noprop::sample_usize_in(ctx, 0..=20);
-        let entries = (0..entry_count)
+        let mut entries = (0..entry_count)
             .map(|_| sample_media_timeline_entry(ctx))
-            .collect();
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.pts_ms);
         let tl = MsfMediaTimeline(entries);
         let encoded = tl.encode();
         let decoded =
@@ -672,9 +801,10 @@ fn media_timeline_gzip_roundtrip() -> noprop::TestResult {
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
         let entry_count = noprop::sample_usize_in(ctx, 0..=20);
-        let entries = (0..entry_count)
+        let mut entries = (0..entry_count)
             .map(|_| sample_media_timeline_entry(ctx))
-            .collect();
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.pts_ms);
         let tl = MsfMediaTimeline(entries);
         let encoded = encode_media_timeline(&tl, TimelineEncodingOptions { gzip: true })
             .expect("テストフィクスチャの前提条件を満たす");
@@ -703,6 +833,27 @@ fn event_timeline_gzip_roundtrip() -> noprop::TestResult {
         let decoded =
             decode_event_timeline(&encoded).expect("テストフィクスチャの前提条件を満たす");
         assert_eq!(decoded, tl);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// カタログ namespace の parse / serialize 往復
+///
+/// draft-ietf-moq-msf-02 §5.2.2 / §11.2: `/` 区切りの正規形を書いた文字列は、Track Namespace
+/// に写像して戻すと同じ文字列になる。JSON エスケープを要する field も往復させる。
+#[test]
+fn catalog_namespace_roundtrip() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let value = sample_catalog_namespace(ctx);
+        let namespace =
+            parse_catalog_namespace(&value).expect("生成した namespace を解決できること");
+        assert_eq!(
+            serialize_catalog_namespace(&namespace).expect("カタログ形式に戻せること"),
+            value,
+            "parse / serialize が往復すること"
+        );
         Ok(())
     })?;
     Ok(())

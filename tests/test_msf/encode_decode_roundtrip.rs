@@ -16,7 +16,6 @@ fn full_catalog_with_all_fields() {
     track.max_gop_duration = Some(2000);
     track.max_group_duration = Some(4000);
     track.connection_uri = Some("moqt://example.com:4443".to_string());
-    track.token = Some("DUMMY-TOKEN".to_string());
     track.encryption_scheme = Some("moq-secure-objects".to_string());
     track.cipher_suite = Some("aes-128-gcm-sha256".to_string());
     track.key_id = Some("key-1".to_string());
@@ -80,7 +79,7 @@ fn full_catalog_with_max_durations_absent() {
 fn full_catalog_with_init_data_list_and_buffers() {
     let mut track = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
     track.init_ref = Some("init1".to_string());
-    track.depends = vec!["audio".to_string()];
+    track.depends = vec![MsfDependency::TrackName("audio".to_string())];
     track.temporal_id = Some(1);
     track.spatial_id = Some(0);
     track.buffers = Some(MsfBuffers {
@@ -89,11 +88,12 @@ fn full_catalog_with_init_data_list_and_buffers() {
         max: Some(2000),
     });
 
+    let audio = MsfTrack::new("audio".to_string(), MsfPackaging::Loc, true);
     let doc = MsfCatalogDocument::Full(MsfCatalog {
         version: MSF_VERSION.to_string(),
         generated_at: None,
         is_complete: true,
-        tracks: vec![track],
+        tracks: vec![track, audio],
         publish_tracks: Vec::new(),
         removed_tracks: Default::default(),
         init_data_list: vec![MsfInitData {
@@ -111,15 +111,16 @@ fn full_catalog_with_init_data_list_and_buffers() {
 #[test]
 fn full_catalog_with_media_timeline_track() {
     let mut track = MsfTrack::new("timeline".to_string(), MsfPackaging::MediaTimeline, true);
-    track.depends = vec!["video".to_string()];
+    track.depends = vec![MsfDependency::TrackName("video".to_string())];
     track.mime_type = Some("application/json".to_string());
     track.timescale = Some(1_000);
 
+    let video = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
     let doc = MsfCatalogDocument::Full(MsfCatalog {
         version: MSF_VERSION.to_string(),
         generated_at: None,
         is_complete: false,
-        tracks: vec![track],
+        tracks: vec![track, video],
         publish_tracks: Vec::new(),
         removed_tracks: Default::default(),
         init_data_list: Vec::new(),
@@ -133,7 +134,7 @@ fn full_catalog_with_media_timeline_track() {
 #[test]
 fn delta_all_operations() {
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: Some(1_700_000_000_000),
+        generated_at: 1_700_000_000_000,
         operations: vec![
             MsfDeltaOperation::Add {
                 tracks: vec![MsfTrack::new("new".to_string(), MsfPackaging::Loc, true)],
@@ -150,6 +151,7 @@ fn delta_all_operations() {
                     parent_name: "original".to_string(),
                     parent_namespace: None,
                     packaging: Some(MsfPackaging::Loc),
+                    packaging_metadata: None,
                     is_live: Some(true),
                     namespace: None,
                     event_type: None,
@@ -159,6 +161,8 @@ fn delta_all_operations() {
                     label: None,
                     render_group: None,
                     alt_group: None,
+                    accessible_window_time: None,
+                    keyframe_spacing: None,
                     init_ref: None,
                     depends: None,
                     template: None,
@@ -181,7 +185,6 @@ fn delta_all_operations() {
                     lang: None,
                     track_duration: None,
                     connection_uri: None,
-                    token: None,
                     encryption_scheme: None,
                     cipher_suite: None,
                     key_id: None,
@@ -230,7 +233,7 @@ fn is_complete_emitted_when_true() {
 
 /// isLive=false の MsfTrack は targetLatency / buffers をエンコードしないこと
 ///
-/// draft-ietf-moq-msf-01 §5.2.8 / §5.2.9: isLive=false なら両フィールドは無視される。
+/// draft-ietf-moq-msf-02 §5.2.9 / §5.2.10: isLive=false なら両フィールドは無視される。
 /// decode 側は None に正規化するため、encode 側も出力しないことで往復を一致させる。
 #[test]
 fn target_latency_and_buffers_not_emitted_when_is_live_false() {
@@ -332,7 +335,7 @@ fn encode_full_catalog_with_track(track: MsfTrack) -> Vec<u8> {
 
 fn encode_delta_with_clone(clone: MsfCloneTrack) -> Vec<u8> {
     MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -344,15 +347,18 @@ fn encode_delta_with_clone(clone: MsfCloneTrack) -> Vec<u8> {
 #[test]
 fn clone_track_roundtrip_all_fields() {
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![MsfCloneTrack {
                 name: "clone".to_string(),
                 parent_name: "original".to_string(),
-                // draft-ietf-moq-msf-01 §5.2.34 (Parent namespace):
+                // draft-ietf-moq-msf-02 §5.2.35 (Parent namespace):
                 // parentNamespace 付き clone の roundtrip を検証する
                 parent_namespace: Some("parent-ns".to_string()),
                 packaging: Some(MsfPackaging::EventTimeline),
+                packaging_metadata: None,
+                accessible_window_time: None,
+                keyframe_spacing: None,
                 namespace: Some("ns".to_string()),
                 event_type: Some("com.example.cue".to_string()),
                 role: Some("caption".to_string()),
@@ -367,7 +373,7 @@ fn clone_track_roundtrip_all_fields() {
                 render_group: Some(1),
                 alt_group: Some(2),
                 init_ref: Some("init1".to_string()),
-                depends: Some(vec!["original".to_string()]),
+                depends: Some(vec![MsfDependency::TrackName("original".to_string())]),
                 template: Some(MsfTemplate {
                     start_media_time: 0,
                     delta_media_time: 2002,
@@ -389,7 +395,6 @@ fn clone_track_roundtrip_all_fields() {
                 max_gop_duration: Some(2000),
                 max_group_duration: Some(4000),
                 connection_uri: Some("moqt://logs.example.com:4443".to_string()),
-                token: Some("DUMMY-TOKEN".to_string()),
                 encryption_scheme: Some("moq-secure-objects".to_string()),
                 cipher_suite: Some("aes-128-gcm-sha256".to_string()),
                 key_id: Some("key-2024-q1".to_string()),
@@ -416,13 +421,14 @@ fn clone_track_roundtrip_all_fields() {
 #[test]
 fn clone_track_roundtrip_with_target_latency() {
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![MsfCloneTrack {
                 name: "clone".to_string(),
                 parent_name: "original".to_string(),
                 parent_namespace: None,
                 packaging: Some(MsfPackaging::Loc),
+                packaging_metadata: None,
                 namespace: None,
                 event_type: None,
                 role: None,
@@ -432,6 +438,8 @@ fn clone_track_roundtrip_with_target_latency() {
                 label: None,
                 render_group: None,
                 alt_group: None,
+                accessible_window_time: None,
+                keyframe_spacing: None,
                 init_ref: None,
                 depends: None,
                 template: None,
@@ -454,7 +462,6 @@ fn clone_track_roundtrip_with_target_latency() {
                 lang: None,
                 track_duration: None,
                 connection_uri: None,
-                token: None,
                 encryption_scheme: None,
                 cipher_suite: None,
                 key_id: None,
@@ -473,13 +480,14 @@ fn clone_track_roundtrip_with_target_latency() {
 #[test]
 fn clone_track_roundtrip_with_track_duration() {
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![MsfCloneTrack {
                 name: "clone".to_string(),
                 parent_name: "original".to_string(),
                 parent_namespace: None,
                 packaging: Some(MsfPackaging::Loc),
+                packaging_metadata: None,
                 namespace: None,
                 event_type: None,
                 role: None,
@@ -489,6 +497,8 @@ fn clone_track_roundtrip_with_track_duration() {
                 label: None,
                 render_group: None,
                 alt_group: None,
+                accessible_window_time: None,
+                keyframe_spacing: None,
                 init_ref: None,
                 depends: None,
                 template: None,
@@ -511,7 +521,6 @@ fn clone_track_roundtrip_with_track_duration() {
                 lang: None,
                 track_duration: Some(60_000),
                 connection_uri: None,
-                token: None,
                 encryption_scheme: None,
                 cipher_suite: None,
                 key_id: None,
@@ -548,7 +557,7 @@ fn clone_depends_empty_some_roundtrip() {
     let mut clone = MsfCloneTrack::new("c".to_string(), "p".to_string());
     clone.depends = Some(Vec::new());
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -575,7 +584,7 @@ fn clone_depends_none_omitted() {
     // clone の None 時はキーが出力されないこと (親から継承)
     let clone = MsfCloneTrack::new("c".to_string(), "p".to_string());
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![clone],
         }],
@@ -587,9 +596,9 @@ fn clone_depends_none_omitted() {
 
 #[test]
 fn publish_tracks_roundtrip() {
-    // draft-ietf-moq-msf-01 §5.6.16 を適用した例 (version を draft-01 化 ・ isLive 補完 ・
-    // token / connectionUri 除外 ・ %resourceId% は文字列として保持。
-    // token / connectionUri なし版の roundtrip (あり版は connection_uri_token_roundtrip) 。
+    // draft-ietf-moq-msf-02 §5.6.16 を適用した例 (version を draft-02 化 ・ isLive 補完 ・
+    // token / connectionURI 除外 ・ %resourceId% は文字列として保持。
+    // token / connectionURI なし版の roundtrip (あり版は connection_uri_token_roundtrip) 。
     // 仕様例の track 名と namespace の MUST 形式 (§9.2 / §10.2) の妥当性検証は対象外とし、
     // roundtrip 検証のため簡略化している) が roundtrip すること
     let mut metrics = MsfTrack::new("metrics".to_string(), MsfPackaging::MoqMetrics, true);
@@ -636,7 +645,7 @@ fn publish_tracks_absent_not_emitted() {
 #[test]
 fn publish_tracks_non_array_rejected() {
     // publishTracks が配列でない場合は reject されること
-    let json = br#"{"version":"draft-01","tracks":[],"publishTracks":{}}"#;
+    let json = br#"{"version":"draft-02","tracks":[],"publishTracks":{}}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -646,7 +655,7 @@ fn publish_tracks_non_array_rejected() {
 #[test]
 fn publish_tracks_empty_array_roundtrip() {
     // 明示の空配列は受理され、再 encode でキーが消えること
-    let json = br#"{"version":"draft-01","tracks":[],"publishTracks":[]}"#;
+    let json = br#"{"version":"draft-02","tracks":[],"publishTracks":[]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let encoded = doc.encode().expect("encode に成功すること");
     assert!(!encoded.windows(15).any(|w| w == b"\"publishTracks\""));
@@ -658,7 +667,7 @@ fn publish_tracks_empty_array_roundtrip() {
 #[test]
 fn publish_tracks_duplicate_with_tracks_rejected() {
     // tracks と publishTracks の間の (namespace, name) 重複は reject されること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true}],"publishTracks":[{"name":"t","packaging":"moqlog","isLive":true}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true}],"publishTracks":[{"name":"t","packaging":"moqlog","isLive":true}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -699,14 +708,12 @@ fn publish_tracks_key_order() {
 }
 
 #[test]
-fn connection_uri_token_roundtrip() {
-    // §5.6.16 を適用した完全版 (token / connectionUri 付き) が roundtrip すること
-    // token 値は打切りダミーとし、実在し得る認証情報を使わない
+fn connection_uri_roundtrip() {
+    // §5.6.16 を適用した完全版 (connectionURI 付き) が roundtrip すること
     let mut metrics = MsfTrack::new("metrics".to_string(), MsfPackaging::MoqMetrics, true);
     metrics.namespace = Some("%resourceId%".to_string());
     metrics.role = Some("metrics".to_string());
     metrics.connection_uri = Some("moqt://logs.example.com:4443".to_string());
-    metrics.token = Some("DUMMY-TOKEN".to_string());
 
     let doc = MsfCatalogDocument::Full(MsfCatalog {
         version: MSF_VERSION.to_string(),
@@ -726,7 +733,7 @@ fn connection_uri_token_roundtrip() {
 #[test]
 fn publish_tracks_unknown_fields_ignored() {
     // 未知フィールドは無視され受理されること (§5 の MUST ignore)
-    let json = br#"{"version":"draft-01","tracks":[],"publishTracks":[{"name":"6","packaging":"moqlog","isLive":true,"unknownFutureKey":"x","role":"log"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[],"publishTracks":[{"name":"6","packaging":"moqlog","isLive":true,"unknownFutureKey":"x","role":"log"}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -738,14 +745,14 @@ fn publish_tracks_unknown_fields_ignored() {
 #[test]
 fn group_validation_separated_between_tracks_and_publish_tracks() {
     // tracks と publishTracks で同一 group 番号・異なる値でも受理されること (分離の意図固定)
-    let json = br#"{"version":"draft-01","tracks":[{"name":"v","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":100}],"publishTracks":[{"name":"m","packaging":"moqlog","isLive":true,"renderGroup":1,"targetLatency":200}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":100}],"publishTracks":[{"name":"m","packaging":"moqlog","isLive":true,"renderGroup":1,"targetLatency":200}]}"#;
     assert!(MsfCatalogDocument::decode(json).is_ok());
 }
 
 #[test]
 fn group_validation_inside_publish_tracks_rejected() {
     // publishTracks 内部の同一 group 不一致は reject されること
-    let json = br#"{"version":"draft-01","tracks":[],"publishTracks":[{"name":"a","packaging":"moqlog","isLive":true,"renderGroup":1,"targetLatency":100},{"name":"b","packaging":"moqlog","isLive":true,"renderGroup":1,"targetLatency":200}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[],"publishTracks":[{"name":"a","packaging":"moqlog","isLive":true,"renderGroup":1,"targetLatency":100},{"name":"b","packaging":"moqlog","isLive":true,"renderGroup":1,"targetLatency":200}]}"#;
     assert!(matches!(
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -754,7 +761,7 @@ fn group_validation_inside_publish_tracks_rejected() {
 
 #[test]
 fn encryption_signaling_roundtrip() {
-    // §5.6.8 を適用した例 (version を draft-01 化) が roundtrip すること
+    // §5.6.8 を適用した例 (version を draft-02 化) が roundtrip すること
     // trackBaseKey 値は打切りダミーとし、実在し得る鍵情報を使わない
     let mut track = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
     track.encryption_scheme = Some("moq-secure-objects".to_string());
@@ -780,7 +787,7 @@ fn encryption_signaling_roundtrip() {
 #[test]
 fn encryption_clone_partial_accepted() {
     // clone の継承時 (欠如あり) は reject されないこと (親未知のため断定不可)
-    let json = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","encryptionScheme":"moq-secure-objects"}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","encryptionScheme":"moq-secure-objects"}]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(delta) = doc else {
         panic!("Delta update がデコードされること");
@@ -798,7 +805,7 @@ fn encryption_clone_partial_accepted() {
 #[test]
 fn encryption_orphan_field_accepted() {
     // encryptionScheme なしの cipherSuite 単独は受理され roundtrip すること (片方向 MUST のみ)
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"cipherSuite":"aes-128-gcm-sha256"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"cipherSuite":"aes-128-gcm-sha256"}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -822,14 +829,27 @@ fn encryption_orphan_field_accepted() {
 }
 
 #[test]
-fn encryption_cipher_suite_missing_rejected() {
-    // encryptionScheme 指定時の cipherSuite 欠如は scheme によらず reject されること
-    // (secure-objects 時の cipherSuite ケースと合わせて scheme 非依存を固定する)
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"encryptionScheme":"com.example.custom"}]}"#;
-    assert!(matches!(
-        MsfCatalogDocument::decode(json),
-        Err(MessageError::InvalidCatalog(_))
-    ));
+fn encryption_custom_scheme_without_cipher_suite_accepted() {
+    // draft-ietf-moq-msf-02 §5.2.39: cipherSuite は moq-secure-objects のときだけ必須
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"encryptionScheme":"com.example.custom"}]}"#;
+    let doc = MsfCatalogDocument::decode(json).expect("custom scheme は受理されること");
+    let MsfCatalogDocument::Full(cat) = doc else {
+        panic!("Full catalog がデコードされること");
+    };
+    assert_eq!(
+        cat.tracks[0].encryption_scheme.as_deref(),
+        Some("com.example.custom")
+    );
+    assert_eq!(cat.tracks[0].cipher_suite, None);
+    let encoded = MsfCatalogDocument::Full(cat)
+        .encode()
+        .expect("cipherSuite なしの custom scheme を encode できること");
+    assert!(
+        !String::from_utf8(encoded)
+            .expect("JSON は UTF-8 であること")
+            .contains("cipherSuite"),
+        "cipherSuite が無ければ出力しないこと"
+    );
 }
 
 #[test]
@@ -844,7 +864,7 @@ fn encryption_secure_objects_incomplete_rejected() {
         ];
         fields.retain(|f| !f.contains(missing));
         let json = format!(
-            "{{\"version\":\"draft-01\",\"tracks\":[{{\"name\":\"t\",\"packaging\":\"loc\",\"isLive\":true,{}}}]}}",
+            "{{\"version\":\"draft-02\",\"tracks\":[{{\"name\":\"t\",\"packaging\":\"loc\",\"isLive\":true,{}}}]}}",
             fields.join(",")
         );
         assert!(
@@ -860,7 +880,7 @@ fn encryption_secure_objects_incomplete_rejected() {
 #[test]
 fn encryption_custom_scheme_accepted() {
     // 未知 scheme は任意文字列として受理されること (custom 許容。 RDNN 検証なし)
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"encryptionScheme":"com.example.custom","cipherSuite":"custom-suite"}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"encryptionScheme":"com.example.custom","cipherSuite":"custom-suite"}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -889,9 +909,9 @@ fn encryption_custom_scheme_accepted() {
 
 #[test]
 fn auth_info_roundtrip() {
-    // §5.6.15 を適用した例 (version を draft-01 化、`%...%` は文字列として保持) が
+    // §5.6.15 を適用した例 (version を draft-02 化、`%...%` は文字列として保持) が
     // decode / encode で roundtrip すること。両エントリとも文字列値とする
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"%cat-token%","privacy-pass":"%pp-token%"}}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"%cat-token%","privacy-pass":"%pp-token%"}}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -934,7 +954,7 @@ fn auth_info_roundtrip() {
 #[test]
 fn auth_info_object_value_roundtrip() {
     // object 値も生 JSON として保持され roundtrip すること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":{"token":"%cat-token%"}}}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":{"token":"%cat-token%"}}}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -973,11 +993,11 @@ fn auth_info_object_value_roundtrip() {
 fn auth_info_non_object_rejected() {
     // 非 object の authInfo は reject されること
     for json in [
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":[]}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":"x"}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":null}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":0}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":true}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":[]}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":"x"}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":null}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":0}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":true}]}"#.as_slice(),
     ] {
         assert!(
             matches!(
@@ -992,7 +1012,7 @@ fn auth_info_non_object_rejected() {
 #[test]
 fn auth_info_null_value_accepted() {
     // 値 null も受理され roundtrip すること (値位置の型は問わない)
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":null}}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":null}}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -1023,7 +1043,7 @@ fn find_auth_value_track<'a>(tracks: &'a [MsfTrack], scheme: &str) -> &'a [u8] {
 #[test]
 fn auth_info_empty_object_accepted() {
     // 空 object は空 Vec として受理され roundtrip すること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{}}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{}}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -1043,7 +1063,7 @@ fn auth_info_empty_object_accepted() {
 #[test]
 fn auth_info_duplicate_scheme_kept_in_order() {
     // 重複 scheme は順序どおりに保持されること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"a","cat":"b"}}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"a","cat":"b"}}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -1075,7 +1095,7 @@ fn auth_info_duplicate_scheme_kept_in_order() {
 #[test]
 fn auth_info_clone_roundtrip() {
     // clone 経路でも authInfo が roundtrip すること
-    let json = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","authInfo":{"cat":"%cat-token%"}}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","authInfo":{"cat":"%cat-token%"}}]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(delta) = doc else {
         panic!("Delta update がデコードされること");
@@ -1119,9 +1139,9 @@ fn find_auth<'a>(entries: &'a [MsfAuthInfo], scheme: &str) -> &'a MsfAuthInfo {
 
 #[test]
 fn accessibility_roundtrip() {
-    // §5.6.11 と §5.6.12 の記述子を併せた合成例 (version のみ draft-01 化) が decode / encode で
+    // §5.6.11 と §5.6.12 の記述子を併せた合成例 (version のみ draft-02 化) が decode / encode で
     // roundtrip すること。608 と 708 の両記述子を含む
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"scheme":"urn:scte:dash:cc:cea-608:2015","value":"CC1=eng;CC3=spa"},{"scheme":"urn:scte:dash:cc:cea-708:2015","value":"1=lang:eng;2=lang:spa;3=lang:fra"}]}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"scheme":"urn:scte:dash:cc:cea-608:2015","value":"CC1=eng;CC3=spa"},{"scheme":"urn:scte:dash:cc:cea-708:2015","value":"1=lang:eng;2=lang:spa;3=lang:fra"}]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -1167,7 +1187,7 @@ fn accessibility_roundtrip() {
 #[test]
 fn accessibility_clone_roundtrip() {
     // clone 経路でも accessibility が roundtrip すること
-    let json = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","accessibility":[{"scheme":"urn:scte:dash:cc:cea-608:2015","value":"CC1=eng"}]}]}]}"#;
+    let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","accessibility":[{"scheme":"urn:scte:dash:cc:cea-608:2015","value":"CC1=eng"}]}]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(delta) = doc else {
         panic!("Delta update がデコードされること");
@@ -1210,6 +1230,7 @@ fn accessibility_empty_some_roundtrip() {
         parent_name: "p".to_string(),
         parent_namespace: None,
         packaging: None,
+        packaging_metadata: None,
         is_live: None,
         namespace: None,
         event_type: None,
@@ -1219,6 +1240,8 @@ fn accessibility_empty_some_roundtrip() {
         label: None,
         render_group: None,
         alt_group: None,
+        accessible_window_time: None,
+        keyframe_spacing: None,
         init_ref: None,
         depends: None,
         template: None,
@@ -1241,7 +1264,6 @@ fn accessibility_empty_some_roundtrip() {
         lang: None,
         track_duration: None,
         connection_uri: None,
-        token: None,
         encryption_scheme: None,
         cipher_suite: None,
         key_id: None,
@@ -1250,7 +1272,7 @@ fn accessibility_empty_some_roundtrip() {
         accessibility: Some(Vec::new()),
     };
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![track],
         }],
@@ -1274,13 +1296,14 @@ fn accessibility_empty_some_roundtrip() {
 fn accessibility_clone_none_omitted() {
     // clone の None 時はキーが出力されないこと
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![MsfDeltaOperation::Clone {
             tracks: vec![MsfCloneTrack {
                 name: "c".to_string(),
                 parent_name: "p".to_string(),
                 parent_namespace: None,
                 packaging: None,
+                packaging_metadata: None,
                 is_live: None,
                 namespace: None,
                 event_type: None,
@@ -1290,6 +1313,8 @@ fn accessibility_clone_none_omitted() {
                 label: None,
                 render_group: None,
                 alt_group: None,
+                accessible_window_time: None,
+                keyframe_spacing: None,
                 init_ref: None,
                 depends: None,
                 template: None,
@@ -1312,7 +1337,6 @@ fn accessibility_clone_none_omitted() {
                 lang: None,
                 track_duration: None,
                 connection_uri: None,
-                token: None,
                 encryption_scheme: None,
                 cipher_suite: None,
                 key_id: None,
@@ -1330,7 +1354,7 @@ fn accessibility_clone_none_omitted() {
 #[test]
 fn accessibility_full_empty_normalized() {
     // Full の明示 [] は受理され、再 encode で省略されること
-    let json = br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[]}]}"#;
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[]}]}"#;
     let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
@@ -1347,14 +1371,14 @@ fn accessibility_full_empty_normalized() {
 fn accessibility_missing_field_rejected() {
     // scheme / value の欠如・型不正は reject されること
     for json in [
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"value":"CC1=eng"}]}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"scheme":"urn:scte:dash:cc:cea-608:2015"}]}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"scheme":"x","value":0}]}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":{}}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":"x"}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":null}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[0]}]}"#.as_slice(),
-        br#"{"version":"draft-01","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"scheme":0,"value":"x"}]}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"value":"CC1=eng"}]}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"scheme":"urn:scte:dash:cc:cea-608:2015"}]}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"scheme":"x","value":0}]}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":{}}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":"x"}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":null}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[0]}]}"#.as_slice(),
+        br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"scheme":0,"value":"x"}]}]}"#.as_slice(),
     ] {
         assert!(
             matches!(
@@ -1364,4 +1388,821 @@ fn accessibility_missing_field_rejected() {
             "記述子内の必須欠如は reject されること"
         );
     }
+}
+
+/// v02 の `/` 区切り namespace を持つ完全カタログが encode / decode を往復すること
+#[test]
+fn catalog_namespace_v02_roundtrip() {
+    let mut track = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
+    track.namespace = Some("customer/livestream/123".to_string());
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![track.clone()],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    let encoded = doc.encode().expect("v02 の namespace を encode できること");
+    let text = String::from_utf8(encoded.clone()).expect("JSON は UTF-8 であること");
+    assert!(
+        text.contains(r#""namespace":"customer/livestream/123""#),
+        "JSON に '/' 区切りの namespace を出力すること: {text}"
+    );
+
+    let decoded =
+        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(decoded, doc, "decode / encode が往復すること");
+}
+
+/// encode が decode できない名前・namespace を出力しないこと
+///
+/// `MsfCatalogDocument::encode` は `decode_full_catalog` と同じ MUST 検証を通すため、
+/// 手組みの不正値もここで拒否される。
+#[test]
+fn encode_rejects_invalid_catalog_names() {
+    // 空の track name
+    let empty_name = MsfTrack::new(String::new(), MsfPackaging::Loc, true);
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![empty_name],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "空の track name を encode しないこと"
+    );
+
+    // NUL を含む track name
+    let nul_name = MsfTrack::new("a\u{0}b".to_string(), MsfPackaging::Loc, true);
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![nul_name],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "NUL を含む track name を encode しないこと"
+    );
+
+    // 不正な namespace (空 field)
+    let mut invalid_namespace = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
+    invalid_namespace.namespace = Some("a//b".to_string());
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![invalid_namespace],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "不正な namespace を encode しないこと"
+    );
+
+    // NUL を含む namespace
+    let mut nul_namespace = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
+    nul_namespace.namespace = Some("a\u{0}b".to_string());
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![nul_namespace],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "NUL を含む namespace を encode しないこと"
+    );
+
+    // clone の空の parentName
+    let clone = MsfCloneTrack::new("child".to_string(), String::new());
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: 1,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "空の parentName を encode しないこと"
+    );
+
+    // remove の空の name
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: 1,
+        operations: vec![MsfDeltaOperation::Remove {
+            tracks: vec![MsfRemoveTrack::new(String::new())],
+        }],
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "空の removeTracks name を encode しないこと"
+    );
+}
+
+/// encode が clone / remove / publishTracks の不正な名前を出力しないこと
+///
+/// `MsfCatalogDocument::encode` は decode と同じ写像規則を encode 前にも適用する
+/// (draft-ietf-moq-msf-02 §5.2.2 / §5.2.3 / §5.2.34 / §5.2.35 / §11.2)。
+#[test]
+fn encode_rejects_invalid_clone_and_remove_names() {
+    // clone 自身の name が空 / NUL
+    for name in ["", "a\u{0}b"] {
+        let clone = MsfCloneTrack::new(name.to_string(), "parent".to_string());
+        let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+            generated_at: 1,
+            operations: vec![MsfDeltaOperation::Clone {
+                tracks: vec![clone],
+            }],
+        });
+        assert!(
+            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            "clone の不正な name を encode しないこと"
+        );
+    }
+
+    // clone 自身の namespace / parentNamespace が不正
+    for (namespace, parent_namespace) in [
+        (Some("a//b".to_string()), None),
+        (None, Some("a//b".to_string())),
+        (Some("a\u{0}b".to_string()), None),
+        (None, Some("a\u{0}b".to_string())),
+    ] {
+        let mut clone = MsfCloneTrack::new("child".to_string(), "parent".to_string());
+        clone.namespace = namespace;
+        clone.parent_namespace = parent_namespace;
+        let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+            generated_at: 1,
+            operations: vec![MsfDeltaOperation::Clone {
+                tracks: vec![clone],
+            }],
+        });
+        assert!(
+            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            "clone の不正な namespace を encode しないこと"
+        );
+    }
+
+    // clone の depends 要素が空 / NUL
+    for dependency in ["", "a\u{0}b"] {
+        let mut clone = MsfCloneTrack::new("child".to_string(), "parent".to_string());
+        clone.depends = Some(vec![MsfDependency::TrackName(dependency.to_string())]);
+        let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+            generated_at: 1,
+            operations: vec![MsfDeltaOperation::Clone {
+                tracks: vec![clone],
+            }],
+        });
+        assert!(
+            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            "clone の不正な depends 要素を encode しないこと"
+        );
+    }
+
+    // remove の name / namespace が不正
+    for (name, namespace) in [
+        ("a\u{0}b", None),
+        ("video", Some("a//b")),
+        ("video", Some("a\u{0}b")),
+    ] {
+        let mut remove = MsfRemoveTrack::new(name.to_string());
+        remove.namespace = namespace.map(str::to_string);
+        let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+            generated_at: 1,
+            operations: vec![MsfDeltaOperation::Remove {
+                tracks: vec![remove],
+            }],
+        });
+        assert!(
+            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            "remove の不正な name / namespace を encode しないこと"
+        );
+    }
+
+    // publishTracks の name / namespace が不正
+    for (name, namespace) in [("", None), ("publish", Some("a//b"))] {
+        let mut track = MsfTrack::new(name.to_string(), MsfPackaging::Loc, true);
+        track.namespace = namespace.map(str::to_string);
+        let doc = MsfCatalogDocument::Full(MsfCatalog {
+            version: MSF_VERSION.to_string(),
+            generated_at: None,
+            is_complete: false,
+            tracks: Vec::new(),
+            publish_tracks: vec![track],
+            removed_tracks: Default::default(),
+            init_data_list: Vec::new(),
+        });
+        assert!(
+            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            "publishTracks の不正な name / namespace を encode しないこと"
+        );
+    }
+
+    // full track の depends 要素が空 / NUL
+    for dependency in ["", "a\u{0}b"] {
+        let mut track = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
+        track.depends = vec![MsfDependency::TrackName(dependency.to_string())];
+        let doc = MsfCatalogDocument::Full(MsfCatalog {
+            version: MSF_VERSION.to_string(),
+            generated_at: None,
+            is_complete: false,
+            tracks: vec![track],
+            publish_tracks: Vec::new(),
+            removed_tracks: Default::default(),
+            init_data_list: Vec::new(),
+        });
+        assert!(
+            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            "full track の不正な depends 要素を encode しないこと"
+        );
+    }
+}
+
+/// encode が Full Track Name 4,096 バイト超の delta を出力しないこと
+///
+/// draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の上限は
+/// 4,096 バイト。clone / remove の encode でも同じ制約を適用する。
+#[test]
+fn encode_rejects_overlong_delta_full_track_names() {
+    let namespace = "a".repeat(4096);
+
+    // clone 自身の namespace 4,096 バイト + name 1 バイト
+    let mut clone = MsfCloneTrack::new("b".to_string(), "p".to_string());
+    clone.namespace = Some(namespace.clone());
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: 1,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "clone の Full Track Name 4,097 バイトを encode しないこと"
+    );
+
+    // clone の parentNamespace 4,096 バイト + parentName 1 バイト
+    let mut clone = MsfCloneTrack::new("b".to_string(), "p".to_string());
+    clone.parent_namespace = Some(namespace.clone());
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: 1,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "clone の親 Full Track Name 4,097 バイトを encode しないこと"
+    );
+
+    // clone の parentName 単体 4,097 バイト
+    let clone = MsfCloneTrack::new("b".to_string(), "p".repeat(4097));
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: 1,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "clone の parentName 4,097 バイトを encode しないこと"
+    );
+
+    // clone 自身の namespace を省略し parentNamespace を継承する場合の実効 namespace
+    let parent_namespace = "a".repeat(4095);
+    let mut clone = MsfCloneTrack::new("bb".to_string(), "p".to_string());
+    clone.parent_namespace = Some(parent_namespace);
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: 1,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "clone が親 namespace を継承した Full Track Name 4,097 バイトを encode しないこと"
+    );
+
+    // delta add の namespace 4,096 バイト + name 1 バイト
+    let mut add_track = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
+    add_track.namespace = Some(namespace.clone());
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: 1,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![add_track],
+        }],
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "delta add の Full Track Name 4,097 バイトを encode しないこと"
+    );
+
+    // remove の namespace 4,096 バイト + name 1 バイト
+    let mut remove = MsfRemoveTrack::new("b".to_string());
+    remove.namespace = Some(namespace);
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: 1,
+        operations: vec![MsfDeltaOperation::Remove {
+            tracks: vec![remove],
+        }],
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "remove の Full Track Name 4,097 バイトを encode しないこと"
+    );
+}
+
+/// `serialize_catalog_namespace` が Track Namespace を `/` 区切りへ戻すこと
+#[test]
+fn catalog_namespace_serializes_with_slashes() {
+    let namespace = TrackNamespace::new(vec![
+        b"customer".to_vec(),
+        b"livestream".to_vec(),
+        b"123".to_vec(),
+    ])
+    .expect("テスト用 namespace を作れること");
+    assert_eq!(
+        serialize_catalog_namespace(&namespace).expect("カタログ形式に変換できること"),
+        "customer/livestream/123"
+    );
+
+    let no_fields = TrackNamespace::new(Vec::new()).expect("0 fields の namespace を作れること");
+    assert!(
+        matches!(
+            serialize_catalog_namespace(&no_fields),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "0 fields の namespace はカタログで表現できないこと"
+    );
+}
+
+/// カタログで表現できない Track Namespace Field を拒否すること
+#[test]
+fn catalog_namespace_serialization_rejects_unrepresentable_fields() {
+    // `/` は区切りとして解釈されるため field 自体に含められない
+    let slash =
+        TrackNamespace::new(vec![b"a/b".to_vec()]).expect("テスト用 namespace を作れること");
+    assert!(
+        matches!(
+            serialize_catalog_namespace(&slash),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "'/' を含む field はカタログで表現できないこと"
+    );
+
+    // NUL は §11.2.1 が禁止する
+    let nul = TrackNamespace::new(vec![b"a\0b".to_vec()]).expect("テスト用 namespace を作れること");
+    assert!(
+        matches!(
+            serialize_catalog_namespace(&nul),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "NUL を含む field はカタログで表現できないこと"
+    );
+
+    // UTF-8 でないバイト列は JSON 文字列にできない
+    let invalid_utf8 =
+        TrackNamespace::new(vec![vec![0xff]]).expect("テスト用 namespace を作れること");
+    assert!(
+        matches!(
+            serialize_catalog_namespace(&invalid_utf8),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "UTF-8 でない field はカタログで表現できないこと"
+    );
+}
+
+/// encode が Full Track Name 4,096 バイトちょうどを受理すること
+#[test]
+fn encode_accepts_exact_full_track_name_boundaries() {
+    let name = "a".repeat(4096);
+
+    let mut add_track = MsfTrack::new(name.clone(), MsfPackaging::Loc, true);
+    add_track.namespace = None;
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: 1,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![add_track],
+        }],
+    });
+    assert!(
+        doc.encode().is_ok(),
+        "add の name 単体 4,096 バイトを encode できること"
+    );
+
+    let clone = MsfCloneTrack::new(name.clone(), "p".to_string());
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: 1,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    });
+    assert!(
+        doc.encode().is_ok(),
+        "clone の name 単体 4,096 バイトを encode できること"
+    );
+
+    let remove = MsfRemoveTrack::new(name);
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: 1,
+        operations: vec![MsfDeltaOperation::Remove {
+            tracks: vec![remove],
+        }],
+    });
+    assert!(
+        doc.encode().is_ok(),
+        "remove の name 単体 4,096 バイトを encode できること"
+    );
+}
+
+/// clone の親 Full Track Name の長さを clone 自身とは独立に encode 検証すること
+#[test]
+fn encode_rejects_clone_parent_full_track_name_overflow() {
+    let parent_namespace = "a".repeat(4095);
+    let mut clone = MsfCloneTrack::new("b".to_string(), "pp".to_string());
+    clone.parent_namespace = Some(parent_namespace);
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: 1,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "親の Full Track Name 4,097 バイトを encode しないこと"
+    );
+}
+
+/// packaging 値 `catalog` が encode / decode を往復すること
+#[test]
+fn catalog_packaging_roundtrip() {
+    let track = MsfTrack::new("catalog".to_string(), MsfPackaging::Catalog, true);
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![track],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    let encoded = doc
+        .encode()
+        .expect("catalog packaging を encode できること");
+    let text = String::from_utf8(encoded.clone()).expect("JSON は UTF-8 であること");
+    assert!(
+        text.contains(r#""packaging":"catalog""#),
+        "JSON に packaging=catalog を出力すること: {text}"
+    );
+    let decoded =
+        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(decoded, doc, "decode / encode が往復すること");
+}
+
+/// §5.2.4.1 Table 6 の (packaging, role) ごとの必須フィールドを持つ track が往復すること
+#[test]
+fn table_6_required_fields_roundtrip() {
+    let mut video = MsfTrack::new("video".to_string(), MsfPackaging::Loc, true);
+    video.role = Some("video".to_string());
+    video.codec = Some("av01".to_string());
+    video.bitrate = Some(1_000_000);
+    video.framerate = Some(30.0);
+
+    let mut sign = MsfTrack::new("sign".to_string(), MsfPackaging::Loc, true);
+    sign.role = Some("signlanguage".to_string());
+    sign.codec = Some("av01".to_string());
+    sign.bitrate = Some(500_000);
+    sign.framerate = Some(30.0);
+
+    let mut audio_description = MsfTrack::new("ad".to_string(), MsfPackaging::Loc, true);
+    audio_description.role = Some("audiodescription".to_string());
+    audio_description.codec = Some("opus".to_string());
+    audio_description.bitrate = Some(32_000);
+    audio_description.samplerate = Some(48_000);
+    audio_description.channel_config = Some("2".to_string());
+    audio_description.lang = Some("en".to_string());
+
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![video, sign, audio_description],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    let encoded = doc
+        .encode()
+        .expect("Table 6 の必須フィールドを encode できること");
+    let decoded =
+        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(decoded, doc, "decode / encode が往復すること");
+}
+
+/// packagingMetadata が encode / decode を往復すること
+#[test]
+fn packaging_metadata_roundtrip() {
+    let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
+    track.packaging_metadata = Some("streamMapping=object;key=value".to_string());
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![track],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    let encoded = doc
+        .encode()
+        .expect("packagingMetadata を encode できること");
+    let text = String::from_utf8(encoded.clone()).expect("JSON は UTF-8 であること");
+    assert!(
+        text.contains(r#""packagingMetadata":"streamMapping=object;key=value""#),
+        "JSON に packagingMetadata を出力すること: {text}"
+    );
+    let decoded =
+        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(decoded, doc, "decode / encode が往復すること");
+}
+
+/// 手組みの不正な packagingMetadata を encode しないこと
+#[test]
+fn encode_rejects_invalid_packaging_metadata() {
+    for metadata in ["", "a=b;;c=d", "key", "=value", "key=", "a b=c", "a=b=c"] {
+        let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
+        track.packaging_metadata = Some(metadata.to_string());
+        let doc = MsfCatalogDocument::Full(MsfCatalog {
+            version: MSF_VERSION.to_string(),
+            generated_at: None,
+            is_complete: false,
+            tracks: vec![track],
+            publish_tracks: Vec::new(),
+            removed_tracks: Default::default(),
+            init_data_list: Vec::new(),
+        });
+        assert!(
+            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            "不正な packagingMetadata {metadata:?} を encode しないこと"
+        );
+    }
+
+    let mut clone = MsfCloneTrack::new("c".to_string(), "p".to_string());
+    clone.packaging_metadata = Some("a=b;;c=d".to_string());
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: 1,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    });
+    assert!(
+        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        "clone の不正な packagingMetadata を encode しないこと"
+    );
+}
+
+/// 手組みの未解決 depends を encode しないこと
+#[test]
+fn encode_rejects_unresolved_depends() {
+    let mut track = MsfTrack::new("x".to_string(), MsfPackaging::Loc, true);
+    track.depends = vec![MsfDependency::TrackName("missing".to_string())];
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![track],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+}
+
+/// media timeline の renderGroup 参照規則違反を encode しないこと
+#[test]
+fn encode_rejects_media_timeline_naming_all_render_group_tracks() {
+    let mut v1 = MsfTrack::new("v1".to_string(), MsfPackaging::Loc, true);
+    v1.render_group = Some(1);
+    let mut v2 = MsfTrack::new("v2".to_string(), MsfPackaging::Loc, true);
+    v2.render_group = Some(1);
+    let mut timeline = MsfTrack::new("timeline".to_string(), MsfPackaging::MediaTimeline, true);
+    timeline.depends = vec![
+        MsfDependency::TrackName("v1".to_string()),
+        MsfDependency::TrackName("v2".to_string()),
+    ];
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![v1, v2, timeline],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+}
+
+/// accessibleWindowTime が encode / decode を往復すること
+#[test]
+fn accessible_window_time_roundtrip() {
+    let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
+    track.alt_group = Some(1);
+    track.accessible_window_time = Some(60_000);
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![track],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    let encoded = doc
+        .encode()
+        .expect("accessibleWindowTime を encode できること");
+    let text = String::from_utf8(encoded.clone()).expect("JSON は UTF-8 であること");
+    assert!(
+        text.contains(r#""accessibleWindowTime":60000"#),
+        "JSON に accessibleWindowTime を出力すること: {text}"
+    );
+    let decoded =
+        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(decoded, doc, "decode / encode が往復すること");
+}
+
+/// 同じ altGroup で accessibleWindowTime が異なるカタログを encode しないこと
+#[test]
+fn encode_rejects_alt_group_accessible_window_time_mismatch() {
+    let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
+    a.alt_group = Some(1);
+    a.accessible_window_time = Some(60_000);
+    let mut b = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
+    b.alt_group = Some(1);
+    b.accessible_window_time = Some(120_000);
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![a, b],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+}
+
+/// track-property / object-property の initData が encode / decode を往復すること
+#[test]
+fn init_data_property_types_roundtrip() {
+    let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
+    track.init_ref = Some("init1".to_string());
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![track],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: vec![
+            MsfInitData {
+                id: "init1".to_string(),
+                kind: MsfInitDataKind::TrackProperty,
+                data: "0x0D".to_string(),
+            },
+            MsfInitData {
+                id: "init2".to_string(),
+                kind: MsfInitDataKind::ObjectProperty,
+                data: "0x78".to_string(),
+            },
+        ],
+    });
+    let encoded = doc
+        .encode()
+        .expect("property type の initData を encode できること");
+    let decoded =
+        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(decoded, doc, "decode / encode が往復すること");
+}
+
+/// 手組みの不正な property type を encode しないこと
+#[test]
+fn encode_rejects_invalid_init_data_property_type() {
+    for data in ["0D", "0x", "0xZZ", "0x4000000000000000"] {
+        let doc = MsfCatalogDocument::Full(MsfCatalog {
+            version: MSF_VERSION.to_string(),
+            generated_at: None,
+            is_complete: false,
+            tracks: Vec::new(),
+            publish_tracks: Vec::new(),
+            removed_tracks: Default::default(),
+            init_data_list: vec![MsfInitData {
+                id: "i".to_string(),
+                kind: MsfInitDataKind::TrackProperty,
+                data: data.to_string(),
+            }],
+        });
+        assert!(
+            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            "不正な hex {data:?} を encode しないこと"
+        );
+    }
+}
+
+/// update 操作が encode / decode を往復すること
+#[test]
+fn delta_update_roundtrip() {
+    let mut update = MsfCloneTrack::new("v".to_string(), "v".to_string());
+    update.label = Some("new".to_string());
+    update.codec = Some("av01".to_string());
+    update.role = Some("video".to_string());
+    update.framerate = Some(30.0);
+    update.bitrate = Some(1_000_000);
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: 123,
+        operations: vec![MsfDeltaOperation::Update {
+            tracks: vec![MsfUpdateTrack { track: update }],
+        }],
+    });
+    let encoded = doc.encode().expect("update 操作を encode できること");
+    let text = String::from_utf8(encoded.clone()).expect("JSON は UTF-8 であること");
+    assert!(
+        text.contains(r#""op":"update""#),
+        "op=update を出力すること: {text}"
+    );
+    let decoded =
+        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(decoded, doc, "decode / encode が往復すること");
+}
+
+/// 手組みの不正な update を encode しないこと
+#[test]
+fn encode_rejects_invalid_update() {
+    let mut mismatch = MsfCloneTrack::new("x".to_string(), "v".to_string());
+    mismatch.label = Some("new".to_string());
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: 1,
+        operations: vec![MsfDeltaOperation::Update {
+            tracks: vec![MsfUpdateTrack { track: mismatch }],
+        }],
+    });
+    assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+
+    let mut namespace_mismatch = MsfCloneTrack::new("v".to_string(), "v".to_string());
+    namespace_mismatch.parent_namespace = Some("a".to_string());
+    namespace_mismatch.namespace = Some("b".to_string());
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: 1,
+        operations: vec![MsfDeltaOperation::Update {
+            tracks: vec![MsfUpdateTrack {
+                track: namespace_mismatch,
+            }],
+        }],
+    });
+    assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+}
+
+/// keyframeSpacing が encode / decode を往復し、altGroup だけのカタログも受理されること
+#[test]
+fn keyframe_spacing_roundtrip() {
+    let mut track = MsfTrack::new("v".to_string(), MsfPackaging::Loc, true);
+    track.alt_group = Some(1);
+    track.keyframe_spacing = Some(30);
+    let doc = MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks: vec![track],
+        publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
+        init_data_list: Vec::new(),
+    });
+    let encoded = doc.encode().expect("keyframeSpacing を encode できること");
+    let text = String::from_utf8(encoded.clone()).expect("JSON は UTF-8 であること");
+    assert!(
+        text.contains(r#""keyframeSpacing":30"#),
+        "JSON に keyframeSpacing を出力すること: {text}"
+    );
+    let decoded =
+        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(decoded, doc, "decode / encode が往復すること");
+
+    // altGroup だけを持ち keyframeSpacing を持たない既存カタログは引き続き受理する
+    let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"altGroup":1}]}"#;
+    assert!(
+        MsfCatalogDocument::decode(json).is_ok(),
+        "keyframeSpacing は任意であり、共通検証で要求しないこと"
+    );
 }

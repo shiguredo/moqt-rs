@@ -2318,6 +2318,13 @@ pub struct Fetch {
     /// 同じ値は [`SessionEvent::FetchOkReceived`] の `expires_ms` でも通知する。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub expires_ms: Option<u64>,
+    /// FETCH_OK が運んだ Track Properties
+    ///
+    /// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK) / draft-ietf-moq-msf-02 §12.3.1:
+    /// MSF_EVENT_TIMELINE_HEADER (0x7B) などの Track property を FETCH 経由でも参照できる
+    /// ように保持する。subscriber 側は初回 FETCH_OK の値、publisher 側は送信した FETCH_OK の
+    /// 値を持つ。FETCH_OK 受信前は空。
+    pub track_properties: TrackProperties,
     /// FETCH への初回応答 (REQUEST_OK / FETCH への応答の REQUEST_ERROR) を受信済みか
     ///
     /// subscriber 側の受信経路のみで更新され、publisher 側は常に false のまま

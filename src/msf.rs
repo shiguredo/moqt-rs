@@ -1,16 +1,17 @@
 //! MOQT Streaming Format (MSF) 実装
 //!
-//! draft-ietf-moq-msf-01 に基づく。
+//! draft-ietf-moq-msf-02 に基づく。
 //! カタログ、メディアタイムライン、イベントタイムラインの JSON エンコード/デコードを提供する。
 //!
 //! # カタログの種類
-//! - Full catalog: `{"version":"draft-01","tracks":[...]}` 形式
+//! - Full catalog: `{"version":"draft-02","tracks":[...]}` 形式
 //! - Delta update: `{"deltaUpdate":[...]}` 形式
 //!
 //! # 注意
-//! カタログトラックのトラック名は "catalog" でなければならない (draft-ietf-moq-msf-01 §5 (Catalog))。
+//! カタログトラックのトラック名は "catalog" でなければならない (draft-ietf-moq-msf-02 §5 (Catalog))。
 
 use crate::error::MessageError;
+use crate::message::common::{MAX_TRACK_NAME_LENGTH, TrackNamespace, validate_full_track_name};
 use alloc::{
     format,
     string::{String, ToString},
@@ -18,21 +19,160 @@ use alloc::{
 };
 use nojson::{DisplayJson, JsonFormatter};
 
-/// MSF URI / fragment のパース (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation))
+/// MSF URI / fragment のパース (draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation))
 pub mod uri;
 
-/// 対応 MSF バージョン (draft-ietf-moq-msf-01 §5.1.1 (MSF version))
+/// 対応 MSF バージョン (draft-ietf-moq-msf-02 §5.1.1 (MSF version))
 ///
-/// draft-ietf-moq-msf-01 §5.1.1 (MSF version): version は JSON Type: String である。
+/// draft-ietf-moq-msf-02 §5.1.1 (MSF version): version は JSON Type: String である。
 /// IETF Internet-Draft 利用時は "draft-XX" 形式を使う。
 /// この仕様は将来変更される可能性がある。
-pub const MSF_VERSION: &str = "draft-01";
+pub const MSF_VERSION: &str = "draft-02";
 
-/// カタログトラックの Track Name (draft-ietf-moq-msf-01 §5 (Catalog))
+/// カタログトラックの Track Name (draft-ietf-moq-msf-02 §5 (Catalog))
 ///
 /// "The catalog track MUST have a case-sensitive Track Name of 'catalog'."
 /// この仕様は将来変更される可能性がある。
 pub const MSF_CATALOG_TRACK_NAME: &[u8] = b"catalog";
+
+/// カタログの namespace 文字列を MOQT の Track Namespace に変換する
+///
+/// draft-ietf-moq-msf-02 §5.2.2 (Track namespace): カタログの `namespace` は JSON 文字列で、
+/// `/` (U+002F) が Track Namespace Field の区切りである。JSON デコード後の文字列を `/` で
+/// 分割した各 substring が、順に Track Namespace Field の UTF-8 バイト列になる
+/// (§11.2.1 (Producing bytes from a JSON string))。
+///
+/// 1 〜 32 fields、各 field は非空、全体で 4,096 バイト以下でなければならない (§5.2.2 /
+/// draft-ietf-moq-transport-23 §8.7)。空文字列、先頭・末尾・連続する `/`、33 fields 以上、
+/// NUL を含む文字列は `InvalidCatalog` にする。この仕様は将来変更される可能性がある。
+///
+/// # Errors
+///
+/// - 空文字列 / 空の field / 33 fields 以上 / NUL を含む: `InvalidCatalog`
+/// - 4,096 バイトを超える: `InvalidCatalog`
+pub fn parse_catalog_namespace(value: &str) -> Result<TrackNamespace, MessageError> {
+    if value.is_empty() {
+        return Err(MessageError::InvalidCatalog(
+            "namespace MUST NOT be empty".to_string(),
+        ));
+    }
+    // §11.2.1: NUL はカタログの名前に含めてはならない (MUST NOT)
+    if value.contains('\0') {
+        return Err(MessageError::InvalidCatalog(
+            "namespace MUST NOT contain U+0000".to_string(),
+        ));
+    }
+    // `/` で分割した各 substring が Track Namespace Field になる。境界の空 substring や
+    // 33 fields 以上は §5.2.2 の MUST 違反であり、`TrackNamespace::new` に渡す前に明示的に
+    // 拒否して、MOQT の INVALID_TRACK_NAMESPACE ではなくカタログ不正として扱う
+    let fields = value
+        .split('/')
+        .map(|field| field.as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    if fields.len() > 32 {
+        return Err(MessageError::InvalidCatalog(
+            "namespace MUST contain at most 32 fields".to_string(),
+        ));
+    }
+    if fields.iter().any(Vec::is_empty) {
+        return Err(MessageError::InvalidCatalog(
+            "namespace field MUST NOT be empty".to_string(),
+        ));
+    }
+    TrackNamespace::new(fields)
+        .map_err(|_| MessageError::InvalidCatalog("namespace exceeds 4096 bytes".to_string()))
+}
+
+/// MOQT の Track Namespace をカタログの namespace 文字列に変換する
+///
+/// draft-ietf-moq-msf-02 §5.2.2 (Track namespace): 各 Track Namespace Field を UTF-8 として
+/// `/` で連結する。カタログは名前を JSON 文字列でしか表現できないため、UTF-8 でない field
+/// (§11.2.3 (Consuming names received from MOQT) の写像は部分関数)、NUL を含む field
+/// (§11.2.1)、`/` を含む field (§5.2.2 の区切り規則) は表現できず `InvalidCatalog` になる。
+/// この仕様は将来変更される可能性がある。
+///
+/// # Errors
+///
+/// - field が 0 個: `InvalidCatalog`
+/// - UTF-8 でない field / NUL を含む field / `/` を含む field: `InvalidCatalog`
+pub fn serialize_catalog_namespace(namespace: &TrackNamespace) -> Result<String, MessageError> {
+    if namespace.fields().is_empty() {
+        return Err(MessageError::InvalidCatalog(
+            "namespace MUST contain at least one field".to_string(),
+        ));
+    }
+    let mut out = String::new();
+    for (index, field) in namespace.fields().iter().enumerate() {
+        let text = core::str::from_utf8(field).map_err(|_| {
+            MessageError::InvalidCatalog("namespace field is not valid UTF-8".to_string())
+        })?;
+        if text.contains('\0') {
+            return Err(MessageError::InvalidCatalog(
+                "namespace field MUST NOT contain U+0000".to_string(),
+            ));
+        }
+        if text.contains('/') {
+            return Err(MessageError::InvalidCatalog(
+                "namespace field MUST NOT contain '/'".to_string(),
+            ));
+        }
+        if index > 0 {
+            out.push('/');
+        }
+        out.push_str(text);
+    }
+    Ok(out)
+}
+
+/// カタログの track name 文字列を MOQT の Track Name バイト列に変換する
+///
+/// draft-ietf-moq-msf-02 §5.2.3 (Track name) / §11.2.1 (Producing bytes from a JSON string):
+/// JSON デコード済みの文字列を UTF-8 のバイト列にする。空文字列と NUL は禁止される
+/// (§5.2.3 MUST NOT / §11.2.1 MUST NOT)。JSON パーサが未対サロゲートを拒否するため、
+/// ここに到達する `String` は常に Unicode scalar value の列である。この仕様は将来変更される
+/// 可能性がある。
+///
+/// # Errors
+///
+/// - 空文字列: `InvalidCatalog`
+/// - NUL を含む: `InvalidCatalog`
+pub fn catalog_track_name_bytes(name: &str) -> Result<Vec<u8>, MessageError> {
+    if name.is_empty() {
+        return Err(MessageError::InvalidCatalog(
+            "track name MUST NOT be empty".to_string(),
+        ));
+    }
+    if name.contains('\0') {
+        return Err(MessageError::InvalidCatalog(
+            "track name MUST NOT contain U+0000".to_string(),
+        ));
+    }
+    Ok(name.as_bytes().to_vec())
+}
+
+/// カタログの Full Track Name が MOQT の長さ制約を満たすことを検証する
+///
+/// draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の長さは
+/// Track Namespace の全 field の長さと Track Name の長さの合計で、上限は 4,096 バイトである。
+/// 超過はカタログ不正 (`InvalidCatalog`) として扱い、購読要求の構築時に初めて
+/// `FieldLengthExceeded` になる状態を避ける。
+///
+/// `namespace` が `None` の場合は継承先が不明なため、Track Name 単体の長さだけを検証する。
+/// 長さの計算と上限定数は [`crate::message::common::validate_full_track_name`] と共有する。
+fn validate_catalog_full_track_name(
+    namespace: Option<&TrackNamespace>,
+    name: &[u8],
+) -> Result<(), MessageError> {
+    match namespace {
+        Some(namespace) => validate_full_track_name(namespace, name).map_err(|error| {
+            MessageError::InvalidCatalog(format!("full track name exceeds 4096 bytes: {error}"))
+        }),
+        None if name.len() > MAX_TRACK_NAME_LENGTH => Err(MessageError::InvalidCatalog(
+            "full track name exceeds 4096 bytes".to_string(),
+        )),
+        None => Ok(()),
+    }
+}
 
 /// nojson のパースエラーを MessageError に変換する
 impl From<nojson::JsonParseError> for MessageError {
@@ -98,7 +238,7 @@ fn is_lang_irregular(lang: &str) -> bool {
 
 /// lang フィールドの軽量構文バリデーション
 ///
-/// draft-ietf-moq-msf-01 §5.2.32 (Language): lang は BCP 47 言語タグでなければならない (MUST)
+/// draft-ietf-moq-msf-02 §5.2.33 (Language): lang は BCP 47 言語タグでなければならない (MUST)
 /// この仕様は将来変更される可能性がある。
 /// 完全な BCP 47 準拠は行わず、RFC 5646 §2.1 (Syntax) に沿った簡略ルールで
 /// 明らかに不正な値のみを拒否する:
@@ -169,7 +309,7 @@ impl DisplayJson for RawJsonBytes<'_> {
 
 // ─── パブリック型定義 ─────────────────────────────────────────────────────────
 
-/// MSF パッケージングタイプ (draft-ietf-moq-msf-01 §5.2.4 (Packaging))
+/// MSF パッケージングタイプ (draft-ietf-moq-msf-02 §5.2.4 (Packaging))
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MsfPackaging {
     /// LOC パッケージング ("loc")
@@ -182,6 +322,11 @@ pub enum MsfPackaging {
     MoqLog,
     /// moqmetrics ("moqmetrics")
     MoqMetrics,
+    /// 別のカタログトラックを参照するカタログ ("catalog")
+    ///
+    /// draft-ietf-moq-msf-02 §5.2.4 (Packaging) の Table 5 が追加した値。トップレベルの
+    /// カタログトラックだけが Track Name "catalog" を持つ必要がある (Appendix A.1.3)。
+    Catalog,
 }
 
 impl MsfPackaging {
@@ -192,10 +337,12 @@ impl MsfPackaging {
             Self::EventTimeline => "eventtimeline",
             Self::MoqLog => "moqlog",
             Self::MoqMetrics => "moqmetrics",
+            Self::Catalog => "catalog",
         }
     }
 
-    /// draft-ietf-moq-msf-01 §5.2.4 (Packaging): 許容値は loc / mediatimeline / eventtimeline / moqlog / moqmetrics
+    /// draft-ietf-moq-msf-02 §5.2.4 (Packaging): 許容値は loc / mediatimeline /
+    /// eventtimeline / moqlog / moqmetrics / catalog
     /// この仕様は将来変更される可能性がある。
     fn from_packaging_str(s: &str) -> Result<Self, MessageError> {
         match s {
@@ -204,6 +351,7 @@ impl MsfPackaging {
             "eventtimeline" => Ok(Self::EventTimeline),
             "moqlog" => Ok(Self::MoqLog),
             "moqmetrics" => Ok(Self::MoqMetrics),
+            "catalog" => Ok(Self::Catalog),
             other => Err(MessageError::InvalidCatalog(format!(
                 "unknown packaging value '{other}'"
             ))),
@@ -211,17 +359,62 @@ impl MsfPackaging {
     }
 }
 
-/// 初期化データの種別 (draft-ietf-moq-msf-01 §5.1.7 (Initialization Data List))
+/// LOC packaging の Object から MOQT Stream への割り当てモード
+///
+/// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) / §5.2.5 (Packaging metadata):
+/// publisher は `packagingMetadata` の `streamMapping` キーで `group` または `object` を通知する。
+/// キーがない場合は `group` と仮定する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamMapping {
+    /// 1 Group を 1 Subgroup に載せる ("group")
+    Group,
+    /// 1 Object を 1 Subgroup に載せる ("object")
+    Object,
+}
+
+impl StreamMapping {
+    /// `packagingMetadata` の `streamMapping` 値として書き出す文字列を返す
+    ///
+    /// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) の許容値は
+    /// `group` / `object` である。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Group => "group",
+            Self::Object => "object",
+        }
+    }
+
+    /// `packagingMetadata` の `streamMapping` 値を解釈する
+    ///
+    /// 値がない場合は `Group`、`group` / `object` 以外は `InvalidCatalog`。
+    fn from_value(value: Option<&str>) -> Result<Self, MessageError> {
+        match value {
+            None | Some("group") => Ok(Self::Group),
+            Some("object") => Ok(Self::Object),
+            Some(other) => Err(MessageError::InvalidCatalog(format!(
+                "unknown streamMapping value '{other}'"
+            ))),
+        }
+    }
+}
+
+/// 初期化データの種別 (draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List))
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MsfInitDataKind {
     /// インライン Base64 ("inline")
     Inline,
+    /// Track property の type ("track-property")
+    TrackProperty,
+    /// Object property の type ("object-property")
+    ObjectProperty,
 }
 
 impl DisplayJson for MsfInitDataKind {
     fn fmt(&self, f: &mut JsonFormatter<'_, '_>) -> core::fmt::Result {
         match self {
             Self::Inline => f.value("inline"),
+            Self::TrackProperty => f.value("track-property"),
+            Self::ObjectProperty => f.value("object-property"),
         }
     }
 }
@@ -230,6 +423,8 @@ impl MsfInitDataKind {
     fn from_init_data_kind_str(s: &str) -> Result<Self, MessageError> {
         match s {
             "inline" => Ok(Self::Inline),
+            "track-property" => Ok(Self::TrackProperty),
+            "object-property" => Ok(Self::ObjectProperty),
             other => Err(MessageError::InvalidCatalog(format!(
                 "unknown initData type '{other}'"
             ))),
@@ -237,14 +432,14 @@ impl MsfInitDataKind {
     }
 }
 
-/// 初期化データエントリ (draft-ietf-moq-msf-01 §5.1.7 (Initialization Data List))
+/// 初期化データエントリ (draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List))
 #[derive(Debug, Clone, PartialEq)]
 pub struct MsfInitData {
-    /// エントリを識別する ID (draft-ietf-moq-msf-01 §5.1.7 (Initialization Data List))
+    /// エントリを識別する ID (draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List))
     pub id: String,
     /// 初期化データの種別 (JSON key "type")
     pub kind: MsfInitDataKind,
-    /// 初期化データ (draft-ietf-moq-msf-01 §5.1.7 (Initialization Data List))
+    /// 初期化データ (draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List))
     pub data: String,
 }
 
@@ -259,7 +454,7 @@ impl DisplayJson for MsfInitData {
     }
 }
 
-/// ターゲットバッファ情報 (draft-ietf-moq-msf-01 §5.2.9 (Buffers))
+/// ターゲットバッファ情報 (draft-ietf-moq-msf-02 §5.2.10 (Buffers))
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MsfBuffers {
     /// ターゲットバッファ ms
@@ -287,9 +482,9 @@ impl DisplayJson for MsfBuffers {
     }
 }
 
-/// メディアタイムラインテンプレート (draft-ietf-moq-msf-01 §5.2.15 (Template) / §7.5.1 (Template Format))
+/// メディアタイムラインテンプレート (draft-ietf-moq-msf-02 §5.2.16 (Template) / §7.4.1 (Template Format))
 ///
-/// 6 要素は必須であり指定順に現れる。計算式は §7.5.1 に従う。
+/// 6 要素は必須であり指定順に現れる。計算式は §7.4.1 に従う。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MsfTemplate {
     /// 先頭エントリのメディア PTS ms
@@ -332,7 +527,7 @@ impl DisplayJson for MsfTemplate {
 impl MsfTemplate {
     /// n 番目 (0 始まり) のエントリを求める
     ///
-    /// draft-ietf-moq-msf-01 §7.5.1 の計算式に従う。4 系列のいずれかが overflow した場合は
+    /// draft-ietf-moq-msf-02 §7.4.1 の計算式に従う。4 系列のいずれかが overflow した場合は
     /// 全体を `None` とする (仕様式に overflow 定義がないための防御的扱い)。
     pub fn resolve_entry(&self, n: u64) -> Option<MsfMediaTimelineEntry> {
         let media_time = self
@@ -360,7 +555,7 @@ impl MsfTemplate {
     }
 }
 
-/// 認可情報エントリ (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))
+/// 認可情報エントリ (draft-ietf-moq-msf-02 §5.2.42 (Authorization Info))
 ///
 /// 値は scheme 固有であり、任意の JSON 値を生保持する (string / object を含む)。
 /// §5.2.42 本文は configuration object と述べるが、§5.2.43 と §5.6.15 の例は
@@ -406,7 +601,7 @@ impl DisplayJson for AuthInfoEntries<'_> {
     }
 }
 
-/// accessibility 記述子 (draft-ietf-moq-msf-01 §5.2.44 (Accessibility))
+/// accessibility 記述子 (draft-ietf-moq-msf-02 §5.2.44 (Accessibility))
 #[derive(Debug, Clone, PartialEq)]
 pub struct MsfAccessibility {
     /// 記述子 scheme
@@ -424,99 +619,134 @@ impl DisplayJson for MsfAccessibility {
     }
 }
 
-/// MSF トラックオブジェクト (draft-ietf-moq-msf-01 §5.2 (Track Object Fields))
+/// MSF の depends 要素 (draft-ietf-moq-msf-02 §5.2.15 (Dependencies))
 ///
-/// `Debug` は機密値を伏せる。`token` (§5.2.37 の認証トークン)、`track_base_key` (§5.2.41 の
-/// 鍵材料)、`connection_uri` (§11.4.2 のとおり token パラメータを含み得る endpoint URI) は、
-/// 値の代わりにバイト長を `Option<usize>` で表示する。`auth_info` は [`MsfAuthInfo`] の
-/// `Debug` で値を伏せる。
+/// track name (JSON String) と renderGroup (JSON Number) のいずれかを表す。
+/// この型への変更は公開 API の破壊的変更である。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MsfDependency {
+    /// 依存先の Track Name
+    TrackName(String),
+    /// 依存先の renderGroup 識別子
+    RenderGroup(u64),
+}
+
+impl DisplayJson for MsfDependency {
+    fn fmt(&self, f: &mut JsonFormatter<'_, '_>) -> core::fmt::Result {
+        match self {
+            Self::TrackName(value) => f.value(value.as_str()),
+            Self::RenderGroup(value) => f.value(*value),
+        }
+    }
+}
+
+/// MSF トラックオブジェクト (draft-ietf-moq-msf-02 §5.2 (Track Object Fields))
+///
+/// `Debug` は機密値を伏せる。`track_base_key` (§5.2.41 の鍵材料) と `connection_uri`
+/// (§11.4.2 のとおり token パラメータを含み得る endpoint URI) は、値の代わりにバイト長を
+/// `Option<usize>` で表示する。`auth_info` は [`MsfAuthInfo`] の `Debug` で値を伏せる。
 #[derive(Clone, PartialEq)]
 pub struct MsfTrack {
-    /// トラック名 (draft-ietf-moq-msf-01 §5.2.3 (Track name)) - 必須
+    /// トラック名 (draft-ietf-moq-msf-02 §5.2.3 (Track name)) - 必須
+    ///
+    /// 空文字列は禁止され (§5.2.3 (Track name))、NUL は禁止される
+    /// (§11.2.1 (Producing bytes from a JSON string))。
     pub name: String,
-    /// トラックネームスペース (draft-ietf-moq-msf-01 §5.2.2 (Track namespace))
+    /// トラックネームスペース (draft-ietf-moq-msf-02 §5.2.2 (Track namespace))
+    ///
+    /// `/` 区切りの JSON 文字列で、1 〜 32 個の非空 field を持ち、NUL を含まない。
+    /// `None` のときはカタログトラックの MOQT Track Namespace を継承する。
     pub namespace: Option<String>,
-    /// パッケージングタイプ (draft-ietf-moq-msf-01 §5.2.4 (Packaging)) - 必須
+    /// パッケージングタイプ (draft-ietf-moq-msf-02 §5.2.4 (Packaging)) - 必須
     pub packaging: MsfPackaging,
-    /// イベントタイムラインタイプ (draft-ietf-moq-msf-01 §5.2.5 (Event timeline type)) - packaging=eventtimeline の場合必須
+    /// パッケージング固有メタデータ (draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata))
+    ///
+    /// `;` 区切りの `key=value`。key / value に whitespace・`=`・`;` は含められない。
+    /// `streamMapping` の値の解釈と既定値は [`MsfTrack::stream_mapping`] が扱う。
+    pub packaging_metadata: Option<String>,
+    /// イベントタイムラインタイプ (draft-ietf-moq-msf-02 §5.2.6 (Event timeline type)) - packaging=eventtimeline の場合必須
     pub event_type: Option<String>,
-    /// トラックロール (draft-ietf-moq-msf-01 §5.2.6 (Track role))
+    /// トラックロール (draft-ietf-moq-msf-02 §5.2.7 (Track role))
     pub role: Option<String>,
-    /// ライブフラグ (draft-ietf-moq-msf-01 §5.2.7 (Is Live)) - 必須
+    /// ライブフラグ (draft-ietf-moq-msf-02 §5.2.8 (Is Live)) - 必須
     pub is_live: bool,
-    /// ターゲットレイテンシ ms (draft-ietf-moq-msf-01 §5.2.8 (Target latency))
+    /// ターゲットレイテンシ ms (draft-ietf-moq-msf-02 §5.2.9 (Target latency))
     ///
     /// isLive=false の場合は無視され encode されない。
     pub target_latency: Option<u64>,
-    /// ターゲットバッファ情報 (draft-ietf-moq-msf-01 §5.2.9 (Buffers))
+    /// ターゲットバッファ情報 (draft-ietf-moq-msf-02 §5.2.10 (Buffers))
     ///
     /// isLive=false の場合は無視され encode されない。
     pub buffers: Option<MsfBuffers>,
-    /// トラックラベル (draft-ietf-moq-msf-01 §5.2.10 (Track label))
+    /// トラックラベル (draft-ietf-moq-msf-02 §5.2.11 (Track label))
     pub label: Option<String>,
-    /// レンダーグループ (draft-ietf-moq-msf-01 §5.2.11 (Render group))
+    /// レンダーグループ (draft-ietf-moq-msf-02 §5.2.12 (Render group))
     pub render_group: Option<u64>,
-    /// オルタネートグループ (draft-ietf-moq-msf-01 §5.2.12 (Alternate group))
+    /// オルタネートグループ (draft-ietf-moq-msf-02 §5.2.13 (Alternate group))
     pub alt_group: Option<u64>,
-    /// 初期化データ参照 (draft-ietf-moq-msf-01 §5.2.13 (Initialization reference))
+    /// アクセス可能ウィンドウ (draft-ietf-moq-msf-02 §5.2.45 (Accessible Window Time)) ミリ秒
+    ///
+    /// 同じ altGroup の track は、すべて値を持たないか、すべて同じ値を持たなければならない。
+    pub accessible_window_time: Option<u64>,
+    /// キーフレーム間隔 (draft-ietf-moq-msf-02 §5.2.46 (Keyframe Spacing))
+    pub keyframe_spacing: Option<u64>,
+    /// 初期化データ参照 (draft-ietf-moq-msf-02 §5.2.14 (Initialization reference))
     pub init_ref: Option<String>,
-    /// 依存トラック名配列 (draft-ietf-moq-msf-01 §5.2.14 (Dependencies))
-    pub depends: Vec<String>,
-    /// メディアタイムラインテンプレート (draft-ietf-moq-msf-01 §5.2.15 (Template))
+    /// 依存トラック / renderGroup 配列 (draft-ietf-moq-msf-02 §5.2.15 (Dependencies))
+    pub depends: Vec<MsfDependency>,
+    /// メディアタイムラインテンプレート (draft-ietf-moq-msf-02 §5.2.16 (Template))
     pub template: Option<MsfTemplate>,
-    /// テンポラル ID (draft-ietf-moq-msf-01 §5.2.16 (Temporal ID))
+    /// テンポラル ID (draft-ietf-moq-msf-02 §5.2.17 (Temporal ID))
     pub temporal_id: Option<u64>,
-    /// スペーシャル ID (draft-ietf-moq-msf-01 §5.2.17 (Spatial ID))
+    /// スペーシャル ID (draft-ietf-moq-msf-02 §5.2.18 (Spatial ID))
     pub spatial_id: Option<u64>,
-    /// コーデック (draft-ietf-moq-msf-01 §5.2.18 (Codec))
+    /// コーデック (draft-ietf-moq-msf-02 §5.2.19 (Codec))
     pub codec: Option<String>,
-    /// MIME タイプ (draft-ietf-moq-msf-01 §5.2.19 (Mimetype))
+    /// MIME タイプ (draft-ietf-moq-msf-02 §5.2.20 (Mimetype))
     pub mime_type: Option<String>,
-    /// フレームレート fps (draft-ietf-moq-msf-01 §5.2.20 (Framerate))
+    /// フレームレート fps (draft-ietf-moq-msf-02 §5.2.21 (Framerate))
     pub framerate: Option<f64>,
-    /// タイムスケール (draft-ietf-moq-msf-01 §5.2.21 (Timescale))
+    /// タイムスケール (draft-ietf-moq-msf-02 §5.2.22 (Timescale))
     pub timescale: Option<u64>,
-    /// 最大ビットレート bps (draft-ietf-moq-msf-01 §5.2.22 (Maximum Bitrate))
+    /// 最大ビットレート bps (draft-ietf-moq-msf-02 §5.2.23 (Maximum Bitrate))
     pub bitrate: Option<u64>,
-    /// 平均ビットレート bps (draft-ietf-moq-msf-01 §5.2.23 (Average Bitrate))
+    /// 平均ビットレート bps (draft-ietf-moq-msf-02 §5.2.24 (Average Bitrate))
     pub avg_bitrate: Option<u64>,
-    /// 最大 GOP 長 ms (draft-ietf-moq-msf-01 §5.2.24 (Maximum GOP Duration))
+    /// 最大 GOP 長 ms (draft-ietf-moq-msf-02 §5.2.25 (Maximum GOP Duration))
     pub max_gop_duration: Option<u64>,
-    /// 最大 Group 長 ms (draft-ietf-moq-msf-01 §5.2.25 (Maximum Group Duration))
+    /// 最大 Group 長 ms (draft-ietf-moq-msf-02 §5.2.26 (Maximum Group Duration))
     pub max_group_duration: Option<u64>,
-    /// エンコード幅 px (draft-ietf-moq-msf-01 §5.2.26 (Width))
+    /// エンコード幅 px (draft-ietf-moq-msf-02 §5.2.27 (Width))
     pub width: Option<u64>,
-    /// エンコード高さ px (draft-ietf-moq-msf-01 §5.2.27 (Height))
+    /// エンコード高さ px (draft-ietf-moq-msf-02 §5.2.28 (Height))
     pub height: Option<u64>,
-    /// オーディオサンプルレート Hz (draft-ietf-moq-msf-01 §5.2.28 (Audio sample rate))
+    /// オーディオサンプルレート Hz (draft-ietf-moq-msf-02 §5.2.29 (Audio sample rate))
     pub samplerate: Option<u64>,
-    /// チャンネル設定 (draft-ietf-moq-msf-01 §5.2.29 (Channel configuration))
+    /// チャンネル設定 (draft-ietf-moq-msf-02 §5.2.30 (Channel configuration))
     pub channel_config: Option<String>,
-    /// 表示幅 px (draft-ietf-moq-msf-01 §5.2.30 (Display width))
+    /// 表示幅 px (draft-ietf-moq-msf-02 §5.2.31 (Display width))
     pub display_width: Option<u64>,
-    /// 表示高さ px (draft-ietf-moq-msf-01 §5.2.31 (Display height))
+    /// 表示高さ px (draft-ietf-moq-msf-02 §5.2.32 (Display height))
     pub display_height: Option<u64>,
-    /// 言語タグ (draft-ietf-moq-msf-01 §5.2.32 (Language))
+    /// 言語タグ (draft-ietf-moq-msf-02 §5.2.33 (Language))
     pub lang: Option<String>,
-    /// 親トラック名 (draft-ietf-moq-msf-01 §5.2.33 (Parent name)) - cloneTracks 内のみ
+    /// 親トラック名 (draft-ietf-moq-msf-02 §5.2.34 (Parent name)) - cloneTracks 内のみ
     pub parent_name: Option<String>,
-    /// トラック長 ms (draft-ietf-moq-msf-01 §5.2.35 (Track duration))
+    /// トラック長 ms (draft-ietf-moq-msf-02 §5.2.36 (Track duration))
     pub track_duration: Option<u64>,
-    /// 接続先 URI (draft-ietf-moq-msf-01 §5.2.36 (Connection URI))
+    /// 接続先 URI (draft-ietf-moq-msf-02 §5.2.37 (Connection URI))
     pub connection_uri: Option<String>,
-    /// 認証トークン (draft-ietf-moq-msf-01 §5.2.37 (Token))
-    pub token: Option<String>,
-    /// 暗号化方式 (draft-ietf-moq-msf-01 §5.2.38 (Encryption Scheme))
+    /// 暗号化方式 (draft-ietf-moq-msf-02 §5.2.38 (Encryption Scheme))
     pub encryption_scheme: Option<String>,
-    /// 暗号スイート (draft-ietf-moq-msf-01 §5.2.39 (Cipher Suite))
+    /// 暗号スイート (draft-ietf-moq-msf-02 §5.2.39 (Cipher Suite))
     pub cipher_suite: Option<String>,
-    /// 鍵識別子 (draft-ietf-moq-msf-01 §5.2.40 (Key ID))
+    /// 鍵識別子 (draft-ietf-moq-msf-02 §5.2.40 (Key ID))
     pub key_id: Option<String>,
-    /// track 基本鍵 (draft-ietf-moq-msf-01 §5.2.41 (Track Base Key))
+    /// track 基本鍵 (draft-ietf-moq-msf-02 §5.2.41 (Track Base Key))
     pub track_base_key: Option<String>,
-    /// 認可情報 (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))
+    /// 認可情報 (draft-ietf-moq-msf-02 §5.2.42 (Authorization Info))
     pub auth_info: Option<Vec<MsfAuthInfo>>,
-    /// accessibility 記述子列 (draft-ietf-moq-msf-01 §5.2.44 (Accessibility))
+    /// accessibility 記述子列 (draft-ietf-moq-msf-02 §5.2.44 (Accessibility))
     pub accessibility: Vec<MsfAccessibility>,
 }
 
@@ -527,6 +757,7 @@ impl core::fmt::Debug for MsfTrack {
             name,
             namespace,
             packaging,
+            packaging_metadata,
             event_type,
             role,
             is_live,
@@ -535,6 +766,8 @@ impl core::fmt::Debug for MsfTrack {
             label,
             render_group,
             alt_group,
+            accessible_window_time,
+            keyframe_spacing,
             init_ref,
             depends,
             template,
@@ -558,7 +791,6 @@ impl core::fmt::Debug for MsfTrack {
             parent_name,
             track_duration,
             connection_uri,
-            token,
             encryption_scheme,
             cipher_suite,
             key_id,
@@ -570,6 +802,7 @@ impl core::fmt::Debug for MsfTrack {
             .field("name", name)
             .field("namespace", namespace)
             .field("packaging", packaging)
+            .field("packaging_metadata", packaging_metadata)
             .field("event_type", event_type)
             .field("role", role)
             .field("is_live", is_live)
@@ -578,6 +811,8 @@ impl core::fmt::Debug for MsfTrack {
             .field("label", label)
             .field("render_group", render_group)
             .field("alt_group", alt_group)
+            .field("accessible_window_time", accessible_window_time)
+            .field("keyframe_spacing", keyframe_spacing)
             .field("init_ref", init_ref)
             .field("depends", depends)
             .field("template", template)
@@ -601,7 +836,6 @@ impl core::fmt::Debug for MsfTrack {
             .field("parent_name", parent_name)
             .field("track_duration", track_duration)
             .field("connection_uri", &connection_uri.as_ref().map(String::len))
-            .field("token", &token.as_ref().map(String::len))
             .field("encryption_scheme", encryption_scheme)
             .field("cipher_suite", cipher_suite)
             .field("key_id", key_id)
@@ -618,6 +852,7 @@ impl MsfTrack {
         Self {
             name,
             packaging,
+            packaging_metadata: None,
             namespace: None,
             event_type: None,
             role: None,
@@ -627,6 +862,8 @@ impl MsfTrack {
             label: None,
             render_group: None,
             alt_group: None,
+            accessible_window_time: None,
+            keyframe_spacing: None,
             init_ref: None,
             depends: Vec::new(),
             template: None,
@@ -650,7 +887,6 @@ impl MsfTrack {
             parent_name: None,
             track_duration: None,
             connection_uri: None,
-            token: None,
             encryption_scheme: None,
             cipher_suite: None,
             key_id: None,
@@ -658,6 +894,32 @@ impl MsfTrack {
             auth_info: None,
             accessibility: Vec::new(),
         }
+    }
+
+    /// packagingMetadata の指定 key の値を返す
+    ///
+    /// draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata): `;` 区切りの `key=value` を
+    /// 先頭から探し、最初に現れた key の値を返す。未知の key は `None` になる。
+    /// 構文は decode / encode 時に `validate_packaging_metadata` で検証済みである。
+    /// `streamMapping` の値の解釈と、キーがない場合の既定 `group` は
+    /// [`MsfTrack::stream_mapping`] が扱う。
+    pub fn packaging_metadata_value(&self, key: &str) -> Option<&str> {
+        self.packaging_metadata
+            .as_deref()?
+            .split(';')
+            .filter_map(|element| element.split_once('='))
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| value)
+    }
+
+    /// LOC packaging の stream mapping を返す
+    ///
+    /// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping): `packagingMetadata` の
+    /// `streamMapping` を解釈する。キーがない場合は `Group`、`group` / `object` 以外は
+    /// `InvalidCatalog` にする。`streamMapping` は `loc` packaging 向けのキーであり、
+    /// 他の packaging では未知キーとして無視されるが、本メソッドは互換のため値を解釈する。
+    pub fn stream_mapping(&self) -> Result<StreamMapping, MessageError> {
+        StreamMapping::from_value(self.packaging_metadata_value("streamMapping"))
     }
 }
 
@@ -676,6 +938,7 @@ impl MsfTrack {
 struct TrackJsonParts<'a> {
     name: &'a str,
     packaging: Option<&'a str>,
+    packaging_metadata: Option<&'a str>,
     parent_name: Option<&'a str>,
     parent_namespace: Option<&'a str>,
     namespace: Option<&'a str>,
@@ -687,8 +950,10 @@ struct TrackJsonParts<'a> {
     label: Option<&'a str>,
     render_group: Option<u64>,
     alt_group: Option<u64>,
+    accessible_window_time: Option<u64>,
+    keyframe_spacing: Option<u64>,
     init_ref: Option<&'a str>,
-    depends: Option<&'a [String]>,
+    depends: Option<&'a [MsfDependency]>,
     template: Option<&'a MsfTemplate>,
     temporal_id: Option<u64>,
     spatial_id: Option<u64>,
@@ -709,7 +974,6 @@ struct TrackJsonParts<'a> {
     lang: Option<&'a str>,
     track_duration: Option<u64>,
     connection_uri: Option<&'a str>,
-    token: Option<&'a str>,
     encryption_scheme: Option<&'a str>,
     cipher_suite: Option<&'a str>,
     key_id: Option<&'a str>,
@@ -736,6 +1000,9 @@ fn write_track_json(
     if let Some(v) = p.packaging {
         f.member("packaging", v)?;
     }
+    if let Some(v) = p.packaging_metadata {
+        f.member("packagingMetadata", v)?;
+    }
     if let Some(v) = p.namespace {
         f.member("namespace", v)?;
     }
@@ -749,7 +1016,7 @@ fn write_track_json(
         f.member("isLive", v)?;
     }
     // decode 側が isLive=false で targetLatency / buffers を None に正規化するため、
-    // encode も省略して対称にする。draft-ietf-moq-msf-01 §5.2.8 / §5.2.9 は
+    // encode も省略して対称にする。draft-ietf-moq-msf-02 §5.2.9 / §5.2.10 は
     // 受信側の無視規則であり、エンコーダの出力禁止ではない。
     if p.is_live != Some(false) {
         if let Some(v) = p.target_latency {
@@ -768,16 +1035,19 @@ fn write_track_json(
     if let Some(v) = p.alt_group {
         f.member("altGroup", v)?;
     }
+    if let Some(v) = p.accessible_window_time {
+        f.member("accessibleWindowTime", v)?;
+    }
+    if let Some(v) = p.keyframe_spacing {
+        f.member("keyframeSpacing", v)?;
+    }
     if let Some(v) = p.init_ref {
         f.member("initRef", v)?;
     }
     if let Some(deps) = p.depends
         && (p.is_clone || !deps.is_empty())
     {
-        f.member(
-            "depends",
-            nojson::array(|f| f.elements(deps.iter().map(|s| s.as_str()))),
-        )?;
+        f.member("depends", nojson::array(|f| f.elements(deps.iter())))?;
     }
     if let Some(v) = p.template {
         f.member("template", v)?;
@@ -843,10 +1113,7 @@ fn write_track_json(
         f.member("trackDuration", v)?;
     }
     if let Some(v) = p.connection_uri {
-        f.member("connectionUri", v)?;
-    }
-    if let Some(v) = p.token {
-        f.member("token", v)?;
+        f.member("connectionURI", v)?;
     }
     if let Some(v) = p.encryption_scheme {
         f.member("encryptionScheme", v)?;
@@ -879,6 +1146,7 @@ impl DisplayJson for MsfTrack {
                 &TrackJsonParts {
                     name: &self.name,
                     packaging: Some(self.packaging.as_str()),
+                    packaging_metadata: self.packaging_metadata.as_deref(),
                     parent_name: self.parent_name.as_deref(),
                     parent_namespace: None,
                     namespace: self.namespace.as_deref(),
@@ -890,6 +1158,8 @@ impl DisplayJson for MsfTrack {
                     label: self.label.as_deref(),
                     render_group: self.render_group,
                     alt_group: self.alt_group,
+                    accessible_window_time: self.accessible_window_time,
+                    keyframe_spacing: self.keyframe_spacing,
                     init_ref: self.init_ref.as_deref(),
                     depends: Some(self.depends.as_slice()),
                     template: self.template.as_ref(),
@@ -912,7 +1182,6 @@ impl DisplayJson for MsfTrack {
                     lang: self.lang.as_deref(),
                     track_duration: self.track_duration,
                     connection_uri: self.connection_uri.as_deref(),
-                    token: self.token.as_deref(),
                     encryption_scheme: self.encryption_scheme.as_deref(),
                     cipher_suite: self.cipher_suite.as_deref(),
                     key_id: self.key_id.as_deref(),
@@ -926,109 +1195,126 @@ impl DisplayJson for MsfTrack {
     }
 }
 
-/// cloneTracks 内のトラック定義 (draft-ietf-moq-msf-01 §5.1.6 (Delta update))
+/// cloneTracks 内のトラック定義 (draft-ietf-moq-msf-02 §5.1.6 (Delta update))
 ///
-/// draft-ietf-moq-msf-01 §5.1.6 (Delta update): cloned track は親の全属性を継承し、
+/// draft-ietf-moq-msf-02 §5.1.6 (Delta update): cloned track は親の全属性を継承し、
 /// 再定義された属性のみ上書きする。
 /// Track Name は新規でなければならない。
 /// この仕様は将来変更される可能性がある。
 ///
-/// `Debug` は機密値を伏せる。`token` (§5.2.37 の認証トークン)、`track_base_key` (§5.2.41 の
-/// 鍵材料)、`connection_uri` (§11.4.2 のとおり token パラメータを含み得る endpoint URI) は、
-/// 値の代わりにバイト長を `Option<usize>` で表示する。`auth_info` は [`MsfAuthInfo`] の
-/// `Debug` で値を伏せる。
+/// `Debug` は機密値を伏せる。`track_base_key` (§5.2.41 の鍵材料) と `connection_uri`
+/// (§11.4.2 のとおり token パラメータを含み得る endpoint URI) は、値の代わりにバイト長を
+/// `Option<usize>` で表示する。`auth_info` は [`MsfAuthInfo`] の `Debug` で値を伏せる。
 #[derive(Clone, PartialEq)]
 pub struct MsfCloneTrack {
-    /// トラック名 (draft-ietf-moq-msf-01 §5.2.3 (Track name)) - 必須、新規でなければならない
-    pub name: String,
-    /// 親トラック名 (draft-ietf-moq-msf-01 §5.2.33 (Parent name)) - 必須
-    pub parent_name: String,
-    /// 親トラックネームスペース (draft-ietf-moq-msf-01 §5.2.34 (Parent namespace))
+    /// トラック名 (draft-ietf-moq-msf-02 §5.2.3 (Track name)) - 必須、新規でなければならない
     ///
+    /// 空文字列は禁止され (§5.2.3 (Track name))、NUL は禁止される
+    /// (§11.2.1 (Producing bytes from a JSON string))。
+    pub name: String,
+    /// 親トラック名 (draft-ietf-moq-msf-02 §5.2.34 (Parent name)) - 必須
+    ///
+    /// 空文字列は禁止され (§5.2.3 (Track name))、NUL は禁止される
+    /// (§11.2.1 (Producing bytes from a JSON string))。
+    pub parent_name: String,
+    /// 親トラックネームスペース (draft-ietf-moq-msf-02 §5.2.35 (Parent namespace))
+    ///
+    /// `/` 区切りの JSON 文字列で、1 〜 32 個の非空 field を持ち、NUL を含まない。
     /// `None` のときはカタログのネームスペースが親のネームスペースと仮定される。
     /// この仕様は将来変更される可能性がある。
     pub parent_namespace: Option<String>,
-    /// パッケージングタイプ (draft-ietf-moq-msf-01 §5.2.4 (Packaging)) - 省略時は親から継承
+    /// パッケージングタイプ (draft-ietf-moq-msf-02 §5.2.4 (Packaging)) - 省略時は親から継承
     pub packaging: Option<MsfPackaging>,
-    /// トラックネームスペース (draft-ietf-moq-msf-01 §5.2.2 (Track namespace))
+    /// パッケージング固有メタデータ (draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata))
+    ///
+    /// `;` 区切りの `key=value`。`None` のときは親トラックから継承する。
+    pub packaging_metadata: Option<String>,
+    /// トラックネームスペース (draft-ietf-moq-msf-02 §5.2.2 (Track namespace))
+    ///
+    /// `/` 区切りの JSON 文字列で、1 〜 32 個の非空 field を持ち、NUL を含まない。
+    /// `None` のときは clone の親トラックの namespace を継承する (§5.1.6 (Delta update))。
     pub namespace: Option<String>,
-    /// イベントタイムラインタイプ (draft-ietf-moq-msf-01 §5.2.5 (Event timeline type))
+    /// イベントタイムラインタイプ (draft-ietf-moq-msf-02 §5.2.6 (Event timeline type))
     pub event_type: Option<String>,
-    /// トラックロール (draft-ietf-moq-msf-01 §5.2.6 (Track role))
+    /// トラックロール (draft-ietf-moq-msf-02 §5.2.7 (Track role))
     pub role: Option<String>,
-    /// ライブフラグ (draft-ietf-moq-msf-01 §5.2.7 (Is Live)) - 省略時は親から継承
+    /// ライブフラグ (draft-ietf-moq-msf-02 §5.2.8 (Is Live)) - 省略時は親から継承
     pub is_live: Option<bool>,
-    /// ターゲットレイテンシ ms (draft-ietf-moq-msf-01 §5.2.8 (Target latency))
+    /// ターゲットレイテンシ ms (draft-ietf-moq-msf-02 §5.2.9 (Target latency))
     ///
     /// isLive が Some(false) の場合は無視され encode されない。None (親から継承) と Some(true) では出力する。
     pub target_latency: Option<u64>,
-    /// ターゲットバッファ情報 (draft-ietf-moq-msf-01 §5.2.9 (Buffers))
+    /// ターゲットバッファ情報 (draft-ietf-moq-msf-02 §5.2.10 (Buffers))
     ///
     /// isLive が Some(false) の場合は無視され encode されない。None (親から継承) と Some(true) では出力する。
     pub buffers: Option<MsfBuffers>,
-    /// トラックラベル (draft-ietf-moq-msf-01 §5.2.10 (Track label))
+    /// トラックラベル (draft-ietf-moq-msf-02 §5.2.11 (Track label))
     pub label: Option<String>,
-    /// レンダーグループ (draft-ietf-moq-msf-01 §5.2.11 (Render group))
+    /// レンダーグループ (draft-ietf-moq-msf-02 §5.2.12 (Render group))
     pub render_group: Option<u64>,
-    /// オルタネートグループ (draft-ietf-moq-msf-01 §5.2.12 (Alternate group))
+    /// オルタネートグループ (draft-ietf-moq-msf-02 §5.2.13 (Alternate group))
     pub alt_group: Option<u64>,
-    /// 初期化データ参照 (draft-ietf-moq-msf-01 §5.2.13 (Initialization reference))
+    /// アクセス可能ウィンドウ (draft-ietf-moq-msf-02 §5.2.45 (Accessible Window Time)) ミリ秒
+    ///
+    /// 同じ altGroup の track は、すべて値を持たないか、すべて同じ値を持たなければならない。
+    pub accessible_window_time: Option<u64>,
+    /// キーフレーム間隔 (draft-ietf-moq-msf-02 §5.2.46 (Keyframe Spacing))
+    pub keyframe_spacing: Option<u64>,
+    /// 初期化データ参照 (draft-ietf-moq-msf-02 §5.2.14 (Initialization reference))
     pub init_ref: Option<String>,
-    /// 依存トラック名配列 (draft-ietf-moq-msf-01 §5.2.14 (Dependencies)) - None は親から継承
-    pub depends: Option<Vec<String>>,
-    /// メディアタイムラインテンプレート (draft-ietf-moq-msf-01 §5.2.15 (Template)) - None は親から継承
+    /// 依存トラック / renderGroup 配列 (draft-ietf-moq-msf-02 §5.2.15 (Dependencies)) - None は親から継承
+    pub depends: Option<Vec<MsfDependency>>,
+    /// メディアタイムラインテンプレート (draft-ietf-moq-msf-02 §5.2.16 (Template)) - None は親から継承
     pub template: Option<MsfTemplate>,
-    /// テンポラル ID (draft-ietf-moq-msf-01 §5.2.16 (Temporal ID))
+    /// テンポラル ID (draft-ietf-moq-msf-02 §5.2.17 (Temporal ID))
     pub temporal_id: Option<u64>,
-    /// スペーシャル ID (draft-ietf-moq-msf-01 §5.2.17 (Spatial ID))
+    /// スペーシャル ID (draft-ietf-moq-msf-02 §5.2.18 (Spatial ID))
     pub spatial_id: Option<u64>,
-    /// コーデック (draft-ietf-moq-msf-01 §5.2.18 (Codec))
+    /// コーデック (draft-ietf-moq-msf-02 §5.2.19 (Codec))
     pub codec: Option<String>,
-    /// MIME タイプ (draft-ietf-moq-msf-01 §5.2.19 (Mimetype))
+    /// MIME タイプ (draft-ietf-moq-msf-02 §5.2.20 (Mimetype))
     pub mime_type: Option<String>,
-    /// フレームレート fps (draft-ietf-moq-msf-01 §5.2.20 (Framerate))
+    /// フレームレート fps (draft-ietf-moq-msf-02 §5.2.21 (Framerate))
     pub framerate: Option<f64>,
-    /// タイムスケール (draft-ietf-moq-msf-01 §5.2.21 (Timescale))
+    /// タイムスケール (draft-ietf-moq-msf-02 §5.2.22 (Timescale))
     pub timescale: Option<u64>,
-    /// 最大ビットレート bps (draft-ietf-moq-msf-01 §5.2.22 (Maximum Bitrate))
+    /// 最大ビットレート bps (draft-ietf-moq-msf-02 §5.2.23 (Maximum Bitrate))
     pub bitrate: Option<u64>,
-    /// 平均ビットレート bps (draft-ietf-moq-msf-01 §5.2.23 (Average Bitrate))
+    /// 平均ビットレート bps (draft-ietf-moq-msf-02 §5.2.24 (Average Bitrate))
     pub avg_bitrate: Option<u64>,
-    /// 最大 GOP 長 ms (draft-ietf-moq-msf-01 §5.2.24 (Maximum GOP Duration))
+    /// 最大 GOP 長 ms (draft-ietf-moq-msf-02 §5.2.25 (Maximum GOP Duration))
     pub max_gop_duration: Option<u64>,
-    /// 最大 Group 長 ms (draft-ietf-moq-msf-01 §5.2.25 (Maximum Group Duration))
+    /// 最大 Group 長 ms (draft-ietf-moq-msf-02 §5.2.26 (Maximum Group Duration))
     pub max_group_duration: Option<u64>,
-    /// エンコード幅 px (draft-ietf-moq-msf-01 §5.2.26 (Width))
+    /// エンコード幅 px (draft-ietf-moq-msf-02 §5.2.27 (Width))
     pub width: Option<u64>,
-    /// エンコード高さ px (draft-ietf-moq-msf-01 §5.2.27 (Height))
+    /// エンコード高さ px (draft-ietf-moq-msf-02 §5.2.28 (Height))
     pub height: Option<u64>,
-    /// オーディオサンプルレート Hz (draft-ietf-moq-msf-01 §5.2.28 (Audio sample rate))
+    /// オーディオサンプルレート Hz (draft-ietf-moq-msf-02 §5.2.29 (Audio sample rate))
     pub samplerate: Option<u64>,
-    /// チャンネル設定 (draft-ietf-moq-msf-01 §5.2.29 (Channel configuration))
+    /// チャンネル設定 (draft-ietf-moq-msf-02 §5.2.30 (Channel configuration))
     pub channel_config: Option<String>,
-    /// 表示幅 px (draft-ietf-moq-msf-01 §5.2.30 (Display width))
+    /// 表示幅 px (draft-ietf-moq-msf-02 §5.2.31 (Display width))
     pub display_width: Option<u64>,
-    /// 表示高さ px (draft-ietf-moq-msf-01 §5.2.31 (Display height))
+    /// 表示高さ px (draft-ietf-moq-msf-02 §5.2.32 (Display height))
     pub display_height: Option<u64>,
-    /// 言語タグ (draft-ietf-moq-msf-01 §5.2.32 (Language))
+    /// 言語タグ (draft-ietf-moq-msf-02 §5.2.33 (Language))
     pub lang: Option<String>,
-    /// トラック長 ms (draft-ietf-moq-msf-01 §5.2.35 (Track duration))
+    /// トラック長 ms (draft-ietf-moq-msf-02 §5.2.36 (Track duration))
     pub track_duration: Option<u64>,
-    /// 接続先 URI (draft-ietf-moq-msf-01 §5.2.36 (Connection URI))
+    /// 接続先 URI (draft-ietf-moq-msf-02 §5.2.37 (Connection URI))
     pub connection_uri: Option<String>,
-    /// 認証トークン (draft-ietf-moq-msf-01 §5.2.37 (Token))
-    pub token: Option<String>,
-    /// 暗号化方式 (draft-ietf-moq-msf-01 §5.2.38 (Encryption Scheme))
+    /// 暗号化方式 (draft-ietf-moq-msf-02 §5.2.38 (Encryption Scheme))
     pub encryption_scheme: Option<String>,
-    /// 暗号スイート (draft-ietf-moq-msf-01 §5.2.39 (Cipher Suite))
+    /// 暗号スイート (draft-ietf-moq-msf-02 §5.2.39 (Cipher Suite))
     pub cipher_suite: Option<String>,
-    /// 鍵識別子 (draft-ietf-moq-msf-01 §5.2.40 (Key ID))
+    /// 鍵識別子 (draft-ietf-moq-msf-02 §5.2.40 (Key ID))
     pub key_id: Option<String>,
-    /// track 基本鍵 (draft-ietf-moq-msf-01 §5.2.41 (Track Base Key))
+    /// track 基本鍵 (draft-ietf-moq-msf-02 §5.2.41 (Track Base Key))
     pub track_base_key: Option<String>,
-    /// 認可情報 (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info)) - None は親から継承
+    /// 認可情報 (draft-ietf-moq-msf-02 §5.2.42 (Authorization Info)) - None は親から継承
     pub auth_info: Option<Vec<MsfAuthInfo>>,
-    /// accessibility 記述子列 (draft-ietf-moq-msf-01 §5.2.44 (Accessibility)) - None は親から継承
+    /// accessibility 記述子列 (draft-ietf-moq-msf-02 §5.2.44 (Accessibility)) - None は親から継承
     pub accessibility: Option<Vec<MsfAccessibility>>,
 }
 
@@ -1040,6 +1326,7 @@ impl core::fmt::Debug for MsfCloneTrack {
             parent_name,
             parent_namespace,
             packaging,
+            packaging_metadata,
             namespace,
             event_type,
             role,
@@ -1049,6 +1336,8 @@ impl core::fmt::Debug for MsfCloneTrack {
             label,
             render_group,
             alt_group,
+            accessible_window_time,
+            keyframe_spacing,
             init_ref,
             depends,
             template,
@@ -1071,7 +1360,6 @@ impl core::fmt::Debug for MsfCloneTrack {
             lang,
             track_duration,
             connection_uri,
-            token,
             encryption_scheme,
             cipher_suite,
             key_id,
@@ -1084,6 +1372,7 @@ impl core::fmt::Debug for MsfCloneTrack {
             .field("parent_name", parent_name)
             .field("parent_namespace", parent_namespace)
             .field("packaging", packaging)
+            .field("packaging_metadata", packaging_metadata)
             .field("namespace", namespace)
             .field("event_type", event_type)
             .field("role", role)
@@ -1093,6 +1382,8 @@ impl core::fmt::Debug for MsfCloneTrack {
             .field("label", label)
             .field("render_group", render_group)
             .field("alt_group", alt_group)
+            .field("accessible_window_time", accessible_window_time)
+            .field("keyframe_spacing", keyframe_spacing)
             .field("init_ref", init_ref)
             .field("depends", depends)
             .field("template", template)
@@ -1115,7 +1406,6 @@ impl core::fmt::Debug for MsfCloneTrack {
             .field("lang", lang)
             .field("track_duration", track_duration)
             .field("connection_uri", &connection_uri.as_ref().map(String::len))
-            .field("token", &token.as_ref().map(String::len))
             .field("encryption_scheme", encryption_scheme)
             .field("cipher_suite", cipher_suite)
             .field("key_id", key_id)
@@ -1130,13 +1420,14 @@ impl MsfCloneTrack {
     /// name / parentName のみを指定して clone トラック定義を作成する
     ///
     /// 他の属性はすべて未指定 (`None`) とし、親トラックから継承する
-    /// (draft-ietf-moq-msf-01 §5.1.6 (Delta update))。
+    /// (draft-ietf-moq-msf-02 §5.1.6 (Delta update))。
     pub fn new(name: String, parent_name: String) -> Self {
         Self {
             name,
             parent_name,
             parent_namespace: None,
             packaging: None,
+            packaging_metadata: None,
             namespace: None,
             event_type: None,
             role: None,
@@ -1146,6 +1437,8 @@ impl MsfCloneTrack {
             label: None,
             render_group: None,
             alt_group: None,
+            accessible_window_time: None,
+            keyframe_spacing: None,
             init_ref: None,
             depends: None,
             template: None,
@@ -1168,7 +1461,6 @@ impl MsfCloneTrack {
             lang: None,
             track_duration: None,
             connection_uri: None,
-            token: None,
             encryption_scheme: None,
             cipher_suite: None,
             key_id: None,
@@ -1187,6 +1479,7 @@ impl DisplayJson for MsfCloneTrack {
                 &TrackJsonParts {
                     name: &self.name,
                     packaging: self.packaging.as_ref().map(|p| p.as_str()),
+                    packaging_metadata: self.packaging_metadata.as_deref(),
                     parent_name: Some(self.parent_name.as_str()),
                     parent_namespace: self.parent_namespace.as_deref(),
                     namespace: self.namespace.as_deref(),
@@ -1198,6 +1491,8 @@ impl DisplayJson for MsfCloneTrack {
                     label: self.label.as_deref(),
                     render_group: self.render_group,
                     alt_group: self.alt_group,
+                    accessible_window_time: self.accessible_window_time,
+                    keyframe_spacing: self.keyframe_spacing,
                     init_ref: self.init_ref.as_deref(),
                     depends: self.depends.as_deref(),
                     template: self.template.as_ref(),
@@ -1220,7 +1515,6 @@ impl DisplayJson for MsfCloneTrack {
                     lang: self.lang.as_deref(),
                     track_duration: self.track_duration,
                     connection_uri: self.connection_uri.as_deref(),
-                    token: self.token.as_deref(),
                     encryption_scheme: self.encryption_scheme.as_deref(),
                     cipher_suite: self.cipher_suite.as_deref(),
                     key_id: self.key_id.as_deref(),
@@ -1237,7 +1531,7 @@ impl DisplayJson for MsfCloneTrack {
 impl MsfCloneTrack {
     /// 親トラックの属性を継承し、clone で再定義された属性で上書きしたトラックを生成する
     ///
-    /// draft-ietf-moq-msf-01 §5.1.6 (Delta update): "The cloned track inherits all
+    /// draft-ietf-moq-msf-02 §5.1.6 (Delta update): "The cloned track inherits all
     /// attributes from the parent except the Track Name which MUST be new.
     /// Attributes redefined in the track object override inherited values."
     /// この仕様は将来変更される可能性がある。
@@ -1251,14 +1545,21 @@ impl MsfCloneTrack {
     /// `InvalidCatalog` を返す。検証は `validate_full_track` に一本化しており、
     /// add 経路と同じ範囲を検査する。
     pub fn into_track(self, parent: &MsfTrack) -> Result<MsfTrack, MessageError> {
-        // draft-ietf-moq-msf-01 §5.1.6 (Delta update): 再定義が無い属性は親から継承する
+        // draft-ietf-moq-msf-02 §5.1.6 (Delta update): 再定義が無い属性は親から継承する
         let packaging = self.packaging.unwrap_or(parent.packaging);
+        let packaging_metadata = self
+            .packaging_metadata
+            .or_else(|| parent.packaging_metadata.clone());
         let event_type = self.event_type.or_else(|| parent.event_type.clone());
         let role = self.role.or_else(|| parent.role.clone());
         let is_live = self.is_live.unwrap_or(parent.is_live);
         let label = self.label.or_else(|| parent.label.clone());
         let render_group = self.render_group.or(parent.render_group);
         let alt_group = self.alt_group.or(parent.alt_group);
+        let accessible_window_time = self
+            .accessible_window_time
+            .or(parent.accessible_window_time);
+        let keyframe_spacing = self.keyframe_spacing.or(parent.keyframe_spacing);
         let init_ref = self.init_ref.or_else(|| parent.init_ref.clone());
         let depends = self.depends.unwrap_or_else(|| parent.depends.clone());
         let template = self.template.or(parent.template);
@@ -1285,7 +1586,6 @@ impl MsfCloneTrack {
         let connection_uri = self
             .connection_uri
             .or_else(|| parent.connection_uri.clone());
-        let token = self.token.or_else(|| parent.token.clone());
         let encryption_scheme = self
             .encryption_scheme
             .or_else(|| parent.encryption_scheme.clone());
@@ -1301,7 +1601,7 @@ impl MsfCloneTrack {
         // clone 自身の namespace 指定が無ければ親の namespace を継承する
         let namespace = self.namespace.or_else(|| parent.namespace.clone());
 
-        // draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers):
+        // draft-ietf-moq-msf-02 §5.2.9 (Target latency) / §5.2.10 (Buffers):
         // isLive=false なら targetLatency / buffers は無視されるため継承分も含めて落とす
         let (target_latency, buffers) = if is_live {
             (
@@ -1312,19 +1612,19 @@ impl MsfCloneTrack {
             (None, None)
         };
 
-        // draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers):
+        // draft-ietf-moq-msf-02 §5.2.9 (Target latency) / §5.2.10 (Buffers):
         // 継承解決後に targetLatency と buffers が共存してはならない。
         // clone 側と親側で別々に指定された場合もここで検出する。
         validate_target_latency_buffers_exclusive(target_latency, buffers.as_ref())?;
 
-        // draft-ietf-moq-msf-01 §5.2.35 (Track duration): isLive=true なら trackDuration は禁止
+        // draft-ietf-moq-msf-02 §5.2.36 (Track duration): isLive=true なら trackDuration は禁止
         if is_live && track_duration.is_some() {
             return Err(MessageError::InvalidCatalog(
                 "trackDuration MUST NOT be included when isLive is true".to_string(),
             ));
         }
 
-        // draft-ietf-moq-msf-01 §5.2.5 (Event timeline type): eventtimeline なら eventType 必須、それ以外では禁止
+        // draft-ietf-moq-msf-02 §5.2.6 (Event timeline type): eventtimeline なら eventType 必須、それ以外では禁止
         let is_event_timeline = matches!(packaging, MsfPackaging::EventTimeline);
         if is_event_timeline && event_type.is_none() {
             return Err(MessageError::InvalidCatalog(
@@ -1336,39 +1636,20 @@ impl MsfCloneTrack {
             event_type.as_deref(),
         )?;
 
-        // draft-ietf-moq-msf-01 §7.2 (Media Timeline Catalog requirements) / §8.2 (Event Timeline Catalog requirements):
+        // draft-ietf-moq-msf-02 §7.2 (Media Timeline Catalog requirements) / §8.3 (Event Timeline Catalog requirements):
         // timeline は depends 必須、mimeType=application/json 必須
         let is_media_timeline = matches!(packaging, MsfPackaging::MediaTimeline);
-        if is_media_timeline {
-            if depends.is_empty() {
-                return Err(MessageError::InvalidCatalog(
-                    "mediatimeline track MUST have a 'depends' attribute".to_string(),
-                ));
-            }
-            if mime_type.as_deref() != Some("application/json") {
-                return Err(MessageError::InvalidCatalog(
-                    "mediatimeline track mimeType MUST be 'application/json'".to_string(),
-                ));
-            }
-        }
-        if is_event_timeline {
-            if depends.is_empty() {
-                return Err(MessageError::InvalidCatalog(
-                    "eventtimeline track MUST have a 'depends' attribute".to_string(),
-                ));
-            }
-            if mime_type.as_deref() != Some("application/json") {
-                return Err(MessageError::InvalidCatalog(
-                    "eventtimeline track mimeType MUST be 'application/json'".to_string(),
-                ));
-            }
+        if is_media_timeline && depends.is_empty() {
+            return Err(MessageError::InvalidCatalog(
+                "mediatimeline track MUST have a 'depends' attribute".to_string(),
+            ));
         }
 
-        // draft-ietf-moq-msf-01 §5.2.39 (Cipher suite) / §4.3.3 (Recommended encryption scheme):
-        // 暗号化 signaling の必須組
-        if encryption_scheme.is_some() && cipher_suite.is_none() {
+        // draft-ietf-moq-msf-02 §5.2.39 (Cipher suite) / §4.4.3 (Recommended encryption scheme):
+        // cipherSuite は encryptionScheme が moq-secure-objects のときだけ必須。
+        if encryption_scheme.as_deref() == Some("moq-secure-objects") && cipher_suite.is_none() {
             return Err(MessageError::InvalidCatalog(
-                "cipherSuite MUST be present when encryptionScheme is specified".to_string(),
+                "cipherSuite MUST be present with moq-secure-objects".to_string(),
             ));
         }
         if encryption_scheme.as_deref() == Some("moq-secure-objects")
@@ -1383,6 +1664,7 @@ impl MsfCloneTrack {
             name: self.name,
             namespace,
             packaging,
+            packaging_metadata,
             event_type,
             role,
             is_live,
@@ -1391,6 +1673,8 @@ impl MsfCloneTrack {
             label,
             render_group,
             alt_group,
+            accessible_window_time,
+            keyframe_spacing,
             init_ref,
             depends,
             template,
@@ -1415,7 +1699,6 @@ impl MsfCloneTrack {
             parent_name: None,
             track_duration,
             connection_uri,
-            token,
             encryption_scheme,
             cipher_suite,
             key_id,
@@ -1431,14 +1714,41 @@ impl MsfCloneTrack {
     }
 }
 
-/// removeTracks 内のトラック参照 (draft-ietf-moq-msf-01 §5.1.6 (Delta update))
+/// トラックの部分更新 (delta update の update 操作用)
+///
+/// draft-ietf-moq-msf-02 §5.1.6 (Delta update): update の track object は `parentName` を
+/// MUST、`parentNamespace` を MAY で持ち、宣言した属性が既存値を上書きする。`name` は
+/// §5.2.3 の Required のため必須で、`parentName` と一致しなければならない。名前と namespace を
+/// 変更する経路は作らない。`parentNamespace` 省略時は catalog namespace を使う。
+///
+/// 内部表現は clone の track object と同じ `MsfCloneTrack` を使う。名前の一致と namespace の
+/// 一致は decode / encode / 適用時に別途検証する。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MsfUpdateTrack {
+    /// update する属性を持つ track object
+    pub track: MsfCloneTrack,
+}
+
+impl DisplayJson for MsfUpdateTrack {
+    fn fmt(&self, f: &mut JsonFormatter<'_, '_>) -> core::fmt::Result {
+        self.track.fmt(f)
+    }
+}
+
+/// removeTracks 内のトラック参照 (draft-ietf-moq-msf-02 §5.1.6 (Delta update))
 ///
 /// name と namespace のみ保持する。
 #[derive(Debug, Clone, PartialEq)]
 pub struct MsfRemoveTrack {
     /// トラック名 (必須)
+    ///
+    /// 空文字列と NUL は禁止される (draft-ietf-moq-msf-02 §5.2.3 / §11.2.1)。
     pub name: String,
     /// トラックネームスペース
+    ///
+    /// `/` 区切りの JSON 文字列で、1 〜 32 個の非空 field を持ち、NUL を含まない。
+    /// `None` のときはカタログトラックの MOQT Track Namespace を継承する
+    /// (draft-ietf-moq-msf-02 §5.2.2)。
     pub namespace: Option<String>,
 }
 
@@ -1446,7 +1756,7 @@ impl MsfRemoveTrack {
     /// name のみを指定して削除対象トラック参照を作成する
     ///
     /// namespace は未指定 (`None`) とし、カタログの namespace を継承したものとして扱う
-    /// (draft-ietf-moq-msf-01 §5.1.6 (Delta update))。
+    /// (draft-ietf-moq-msf-02 §5.1.6 (Delta update))。
     pub fn new(name: String) -> Self {
         Self {
             name,
@@ -1467,35 +1777,38 @@ impl DisplayJson for MsfRemoveTrack {
     }
 }
 
-/// Full カタログ (draft-ietf-moq-msf-01 §5.1 (Root Catalog Fields))
+/// Full カタログ (draft-ietf-moq-msf-02 §5.1 (Root Catalog Fields))
 ///
 /// `removed_tracks` は delta update の検証のための内部状態であり、JSON には含まれない。
 /// ただし `PartialEq` / `Debug` には含まれるため、JSON が同一でも削除履歴が異なれば
 /// 等価にはならず、`Debug` には削除済みトラックも現れる。
 #[derive(Debug, Clone, PartialEq)]
 pub struct MsfCatalog {
-    /// MSF バージョン (draft-ietf-moq-msf-01 §5.1.1 (MSF version))
+    /// MSF バージョン (draft-ietf-moq-msf-02 §5.1.1 (MSF version))
     pub version: String,
-    /// カタログ生成時刻 ms (draft-ietf-moq-msf-01 §5.1.2 (Generated at))
+    /// カタログ生成時刻 ms (draft-ietf-moq-msf-02 §5.1.2 (Generated at))
     pub generated_at: Option<u64>,
-    /// ブロードキャスト完了フラグ (draft-ietf-moq-msf-01 §5.1.3 (Is Complete))
+    /// ブロードキャスト完了フラグ (draft-ietf-moq-msf-02 §5.1.3 (Is Complete))
     pub is_complete: bool,
-    /// トラック一覧 (draft-ietf-moq-msf-01 §5.1.4 (Tracks))
+    /// トラック一覧 (draft-ietf-moq-msf-02 §5.1.4 (Tracks))
     pub tracks: Vec<MsfTrack>,
-    /// publish track 一覧 (draft-ietf-moq-msf-01 §5.1.5 (Publish tracks))
+    /// publish track 一覧 (draft-ietf-moq-msf-02 §5.1.5 (Publish tracks))
     ///
     /// 未知フィールドは無視される (§5 前文の MUST ignore)。
     pub publish_tracks: Vec<MsfTrack>,
-    /// 初期化データ一覧 (draft-ietf-moq-msf-01 §5.1.7 (Initialization Data List))
+    /// 初期化データ一覧 (draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List))
     pub init_data_list: Vec<MsfInitData>,
-    /// 削除済みトラックの履歴 (キーは解決済みの (namespace, name))
+    /// 削除済みトラックの履歴 (キーは解決済みの (Track Namespace, Track Name バイト列))
     ///
-    /// draft-ietf-moq-msf-01 §5.3 (Delta updates): "The tuple of Track Namespace and Track Name
-    /// defines a fixed set of Track attributes which MUST NOT be modified after being declared."
+    /// draft-ietf-moq-msf-02 §5.2.8 (Is Live): "A True value MUST never follow a False value."
     /// を delta update の適用時に検査するための内部状態である。JSON には出力せず、
-    /// デコード直後は空になる。同じ (namespace, name) が再追加されても削除前の属性を
-    /// 保持し続ける (削除しても消えないため、remove した tuple の数だけ単調増加する)。
-    pub removed_tracks: hashbrown::HashMap<(Option<String>, String), MsfTrack>,
+    /// デコード直後は空になる。削除のたびに削除時点の track で上書きし、最新の `isLive` を
+    /// 保持する。v02 は v01 の属性不変 MUST を削除したため、属性の比較には使わない。
+    ///
+    /// キーは draft-ietf-moq-msf-02 §11.2 (Mapping catalog strings to MOQT byte values) に従い、
+    /// カタログ文字列ではなく MOQT のバイト値へ変換した後の値で比較する。基準 namespace が
+    /// 不明な場合は Track Namespace を `None` のまま保持する。
+    pub removed_tracks: hashbrown::HashMap<(Option<TrackNamespace>, Vec<u8>), MsfTrack>,
 }
 
 impl MsfCatalog {
@@ -1526,14 +1839,14 @@ impl DisplayJson for MsfCatalog {
     fn fmt(&self, f: &mut JsonFormatter<'_, '_>) -> core::fmt::Result {
         f.object(|f| {
             f.member("version", self.version.as_str())?;
-            if let Some(ga) = self.generated_at {
-                f.member("generatedAt", ga)?;
+            if let Some(generated_at) = self.generated_at {
+                f.member("generatedAt", generated_at)?;
             }
             if self.is_complete {
                 f.member("isComplete", true)?;
             }
             f.member("tracks", nojson::array(|f| f.elements(self.tracks.iter())))?;
-            // draft-ietf-moq-msf-01 §5.1.5 (Publish tracks): 空配列のときは出力しない
+            // draft-ietf-moq-msf-02 §5.1.5 (Publish tracks): 空配列のときは出力しない
             // (§5.1.5 は Optional とするのみで、省略はエンコーダの約束である)
             if !self.publish_tracks.is_empty() {
                 f.member(
@@ -1544,7 +1857,7 @@ impl DisplayJson for MsfCatalog {
             // エンコーダの慣例として tracks → publishTracks → initDataList の順で出力する
             // (initDataList が tracks より後という §5.1.7 の MUST を満たし、間は Table 1 の記載順に従う。
             // JSON としての意味は変わらない)
-            // draft-ietf-moq-msf-01 §5.1.7 (Initialization Data List): initDataList は tracks 配列より後に出現しなければならない
+            // draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List): initDataList は tracks 配列より後に出現しなければならない
             // 空配列のときは出力しない
             if !self.init_data_list.is_empty() {
                 f.member(
@@ -1560,19 +1873,25 @@ impl DisplayJson for MsfCatalog {
 impl MsfCatalog {
     /// デルタ更新をこのカタログへ適用する
     ///
-    /// draft-ietf-moq-msf-01 §5.1.6 (Delta update) / §5.3 (Delta updates): 操作は配列順に
+    /// draft-ietf-moq-msf-02 §5.1.6 (Delta update) / §5.3 (Delta updates): 操作は配列順に
     /// 適用される。clone は親トラックの属性を継承し、再定義された属性で上書きする。
     /// この仕様は将来変更される可能性がある。
     ///
-    /// `catalog_namespace` はカタログトラック自身のネームスペースであり、トラックが
-    /// namespace を省略した場合の継承先 (§5.2.2 (Track namespace)) として使う。
+    /// `catalog_namespace` はカタログトラック自身の MOQT Track Namespace である。clone 以外の
+    /// track が namespace を省略した場合の継承先 (§5.2.2 (Track namespace)) と、clone の
+    /// `parentNamespace` を省略した場合の親の探索に使う (§5.2.35 (Parent namespace))。
+    /// clone 自身の namespace を省略した場合は §5.1.6 (Delta update) により親トラックの
+    /// namespace を継承する。JSON の namespace 文字列は v02 の `/` 区切り表現であり、比較は
+    /// §11.2 の写像後のバイト値で行う。
     ///
     /// # Errors
     ///
     /// - `isComplete` が true のカタログへの add / clone: `InvalidCatalog`
-    ///   (draft-ietf-moq-msf-01 §5.1.3 (Is Complete))
+    ///   (draft-ietf-moq-msf-02 §5.1.3 (Is Complete))
     /// - add / clone のトラック名が既存と重複する: `InvalidCatalog`
     /// - add するトラックが §5.2 の各フィールド / §4.3.3 / §7.2 / §8.2 / §5.2.33 の MUST に違反する: `InvalidCatalog`
+    /// - namespace / track name が §5.2.2 / §5.2.3 / §11.2 の制約に違反する: `InvalidCatalog`
+    /// - Full Track Name が 4,096 バイトを超える (draft-ietf-moq-transport-23 §8.7): `InvalidCatalog`
     /// - remove / clone の対象トラックが見つからない: `InvalidCatalog`
     /// - clone の継承結果がトラックの制約に違反する: `InvalidCatalog`
     /// - 適用後のカタログがグループ内で宣言された targetLatency / buffers の一致
@@ -1580,9 +1899,7 @@ impl MsfCatalog {
     ///   (省略されたトラックは player の裁量 (MAY) のため比較対象外、`isLive=false` は無視)
     /// - 適用後の initRef が initDataList の id を指さない: `InvalidCatalog`
     ///   (§5.2.13 (Initialization reference))
-    /// - 削除済みの同じ (namespace, name) を再追加し、属性が変わる: `InvalidCatalog`
-    ///   (§5.3 (Delta updates) の属性不変)
-    /// - 削除済みの同じ (namespace, name) を `isLive=false` から `true` で再追加する: `InvalidCatalog`
+    /// - 削除済みの同じ Full Track Name を `isLive=false` から `true` で再追加する: `InvalidCatalog`
     ///   (§5.2.7 (Is Live))
     ///
     /// 失敗時はカタログを変更しない。操作は複製に対して配列順に適用し、全操作と
@@ -1590,7 +1907,7 @@ impl MsfCatalog {
     pub fn apply_delta(
         &mut self,
         delta: &MsfDeltaUpdate,
-        catalog_namespace: Option<&str>,
+        catalog_namespace: Option<&TrackNamespace>,
     ) -> Result<(), MessageError> {
         // 失敗時にカタログを不変に保つため、複製へ適用してから差し替える
         let mut working = self.clone();
@@ -1604,12 +1921,12 @@ impl MsfCatalog {
     fn apply_delta_in_place(
         &mut self,
         delta: &MsfDeltaUpdate,
-        catalog_namespace: Option<&str>,
+        catalog_namespace: Option<&TrackNamespace>,
     ) -> Result<(), MessageError> {
         for op in &delta.operations {
             match op {
                 MsfDeltaOperation::Add { tracks } => {
-                    // draft-ietf-moq-msf-01 §5.1.3 (Is Complete): "no new tracks will be
+                    // draft-ietf-moq-msf-02 §5.1.3 (Is Complete): "no new tracks will be
                     // added to the catalog" のため、isComplete=true への add は拒否する。
                     // remove は同節が禁じていないため許可する。
                     if self.is_complete {
@@ -1619,17 +1936,17 @@ impl MsfCatalog {
                         ));
                     }
                     // add 操作内の全トラックを先に検証し、操作内での部分適用を避ける。
-                    // 1) §5.2 各フィールドの MUST を検証する (draft-ietf-moq-msf-01 §5.2)
+                    // 1) §5.2 各フィールドの MUST を検証する (draft-ietf-moq-msf-02 §5.2)
                     for track in tracks {
                         validate_full_track(track)?;
                     }
                     // 2) 既存トラックおよびバッチ内の重複を全件検出してから追加する
-                    let mut batch_keys: Vec<(Option<String>, String)> =
+                    let mut batch_keys: Vec<(Option<TrackNamespace>, Vec<u8>)> =
                         Vec::with_capacity(tracks.len());
                     for track in tracks {
-                        let key = Self::track_key(track, catalog_namespace);
+                        let key = Self::track_key(track, catalog_namespace)?;
                         if self
-                            .find_track_index(key.0.as_deref(), &track.name, catalog_namespace)
+                            .find_track_index(key.0.as_ref(), &key.1, catalog_namespace)?
                             .is_some()
                             || batch_keys.contains(&key)
                         {
@@ -1640,7 +1957,7 @@ impl MsfCatalog {
                         }
                         batch_keys.push(key);
                     }
-                    // 3) 削除済みの同じ (namespace, name) があれば属性変更と isLive の逆行を検査する
+                    // 3) 削除済みの同じ Full Track Name があれば isLive の逆行を検査する
                     for track in tracks {
                         self.validate_readded_track(track, catalog_namespace, ReaddOperation::Add)?;
                     }
@@ -1651,9 +1968,14 @@ impl MsfCatalog {
                 }
                 MsfDeltaOperation::Remove { tracks } => {
                     for r in tracks {
-                        let ns = r.namespace.as_deref().or(catalog_namespace);
+                        // remove の namespace も省略時はカタログトラックの namespace を継承する
+                        let ns = match r.namespace.as_deref() {
+                            Some(value) => Some(parse_catalog_namespace(value)?),
+                            None => catalog_namespace.cloned(),
+                        };
+                        let name = catalog_track_name_bytes(&r.name)?;
                         let idx = self
-                            .find_track_index(ns, &r.name, catalog_namespace)
+                            .find_track_index(ns.as_ref(), &name, catalog_namespace)?
                             .ok_or_else(|| {
                                 MessageError::InvalidCatalog(format!(
                                     "delta remove: track '{}' not found",
@@ -1661,19 +1983,19 @@ impl MsfCatalog {
                                 ))
                             })?;
                         let removed = self.tracks.remove(idx);
-                        // draft-ietf-moq-msf-01 §5.3 (Delta updates): 削除した Track の属性を
-                        // 履歴として残し、同じ (namespace, name) の再追加で属性変更と
+                        // draft-ietf-moq-msf-02 §5.3 (Delta updates): 削除した Track の属性を
+                        // 履歴として残し、同じ Full Track Name の再追加で属性変更と
                         // isLive の逆行を検出できるようにする。`or_insert` により、同じ
                         // tuple が既に履歴にある場合は最初に削除されたときの属性を保持し続ける
                         // (§5.3 が求める「宣言時の属性」を保持する側に倒す。apply_delta 経由で
                         // 再追加される限り直近の削除で上書きしても検証結果は変わらないが、
                         // 履歴の値は公開フィールドとして観測できるため差が生じる)。
-                        let key = Self::track_key(&removed, catalog_namespace);
-                        self.removed_tracks.entry(key).or_insert(removed);
+                        let key = Self::track_key(&removed, catalog_namespace)?;
+                        self.removed_tracks.insert(key, removed);
                     }
                 }
                 MsfDeltaOperation::Clone { tracks } => {
-                    // draft-ietf-moq-msf-01 §5.1.3 (Is Complete): add と同様、clone による
+                    // draft-ietf-moq-msf-02 §5.1.3 (Is Complete): add と同様、clone による
                     // 新規トラック追加も拒否する。
                     if self.is_complete {
                         return Err(MessageError::InvalidCatalog(
@@ -1682,9 +2004,13 @@ impl MsfCatalog {
                         ));
                     }
                     for clone in tracks {
-                        let parent_ns = clone.parent_namespace.as_deref().or(catalog_namespace);
+                        let parent_ns = match clone.parent_namespace.as_deref() {
+                            Some(value) => Some(parse_catalog_namespace(value)?),
+                            None => catalog_namespace.cloned(),
+                        };
+                        let parent_name = catalog_track_name_bytes(&clone.parent_name)?;
                         let idx = self
-                            .find_track_index(parent_ns, &clone.parent_name, catalog_namespace)
+                            .find_track_index(parent_ns.as_ref(), &parent_name, catalog_namespace)?
                             .ok_or_else(|| {
                                 MessageError::InvalidCatalog(format!(
                                     "delta clone: parent track '{}' not found",
@@ -1693,9 +2019,9 @@ impl MsfCatalog {
                             })?;
                         let parent = self.tracks[idx].clone();
                         let new_track = clone.clone().into_track(&parent)?;
-                        let new_ns = new_track.namespace.as_deref().or(catalog_namespace);
+                        let key = Self::track_key(&new_track, catalog_namespace)?;
                         if self
-                            .find_track_index(new_ns, &new_track.name, catalog_namespace)
+                            .find_track_index(key.0.as_ref(), &key.1, catalog_namespace)?
                             .is_some()
                         {
                             return Err(MessageError::InvalidCatalog(format!(
@@ -1711,61 +2037,88 @@ impl MsfCatalog {
                         self.tracks.push(new_track);
                     }
                 }
+                MsfDeltaOperation::Update { tracks } => {
+                    for update in tracks {
+                        validate_update_track(&update.track)?;
+                        let parent_ns = match update.track.parent_namespace.as_deref() {
+                            Some(value) => Some(parse_catalog_namespace(value)?),
+                            None => catalog_namespace.cloned(),
+                        };
+                        let parent_name = catalog_track_name_bytes(&update.track.parent_name)?;
+                        let idx = self
+                            .find_track_index(parent_ns.as_ref(), &parent_name, catalog_namespace)?
+                            .ok_or_else(|| {
+                                MessageError::InvalidCatalog(format!(
+                                    "delta update: parent track '{}' not found",
+                                    update.track.parent_name
+                                ))
+                            })?;
+                        let parent = self.tracks[idx].clone();
+                        // namespace を明示する場合は、解決後の対象 namespace と一致すること
+                        let update_ns = match update.track.namespace.as_deref() {
+                            Some(value) => Some(parse_catalog_namespace(value)?),
+                            None => parent_ns.clone(),
+                        };
+                        if update_ns != parent_ns {
+                            return Err(MessageError::InvalidCatalog(format!(
+                                "delta update: track '{}' namespace MUST NOT change",
+                                update.track.name
+                            )));
+                        }
+                        // §5.2.7 (Is Live): False から True への変更は禁止
+                        if update.track.is_live == Some(true) && !parent.is_live {
+                            return Err(MessageError::InvalidCatalog(format!(
+                                "delta update: track '{}' isLive MUST NOT change from false to true",
+                                update.track.name
+                            )));
+                        }
+                        let merged = update.track.clone().into_track(&parent)?;
+                        // マージ後の track が通常の track と同じ MUST を満たすこと
+                        validate_full_track(&merged)?;
+                        self.tracks[idx] = merged;
+                    }
+                }
             }
         }
         // デルタ更新の generatedAt は適用後のカタログの生成時刻として引き継ぐ
-        if let Some(generated_at) = delta.generated_at {
-            self.generated_at = Some(generated_at);
-        }
+        self.generated_at = Some(delta.generated_at);
         self.validate_after_delta(catalog_namespace)
     }
 
-    /// トラックの (解決済み namespace, name) キーを作る
+    /// トラックの (解決済み Track Namespace, Track Name バイト列) キーを作る
     ///
     /// namespace 省略時はカタログの namespace を継承したものとして解決する
-    /// (draft-ietf-moq-msf-01 §5.2.2 (Track namespace))。
-    fn track_key(track: &MsfTrack, catalog_namespace: Option<&str>) -> (Option<String>, String) {
-        (
-            track
-                .namespace
-                .as_deref()
-                .or(catalog_namespace)
-                .map(str::to_string),
-            track.name.clone(),
-        )
+    /// (draft-ietf-moq-msf-02 §5.2.2 (Track namespace))。比較は §11.2 の写像後のバイト値で
+    /// 行い、JSON 文字列表現の違い (エスケープの有無など) に依存しない。
+    fn track_key(
+        track: &MsfTrack,
+        catalog_namespace: Option<&TrackNamespace>,
+    ) -> Result<(Option<TrackNamespace>, Vec<u8>), MessageError> {
+        let namespace = match track.namespace.as_deref() {
+            Some(value) => Some(parse_catalog_namespace(value)?),
+            None => catalog_namespace.cloned(),
+        };
+        Ok((namespace, catalog_track_name_bytes(&track.name)?))
     }
 
-    /// 削除済みの同じ (namespace, name) に再追加されるトラックを検証する
+    /// 削除済みの同じ Full Track Name に再追加されるトラックの isLive を検証する
     ///
-    /// draft-ietf-moq-msf-01 §5.3 (Delta updates): "The tuple of Track Namespace and Track Name
-    /// defines a fixed set of Track attributes which MUST NOT be modified after being declared.
-    /// To modify any attribute, a new track with a different Namespace|Name tuple is created by
-    /// Adding or Cloning and then the old track is removed."
-    ///
-    /// §5.2.7 (Is Live): "A True value MUST never follow a False value." は独立した MUST のため、
-    /// 属性差分より先に検査して専用の文言で返す。
+    /// draft-ietf-moq-msf-02 §5.2.8 (Is Live): "A True value MUST never follow a False value."
+    /// のみを検査する。v02 は v01 の属性不変 MUST を削除したため、属性の変更は許可する。
     fn validate_readded_track(
         &self,
         track: &MsfTrack,
-        catalog_namespace: Option<&str>,
+        catalog_namespace: Option<&TrackNamespace>,
         operation: ReaddOperation,
     ) -> Result<(), MessageError> {
-        let key = Self::track_key(track, catalog_namespace);
+        let key = Self::track_key(track, catalog_namespace)?;
         let Some(previous) = self.removed_tracks.get(&key) else {
             return Ok(());
         };
         if !previous.is_live && track.is_live {
             return Err(MessageError::InvalidCatalog(format!(
                 "delta {}: track '{}' isLive MUST NOT change from false to true \
-                 (draft-ietf-moq-msf-01 §5.2.7)",
-                operation.as_str(),
-                track.name
-            )));
-        }
-        if comparable_attributes(previous) != comparable_attributes(track) {
-            return Err(MessageError::InvalidCatalog(format!(
-                "delta {}: track '{}' attributes MUST NOT be modified after being \
-                 declared (draft-ietf-moq-msf-01 §5.3)",
+                 (draft-ietf-moq-msf-02 §5.2.8)",
                 operation.as_str(),
                 track.name
             )));
@@ -1773,41 +2126,83 @@ impl MsfCatalog {
         Ok(())
     }
 
-    /// namespace / name が一致するトラックの index を返す
+    /// Full Track Name が一致するトラックの index を返す
     ///
-    /// `namespace` が `None` の場合はカタログの namespace を継承したものとして比較する
-    /// (draft-ietf-moq-msf-01 §5.2.2 (Track namespace))。
+    /// `namespace` / `name` は解決済みの MOQT のバイト値であり、カタログの JSON 文字列では
+    /// 比較しない (draft-ietf-moq-msf-02 §11.2.2 (Comparing names))。`namespace` が `None` の
+    /// 場合はカタログの namespace も不明な状態を表し、namespace を省略したトラックだけが
+    /// 一致する。
     fn find_track_index(
         &self,
-        namespace: Option<&str>,
-        name: &str,
-        catalog_namespace: Option<&str>,
-    ) -> Option<usize> {
-        self.tracks.iter().position(|t| {
-            t.name == name && t.namespace.as_deref().or(catalog_namespace) == namespace
-        })
+        namespace: Option<&TrackNamespace>,
+        name: &[u8],
+        catalog_namespace: Option<&TrackNamespace>,
+    ) -> Result<Option<usize>, MessageError> {
+        for (index, track) in self.tracks.iter().enumerate() {
+            let track_namespace = match track.namespace.as_deref() {
+                Some(value) => Some(parse_catalog_namespace(value)?),
+                None => catalog_namespace.cloned(),
+            };
+            if track_namespace.as_ref() == namespace
+                && catalog_track_name_bytes(&track.name)? == name
+            {
+                return Ok(Some(index));
+            }
+        }
+        Ok(None)
     }
 
-    /// デルタ適用後のカタログが満たすべき制約を再検証する
-    fn validate_after_delta(&self, catalog_namespace: Option<&str>) -> Result<(), MessageError> {
-        // draft-ietf-moq-msf-01 §5.2.3 (Track name): track name は namespace ごとに一意。
-        // "Within the catalog" のため tracks と publishTracks をまたいで検査する。
-        // namespace 省略時はカタログの namespace を継承したものとして解決して比較する。
-        let mut seen: hashbrown::HashSet<(Option<&str>, &str)> = hashbrown::HashSet::new();
-        for t in self.tracks.iter().chain(self.publish_tracks.iter()) {
-            let ns = t.namespace.as_deref().or(catalog_namespace);
-            if !seen.insert((ns, t.name.as_str())) {
+    /// カタログ内の Full Track Name の一意性を検証する
+    ///
+    /// draft-ietf-moq-msf-02 §5.2.3 (Track name): "Within a catalog, the combination of Track
+    /// Namespace and Track Name (the Full Track Name) MUST be unique." 比較は §11.2 の写像後の
+    /// バイト値で行う。`catalog_namespace` を渡すと、namespace を省略したトラックが継承する
+    /// カタログトラックの namespace を解決したうえで比較する。`None` の場合は継承先が不明な
+    /// ため、省略したトラック同士だけを同じ namespace として比較する。
+    /// この仕様は将来変更される可能性がある。
+    ///
+    /// # Errors
+    ///
+    /// - Full Track Name が重複する: `InvalidCatalog`
+    /// - namespace / track name が §5.2.2 / §5.2.3 / §11.2 の制約に違反する: `InvalidCatalog`
+    /// - Full Track Name が 4,096 バイトを超える (draft-ietf-moq-transport-23 §8.7): `InvalidCatalog`
+    pub fn validate_track_names(
+        &self,
+        catalog_namespace: Option<&TrackNamespace>,
+    ) -> Result<(), MessageError> {
+        let mut seen: hashbrown::HashSet<(Option<TrackNamespace>, Vec<u8>)> =
+            hashbrown::HashSet::new();
+        for track in self.tracks.iter().chain(self.publish_tracks.iter()) {
+            let key = Self::track_key(track, catalog_namespace)?;
+            validate_catalog_full_track_name(key.0.as_ref(), &key.1)?;
+            if !seen.insert(key) {
                 return Err(MessageError::InvalidCatalog(format!(
                     "duplicate track name '{}' in namespace '{}'",
-                    t.name,
-                    ns.unwrap_or("(inherited)")
+                    track.name,
+                    track.namespace.as_deref().unwrap_or("(inherited)")
                 )));
             }
         }
-        // draft-ietf-moq-msf-01 §5.2.13 (Initialization reference): 適用後の tracks /
+        Ok(())
+    }
+
+    /// デルタ適用後のカタログが満たすべき制約を再検証する
+    fn validate_after_delta(
+        &self,
+        catalog_namespace: Option<&TrackNamespace>,
+    ) -> Result<(), MessageError> {
+        // draft-ietf-moq-msf-02 §5.2.3 (Track name): Full Track Name は catalog 全体で一意。
+        // "Within the catalog" のため tracks と publishTracks をまたいで検査する。
+        self.validate_track_names(catalog_namespace)?;
+        // draft-ietf-moq-msf-02 §5.2.14 (Initialization reference): 適用後の tracks /
         // publishTracks の initRef が initDataList の id を指すこと。
         validate_init_refs(&self.tracks, &self.publish_tracks, &self.init_data_list)?;
-        // draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers):
+        // draft-ietf-moq-msf-02 §5.2.15 (Dependencies): 適用後の catalog 全体で解決できること
+        validate_catalog_dependencies(&self.tracks, &self.publish_tracks)?;
+        validate_media_timeline_dependencies(&self.tracks, &self.publish_tracks)?;
+        validate_alt_group_accessible_window_time(&self.tracks)?;
+        validate_alt_group_accessible_window_time(&self.publish_tracks)?;
+        // draft-ietf-moq-msf-02 §5.2.9 (Target latency) / §5.2.10 (Buffers):
         // 同一 renderGroup / altGroup 内の isLive=true トラックが宣言した値は一致しなければならない (MUST)。
         // 省略は player の裁量 (MAY) のため比較しない。この仕様は将来変更される可能性がある。
         // delta の操作は self.tracks のみを変更するため publishTracks のグループ一致は再検証しない
@@ -1817,39 +2212,6 @@ impl MsfCatalog {
         validate_group_buffers(&self.tracks, "altGroup", |t| t.alt_group)?;
         Ok(())
     }
-}
-
-/// 属性比較用に正規化した Track を返す
-///
-/// 履歴のキー (解決済み namespace, name) で同一性を確認したトラック同士を比較するが、
-/// 元の表現は一致するとは限らないため次を比較対象外にする。
-///
-/// - `name` / `namespace`: キーで同一性を確認済み。namespace は省略形と明示形で
-///   生の表現が異なる (どちらも同じ tuple を指す)
-/// - `parent_name`: clone 以外では §5.2.33 (Parent name) により出現せず、clone の解決後
-///   (`MsfCloneTrack::into_track`) は常に `None` になる
-///
-/// `isLive=false` のときの `target_latency` / `buffers` は draft-ietf-moq-msf-01
-/// §5.2.8 (Target latency) / §5.2.9 (Buffers) により無視されるため `None` とみなす。
-/// Add 経路は手組みの `MsfTrack` を正規化せず追加するため、比較側で正規化しないと
-/// 結果が構築経路 (Add / Clone) に依存する。この正規化により、`isLive=false` の
-/// トラックは targetLatency / buffers の有無だけが異なる再追加も受理する (実効的な
-/// 属性が同じなら受理するという本検査の範囲。`isLive=false` のときの targetLatency /
-/// buffers は値の変更も検出しない)。
-///
-/// なお `isLive=true` での「宣言 (`Some`) ↔ 省略 (`None`)」は §5.3 (Delta updates) の
-/// 属性不変に基づき属性変更として拒否する。これは §5.2.8 (Target latency) / §5.2.9 (Buffers)
-/// のグループ内一致検証が省略を比較対象外とするのとは要求が異なるためである。
-fn comparable_attributes(track: &MsfTrack) -> MsfTrack {
-    let mut normalized = track.clone();
-    normalized.name.clear();
-    normalized.namespace = None;
-    normalized.parent_name = None;
-    if !normalized.is_live {
-        normalized.target_latency = None;
-        normalized.buffers = None;
-    }
-    normalized
 }
 
 /// 削除済みトラックの再追加を検査する操作 (エラー文言に使う)
@@ -1871,9 +2233,9 @@ impl ReaddOperation {
     }
 }
 
-/// デルタ更新の個別操作 (draft-ietf-moq-msf-01 §5.1.6 (Delta update))
+/// デルタ更新の個別操作 (draft-ietf-moq-msf-02 §5.1.6 (Delta update))
 ///
-/// draft-ietf-moq-msf-01 §5.1.6 (Delta update): 各 operation object は "op" フィールドと
+/// draft-ietf-moq-msf-02 §5.1.6 (Delta update): 各 operation object は "op" フィールドと
 /// "tracks" フィールドを持つ。
 /// この仕様は将来変更される可能性がある。
 #[derive(Debug, Clone, PartialEq)]
@@ -1893,23 +2255,30 @@ pub enum MsfDeltaOperation {
         /// クローンするトラック定義一覧
         tracks: Vec<MsfCloneTrack>,
     },
+    /// トラックの部分更新 ("update")
+    Update {
+        /// 更新するトラック定義一覧
+        tracks: Vec<MsfUpdateTrack>,
+    },
 }
 
-/// デルタ更新 (draft-ietf-moq-msf-01 §5.1.6 (Delta update))
+/// デルタ更新 (draft-ietf-moq-msf-02 §5.1.6 (Delta update))
 ///
-/// draft-ietf-moq-msf-01 §5.1.6 (Delta update): 操作は配列順に適用される。
+/// draft-ietf-moq-msf-02 §5.1.6 (Delta update): 操作は配列順に適用される。
 /// この仕様は将来変更される可能性がある。
 #[derive(Debug, Clone, PartialEq)]
 pub struct MsfDeltaUpdate {
-    /// カタログ生成時刻 ms
-    pub generated_at: Option<u64>,
+    /// カタログ生成時刻 ms (draft-ietf-moq-msf-02 §5.3 (Delta updates) で必須)
+    ///
+    /// v01 の `Option<u64>` から `u64` への破壊的変更である。
+    pub generated_at: u64,
     /// 操作リスト (配列順)
     pub operations: Vec<MsfDeltaOperation>,
 }
 
 impl DisplayJson for MsfDeltaUpdate {
     fn fmt(&self, f: &mut JsonFormatter<'_, '_>) -> core::fmt::Result {
-        // draft-ietf-moq-msf-01 §5.1.6 (Delta update): deltaUpdate は operation object の配列。
+        // draft-ietf-moq-msf-02 §5.1.6 (Delta update): deltaUpdate は operation object の配列。
         // 操作は operations 配列順に 1 つの operation object ずつ出力する。
         // この仕様は将来変更される可能性がある。
         f.object(|f| {
@@ -1922,9 +2291,7 @@ impl DisplayJson for MsfDeltaUpdate {
                     Ok(())
                 }),
             )?;
-            if let Some(ga) = self.generated_at {
-                f.member("generatedAt", ga)?;
-            }
+            f.member("generatedAt", self.generated_at)?;
             Ok(())
         })
     }
@@ -1960,6 +2327,18 @@ impl DisplayJson for MsfDeltaOperation {
                 }
                 Self::Clone { tracks } => {
                     f.member("op", "clone")?;
+                    f.member(
+                        "tracks",
+                        nojson::array(|f| {
+                            for t in tracks {
+                                f.element(t)?;
+                            }
+                            Ok(())
+                        }),
+                    )?;
+                }
+                Self::Update { tracks } => {
+                    f.member("op", "update")?;
                     f.member(
                         "tracks",
                         nojson::array(|f| {
@@ -2024,6 +2403,13 @@ impl MsfCatalogDocument {
                                 }
                             }
                         }
+                        MsfDeltaOperation::Update { tracks } => {
+                            for update in tracks {
+                                if let Some(auth_info) = update.track.auth_info.as_ref() {
+                                    infos.extend(auth_info.iter());
+                                }
+                            }
+                        }
                         MsfDeltaOperation::Remove { .. } => {}
                     }
                 }
@@ -2047,6 +2433,11 @@ impl MsfCatalogDocument {
     /// - `authInfo` の値が UTF-8 でない / 単独の JSON 値でない: `InvalidCatalog`
     /// - 完全カタログが MUST に違反する (一意性、initRef 参照、フィールド整合など): `InvalidCatalog`
     /// - デルタ更新が空の operations を持つなど MUST に違反する: `InvalidCatalog`
+    ///
+    /// 完全カタログ / delta はカタログトラックの namespace を受け取らないため、namespace を
+    /// 省略した track が継承する catalog namespace を含む Full Track Name の長さは、継承先が
+    /// 不明な範囲 (Track Name 単体) でしか検証できない。継承を解決した完全な検証は受信側の
+    /// [`MsfCatalog::validate_track_names`] が担う。
     pub fn encode(&self) -> Result<Vec<u8>, MessageError> {
         for info in self.auth_infos() {
             validate_auth_info_value_raw(&info.value_raw)?;
@@ -2075,7 +2466,7 @@ impl MsfCatalogDocument {
         // deltaUpdate が存在しない場合のみ Full、存在して配列以外なら InvalidCatalog とする
         let delta_member = val.to_member("deltaUpdate")?.optional();
         if let Some(delta_v) = delta_member {
-            // draft-ietf-moq-msf-01 §5.1.6 (Delta update): deltaUpdate は operation object の配列
+            // draft-ietf-moq-msf-02 §5.1.6 (Delta update): deltaUpdate は operation object の配列
             // 配列以外の型は InvalidCatalog とする
             let _ = delta_v.to_array().map_err(|_| {
                 MessageError::InvalidCatalog("deltaUpdate MUST be an array".to_string())
@@ -2096,7 +2487,7 @@ impl MsfCatalogDocument {
 
 // ─── タイムライン型定義 ───────────────────────────────────────────────────────
 
-/// メディアタイムラインエントリ (draft-ietf-moq-msf-01 §7.1 (Media Timeline track payload))
+/// メディアタイムラインエントリ (draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload))
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MsfMediaTimelineEntry {
     /// メディア PTS ms
@@ -2109,7 +2500,7 @@ pub struct MsfMediaTimelineEntry {
     pub wallclock_ms: u64,
 }
 
-/// メディアタイムライントラックペイロード (draft-ietf-moq-msf-01 §7.1 (Media Timeline track payload))
+/// メディアタイムライントラックペイロード (draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload))
 ///
 /// フォーマット: `[[pts_ms, [group_id, object_id], wallclock_ms], ...]`
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -2148,6 +2539,7 @@ impl MsfMediaTimeline {
     ///
     /// 全フィールドが型付きで失敗する入力が存在しないため Result を返さない
     /// (`MsfEventTimeline::encode` は生バイト列 `data_raw` を持つため Result を返す)。
+    /// media time の非降順検証は呼び出し側の [`encode_media_timeline`] が行う。
     pub fn encode(&self) -> Vec<u8> {
         nojson::Json(self).to_string().into_bytes()
     }
@@ -2164,26 +2556,62 @@ impl MsfMediaTimeline {
         })?;
         let raw = nojson::RawJson::parse(text)?;
         let val = raw.value();
-        let entries = val
+        let entries: Vec<MsfMediaTimelineEntry> = val
             .to_array()?
             .map(decode_media_entry)
             .collect::<Result<_, _>>()?;
+        validate_media_time_order(&entries)?;
         Ok(Self(entries))
     }
 }
 
-/// イベントタイムラインのインデックス参照 (draft-ietf-moq-msf-01 §8.1 (Event Timeline data format))
+/// media timeline の pts_ms が非降順であることを検証する
+///
+/// draft-ietf-moq-msf-02 §7.1.1 (Media Timeline ordering): media timeline track は media time の
+/// 順に並ばなければならない。同値は許容する。
+fn validate_media_time_order(entries: &[MsfMediaTimelineEntry]) -> Result<(), MessageError> {
+    for pair in entries.windows(2) {
+        if pair[0].pts_ms > pair[1].pts_ms {
+            return Err(MessageError::InvalidCatalog(
+                "media timeline entries MUST be in non-decreasing media time order".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// media timeline の payload 形式を検証する
+///
+/// draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload): template 属性を使う形式と
+/// explicit な媒体タイムライン payload を 1 つの document で併用してはならない (MUST NOT)。
+/// `track.template` が設定されている track に explicit payload を紐付けた場合はエラーにする。
+/// media time の非降順も併せて検証する。§5.2.16 の cross-track の SHOULD NOT は、1 つの
+/// track と payload の組からは判定できないため対象外とする。
+pub fn validate_media_timeline_format(
+    track: &MsfTrack,
+    timeline: &MsfMediaTimeline,
+) -> Result<(), MessageError> {
+    if track.template.is_some() {
+        return Err(MessageError::InvalidCatalog(
+            "a track with a template attribute MUST NOT carry an explicit media timeline"
+                .to_string(),
+        ));
+    }
+    validate_media_time_order(&timeline.0)
+}
+
+/// イベントタイムラインのインデックス参照 (draft-ietf-moq-msf-02 §8.1 (Event Timeline data format))
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MsfEventIndex {
-    /// 'l': MOQT Location [group_id, object_id]
+    /// 'L': MOQT Location [group_id, object_id]
     Location(u64, u64),
-    /// 't': ウォールクロック ms
+    /// 'T': ウォールクロック ms
     WallclockMs(u64),
-    /// 'm': メディア PTS ms
+    /// 'M': メディア PTS ms
     MediaPtsMs(u64),
 }
 
-/// イベントタイムラインエントリ (draft-ietf-moq-msf-01 §8.1 (Event Timeline data format))
+/// イベントタイムラインエントリ (draft-ietf-moq-msf-02 §8.1 (Event Timeline data format))
 #[derive(Debug, Clone, PartialEq)]
 pub struct MsfEventTimelineEntry {
     /// インデックス参照
@@ -2200,7 +2628,7 @@ impl DisplayJson for MsfEventTimelineEntry {
                     let g = *g;
                     let o = *o;
                     f.member(
-                        "l",
+                        "L",
                         nojson::array(|f| {
                             f.element(g)?;
                             f.element(o)
@@ -2208,10 +2636,10 @@ impl DisplayJson for MsfEventTimelineEntry {
                     )?;
                 }
                 MsfEventIndex::WallclockMs(t) => {
-                    f.member("t", *t)?;
+                    f.member("T", *t)?;
                 }
                 MsfEventIndex::MediaPtsMs(m) => {
-                    f.member("m", *m)?;
+                    f.member("M", *m)?;
                 }
             }
             f.member("data", RawJsonBytes(&self.data_raw))
@@ -2219,7 +2647,7 @@ impl DisplayJson for MsfEventTimelineEntry {
     }
 }
 
-/// イベントタイムライントラックペイロード (draft-ietf-moq-msf-01 §8.1 (Event Timeline data format))
+/// イベントタイムライントラックペイロード (draft-ietf-moq-msf-02 §8.1 (Event Timeline data format))
 ///
 /// フォーマット: `[{"t"/"l"/"m": ..., "data": ...}, ...]`
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -2247,7 +2675,7 @@ impl MsfEventTimeline {
     /// - `data_raw` が UTF-8 でない: `InvalidCatalog`
     /// - `data_raw` 全体が単一の JSON object としてパース可能でない (trailing 文字を含む): `InvalidCatalog`
     pub fn encode(&self) -> Result<Vec<u8>, MessageError> {
-        // draft-ietf-moq-msf-01 §8.1 (Event Timeline data format): "An event timeline track is a JSON [JSON] document."
+        // draft-ietf-moq-msf-02 §8.1 (Event Timeline data format): "An event timeline track is a JSON [JSON] document."
         // この仕様は将来変更される可能性がある。
         // data_raw は利用者が任意に構築できる pub フィールドのため、encode 前に検証して
         // panic 経路と不正な JSON の生成を防ぐ (検証の詳細は validate_event_data_raw を参照)。
@@ -2255,6 +2683,18 @@ impl MsfEventTimeline {
             validate_event_data_raw(&entry.data_raw)?;
         }
         Ok(nojson::Json(self).to_string().into_bytes())
+    }
+
+    /// header data 付きで JSON バイト列からデコードする
+    ///
+    /// draft-ietf-moq-msf-02 §8.1 (Event Timeline header data): header data は
+    /// MSF_EVENT_TIMELINE_HEADER Track property (0x7B) で運ばれ、その解釈は eventType が
+    /// 定義する。library は eventType を知らないため header を解釈せず、entry 列の decode
+    /// だけを行う。header の有無と必須性の判定は呼び出し側が行う。property が無い場合は
+    /// 「header data なし」であり、この関数は失敗しない。
+    pub fn decode_with_header(buf: &[u8], header: &[u8]) -> Result<Self, MessageError> {
+        let _ = header;
+        Self::decode(buf)
     }
 
     /// JSON バイト列からデコードする
@@ -2281,7 +2721,7 @@ impl MsfEventTimeline {
 
 /// 同一グループ内で宣言された targetLatency が一致することを検証する
 ///
-/// draft-ietf-moq-msf-01 §5.2.8 (Target latency): isLive=false のトラックでは targetLatency は無視されるため、
+/// draft-ietf-moq-msf-02 §5.2.9 (Target latency): isLive=false のトラックでは targetLatency は無視されるため、
 /// 同一 group 内の isLive=true かつ targetLatency を宣言したトラック間で一致することのみを検証する。
 /// また同節は「フィールドが無い場合、isLive が TRUE なら player が遅延を選んでよい (MAY)」と定めるため、
 /// 省略されたトラックは比較対象に加えない。
@@ -2326,7 +2766,7 @@ fn validate_group_target_latency(
 
 /// 同一グループ内で宣言された buffers が一致することを検証する
 ///
-/// draft-ietf-moq-msf-01 §5.2.9 (Buffers): isLive=false のトラックでは buffers は無視されるため、
+/// draft-ietf-moq-msf-02 §5.2.10 (Buffers): isLive=false のトラックでは buffers は無視されるため、
 /// 同一 group 内の isLive=true かつ buffers を宣言したトラック間で一致することのみを検証する。
 /// また同節は「フィールドが無い場合、isLive が TRUE なら player がバッファを選んでよい (MAY)」と定めるため、
 /// 省略されたトラックは比較対象に加えない。
@@ -2370,7 +2810,7 @@ fn validate_group_buffers(
 
 /// codec 文字列がレジストリの登録名に一致するかを判定する
 ///
-/// draft-ietf-moq-msf-01 §5.2.18 (Codec) が参照する登録表記に一致するかで判定する。
+/// draft-ietf-moq-msf-02 §5.2.19 (Codec) が参照する登録表記に一致するかで判定する。
 /// 登録名との完全一致、または `登録名 + separator` で始まる文字列を一致とみなす。
 /// 登録表記の `*` は可変サフィックスを表し、`*` に隣接する区切り文字も可変部分に含めるため、
 /// 登録名単独 (`av01`) と区切り文字だけの `名前.` / `名前-` も一致とする。
@@ -2412,12 +2852,12 @@ fn is_video_codec(codec: &str) -> bool {
 
 /// codec / bitrate / samplerate / channelConfig の必須フィールドを検証する
 ///
-/// draft-ietf-moq-msf-01 §5.2.18 (Codec) / §5.2.22 (Maximum Bitrate) /
+/// draft-ietf-moq-msf-02 §5.2.19 (Codec) / §5.2.23 (Maximum Bitrate) /
 /// §5.2.28 (Audio sample rate) / §5.2.29 (Channel configuration)。
 /// 必須条件は codec が定まるトラック (audio / video) に課され、role の有無には依存しない。
 /// そのため codec 文字列から audio / video を判定して要求する。role が `video` / `audio` /
-/// `audiodescription` (§5.2.6 Table 4 の予約 role のうち audio / video に対応するもの) の
-/// トラックには、従来どおり role に基づく要求も重ねて適用する。`signlanguage` は Table 4 で
+/// `audiodescription` (§5.2.7 Table 7 の予約 role のうち audio / video に対応するもの) の
+/// トラックには、従来どおり role に基づく要求も重ねて適用する。`signlanguage` は Table 7 で
 /// "A visual track for hearing impaired users." と定められる visual track のため video として
 /// 扱う。
 /// codec からも role からも種別を判定できないトラック (codec なし、または登録外の codec で
@@ -2426,11 +2866,30 @@ fn is_video_codec(codec: &str) -> bool {
 fn validate_media_track_fields(track: &MsfTrack) -> Result<(), MessageError> {
     let role = track.role.as_deref();
     let role_audio = matches!(role, Some("audio") | Some("audiodescription"));
-    // §5.2.6 Table 4 の `signlanguage` は "A visual track for hearing impaired users." のため video
+    // §5.2.7 Table 7 の `signlanguage` は "A visual track for hearing impaired users." のため video
     let role_video = matches!(role, Some("video") | Some("signlanguage"));
 
     let codec_audio = track.codec.as_deref().is_some_and(is_audio_codec);
     let codec_video = track.codec.as_deref().is_some_and(is_video_codec);
+
+    // draft-ietf-moq-msf-02 §5.2.4.1 (Required fields per packaging and track type) の
+    // Table 6: (packaging, role) ごとの追加必須フィールド。個別フィールドの Conditional MUST
+    // (bitrate / samplerate / channelConfig など) はこの後の codec 由来検証でも適用する。
+    if matches!(track.packaging, MsfPackaging::Loc) {
+        if matches!(role, Some("video") | Some("signlanguage")) && track.framerate.is_none() {
+            return Err(MessageError::InvalidCatalog(format!(
+                "track '{}' with role '{}' MUST specify framerate",
+                track.name,
+                role.unwrap_or("")
+            )));
+        }
+        if role == Some("audiodescription") && track.lang.is_none() {
+            return Err(MessageError::InvalidCatalog(format!(
+                "track '{}' with role 'audiodescription' MUST specify lang",
+                track.name
+            )));
+        }
+    }
 
     // role による判定と codec による判定が食い違う場合は、両方の要求を重ねて適用する
     let require_audio = role_audio || codec_audio;
@@ -2487,7 +2946,7 @@ fn validate_media_track_fields(track: &MsfTrack) -> Result<(), MessageError> {
 
 /// initDataList の id が catalog 内で一意であることを検証する
 ///
-/// draft-ietf-moq-msf-01 §5.1.7 (Initialization Data List): id は catalog 内で一意。
+/// draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List): id は catalog 内で一意。
 fn validate_init_data_list_unique(init_data_list: &[MsfInitData]) -> Result<(), MessageError> {
     let mut seen_ids = hashbrown::HashSet::new();
     for entry in init_data_list {
@@ -2501,30 +2960,9 @@ fn validate_init_data_list_unique(init_data_list: &[MsfInitData]) -> Result<(), 
     Ok(())
 }
 
-/// tracks / publishTracks をまたいだ (namespace, name) の一意性を検証する
-///
-/// draft-ietf-moq-msf-01 §5.2.3 (Track name): "Within the catalog, track names MUST be
-/// unique per namespace." のため、catalog 全体で検査する。
-fn validate_track_name_uniqueness(
-    tracks: &[MsfTrack],
-    publish_tracks: &[MsfTrack],
-) -> Result<(), MessageError> {
-    let mut seen: hashbrown::HashSet<(Option<&str>, &str)> = hashbrown::HashSet::new();
-    for t in tracks.iter().chain(publish_tracks.iter()) {
-        if !seen.insert((t.namespace.as_deref(), t.name.as_str())) {
-            return Err(MessageError::InvalidCatalog(format!(
-                "duplicate track name '{}' in namespace '{}'",
-                t.name,
-                t.namespace.as_deref().unwrap_or("(inherited)")
-            )));
-        }
-    }
-    Ok(())
-}
-
 /// tracks / publishTracks の initRef が initDataList の id を指すことを検証する
 ///
-/// draft-ietf-moq-msf-01 §5.2.13 (Initialization reference): initRef は initDataList の
+/// draft-ietf-moq-msf-02 §5.2.14 (Initialization reference): initRef は initDataList の
 /// id を指す。完全カタログ単体で参照整合性を検証する。
 fn validate_init_refs(
     tracks: &[MsfTrack],
@@ -2545,7 +2983,7 @@ fn validate_init_refs(
 
 /// targetLatency / buffers の共存禁止を検証する
 ///
-/// draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers)。MsfTrack と
+/// draft-ietf-moq-msf-02 §5.2.9 (Target latency) / §5.2.10 (Buffers)。MsfTrack と
 /// MsfCloneTrack で同一の規則。
 fn validate_target_latency_buffers_exclusive(
     target_latency: Option<u64>,
@@ -2561,7 +2999,7 @@ fn validate_target_latency_buffers_exclusive(
 
 /// packaging が明示的に eventtimeline 以外のとき eventType を禁止する
 ///
-/// draft-ietf-moq-msf-01 §5.2.5 (Event timeline type)。MsfTrack と MsfCloneTrack で
+/// draft-ietf-moq-msf-02 §5.2.6 (Event timeline type)。MsfTrack と MsfCloneTrack で
 /// 同一の規則 (clone は packaging 省略時に親から継承し得るため None は対象外)。
 fn validate_event_type_not_set_when_not_event_timeline(
     packaging: Option<&MsfPackaging>,
@@ -2578,13 +3016,304 @@ fn validate_event_type_not_set_when_not_event_timeline(
     Ok(())
 }
 
+/// depends 要素の形を検証する
+///
+/// Track Name は §5.2.3 / §11.2 の写像規則、renderGroup は Number であることを確認する。
+/// 参照先がカタログ内に解決できるかは [`validate_catalog_dependencies`] が検査する。
+fn validate_dependency_shape(dependency: &MsfDependency) -> Result<(), MessageError> {
+    if let MsfDependency::TrackName(name) = dependency {
+        catalog_track_name_bytes(name)?;
+    }
+    Ok(())
+}
+
+/// カタログ全体の depends 解決を検証する
+///
+/// draft-ietf-moq-msf-02 §5.2.15 (Dependencies): String 要素は依存元以外の track object の
+/// Track Name にちょうど 1 つ一致し、Number 要素はカタログ内の renderGroup に一致しなければ
+/// ならない。tracks と publishTracks の双方を対象とし、相互参照も許可する。
+fn validate_catalog_dependencies(
+    tracks: &[MsfTrack],
+    publish_tracks: &[MsfTrack],
+) -> Result<(), MessageError> {
+    for source in tracks.iter().chain(publish_tracks.iter()) {
+        for dependency in &source.depends {
+            match dependency {
+                MsfDependency::TrackName(name) => {
+                    let matches = tracks
+                        .iter()
+                        .chain(publish_tracks.iter())
+                        .filter(|candidate| {
+                            !core::ptr::eq(*candidate, source) && candidate.name == name.as_str()
+                        })
+                        .count();
+                    if matches != 1 {
+                        return Err(MessageError::InvalidCatalog(format!(
+                            "track '{}' depends on track name '{}' which MUST match exactly one other track (matched {matches})",
+                            source.name, name
+                        )));
+                    }
+                }
+                MsfDependency::RenderGroup(render_group) => {
+                    if !tracks
+                        .iter()
+                        .chain(publish_tracks.iter())
+                        .any(|candidate| candidate.render_group == Some(*render_group))
+                    {
+                        return Err(MessageError::InvalidCatalog(format!(
+                            "track '{}' depends on renderGroup {render_group} which does not exist in the catalog",
+                            source.name
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 同じ altGroup の track が accessibleWindowTime を一致させることを検証する
+///
+/// draft-ietf-moq-msf-02 §5.2.45 (Accessible Window Time): 同じ alternate group の track は
+/// 同じ accessibleWindowTime を持たなければならない (MUST)。全 track が持たない場合と、
+/// 全 track が同じ値を持つ場合のどちらかだけを受理し、一部だけの保持と値の不一致を拒否する。
+/// isLive の値による例外はない。
+fn validate_alt_group_accessible_window_time(tracks: &[MsfTrack]) -> Result<(), MessageError> {
+    let mut groups = Vec::new();
+    for track in tracks {
+        if let Some(group) = track.alt_group
+            && !groups.contains(&group)
+        {
+            groups.push(group);
+        }
+    }
+    for group in groups {
+        let members = tracks
+            .iter()
+            .filter(|track| track.alt_group == Some(group))
+            .collect::<Vec<_>>();
+        let values = members
+            .iter()
+            .map(|track| track.accessible_window_time)
+            .collect::<Vec<_>>();
+        if values.iter().all(Option::is_none) {
+            continue;
+        }
+        if values.iter().any(Option::is_none) {
+            return Err(MessageError::InvalidCatalog(format!(
+                "tracks in altGroup {group} MUST all specify accessibleWindowTime or all omit it"
+            )));
+        }
+        let first = values[0];
+        if values.iter().any(|value| *value != first) {
+            return Err(MessageError::InvalidCatalog(format!(
+                "tracks in altGroup {group} MUST have the same accessibleWindowTime"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Media Timeline の depends が renderGroup の参照規則を満たすか検証する
+///
+/// draft-ietf-moq-msf-02 §7.2 (Media Timeline Catalog requirements): renderGroup 内の全 track が
+/// 対象なら renderGroup を参照し個別名を参照してはならず、一部だけが対象なら renderGroup を
+/// 参照せず個別名を参照しなければならない。catalog だけからは「一部だけ」を判定できないため、
+/// 全 track が個別名で列挙されている場合と、renderGroup 参照と所属 track の個別名参照が併存する
+/// 場合だけを拒否する。一部だけの判定は publisher の責務である。
+fn validate_media_timeline_dependencies(
+    tracks: &[MsfTrack],
+    publish_tracks: &[MsfTrack],
+) -> Result<(), MessageError> {
+    let all_tracks = tracks
+        .iter()
+        .chain(publish_tracks.iter())
+        .collect::<Vec<_>>();
+    let mut render_groups = Vec::new();
+    for track in &all_tracks {
+        if let Some(group) = track.render_group
+            && !render_groups.contains(&group)
+        {
+            render_groups.push(group);
+        }
+    }
+
+    for source in &all_tracks {
+        if source.packaging != MsfPackaging::MediaTimeline {
+            continue;
+        }
+        let referenced_names = source
+            .depends
+            .iter()
+            .filter_map(|dependency| match dependency {
+                MsfDependency::TrackName(name) => Some(name.as_str()),
+                MsfDependency::RenderGroup(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let referenced_groups = source
+            .depends
+            .iter()
+            .filter_map(|dependency| match dependency {
+                MsfDependency::RenderGroup(group) => Some(*group),
+                MsfDependency::TrackName(_) => None,
+            })
+            .collect::<Vec<_>>();
+
+        for group in &render_groups {
+            let members = all_tracks
+                .iter()
+                .copied()
+                .filter(|track| {
+                    track.render_group == Some(*group) && !core::ptr::eq(*track, *source)
+                })
+                .collect::<Vec<_>>();
+            if members.is_empty() {
+                continue;
+            }
+            let group_referenced = referenced_groups.contains(group);
+            let all_members_referenced = members
+                .iter()
+                .all(|track| referenced_names.contains(&track.name.as_str()));
+            if all_members_referenced && !group_referenced {
+                return Err(MessageError::InvalidCatalog(format!(
+                    "media timeline '{}' MUST reference renderGroup {group} instead of all of its tracks",
+                    source.name
+                )));
+            }
+            if group_referenced
+                && members
+                    .iter()
+                    .any(|track| referenced_names.contains(&track.name.as_str()))
+            {
+                return Err(MessageError::InvalidCatalog(format!(
+                    "media timeline '{}' MUST NOT reference individual tracks in the referenced renderGroup {group}",
+                    source.name
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Event Timeline の index が参照する Media Timeline の depends を検証する
+///
+/// draft-ietf-moq-msf-02 §8.3 (Event Timeline Catalog requirements): index が MediaPtsMs を
+/// 参照する場合、対応する Media Timeline track を event timeline の `depends` に列挙しなければ
+/// ならない。catalog だけでは event timeline payload の index と track の対応を判定できないため、
+/// 本関数は catalog 内の eventtimeline track のうち少なくとも 1 つが media timeline を参照して
+/// いることを確認する。複数の event timeline track がある場合の対応付けは呼び出し側の責務である。
+pub fn validate_event_timeline_depends(
+    catalog: &MsfCatalog,
+    timeline: &MsfEventTimeline,
+) -> Result<(), MessageError> {
+    let uses_media_pts = timeline
+        .0
+        .iter()
+        .any(|entry| matches!(entry.index, MsfEventIndex::MediaPtsMs(_)));
+    if !uses_media_pts {
+        return Ok(());
+    }
+
+    let media_tracks = catalog
+        .tracks
+        .iter()
+        .chain(catalog.publish_tracks.iter())
+        .filter(|track| track.packaging == MsfPackaging::MediaTimeline)
+        .collect::<Vec<_>>();
+    if media_tracks.is_empty() {
+        return Err(MessageError::InvalidCatalog(
+            "event timeline with MediaPtsMs index requires a media timeline track".to_string(),
+        ));
+    }
+    let media_names = media_tracks
+        .iter()
+        .map(|track| track.name.as_str())
+        .collect::<Vec<_>>();
+    let media_groups = media_tracks
+        .iter()
+        .filter_map(|track| track.render_group)
+        .collect::<Vec<_>>();
+
+    let referenced = catalog
+        .tracks
+        .iter()
+        .chain(catalog.publish_tracks.iter())
+        .filter(|track| track.packaging == MsfPackaging::EventTimeline)
+        .any(|track| {
+            track.depends.iter().any(|dependency| match dependency {
+                MsfDependency::TrackName(name) => media_names.contains(&name.as_str()),
+                MsfDependency::RenderGroup(group) => media_groups.contains(group),
+            })
+        });
+    if referenced {
+        Ok(())
+    } else {
+        Err(MessageError::InvalidCatalog(
+            "event timeline with MediaPtsMs index MUST depend on a media timeline track"
+                .to_string(),
+        ))
+    }
+}
+
+/// packagingMetadata の構文を検証する
+///
+/// draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata): `;` 区切りの `key=value` で、key と
+/// value は case-sensitive、whitespace・`=`・`;` を含んではならない (MUST NOT)。空要素、
+/// `=` を含まない要素、空の key / value も不正とする。未知の key は呼び出し側で無視する。
+fn validate_packaging_metadata(value: &str) -> Result<(), MessageError> {
+    if value.is_empty() {
+        return Err(MessageError::InvalidCatalog(
+            "packagingMetadata MUST NOT be empty".to_string(),
+        ));
+    }
+    for element in value.split(';') {
+        if element.is_empty() {
+            return Err(MessageError::InvalidCatalog(
+                "packagingMetadata MUST NOT contain an empty element".to_string(),
+            ));
+        }
+        let Some((key, value)) = element.split_once('=') else {
+            return Err(MessageError::InvalidCatalog(
+                "packagingMetadata element MUST be 'key=value'".to_string(),
+            ));
+        };
+        if key.is_empty() {
+            return Err(MessageError::InvalidCatalog(
+                "packagingMetadata key MUST NOT be empty".to_string(),
+            ));
+        }
+        if value.is_empty() {
+            return Err(MessageError::InvalidCatalog(
+                "packagingMetadata value MUST NOT be empty".to_string(),
+            ));
+        }
+        if key
+            .chars()
+            .any(|c| c.is_whitespace() || c == '=' || c == ';')
+        {
+            return Err(MessageError::InvalidCatalog(
+                "packagingMetadata key MUST NOT contain whitespace, '=' or ';'".to_string(),
+            ));
+        }
+        if value
+            .chars()
+            .any(|c| c.is_whitespace() || c == '=' || c == ';')
+        {
+            return Err(MessageError::InvalidCatalog(
+                "packagingMetadata value MUST NOT contain whitespace, '=' or ';'".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// 完全カタログのトラック 1 件が満たすべき MUST を検証する (encode 前 / delta add 適用前の検証用)
 ///
 /// `decode_track` の構造体ベース検証と同等の規則を、手組みの `MsfTrack` に対しても
 /// 適用する。JSON キーの存在で判定する `targetLatency` / `buffers` の共存は、
 /// 構造体では両フィールドが `Some` であることで判定する。
 ///
-/// - draft-ietf-moq-msf-01 §5.2.5 (Event timeline type)
+/// - draft-ietf-moq-msf-02 §5.2.6 (Event timeline type)
 /// - §5.2.8 (Target latency) / §5.2.9 (Buffers)
 /// - §5.2.13 (Initialization reference) は呼び出し側で catalog 全体を検査する
 /// - §5.2.32 (Language) / §5.2.33 (Parent name) / §5.2.35 (Track duration)
@@ -2593,7 +3322,23 @@ fn validate_event_type_not_set_when_not_event_timeline(
 /// - §5.2.18 (Codec) / §5.2.22 (Maximum Bitrate) / §5.2.28 (Audio sample rate) /
 ///   §5.2.29 (Channel configuration)
 fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
-    // draft-ietf-moq-msf-01 §5.2.33 (Parent name): clone 操作内でのみ許可される
+    // draft-ietf-moq-msf-02 §5.2.2 (Track namespace) / §5.2.3 (Track name) / §11.2:
+    // 手組みの値も decode と同じ写像規則で検証する。
+    if let Some(ref metadata) = track.packaging_metadata {
+        validate_packaging_metadata(metadata)?;
+    }
+    let name = catalog_track_name_bytes(&track.name)?;
+    let namespace = match track.namespace.as_deref() {
+        Some(value) => Some(parse_catalog_namespace(value)?),
+        None => None,
+    };
+    // draft-ietf-moq-transport-23 §8.7: Full Track Name は 4,096 バイト以下
+    validate_catalog_full_track_name(namespace.as_ref(), &name)?;
+    for dependency in &track.depends {
+        validate_dependency_shape(dependency)?;
+    }
+
+    // draft-ietf-moq-msf-02 §5.2.34 (Parent name): clone 操作内でのみ許可される
     if track.parent_name.is_some() {
         return Err(MessageError::InvalidCatalog(
             "parentName MUST only be included inside a clone operation in a delta update"
@@ -2601,7 +3346,7 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
         ));
     }
 
-    // draft-ietf-moq-msf-01 §5.2.5 (Event timeline type): eventtimeline なら eventType 必須
+    // draft-ietf-moq-msf-02 §5.2.6 (Event timeline type): eventtimeline なら eventType 必須
     let is_event_timeline = matches!(track.packaging, MsfPackaging::EventTimeline);
     if is_event_timeline && track.event_type.is_none() {
         return Err(MessageError::InvalidCatalog(
@@ -2613,10 +3358,13 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
         track.event_type.as_deref(),
     )?;
 
-    // draft-ietf-moq-msf-01 §5.2.39 (Cipher suite) / §4.3.3 (Recommended encryption scheme)
-    if track.encryption_scheme.is_some() && track.cipher_suite.is_none() {
+    // draft-ietf-moq-msf-02 §5.2.39 (Cipher suite) / §4.4.3 (Recommended encryption scheme):
+    // cipherSuite は encryptionScheme が moq-secure-objects のときだけ必須。
+    if track.encryption_scheme.as_deref() == Some("moq-secure-objects")
+        && track.cipher_suite.is_none()
+    {
         return Err(MessageError::InvalidCatalog(
-            "cipherSuite MUST be present when encryptionScheme is specified".to_string(),
+            "cipherSuite MUST be present with moq-secure-objects".to_string(),
         ));
     }
     if track.encryption_scheme.as_deref() == Some("moq-secure-objects")
@@ -2627,44 +3375,26 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
         ));
     }
 
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers): 共存禁止
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency) / §5.2.10 (Buffers): 共存禁止
     validate_target_latency_buffers_exclusive(track.target_latency, track.buffers.as_ref())?;
 
-    // draft-ietf-moq-msf-01 §5.2.35 (Track duration): isLive=true なら禁止
+    // draft-ietf-moq-msf-02 §5.2.36 (Track duration): isLive=true なら禁止
     if track.is_live && track.track_duration.is_some() {
         return Err(MessageError::InvalidCatalog(
             "trackDuration MUST NOT be included when isLive is true".to_string(),
         ));
     }
 
-    // draft-ietf-moq-msf-01 §7.2 (Media Timeline Catalog requirements) / §8.2 (Event Timeline Catalog requirements)
+    // draft-ietf-moq-msf-02 §7.2 (Media Timeline Catalog requirements):
+    // mediatimeline は depends 必須。mimeType の値は要求しない。
     let is_media_timeline = matches!(track.packaging, MsfPackaging::MediaTimeline);
-    if is_media_timeline {
-        if track.depends.is_empty() {
-            return Err(MessageError::InvalidCatalog(
-                "mediatimeline track MUST have a 'depends' attribute".to_string(),
-            ));
-        }
-        if track.mime_type.as_deref() != Some("application/json") {
-            return Err(MessageError::InvalidCatalog(
-                "mediatimeline track mimeType MUST be 'application/json'".to_string(),
-            ));
-        }
-    }
-    if is_event_timeline {
-        if track.depends.is_empty() {
-            return Err(MessageError::InvalidCatalog(
-                "eventtimeline track MUST have a 'depends' attribute".to_string(),
-            ));
-        }
-        if track.mime_type.as_deref() != Some("application/json") {
-            return Err(MessageError::InvalidCatalog(
-                "eventtimeline track mimeType MUST be 'application/json'".to_string(),
-            ));
-        }
+    if is_media_timeline && track.depends.is_empty() {
+        return Err(MessageError::InvalidCatalog(
+            "mediatimeline track MUST have a 'depends' attribute".to_string(),
+        ));
     }
 
-    // draft-ietf-moq-msf-01 §5.2.32 (Language): BCP 47 言語タグ
+    // draft-ietf-moq-msf-02 §5.2.33 (Language): BCP 47 言語タグ
     if let Some(ref lang) = track.lang {
         validate_lang_tag(lang)?;
     }
@@ -2677,10 +3407,37 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
 /// `decode_clone_track` の検証と同等の規則を、手組みの `MsfCloneTrack` に適用する。
 /// clone は親から属性を継承し得るため、欠如側の必須検査は行わない。
 ///
-/// - draft-ietf-moq-msf-01 §5.2.5 (Event timeline type)
+/// - draft-ietf-moq-msf-02 §5.2.6 (Event timeline type)
 /// - §5.2.8 (Target latency) / §5.2.9 (Buffers)
 /// - §5.2.32 (Language) / §5.2.35 (Track duration)
 fn validate_clone_track_fragment(track: &MsfCloneTrack) -> Result<(), MessageError> {
+    // draft-ietf-moq-msf-02 §5.2.2 (Track namespace) / §5.2.3 (Track name) /
+    // §5.2.34 (Parent name) / §5.2.35 (Parent namespace) / §11.2: decode と同じ写像規則。
+    if let Some(ref metadata) = track.packaging_metadata {
+        validate_packaging_metadata(metadata)?;
+    }
+    let name = catalog_track_name_bytes(&track.name)?;
+    let parent_name = catalog_track_name_bytes(&track.parent_name)?;
+    let namespace = match track.namespace.as_deref() {
+        Some(value) => Some(parse_catalog_namespace(value)?),
+        None => None,
+    };
+    let parent_namespace = match track.parent_namespace.as_deref() {
+        Some(value) => Some(parse_catalog_namespace(value)?),
+        None => None,
+    };
+    // draft-ietf-moq-transport-23 §8.7: clone 自身と親の Full Track Name の長さ制限。
+    // clone が namespace を宣言しない場合は親の namespace を継承する (§5.1.6) ため、
+    // parentNamespace を clone 自身の実効 namespace としても使う。
+    let effective_namespace = namespace.as_ref().or(parent_namespace.as_ref());
+    validate_catalog_full_track_name(effective_namespace, &name)?;
+    validate_catalog_full_track_name(parent_namespace.as_ref(), &parent_name)?;
+    if let Some(ref depends) = track.depends {
+        for dependency in depends {
+            validate_dependency_shape(dependency)?;
+        }
+    }
+
     // packaging を明示して非 eventtimeline とした場合は eventType を禁止する
     // (packaging 省略 + eventType ありは親からの継承で正当化され得るため受理する)
     validate_event_type_not_set_when_not_event_timeline(
@@ -2688,17 +3445,17 @@ fn validate_clone_track_fragment(track: &MsfCloneTrack) -> Result<(), MessageErr
         track.event_type.as_deref(),
     )?;
 
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers): 共存禁止
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency) / §5.2.10 (Buffers): 共存禁止
     validate_target_latency_buffers_exclusive(track.target_latency, track.buffers.as_ref())?;
 
-    // draft-ietf-moq-msf-01 §5.2.35 (Track duration): isLive=true なら禁止
+    // draft-ietf-moq-msf-02 §5.2.36 (Track duration): isLive=true なら禁止
     if track.is_live == Some(true) && track.track_duration.is_some() {
         return Err(MessageError::InvalidCatalog(
             "trackDuration MUST NOT be included when isLive is true".to_string(),
         ));
     }
 
-    // draft-ietf-moq-msf-01 §5.2.32 (Language): BCP 47 言語タグ
+    // draft-ietf-moq-msf-02 §5.2.33 (Language): BCP 47 言語タグ
     if let Some(ref lang) = track.lang {
         validate_lang_tag(lang)?;
     }
@@ -2709,18 +3466,27 @@ fn validate_clone_track_fragment(track: &MsfCloneTrack) -> Result<(), MessageErr
 ///
 /// `decode_full_catalog` が行う検証と同等の規則を、手組みの `MsfCatalog` にも適用する。
 fn validate_full_catalog_for_encode(catalog: &MsfCatalog) -> Result<(), MessageError> {
+    for entry in &catalog.init_data_list {
+        validate_init_data(entry)?;
+    }
     validate_init_data_list_unique(&catalog.init_data_list)?;
     validate_init_refs(
         &catalog.tracks,
         &catalog.publish_tracks,
         &catalog.init_data_list,
     )?;
-    validate_track_name_uniqueness(&catalog.tracks, &catalog.publish_tracks)?;
+    // 完全カタログの encode はカタログトラックの namespace を受け取らないため、継承先を
+    // 解決しない検証になる (decode と同じ範囲)。
+    catalog.validate_track_names(None)?;
     for track in catalog.tracks.iter().chain(catalog.publish_tracks.iter()) {
         validate_full_track(track)?;
     }
+    validate_catalog_dependencies(&catalog.tracks, &catalog.publish_tracks)?;
+    validate_media_timeline_dependencies(&catalog.tracks, &catalog.publish_tracks)?;
+    validate_alt_group_accessible_window_time(&catalog.tracks)?;
+    validate_alt_group_accessible_window_time(&catalog.publish_tracks)?;
     // tracks と publishTracks は方向が異なるため group 検証は分離する
-    // (draft-ietf-moq-msf-01 §5.1.5 の reverse direction による本実装の解釈)
+    // (draft-ietf-moq-msf-02 §5.1.5 の reverse direction による本実装の解釈)
     validate_group_target_latency(&catalog.tracks, "renderGroup", |t| t.render_group)?;
     validate_group_target_latency(&catalog.tracks, "altGroup", |t| t.alt_group)?;
     validate_group_target_latency(&catalog.publish_tracks, "renderGroup", |t| t.render_group)?;
@@ -2737,7 +3503,7 @@ fn validate_full_catalog_for_encode(catalog: &MsfCatalog) -> Result<(), MessageE
 /// `decode_delta` / `decode_delta_operation` が行う検証と同等の規則を、手組みの
 /// `MsfDeltaUpdate` にも適用する。
 fn validate_delta_for_encode(delta: &MsfDeltaUpdate) -> Result<(), MessageError> {
-    // draft-ietf-moq-msf-01 §5.3 (Delta updates): 少なくとも 1 つの操作が必要
+    // draft-ietf-moq-msf-02 §5.3 (Delta updates): 少なくとも 1 つの操作が必要
     if delta.operations.is_empty() {
         return Err(MessageError::InvalidCatalog(
             "delta update MUST contain at least one operation".to_string(),
@@ -2755,7 +3521,24 @@ fn validate_delta_for_encode(delta: &MsfDeltaUpdate) -> Result<(), MessageError>
                     validate_clone_track_fragment(track)?;
                 }
             }
-            MsfDeltaOperation::Remove { .. } => {}
+            MsfDeltaOperation::Update { tracks } => {
+                for update in tracks {
+                    validate_update_track(&update.track)?;
+                    validate_clone_track_fragment(&update.track)?;
+                }
+            }
+            MsfDeltaOperation::Remove { tracks } => {
+                // remove の track 参照も name / namespace の写像規則と Full Track Name の
+                // 長さ制限を満たす必要がある
+                for track in tracks {
+                    let name = catalog_track_name_bytes(&track.name)?;
+                    let namespace = match track.namespace.as_deref() {
+                        Some(value) => Some(parse_catalog_namespace(value)?),
+                        None => None,
+                    };
+                    validate_catalog_full_track_name(namespace.as_ref(), &name)?;
+                }
+            }
         }
     }
     Ok(())
@@ -2766,7 +3549,7 @@ fn decode_full_catalog(
     version: String,
 ) -> Result<MsfCatalog, MessageError> {
     let generated_at = val.to_member("generatedAt")?.map(parse_u64)?;
-    // draft-ietf-moq-msf-01 §5.1.3 (Is Complete): isComplete が FALSE ならフィールド自体を含めてはならない
+    // draft-ietf-moq-msf-02 §5.1.3 (Is Complete): isComplete が FALSE ならフィールド自体を含めてはならない
     // この仕様は将来変更される可能性がある。
     let is_complete = match val.to_member("isComplete")?.optional() {
         Some(v) => {
@@ -2786,7 +3569,7 @@ fn decode_full_catalog(
         .map(|v| decode_track(v))
         .collect::<Result<Vec<_>, _>>()?;
 
-    // draft-ietf-moq-msf-01 §5.1.5 (Publish tracks): 欠如時は空とする
+    // draft-ietf-moq-msf-02 §5.1.5 (Publish tracks): 欠如時は空とする
     // (JSON キーの出現順には依存しない。順序検証は行わない)
     let publish_tracks = match val.to_member("publishTracks")?.optional() {
         None => Vec::new(),
@@ -2796,7 +3579,7 @@ fn decode_full_catalog(
             .collect::<Result<Vec<_>, _>>()?,
     };
 
-    // draft-ietf-moq-msf-01 §5.1.7 (Initialization Data List): initDataList は tracks 配列より後に出現しなければならない
+    // draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List): initDataList は tracks 配列より後に出現しなければならない
     // nojson はキー出現順を提供しないため、順序検証は行わない。
     // この仕様は将来変更される可能性がある。
     let init_data_list = match val.to_member("initDataList")?.optional() {
@@ -2808,36 +3591,24 @@ fn decode_full_catalog(
     };
     validate_init_data_list_unique(&init_data_list)?;
 
-    // draft-ietf-moq-msf-01 §5.2.13 (Initialization reference): initRef は initDataList の
+    // draft-ietf-moq-msf-02 §5.2.14 (Initialization reference): initRef は initDataList の
     // id を指す。完全カタログ単体で参照整合性を検証する (delta は initDataList を持たず、
     // 基底カタログの id を継承し得るためここでは検証しない)。
     validate_init_refs(&tracks, &publish_tracks, &init_data_list)?;
 
-    // draft-ietf-moq-msf-01 §5.2.3 (Track name): track name は namespace ごとに一意でなければならない
-    // この仕様は将来変更される可能性がある。
-    //
-    // 注意: ここではカタログトラックの namespace が不明なため、JSON 上の値での部分的なチェックのみ行う。
-    // namespace 省略 (None) と明示指定が実質同じ namespace になるケースの検出はできない
-    // (カタログトラックの namespace が判明するのはカタログトラック自体の受信後であり、
-    // デコード単体では判定不能)。
-    //
-    // draft-ietf-moq-msf-01 §5.2.3 (Track name) の一意性は catalog 全体 ("Within the catalog") の規定のため、
-    // tracks と publishTracks を通して検査する。
-    validate_track_name_uniqueness(&tracks, &publish_tracks)?;
-
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 同一 renderGroup / altGroup 内で
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency): 同一 renderGroup / altGroup 内で
     // isLive=true かつ targetLatency を宣言したトラック同士の値は一致しなければならない (MUST)
     // この仕様は将来変更される可能性がある。
     validate_group_target_latency(&tracks, "renderGroup", |t| t.render_group)?;
     validate_group_target_latency(&tracks, "altGroup", |t| t.alt_group)?;
     // tracks と publishTracks は方向が異なるため group 検証は分離する
-    // (draft-ietf-moq-msf-01 §5.1.5 の reverse direction による本実装の解釈。
+    // (draft-ietf-moq-msf-02 §5.1.5 の reverse direction による本実装の解釈。
     // §5.2.8 / §5.2.9 の All tracks の範囲は曖昧であり、この仕様は将来変更される可能性がある。
     // 重複検査のみ §5.2.3 の Within the catalog に従い catalog 通し)
     validate_group_target_latency(&publish_tracks, "renderGroup", |t| t.render_group)?;
     validate_group_target_latency(&publish_tracks, "altGroup", |t| t.alt_group)?;
 
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): 同一 renderGroup / altGroup 内で
+    // draft-ietf-moq-msf-02 §5.2.10 (Buffers): 同一 renderGroup / altGroup 内で
     // isLive=true かつ buffers を宣言したトラック同士の値は一致しなければならない (MUST)
     // この仕様は将来変更される可能性がある。
     validate_group_buffers(&tracks, "renderGroup", |t| t.render_group)?;
@@ -2845,7 +3616,13 @@ fn decode_full_catalog(
     validate_group_buffers(&publish_tracks, "renderGroup", |t| t.render_group)?;
     validate_group_buffers(&publish_tracks, "altGroup", |t| t.alt_group)?;
 
-    Ok(MsfCatalog {
+    // draft-ietf-moq-msf-02 §5.2.15 (Dependencies): 参照先が解決できること
+    validate_catalog_dependencies(&tracks, &publish_tracks)?;
+    validate_media_timeline_dependencies(&tracks, &publish_tracks)?;
+    validate_alt_group_accessible_window_time(&tracks)?;
+    validate_alt_group_accessible_window_time(&publish_tracks)?;
+
+    let catalog = MsfCatalog {
         version,
         generated_at,
         is_complete,
@@ -2853,25 +3630,39 @@ fn decode_full_catalog(
         publish_tracks,
         init_data_list,
         removed_tracks: hashbrown::HashMap::new(),
-    })
+    };
+    // draft-ietf-moq-msf-02 §5.2.3 (Track name): Full Track Name は catalog 内で一意でなければ
+    // ならない。カタログトラックの namespace はデコード単体では不明なため、ここでは継承先を
+    // 渡さずに検証する (継承を解決した完全な検証は受信側が
+    // [`MsfCatalog::validate_track_names`] に基準 namespace を渡して行う)。
+    // tracks と publishTracks を通して検査する。
+    catalog.validate_track_names(None)?;
+    Ok(catalog)
 }
 
 fn decode_delta(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfDeltaUpdate, MessageError> {
-    // draft-ietf-moq-msf-01 §5.3 (Delta updates): delta update に version や tracks が含まれてはいけない
-    if val.to_member("version")?.optional().is_some() {
-        return Err(MessageError::InvalidCatalog(
-            "delta update MUST NOT contain 'version'".to_string(),
-        ));
-    }
-    if val.to_member("tracks")?.optional().is_some() {
-        return Err(MessageError::InvalidCatalog(
-            "delta update MUST NOT contain 'tracks'".to_string(),
-        ));
+    // draft-ietf-moq-msf-02 §5.3 (Delta updates): delta update は deltaUpdate と
+    // generatedAt だけを持ち、他の Root Catalog フィールドを含んではならない。
+    for forbidden in [
+        "version",
+        "isComplete",
+        "tracks",
+        "publishTracks",
+        "initDataList",
+    ] {
+        if val.to_member(forbidden)?.optional().is_some() {
+            return Err(MessageError::InvalidCatalog(format!(
+                "delta update MUST NOT contain '{forbidden}'"
+            )));
+        }
     }
 
-    let generated_at = val.to_member("generatedAt")?.map(parse_u64)?;
+    let generated_at_value = val.to_member("generatedAt")?.required().map_err(|_| {
+        MessageError::InvalidCatalog("delta update MUST contain 'generatedAt'".to_string())
+    })?;
+    let generated_at = parse_u64(generated_at_value)?;
 
-    // draft-ietf-moq-msf-01 §5.1.6 (Delta update): deltaUpdate は operation object の配列。
+    // draft-ietf-moq-msf-02 §5.1.6 (Delta update): deltaUpdate は operation object の配列。
     // 操作は配列順に適用される。
     // この仕様は将来変更される可能性がある。
     let operations_v = val.to_member("deltaUpdate")?.required()?;
@@ -2880,7 +3671,7 @@ fn decode_delta(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfDeltaUpdate, Mes
         operations.push(decode_delta_operation(op_v)?);
     }
 
-    // draft-ietf-moq-msf-01 §5.3 (Delta updates): 少なくとも 1 つの操作が必要
+    // draft-ietf-moq-msf-02 §5.3 (Delta updates): 少なくとも 1 つの操作が必要
     if operations.is_empty() {
         return Err(MessageError::InvalidCatalog(
             "delta update MUST contain at least one operation".to_string(),
@@ -2920,6 +3711,13 @@ fn decode_delta_operation(
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(MsfDeltaOperation::Clone { tracks })
         }
+        "update" => {
+            let tracks = tracks_v
+                .to_array()?
+                .map(decode_update_track)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(MsfDeltaOperation::Update { tracks })
+        }
         other => Err(MessageError::InvalidCatalog(format!(
             "unknown delta operation '{other}'"
         ))),
@@ -2943,6 +3741,8 @@ struct CommonTrackFields {
     label: Option<String>,
     render_group: Option<u64>,
     alt_group: Option<u64>,
+    accessible_window_time: Option<u64>,
+    keyframe_spacing: Option<u64>,
     init_ref: Option<String>,
     template: Option<MsfTemplate>,
     temporal_id: Option<u64>,
@@ -2964,16 +3764,16 @@ struct CommonTrackFields {
     lang: Option<String>,
     track_duration: Option<u64>,
     connection_uri: Option<String>,
-    token: Option<String>,
     encryption_scheme: Option<String>,
     cipher_suite: Option<String>,
     key_id: Option<String>,
     track_base_key: Option<String>,
     auth_info: Option<Vec<MsfAuthInfo>>,
-    depends: Option<Vec<String>>,
+    depends: Option<Vec<MsfDependency>>,
     accessibility: Option<Vec<MsfAccessibility>>,
     parent_name: Option<String>,
     parent_namespace: Option<String>,
+    packaging_metadata: Option<String>,
 }
 
 /// track / cloneTracks 共通フィールドを抽出する
@@ -2984,6 +3784,7 @@ fn decode_common_track_fields(
 ) -> Result<CommonTrackFields, MessageError> {
     let fields = CommonTrackFields {
         namespace: val.to_member("namespace")?.map(|v| v.try_into())?,
+        packaging_metadata: val.to_member("packagingMetadata")?.map(|v| v.try_into())?,
         event_type: val.to_member("eventType")?.map(|v| v.try_into())?,
         role: val.to_member("role")?.map(|v| v.try_into())?,
         target_latency: val.to_member("targetLatency")?.map(parse_u64)?,
@@ -2994,6 +3795,8 @@ fn decode_common_track_fields(
         label: val.to_member("label")?.map(|v| v.try_into())?,
         render_group: val.to_member("renderGroup")?.map(parse_u64)?,
         alt_group: val.to_member("altGroup")?.map(parse_u64)?,
+        accessible_window_time: val.to_member("accessibleWindowTime")?.map(parse_u64)?,
+        keyframe_spacing: val.to_member("keyframeSpacing")?.map(parse_u64)?,
         init_ref: val.to_member("initRef")?.map(|v| v.try_into())?,
         template: match val.to_member("template")?.optional() {
             Some(v) => Some(decode_template(v)?),
@@ -3017,11 +3820,10 @@ fn decode_common_track_fields(
         display_height: val.to_member("displayHeight")?.map(parse_u64)?,
         lang: val.to_member("lang")?.map(|v| v.try_into())?,
         track_duration: val.to_member("trackDuration")?.map(parse_u64)?,
-        // キー綴りは §5.2.36 / §5.2.37 に定義がなく §5.6.16 の例に準拠する。
+        // キー綴りは §5.2.37 に定義がなく §5.6.17 の例に準拠する。
         // URI 形式検証は行わない (§5.2.36 の妥当性 MUST を含め、接続確立時の振る舞いは
         // catalog decode の責務外とし transport 層に委ねる)。
-        connection_uri: val.to_member("connectionUri")?.map(|v| v.try_into())?,
-        token: val.to_member("token")?.map(|v| v.try_into())?,
+        connection_uri: val.to_member("connectionURI")?.map(|v| v.try_into())?,
         encryption_scheme: val.to_member("encryptionScheme")?.map(|v| v.try_into())?,
         cipher_suite: val.to_member("cipherSuite")?.map(|v| v.try_into())?,
         key_id: val.to_member("keyId")?.map(|v| v.try_into())?,
@@ -3035,7 +3837,19 @@ fn decode_common_track_fields(
             Some(arr_v) => Some(
                 arr_v
                     .to_array()?
-                    .map(|v| -> Result<String, MessageError> { v.try_into().map_err(Into::into) })
+                    .map(|v| -> Result<MsfDependency, MessageError> {
+                        match v.kind() {
+                            nojson::JsonValueKind::String => {
+                                Ok(MsfDependency::TrackName(v.try_into()?))
+                            }
+                            nojson::JsonValueKind::Integer => {
+                                Ok(MsfDependency::RenderGroup(parse_u64(v)?))
+                            }
+                            _ => Err(MessageError::InvalidCatalog(
+                                "depends element MUST be a string or an integer".to_string(),
+                            )),
+                        }
+                    })
                     .collect::<Result<Vec<_>, _>>()?,
             ),
         },
@@ -3049,12 +3863,30 @@ fn decode_common_track_fields(
     if let Some(ref lang) = fields.lang {
         validate_lang_tag(lang)?;
     }
+    if let Some(ref metadata) = fields.packaging_metadata {
+        validate_packaging_metadata(metadata)?;
+    }
+    // draft-ietf-moq-msf-02 §5.2.2 (Track namespace) / §5.2.35 (Parent namespace) /
+    // §5.2.15 (Dependencies) / §11.2: 共通フィールドの写像規則をここでまとめて検証する。
+    // clone の parentNamespace は本関数を通るため、MsfTrack 側の配置制約より先に
+    // 構文不正として拒否される。
+    if let Some(ref namespace) = fields.namespace {
+        parse_catalog_namespace(namespace)?;
+    }
+    if let Some(ref parent_namespace) = fields.parent_namespace {
+        parse_catalog_namespace(parent_namespace)?;
+    }
+    if let Some(ref depends) = fields.depends {
+        for dependency in depends {
+            validate_dependency_shape(dependency)?;
+        }
+    }
     Ok(fields)
 }
 
 /// targetLatency と buffers の共存を拒否する (両者共通の presence 検査)
 ///
-/// draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers)。
+/// draft-ietf-moq-msf-02 §5.2.9 (Target latency) / §5.2.10 (Buffers)。
 /// None 化より前に key 存在で判定する (パース済み値では None 化で情報が落ちるため)。
 fn reject_coexisting_target_latency_buffers(
     val: nojson::RawJsonValue<'_, '_>,
@@ -3071,12 +3903,15 @@ fn reject_coexisting_target_latency_buffers(
 
 fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageError> {
     let name: String = val.to_member("name")?.required()?.try_into()?;
+    // draft-ietf-moq-msf-02 §5.2.3 (Track name): 空文字と NUL は禁止
+    let name_bytes = catalog_track_name_bytes(&name)?;
     let packaging_str: String = val.to_member("packaging")?.required()?.try_into()?;
     let packaging = MsfPackaging::from_packaging_str(&packaging_str)?;
 
     let f = decode_common_track_fields(val)?;
     let CommonTrackFields {
         namespace,
+        packaging_metadata,
         event_type,
         role,
         target_latency,
@@ -3084,6 +3919,8 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
         label,
         render_group,
         alt_group,
+        accessible_window_time,
+        keyframe_spacing,
         init_ref,
         depends,
         template,
@@ -3108,7 +3945,6 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
         parent_namespace,
         track_duration,
         connection_uri,
-        token,
         encryption_scheme,
         cipher_suite,
         key_id,
@@ -3118,8 +3954,14 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
     } = f;
     let depends = depends.unwrap_or_default();
     let accessibility = accessibility.unwrap_or_default();
+    // draft-ietf-moq-transport-23 §8.7: Full Track Name の長さ制限
+    let parsed_namespace = match namespace.as_deref() {
+        Some(value) => Some(parse_catalog_namespace(value)?),
+        None => None,
+    };
+    validate_catalog_full_track_name(parsed_namespace.as_ref(), &name_bytes)?;
 
-    // draft-ietf-moq-msf-01 §5.2.5 (Event timeline type): eventtimeline なら eventType 必須、それ以外では禁止
+    // draft-ietf-moq-msf-02 §5.2.6 (Event timeline type): eventtimeline なら eventType 必須、それ以外では禁止
     let is_event_timeline = matches!(packaging, MsfPackaging::EventTimeline);
     if is_event_timeline && event_type.is_none() {
         return Err(MessageError::InvalidCatalog(
@@ -3128,14 +3970,14 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
     }
     validate_event_type_not_set_when_not_event_timeline(Some(&packaging), event_type.as_deref())?;
 
-    // draft-ietf-moq-msf-01 §5.2.7 (Is Live): isLive は必須フィールド
+    // draft-ietf-moq-msf-02 §5.2.8 (Is Live): isLive は必須フィールド
     // §5.6 の例は非規範例であり isLive を省略しているものがある。本実装は §5.2.7 に従い
     // required とするため、仕様例をそのままデコードすると reject される。テストで利用する際は isLive を補完すること
     // この仕様は将来変更される可能性がある。
     let is_live: bool = val.to_member("isLive")?.required()?.try_into()?;
 
     // ─── parentName / parentNamespace の配置制約 ─────────────
-    // draft-ietf-moq-msf-01 §5.2.33 (Parent name) / §5.2.34 (Parent namespace):
+    // draft-ietf-moq-msf-02 §5.2.34 (Parent name) / §5.2.35 (Parent namespace):
     // 両者とも clone 操作 (delta update §5.1.6) 内でのみ許可される。
     // cloneTracks は decode_clone_track で処理されるため、ここでは常に禁止
     // (parentNamespace は本実装が decode_clone_track で理解するフィールドであり、
@@ -3154,12 +3996,12 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
     }
 
     // ─── 暗号化 signaling の必須組 ───
-    // draft-ietf-moq-msf-01 §5.2.39: encryptionScheme 指定時は scheme によらず cipherSuite が必須。
-    // draft-ietf-moq-msf-01 §4.3.3: moq-secure-objects 時は cipherSuite ・ keyId ・ trackBaseKey の 3 点が必須。
+    // draft-ietf-moq-msf-02 §5.2.39: cipherSuite は moq-secure-objects のときだけ必須。
+    // draft-ietf-moq-msf-02 §4.4.3: moq-secure-objects 時は keyId ・ trackBaseKey も必須。
     // clone (decode_clone_track) では親未知のため欠如 reject を行わない (継承で補完され得る)。
-    if encryption_scheme.is_some() && cipher_suite.is_none() {
+    if encryption_scheme.as_deref() == Some("moq-secure-objects") && cipher_suite.is_none() {
         return Err(MessageError::InvalidCatalog(
-            "cipherSuite MUST be present when encryptionScheme is specified".to_string(),
+            "cipherSuite MUST be present with moq-secure-objects".to_string(),
         ));
     }
     if encryption_scheme.as_deref() == Some("moq-secure-objects")
@@ -3171,21 +4013,21 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
     }
 
     // ─── isLive と targetLatency / buffers / trackDuration の相互制約 ───
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): "This property MUST NOT be present if the
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency): "This property MUST NOT be present if the
     // buffers Section 5.2.9 property is present within a track definition."
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): "This property MUST NOT be present if the target
+    // draft-ietf-moq-msf-02 §5.2.10 (Buffers): "This property MUST NOT be present if the target
     // latency Section 5.2.8 property is present within a track definition."
     // 共存は isLive の値によらず reject する (本実装では presence 違反を優先する選択とする)。
     // None 化より前に key 存在で判定する。
     reject_coexisting_target_latency_buffers(val)?;
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): isLive=false なら targetLatency は無視される
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): isLive=false なら buffers は無視される
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency): isLive=false なら targetLatency は無視される
+    // draft-ietf-moq-msf-02 §5.2.10 (Buffers): isLive=false なら buffers は無視される
     let (target_latency, buffers) = if is_live {
         (target_latency, buffers)
     } else {
         (None, None)
     };
-    // draft-ietf-moq-msf-01 §5.2.35 (Track duration): isLive=true なら trackDuration 禁止
+    // draft-ietf-moq-msf-02 §5.2.36 (Track duration): isLive=true なら trackDuration 禁止
     if is_live && track_duration.is_some() {
         return Err(MessageError::InvalidCatalog(
             "trackDuration MUST NOT be included when isLive is true".to_string(),
@@ -3193,37 +4035,19 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
     }
 
     // ─── timeline track の必須属性 ────────────────
+    // draft-ietf-moq-msf-02 §7.2 (Media Timeline Catalog requirements):
+    // mediatimeline は depends 必須。mimeType の値は要求しない。
     let is_media_timeline = matches!(packaging, MsfPackaging::MediaTimeline);
-    // draft-ietf-moq-msf-01 §7.2 (Media Timeline Catalog requirements): mediatimeline は depends 必須, mimeType=application/json 必須
-    if is_media_timeline {
-        if depends.is_empty() {
-            return Err(MessageError::InvalidCatalog(
-                "mediatimeline track MUST have a 'depends' attribute".to_string(),
-            ));
-        }
-        if mime_type.as_deref() != Some("application/json") {
-            return Err(MessageError::InvalidCatalog(
-                "mediatimeline track mimeType MUST be 'application/json'".to_string(),
-            ));
-        }
-    }
-    // draft-ietf-moq-msf-01 §8.2 (Event Timeline Catalog requirements): eventtimeline は depends 必須, mimeType=application/json 必須
-    if is_event_timeline {
-        if depends.is_empty() {
-            return Err(MessageError::InvalidCatalog(
-                "eventtimeline track MUST have a 'depends' attribute".to_string(),
-            ));
-        }
-        if mime_type.as_deref() != Some("application/json") {
-            return Err(MessageError::InvalidCatalog(
-                "eventtimeline track mimeType MUST be 'application/json'".to_string(),
-            ));
-        }
+    if is_media_timeline && depends.is_empty() {
+        return Err(MessageError::InvalidCatalog(
+            "mediatimeline track MUST have a 'depends' attribute".to_string(),
+        ));
     }
 
     let track = MsfTrack {
         name,
         packaging,
+        packaging_metadata,
         namespace,
         event_type,
         role,
@@ -3233,6 +4057,8 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
         label,
         render_group,
         alt_group,
+        accessible_window_time,
+        keyframe_spacing,
         init_ref,
         depends,
         template,
@@ -3256,7 +4082,6 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
         parent_name,
         track_duration,
         connection_uri,
-        token,
         encryption_scheme,
         cipher_suite,
         key_id,
@@ -3268,13 +4093,52 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
     Ok(track)
 }
 
+/// initData の data を kind に応じて検証する
+///
+/// draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List): `track-property` /
+/// `object-property` の data は property type の hex notation を持つ。仕様は文法を定めないため、
+/// 本実装は `0x` に続く 1〜16 桁の hex digit (大文字小文字を問わない) で、MOQT の property type が
+/// 表現できる 2^62 - 1 以下と定める。`inline` の Base64 検証は 0342 が担当する。
+fn validate_init_data(entry: &MsfInitData) -> Result<(), MessageError> {
+    if matches!(entry.kind, MsfInitDataKind::Inline) {
+        return Ok(());
+    }
+    let Some(hex) = entry.data.strip_prefix("0x") else {
+        return Err(MessageError::InvalidCatalog(format!(
+            "initData '{}' with property type MUST use 0x-prefixed hex notation",
+            entry.id
+        )));
+    };
+    if hex.is_empty() || hex.len() > 16 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(MessageError::InvalidCatalog(format!(
+            "initData '{}' has invalid property type hex notation",
+            entry.id
+        )));
+    }
+    let value = u64::from_str_radix(hex, 16).map_err(|_| {
+        MessageError::InvalidCatalog(format!(
+            "initData '{}' has invalid property type hex notation",
+            entry.id
+        ))
+    })?;
+    if value > (1_u64 << 62) - 1 {
+        return Err(MessageError::InvalidCatalog(format!(
+            "initData '{}' property type is out of range",
+            entry.id
+        )));
+    }
+    Ok(())
+}
+
 fn decode_init_data(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfInitData, MessageError> {
     let id: String = val.to_member("id")?.required()?.try_into()?;
     let kind_str: String = val.to_member("type")?.required()?.try_into()?;
     let kind = MsfInitDataKind::from_init_data_kind_str(&kind_str)?;
     let data: String = val.to_member("data")?.required()?.try_into()?;
+    let entry = MsfInitData { id, kind, data };
+    validate_init_data(&entry)?;
     // 未知キーは無視する
-    Ok(MsfInitData { id, kind, data })
+    Ok(entry)
 }
 
 fn decode_buffers(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfBuffers, MessageError> {
@@ -3288,14 +4152,14 @@ fn decode_buffers(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfBuffers, Messa
             "min" => min = Some(parse_u64(value)?),
             "max" => max = Some(parse_u64(value)?),
             _ => {
-                // draft-ietf-moq-msf-01 §5.2.9 (Buffers): 未知 key は無視する
+                // draft-ietf-moq-msf-02 §5.2.10 (Buffers): 未知 key は無視する
             }
         }
     }
     Ok(MsfBuffers { target, min, max })
 }
 
-/// authInfo object をデコードする (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))
+/// authInfo object をデコードする (draft-ietf-moq-msf-02 §5.2.42 (Authorization Info))
 ///
 /// scheme 名と値の生 JSON を順序どおりに保持する。非 object は reject する。
 /// 空 object は空 `Vec` として受理する。`null` は非 object として reject する。
@@ -3311,7 +4175,7 @@ fn decode_auth_info(val: nojson::RawJsonValue<'_, '_>) -> Result<Vec<MsfAuthInfo
     Ok(entries)
 }
 
-/// accessibility 配列をデコードする (draft-ietf-moq-msf-01 §5.2.44 (Accessibility))
+/// accessibility 配列をデコードする (draft-ietf-moq-msf-02 §5.2.44 (Accessibility))
 ///
 /// 記述子内の `scheme` / `value` の欠如・型不正は reject する。
 /// 配列自体の欠如時の扱いは呼び出し側が決める (Full は空、clone は `None` = 継承)。
@@ -3327,7 +4191,7 @@ fn decode_accessibility(
     Ok(descs)
 }
 
-/// template 配列をデコードする (draft-ietf-moq-msf-01 §7.5.1 (Template Format))
+/// template 配列をデコードする (draft-ietf-moq-msf-02 §7.4.1 (Template Format))
 ///
 /// 6 要素は必須であり指定順に現れる。入れ子の location 配列は要素数 2 とする。
 /// 要素数・順序・型のいずれかに違反した場合は `InvalidCatalog` を返す。
@@ -3385,8 +4249,41 @@ fn decode_template(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTemplate, Mes
     })
 }
 
+/// update の track object が name / parentName / namespace の制約を満たすか検証する
+///
+/// draft-ietf-moq-msf-02 §5.1.6 (Delta update): update は `parentName` を MUST とし、
+/// `name` は §5.2.3 の Required のため必須である。本実装は update で Full Track Name を
+/// 変更しないため、`name` は `parentName` と一致し、明示 namespace は `parentNamespace` と
+/// 一致しなければならない。`parentNamespace` 省略時の catalog namespace との比較は適用時に
+/// 行う。
+fn validate_update_track(track: &MsfCloneTrack) -> Result<(), MessageError> {
+    if track.name != track.parent_name {
+        return Err(MessageError::InvalidCatalog(format!(
+            "delta update: name '{}' MUST equal parentName '{}'",
+            track.name, track.parent_name
+        )));
+    }
+    if let (Some(namespace), Some(parent_namespace)) = (
+        track.namespace.as_deref(),
+        track.parent_namespace.as_deref(),
+    ) && parse_catalog_namespace(namespace)? != parse_catalog_namespace(parent_namespace)?
+    {
+        return Err(MessageError::InvalidCatalog(format!(
+            "delta update: track '{}' namespace MUST equal parentNamespace",
+            track.name
+        )));
+    }
+    Ok(())
+}
+
+fn decode_update_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfUpdateTrack, MessageError> {
+    let track = decode_clone_track(val)?;
+    validate_update_track(&track)?;
+    Ok(MsfUpdateTrack { track })
+}
+
 fn decode_remove_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfRemoveTrack, MessageError> {
-    // draft-ietf-moq-msf-01 §5.1.6 (Delta update): remove operation の track object は
+    // draft-ietf-moq-msf-02 §5.1.6 (Delta update): remove operation の track object は
     // name 必須、namespace 任意、それ以外は禁止
     // この仕様は将来変更される可能性がある。
     for (key, _) in val.to_object()? {
@@ -3398,26 +4295,37 @@ fn decode_remove_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfRemoveTra
         }
     }
     let name: String = val.to_member("name")?.required()?.try_into()?;
+    // draft-ietf-moq-msf-02 §5.2.3 (Track name): 空文字と NUL は禁止
+    let name_bytes = catalog_track_name_bytes(&name)?;
     let namespace: Option<String> = val.to_member("namespace")?.map(|v| v.try_into())?;
+    let parsed_namespace = match namespace.as_deref() {
+        Some(value) => Some(parse_catalog_namespace(value)?),
+        None => None,
+    };
+    validate_catalog_full_track_name(parsed_namespace.as_ref(), &name_bytes)?;
     Ok(MsfRemoveTrack { name, namespace })
 }
 
 /// cloneTracks 内のトラックオブジェクトをデコードする
 ///
-/// draft-ietf-moq-msf-01 §5.1.6 (Delta update): cloned track は親の全属性を継承し、
+/// draft-ietf-moq-msf-02 §5.1.6 (Delta update): cloned track は親の全属性を継承し、
 /// 再定義された属性のみ上書きする。packaging や isLive は省略可。
 /// この仕様は将来変更される可能性がある。
 fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack, MessageError> {
     let name: String = val.to_member("name")?.required()?.try_into()?;
+    // draft-ietf-moq-msf-02 §5.2.3 (Track name): 空文字と NUL は禁止
+    let name_bytes = catalog_track_name_bytes(&name)?;
 
-    // draft-ietf-moq-msf-01 §5.1.6 (Delta update): cloneTracks 内では parentName 必須
+    // draft-ietf-moq-msf-02 §5.1.6 (Delta update): cloneTracks 内では parentName 必須
     let parent_name: String = val
         .to_member("parentName")?
         .required()?
         .try_into()
         .map_err(|e: nojson::JsonParseError| MessageError::InvalidCatalog(e.to_string()))?;
+    // draft-ietf-moq-msf-02 §5.2.34 (Parent name): track name と同じ写像規則
+    let parent_name_bytes = catalog_track_name_bytes(&parent_name)?;
 
-    // draft-ietf-moq-msf-01 §5.2.34 (Parent namespace): 省略時はカタログのネームスペースが
+    // draft-ietf-moq-msf-02 §5.2.35 (Parent namespace): 省略時はカタログのネームスペースが
     // 親のネームスペースと仮定される。この仕様は将来変更される可能性がある。
     let parent_namespace: Option<String> =
         val.to_member("parentNamespace")?.map(|v| v.try_into())?;
@@ -3433,6 +4341,7 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
     let f = decode_common_track_fields(val)?;
     let CommonTrackFields {
         namespace,
+        packaging_metadata,
         event_type,
         role,
         target_latency,
@@ -3440,6 +4349,8 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
         label,
         render_group,
         alt_group,
+        accessible_window_time,
+        keyframe_spacing,
         init_ref,
         depends,
         template,
@@ -3462,7 +4373,6 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
         lang,
         track_duration,
         connection_uri,
-        token,
         encryption_scheme,
         cipher_suite,
         key_id,
@@ -3478,7 +4388,7 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
     // 断片単体では MUST 違反と断定できない (decode_track のみで検証する)。
 
     // packaging が明示されている場合も eventType の欠如は検証しない:
-    // clone は親の属性を継承する (draft-ietf-moq-msf-01 §5.1.6 (Delta update):
+    // clone は親の属性を継承する (draft-ietf-moq-msf-02 §5.1.6 (Delta update):
     // "The cloned track inherits all attributes from the parent except the Track Name") ため、
     // packaging を eventtimeline と明示して eventType を省略した clone は、親が
     // eventtimeline (親は §5.2.5 の必須により eventType を持つ) ならば正当な継承表現であり、
@@ -3490,7 +4400,7 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
     // 共存検査は isLive の値・有無によらず行い、trackDuration は isLive=true の場合のみ検証する
     // (本実装では presence 違反を優先して reject する選択とする。省略時は親から継承され得るが、
     // 断片単体では判定できないため fragment 内の両 key 存在で reject する)
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers):
+    // draft-ietf-moq-msf-02 §5.2.9 (Target latency) / §5.2.10 (Buffers):
     // isLive=false なら targetLatency / buffers は無視されるため None に統一する。
     // None 化より前に key 存在で判定する (パース済み値では None 化で情報が落ちるため)。
     reject_coexisting_target_latency_buffers(val)?;
@@ -3505,11 +4415,29 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
         ));
     }
 
+    // draft-ietf-moq-transport-23 §8.7: clone 自身と親の Full Track Name の長さ制限。
+    // clone が namespace を宣言しない場合は親の namespace を継承する (§5.1.6) ため、
+    // parentNamespace を clone 自身の実効 namespace としても使う。
+    let parsed_namespace = match namespace.as_deref() {
+        Some(value) => Some(parse_catalog_namespace(value)?),
+        None => None,
+    };
+    let parsed_parent_namespace = match parent_namespace.as_deref() {
+        Some(value) => Some(parse_catalog_namespace(value)?),
+        None => None,
+    };
+    let effective_namespace = parsed_namespace
+        .as_ref()
+        .or(parsed_parent_namespace.as_ref());
+    validate_catalog_full_track_name(effective_namespace, &name_bytes)?;
+    validate_catalog_full_track_name(parsed_parent_namespace.as_ref(), &parent_name_bytes)?;
+
     Ok(MsfCloneTrack {
         name,
         parent_name,
         parent_namespace,
         packaging,
+        packaging_metadata,
         namespace,
         event_type,
         role,
@@ -3519,6 +4447,8 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
         label,
         render_group,
         alt_group,
+        accessible_window_time,
+        keyframe_spacing,
         init_ref,
         depends,
         template,
@@ -3541,7 +4471,6 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
         lang,
         track_duration,
         connection_uri,
-        token,
         encryption_scheme,
         cipher_suite,
         key_id,
@@ -3604,51 +4533,47 @@ fn decode_media_entry(
 fn decode_event_entry(
     val: nojson::RawJsonValue<'_, '_>,
 ) -> Result<MsfEventTimelineEntry, MessageError> {
-    // draft-ietf-moq-msf-01 §8.1 (Event Timeline data format): index は t/l/m のうち 1 つだけ
-    let has_l = val.to_member("l")?.optional().is_some();
-    let has_t = val.to_member("t")?.optional().is_some();
-    let has_m = val.to_member("m")?.optional().is_some();
+    // draft-ietf-moq-msf-02 §8.2 (Event Timeline data format): index は T/L/M のうち 1 つだけ
+    let has_l = val.to_member("L")?.optional().is_some();
+    let has_t = val.to_member("T")?.optional().is_some();
+    let has_m = val.to_member("M")?.optional().is_some();
     let index_count = has_l as u8 + has_t as u8 + has_m as u8;
     if index_count == 0 {
         return Err(MessageError::InvalidCatalog(
-            "event record missing index field ('t', 'l', or 'm')".to_string(),
+            "event record missing index field ('T', 'L', or 'M')".to_string(),
         ));
     }
     if index_count > 1 {
         return Err(MessageError::InvalidCatalog(
-            "event record MUST have only one of 't', 'l', or 'm'".to_string(),
+            "event record MUST have only one of 'T', 'L', or 'M'".to_string(),
         ));
     }
 
-    let index = if let Some(l_v) = val.to_member("l")?.optional() {
+    let index = if let Some(l_v) = val.to_member("L")?.optional() {
         let mut iter = l_v.to_array()?;
         let g_v = iter.next().ok_or_else(|| {
-            MessageError::InvalidCatalog("event 'l': missing group_id".to_string())
+            MessageError::InvalidCatalog("event 'L': missing group_id".to_string())
         })?;
         let o_v = iter.next().ok_or_else(|| {
-            MessageError::InvalidCatalog("event 'l' must have exactly 2 elements".to_string())
+            MessageError::InvalidCatalog("event 'L' must have exactly 2 elements".to_string())
         })?;
         if iter.next().is_some() {
             return Err(MessageError::InvalidCatalog(
-                "event 'l' has more than 2 elements".to_string(),
+                "event 'L' has more than 2 elements".to_string(),
             ));
         }
         MsfEventIndex::Location(parse_u64(g_v)?, parse_u64(o_v)?)
-    } else if let Some(t_v) = val.to_member("t")?.optional() {
+    } else if let Some(t_v) = val.to_member("T")?.optional() {
         MsfEventIndex::WallclockMs(parse_u64(t_v)?)
     } else {
         // has_m は true (上で index_count == 1 を保証済み)
-        let m_v = val.to_member("m")?.required()?;
+        let m_v = val.to_member("M")?.required()?;
         MsfEventIndex::MediaPtsMs(parse_u64(m_v)?)
     };
 
     let data_v = val.to_member("data")?.required()?;
-    // draft-ietf-moq-msf-01 §8.1 (Event Timeline data format): data は Object でなければならない
-    // この仕様は将来変更される可能性がある。
-    // to_object() で型チェックだけ行い、生 JSON として保持する
-    let _ = data_v.to_object().map_err(|_| {
-        MessageError::InvalidCatalog("event data MUST be a JSON object".to_string())
-    })?;
+    // draft-ietf-moq-msf-02 §8.2 (Event Timeline data format): data は任意の JSON 値。
+    // 生 JSON のまま保持し、encode 時に再正規化しない。
     let data_raw = data_v.as_raw_str().as_bytes().to_vec();
 
     Ok(MsfEventTimelineEntry { index, data_raw })
@@ -3656,7 +4581,7 @@ fn decode_event_entry(
 
 /// 認可情報の生 JSON 値を検証する
 ///
-/// draft-ietf-moq-msf-01 §5.2.42 (Authorization Info): 値は scheme 固有の
+/// draft-ietf-moq-msf-02 §5.2.42 (Authorization Info): 値は scheme 固有の
 /// 単独の JSON 値でなければならない。encode 側の検証欠落による panic
 /// (`RawJsonBytes` の fmt エラー時の `to_string` の仕様) と不正な JSON の
 /// 静的な生成を防ぐため、`value_raw` が「UTF-8 かつ単独の JSON 値として
@@ -3673,7 +4598,7 @@ fn validate_auth_info_value_raw(value_raw: &[u8]) -> Result<(), MessageError> {
 
 /// イベントデータの生 JSON バイト列を検証する
 ///
-/// draft-ietf-moq-msf-01 §8.1 (Event Timeline data format): "An event timeline track is a JSON `[JSON]` document."
+/// draft-ietf-moq-msf-02 §8.1 (Event Timeline data format): "An event timeline track is a JSON `[JSON]` document."
 /// この仕様は将来変更される可能性がある。
 /// encode 側の検証欠落による panic (fmt エラー時の to_string の仕様) と
 /// 不正な JSON の静的な生成を防ぐため、`data_raw` が「UTF-8 かつ単独の JSON object
@@ -3682,11 +4607,7 @@ fn validate_event_data_raw(data_raw: &[u8]) -> Result<(), MessageError> {
     let text = core::str::from_utf8(data_raw).map_err(|_| {
         MessageError::InvalidCatalog("event timeline is not valid UTF-8".to_string())
     })?;
-    let raw = nojson::RawJson::parse(text)?;
-    let val = raw.value();
-    let _ = val.to_object().map_err(|_| {
-        MessageError::InvalidCatalog("event data MUST be a JSON object".to_string())
-    })?;
+    let _ = nojson::RawJson::parse(text)?;
     Ok(())
 }
 
@@ -3700,7 +4621,7 @@ fn validate_event_data_raw(data_raw: &[u8]) -> Result<(), MessageError> {
 /// Media / Event Timeline のエンコードオプション
 ///
 /// `gzip == true` の場合、JSON バイト列を gzip で圧縮してから返す
-/// (draft-ietf-moq-msf-01 §7.1 (Media Timeline track payload) / §8.1 (Event Timeline data format))。
+/// (draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload) / §8.1 (Event Timeline data format))。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TimelineEncodingOptions {
     /// true の場合は JSON バイト列を gzip 圧縮する
@@ -3715,8 +4636,8 @@ fn is_gzip_compressed(data: &[u8]) -> bool {
 /// gzip 展開後の累計出力サイズの上限 (16 MiB)
 ///
 /// この上限は実装が定める防御的上限であり、仕様で規定された値ではない。
-/// draft-ietf-moq-msf-01 §7.1 (Media Timeline track payload) / §8.1 (Event Timeline data format) は MSF_COMPRESSION property (Section 12.1) による圧縮のみ規定し、
-/// 展開後サイズや圧縮比の上限を定めていない。draft-ietf-moq-msf-01 §13 (Security Considerations)
+/// draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload) / §8.1 (Event Timeline data format) は MSF_COMPRESSION property (Section 12.1) による圧縮のみ規定し、
+/// 展開後サイズや圧縮比の上限を定めていない。draft-ietf-moq-msf-02 §13 (Security Considerations)
 /// も上限値を規定していないため、本実装は OOM 防止の防御として独自上限を置く。
 /// GZIP 自体 (RFC 1952) も展開後サイズを規定しない。
 ///
@@ -3791,17 +4712,18 @@ fn maybe_compress_gzip(
 
 /// Media Timeline を JSON にシリアライズし、オプションで gzip 圧縮する
 ///
-/// draft-ietf-moq-msf-01 §7.1 (Media Timeline track payload) に準拠。
+/// draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload) に準拠。
 pub fn encode_media_timeline(
     timeline: &MsfMediaTimeline,
     options: TimelineEncodingOptions,
 ) -> Result<Vec<u8>, MessageError> {
+    validate_media_time_order(&timeline.0)?;
     maybe_compress_gzip(timeline.encode(), options)
 }
 
 /// Media Timeline バイト列をデコードする。先頭に gzip magic があれば自動展開する
 ///
-/// draft-ietf-moq-msf-01 §7.1 (Media Timeline track payload) に準拠。
+/// draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload) に準拠。
 pub fn decode_media_timeline(data: &[u8]) -> Result<MsfMediaTimeline, MessageError> {
     let json = maybe_decompress_gzip(data)?;
     MsfMediaTimeline::decode(&json)
@@ -3809,7 +4731,7 @@ pub fn decode_media_timeline(data: &[u8]) -> Result<MsfMediaTimeline, MessageErr
 
 /// Event Timeline を JSON にシリアライズし、オプションで gzip 圧縮する
 ///
-/// draft-ietf-moq-msf-01 §8.1 (Event Timeline data format) に準拠。
+/// draft-ietf-moq-msf-02 §8.1 (Event Timeline data format) に準拠。
 pub fn encode_event_timeline(
     timeline: &MsfEventTimeline,
     options: TimelineEncodingOptions,
@@ -3819,35 +4741,45 @@ pub fn encode_event_timeline(
 
 /// Event Timeline バイト列をデコードする。先頭に gzip magic があれば自動展開する
 ///
-/// draft-ietf-moq-msf-01 §8.1 (Event Timeline data format) に準拠。
+/// draft-ietf-moq-msf-02 §8.1 (Event Timeline data format) に準拠。
 pub fn decode_event_timeline(data: &[u8]) -> Result<MsfEventTimeline, MessageError> {
     let json = maybe_decompress_gzip(data)?;
     MsfEventTimeline::decode(&json)
 }
 
-// ─── 変数置換 (draft-ietf-moq-msf-01 §5.4 (Variable Substitution)) ─────────────
+// ─── 変数置換 (draft-ietf-moq-msf-02 §5.4 (Variable Substitution)) ─────────────
 //
 // カタログ decode の前処理として使う。decode 層自体は `%` を検証しない。
 
-/// 変数名として有効な文字か (英数字・`-`・`_`)
+/// 変数名として有効な文字か (draft-ietf-moq-msf-02 §5.4.1 (Variable Syntax))
 ///
-/// draft-ietf-moq-msf-01 §5.4.1 (Variable Syntax) に準拠。
+/// v02 は変数名の文字種を列挙していないため、fragment の `param-name` として表現できる
+/// 文字 (draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の
+/// `pchar-no-amp / "/"`) に従う。`pct-encoded` は本実装では percent-decode しないため
+/// 受理せず、`%` は変数参照の区切りと衝突するため含めない。`=` は `pchar` に含まれるが、
+/// fragment の key は最初の `=` で分割されるため key としては到達不能であり、そのような
+/// 参照は未定義参照として保持される。この仕様は将来変更される可能性がある。
 fn is_variable_name_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+    // `pchar-no-amp` の定義は `src/msf/uri.rs` と共有する (片方だけ変更すると
+    // fragment パーサと変数パーサで受理範囲が食い違うため)。
+    crate::msf::uri::is_pchar_no_amp_byte(b) || b == b'/'
 }
 
-/// 変数値として有効な文字か (英数字・`-`・`_`・`@`)
+/// 変数値として有効な文字か (draft-ietf-moq-msf-02 §5.4.1 (Variable Syntax))
 ///
-/// draft-ietf-moq-msf-01 §5.4.1 (Variable Syntax) に準拠。
+/// 英数字・`-`・`_`・`+`・`/`・`=`・`.`・`@` だけを許可する。`,` `;` `"` `'` `~` `&`
+/// などの記号は注入対策のため拒否する。この仕様は将来変更される可能性がある。
 fn is_variable_value_char(b: u8) -> bool {
-    is_variable_name_char(b) || b == b'@'
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'+' | b'/' | b'=' | b'.' | b'@')
 }
 
 /// fragment 文字列を key-value 対にパースする
 ///
-/// draft-ietf-moq-msf-01 §5.4.2 (Variable Resolution) に準拠し、`&` 区切り・
-/// `=` 分離で解釈する。`=` を含まない要素は無視する。空の変数名・変数名文字種外・
-/// 値文字種外は reject する。重複キーは両方保持する。空値は空文字列として受理する。
+/// draft-ietf-moq-msf-02 §5.4.2 (Variable Resolution) に準拠し、`&` 区切り・
+/// 最初の `=` での分離として解釈する。`=` を含まない要素は無視する。空の変数名・
+/// fragment の param-name として表現できない変数名 (`pct-encoded` を除く)・値文字種外は
+/// reject する。
+/// 重複キーは両方保持する。空値は空文字列として受理する。
 /// query (`?` 以降) は呼出層で除外し、`#` を含まない `#` 以降の fragment 全体
 /// (`msf:` 含む) を渡すこと。percent-decode は行わず、値をそのまま使う。
 /// 単独利用時は変数 fragment の検査用。`resolve_catalog_variables` と異なり
@@ -3856,7 +4788,8 @@ fn is_variable_value_char(b: u8) -> bool {
 ///
 /// # Errors
 ///
-/// - 空の変数名・変数名文字種外・値文字種外・`#` 含有: `InvalidCatalog`
+/// - 空の変数名・fragment の param-name として表現できない変数名 (`pct-encoded` を除く)・
+///   値文字種外・`#` 含有: `InvalidCatalog`
 ///
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 pub fn parse_fragment_pairs(fragment: &str) -> Result<Vec<(String, String)>, MessageError> {
@@ -3873,6 +4806,8 @@ pub fn parse_fragment_pairs(fragment: &str) -> Result<Vec<(String, String)>, Mes
         let Some((key, value)) = element.split_once('=') else {
             continue;
         };
+        // v02 は変数名の文字種を列挙しないが、fragment の param-name として表現できる
+        // 文字だけを受理する。`%` は変数参照の区切りと衝突するため拒否する。
         if key.is_empty() || !key.bytes().all(is_variable_name_char) {
             return Err(MessageError::InvalidCatalog(format!(
                 "invalid variable name '{key}'"
@@ -3891,8 +4826,8 @@ pub fn parse_fragment_pairs(fragment: &str) -> Result<Vec<(String, String)>, Mes
 /// fragment を検証なしで key-value に分割する (resolve 内部用)
 ///
 /// §11.1 の予約パラメータ等、変数以外の対を含み得るため文字種検証は行わない。
-/// `=` を含まない要素は無視する。変数名として不正な key は正規の参照と
-/// 一致しないため置換対象にならない。値文字種は置換時に検証する。
+/// `=` を含まない要素は無視する。変数参照と一致しない key は置換対象にならない。
+/// 値文字種は置換時に検証する。
 fn split_fragment_pairs_unchecked(fragment: &str) -> Vec<(String, String)> {
     fragment
         .split('&')
@@ -3903,11 +4838,13 @@ fn split_fragment_pairs_unchecked(fragment: &str) -> Vec<(String, String)> {
 
 /// catalog JSON の変数参照 (`%name%`) を解決する
 ///
-/// draft-ietf-moq-msf-01 §5.4 (Variable Substitution) に準拠する。
+/// draft-ietf-moq-msf-02 §5.4 (Variable Substitution) に準拠する。
 /// 置換は decode 前の生 JSON に対して行い、decode 層は変更しない。
 /// 未定義変数の参照は保持する (§5.4.2 に未定義時の規定がないため。decode 層は
 /// `%` を検証しないため、そのまま通過する)。閉じない `%`・空名・
-/// 変数名不正文字・リテラル `%` は reject する。呼出層が URI から `#` 以降全体
+/// fragment の param-name として表現できない名前 (`pct-encoded` を除く)・リテラル `%` は
+/// reject する。名前は `pchar` に `=` を含むが、fragment の key は最初の `=` で分割される
+/// ため key に `=` を含む参照は一致せず、未定義参照として保持される。呼出層が URI から `#` 以降全体
 /// (`msf:` 含む) を渡すこと。先頭要素 (track-identifier 等の `=` なし要素) は無視する。
 /// fragment 内の予約パラメータ等 (変数以外) は無視し、参照された値のみ文字種検証する。
 /// 重複キーは先勝ちで解決する。
@@ -3949,6 +4886,8 @@ pub fn resolve_catalog_variables(json: &[u8], fragment: &str) -> Result<Vec<u8>,
             )));
         };
         let name = &rest[..end];
+        // 変数名は fragment の param-name として表現できる文字かつ非空であること。
+        // `%` は次 `%` までを名前として切り出す本ループの構造上ここには現れない。
         if name.is_empty() || !name.iter().all(|&b| is_variable_name_char(b)) {
             return Err(MessageError::InvalidCatalog(format!(
                 "invalid variable reference at byte {pos}"

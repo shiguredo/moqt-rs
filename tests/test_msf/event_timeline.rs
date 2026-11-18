@@ -22,8 +22,8 @@ fn wallclock_index() {
 
 #[test]
 fn data_object_with_nested_values() {
-    // draft-ietf-moq-msf-01 §8.1 (Event Timeline data format): data は Object でなければならない
-    let json = br#"[{"l":[0,0],"data":{"lat":47.1812,"lon":8.4592}}]"#;
+    // draft-ietf-moq-msf-02 §8.1 (Event Timeline data format): data は Object でなければならない
+    let json = br#"[{"L":[0,0],"data":{"lat":47.1812,"lon":8.4592}}]"#;
     let tl = MsfEventTimeline::decode(json).expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(tl.0[0].index, MsfEventIndex::Location(0, 0));
     let data_str =
@@ -33,7 +33,7 @@ fn data_object_with_nested_values() {
 
 #[test]
 fn multiple_index_keys_rejected() {
-    let json = br#"[{"t":1000,"l":[0,0],"data":{}}]"#;
+    let json = br#"[{"T":1000,"L":[0,0],"data":{}}]"#;
     assert!(matches!(
         MsfEventTimeline::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -42,12 +42,12 @@ fn multiple_index_keys_rejected() {
 
 #[test]
 fn location_wrong_length_rejected() {
-    let json = br#"[{"l":[0],"data":{}}]"#;
+    let json = br#"[{"L":[0],"data":{}}]"#;
     assert!(matches!(
         MsfEventTimeline::decode(json),
         Err(MessageError::InvalidCatalog(_))
     ));
-    let json = br#"[{"l":[0,0,0],"data":{}}]"#;
+    let json = br#"[{"L":[0,0,0],"data":{}}]"#;
     assert!(matches!(
         MsfEventTimeline::decode(json),
         Err(MessageError::InvalidCatalog(_))
@@ -64,38 +64,39 @@ fn invalid_utf8_rejected() {
 }
 
 #[test]
-fn data_non_object_rejected() {
-    // draft-ietf-moq-msf-01 §8.1 (Event Timeline data format): data が Object でない場合はエラー
-    // 配列
-    let json = br#"[{"t":1000,"data":[1,2,3]}]"#;
-    assert!(matches!(
-        MsfEventTimeline::decode(json),
-        Err(MessageError::InvalidCatalog(_))
-    ));
-    // 文字列
-    let json = br#"[{"t":1000,"data":"hello"}]"#;
-    assert!(matches!(
-        MsfEventTimeline::decode(json),
-        Err(MessageError::InvalidCatalog(_))
-    ));
-    // 数値
-    let json = br#"[{"t":1000,"data":42}]"#;
-    assert!(matches!(
-        MsfEventTimeline::decode(json),
-        Err(MessageError::InvalidCatalog(_))
-    ));
-    // null
-    let json = br#"[{"t":1000,"data":null}]"#;
-    assert!(matches!(
-        MsfEventTimeline::decode(json),
-        Err(MessageError::InvalidCatalog(_))
-    ));
-    // true
-    let json = br#"[{"t":1000,"data":true}]"#;
-    assert!(matches!(
-        MsfEventTimeline::decode(json),
-        Err(MessageError::InvalidCatalog(_))
-    ));
+fn data_any_json_value_accepted() {
+    // draft-ietf-moq-msf-02 §8.2 (Event Timeline data format): data は任意の JSON 値
+    for (json, expected) in [
+        (
+            br#"[{"T":1000,"data":[1,2,3]}]"#.as_slice(),
+            &b"[1,2,3]"[..],
+        ),
+        (
+            br#"[{"T":1000,"data":"hello"}]"#.as_slice(),
+            &b"\"hello\""[..],
+        ),
+        (br#"[{"T":1000,"data":42}]"#.as_slice(), &b"42"[..]),
+        (br#"[{"T":1000,"data":null}]"#.as_slice(), &b"null"[..]),
+        (br#"[{"T":1000,"data":true}]"#.as_slice(), &b"true"[..]),
+    ] {
+        let timeline = MsfEventTimeline::decode(json).expect("任意の JSON 値を受理すること");
+        assert_eq!(timeline.0[0].data_raw, expected);
+    }
+}
+
+/// 小文字の index key だけを持つ record は index 欠如として拒否されること
+#[test]
+fn lowercase_index_keys_rejected() {
+    for json in [
+        br#"[{"t":1000,"data":{}}]"#.as_slice(),
+        br#"[{"l":[0,0],"data":{}}]"#.as_slice(),
+        br#"[{"m":1000,"data":{}}]"#.as_slice(),
+    ] {
+        assert!(matches!(
+            MsfEventTimeline::decode(json),
+            Err(MessageError::InvalidCatalog(_))
+        ));
+    }
 }
 
 #[test]
@@ -109,27 +110,14 @@ fn encode_rejects_non_utf8_data_raw() {
 }
 
 #[test]
-fn encode_rejects_non_object_data_raw() {
-    // draft-ietf-moq-msf-01 §8.1 (Event Timeline data format): data は Object でなければならない
-    // 構文不正・ JSON 文字列・配列・数値・ null ・ true はいずれも encode 時にエラーを返す
-    let cases: &[&[u8]] = &[
-        b"abc",      // JSON として構文不正
-        br#""abc""#, // JSON 文字列
-        b"[1,2,3]",  // 配列
-        b"42",       // 数値
-        b"null",     // null
-        b"true",     // true
-    ];
-    for data_raw in cases {
-        let tl = MsfEventTimeline(vec![MsfEventTimelineEntry {
-            index: MsfEventIndex::WallclockMs(1000),
-            data_raw: data_raw.to_vec(),
-        }]);
-        assert!(
-            matches!(tl.encode(), Err(MessageError::InvalidCatalog(_))),
-            "invalid data_raw must be rejected: {data_raw:?}"
-        );
-    }
+fn encode_rejects_invalid_json_data_raw() {
+    // draft-ietf-moq-msf-02 §8.2 (Event Timeline data format): data は任意の JSON 値。
+    // JSON として構文不正なバイト列だけを拒否する。
+    let tl = MsfEventTimeline(vec![MsfEventTimelineEntry {
+        index: MsfEventIndex::WallclockMs(1000),
+        data_raw: b"abc".to_vec(),
+    }]);
+    assert!(matches!(tl.encode(), Err(MessageError::InvalidCatalog(_))));
 }
 
 #[test]
@@ -176,7 +164,7 @@ fn encode_preserves_raw_data_bytes() {
         data_raw: br#"{"v": 1}"#.to_vec(),
     }]);
     let encoded = tl.encode().expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(encoded, br#"[{"t":1000,"data":{"v": 1}}]"#);
+    assert_eq!(encoded, br#"[{"T":1000,"data":{"v": 1}}]"#);
 }
 
 #[test]
@@ -191,7 +179,7 @@ fn encode_preserves_non_ascii_raw_data_bytes() {
     let encoded = tl.encode().expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(
         encoded,
-        b"[{\"l\":[1,2],\"data\":{\"msg\":\"\xe3\x81\x93\xe3\x82\x93\xe3\x81\xab\xe3\x81\xa1\xe3\x81\xaf\"}}]"
+        b"[{\"L\":[1,2],\"data\":{\"msg\":\"\xe3\x81\x93\xe3\x82\x93\xe3\x81\xab\xe3\x81\xa1\xe3\x81\xaf\"}}]"
     );
 }
 
@@ -345,4 +333,77 @@ fn deep_data_raw_roundtrip_at_boundary() {
     let decoded =
         MsfEventTimeline::decode(&encoded).expect("境界内の data_raw は decode できること");
     assert_eq!(decoded, tl);
+}
+
+/// event timeline の index が MediaPtsMs を参照する場合の depends 検証
+#[test]
+fn event_timeline_depends_validation_requires_media_timeline_dependency() {
+    let mut catalog = MsfCatalog::new();
+    let media = MsfTrack::new("media".to_string(), MsfPackaging::MediaTimeline, true);
+    let mut event = MsfTrack::new("event".to_string(), MsfPackaging::EventTimeline, true);
+    event.event_type = Some("com.example.cue".to_string());
+    catalog.tracks.push(media);
+    catalog.tracks.push(event);
+
+    // MediaPtsMs を持たない timeline は depends なしでよい
+    let no_media_pts = MsfEventTimeline(vec![MsfEventTimelineEntry {
+        index: MsfEventIndex::WallclockMs(1),
+        data_raw: b"{}".to_vec(),
+    }]);
+    assert!(
+        validate_event_timeline_depends(&catalog, &no_media_pts).is_ok(),
+        "MediaPtsMs が無ければ depends を要求しないこと"
+    );
+
+    // MediaPtsMs を持つのに media timeline への依存が無ければ拒否する
+    let media_pts = MsfEventTimeline(vec![MsfEventTimelineEntry {
+        index: MsfEventIndex::MediaPtsMs(1),
+        data_raw: b"{}".to_vec(),
+    }]);
+    assert!(
+        matches!(
+            validate_event_timeline_depends(&catalog, &media_pts),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "MediaPtsMs を持つ場合は media timeline への依存を要求すること"
+    );
+
+    // media timeline track を depends に列挙すれば受理する
+    catalog.tracks[1].depends = vec![MsfDependency::TrackName("media".to_string())];
+    assert!(
+        validate_event_timeline_depends(&catalog, &media_pts).is_ok(),
+        "media timeline を depends に持つ場合は受理すること"
+    );
+}
+
+/// v02 の大文字 index key と任意 JSON 値の data が往復すること
+#[test]
+fn v02_index_keys_and_any_data_roundtrip() {
+    let json = br#"[{"T":1000,"data":{"status":"ok"}},{"L":[0,0],"data":"text"},{"M":2000,"data":[1,2,3]}]"#;
+    let timeline = MsfEventTimeline::decode(json).expect("v02 の index key を受理すること");
+    assert_eq!(timeline.0[0].index, MsfEventIndex::WallclockMs(1000));
+    assert_eq!(timeline.0[1].index, MsfEventIndex::Location(0, 0));
+    assert_eq!(timeline.0[2].index, MsfEventIndex::MediaPtsMs(2000));
+
+    let encoded = timeline.encode().expect("encode に成功すること");
+    let decoded = MsfEventTimeline::decode(&encoded).expect("roundtrip できること");
+    assert_eq!(decoded, timeline);
+    let text = String::from_utf8(encoded).expect("JSON は UTF-8 であること");
+    assert!(text.contains("\"T\":1000"));
+    assert!(text.contains("\"L\":[0,0]"));
+    assert!(text.contains("\"M\":2000"));
+    assert!(!text.contains("\"t\":"));
+    assert!(!text.contains("\"l\":"));
+    assert!(!text.contains("\"m\":"));
+}
+
+/// header data 付き decode が entry 列を返し、header の有無で失敗しないこと
+#[test]
+fn decode_with_header_does_not_interpret_header() {
+    let json = br#"[{"T":1000,"data":{}}]"#;
+    let with_header = MsfEventTimeline::decode_with_header(json, b"header")
+        .expect("header data 付きでも decode できること");
+    let without_header =
+        MsfEventTimeline::decode_with_header(json, b"").expect("header なしでも decode できること");
+    assert_eq!(with_header, without_header);
 }

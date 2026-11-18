@@ -1,20 +1,18 @@
 //! MSF の公開型の `Debug` が機密値を伏せることのテスト
 //!
-//! token (§5.2.37)、trackBaseKey (§5.2.41)、authInfo (§5.2.42。変数置換による token の混入は
+//! trackBaseKey (§5.2.41)、authInfo (§5.2.42。変数置換による token の混入は
 //! §5.2.43)、token を含み得る URI
-//! (connectionUri の §5.2.36、fragment パラメータの §11.1.1 / §11.4.2、query) の値を、
+//! (connectionURI の §5.2.37、fragment パラメータの §11.1.1 / §11.4.2、query) の値を、
 //! 文字列としても十進のバイト列としても出さず、長さだけを表示することを固定する。
 
 use super::*;
 use shiguredo_moqt::msf::uri::parse_msf_uri;
 
-/// テストで使う bearer token のダミー値
-const TOKEN: &str = "dummy-track-token";
 /// テストで使う trackBaseKey のダミー値
 const TRACK_BASE_KEY: &str = "dummy-base-key";
 /// テストで使う authInfo の scheme 固有値 (生 JSON) のダミー値
 const AUTH_VALUE_RAW: &str = "\"dummy-auth-value\"";
-/// テストで使う connectionUri のダミー値 (token パラメータを含む)
+/// テストで使う connectionURI のダミー値 (token パラメータを含む)
 const CONNECTION_URI: &str = "moqt://relay.example.com/pub?token=dummy-connection-token";
 
 /// `debug` に `secret` が文字列としても十進のバイト列としても含まれないことを確認する
@@ -44,7 +42,6 @@ fn secret_auth_info() -> MsfAuthInfo {
 fn secret_track(name: &str) -> MsfTrack {
     let mut track = MsfTrack::new(name.to_string(), MsfPackaging::Loc, true);
     track.codec = Some("avc1.42E01E".to_string());
-    track.token = Some(TOKEN.to_string());
     track.track_base_key = Some(TRACK_BASE_KEY.to_string());
     track.connection_uri = Some(CONNECTION_URI.to_string());
     track.auth_info = Some(vec![secret_auth_info()]);
@@ -55,7 +52,6 @@ fn secret_track(name: &str) -> MsfTrack {
 fn secret_clone_track() -> MsfCloneTrack {
     let mut track = MsfCloneTrack::new("video-clone".to_string(), "video".to_string());
     track.codec = Some("avc1.640028".to_string());
-    track.token = Some(TOKEN.to_string());
     track.track_base_key = Some(TRACK_BASE_KEY.to_string());
     track.connection_uri = Some(CONNECTION_URI.to_string());
     track.auth_info = Some(vec![secret_auth_info()]);
@@ -64,7 +60,6 @@ fn secret_clone_track() -> MsfCloneTrack {
 
 /// トラックの全機密値が伏せられ、長さと非機密フィールドが表示されることを確認する
 fn assert_track_redacted(debug: &str, context: &str) {
-    assert_hidden(debug, TOKEN, context);
     assert_hidden(debug, TRACK_BASE_KEY, context);
     assert_hidden(debug, CONNECTION_URI, context);
     assert_hidden(debug, "dummy-auth-value", context);
@@ -73,10 +68,6 @@ fn assert_track_redacted(debug: &str, context: &str) {
         "{context}: authInfo の生 JSON をバイト列として出さないこと"
     );
     // 伏せたフィールドは長さを表示する
-    assert!(
-        debug.contains(&format!("token: Some({})", TOKEN.len())),
-        "{context}: token の長さを表示すること: {debug}"
-    );
     assert!(
         debug.contains(&format!("track_base_key: Some({})", TRACK_BASE_KEY.len())),
         "{context}: track_base_key の長さを表示すること: {debug}"
@@ -120,10 +111,6 @@ fn track_debug_hides_secrets() {
 fn track_debug_shows_none_for_absent_secrets() {
     let track = MsfTrack::new("audio".to_string(), MsfPackaging::Loc, true);
     let debug = format!("{track:?}");
-    assert!(
-        debug.contains("token: None"),
-        "token が無ければ None を表示すること"
-    );
     assert!(
         debug.contains("track_base_key: None"),
         "track_base_key が無ければ None を表示すること"
@@ -181,7 +168,7 @@ fn container_debug_hides_track_secrets() {
     // removed_tracks は Debug に含まれる (MsfCatalog の doc) が、値は MsfTrack の Debug で伏せる
     catalog
         .removed_tracks
-        .insert((None, "removed".to_string()), secret_track("removed"));
+        .insert((None, b"removed".to_vec()), secret_track("removed"));
 
     let debug = format!("{catalog:?}");
     assert_track_redacted(&debug, "MsfCatalog");
@@ -191,7 +178,7 @@ fn container_debug_hides_track_secrets() {
     );
 
     let delta = MsfDeltaUpdate {
-        generated_at: None,
+        generated_at: 1,
         operations: vec![
             MsfDeltaOperation::Add {
                 tracks: vec![secret_track("added")],
@@ -216,20 +203,20 @@ fn container_debug_hides_track_secrets() {
 #[test]
 fn uri_debug_hides_query_and_fragment_parameter_values() {
     let uri = parse_msf_uri(
-        "moqt://relay.example.com/live?auth=dummy-query-token#msf:example--video&c4m=dummy-c4m-token&token=dummy-fragment-token",
+        "moqt://relay.example.com/live?auth=dummy-query-token#msf:example--video&cat=dummy-cat-token&token=dummy-fragment-token",
     )
     .expect("テストフィクスチャの前提条件を満たす");
     let debug = format!("{uri:?}");
     for secret in [
         "dummy-query-token",
-        "dummy-c4m-token",
+        "dummy-cat-token",
         "dummy-fragment-token",
     ] {
         assert_hidden(&debug, secret, "MsfUri");
     }
     assert_hidden(
         &format!("{:?}", uri.fragment),
-        "dummy-c4m-token",
+        "dummy-cat-token",
         "MsfFragment",
     );
 
@@ -240,10 +227,10 @@ fn uri_debug_hides_query_and_fragment_parameter_values() {
     );
     assert!(
         debug.contains(&format!(
-            "MsfFragmentParameter {{ name: \"c4m\", value_bytes: {} }}",
-            "dummy-c4m-token".len()
+            "MsfFragmentParameter {{ name: \"cat\", value_bytes: {} }}",
+            "dummy-cat-token".len()
         )),
-        "c4m パラメータは名前と値の長さを表示すること: {debug}"
+        "cat パラメータは名前と値の長さを表示すること: {debug}"
     );
     assert!(
         debug.contains(&format!(

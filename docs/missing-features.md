@@ -6,7 +6,7 @@
 moq-sub の `--subscribe-tracks` を反映した)。
 
 対象仕様は `refs/moq/` の MOQT `draft-ietf-moq-transport-23`、LOC `draft-ietf-moq-loc-05`、
-MSF `draft-ietf-moq-msf-01`、C4M `draft-ietf-moq-c4m-02` である。
+MSF `draft-ietf-moq-msf-02`、C4M `draft-ietf-moq-c4m-02` である。
 対象コードは `src/` (ライブラリ)、`crates/moq-pub`、`crates/moq-sub`、
 `crates/tokio-moq` (transport 層)。
 
@@ -39,7 +39,7 @@ relay による namespace の集約・forwarding) は本稿の対象外とする
    Video Frame Marking 違反の `MALFORMED_KEY_VALUE` によるセッション終了が未対応 (§8.3)、
    `isLive=false` の `targetLatency` (MSF §5.2.8)、
    catalog 更新をまたいだ
-   `isLive` の False → True (MSF §5.2.7)、`connectionUri` の検証と新規接続 (MSF §5.2.36)、
+   `isLive` の False → True (MSF §5.2.8)、`connectionURI` の検証と新規接続 (MSF §5.2.37)、
    range パラメータの union (MSF §11.1.1)、`initDataList` の配置 (§5.1.7)、
    STOP_SENDING 受信時の open stream の reset (§3.1.2 / §3.2.4)。
 
@@ -81,7 +81,7 @@ C4M draft-02 の `moqt` クレームの map 化と未知キーの fail-closed、
 | TRACK_STATUS | `send_track_status` / `forget_track_status` | §9.12 | 購読前にトラックの存在・最新 Object を確認できない。moq-pub 側は受信しても `NOT_SUPPORTED` で拒否する |
 | Media / Event Timeline | `msf::encode_media_timeline` / `encode_event_timeline` | MSF §7 / §8 | moq-pub はタイムラインを配信せず、moq-sub も受信しない |
 | Timeline のテンプレート展開 | `MsfTemplate::resolve_entry` | MSF §7.4 | テンプレート形式の Timeline を使えない |
-| MSF の変数置換 | `msf::resolve_catalog_variables` | MSF §5.4 / §5.2.43 | moq-pub が `authInfo` に `"%c4m%"` を書くのに、moq-sub が解決しないため認可トークンの受け渡しが example 間で成立しない |
+| MSF の変数置換 | `msf::resolve_catalog_variables` | MSF §5.4 / §5.2.43 | moq-pub が `authInfo` に `"%cat%"` を書くのに、moq-sub が解決しないため認可トークンの受け渡しが example 間で成立しない |
 | MSF fragment の範囲指定 | `msf::uri` の `wallclock_ranges` / `mediatime_ranges` / `location_ranges` | MSF §11.1.1 | 範囲指定を解釈せず全期間を購読する。複数指定の union MUST も未実装 |
 | `MAX_FILTER_RANGES` の宣言 | `SETUP_OPTION_MAX_FILTER_RANGES` | §9.1.6 | 既定 0 のため、購読者は Range Filters (§3.3.2) を送ってはならない。ライブラリのフィルタ評価実装が活きない |
 | `MAX_REQUEST_UPDATES` / `MAX_AUTH_TOKEN_CACHE_SIZE` | `SETUP_OPTION_*` | §9.1.7 / §9.1.3 | 既定値で実害は無いが、上限を宣言しない |
@@ -152,9 +152,9 @@ moq-sub は `targetLatency` を無条件に再生遅延へ反映する
 (`crates/moq-sub/src/pipeline.rs:727-743`、`2150-2175`)。
 `is_live` は example から参照されていない (grep で 0 件)。VOD のトラックで不要な遅延を入れる。
 
-### 4.3 catalog 更新をまたいだ `isLive` の False → True を拒否しない (MSF §5.2.7、moq-sub)
+### 4.3 catalog 更新をまたいだ `isLive` の False → True を拒否しない (MSF §5.2.8、moq-sub)
 
-MSF §5.2.7 は「A True value MUST never follow a False value.」と定める。
+MSF §5.2.8 は「A True value MUST never follow a False value.」と定める。
 ライブラリは同一 catalog 内の delta 再追加では検証する (`src/msf.rs:1537` 付近の
 `validate_readded_track`) が、moq-sub は独立カタログ (Full) を受けるたびに
 直前のカタログを捨てて丸ごと差し替える (`crates/moq-sub/src/catalog.rs:118-130`)。
@@ -162,12 +162,12 @@ MSF §5.2.7 は「A True value MUST never follow a False value.」と定める�
 カタログを受けても受理する。`isComplete` の「一度 TRUE にしたら削除できない」
 (§5.1.3) も同じ経路で検証されない。
 
-### 4.4 `connectionUri` の検証と新規接続 (MSF §5.2.36)
+### 4.4 `connectionURI` の検証と新規接続 (MSF §5.2.37)
 
-MSF §5.2.36 は `connectionUri` が「valid MOQT endpoint URI でなければならない (MUST)」とし、
+MSF §5.2.37 は `connectionURI` が「valid MOQT endpoint URI でなければならない (MUST)」とし、
 指定時は「購読者が新しい MOQT 接続を確立しなければならない (MUST)」と定める。
 ライブラリは URI 形式の検証を行わないと明記し (`src/msf.rs:2810-2813`)、
-example に `connectionUri` を参照する箇所も無い (grep で 0 件)。
+example に `connectionURI` を参照する箇所も無い (grep で 0 件)。
 publishTracks (Log / Metrics) を使う配信で壊れた URI を検出できず、
 購読側も別接続を張らない。
 
@@ -217,8 +217,8 @@ moq-pub は終了時に `PUBLISH_DONE(GOING_AWAY = 0x4)` を送るだけであ�
 example から使われず、catalog は `is_complete: false` / `isLive: true` 固定で
 `trackDuration` も設定しない (`crates/moq-pub/src/catalog.rs:154-205`)。
 購読側は配信が正常終了したことを判別できない。
-なお MSF §11.3 は `SUBSCRIBE_DONE` と書くが、MOQT は draft-13 以降 `PUBLISH_DONE` に
-改名している (コードは `src/error.rs:258` の `PUBLISH_DONE_TRACK_ENDED = 0x2`)。
+MSF v02 §11.4 は `PUBLISH_DONE` を使う (v01 §11.3 の `SUBSCRIBE_DONE` から改名されている)。
+コードは `src/error.rs:258` の `PUBLISH_DONE_TRACK_ENDED = 0x2` を使う。
 
 ### 5.2 PUBLISH に Message Parameters を載せられない
 
@@ -377,8 +377,8 @@ track の追加 (§5.3 の `add` / `clone`) に追随して SUBSCRIBE を送ら�
 
 MSF §11.4.1 は「購読者は track ごとに `authInfo` を見て認可要件を判断する」と定める。
 moq-sub は `authInfo` を参照せず (grep で 0 件)、track ごとの認可要件を判定しない。
-さらに moq-pub は `authInfo` の値に `"%c4m%"` という変数参照を書く
-(`crates/moq-pub/src/catalog.rs:31`、§5.2.43) が、moq-sub は
+さらに moq-pub は `authInfo` の値に `"%cat%"` という変数参照を書く
+(`crates/moq-pub/src/catalog.rs:32`、§5.2.43) が、moq-sub は
 `MsfCatalogDocument::decode` を直接呼び (`crates/moq-sub/src/catalog.rs:32-38`)、
 `msf::resolve_catalog_variables` (§5.4) を通さない。
 このため example 同士でも認可付き配信の受け渡しが成立しない。
@@ -421,7 +421,7 @@ session で再発行する。
 - 音声は移行境界を最後に受信した Location にして Absolute Start で再購読する。移行先が同じ
   publisher の続きとして TIMESTAMP を進める前提であり、別 publisher へ移って TIMESTAMP が
   巻き戻る場合は live 音声が stale として落ちる。
-- 移行先の c4m が変わった場合、publisher は catalog の authInfo を新しいトークンで再構築する。
+- 移行先の cat パラメータが変わった場合、publisher は catalog の authInfo を新しいトークンで再構築する。
 - 移行先がまた GOAWAY を返す連鎖は `MigrationLimiter` (10 分で 5 回) で制限する。
 - transport (HTTP/3 / HTTP/2) の GOAWAY と WT_DRAIN_SESSION は `WtSessionState::Draining` として
   観測し、現在 URL への移行を開始する。QUIC / QMux は drain 通知が無いため MOQT GOAWAY 起点のみ。
@@ -592,7 +592,7 @@ moqt-js (HEAD `f6a171e8`) の playout のうち、次の 2 つは移植してい
 - `crates/moq-sub/README.md:76` は「moq-pub は `--audio-datagram` でこの配送を選べる」と
   書くが、そのようなフラグは無い (既定が datagram で、subgroup にするのが `--audio-subgroup`)。
   `crates/moq-sub/src/pipeline.rs:4775` のコメントも同じ
-- MSF §11.3 は `SUBSCRIBE_DONE` と書くが、MOQT は draft-13 以降 `PUBLISH_DONE` に改名している。
+- MSF v02 §11.4 は `PUBLISH_DONE` を使う (v01 §11.3 の `SUBSCRIBE_DONE` から改名されている)。
   実装は改名後に追従している
 
 ## 9. 優先度の目安
@@ -635,9 +635,8 @@ moqt-js (HEAD `f6a171e8`) の playout のうち、次の 2 つは移植してい
   `:323` / `:927` のコメント) を encode 前に閉じるか
 - リレー経由でない直接 subscriber の受け入れは、moq-pub が client 専用 (待ち受け API 無し) の
   ため不可。要件次第で判断が必要
-- MSF §7.1 は payload 文書が explicit 形式と template 形式の 2 つを併用してよい (MAY) と
-  するが、payload 内の template 形式を定義する節が無い (draft 側の記載不足)
-- MSF §5.1.6 の delta に `isComplete` が混ざった場合、library は黙って無視する。
-  「restricted set of fields」の解釈次第で拒否すべきか
+- MSF §7.1 は template 形式と explicit payload の併用を MUST NOT とする。library は
+  `validate_media_timeline_format` で同一 track 内の併用と media time の降順を検出するが、
+  §5.2.16 の cross-track の SHOULD NOT は判定しない
 - C4M §2.2 の `moqt-reval` を複合クレーム内に置いたトークンの well-formed 性拒否は未実装
   (composite claims の draft が `refs/` に無い)

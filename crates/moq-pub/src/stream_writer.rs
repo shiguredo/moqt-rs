@@ -55,6 +55,12 @@ impl SubgroupTermination {
 struct SubgroupObjectState {
     /// Subgroup の Group ID (省略した Object の Location を組み立てるために使う)
     group_id: u64,
+    /// この Subgroup が最初に送る Object の Object ID
+    ///
+    /// 1 Group を 1 Subgroup に載せる `group` モードでは常に 0 である。1 Object を
+    /// 1 Subgroup に載せる `object` モードでは、その Object の Group 内の ID になる。
+    /// FIRST_OBJECT bit の判定 (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header)) に使う。
+    first_object_id: u64,
     /// 次に送信を試みる Object ID
     next_object_id: u64,
     /// 直前の Pass 済み Object ID (デルタ計算用)
@@ -75,10 +81,11 @@ impl SubgroupObjectState {
     ///
     /// `start_location` には Subgroup 開始時点の購読の Start Location を渡す (判定規則は
     /// [`SubgroupObjectState::termination`] を参照)。
-    fn new(group_id: u64, start_location: Option<Location>) -> Self {
+    fn new(group_id: u64, first_object_id: u64, start_location: Option<Location>) -> Self {
         Self {
             group_id,
-            next_object_id: 0,
+            first_object_id,
+            next_object_id: first_object_id,
             prev_object_id: None,
             header_sent: false,
             start_location,
@@ -123,7 +130,7 @@ impl SubgroupObjectState {
             None
         } else {
             self.header_sent = true;
-            Some(object_id == 0)
+            Some(object_id == self.first_object_id)
         };
         self.prev_object_id = Some(object_id);
         self.next_object_id = object_id + 1;
@@ -189,6 +196,8 @@ pub struct SubgroupWriter {
     track_alias: u64,
     /// ヘッダ再構築用の Group ID
     group_id: u64,
+    /// ヘッダ再構築用の Subgroup ID のエンコードモード
+    subgroup_id: SubgroupIdMode,
     /// ヘッダ再構築用の Publisher Priority
     publisher_priority: u8,
     /// SUBGROUP_HEADER の PROPERTIES ビット
@@ -205,6 +214,17 @@ impl SubgroupWriter {
     /// Session 登録 (`send_subgroup_header`) は `send_subgroup_object` のフィルタ評価と
     /// `send_data_stream_closed` の前提になるため、`new` の時点で行う。
     ///
+    /// `subgroup_id` は SUBGROUP_HEADER の Subgroup ID のエンコードモードである。1 Group を
+    /// 1 Subgroup に載せる `group` モードでは [`SubgroupIdMode::Zero`]、1 Object を 1 Subgroup
+    /// に載せる `object` モードでは [`SubgroupIdMode::FirstObjectId`] または
+    /// [`SubgroupIdMode::Explicit`] を渡す。`object` モードでは Subgroup ごとに writer を作り、
+    /// 1 Object を書いたら [`SubgroupWriter::finish`] で閉じる。
+    ///
+    /// `first_object_id` はこの Subgroup が最初に送る Object の Object ID である。
+    /// `group` モードでは 0、`object` モードでは送る Object の Group 内の ID を渡す。
+    /// Subgroup ID を Object ID から決めるモード ([`SubgroupIdMode::FirstObjectId`]) では、
+    /// この値が Subgroup ID になる。
+    ///
     /// `start_location` は Subgroup 開始時点の購読の Start Location
     /// (`MoqtClient::subscription_filter_start`)。
     #[expect(
@@ -217,6 +237,8 @@ impl SubgroupWriter {
         request_id: u64,
         track_alias: u64,
         group_id: u64,
+        subgroup_id: SubgroupIdMode,
+        first_object_id: u64,
         publisher_priority: u8,
         has_properties: bool,
         start_location: Option<Location>,
@@ -230,9 +252,10 @@ impl SubgroupWriter {
             stream_id,
             track_alias,
             group_id,
+            subgroup_id,
             publisher_priority,
             has_properties,
-            object_state: SubgroupObjectState::new(group_id, start_location),
+            object_state: SubgroupObjectState::new(group_id, first_object_id, start_location),
         };
         // Session 登録用のヘッダ。first_object は Session では参照されないため、
         // ワイヤ送信時に確定した値で組み立て直す
@@ -246,7 +269,7 @@ impl SubgroupWriter {
         SubgroupHeader {
             track_alias: self.track_alias,
             group_id: self.group_id,
-            subgroup_id: SubgroupIdMode::Zero,
+            subgroup_id: self.subgroup_id,
             publisher_priority: Some(self.publisher_priority),
             has_properties: self.has_properties,
             end_of_group: false,
@@ -467,7 +490,7 @@ mod tests {
 
     /// Group `group_id` の Subgroup と Start Location の状態を作る
     fn state_in_group(group_id: u64, start_location: Option<Location>) -> SubgroupObjectState {
-        SubgroupObjectState::new(group_id, start_location)
+        SubgroupObjectState::new(group_id, 0, start_location)
     }
 
     /// Start Location を持たない (unfiltered) 購読の状態を作る
@@ -704,6 +727,21 @@ mod tests {
         assert_eq!(state.on_pass(), Some(true));
         state.on_skip();
         assert_eq!(state.termination(Some(loc(7, 0))), SubgroupTermination::Fin);
+    }
+
+    // object モード (Subgroup ごとに 1 Object) では、最初の Object が Object ID 0 でなくても
+    // FIRST_OBJECT を true で送る
+    //
+    // draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header) の FIRST_OBJECT は「この
+    // Subgroup の最初の Object が publisher によりその Subgroup に最初に公開された Object」
+    // を示す。Subgroup を Object ごとに開くので、Object ID が 0 以外でも true になる
+    #[test]
+    fn first_object_true_for_a_single_object_subgroup_with_non_zero_object_id() {
+        let mut state = SubgroupObjectState::new(7, 3, None);
+        assert_eq!(state.current_object_id(), 3);
+        assert_eq!(state.current_object_id_delta(), 3);
+        assert_eq!(state.on_pass(), Some(true));
+        assert_eq!(state.termination(None), SubgroupTermination::Fin);
     }
 
     // FIN の場合は Stream Reset Error Code を持たず、RESET の場合は CANCELLED を持つ

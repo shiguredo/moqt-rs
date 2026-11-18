@@ -12,7 +12,7 @@ tobi-quic は Windows 非対応のため、Windows ビルドでは tobi-quic を
   - `parse_url`：`moqt://` URI を `ServerUrl` にパースする。fragment は draft-ietf-moq-transport-23 §6.1.1 の構文で検証し、`msf` fragment は MSF fragment (`track-identifier [ "&" parameter-list ]`) として検証する
   - `resolve_transport`：`--transport` の指定と `msf` fragment の `connection` から `Transport` を解決する
   - `resolve_namespace`：`--namespace` の指定と `msf` fragment の track-identifier から Track Namespace を解決する
-  - `ServerUrl`：authority / path / fragment / MSF fragment の解釈結果 / C4M 認可トークン (`c4m_tokens`) を保持する
+  - `ServerUrl`：authority / path / fragment / MSF fragment の解釈結果 / C4M 認可トークン (`cat_tokens`) を保持する
 - 接続確立：`quic` / `webtransport_h3` / `webtransport_h2` / `qmux` の各モジュールが TLS とハンドシェイクを行う (`webtransport_h3` は Windows ビルドでは提供しない)
 - `transport`：4 経路を統一的に扱う `SendStream` / `RecvStream` / `StreamHandle` / `StreamAcceptor` / `BidiStreamAcceptor`
 - `moqt_client::MoqtClient`：control stream と bidi request stream を駆動する。`establish_quic` /
@@ -41,7 +41,7 @@ query (`?key=value`) は SETUP の PATH option と WebTransport の `:path` に�
 fragment (`#type:value`) は draft-ietf-moq-transport-23 §6.1.1 に従いサーバーへ送信せず、SETUP の PATH option と WebTransport の `:path` には含めない。§6.2.1 が WebTransport の https:// URI を moqt URI の scheme 置換と定め、§16.2 が application/moqt の fragment identifier を同節に従わせるため、WebTransport 経路でも同じ規則で扱う。
 `type` は ASCII 小文字 / 数字 / ハイフンに限り、`:` を含まない fragment、空または規則に一致しない `type`、fragment 内の 2 個目の `#` (RFC 3986 §3.5 により `%23` が必要) はエラーになる。
 
-`parse_url` は `type` が `msf` のときだけ値を MSF fragment (`track-identifier [ "&" parameter-list ]`) として検証し、`resolve_namespace` が track-identifier の示す namespace を `--namespace` 省略時の Track Namespace として使う。予約パラメータ `c4m` の認可トークンは `ServerUrl::c4m_tokens` に取り出す ([C4M 認可トークン](#c4m-認可トークン) を参照)。
+`parse_url` は `type` が `msf` のときだけ値を MSF fragment (`track-identifier [ "&" parameter-list ]`) として検証し、`resolve_namespace` が track-identifier の示す namespace を `--namespace` 省略時の Track Namespace として使う。予約パラメータ `cat` の認可トークンは `ServerUrl::cat_tokens` に取り出す ([C4M 認可トークン](#c4m-認可トークン) を参照)。
 
 予約パラメータ `connection` は `--transport` 省略時の接続種別として使い、`--transport` と矛盾する場合はエラーになる ([トランスポート](#トランスポート) を参照)。`msf` 以外の `type` の値は構文 (§6.1.1) の検証だけを行い、解釈しない。
 
@@ -59,7 +59,7 @@ scheme は RFC 3986 §3.1 に従い大文字小文字を区別しない (`MOQT:/
 
 接続経路は `--transport` で選ぶ。`--transport` を省略した場合は `--url` の `msf` fragment の
 `connection` (`q`: native QUIC / `wt`: WebTransport) を使い、それも無ければ `quic` になる
-(draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters))。`connection=wt` の
+(draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters))。`connection=wt` の
 ときの既定は `wt-h3` (HTTP/2 にする場合は `--transport wt-h2` を明示する)。ただし `wt-h3` を
 提供しないビルド (s2n-quic バックエンド / Windows) では、`--transport` を省略した `connection=wt` は
 エラーになる。`connection` と矛盾する `--transport`、`connection=q` と `connection=wt` の
@@ -115,20 +115,20 @@ DATAGRAM は経路での損失を下位の TCP が再送するため起きない
 
 ## C4M 認可トークン
 
-MSF fragment (`#msf:<track-identifier>&c4m=<token>`) の `c4m` パラメータに C4M トークンを指定すると、SETUP の AUTHORIZATION_TOKEN (Token Type CAT) として送信する (draft-ietf-moq-msf-01 §11.1.1、draft-ietf-moq-c4m-02 §8.2.1)。
+MSF fragment (`#msf:<track-identifier>&cat=<token>`) の `cat` パラメータに C4M トークンを指定すると、SETUP の AUTHORIZATION_TOKEN (Token Type CAT) として送信する (draft-ietf-moq-msf-02 §11.1.1、draft-ietf-moq-c4m-02 §8.2.1)。
 この経路はトークンのバイト列を運ぶだけで、トークンのデコード、署名 / MAC の検証、クレームや scope の認可、DPoP proof の検証は行わない。検証はトークンを受け取る側 (リレー) またはアプリケーションの責務である。
-あわせて PUBLISH / SUBSCRIBE / REQUEST_UPDATE の AUTHORIZATION_TOKEN としてもすべてのトークンを送信する (draft-ietf-moq-msf-01 §11.4.3 の MUST。SETUP に載せていても免除されない。`MoqtClient` が catalog を解析しないため track とトークンの対応付けは行わず、アクションごとの選別はしない)。
+あわせて PUBLISH / SUBSCRIBE / FETCH / REQUEST_UPDATE の AUTHORIZATION_TOKEN としてもすべてのトークンを送信する (draft-ietf-moq-msf-02 §11.5.3 の MUST。SETUP に載せていても免除されない。`MoqtClient` が catalog を解析しないため track とトークンの対応付けは行わず、アクションごとの選別はしない)。
 
 ```bash
 # C4M トークン付きで QUIC 接続する (シェルでは `&` を引用符で囲む)
-cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video&c4m=<base64 token>' --fake-capture-device
-cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video&c4m=<base64 token>'
+cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video&cat=<base64 token>' --fake-capture-device
+cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video&cat=<base64 token>'
 ```
 
 `<base64 token>` は C4M トークンのバイト列 (CBOR エンコードされた CWT) を Base64 (RFC 4648 §4) または base64url (§5) で表した文字列で、パディングは省略できる。`%XX` の percent-encoding もデコードする。
-トークンの検証 (署名 / クレーム / `moqt` クレームの認可判定) は MoQ リレーが行い、`parse_url` はデコードしたバイト列を `ServerUrl::c4m_tokens` に保持し、送信時にそのまま載せる。DPoP バインディング (`cnf` / `catdpop`) を使うトークンに必要な DPoP proof の送信には対応しない。
+トークンの検証 (署名 / クレーム / `moqt` クレームの認可判定) は MoQ リレーが行い、`parse_url` はデコードしたバイト列を `ServerUrl::cat_tokens` に保持し、送信時にそのまま載せる。DPoP バインディング (`cnf` / `catdpop`) を使うトークンに必要な DPoP proof の送信には対応しない。
 
-`c4m` は複数指定でき、すべてのトークンを SETUP と上記の制御メッセージの双方に載せる (同一トークンは 1 つに畳む)。MSF fragment が §11.1 の ABNF に一致しない場合と、`c4m` が空または Base64 として不正な場合は `--url` の解釈でエラーになる。
+`cat` は複数指定でき、すべてのトークンを SETUP と上記の制御メッセージの双方に載せる (同一トークンは 1 つに畳む)。MSF fragment が §11.1 の ABNF に一致しない場合と、`cat` が空または Base64 として不正な場合は `--url` の解釈でエラーになる。
 
 ## TLS 証明書
 

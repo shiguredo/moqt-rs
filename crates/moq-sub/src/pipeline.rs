@@ -39,15 +39,17 @@ use shiguredo_moqt::stream::subgroup::SubgroupHeader;
 use shiguredo_moqt::video_decode_order::{
     VideoDecodeOrder, VideoObjectAdmission, VideoObjectPosition, prior_object_id_gap_of,
 };
+use shiguredo_moqt::video_object_reorder::VideoObjectReorderBuffer;
 use shiguredo_moqt::{
     message::ControlMessage, message::Publish, message::common::Location,
     message::common::TrackNamespace, message_parameter::LocationFilter,
     message_parameter::MessageParameter, message_parameter::MessageParameterValue,
     message_parameter::MessageParameters, message_parameter::PARAM_FILL_PARAMETERS,
     message_parameter::PARAM_LOCATION_FILTER, message_parameter::PARAM_NEW_GROUP_REQUEST,
-    message_parameter::PARAM_RENDEZVOUS_TIMEOUT, msf::MSF_CATALOG_TRACK_NAME, msf::MsfTrack,
-    name::parse_namespace, name::serialize_namespace, name::serialize_track_name,
-    session::types::DataStreamId, session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
+    message_parameter::PARAM_RENDEZVOUS_TIMEOUT, message_parameter::PARAM_SUBSCRIBER_PRIORITY,
+    msf::MSF_CATALOG_TRACK_NAME, msf::MsfTrack, msf::StreamMapping, msf::parse_catalog_namespace,
+    name::serialize_namespace, name::serialize_track_name, session::types::DataStreamId,
+    session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
     stream::decoder::DecodedSubgroupObject, stream::decoder::FetchStreamDecoder,
     stream::decoder::SubgroupStreamDecoder, stream::fetch::FetchHeader,
 };
@@ -840,7 +842,7 @@ use tokio_moq::webtransport::WtSessionState;
 struct VideoTrackInfo {
     /// 購読に使う namespace
     ///
-    /// draft-ietf-moq-msf-01 §5.2.2 (Track namespace) は track が宣言した namespace が
+    /// draft-ietf-moq-msf-02 §5.2.2 (Track namespace) は track が宣言した namespace が
     /// catalog track の namespace を上書きすると定めるため、宣言があればそれを使う。
     namespace: TrackNamespace,
     track_name: String,
@@ -848,6 +850,12 @@ struct VideoTrackInfo {
     width: u32,
     height: u32,
     fps: u32,
+    /// LOC packaging の Object を MOQT Stream へ割り当てるモード
+    ///
+    /// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) / §5.2.5 (Packaging
+    /// metadata): `packagingMetadata` の `streamMapping` で通知される。キーが無い場合は
+    /// `group` である。
+    stream_mapping: StreamMapping,
 }
 
 /// カタログから取得した音声トラック情報
@@ -1196,6 +1204,7 @@ fn spawn_stream_task(
     display_backlog: &std::sync::Arc<std::sync::atomic::AtomicI64>,
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
     video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
+    object_mode_video: &std::sync::Arc<ObjectModeVideo>,
     group_switch: &std::sync::Arc<SharedGroupSwitchGate>,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
     audio_config_validated_generation: &std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -1221,6 +1230,7 @@ fn spawn_stream_task(
     let backlog = std::sync::Arc::clone(display_backlog);
     let video_decode_order = std::sync::Arc::clone(video_decode_order);
     let video_delivery_order = std::sync::Arc::clone(video_delivery_order);
+    let object_mode_video = std::sync::Arc::clone(object_mode_video);
     // 世代は stream task を作った時点で固定する。session 移行で世代を進めた後に旧い task が
     // 呼んでも、新しい世代の判定に影響しないようにするためである
     let group_switch = GroupSwitchHandle::new(std::sync::Arc::clone(group_switch));
@@ -1252,6 +1262,7 @@ fn spawn_stream_task(
             backlog,
             &video_decode_order,
             &video_delivery_order,
+            &object_mode_video,
             &group_switch,
             audio_decoder.as_ref(),
             &audio_config_validated_generation,
@@ -1279,7 +1290,7 @@ enum TrackKind {
     /// カタログトラック
     ///
     /// 購読は LARGEST_OBJECT の取得と、以後に配られるカタログ (独立カタログと delta) の
-    /// 受信に使う (draft-ietf-moq-msf-01 §5 (Catalog))。購読で届くカタログは、stream task が
+    /// 受信に使う (draft-ietf-moq-msf-02 §5 (Catalog))。購読で届くカタログは、stream task が
     /// 読み出した Object を main ループへ渡し、`CatalogState` を所有する main ループが
     /// MSF の配置規則で適用する。
     Catalog,
@@ -1633,7 +1644,7 @@ fn record_last_location(
 
 /// 移行先の session で購読を張り直す
 ///
-/// catalog は FILL_PARAMETERS 付き SUBSCRIBE で張り直す (draft-ietf-moq-msf-01 §5 (Catalog)
+/// catalog は FILL_PARAMETERS 付き SUBSCRIBE で張り直す (draft-ietf-moq-msf-02 §5 (Catalog)
 /// が catalog の取得に求める経路)。映像は SUBSCRIBE のあとに SUBSCRIBER_PRIORITY の
 /// REQUEST_UPDATE を送る (起動時と同じ手順)。音声は SUBSCRIBE だけである。
 /// 映像だけ、購読のあとに直近 Group の FETCH を発行する (起動時と同じ手順)。音声の明示
@@ -1646,7 +1657,7 @@ fn record_last_location(
 /// いない) はフィルタを載せず、起動時と同じ「購読後の live のみ」になる。
 ///
 /// catalog だけは位置を使わない。catalog は「最新の完全なカタログと、それに続く delta」を
-/// 状態へ適用し続ける必要があり (draft-ietf-moq-msf-01 §5 (Catalog))、移行中に更新が
+/// 状態へ適用し続ける必要があり (draft-ietf-moq-msf-02 §5 (Catalog))、移行中に更新が
 /// 抜けた場合に delta だけを再開すると状態が壊れる。起動時と同じ Next Object の購読に
 /// 戻し、移行後に publish される次のカタログ (独立カタログまたは delta) を受け直す。
 /// なお移行後の fill fetch stream は受信ループの stream task が読み捨てるため (起動時の
@@ -1713,7 +1724,7 @@ async fn resubscribe_tracks(
                 last_locations.get(TrackKind::Video),
             );
             // 起動時と同じく SUBSCRIBER_PRIORITY を送る。C4M 認可トークンは
-            // `MoqtClient::send_request_update` が付ける (draft-ietf-moq-msf-01 §11.4.3)
+            // `MoqtClient::send_request_update` が付ける (draft-ietf-moq-msf-02 §11.5.3)
             let mut params = shiguredo_moqt::message_parameter::MessageParameters::new();
             params.push(shiguredo_moqt::message_parameter::MessageParameter {
                 param_type: shiguredo_moqt::message_parameter::PARAM_SUBSCRIBER_PRIORITY,
@@ -2038,7 +2049,7 @@ fn goaway_request_target(
 /// fragment の type と value は `:` で連結するが、`:` は RFC 3986 §3.5 の fragment の
 /// 文字集合に含まれるため、type と value の組が異なればキーも異なる。
 ///
-/// fragment には c4m の認可トークンが含まれうるため、キーには fragment のハッシュだけを
+/// fragment には cat の認可トークンが含まれうるため、キーには fragment のハッシュだけを
 /// 入れ、ログに出してもトークンが漏れないようにする。同じ fragment なら同じキーになり、
 /// 異なる fragment (別トラック、別トークン) は別のキーになる。
 fn side_session_url_key(url: &tokio_moq::ServerUrl) -> String {
@@ -2744,6 +2755,8 @@ struct RequestMigrationShared {
     video_decode_order: std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
     /// 映像の購読境界と送出順の判定状態 (購読で 1 つ共有する)
     video_delivery_order: std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
+    /// object モードの並べ替えと復号器の共有状態 (購読で 1 つ共有する)
+    object_mode_video: std::sync::Arc<ObjectModeVideo>,
     /// 表示待ちの映像フレーム数 (受信側が増やし、表示側が減らす)
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
     /// Group の切り替え gate (購読で 1 つ共有する)
@@ -3292,6 +3305,7 @@ async fn run_side_session(
                 &shared.display_backlog,
                 &shared.video_decode_order,
                 &shared.video_delivery_order,
+                &shared.object_mode_video,
                 &shared.group_switch,
                 shared.audio_decoder.as_ref(),
                 &shared.audio_config_validated_generation,
@@ -3680,7 +3694,7 @@ pub async fn run(
     // 3. カタログを FILL_PARAMETERS 付き SUBSCRIBE で取得する
     //
     // MSF は catalog の取得に "SUBSCRIBE with a Joining FETCH (offset = 0)" を MUST とする
-    // (draft-ietf-moq-msf-01 §5 (Catalog))。Joining FETCH は draft-20 で削除され
+    // (draft-ietf-moq-msf-02 §5 (Catalog))。Joining FETCH は draft-20 で削除され
     // (draft-ietf-moq-transport-23 Appendix A.4 の "Since draft-ietf-moq-transport-19" に記録)、
     // §3.5 (Joining an Ongoing Track) が示す購読パターンに置き換わった:
     //
@@ -3692,11 +3706,11 @@ pub async fn run(
     //    `CatalogState` へ到着順に適用する
     //
     // Group ID を 0 と仮定してはならない。publisher は再起動時に以前 publish したどの
-    // Group ID よりも大きい値から始める MUST があり (draft-ietf-moq-msf-01 §6.1
+    // Group ID よりも大きい値から始める MUST があり (draft-ietf-moq-msf-02 §6.1
     // (Group numbering))、Unix epoch ミリ秒を開始値にする実装が一般的である。
     //
-    // C4M 認可トークンは `MoqtClient` が URL の c4m トークンをすべて付けるため、ここでは
-    // 指定しない (draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization))。
+    // C4M 認可トークンは `MoqtClient` が URL の C4M トークンをすべて付けるため、ここでは
+    // 指定しない (draft-ietf-moq-msf-02 §11.5.3 (Presenting Authorization))。
     // 移行 (GOAWAY) で catalog を張り直すときに使う namespace
     let catalog_namespace_for_migration = namespace.clone();
     let catalog_params =
@@ -3798,7 +3812,7 @@ pub async fn run(
     // カタログの targetLatency をプレイヤーへ渡す。プレイヤーは時間軸の表示の遅れの下限として
     // 反映する。対象は実際に購読する track の render group に属する track に限る
     // (別の render group の宣言値を購読中の track に適用しない。
-    // draft-ietf-moq-msf-01 §5.2.8 は同じ render group の track が同一の targetLatency を
+    // draft-ietf-moq-msf-02 §5.2.9 は同じ render group の track が同一の targetLatency を
     // 持つことを MUST とする)
     let subscribed_latencies = subscribed_track_latencies(
         video_latency,
@@ -3862,6 +3876,20 @@ pub async fn run(
     // Group の切り替えで次の Group の映像 Object を保留する gate は購読で 1 つ持つ。
     // stream task 間で共有し、session 移行の直前に世代を進めて状態を捨てる
     let group_switch = std::sync::Arc::new(SharedGroupSwitchGate::new());
+    // object モードの並べ替えと復号器の共有状態は購読で 1 つ持つ。Group モードでは
+    // 並べ替えも復号器の共有もしない (既存の stream ごとの復号を変えない)
+    let object_mode_video = std::sync::Arc::new(ObjectModeVideo::new(
+        video_info
+            .as_ref()
+            .filter(|_| subscribe_video)
+            .map(|video| video.stream_mapping)
+            .unwrap_or(StreamMapping::Group),
+        playback,
+        video_info
+            .as_ref()
+            .filter(|_| subscribe_video)
+            .map(|video| video.codec.as_str()),
+    ));
 
     if subscribe_video {
         let v = video_info.as_ref().expect("video_info is Some");
@@ -3890,7 +3918,7 @@ pub async fn run(
         // REQUEST_UPDATE で video subscription の subscriber priority を変更するサンプル
         //
         // C4M 認可トークンは `MoqtClient::send_request_update` が付けるため、ここでは
-        // 指定しない (draft-ietf-moq-msf-01 §11.4.3)。SUBSCRIBE と同じトークンを
+        // 指定しない (draft-ietf-moq-msf-02 §11.5.3)。SUBSCRIBE と同じトークンを
         // REQUEST_UPDATE にも MUST 付与する。
         let mut params = shiguredo_moqt::message_parameter::MessageParameters::new();
         params.push(shiguredo_moqt::message_parameter::MessageParameter {
@@ -4515,6 +4543,7 @@ pub async fn run(
                 &display_backlog,
                 &video_decode_order,
                 &video_delivery_order,
+                &object_mode_video,
                 &group_switch,
                 audio_decoder.as_ref(),
                 &audio_config_validated_generation,
@@ -4562,7 +4591,7 @@ pub async fn run(
             }
             Some(object) = catalog_rx.recv() => {
                 // 購読で届いた catalog の更新を MSF の配置規則で適用する
-                // (draft-ietf-moq-msf-01 §5 (Catalog))。起動時に解決したトラックは
+                // (draft-ietf-moq-msf-02 §5 (Catalog))。起動時に解決したトラックは
                 // 変更しないが、カタログの状態は購読が続く限り最新に保つ
                 // 移行後の再購読の Location Filter に使うため、配送した catalog Object の
                 // 位置も記録する
@@ -4632,7 +4661,7 @@ pub async fn run(
                                         }
                                         // 移行先 URI の msf fragment の connection が現在の
                                         // 接続経路と矛盾する場合は移行しない
-                                        // (draft-ietf-moq-msf-01 §11.1.1)
+                                        // (draft-ietf-moq-msf-02 §11.1.1)
                                         if let Err(e) = tokio_moq::resolve_transport(
                                             Some(config.transport),
                                             &target.url,
@@ -4742,7 +4771,7 @@ pub async fn run(
                                             !same_session_url(&target.url, &config.url);
                                         // 移行先 URI の msf fragment の connection が現在の
                                         // 接続経路と矛盾する場合は移行しない
-                                        // (draft-ietf-moq-msf-01 §11.1.1)
+                                        // (draft-ietf-moq-msf-02 §11.1.1)
                                         if new_session_url
                                             && let Err(e) = tokio_moq::resolve_transport(
                                                 Some(config.transport),
@@ -4768,6 +4797,9 @@ pub async fn run(
                                                 ),
                                                 video_delivery_order: std::sync::Arc::clone(
                                                     &video_delivery_order,
+                                                ),
+                                                object_mode_video: std::sync::Arc::clone(
+                                                    &object_mode_video,
                                                 ),
                                                 display_backlog: std::sync::Arc::clone(
                                                     &display_backlog,
@@ -5584,6 +5616,9 @@ pub async fn run(
                         // 旧 session の復号順と追いつきの状態を捨てる。新 session の live を
                         // 古い Group として誤って拒否しないためである
                         video_decode_order.lock().await.reset();
+                        // object モードの並べ替えも捨てる。復号器は同じコーデックを
+                        // 続けて復号できるため残す
+                        object_mode_video.reset().await;
                         // Group の切り替え gate も初期化する。旧 session の stream task は
                         // abort しても await 点でしか止まらず、drain の打ち切り後も動き得る
                         // ため、世代を進めて旧い task の begin_stream / end_stream /
@@ -7089,6 +7124,13 @@ struct SelectedTrackLatency {
 /// 独立したカタログが届くまで待つ。待ち続けないよう上限を設ける。
 const CATALOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// カタログ購読の SUBSCRIBER_PRIORITY
+///
+/// draft-ietf-moq-msf-02 Appendix A.1.3: 購読者はカタログ購読に他の同時購読より高い
+/// subscriber priority を使うこと (SHOULD)。MOQT §5.1 は値が小さいほど優先度が高いため、
+/// media の既定値 128 より小さい 64 を使う。
+const CATALOG_SUBSCRIBER_PRIORITY: u8 = 64;
+
 /// カタログ購読のメッセージパラメータを組み立てる
 ///
 /// draft-ietf-moq-transport-23 §3.5 (Joining an Ongoing Track) の購読パターンに従い、
@@ -7099,6 +7141,10 @@ const CATALOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// 独立カタログが fill range に入らない。
 fn catalog_subscribe_parameters() -> MessageParameters {
     let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_SUBSCRIBER_PRIORITY,
+        value: MessageParameterValue::Uint8(CATALOG_SUBSCRIBER_PRIORITY),
+    });
     parameters.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
         value: MessageParameterValue::LocationFilter(LocationFilter::NextObject),
@@ -7135,7 +7181,7 @@ fn catalog_subscribe_parameters() -> MessageParameters {
 /// `CATALOG_TIMEOUT` より後になると期限切れで終了する (MSF は fill を伴う購読を MUST と
 /// するため、本 example は fill 非対応の publisher を対象にしない)。
 ///
-/// これにより draft-ietf-moq-msf-01 §5 (Catalog) が求める「最新の完全なカタログと、
+/// これにより draft-ietf-moq-msf-02 §5 (Catalog) が求める「最新の完全なカタログと、
 /// それに続く delta update」を 1 つの状態 [`catalog::CatalogState`] へまとめて適用できる。
 async fn receive_catalog(
     recv_acceptor: &mut transport::StreamAcceptor,
@@ -7145,9 +7191,9 @@ async fn receive_catalog(
     catalog_namespace: TrackNamespace,
 ) -> Result<CatalogResolution> {
     let deadline = tokio::time::Instant::now() + CATALOG_TIMEOUT;
-    // delta の namespace 継承は catalog JSON の `namespace` との文字列比較になるため、
-    // publisher が書く表現と同じ draft-ietf-moq-transport-23 §8.8 の表現へ直す
-    let mut state = catalog::CatalogState::new(serialize_namespace(&catalog_namespace));
+    // 継承の解決と比較は MOQT の Track Namespace のバイト値で行うため、catalog track の
+    // namespace をそのまま状態へ渡す (draft-ietf-moq-msf-02 §5.2.2 / §11.2)
+    let mut state = catalog::CatalogState::new(catalog_namespace.clone());
     while state.catalog().is_none() {
         let accepted =
             match tokio::time::timeout_at(deadline, recv_acceptor.accept_recv_stream()).await {
@@ -7290,7 +7336,7 @@ async fn receive_catalog(
         })
     });
     // 音声トラックは本 example がデコードできる codec (opus / mp4a.* (AAC)) から選ぶ。
-    // codec の文字列は draft-ietf-moq-msf-01 §5.2.18 (Codec) が定める RFC 6381 の表記である。
+    // codec の文字列は draft-ietf-moq-msf-02 §5.2.19 (Codec) が定める RFC 6381 の表記である。
     // デコードできない codec を購読すると、録画中でも再生時にデコーダを生成できずに失敗する。
     let audio_track = catalog.tracks.iter().find(|t| {
         t.codec
@@ -7652,7 +7698,7 @@ async fn read_catalog_payload(
 
 /// 受信した catalog Object を状態へ適用し、結果をログに出す
 ///
-/// draft-ietf-moq-msf-01 §5 (Catalog) の配置規則の判定は [`catalog::CatalogState::apply`]
+/// draft-ietf-moq-msf-02 §5 (Catalog) の配置規則の判定は [`catalog::CatalogState::apply`]
 /// が行う。適用しなかった Object は理由付きで debug に出す。
 fn apply_catalog_object(
     state: &mut catalog::CatalogState,
@@ -7712,7 +7758,7 @@ fn subscribed_track_latencies(
 /// カタログの track から、購読する track の `targetLatency` (ミリ秒) を求める
 ///
 /// 対象は購読する track の `renderGroup` に属する track に限る。`renderGroup` は
-/// 「一緒に描画される track の集合」であり (draft-ietf-moq-msf-01 §5.2.11)、同じ group の
+/// 「一緒に描画される track の集合」であり (draft-ietf-moq-msf-02 §5.2.12)、同じ group の
 /// track は同じ `targetLatency` を持たなければならない (§5.2.8 の MUST)。購読する group が
 /// 複数あるときは、時間軸が持てる値が 1 つだけであるため最大値をすべての購読 track に掛ける
 /// (track ごとの値の適用は本 example の範囲外)。
@@ -7752,16 +7798,14 @@ fn catalog_target_latency_ms(
 
 /// track の購読に使う namespace を解決する
 ///
-/// draft-ietf-moq-msf-01 §5.2.2 (Track namespace) は「track が宣言した namespace は継承した
+/// draft-ietf-moq-msf-02 §5.2.2 (Track namespace) は「track が宣言した namespace は継承した
 /// namespace を上書きする」と定める。宣言が無ければ catalog track の namespace を継承する
 /// (MSF の継承の規則。delta 適用時の継承は [`catalog::CatalogState`] が扱う)。
 ///
-/// 宣言された namespace は draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track
-/// Names。MSF では §11.1.2 に再掲) の表現として [`parse_namespace`] で解決する。§8.8 の形式は
-/// RECOMMENDED であり、draft-ietf-moq-msf-01 §5.2.2 (Track namespace) も catalog JSON の
-/// `namespace` を String と定めるのみで符号化を規定しない。本 example は moq-pub が書く §8.8
-/// 表現を前提とする契約であり、それ以外の表現 (MSF §5.6.1 の例のような値) を宣言したカタログでは
-/// この解決に失敗して起動できない。
+/// 宣言された namespace は draft-ietf-moq-msf-02 §5.2.2 / §11.2 (Mapping catalog strings to
+/// MOQT byte values) の `/` 区切り表現として [`parse_catalog_namespace`] で解決する。JSON
+/// デコード後の文字列を `/` で分割した各 substring が Track Namespace Field の UTF-8
+/// バイト列になる。
 ///
 /// 解決に失敗した場合はエラーにする。カタログは publisher の契約であり、本 example の契約では
 /// 解決できない namespace を publisher のバグとして扱う。黙って catalog track の namespace を
@@ -7773,11 +7817,10 @@ fn catalog_target_latency_ms(
 /// 同じ扱い)。無効化した側の解決に失敗しても example は起動しない。
 fn resolve_track_namespace(track: &MsfTrack, inherited: &TrackNamespace) -> Result<TrackNamespace> {
     let namespace = match track.namespace.as_deref() {
-        Some(declared) => parse_namespace(declared).map_err(|e| {
+        Some(declared) => parse_catalog_namespace(declared).map_err(|e| {
             Error::Other(format!(
                 "catalog media track {:?} has an invalid namespace {declared:?}: {e} \
-                 ('-' separates namespace fields; use the draft-ietf-moq-transport-23 \
-                 §8.8 form)",
+                 ('/' separates namespace fields in the draft-ietf-moq-msf-02 form)",
                 track.name
             ))
         })?,
@@ -7809,6 +7852,14 @@ fn extract_video_info(
         .ok_or_else(|| Error::Other("catalog track missing height".to_string()))?
         as u32;
     let fps = track.framerate.map(|f| f as u32).unwrap_or(30);
+    // draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) / §5.2.5 (Packaging
+    // metadata): streamMapping がない場合は group。不正値はカタログ不正として扱う
+    let stream_mapping = track.stream_mapping().map_err(|e| {
+        Error::Other(format!(
+            "catalog video track {:?} has an invalid streamMapping: {e}",
+            track.name
+        ))
+    })?;
     Ok(VideoTrackInfo {
         namespace: resolve_track_namespace(track, inherited_namespace)?,
         track_name: track.name.clone(),
@@ -7816,6 +7867,7 @@ fn extract_video_info(
         width,
         height,
         fps,
+        stream_mapping,
     })
 }
 
@@ -7860,6 +7912,7 @@ async fn handle_incoming_stream(
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
     video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
+    object_mode_video: &std::sync::Arc<ObjectModeVideo>,
     group_switch: &GroupSwitchHandle,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
     audio_config_validated_generation: &std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -7893,6 +7946,7 @@ async fn handle_incoming_stream(
         display_backlog,
         video_decode_order,
         video_delivery_order,
+        object_mode_video,
         group_switch,
         audio_decoder,
         audio_config_validated_generation,
@@ -7968,6 +8022,7 @@ async fn handle_stream_body(
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
     video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
+    object_mode_video: &std::sync::Arc<ObjectModeVideo>,
     group_switch: &GroupSwitchHandle,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
     audio_config_validated_generation: &std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -8144,7 +8199,7 @@ async fn handle_stream_body(
                         FetchStreamAction::DeliverCatalog => {
                             // fill fetch stream で届く完全な catalog を、購読で届く catalog と
                             // 同じ `CatalogState` へ適用するため main ループへ渡す
-                            // (draft-ietf-moq-msf-01 §5 (Catalog))。移行後に catalog 購読を
+                            // (draft-ietf-moq-msf-02 §5 (Catalog))。移行後に catalog 購読を
                             // 張り直すと、移行中に更新された catalog が fill で届く
                             match read_catalog_fetch_objects(
                                 stream,
@@ -8231,7 +8286,12 @@ async fn handle_stream_body(
             };
             // 再生の間引きで video group を破棄するのは録画していない場合だけにする。
             // 録画中は group を読み切って録画し、デコードだけをスキップする。
-            let skip_decode = track_map.get(&header.track_alias) == Some(&TrackKind::Video)
+            //
+            // object モードでは Subgroup を破棄しない。1 つの Subgroup は 1 Object であり、
+            // 破棄すると Group 内の Object ID が欠けて、以降の delta を復号できなくなる
+            // (次の Group のキーフレームまで復号が止まる)。
+            let skip_decode = !object_mode_video.is_object_mode()
+                && track_map.get(&header.track_alias) == Some(&TrackKind::Video)
                 && display_backlog.load(Ordering::Relaxed) > MAX_DISPLAY_BACKLOG;
             if skip_decode && recorder.is_none() {
                 tracing::debug!(
@@ -8271,6 +8331,36 @@ async fn handle_stream_body(
                         let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
                         return;
                     };
+                    if object_mode_video.is_object_mode() {
+                        // object モードでは 1 Group の複数 Subgroup を Object ID 順に並べ替え、
+                        // 購読で共有する 1 つの復号器へ直列に流す。stream ごとに復号器を
+                        // 作らない
+                        let frames = decode_object_mode_video_stream(
+                            stream,
+                            data_plane,
+                            stream_id,
+                            header.group_id,
+                            &mut sg_decoder,
+                            object_mode_video,
+                            &ObjectModeVideoDelivery {
+                                video_decode_order,
+                                video_delivery_order,
+                                sink: &FrameSink {
+                                    frame_tx,
+                                    display_backlog: &display_backlog,
+                                },
+                                recorder,
+                                last_received_locations,
+                                termination_tx,
+                            },
+                        )
+                        .await;
+                        tracing::debug!(
+                            "Stream #{stream_num}: video object group {} complete ({frames} frames)",
+                            header.group_id,
+                        );
+                        return;
+                    }
                     let mut decoder = match build_stream_video_decoder(
                         playback,
                         skip_decode,
@@ -8844,6 +8934,280 @@ fn monotonic_now_us() -> i64 {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     let start = START.get_or_init(Instant::now);
     i64::try_from(start.elapsed().as_micros()).unwrap_or(i64::MAX)
+}
+
+/// object モードで並べ替える映像 Object
+///
+/// 受信した Subgroup の Object を、Group ID と Object ID が付いたまま並べ替えバッファへ
+/// 渡す。payload と Properties は配送するまで保持する。
+#[derive(Debug)]
+struct ObjectModeVideoObject {
+    /// Object の Group ID
+    group_id: u64,
+    /// Group 内の Object ID
+    object_id: u64,
+    /// Object Properties の生バイト (Properties フィールドが無い場合は `None`)
+    properties_bytes: Option<Vec<u8>>,
+    /// Object の payload
+    payload: Vec<u8>,
+}
+
+/// object モードの映像 Object の配送に使う購読の状態
+///
+/// stream task ごとに借用で渡す。並べ替えと復号器は [`ObjectModeVideo`] が共有する。
+struct ObjectModeVideoDelivery<'a> {
+    /// 映像の復号順の判定 (購読で共有する)
+    video_decode_order: &'a std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
+    /// 映像の購読境界と送出順の判定 (購読で共有する)
+    video_delivery_order: &'a std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
+    /// 復号済みフレームの送り先
+    sink: &'a FrameSink<'a>,
+    /// 録画先 (`--mp4` 指定時のみ)
+    recorder: Option<&'a RecorderSender>,
+    /// track ごとに最後に受信した Object の位置
+    last_received_locations: &'a std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
+    /// 書式違反によるセッション終了を依頼するチャネル
+    termination_tx: &'a tokio::sync::mpsc::Sender<SessionError>,
+}
+
+/// object モードの映像 Object の並べ替えと復号器の共有状態
+///
+/// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) の `object` モードでは、
+/// 1 Group が複数の Subgroup stream に分かれて届く。Group 内の Object を Object ID 順に
+/// 並べ替え (draft-ietf-moq-msf-02 §6.2 (Object Numbering))、購読で 1 つの復号器へ直列に
+/// 流す。Group モードでは使わない。
+///
+/// 復号器を stream ごとに作ると、Group 内の複数 Subgroup の Object を同じ参照の連鎖で
+/// 復号できず、delta の参照フレームが失われる。そのため購読で 1 つだけ作る。
+struct ObjectModeVideo {
+    /// カタログが通知した stream mapping
+    mapping: StreamMapping,
+    /// 並べ替えバッファと復号器
+    ///
+    /// 復号器を排他的に借りる `deliver_video_object` を保持したまま呼ぶため、stream task 間で
+    /// 直列化する。actor にすると Object ごとに往復が増え、受信側の backpressure と
+    /// 終了処理が複雑になるため Mutex を使う。ロックの保持は 1 Object の配送に限られる。
+    state: tokio::sync::Mutex<ObjectModeVideoState>,
+}
+
+/// [`ObjectModeVideo`] がロックで保護する状態
+struct ObjectModeVideoState {
+    /// Group ごとの Object ID 順の並べ替えバッファ
+    reorder: VideoObjectReorderBuffer<ObjectModeVideoObject>,
+    /// 購読で共有する映像の復号器
+    ///
+    /// 再生しない場合と、復号器を生成できなかった場合は `None`。
+    decoder: Option<decoder::VideoDecoder>,
+}
+
+impl ObjectModeVideo {
+    /// stream mapping と映像の設定から作る
+    ///
+    /// `object` モードで再生する場合は、購読で共有する復号器をここで 1 つ作る。
+    /// 復号器を生成できない場合は警告を残して復号なしで動く (録画は続く)。起動時の
+    /// 復号器の確認 (`run`) が再生時にエラーにするため、通常はここで失敗しない。
+    fn new(mapping: StreamMapping, playback: bool, codec: Option<&str>) -> Self {
+        let decoder = if mapping == StreamMapping::Object && playback {
+            match codec {
+                Some(codec) => match decoder::build_video_decoder(codec) {
+                    Ok(decoder) => Some(decoder),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to create the shared video decoder for object stream mapping; \
+                             continuing without video playback: {e}"
+                        );
+                        None
+                    }
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
+        Self {
+            mapping,
+            state: tokio::sync::Mutex::new(ObjectModeVideoState {
+                reorder: VideoObjectReorderBuffer::new(),
+                decoder,
+            }),
+        }
+    }
+
+    /// object モードかどうか
+    fn is_object_mode(&self) -> bool {
+        self.mapping == StreamMapping::Object
+    }
+
+    /// session 移行の直前に並べ替えの状態を捨てる
+    ///
+    /// 旧 session の Object を配送すると、新しい session の復号順の判定を古い位置で
+    /// 汚すためである。復号器は同じコーデックを続けて復号できるため残す。
+    async fn reset(&self) {
+        self.state.lock().await.reorder.reset();
+    }
+
+    /// Object を並べ替えバッファへ追加し、配送してよい Object を Object ID 順に流す
+    ///
+    /// 戻り値は配送の結果である。`MalformedTrack` / `Terminated` は呼び出し側が読み取りを
+    /// 打ち切る必要がある。
+    async fn deliver_object(
+        &self,
+        object: ObjectModeVideoObject,
+        delivery: &ObjectModeVideoDelivery<'_>,
+    ) -> VideoDelivery {
+        // 並べ替えと配送を同じロックで直列化する。配送中に別の stream task が Object を
+        // 追加しても、Object ID 順の配送が崩れない
+        let mut state = self.state.lock().await;
+        let ready = state
+            .reorder
+            .insert(object.group_id, object.object_id, object);
+        let mut frames: u64 = 0;
+        for object in ready {
+            let location = Location {
+                group_id: object.group_id,
+                object_id: object.object_id,
+            };
+            // 移行後の再購読に使う位置は、復号順の判定より前に記録する (購読の境界以下でも
+            // 受信済みとして再開位置を進める。既存の group モードと同じ規則)
+            record_last_location(delivery.last_received_locations, TrackKind::Video, location);
+            let result = deliver_video_object(
+                object.group_id,
+                object.object_id,
+                object.value.properties_bytes.as_deref(),
+                &object.value.payload,
+                delivery.video_decode_order,
+                delivery.video_delivery_order,
+                state.decoder.as_mut(),
+                delivery.sink,
+                delivery.recorder,
+                delivery.termination_tx,
+            )
+            .await;
+            match result {
+                VideoDelivery::Delivered(delivered) => frames += delivered,
+                other => return other,
+            }
+        }
+        VideoDelivery::Delivered(frames)
+    }
+}
+
+/// object モードの 1 本の Subgroup ストリームから映像 Object を取り出して配送する
+///
+/// Subgroup ストリームの Object はすべて同じ Group に属する
+/// (draft-ietf-moq-transport-23 §2.2 (Subgroups))。publisher は `object` モードで 1 Object を
+/// 1 Subgroup に載せるが、この関数は 1 本に複数の Object が載る場合も受け付ける。
+/// 並べ替えと復号器の共有は [`ObjectModeVideo`] が担う。
+async fn decode_object_mode_video_stream(
+    stream: &mut transport::RecvStream,
+    data_plane: &DataPlaneHandle,
+    stream_id: DataStreamId,
+    group_id: u64,
+    sg_decoder: &mut SubgroupStreamDecoder,
+    object_mode_video: &ObjectModeVideo,
+    delivery: &ObjectModeVideoDelivery<'_>,
+) -> u64 {
+    let mut frames: u64 = 0;
+    loop {
+        let (obj, deliver) = loop {
+            match sg_decoder.try_decode_object() {
+                Ok(Some(object)) => {
+                    let deliver = match data_plane.recv_subgroup_object(stream_id, &object) {
+                        Ok(TrackDataAcceptance::Accepted) => true,
+                        // header 受理済み stream では `UnknownTrackAlias` は返らない契約だが、
+                        // 型上あり得るため防御的に破棄する
+                        Ok(
+                            TrackDataAcceptance::UnknownTrackAlias
+                            | TrackDataAcceptance::FilteredOut
+                            | TrackDataAcceptance::Discarded,
+                        ) => false,
+                        Err(e) => {
+                            tracing::warn!("Failed to register video object: {e}");
+                            return frames;
+                        }
+                    };
+                    break (object, deliver);
+                }
+                Ok(None) => {
+                    match receive_registered_stream_data_outcome(stream, data_plane, stream_id)
+                        .await
+                    {
+                        Ok(RegisteredStreamData::Data(data)) => sg_decoder.push(&data),
+                        Ok(RegisteredStreamData::End(end)) => {
+                            report_mid_object_fin_if_needed(
+                                data_plane,
+                                stream_id,
+                                &end,
+                                &sg_decoder.finish(),
+                            );
+                            return frames;
+                        }
+                        Ok(RegisteredStreamData::StoppedBySession) => return frames,
+                        Err(e) => {
+                            log_failure(
+                                format_args!("Failed to read object: {e}"),
+                                is_transport_session_end(&e),
+                            );
+                            return frames;
+                        }
+                    }
+                }
+                Err(e) => {
+                    request_session_termination_for_decode_error(delivery.termination_tx, &e);
+                    tracing::warn!("Failed to decode object: {e}");
+                    let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
+                    return frames;
+                }
+            }
+        };
+        if obj.payload_length == 0 {
+            continue;
+        }
+        // 配送しない Object でも payload は wire 上に存在するため読み出して消費する
+        let payload = loop {
+            if let Some(payload) = sg_decoder.try_read_payload() {
+                break payload;
+            }
+            match receive_registered_stream_data_outcome(stream, data_plane, stream_id).await {
+                Ok(RegisteredStreamData::Data(data)) => sg_decoder.push(&data),
+                Ok(RegisteredStreamData::End(end)) => {
+                    report_mid_object_fin_if_needed(
+                        data_plane,
+                        stream_id,
+                        &end,
+                        &sg_decoder.finish(),
+                    );
+                    return frames;
+                }
+                Ok(RegisteredStreamData::StoppedBySession) => return frames,
+                Err(e) => {
+                    log_failure(
+                        format_args!("Failed to read object payload: {e}"),
+                        is_transport_session_end(&e),
+                    );
+                    return frames;
+                }
+            }
+        };
+        if !deliver {
+            continue;
+        }
+        let result = object_mode_video
+            .deliver_object(
+                ObjectModeVideoObject {
+                    group_id,
+                    object_id: obj.object_id,
+                    properties_bytes: obj.properties_bytes.clone(),
+                    payload: payload.to_vec(),
+                },
+                delivery,
+            )
+            .await;
+        match result {
+            VideoDelivery::Delivered(delivered) => frames += delivered,
+            VideoDelivery::MalformedTrack | VideoDelivery::Terminated => return frames,
+        }
+    }
 }
 
 /// 1 本の Subgroup ストリームから映像 Object を取り出して復号する
@@ -10566,7 +10930,7 @@ mod tests {
         );
         assert!(
             !side_session_url_key(&base).contains("moq-example--video"),
-            "fragment の値をキーに含めないこと (c4m の認可トークンをログに出さない)"
+            "fragment の値をキーに含めないこと (cat の認可トークンをログに出さない)"
         );
         let other_fragment =
             tokio_moq::parse_url("moqt://relay.example:443/live#msf:moq-example--audio")
@@ -10817,9 +11181,9 @@ mod tests {
         }
     }
 
-    /// テスト用の namespace を §8.8 表現から解決する
+    /// テスト用の namespace を v02 の `/` 区切り表現から解決する
     fn test_namespace(value: &str) -> TrackNamespace {
-        parse_namespace(value).expect("namespace を解決できること")
+        parse_catalog_namespace(value).expect("namespace を解決できること")
     }
 
     /// テスト用の track (codec と namespace だけを設定する)
@@ -10836,27 +11200,83 @@ mod tests {
 
     /// namespace を宣言した track は宣言された namespace を購読に使う
     ///
-    /// draft-ietf-moq-msf-01 §5.2.2 (Track namespace) は track が宣言した namespace が継承した
+    /// draft-ietf-moq-msf-02 §5.2.2 (Track namespace) は track が宣言した namespace が継承した
     /// namespace を上書きすると定める。MOQT の購読は Full Track Name に対して行うため
     /// (draft-ietf-moq-transport-23 §2.4.1 (Track Naming))、catalog track の namespace を使うと
     /// 別の track を購読するか DOES_NOT_EXIST になる。
     #[test]
     fn video_track_info_uses_declared_namespace() {
-        let mut track = track_with_namespace("av01.0.04M.08", Some("moq-example-video"));
+        let mut track = track_with_namespace("av01.0.04M.08", Some("moq-example/video"));
         track.width = Some(1920);
         track.height = Some(1080);
         let info = extract_video_info(&track, &test_namespace("moq-example"))
             .expect("トラック情報を取り出せること");
         assert_eq!(
             info.namespace,
-            test_namespace("moq-example-video"),
+            test_namespace("moq-example/video"),
             "宣言された namespace を使うこと"
+        );
+    }
+
+    /// カタログの streamMapping を映像トラックの情報へ引き継ぐこと
+    ///
+    /// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) / §5.2.5 (Packaging
+    /// metadata): `streamMapping` がない場合は `group` と仮定する MUST。`object` は
+    /// 1 Object ごとに 1 Subgroup で届くモードである。
+    #[test]
+    fn video_track_info_reads_the_stream_mapping() {
+        let mut track = track_with_namespace("av01.0.04M.08", None);
+        track.width = Some(1920);
+        track.height = Some(1080);
+        assert_eq!(
+            extract_video_info(&track, &test_namespace("moq-example"))
+                .expect("トラック情報を取り出せること")
+                .stream_mapping,
+            StreamMapping::Group,
+            "packagingMetadata がない場合は group と仮定すること"
+        );
+
+        track.packaging_metadata = Some("streamMapping=object".to_string());
+        assert_eq!(
+            extract_video_info(&track, &test_namespace("moq-example"))
+                .expect("トラック情報を取り出せること")
+                .stream_mapping,
+            StreamMapping::Object,
+            "streamMapping=object を object モードとして読むこと"
+        );
+
+        track.packaging_metadata = Some("streamMapping=group".to_string());
+        assert_eq!(
+            extract_video_info(&track, &test_namespace("moq-example"))
+                .expect("トラック情報を取り出せること")
+                .stream_mapping,
+            StreamMapping::Group,
+            "streamMapping=group を group モードとして読むこと"
+        );
+    }
+
+    /// 不正な streamMapping を持つ映像トラックはエラーにすること
+    ///
+    /// draft-ietf-moq-msf-02 §4.1.1 の許容値は `group` / `object` だけである。値を解釈できない
+    /// まま group と仮定すると、object モードの publisher を誤って group として受信する。
+    #[test]
+    fn video_track_info_with_invalid_stream_mapping_is_an_error() {
+        let mut track = track_with_namespace("av01.0.04M.08", None);
+        track.width = Some(1920);
+        track.height = Some(1080);
+        track.packaging_metadata = Some("streamMapping=spam".to_string());
+        let error = extract_video_info(&track, &test_namespace("moq-example"))
+            .err()
+            .expect("不正な streamMapping はエラーになること");
+        assert!(
+            error.to_string().contains("invalid streamMapping"),
+            "streamMapping の解釈失敗として分かること: {error}"
         );
     }
 
     /// namespace を宣言しない track は catalog track の namespace を継承する
     ///
-    /// draft-ietf-moq-msf-01 §5.2.2 (Track namespace) は宣言が無い場合に catalog track の
+    /// draft-ietf-moq-msf-02 §5.2.2 (Track namespace) は宣言が無い場合に catalog track の
     /// namespace を継承する MUST を定める。
     #[test]
     fn video_track_info_inherits_catalog_namespace() {
@@ -10874,12 +11294,12 @@ mod tests {
 
     /// 解決できない namespace を宣言した track はエラーにする
     ///
-    /// カタログは publisher の契約であり、本 example は §8.8 (Representing Namespace and Track
-    /// Names) 表現を前提とするため、解決できない namespace を publisher のバグとして扱う。
+    /// カタログは publisher の契約であり、本 example は draft-ietf-moq-msf-02 §5.2.2 の
+    /// `/` 区切り表現を前提とするため、解決できない namespace を publisher のバグとして扱う。
     /// 黙って catalog track の namespace を継承すると別の track を購読して気づかない誤動作になる。
     #[test]
     fn video_track_info_with_invalid_namespace_is_an_error() {
-        let mut track = track_with_namespace("av01.0.04M.08", Some("moq-example--video"));
+        let mut track = track_with_namespace("av01.0.04M.08", Some("moq-example//video"));
         track.width = Some(1920);
         track.height = Some(1080);
         let error = extract_video_info(&track, &test_namespace("moq-example"))
@@ -10893,8 +11313,9 @@ mod tests {
 
     /// 空の namespace を宣言した映像 track はエラーにする
     ///
-    /// `parse_namespace` は空文字を 0 フィールドの namespace として通すが、本 example は
-    /// 1 つ以上のフィールドを持つ namespace を扱う (`tokio_moq::resolve_namespace` と同じ前提)。
+    /// draft-ietf-moq-msf-02 §5.2.2 は少なくとも 1 つの空でない field を要求するため、
+    /// 空文字は namespace として解決できない。`tokio_moq::resolve_namespace` と同じ前提で、
+    /// 1 つ以上のフィールドを持つ namespace だけを扱う。
     #[test]
     fn video_track_info_with_empty_namespace_is_an_error() {
         let mut track = track_with_namespace("av01.0.04M.08", Some(""));
@@ -10904,7 +11325,7 @@ mod tests {
             .err()
             .expect("空の namespace はエラーになること");
         assert!(
-            error.to_string().contains("empty namespace"),
+            error.to_string().contains("MUST NOT be empty"),
             "空の namespace として分かること: {error}"
         );
     }
@@ -10919,7 +11340,7 @@ mod tests {
             .err()
             .expect("空の namespace はエラーになること");
         assert!(
-            error.to_string().contains("empty namespace"),
+            error.to_string().contains("MUST NOT be empty"),
             "空の namespace として分かること: {error}"
         );
     }
@@ -10927,14 +11348,14 @@ mod tests {
     /// 音声 track でも宣言された namespace を購読に使う
     #[test]
     fn audio_track_info_uses_declared_namespace() {
-        let mut track = track_with_namespace("opus", Some("moq-example-audio"));
+        let mut track = track_with_namespace("opus", Some("moq-example/audio"));
         track.samplerate = Some(48000);
         track.channel_config = Some("2".to_string());
         let info = extract_audio_info(&track, &test_namespace("moq-example"))
             .expect("トラック情報を取り出せること");
         assert_eq!(
             info.namespace,
-            test_namespace("moq-example-audio"),
+            test_namespace("moq-example/audio"),
             "宣言された namespace を使うこと"
         );
     }
@@ -10957,7 +11378,7 @@ mod tests {
     /// 解決できない namespace を宣言した音声 track もエラーにする (映像と同じ扱い)
     #[test]
     fn audio_track_info_with_invalid_namespace_is_an_error() {
-        let mut track = track_with_namespace("opus", Some("moq-example--audio"));
+        let mut track = track_with_namespace("opus", Some("moq-example//audio"));
         track.samplerate = Some(48000);
         track.channel_config = Some("2".to_string());
         let error = extract_audio_info(&track, &test_namespace("moq-example"))
@@ -12538,6 +12959,18 @@ mod tests {
                 .expect("内側の LOCATION_FILTER を読めること"),
             LocationFilterUpdate::Set(LocationFilter::RelativeGroup { start_group: 1 }),
             "fill range は現在 Group の先頭からにすること"
+        );
+        let priority = parameters
+            .as_slice()
+            .iter()
+            .find(|parameter| parameter.param_type == PARAM_SUBSCRIBER_PRIORITY)
+            .expect("SUBSCRIBER_PRIORITY を持つこと");
+        let MessageParameterValue::Uint8(priority) = priority.value else {
+            panic!("SUBSCRIBER_PRIORITY は Uint8 であること");
+        };
+        assert!(
+            priority < 128,
+            "カタログ購読の priority は media の既定値より小さく (高く) すること: {priority}"
         );
     }
 
@@ -14726,6 +15159,121 @@ mod tests {
             props
         }
 
+        /// object モードで到着順が入れ替わっても Object ID 順に復号し、復号器を共有すること
+        ///
+        /// publisher が 1 Object を 1 Subgroup に載せる object モードでは、Group 内の
+        /// Subgroup が到着順に入れ替わる。並べ替えバッファが Object ID 順に配送し、
+        /// 購読で共有する 1 つの復号器でキーフレームと delta を続けて復号できることを
+        /// 実 VP8 エンコーダ / デコーダで確かめる。Object ごとに復号器を作ると、先に届いた
+        /// delta は参照フレームを持たず復号できない。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn object_mode_reorders_objects_and_shares_one_decoder() {
+            let (keyframe, inter) = encode_vp8_frames();
+            let (frame_tx, frame_rx) = std::sync::mpsc::channel();
+            let display_backlog = std::sync::atomic::AtomicI64::new(0);
+            let sink = FrameSink {
+                frame_tx: &frame_tx,
+                display_backlog: &display_backlog,
+            };
+            let video_decode_order =
+                std::sync::Arc::new(tokio::sync::Mutex::new(VideoDecodeOrder::new()));
+            let video_delivery_order = delivery_order_with_boundary(None);
+            let last_received_locations =
+                std::sync::Arc::new(std::sync::Mutex::new(LastReceivedLocations {
+                    catalog: None,
+                    video: None,
+                    audio: None,
+                }));
+            let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
+            let object_mode_video = ObjectModeVideo::new(StreamMapping::Object, true, Some("vp8"));
+            let delivery = ObjectModeVideoDelivery {
+                video_decode_order: &video_decode_order,
+                video_delivery_order: &video_delivery_order,
+                sink: &sink,
+                recorder: None,
+                last_received_locations: &last_received_locations,
+                termination_tx: &termination_tx,
+            };
+            let group_id = 7;
+
+            // 後ろの Object (delta) を先に届ける。先頭 (キーフレーム) が届くまで保留する
+            let inter_properties = video_loc_properties(1_000, 1_000, None, false)
+                .encode()
+                .expect("LOC プロパティを encode できること");
+            let result = object_mode_video
+                .deliver_object(
+                    ObjectModeVideoObject {
+                        group_id,
+                        object_id: 1,
+                        properties_bytes: Some(inter_properties),
+                        payload: inter,
+                    },
+                    &delivery,
+                )
+                .await;
+            assert_eq!(
+                result,
+                VideoDelivery::Delivered(0),
+                "先頭が届くまでは復号せず保留すること"
+            );
+            assert!(
+                frame_rx.try_recv().is_err(),
+                "保留中の Object を先に復号しないこと"
+            );
+
+            // 先頭 (キーフレーム) が届くと、同じ復号器で Object 0 → 1 の順に復号する
+            let keyframe_properties = video_loc_properties(0, 1_000, None, true)
+                .encode()
+                .expect("LOC プロパティを encode できること");
+            let result = object_mode_video
+                .deliver_object(
+                    ObjectModeVideoObject {
+                        group_id,
+                        object_id: 0,
+                        properties_bytes: Some(keyframe_properties),
+                        payload: keyframe,
+                    },
+                    &delivery,
+                )
+                .await;
+            assert_eq!(
+                result,
+                VideoDelivery::Delivered(2),
+                "先頭が揃ったら Object ID 順に 2 フレームを復号すること"
+            );
+            let frames: Vec<DecodedVideoFrame> = frame_rx.try_iter().collect();
+            assert_eq!(
+                frames.len(),
+                2,
+                "キーフレームと delta の 2 フレームが送出されること"
+            );
+            assert_eq!(
+                frames[0].timestamp_us,
+                Some(0),
+                "先頭のキーフレームが先に送出されること"
+            );
+            assert_eq!(
+                frames[1].timestamp_us,
+                Some(1_000_000),
+                "後続の delta が後に送出されること"
+            );
+            assert_eq!(
+                last_received_locations
+                    .lock()
+                    .expect("last locations lock is not poisoned")
+                    .video,
+                Some(Location {
+                    group_id,
+                    object_id: 1,
+                }),
+                "配送した最後の Object の位置を記録すること"
+            );
+            assert!(
+                termination_rx.try_recv().is_err(),
+                "書式違反としてセッション終了を依頼しないこと"
+            );
+        }
+
         /// テスト用: 実エンコーダで VP8 のキーフレームと後続の inter frame を 1 つずつ作る
         ///
         /// 実デコーダで復号できる本物のフレームを使う。
@@ -15924,7 +16472,7 @@ mod tests {
         /// moq-sub が音声トラックを選ぶために必要な `codec` / `samplerate` /
         /// `channelConfig` だけを持つ最小のカタログである。
         fn audio_catalog_json() -> Vec<u8> {
-            br#"{"version":"draft-01","tracks":[{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":64000,"samplerate":48000,"channelConfig":"1"}]}"#.to_vec()
+            br#"{"version":"draft-02","tracks":[{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":64000,"samplerate":48000,"channelConfig":"1"}]}"#.to_vec()
         }
 
         /// 映像と音声を持つ独立した MSF カタログの JSON
@@ -15933,17 +16481,17 @@ mod tests {
         /// 解像度に合わせる。
         fn video_and_audio_catalog_json(width: u64, height: u64) -> Vec<u8> {
             format!(
-                r#"{{"version":"draft-01","tracks":[{{"name":"video","packaging":"loc","isLive":true,"codec":"vp8","bitrate":500000,"width":{width},"height":{height},"framerate":30}},{{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":64000,"samplerate":48000,"channelConfig":"1"}}]}}"#
+                r#"{{"version":"draft-02","tracks":[{{"name":"video","packaging":"loc","isLive":true,"codec":"vp8","bitrate":500000,"width":{width},"height":{height},"framerate":30}},{{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":64000,"samplerate":48000,"channelConfig":"1"}}]}}"#
             )
             .into_bytes()
         }
 
         /// 同じ Group の delta カタログの JSON (track を 1 つ追加する)
         ///
-        /// delta update は version を持ってはならない (draft-ietf-moq-msf-01 §5.3)。
+        /// delta update は version を持ってはならない (draft-ietf-moq-msf-02 §5.3)。
         fn catalog_delta_json(track_name: &str) -> Vec<u8> {
             format!(
-                r#"{{"deltaUpdate":[{{"op":"add","tracks":[{{"name":"{track_name}","packaging":"loc","isLive":true}}]}}]}}"#
+                r#"{{"generatedAt":1,"deltaUpdate":[{{"op":"add","tracks":[{{"name":"{track_name}","packaging":"loc","isLive":true}}]}}]}}"#
             )
             .into_bytes()
         }
@@ -16332,6 +16880,72 @@ mod tests {
                 .finish()
                 .await
                 .expect("音声の subgroup stream を FIN できること");
+        }
+
+        /// 映像 Object 1 つを 1 本の subgroup stream で送る
+        ///
+        /// object モード (draft-ietf-moq-msf-02 §4.1.1) の publisher を模し、1 Object だけを
+        /// 載せた Subgroup を開く。Subgroup ID は `FirstObjectId` (最初の Object ID で解決)
+        /// にする。LOC Properties は TIMESTAMP と TIMESCALE、キーフレームの
+        /// VIDEO_FRAME_MARKING を持つ。
+        async fn send_video_object_subgroup_stream(
+            peer: &mut TestPeer,
+            track_alias: u64,
+            group_id: u64,
+            object_id: u64,
+            timestamp: u64,
+            is_keyframe: bool,
+            packet: &[u8],
+        ) {
+            let header = SubgroupHeader {
+                track_alias,
+                group_id,
+                subgroup_id: SubgroupIdMode::FirstObjectId,
+                publisher_priority: Some(128),
+                has_properties: true,
+                end_of_group: false,
+                first_object: true,
+            };
+            // 時刻の基準をそろえるため、映像の Timescale は 90 kHz にする。
+            // VIDEO_FRAME_MARKING の I ビット (0x20) でキーフレームを告知する
+            let mut properties = LocProperties::new();
+            properties.push(shiguredo_moqt::loc::LocProperty {
+                prop_id: PROP_TIMESTAMP,
+                value: LocPropertyValue::VarInt(timestamp),
+            });
+            properties.push(shiguredo_moqt::loc::LocProperty {
+                prop_id: PROP_TIMESCALE,
+                value: LocPropertyValue::VarInt(90_000),
+            });
+            properties.push(shiguredo_moqt::loc::LocProperty {
+                prop_id: PROP_VIDEO_FRAME_MARKING,
+                value: LocPropertyValue::Bytes(vec![if is_keyframe { 0xE0 } else { 0x00 }]),
+            });
+            let properties = properties
+                .encode()
+                .expect("映像の LOC プロパティを encode できること");
+            let object = SubgroupObject {
+                object_id_delta: object_id,
+                payload_length: packet.len() as u64,
+                status: None,
+            };
+            let mut buf = header.encode();
+            object
+                .encode(true, Some(&properties), &mut buf)
+                .expect("映像の Subgroup Object を encode できること");
+            buf.extend_from_slice(packet);
+            let mut stream = peer
+                .open_uni_send_stream()
+                .await
+                .expect("映像の subgroup stream を開けること");
+            stream
+                .send(Bytes::from(buf))
+                .await
+                .expect("映像の subgroup stream を送れること");
+            stream
+                .finish()
+                .await
+                .expect("映像の subgroup stream を FIN できること");
         }
 
         /// 音声 Object を 1 本の subgroup stream にまとめて送る
@@ -16779,7 +17393,7 @@ mod tests {
         ///
         /// fill fetch stream は購読より前に publish された独立カタログを運び
         /// (draft-ietf-moq-transport-23 §3.4 (Fill Semantics))、同じ Group の Object ID 1
-        /// 以降は MSF の delta update である (draft-ietf-moq-msf-01 §5 (Catalog))。
+        /// 以降は MSF の delta update である (draft-ietf-moq-msf-02 §5 (Catalog))。
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn receive_catalog_applies_the_fill_fetch_catalog_and_delta() {
             run_with_timeout(async {
@@ -17175,10 +17789,10 @@ mod tests {
         /// `apply_catalog_object` が MSF の不変条件に反する delta を Err にすること
         ///
         /// 同じ (namespace, name) の track を add する delta は track の一意性 MUST に反する
-        /// ため、カタログを変更せず Err を返す (draft-ietf-moq-msf-01 §5.2.3)。
+        /// ため、カタログを変更せず Err を返す (draft-ietf-moq-msf-02 §5.2.3)。
         #[test]
         fn apply_catalog_object_rejects_an_invalid_delta() {
-            let mut state = catalog::CatalogState::new("moq-example");
+            let mut state = catalog::CatalogState::new(test_track_namespace());
             let full = catalog::CatalogObject::decode(
                 Location {
                     group_id: 100,
@@ -17241,7 +17855,7 @@ mod tests {
                 )
                 .await;
                 let data_plane = client.data_plane();
-                let spurious_catalog = br#"{"version":"draft-01","tracks":[{"name":"spurious","packaging":"loc","isLive":true}]}"#.to_vec();
+                let spurious_catalog = br#"{"version":"draft-02","tracks":[{"name":"spurious","packaging":"loc","isLive":true}]}"#.to_vec();
                 send_catalog_subgroup_stream(
                     &mut peer,
                     video.track_alias,
@@ -17800,6 +18414,114 @@ mod tests {
                     drain_audio(&audio_rx).is_empty(),
                     "音声 Object は届いていないこと"
                 );
+                assert_eq!(
+                    peer.await.expect("peer のタスクが panic しないこと"),
+                    0,
+                    "shutdown は NO_ERROR (0) で接続を閉じること"
+                );
+            })
+            .await;
+        }
+
+        /// object モードの映像を受信し、Subgroup の到着順が入れ替わっても復号できること
+        ///
+        /// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping): object モードの
+        /// publisher は 1 Object を 1 Subgroup に載せる。Group 内の Subgroup は到着順が
+        /// 保証されないため、delta (Object 1) をキーフレーム (Object 0) より先に届け、
+        /// 並べ替えて同じ復号器で 2 フレームを復号できることを確認する。catalog の
+        /// `packagingMetadata` が `streamMapping=object` を示すため、subscriber は
+        /// Group モードではなく object モードとして受信する。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn run_decodes_object_mode_video_with_reordered_subgroups() {
+            run_with_timeout(async {
+                let mut server = TestPeerServer::start()
+                    .await
+                    .expect("テスト用サーバーを起動できること");
+                let pipeline = RunningPipeline::start(server.local_addr());
+                let (keyframe, inter) =
+                    super::video_delivery_boundary_tests::encode_vp8_frames();
+                let peer = tokio::spawn(async move {
+                    let mut peer = server
+                        .accept()
+                        .await
+                        .expect("client の接続を受理できること");
+                    peer.establish().await.expect("SETUP を交換できること");
+
+                    // object モードの映像 track だけを持つカタログを fill fetch stream で届ける
+                    let catalog = accept_subscription(&mut peer, 7, MessageParameters::new()).await;
+                    let catalog_json =
+                        br#"{"version":"draft-02","tracks":[{"name":"video","packaging":"loc","isLive":true,"codec":"vp8","bitrate":500000,"width":640,"height":480,"framerate":30,"packagingMetadata":"streamMapping=object"}]}"#
+                            .to_vec();
+                    send_catalog_fill_fetch_stream(
+                        &mut peer,
+                        catalog.request_id,
+                        &[(
+                            Location {
+                                group_id: 0,
+                                object_id: 0,
+                            },
+                            catalog_json,
+                        )],
+                    )
+                    .await;
+
+                    let video = accept_subscription(&mut peer, 8, MessageParameters::new()).await;
+                    assert_eq!(
+                        video.track_name,
+                        b"video".to_vec(),
+                        "catalog の映像 track を購読すること"
+                    );
+                    // REQUEST_UPDATE は応答不要である。読んでから Object を送る
+                    let update = peer
+                        .recv_request_stream_message(video.request_id)
+                        .await
+                        .expect("映像の REQUEST_UPDATE を読めること");
+                    assert!(
+                        matches!(update, RequestStreamRead::Message(_)),
+                        "映像の request stream に REQUEST_UPDATE が届くこと: {update:?}"
+                    );
+
+                    // Group 内の Subgroup を到着順を逆にして送る。delta (Object 1) が先、
+                    // キーフレーム (Object 0) が後である
+                    send_video_object_subgroup_stream(
+                        &mut peer,
+                        8,
+                        4,
+                        1,
+                        90_000,
+                        false,
+                        &inter,
+                    )
+                    .await;
+                    send_video_object_subgroup_stream(
+                        &mut peer,
+                        8,
+                        4,
+                        0,
+                        0,
+                        true,
+                        &keyframe,
+                    )
+                    .await;
+                    peer.recv_close_code()
+                        .await
+                        .expect("shutdown の CONNECTION_CLOSE を観測できること")
+                });
+
+                // 並べ替えの結果、キーフレーム → delta の順に 2 フレームが復号されること
+                let first = pipeline.next_video().await;
+                assert_eq!(
+                    first.timestamp_us,
+                    Some(0),
+                    "先に復号されるのはキーフレーム (Object 0) であること"
+                );
+                let second = pipeline.next_video().await;
+                assert_eq!(
+                    second.timestamp_us,
+                    Some(1_000_000),
+                    "遅れて届いたキーフレームの後に delta (Object 1) を復号すること"
+                );
+                pipeline.finish().await.expect("run が正常終了すること");
                 assert_eq!(
                     peer.await.expect("peer のタスクが panic しないこと"),
                     0,
