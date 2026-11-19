@@ -3,7 +3,7 @@
 - Created: 2026-10-19
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-name-parse-namespace-error
-- Polished: 2026-10-20
+- Polished: 2026-11-20
 - Refreshed: 2026-11-04
 
 ## 目的
