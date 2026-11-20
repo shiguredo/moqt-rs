@@ -2042,31 +2042,68 @@ fn goaway_request_target(
         .then_some(GoawayRequestTarget::Fetch)
 }
 
-/// side session を共有する単位のキー
+/// side session の接続先をキーにする
 ///
-/// side session は接続先 (authority / path / fragment) ごとに 1 本にする。キーは
-/// [`tokio_moq::same_session_url`] と同じ比較対象をすべて含む可読な URL 表現にする。
-/// fragment の type と value は `:` で連結するが、`:` は RFC 3986 §3.5 の fragment の
-/// 文字集合に含まれるため、type と value の組が異なればキーも異なる。
+/// side session は接続先 (authority / path / query / fragment) ごとに 1 本にする。
+/// [`tokio_moq::same_session_url`] は authority / path (query を含む) / fragment を比較する
+/// ため、キーも同じ範囲を区別できなければならない。
 ///
-/// fragment には cat の認可トークンが含まれうるため、キーには fragment のハッシュだけを
-/// 入れ、ログに出してもトークンが漏れないようにする。同じ fragment なら同じキーになり、
-/// 異なる fragment (別トラック、別トークン) は別のキーになる。
+/// query と fragment は認可トークンを含み得る (draft-ietf-moq-msf-02 §11.5.2 / §11.1.1)。
+/// キーは `HashMap` の索引とイベントの照合にだけ使い、実値を持たせない。query は
+/// `?q={:016x}`、fragment は `#{:016x}` の形で `DefaultHasher` のハッシュに置き換える
+/// (`?q=` は実在の query パラメータではなく、実 URL と区別するための目印である)。path は
+/// `?` より前だけを使い、query と fragment が無いときは対応する部分を省く。
+///
+/// 64 bit のハッシュなので、query と fragment だけが異なる URL が衝突すると別の接続先を
+/// 同じ side session にまとめてしまう。衝突は side session の共有にとどまり、認可の判断には
+/// 使わない。ログにはこのキーを直接出さず、[`side_session_url_display`] を通す。
 fn side_session_url_key(url: &tokio_moq::ServerUrl) -> String {
     use std::hash::{Hash, Hasher};
-    match &url.fragment {
-        Some(fragment) => {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            fragment.fragment_type.hash(&mut hasher);
-            fragment.value.hash(&mut hasher);
-            format!(
-                "moqt://{}{}#{:016x}",
-                url.authority,
-                url.path,
-                hasher.finish()
-            )
-        }
-        None => format!("moqt://{}{}", url.authority, url.path),
+    let (path, query) = match url.path.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (url.path.as_str(), None),
+    };
+    let mut key = format!("moqt://{}{}", url.authority, path);
+    if let Some(query) = query {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        query.hash(&mut hasher);
+        key.push_str(&format!("?q={:016x}", hasher.finish()));
+    }
+    if let Some(fragment) = &url.fragment {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        fragment.fragment_type.hash(&mut hasher);
+        fragment.value.hash(&mut hasher);
+        key.push_str(&format!("#{:016x}", hasher.finish()));
+    }
+    key
+}
+
+/// side session の接続先をログに出すための表示文字列にする
+///
+/// [`side_session_url_key`] は query と fragment をハッシュにしているが、authority は実値の
+/// ままである。authority は userinfo (`user:password@host`) を含み得るため、ログには
+/// `@` より前を除いた host / port だけを出す (RFC 3986 §3.2.1)。キーは照合に使うため
+/// userinfo を含む実値の authority のままにし、ログだけこの関数を通す。
+///
+/// 現在の side session の URL は [`tokio_moq::migration_target`] が返した値だけで、
+/// `migration_target` は authority に userinfo を含む New Session URI を拒否する。そのため
+/// `@` を含む authority は通常は到達しない。この関数は将来 `migration_target` の扱いが
+/// 変わったときの防御として残す。
+fn side_session_url_display(key: &str) -> String {
+    // キーは `moqt://<authority><path>...` の形をしているため、scheme の後ろから
+    // path の手前までが authority になる。呼び出し側は side_session_url_key の戻り値
+    // (必ず `moqt://` で始まる) だけを渡す
+    let Some(rest) = key.strip_prefix("moqt://") else {
+        // キー以外の入力は想定していない。実値が混ざった文字列をそのまま返さないよう、
+        // 未知の入力は固定の伏せ字にする
+        return "moqt://<redacted>".to_string();
+    };
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    match authority.rsplit_once('@') {
+        // userinfo の区切りは最後の `@` とする (userinfo に `@` は現れないが、安全側に倒す)
+        Some((_, host)) => format!("moqt://{host}{tail}"),
+        None => key.to_string(),
     }
 }
 
@@ -2854,7 +2891,8 @@ fn start_side_session(
     let deadline = initial.deadline();
     let generation = shared.generation;
     tracing::info!(
-        "Starting a request migration side session: url={key}, request={}",
+        "Starting a request migration side session: url={}, request={}",
+        side_session_url_display(&key),
         initial.describe(),
     );
     let (handle, commands) = spawn_side_session(
@@ -2907,7 +2945,8 @@ async fn dispatch_side_session_command<F>(
     let key = side_session_url_key(&url);
     if let Some(slot) = sessions.get_mut(&key) {
         tracing::info!(
-            "Sharing the request migration side session: url={key}, state={:?}, request={}",
+            "Sharing the request migration side session: url={}, state={:?}, request={}",
+            side_session_url_display(&key),
             slot.state,
             command.describe(),
         );
@@ -2915,7 +2954,10 @@ async fn dispatch_side_session_command<F>(
         {
             // side session のタスクは終了済みである。Ended の到着を待たずに slot を捨て、
             // 新しい session で要求をやり直す
-            tracing::debug!("Replacing a closed request migration side session: url={key}");
+            tracing::debug!(
+                "Replacing a closed request migration side session: url={}",
+                side_session_url_display(&key)
+            );
             sessions.remove(&key);
             *session_generation = session_generation.saturating_add(1);
             start_side_session(
@@ -2994,6 +3036,7 @@ async fn reissue_on_side_session(
     subscription_requests: &mut HashMap<u64, TrackKind>,
     fetch_targets: &SharedFetchTargets,
 ) -> bool {
+    let url_display = side_session_url_display(url);
     let remaining = command.deadline().remaining();
     if remaining.is_zero() {
         send_migration_failed(
@@ -3045,7 +3088,7 @@ async fn reissue_on_side_session(
             // この side session で配送できるよう、Request ID を対応表へ足す
             lock_fetch_targets(fetch_targets).extend(reissued.fetch_targets);
             tracing::info!(
-                "Re-issued the request on the request migration side session: url={url}, \
+                "Re-issued the request on the request migration side session: url={url_display}, \
                  kind={kind:?}, old_request_id={old_request_id}, new_request_id={}, \
                  alias={}, filter_start={:?}",
                 reissued.subscription.request_id,
@@ -3086,7 +3129,7 @@ async fn reissue_on_side_session(
                     lock_fetch_targets(fetch_targets).insert(new_request_id, FetchTarget::Video);
                     tracing::info!(
                         "Re-issued the media FETCH on the request migration side session: \
-                         url={url}, old_request_id={old_request_id}, \
+                         url={url_display}, old_request_id={old_request_id}, \
                          new_request_id={new_request_id}, namespace={}, track={}",
                         serialize_namespace(&target.namespace),
                         serialize_track_name(&target.track_name),
@@ -3149,6 +3192,8 @@ async fn run_side_session(
     mut commands: tokio::sync::mpsc::Receiver<SideSessionCommand>,
 ) {
     let url = side_session_url_key(&request.url);
+    // ログには userinfo を除いた表示用の値を使う。`url` はイベントの照合に使うキーである
+    let url_display = side_session_url_display(&url);
     let generation = shared.generation;
 
     // 1. 移行先の session を確立する
@@ -3594,7 +3639,9 @@ async fn run_side_session(
     // 打ち切られる
     datagram_task.abort();
     let _ = datagram_task.await;
-    tracing::info!("The request migration side session ended: url={url}, reason={end_reason}");
+    tracing::info!(
+        "The request migration side session ended: url={url_display}, reason={end_reason}"
+    );
     // 移行済みの request は配送されなくなる。main ループへ終了を伝えて slot を捨てさせる
     let _ = events
         .send(RequestMigrationEvent::Ended {
@@ -5841,6 +5888,7 @@ pub async fn run(
                         old_request_id,
                         new_request_id,
                     } => {
+                        let url_display = side_session_url_display(&url);
                         // side session の進行状態を「確立済み」へ進める。同じ URL の次の
                         // request はこの session に相乗りする
                         if let Some(slot) = request_migration_sessions.get_mut(&url) {
@@ -5942,7 +5990,7 @@ pub async fn run(
                                 ));
                                 tracing::info!(
                                     "Migrated the {kind:?} request to the new session: \
-                                     url={url}, old_request_id={old_request_id}, \
+                                     url={url_display}, old_request_id={old_request_id}, \
                                      new_request_id={new_request_id}"
                                 );
                             }
@@ -5954,7 +6002,7 @@ pub async fn run(
                                 fetch_requests.remove(&old_request_id);
                                 tracing::info!(
                                     "Migrated the media FETCH request to the new session: \
-                                     url={url}, old_request_id={old_request_id}, \
+                                     url={url_display}, old_request_id={old_request_id}, \
                                      new_request_id={new_request_id}"
                                 );
                             }
@@ -5965,137 +6013,144 @@ pub async fn run(
                         request,
                         old_request_id,
                         reason,
-                    } => match request {
-                        MigratedRequest::Subscribe(kind) => {
-                            // 期限切れ・接続失敗・再発行失敗である。control GOAWAY の移行
-                            // 失敗と同じく警告を出し、旧 session の終了経路へ進む
-                            tracing::warn!(
-                                "Failed to migrate the {kind:?} request to a new session: \
-                                 url={url}, request_id={old_request_id}: {reason}"
-                            );
-                            break 'main;
-                        }
-                        MigratedRequest::Fetch => {
-                            // FETCH は欠落した Group を補う補助であり、移行に失敗しても購読は
-                            // 続く。旧 session の request を終端し、対応表から外す
-                            tracing::warn!(
-                                "Failed to migrate the FETCH request to a new session: \
-                                 url={url}, request_id={old_request_id}: {reason}"
-                            );
-                            stop_fetch_request_stream(&mut client, old_request_id).await;
-                            lock_fetch_targets(&fetch_targets).remove(&old_request_id);
-                            fetch_requests.remove(&old_request_id);
-                        }
-                    },
-                    RequestMigrationEvent::SessionEvent { url, kind, event } => match event {
-                        SessionEvent::PublishDoneReceived {
-                            request_id,
-                            status_code,
-                            stream_count,
-                            ..
-                        } => {
-                            // 移行済みの購読の終端である。main ループの PUBLISH_DONE と同じ
-                            // 分類でログに残し、恒久終了だけ状態へ反映する。side session の
-                            // 購読の cleanup は main ループが所有する `MoqtClient` では観測
-                            // できないため、drain 完了は待たない
-                            let disposition = publish_done_disposition(
-                                normalize_publish_done_code(status_code),
-                            );
-                            tracing::info!(
-                                "Received PUBLISH_DONE on the request migration side session: \
-                                 url={url}, kind={kind:?}, request_id={request_id}, \
-                                 status_code={status_code}, \
-                                 normalized_status_code={}, \
-                                 stream_count={stream_count}, \
-                                 disposition={disposition:?}",
-                                normalize_publish_done_code(status_code),
-                            );
-                            match (kind, disposition) {
-                                (
-                                    Some(kind),
-                                    PublishDoneDisposition::TrackEnded
-                                    | PublishDoneDisposition::Error,
-                                ) => {
-                                    permanently_ended_tracks.insert(kind);
-                                    // 全 media track が終了したら pipeline を終える
-                                    // (main ループの tick の終了判定と同じ規則)
-                                    if matches!(kind, TrackKind::Video | TrackKind::Audio)
-                                        && all_media_tracks_ended(
-                                            subscribe_video,
-                                            subscribe_audio,
-                                            &permanently_ended_tracks,
-                                            &migration_pending_tracks,
-                                        )
-                                    {
-                                        tracing::info!(
-                                            "All media tracks ended permanently: ending the pipeline"
-                                        );
-                                        peer_ended = true;
-                                        break 'main;
-                                    }
-                                }
-                                (Some(kind), PublishDoneDisposition::GoingAway) => {
-                                    // request stream の GOAWAY は受けるが、side session の
-                                    // 購読をさらに移行する経路は持たない
-                                    tracing::info!(
-                                        "The migrated {kind:?} track is going away on the side session: url={url}"
-                                    );
-                                }
-                                (None, _) => {
-                                    tracing::warn!(
-                                        "PUBLISH_DONE on the side session does not belong to a migrated subscription: url={url}, request_id={request_id}"
-                                    );
-                                }
+                    } => {
+                        let url_display = side_session_url_display(&url);
+                        match request {
+                            MigratedRequest::Subscribe(kind) => {
+                                // 期限切れ・接続失敗・再発行失敗である。control GOAWAY の移行
+                                // 失敗と同じく警告を出し、旧 session の終了経路へ進む
+                                tracing::warn!(
+                                    "Failed to migrate the {kind:?} request to a new session: \
+                                     url={url_display}, request_id={old_request_id}: {reason}"
+                                );
+                                break 'main;
+                            }
+                            MigratedRequest::Fetch => {
+                                // FETCH は欠落した Group を補う補助であり、移行に失敗しても購読は
+                                // 続く。旧 session の request を終端し、対応表から外す
+                                tracing::warn!(
+                                    "Failed to migrate the FETCH request to a new session: \
+                                     url={url_display}, request_id={old_request_id}: {reason}"
+                                );
+                                stop_fetch_request_stream(&mut client, old_request_id).await;
+                                lock_fetch_targets(&fetch_targets).remove(&old_request_id);
+                                fetch_requests.remove(&old_request_id);
                             }
                         }
-                        SessionEvent::RequestErrorReceived {
-                            request_id,
-                            error_code,
-                            retry_interval,
-                            reason,
-                            ..
-                        } => {
-                            tracing::warn!(
-                                "Received REQUEST_ERROR on the request migration side session: \
-                                 url={url}, kind={kind:?}, request_id={request_id}, \
-                                 error_code={error_code:#x}, \
-                                 retry_interval={retry_interval}, reason={}",
-                                reason.as_str(),
-                            );
+                    }
+                    RequestMigrationEvent::SessionEvent { url, kind, event } => {
+                        let url_display = side_session_url_display(&url);
+                        match event {
+                            SessionEvent::PublishDoneReceived {
+                                request_id,
+                                status_code,
+                                stream_count,
+                                ..
+                            } => {
+                                // 移行済みの購読の終端である。main ループの PUBLISH_DONE と同じ
+                                // 分類でログに残し、恒久終了だけ状態へ反映する。side session の
+                                // 購読の cleanup は main ループが所有する `MoqtClient` では観測
+                                // できないため、drain 完了は待たない
+                                let disposition = publish_done_disposition(
+                                    normalize_publish_done_code(status_code),
+                                );
+                                tracing::info!(
+                                    "Received PUBLISH_DONE on the request migration side session: \
+                                     url={url_display}, kind={kind:?}, request_id={request_id}, \
+                                     status_code={status_code}, \
+                                     normalized_status_code={}, \
+                                     stream_count={stream_count}, \
+                                     disposition={disposition:?}",
+                                    normalize_publish_done_code(status_code),
+                                );
+                                match (kind, disposition) {
+                                    (
+                                        Some(kind),
+                                        PublishDoneDisposition::TrackEnded
+                                        | PublishDoneDisposition::Error,
+                                    ) => {
+                                        permanently_ended_tracks.insert(kind);
+                                        // 全 media track が終了したら pipeline を終える
+                                        // (main ループの tick の終了判定と同じ規則)
+                                        if matches!(kind, TrackKind::Video | TrackKind::Audio)
+                                            && all_media_tracks_ended(
+                                                subscribe_video,
+                                                subscribe_audio,
+                                                &permanently_ended_tracks,
+                                                &migration_pending_tracks,
+                                            )
+                                        {
+                                            tracing::info!(
+                                                "All media tracks ended permanently: ending the pipeline"
+                                            );
+                                            peer_ended = true;
+                                            break 'main;
+                                        }
+                                    }
+                                    (Some(kind), PublishDoneDisposition::GoingAway) => {
+                                        // request stream の GOAWAY は受けるが、side session の
+                                        // 購読をさらに移行する経路は持たない
+                                        tracing::info!(
+                                            "The migrated {kind:?} track is going away on the side session: url={url_display}"
+                                        );
+                                    }
+                                    (None, _) => {
+                                        tracing::warn!(
+                                            "PUBLISH_DONE on the side session does not belong to a migrated subscription: url={url_display}, request_id={request_id}"
+                                        );
+                                    }
+                                }
+                            }
+                            SessionEvent::RequestErrorReceived {
+                                request_id,
+                                error_code,
+                                retry_interval,
+                                reason,
+                                ..
+                            } => {
+                                tracing::warn!(
+                                    "Received REQUEST_ERROR on the request migration side session: \
+                                     url={url_display}, kind={kind:?}, request_id={request_id}, \
+                                     error_code={error_code:#x}, \
+                                     retry_interval={retry_interval}, reason={}",
+                                    reason.as_str(),
+                                );
+                            }
+                            SessionEvent::GoawayReceived {
+                                new_session_uri,
+                                timeout,
+                                on_request_stream,
+                            } => {
+                                tracing::warn!(
+                                    "Received GOAWAY on the request migration side session: \
+                                     url={url_display}, timeout={timeout}, \
+                                     on_request_stream={on_request_stream:?}, \
+                                     new_session_uri_len={}",
+                                    new_session_uri.len(),
+                                );
+                            }
+                            SessionEvent::CloseSession(err) => {
+                                tracing::warn!(
+                                    "The request migration side session closed: url={url_display}, \
+                                     {:#x} {}",
+                                    err.code,
+                                    err.reason,
+                                );
+                            }
+                            other => {
+                                tracing::debug!(
+                                    "Ignoring a session event on the request migration side session: \
+                                     url={url_display}, event={other:?}"
+                                );
+                            }
                         }
-                        SessionEvent::GoawayReceived {
-                            new_session_uri,
-                            timeout,
-                            on_request_stream,
-                        } => {
-                            tracing::warn!(
-                                "Received GOAWAY on the request migration side session: \
-                                 url={url}, timeout={timeout}, \
-                                 on_request_stream={on_request_stream:?}, \
-                                 new_session_uri_len={}",
-                                new_session_uri.len(),
-                            );
-                        }
-                        SessionEvent::CloseSession(err) => {
-                            tracing::warn!(
-                                "The request migration side session closed: url={url}, \
-                                 {:#x} {}",
-                                err.code,
-                                err.reason,
-                            );
-                        }
-                        other => {
-                            tracing::debug!(
-                                "Ignoring a session event on the request migration side session: \
-                                 url={url}, event={other:?}"
-                            );
-                        }
-                    },
+                    }
                     RequestMigrationEvent::Ended {
                         url,
                         generation,
                         reason,
                     } => {
+                        let url_display = side_session_url_display(&url);
                         // 同じ URL で作り直した side session の slot を消さないよう、
                         // 世代が一致する場合だけ slot を捨てる
                         let same_session = request_migration_sessions
@@ -6106,7 +6161,7 @@ pub async fn run(
                         }
                         // 移行済みの track は配送されなくなるが、他の track の受信は続ける
                         tracing::warn!(
-                            "The request migration side session ended: url={url}, \
+                            "The request migration side session ended: url={url_display}, \
                              generation={generation}, same_session={same_session}: {reason}"
                         );
                     }
@@ -10970,6 +11025,113 @@ mod tests {
             side_session_url_key(&no_fragment),
             "moqt://relay.example:443/live",
             "fragment が無いときは path までをキーにすること"
+        );
+    }
+
+    /// query の認可トークンをキーに含めないこと
+    ///
+    /// query は認可トークンを含み得るため、キーにはハッシュだけを入れる。query が異なる URL は
+    /// 別の side session にするため、キーも異ならせる。
+    #[test]
+    fn side_session_url_key_hides_query_tokens() {
+        let base = tokio_moq::parse_url(
+            "moqt://relay.example:443/live?token=SECRETVALUE#msf:moq-example--video",
+        )
+        .expect("URL をパースできること");
+        let key = side_session_url_key(&base);
+        assert!(
+            !key.contains("SECRETVALUE"),
+            "キーに query の実値を含めないこと: {key}"
+        );
+        // query が無い場合との区別と、query 違いの区別
+        let no_query = tokio_moq::parse_url("moqt://relay.example:443/live#msf:moq-example--video")
+            .expect("query 無しの URL をパースできること");
+        assert_ne!(
+            key,
+            side_session_url_key(&no_query),
+            "query の有無を区別すること"
+        );
+        let other_query = tokio_moq::parse_url(
+            "moqt://relay.example:443/live?token=OTHERVALUE#msf:moq-example--video",
+        )
+        .expect("別 query の URL をパースできること");
+        assert_ne!(
+            key,
+            side_session_url_key(&other_query),
+            "query が違えば別のキーにすること"
+        );
+        // fragment が無く query だけの場合も実値を含めない
+        let query_only = tokio_moq::parse_url("moqt://relay.example:443/live?token=SECRETVALUE")
+            .expect("fragment 無しの URL をパースできること");
+        let key = side_session_url_key(&query_only);
+        assert!(
+            !key.contains("SECRETVALUE"),
+            "fragment が無くても query の実値を含めないこと: {key}"
+        );
+        assert!(
+            key.starts_with("moqt://relay.example:443/live?q="),
+            "path は `?` より前を使うこと: {key}"
+        );
+        // 空の query と query 無しは別の接続先として扱う
+        let empty_query = tokio_moq::parse_url("moqt://relay.example:443/live?")
+            .expect("空 query の URL をパースできること");
+        assert_ne!(
+            side_session_url_key(&empty_query),
+            side_session_url_key(&no_query),
+            "空の query と query 無しを区別すること"
+        );
+    }
+
+    /// 表示値が userinfo を除き、それ以外はキーと同じであること
+    ///
+    /// userinfo はパスワードなどの機密値を含み得るため、ログには `@` より後ろだけを出す。
+    #[test]
+    fn side_session_url_display_hides_userinfo() {
+        // userinfo を含まないキーは表示値も変わらない
+        let plain = tokio_moq::parse_url("moqt://relay.example:443/live?token=SECRETVALUE")
+            .expect("URL をパースできること");
+        let key = side_session_url_key(&plain);
+        assert_eq!(
+            side_session_url_display(&key),
+            key,
+            "userinfo を含まないキーは表示値も同じであること"
+        );
+        // userinfo を含むキーは `@` より前を落とし、query と fragment のハッシュは残す
+        let url = tokio_moq::parse_url(
+            "moqt://alice:s3cr3t@relay.example:443/live?token=SECRETVALUE#msf:moq-example--video",
+        )
+        .expect("URL をパースできること");
+        let key = side_session_url_key(&url);
+        let display = side_session_url_display(&key);
+        assert!(
+            !display.contains("alice"),
+            "userinfo のユーザ名を表示値に含めないこと: {display}"
+        );
+        assert!(
+            !display.contains("s3cr3t"),
+            "userinfo のパスワードを表示値に含めないこと: {display}"
+        );
+        assert!(
+            !display.contains("SECRETVALUE"),
+            "表示値に query の実値を含めないこと: {display}"
+        );
+        assert!(
+            display.contains("relay.example:443"),
+            "host と port は表示すること: {display}"
+        );
+        assert!(
+            display.contains("?q="),
+            "query のハッシュは表示値に残すこと: {display}"
+        );
+        assert!(
+            display.contains('#'),
+            "fragment のハッシュは表示値に残すこと: {display}"
+        );
+        // キー以外の入力は実値をそのまま返さない
+        assert_eq!(
+            side_session_url_display("https://alice:s3cr3t@relay.example/live?token=SECRETVALUE"),
+            "moqt://<redacted>",
+            "キー以外の入力は実値を返さないこと"
         );
     }
 
