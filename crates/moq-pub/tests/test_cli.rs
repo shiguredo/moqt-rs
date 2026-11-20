@@ -159,3 +159,37 @@ fn msf_fragment_provides_namespace_without_the_option() {
         "--namespace のエラーにならないこと: {stdout}{stderr}"
     );
 }
+
+/// `--url` の解析エラーは入力 URL を標準エラーに反射しない
+///
+/// URL の query / fragment は認可トークンを含み得て、解析エラーは標準エラーに出る。
+/// noargs の InvalidOpt はオプションの生値を表示するため、値の検証エラーは生値を
+/// 含まない経路で返す必要がある。
+#[test]
+fn invalid_url_error_does_not_echo_the_url() {
+    for (url, keyword) in [
+        (
+            "moqt://example.com/app?token=SECRETVALUE#badvalue",
+            "invalid moqt URI fragment",
+        ),
+        (
+            "moqt://example.com/app#msf:ns--track&cat=SECRETVALUE!",
+            "invalid cat parameter",
+        ),
+    ] {
+        let (code, stdout, stderr) = run(&["--url", url]);
+        assert_eq!(code, Some(1), "異常終了すること ({url}): {stdout}{stderr}");
+        assert!(
+            stderr.contains(keyword),
+            "拒否理由が表示されること ({url}): {stdout}{stderr}"
+        );
+        assert!(
+            stderr.contains("--url"),
+            "どのオプションのエラーかを示すこと ({url}): {stdout}{stderr}"
+        );
+        assert!(
+            !stderr.contains("SECRETVALUE"),
+            "入力 URL の値を反射しないこと ({url}): {stdout}{stderr}"
+        );
+    }
+}

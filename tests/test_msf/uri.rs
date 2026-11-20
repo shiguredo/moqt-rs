@@ -554,3 +554,90 @@ fn parse_fragment_keeps_dot_escape_rules() {
         ".4A は UppercaseHex であること: {err:?}"
     );
 }
+
+/// パラメータ値の検証エラーは実値を含まないこと
+///
+/// パラメータ値は認可トークンなどの機密値を含み得るため、エラーメッセージには実値を
+/// 含めず、パラメータ名と 1 始まりの位置を示す。
+#[test]
+fn parse_fragment_parameter_value_errors_do_not_leak_value() {
+    // percent-encoding の不正 (`%zz` は hex 2 桁でない)
+    let err = parse_msf_fragment("msf:ns--catalog&cat=%zz")
+        .expect_err("不正な percent-encoding は拒否すること");
+    let reason = invalid_catalog_reason(&err);
+    assert!(!reason.contains("%zz"), "値を含めないこと: {reason}");
+    assert!(
+        reason.contains("MSF fragment parameter 'cat' value (#1)"),
+        "名前と位置を示すこと: {reason}"
+    );
+
+    // 文字種の不正 (空白)
+    let err = parse_msf_fragment("msf:ns--catalog&cat=secret value")
+        .expect_err("空白を含む値は拒否すること");
+    let reason = invalid_catalog_reason(&err);
+    assert!(!reason.contains("secret"), "値を含めないこと: {reason}");
+    assert!(
+        reason.contains("MSF fragment parameter 'cat' value (#1)"),
+        "名前と位置を示すこと: {reason}"
+    );
+
+    // 2 個目のパラメータでも名前と位置を示すこと
+    let err = parse_msf_fragment("msf:ns--catalog&connection=q&cat=%zz")
+        .expect_err("不正な percent-encoding は拒否すること");
+    let reason = invalid_catalog_reason(&err);
+    assert!(!reason.contains("%zz"), "値を含めないこと: {reason}");
+    assert!(
+        reason.contains("MSF fragment parameter 'cat' value (#2)"),
+        "名前と位置を示すこと: {reason}"
+    );
+}
+
+/// `=` の無いパラメータのエラーは要素全体を含まないこと
+///
+/// `=` が無い要素は名前と値を区別できないため、要素全体を埋め込まず位置だけを示す。
+#[test]
+fn parse_fragment_missing_equal_reports_position_only() {
+    let err = parse_msf_fragment("msf:ns--catalog&catSECRET")
+        .expect_err("`=` の無いパラメータは拒否すること");
+    let reason = invalid_catalog_reason(&err);
+    assert!(
+        !reason.contains("catSECRET"),
+        "要素を含めないこと: {reason}"
+    );
+    assert!(
+        reason.contains("MSF fragment parameter #1 is missing '='"),
+        "位置を示すこと: {reason}"
+    );
+}
+
+/// track-identifier とパラメータ名は機密値でないため実値を示すこと
+#[test]
+fn parse_fragment_identifier_errors_include_value() {
+    let err =
+        parse_msf_fragment("msf:ns--cata?log").expect_err("track-identifier の `?` は拒否すること");
+    let reason = invalid_catalog_reason(&err);
+    assert!(
+        reason.contains("MSF track identifier") && reason.contains("ns--cata?log"),
+        "track-identifier を示すこと: {reason}"
+    );
+
+    let err = parse_msf_fragment("msf:ns--catalog&ca t=SECRET")
+        .expect_err("パラメータ名の空白は拒否すること");
+    let reason = invalid_catalog_reason(&err);
+    assert!(
+        reason.contains("MSF fragment parameter name") && reason.contains("ca t"),
+        "パラメータ名を示すこと: {reason}"
+    );
+    assert!(
+        !reason.contains("SECRET"),
+        "パラメータ名の検証エラーでも値を示さないこと: {reason}"
+    );
+}
+
+/// `MessageError::InvalidCatalog` からエラーメッセージを取り出す
+fn invalid_catalog_reason(err: &MessageError) -> &str {
+    match err {
+        MessageError::InvalidCatalog(reason) => reason,
+        other => panic!("InvalidCatalog になること: {other:?}"),
+    }
+}

@@ -280,6 +280,10 @@ pub fn parse_msf_uri(uri: &str) -> Result<MsfUri, MessageError> {
 /// - `msf:` で始まらない / track-identifier が空 / パラメータ形式不正: `InvalidCatalog`
 /// - track-identifier の文字が ABNF 外、または `%XX` が hex 2 桁でない: `InvalidCatalog`
 /// - track-identifier が namespace-name 表現として不正: `InvalidCatalog`
+///
+/// パラメータ値は認可トークンなどの機密値を含み得るため、パラメータ値の検証エラーには実値を
+/// 含めず、パラメータ名と 1 始まりの位置を示す。`=` の無い要素は名前と値を区別できないため、
+/// 要素全体を示さず位置だけを示す。track-identifier とパラメータ名は機密値でないため実値を示す。
 pub fn parse_msf_fragment(fragment: &str) -> Result<MsfFragment, MessageError> {
     let value = fragment.strip_prefix("msf:").ok_or_else(|| {
         MessageError::InvalidCatalog("MSF fragment must start with 'msf:'".to_string())
@@ -298,7 +302,7 @@ pub fn parse_msf_fragment(fragment: &str) -> Result<MsfFragment, MessageError> {
             "MSF track identifier is empty".to_string(),
         ));
     }
-    validate_pchar_no_amp(track_identifier, true)?;
+    validate_pchar_no_amp(track_identifier, true, FragmentComponent::TrackIdentifier)?;
     // draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation): track-identifier は
     // `pchar-no-amp / "/"` であり、RFC 3986 §2.1 (Percent-Encoding) の `pct-encoded` を含む。
     // `%XX` をデータバイトとしてデコードする (`?` は `%3F` として現れる)。
@@ -308,15 +312,17 @@ pub fn parse_msf_fragment(fragment: &str) -> Result<MsfFragment, MessageError> {
         })?;
 
     let mut parameters = Vec::new();
-    for element in parts {
+    for (index, element) in parts.enumerate() {
         if element.is_empty() {
             return Err(MessageError::InvalidCatalog(
                 "MSF fragment contains an empty parameter".to_string(),
             ));
         }
         let (name, value) = element.split_once('=').ok_or_else(|| {
+            // 要素全体はパラメータ値 (認可トークンなど) を含み得るため、位置だけを示す
             MessageError::InvalidCatalog(format!(
-                "MSF fragment parameter '{element}' is missing '='"
+                "MSF fragment parameter #{} is missing '='",
+                index + 1
             ))
         })?;
         if name.is_empty() {
@@ -324,8 +330,15 @@ pub fn parse_msf_fragment(fragment: &str) -> Result<MsfFragment, MessageError> {
                 "MSF fragment parameter name is empty".to_string(),
             ));
         }
-        validate_pchar_no_amp(name, true)?;
-        validate_pchar_no_amp(value, true)?;
+        validate_pchar_no_amp(name, true, FragmentComponent::ParameterName)?;
+        validate_pchar_no_amp(
+            value,
+            true,
+            FragmentComponent::ParameterValue {
+                name,
+                position: index + 1,
+            },
+        )?;
         parameters.push(MsfFragmentParameter {
             name: name.to_string(),
             value: value.to_string(),
@@ -338,10 +351,50 @@ pub fn parse_msf_fragment(fragment: &str) -> Result<MsfFragment, MessageError> {
     })
 }
 
+/// `pchar-no-amp` (任意で `/` を含む) の文字種を検証する成分
+///
+/// エラーメッセージに実値を含めてよいかを成分ごとに決める。track-identifier と
+/// パラメータ名は機密値でないため実値を示す。パラメータ値は認可トークンなどの機密値を
+/// 含み得るため、実値を示さずパラメータ名と位置を示す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FragmentComponent<'a> {
+    /// fragment の track-identifier
+    TrackIdentifier,
+    /// fragment のパラメータ名
+    ParameterName,
+    /// fragment のパラメータ値
+    ParameterValue {
+        /// パラメータ名 (機密値でないためメッセージに示す)
+        name: &'a str,
+        /// パラメータ列 (track-identifier を除く) の 1 始まりの位置
+        position: usize,
+    },
+}
+
+impl FragmentComponent<'_> {
+    /// エラーメッセージに埋め込む成分の説明を返す
+    fn describe(self, value: &str) -> String {
+        match self {
+            Self::TrackIdentifier => format!("MSF track identifier '{value}'"),
+            Self::ParameterName => format!("MSF fragment parameter name '{value}'"),
+            // パラメータ値は認可トークンなどの機密値を含み得るため実値を示さない。
+            // 名前と位置は機密値でないため、該当するパラメータを特定できるように示す
+            Self::ParameterValue { name, position } => {
+                format!("MSF fragment parameter '{name}' value (#{position})")
+            }
+        }
+    }
+}
+
 /// `pchar-no-amp` (任意で `/` を含む) の文字種を検証する
 ///
 /// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の ABNF に従う。
-fn validate_pchar_no_amp(value: &str, allow_slash: bool) -> Result<(), MessageError> {
+/// パラメータ値の検証では実値をエラーメッセージに埋め込まない ([`FragmentComponent`])。
+fn validate_pchar_no_amp(
+    value: &str,
+    allow_slash: bool,
+    component: FragmentComponent,
+) -> Result<(), MessageError> {
     let bytes = value.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -355,13 +408,15 @@ fn validate_pchar_no_amp(value: &str, allow_slash: bool) -> Result<(), MessageEr
                 || !bytes[i + 2].is_ascii_hexdigit()
             {
                 return Err(MessageError::InvalidCatalog(format!(
-                    "invalid percent-encoding in MSF fragment component '{value}'"
+                    "invalid percent-encoding in {}",
+                    component.describe(value)
                 )));
             }
             i += 3;
         } else {
             return Err(MessageError::InvalidCatalog(format!(
-                "invalid character in MSF fragment component '{value}'"
+                "invalid character in {}",
+                component.describe(value)
             )));
         }
     }

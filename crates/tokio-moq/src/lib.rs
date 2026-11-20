@@ -391,27 +391,39 @@ pub struct ServerUrl {
 /// - fragment が `<type>:<value>` でない / type の文字種が §6.1.1 に一致しない: `invalid moqt URI fragment`
 /// - `msf` fragment が MSF §11.1 の ABNF に一致しない: `invalid MSF fragment`
 /// - `cat` の値が Base64 でない / 空: `invalid cat parameter`
+///
+/// query と fragment は認可トークンを含み得て (connection URI のパラメータは
+/// draft-ietf-moq-msf-02 §11.5.2、fragment の `cat` は §11.1.1)、解析エラーはログや CLI の
+/// 標準エラーに出るため、エラーメッセージには入力 URL 全体とパラメータ値を含めない。
+/// scheme、`authority` / `path` などの成分名、空白のバイト位置、MSF fragment の
+/// track-identifier・パラメータ名・パラメータ位置 (いずれも機密値でない) だけを示し、
+/// fragment type の値は示さない。
 pub fn parse_url(url: &str) -> Result<ServerUrl, String> {
     // RFC 3986 §3 (`URI = scheme ":" hier-part`) が scheme を `:` の前に置くことを定め、
     // §3.1 (Scheme) が比較の大文字小文字非区別を定める。エラーメッセージの生成は 1 箇所に集約する。
     let Some((scheme, rest)) = url.split_once(':') else {
-        return Err(format!("unsupported URL scheme: {url} (use moqt://)"));
+        return Err("unsupported URL scheme (use moqt://)".to_string());
     };
+    // `:` より前は、URL でない入力では任意の文字列になり得る。RFC 3986 §3.1 の scheme の
+    // 文字種に一致するときだけ示し、query / fragment の認可トークンを反射させない
+    if !is_uri_scheme(scheme) {
+        return Err("unsupported URL scheme (use moqt://)".to_string());
+    }
     if !scheme.eq_ignore_ascii_case("moqt") {
-        return Err(format!("unsupported URL scheme: {url} (use moqt://)"));
+        return Err(format!("unsupported URL scheme '{scheme}' (use moqt://)"));
     }
     // RFC 3986 §3 は `//` の有無で authority の有無が決まり、draft-ietf-moq-transport-23
     // §6.1 も `moqt-URI = "moqt" "://" authority ...` と `//` を必須にする。未対応 scheme と
     // 区別できるよう、`//` の欠落は authority の欠落として報告する。
-    let requires_authority =
-        || format!("moqt:// URL requires authority: {url} (e.g. moqt://localhost:4443)");
+    // 同じ文言を `//` の欠落と authority の空の 2 箇所で返すため定数にする
+    const REQUIRES_AUTHORITY: &str = "moqt:// URL requires authority (e.g. moqt://localhost:4443)";
     let Some(rest) = rest.strip_prefix("//") else {
-        return Err(requires_authority());
+        return Err(REQUIRES_AUTHORITY.to_string());
     };
     let (before_fragment, raw_fragment) = split_fragment(rest);
     let (authority, path) = split_authority_path(before_fragment);
     if authority.is_empty() {
-        return Err(requires_authority());
+        return Err(REQUIRES_AUTHORITY.to_string());
     }
     // RFC 3986 §2 (Characters) の `pchar` は `unreserved` / `pct-encoded` / sub-delims /
     // ":" / "@" であり、空白 (SP / HTAB) と制御文字を含まない。path に残った空白は SETUP の
@@ -420,12 +432,13 @@ pub fn parse_url(url: &str) -> Result<ServerUrl, String> {
     // fragment は解釈する仕様が意味を定めるため対象外にし、percent-encoding された
     // `%20` は RFC 3986 §2.1 の `pct-encoded` として正当なので拒否しない。
     if let Some((component, index)) = first_url_whitespace(&authority, &path) {
+        // 成分名とバイト位置は機密値でないため示し、URL 全体は示さない
         return Err(format!(
-            "invalid URL: {url} ('{component}' contains a whitespace or control character at byte {index})"
+            "invalid URL: '{component}' contains a whitespace or control character at byte {index}"
         ));
     }
     let fragment = match raw_fragment {
-        Some(fragment) => Some(parse_moqt_fragment(url, fragment)?),
+        Some(fragment) => Some(parse_moqt_fragment(fragment)?),
         None => None,
     };
     // draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation): fragment type
@@ -434,11 +447,11 @@ pub fn parse_url(url: &str) -> Result<ServerUrl, String> {
     // connection の接続種別 ([`resolve_transport`]) である。
     // 同じ value を 2 度パースしないよう、解釈結果を 1 度だけ作って共有する。
     let msf = match &fragment {
-        Some(f) if f.fragment_type == "msf" => Some(parse_msf_value(url, &f.value)?),
+        Some(f) if f.fragment_type == "msf" => Some(parse_msf_value(&f.value)?),
         _ => None,
     };
     let cat_tokens = match &msf {
-        Some(msf) => parse_cat_tokens(url, msf)?,
+        Some(msf) => parse_cat_tokens(msf)?,
         None => Vec::new(),
     };
     Ok(ServerUrl {
@@ -655,21 +668,22 @@ fn first_url_whitespace<'a>(authority: &'a str, path: &'a str) -> Option<(&'a st
 /// `#` は fragment の中に現れ得ない (RFC 3986 §3.5) ため、2 個目以降の `#` は拒否する。
 ///
 /// この仕様は将来 draft 改訂で変更される可能性がある。
-fn parse_moqt_fragment(url: &str, fragment: &str) -> Result<MoqtFragment, String> {
+///
+/// エラーメッセージには fragment の実値を含めない (認可トークンなどの機密値を含み得るため)。
+fn parse_moqt_fragment(fragment: &str) -> Result<MoqtFragment, String> {
     if fragment.contains('#') {
-        return Err(format!(
-            "invalid moqt URI fragment: {url} ('#' inside a fragment must be percent-encoded)"
-        ));
+        return Err(
+            "invalid moqt URI fragment ('#' inside a fragment must be percent-encoded)".to_string(),
+        );
     }
     let Some((fragment_type, value)) = fragment.split_once(':') else {
-        return Err(format!(
-            "invalid moqt URI fragment: {url} (must be '<type>:<value>')"
-        ));
+        return Err("invalid moqt URI fragment (must be '<type>:<value>')".to_string());
     };
     if !is_fragment_type(fragment_type) {
-        return Err(format!(
-            "invalid moqt URI fragment type: {url} (must be non-empty and consist of ASCII lowercase letters, digits, and hyphens)"
-        ));
+        return Err(
+            "invalid moqt URI fragment type (must be non-empty and consist of ASCII lowercase letters, digits, and hyphens)"
+                .to_string(),
+        );
     }
     Ok(MoqtFragment {
         fragment_type: fragment_type.to_string(),
@@ -685,6 +699,19 @@ fn is_fragment_type(fragment_type: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// RFC 3986 §3.1 の `scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )` に一致するかを返す
+///
+/// URL でない入力の `:` より前は任意の文字列になり得るため、エラーメッセージに示してよい
+/// scheme かどうかの判定に使う。
+fn is_uri_scheme(scheme: &str) -> bool {
+    let mut bytes = scheme.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    first.is_ascii_alphabetic()
+        && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+}
+
 /// `msf` fragment の value を MSF fragment としてパースする
 ///
 /// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の
@@ -696,10 +723,14 @@ fn is_fragment_type(fragment_type: &str) -> bool {
 /// # Errors
 ///
 /// - MSF fragment が §11.1 の ABNF に一致しない: `invalid MSF fragment`
-fn parse_msf_value(url: &str, fragment_value: &str) -> Result<MsfFragment, String> {
+///
+/// エラーメッセージにはパラメータ値を含めない (認可トークンなどの機密値を含み得るため)。
+/// track-identifier とパラメータ名は機密値でないため、内側の [`parse_msf_fragment`] の
+/// メッセージ経由で含まれ得る。
+fn parse_msf_value(fragment_value: &str) -> Result<MsfFragment, String> {
     // parse_msf_fragment は `msf:` 前置を含む fragment 全体を受け取る
     parse_msf_fragment(&format!("msf:{fragment_value}"))
-        .map_err(|e| format!("invalid MSF fragment in {url}: {e}"))
+        .map_err(|e| format!("invalid MSF fragment: {e}"))
 }
 
 /// パース済みの `msf` fragment から `cat` パラメータの認可トークンを取り出す
@@ -714,10 +745,12 @@ fn parse_msf_value(url: &str, fragment_value: &str) -> Result<MsfFragment, Strin
 /// # Errors
 ///
 /// - `cat` の値が Base64 でない / 空: `invalid cat parameter`
-fn parse_cat_tokens(url: &str, msf: &MsfFragment) -> Result<Vec<Vec<u8>>, String> {
+///
+/// エラーメッセージには `cat` の実値を含めない (認可トークンそのものであるため)。
+fn parse_cat_tokens(msf: &MsfFragment) -> Result<Vec<Vec<u8>>, String> {
     let mut tokens: Vec<Vec<u8>> = Vec::new();
     for text in msf.cat_tokens() {
-        let token = decode_cat_token(url, text)?;
+        let token = decode_cat_token(text)?;
         // draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression):
         // alias 解決後の (Token Type, Token Value) の重複は送れないため、同一トークンは畳む
         if !tokens.contains(&token) {
@@ -738,8 +771,10 @@ fn parse_cat_tokens(url: &str, msf: &MsfFragment) -> Result<Vec<Vec<u8>>, String
 /// # Errors
 ///
 /// - Base64 としてデコードできない / デコード結果が空: `invalid cat parameter`
-fn decode_cat_token(url: &str, text: &str) -> Result<Vec<u8>, String> {
-    let invalid = || format!("invalid cat parameter in {url}: not a non-empty Base64 token");
+///
+/// エラーメッセージには入力の実値を含めない (認可トークンそのものであるため)。
+fn decode_cat_token(text: &str) -> Result<Vec<u8>, String> {
+    let invalid = || "invalid cat parameter: not a non-empty Base64 token".to_string();
     // RFC 3986 §2.1 (Percent-Encoding): MSF のパラメータ列は library が生の文字列で
     // 返すため、Base64 アルファベット外の `%XX` をここでデータバイトへ戻す。
     // Base64 のテキストは ASCII のみのため、UTF-8 でなければ Base64 として不正である。
@@ -967,7 +1002,14 @@ fn authority_parts(authority: &str) -> Result<AuthorityParts<'_>, TransportError
 }
 
 /// authority の解釈に失敗したことを表すエラーを作る
+///
+/// userinfo を含む authority はパスワードなどの機密値を含み得るため、その場合は authority を
+/// メッセージに含めない。この判定をここに集約し、呼び出し側が authority を渡すだけで安全に
+/// なるようにする。
 fn invalid_authority(authority: &str, reason: &str) -> TransportError {
+    if authority.contains('@') {
+        return TransportError::InvalidAuthority(format!("invalid server address: {reason}"));
+    }
     TransportError::InvalidAuthority(format!("invalid server address '{authority}': {reason}"))
 }
 
@@ -1121,7 +1163,10 @@ pub fn same_session_url(current: &ServerUrl, target: &ServerUrl) -> bool {
 ///   `Ok(None)` にする。
 /// - `new_session_uri` が空のときは現在の URL を再利用する (空 URI は request stream の
 ///   GOAWAY でも「現在の session で再発行する」ことを意味する)。
-/// - 非空のときは [`parse_url`] と同じ規則で解釈する。認可トークン (`cat`) は
+/// - 非空のときは [`parse_url`] と同じ規則で解釈し、そのあと authority に userinfo
+///   (`user@host`) を含まないことを確認する。userinfo はパスワードなどの機密値を含み得て、
+///   移行先としてログに表示し得るため、request 単位では `Ok(None)`、session 単位では
+///   エラーにする。認可トークン (`cat`) は
 ///   **現在の URL と同じ origin (host / port) のときだけ** 引き継ぐ。別 origin へ
 ///   credential を送らないためである。移行先が自前の `cat` を持つ場合はそちらを優先する。
 ///
@@ -1131,8 +1176,9 @@ pub fn same_session_url(current: &ServerUrl, target: &ServerUrl) -> bool {
 ///
 /// # Errors
 ///
-/// control stream の GOAWAY で `new_session_uri` が UTF-8 でない場合と、[`parse_url`] が
-/// 解釈できない場合に [`TransportError`] になる。
+/// control stream の GOAWAY で `new_session_uri` が UTF-8 でない場合、[`parse_url`] が
+/// 解釈できない場合、authority に userinfo を含む場合に [`TransportError`] になる。
+/// request stream の GOAWAY では同じ入力で `Ok(None)` になり、session を維持する。
 pub fn migration_target(
     new_session_uri: &[u8],
     on_request_stream: Option<u64>,
@@ -1167,14 +1213,28 @@ pub fn migration_target(
             if on_request_stream.is_some() {
                 return Ok(None);
             }
+            // parse_url のエラーは URL の実値を含まないため、URI を付け直さない。
+            // New Session URI は peer が供給し、query / fragment に認可トークンを
+            // 含み得る (draft-ietf-moq-msf-02 §11.5.2)
             return Err(TransportError::Internal(format!(
-                "invalid new session URI '{}': {e}",
-                sanitize_for_log(uri)
+                "invalid new session URI: {e}"
             )));
         }
     };
+    // authority に userinfo を含む New Session URI は受け付けない。パスワードなどの機密値を
+    // 保持し、移行先としてログに表示し得るため (RFC 3986 §3.2.1)。接続時の authority_parts でも
+    // 拒否するが、移行の判断とログ出力より前にここで落とす
+    if target.authority.contains('@') {
+        if on_request_stream.is_some() {
+            return Ok(None);
+        }
+        return Err(TransportError::Internal(
+            "invalid new session URI: userinfo is not supported".to_string(),
+        ));
+    }
     // 認可トークンは同一 origin のときだけ引き継ぐ。別 origin へ送ると credential の
-    // 漏洩になるため、移行先で再取得する (draft-ietf-moq-msf-02 §11.5.4)。
+    // 漏洩になるため、移行先ではトークンを再取得する (再取得は
+    // draft-ietf-moq-msf-02 §11.5.4 の対象)。
     if target.cat_tokens.is_empty() && same_origin(&target, current) {
         target.cat_tokens = current.cat_tokens.clone();
     }
@@ -1797,8 +1857,8 @@ mod tests {
                 "URL の検証エラーとして返ること: {err}"
             );
             assert!(
-                err.contains(url),
-                "入力の URL がエラーに含まれること: {err}"
+                !err.contains(url),
+                "入力の URL 全体はエラーに含めないこと: {err}"
             );
         }
     }
@@ -1817,6 +1877,18 @@ mod tests {
             err.contains("'path' contains a whitespace or control character at byte 2"),
             "path の位置を報告すること: {err}"
         );
+
+        // userinfo を含む authority でも、userinfo の値を反射しない
+        let err = parse_url("moqt://alice:s3cr3t@exa mple.com/app").expect_err("エラーになること");
+        assert!(
+            !err.contains("alice") && !err.contains("s3cr3t"),
+            "userinfo を含めないこと: {err}"
+        );
+
+        // query を含む path のエラーでも、query の値を反射しない
+        let err =
+            parse_url("moqt://example.com/app?token=SECRETVALUE x").expect_err("エラーになること");
+        assert!(!err.contains("SECRETVALUE"), "query を含めないこと: {err}");
     }
 
     /// percent-encoding された空白は path として受理する
@@ -1848,15 +1920,21 @@ mod tests {
     /// `moqt://` 以外の scheme はエラーになる (接続経路は --transport で選ぶ)
     #[test]
     fn parse_url_rejects_unknown_scheme() {
-        for url in [
-            "ftp://127.0.0.1:4443",
-            "https://example.com:443/foo?bar=baz",
-            "://host/path",
+        for (url, scheme) in [
+            ("ftp://127.0.0.1:4443", Some("ftp")),
+            ("https://example.com:443/foo?bar=baz", Some("https")),
+            // `:` より前が RFC 3986 §3.1 の scheme の文字種に一致しないため、値を示さない
+            ("://host/path", None),
+            ("cat=AQID#msf:ns--track", None),
         ] {
-            assert_eq!(
-                parse_url(url).expect_err("未対応 scheme がエラーになること"),
-                format!("unsupported URL scheme: {url} (use moqt://)")
-            );
+            let err = parse_url(url).expect_err("未対応 scheme がエラーになること");
+            let expected = match scheme {
+                Some(scheme) => format!("unsupported URL scheme '{scheme}' (use moqt://)"),
+                None => "unsupported URL scheme (use moqt://)".to_string(),
+            };
+            assert_eq!(err, expected, "scheme だけを示すこと: {err}");
+            assert!(!err.contains("bar=baz"), "query を含めないこと: {err}");
+            assert!(!err.contains("AQID"), "token を反射しないこと: {err}");
         }
     }
 
@@ -1874,10 +1952,12 @@ mod tests {
             "MOQT:foo",
             "moqt:///app",
         ] {
+            let err = parse_url(url).expect_err("`//` が無い URL がエラーになること");
             assert_eq!(
-                parse_url(url).expect_err("`//` が無い URL がエラーになること"),
-                format!("moqt:// URL requires authority: {url} (e.g. moqt://localhost:4443)")
+                err,
+                "moqt:// URL requires authority (e.g. moqt://localhost:4443)"
             );
+            assert!(!err.contains(url), "入力の URL を含めないこと: {err}");
         }
     }
 
@@ -1889,7 +1969,7 @@ mod tests {
     fn parse_url_rejects_url_without_scheme_delimiter() {
         assert_eq!(
             parse_url("example.com/app").expect_err("scheme が無い URL がエラーになること"),
-            "unsupported URL scheme: example.com/app (use moqt://)"
+            "unsupported URL scheme (use moqt://)"
         );
     }
 
@@ -2024,15 +2104,17 @@ mod tests {
     fn parse_url_rejects_empty_authority() {
         assert_eq!(
             parse_url("moqt://").expect_err("authority が無い moqt URL がエラーになること"),
-            "moqt:// URL requires authority: moqt:// (e.g. moqt://localhost:4443)"
+            "moqt:// URL requires authority (e.g. moqt://localhost:4443)"
         );
         // fragment の検証より前に authority の有無を判定する。
         // fragment 自体が不正でも authority のエラーになることを固定する
         for url in ["moqt://?x=1#t:v", "moqt://?x=1#bad", "moqt://#bad"] {
+            let err = parse_url(url).expect_err("authority が無い moqt URL がエラーになること");
             assert_eq!(
-                parse_url(url).expect_err("authority が無い moqt URL がエラーになること"),
-                format!("moqt:// URL requires authority: {url} (e.g. moqt://localhost:4443)")
+                err,
+                "moqt:// URL requires authority (e.g. moqt://localhost:4443)"
             );
+            assert!(!err.contains("x=1"), "query を含めないこと: {err}");
         }
     }
 
@@ -2042,7 +2124,7 @@ mod tests {
         assert_eq!(
             parse_url("moqt://example.com/app#typevalue")
                 .expect_err("fragment に `:` が無い URL がエラーになること"),
-            "invalid moqt URI fragment: moqt://example.com/app#typevalue (must be '<type>:<value>')"
+            "invalid moqt URI fragment (must be '<type>:<value>')"
         );
     }
 
@@ -2052,7 +2134,7 @@ mod tests {
         assert_eq!(
             parse_url("moqt://example.com/app#")
                 .expect_err("fragment のみの URL がエラーになること"),
-            "invalid moqt URI fragment: moqt://example.com/app# (must be '<type>:<value>')"
+            "invalid moqt URI fragment (must be '<type>:<value>')"
         );
     }
 
@@ -2062,7 +2144,7 @@ mod tests {
         assert_eq!(
             parse_url("moqt://example.com/app#Type:value")
                 .expect_err("大文字の fragment type がエラーになること"),
-            "invalid moqt URI fragment type: moqt://example.com/app#Type:value (must be non-empty and consist of ASCII lowercase letters, digits, and hyphens)"
+            "invalid moqt URI fragment type (must be non-empty and consist of ASCII lowercase letters, digits, and hyphens)"
         );
         for url in [
             // 空の type は registered identifier にならない
@@ -2096,7 +2178,7 @@ mod tests {
         assert_eq!(
             parse_url("moqt://example.com/app#a:b#c:d")
                 .expect_err("fragment 内の 2 個目の `#` がエラーになること"),
-            "invalid moqt URI fragment: moqt://example.com/app#a:b#c:d ('#' inside a fragment must be percent-encoded)"
+            "invalid moqt URI fragment ('#' inside a fragment must be percent-encoded)"
         );
         assert!(parse_url("moqt://example.com/app#t:v#").is_err());
     }
@@ -2653,6 +2735,75 @@ mod tests {
         }
     }
 
+    /// URL の解析エラーは query / fragment の実値を含まない
+    ///
+    /// query と fragment は認可トークン (connection URI のパラメータは
+    /// draft-ietf-moq-msf-02 §11.5.2、fragment の `cat` は §11.1.1) を含み得て、解析エラーは
+    /// ログや CLI の標準エラーに出るため、実値をエラーメッセージに埋め込まない。
+    #[test]
+    fn parse_url_errors_do_not_leak_query_or_fragment_values() {
+        for (url, secrets) in [
+            (
+                "moqt://exa mple.com/app?token=SECRETVALUE",
+                &["SECRETVALUE"][..],
+            ),
+            (
+                "moqt://example.com/app?token=SECRETVALUE#badvalue",
+                &["SECRETVALUE", "badvalue"][..],
+            ),
+            (
+                "moqt://example.com/app?token=SECRETVALUE#",
+                &["SECRETVALUE"][..],
+            ),
+            (
+                "moqt://example.com/app?token=SECRETVALUE#Type:value",
+                &["SECRETVALUE"][..],
+            ),
+            (
+                "moqt://example.com/app?token=SECRETVALUE#a:b#c:d",
+                &["SECRETVALUE"][..],
+            ),
+            (
+                "moqt://example.com/app?token=SECRETVALUE#msf:",
+                &["SECRETVALUE"][..],
+            ),
+            (
+                "moqt://example.com/app?token=SECRETVALUE#msf:ns--catalog&cat",
+                &["SECRETVALUE"][..],
+            ),
+            (
+                "moqt://example.com/app#msf:ns--catalog&cat=SECRETVALUE!",
+                &["SECRETVALUE"][..],
+            ),
+        ] {
+            let err = parse_url(url).expect_err("エラーになること");
+            for secret in secrets {
+                assert!(!err.contains(secret), "{url}: 実値を含まないこと: {err}");
+            }
+        }
+    }
+
+    /// fragment と cat の解析エラーは入力を含まない
+    ///
+    /// これらは公開 API のエラーとして伝播するため、実値を含めないことを直接固定する。
+    #[test]
+    fn fragment_parser_errors_do_not_include_input() {
+        let err =
+            parse_moqt_fragment("badvalue").expect_err("`:` の無い fragment はエラーになること");
+        assert!(!err.contains("badvalue"), "fragment を含めないこと: {err}");
+
+        let err =
+            parse_moqt_fragment("bad#value:x").expect_err("`#` を含む fragment はエラーになること");
+        assert!(!err.contains("bad#value"), "fragment を含めないこと: {err}");
+
+        let err = parse_msf_value("ns--catalog&catSECRET")
+            .expect_err("`=` の無いパラメータはエラーになること");
+        assert!(!err.contains("catSECRET"), "要素を含めないこと: {err}");
+
+        let err = decode_cat_token("SECRET!").expect_err("Base64 でない値はエラーになること");
+        assert!(!err.contains("SECRET"), "トークンを含めないこと: {err}");
+    }
+
     /// SETUP に C4M トークンを AUTHORIZATION_TOKEN (Token Type CAT) として含める
     #[test]
     fn setup_options_include_c4m_authorization_tokens() {
@@ -2840,19 +2991,26 @@ mod tests {
     /// reference 中の userinfo を reject する選択を許す。
     #[test]
     fn authority_parts_rejects_userinfo() {
-        for authority in [
-            "user@127.0.0.1:4433",
-            "user:pass@relay.example.com",
-            "user@[::1]:4433",
+        for (authority, user, password) in [
+            ("alice:s3cr3t@127.0.0.1:4433", "alice", "s3cr3t"),
+            ("alice:s3cr3t@relay.example.com", "alice", "s3cr3t"),
+            ("alice:s3cr3t@[::1]:4433", "alice", "s3cr3t"),
         ] {
             let err = authority_parts(authority).expect_err("エラーになること");
             assert!(
                 matches!(err, TransportError::InvalidAuthority(_)),
                 "authority の解釈失敗として返ること: {err}"
             );
+            let message = err.to_string();
             assert!(
-                err.to_string().contains("userinfo is not supported"),
-                "理由が含まれること: {err}"
+                message.contains("userinfo is not supported"),
+                "理由が含まれること: {message}"
+            );
+            assert!(
+                !message.contains(authority)
+                    && !message.contains(user)
+                    && !message.contains(password),
+                "userinfo (ユーザー名・パスワード) を含めないこと: {message}"
             );
         }
     }
@@ -3340,6 +3498,40 @@ mod tests {
     fn migration_target_keeps_session_for_invalid_request_uri() {
         let current = parse_url("moqt://relay.example/live").expect("URL をパースできること");
         let target = migration_target(b"https://other.example/live", Some(7), &current)
+            .expect("request 単位移行ではエラーにしないこと");
+        assert!(target.is_none(), "session を維持すること");
+    }
+
+    /// New Session URI の解析エラーは URI の実値を含まない
+    ///
+    /// New Session URI は peer が供給し、query / fragment に認可トークンを含み得る
+    /// (draft-ietf-moq-msf-02 §11.5.2)。エラーはログに出るため実値を含めない。
+    #[test]
+    fn migration_target_errors_do_not_include_uri() {
+        let current = parse_url("moqt://relay.example/live").expect("URL をパースできること");
+        for uri in [
+            "moqt://other.example/live?token=SECRETVALUE#badvalue",
+            "moqt://other.example/live#msf:ns--track&cat=SECRETVALUE!",
+        ] {
+            let err = migration_target(uri.as_bytes(), None, &current)
+                .expect_err("session 単位の移行ではエラーにすること");
+            let message = err.to_string();
+            assert!(
+                !message.contains("SECRETVALUE"),
+                "実値を含めないこと: {message}"
+            );
+        }
+
+        // userinfo を含む移行先は拒否し、ユーザー名とパスワードを保持・表示しない
+        let err = migration_target(b"moqt://alice:s3cr3t@other.example/live", None, &current)
+            .expect_err("userinfo を含む移行先は拒否すること");
+        let message = err.to_string();
+        assert!(
+            !message.contains("alice") && !message.contains("s3cr3t"),
+            "userinfo を含めないこと: {message}"
+        );
+        // request 単位移行では session を維持する
+        let target = migration_target(b"moqt://alice:s3cr3t@other.example/live", Some(7), &current)
             .expect("request 単位移行ではエラーにしないこと");
         assert!(target.is_none(), "session を維持すること");
     }

@@ -109,7 +109,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     }
     noargs::HELP_FLAG.take_help(&mut args);
 
-    let url: ServerUrl = noargs::opt("url")
+    let url_value: String = noargs::opt("url")
         .ty("URL")
         .doc("Server URL (moqt://host[:port]/path; '#msf:ns--track&cat=BASE64' sends a C4M token in SETUP)")
         // 必須オプションは help モードでも Opt::None になり `then()` が MissingOpt を返すため、
@@ -117,13 +117,14 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         // 例は使われず、`--url` の省略は従来どおり MissingOpt になる)
         .example("moqt://relay.example.com:4433/app")
         .take(&mut args)
-        .then(|o| {
-            let v = o.value();
-            if v.is_empty() {
-                return Err("--url is required".to_string());
-            }
-            tokio_moq::parse_url(v)
-        })?;
+        .then(|o| Ok::<_, std::convert::Infallible>(o.value().to_string()))?;
+    // noargs の InvalidOpt はオプションの生値を表示するため、URL の検証エラーは
+    // Error::other で返し、query / fragment の認可トークンを標準エラーへ反射させない
+    if url_value.is_empty() {
+        return Err(noargs::Error::other(&args, "--url is required"));
+    }
+    let url: ServerUrl = tokio_moq::parse_url(&url_value)
+        .map_err(|e| noargs::Error::other(&args, format!("--url: {e}")))?;
 
     // `--transport` が省略された場合は `--url` の msf fragment の `connection` を使う
     // (draft-ietf-moq-msf-02 §11.1.1)。解決の規則は `tokio_moq::resolve_transport` を参照

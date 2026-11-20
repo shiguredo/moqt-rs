@@ -32,7 +32,13 @@ tobi-quic は Windows 非対応のため、Windows ビルドでは tobi-quic を
 
 `port` を省略すると 443 を使う (draft-ietf-moq-transport-23 §6.1.2)。`host` は IP リテラル (例：`127.0.0.1` / `[2001:db8::1]`) と DNS 名の両方を受け付け、DNS 名は接続時に名前解決する。解決した接続先アドレスはログに出力される。
 
-RFC 3986 §3.2.2 の host に一致しない authority は名前解決の前に拒否する。`[` `]` の中身は IPv6 アドレスに限るため `[example.com]` や IPvFuture (`[v1.fe80::]`)、zone id 付き IPv6 リテラル (`[fe80::1%25en0]`) はエラーになる。ポート 0 と userinfo (`user@host`) もエラーになる。エラーメッセージには拒否理由と入力した authority が含まれる。
+RFC 3986 §3.2.2 の host に一致しない authority は名前解決の前に拒否する。`[` `]` の中身は IPv6 アドレスに限るため `[example.com]` や IPvFuture (`[v1.fe80::]`)、zone id 付き IPv6 リテラル (`[fe80::1%25en0]`) はエラーになる。
+ポート 0 と userinfo (`user@host`) もエラーになる。
+userinfo を含まない authority の拒否メッセージには、拒否理由と入力した authority が含まれる。
+userinfo を含む authority はパスワードなどの機密値を含み得るため、メッセージに authority を含めない。
+
+URL と MSF fragment の構文検証エラーのメッセージには、入力 URL 全体とパラメータ値を含めない。query と fragment は認可トークンを含み得るため (draft-ietf-moq-msf-02 §11.5.2 / §11.1.1)、原因を特定できる非機密の成分 (scheme、authority / path などの成分名、track-identifier、パラメータ名、パラメータ位置) だけを示す。
+`connection` や range の値変換エラーは機密値でないため、従来どおり値を示す。
 
 DNS 名が複数のアドレスに解決される場合は、解決順に接続を試し、確立できたアドレスを採用する。IPv4 と IPv6 の両方に解決される `localhost` などで、先頭の接続先が待ち受けていない場合にも次のアドレスへ進む。接続の試行は `--transport` で選んだ経路の確立までを単位とし、確立後の SETUP の失敗では次のアドレスを試さない。接続先のアドレスファミリに合わせてローカルソケットを選ぶため、IPv6 の接続先にも送信できる。
 
