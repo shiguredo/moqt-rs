@@ -1,7 +1,7 @@
 # tokio-moq の ServerUrl の Debug 出力から token を含む値を隠す
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-20
 - Branch: feature/fix-server-url-debug-redaction
 - Polished: 2026-11-14
 
@@ -37,3 +37,14 @@ MSF の公開型 (`MsfUri` / `MsfFragmentParameter` など) は Debug で値を�
 - `ServerUrl` / `MoqtFragment` / `MigrationTarget` / `ConnectParams` の `{:?}` に、query の値、fragment の生文字列、C4M トークンの値が、文字列としても十進のバイト列としても含まれないこと。
 - 伏せたフィールドは長さを表示し、表示するフィールド (`authority`、query より前の path など) は従来どおり表示されること。
 - 上記を `crates/tokio-moq/src/lib.rs` の `#[cfg(test)] mod tests` に追加するテストで固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+現在のコードは C4M draft-02 / MSF draft-02 に移行しており、予約パラメータは `c4m` ではなく `cat` である。本 issue の `c4m` は `cat` として対応した。
+
+- `crates/tokio-moq/src/lib.rs` の `ServerUrl` と `MoqtFragment` から `derive(Debug)` を外し、独自の `core::fmt::Debug` を実装した。`..` を使わずに全フィールドを分解するため、フィールドを追加したときの表示漏れをコンパイラが検出できる。
+- `MoqtFragment` の `Debug` は `fragment_type` を表示し、`value` は実値ではなくバイト長を `value_bytes` として表示する。
+- `ServerUrl` の `Debug` は `authority` と path の `?` より前を表示し、`query: Option<usize>` に query のバイト長、`fragment` は `MoqtFragment` の `Debug`、`msf` は `MsfFragment` の `Debug` (`cat` の値は既存の `MsfFragmentParameter` の `Debug` が伏せる)、`cat_token_count` に `cat` の件数、`cat_token_bytes` に各トークンのバイト長の配列を表示する。
+- `MigrationTarget` と `ConnectParams` は `derive(Debug)` のままで、内側の `ServerUrl` の `Debug` を通るため自動的に秘匿される。
+- テストは `crates/tokio-moq/src/lib.rs` の単体テストに追加した。query の値と全体、fragment 全体、`cat` の Base64 表現、デコード済みトークンの十進列が、文字列としても十進のバイト列としても表示されないことを固定し、伏せたフィールドの長さと非機密フィールドの表示 (query なし、複数 `?`、複数 `cat`、`msf` 以外の fragment を含む) も固定した。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ることを確認した。
