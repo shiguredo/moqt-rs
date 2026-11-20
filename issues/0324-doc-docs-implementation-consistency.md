@@ -96,7 +96,8 @@ docs と README / SKILL.md / crates の記述が実装と食い違い、利用�
 - `docs/moqt.md` の「モジュール構成」の表に `audio_clock` / `media_clock` / `pending_subgroup_buffer` / `video_decode_order` / `video_object_reorder` / `group_switch_gate` を追加する
 - `docs/moqt.md` の「その他」の playout のモジュール一覧に `publish_catch_up` を追加する
 - `docs/moqt.md` の「時間圧縮・伸長」は `src/playout/stretch.rs` の `compress` と `preemptively_expand` に合っているため変更しない
-- `skills/shiguredo-moqt/SKILL.md` の「モジュール構成」の表に `audio_clock` / `media_clock` / `pending_subgroup_buffer` / `video_decode_order` / `video_object_reorder` と `playout` の公開サブモジュール (`buffer` / `catch_up` / `expansion` / `gap` / `predictor` / `publish_catch_up` / `resample` / `scheduler` / `splice_fade` / `stretch` / `timeline` / `timing`) を追加する
+- `skills/shiguredo-moqt/SKILL.md` の「モジュール構成」の表に `audio_clock` / `media_clock` / `pending_subgroup_buffer` / `video_decode_order` / `video_object_reorder` と `playout` の公開サブモジュール (`buffer` / `catch_up` / `expansion` / `gap` / `predictor` / `publish_catch_up` / `resample` /
+   `scheduler` / `splice_fade` / `stretch` / `timeline` / `timing`) を追加する
 - `skills/shiguredo-moqt/SKILL.md` の `playout::timeline` の free function 一覧に `audio_arrival_delay_us_with_min` を追加する
 - `skills/shiguredo-moqt/SKILL.md` の `playout::stretch` の一覧に `compress_with_history` を追加する
 - `skills/shiguredo-moqt/SKILL.md` の `select_nearest` / `conceal` / A/V 同期の記述は現行実装と一致しているため変更しない
@@ -115,6 +116,7 @@ docs と README / SKILL.md / crates の記述が実装と食い違い、利用�
 - `crates/moq-pub/README.md` の `--audio-subgroup` の行に `--datagram-max-size` の上限説明が無いこと
 - `README.md` の docs / crates へのリンクが `https://github.com/shiguredo/moqt-rs/...` の絶対 URL であること (`rg -n '\]\((docs|crates|skills)/' README.md` が 0 件)
 - `docs/moqt.md` の「モジュール構成」の表に `audio_clock` / `media_clock` / `pending_subgroup_buffer` / `video_decode_order` / `video_object_reorder` / `group_switch_gate` があり、「その他」の playout のモジュール一覧に `publish_catch_up` があること
-- `skills/shiguredo-moqt/SKILL.md` の「モジュール構成」の表に `audio_clock` / `media_clock` / `pending_subgroup_buffer` / `video_decode_order` / `video_object_reorder` と `playout` の公開サブモジュールがあり、`playout::timeline` の free function 一覧に `audio_arrival_delay_us_with_min`、`playout::stretch` の一覧に `compress_with_history` があること
+- `skills/shiguredo-moqt/SKILL.md` の「モジュール構成」の表に `audio_clock` / `media_clock` / `pending_subgroup_buffer` / `video_decode_order` / `video_object_reorder` と `playout` の公開サブモジュールがあり、`playout::timeline` の free function 一覧に `audio_arrival_delay_us_with_min`、
+  `playout::stretch` の一覧に `compress_with_history` があること
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること
 - `markdownlint-cli2` が変更した Markdown で通ること
