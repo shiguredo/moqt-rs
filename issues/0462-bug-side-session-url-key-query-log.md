@@ -49,3 +49,14 @@ MSF は接続 URI のパラメータとして token を供給してよいと定�
 - 表示用の値についても、`SECRETVALUE` と authority の userinfo (`@` より前) が含まれないことを単体テストで固定すること。
 - side session の `url=` を出すすべてのログが、キーではなく表示用の値を使うこと (コードレビューで確認する)。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+`crates/moq-sub/src/pipeline.rs` の `side_session_url_key` を、認可トークンの実値を含まない形に変えた。あわせてログ用の表示値を作る `side_session_url_display` を追加し、side session の URL を出すすべてのログを表示値に切り替えた。
+
+- キーの形は `moqt://{authority}{path の ? より前}[?q={query のハッシュ:016x}][#{fragment のハッシュ:016x}]` にした。query と fragment は `DefaultHasher` のハッシュだけを入れ、実値を持たせない。query と fragment が無いときは対応する部分を省くため、query も fragment も無い URL のキーは従来と同じ `moqt://relay.example:443/live` になる。
+- `?q=` は実在の query パラメータではなく、実 URL と区別するための目印である。空の query (`.../live?`) と query 無し (`.../live`) は別の接続先として区別する (`tokio_moq::same_session_url` も別の path として比較する)。
+- キーは `HashMap` の索引とイベントの照合にだけ使い、ログには `side_session_url_display` を通した値を使う。この関数は authority の `@` より前 (userinfo) を除き、`@` より後ろの host / port を残す (RFC 3986 §3.2.1)。キー以外の入力を渡された場合は、実値をそのまま返さず `moqt://<redacted>` にする。
+- side session の URL は `tokio_moq::migration_target` が返した値だけで、`migration_target` は userinfo を含む New Session URI を拒否する。そのため userinfo の除去は通常は到達しないが、将来 `migration_target` の扱いが変わったときの防御として残した。
+- 64 bit のハッシュなので、query と fragment だけが異なる URL が衝突すると別の接続先を同じ side session にまとめてしまう。衝突は side session の共有にとどまり、認可の判断には使わない。`DefaultHasher` は固定鍵で暗号学的なハッシュではないため、低エントロピーのトークンではログの `?q=` から総当たりできる余地が残る (既存の fragment の扱いと同じ)。
+- `crates/moq-sub/src/pipeline.rs` の単体テストに `side_session_url_key_hides_query_tokens` と `side_session_url_display_hides_userinfo` を追加した。前者は query の実値を含まないこと、query の有無と違いでキーが変わること、空 query と query 無しの区別を固定する。後者は userinfo と query の実値を含まないこと、host / port とハッシュは残ること、キー以外の入力で実値を返さないことを固定する。
