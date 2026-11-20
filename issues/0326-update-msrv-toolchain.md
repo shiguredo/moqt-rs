@@ -3,7 +3,7 @@
 - Created: 2026-10-19
 - Completed: {YYYY-MM-DD}
 - Branch: feature/update-msrv-toolchain
-- Polished: 2026-10-20
+- Polished: 2026-11-20
 - Refreshed: 2026-11-04
 
 ## 目的
@@ -15,9 +15,9 @@ shiguredo-rust はライブラリの MSRV を 1.95 とし、`Cargo.toml` の `ru
 - ルート `Cargo.toml` と `pbt/Cargo.toml` の `rust-version` は 1.93。
 - `fuzz/Cargo.toml` も `rust-version = "1.93"` である。`fuzz` はルート workspace の `exclude = ["fuzz"]` で独立した workspace だが、`shiguredo_moqt` を path 依存に持つ。
 - `crates/moq-pub/Cargo.toml` / `crates/moq-sub/Cargo.toml` / `crates/tokio-moq/Cargo.toml` / `e2e-tests/Cargo.toml` の `rust-version` は 1.95。workspace の最大 `rust-version` は既に 1.95。
-- `rust-toolchain.toml` の channel は 1.95。コメントに「MSRV は Cargo.toml の rust-version (ライブラリ本体と pbt は 1.93) だが、workspace の crates 配下の crate が使う s2n-quic が 1.95 を要求するため 1.95 に固定する。」「workspace の最大 rust-version を上げたら channel も同時に更新すること。」とある。
+- `rust-toolchain.toml` の channel は 1.95。コメントに「MSRV は Cargo.toml の rust-version (ライブラリ本体と pbt は 1.93) だが、workspace の crates 配下の crate が使う QUIC バックエンド (s2n-quic / tobi-quic) が 1.95 を要求するため 1.95 に固定する。」「workspace の最大 rust-version を上げたら channel も同時に更新すること。」とある。
 - 1.93 のツールチェーンで check / clippy する CI ジョブは無い。`.github/workflows/ci.yml` は `rust-toolchain.toml` の 1.95 を使い、冒頭コメントに「MSRV 検証は含めない。crates 配下の crate が rust-version 1.95 を要求するため workspace 単位の 1.93 検証が構造的にできない」とある。
-- `README.md` は「前提条件は Rust 1.95 以降です。サンプルが使う `s2n-quic` が 1.95 を要求するためです。`shiguredo_moqt` ライブラリと `pbt` だけであれば 1.93 で構築できます。」と、ライブラリ単体の MSRV を 1.93 と案内している。
+- `crates/README.md` は「Rust 1.95 以降が必要です (s2n-quic と、Windows 以外のビルドで使う tobi-quic の要求。ライブラリと pbt は 1.93 でビルドできます)。」と、ライブラリと pbt の MSRV を 1.93 と案内している。ルート `README.md` には Rust のバージョンに関する記述はない。
 - `skills/shiguredo-moqt/SKILL.md` は「最小 Rust バージョン: 1.93」と案内している。
 - 影響: 1.94 以降で安定化した API を 1.93 互換コードに誤用しても検出できない。規約上の逸脱でもある。
 
@@ -26,20 +26,22 @@ shiguredo-rust はライブラリの MSRV を 1.95 とし、`Cargo.toml` の `ru
 - shiguredo-rust の「最小 Rust バージョン (MSRV) は 1.95 とすること」「`Cargo.toml` の `rust-version` に `"1.95"` を明記すること」「`rust-toolchain.toml` の `channel` には `rust-version` と同じ値 (`"1.95"`) を指定すること」に従い、MSRV を 1.95 にする。1.93 を維持する選択肢は規約に反するため採らない。
 - ルート `Cargo.toml` と `pbt/Cargo.toml` の `rust-version` を 1.95 に上げる。
 - `fuzz/Cargo.toml` の `rust-version` も 1.95 に上げる。`fuzz` は独立 workspace だが `shiguredo_moqt` を path 依存に持ち、ライブラリの MSRV が 1.95 になると 1.93 では依存先の `rust-version = "1.95"` によりビルドできない。1.93 の宣言を残すと虚偽になる。
-- `rust-toolchain.toml` の `channel` は既に 1.95 なので変更しない。コメントは 1.93 前提を削除し、MSRV 1.95 と channel 1.95 を揃えていること、crates 配下の crate / e2e-tests も s2n-quic が 1.95 を要求することを示す内容に更新する。
-- `README.md` の「`shiguredo_moqt` ライブラリと `pbt` だけであれば 1.93 で構築できます。」を削除し、「サンプルが使う `s2n-quic` が 1.95 を要求するためです。」を「ライブラリの MSRV と、サンプルが使う `s2n-quic` が 1.95 を要求するためです。」に更新する。前提条件が Rust 1.95 以降であることは変更しない。
-- `skills/shiguredo-moqt/SKILL.md` の「最小 Rust バージョン: 1.93」を「最小 Rust バージョン: 1.95」に更新する。
-- `.github/workflows/ci.yml` の冒頭コメント「MSRV 検証は含めない。crates 配下の crate が rust-version 1.95 を要求するため workspace 単位の 1.93 検証が構造的にできない」を、MSRV 1.95 と channel 1.95 が一致し、既存の CI が 1.95 で workspace をビルド・テストするため MSRV 1.95 が検証される旨に更新する。新しい CI ジョブは追加しない。
+- `rust-toolchain.toml` の `channel` は既に 1.95 なので変更しない。コメントは 1.93 前提を削除し、MSRV 1.95 と channel 1.95 を揃えていること、crates 配下の crate と e2e-tests が 1.95 を要求する理由 (QUIC バックエンドの s2n-quic / tobi-quic、moq-pub の raden) を示す内容に更新する。既存の「workspace の最大 rust-version を上げたら channel も同時に更新すること。」は残す。
+- `crates/README.md` の「Rust 1.95 以降が必要です (s2n-quic と、Windows 以外のビルドで使う tobi-quic の要求。ライブラリと pbt は 1.93 でビルドできます)。」を「Rust 1.95 以降が必要です (ライブラリの MSRV と、s2n-quic および Windows 以外のビルドで使う tobi-quic の要求)。」に更新する。ルート `README.md` は Rust のバージョンに言及していないため変更しない。
+- `skills/shiguredo-moqt/SKILL.md` の「最小 Rust バージョン: 1.93」を「最小 Rust バージョン: 1.95」に更新する。あわせて、同ファイルの既存の MD013 違反 (304 文字の `MsfTrack` の段落) を折り返し、`prek run --files` が通る状態にする。
+- `.github/workflows/ci.yml` の冒頭コメント「MSRV 検証は含めない。crates 配下の crate が rust-version 1.95 を要求するため workspace 単位の 1.93 検証が構造的にできない」を、MSRV 1.95 と channel 1.95 が一致し、既存の CI が `rust-toolchain.toml` の 1.95 で workspace をビルド・テストするため MSRV 1.95 が検証される旨に更新する。新しい CI ジョブは追加しない。
 - `fuzz` は独立 workspace で CI の `cargo test --workspace` の対象外であり、fuzz のビルド検証は CI では行わない。`fuzz/Cargo.toml` の `rust-version` を 1.95 にするのは宣言の整合のためであり、fuzz 用の CI ジョブは追加しない。
 - `CHANGES.md` にはエントリを追加しない (CODEBASE.md の「変更履歴を `CHANGES.md` に残さないこと」に従う)。
-- `issues/` 内の 1.93 への言及 (例: `issues/0300-draft-23-authority-ipv6-validation.md`) は別 issue の記述であり、本 issue では変更しない。必要な場合は refresh-issue で同期する。
+- `issues/` 配下 (open / closed) の 1.93 への言及 (例: `issues/closed/0300-draft-23-authority-ipv6-validation.md`) は別 issue の記述であり、本 issue では変更しない。必要な場合は refresh-issue で同期する。
 - CODEBASE.md の「Pull-Request やブランチを作らず develop にコミットしていくこと」「1 issue 1 commit 1 push」に従い、`Branch:` のブランチは作らず develop に直接コミットする。上記の変更は 1 コミットにまとめる。
+- CODEBASE.md の GitHub Actions 非対応方針は既存 workflow の維持を妨げない (リポジトリには既に 4 workflow があり、維持されている)。本 issue は既存 workflow のコメント更新のみで、新しい CI ジョブを追加しない。
 
 ## 完了条件
 
 - ルート `Cargo.toml`、`pbt/Cargo.toml`、`fuzz/Cargo.toml` の `rust-version` が 1.95 になっていること。
-- `rust-toolchain.toml` の `channel` が 1.95 のままで、コメントに 1.93 前提が残っていないこと。
-- `README.md` と `skills/shiguredo-moqt/SKILL.md` に 1.93 を前提とした記述が残っていないこと。
+- `rust-toolchain.toml` の `channel` が 1.95 のままで、コメントに 1.93 前提が残っておらず、「workspace の最大 rust-version を上げたら channel も同時に更新すること。」が残っていること。
+- `crates/README.md` と `skills/shiguredo-moqt/SKILL.md` に 1.93 を前提とした記述が残っていないこと (ルート `README.md` は Rust のバージョンに言及していない)。`skills/shiguredo-moqt/SKILL.md` の 304 文字の `MsfTrack` の段落が折り返されていること。
 - `.github/workflows/ci.yml` の冒頭コメントが、MSRV 1.95 と channel 1.95 の関係、および既存 CI が MSRV 1.95 を検証することを正しく説明していること。新しい CI ジョブが追加されていないこと。
-- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
-- `prek run --all-files` が通ること (markdownlint / tombi を含む)。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が macOS 上で通ること (crates 配下の crate が macOS 専用依存を持つため、Linux では workspace 全体をビルドできない)。
+- 変更したファイルを指定した `prek run --files` が通ること (markdownlint / tombi を含む)。`prek run --all-files` は本 issue と無関係な既存の markdownlint 違反 (`issues/0324-doc-docs-implementation-consistency.md` と `issues/0002-msf-draft-02-compression-signaling.md` の MD013) が残っている間は失敗するため、本 issue では新たな違反を増やさないこと。
+- `CHANGES.md` にエントリが追加されていないこと。
