@@ -3,7 +3,7 @@
 - Created: 2026-11-20
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-server-url-userinfo-debug-redaction
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-11-20
 
 ## 目的
 
@@ -28,8 +28,9 @@ RFC 3986 §3.2.1 は `user:password` 形式の userinfo を deprecated とし、
 - `authority` に `@` が含まれる場合、`@` より前 (userinfo) を実値で表示せず、`userinfo_bytes` のようなバイト長に置き換える。`@` より後ろ (host + port) は機密値でないため従来どおり表示する。
 - `authority` に `@` が含まれない場合は従来どおり実値を表示する。
 - 判別のための private ヘルパ (`authority_debug_fields` など) を追加し、`Debug` の実装から呼ぶ。`derive(Debug)` は使わない (既に独自実装である)。
-- `parse_url` の userinfo の扱い (受理するか拒否するか) は変えない。`parse_url` / `ServerUrl` の扱いを変えない方針は別 issue (`issues/0424-bug-msf-uri-userinfo.md`) にも明記されているため、本 issue は `Debug` の表示だけを対象にする。
+- `parse_url` の userinfo の扱い (受理するか拒否するか) は変えない。`parse_url` / `ServerUrl` の扱いを変えない方針は別 issue (`issues/0424-bug-msf-uri-userinfo.md`) にも明記されているため、本 issue は `Debug` の表示と、それに伴う doc コメントの更新だけを対象にする。
 - `crates/tokio-moq/README.md` の `ServerUrl` の `Debug` の説明に、userinfo を伏せることを追記する。
+- `crates/tokio-moq/src/lib.rs` の `ServerUrl` の doc コメントの `Debug` の説明を、authority の userinfo を伏せる実装に合わせて更新する。`ServerUrl::authority` の doc コメントにも、`parse_url` が返す値では userinfo (`user:password@host`) を含み得ることを追記する。
 
 ## 完了条件
 
@@ -39,4 +40,5 @@ RFC 3986 §3.2.1 は `user:password` 形式の userinfo を deprecated とし、
 - `MigrationTarget` と `ConnectParams` の `{:?}` でも同じ秘匿が通ること。
 - 上記を `crates/tokio-moq/src/lib.rs` の `#[cfg(test)] mod tests` に追加するテストで固定すること。
 - `crates/tokio-moq/README.md` の `ServerUrl` の `Debug` の説明が実装と一致すること。
+- `crates/tokio-moq/src/lib.rs` の `ServerUrl` と `ServerUrl::authority` の doc コメントが、上記の `Debug` の表示と `parse_url` が返す値を説明していること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
