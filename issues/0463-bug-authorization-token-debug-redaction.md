@@ -3,7 +3,7 @@
 - Created: 2026-11-20
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-authorization-token-debug-redaction
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-11-20
 
 ## 目的
 
@@ -17,9 +17,10 @@
 ## 現状
 
 - `src/message_parameter.rs` の `AuthorizationToken` は `#[derive(Debug, Clone, PartialEq)]` で、`Register` / `UseValue` が `token_value: Vec<u8>` を持つ。
-- `token_value` は draft-ietf-moq-transport-23 §9.1.4 (AUTHORIZATION TOKEN) の Token Value であり、種別固有のバイト列である。今後の C4M の認可トークン (CAT) のように、それ自体が認可情報になる値を想定している。
+- `token_value` は draft-ietf-moq-transport-23 §9.1.4 (AUTHORIZATION TOKEN) の Token Value であり、種別固有のバイト列である。C4M の認可トークン (CAT) のように、それ自体が認可情報になる値を想定している。
 - `src/parameter.rs` の `SetupOptionValue` と `SetupOption`、`SetupOptions` はすべて `#[derive(Debug)]` であり、内側の `AuthorizationToken` の `Debug` をそのまま使う。
-- `crates/tokio-moq/src/moqt_client.rs` の `panics` / `peer_setup_options` は `SetupOptions` を clone して返す公開 API であり、利用者側の `Debug` 出力に到達する。
+- `src/message_parameter.rs` の `MessageParameterValue` と `MessageParameters` も `#[derive(Debug)]` であり、同じ `AuthorizationToken` の `Debug` を通る。
+- `crates/tokio-moq/src/moqt_client.rs` の `MoqtClient::peer_setup_options` は `SetupOptions` を clone して `Option<SetupOptions>` として返し、`src/session/core.rs` の `Session::peer_setup_options` は `Option<&SetupOptions>` を返す公開 API であり、利用者側の `Debug` 出力に到達する。
 - 影響: 利用者のログ出力で認可トークンが漏れる。ライブラリ内には現時点で `SetupOptions` を `{:?}` で出力する箇所はないが、公開型であるため利用側の使い方に依存する。
 
 ## 設計方針
@@ -30,8 +31,8 @@
 - `REGISTER` / `USE_VALUE` は `token_type` を表示し、`token_value` は実値ではなく `token_value_bytes` としてバイト長を表示する。
 - variant 名は従来の `Debug` と同じ表記 (`Delete` / `Register` / `UseAlias` / `UseValue`) にし、利用者が構造を追えるようにする。
 - フィールドを追加したときに表示漏れをコンパイラが検出できるよう、`..` を使わずに全フィールドを分解してから `debug_struct` に渡す。
-- `SetupOptionValue` / `SetupOption` / `SetupOptions` は `derive(Debug)` のままでよい (内側の `AuthorizationToken` の独自 `Debug` を通るため、値は伏せられる)。
-- `token_value` の doc に、`Debug` が実値を表示しないことを明記する。
+- `SetupOptionValue` / `SetupOption` / `SetupOptions` と `MessageParameterValue` / `MessageParameter` / `MessageParameters` は `derive(Debug)` のままでよい (内側の `AuthorizationToken` の独自 `Debug` を通るため、値は伏せられる)。
+- `Register` と `UseValue` の `token_value` の doc に、`Debug` が実値を表示しないことを明記する。
 
 ## 完了条件
 
@@ -39,5 +40,5 @@
 - 伏せたフィールドはバイト長を表示し、`alias` と `token_type` は従来どおり表示されること。
 - `SetupOptions` に `AuthorizationToken` を積んだ `{:?}` でも、`token_value` の実値が含まれないこと。
 - `AuthorizationToken::Delete` と `AuthorizationToken::UseAlias` の `{:?}` が従来どおり `alias` を表示すること。
-- 上記を `src/message_parameter.rs` の `#[cfg(test)] mod tests` に追加するテストで固定すること。
+- 上記を `tests/test_message_parameter.rs` (`AuthorizationToken` の `Debug`) と `tests/test_parameter.rs` (`SetupOptions` の `Debug`) に追加するテストで固定すること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
