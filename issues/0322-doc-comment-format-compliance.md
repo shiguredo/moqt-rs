@@ -3,7 +3,7 @@
 - Created: 2026-10-19
 - Completed: {YYYY-MM-DD}
 - Branch: feature/update-doc-comment-format-compliance
-- Polished: 2026-10-20
+- Polished: 2026-11-20
 - Refreshed: 2026-11-04
 
 ## 目的
@@ -17,9 +17,9 @@ shiguredo-doc は全角半角の境界、半角括弧、中黒の扱いを定め
 
 ## 対象
 
-- `src/`, `tests/`, `pbt/`, `crates/` の `//` / `///` / `//!` コメント
-- `tests/`, `pbt/`, `src/` の `#[cfg(test)]` モジュールの panic / assert メッセージ
-  (`unreachable!` / `expect` / `assert!` など)
+- `src/`, `tests/`, `pbt/`, `crates/`, `e2e-tests/`, `fuzz/` の `//` / `///` / `//!` コメント
+- `tests/`, `pbt/`, `src/`, `crates/` のテストコード (`#[cfg(test)]` モジュールと
+  `crates/*/tests/`) の panic / assert メッセージ (`unreachable!` / `expect` / `assert!` など)
 - `docs/`, `skills/` の日本語文の全角半角境界、全角中黒、全角括弧
 - 対象外: 仕様の英語引用、`# Errors` などの rustdoc 見出し、コード例・表・コード断片、
   本体コードと `crates/` のログ / `println!` / `eprintln!` メッセージ、
@@ -27,27 +27,34 @@ shiguredo-doc は全角半角の境界、半角括弧、中黒の扱いを定め
 
 ## 現状
 
-- 英語のみのコメントが `tests/`, `pbt/`, `crates/` に多数ある。代表例:
-  `tests/test_track_properties.rs` の「delta=1 (odd type), length=10, but only 3 bytes of data」、
+- 英語のみのコメントが `src/`, `tests/`, `pbt/`, `crates/`, `fuzz/` に多数ある。代表例:
+  `src/stream.rs` の「Object Status: Normal」、
+  `tests/test_track_properties.rs` の「delta=1 (odd type), length=65536 (> 65535)」、
   `tests/test_message_parameter.rs` の「delta = 2 (type=0x02 - prev=0)」、
-  `crates/tokio-moq/src/webtransport_h2.rs` の「1. TCP + TLS」。
+  `crates/tokio-moq/src/webtransport_h2.rs` の「1. TCP + TLS」、
+  `fuzz/fuzz_targets/fuzz_decode_subgroup_object.rs` の「has_properties = false」。
   仕様の英語引用 (`draft-ietf-...` / `§...`) は対象外とする。
-- `tests/`, `pbt/`, `src/` の `#[cfg(test)]` モジュールの panic / assert メッセージにも
+- `tests/`, `pbt/`, `src/`, `crates/` のテストコードの panic / assert メッセージにも
   英語のみのものがある。代表例: `pbt/tests/prop_varint.rs` の
   `unreachable!("vi64 encoded length is always 1..=9")`、`src/session/types.rs` の
   `terminated_subscription_with_publish_done` テストの
-  `expect("terminated_subscription_with_publish_done must set publish_done")`。
-- 全角半角間のスペース欠落が `src/`, `tests/`, `pbt/`, `crates/`, `docs/`, `skills/` にある。
-  `・` と ASCII の間が 83 箇所、全角括弧と ASCII の間が 32 箇所
-  (2026-10-20 時点、`rg` で確認)。全角括弧は `src/` と `tests/` のコメントに 116 箇所あり、
-  半角 `()` に統一する。`src/message_parameter.rs` の `（EXPIRES=0 のとき）`、
-  `src/session/types.rs` の `§9.19.16（将来の draft で変更される可能性がある）` など。
+  `expect("terminated_subscription_with_publish_done must set publish_done")`、
+  `crates/moq-sub/src/pipeline.rs` のテストモジュールの
+  `expect("audio delivery order lock is not poisoned")`。
+- 全角半角間のスペース欠落が `src/`, `tests/`, `pbt/`, `crates/`, `e2e-tests/`, `fuzz/`,
+  `docs/`, `skills/` にある。`・` と ASCII の間はコメントに 141 箇所、`docs/` と
+  `skills/` に 37 箇所、全角括弧と ASCII の間は 32 箇所ある
+  (2026-11-20 時点、`rg` で確認)。全角括弧は `src/` と `tests/` のコメントに
+  112 箇所あり、半角 `()` に統一する。`src/message_parameter.rs` の
+  `（EXPIRES=0 のとき）`、`src/session/types.rs` の
+  `§9.19.16（将来の draft で変更される可能性がある）` など。
 - draft の changelog PR 番号 (`#1595`, `#1583`, `#1540`, `#1790`, `#1872`, `#1623`) が
-  `src/` と `tests/`, `pbt/` の 18 ファイルにある。`src/varint.rs`, `src/message.rs`,
+  `src/` と `tests/`, `pbt/` の 17 ファイルにある。`src/varint.rs`, `src/message.rs`,
   `src/message_parameter.rs`, `src/subgroup_tracker.rs` はその一部。
   `rg -n '#[0-9]{3,5}' src tests pbt` で全数を確認できる。
-- `crates/moq-pub/src/pipeline.rs` と `crates/moq-sub/src/pipeline.rs` に
-  「本 issue の対象外」というコメントがある。
+- `src/msf.rs` の「`inline` の Base64 検証は 0342 が担当する。」と、
+  `crates/moq-sub/src/pipeline.rs` の「0100 型の警告」 (4 箇所) は `#` を付けずに
+  issue 番号を書いている。`rg -n '#[0-9]{3,5}'` では検出できないため、個別に確認する。
 - 影響: 規約違反であり、draft の changelog PR 番号は draft の版が変わると辿れなくなる。
 
 ## 設計方針
@@ -63,9 +70,9 @@ shiguredo-doc は全角半角の境界、半角括弧、中黒の扱いを定め
   半角スラッシュ `/`、3 項以上は読点 `、` に置き換える。固有名詞内部の中黒は残し、ASCII との
   境界に半角スペースを入れる。`docs/` と `skills/` では、ASCII が隣接しない並列列挙の `・`
   も `/` または `、` に置き換える (`shiguredo-doc`)。
-- source コメントからこのリポジトリの issue 番号・issue パス・「本 issue」への言及を削除し、
-  理由そのもの (仕様の節番号・再現条件・設計意図) に置き換える。draft の changelog PR 番号は
-  draft の版が変わると辿れなくなるため削除し、
+- source コメントからこのリポジトリの issue 番号 (`#` の有無を問わない)・issue パス・
+  「本 issue」への言及を削除し、理由そのもの (仕様の節番号・再現条件・設計意図) に置き換える。
+  draft の changelog PR 番号は draft の版が変わると辿れなくなるため削除し、
   `draft-ietf-moq-transport-23 Appendix A.x (Since draft-ietf-moq-transport-y)` の形に置き換える。
   draft-23 の Appendix A.1 は "Since draft-ietf-moq-transport-22" であり、draft-22 以前の変更を指す
   A.x は draft-22 の対応する番号に 1 を足したものになる (例: draft-22 の A.3 は A.4)。
@@ -77,14 +84,21 @@ shiguredo-doc は全角半角の境界、半角括弧、中黒の扱いを定め
   (`"..."` と `draft-ietf-moq-transport-23 §...`) で残っていること。`# Errors` などの
   rustdoc 見出しは現行のままであること。
 - 対象のコメントに全角括弧・全角中黒・全角半角間のスペース欠落が無いこと。
-  `rg -n '//.*[（）]' src tests pbt crates`、
-  `rg -n '//.*[A-Za-z0-9]・|//.*・[A-Za-z0-9]' src tests pbt crates`、
+  `rg -n '//.*[（）]' src tests pbt crates e2e-tests fuzz`、
+  `rg -n '//.*[A-Za-z0-9]・|//.*・[A-Za-z0-9]' src tests pbt crates e2e-tests fuzz`、
   `rg -n '[A-Za-z0-9]・|・[A-Za-z0-9]' docs skills`、
   `rg -n '[（）]' docs skills` が 0 件であること。
-- docs/skills の並列列挙に `・` が無いこと (固有名詞内部を除く)。
+- docs/skills の並列列挙に `・` が無いこと (固有名詞内部とコード例・表・コード断片を除く)。
 - ソースコメント・テストコメントにこのリポジトリの issue 番号 / issue パス /
-  「本 issue」への言及が無いこと。draft の changelog PR 番号も無いこと。
-  `rg -n '//.*#[0-9]{3,5}|//.*本 issue|//.*issues/' src tests pbt crates` が 0 件であること。
+  「本 issue」への言及が無いこと (`#` の有無を問わない)。draft の changelog PR 番号も無いこと。
+  `rg -n '//.*#[0-9]{3,5}|//.*本 issue|//.*issues/' src tests pbt crates e2e-tests fuzz`
+  が 0 件であること。
+- `src/msf.rs` の `0342` と `crates/moq-sub/src/pipeline.rs` の `0100` (4 箇所) が
+  コメントから消えていること (`#` 無しの issue 番号)。
+- `crates/` のテストコードの panic / assert メッセージも日本語であること
+  (例: `crates/moq-sub/src/pipeline.rs` の
+  `expect("audio delivery order lock is not poisoned")`)。
 - 本体コードと `crates/` のログ / `println!` / `eprintln!` メッセージが英語のままであること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
-  `cargo fmt --all -- --check` が通ること。
+  `cargo fmt --all -- --check` が通ること (`fuzz/` は独立 workspace のため
+  `cargo test --workspace` の対象外であり、コメントのみの変更なのでビルド確認は不要)。
