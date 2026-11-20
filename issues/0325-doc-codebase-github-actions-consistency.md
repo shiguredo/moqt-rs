@@ -3,7 +3,7 @@
 - Created: 2026-10-19
 - Completed: {YYYY-MM-DD}
 - Branch: feature/update-codebase-github-actions-consistency
-- Polished: 2026-10-20
+- Polished: 2026-11-20
 
 ## 目的
 
@@ -28,7 +28,7 @@ CODEBASE.md は「この指示がなくなるまでは GitHub Actions 対応は�
   - `cd6c33f` / `f297e07` (2026-10-19): `ci-windows.yml` のビルド対象とジョブ名を更新する。
 - `e2e-tests/README.md` の「## CI」節は「`.github/workflows/e2e-test.yml` がこのテストを実行します。」と明記しており、workflow を前提にしている。
 - `docs/windows-audio.md` は「- Windows の CI はコンパイル確認のみで、実デバイスの実行をしない (`.github/workflows/ci-windows.yml`)。実マイクを使う手動 E2E の手順を用意する。」と明記しており、workflow を前提にしている。
-- 影響: `issues/0156-update-example-rustdoc-ci.md` は「なお `CODEBASE.md` は「この指示がなくなるまでは GitHub Actions 対応はしないこと」を定めており (2026-10-10 の整備で追記)、CI ジョブを追加する本 issue は現時点では着手できない。」と明記しており、非対応方針が実際に CI 追加作業を止めている。また、エージェントが既存 workflow を規約違反として削除する方向に判断するおそれがある。
+- 影響: `issues/pending/0156-update-example-rustdoc-ci.md` は「なお `CODEBASE.md` は「この指示がなくなるまでは GitHub Actions 対応はしないこと」を定めており (2026-10-10 の整備で追記)、CI ジョブを追加する本 issue は現時点では着手できない。」と明記しており、非対応方針が実際に CI 追加作業を止めている。また、エージェントが既存 workflow を規約違反として削除する方向に判断するおそれがある。
 
 ## 設計方針
 
@@ -49,4 +49,4 @@ CODEBASE.md は「この指示がなくなるまでは GitHub Actions 対応は�
 - ルート `README.md` と `skills/shiguredo-moqt/SKILL.md` が変更されておらず、GitHub Actions 非対応を前提とした記述がないこと。
 - CHANGES.md にエントリが追加されていないこと。
 - コミットメッセージが `整備` で、本文がないこと。
-- `prek run --all-files` が通ること (markdownlint を含む)。
+- `prek run --files CODEBASE.md` が通ること (markdownlint を含む)。`prek run --all-files` は本 issue の変更対象外の既存の markdownlint 違反 (2026-11-20 時点で `issues/0324-doc-docs-implementation-consistency.md` と `issues/0002-msf-draft-02-compression-signaling.md`) で失敗するため、本 issue では新たな違反を増やさないことを確認する。
