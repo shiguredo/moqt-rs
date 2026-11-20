@@ -3,11 +3,11 @@
 - Created: 2026-10-19
 - Completed: {YYYY-MM-DD}
 - Branch: feature/change-msf-timeline-number-type
-- Polished: 2026-10-21
+- Polished: 2026-11-21
 
 ## 目的
 
-MSF-01 §7.1.1 (Media Timeline) と §8.1 (Event Timeline)、§7.4.1 (Template) は時刻を JSON Number と規定する。
+draft-ietf-moq-msf-02 §7.1.1 (Explicit entry format) と §8.2 (Event Timeline data format)、§7.4.1 (Template Format) は時刻を JSON Number と規定する。
 §7.1.1 はメディア PTS を「floor in integral milliseconds」と定め、値が整数ミリ秒であることを要求するが、負値を禁じる記述はない。
 現行の `src/msf.rs` は `u64` と `parse_u64` で実装しており、整数値を持つ小数表記 (`2002.0`) と負のメディア PTS (`-1`) を拒否する。
 時刻フィールドについて、仕様が許す表現と実装の受理範囲を一致させ、契約を公開 doc とテストで固定する。公開型のフィールド型を変更する破壊的変更を含む。
@@ -17,16 +17,18 @@ MSF-01 §7.1.1 (Media Timeline) と §8.1 (Event Timeline)、§7.4.1 (Template) 
 - `parse_u64` は `nojson::RawJsonValue::as_integer_str()` で JSON の整数リテラルだけを受理し、`2002.0` や `2.002e3` のような整数値を持つ小数・指数表記を拒否する。負値 (`-1`) は `u64` への変換で拒否する。
 - Media Timeline の `pts_ms`、Event Timeline の `MsfEventIndex::MediaPtsMs`、Template の `start_media_time` / `delta_media_time` は `u64` である。
 - wallclock は `MsfMediaTimelineEntry::wallclock_ms`、`MsfEventIndex::WallclockMs`、`MsfTemplate::start_wallclock` / `delta_wallclock` のすべてが `u64` である。
-- §7.1.1 はメディア PTS を「floor in integral milliseconds」と規定する。§7.4.1 の `startMediaTime` は §7.1.1 の定義を参照し、`deltaMediaTime` は「JSON Number in milliseconds」である。§8.1 の `m` も §7.1 の定義を参照する。これらの値は整数ミリ秒でなければならないが、負値を禁じる記述はない。
-- wallclock は epoch からの経過ミリ秒であり、負値は意味を持たない。§7.1.1 は VOD や不明時に 0 を SHOULD とする。
+- §7.1.1 はメディア PTS を「floor in integral milliseconds」と規定する。§7.4.1 の `startMediaTime` は §7.1.1 の定義を参照し、`deltaMediaTime` は「JSON Number in milliseconds」である。§8.2 の `M` も §7.1 の定義を参照する。これらの値は整数ミリ秒でなければならないが、負値を禁じる記述はない。
+- wallclock は §11.6 (Wallclock time) で epoch からの経過ミリ秒と定義され、負値は意味を持たない。§7.1.1 は VOD や不明時に 0 を SHOULD とする。
 - `MsfMediaTimelineEntry::pts_ms` / `wallclock_ms`、`MsfEventIndex`、`MsfTemplate` の公開 doc は型と単位を示すだけで、受理範囲と表現を明記していない。
-- `docs/msf.md` は `[[pts_ms, [group_id, object_id], wallclock_ms], ...]` 形式を示すだけで、受理する数値の範囲と表現を明記していない。
-- `tests/test_msf` には `2002.0` / `-1` / 範囲外の受理・拒否を固定するテストがない。`pbt/tests/prop_msf.rs` と `fuzz/fuzz_targets/fuzz_msf_template.rs` はメディア時刻を `u64` として生成している。
+- `src/msf.rs` の Timeline 関連 doc・コメントと `tests/test_msf/event_timeline.rs` のコメントは `draft-ietf-moq-msf-02 §8.1 (Event Timeline data format)` としているが、v02 の Event Timeline data format は §8.2 であり、この節番号も本 issue で修正する。
+- `docs/msf.md` は `[[pts_ms, [group_id, object_id], wallclock_ms], ...]` 形式と pts_ms の非降順を示すだけで、受理する数値の範囲と表現を明記していない。
+- `tests/test_msf` には decode の入力について `2002.0` / `-1` / `i64` / `u64` の範囲外の受理・拒否を固定するテストがない。`resolve_entry` の計算結果の overflow を確認するテストは `tests/test_msf/template.rs` にあるが、decode の数値範囲は未固定である。`pbt/tests/prop_msf.rs` と `fuzz/fuzz_targets/fuzz_msf_template.rs` はメディア時刻を `u64` として生成している。
 - 影響: 仕様に適合する `2002.0` を送る実装を decode できず、負のメディア PTS を送る実装と相互運用できない。逆に、非整数値 (`2002.5`) を受理すると、§7.1.1 の「floor in integral milliseconds」に反する値を通してしまう。公開型のフィールド型が変わるため、`MsfMediaTimelineEntry` / `MsfEventIndex` / `MsfTemplate` を構築する利用側には破壊的変更になる。
 
 ## 設計方針
 
-- メディア PTS を非負整数に限定する案は、仕様にない制限を残すため採用しない。メディア時刻は負値を許す `i64` とし、wallclock は epoch からの経過ミリ秒、Location の ID は MOQT varint のため `u64` とする。`deltaMediaTime` はメディア PTS の間隔、`deltaWallclock` は epoch ミリ秒の増加間隔として同じ型に従う。
+- メディア PTS を非負整数に限定する案は、仕様にない制限を残すため採用しない。メディア時刻は負値を許す `i64` とし、wallclock は §11.6 の epoch からの経過ミリ秒、Location の ID は MOQT varint のため `u64` とする。`deltaMediaTime` はメディア PTS の間隔として `i64` に従う。
+- `deltaWallclock` は §7.4.1 が「constant interval」と定めるだけで負値を明示的に禁じていないが、wallclock は epoch からの経過ミリ秒で、メディア時刻の増加に伴い増加する系列を表すため `u64` とする。
 - メディア時刻 (PTS) とその間隔を表すフィールドを `i64` にする:
   - `MsfMediaTimelineEntry::pts_ms`
   - `MsfEventIndex::MediaPtsMs`
@@ -56,9 +58,9 @@ MSF-01 §7.1.1 (Media Timeline) と §8.1 (Event Timeline)、§7.4.1 (Template) 
 
 ## 変更対象
 
-- `src/msf.rs` (型定義、decode の数値パーサ、`MsfTemplate::resolve_entry`、公開 doc)
+- `src/msf.rs` (型定義、decode の数値パーサ、`MsfTemplate::resolve_entry`、公開 doc・コメント)
 - `docs/msf.md`
-- `tests/test_msf/media_timeline.rs` / `tests/test_msf/event_timeline.rs` / `tests/test_msf/template.rs` / `tests/test_msf/error_cases.rs` (境界値と受理・拒否のテスト)
+- `tests/test_msf/media_timeline.rs` / `tests/test_msf/event_timeline.rs` / `tests/test_msf/template.rs` / `tests/test_msf/error_cases.rs` (境界値と受理・拒否のテスト。既存の型に関するコメントと `u64::MAX` を使う media 系列の overflow テストを新しい型に合わせる)
 - `tests/test_msf/timeline_gzip.rs` (`pts_ms` の型に合わせる)
 - `pbt/tests/prop_msf.rs` (生成器の型)
 - `fuzz/fuzz_targets/fuzz_msf_template.rs` (入力型)
@@ -72,11 +74,11 @@ MSF-01 §7.1.1 (Media Timeline) と §8.1 (Event Timeline)、§7.4.1 (Template) 
   - メディア PTS の `-1`, `-1.0`, `i64::MIN`, `i64::MAX` を受理し、`i64::MIN - 1`, `i64::MAX + 1` を拒否する。
   - `9223372036854775807.0` (i64::MAX の小数表記) と `18446744073709551615.0` (u64::MAX の小数表記) を受理する (f64 を経由しないことの確認)。
   - `deltaMediaTime` の `-2002` を受理し、`resolve_entry(1)` が `startMediaTime - 2002` を返す。
-  - wallclock の `0`, `0.0`, `u64::MAX` を受理し、`-1`, `u64::MAX + 1` を拒否する。
+  - wallclock の `0`, `0.0`, `u64::MAX` を受理し、`-1`, `u64::MAX + 1` を拒否する。`deltaWallclock` の `-1` も拒否する。
 - `MsfTemplate::resolve_entry` が `n = u64::MAX` で全系列が範囲内なら `Some`、いずれかが範囲外なら `None` を返すテストがあること。
 - decode した `2002.0` を encode すると `2002` になるテストがあること。
-- Location の ID とカタログの `generatedAt` など、本 issue の対象外の `parse_u64` 利用箇所の受理範囲が変わっていないこと。
-- `docs/msf.md` と公開 doc に受理範囲・表現・負値の扱いが明記されていること。
+- Location の ID とカタログの `generatedAt` など、本 issue の対象外の `parse_u64` 利用箇所の受理範囲が変わっていないこと。Location の ID に `0.0` を渡すと拒否され、`0` は受理されるテストを含む。
+- `docs/msf.md` と公開 doc に受理範囲・表現・負値の扱いが明記され、`src/msf.rs` の Timeline 関連 doc・コメントと `tests/test_msf/event_timeline.rs` の §8.1 (Event Timeline data format) 参照が §8.2 に修正されていること。
 - `pbt/tests/prop_msf.rs` と `fuzz/fuzz_targets/fuzz_msf_template.rs` が新しい型でコンパイルできること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
 - `cargo build -p shiguredo_moqt --target thumbv7em-none-eabihf` と `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` が通ること (no_std と公開 doc の維持)。
