@@ -420,7 +420,7 @@ fn cwt_dpop_does_not_use_draft_key3_thumbprint() {
     // key 3 だけの cnf は MissingThumbprint で拒否する
     let token = cwt_cat_token(
         Some(Confirmation {
-            c4m_draft_jwk_thumbprint: Some(cwt_jkt(&es256_public_key())),
+            confirmation_key_3: Some(cwt_jkt(&es256_public_key())),
             ..Confirmation::default()
         }),
         Some(CatDpop::new(300.0, false)),
@@ -450,7 +450,7 @@ fn cwt_dpop_does_not_use_draft_key3_thumbprint() {
     let token = cwt_cat_token(
         Some(Confirmation {
             cose_key_thumbprint: Some(cwt_ckt(&es256_public_key())),
-            c4m_draft_jwk_thumbprint: Some(vec![0x5c; 32]),
+            confirmation_key_3: Some(vec![0x5c; 32]),
             ..Confirmation::default()
         }),
         Some(CatDpop::new(300.0, false)),

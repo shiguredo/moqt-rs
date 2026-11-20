@@ -66,14 +66,60 @@ struct GeneratedContext {
     duplicate: bool,
 }
 
+/// resource 検証の action の分類 (モデル側)
+///
+/// draft-ietf-moq-c4m-01 §3.1.3 の action 別の resource 形式を、実装とは別に列挙する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResourceModelKind {
+    /// SETUP。authority だけの形式を検証する
+    Setup,
+    /// namespace 操作。`tns` を必須とし、`tn` は両方にある場合だけ比較する
+    Namespace,
+    /// track 操作。`tns` を必須とし、actx に `tn` があれば `tn` も必須とする
+    Track,
+}
+
+/// action を resource 検証の分類へ変換するモデル
+fn resource_model_kind(action: MoqtAction) -> ResourceModelKind {
+    match action {
+        MoqtAction::Setup => ResourceModelKind::Setup,
+        MoqtAction::PublishNamespace
+        | MoqtAction::SubscribeNamespace
+        | MoqtAction::SubscribeTracks => ResourceModelKind::Namespace,
+        MoqtAction::Subscribe
+        | MoqtAction::RequestUpdate
+        | MoqtAction::Publish
+        | MoqtAction::Fetch
+        | MoqtAction::TrackStatus => ResourceModelKind::Track,
+    }
+}
+
 /// 仕様 (draft-ietf-moq-c4m-01 §3.1.2 / §3.1.3) の規則で `resource` の整合を判定するモデル
 ///
 /// `verify_resource_consistency` と同じく、クエリを文字列として分割し、
-/// パーセントエンコーディングは解釈しない。
-fn resource_consistent(resource: &Option<String>, tns: &str, tn: &Option<String>) -> bool {
+/// パーセントエンコーディングは解釈しない。SETUP は `moqt://<authority>` の形式だけを
+/// 検証し、namespace と track 操作はクエリの `tns` / `tn` を検証する。
+fn resource_consistent(
+    action: MoqtAction,
+    resource: &Option<String>,
+    tns: &str,
+    tn: &Option<String>,
+) -> bool {
     let Some(resource) = resource else {
         return true;
     };
+    let kind = resource_model_kind(action);
+    if kind == ResourceModelKind::Setup {
+        let Some(authority) = resource.strip_prefix("moqt://") else {
+            return false;
+        };
+        return !authority.is_empty()
+            && !authority.chars().any(|character| {
+                character.is_whitespace()
+                    || character.is_control()
+                    || matches!(character, '?' | '#' | '/' | '@')
+            });
+    }
     let query = resource.split_once('?').map_or("", |(_, query)| query);
     let mut parsed_tns = None;
     let mut parsed_tn = None;
@@ -87,9 +133,14 @@ fn resource_consistent(resource: &Option<String>, tns: &str, tn: &Option<String>
     if parsed_tns != Some(tns) {
         return false;
     }
-    match tn {
-        Some(tn) => parsed_tn == Some(tn.as_str()),
-        None => true,
+    let Some(tn) = tn else {
+        return true;
+    };
+    match parsed_tn {
+        Some(parsed_tn) => parsed_tn == tn.as_str(),
+        // actx に tn がありクエリに無い場合、namespace 操作では比較を省略し、
+        // track 操作では整合しない (§3.1.3 の namespace 形式は tn を持たない)
+        None => kind == ResourceModelKind::Namespace,
     }
 }
 
@@ -127,22 +178,71 @@ fn sample_authorization_context(
         1 => Some(sample_safe_text(ctx, 8)),
         _ => None,
     };
-    // 整合する resource / 順序と追加パラメータを変えた resource / クエリ無し /
-    // 破損した resource / resource 無しを生成する
-    let resource = match noprop::sample_weighted_index(ctx, &[3, 3, 1, 1, 2]) {
-        0 => {
+    // action に応じた resource の形式と、整合する / しないケースを生成する
+    let resource = match resource_model_kind(action) {
+        ResourceModelKind::Setup => match noprop::sample_weighted_index(ctx, &[3, 1, 3]) {
+            // §3.1.3 の SETUP 用 resource。tns / tn は比較しない
+            0 => Some(String::from("moqt://relay.example")),
+            // resource は任意
+            1 => None,
+            // SETUP の resource として不正な形式
+            _ => {
+                let garbage = sample_safe_text(ctx, 12);
+                Some(noprop::sample_choice(
+                    ctx,
+                    &[
+                        String::from("https://relay.example"),
+                        String::from("MOQT://relay.example"),
+                        String::from("moqt://"),
+                        String::from("moqt://relay.example?tns=example.2ecom"),
+                        String::from("moqt://relay.example#fragment"),
+                        String::from("moqt://relay.example/path"),
+                        String::from("moqt://user@relay.example"),
+                        String::from("moqt://relay example"),
+                        String::from("moqt://relay.example\u{7f}"),
+                        garbage,
+                    ],
+                ))
+            }
+        },
+        ResourceModelKind::Namespace => {
             let tn = tn_value.clone().unwrap_or_default();
-            Some(format!("moqt://relay.example?tns={tns_value}&tn={tn}"))
+            match noprop::sample_weighted_index(ctx, &[3, 3, 1, 1, 2]) {
+                // §3.1.3 の namespace 形式 (クエリに tn を持たない)
+                0 => Some(format!("moqt://relay.example?tns={tns_value}")),
+                // 順序と追加パラメータを変えた形式。actx に tn がある場合だけ比較される
+                1 => Some(format!(
+                    "moqt://relay.example?extra=1&tn={tn}&tns={tns_value}"
+                )),
+                // tns が一致しない
+                2 => Some(format!(
+                    "moqt://relay.example?tns={}&tn={tn}",
+                    sample_safe_text(ctx, 8)
+                )),
+                // クエリ無し (tns が無いため整合しない)
+                3 => Some(String::from("moqt://relay.example")),
+                _ => None,
+            }
         }
-        1 => {
+        ResourceModelKind::Track => {
             let tn = tn_value.clone().unwrap_or_default();
-            Some(format!(
-                "moqt://relay.example?extra=1&tn={tn}&tns={tns_value}"
-            ))
+            match noprop::sample_weighted_index(ctx, &[3, 3, 1, 1, 2]) {
+                // tns と tn が一致する
+                0 => Some(format!("moqt://relay.example?tns={tns_value}&tn={tn}")),
+                // 順序と追加パラメータを変えた一致
+                1 => Some(format!(
+                    "moqt://relay.example?extra=1&tn={tn}&tns={tns_value}"
+                )),
+                // tn が無い。actx に tn がある場合は整合しない
+                2 => Some(format!("moqt://relay.example?tns={tns_value}")),
+                // tn が一致しない
+                3 => Some(format!(
+                    "moqt://relay.example?tns={tns_value}&tn={}",
+                    sample_safe_text(ctx, 8)
+                )),
+                _ => None,
+            }
         }
-        2 => Some(String::from("moqt://relay.example")),
-        3 => Some(sample_safe_text(ctx, 12)),
-        _ => None,
     };
     // 重複メンバーはデコード自体を失敗させる
     let duplicate = noprop::sample_ratio(ctx, noprop::Ratio::one_nth(8));
@@ -173,7 +273,8 @@ fn sample_authorization_context(
 
 /// `verify_authorization_context` の判定を仕様から導くモデル
 ///
-/// 検証の順序 (type / action / resource / target) も実装と同じにする。
+/// 検証の順序 (type / action / resource / target) も実装と同じにする。SETUP では
+/// target を比較せず、actx の `tn` の存在だけを要求する。
 fn expected_authorization_context_error(
     context: &GeneratedContext,
     action: MoqtAction,
@@ -186,8 +287,21 @@ fn expected_authorization_context_error(
     if Some(context.action_value.as_str()) != action.authorization_context() {
         return Some(DpopError::ActionMismatch);
     }
-    if !resource_consistent(&context.resource, &context.tns_value, &context.tn_value) {
+    if !resource_consistent(
+        action,
+        &context.resource,
+        &context.tns_value,
+        &context.tn_value,
+    ) {
         return Some(DpopError::ResourceInconsistent);
+    }
+    // SETUP には track が無いため target と比較しない。actx の `tn` だけを必須とする
+    if action == MoqtAction::Setup {
+        return if context.tn_value.is_some() {
+            None
+        } else {
+            Some(DpopError::MissingTrackName)
+        };
     }
     if context.tns_value != name::serialize_namespace(namespace) {
         return Some(DpopError::TargetMismatch);
@@ -346,6 +460,7 @@ fn authorization_context_matches_model() -> noprop::TestResult {
         );
 
         let expected_resource = if resource_consistent(
+            action,
             &generated.resource,
             &generated.tns_value,
             &generated.tn_value,
@@ -355,9 +470,9 @@ fn authorization_context_matches_model() -> noprop::TestResult {
             Err(DpopError::ResourceInconsistent)
         };
         assert_eq!(
-            context.verify_resource_consistency(),
+            context.verify_resource_consistency(action),
             expected_resource,
-            "resource の検証がモデルと一致しない: generated={generated:?}"
+            "resource の検証がモデルと一致しない: generated={generated:?} action={action:?}"
         );
 
         // 到達した分岐を数える
@@ -890,22 +1005,36 @@ fn proof_freshness_matches_model() -> noprop::TestResult {
 enum ReplayResult {
     /// 記録した
     Recorded,
-    /// 同じ jti がウィンドウ内にあった
+    /// 同じ jti が保持期間内にあった
     Replayed,
+    /// ウィンドウがキャッシュの最大ウィンドウを超えた
+    ReplayWindowTooLarge,
+    /// ウィンドウが負である
+    InvalidFreshnessWindow,
     /// 数値が有限でない
     NonFinite,
     /// 想定していないエラー
     Other,
 }
 
-/// リプレイキャッシュのモデル (保持期間と重複の規則を独立に実装する)
-#[derive(Debug, Default)]
+/// リプレイキャッシュのモデル (最大ウィンドウによる保持期間と重複の規則を独立に実装する)
+#[derive(Debug)]
 struct ReplayModel {
-    /// 記録した (jti, iat) の一覧
+    /// 構築時に固定した最大ウィンドウ (秒)
+    max_window_seconds: f64,
+    /// 記録した (jti, 保持期限) の一覧
     entries: Vec<(String, f64)>,
 }
 
 impl ReplayModel {
+    /// モデルを作る
+    fn new(max_window_seconds: f64) -> Self {
+        Self {
+            max_window_seconds,
+            entries: Vec::new(),
+        }
+    }
+
     /// 仕様どおりに確認して記録する
     fn check_and_record(
         &mut self,
@@ -920,13 +1049,23 @@ impl ReplayModel {
         {
             return ReplayResult::NonFinite;
         }
-        // ウィンドウ外の記録は参照時刻で破棄する
+        if window_seconds < 0.0 {
+            return ReplayResult::InvalidFreshnessWindow;
+        }
+        if window_seconds > self.max_window_seconds {
+            return ReplayResult::ReplayWindowTooLarge;
+        }
+        let retain_until = issued_at + self.max_window_seconds;
+        if !retain_until.is_finite() {
+            return ReplayResult::NonFinite;
+        }
+        // 保持期限 (`iat` + 最大ウィンドウ) を超えた記録だけを参照時刻で破棄する
         self.entries
-            .retain(|(_, recorded_at)| reference_time_seconds - recorded_at <= window_seconds);
+            .retain(|(_, retain_until)| reference_time_seconds <= *retain_until);
         if self.entries.iter().any(|(recorded, _)| recorded == jti) {
             return ReplayResult::Replayed;
         }
-        self.entries.push((String::from(jti), issued_at));
+        self.entries.push((String::from(jti), retain_until));
         ReplayResult::Recorded
     }
 }
@@ -936,12 +1075,17 @@ impl ReplayModel {
 fn replay_cache_matches_model() -> noprop::TestResult {
     let recorded_seen = std::cell::Cell::new(0usize);
     let replayed_seen = std::cell::Cell::new(0usize);
+    let too_large_seen = std::cell::Cell::new(0usize);
+    let invalid_window_seen = std::cell::Cell::new(0usize);
     let non_finite_seen = std::cell::Cell::new(0usize);
     let pruned_seen = std::cell::Cell::new(0usize);
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
-        let mut cache = DpopReplayCache::new();
-        let mut model = ReplayModel::default();
+        let max_window_seconds = noprop::sample_choice(ctx, &[1.0, 10.0, 100.0, 300.0]);
+        let mut cache = DpopReplayCache::with_max_window(max_window_seconds)
+            .expect("テストフィクスチャの最大ウィンドウは正");
+        assert_eq!(cache.max_window_seconds(), max_window_seconds);
+        let mut model = ReplayModel::new(max_window_seconds);
         assert!(cache.is_empty(), "新しいキャッシュは空");
         // jti の衝突を起こすため、少数のプールから選ぶ
         let pool: Vec<String> = (0..3).map(|_| sample_safe_text(ctx, 4)).collect();
@@ -959,11 +1103,20 @@ fn replay_cache_matches_model() -> noprop::TestResult {
                 noprop::Ratio::one_nth(3),
                 |ctx| noprop::sample_f64_in(ctx, -100.0, 100.0),
             );
+            // 最大ウィンドウと等しい値、超える値、負の値、非有限値を生成する
             let window = noprop::sample_with_boundaries(
                 ctx,
-                &[0.0, 1.0, 10.0, 100.0, f64::NAN, f64::INFINITY],
+                &[
+                    0.0,
+                    1.0,
+                    max_window_seconds,
+                    max_window_seconds + 1.0,
+                    -1.0,
+                    f64::NAN,
+                    f64::INFINITY,
+                ],
                 noprop::Ratio::one_nth(3),
-                |ctx| noprop::sample_f64_in(ctx, 0.0, 100.0),
+                |ctx| noprop::sample_f64_in(ctx, 0.0, max_window_seconds),
             );
             reference += noprop::sample_f64_in(ctx, 0.0, 30.0);
             let reference_now = if noprop::sample_ratio(ctx, noprop::Ratio::one_nth(8)) {
@@ -977,31 +1130,42 @@ fn replay_cache_matches_model() -> noprop::TestResult {
             let actual = match cache.check_and_record(&jti, issued_at, window, reference_now) {
                 Ok(()) => ReplayResult::Recorded,
                 Err(DpopError::Replayed) => ReplayResult::Replayed,
+                Err(DpopError::ReplayWindowTooLarge) => ReplayResult::ReplayWindowTooLarge,
+                Err(DpopError::InvalidFreshnessWindow) => ReplayResult::InvalidFreshnessWindow,
                 Err(DpopError::NonFiniteNumber(_)) => ReplayResult::NonFinite,
                 Err(_) => ReplayResult::Other,
             };
             assert_eq!(
                 actual, expected,
-                "判定がモデルと一致しない: jti={jti} iat={issued_at} window={window} reference={reference_now}"
+                "判定がモデルと一致しない: jti={jti} iat={issued_at} window={window} \
+                 reference={reference_now} max={max_window_seconds}"
             );
             assert_eq!(
                 cache.len(),
                 model.entries.len(),
-                "記録数がモデルと一致しない: jti={jti} iat={issued_at} window={window} reference={reference_now}"
+                "記録数がモデルと一致しない: jti={jti} iat={issued_at} window={window} \
+                 reference={reference_now} max={max_window_seconds}"
             );
-            assert_eq!(cache.is_empty(), model.entries.is_empty(), "空判定が一致しない");
+            assert_eq!(
+                cache.is_empty(),
+                model.entries.is_empty(),
+                "空判定が一致しない"
+            );
+            if model.entries.len() < before {
+                pruned_seen.set(pruned_seen.get() + 1);
+            }
             match expected {
                 ReplayResult::Recorded => {
                     recorded_seen.set(recorded_seen.get() + 1);
-                    if model.entries.len() < before {
-                        pruned_seen.set(pruned_seen.get() + 1);
-                    }
                 }
                 ReplayResult::Replayed => {
                     replayed_seen.set(replayed_seen.get() + 1);
-                    if model.entries.len() < before {
-                        pruned_seen.set(pruned_seen.get() + 1);
-                    }
+                }
+                ReplayResult::ReplayWindowTooLarge => {
+                    too_large_seen.set(too_large_seen.get() + 1);
+                }
+                ReplayResult::InvalidFreshnessWindow => {
+                    invalid_window_seen.set(invalid_window_seen.get() + 1);
                 }
                 ReplayResult::NonFinite => {
                     non_finite_seen.set(non_finite_seen.get() + 1);
@@ -1021,12 +1185,20 @@ fn replay_cache_matches_model() -> noprop::TestResult {
         "リプレイと判定されるケースが生成されなかった\n{runner}"
     );
     assert!(
+        too_large_seen.get() > 0,
+        "最大ウィンドウを超えるケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        invalid_window_seen.get() > 0,
+        "負のウィンドウのケースが生成されなかった\n{runner}"
+    );
+    assert!(
         non_finite_seen.get() > 0,
         "非有限値のケースが生成されなかった\n{runner}"
     );
     assert!(
         pruned_seen.get() > 0,
-        "ウィンドウ外の記録が破棄されるケースが生成されなかった\n{runner}"
+        "保持期限を過ぎた記録が破棄されるケースが生成されなかった\n{runner}"
     );
     Ok(())
 }

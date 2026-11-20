@@ -1335,7 +1335,7 @@ fn cnf_binding_requires_every_present_thumbprint_to_match() {
     let confirmation = Confirmation {
         jwk_thumbprint: Some(jkt.clone()),
         cose_key_thumbprint: Some(ckt.clone()),
-        c4m_draft_jwk_thumbprint: None,
+        confirmation_key_3: None,
         raw: Vec::new(),
     };
     proof
@@ -1444,7 +1444,7 @@ fn cnf_binding_rejects_unknown_confirmation_methods() {
 
     // ドラフトのベクタが jkt に使う key 3 は、この API の認可の根拠にしない
     let confirmation = Confirmation {
-        c4m_draft_jwk_thumbprint: Some(jkt),
+        confirmation_key_3: Some(jkt),
         ..Confirmation::default()
     };
     assert_eq!(

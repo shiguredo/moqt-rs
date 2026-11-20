@@ -30,7 +30,8 @@ use super::MoqtAction;
 use super::base64url;
 use super::cat::{
     CLAIM_CONFIRMATION, CLAIM_CWT_ID, CLAIM_ISSUED_AT, CONFIRMATION_COSE_KEY, CatClaims, CatError,
-    CatReplay, CatToken, ClaimValidationOptions, Confirmation, VerifyOptions,
+    CatReplay, CatToken, ClaimValidationOptions, Confirmation, ConfirmationKey3Interpretation,
+    VerifyOptions,
 };
 use super::cbor::{self, CborError, Value};
 use super::cose::{Algorithm, CoseEncodingOptions, CoseError, CoseMessage, CoseSign1, Header};
@@ -45,6 +46,13 @@ pub const DPOP_PROOF_JWT_TYPE: &str = "dpop-proof+jwt";
 
 /// CWT 形式の DPoP proof の `typ` (draft-ietf-moq-c4m-02 §4.2)
 pub const DPOP_PROOF_CWT_TYPE: &str = "dpop-proof+cwt";
+
+/// [`DpopReplayCache`] の既定の最大ウィンドウ (秒)
+///
+/// draft-ietf-moq-c4m-01 §3.1.1 の `catdpop` の例と同じ 300 秒である。主体がこれより
+/// 長い `catdpop` ウィンドウの proof を受け入れる場合は
+/// [`DpopReplayCache::with_max_window`] でより大きい値を設定したキャッシュを使う。
+pub const DEFAULT_MAX_WINDOW_SECONDS: f64 = 300.0;
 
 /// MOQT の Authorization Context の `type` (draft-nandakumar-moq-generic-dpop-proof-00 §5.1)
 pub const MOQT_AUTHORIZATION_CONTEXT_TYPE: &str = "moqt";
@@ -165,41 +173,165 @@ impl AuthorizationContext {
         Ok(())
     }
 
-    /// `resource` が指定されている場合に `tns` / `tn` と整合するかどうかを検証する
+    /// `resource` が指定されている場合に action に応じた形式と `tns` / `tn` の整合を検証する
     ///
-    /// `resource` は `moqt://<relay-endpoint>?tns=<namespace>&tn=<track>` の形式
-    /// (旧 draft-ietf-moq-c4m-01 §3.1.3) を前提とし、クエリパラメータを文字列として
-    /// 比較する。パーセントエンコーディングは解釈しない。
+    /// resource の形式は draft-ietf-moq-c4m-01 §3.1.3 の action 別の定義に従う。
     ///
-    /// §3.1.3 が挙げる接続確立時の `moqt://<relay-endpoint>` (クエリ無し) は
-    /// `tns` を持たないため、この関数は整合しないものとして拒否する (fail-closed)。
-    pub fn verify_resource_consistency(&self) -> Result<(), DpopError> {
+    /// - SETUP ([`MoqtAction::Setup`]): `moqt://<relay-endpoint>` だけを受理する。
+    ///   `moqt://` (小文字) に続く authority が空でなく、クエリ (`?`)、フラグメント
+    ///   (`#`)、パス (`/`)、userinfo (`@`)、空白、制御文字を含まないことを検証する。
+    ///   `tns` / `tn` は比較しない
+    /// - namespace 操作 ([`MoqtAction::PublishNamespace`] /
+    ///   [`MoqtAction::SubscribeNamespace`] / [`MoqtAction::SubscribeTracks`]):
+    ///   クエリの `tns` と actx の `tns` の一致を要求する。actx に `tn` があり、
+    ///   クエリにも `tn` がある場合だけ `tn` の一致を要求する
+    /// - track 操作 ([`MoqtAction::Subscribe`] / [`MoqtAction::RequestUpdate`] /
+    ///   [`MoqtAction::Publish`] / [`MoqtAction::Fetch`] / [`MoqtAction::TrackStatus`]):
+    ///   クエリの `tns` と actx の `tns` の一致を要求し、actx に `tn` がある場合は
+    ///   クエリの `tn` の一致も要求する。actx に `tn` が無い場合は `tn` を比較せず、
+    ///   後段の [`AuthorizationContext::verify_target`] が
+    ///   [`DpopError::MissingTrackName`] で拒否する
+    ///
+    /// `resource` が無い場合は受理する (任意)。クエリパラメータの重複は現行どおり
+    /// 最後の値を使う。パーセントエンコーディングは解釈しない。endpoint の値
+    /// (host / port) が接続先と一致することや、authority の完全な RFC 3986 検証は
+    /// 行わない。resource の値は proof のクレームとして保持されるため、接続先と
+    /// 比較する必要がある利用側は [`AuthorizationContext::resource`] を自分で確認すること。
+    ///
+    /// §3.1.2 は resource が `tns` / `tn` と一致することを MUST とするが、§3.1.3 の
+    /// SETUP と namespace 操作の resource 形式には比較対象のパラメータが無い。本実装は
+    /// §3.1.3 の action 別形式を優先し、resource に無いパラメータは比較しない。
+    pub fn verify_resource_consistency(&self, action: MoqtAction) -> Result<(), DpopError> {
         let Some(resource) = &self.resource else {
             return Ok(());
         };
-        let query = resource
-            .split_once('?')
-            .map(|(_, query)| query)
-            .unwrap_or("");
-        let mut tns = None;
-        let mut tn = None;
-        for pair in query.split('&') {
-            match pair.split_once('=') {
-                Some(("tns", value)) => tns = Some(value),
-                Some(("tn", value)) => tn = Some(value),
-                _ => {}
+        match resource_target_kind(action) {
+            ResourceTargetKind::Setup => verify_setup_resource(resource),
+            ResourceTargetKind::Namespace => {
+                verify_resource_prefix(resource)?;
+                let (tns, tn) = resource_query_parameters(resource);
+                if tns != Some(self.track_namespace.as_str()) {
+                    return Err(DpopError::ResourceInconsistent);
+                }
+                // §3.1.3 の namespace 操作の resource は `tn` を持たない。actx と
+                // クエリの両方に `tn` がある場合だけ比較し、片方にしか無い場合は
+                // 比較しない
+                if let (Some(expected), Some(actual)) = (&self.track_name, tn)
+                    && expected != actual
+                {
+                    return Err(DpopError::ResourceInconsistent);
+                }
+                Ok(())
+            }
+            ResourceTargetKind::Track => {
+                verify_resource_prefix(resource)?;
+                let (tns, tn) = resource_query_parameters(resource);
+                if tns != Some(self.track_namespace.as_str()) {
+                    return Err(DpopError::ResourceInconsistent);
+                }
+                // track 操作の resource は actx の `tn` と一致しなければならない。
+                // actx に `tn` が無い場合はここでは比較せず、verify_target が
+                // MissingTrackName で拒否する
+                if let Some(expected) = &self.track_name
+                    && tn != Some(expected.as_str())
+                {
+                    return Err(DpopError::ResourceInconsistent);
+                }
+                Ok(())
             }
         }
-        if tns != Some(self.track_namespace.as_str()) {
-            return Err(DpopError::ResourceInconsistent);
-        }
-        if let Some(track_name) = &self.track_name
-            && tn != Some(track_name.as_str())
-        {
-            return Err(DpopError::ResourceInconsistent);
-        }
-        Ok(())
     }
+}
+
+/// `resource` の検証で使う action の分類 (draft-ietf-moq-c4m-01 §3.1.3)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResourceTargetKind {
+    /// SETUP。target を比較せず、resource の形式だけを検証する
+    Setup,
+    /// namespace 操作。`tns` を比較し、`tn` は両方にある場合だけ比較する
+    Namespace,
+    /// track 操作。`tns` を比較し、actx に `tn` があれば `tn` も比較する
+    Track,
+}
+
+/// action を resource 検証の分類へ変換する (draft-ietf-moq-c4m-01 §3.1.3)
+fn resource_target_kind(action: MoqtAction) -> ResourceTargetKind {
+    match action {
+        MoqtAction::Setup => ResourceTargetKind::Setup,
+        MoqtAction::PublishNamespace
+        | MoqtAction::SubscribeNamespace
+        | MoqtAction::SubscribeTracks => ResourceTargetKind::Namespace,
+        MoqtAction::Subscribe
+        | MoqtAction::RequestUpdate
+        | MoqtAction::Publish
+        | MoqtAction::Fetch
+        | MoqtAction::TrackStatus => ResourceTargetKind::Track,
+    }
+}
+
+/// `resource` の `moqt://<authority>` 部分の形式を検証する
+///
+/// draft-ietf-moq-c4m-01 §3.1.3 の resource は action によらず `moqt://<relay-endpoint>`
+/// で始まる。scheme は小文字の `moqt://` だけを受理し、authority は空でなく、`?` 以外の
+/// `#` `/` `@` と空白・制御文字を含まないことを検証する。authority の完全な RFC 3986
+/// 検証は行わない。
+fn verify_resource_prefix(resource: &str) -> Result<(), DpopError> {
+    let rest = resource
+        .strip_prefix("moqt://")
+        .ok_or(DpopError::ResourceInconsistent)?;
+    // クエリ区切りの `?` より前が authority である
+    let authority = rest
+        .split_once('?')
+        .map_or(rest, |(authority, _)| authority);
+    if authority.is_empty()
+        || authority.chars().any(|character| {
+            character.is_whitespace()
+                || character.is_control()
+                || matches!(character, '#' | '/' | '@')
+        })
+    {
+        return Err(DpopError::ResourceInconsistent);
+    }
+    Ok(())
+}
+
+/// SETUP の `resource` (`moqt://<relay-endpoint>`) の形式を検証する
+///
+/// draft-ietf-moq-c4m-01 §3.1.3 の接続確立用 resource はクエリを持たない。scheme は
+/// 小文字の `moqt://` だけを受理する。authority の完全な RFC 3986 検証は行わず、
+/// クエリ / フラグメント / パス / userinfo と、空白・制御文字だけを拒否する。
+fn verify_setup_resource(resource: &str) -> Result<(), DpopError> {
+    let authority = resource
+        .strip_prefix("moqt://")
+        .ok_or(DpopError::ResourceInconsistent)?;
+    if authority.is_empty()
+        || authority.chars().any(|character| {
+            character.is_whitespace()
+                || character.is_control()
+                || matches!(character, '?' | '#' | '/' | '@')
+        })
+    {
+        return Err(DpopError::ResourceInconsistent);
+    }
+    Ok(())
+}
+
+/// `resource` のクエリから `tns` と `tn` の最後の値を取り出す
+///
+/// クエリが無い場合も空のクエリとして扱う (どちらも `None`)。パーセントエンコーディング
+/// は解釈しない。重複したパラメータは最後の値を使う。
+fn resource_query_parameters(resource: &str) -> (Option<&str>, Option<&str>) {
+    let query = resource.split_once('?').map_or("", |(_, query)| query);
+    let mut tns = None;
+    let mut tn = None;
+    for pair in query.split('&') {
+        match pair.split_once('=') {
+            Some(("tns", value)) => tns = Some(value),
+            Some(("tn", value)) => tn = Some(value),
+            _ => {}
+        }
+    }
+    (tns, tn)
 }
 
 /// 旧 JWT 形式の DPoP proof のペイロード
@@ -266,10 +398,23 @@ pub struct DpopVerification<'a> {
     /// 検証対象の CAT のクレーム
     pub token_claims: &'a CatClaims,
     /// 要求されたアクション
+    ///
+    /// [`MoqtAction::Setup`] では `namespace` / `track_name` を使わない。呼び出し側は
+    /// 任意の値 (空の namespace など) を渡してよい。
     pub action: MoqtAction,
+    /// `cnf` の confirmation key 3 の解釈
+    ///
+    /// IANA の CWT Confirmation Methods レジストリでは 3 は `kid` である
+    /// (RFC 8747 §3.4)。draft-ietf-moq-c4m-01 のベクタだけが 3 を `jkt` として使う。
+    /// 既定は [`ConfirmationKey3Interpretation::IanaKid`]。
+    pub confirmation_key3: ConfirmationKey3Interpretation,
     /// 対象の Track Namespace
+    ///
+    /// [`MoqtAction::Setup`] では使わない。
     pub namespace: &'a TrackNamespace,
     /// 対象の Track Name
+    ///
+    /// [`MoqtAction::Setup`] では使わない。
     pub track_name: &'a [u8],
     /// 検証に使う現在時刻 (UNIX 秒)
     pub reference_time_seconds: f64,
@@ -348,15 +493,25 @@ impl DpopProof {
 
     /// proof の JWK がトークンの `cnf` の JWK サムプリントと一致するか検証する
     ///
-    /// `cnf` の confirmation key 323 (IANA 登録の `jkt`) を優先し、323 が無い場合だけ
-    /// 3 (draft-ietf-moq-c4m-01 のベクタが使う値。IANA では `kid`) と比較する。
+    /// `interpretation` は confirmation key 3 の解釈である。IANA 登録の confirmation
+    /// key 323 (`jkt`) を優先し、323 が無い場合だけ
+    /// [`ConfirmationKey3Interpretation::C4mDraftJkt`] のときに限り key 3 を `jkt`
+    /// として比較する。既定の [`ConfirmationKey3Interpretation::IanaKid`] では key 3 は
+    /// `kid` (RFC 8747 §3.4) でありサムプリントではないため、323 が無ければ
+    /// [`DpopError::MissingThumbprint`] を返す。
+    ///
+    /// kid から検証鍵を解決して PoP を検証することはこのライブラリでは行わない。
+    /// 利用側が [`Confirmation::kid`] で kid を取り出して鍵を解決すること。
     pub fn verify_key_binding<C: CoseCrypto>(
         &self,
         crypto: &C,
         confirmation: &Confirmation,
+        interpretation: ConfirmationKey3Interpretation,
     ) -> Result<(), DpopError> {
         let thumbprint = self.header.jwk.thumbprint_sha256(crypto)?;
-        let expected = confirmation.jkt().ok_or(DpopError::MissingThumbprint)?;
+        let expected = confirmation
+            .jkt_with(interpretation)
+            .ok_or(DpopError::MissingThumbprint)?;
         if expected != thumbprint.as_slice() {
             return Err(DpopError::KeyBindingMismatch);
         }
@@ -428,8 +583,19 @@ impl DpopProof {
 
     /// Authorization Context (actx) を検証する
     ///
-    /// `type` が "moqt"、`action` が一致し、`resource` が与えられている場合は
-    /// `tns` / `tn` と整合し、`tns` / `tn` が対象と一致することを確認する。
+    /// `type` が "moqt"、`action` が一致し、`resource` が与えられている場合は action に
+    /// 応じた形式と `tns` / `tn` の整合 ([`AuthorizationContext::verify_resource_consistency`])
+    /// を確認する。
+    ///
+    /// [`MoqtAction::Setup`] では `verify_target` を呼ばず、actx に `tn` があること
+    /// だけを要求する (旧 draft-ietf-moq-c4m-01 §3.1.2 は `tn` を必須としている)。
+    /// SETUP には track が無いため、`namespace` / `track_name` の引数は使わない。
+    /// 呼び出し側は任意の値 (空の namespace など) を渡してよい。SETUP 以外では
+    /// `tns` / `tn` が対象と一致することを検証する。
+    ///
+    /// この `tn` 必須は旧 draft-01 の互換 API としての規則である。draft-02 §4.2 の
+    /// CWT 形式 actx は SETUP に `tn` を持たないため、draft-02 に従う場合は
+    /// [`CwtDpopProof::verify_authorization_context`] を使うこと。
     ///
     /// 検証は type → action → resource → target の順に行う。旧 JWT 形式の actx を
     /// 対象とするため、type が正しい場合、旧形式に対応する文字列を持たない
@@ -444,7 +610,13 @@ impl DpopProof {
         let context = &self.claims.authorization_context;
         context.verify_context_type(MOQT_AUTHORIZATION_CONTEXT_TYPE)?;
         context.verify_action(action)?;
-        context.verify_resource_consistency()?;
+        context.verify_resource_consistency(action)?;
+        if action == MoqtAction::Setup {
+            if context.track_name.is_none() {
+                return Err(DpopError::MissingTrackName);
+            }
+            return Ok(());
+        }
         context.verify_target(namespace, track_name)
     }
 
@@ -457,6 +629,11 @@ impl DpopProof {
     ///
     /// 署名、`ath`、JWK サムプリントのバインディング、Authorization Context、
     /// `catdpop` のウィンドウによる鮮度、jti によるリプレイ保護の順に検証する。
+    ///
+    /// `cnf` の confirmation key 3 は既定の [`ConfirmationKey3Interpretation::IanaKid`]
+    /// として扱う (RFC 8747 §3.4 では key 3 は `kid`)。draft-ietf-moq-c4m-01 のベクタの
+    /// ように key 3 を `jkt` として扱う場合は
+    /// [`DpopProof::verify_against_cat_token_with`] を使う。
     ///
     /// この API は proof 側だけを検証する。CAT トークンの署名・クレーム・scope は
     /// 検証しないため、呼び出し側が別途検証すること。CWT 形式と CAT の検証を
@@ -477,9 +654,43 @@ impl DpopProof {
         default_window_seconds: f64,
         replay_cache: Option<&mut DpopReplayCache>,
     ) -> Result<(), DpopError> {
+        self.verify_against_cat_token_with(
+            crypto,
+            token,
+            action,
+            ConfirmationKey3Interpretation::IanaKid,
+            namespace,
+            track_name,
+            reference_time_seconds,
+            default_window_seconds,
+            replay_cache,
+        )
+    }
+
+    /// `cnf` の confirmation key 3 の解釈を指定できる
+    /// [`DpopProof::verify_against_cat_token`]
+    ///
+    /// 引数は [`DpopProof::verify_against_cat_token`] に `confirmation_key3` を加えた
+    /// ものである。draft-ietf-moq-c4m-01 の付録 A.4 のベクタのように `cnf` の key 3 を
+    /// `jkt` として扱う場合は [`ConfirmationKey3Interpretation::C4mDraftJkt`] を渡す。
+    /// それ以外の挙動は [`DpopProof::verify_against_cat_token`] と同じである。
+    #[expect(clippy::too_many_arguments)]
+    pub fn verify_against_cat_token_with<C: CoseCrypto>(
+        &self,
+        crypto: &C,
+        token: &crate::c4m::cat::CatToken,
+        action: MoqtAction,
+        confirmation_key3: ConfirmationKey3Interpretation,
+        namespace: &TrackNamespace,
+        track_name: &[u8],
+        reference_time_seconds: f64,
+        default_window_seconds: f64,
+        replay_cache: Option<&mut DpopReplayCache>,
+    ) -> Result<(), DpopError> {
         let request = DpopVerification {
             token_claims: token.claims(),
             action,
+            confirmation_key3,
             namespace,
             track_name,
             reference_time_seconds,
@@ -495,6 +706,9 @@ impl DpopProof {
     /// Authorization Context、`catdpop` のウィンドウによる鮮度、jti によるリプレイ
     /// 保護の順に検証する。MOQT のようにアクセストークンと proof を同時に受ける場合は
     /// [`DpopProof::verify_against_cat_token`] を使うこと。
+    ///
+    /// `cnf` の confirmation key 3 は [`DpopVerification::confirmation_key3`] の解釈で
+    /// 扱う。既定は [`ConfirmationKey3Interpretation::IanaKid`] である。
     ///
     /// `catdpop` が jti の処理を要求している場合 (`honor_jti` が真) は
     /// `replay_cache` が必須である。
@@ -524,7 +738,7 @@ impl DpopProof {
             .confirmation
             .as_ref()
             .ok_or(DpopError::MissingConfirmation)?;
-        self.verify_key_binding(crypto, confirmation)?;
+        self.verify_key_binding(crypto, confirmation, request.confirmation_key3)?;
         self.verify_authorization_context(request.action, request.namespace, request.track_name)?;
         let window_seconds = request
             .token_claims
@@ -534,6 +748,13 @@ impl DpopProof {
                 catdpop.window_seconds_or(request.default_window_seconds)
             });
         self.verify_freshness(request.reference_time_seconds, window_seconds)?;
+        // キャッシュが渡された場合は replay detection の要否にかかわらず最大ウィンドウを
+        // 検査する。CWT 形式の受理 API と同じく fail-closed に倒す
+        if let Some(cache) = replay_cache.as_deref()
+            && window_seconds > cache.max_window_seconds()
+        {
+            return Err(DpopError::ReplayWindowTooLarge);
+        }
         if request
             .token_claims
             .catdpop
@@ -554,25 +775,89 @@ impl DpopProof {
 
 /// jti によるリプレイ保護のキャッシュ
 ///
-/// アプリケーションが 1 つの主体 (セッションやアクセストークン) ごとに保持する。
-/// エントリ数と jti 長の上限は持たないため、アプリケーションが主体ごとのレート制限や
-/// jti の長さ制限で肥大化を防ぐこと (RFC 9449 §11.1 は大きすぎる jti の拒否や
-/// ハッシュ化を推奨する)。
-#[derive(Debug, Clone, Default)]
+/// アプリケーションが 1 つの主体 (トークンの有効期間や検証主体) ごとに保持する。
+/// 1 つのキャッシュを複数の主体で共有しないこと。接続ごとに作り直してはならない。
+/// 作り直すと記録が接続とともに消え、別の接続で同じ `jti` を再利用できてしまう。
+///
+/// - `max_window_seconds` は構築時に固定し、有限かつ正でなければならない。主体が
+///   受け入れる `catdpop` ウィンドウの最大値以上にすること。proof のウィンドウが
+///   これを超える場合は [`DpopError::ReplayWindowTooLarge`] で拒否する (fail-closed)
+/// - 記録は `jti` から保持期限 (`iat` + `max_window_seconds`) への写像である。参照時刻が
+///   保持期限と等しい間は保持し、超えた後にだけ解放する。**現在の proof のウィンドウで
+///   古い記録を破棄しない**。そのため、小さいウィンドウの proof を処理した後でも、
+///   既に記録した `jti` が大きいウィンドウ内に残っていれば再送を
+///   [`DpopError::Replayed`] で拒否できる
+/// - 未失効の記録を追い出して別の `jti` を記録することはしない。エントリ数と jti 長の
+///   上限は持たないため、肥大化を防ぐ必要がある場合は主体ごとのレート制限や jti の
+///   長さ制限を行うこと (RFC 9449 §11.1 は大きすぎる jti の拒否やハッシュ化を推奨する)
+/// - [`DpopReplayCache::check_and_record`] が成功するたびに全記録を走査するため、記録数
+///   に対して O(n) のコストがかかる
+/// - 参照時刻は単調増加を前提とする。時計が巻き戻ると、解放済みの `jti` が再び受理され
+///   得る
+#[derive(Debug, Clone)]
 pub struct DpopReplayCache {
+    /// 記録の保持期間の上限 (秒)。構築時に固定する
+    max_window_seconds: f64,
+    /// `jti` → 保持期限 (`iat` + `max_window_seconds`)
     entries: Vec<(String, f64)>,
 }
 
+impl Default for DpopReplayCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DpopReplayCache {
-    /// 空のキャッシュを作る
+    /// 既定の最大ウィンドウ ([`DEFAULT_MAX_WINDOW_SECONDS`]) で空のキャッシュを作る
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            max_window_seconds: DEFAULT_MAX_WINDOW_SECONDS,
+            entries: Vec::new(),
+        }
     }
 
-    /// jti を確認して記録する
+    /// 最大ウィンドウ (秒) を指定して空のキャッシュを作る
     ///
-    /// ウィンドウ外の古い記録は破棄する。同じ jti がウィンドウ内に存在する場合は
-    /// [`DpopError::Replayed`] を返す。
+    /// `max_window_seconds` は有限かつ 0 より大きくなければならない。不正な場合は
+    /// [`DpopError::InvalidReplayWindow`] を返す。
+    pub fn with_max_window(max_window_seconds: f64) -> Result<Self, DpopError> {
+        if !max_window_seconds.is_finite() || max_window_seconds <= 0.0 {
+            return Err(DpopError::InvalidReplayWindow);
+        }
+        Ok(Self {
+            max_window_seconds,
+            entries: Vec::new(),
+        })
+    }
+
+    /// 構築時に固定した最大ウィンドウ (秒) を返す
+    pub fn max_window_seconds(&self) -> f64 {
+        self.max_window_seconds
+    }
+
+    /// jti を確認し、記録できれば記録する
+    ///
+    /// `window_seconds` は proof の鮮度に使った (`catdpop` の) ウィンドウである。
+    /// 次の順に判定する。
+    ///
+    /// 1. `issued_at` / `window_seconds` / `reference_time_seconds` が有限であること。
+    ///    非有限の `window_seconds` は [`DpopError::NonFiniteNumber`] を返す
+    /// 2. `window_seconds` が 0 以上であること。負の場合は
+    ///    [`DpopError::InvalidFreshnessWindow`] を返す
+    /// 3. `window_seconds <= max_window_seconds` であること。超える場合は
+    ///    [`DpopError::ReplayWindowTooLarge`] を返す
+    /// 4. 保持期限 (`iat` + `max_window_seconds`) が有限であること
+    /// 5. 参照時刻が保持期限を超えた記録だけを解放する (等しい間は保持する)
+    /// 6. 同じ jti が残っていれば [`DpopError::Replayed`] を返す
+    /// 7. 記録する
+    ///
+    /// 1 〜 4 で拒否した場合は新しい jti を記録せず、解放もしない。6 で拒否した場合も
+    /// 記録しないが、5 の解放は 6 の判定より前に行うため、期限切れの記録は解放され得る。
+    /// いずれも受理の可否には影響しない。
+    ///
+    /// [`DpopProof::verify_against_token`] は、`catdpop` が replay detection を要求して
+    /// いる場合にだけこの関数を呼ぶ。要求していない proof は記録しない。
     pub fn check_and_record(
         &mut self,
         jti: &str,
@@ -589,24 +874,39 @@ impl DpopReplayCache {
         if !reference_time_seconds.is_finite() {
             return Err(DpopError::NonFiniteNumber("reference time"));
         }
+        if window_seconds < 0.0 {
+            return Err(DpopError::InvalidFreshnessWindow);
+        }
+        if window_seconds > self.max_window_seconds {
+            return Err(DpopError::ReplayWindowTooLarge);
+        }
+        let retain_until = issued_at + self.max_window_seconds;
+        if !retain_until.is_finite() {
+            return Err(DpopError::NonFiniteNumber("replay retention"));
+        }
+        // 参照時刻が保持期限と等しい間は記録を保持し、超えた後だけ解放する。現在の
+        // proof のウィンドウではなく、キャッシュに固定した最大ウィンドウで判定する
         self.entries
-            .retain(|(_, recorded_at)| reference_time_seconds - recorded_at <= window_seconds);
+            .retain(|(_, retain_until)| reference_time_seconds <= *retain_until);
         if self.entries.iter().any(|(recorded, _)| recorded == jti) {
             return Err(DpopError::Replayed);
         }
-        self.entries.push((String::from(jti), issued_at));
+        self.entries.push((String::from(jti), retain_until));
         Ok(())
     }
 
     /// 記録数を返す
+    ///
+    /// 期限切れの記録は次の [`DpopReplayCache::check_and_record`] で解放されるまで
+    /// 残るため、この数には期限切れの記録も含まれ得る。
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// 記録が空かどうかを返す
     ///
-    /// 期限切れの記録は次の [`CwtDpopReplayCache::check_and_record`] の成功経路で解放
-    /// されるまで残るため、期限切れの記録だけが残っている場合も `false` を返す。
+    /// 期限切れの記録は次の [`DpopReplayCache::check_and_record`] で解放されるまで
+    /// 残るため、期限切れの記録だけが残っている場合も `false` を返す。
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -1838,7 +2138,7 @@ pub enum DpopError {
     TargetMismatch,
     /// `actx.tn` が無い
     MissingTrackName,
-    /// `actx.resource` が `tns` / `tn` と整合しない
+    /// `actx.resource` が action に応じた形式と整合しない、または `tns` / `tn` と一致しない
     ResourceInconsistent,
     /// `ath` がアクセストークンと一致しない
     AccessTokenHashMismatch,
@@ -1910,7 +2210,10 @@ impl fmt::Display for DpopError {
             Self::TargetMismatch => write!(f, "actx.tns or actx.tn does not match the target"),
             Self::MissingTrackName => write!(f, "actx.tn is missing"),
             Self::ResourceInconsistent => {
-                write!(f, "actx.resource is inconsistent with tns or tn")
+                write!(
+                    f,
+                    "actx.resource is malformed or inconsistent with tns or tn"
+                )
             }
             Self::AccessTokenHashMismatch => write!(f, "ath does not match the access token"),
             Self::MissingAccessTokenHash => {

@@ -57,7 +57,7 @@ fn sample_claims(ctx: &mut noprop::TestCaseContext) -> CatClaims {
             } else {
                 None
             },
-            c4m_draft_jwk_thumbprint: if noprop::sample_bool(ctx) {
+            confirmation_key_3: if noprop::sample_bool(ctx) {
                 Some(sample_bytes(ctx, 32))
             } else {
                 None
@@ -856,6 +856,90 @@ fn bearer_replay_cache_matches_model() -> noprop::TestResult {
     assert!(
         release_seen.get() > 0,
         "保持期限を過ぎた記録の解放ケースが生成されなかった\n{runner}"
+    );
+    Ok(())
+}
+
+/// `cnf` を生成する (323 と confirmation key 3 の有無を独立に選ぶ)
+fn sample_confirmation(ctx: &mut noprop::TestCaseContext) -> Confirmation {
+    Confirmation {
+        jwk_thumbprint: if noprop::sample_bool(ctx) {
+            Some(sample_bytes(ctx, 32))
+        } else {
+            None
+        },
+        confirmation_key_3: if noprop::sample_bool(ctx) {
+            Some(sample_bytes(ctx, 32))
+        } else {
+            None
+        },
+        ..Confirmation::default()
+    }
+}
+
+/// `cnf` の confirmation key 3 の解釈が仕様どおりであること
+///
+/// RFC 8747 §3.4 では key 3 は `kid`、旧 draft-ietf-moq-c4m-01 のベクタでは `jkt` である。
+#[test]
+fn confirmation_key3_interpretation_matches_spec() -> noprop::TestResult {
+    use shiguredo_moqt::c4m::cat::ConfirmationKey3Interpretation;
+
+    let both_seen = std::cell::Cell::new(0usize);
+    let only_key3_seen = std::cell::Cell::new(0usize);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let confirmation = sample_confirmation(ctx);
+        if confirmation.jwk_thumbprint.is_some() && confirmation.confirmation_key_3.is_some() {
+            both_seen.set(both_seen.get() + 1);
+        }
+        if confirmation.jwk_thumbprint.is_none() && confirmation.confirmation_key_3.is_some() {
+            only_key3_seen.set(only_key3_seen.get() + 1);
+        }
+        // jkt は IANA 登録の 323 だけを返す
+        assert_eq!(
+            confirmation.jkt(),
+            confirmation.jwk_thumbprint.as_deref(),
+            "jkt は confirmation key 323 だけを返す"
+        );
+        for interpretation in [
+            ConfirmationKey3Interpretation::IanaKid,
+            ConfirmationKey3Interpretation::C4mDraftJkt,
+        ] {
+            // 323 を優先し、323 が無い場合だけ C4mDraftJkt で key 3 にフォールバックする
+            let expected_jkt = match interpretation {
+                ConfirmationKey3Interpretation::IanaKid => confirmation.jwk_thumbprint.as_deref(),
+                ConfirmationKey3Interpretation::C4mDraftJkt => confirmation
+                    .jwk_thumbprint
+                    .as_deref()
+                    .or(confirmation.confirmation_key_3.as_deref()),
+            };
+            assert_eq!(
+                confirmation.jkt_with(interpretation),
+                expected_jkt,
+                "jkt_with の解釈が仕様と一致しない ({interpretation:?})"
+            );
+            // kid は IanaKid のときだけ key 3 を返す
+            let expected_kid = match interpretation {
+                ConfirmationKey3Interpretation::IanaKid => {
+                    confirmation.confirmation_key_3.as_deref()
+                }
+                ConfirmationKey3Interpretation::C4mDraftJkt => None,
+            };
+            assert_eq!(
+                confirmation.kid(interpretation),
+                expected_kid,
+                "kid の解釈が仕様と一致しない ({interpretation:?})"
+            );
+        }
+        Ok(())
+    })?;
+    assert!(
+        both_seen.get() > 0,
+        "323 と key 3 が併存するケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        only_key3_seen.get() > 0,
+        "key 3 だけのケースが生成されなかった\n{runner}"
     );
     Ok(())
 }

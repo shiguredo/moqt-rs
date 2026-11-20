@@ -1430,9 +1430,14 @@ Ok(())
 ### 旧 JWT 形式 (互換 API)
 
 旧 draft-01 の JWT 形式の proof は `DpopProof` / `DpopProofBuilder` / `DpopReplayCache` で扱える。
-`DpopProof::verify_against_cat_token` は proof の署名、`ath`、`cnf` の JWK サムプリントとの一致、actx、鮮度、`jti` の replay を検証するが、CAT の署名、クレーム、scope は検証しない。呼び出し側が別途検証すること。
-旧形式の `cnf` は key 323 を優先し、無い場合は旧 draft-01 の key 3 を JWK サムプリントとして参照する。key 3 は IANA では `kid` である。
-旧形式の `DpopReplayCache` は現在の proof のウィンドウで古い記録を破棄するため、ウィンドウの異なるトークンで共有すると `jti` を再受理し得る。
+`DpopProof::verify_against_cat_token` と `verify_against_cat_token_with` は proof の署名、`ath`、`cnf` の JWK サムプリントとの一致、actx (action に応じた `resource` の検証を含む)、鮮度、`jti` の replay を検証するが、CAT の署名、クレーム、scope は検証しない。呼び出し側が別途検証すること。
+`resource` の検証は action ごとに異なる。
+SETUP は `moqt://<authority>` の形式だけを検証し (小文字の `moqt://`、空でない authority、クエリ / フラグメント / パス / userinfo / 空白 / 制御文字なし)、`tns` / `tn` は比較しない。
+namespace 操作は `tns` と、actx とクエリの両方に `tn` がある場合の `tn` を検証する。
+track 操作は `tns` と、actx に `tn` がある場合の `tn` を検証する。
+SETUP では `verify_target` を呼ばず、actx の `tn` の存在だけを要求する。
+`DpopVerification::confirmation_key3` は `cnf` の key 3 の解釈で、既定は `ConfirmationKey3Interpretation::IanaKid` である。`Confirmation::jkt()` は IANA 登録の 323 だけを返し、key 3 は `jkt_with` と `kid` に解釈を渡して取り出す。旧形式の検証は 323 を優先し、323 が無い場合は `C4mDraftJkt` を指定したときだけ key 3 を JWK サムプリントとして参照する。key 3 は IANA では `kid` である。
+旧形式の `DpopReplayCache` は `max_window_seconds` (既定 300 秒、`DEFAULT_MAX_WINDOW_SECONDS`) で記録を保持し、現在の proof のウィンドウでは古い記録を破棄しない。`with_max_window` で主体が受け入れる `catdpop` ウィンドウの最大値以上に設定すること。proof のウィンドウが最大値を超えると `ReplayWindowTooLarge` で拒否する。
 
 ### 残る制約
 
@@ -1477,14 +1482,24 @@ fn MoqtAction::authorization_context(self) -> Option<&'static str>
 fn CatReplay::key(self) -> i64
 fn CatReplay::from_key(key: i64) -> Option<CatReplay>
 fn Confirmation::ckt(&self) -> Option<&[u8]>
+fn Confirmation::jkt(&self) -> Option<&[u8]>
+fn Confirmation::jkt_with(&self, interpretation: ConfirmationKey3Interpretation) -> Option<&[u8]>
+fn Confirmation::kid(&self, interpretation: ConfirmationKey3Interpretation) -> Option<&[u8]>
 fn BearerReplayCache::new(leeway_seconds: f64) -> Result<BearerReplayCache, BearerReplayError>
 fn BearerReplayCache::check_and_bind(&mut self, cti: &[u8], connection_id: &[u8], retain_until: f64, reference_time_seconds: f64) -> Result<(), BearerReplayError>
 
 // DPoP (旧 JWT 形式)
+use shiguredo_moqt::c4m::cat::ConfirmationKey3Interpretation;
 use shiguredo_moqt::c4m::dpop::{DpopProof, DpopProofBuilder, DpopReplayCache, DpopVerification};
 fn DpopProof::decode(input: &str) -> Result<DpopProof, DpopError>
+fn DpopProof::verify_key_binding(&self, crypto: &C, confirmation: &Confirmation, interpretation: ConfirmationKey3Interpretation) -> Result<(), DpopError>
 fn DpopProof::verify_against_token(&self, crypto: &C, request: &DpopVerification<'_>, replay_cache: Option<&mut DpopReplayCache>) -> Result<(), DpopError>
 fn DpopProof::verify_against_cat_token(&self, crypto: &C, token: &CatToken, action: MoqtAction, namespace: &TrackNamespace, track_name: &[u8], reference_time_seconds: f64, default_window_seconds: f64, replay_cache: Option<&mut DpopReplayCache>) -> Result<(), DpopError>
+fn DpopProof::verify_against_cat_token_with(&self, crypto: &C, token: &CatToken, action: MoqtAction, confirmation_key3: ConfirmationKey3Interpretation, namespace: &TrackNamespace, track_name: &[u8], reference_time_seconds: f64, default_window_seconds: f64, replay_cache: Option<&mut DpopReplayCache>) -> Result<(), DpopError>
+fn DpopReplayCache::new() -> DpopReplayCache
+fn DpopReplayCache::with_max_window(max_window_seconds: f64) -> Result<DpopReplayCache, DpopError>
+fn DpopReplayCache::max_window_seconds(&self) -> f64
+fn DpopReplayCache::check_and_record(&mut self, jti: &str, issued_at: f64, window_seconds: f64, reference_time_seconds: f64) -> Result<(), DpopError>
 
 // DPoP (CWT 形式)
 use shiguredo_moqt::c4m::dpop::{
@@ -1911,5 +1926,5 @@ moqt-js 0885 の `presentationLatencyTicks` (推定表示時刻) は移植して
 - CWT 形式の DPoP proof の `actx` / `ath` は claim label が TBD である。`CwtDpopProofCodec::new` に呼び出し側が label を指定し、発行、デコード、検証で同じ値を使う。ライブラリが正式な label を割り当てることはない
 - CWT 形式の proof を MOQT の AUTHORIZATION_TOKEN に載せる方法は仕様で未定義である。独自の envelope を決めない
 - `moqt-reval` は既定 (`revalidation_interval_seconds: None`) では値にかかわらず拒否される。再検証できる場合は `Some(x)` を渡し、受理した非ゼロの `moqt-reval` のトークンをその間隔以内で検証し直すこと (0 は再検証しない)。Composite claims の評価と `catreplay` 2 は未対応
-- 旧 compact 形式、旧 JWT 形式の proof、`cnf` の key 3 は互換 API である。新しい実装では COSE 形式のトークンと CWT 形式の proof を使う
+- 旧 compact 形式と旧 JWT 形式の proof は互換 API である。`cnf` の key 3 は IANA では `kid` であり、旧 draft-01 のベクタのように `jkt` として扱う場合は `ConfirmationKey3Interpretation::C4mDraftJkt` を明示する。新しい実装では COSE 形式のトークンと CWT 形式の proof を使う
 - 開発中のライブラリであり、仕様は積極的に変更される場合がある

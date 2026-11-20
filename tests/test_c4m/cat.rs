@@ -3,8 +3,8 @@
 use shiguredo_moqt::c4m::cat::{
     CAT_CONTENT_TYPE, CLAIM_CAT_REPLAY, CLAIM_CAT_VERSION, CLAIM_CONFIRMATION,
     CONFIRMATION_COSE_KEY_THUMBPRINT, CatClaims, CatError, CatReplay, CatToken,
-    ClaimValidationError, ClaimValidationOptions, Confirmation, MOQT_AUTH_TOKEN_TYPE_CAT,
-    TokenFormat,
+    ClaimValidationError, ClaimValidationOptions, Confirmation, ConfirmationKey3Interpretation,
+    MOQT_AUTH_TOKEN_TYPE_CAT, TokenFormat,
 };
 use shiguredo_moqt::c4m::cbor::Value;
 use shiguredo_moqt::c4m::{
@@ -166,15 +166,24 @@ fn dpop_vectors_decode() {
             .as_ref()
             .unwrap_or_else(|| panic!("ベクタ {} に cnf が無い", vector.id));
         assert_eq!(
-            confirmation.c4m_draft_jwk_thumbprint.as_deref(),
+            confirmation.confirmation_key_3.as_deref(),
             Some(&decode_hex(vector.cnf_jkt_hex)[..]),
-            "ベクタ {} の jkt (confirmation key 3)",
+            "ベクタ {} の confirmation key 3",
             vector.id
         );
+        // 旧 draft-01 のベクタは key 3 を jkt として使うため C4mDraftJkt を明示する
         assert_eq!(
-            confirmation.jkt(),
+            confirmation.jkt_with(ConfirmationKey3Interpretation::C4mDraftJkt),
             Some(&decode_hex(vector.cnf_jkt_hex)[..]),
-            "ベクタ {} の jkt",
+            "ベクタ {} の jkt (C4mDraftJkt)",
+            vector.id
+        );
+        // 既定の IANA 解釈では key 3 は kid であり jkt ではない
+        assert_eq!(confirmation.jkt(), None, "ベクタ {} の jkt", vector.id);
+        assert_eq!(
+            confirmation.kid(ConfirmationKey3Interpretation::IanaKid),
+            Some(&decode_hex(vector.cnf_jkt_hex)[..]),
+            "ベクタ {} の kid",
             vector.id
         );
         match &token.claims().catdpop {
@@ -578,10 +587,28 @@ fn claims_raw_round_trip_and_get() {
 fn confirmation_jkt_prefers_iana_key() {
     let confirmation = Confirmation {
         jwk_thumbprint: Some(vec![1; 32]),
-        c4m_draft_jwk_thumbprint: Some(vec![2; 32]),
+        confirmation_key_3: Some(vec![2; 32]),
         ..Confirmation::default()
     };
+    // jkt() と jkt_with は IANA 登録の 323 を優先する
     assert_eq!(confirmation.jkt(), Some(&[1u8; 32][..]));
+    assert_eq!(
+        confirmation.jkt_with(ConfirmationKey3Interpretation::IanaKid),
+        Some(&[1u8; 32][..])
+    );
+    assert_eq!(
+        confirmation.jkt_with(ConfirmationKey3Interpretation::C4mDraftJkt),
+        Some(&[1u8; 32][..])
+    );
+    // 323 と併存する key 3 は IanaKid では kid として取り出せる
+    assert_eq!(
+        confirmation.kid(ConfirmationKey3Interpretation::IanaKid),
+        Some(&[2u8; 32][..])
+    );
+    assert_eq!(
+        confirmation.kid(ConfirmationKey3Interpretation::C4mDraftJkt),
+        None
+    );
     let value = confirmation.encode().expect("cnf をエンコードできる");
     assert_eq!(
         CatClaims {
@@ -596,6 +623,36 @@ fn confirmation_jkt_prefers_iana_key() {
     );
     let decoded = Confirmation::decode(&value).expect("デコードできる");
     assert_eq!(decoded, confirmation);
+}
+
+#[test]
+fn confirmation_key3_interpretation_follows_iana_and_c4m_draft() {
+    // 既定は IANA の登録に従い、key 3 を kid として扱う
+    assert_eq!(
+        ConfirmationKey3Interpretation::default(),
+        ConfirmationKey3Interpretation::IanaKid
+    );
+    let key3 = Confirmation {
+        confirmation_key_3: Some(vec![3; 32]),
+        ..Confirmation::default()
+    };
+    // IanaKid では key 3 は jkt ではない
+    assert_eq!(key3.jkt(), None);
+    assert_eq!(key3.jkt_with(ConfirmationKey3Interpretation::IanaKid), None);
+    assert_eq!(
+        key3.kid(ConfirmationKey3Interpretation::IanaKid),
+        Some(&[3u8; 32][..])
+    );
+    // C4mDraftJkt では key 3 を jkt として扱い、kid としては扱わない
+    assert_eq!(
+        key3.jkt_with(ConfirmationKey3Interpretation::C4mDraftJkt),
+        Some(&[3u8; 32][..])
+    );
+    assert_eq!(key3.kid(ConfirmationKey3Interpretation::C4mDraftJkt), None);
+    // key 3 の生値は encode / decode で保たれる
+    let decoded = Confirmation::decode(&key3.encode().expect("cnf をエンコードできる"))
+        .expect("cnf をデコードできる");
+    assert_eq!(decoded, key3);
 }
 
 #[test]
@@ -1413,8 +1470,16 @@ fn builder_setters_are_covered() {
         decoded
             .confirmation
             .as_ref()
-            .and_then(|confirmation| confirmation.c4m_draft_jwk_thumbprint.as_deref()),
+            .and_then(|confirmation| confirmation.confirmation_key_3.as_deref()),
         Some(&[0x01u8; 32][..])
+    );
+    // ビルダーが設定した key 3 は IanaKid では kid であり、jkt ではない
+    assert_eq!(
+        decoded
+            .confirmation
+            .as_ref()
+            .and_then(|confirmation| confirmation.jkt_with(ConfirmationKey3Interpretation::IanaKid)),
+        None
     );
     assert_eq!(
         decoded.get(shiguredo_moqt::c4m::cat::CLAIM_CAT_VERSION),

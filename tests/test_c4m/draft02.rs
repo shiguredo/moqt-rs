@@ -540,7 +540,7 @@ fn dpop_vectors_decode_cose() {
             vector.id
         );
         assert!(
-            confirmation.c4m_draft_jwk_thumbprint.is_none(),
+            confirmation.confirmation_key_3.is_none(),
             "ベクタ {} は旧 label 3 を使わない",
             vector.id
         );

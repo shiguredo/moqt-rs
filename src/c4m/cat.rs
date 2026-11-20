@@ -137,9 +137,12 @@ const COSE_KEY_THUMBPRINT_SHA256_LENGTH: usize = 32;
 /// draft-ietf-moq-c4m-01 のベクタが `jkt` に使う confirmation key
 ///
 /// 付録 A.4 のベクタは 3 を使うが、IANA の CWT Confirmation Methods レジストリでは
-/// 3 は `kid` (RFC 8747 §3.4) である。この値を解釈するのは旧 JWT 形式の検証だけで
-/// あり、CWT 形式の鍵束縛は 323 だけを扱う (3 は曖昧な fallback を避けるため使わない)。
-/// 発行は [`CONFIRMATION_JWK_THUMBPRINT`] を既定とする。
+/// 3 は `kid` (RFC 8747 §3.4) である。値の解釈は
+/// [`ConfirmationKey3Interpretation`] で決まり、既定
+/// ([`ConfirmationKey3Interpretation::IanaKid`]) では `kid` として扱う。旧 JWT 形式の
+/// DPoP proof の鍵束縛でこの値を `jkt` として使う場合は
+/// [`ConfirmationKey3Interpretation::C4mDraftJkt`] を明示する。CWT 形式の鍵束縛は
+/// 323 だけを扱い、3 は使わない。発行は [`CONFIRMATION_JWK_THUMBPRINT`] を既定とする。
 pub const CONFIRMATION_C4M_DRAFT_JWK_THUMBPRINT: i64 = 3;
 
 /// MOQT の Auth Token Type (CAT) (draft-ietf-moq-c4m-02 §8.2.1)
@@ -162,10 +165,30 @@ pub enum TokenFormat {
     CoseMac0,
 }
 
+/// `cnf` の confirmation key 3 の解釈
+///
+/// RFC 8747 §3.4 / §7.2 は IANA の CWT Confirmation Methods レジストリの値 3 を
+/// `kid` (Key Identifier) と定義する。一方、draft-ietf-moq-c4m-01 §3.1.1 と付録 A.4 は
+/// key 3 を `jkt` (JWK サムプリント) として使う。wire 上はどちらもバイト文字列で
+/// 区別できないため、どちらの解釈で検証するかを検証 API の呼び出し側が明示する。
+///
+/// 既定は IANA の登録に従う [`ConfirmationKey3Interpretation::IanaKid`] である。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ConfirmationKey3Interpretation {
+    /// RFC 8747 §3.4 に従い、confirmation key 3 を `kid` として扱う (既定)
+    #[default]
+    IanaKid,
+    /// draft-ietf-moq-c4m-01 §3.1.1 / 付録 A.4 に従い、confirmation key 3 を `jkt`
+    /// として扱う (旧 JWT 形式の proof との互換用)
+    C4mDraftJkt,
+}
+
 /// `cnf` (confirmation) クレーム (RFC 8747 / RFC 9679 / CTA-5007-B)
 ///
 /// `ckt` (RFC 9679 の COSE Key Thumbprint) と `jkt` (RFC 7638 の JWK サムプリント) を
-/// 型付きで保持する。
+/// 型付きで保持する。confirmation key 3 は IANA では `kid` であり、draft-ietf-moq-c4m-01
+/// のベクタだけが `jkt` として使うため、生値を保持して解釈を
+/// [`ConfirmationKey3Interpretation`] に委ねる。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Confirmation {
     /// IANA 登録の `jkt` (confirmation key 323) の値
@@ -174,11 +197,14 @@ pub struct Confirmation {
     ///
     /// RFC 9679 §3 の COSE Key Thumbprint を SHA-256 で計算した 32 バイトである。
     pub cose_key_thumbprint: Option<Vec<u8>>,
-    /// draft-ietf-moq-c4m-01 のベクタが使う `jkt` (confirmation key 3) の値
+    /// confirmation key 3 の生値
     ///
-    /// IANA のレジストリでは 3 は `kid` であり、値の意味が確定していないため
-    /// [`Confirmation::raw`] とは分けて保持する。
-    pub c4m_draft_jwk_thumbprint: Option<Vec<u8>>,
+    /// IANA の CWT Confirmation Methods レジストリでは 3 は `kid` (RFC 8747 §3.4) で
+    /// ある。draft-ietf-moq-c4m-01 §3.1.1 と付録 A.4 のベクタは 3 を `jkt` として使う。
+    /// wire 上はどちらもバイト文字列で区別できないため、生値を保持し、意味の解釈は
+    /// [`Confirmation::jkt_with`] と [`Confirmation::kid`] に
+    /// [`ConfirmationKey3Interpretation`] を渡して行う。
+    pub confirmation_key_3: Option<Vec<u8>>,
     /// 解釈しなかった confirmation の値
     pub raw: Vec<(Value, Value)>,
 }
@@ -212,10 +238,10 @@ impl Confirmation {
                     confirmation.cose_key_thumbprint = Some(thumbprint.to_vec());
                 }
                 Some(CONFIRMATION_C4M_DRAFT_JWK_THUMBPRINT) => {
-                    confirmation.c4m_draft_jwk_thumbprint = Some(
+                    confirmation.confirmation_key_3 = Some(
                         entry
                             .as_bytes()
-                            .ok_or(CatError::UnexpectedType("jkt"))?
+                            .ok_or(CatError::UnexpectedType("confirmation key 3"))?
                             .to_vec(),
                     );
                 }
@@ -249,10 +275,10 @@ impl Confirmation {
                 Value::ByteString(ckt.clone()),
             ));
         }
-        if let Some(jkt) = &self.c4m_draft_jwk_thumbprint {
+        if let Some(confirmation_key_3) = &self.confirmation_key_3 {
             entries.push((
                 Value::integer(CONFIRMATION_C4M_DRAFT_JWK_THUMBPRINT),
-                Value::ByteString(jkt.clone()),
+                Value::ByteString(confirmation_key_3.clone()),
             ));
         }
         for (key, value) in &self.raw {
@@ -270,15 +296,51 @@ impl Confirmation {
         Ok(Value::Map(entries))
     }
 
-    /// 旧 JWT 形式の検証で使う JWK サムプリントを返す
+    /// IANA 登録の `jkt` (confirmation key 323) を返す
     ///
-    /// IANA 登録の 323 を優先し、無ければ draft-ietf-moq-c4m-01 のベクタが使う 3 を返す。
-    /// 3 は IANA では `kid` であり意味が確定していないため、CWT 形式の鍵束縛には
-    /// この accessor を使わず、[`Confirmation::jwk_thumbprint`] (323) だけを扱うこと。
+    /// confirmation key 3 は返さない。3 は IANA では `kid` であり (RFC 8747 §3.4)、
+    /// draft-ietf-moq-c4m-01 のベクタだけが `jkt` として使う。3 を `jkt` として扱う
+    /// 互換経路は [`Confirmation::jkt_with`] に
+    /// [`ConfirmationKey3Interpretation::C4mDraftJkt`] を渡して使う。
     pub fn jkt(&self) -> Option<&[u8]> {
-        self.jwk_thumbprint
-            .as_deref()
-            .or(self.c4m_draft_jwk_thumbprint.as_deref())
+        self.jwk_thumbprint.as_deref()
+    }
+
+    /// `jkt` を confirmation key 3 の解釈付きで返す
+    ///
+    /// IANA 登録の 323 を優先し、323 が無い場合だけ
+    /// [`ConfirmationKey3Interpretation::C4mDraftJkt`] のときに限り confirmation key 3 を
+    /// 返す。[`ConfirmationKey3Interpretation::IanaKid`] では 3 は `kid` であり `jkt`
+    /// ではないため、323 が無ければ `None` を返す。
+    ///
+    /// 323 と 3 が併存する場合は 323 を返す。3 は
+    /// [`ConfirmationKey3Interpretation::IanaKid`] のとき
+    /// [`Confirmation::kid`] で取り出せる。
+    pub fn jkt_with(&self, interpretation: ConfirmationKey3Interpretation) -> Option<&[u8]> {
+        if let Some(jkt) = self.jwk_thumbprint.as_deref() {
+            return Some(jkt);
+        }
+        match interpretation {
+            ConfirmationKey3Interpretation::IanaKid => None,
+            ConfirmationKey3Interpretation::C4mDraftJkt => self.confirmation_key_3.as_deref(),
+        }
+    }
+
+    /// `kid` を confirmation key 3 の解釈付きで返す
+    ///
+    /// IANA の CWT Confirmation Methods レジストリでは 3 は `kid` である
+    /// (RFC 8747 §3.4)。[`ConfirmationKey3Interpretation::IanaKid`] のときだけ
+    /// confirmation key 3 を返し、[`ConfirmationKey3Interpretation::C4mDraftJkt`] では
+    /// 3 を `jkt` として扱うため `None` を返す。
+    ///
+    /// 323 (`jkt`) が併存していても `kid` は key 3 だけを指す。kid から検証鍵を解決
+    /// して PoP を検証することはこのライブラリでは行わない。利用側が `kid` から鍵を
+    /// 解決して検証すること。
+    pub fn kid(&self, interpretation: ConfirmationKey3Interpretation) -> Option<&[u8]> {
+        match interpretation {
+            ConfirmationKey3Interpretation::IanaKid => self.confirmation_key_3.as_deref(),
+            ConfirmationKey3Interpretation::C4mDraftJkt => None,
+        }
     }
 
     /// COSE Key Thumbprint (`ckt`、confirmation key 5) を返す
@@ -1524,13 +1586,19 @@ impl CatTokenBuilder {
         self
     }
 
-    /// `cnf` の `jkt` を draft-ietf-moq-c4m-01 のベクタが使う key 3 で設定する
+    /// `cnf` の confirmation key 3 に値を設定する
+    ///
+    /// IANA の CWT Confirmation Methods レジストリでは key 3 は `kid` であり
+    /// (RFC 8747 §3.4)、draft-ietf-moq-c4m-01 §3.1.1 / 付録 A.4 のベクタは key 3 を
+    /// `jkt` として使う。どちらも wire 上はバイト文字列のため、設定した値の意味は
+    /// 検証側の [`ConfirmationKey3Interpretation`] で決まる。IANA の `jkt` を設定する
+    /// 場合は [`CatTokenBuilder::jwk_thumbprint`] (323) を使うこと。
     pub fn c4m_draft_jwk_thumbprint(mut self, thumbprint: impl Into<Vec<u8>>) -> Self {
         let confirmation = self
             .claims
             .confirmation
             .get_or_insert_with(Default::default);
-        confirmation.c4m_draft_jwk_thumbprint = Some(thumbprint.into());
+        confirmation.confirmation_key_3 = Some(thumbprint.into());
         self
     }
 

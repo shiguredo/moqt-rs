@@ -39,5 +39,5 @@ fuzz_target!(|input: FuzzInput| {
     if let Ok(namespace) = TrackNamespace::new(input.namespace) {
         let _ = context.verify_target(&namespace, &input.track_name);
     }
-    let _ = context.verify_resource_consistency();
+    let _ = context.verify_resource_consistency(action);
 });
