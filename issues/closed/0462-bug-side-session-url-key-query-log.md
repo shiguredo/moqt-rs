@@ -1,7 +1,7 @@
 # moq-sub の side session キーが query の認可トークンをログに出す
 
 - Created: 2026-11-20
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-21
 - Branch: feature/fix-side-session-url-key-query-redaction
 - Polished: 2026-11-20
 
