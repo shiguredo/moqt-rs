@@ -3,7 +3,7 @@
 - Created: 2026-10-19
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-c4m-cose-encode-validation
-- Polished: 2026-10-21
+- Polished: 2026-11-21
 
 ## 目的
 
@@ -37,24 +37,28 @@ COSE タグはメッセージ種別から `AlgorithmClass::tag()` で決まる�
   - 不一致なら `CoseError::AlgorithmClassMismatch` を返す。
 - `header().algorithm` が `None` の場合、decode の受理範囲に合わせる。
   - タグ付きメッセージ (encode 内で計算する `tagged` が true) は decode がタグから種別を決めて受理するため、encode も受理する。
-  - タグ無しメッセージ (encode 内で計算する `tagged` が false) は decode が `MissingAlgorithm` で拒否するため、encode も `MissingAlgorithm` を返す。
+  - タグ無しメッセージ (encode 内で計算する `tagged` が false で、CWT タグも付けない) は decode が `MissingAlgorithm` で拒否するため、encode も `MissingAlgorithm` を返す。
 - COSE タグはメッセージ種別から `AlgorithmClass::tag()` で決まるため、個別のタグ検証は追加しない。CWT タグには COSE タグが必要という既存の検証は維持する。
+- `header()` の検証の後、既存の CWT タグ / COSE タグの検証を行い、その後に `alg` の class と `MissingAlgorithm` を検証する。
 - `CoseSign1` / `CoseMac0` の公開フィールドは変更しない。構築を検証付きコンストラクタに限定する案は、公開フィールドを private にする破壊的変更になるため採用しない。encode の境界で検証する。
 - `CoseMessage::encode` の doc コメントに、検証内容と返すエラーを追記する。
+- `tests/test_c4m/dpop/cwt.rs` は decode のエラーを確認するために encode で不正なヘッダを持つメッセージを作っている。encode の検証を追加すると encode が先にエラーを返すため、`sign_proof_with_key` を encode を経由せず `CoseMessage::signing_input` と `cbor::encode` で COSE の CBOR を組み立てる形に変更する。`rejects_symmetric_algorithm` の Sign1 (HMAC alg) も同様に直接組み立てる。
 
 ## 変更対象
 
 - `src/c4m/cose.rs`
 - `tests/test_c4m/cose.rs`
+- `tests/test_c4m/dpop/cwt.rs`
 
 ## 完了条件
 
 - `CoseSign1` に MAC alg、`CoseMac0` に署名 alg を設定したメッセージの encode が、タグ付き / タグ無しのどちらでも `CoseError::AlgorithmClassMismatch` を返すこと。
-- `alg` が無いタグ無しメッセージの encode が `CoseError::MissingAlgorithm` を返すこと。
+- `alg` が無く、COSE タグも CWT タグも付けないメッセージの encode が `CoseError::MissingAlgorithm` を返すこと。
 - unprotected にしか `alg` が無いメッセージの encode が `CoseError::UnprotectedAlgorithm` を返すこと。
 - `alg` が無いタグ付きメッセージの encode が成功し、decode で同じ種別に戻ること。
 - 正当な Sign1 / Mac0 の roundtrip が維持されること (既存の `tests/test_c4m/cose.rs` と `pbt/tests/prop_c4m/cose.rs` で確認する)。
 - `tests/test_c4m/cose.rs` に上記の encode エラーとタグ付き / タグ無しの受理範囲を固定するテストが追加されていること。
+- `tests/test_c4m/dpop/cwt.rs` の `sign_proof_with_key` が encode を経由せずに COSE の CBOR を組み立て、`rejects_symmetric_algorithm` / `rejects_misplaced_protected_header_members` / `accepts_understood_critical_header` が encode の検証追加後も decode のエラーを確認できること。
 - `CoseMessage::encode` の doc コメントが、`header()` の検証 (例: `UnprotectedAlgorithm`)、`AlgorithmClassMismatch`、`MissingAlgorithm` を説明していること。
 - 次のコマンドが通ること。
   - `cargo test --workspace`
