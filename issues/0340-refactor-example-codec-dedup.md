@@ -3,7 +3,7 @@
 - Created: 2026-10-19
 - Completed: {YYYY-MM-DD}
 - Branch: feature/refactor-example-codec-dedup
-- Polished: 2026-10-20
+- Polished: 2026-11-20
 
 ## 目的
 
@@ -20,7 +20,7 @@
 - H.264 / H.265 では `skip_ps_nal` / `parse_avc_config` / `parse_hvc_config` / `AvcConfig` / `HvcConfig` / `decode_handler` / `convert_decoded_frame` もそれぞれのモジュールに重複している。
 - pub / sub の差は次のとおり。
   - pub のみ: `Av1Decoder::drain_delayed` / `Av1Decoder::reset`、`VideoDecoder::drain_delayed` / `VideoDecoder::reset`、`interleave_uv`。
-  - sub のみ: `DecodedVideoFrame` の `timestamp_us` フィールド、`AudioDecoder` と `decoder` モジュールの `build_video_decoder`、VP8 / VP9 / AAC の各デコーダ、`OpusDecoder::reset` / `sample_rate` / `channels`。
+  - sub のみ: `DecodedVideoFrame` の `timestamp_us` / `timestamp_kind` フィールドと `TimestampKind`、`AudioDecoder` と `decoder` モジュールの `build_video_decoder`、VP8 / VP9 / AAC の各デコーダ、`OpusDecoder::reset` / `sample_rate` / `channels`。
   - H.264 / H.265 の設定レコード未到達時の挙動が異なる。pub はエラーを返し、sub は警告ログを出して空のフレーム列を返す。
   - sub の `H264Decoder` / `H265Decoder` は `nalu_len_bytes` フィールドを持つが、代入しているだけで読み出していない。共有化の際に削除する。
 - 影響: 修正コストと不整合リスクが二重化している。
@@ -29,13 +29,13 @@
 
 - `crates/moq-codec` (package `moq-codec`、`publish = false`、`rust-version = "1.95"`) を新設し、workspace の `members` に追加する。`tokio-moq` には置かない。`tokio-moq` はトランスポート層であり、codec 依存や macOS 専用依存を持ち込むと層が混ざるためである。
 - 共有 crate に置くもの:
-  - AV1 / H.264 / H.265 / Opus の各デコーダと、`DecodedVideoFrame` (I420 プレーンのみ。`timestamp_us` は持たない)。
+  - AV1 / H.264 / H.265 / Opus の各デコーダと、`DecodedVideoFrame` (I420 プレーンのみ。`timestamp_us` / `timestamp_kind` は持たない)。
   - `copy_plane` / `read_ps_nal` / `skip_ps_nal` と、`parse_avc_config` / `parse_hvc_config` およびその設定型。
   - codec 層のエラー型。アプリの `crate::error::Error` には依存しない。
 - pub / sub に残すもの:
   - pub の `VideoDecoder`、sub の `VideoDecoder` / `AudioDecoder` の Enum と codec 選択 (`build_video_decoder` / `AudioDecoder::build` など)。
   - pub の `interleave_uv`、`drain_delayed` / `reset` の呼び出し。
-  - sub の `DecodedVideoFrame` (`timestamp_us: Option<i64>` を持つ公開型) と、共有 crate のフレームからの変換。変換時は `timestamp_us: None` にし、pipeline が Object の Properties から設定する現行挙動を保つ。
+  - sub の `DecodedVideoFrame` (`timestamp_us: Option<i64>` / `timestamp_kind: TimestampKind` を持つ公開型) と、共有 crate のフレームからの変換。変換時は `timestamp_us: None` / `timestamp_kind: TimestampKind::None` にし、pipeline が Object の Properties から設定する現行挙動を保つ。
   - sub の VP8 / VP9 / AAC デコーダ。これらは pub と重複していないため共有 crate へ移さない。
 - 差の吸収:
   - pub / sub の各 `Error` に共有 crate のエラー型からの `From` を実装し、既存の variant と表示 (例: `decode: ...` / `video toolbox: ...` / `opus: ...`) を保つ。
@@ -46,7 +46,7 @@
 - 既存の pub の H.264 / H.265 の encode→decode テストは削除せず、共有 crate のデコーダを対象に通す。sub の VP8 / VP9 / AAC のテストも残す。
 - 共有 crate が使う codec 依存 (`shiguredo_dav1d` / `shiguredo_opus` / `shiguredo_video_toolbox`) は pub / sub と同じバージョン指定を使い、`shiguredo_video_toolbox` は macOS 限定依存として H.264 / H.265 モジュールを `#[cfg(target_os = "macos")]` にする。
 - 公開項目には `///` を付け、`mod.rs` を使わないなど shiguredo-rust に従う。
-- 変更対象は `crates/moq-codec` の新設、`crates/moq-pub` / `crates/moq-sub` の decoder と関連 import、workspace の `Cargo.toml`、各 example の `Cargo.toml` に限定する。
+- 変更対象は `crates/moq-codec` の新設、`crates/moq-pub` / `crates/moq-sub` の decoder と関連 import、workspace の `Cargo.toml`、各 example の `Cargo.toml`、workspace member 追加に伴う `Cargo.lock` の更新に限定する。
 
 ## 完了条件
 
