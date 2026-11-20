@@ -302,7 +302,10 @@ impl Transport {
 /// `shiguredo_moqt::msf::uri::parse_msf_fragment` で MSF fragment として検証し、
 /// 予約パラメータ `cat` の認可トークンを取り出す ([`ServerUrl::cat_tokens`])。
 /// 他の `type` の value は moq-pub / moq-sub が解釈しないため、構文 (§6.1.1) の検証だけを行う。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// value は認可トークンなどの機密値を含み得るため、`Debug` は実値を表示せずバイト長を
+/// `value_bytes` として表示する ([`ServerUrl`] の `Debug` も同じ方針である)。
+#[derive(Clone, PartialEq, Eq)]
 pub struct MoqtFragment {
     /// fragment type (`<type>` 部分)。ASCII 小文字 / 数字 / ハイフンに限る
     pub fragment_type: String,
@@ -313,12 +316,34 @@ pub struct MoqtFragment {
     pub value: String,
 }
 
+impl core::fmt::Debug for MoqtFragment {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // フィールドを追加したときに表示漏れをコンパイラが検出できるよう、`..` を使わずに分解する
+        let Self {
+            fragment_type,
+            value,
+        } = self;
+        // value は認可トークンなどの機密値を含み得るため、文字列ではなくバイト長を表示する
+        f.debug_struct("MoqtFragment")
+            .field("fragment_type", fragment_type)
+            .field("value_bytes", &value.len())
+            .finish()
+    }
+}
+
 /// パース済みの接続先情報
 ///
 /// 接続経路 (QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux) は
 /// [`Transport`] で選ぶため、ここには持たない。`--transport` が指定されていればそれを使い、無ければ `msf` fragment
 /// の `connection`、どちらも無ければ native QUIC になる ([`resolve_transport`])。
-#[derive(Debug, Clone)]
+///
+/// query と fragment は認可トークンなどを含み得るため、`Debug` は実値を表示しない。
+/// `authority` と path (`?` より前) を表示し、`query: Option<usize>` に `?` 以降のバイト長、
+/// [`MoqtFragment`] の `value_bytes` に fragment の value のバイト長、`cat_token_count` に
+/// `cat` の件数、`cat_token_bytes` に各トークンのバイト長の配列を表示する。`msf` の
+/// namespace は [`TrackNamespace`] の `Debug` 表現、track name は十進のバイト列として表示する
+/// (いずれも機密値でない)。
+#[derive(Clone)]
 pub struct ServerUrl {
     /// ホスト名または IP アドレス (ポートを含む場合がある)
     ///
@@ -360,6 +385,39 @@ pub struct ServerUrl {
     /// (draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression) は
     /// alias 解決後の (Token Type, Token Value) の重複を拒否するため)。
     pub cat_tokens: Vec<Vec<u8>>,
+}
+
+impl core::fmt::Debug for ServerUrl {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // フィールドを追加したときに表示漏れをコンパイラが検出できるよう、`..` を使わずに分解する
+        let Self {
+            authority,
+            path,
+            fragment,
+            msf,
+            cat_tokens,
+        } = self;
+        // path は query を含み、query は認可トークンを含み得るため、`?` より前だけを表示する
+        let (path_without_query, query) = match path.split_once('?') {
+            Some((path, query)) => (path, Some(query.len())),
+            None => (path.as_str(), None),
+        };
+        f.debug_struct("ServerUrl")
+            .field("authority", authority)
+            .field("path", &path_without_query)
+            .field("query", &query)
+            .field("fragment", fragment)
+            .field("msf", msf)
+            .field("cat_token_count", &cat_tokens.len())
+            .field(
+                "cat_token_bytes",
+                &cat_tokens
+                    .iter()
+                    .map(|token| token.len())
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 /// URL をパースして authority ・ path ・ fragment ・ C4M 認可トークンを取得する
@@ -2781,6 +2839,243 @@ mod tests {
                 assert!(!err.contains(secret), "{url}: 実値を含まないこと: {err}");
             }
         }
+    }
+
+    /// Debug 出力に実値が文字列としても十進のバイト列としても含まれないことを確認する
+    ///
+    /// 失敗時に Debug 出力をそのまま出すと、漏えいした実値を CI のログへ書いてしまうため、
+    /// どの値が漏れたかだけを示す。空または 1 バイトの `secret` は無関係な長さ表示などと
+    /// 衝突するため検査しない。呼び出し側は 2 バイト以上の値を渡すこと。
+    fn assert_hidden(debug: &str, what: &str, secret: &[u8]) {
+        if secret.len() <= 1 {
+            return;
+        }
+        // 認可トークンは UTF-8 でないバイト列でもよいため、文字列として扱える場合だけ比較する
+        if let Ok(text) = core::str::from_utf8(secret) {
+            assert!(
+                !debug.contains(text),
+                "{what} の文字列が Debug 出力に含まれている"
+            );
+        }
+        let list = format!("{secret:?}");
+        let inner = list
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+            .expect("バイト列の Debug 表現は [...] の形になること");
+        assert!(
+            !debug.contains(inner),
+            "{what} の十進のバイト列が Debug 出力に含まれている"
+        );
+    }
+
+    /// ServerUrl の Debug は query / fragment / cat トークンの実値を表示しない
+    ///
+    /// ログ出力で `{:?}` を使っても認可トークンが漏れないよう、伏せたフィールドはバイト長を
+    /// 表示する。authority と query より前の path は非機密のため従来どおり表示する。
+    #[test]
+    fn server_url_debug_hides_token_values() {
+        let token = [222u8, 173, 190, 239];
+        let text = Base64::encode_string(&token);
+        let fragment_value = format!("moq-example--video&cat={text}");
+        // query は `?` 以降 (`token=SECRETQUERY` の 17 バイト)
+        let url = parse_url(&format!(
+            "moqt://example.com/app?token=SECRETQUERY#msf:{fragment_value}"
+        ))
+        .expect("URL のパースに成功すること");
+        let debug = format!("{url:?}");
+
+        // 実値は文字列でも十進のバイト列でも現れない。query と fragment は「その中の
+        // 秘匿対象の値」と「全体の文字列」を別々に検査する
+        assert_hidden(&debug, "query の値", b"SECRETQUERY");
+        assert_hidden(&debug, "query 全体", b"token=SECRETQUERY");
+        assert_hidden(&debug, "fragment", fragment_value.as_bytes());
+        assert_hidden(&debug, "cat トークンの Base64 表現", text.as_bytes());
+        assert_hidden(&debug, "cat トークン", &token);
+
+        // 伏せたフィールドはバイト長を表示する
+        assert!(
+            debug.contains("query: Some(17)"),
+            "query のバイト長を表示すること: {debug}"
+        );
+        assert!(
+            debug.contains("fragment: Some("),
+            "fragment を表示すること: {debug}"
+        );
+        assert!(debug.contains("msf: Some("), "msf を表示すること: {debug}");
+        assert!(
+            debug.contains("value_bytes: 31"),
+            "fragment の value のバイト長を表示すること: {debug}"
+        );
+        assert!(
+            debug.contains("cat_token_count: 1"),
+            "cat の件数を表示すること: {debug}"
+        );
+        assert!(
+            debug.contains("cat_token_bytes: [4]"),
+            "cat の各バイト長を表示すること: {debug}"
+        );
+        // 非機密のフィールドは従来どおり表示する
+        assert!(
+            debug.contains("authority: \"example.com\""),
+            "authority は表示すること: {debug}"
+        );
+        assert!(
+            debug.contains("path: \"/app\""),
+            "path は query より前だけを表示すること: {debug}"
+        );
+        // msf fragment の namespace と track name は非機密のため、十進のバイト列として表示する
+        assert!(
+            debug.contains("track_name: [118, 105, 100, 101, 111]"),
+            "track name は非機密として表示すること: {debug}"
+        );
+    }
+
+    /// query と fragment が無い URL の Debug は None と空の件数を表示する
+    #[test]
+    fn server_url_debug_reports_absent_query_and_fragment() {
+        let url = parse_url("moqt://example.com/app").expect("URL のパースに成功すること");
+        let debug = format!("{url:?}");
+        assert!(
+            debug.contains("query: None"),
+            "query は None になること: {debug}"
+        );
+        assert!(
+            debug.contains("fragment: None"),
+            "fragment は None になること: {debug}"
+        );
+        assert!(
+            debug.contains("msf: None"),
+            "msf は None になること: {debug}"
+        );
+        assert!(
+            debug.contains("cat_token_count: 0"),
+            "cat の件数は 0 になること: {debug}"
+        );
+        assert!(
+            debug.contains("cat_token_bytes: []"),
+            "cat の各バイト長は空になること: {debug}"
+        );
+        assert!(
+            debug.contains("path: \"/app\""),
+            "path は表示すること: {debug}"
+        );
+    }
+
+    /// query に複数の `?` がある URL は最初の `?` 以降をまとめて隠す
+    #[test]
+    fn server_url_debug_hides_query_after_the_first_question_mark() {
+        let url = parse_url("moqt://example.com/app?token=SECRET1?token=SECRET2")
+            .expect("URL のパースに成功すること");
+        let debug = format!("{url:?}");
+        // 漏えい検出を長さのアサートより先に行い、失敗時に secret を印字しない
+        assert_hidden(&debug, "query", b"SECRET1");
+        assert_hidden(&debug, "query", b"SECRET2");
+        // `token=SECRET1?token=SECRET2` の 27 バイト
+        assert!(
+            debug.contains("query: Some(27)"),
+            "query 全体のバイト長を表示すること: {debug}"
+        );
+        assert!(
+            debug.contains("path: \"/app\""),
+            "path は最初の `?` より前だけを表示すること: {debug}"
+        );
+    }
+
+    /// cat が複数ある場合も件数と各トークンのバイト長を表示する
+    #[test]
+    fn server_url_debug_reports_each_cat_token_length() {
+        let url = parse_url("moqt://example.com/app#msf:moq-example--video&cat=AQID&cat=BAUG")
+            .expect("URL のパースに成功すること");
+        assert_eq!(url.cat_tokens.len(), 2, "トークンは 2 個になること");
+        let debug = format!("{url:?}");
+        assert_hidden(&debug, "1 個目の cat トークンの Base64 表現", b"AQID");
+        assert_hidden(&debug, "2 個目の cat トークンの Base64 表現", b"BAUG");
+        assert_hidden(&debug, "1 個目の cat トークン", &[1u8, 2, 3]);
+        assert_hidden(&debug, "2 個目の cat トークン", &[4u8, 5, 6]);
+        assert!(
+            debug.contains("cat_token_count: 2"),
+            "cat の件数を表示すること: {debug}"
+        );
+        assert!(
+            debug.contains("cat_token_bytes: [3, 3]"),
+            "cat の各トークンのバイト長を表示すること: {debug}"
+        );
+    }
+
+    /// msf 以外の fragment は type を表示し、value の実値を表示しない
+    #[test]
+    fn server_url_debug_hides_non_msf_fragment_value() {
+        let url = parse_url("moqt://example.com/app#other:SECRETVALUE")
+            .expect("URL のパースに成功すること");
+        let debug = format!("{url:?}");
+        assert_hidden(&debug, "fragment の value", b"SECRETVALUE");
+        assert!(
+            debug.contains("fragment_type: \"other\""),
+            "fragment type は表示すること: {debug}"
+        );
+        assert!(
+            debug.contains("msf: None"),
+            "msf は None になること: {debug}"
+        );
+    }
+
+    /// MoqtFragment の Debug は value の実値を表示しない
+    #[test]
+    fn moqt_fragment_debug_hides_value() {
+        let fragment = MoqtFragment {
+            fragment_type: "msf".to_string(),
+            value: "SECRETFRAGMENT".to_string(),
+        };
+        let debug = format!("{fragment:?}");
+        // 漏えい検出を長さのアサートより先に行い、失敗時に secret を印字しない
+        assert_hidden(&debug, "fragment の value", b"SECRETFRAGMENT");
+        assert!(
+            debug.contains("fragment_type: \"msf\""),
+            "fragment type は表示すること: {debug}"
+        );
+        assert!(
+            debug.contains("value_bytes: 14"),
+            "value のバイト長を表示すること: {debug}"
+        );
+    }
+
+    /// MigrationTarget と ConnectParams の Debug も URL の秘匿を通ること
+    #[test]
+    fn migration_and_connect_params_debug_hide_url_secrets() {
+        let token = [222u8, 173, 190, 239];
+        let text = Base64::encode_string(&token);
+        let fragment_value = format!("moq-example--video&cat={text}");
+        let url = parse_url(&format!(
+            "moqt://example.com/app?token=SECRETQUERY#msf:{fragment_value}"
+        ))
+        .expect("URL のパースに成功すること");
+        let target = MigrationTarget {
+            scope: MigrationScope::Session,
+            url: url.clone(),
+        };
+        let debug = format!("{target:?}");
+        assert_hidden(&debug, "query の値", b"SECRETQUERY");
+        assert_hidden(&debug, "fragment", fragment_value.as_bytes());
+        assert_hidden(&debug, "cat トークンの Base64 表現", text.as_bytes());
+        assert_hidden(&debug, "cat トークン", &token);
+
+        let params = ConnectParams {
+            url: &url,
+            transport: Transport::Quic,
+            cert: None,
+            impl_name: "impl",
+            receive_datagrams: false,
+            datagram_max_size: None,
+        };
+        let debug = format!("{params:?}");
+        assert_hidden(&debug, "query の値", b"SECRETQUERY");
+        assert_hidden(&debug, "fragment", fragment_value.as_bytes());
+        assert_hidden(&debug, "cat トークンの Base64 表現", text.as_bytes());
+        assert_hidden(&debug, "cat トークン", &token);
+        assert!(
+            debug.contains("authority: \"example.com\""),
+            "authority は表示すること: {debug}"
+        );
     }
 
     /// fragment と cat の解析エラーは入力を含まない
