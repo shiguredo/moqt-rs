@@ -1,7 +1,7 @@
 # URL と MSF fragment の解析エラーのメッセージに機密値を埋め込まない
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-20
 - Branch: feature/fix-url-parse-error-secret-leak
 - Polished: 2026-11-14
 
@@ -63,3 +63,17 @@ fragment のパラメータ値は C4M トークンなどの認可情報を含み
 - 既存の拒否条件とエラーの種類が変わらないこと。
 - `parse_url` の `# Errors` と、入力 URL 全体を含むことを前提にした既存テストを新しい方針に合わせること。
 - 上記をテストで固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+現在のコードは MSF draft-02 と C4M draft-02 に移行しており、予約パラメータは `c4m` ではなく `cat` である。本 issue の `c4m` は `cat` として対応した。
+
+- `src/msf/uri.rs` の `parse_msf_fragment` / `validate_pchar_no_amp` は、パラメータ値の検証エラーに実値を含めず、パラメータ名と 1 始まりの位置 (`MSF fragment parameter 'cat' value (#1)`) を示すようにした。`=` の無い要素は名前と値を区別できないため、要素全体ではなく位置 (`MSF fragment parameter #1 is missing '='`) だけを示す。track-identifier とパラメータ名は機密値でないため従来どおり示す。
+- `crates/tokio-moq/src/lib.rs` の `parse_url` / `parse_moqt_fragment` / `parse_msf_value` / `parse_cat_tokens` / `decode_cat_token` から `url` 引数を外し、入力 URL 全体をエラーメッセージに含めないようにした。原因を特定できる非機密の成分 (scheme、`authority` / `path` などの成分名、空白のバイト位置) だけを示す。
+- `parse_url` の scheme 表示は RFC 3986 §3.1 の文字種に一致するときだけにした (`is_uri_scheme`)。URL でない入力の `:` より前を反射させない。
+- `invalid_authority` は userinfo (`@`) を含む authority をメッセージに含めないようにし、判定を 1 箇所に集約した。
+- `migration_target` のエラーから New Session URI を外し、authority に userinfo を含む移行先を request 単位は `Ok(None)`、session 単位はエラーで拒否するようにした。
+- `crates/moq-pub/src/cli.rs` と `crates/moq-sub/src/cli.rs` の `--url` の検証エラーを `noargs::Error::other` で返し、noargs の `InvalidOpt` がオプションの生値を表示する経路をなくした。エラーメッセージには `--url` を前置する。
+- `crates/tokio-moq/README.md` の authority と解析エラーの記述を実装に合わせた。
+- テストは `tests/test_msf/uri.rs` (パラメータ値と `=` の無い要素の漏えい禁止)、`crates/tokio-moq/src/lib.rs` の単体テスト (URL 全体・query / fragment・userinfo・scheme 反射・`migration_target` の漏えい禁止)、`crates/moq-pub/tests/test_cli.rs` と `crates/moq-sub/tests/test_cli.rs` (CLI の標準エラーへの漏えい禁止) に追加した。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ることを確認した。
