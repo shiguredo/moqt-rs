@@ -1,7 +1,7 @@
 # C4M の DPoP / トークン束縛の検証を仕様に合わせる
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-20
 - Branch: feature/fix-c4m-dpop-validation
 - Polished: 2026-10-21
 
@@ -151,3 +151,19 @@ draft-ietf-moq-c4m-01 の DPoP 検証に次の不備がある。認可とリプ�
 - CWT 形式の DPoP proof (`dpop-proof+cwt`)。actx の claim label が TBD のため、従来どおり対象外とする。
 - クエリパラメータの重複時の厳密な検証。0356 のモデル独立化で扱う。
 - `moqt-reval` の再検証。0345 で扱う。
+
+## 解決方法
+
+現在のコードは C4M draft-02 に移行しており、`MoqtAction::ClientSetup` / `ServerSetup` は `MoqtAction::Setup` に統合されている。本 issue の SETUP は `MoqtAction::Setup` として対応した。対象は旧 JWT 形式の DPoP proof の互換 API であり、CWT 形式 (`CwtDpopProof` / `CwtDpopReplayCache` / `CwtAuthorizationContext`) の挙動は変えていない。
+
+- `src/c4m/cat.rs` に `ConfirmationKey3Interpretation` (`IanaKid` 既定 / `C4mDraftJkt`) を追加した。`Confirmation::c4m_draft_jwk_thumbprint` を `confirmation_key_3` に改名し、`Confirmation::jkt()` は IANA 登録の 323 だけを返すようにした。
+  `jkt_with(interpretation)` は 323 を優先し、323 が無い場合だけ `C4mDraftJkt` で key 3 を返す。`kid(interpretation)` は `IanaKid` のときだけ key 3 を返す。`CatTokenBuilder::c4m_draft_jwk_thumbprint` は key 3 を設定するメソッドとして残した。
+- `src/c4m/dpop.rs` の `DpopProof::verify_key_binding` に解釈引数を追加し、`DpopVerification::confirmation_key3` を使うようにした。`verify_against_cat_token` は `IanaKid` を渡し、`verify_against_cat_token_with` で `C4mDraftJkt` も指定できる。
+- `AuthorizationContext::verify_resource_consistency(action)` を action 別にした。SETUP は `moqt://<authority>` の形式だけを検証し、namespace 操作は `tns` と (両方にある場合だけ) `tn`、track 操作は `tns` と `tn` を比較する。SETUP 以外でも `moqt://<authority>` の形式を検証する。
+- `DpopProof::verify_authorization_context` は SETUP で `verify_target` を呼ばず、actx の `tn` の存在だけを要求する (旧 draft-ietf-moq-c4m-01 §3.1.2 の互換規則)。draft-02 §4.2 の CWT 形式 actx は SETUP に `tn` を持たないため、draft-02 に従う場合は CWT 形式の API を使うことを doc に明記した。
+- `DpopReplayCache` に `max_window_seconds` (既定 300 秒) を導入し、`with_max_window` と `max_window_seconds` を追加した。保持期限 (`iat` + `max_window_seconds`) で記録を解放し、`window_seconds > max_window_seconds` は `ReplayWindowTooLarge` で拒否する。キャッシュが渡された場合は `honor_jti` の有無にかかわらず最大ウィンドウを検査する。
+  負のウィンドウは `InvalidFreshnessWindow`、非有限は `NonFiniteNumber` で拒否する。拒否時は既存の記録を解放しない。
+- テストは `tests/test_c4m/dpop.rs` と `tests/test_c4m/cat.rs` に追加・更新した。SETUP / namespace / track の resource の受理と拒否、resource の形式不正、replay cache の最大ウィンドウと保持期限の境界、拒否時に解放しないこと、`IanaKid` と `C4mDraftJkt` の鍵束縛、323 と 3 の併存時の優先を固定した。
+- PBT は `pbt/tests/prop_c4m/dpop.rs` の resource / replay のモデルを action 別 resource と最大ウィンドウに追随させ、`pbt/tests/prop_c4m/cat.rs` に key 3 の解釈の property を追加した。fuzz は `verify_resource_consistency` に action を渡し、入力の末尾バイトで action を選ぶようにした。
+- `docs/c4m.md` と `skills/shiguredo-moqt/SKILL.md` を新しい挙動に合わせ、`docs/missing-features.md` の解消済みの行を削除した。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / `cargo test -p pbt` / `cargo +nightly fuzz build` / `prek run --all-files` が通ることを確認した。
