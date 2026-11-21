@@ -240,6 +240,15 @@ mod error_cases {
         );
     }
 
+    /// 7 バイト形 (0xFC + 6 バイト) の切り詰め
+    #[test]
+    fn seven_byte_truncated() {
+        assert_eq!(
+            varint::decode(&[0xFC, 0x00, 0x00, 0x00, 0x00, 0x00]),
+            Err(MessageError::UnexpectedEof)
+        );
+    }
+
     #[test]
     fn eight_byte_truncated() {
         assert_eq!(
@@ -307,12 +316,32 @@ mod spec_test_vectors {
         );
     }
 
+    /// Table 4 の 0xed7f3e7d = 226,442,877 (4 バイト)
+    #[test]
+    fn value_226442877() {
+        assert_eq!(
+            varint::decode(&[0xED, 0x7F, 0x3E, 0x7D])
+                .expect("テストフィクスチャの前提条件を満たす"),
+            (226_442_877, 4)
+        );
+    }
+
     #[test]
     fn value_2893212287960() {
         assert_eq!(
             varint::decode(&[0xFA, 0xA1, 0xA0, 0xE4, 0x03, 0xD8])
                 .expect("テストフィクスチャの前提条件を満たす"),
             (2_893_212_287_960, 6)
+        );
+    }
+
+    /// Table 4 の 0xfc8998abc66bc0 = 151,288,809,941,952 (7 バイト)
+    #[test]
+    fn value_151288809941952() {
+        assert_eq!(
+            varint::decode(&[0xFC, 0x89, 0x98, 0xAB, 0xC6, 0x6B, 0xC0])
+                .expect("テストフィクスチャの前提条件を満たす"),
+            (151_288_809_941_952, 7)
         );
     }
 
@@ -386,6 +415,22 @@ mod checked_len {
         // u64 空間で remaining と比較するため切り捨てなく UnexpectedEof を返す
         assert_eq!(
             varint::checked_len(u64::MAX, 10),
+            Err(MessageError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn u32_max_plus_one_is_eof_without_32bit_truncation() {
+        // 2^32 は 32bit の usize で 0 に切り詰められる。`len as usize` を先に行う
+        // 実装では `0 <= remaining` となって受理されてしまうため、u64 空間での
+        // 比較が必須であることを固定する (この入力は 64bit では 2^32 のまま比較される)。
+        assert_eq!(
+            varint::checked_len(1u64 << 32, 0),
+            Err(MessageError::UnexpectedEof)
+        );
+        // 2^32 - 1 は 32bit でも切り詰められない
+        assert_eq!(
+            varint::checked_len((1u64 << 32) - 1, 0),
             Err(MessageError::UnexpectedEof)
         );
     }

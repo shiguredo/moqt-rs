@@ -39,20 +39,19 @@ fn leading_ones_indicate_length() -> noprop::TestResult {
             5 => 4u32,
             6 => 5u32,
             7 => 6u32, // 1111110x: draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1595 で追加
-            8 => 6u32, // 11111110: leading_ones=7 だが 0xFE は first=0xFE で leading_ones()=7
+            8 => 7u32, // 11111110
             9 => 8u32,
             _ => unreachable!("vi64 encoded length is always 1..=9"),
         };
-        // 8 バイトの場合は先頭バイトが 0xFE (11111110) で leading_ones=7
+        // 8 バイトの場合は先頭バイトが 0xFE (11111110)
         if expected_len == 8 {
             assert_eq!(buf[0], 0xFE);
-        } else if expected_len == 7 {
-            // 7 バイトの場合は先頭バイトが 1111110x (0xFC-0xFD)
-            assert_eq!(buf[0] & 0xFE, 0xFC);
-            assert_eq!(leading_ones, expected_leading_ones);
-        } else {
-            assert_eq!(leading_ones, expected_leading_ones);
         }
+        // 7 バイトの場合は先頭バイトが 1111110x (0xFC-0xFD)
+        if expected_len == 7 {
+            assert_eq!(buf[0] & 0xFE, 0xFC);
+        }
+        assert_eq!(leading_ones, expected_leading_ones);
         Ok(())
     })?;
     Ok(())
