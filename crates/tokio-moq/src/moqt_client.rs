@@ -11,6 +11,8 @@
 //! - 受信は `tokio::spawn` した task で行い、`mpsc` 経由でメインループに集約する
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -673,12 +675,10 @@ fn lock_pending_fill_headers(
 /// `AwaitingHeader` の受信 data stream を Session から除去する
 /// ([`Session::send_data_stream_stop_sending`])。これにより stream の open 数の会計と
 /// DATA_STREAM_TIMEOUT の監視が残らない。
-fn discard_pending_fill_header(session: &Arc<StdMutex<Session>>, pending: PendingFillHeader) {
-    {
-        let mut session = lock_session(session);
-        // Session が既に閉じている場合は会計も不要である。エラーは無視する
-        let _ = session.send_data_stream_stop_sending(pending.stream_id);
-    }
+fn discard_pending_fill_header(data_plane: &DataPlaneHandle, pending: PendingFillHeader) {
+    // Session が既に閉じている場合は会計も不要である。エラーは無視する。
+    let _ =
+        data_plane.with_session(|session| session.send_data_stream_stop_sending(pending.stream_id));
     pending.resolve(FetchHeaderResolution::Discarded);
 }
 
@@ -690,32 +690,26 @@ fn discard_pending_fill_header(session: &Arc<StdMutex<Session>>, pending: Pendin
 ///
 /// PUBLISH を処理した後もまだ要求が登録されていない場合 (PUBLISH が REQUEST_ERROR で
 /// 拒否された等) は、対応する subscription が存在しないため保留を破棄する。
-fn resolve_pending_fill_header(
-    session: &Arc<StdMutex<Session>>,
-    pending: &Arc<StdMutex<PendingFillHeaders>>,
-    publish_request_id: u64,
-) {
+fn resolve_pending_fill_header(data_plane: &DataPlaneHandle, publish_request_id: u64) {
     let entry = {
-        let mut pending = lock_pending_fill_headers(pending);
+        let mut pending = lock_pending_fill_headers(&data_plane.pending_fill_headers);
         pending.remove_entry(publish_request_id)
     };
     let Some(entry) = entry else {
         return;
     };
-    let result = {
-        let mut session = lock_session(session);
-        session.recv_fetch_header(entry.stream_id, &entry.header)
-    };
+    let result = data_plane
+        .with_session(|session| session.recv_fetch_header(entry.stream_id, &entry.header));
     match result {
         Ok(FetchHeaderAcceptance::Accepted) => entry.resolve(FetchHeaderResolution::Accepted),
         // PUBLISH の受理後も要求が未登録である。PUBLISH が拒否された等で fill の帰属先が
         // 存在しないため、保留を破棄して会計を解放する
         Ok(FetchHeaderAcceptance::RequestNotRegistered) => {
-            discard_pending_fill_header(session, entry);
+            discard_pending_fill_header(data_plane, entry);
         }
         // Session が closing へ遷移した。会計は Session の終了とともに不要になるが、
         // stream を残さないため同じ経路で破棄する
-        Err(_) => discard_pending_fill_header(session, entry),
+        Err(_) => discard_pending_fill_header(data_plane, entry),
     }
 }
 
@@ -730,6 +724,7 @@ pub struct DataPlaneHandle {
     /// `MoqtClient` と共有する。PUBLISH の受理は制御メッセージの受信側で観測されるため、
     /// 同じ集合を両者から更新できる必要がある。
     pending_fill_headers: Arc<StdMutex<PendingFillHeaders>>,
+    events_ready: Arc<Notify>,
 }
 
 impl DataPlaneHandle {
@@ -742,7 +737,22 @@ impl DataPlaneHandle {
             session,
             stop_sending,
             pending_fill_headers,
+            events_ready: Arc::new(Notify::new()),
         }
+    }
+
+    fn with_session<T>(&self, operation: impl FnOnce(&mut Session) -> T) -> T {
+        let (result, has_events) = {
+            let mut session = lock_session(&self.session);
+            let result = operation(&mut session);
+            (result, session.has_pending_events())
+        };
+        if has_events {
+            // notify_one は受信待機の登録前でも許可を 1 つ保持する。キューの空を確認した直後に
+            // 別タスクがイベントを追加しても、制御ドライバーは通信なしで再開できる。
+            self.events_ready.notify_one();
+        }
+        result
     }
 
     /// Session が指示した STOP_SENDING を待つ
@@ -776,10 +786,11 @@ impl DataPlaneHandle {
         request_id: u64,
         header: &SubgroupHeader,
     ) -> Result<()> {
-        let mut session = lock_session(&self.session);
-        session
-            .send_subgroup_header(stream_id, request_id, header)
-            .map_err(|e| TransportError::Internal(format!("send_subgroup_header: {e}")))
+        self.with_session(|session| {
+            session
+                .send_subgroup_header(stream_id, request_id, header)
+                .map_err(|e| TransportError::Internal(format!("send_subgroup_header: {e}")))
+        })
     }
 
     /// subgroup object を Session に通知し、フィルタ評価の結果を返す
@@ -795,16 +806,17 @@ impl DataPlaneHandle {
         object_id: u64,
         properties_bytes: Option<&[u8]>,
     ) -> Result<ObjectFilterOutcome> {
-        let mut session = lock_session(&self.session);
-        match session.send_subgroup_object(stream_id, object_id, properties_bytes) {
-            Ok(()) => Ok(ObjectFilterOutcome::Pass),
-            Err(SendRequestError::LocalFilterMismatch | SendRequestError::LocalSubgroupTimeout) => {
-                Ok(ObjectFilterOutcome::Skip)
+        self.with_session(|session| {
+            match session.send_subgroup_object(stream_id, object_id, properties_bytes) {
+                Ok(()) => Ok(ObjectFilterOutcome::Pass),
+                Err(
+                    SendRequestError::LocalFilterMismatch | SendRequestError::LocalSubgroupTimeout,
+                ) => Ok(ObjectFilterOutcome::Skip),
+                Err(e) => Err(TransportError::Internal(format!(
+                    "send_subgroup_object: {e}"
+                ))),
             }
-            Err(e) => Err(TransportError::Internal(format!(
-                "send_subgroup_object: {e}"
-            ))),
-        }
+        })
     }
 
     /// Object Datagram 送信を Session に通知し、フィルタ評価の結果を返す
@@ -823,21 +835,22 @@ impl DataPlaneHandle {
         status: Option<u64>,
         end_of_group: bool,
     ) -> Result<ObjectFilterOutcome> {
-        let mut session = lock_session(&self.session);
-        match session.send_object_datagram(
-            request_id,
-            group_id,
-            object_id,
-            properties_data,
-            status,
-            end_of_group,
-        ) {
-            Ok(()) => Ok(ObjectFilterOutcome::Pass),
-            Err(SendRequestError::LocalFilterMismatch) => Ok(ObjectFilterOutcome::Skip),
-            Err(e) => Err(TransportError::Internal(format!(
-                "send_object_datagram: {e}"
-            ))),
-        }
+        self.with_session(|session| {
+            match session.send_object_datagram(
+                request_id,
+                group_id,
+                object_id,
+                properties_data,
+                status,
+                end_of_group,
+            ) {
+                Ok(()) => Ok(ObjectFilterOutcome::Pass),
+                Err(SendRequestError::LocalFilterMismatch) => Ok(ObjectFilterOutcome::Skip),
+                Err(e) => Err(TransportError::Internal(format!(
+                    "send_object_datagram: {e}"
+                ))),
+            }
+        })
     }
 
     /// uni data stream close を Session に通知する (publisher 側)
@@ -846,10 +859,11 @@ impl DataPlaneHandle {
         stream_id: DataStreamId,
         end: RequestStreamEnd,
     ) -> Result<()> {
-        let mut session = lock_session(&self.session);
-        session
-            .send_data_stream_closed(stream_id, end)
-            .map_err(|e| TransportError::Internal(format!("send_data_stream_closed: {e}")))
+        self.with_session(|session| {
+            session
+                .send_data_stream_closed(stream_id, end)
+                .map_err(|e| TransportError::Internal(format!("send_data_stream_closed: {e}")))
+        })
     }
 
     /// FETCH 応答用 uni stream の open を Session に通知する (publisher 側)
@@ -857,10 +871,11 @@ impl DataPlaneHandle {
     /// draft-ietf-moq-transport-23 §11.4.1 (Fetch Header): FETCH_OK を返した publisher は
     /// 要求の Request ID を載せた FETCH_HEADER で応答 stream を開く。
     pub fn send_fetch_header(&self, stream_id: DataStreamId, request_id: u64) -> Result<()> {
-        let mut session = lock_session(&self.session);
-        session
-            .send_fetch_header(stream_id, request_id)
-            .map_err(|e| TransportError::Internal(format!("send_fetch_header: {e}")))
+        self.with_session(|session| {
+            session
+                .send_fetch_header(stream_id, request_id)
+                .map_err(|e| TransportError::Internal(format!("send_fetch_header: {e}")))
+        })
     }
 
     /// fill fetch stream の open を Session に通知する (publisher 側)
@@ -874,10 +889,11 @@ impl DataPlaneHandle {
         stream_id: DataStreamId,
         fill_request_id: u64,
     ) -> Result<()> {
-        let mut session = lock_session(&self.session);
-        session
-            .send_fill_fetch_header(stream_id, fill_request_id)
-            .map_err(|e| TransportError::Internal(format!("send_fill_fetch_header: {e}")))
+        self.with_session(|session| {
+            session
+                .send_fill_fetch_header(stream_id, fill_request_id)
+                .map_err(|e| TransportError::Internal(format!("send_fill_fetch_header: {e}")))
+        })
     }
 
     /// FETCH 応答 stream 上の Object 送信を Session に通知する (publisher 側)
@@ -885,10 +901,11 @@ impl DataPlaneHandle {
     /// `location` は要求範囲の検証に使う (draft-ietf-moq-transport-23 §3.3.1)。
     /// 範囲外なら `LocalFilterMismatch` 由来のエラーになる。
     pub fn send_fetch_object(&self, stream_id: DataStreamId, location: &Location) -> Result<()> {
-        let mut session = lock_session(&self.session);
-        session
-            .send_fetch_object(stream_id, location)
-            .map_err(|e| TransportError::Internal(format!("send_fetch_object: {e}")))
+        self.with_session(|session| {
+            session
+                .send_fetch_object(stream_id, location)
+                .map_err(|e| TransportError::Internal(format!("send_fetch_object: {e}")))
+        })
     }
 
     /// FETCH 応答 stream 上の End of Range 送信を Session に通知する (publisher 側)
@@ -896,32 +913,39 @@ impl DataPlaneHandle {
     /// End of Range は Object ではないため Location 検証は行わない
     /// (draft-ietf-moq-transport-23 §11.4.2 (End of Range))。
     pub fn send_fetch_end_of_range(&self, stream_id: DataStreamId) -> Result<()> {
-        let mut session = lock_session(&self.session);
-        session
-            .send_fetch_end_of_range(stream_id)
-            .map_err(|e| TransportError::Internal(format!("send_fetch_end_of_range: {e}")))
+        self.with_session(|session| {
+            session
+                .send_fetch_end_of_range(stream_id)
+                .map_err(|e| TransportError::Internal(format!("send_fetch_end_of_range: {e}")))
+        })
     }
 
     /// FETCH 応答 stream の終端を Session に通知する (publisher 側)
     pub fn send_fetch_data_stream_closed(&self, stream_id: DataStreamId) -> Result<()> {
-        let mut session = lock_session(&self.session);
-        session
-            .send_fetch_data_stream_closed(stream_id)
-            .map_err(|e| TransportError::Internal(format!("send_fetch_data_stream_closed: {e}")))
+        self.with_session(|session| {
+            session
+                .send_fetch_data_stream_closed(stream_id)
+                .map_err(|e| {
+                    TransportError::Internal(format!("send_fetch_data_stream_closed: {e}"))
+                })
+        })
     }
 
     /// uni data stream の type を Session に通知する (subscriber 側)
     pub fn recv_data_stream_type(&self, stream_id: DataStreamId, stream_type: u64) -> Result<()> {
-        let mut session = lock_session(&self.session);
-        match session.recv_data_stream_type(stream_id, stream_type) {
-            Ok(_) => Ok(()),
-            Err(RecvDataStreamError::BeforeSessionEstablished) => Err(TransportError::Internal(
-                "data stream arrived before session established".to_string(),
-            )),
-            Err(RecvDataStreamError::InvalidInput(e) | RecvDataStreamError::Session(e)) => Err(
-                TransportError::Internal(format!("recv_data_stream_type: {e}")),
-            ),
-        }
+        self.with_session(
+            |session| match session.recv_data_stream_type(stream_id, stream_type) {
+                Ok(_) => Ok(()),
+                Err(RecvDataStreamError::BeforeSessionEstablished) => {
+                    Err(TransportError::Internal(
+                        "data stream arrived before session established".to_string(),
+                    ))
+                }
+                Err(RecvDataStreamError::InvalidInput(e) | RecvDataStreamError::Session(e)) => Err(
+                    TransportError::Internal(format!("recv_data_stream_type: {e}")),
+                ),
+            },
+        )
     }
 
     /// subgroup header を Session に通知する (subscriber 側)
@@ -930,10 +954,11 @@ impl DataPlaneHandle {
         stream_id: DataStreamId,
         header: &SubgroupHeader,
     ) -> Result<TrackDataAcceptance> {
-        let mut session = lock_session(&self.session);
-        session
-            .recv_subgroup_header(stream_id, header)
-            .map_err(|e| TransportError::Internal(format!("recv_subgroup_header: {e}")))
+        self.with_session(|session| {
+            session
+                .recv_subgroup_header(stream_id, header)
+                .map_err(|e| TransportError::Internal(format!("recv_subgroup_header: {e}")))
+        })
     }
 
     /// subgroup object を Session に通知する (subscriber 側)
@@ -946,10 +971,11 @@ impl DataPlaneHandle {
         stream_id: DataStreamId,
         object: &DecodedSubgroupObject,
     ) -> Result<TrackDataAcceptance> {
-        let mut session = lock_session(&self.session);
-        session
-            .recv_subgroup_object(stream_id, object)
-            .map_err(|e| TransportError::Internal(format!("recv_subgroup_object: {e}")))
+        self.with_session(|session| {
+            session
+                .recv_subgroup_object(stream_id, object)
+                .map_err(|e| TransportError::Internal(format!("recv_subgroup_object: {e}")))
+        })
     }
 
     /// fetch header を Session に通知する (subscriber 側)
@@ -982,14 +1008,11 @@ impl DataPlaneHandle {
             pending.take_expired(tokio::time::Instant::now())
         };
         for entry in expired {
-            discard_pending_fill_header(&self.session, entry);
+            discard_pending_fill_header(self, entry);
         }
-        let acceptance = {
-            let mut session = lock_session(&self.session);
-            session
-                .recv_fetch_header(stream_id, header)
-                .map_err(|e| TransportError::Internal(format!("recv_fetch_header: {e}")))?
-        };
+        let acceptance = self
+            .with_session(|session| session.recv_fetch_header(stream_id, header))
+            .map_err(|e| TransportError::Internal(format!("recv_fetch_header: {e}")))?;
         if acceptance == FetchHeaderAcceptance::Accepted {
             return Ok(FetchHeaderRegistration::Accepted);
         }
@@ -1004,13 +1027,12 @@ impl DataPlaneHandle {
         // 同じ Request ID の保留が既にある場合 (peer が同じ要求に対して 2 本目を開いた) は、
         // 古い方を破棄する。Request ID をキーに 1 件だけ保持するため、後着を残す
         if let Some(old) = pending.remove_entry(header.request_id) {
-            discard_pending_fill_header(&self.session, old);
+            discard_pending_fill_header(self, old);
         }
         if pending.entries.len() >= MAX_PENDING_FILL_HEADERS {
             drop(pending);
             // 上限超過。保留せずに会計だけ解放し、呼び出し側に破棄させる
-            let mut session = lock_session(&self.session);
-            let _ = session.send_data_stream_stop_sending(stream_id);
+            let _ = self.with_session(|session| session.send_data_stream_stop_sending(stream_id));
             return Ok(FetchHeaderRegistration::Rejected);
         }
         let (resolution, receiver) = oneshot::channel();
@@ -1029,10 +1051,7 @@ impl DataPlaneHandle {
         // 場合も、この再通知が拾う)。再通知の結果を受け取るまで pending ロックを保持する
         // ため、通知側は「保留を解決する」か「保留がまだ無いので何もしない」のどちらか
         // になり、両者の間で entry が取り残されることはない。
-        let retry = {
-            let mut session = lock_session(&self.session);
-            session.recv_fetch_header(stream_id, header)
-        };
+        let retry = self.with_session(|session| session.recv_fetch_header(stream_id, header));
         match retry {
             Ok(FetchHeaderAcceptance::Accepted) => {
                 // Session が受理したため保留は不要である。待機側は作らない
@@ -1101,8 +1120,7 @@ impl DataPlaneHandle {
         // fill fetch stream の会計と DATA_STREAM_TIMEOUT の監視が戻る。逆にここが先に通った
         // 場合、解決側の再通知は未知 stream id のエラーとなり受理されない (セッションは閉じない)
         {
-            let mut session = lock_session(&self.session);
-            let _ = session.send_data_stream_stop_sending(stream_id);
+            let _ = self.with_session(|session| session.send_data_stream_stop_sending(stream_id));
         }
         FetchHeaderResolution::Discarded
     }
@@ -1113,11 +1131,7 @@ impl DataPlaneHandle {
     /// `MoqtClient` の受信ループが呼ぶ。呼び出し側 (アプリ) が独自に制御メッセージを
     /// 処理する場合は、PUBLISH の受理後にも同じく呼ぶ必要がある。
     pub fn notify_publish_accepted(&self, publish_request_id: u64) {
-        resolve_pending_fill_header(
-            &self.session,
-            &self.pending_fill_headers,
-            publish_request_id,
-        );
+        resolve_pending_fill_header(self, publish_request_id);
     }
 
     /// fetch entry を Session に通知する (subscriber 側)
@@ -1131,10 +1145,11 @@ impl DataPlaneHandle {
         stream_id: DataStreamId,
         entry: &DecodedFetchEntry,
     ) -> Result<()> {
-        let mut session = lock_session(&self.session);
-        session
-            .recv_fetch_entry(stream_id, entry)
-            .map_err(|e| TransportError::Internal(format!("recv_fetch_entry: {e}")))
+        self.with_session(|session| {
+            session
+                .recv_fetch_entry(stream_id, entry)
+                .map_err(|e| TransportError::Internal(format!("recv_fetch_entry: {e}")))
+        })
     }
 
     /// uni data stream close を Session に通知する (subscriber 側)
@@ -1143,10 +1158,11 @@ impl DataPlaneHandle {
         stream_id: DataStreamId,
         end: RequestStreamEnd,
     ) -> Result<()> {
-        let mut session = lock_session(&self.session);
-        session
-            .recv_data_stream_closed(stream_id, end)
-            .map_err(|e| TransportError::Internal(format!("recv_data_stream_closed: {e}")))
+        self.with_session(|session| {
+            session
+                .recv_data_stream_closed(stream_id, end)
+                .map_err(|e| TransportError::Internal(format!("recv_data_stream_closed: {e}")))
+        })
     }
 
     /// Object のシリアライズ途中で FIN が届いたことを Session に通知する (subscriber 側)
@@ -1156,18 +1172,22 @@ impl DataPlaneHandle {
     /// receiver SHOULD close the session with TRUNCATED_OBJECT." 破棄対象の stream では
     /// Session が no-op で吸収する。
     pub fn report_mid_object_fin(&self, stream_id: DataStreamId) -> Result<()> {
-        let mut session = lock_session(&self.session);
-        session
-            .report_mid_object_fin(stream_id)
-            .map_err(|e| TransportError::Internal(format!("report_mid_object_fin: {e}")))
+        self.with_session(|session| {
+            session
+                .report_mid_object_fin(stream_id)
+                .map_err(|e| TransportError::Internal(format!("report_mid_object_fin: {e}")))
+        })
     }
 
     /// data stream へ STOP_SENDING を送信する (subscriber 側)
     pub fn send_data_stream_stop_sending(&self, stream_id: DataStreamId) -> Result<()> {
-        let mut session = lock_session(&self.session);
-        session
-            .send_data_stream_stop_sending(stream_id)
-            .map_err(|e| TransportError::Internal(format!("send_data_stream_stop_sending: {e}")))
+        self.with_session(|session| {
+            session
+                .send_data_stream_stop_sending(stream_id)
+                .map_err(|e| {
+                    TransportError::Internal(format!("send_data_stream_stop_sending: {e}"))
+                })
+        })
     }
 
     /// FETCH データストリームの終端を Session に通知する (subscriber 側)
@@ -1176,10 +1196,13 @@ impl DataPlaneHandle {
         request_id: u64,
         end: RequestStreamEnd,
     ) -> Result<()> {
-        let mut session = lock_session(&self.session);
-        session
-            .recv_fetch_data_stream_closed(request_id, end)
-            .map_err(|e| TransportError::Internal(format!("recv_fetch_data_stream_closed: {e}")))
+        self.with_session(|session| {
+            session
+                .recv_fetch_data_stream_closed(request_id, end)
+                .map_err(|e| {
+                    TransportError::Internal(format!("recv_fetch_data_stream_closed: {e}"))
+                })
+        })
     }
 
     /// 受信 datagram を Session に渡す (subscriber 側)
@@ -1187,10 +1210,11 @@ impl DataPlaneHandle {
     /// type 分岐は Session が行う。未知 type は draft-ietf-moq-transport-23 §11 (Data Streams and Datagrams) に従い
     /// セッションクローズになるため、I/O 層は decode せずそのまま渡す。
     pub fn recv_datagram(&self, raw: &[u8]) -> Result<DatagramAcceptance> {
-        let mut session = lock_session(&self.session);
-        session
-            .recv_datagram(raw)
-            .map_err(|e| TransportError::Internal(format!("recv_datagram: {e}")))
+        self.with_session(|session| {
+            session
+                .recv_datagram(raw)
+                .map_err(|e| TransportError::Internal(format!("recv_datagram: {e}")))
+        })
     }
 }
 
@@ -1213,6 +1237,33 @@ pub struct MoqtClient {
     /// アプリはこの変化を観測し、MOQT の GOAWAY より先に移行を始められる。
     wt_session_state: Option<watch::Receiver<crate::webtransport::WtSessionState>>,
     session: Arc<StdMutex<Session>>,
+    handle: StreamHandle,
+    data_plane: DataPlaneHandle,
+    /// 処理開始時に所有権を移す間を除いて、常にドライバーか実行中の処理を保持する。
+    driver: Option<DriverSlot>,
+}
+
+/// アプリが待機を中断しても、確定済み I/O を保持するスロット
+// ドライバーを Box に入れ、処理開始・完了ごとに台帳の全フィールドを移動させない。
+enum DriverSlot {
+    Idle(Box<SessionDriver>),
+    Working(DriverFuture),
+}
+
+type DriverFuture = Pin<Box<dyn Future<Output = (Box<SessionDriver>, Result<()>)> + Send + Sync>>;
+
+/// 受信を待つ段階と、その入力に対する処理を始める段階を分ける
+// mpsc の recv はキャンセル安全だが、取り出したメッセージの処理は中断できない。
+enum DriverInput {
+    Control(Option<ControlIncoming>),
+    Bidi(Option<BidiMessage>),
+    StopSending(Option<StopSendingObserved>),
+    LocalEvents,
+}
+
+/// 制御ストリーム、要求ストリーム、終了処理の I/O 資源を単独で所有する
+struct SessionDriver {
+    session: Arc<StdMutex<Session>>,
     /// 自側が受信を許容する制御メッセージ本文の最大長 (バイト)
     ///
     /// SETUP 交換時に `Session::local_max_control_message_size` から確定する
@@ -1231,13 +1282,7 @@ pub struct MoqtClient {
     /// QUIC 直接接続 / WebTransport over HTTP/3 / WebTransport over HTTP/2 のいずれも
     /// 観測経路を持ち、wt-h2 は driver が受信した capsule をそのまま流す。
     stop_sending_rx: Option<StopSendingReceiver>,
-    /// Session が指示した受信 data stream の STOP_SENDING (`DataPlaneHandle` と共有する)
-    stop_sending_signals: Arc<StopSendingSignals>,
-    /// 対応 PUBLISH の受理待ちで保留している FETCH_HEADER (`DataPlaneHandle` と共有する)
-    ///
-    /// PUBLISH の受理は制御メッセージの受信側で観測されるため、`pump_once` が
-    /// [`resolve_pending_fill_header`] で保留を解決する。
-    pending_fill_headers: Arc<StdMutex<PendingFillHeaders>>,
+    data_plane: DataPlaneHandle,
     /// FETCH 応答用 uni stream の stream id → request_id
     ///
     /// `Session::fetch_stop_sending_received` は request_id を要求するため、peer の
@@ -1253,12 +1298,6 @@ pub struct MoqtClient {
     incoming_requests: VecDeque<IncomingRequest>,
     /// peer から届いた未処理の REQUEST_UPDATE
     incoming_updates: VecDeque<IncomingRequestUpdate>,
-    /// peer が返した REQUEST_ERROR の理由 (request_id ごと)
-    ///
-    /// REQUEST_ERROR はセッションの状態としては Terminated にしか見えないため、拒否の
-    /// 理由をアプリへ伝えるために保持する (draft-ietf-moq-transport-23 §9.4.1 (REQUEST_ERROR
-    /// Message Format))。
-    request_errors: HashMap<u64, (u64, String)>,
     /// drain_events が Session から取り出した notable イベント
     ///
     /// `drain_events` は受信メッセージを契機に生成されたイベントも一緒に poll するため、
@@ -1273,8 +1312,8 @@ pub struct MoqtClient {
 /// アプリ (`next_event`) が観測する notable イベントか
 ///
 /// `drain_events` はアプリより先に `Session` のイベントを poll し、配送対象のイベントを
-/// 配送キュー (`notable_events`) へ積む。`take_notable_event` はキューの pop だけを
-/// 行うため、配送対象から漏れたイベントはアプリへ届かない。
+/// 配送キュー (`notable_events`) へ積む。`next_event` はこのキューから取り出すため、
+/// 配送対象から漏れたイベントはアプリへ届かない。
 ///
 /// 配送対象の判定は `drain_events` の arm の列挙が行う。この述語は同じ集合を表し、
 /// notable / 非配送の 2 つの arm が debug ビルドで一致を検査する (`CloseSession` は
@@ -1344,11 +1383,8 @@ fn should_forget_subscription(cleanup_ready: bool, pending_publish_done: Option<
 
 /// `SessionEvent::SendOnStream` の処理方法
 ///
-/// `drain_events` の送信は await をまたぐ。送信半を台帳から先に取り出すと、`next_event` の
-/// future が `tokio::select!` の敗北で破棄されたときに送信半が失われ、以後その request への
-/// 送信がすべて「送信方向を閉じた request」として捨てられる (draft-ietf-moq-transport-23
-/// §9.5.1 (Updating Subscriptions) の MUST を果たせない)。台帳から取り出すのは、送信と FIN が
-/// 成功したときだけにする。
+/// 送信半がある場合は、メッセージと必要な FIN の送出を試みる。FIN が失敗した場合は、
+/// 以降の処理でも送信半を参照できるよう台帳に残す。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SendOnStreamStep {
     /// 送信半が台帳に無い。encode も送信もしない
@@ -1892,29 +1928,9 @@ impl MoqtClient {
     ) -> Result<(Self, StreamAcceptor)> {
         let shared = Arc::new(TokioMutex::new(wt_session));
         let handle = StreamHandle::WtH3(shared.clone());
-        // 制御ストリームは単方向受信ストリームの receiver から受け取るため、
-        // `take_uni_receiver` で receiver を acceptor へ渡すより先に accept する。
-        // 逆順にすると `accept_uni_stream` が receiver を取れず `StreamClosed` になる。
-        // session のロックは制御ストリームの到着を待つ間だけ保持する (以降は receiver を
-        // 取り出してロック外で待つ)。
-        let (wt_uni_rx, wt_bi_rx, stop_sending_rx, session_state, wt_recv) = {
-            let mut s = shared.lock().await;
-            let wt_recv = s.accept_uni_stream().await?;
-            // 受信ストリームの receiver は acceptor が持ち、accept の待機中に
-            // session のロックを保持しないようにする (`WtSession::take_uni_receiver`)。
-            // セッション状態の receiver も同じ理由でここで取り出す (セッション終了を
-            // accept の待機中に観測し、受信ループを待たせないため)。
-            let uni_rx = s.take_uni_receiver().ok_or_else(|| {
-                TransportError::Internal("uni stream receiver already taken".into())
-            })?;
-            let bi_rx = s.take_bi_receiver().ok_or_else(|| {
-                TransportError::Internal("bidi stream receiver already taken".into())
-            })?;
-            let stop_sending_rx = s.take_stop_sending_receiver();
-            let session_state = s.session_state_receiver();
-            (uni_rx, bi_rx, stop_sending_rx, session_state, wt_recv)
-        };
-
+        // draft-ietf-moq-transport-23 §6.3: 両端は独立した制御ストリームを開く。
+        // peer がこちらの SETUP を待つ場合も進めるよう、受信を待つ前に送信する。
+        // draft 由来の仕様であり将来変更されうる。
         let wt_send = {
             let mut s = shared.lock().await;
             s.open_uni_stream().await?
@@ -1933,8 +1949,25 @@ impl MoqtClient {
         .await?;
         tracing::info!("Sent SETUP message");
 
-        // 制御ストリームを受け取る順序は `take_uni_receiver` より前である (上記)。
-        // 受け取ったストリームは acceptor へ流さず、ここで制御ストリームとして読む
+        // 制御ストリームは session 側で受け取り、残りの受信を acceptor へ渡す。
+        let (wt_uni_rx, wt_bi_rx, stop_sending_rx, session_state, wt_recv) = {
+            let mut s = shared.lock().await;
+            let wt_recv = s.accept_uni_stream().await?;
+            // 受信ストリームの receiver は acceptor が持ち、accept の待機中に
+            // session のロックを保持しないようにする (`WtSession::take_uni_receiver`)。
+            // セッション状態の receiver も同じ理由でここで取り出す (セッション終了を
+            // accept の待機中に観測し、受信ループを待たせないため)。
+            let uni_rx = s.take_uni_receiver().ok_or_else(|| {
+                TransportError::Internal("uni stream receiver already taken".into())
+            })?;
+            let bi_rx = s.take_bi_receiver().ok_or_else(|| {
+                TransportError::Internal("bidi stream receiver already taken".into())
+            })?;
+            let stop_sending_rx = s.take_stop_sending_receiver();
+            let session_state = s.session_state_receiver();
+            (uni_rx, bi_rx, stop_sending_rx, session_state, wt_recv)
+        };
+
         let mut control_recv = ControlStream::new(
             RecvStream::WtH3(wt_recv),
             session.local_max_control_message_size(),
@@ -2149,6 +2182,31 @@ impl MoqtClient {
 
         let task_monitor = task_monitor.clone();
 
+        let data_plane = DataPlaneHandle::new(
+            Arc::clone(&session),
+            Arc::new(StopSendingSignals::default()),
+            Arc::new(StdMutex::new(PendingFillHeaders::default())),
+        );
+        let driver = Box::new(SessionDriver {
+            session: Arc::clone(&session),
+            max_control_message_size,
+            control_send,
+            handle: handle.clone(),
+            bidi_sends: HashMap::new(),
+            bidi_stop_txs: HashMap::new(),
+            closed_request_streams: HashSet::new(),
+            stop_sending_rx,
+            data_plane: data_plane.clone(),
+            outgoing_fetch_streams: HashMap::new(),
+            terminated_request_streams: TerminatedRequestStreams::default(),
+            incoming_requests: VecDeque::new(),
+            incoming_updates: VecDeque::new(),
+            notable_events: VecDeque::new(),
+            control_rx,
+            bidi_tx,
+            bidi_rx,
+            task_monitor,
+        });
         Ok(Self {
             auth_tokens: cat_tokens
                 .iter()
@@ -2157,25 +2215,9 @@ impl MoqtClient {
             tick_epoch: Instant::now(),
             wt_session_state,
             session,
-            max_control_message_size,
-            control_send,
             handle,
-            bidi_sends: HashMap::new(),
-            bidi_stop_txs: HashMap::new(),
-            closed_request_streams: HashSet::new(),
-            stop_sending_rx,
-            stop_sending_signals: Arc::new(StopSendingSignals::default()),
-            pending_fill_headers: Arc::new(StdMutex::new(PendingFillHeaders::default())),
-            outgoing_fetch_streams: HashMap::new(),
-            terminated_request_streams: TerminatedRequestStreams::default(),
-            incoming_requests: VecDeque::new(),
-            incoming_updates: VecDeque::new(),
-            request_errors: HashMap::new(),
-            notable_events: VecDeque::new(),
-            control_rx,
-            bidi_tx,
-            bidi_rx,
-            task_monitor,
+            data_plane,
+            driver: Some(DriverSlot::Idle(driver)),
         })
     }
 
@@ -2211,11 +2253,7 @@ impl MoqtClient {
 
     /// data plane 通知用ハンドルのクローン
     pub fn data_plane(&self) -> DataPlaneHandle {
-        DataPlaneHandle::new(
-            Arc::clone(&self.session),
-            Arc::clone(&self.stop_sending_signals),
-            Arc::clone(&self.pending_fill_headers),
-        )
+        self.data_plane.clone()
     }
 
     /// PUBLISH を発行し、REQUEST_OK または REQUEST_ERROR が返るまで待つ (publisher 側)
@@ -2477,8 +2515,8 @@ impl MoqtClient {
             }
             if terminated {
                 let detail = self
-                    .request_errors
-                    .get(&request_id)
+                    .idle_driver()
+                    .request_error(request_id)
                     .map(|(code, reason)| {
                         format!(": code={code} reason={}", crate::sanitize_for_log(reason))
                     })
@@ -2610,12 +2648,12 @@ impl MoqtClient {
                 Some(SubscriptionState::Terminated) => {
                     // 拒否の理由が分かっていれば添える (relay 側の判断を調べるため)
                     let detail = self
-                        .request_errors
-                        .get(&request_id)
+                        .idle_driver()
+                        .request_error(request_id)
                         .map(|(code, reason)| {
                             format!(
                                 ": code={code} normalized_code={} reason={}",
-                                normalize_request_error_code(*code),
+                                normalize_request_error_code(code),
                                 crate::sanitize_for_log(reason)
                             )
                         })
@@ -2658,28 +2696,26 @@ impl MoqtClient {
     /// 届き得る (戻り値は同期 API の失敗、イベントはセッションの通知であり、Retry Interval と
     /// Error Details はイベントにだけ載る)。
     ///
-    /// この future は `tokio::select!` の分岐で使えるよう、await の途中で破棄されても
-    /// 送信半の台帳 (`bidi_sends`) を壊さない。破棄された時点で送信中だったメッセージは
-    /// 再送されず、破棄後に呼び直すとキューに残っていたメッセージから送信が再開される
-    /// (`drain_events` の doc を参照)。
+    /// `tokio::select!` の分岐が破棄されても、受信した入力や送出途中の指示は失われない。
+    /// 次の駆動時には、保留中の I/O を最初から繰り返さず、続きから処理する。
     pub async fn next_event(&mut self) -> Result<Option<ClientEvent>> {
         loop {
-            if let Some(update) = self.incoming_updates.pop_front() {
+            self.finish_driver_work().await?;
+            let driver = self.idle_driver();
+            if let Some(update) = driver.incoming_updates.pop_front() {
                 return Ok(Some(ClientEvent::RequestUpdate(update)));
             }
-            if let Some(request) = self.incoming_requests.pop_front() {
+            if let Some(request) = driver.incoming_requests.pop_front() {
                 return Ok(Some(ClientEvent::Request(request)));
             }
             self.drain_events().await?;
-            // `drain_events` は `RequestUpdateReceived` をアプリ向けキューへ積む。同一呼び出しで
-            // notable イベント (とくに `CloseSession`) を先に返すと、アプリがループを抜けたときに
-            // その update が配送されないまま残るため、積まれた分を先に返す
-            // (`incoming_requests` は現状 drain では積まないが、同じ優先規則を両キューに適用する)
-            if !self.incoming_updates.is_empty() || !self.incoming_requests.is_empty() {
+            let driver = self.idle_driver();
+            // 同じ drain で積まれた更新要求は CloseSession 等より先に配送する。
+            if !driver.incoming_updates.is_empty() || !driver.incoming_requests.is_empty() {
                 continue;
             }
-            if let Some(ev) = self.take_notable_event() {
-                return Ok(Some(ClientEvent::Session(ev)));
+            if let Some(event) = driver.notable_events.pop_front() {
+                return Ok(Some(ClientEvent::Session(event)));
             }
             self.pump_once().await?;
         }
@@ -2780,13 +2816,16 @@ impl MoqtClient {
         publisher_priority: u8,
     ) -> Result<()> {
         let data_plane = self.data_plane();
+        self.finish_driver_work().await?;
         let mut stream = self.handle.open_send_stream().await?;
         let stream_id = DataStreamId(stream.stream_id());
 
         // Session に FETCH 応答 stream の open を通知する
         data_plane.send_fetch_header(stream_id, request_id)?;
         // 台帳に登録する
-        self.outgoing_fetch_streams.insert(stream_id.0, request_id);
+        self.idle_driver()
+            .outgoing_fetch_streams
+            .insert(stream_id.0, request_id);
 
         let mut buf = Vec::new();
         buf.extend_from_slice(&FetchHeader { request_id }.encode());
@@ -2830,12 +2869,15 @@ impl MoqtClient {
     /// [`FetchResponseWriter::finish`] で FIN する。
     pub async fn open_fetch_response(&mut self, request_id: u64) -> Result<FetchResponseWriter> {
         let data_plane = self.data_plane();
+        self.finish_driver_work().await?;
         let mut stream = self.handle.open_send_stream().await?;
         let stream_id = DataStreamId(stream.stream_id());
 
         // Session に FETCH 応答 stream の open を通知する
         data_plane.send_fetch_header(stream_id, request_id)?;
-        self.outgoing_fetch_streams.insert(stream_id.0, request_id);
+        self.idle_driver()
+            .outgoing_fetch_streams
+            .insert(stream_id.0, request_id);
 
         let encoder = FetchStreamEncoder::new(request_id);
         stream.send(Bytes::from(encoder.encode_header())).await?;
@@ -2952,12 +2994,15 @@ impl MoqtClient {
     /// REQUEST_OK の別名である (§1.5))。
     pub async fn send_empty_fetch_response(&mut self, request_id: u64) -> Result<()> {
         let data_plane = self.data_plane();
+        self.finish_driver_work().await?;
         let mut stream = self.handle.open_send_stream().await?;
         let stream_id = DataStreamId(stream.stream_id());
 
         // Session に FETCH 応答 stream の open を通知し、台帳に登録する
         data_plane.send_fetch_header(stream_id, request_id)?;
-        self.outgoing_fetch_streams.insert(stream_id.0, request_id);
+        self.idle_driver()
+            .outgoing_fetch_streams
+            .insert(stream_id.0, request_id);
 
         let buf = FetchHeader { request_id }.encode();
         stream.send(Bytes::from(buf)).await?;
@@ -2973,8 +3018,7 @@ impl MoqtClient {
     /// `cleanup_closed_requests` 参照)、
     /// ここでは行わない。
     pub fn tick(&mut self, now_ms: u64) {
-        let mut session = lock_session(&self.session);
-        session.tick(now_ms);
+        self.data_plane.with_session(|session| session.tick(now_ms));
     }
 
     /// クライアント生成時からの経過時間で [`Session::tick`] を呼び出す
@@ -2987,110 +3031,34 @@ impl MoqtClient {
         self.tick(now_ms);
     }
 
-    /// bidi 受信タスクへ STOP_SENDING を指示する (失敗は warn のみ)
-    ///
-    /// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection):
-    /// 受信方向の cancel は STOP_SENDING で行う。
-    async fn request_stop_sending(&mut self, request_id: u64, error_code: u64) {
-        let Some(stop_tx) = self.bidi_stop_txs.remove(&request_id) else {
-            tracing::warn!(
-                "Failed to send STOP_SENDING: no bidi receive task (request_id={request_id})"
-            );
-            return;
-        };
-        let (ack_tx, ack_rx) = oneshot::channel();
-        let command = StopSendingCommand {
-            error_code,
-            ack: ack_tx,
-        };
-        if stop_tx.send(command).await.is_err() {
-            tracing::warn!(
-                "Failed to send STOP_SENDING: bidi receive task already finished (request_id={request_id})"
-            );
-            return;
-        }
-        // 受信タスクが bidi メッセージ送信でブロックしている場合に備え、ack 待ちに上限を設ける
-        match tokio::time::timeout(std::time::Duration::from_secs(1), ack_rx).await {
-            Ok(Ok(Ok(()))) => tracing::info!("Sent STOP_SENDING (request_id={request_id})"),
-            Ok(Ok(Err(e))) => {
-                tracing::warn!("Failed to send STOP_SENDING (request_id={request_id}): {e}");
-            }
-            Ok(Err(_)) => {
-                tracing::warn!(
-                    "Failed to send STOP_SENDING: bidi receive task dropped the command (request_id={request_id})"
-                );
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "Failed to send STOP_SENDING: timed out waiting for the bidi receive task (request_id={request_id})"
-                );
-            }
-        }
-    }
-
-    /// 指定した subscription に対して STOP_SENDING を送信する (subscriber 側)
-    ///
-    /// `Session::stop_sending` で subscription を Terminated にした後、bidi 受信タスクへ
-    /// 停止指示を渡し、request stream の受信半に実際の STOP_SENDING を送出する。
-    /// 受信半への送出 API 呼び出しが成功した後にのみ `Sent STOP_SENDING` をログし、
-    /// 送出できなかった場合は未送出であることと理由を警告ログに残す。
-    /// I/O 送出に失敗しても戻り値は `Ok(())` とし、呼び出し側はログで未送出を判断する。
-    ///
-    /// 手動確認 (開発者向け): `crates/moq-sub/src/pipeline.rs` の `client.close(0, "")` の直前に
-    /// `tokio::time::sleep(std::time::Duration::from_millis(100)).await` を一時的に入れて、
-    /// GOAWAY / close の前に STOP_SENDING を flush させ、peer (publisher / relay) 側で
-    /// 当該 bidi request stream が RESET_STREAM で停止することを `RUST_LOG=debug` のログで観測する。
     /// FETCH の bidi request stream を STOP_SENDING と RESET_STREAM で終端する
     ///
     /// draft-ietf-moq-transport-23 §3.2.4 (Fetch State Management) は、FETCH を取り消す
     /// subscriber に bidi request stream への STOP_SENDING を MUST で求める。
     /// draft 由来の仕様であり将来変更されうる。
     pub async fn stop_fetch_sending(&mut self, request_id: u64) -> Result<()> {
+        self.finish_driver_work().await?;
         {
             let mut session = lock_session(&self.session);
             session
                 .send_fetch_stop_sending(request_id)
                 .map_err(|e| TransportError::Internal(format!("send_fetch_stop_sending: {e}")))?;
         }
-        self.drain_events().await?;
-        // 送信方向が開いたままなら RESET_STREAM で打ち切る (§6.4.2.3 と同じ扱い)
-        let error_code = DataStreamResetReason::Cancelled.error_code();
-        if let Some(mut send) = self.bidi_sends.remove(&request_id)
-            && let Err(e) = send.reset(error_code, None).await
-        {
-            tracing::warn!(
-                "Failed to reset the FETCH bidi request stream (request_id={request_id}): {e}"
-            );
-        }
-        self.closed_request_streams.insert(request_id);
-        Ok(())
+        self.reset_request(request_id, false).await
     }
 
+    /// 購読を打ち切り、要求ストリームの両方向を終端する。
+    ///
+    /// STOP_SENDING / RESET_STREAM の送出だけが失敗した場合は警告を記録して継続する。
     pub async fn stop_sending(&mut self, request_id: u64) -> Result<()> {
+        self.finish_driver_work().await?;
         {
             let mut session = lock_session(&self.session);
             session
                 .stop_sending(request_id)
                 .map_err(|e| TransportError::Internal(format!("stop_sending: {e}")))?;
         }
-        self.drain_events().await?;
-        // 購読停止は subscriber 主導の cancel のため CANCELLED を使う
-        // (draft-ietf-moq-transport-23 §12.5 (Stream Reset Error Codes))
-        let error_code = DataStreamResetReason::Cancelled.error_code();
-        // 送信方向が開いたままなら RESET_STREAM で打ち切る
-        // (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection): 送信方向は
-        // RESET_STREAM、受信方向は STOP_SENDING)
-        if let Some(mut send) = self.bidi_sends.remove(&request_id)
-            && let Err(e) = send.reset(error_code, None).await
-        {
-            tracing::warn!("Failed to reset bidi request stream (request_id={request_id}): {e}");
-        }
-        // 受信タスク終了後は peer からの close を検知できないため、回収対象として登録する。
-        // 実際の回収は次の `drain_events` に任せる (キュー済みの Closed を先に処理させるため、
-        // ここで即時 cleanup すると unknown request id になる余地がある)
-        self.closed_request_streams.insert(request_id);
-        self.request_stop_sending(request_id, error_code).await;
-        Ok(())
+        self.reset_request(request_id, true).await
     }
 
     /// 指定した request に対して REQUEST_UPDATE を送信する (subscriber 側)
@@ -3187,19 +3155,160 @@ impl MoqtClient {
         Ok(())
     }
 
-    /// 配送キューからアプリ側に通知すべき SessionEvent を取り出す
-    ///
-    /// `Session::poll_event` を直接呼ぶとキューに残った `SendOnStream` を
-    /// アプリへの配送対象外として捨ててしまうため、配送対象の判定と push は
-    /// `drain_events` に任せる。
-    fn take_notable_event(&mut self) -> Option<SessionEvent> {
-        self.notable_events.pop_front()
+    fn idle_driver(&mut self) -> &mut SessionDriver {
+        match self.driver.as_mut() {
+            Some(DriverSlot::Idle(driver)) => driver,
+            _ => unreachable!("driver still has in-flight work"),
+        }
     }
 
-    /// control / bidi channel のいずれか 1 件を受信して session に流し、events を drain
+    /// ドライバーを所有する Future を、現在の API 呼び出しではなくクライアントへ格納する。
+    /// 受信確定後には await を挟まず、I/O 開始前に必ず格納を済ませる。
+    fn start_driver_work<F>(&mut self, work: impl FnOnce(Box<SessionDriver>) -> F)
+    where
+        F: Future<Output = (Box<SessionDriver>, Result<()>)> + Send + Sync + 'static,
+    {
+        let Some(DriverSlot::Idle(driver)) = self.driver.take() else {
+            unreachable!("driver work already in progress");
+        };
+        self.driver = Some(DriverSlot::Working(Box::pin(work(driver))));
+    }
+
+    async fn finish_driver_work(&mut self) -> Result<()> {
+        let Some(DriverSlot::Working(work)) = self.driver.as_mut() else {
+            return Ok(());
+        };
+        let (driver, result) = work.await;
+        self.driver = Some(DriverSlot::Idle(driver));
+        result
+    }
+
+    async fn drain_events(&mut self) -> Result<()> {
+        self.finish_driver_work().await?;
+        self.start_driver_work(|mut driver| async move {
+            let result = driver.drain_events().await;
+            (driver, result)
+        });
+        self.finish_driver_work().await
+    }
+
     async fn pump_once(&mut self) -> Result<()> {
+        self.finish_driver_work().await?;
+        let input = self.idle_driver().receive().await;
+        self.start_driver_work(move |mut driver| async move {
+            let result = driver.handle_input(input).await;
+            (driver, result)
+        });
+        self.finish_driver_work().await
+    }
+
+    async fn reset_request(&mut self, request_id: u64, stop_sending: bool) -> Result<()> {
+        // 呼び出し側が Session を更新した時点で idle のため、待機せずに処理を確定する。
+        self.start_driver_work(move |mut driver| async move {
+            let result = driver.reset_request(request_id, stop_sending).await;
+            (driver, result)
+        });
+        self.finish_driver_work().await
+    }
+}
+
+impl SessionDriver {
+    /// 同期的な要求待ちに拒否理由を添える。`next_event` にも渡すためキューには残す。
+    fn request_error(&self, request_id: u64) -> Option<(u64, &str)> {
+        self.notable_events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                SessionEvent::RequestErrorReceived {
+                    request_id: rejected_id,
+                    error_code,
+                    reason,
+                    ..
+                } if *rejected_id == request_id => Some((*error_code, reason.as_str())),
+                _ => None,
+            })
+    }
+
+    /// bidi 受信タスクへ STOP_SENDING を指示する (失敗は warn のみ)
+    ///
+    /// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection):
+    /// 受信方向の cancel は STOP_SENDING で行う。
+    async fn request_stop_sending(&mut self, request_id: u64, error_code: u64) {
+        let Some(stop_tx) = self.bidi_stop_txs.remove(&request_id) else {
+            tracing::warn!(
+                "Failed to send STOP_SENDING: no bidi receive task (request_id={request_id})"
+            );
+            return;
+        };
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let command = StopSendingCommand {
+            error_code,
+            ack: ack_tx,
+        };
+        if stop_tx.send(command).await.is_err() {
+            tracing::warn!(
+                "Failed to send STOP_SENDING: bidi receive task already finished (request_id={request_id})"
+            );
+            return;
+        }
+        // 受信タスクが bidi メッセージ送信でブロックしている場合に備え、ack 待ちに上限を設ける
+        match tokio::time::timeout(std::time::Duration::from_secs(1), ack_rx).await {
+            Ok(Ok(Ok(()))) => tracing::info!("Sent STOP_SENDING (request_id={request_id})"),
+            Ok(Ok(Err(e))) => {
+                tracing::warn!("Failed to send STOP_SENDING (request_id={request_id}): {e}");
+            }
+            Ok(Err(_)) => {
+                tracing::warn!(
+                    "Failed to send STOP_SENDING: bidi receive task dropped the command (request_id={request_id})"
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "Failed to send STOP_SENDING: timed out waiting for the bidi receive task (request_id={request_id})"
+                );
+            }
+        }
+    }
+
+    async fn reset_request(&mut self, request_id: u64, stop_sending: bool) -> Result<()> {
+        self.drain_events().await?;
+        // draft-ietf-moq-transport-23 §6.4.2.3 / §12.5: 自側の送信を CANCELLED で打ち切る。
+        // FETCH の受信方向を終端する指示は Session が発行し、上の drain で処理済みである。
+        // draft 由来の仕様であり将来変更されうる。
+        let error_code = DataStreamResetReason::Cancelled.error_code();
+        if let Some(mut send) = self.bidi_sends.remove(&request_id)
+            && let Err(e) = send.reset(error_code, None).await
+        {
+            tracing::warn!(
+                "Failed to reset the bidi request stream (request_id={request_id}): {e}"
+            );
+        }
+        // 受信タスクが停止すると peer の FIN / RESET を観測できないため、回収対象へ登録する。
+        self.closed_request_streams.insert(request_id);
+        if stop_sending {
+            self.request_stop_sending(request_id, error_code).await;
+        }
+        Ok(())
+    }
+
+    async fn receive(&mut self) -> DriverInput {
         tokio::select! {
-            maybe = self.control_rx.recv() => {
+            result = self.control_rx.recv() => DriverInput::Control(result),
+            message = self.bidi_rx.recv() => DriverInput::Bidi(message),
+            () = self.data_plane.events_ready.notified() => DriverInput::LocalEvents,
+            observed = async {
+                match self.stop_sending_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => DriverInput::StopSending(observed),
+        }
+    }
+
+    /// 受信した入力を Session に渡し、その結果を I/O に反映する。
+    async fn handle_input(&mut self, input: DriverInput) -> Result<()> {
+        match input {
+            DriverInput::Control(maybe) => {
                 let Some(res) = maybe else {
                     return Err(TransportError::Internal("control channel closed".into()));
                 };
@@ -3227,7 +3336,7 @@ impl MoqtClient {
                 }
                 self.drain_events().await?;
             }
-            maybe = self.bidi_rx.recv() => {
+            DriverInput::Bidi(maybe) => {
                 let Some(message) = maybe else {
                     return Err(TransportError::Internal("bidi channel closed".into()));
                 };
@@ -3285,7 +3394,12 @@ impl MoqtClient {
                         // 継続できない。終了コードの決定は呼び出し側 (pipeline) に委ねる。
                         return Err(e);
                     }
-                    BidiMessage::PeerRequest { request_id, message, send, stop_tx } => {
+                    BidiMessage::PeerRequest {
+                        request_id,
+                        message,
+                        send,
+                        stop_tx,
+                    } => {
                         // peer (relay) が開始した request stream の受理。
                         // 先頭メッセージを Session に通知して状態を作り、応答用の送信半を
                         // 登録したうえでアプリへ引き渡す。
@@ -3317,11 +3431,7 @@ impl MoqtClient {
                         // 受理できるようになったここで保留中の FETCH_HEADER を再通知する
                         // (通知しないと保留の期限まで fill が Session に届かない)。
                         if matches!(message, ControlMessage::Publish(_)) {
-                            resolve_pending_fill_header(
-                                &self.session,
-                                &self.pending_fill_headers,
-                                request_id,
-                            );
+                            self.data_plane.notify_publish_accepted(request_id);
                         }
                         // Session が受理しなかった FETCH はアプリへ渡さない。§3.2 の MUST 2 条件
                         // (publish 実績が無い / Start Location が Largest Object より大きい) と
@@ -3393,13 +3503,8 @@ impl MoqtClient {
                     }
                 }
             }
-            // peer の STOP_SENDING の観測 (検知の扱いは `handle_stop_sending` を参照する)
-            maybe = async {
-                match self.stop_sending_rx.as_mut() {
-                    Some(rx) => rx.recv().await,
-                    None => std::future::pending().await,
-                }
-            } => {
+            DriverInput::LocalEvents => self.drain_events().await?,
+            DriverInput::StopSending(maybe) => {
                 match maybe {
                     Some(observed) => self.handle_stop_sending(observed).await?,
                     // 接続終了で観測チャネルが閉じた場合は receiver を落とす。
@@ -3561,30 +3666,9 @@ impl MoqtClient {
         Ok(())
     }
 
-    /// session の events キューを drain し、I/O 操作に変換する
-    ///
-    /// `next_event` は `tokio::select!` の分岐で使われるため、この future は await の
-    /// 途中で破棄されうる。破棄で台帳 (`bidi_sends`) が壊れないように、送信中は送信半を
-    /// 台帳から取り出さず、FIN を送るときだけ、その FIN が成功した後に取り出す。送信半が台帳にある
-    /// request では、破棄後に `next_event` を呼び直すとキューに残っていたメッセージから
-    /// 送信が再開される。
-    ///
-    /// 破棄された時点で送信中だったメッセージは、Session のイベントキューから既に
-    /// 取り出されているため再送されない。送られたかどうかは transport の実装に依存する。
-    /// 現在の 4 経路は、QUIC / WebTransport over HTTP/3 が送信バッファに載るまで待つため
-    /// 破棄された分は送られず、WebTransport over HTTP/2 と QMux は driver へ投入済みのため
-    /// 送られる (QMux はドライバへコマンドを渡す await と受理を待つ await の 2 段であり、
-    /// 後者で破棄されてもコマンドは投入済みである)。
-    /// いずれもメッセージ単位で書き込むため部分送信は起きないが、`SendStream::send` の
-    /// 契約として保証されているわけではない。
-    ///
-    /// 破棄で失われる経路は 3 つある。request stream を開く await (`open_bidi_stream`) の
-    /// 途中で破棄された場合は、開いたストリームを台帳へ登録できないまま失う。ヘッド
-    /// メッセージ (PUBLISH / SUBSCRIBE) の送信中に破棄された場合は、
-    /// それを再送できず (Session は再発行しない)、送信半も台帳に登録されないため、以後の
-    /// 応答や PUBLISH_DONE は警告のみで捨てられる。確立済み request のメッセージの送信中に
-    /// 破棄された場合は、そのメッセージを送れず、送信の MUST
-    /// (draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions) など) を果たせない。
+    /// Session のイベントを取り出した順に I/O 操作へ変換する。
+    /// この処理の Future はクライアントが保持するため、await 中にアプリが待機をやめても
+    /// 取り出したイベントや FIN の進捗は失われない。
     async fn drain_events(&mut self) -> Result<()> {
         loop {
             let (event, forgotten, peer_max_control_message_size) = {
@@ -3594,8 +3678,7 @@ impl MoqtClient {
                 // flush は同じロックを取るため、この観測と判定の間に別タスクの flush が
                 // `SessionEvent::SendOnStream` (PUBLISH_DONE) を積むことはない。flush が先に
                 // 起きていれば、その `SendOnStream` がキューに残り `poll_event` が `Some` を
-                // 返すため、この判定には到達しない (取り出し済みなら送出済みか、`next_event` の
-                // future 破棄で失われている。いずれにせよ回収で失われることはない)。
+                // 返すため、この判定では回収しない。
                 let forgotten = if event.is_none() {
                     forget_ready_requests(&mut session, &self.closed_request_streams)
                 } else {
@@ -3627,8 +3710,7 @@ impl MoqtClient {
                     let bytes =
                         Bytes::from(message.encode(peer_max_control_message_size)?);
                     let (mut send, recv) = self.handle.open_bidi_stream().await?;
-                    // 送信の前に受信タスクと STOP_SENDING のチャネルを整える。送信中に
-                    // future が破棄されても受信タスクは起動済みになる
+                    // 受信タスクと STOP_SENDING のチャネルを先に整え、即時応答を受け取れるようにする。
                     let (stop_tx, stop_rx) = mpsc::channel(1);
                     self.bidi_stop_txs.insert(request_id, stop_tx);
                     let reader =
@@ -3641,10 +3723,7 @@ impl MoqtClient {
                         &self.task_monitor,
                     );
                     send.send(bytes).await?;
-                    // ヘッドメッセージを送り終えてから台帳へ登録する。登録を送信より先に
-                    // 行うと、送信中に破棄された場合にヘッド未送信のストリームが台帳へ残り、
-                    // 以後の応答や PUBLISH_DONE が初回メッセージとしてワイヤに載って
-                    // peer が PROTOCOL_VIOLATION でセッションを閉じる
+                    // ヘッドメッセージの送信に失敗したストリームは台帳へ登録しない。
                     self.bidi_sends.insert(request_id, send);
                 }
                 SessionEvent::SendOnStream {
@@ -3677,9 +3756,7 @@ impl MoqtClient {
                             if fin {
                                 // FIN は必須メッセージを送り終えてから送る
                                 // (draft-ietf-moq-transport-23 §6.4.2.2)
-                                // 台帳から取り出すのは FIN が成功したときだけにする。FIN の完了を
-                                // 待つ間 (`wt-h2` は driver の reply を待つ) に `next_event` の future が
-                                // `tokio::select!` の敗北で破棄されても送信半を失わないためである
+                                // 台帳から取り出すのは FIN が成功したときだけにする。
                                 let finish_result = self
                                     .bidi_sends
                                     .get_mut(&request_id)
@@ -3706,8 +3783,7 @@ impl MoqtClient {
                     // draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure):
                     // responder の FIN で request が完了したため、requester である自側も
                     // 送信方向を FIN で閉じる (SHOULD)。既に FIN 済みなら送信半は台帳に無い。
-                    // 台帳から取り出すのは FIN が成功したときだけにする (future の破棄で送信半を
-                    // 失わないため。`SendOnStream` の FIN 経路を参照)
+                    // 台帳から取り出すのは FIN が成功したときだけにする。
                     if let Some(send) = self.bidi_sends.get_mut(&request_id)
                         && let Err(e) = send.finish().await
                     {
@@ -3748,8 +3824,7 @@ impl MoqtClient {
                 }
                 SessionEvent::CloseSession(err) => {
                     // 終了理由をアプリへ届けるため配送キューへ積む。ここで積まないと
-                    // `next_event` は終了理由を観測できない (`take_notable_event` は
-                    // Session のイベントを直接 poll しない)。自側の `close` 起点でも
+                    // `next_event` は終了理由を観測できない。自側の `close` 起点でも
                     // 1 度だけ配送される。
                     // transport の close 失敗で終了理由の配送を落とさないよう、エラーは
                     // warn に留める (QUIC の close は失敗しないが、WebTransport の
@@ -3784,8 +3859,7 @@ impl MoqtClient {
                         stream_id.0,
                         error_code
                     );
-                    self.stop_sending_signals
-                        .request(stream_id.0, error_code);
+                    self.data_plane.stop_sending.request(stream_id.0, error_code);
                 }
                 SessionEvent::RequestUpdateReceived {
                     request_id,
@@ -3829,7 +3903,7 @@ impl MoqtClient {
                 | SessionEvent::NamespaceDoneReceived { .. }
                 | SessionEvent::PublishSkippedReceived { .. }) => {
                     // アプリ (`next_event`) が観測する notable イベント。ここで捨てると
-                    // `take_notable_event` が取り出せない
+                    // `next_event` に届かない。
                     // (配送キューへ積むのはこの drain だけ)。
                     // 配送の判定はこの arm の列挙で行い、`is_notable_event` との一致を
                     // debug ビルドで検査する。
@@ -3860,19 +3934,6 @@ impl MoqtClient {
                     // その他の Received 系 / Established / RequestTerminated は本 example では特別な処理を行わない。
                 }
                 ev @ SessionEvent::RequestErrorReceived { .. } => {
-                    // 拒否の理由を保持し、同期 API (`subscribe_track` / `publish_track`) が
-                    // request の失敗を返すときに添える
-                    // (draft-ietf-moq-transport-23 §9.4.1 (REQUEST_ERROR Message Format))。
-                    if let SessionEvent::RequestErrorReceived {
-                        request_id,
-                        error_code,
-                        reason,
-                        ..
-                    } = &ev
-                    {
-                        self.request_errors
-                            .insert(*request_id, (*error_code, reason.as_str().to_string()));
-                    }
                     // アプリ (`next_event`) へも届ける notable イベントである。FETCH の拒否は
                     // この経路でしか観測できず、Retry Interval と Error Details もここにだけ載る
                     debug_assert!(

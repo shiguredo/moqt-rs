@@ -976,6 +976,14 @@ impl Session {
         self.timing.data_stream_timeout_ms = timeout_ms;
     }
 
+    /// 取り出せる [`SessionEvent`] があるかを返す。
+    ///
+    /// I/O 層が別タスクのイベント処理を起こす必要があるか判定するために使う。
+    /// [`Self::poll_event`] と異なり、キューやセッション状態は変更しない。
+    pub fn has_pending_events(&self) -> bool {
+        !self.events.is_empty()
+    }
+
     /// 次の [`SessionEvent`] を取り出す
     ///
     /// 呼び出し側は `None` が返るまで繰り返し呼び出して I/O 層と同期する。

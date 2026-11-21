@@ -1017,11 +1017,11 @@ impl WtClient {
             .open_send_stream_wait()
             .await
             .map_err(TransportError::transport)?;
-        let encoder_send = handle
+        let mut encoder_send = handle
             .open_send_stream_wait()
             .await
             .map_err(TransportError::transport)?;
-        let decoder_send = handle
+        let mut decoder_send = handle
             .open_send_stream_wait()
             .await
             .map_err(TransportError::transport)?;
@@ -1034,11 +1034,20 @@ impl WtClient {
                 .init_h3_streams(control_send.id(), encoder_send.id(), decoder_send.id())?
         };
 
+        // `init_h3_streams` が返す初期データを各ストリームに書き、ピアがそれぞれの
+        // ストリーム種別を識別できるようにする (RFC 9114 §6.2 / RFC 9204 §4.2)。
         control_send
             .send_all(&init_data.control_data)
             .await
             .map_err(crate::quic::QuicError::from)?;
-        // encoder/decoder は初期データだけ送れば良い (ストリーム自体は保持不要)
+        encoder_send
+            .send_all(&init_data.encoder_data)
+            .await
+            .map_err(crate::quic::QuicError::from)?;
+        decoder_send
+            .send_all(&init_data.decoder_data)
+            .await
+            .map_err(crate::quic::QuicError::from)?;
 
         // peer の SETTINGS を待ってから CONNECT を送る
         //
@@ -1186,16 +1195,8 @@ impl WtClient {
             });
         }
 
-        // 制御ストリームと QPACK ストリームを接続中保持する
-        // (クローズすると H3_CLOSED_CRITICAL_STREAM エラーになる)
-        tokio::spawn(async move {
-            let _control_send = control_send;
-            let _encoder_send = encoder_send;
-            let _decoder_send = decoder_send;
-            std::future::pending::<()>().await;
-        });
-
-        // CONNECT レスポンスを待つ
+        // CONNECT レスポンスを待つ。確立までは H3 の制御 / QPACK ストリームを
+        // この future が所有し、確立に失敗した場合や途中で破棄された場合は解放する。
         // draft-ietf-webtrans-http3-16 §3.2: クライアントは 2xx 応答受信時のみセッション確立とみなす。
         // :status を見ず HeadersEnd だけで判定すると 4xx/5xx エラーレスポンスを成功と誤認するため、
         // connect_outcome で :status を確認する。
@@ -1402,6 +1403,11 @@ impl WtClient {
             }
         });
 
+        tokio::spawn(hold_h3_critical_streams(
+            handle.clone(),
+            [control_send, encoder_send, decoder_send],
+        ));
+
         Ok(WtSession {
             session_id: connect_stream_id,
             reset_stream_at_supported,
@@ -1414,6 +1420,16 @@ impl WtClient {
             session_state: session_state_tx,
         })
     }
+}
+
+/// HTTP/3 の制御 / QPACK ストリームを QUIC 接続が閉じるまで保持する
+///
+/// WebTransport セッションの終了だけでこれらの送信ハンドルを破棄すると、QUIC 接続が
+/// 開いたままストリームがリセットされ、ピアで `H3_CLOSED_CRITICAL_STREAM` になり得る
+/// (RFC 9114 §6.2.1 / RFC 9204 §4.2)。一方、QUIC の終了後は保持する必要がない。
+async fn hold_h3_critical_streams(handle: tobi_quic::Connection, streams: [SendStream; 3]) {
+    let _ = handle.closed().await;
+    drop(streams);
 }
 
 /// CONNECT stream から読んだデータを h3 層へ流し、イベントをセッション状態へ反映する
@@ -2912,6 +2928,358 @@ mod tests {
 
     /// WT_APPLICATION_ERROR 範囲外のプロトコルエラーコード (draft-ietf-webtrans-http3-16 §9.5)
     const WT_SESSION_GONE: u64 = shiguredo_http3::webtransport::ErrorCode::SessionGone as u64;
+
+    /// 実 UDP + TLS のループバック接続を待ち受ける。
+    fn start_h3_loopback_server() -> (
+        tobi_quic::Server,
+        rustls::pki_types::CertificateDer<'static>,
+    ) {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("自己署名証明書を生成できること");
+        let cert = certified.cert.der().clone();
+        let key = rustls::pki_types::PrivateKeyDer::try_from(certified.signing_key.serialize_der())
+            .expect("秘密鍵を変換できること");
+        let mut tls = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.clone()], key)
+            .expect("サーバーの TLS 設定を構築できること");
+        tls.alpn_protocols = vec![H3_ALPN.to_vec()];
+        let server = tobi_quic::Server::builder()
+            .with_tls(tobi_quic::ServerTlsConfig::new(Arc::new(tls)))
+            .with_io(IoConfig::new(SocketAddr::from(([127, 0, 0, 1], 0))))
+            .with_transport(crate::quic::tobi::build_webtransport_transport_config())
+            .with_datagram(crate::quic::tobi::datagram_config())
+            .with_background_driver(true)
+            .start()
+            .expect("QUIC サーバーが起動すること");
+        (server, cert)
+    }
+
+    /// 実 UDP + TLS 接続上で、制御 / QPACK の送信ハンドルを保持するタスクが
+    /// 接続中は待機し、ピアが QUIC を閉じたときには終了することを確認する。
+    #[tokio::test]
+    async fn h3_critical_streams_are_retained_until_quic_connection_closes() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let (mut server, cert) = start_h3_loopback_server();
+            let mut roots = rustls::RootCertStore::empty();
+            roots
+                .add(cert)
+                .expect("クライアントにテスト用の証明書を登録できること");
+            let mut client_tls = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            client_tls.alpn_protocols = vec![H3_ALPN.to_vec()];
+            let client = Client::builder()
+                .with_tls(ClientTlsConfig::new(Arc::new(client_tls)))
+                .with_io(IoConfig::new(SocketAddr::from(([127, 0, 0, 1], 0))))
+                .with_transport(crate::quic::tobi::build_webtransport_transport_config())
+                .with_background_driver(true)
+                .start()
+                .expect("QUIC クライアントが起動すること");
+            let (connection, peer) = tokio::try_join!(
+                client.connect(Connect::new(server.local_addr(), "localhost")),
+                server.accept(),
+            )
+            .expect("QUIC 接続を確立できること");
+            let mut streams = Vec::new();
+            for _ in 0..3 {
+                streams.push(
+                    connection
+                        .open_send_stream_wait()
+                        .await
+                        .expect("単方向ストリームを開けること"),
+                );
+            }
+            let holding = hold_h3_critical_streams(
+                connection,
+                streams.try_into().expect("3 本を保持すること"),
+            );
+            tokio::pin!(holding);
+
+            // 接続が開いたままの時点で一度 poll し、そこで解放していないことを確かめる。
+            assert!(
+                std::future::poll_fn(|cx| {
+                    std::task::Poll::Ready(
+                        std::future::Future::poll(holding.as_mut(), cx).is_pending(),
+                    )
+                })
+                .await,
+                "接続中はクリティカルストリームを保持すること"
+            );
+            peer.close_application(H3ErrorCode::NoError as u64, &[])
+                .await
+                .expect("ピアが QUIC 接続を閉じられること");
+            holding.await;
+        })
+        .await
+        .expect("ピアの QUIC 終了後に保持処理が完了すること");
+    }
+
+    /// ハンドシェイク中の QUIC ストリームから 1 チャンク読む。
+    async fn recv_h3_loopback_chunk(recv: &mut tobi_quic::ReceiveStream) -> Vec<u8> {
+        let chunk = recv
+            .receive_vec(crate::qmux::READ_BUFFER_SIZE)
+            .await
+            .expect("QUIC ストリームを読み取れること");
+        assert!(!chunk.fin, "ハンドシェイク中はストリームが閉じないこと");
+        chunk.data
+    }
+
+    /// QUIC で届いた 1 チャンクを HTTP/3 サーバーの状態機械へ渡す。
+    async fn feed_h3_loopback(
+        h3: &mut shiguredo_http3::ServerConnection,
+        recv: &mut tobi_quic::ReceiveStream,
+    ) -> Vec<Event> {
+        let data = recv_h3_loopback_chunk(recv).await;
+        h3.feed_stream(recv.id(), &data, false)
+            .expect("HTTP/3 の状態機械が入力を受理すること");
+        h3.drain_events()
+            .expect("HTTP/3 のイベントを取得できること")
+    }
+
+    #[tokio::test]
+    async fn wt_h3_client_sends_moqt_setup_before_peer_setup() {
+        use crate::moqt_client::MoqtClient;
+        use shiguredo_http3::ServerConnection;
+        use shiguredo_http3::webtransport::ConnectResponse;
+        use shiguredo_moqt::decoder::MessageDecoder;
+        use shiguredo_moqt::message::ControlMessage;
+        use shiguredo_moqt::parameter::SetupOptions;
+        use shiguredo_moqt::session::core::Session;
+        use shiguredo_moqt::session::types::{SessionEvent, SessionState, Transport};
+        use shiguredo_moqt::stream::encode_control_stream_setup;
+
+        let client_phase = std::cell::Cell::new("WebTransport の接続");
+        let peer_phase = std::cell::Cell::new("QUIC の受理");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (mut server, _cert) = start_h3_loopback_server();
+            let config = ClientConfig::new(server.local_addr(), "localhost")
+                .enable_webtransport(wt_h3_settings())
+                .insecure();
+            let client = async {
+                let wt = WtClient::connect(config, "/moq")
+                    .await
+                    .expect("クライアントが WebTransport に接続できること");
+                client_phase.set("MOQT SETUP の交換");
+                MoqtClient::establish_wt(
+                    wt,
+                    "tokio-moq test",
+                    &[],
+                    &tokio_metrics::TaskMonitor::new(),
+                )
+                .await
+                .expect("サーバーの SETUP を受けてセッションが確立すること")
+            };
+            let peer = async {
+                let (handle, acceptor) = server
+                    .accept()
+                    .await
+                    .expect("QUIC 接続を受理できること")
+                    .split();
+                let mut h3 = ServerConnection::new(
+                    H3Settings::new().enable_webtransport_server(wt_h3_settings()),
+                );
+                h3.set_webtransport_transport_verified(
+                    handle.max_datagram_size().await.is_some(),
+                    handle.peer_supports_reset_stream_at().await,
+                )
+                .expect("WebTransport の QUIC 前提条件を満たすこと");
+
+                // 先に双方の HTTP/3 SETTINGS を交換して、正規の Extended CONNECT を受理する。
+                peer_phase.set("HTTP/3 SETTINGS の交換");
+                let mut h3_send = handle
+                    .open_send_stream_wait()
+                    .await
+                    .expect("HTTP/3 の制御ストリームを開けること");
+                h3.set_control_stream_id(h3_send.id())
+                    .expect("制御ストリームを登録できること");
+                let (settings, _) = h3
+                    .take_stream_data(h3_send.id())
+                    .expect("サーバーの SETTINGS が生成されること");
+                h3_send
+                    .send_all(&settings)
+                    .await
+                    .expect("サーバーの SETTINGS を送れること");
+                // RFC 9114 §6.2.1 / RFC 9204 §4.2 の制御・QPACK encoder / decoder の
+                // 3 本を、暗黙の開設だけでなくピアが実際に種別を読めることで確認する。
+                let mut h3_recvs = Vec::new();
+                let mut h3_stream_types = Vec::new();
+                for _ in 0..3 {
+                    let mut recv = acceptor
+                        .accept_receive_stream()
+                        .await
+                        .expect("HTTP/3 の初期ストリームを受け取れること");
+                    let data = recv_h3_loopback_chunk(&mut recv).await;
+                    let Ok(ClassifiedUniStream::Http3 { stream_type, .. }) =
+                        classify_uni_stream_checked(&data)
+                    else {
+                        panic!("HTTP/3 の初期ストリームの種別が届くこと");
+                    };
+                    h3_stream_types.push(stream_type);
+                    h3.feed_stream(recv.id(), &data, false)
+                        .expect("HTTP/3 の初期ストリームを受理できること");
+                    if stream_type == 0x00 {
+                        while h3.peer_settings().is_none() {
+                            feed_h3_loopback(&mut h3, &mut recv).await;
+                        }
+                    }
+                    h3_recvs.push(recv);
+                }
+                h3_stream_types.sort_unstable();
+                assert_eq!(
+                    h3_stream_types,
+                    [0x00, 0x02, 0x03],
+                    "制御・QPACK encoder / decoder の 3 種類が届くこと"
+                );
+                peer_phase.set("CONNECT の受理");
+                let (mut connect_send, mut connect_recv) = acceptor
+                    .accept_bidirectional_stream()
+                    .await
+                    .expect("CONNECT ストリームを受け取れること")
+                    .split();
+                let session_id = connect_send.id();
+                let mut fields = Vec::new();
+                'headers: loop {
+                    for event in feed_h3_loopback(&mut h3, &mut connect_recv).await {
+                        match event {
+                            Event::Header { name, value, .. } => fields.push((name, value)),
+                            Event::HeadersEnd { .. } => break 'headers,
+                            _ => {}
+                        }
+                    }
+                }
+                let fields: Vec<_> = fields
+                    .iter()
+                    .map(|(n, v)| (n.as_slice(), v.as_slice()))
+                    .collect();
+                let request = ConnectRequest::from_headers(&fields)
+                    .expect("WebTransport の Extended CONNECT が届くこと");
+                assert_eq!(
+                    request.available_protocols,
+                    [crate::MOQT_PROTOCOL],
+                    "クライアントが MOQT を提示すること"
+                );
+                let response = ConnectResponse::new(200)
+                    .with_protocol(crate::MOQT_PROTOCOL)
+                    .to_headers()
+                    .expect("成功レスポンスのヘッダーを作れること");
+                h3.send_response(session_id, &response, false)
+                    .expect("WebTransport セッションを受理できること");
+                while let Some((data, _)) = h3.take_stream_data(session_id) {
+                    connect_send
+                        .send_all(&data)
+                        .await
+                        .expect("CONNECT レスポンスを送れること");
+                }
+
+                // サーバーはクライアントの MOQT SETUP が届くまで自分の制御ストリームを開かない。
+                // ここでクライアントも受信を先に待つと、どちらも進まずテストがタイムアウトする。
+                peer_phase.set("クライアントの MOQT SETUP の受信");
+                let mut moqt = Session::new_server(Transport::WebTransport, SetupOptions::new())
+                    .expect("サーバーの MOQT 状態機械を作れること");
+                let mut setup_recv = acceptor
+                    .accept_receive_stream()
+                    .await
+                    .expect("MOQT の制御ストリームを受け取れること");
+                let mut decoder = MessageDecoder::new(moqt.local_max_control_message_size());
+                let mut stream_type_read = false;
+                loop {
+                    for event in feed_h3_loopback(&mut h3, &mut setup_recv).await {
+                        match event {
+                            Event::WebTransport(WebTransportEvent::UniStreamOpen {
+                                session_id: actual,
+                                ..
+                            }) => assert_eq!(
+                                actual, session_id,
+                                "SETUP は確立したセッションに届くこと"
+                            ),
+                            Event::WebTransport(WebTransportEvent::UniStreamData {
+                                data, ..
+                            }) => {
+                                decoder.push(&data);
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !stream_type_read
+                        && let Some(stream_type) = decoder
+                            .try_decode_varint()
+                            .expect("ストリーム種別を読み取れること")
+                    {
+                        moqt.recv_control_stream_type(stream_type)
+                            .expect("MOQT の制御ストリームであること");
+                        stream_type_read = true;
+                    }
+                    if stream_type_read
+                        && let Some(message) = decoder
+                            .try_decode_message()
+                            .expect("制御メッセージを復号できること")
+                    {
+                        assert!(
+                            matches!(message, ControlMessage::Setup(_)),
+                            "先頭は MOQT SETUP であること"
+                        );
+                        moqt.recv_control(message)
+                            .expect("クライアントの SETUP を受理できること");
+                        break;
+                    }
+                }
+                assert_eq!(
+                    moqt.state(),
+                    SessionState::Established,
+                    "サーバー側の MOQT セッションが確立すること"
+                );
+                let Some(SessionEvent::SendControl(setup)) = moqt.poll_event() else {
+                    panic!("サーバーの SETUP が生成されること");
+                };
+                let mut setup_send = handle
+                    .open_send_stream_wait()
+                    .await
+                    .expect("サーバーの MOQT 制御ストリームを開けること");
+                h3.register_local_wt_stream(session_id, setup_send.id())
+                    .expect("サーバーのストリームを WebTransport に登録できること");
+                let mut data = Vec::new();
+                StreamHeader::new(session_id)
+                    .expect("CONNECT の ID が有効であること")
+                    .encode_unidirectional(&mut data);
+                data.extend(
+                    encode_control_stream_setup(
+                        &setup,
+                        moqt.peer_control_message_size_limit().bytes(),
+                    )
+                    .expect("MOQT SETUP をエンコードできること"),
+                );
+                setup_send
+                    .send_all(&data)
+                    .await
+                    .expect("サーバーの MOQT SETUP を送れること");
+
+                // クライアントが SETUP を処理するまでストリームを閉じない。
+                peer_phase.set("サーバーの MOQT SETUP 送信済み");
+                (
+                    handle,
+                    h3_send,
+                    h3_recvs,
+                    connect_send,
+                    connect_recv,
+                    setup_send,
+                    setup_recv,
+                )
+            };
+            let (_client, (handle, ..)) = tokio::join!(client, peer);
+            handle
+                .close_application(H3ErrorCode::NoError as u64, &[])
+                .await
+                .expect("QUIC 接続を閉じられること");
+        })
+        .await;
+        assert!(
+            result.is_ok(),
+            "双方の MOQT SETUP が完了すること。クライアント: {}、サーバー: {}",
+            client_phase.get(),
+            peer_phase.get()
+        );
+    }
 
     /// 予約コードポイント (0x1f * N + 0x21) のうち WT_APPLICATION_ERROR 範囲に入る最初の値
     ///

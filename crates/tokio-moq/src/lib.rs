@@ -1205,15 +1205,29 @@ where
 /// # Errors
 ///
 /// 名前解決に失敗した場合と、`connect` がすべてのアドレスで失敗した場合はエラーになる。
-pub async fn connect_with_fallback<T, E, F, Fut>(authority: &str, mut connect: F) -> Result<T, E>
+pub async fn connect_with_fallback<T, E, F, Fut>(authority: &str, connect: F) -> Result<T, E>
 where
     E: From<TransportError> + std::fmt::Display,
     F: FnMut(SocketAddr) -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
 {
     let addrs = resolve_socket_addrs(authority).await?;
+    try_resolved_addrs(authority, &addrs, connect).await
+}
+
+/// 解決済みの空でないアドレス列を順に試す
+async fn try_resolved_addrs<T, E, F, Fut>(
+    authority: &str,
+    addrs: &[SocketAddr],
+    mut connect: F,
+) -> Result<T, E>
+where
+    E: std::fmt::Display,
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
     let mut last: Option<E> = None;
-    for addr in addrs {
+    for &addr in addrs {
         tracing::info!("Connecting to {addr} (authority {authority})");
         match connect(addr).await {
             Ok(connected) => return Ok(connected),
@@ -1637,9 +1651,10 @@ pub struct ConnectParams<'a> {
 
 /// URL と接続設定から MOQT セッションを確立する
 ///
-/// 接続先の名前解決と、解決したアドレスを順に試す処理は [`connect_with_fallback`] に任せる。
-/// 接続経路は `params.transport` で選び、SETUP まで終えた
-/// [`MoqtClient`](crate::moqt_client::MoqtClient) と data stream を受信する
+/// 名前解決したアドレスを順に試し、`params.transport` で指定したトランスポートが
+/// 確立した最初のアドレスを採用する。そこで MOQT の SETUP を交換する。SETUP が
+/// 失敗した場合は、別のアドレスを試さずエラーを返す。
+/// 成功時は [`MoqtClient`](crate::moqt_client::MoqtClient) と data stream を受信する
 /// [`StreamAcceptor`](crate::transport::StreamAcceptor) を返す。
 ///
 /// 証明書検証の無効化 (`--cert` の省略) は、この関数が試行ごとに警告する。
@@ -1665,124 +1680,145 @@ pub async fn connect(
     {
         return Err(TransportError::Unsupported(reason.to_string()));
     }
-    let server_name = host_from_authority(&params.url.authority).to_string();
-    let url = params.url.clone();
-    let transport = params.transport;
-    let cert = params.cert.map(str::to_string);
-    let impl_name = params.impl_name.to_string();
-    let receive_datagrams = params.receive_datagrams;
-    let datagram_max_size = params.datagram_max_size;
-    let authority = url.authority.clone();
-    let task_monitor = task_monitor.clone();
+    let addrs = resolve_socket_addrs(&params.url.authority).await?;
+    connect_resolved(params, task_monitor, &addrs).await
+}
 
-    connect_with_fallback(&authority, move |socket_addr| {
-        // 試行ごとに接続を組み立てるため、設定は複製して `move` で取り込む
-        let url = url.clone();
-        let cert = cert.clone();
-        let impl_name = impl_name.clone();
-        let server_name = server_name.clone();
-        let task_monitor = task_monitor.clone();
-        async move {
-            // :authority は target URI の authority を URL の表記どおりに渡す
-            // (draft-ietf-webtrans-http3-16 §3.2 / draft-ietf-webtrans-http2-16 §3.2)
-            let authority_url = url.authority.clone();
-            match transport {
-                Transport::Quic => {
-                    let (connection, stop_sending_rx) =
-                        crate::quic::connect(socket_addr, &server_name, cert.as_deref()).await?;
-                    crate::moqt_client::MoqtClient::establish_quic(
-                        connection,
-                        stop_sending_rx,
-                        &url.path,
-                        &authority_url,
-                        &impl_name,
-                        &url.cat_tokens,
-                        &task_monitor,
-                    )
-                    .await
+/// アドレス試行で確立した、MOQT SETUP 未交換のトランスポート
+enum ConnectedTransport {
+    Quic(crate::quic::Connected, crate::quic::StopSendingReceiver),
+    #[cfg(not(windows))]
+    WtH3(crate::webtransport_h3::WtSession),
+    WtH2(crate::webtransport_h2::WtH2Session),
+    Qmux(crate::qmux::QmuxSession),
+}
+
+/// トランスポートが確立するまで解決順に試し、採用した接続でだけ MOQT SETUP を交換する
+async fn connect_resolved(
+    params: &ConnectParams<'_>,
+    task_monitor: &tokio_metrics::TaskMonitor,
+    addrs: &[SocketAddr],
+) -> Result<
+    (
+        crate::moqt_client::MoqtClient,
+        crate::transport::StreamAcceptor,
+    ),
+    TransportError,
+> {
+    use crate::moqt_client::MoqtClient;
+
+    let url = params.url;
+    let authority = &url.authority;
+    let connection = try_resolved_addrs(authority, addrs, |addr| {
+        connect_transport(params, task_monitor, addr)
+    })
+    .await?;
+
+    // SETUP 失敗をアドレス試行に戻すと、同じ SETUP を別の接続へ送り直してしまう。
+    match connection {
+        ConnectedTransport::Quic(connection, stop_sending_rx) => {
+            MoqtClient::establish_quic(
+                connection,
+                stop_sending_rx,
+                &url.path,
+                authority,
+                params.impl_name,
+                &url.cat_tokens,
+                task_monitor,
+            )
+            .await
+        }
+        #[cfg(not(windows))]
+        ConnectedTransport::WtH3(session) => {
+            MoqtClient::establish_wt(session, params.impl_name, &url.cat_tokens, task_monitor).await
+        }
+        ConnectedTransport::WtH2(session) => {
+            MoqtClient::establish_wt_h2(session, params.impl_name, &url.cat_tokens, task_monitor)
+                .await
+        }
+        ConnectedTransport::Qmux(session) => {
+            // 制御ストリームを開いた後はピアのトランスポートパラメータが届いている
+            // ため、確立直後に datagram の上限を確認できる。
+            let handle = std::sync::Arc::clone(&session.handle);
+            let connected = MoqtClient::establish_qmux(
+                session,
+                &url.path,
+                authority,
+                params.impl_name,
+                &url.cat_tokens,
+                task_monitor,
+            )
+            .await?;
+            crate::qmux::warn_if_datagram_too_large(&handle, params.datagram_max_size);
+            Ok(connected)
+        }
+    }
+}
+
+/// 指定アドレスのトランスポートだけを確立する。MOQT のストリームは開かない
+async fn connect_transport(
+    params: &ConnectParams<'_>,
+    task_monitor: &tokio_metrics::TaskMonitor,
+    socket_addr: SocketAddr,
+) -> Result<ConnectedTransport, TransportError> {
+    let url = params.url;
+    let server_name = host_from_authority(&url.authority);
+    match params.transport {
+        Transport::Quic => {
+            let (connection, stop_sending_rx) =
+                crate::quic::connect(socket_addr, server_name, params.cert).await?;
+            Ok(ConnectedTransport::Quic(connection, stop_sending_rx))
+        }
+        Transport::WtH3 => {
+            #[cfg(not(windows))]
+            {
+                // draft-ietf-webtrans-http3-17 §3.1 / §9.2: draft-17 の codepoint だけを
+                // 広告する。旧 codepoint だけの peer は wait_for_peer_settings が
+                // InvalidState で拒否する。
+                let mut client_config =
+                    crate::webtransport_h3::ClientConfig::new(socket_addr, server_name)
+                        // :authority は target URI の表記どおり渡す
+                        // (draft-ietf-webtrans-http3-16 §3.2)。
+                        .authority(&url.authority)
+                        .enable_webtransport(crate::webtransport_h3::wt_h3_settings());
+                if params.receive_datagrams {
+                    // subscriber は datagram を継続受信するためバックグラウンドタスクを起動する。
+                    client_config = client_config.receive_datagrams();
                 }
-                Transport::WtH3 => {
-                    #[cfg(not(windows))]
-                    {
-                        // draft-ietf-webtrans-http3-17 §3.1 / §9.2: draft-17 の codepoint だけを
-                        // 広告する。旧 codepoint だけの peer は wait_for_peer_settings が
-                        // InvalidState で拒否する
-                        let mut client_config =
-                            crate::webtransport_h3::ClientConfig::new(socket_addr, &server_name)
-                                .authority(&authority_url)
-                                .enable_webtransport(crate::webtransport_h3::wt_h3_settings());
-                        if receive_datagrams {
-                            // subscriber は datagram を継続受信するためバックグラウンドタスクを起動する
-                            client_config = client_config.receive_datagrams();
-                        }
-                        client_config = apply_tls_config_h3(client_config, cert.as_deref())?;
-                        let wt_session =
-                            crate::webtransport_h3::WtClient::connect(client_config, &url.path)
-                                .await?;
-                        crate::moqt_client::MoqtClient::establish_wt(
-                            wt_session,
-                            &impl_name,
-                            &url.cat_tokens,
-                            &task_monitor,
-                        )
-                        .await
-                    }
-                    #[cfg(windows)]
-                    {
-                        // 関数冒頭の検査で到達しないが、Windows では webtransport_h3 を
-                        // コンパイルしないため、エラーを返す腕をここに置く
-                        Err(TransportError::Unsupported(
-                            WT_H3_UNAVAILABLE_WINDOWS.to_string(),
-                        ))
-                    }
-                }
-                Transport::WtH2 => {
-                    let mut client_config =
-                        crate::webtransport_h2::ClientConfig::new(socket_addr, &server_name)
-                            .authority(&authority_url);
-                    if receive_datagrams {
-                        // subscriber は datagram を継続受信するためバックグラウンドタスクを起動する
-                        client_config = client_config.receive_datagrams();
-                    }
-                    client_config = apply_tls_config_h2(client_config, cert.as_deref())?;
-                    let wt_session =
-                        crate::webtransport_h2::WtH2Client::connect(client_config, &url.path)
-                            .await?;
-                    crate::moqt_client::MoqtClient::establish_wt_h2(
-                        wt_session,
-                        &impl_name,
-                        &url.cat_tokens,
-                        &task_monitor,
-                    )
-                    .await
-                }
-                Transport::Qmux => {
-                    let session = crate::qmux::connect(
-                        socket_addr,
-                        &server_name,
-                        cert.as_deref(),
-                        &task_monitor,
-                    )
-                    .await?;
-                    // 制御ストリームを開いた後はピアのトランスポートパラメータが届いている
-                    // ため、確立直後に datagram の上限を確認できる
-                    let handle = std::sync::Arc::clone(&session.handle);
-                    let (client, acceptor) = crate::moqt_client::MoqtClient::establish_qmux(
-                        session,
-                        &url.path,
-                        &authority_url,
-                        &impl_name,
-                        &url.cat_tokens,
-                        &task_monitor,
-                    )
-                    .await?;
-                    crate::qmux::warn_if_datagram_too_large(&handle, datagram_max_size);
-                    Ok((client, acceptor))
-                }
+                client_config = apply_tls_config_h3(client_config, params.cert)?;
+                let session =
+                    crate::webtransport_h3::WtClient::connect(client_config, &url.path).await?;
+                Ok(ConnectedTransport::WtH3(session))
+            }
+            #[cfg(windows)]
+            {
+                // 公開 API の事前検査に加えて、Windows では存在しない経路を型で除外する。
+                Err(TransportError::Unsupported(
+                    WT_H3_UNAVAILABLE_WINDOWS.to_string(),
+                ))
             }
         }
-    })
-    .await
+        Transport::WtH2 => {
+            let mut client_config =
+                crate::webtransport_h2::ClientConfig::new(socket_addr, server_name)
+                    // :authority は target URI の表記どおり渡す
+                    // (draft-ietf-webtrans-http2-16 §3.2)。
+                    .authority(&url.authority);
+            if params.receive_datagrams {
+                // subscriber は datagram を継続受信するためバックグラウンドタスクを起動する。
+                client_config = client_config.receive_datagrams();
+            }
+            client_config = apply_tls_config_h2(client_config, params.cert)?;
+            let session =
+                crate::webtransport_h2::WtH2Client::connect(client_config, &url.path).await?;
+            Ok(ConnectedTransport::WtH2(session))
+        }
+        Transport::Qmux => {
+            let session =
+                crate::qmux::connect(socket_addr, server_name, params.cert, task_monitor).await?;
+            Ok(ConnectedTransport::Qmux(session))
+        }
+    }
 }
 
 /// WebTransport over HTTP/3 の TLS 設定に CA 証明書を適用する
@@ -3768,6 +3804,79 @@ mod tests {
             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             "IPv4 の待ち受けで接続を受け付けること"
         );
+    }
+
+    /// QUIC が確立した後に MOQT SETUP が失敗しても、次のアドレスには接続しない
+    #[tokio::test]
+    async fn connect_does_not_fall_back_after_setup_fails() {
+        use crate::peer_harness::TestPeerServer;
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut first = TestPeerServer::start()
+                .await
+                .expect("最初の QUIC サーバーを起動できること");
+            let mut fallback = TestPeerServer::start()
+                .await
+                .expect("次の QUIC サーバーを起動できること");
+            // DNS や IPv6 の有無に依存せず、実際に応答できる 2 つの接続先を順序付きで用意する。
+            let addrs = [first.local_addr(), fallback.local_addr()];
+            let url = parse_url(&format!("moqt://localhost:{}", addrs[0].port()))
+                .expect("接続先 URL を解釈できること");
+            let params = ConnectParams {
+                url: &url,
+                transport: Transport::Quic,
+                cert: None,
+                impl_name: "test-client",
+                receive_datagrams: false,
+                datagram_max_size: None,
+            };
+            let monitor = tokio_metrics::TaskMonitor::new();
+
+            tokio::join!(
+                async {
+                    let mut peer = first
+                        .accept()
+                        .await
+                        .expect("最初の QUIC 接続を受理できること");
+                    // 制御ストリームの種別は正しく、SETUP だけが欠けるように FIN で終端する。
+                    let mut prefix = Vec::new();
+                    shiguredo_moqt::varint::encode(
+                        shiguredo_moqt::stream::SETUP_STREAM_TYPE,
+                        &mut prefix,
+                    );
+                    peer.send_control_stream_head(prefix)
+                        .await
+                        .expect("制御ストリームの種別を送信できること");
+                    peer.finish_control_stream()
+                        .await
+                        .expect("SETUP を送らずに制御ストリームを終端できること");
+                    // クライアントが MOQT の終了コードを送るまでサーバーを生かしておく。
+                    assert_eq!(
+                        peer.recv_close_code()
+                            .await
+                            .expect("終了コードを観測できること"),
+                        shiguredo_moqt::error::SESSION_CLOSED_CONTROL_STREAM,
+                        "SETUP を受け取る前の制御ストリーム終了として扱うこと"
+                    );
+                },
+                async {
+                    // 次のアドレスへの接続を受け付けながらエラーを待つ。誤って試行すると、
+                    // SETUP の応答を待つ前に QUIC 接続を受理できるため、不在確認用の sleep は不要。
+                    tokio::select! {
+                        result = connect_resolved(&params, &monitor, &addrs) => {
+                            let error = result.err().expect("最初の SETUP の失敗を返すこと");
+                            assert!(
+                                error.to_string().contains("control stream closed before SETUP"),
+                                "最初の SETUP のエラーを保持すること: {error}"
+                            );
+                        }
+                        _ = fallback.accept() => panic!("次の QUIC サーバーには接続しないこと"),
+                    }
+                },
+            );
+        })
+        .await
+        .expect("SETUP の失敗と切断の観測が制限時間内に完了すること");
     }
 
     /// すべての接続先が失敗した場合は最後の失敗を返す

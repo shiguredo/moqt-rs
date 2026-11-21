@@ -20,12 +20,13 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use shiguredo_http2::settings::DEFAULT_INITIAL_WINDOW_SIZE;
 use shiguredo_http2::webtransport::stream::stream_id as wt_stream_id;
+use shiguredo_http2::webtransport::varint::MAX_VALUE as WT_MAX_VARINT;
 use shiguredo_http2::webtransport::{
-    WtConfig, WtError, WtErrorKind, WtEvent, WtSession, WtStreamId,
+    WtConfig, WtError, WtErrorKind, WtEvent, WtSession, WtSessionState as RawWtSessionState,
+    WtStreamId,
 };
 use shiguredo_http2::{ErrorCode, Event, HeaderField, Limits, StreamId};
 use shiguredo_moqt::session::types::RequestStreamEnd;
@@ -384,11 +385,9 @@ impl WtH2Client {
         let (stop_sending_tx, stop_sending_rx) = mpsc::unbounded_channel();
         let (session_state_tx, _) = watch::channel(WtSessionState::Active);
         let datagrams = Arc::new(StdMutex::new(VecDeque::new()));
-        let session_consumed = Arc::new(AtomicU64::new(0));
 
         let driver_session_state = session_state_tx.clone();
         let driver_datagrams = Arc::clone(&datagrams);
-        let driver_consumed = Arc::clone(&session_consumed);
         let driver_cmd_tx = cmd_tx.clone();
         let receive_datagrams = config.receive_datagrams;
         let driver = tokio::spawn(async move {
@@ -409,8 +408,7 @@ impl WtH2Client {
                 stop_sending_sent: HashSet::new(),
                 stop_sending_received: HashMap::new(),
                 stop_sending_tx,
-                session_received: 0,
-                session_consumed: driver_consumed,
+                session_consumed: 0,
             };
             state.run().await;
         });
@@ -961,10 +959,6 @@ pub struct WtH2RecvStream {
     cmd_tx: mpsc::UnboundedSender<Command>,
     data_rx: mpsc::UnboundedReceiver<StreamPacket>,
     session_state: watch::Receiver<WtSessionState>,
-    /// ストリーム単位で消費したバイト数 (受信ウィンドウの拡張に使う)
-    consumed: Arc<AtomicU64>,
-    /// セッション単位で消費したバイト数 (受信ウィンドウの拡張に使う)
-    session_consumed: Arc<AtomicU64>,
     /// 直近のデータに付いていた FIN をまだアプリへ返していない
     pending_fin: bool,
     /// FIN / reset を返し終えた終端 (以降は同じ値を返す)
@@ -992,13 +986,10 @@ impl WtH2RecvStream {
                         if fin {
                             self.pending_fin = true;
                         }
-                        if !data.is_empty() {
-                            let len = data.len() as u64;
-                            self.consumed.fetch_add(len, Ordering::Relaxed);
-                            self.session_consumed.fetch_add(len, Ordering::Relaxed);
-                            return Ok(RecvChunk::Data(data));
+                        if !data.bytes.is_empty() {
+                            return Ok(RecvChunk::Data(data.read()));
                         }
-                        // 空のデータ capsule (FIN なし) は次を待つ
+                        // 空の FIN はデータを挟まず、次の反復で終端として返す。
                     }
                     Some(StreamPacket::Reset { error_code }) => {
                         // WT_RESET_STREAM は Reliable Size も運ぶが (draft-ietf-webtrans-http2-16
@@ -1075,6 +1066,11 @@ enum Command {
         stream_id: WtStreamId,
         error_code: u64,
     },
+    /// 受信データを読み取ったか破棄した。破棄時はセッション窓だけを補充する。
+    RecvConsumed {
+        stream_id: Option<WtStreamId>,
+        len: u64,
+    },
     /// datagram を送る
     SendDatagram {
         data: Vec<u8>,
@@ -1091,9 +1087,42 @@ enum Command {
 /// ストリームのチャネルへ流すメッセージ
 enum StreamPacket {
     /// データ (FIN 付きの場合がある)
-    Data { data: Vec<u8>, fin: bool },
+    Data { data: BufferedRecvData, fin: bool },
     /// peer からの reset
     Reset { error_code: u64 },
+}
+
+/// 受信バッファに滞留しているデータと、データを読み取り・破棄したときのクレジットの通知先
+struct BufferedRecvData {
+    bytes: Vec<u8>,
+    stream_id: WtStreamId,
+    cmd_tx: mpsc::UnboundedSender<Command>,
+}
+
+impl BufferedRecvData {
+    fn read(mut self) -> Vec<u8> {
+        // ピアがクレジットを待っていても次の受信を待たず driver を起こす。
+        self.notify_consumed(Some(self.stream_id));
+        // データを渡したと同時に Drop 側の二重通知を防ぐ。
+        std::mem::take(&mut self.bytes)
+    }
+
+    fn notify_consumed(&self, stream_id: Option<WtStreamId>) {
+        if !self.bytes.is_empty() {
+            let _ = self.cmd_tx.send(Command::RecvConsumed {
+                stream_id,
+                len: self.bytes.len() as u64,
+            });
+        }
+    }
+}
+
+impl Drop for BufferedRecvData {
+    fn drop(&mut self) {
+        // 受信ハンドルの破棄と driver の enqueue が競合しても、チャネル自身が破棄する
+        // データが通知する。破棄した分は他ストリームも使うセッション窓だけに戻す。
+        self.notify_consumed(None);
+    }
 }
 
 /// 送信待ちのデータ
@@ -1111,9 +1140,7 @@ struct StreamState {
     /// アプリへデータを渡すチャネル
     tx: mpsc::UnboundedSender<StreamPacket>,
     /// アプリが消費したバイト数 (受信ウィンドウの拡張に使う)
-    consumed: Arc<AtomicU64>,
-    /// 受信したバイト数
-    received: u64,
+    consumed: u64,
 }
 
 /// WebTransport over HTTP/2 の driver
@@ -1153,10 +1180,8 @@ struct DriverState {
     stop_sending_received: HashMap<WtStreamId, u64>,
     /// peer の STOP_SENDING の観測を MOQT 層へ流す sender
     stop_sending_tx: mpsc::UnboundedSender<StopSendingObserved>,
-    /// セッション全体で受信したバイト数
-    session_received: u64,
-    /// アプリが消費したバイト数 (セッション全体)
-    session_consumed: Arc<AtomicU64>,
+    /// アプリが読み取ったか破棄したバイト数 (セッション全体)
+    session_consumed: u64,
 }
 
 /// 終端済みストリームへの操作に対するエラーを作る
@@ -1169,6 +1194,22 @@ fn stream_end_error(error_code: Option<u64>) -> TransportError {
     match error_code {
         Some(error_code) => TransportError::StreamReset { error_code },
         None => TransportError::StreamClosed,
+    }
+}
+
+/// 初期ウィンドウの半分以上を補充できるときに広告する
+///
+/// varint の上限に達する最後の更新だけは半分未満でも広告する。
+fn next_recv_max(initial: u64, consumed: u64, current: u64) -> Option<u64> {
+    if initial == 0 {
+        return None;
+    }
+    // 初期値も消費量も検証済みの受信上限 (最大 2^62-1) を超えない。
+    let maximum = (initial + consumed).min(WT_MAX_VARINT);
+    if maximum > current && (maximum - current >= initial.div_ceil(2) || maximum == WT_MAX_VARINT) {
+        Some(maximum)
+    } else {
+        None
     }
 }
 
@@ -1335,6 +1376,17 @@ impl DriverState {
                     }
                 }
                 true
+            }
+            Command::RecvConsumed { stream_id, len } => {
+                match self.consume_recv_data(stream_id, len) {
+                    Ok(true) => self.pump_and_flush().await,
+                    Ok(false) => true,
+                    Err(e) => {
+                        tracing::warn!("Failed to replenish WebTransport receive credit: {e}");
+                        update_session_state(&self.session_state, WtSessionState::ConnectionFailed);
+                        false
+                    }
+                }
             }
             Command::SendDatagram { data, reply } => {
                 let result = match self.wt_session.send_datagram(&data) {
@@ -1514,29 +1566,37 @@ impl DriverState {
                 data,
                 fin,
             } => {
+                // FIN を伴わない空データはアプリに渡さない。受信バイト数が増えないため、
+                // 受信窓だけではこの種の capsule がチャネルに滞留する件数を制限できない。
+                if data.is_empty() && !fin {
+                    return Ok(true);
+                }
+                let len = data.len() as u64;
                 if self.stop_sending_sent.contains(&stream_id) {
                     // draft-ietf-moq-transport-23 §6.4.2.3: STOP_SENDING 後のデータは破棄する。
-                    // ストリームウィンドウも拡張しない (draft-ietf-webtrans-http2-16 §6.6)
+                    // draft-ietf-webtrans-http2-16 §6.5 / §6.6: 破棄したデータもセッション全体の
+                    // 受信上限に算入されるが、このストリームの受信上限は増やしてはならない。
+                    self.consume_recv_data(None, len)?;
                     if fin {
                         self.streams.remove(&stream_id);
                         self.stop_sending_sent.remove(&stream_id);
                     }
                     return Ok(true);
                 }
-                let len = data.len() as u64;
-                let Some(state) = self.streams.get_mut(&stream_id) else {
-                    tracing::debug!(
-                        "Received data for an unknown WebTransport stream: {stream_id}"
-                    );
-                    return Ok(true);
-                };
-                state.received = state.received.saturating_add(len);
-                let _ = state.tx.send(StreamPacket::Data { data, fin });
+                if let Some(state) = self.streams.get(&stream_id) {
+                    let data = BufferedRecvData {
+                        bytes: data,
+                        stream_id,
+                        cmd_tx: self.cmd_tx.clone(),
+                    };
+                    // ハンドルがすでに閉じていれば、送信に失敗したデータの Drop が通知する。
+                    let _ = state.tx.send(StreamPacket::Data { data, fin });
+                } else {
+                    self.consume_recv_data(None, len)?;
+                }
                 if fin {
                     self.streams.remove(&stream_id);
                 }
-                self.session_received = self.session_received.saturating_add(len);
-                self.grow_windows(stream_id)?;
                 Ok(true)
             }
             WtEvent::StreamReset {
@@ -1611,22 +1671,13 @@ impl DriverState {
         bidirectional: bool,
     ) -> (Option<WtH2SendStream>, WtH2RecvStream) {
         let (tx, rx) = mpsc::unbounded_channel();
-        let consumed = Arc::new(AtomicU64::new(0));
-        self.streams.insert(
-            stream_id,
-            StreamState {
-                tx,
-                consumed: Arc::clone(&consumed),
-                received: 0,
-            },
-        );
+        self.streams
+            .insert(stream_id, StreamState { tx, consumed: 0 });
         let recv = WtH2RecvStream {
             stream_id,
             cmd_tx: self.cmd_tx.clone(),
             data_rx: rx,
             session_state: self.session_state.subscribe(),
-            consumed,
-            session_consumed: Arc::clone(&self.session_consumed),
             pending_fin: false,
             terminal: None,
         };
@@ -1647,50 +1698,54 @@ impl DriverState {
         }
     }
 
-    /// 受信ウィンドウを消費の進み具合に応じて拡張する
+    /// 消費した分だけ受信上限を増やし、新しい広告を積んだかを返す
     ///
-    /// draft-ietf-webtrans-http2-16 §6.5 / §6.6: アプリが読んだ分だけ
-    /// `WT_MAX_DATA` / `WT_MAX_STREAM_DATA` を送る。読んでいない分を超えて
-    /// ウィンドウを広げないため、アプリの停滞がメモリの増加にならない。
-    fn grow_windows(&mut self, stream_id: WtStreamId) -> Result<()> {
-        // セッションウィンドウ
-        let initial = self.wt_session.config().initial_max_data;
-        if initial > 0 {
-            let consumed = self.session_consumed.load(Ordering::Relaxed);
-            let outstanding = self.session_received.saturating_sub(consumed);
-            if outstanding < initial.div_ceil(2) {
-                self.wt_session.grow_recv_window(initial)?;
-            }
+    /// draft-ietf-webtrans-http2-16 §6.5 / §6.6 の上限は累積値である。初期値に
+    /// 消費量を足した絶対値を使い、アプリに滞留するデータを初期ウィンドウ内に保つ。
+    /// draft の改訂によって仕様が変わる可能性がある。
+    fn consume_recv_data(&mut self, stream_id: Option<WtStreamId>, len: u64) -> Result<bool> {
+        // `process` が同じ HTTP/2 DATA 内の WT_CLOSE_SESSION を先に処理していることがある。
+        if len == 0 || self.wt_session.state() == RawWtSessionState::Closed {
+            return Ok(false);
         }
-        // ストリームウィンドウ
-        let Some(state) = self.streams.get(&stream_id) else {
-            return Ok(());
+        self.session_consumed += len;
+        let mut updated = false;
+        if let Some(maximum) = next_recv_max(
+            self.wt_session.config().initial_max_data,
+            self.session_consumed,
+            self.wt_session.flow_control().recv_max(),
+        ) {
+            self.wt_session.send_max_data(maximum)?;
+            updated = true;
+        }
+
+        let Some(stream_id) = stream_id else {
+            return Ok(updated);
+        };
+        // FIN や reset と消費通知の到着順は独立している。終端後はセッション窓だけ補充する。
+        let Some(state) = self.streams.get_mut(&stream_id) else {
+            return Ok(updated);
         };
         let Some(stream) = self.wt_session.stream(stream_id) else {
-            return Ok(());
+            return Ok(updated);
         };
-        if !stream.can_recv() {
-            return Ok(());
+        if !stream.can_recv() || self.stop_sending_sent.contains(&stream_id) {
+            return Ok(updated);
         }
-        let initial = if stream.is_bidirectional() {
-            if wt_stream_id::is_client_initiated(stream_id) {
-                self.wt_session.config().initial_max_stream_data_bidi_local
-            } else {
-                self.wt_session.config().initial_max_stream_data_bidi_remote
-            }
+        state.consumed += len;
+        let config = self.wt_session.config();
+        let initial = if !stream.is_bidirectional() {
+            config.initial_max_stream_data_uni
+        } else if wt_stream_id::is_client_initiated(stream_id) {
+            config.initial_max_stream_data_bidi_local
         } else {
-            self.wt_session.config().initial_max_stream_data_uni
+            config.initial_max_stream_data_bidi_remote
         };
-        if initial == 0 {
-            return Ok(());
+        if let Some(maximum) = next_recv_max(initial, state.consumed, stream.recv_max()) {
+            self.wt_session.send_max_stream_data(stream_id, maximum)?;
+            updated = true;
         }
-        let consumed = state.consumed.load(Ordering::Relaxed);
-        let outstanding = state.received.saturating_sub(consumed);
-        if outstanding < initial.div_ceil(2) {
-            self.wt_session
-                .grow_stream_recv_window(stream_id, initial)?;
-        }
-        Ok(())
+        Ok(updated)
     }
 
     /// 送信待ちのデータを送信ウィンドウの空きに応じて送る
@@ -3465,6 +3520,215 @@ mod tests {
         io.flush()
             .await
             .map_err(|e| format!("failed to flush a raw capsule: {e}"))
+    }
+
+    const CREDIT_TEST_RESET: u64 = 0x41;
+    const CREDIT_TEST_CONSUMED: &[u8] = b"consumed";
+
+    /// アプリが読み始めるまで、HTTP/2 の窓だけが更新されることを確認する。
+    async fn expect_http2_window_update<S: AsyncRead + AsyncWrite + Unpin>(
+        io: &mut H2Io<S>,
+        connect_stream: StreamId,
+    ) -> std::result::Result<(), String> {
+        loop {
+            match io.next_event().await.map_err(|e| e.to_string())? {
+                Event::WindowUpdateReceived { stream_id, .. } if stream_id == connect_stream => {
+                    return Ok(());
+                }
+                Event::DataReceived { stream_id, .. } if stream_id == connect_stream => {
+                    return Err("読み取り前に WebTransport の広告を受信した".into());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// 実 TLS 上でクライアントの受信窓を使い切り、読み取り・破棄で広告された上限を検証する。
+    async fn run_receive_credit_server(
+        listener: tokio::net::TcpListener,
+        tls: tokio_rustls::TlsAcceptor,
+        credit_exhausted: oneshot::Sender<()>,
+        reset_and_drop: bool,
+    ) -> std::result::Result<(), String> {
+        let (tcp, _) = listener.accept().await.map_err(|e| e.to_string())?;
+        let stream = tls.accept(tcp).await.map_err(|e| e.to_string())?;
+        let config = WtConfig::default();
+        let limits = build_limits(&config).map_err(|e| e.to_string())?;
+        let mut io = H2Io::server(stream, limits);
+        io.send_preface().await.map_err(|e| e.to_string())?;
+        let (mut wt, connect_stream) = loop {
+            if let Event::HeadersReceived {
+                stream_id, headers, ..
+            } = io.next_event().await.map_err(|e| e.to_string())?
+            {
+                break (
+                    accept_wt_connect(&mut io, &config, stream_id, &headers).await?,
+                    stream_id,
+                );
+            }
+        };
+        let initial_session = wt.flow_control().send_available();
+        let mut sent = 0;
+        let mut first_stream = None;
+        let mut initial_stream = 0;
+        while sent < initial_session {
+            let id = wt.open_uni_stream().map_err(|e| e.to_string())?;
+            let stream_credit = wt
+                .stream(id)
+                .expect("ストリームが開いていること")
+                .send_available();
+            if first_stream.is_none() {
+                first_stream = Some(id);
+                initial_stream = stream_credit;
+            }
+            let mut remaining = stream_credit.min(initial_session - sent);
+            while remaining > 0 {
+                // WT の窓全部を先に送る。HTTP/2 の窓とは別なので、各送信の WINDOW_UPDATE を待つ。
+                let len = remaining.min(8192);
+                wt.send_stream_data(id, &vec![0x5a; len as usize], false)
+                    .map_err(|e| e.to_string())?;
+                pump_server_output(&mut io, &mut wt, connect_stream).await?;
+                expect_http2_window_update(&mut io, connect_stream).await?;
+                remaining -= len;
+                sent += len;
+            }
+        }
+        assert_eq!(wt.flow_control().send_available(), 0);
+        let first_stream = first_stream.expect("単方向ストリームを開けること");
+        if reset_and_drop {
+            // 読む前に 1 本目を reset する。残ったデータを読み取っても、閉じた窓は増やさない。
+            wt.reset_stream(first_stream, CREDIT_TEST_RESET)
+                .map_err(|e| e.to_string())?;
+            pump_server_output(&mut io, &mut wt, connect_stream).await?;
+            expect_http2_window_update(&mut io, connect_stream).await?;
+        }
+        credit_exhausted
+            .send(())
+            .expect("クライアントが枯渇の通知を待っていること");
+        let mut session_maxima = Vec::new();
+        let mut stream_maxima = Vec::new();
+        let mut decoder = shiguredo_http2::webtransport::CapsuleDecoder::new();
+        'consume: loop {
+            let Event::DataReceived {
+                stream_id, data, ..
+            } = io.next_event().await.map_err(|e| e.to_string())?
+            else {
+                continue;
+            };
+            if stream_id != connect_stream {
+                continue;
+            }
+            decoder.feed(&data).map_err(|e| e.to_string())?;
+            while let Some(capsule) = decoder.decode().map_err(|e| e.to_string())? {
+                use shiguredo_http2::webtransport::Capsule;
+                match capsule {
+                    Capsule::WtMaxData { maximum } => session_maxima.push(maximum),
+                    Capsule::WtMaxStreamData { stream_id, maximum } => {
+                        assert!(
+                            !reset_and_drop,
+                            "reset または破棄したストリームの窓は補充しないこと"
+                        );
+                        if stream_id == first_stream {
+                            stream_maxima.push(maximum);
+                        }
+                    }
+                    Capsule::Datagram { data } => {
+                        assert_eq!(data, CREDIT_TEST_CONSUMED);
+                        break 'consume;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(session_maxima, [initial_session + initial_session / 2]);
+        if !reset_and_drop {
+            assert_eq!(
+                stream_maxima,
+                [initial_stream + initial_stream / 2, initial_stream * 2]
+            );
+        }
+        Ok(())
+    }
+
+    async fn assert_receive_credit_replenishment(reset_and_drop: bool) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("テストサーバーを起動できること");
+            let addr = listener.local_addr().expect("待受アドレスを取得できること");
+            let (credit_exhausted, exhausted) = oneshot::channel();
+            let server = run_receive_credit_server(
+                listener,
+                test_server_tls(),
+                credit_exhausted,
+                reset_and_drop,
+            );
+            let client = async {
+                let mut client =
+                    WtH2Client::connect(ClientConfig::new(addr, "localhost").insecure(), "/")
+                        .await
+                        .expect("WebTransport を確立できること");
+                // サーバーが初期上限まで送信し、それ以上送らない状態を作ってから読み取る。
+                exhausted
+                    .await
+                    .expect("サーバーが初期クレジットを使い切ること");
+                let config = WtConfig::default();
+                let mut remaining = config.initial_max_data / 2;
+                while remaining > 0 {
+                    let mut stream = client
+                        .accept_uni_stream()
+                        .await
+                        .expect("ストリームを受理できること");
+                    let mut stream_remaining = config.initial_max_stream_data_uni.min(remaining);
+                    if reset_and_drop && remaining < config.initial_max_data / 2 {
+                        // 2 本目は受理しただけで破棄し、未読バイトをセッション窓に戻す。
+                        drop(stream);
+                        remaining -= stream_remaining;
+                        continue;
+                    }
+                    while stream_remaining > 0 {
+                        let RecvChunk::Data(data) =
+                            stream.recv_chunk().await.expect("データを読めること")
+                        else {
+                            panic!("サーバーがまだストリームを閉じないこと");
+                        };
+                        assert!(data.iter().all(|&byte| byte == 0x5a));
+                        stream_remaining -= data.len() as u64;
+                        remaining -= data.len() as u64;
+                    }
+                    if reset_and_drop {
+                        // 1 本目では受信済みデータに続いてピアの reset が届く。
+                        assert_eq!(
+                            stream.recv_chunk().await.expect("reset を受信できること"),
+                            RecvChunk::End(RequestStreamEnd::Reset {
+                                error_code: Some(CREDIT_TEST_RESET),
+                                reliable_size: None,
+                            })
+                        );
+                    }
+                }
+                // 同じコマンドキューにマーカーを積み、ピアがここまでの広告をすべて見るようにする。
+                client
+                    .send_datagram(CREDIT_TEST_CONSUMED)
+                    .await
+                    .expect("マーカーを送信できること");
+                client
+            };
+            let (server_result, _client) = tokio::join!(server, client);
+            server_result.expect("消費分だけ両方のクレジットが増えること");
+        })
+        .await
+        .expect("クレジット待ちで止まらないこと");
+    }
+
+    #[tokio::test]
+    async fn wt_h2_replenishes_credit_only_after_reading() {
+        assert_receive_credit_replenishment(false).await;
+    }
+
+    #[tokio::test]
+    async fn wt_h2_replenishes_only_session_credit_after_reset_or_drop() {
+        assert_receive_credit_replenishment(true).await;
     }
 
     /// WT_MAX_* の厳密増加を検証するテストサーバー

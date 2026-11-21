@@ -722,6 +722,112 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn qmux_fetch_resumes_after_cancellation_while_opening_request_stream() {
+        use std::future::{Future, poll_fn};
+        use std::pin::pin;
+        use std::task::Poll;
+        use std::time::Duration;
+
+        use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
+        use shiguredo_moqt::session::types::{RequestStreamEnd, SessionEvent};
+
+        use crate::moqt_client::ClientEvent;
+        use crate::peer_harness::RequestStreamRead;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (mut peer, mut client, _, _) = connect_pair().await;
+            let namespace =
+                TrackNamespace::new(vec![b"live".to_vec()]).expect("名前空間を作れること");
+
+            // 同一スレッド上の QMux driver は、この 1 回の poll の間に実行されない。
+            // FETCH を Session に登録した後、双方向ストリームを開く応答を待っているところで破棄する。
+            {
+                let mut fetch = pin!(client.fetch(
+                    namespace.clone(),
+                    b"first".to_vec(),
+                    MessageParameters::new(),
+                ));
+                let first_poll = poll_fn(|cx| Poll::Ready(fetch.as_mut().poll(cx))).await;
+                assert!(first_poll.is_pending(), "ストリームの生成を待つこと");
+            }
+
+            // FETCH を発行し直さず、通常のイベント待ちだけで最初の要求が届き、応答を受け取れる。
+            let (event, first_id) = tokio::join!(client.next_event(), async {
+                let message = peer
+                    .recv_request_start()
+                    .await
+                    .expect("キャンセル前の FETCH を受理できること");
+                let ControlMessage::Fetch(fetch) = message else {
+                    panic!("FETCH が届くこと: {message:?}");
+                };
+                assert_eq!(
+                    fetch.track_name.as_slice(),
+                    b"first",
+                    "最初の FETCH が届くこと"
+                );
+                peer.send_request_error(
+                    fetch.request_id,
+                    REQUEST_DOES_NOT_EXIST,
+                    0,
+                    "unknown track",
+                )
+                .await
+                .expect("最初の FETCH に応答できること");
+                fetch.request_id
+            });
+            assert!(
+                matches!(
+                    event.expect("イベントを取得できること"),
+                    Some(ClientEvent::Session(SessionEvent::RequestErrorReceived {
+                        request_id,
+                        ..
+                    })) if request_id == first_id
+                ),
+                "キャンセル前の FETCH の応答がアプリに届くこと",
+            );
+
+            // peer が応答を FIN した後、client の送信方向も FIN するまで駆動する。
+            // 次に読めるのが FIN なら、同じストリームには FETCH が重複していない。
+            tokio::select! {
+                end = peer.recv_request_stream_message(first_id) => {
+                    let end = end.expect("最初の要求ストリームの終端を読めること");
+                    assert!(
+                        matches!(end, RequestStreamRead::Closed(RequestStreamEnd::Fin)),
+                        "同じストリームには重複メッセージではなく FIN が届くこと: {end:?}",
+                    );
+                }
+                event = client.next_event() => {
+                    panic!("FIN の処理中に新たなアプリ向けイベントは届かないこと: {event:?}");
+                }
+            }
+
+            // 同じ接続上の次の要求を目印にし、別ストリームに最初の FETCH が重複しないことを確認する。
+            let second_id = client
+                .fetch(namespace, b"second".to_vec(), MessageParameters::new())
+                .await
+                .expect("次の FETCH を発行できること");
+            let message = peer
+                .recv_request_start()
+                .await
+                .expect("次の FETCH を受理できること");
+            let ControlMessage::Fetch(fetch) = message else {
+                panic!("次の FETCH が届くこと: {message:?}");
+            };
+            assert_eq!(
+                fetch.track_name.as_slice(),
+                b"second",
+                "次の FETCH が先に届くこと"
+            );
+            assert_eq!(
+                fetch.request_id, second_id,
+                "次の FETCH の Request ID が一致すること"
+            );
+        })
+        .await
+        .expect("実ピアとの FETCH の往復が制限時間内に完了すること");
+    }
+
     /// 映像 (subgroup stream) と音声 (datagram) の双方が QMux 経由で届く
     ///
     /// QMux はストリームと DATAGRAM を 1 本のバイトストリームへ多重化するため、両方が

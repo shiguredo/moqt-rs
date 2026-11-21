@@ -1438,6 +1438,90 @@ mod tests {
         .await;
     }
 
+    /// データ受信側が積んだセッション終了イベントは、待機中の `next_event` を起こす
+    #[tokio::test(flavor = "current_thread")]
+    async fn data_stream_error_wakes_pending_next_event() {
+        use std::future::poll_fn;
+        use std::pin::pin;
+
+        use shiguredo_moqt::session::types::DataStreamId;
+
+        use crate::transport::RecvChunk;
+
+        run_with_timeout(async {
+            let (mut peer, mut client, mut acceptor) = connect_pair_with_acceptor().await;
+            let data_plane = client.data_plane();
+
+            // `next_event` が実際に Pending を返したあとでデータを送る。同じ Future を独立したタスクで
+            // 待ち続けるため、peer やデータ受信側の I/O を待つタスクの起床では再 poll されない。
+            let (waiting, wait_until_pending) = tokio::sync::oneshot::channel();
+            let event_task = tokio::spawn(async move {
+                let event = {
+                    let mut event = pin!(client.next_event());
+                    let mut waiting = Some(waiting);
+                    poll_fn(|cx| {
+                        let progress = event.as_mut().poll(cx);
+                        if let Some(waiting) = waiting.take() {
+                            assert!(progress.is_pending(), "最初は制御イベントがないこと");
+                            waiting.send(()).expect("待機開始を通知できること");
+                        }
+                        progress
+                    })
+                    .await
+                };
+                // peer が終了コードを受け取る前に client を破棄しない。
+                (event, client)
+            });
+            wait_until_pending.await.expect("待機開始を観測できること");
+
+            // 未知の stream type (0x00) を実際の QUIC uni stream で受信し、データ側から Session に通知する。
+            // 制御メッセージを追加したり、tick で待機中の処理を進めたりはしない。
+            let mut send = peer
+                .open_uni_send_stream()
+                .await
+                .expect("peer が単方向ストリームを開けること");
+            send.send(Bytes::from_static(&[0x00]))
+                .await
+                .expect("peer が stream type を送れること");
+            send.finish()
+                .await
+                .expect("peer がストリームを閉じられること");
+            let mut recv = acceptor
+                .accept_recv_stream()
+                .await
+                .expect("単方向ストリームを受理できること")
+                .expect("単方向ストリームが届くこと");
+            let RecvChunk::Data(data) = recv.receive_chunk().await.expect("先頭データを読めること")
+            else {
+                panic!("stream type がデータとして届くこと");
+            };
+            let (stream_type, _) = shiguredo_moqt::varint::decode(&data)
+                .expect("stream type の可変長整数を読めること");
+            data_plane
+                .recv_data_stream_type(DataStreamId(recv.stream_id()), stream_type)
+                .expect_err("未知の stream type を拒否すること");
+
+            // 待機中の同じ `next_event` が起きてアプリへ通知し、peer にも終了コードが届く。
+            let (event, _client) = event_task.await.expect("イベント待機タスクが終了すること");
+            let event = event.expect("イベントを取得できること");
+            let Some(ClientEvent::Session(SessionEvent::CloseSession(error))) = event else {
+                panic!("データ側の違反によるセッション終了が届くこと: {event:?}");
+            };
+            assert_eq!(
+                error.code, SESSION_INVALID_STREAM_HEADER,
+                "終了コードが一致すること"
+            );
+            assert_eq!(
+                peer.recv_close_code()
+                    .await
+                    .expect("peer が終了コードを受信できること"),
+                SESSION_INVALID_STREAM_HEADER,
+                "ワイヤ上の終了コードも一致すること",
+            );
+        })
+        .await;
+    }
+
     /// peer が SETUP を送ってハンドシェイクが完了し、peer 起点 request stream の先頭に
     /// 送ったメッセージを example が受理する
     ///
@@ -3226,6 +3310,49 @@ mod tests {
                 }
                 other => panic!("FETCH の REQUEST_ERROR が届くこと: {other:?}"),
             }
+        })
+        .await;
+    }
+
+    /// SUBSCRIBE の API とイベント配送が、同じ拒否理由を失わずに返すことを確認する。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn subscribe_rejection_is_returned_and_remains_queued() {
+        use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
+
+        run_with_timeout(async {
+            let (mut peer, mut client) = connect_pair().await;
+            let namespace =
+                TrackNamespace::new(vec![b"live".to_vec()]).expect("名前空間を作れること");
+            let reason = "unknown requested track";
+            let (result, request_id) = tokio::join!(
+                client.subscribe_track(namespace, b"video".to_vec()),
+                async {
+                    let message = peer
+                        .recv_request_start()
+                        .await
+                        .expect("SUBSCRIBE を受理できること");
+                    let ControlMessage::Subscribe(request) = message else {
+                        panic!("受信した要求が SUBSCRIBE であること: {message:?}");
+                    };
+                    let request_id = request.request_id;
+                    peer.send_request_error(request_id, REQUEST_DOES_NOT_EXIST, 1500, reason)
+                        .await
+                        .expect("要求を拒否できること");
+                    request_id
+                },
+            );
+            let Err(error) = result else {
+                panic!("購読失敗を API が返すこと");
+            };
+            assert!(error.to_string().contains(reason), "拒否理由を API が返すこと: {error}");
+            let event = client.next_event().await.expect("拒否イベントを読めること");
+            assert!(
+                matches!(event, Some(ClientEvent::Session(SessionEvent::RequestErrorReceived {
+                    request_id: rejected_id, error_code: REQUEST_DOES_NOT_EXIST, retry_interval: 1500,
+                    reason: details, ..
+                })) if rejected_id == request_id && details.as_str() == reason),
+                "同じ拒否イベントを理由と再試行間隔付きで取得できること",
+            );
         })
         .await;
     }

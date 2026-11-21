@@ -23,6 +23,12 @@ tobi-quic は Windows 非対応のため、Windows ビルドでは tobi-quic を
 - `error::TransportError`：4 経路と MOQT メッセージのエラーを 1 つに統一する
 - `metrics`：`tokio-metrics` のタスクメトリクスを一定間隔でログ出力するヘルパー
 
+## セッション駆動
+
+アプリケーションは `MoqtClient::next_event` を繰り返し呼び出す。`tokio::select!` で別の分岐が選ばれた場合も、クライアントは着手済みの制御処理を保持する。次に駆動したときに、同じ要求を再発行せず処理を続ける。定期的な `tick` または `tick_now` は、プロトコルの期限を進めるために必要である。
+
+別タスクの `DataPlaneHandle` が制御メッセージの送信やセッションの終了を必要とするイベントを作ると、制御ストリームから何も届いていなくても、待機中の `next_event` が処理を再開する。
+
 ## URL スキーム
 
 `--url` は `moqt://` の URI として解釈する。
@@ -42,7 +48,9 @@ userinfo を含む authority はパスワードなどの機密値を含み得る
 URL と MSF fragment の構文検証エラーのメッセージには、入力 URL 全体とパラメータ値を含めない。query と fragment は認可トークンを含み得るため (draft-ietf-moq-msf-02 §11.5.2 / §11.1.1)、原因を特定できる非機密の成分 (scheme、authority / path などの成分名、track-identifier、パラメータ名、パラメータ位置) だけを示す。
 `connection` や range の値変換エラーは機密値でないため、従来どおり値を示す。
 
-DNS 名が複数のアドレスに解決される場合は、解決順に接続を試し、確立できたアドレスを採用する。IPv4 と IPv6 の両方に解決される `localhost` などで、先頭の接続先が待ち受けていない場合にも次のアドレスへ進む。接続の試行は `--transport` で選んだ経路の確立までを単位とし、確立後の SETUP の失敗では次のアドレスを試さない。接続先のアドレスファミリに合わせてローカルソケットを選ぶため、IPv6 の接続先にも送信できる。
+DNS 名が複数のアドレスに解決される場合は、解決順に `--transport` で選んだトランスポートの確立を試す。IPv4 と IPv6 の両方に解決される `localhost` などで、先頭の接続先が待ち受けていない場合にも次のアドレスへ進む。接続先のアドレスファミリに合わせてローカルソケットを選ぶため、IPv6 の接続先にも送信できる。
+
+トランスポートが確立した時点でアドレスの試行を終え、その接続で MOQT の SETUP を交換する。SETUP が失敗した場合は、次のアドレスを試さずエラーを返す。WebTransport 経路では、Extended CONNECT と WebTransport のプロトコル交渉までがトランスポートの確立に含まれる。
 
 query (`?key=value`) は SETUP の PATH option と WebTransport の `:path` にそのまま引き継がれる。
 
