@@ -45,3 +45,13 @@
 - 上記を `tests/test_message_parameter.rs` (`AuthorizationToken` の `Debug`) と `tests/test_parameter.rs` (`SetupOptions` の `Debug`)、`tests/test_session/auth_token.rs` (`AuthTokenCache` の `Debug`) に追加するテストで固定すること。
 - テストの実値の非含有を検査するアサートの失敗メッセージには、Debug 出力をそのまま含めないこと (漏えいした実値を CI のログに書かないため)。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+`AuthorizationToken` と `AuthTokenCache` から `derive(Debug)` を外し、認可トークンの実値を表示しない独自の `Debug` を実装した。
+
+- `src/message_parameter.rs` の `AuthorizationToken` は、`Delete` / `UseAlias` で `alias` を、`Register` / `UseValue` で `alias` / `token_type` / `token_value_bytes` (バイト長) を表示する。`token_value` の実値は文字列としても十進のバイト列としても表示しない。フィールドを追加したときに表示漏れをコンパイラが検出できるよう、`..` を使わずに全フィールドを分解してから `debug_struct` に渡す。
+- `src/session/auth_token_cache.rs` の `AuthTokenCache` は、`entries` の各エントリを `alias` / `token_type` / `token_value_bytes` として表示し、`total_size` と `max_size` は従来どおり表示する。`Vec` を確保せずに入れ子の `Debug` と `debug_list` で組み立てる (`PendingSubgroupBuffer` と同じ形)。
+- `SetupOptionValue` / `SetupOption` / `SetupOptions` と `MessageParameterValue` / `MessageParameters`、`Session` は `derive(Debug)` のままでよい。内側の独自 `Debug` を通るため実値は表示されない。
+- `AuthorizationToken` の型 doc と `token_value` のフィールド doc、`AuthTokenCache` の型 doc、`Session::peer_auth_token_cache` の doc に、`Debug` が実値を表示しないことを書いた。`Session::peer_setup_options` の rustdoc に混ざっていた AuthTokenCache の説明は `peer_auth_token_cache` へ移した。
+- テストは `tests/test_message_parameter.rs` (`AuthorizationToken`)、`tests/test_parameter.rs` (`SetupOptions`)、`tests/test_session/auth_token.rs` (`AuthTokenCache`) に追加した。表示の完全一致に加え、ASCII のダミー文字列と非 ASCII の十進表記が現れないことを検査する。実値の非含有を検査するアサートを先に実行し、失敗メッセージに Debug 出力を含めない (漏えいした実値を CI のログに書かないため)。
