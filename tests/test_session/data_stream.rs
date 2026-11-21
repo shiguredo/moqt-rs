@@ -5869,3 +5869,69 @@ fn re_subgroup_header_for_registered_stream_is_rejected() {
         "再登録の拒否でセッションが閉じないこと"
     );
 }
+
+/// IMMUTABLE_PROPERTIES の内側の Audio Level 値域違反を subgroup Object で受信すると
+/// SESSION_MALFORMED_KEY_VALUE でセッションを閉じること
+///
+/// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) は、受信側が Type を理解する
+/// 場合、Value が定義された serialization と一致しなければ MALFORMED_KEY_VALUE (0x6) で
+/// セッションを閉じることを MUST とする。Audio Level は 0-255 の varint である
+/// (draft-ietf-moq-loc-05 §2.3.3.2 (Audio Level))。
+#[test]
+fn subgroup_object_with_invalid_inner_audio_level_requires_malformed_key_value() {
+    use shiguredo_moqt::error::SESSION_MALFORMED_KEY_VALUE;
+    use shiguredo_moqt::loc::PROP_AUDIO_LEVEL;
+    use shiguredo_moqt::track_properties::PROP_IMMUTABLE_PROPERTIES;
+
+    let alias = 844u64;
+    let (mut client, _server, _rid) = establish_subscribe_track(alias);
+    let stream_id = DataStreamId(75);
+    let header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(10),
+        has_properties: true,
+        end_of_group: false,
+        first_object: true,
+    };
+    client
+        .recv_data_stream_type(stream_id, 0x15)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_subgroup_header(stream_id, &header)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // IMMUTABLE_PROPERTIES の内側に Audio Level 256 を置く
+    let mut inner = Vec::new();
+    shiguredo_moqt::varint::encode(PROP_AUDIO_LEVEL, &mut inner);
+    shiguredo_moqt::varint::encode(256, &mut inner);
+    let mut kvps = Vec::new();
+    shiguredo_moqt::varint::encode(PROP_IMMUTABLE_PROPERTIES, &mut kvps);
+    shiguredo_moqt::varint::encode(inner.len() as u64, &mut kvps);
+    kvps.extend_from_slice(&inner);
+    let mut block = Vec::new();
+    shiguredo_moqt::varint::encode(kvps.len() as u64, &mut block);
+    block.extend_from_slice(&kvps);
+
+    let err = client
+        .recv_subgroup_object(
+            stream_id,
+            &DecodedSubgroupObject {
+                object_id: 0,
+                payload_length: 4,
+                status: None,
+                properties_bytes: Some(block),
+            },
+        )
+        .expect_err("内側の Audio Level 値域違反は MALFORMED_KEY_VALUE");
+    assert_eq!(
+        err.code, SESSION_MALFORMED_KEY_VALUE,
+        "LOC 固有の値域違反は MALFORMED_KEY_VALUE (0x6) に写ること"
+    );
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "data plane のエラーは戻り値で通知し、セッション終了は呼び出し側が行うこと"
+    );
+}

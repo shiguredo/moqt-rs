@@ -4,6 +4,7 @@
 /// および IMMUTABLE_PROPERTIES の入れ子検出など PBT で書きにくいケースと、
 /// `ObjectFieldMismatch` が `core::error::Error` を実装していることを検証する。
 use shiguredo_moqt::error::MessageError;
+use shiguredo_moqt::loc::PROP_AUDIO_LEVEL;
 use shiguredo_moqt::object_properties::{
     DeliveryMode, ObjectFieldTracker, ObjectProperties, ObjectProperty, ObjectPropertyTracker,
     ObjectPropertyValue, PROP_PRIOR_GROUP_ID_GAP, PROP_PRIOR_OBJECT_ID_GAP,
@@ -1448,5 +1449,31 @@ fn encode_rejects_value_over_65535_as_field_length_exceeded() {
             Err(MessageError::FieldLengthExceeded(_))
         ),
         "65535 バイトを超える値は FieldLengthExceeded になること"
+    );
+}
+
+/// IMMUTABLE_PROPERTIES の内側の Audio Level 値域違反は encode でも拒否する
+///
+/// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の MALFORMED_KEY_VALUE と
+/// draft-ietf-moq-loc-05 §2.3.3.2 (Audio Level) の 8 bit 制約を、ローカル入力の encode でも
+/// 適用する。malformed な直列化を生成しないことを固定する。
+#[test]
+fn encode_rejects_invalid_inner_audio_level() {
+    let mut inner = Vec::new();
+    varint::encode(PROP_AUDIO_LEVEL, &mut inner);
+    varint::encode(256, &mut inner);
+
+    let mut props = ObjectProperties::new();
+    props.push(ObjectProperty {
+        prop_type: PROP_IMMUTABLE_PROPERTIES,
+        value: ObjectPropertyValue::Bytes(inner),
+    });
+    let mut buf = Vec::new();
+    assert!(
+        matches!(
+            props.encode(&mut buf),
+            Err(MessageError::MalformedKeyValue(_))
+        ),
+        "内側の Audio Level 値域違反は MalformedKeyValue になること"
     );
 }

@@ -1,5 +1,5 @@
 use pbt::common::test_runner;
-use shiguredo_moqt::loc::PROP_CODEC_STRING;
+use shiguredo_moqt::loc::{PROP_AUDIO_LEVEL, PROP_CODEC_STRING, PROP_VIDEO_FRAME_MARKING};
 use shiguredo_moqt::object_properties::{ObjectProperties, ObjectProperty, ObjectPropertyValue};
 use shiguredo_moqt::track_properties::{
     PROP_DEFAULT_PUBLISHER_GROUP_ORDER, PROP_DEFAULT_PUBLISHER_PRIORITY, PROP_DYNAMIC_GROUPS,
@@ -38,7 +38,14 @@ fn sample_unique_non_immutable_properties(
         if !seen.insert(id) {
             continue;
         }
-        let value = if id.is_multiple_of(2) {
+        let value = if id == PROP_AUDIO_LEVEL {
+            // Audio Level (0x0C) は 0-255 の varint である (draft-ietf-moq-loc-05 §2.3.3.2)。
+            ObjectPropertyValue::VarInt(noprop::sample_u64_in(ctx, 0..=255))
+        } else if id == PROP_VIDEO_FRAME_MARKING {
+            // Video Frame Marking (0x09) は 1-4 バイトである (draft-ietf-moq-loc-05 §2.3.2.2)。
+            let len = noprop::sample_usize_in(ctx, 1..=4);
+            ObjectPropertyValue::Bytes(vec![0x20; len])
+        } else if id.is_multiple_of(2) {
             ObjectPropertyValue::VarInt(id.wrapping_mul(3))
         } else if id == PROP_CODEC_STRING {
             // CODEC_STRING (0x11) の値は UTF-8 文字列であり、encode が不正な UTF-8 を
@@ -112,7 +119,12 @@ fn roundtrip_immutable_and_find_varint() -> noprop::TestResult {
             if TRACK_ONLY_TYPES.contains(&key) || !seen.insert(key) {
                 continue;
             }
-            let value = noprop::sample_u64(ctx);
+            let value = if key == PROP_AUDIO_LEVEL {
+                // Audio Level (0x0C) の値域は 0-255
+                noprop::sample_u64_in(ctx, 0..=255)
+            } else {
+                noprop::sample_u64(ctx)
+            };
             inner.push(ObjectProperty {
                 prop_type: key,
                 value: ObjectPropertyValue::VarInt(value),
@@ -180,6 +192,10 @@ fn object_scope_rejects_track_only_property() -> noprop::TestResult {
         shiguredo_moqt::varint::encode(prop_type, &mut kvps);
         if prop_type.is_multiple_of(2) {
             shiguredo_moqt::varint::encode(1, &mut kvps);
+        } else if prop_type == PROP_VIDEO_FRAME_MARKING {
+            // Video Frame Marking (0x09) は 1-4 バイトの値を持つ
+            shiguredo_moqt::varint::encode(1, &mut kvps);
+            kvps.push(0x20);
         } else {
             // 奇数型は長さ 0 の値にする (IMMUTABLE_PROPERTIES の内側も空になり構造検証を通る)
             shiguredo_moqt::varint::encode(0, &mut kvps);

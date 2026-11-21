@@ -299,3 +299,73 @@ fn immutable_properties_are_searched_like_top_level() -> noprop::TestResult {
     })?;
     Ok(())
 }
+
+/// LOC の length prefix / start code の encode → decode ラウンドトリップ
+///
+/// draft-ietf-moq-loc-05 §2.1.3 (Length Prefixes in Payload) /
+/// §2.1.4 (Start Code Prefixes in Payload) の境界処理を任意の NAL Unit 列で検証する。
+/// start code 形式の NAL Unit は 00 00 01 を含むと境界と誤認されるため、0 を含まない
+/// バイト列だけを生成する。
+#[test]
+fn video_payload_roundtrip() -> noprop::TestResult {
+    use shiguredo_moqt::loc::video_payload::{NalUnitDecoder, NalUnitFormat, encode_nal_unit};
+
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        // length prefix: 幅 1〜4。幅 1〜4 の長さ 1 は start code と衝突するため、
+        // NAL Unit の長さは 2 以上にする。
+        let width = noprop::sample_usize_in(ctx, 1..=4) as u8;
+        let format =
+            NalUnitFormat::length_prefix(width).expect("テストフィクスチャの前提条件を満たす");
+        let count = noprop::sample_usize_in(ctx, 1..=4);
+        let mut units = Vec::new();
+        for _ in 0..count {
+            let len = noprop::sample_usize_in(ctx, 2..=64);
+            units.push(noprop::sample_bytes_vec(ctx, len));
+        }
+        let mut payload = Vec::new();
+        for unit in &units {
+            encode_nal_unit(unit, format, &mut payload)
+                .expect("テストフィクスチャの前提条件を満たす");
+        }
+        let mut decoder = NalUnitDecoder::new(&payload, format);
+        let mut decoded = Vec::new();
+        while let Some(unit) = decoder
+            .next_unit()
+            .expect("テストフィクスチャの前提条件を満たす")
+        {
+            decoded.push(unit.to_vec());
+        }
+        assert_eq!(decoded, units, "length prefix のラウンドトリップ");
+
+        // start code: 幅 3 / 4。0 を含まない NAL Unit なら start code を誤認しない
+        let width = if noprop::sample_bool(ctx) { 3 } else { 4 };
+        let format =
+            NalUnitFormat::start_code(width).expect("テストフィクスチャの前提条件を満たす");
+        let count = noprop::sample_usize_in(ctx, 1..=4);
+        let mut units = Vec::new();
+        for _ in 0..count {
+            let len = noprop::sample_usize_in(ctx, 1..=64);
+            let unit: Vec<u8> = (0..len)
+                .map(|_| (noprop::sample_u8(ctx) % 255) + 1)
+                .collect();
+            units.push(unit);
+        }
+        let mut payload = Vec::new();
+        for unit in &units {
+            encode_nal_unit(unit, format, &mut payload)
+                .expect("テストフィクスチャの前提条件を満たす");
+        }
+        let mut decoder = NalUnitDecoder::new(&payload, format);
+        let mut decoded = Vec::new();
+        while let Some(unit) = decoder
+            .next_unit()
+            .expect("テストフィクスチャの前提条件を満たす")
+        {
+            decoded.push(unit.to_vec());
+        }
+        assert_eq!(decoded, units, "start code のラウンドトリップ");
+        Ok(())
+    })?;
+    Ok(())
+}

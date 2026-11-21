@@ -164,10 +164,11 @@ impl ObjectProperties {
     /// - IMMUTABLE_PROPERTIES の内側に IMMUTABLE_PROPERTIES を含む: `ProtocolViolation`
     /// - バイト列が 65535 バイトを超える: `FieldLengthExceeded`
     ///   (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の値長上限 2^16-1)
-    /// - CODEC_STRING (0x11) の値が不正な UTF-8: `MalformedKeyValue`
-    ///   (draft-ietf-moq-loc-05 §2.3.1.3 (Codec String) / draft-ietf-moq-transport-23 §8.3
-    ///   (Key-Value-Pair Structure) の MALFORMED_KEY_VALUE。最上位と
-    ///   IMMUTABLE_PROPERTIES の内側)
+    /// - CODEC_STRING (0x11) の値が不正な UTF-8、Audio Level (0x0C) の 8 bit 超過、
+    ///   Video Frame Marking (0x09) の長さ 1-4 バイト違反: `MalformedKeyValue`
+    ///   (draft-ietf-moq-loc-05 §2.3.1.3 / §2.3.2.2 / §2.3.3.2 と
+    ///   draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の MALFORMED_KEY_VALUE。
+    ///   最上位と IMMUTABLE_PROPERTIES の内側)
     pub fn encode(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
         if self.0.is_empty() {
             varint::encode(0, buf);
@@ -182,6 +183,8 @@ impl ObjectProperties {
             MessageError::MalformedTrack(reason) => MessageError::ProtocolViolation(reason),
             other => other,
         })?;
+        // LOC の Audio Level / Video Frame Marking の値域も、送信前に検証する。
+        crate::loc::validate_object_loc_properties(self)?;
 
         let mut sorted = self.0.clone();
         sorted.sort_by_key(|p| p.prop_type);
@@ -282,9 +285,10 @@ impl ObjectProperties {
     ///
     /// # Errors
     ///
-    /// - CODEC_STRING (0x11) の値が不正な UTF-8: `MalformedKeyValue`
+    /// - CODEC_STRING (0x11) の不正 UTF-8、Audio Level (0x0C) の 8 bit 超過、
+    ///   Video Frame Marking (0x09) の長さ 1-4 バイト違反: `MalformedKeyValue`
     ///   (MUST。draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の
-    ///   MALFORMED_KEY_VALUE / draft-ietf-moq-loc-05 §2.3.1.3 (Codec String))。
+    ///   MALFORMED_KEY_VALUE / draft-ietf-moq-loc-05 §2.3.1.3 / §2.3.2.2 / §2.3.3.2)。
     ///   mutable リストと IMMUTABLE_PROPERTIES の内側の両方を検証する
     /// - 書式違反 (delta-key のオーバーフロー、宣言長超過、切り詰めなど):
     ///   `MalformedKeyValue` / `FieldLengthExceeded` / `DeltaEncodingOverflow` /
@@ -312,6 +316,7 @@ impl ObjectProperties {
         let props = decode_kv_pairs(inner, true, KvpContext::Decode)?;
         let properties = Self(props);
         properties.validate()?;
+        crate::loc::validate_object_loc_properties(&properties)?;
         Ok((properties, pos))
     }
 

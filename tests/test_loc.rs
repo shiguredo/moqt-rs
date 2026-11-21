@@ -387,9 +387,10 @@ mod codec_string {
     }
 
     #[test]
-    fn decode_keeps_unparseable_immutable_with_invalid_codec_string() {
-        // 内側 KVP が解析できない場合、decode は内側の CODEC_STRING を検証せず成功すること
-        // (内側の構造破損を decode では検出しない従来の方針の維持)。
+    fn decode_rejects_unparseable_immutable_with_invalid_codec_string() {
+        // 内側 KVP が解析できない場合も、decode は内側の構造破損・値域違反を検出して拒否する
+        // (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) /
+        //  docs/missing-features.md §4.1)。
         //
         // (1) 不正 UTF-8 の CODEC_STRING の後ろに切り詰めがあり、内側全体が解析できない。
         let mut truncated = Vec::new();
@@ -401,13 +402,12 @@ mod codec_string {
         truncated.push(0xAA);
 
         let wire = wire_with_inner_bytes(&truncated);
-        let (decoded, _) =
-            LocProperties::decode(&wire).expect("内側が解析できない場合の decode は成功すること");
-        assert_eq!(decoded.find_bytes(PROP_CODEC_STRING), None);
-        assert_eq!(decoded.codec_string(), Ok(None));
+        assert!(
+            LocProperties::decode(&wire).is_err(),
+            "内側の切り詰めは decode で拒否すること"
+        );
 
-        // (2) 入れ子の IMMUTABLE_PROPERTIES (0x0B) があると内側の走査は打ち切られるため、
-        // 後続の CODEC_STRING が不正な UTF-8 でも decode は成功する。
+        // (2) 入れ子の IMMUTABLE_PROPERTIES (0x0B) は §10.7 に違反するため decode で拒否する。
         let mut nested = Vec::new();
         shiguredo_moqt::varint::encode(PROP_IMMUTABLE_PROPERTIES, &mut nested);
         shiguredo_moqt::varint::encode(0, &mut nested);
@@ -416,14 +416,12 @@ mod codec_string {
         nested.push(0xFF);
 
         let wire = wire_with_inner_bytes(&nested);
-        let (decoded, _) = LocProperties::decode(&wire)
-            .expect("入れ子の 0x0B がある内側も decode を失敗させないこと");
-        assert_eq!(decoded.find_bytes(PROP_CODEC_STRING), None);
-        assert_eq!(decoded.codec_string(), Ok(None));
+        assert!(
+            LocProperties::decode(&wire).is_err(),
+            "入れ子の 0x0B は decode で拒否すること"
+        );
 
-        // (3) LOC 固有の値域違反 (Audio Level 256) も内側の走査を失敗させるため、後続の
-        // CODEC_STRING が不正な UTF-8 でも decode は成功する。この残るギャップは
-        // docs/missing-features.md §4.1 に記録している。
+        // (3) LOC 固有の値域違反 (Audio Level 256) も decode で拒否する。
         let mut value_violation = Vec::new();
         shiguredo_moqt::varint::encode(PROP_AUDIO_LEVEL, &mut value_violation);
         shiguredo_moqt::varint::encode(256, &mut value_violation);
@@ -432,12 +430,9 @@ mod codec_string {
         value_violation.push(0xFF);
 
         let wire = wire_with_inner_bytes(&value_violation);
-        let (decoded, _) = LocProperties::decode(&wire)
-            .expect("内側の値域違反がある場合も decode を失敗させないこと");
-        assert_eq!(
-            decoded.codec_string(),
-            Ok(None),
-            "値域違反で内側を解析できない場合は欠落として扱われること"
+        assert!(
+            LocProperties::decode(&wire).is_err(),
+            "内側の Audio Level 値域違反は decode で拒否すること"
         );
     }
 
@@ -1038,32 +1033,28 @@ mod immutable_properties {
     }
 
     #[test]
-    fn corrupt_inner_immutable_properties_returns_none() {
-        // 内側の KVP が decode できない場合、find_varint / find_bytes は None を返す。
-        // 内側の検証は decode 時ではなく探索時に行うため、外側の decode 自体は成功したまま
-        // であることも合わせて固定する (decode の戻り値とエラー分類を変えない)。
-        //
+    fn corrupt_inner_immutable_properties_rejected() {
+        // 内側の KVP が decode できない場合、decode はエラーを返す。
         // (1) Video Config の宣言長 5 に対して実バイトが 1 しかない (切り詰め)
         let mut truncated = Vec::new();
         shiguredo_moqt::varint::encode(PROP_VIDEO_CONFIG, &mut truncated);
         shiguredo_moqt::varint::encode(5, &mut truncated);
         truncated.push(0xAA);
         let wire = wire_with_inner_bytes(&truncated);
-        let (decoded, _) =
-            LocProperties::decode(&wire).expect("外側の decode は内側の切り詰めを検出しないこと");
-        assert_eq!(decoded.find_bytes(PROP_VIDEO_CONFIG), None);
-        assert_eq!(decoded.video_config(), None);
+        assert!(
+            LocProperties::decode(&wire).is_err(),
+            "内側の Video Config の切り詰めは decode で拒否すること"
+        );
 
-        // (2) Audio Level の値域違反 (256) は内側でも MalformedKeyValue 相当として扱い、
-        // 探索結果を None にする
+        // (2) Audio Level の値域違反 (256)
         let mut audio_level_out_of_range = Vec::new();
         shiguredo_moqt::varint::encode(PROP_AUDIO_LEVEL, &mut audio_level_out_of_range);
         shiguredo_moqt::varint::encode(256, &mut audio_level_out_of_range);
         let wire = wire_with_inner_bytes(&audio_level_out_of_range);
-        let (decoded, _) =
-            LocProperties::decode(&wire).expect("外側の decode は内側の値域違反を検出しないこと");
-        assert_eq!(decoded.find_varint(PROP_AUDIO_LEVEL), None);
-        assert_eq!(decoded.audio_level(), None);
+        assert!(
+            LocProperties::decode(&wire).is_err(),
+            "内側の Audio Level 値域違反は decode で拒否すること"
+        );
 
         // (3) Video Frame Marking の宣言長 5 は 1-4 バイトの範囲外
         let mut vfm_too_long = Vec::new();
@@ -1071,31 +1062,28 @@ mod immutable_properties {
         shiguredo_moqt::varint::encode(5, &mut vfm_too_long);
         vfm_too_long.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05]);
         let wire = wire_with_inner_bytes(&vfm_too_long);
-        let (decoded, _) =
-            LocProperties::decode(&wire).expect("外側の decode は内側の長さ違反を検出しないこと");
-        assert_eq!(decoded.find_bytes(PROP_VIDEO_FRAME_MARKING), None);
-        assert_eq!(decoded.video_frame_marking(), None);
+        assert!(
+            LocProperties::decode(&wire).is_err(),
+            "内側の Video Frame Marking の長さ違反は decode で拒否すること"
+        );
 
-        // (4) 単一に限られる Timestamp の重複は内側でも malformed Track として扱い、
-        // 探索結果を None にする
+        // (4) 単一に限られる Timestamp の重複は内側でも malformed Track として拒否する
         let mut duplicate = Vec::new();
         shiguredo_moqt::varint::encode(PROP_TIMESTAMP, &mut duplicate);
         shiguredo_moqt::varint::encode(1, &mut duplicate);
         shiguredo_moqt::varint::encode(0, &mut duplicate);
         shiguredo_moqt::varint::encode(2, &mut duplicate);
         let wire = wire_with_inner_bytes(&duplicate);
-        let (decoded, _) =
-            LocProperties::decode(&wire).expect("外側の decode は内側の重複を検出しないこと");
-        assert_eq!(decoded.find_varint(PROP_TIMESTAMP), None);
-        assert_eq!(decoded.timestamp(), None);
+        assert!(
+            LocProperties::decode(&wire).is_err(),
+            "内側の単一プロパティ重複は decode で拒否すること"
+        );
     }
 
     #[test]
-    fn nested_immutable_properties_inside_inner_returns_none() {
+    fn nested_immutable_properties_inside_inner_rejected() {
         // draft-ietf-moq-transport-23 §10.7 (Immutable Properties) は、IMMUTABLE_PROPERTIES
         // の内側に別の IMMUTABLE_PROPERTIES を含む Object を malformed Track とする。
-        // 内側に有効な Timestamp が続いていても、入れ子を検出した時点で内側の探索を
-        // 打ち切り、find_varint / find_bytes は None を返すことを固定する。
         let mut inner = Vec::new();
         shiguredo_moqt::varint::encode(PROP_IMMUTABLE_PROPERTIES, &mut inner); // delta = 0x0B
         shiguredo_moqt::varint::encode(0, &mut inner); // 入れ子の 0x0B (値は空)
@@ -1103,12 +1091,10 @@ mod immutable_properties {
         shiguredo_moqt::varint::encode(42, &mut inner); // 入れ子の後ろの Timestamp
 
         let wire = wire_with_inner_bytes(&inner);
-        let (decoded, _) =
-            LocProperties::decode(&wire).expect("外側の decode は入れ子の 0x0B を検出しないこと");
-        assert_eq!(decoded.find_varint(PROP_TIMESTAMP), None);
-        assert_eq!(decoded.timestamp(), None);
-        assert_eq!(decoded.find_bytes(PROP_VIDEO_CONFIG), None);
-        assert_eq!(decoded.video_config(), None);
+        assert!(
+            LocProperties::decode(&wire).is_err(),
+            "入れ子の 0x0B は decode で拒否すること"
+        );
     }
 
     #[test]
@@ -1212,47 +1198,49 @@ mod immutable_properties {
     }
 
     #[test]
-    fn inner_declared_length_over_65535_returns_none() {
-        // 内側の奇数 ID の宣言長が 65535 を超える場合、内側の走査は FieldLengthExceeded と
-        // なり、探索結果は None になる (外側の decode は内側を検証しない)。
+    fn inner_declared_length_over_65535_rejected() {
+        // 内側の奇数 ID の宣言長が 65535 を超える場合、decode は FieldLengthExceeded を返す。
         let mut inner = Vec::new();
         shiguredo_moqt::varint::encode(0x1001, &mut inner); // 未知の奇数 ID (delta)
         shiguredo_moqt::varint::encode(65536, &mut inner); // 65535 超の宣言長
         let wire = wire_with_inner_bytes(&inner);
-        let (decoded, _) =
-            LocProperties::decode(&wire).expect("外側の decode は内側の長さ違反を検出しないこと");
-        assert_eq!(decoded.find_bytes(0x1001), None);
-        assert_eq!(decoded.find_bytes(PROP_VIDEO_CONFIG), None);
+        assert!(
+            matches!(
+                LocProperties::decode(&wire),
+                Err(MessageError::FieldLengthExceeded(_))
+            ),
+            "内側の長さ違反は decode で拒否すること"
+        );
     }
 
     #[test]
-    fn inner_truncated_and_delta_overflow_return_none() {
-        // (1) 内側の varint が途中終端する場合、探索結果は None になる。
+    fn inner_truncated_and_delta_overflow_rejected() {
+        // (1) 内側の varint が途中終端する場合、decode はエラーを返す。
         let mut truncated = Vec::new();
         shiguredo_moqt::varint::encode(PROP_TIMESTAMP, &mut truncated);
         truncated.push(0x80); // 不完全な varint
         let wire = wire_with_inner_bytes(&truncated);
-        let (decoded, _) =
-            LocProperties::decode(&wire).expect("外側の decode は内側の切り詰めを検出しないこと");
-        assert_eq!(decoded.find_varint(PROP_TIMESTAMP), None);
+        assert!(
+            LocProperties::decode(&wire).is_err(),
+            "内側の切り詰めは decode で拒否すること"
+        );
 
-        // (2) 内側の delta-key がオーバーフローする場合、探索結果は None になる。
+        // (2) 内側の delta-key がオーバーフローする場合、decode はエラーを返す。
         let mut overflow = Vec::new();
         shiguredo_moqt::varint::encode(u64::MAX, &mut overflow); // delta = u64::MAX
         shiguredo_moqt::varint::encode(0, &mut overflow); // 奇数 ID の Length 0
         shiguredo_moqt::varint::encode(1, &mut overflow); // 次の delta でオーバーフロー
         let wire = wire_with_inner_bytes(&overflow);
-        let (decoded, _) =
-            LocProperties::decode(&wire).expect("外側の decode は内側の overflow を検出しないこと");
-        assert_eq!(decoded.find_bytes(PROP_VIDEO_CONFIG), None);
-        assert_eq!(decoded.find_varint(PROP_TIMESTAMP), None);
+        assert!(
+            LocProperties::decode(&wire).is_err(),
+            "内側の delta-key overflow は decode で拒否すること"
+        );
     }
 
     #[test]
-    fn valid_match_before_later_inner_error_returns_none() {
-        // 内側は 1 回の走査で全体を検証するため、要求 ID の有効な値が構造エラーより前に
-        // あっても探索結果は None になる。一致時点で打ち切る実装に変わると検出できるよう、
-        // この契約を固定する。
+    fn valid_match_before_later_inner_error_rejected() {
+        // 内側の走査で後続に構造エラーがある場合、先頭に有効な値があっても decode は
+        // 全体を拒否する。
         let mut inner_bytes = Vec::new();
         shiguredo_moqt::varint::encode(PROP_TIMESTAMP, &mut inner_bytes); // 有効な Timestamp
         shiguredo_moqt::varint::encode(1234, &mut inner_bytes);
@@ -1261,13 +1249,9 @@ mod immutable_properties {
         inner_bytes.push(0xAA); // 実バイト 1 のみ (切り詰め)
 
         let wire = wire_with_inner_bytes(&inner_bytes);
-        let (decoded, _) =
-            LocProperties::decode(&wire).expect("外側の decode は内側の切り詰めを検出しないこと");
-        assert_eq!(
-            decoded.find_varint(PROP_TIMESTAMP),
-            None,
-            "後続の構造エラーがある場合は先頭の有効な値も返さないこと"
+        assert!(
+            LocProperties::decode(&wire).is_err(),
+            "後続の構造エラーがある場合は decode 全体を拒否すること"
         );
-        assert_eq!(decoded.timestamp(), None);
     }
 }

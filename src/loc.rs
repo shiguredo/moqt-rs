@@ -36,14 +36,17 @@
 //! 場合に Value が定義された serialization と一致しなければ MALFORMED_KEY_VALUE で
 //! セッションを閉じることを MUST とする。[`LocProperties::encode`] は最上位と
 //! IMMUTABLE_PROPERTIES の内側の 0x11 を検証し、内側が解析できない入力は拒否する。
-//! [`LocProperties::decode`] は最上位の 0x11 を検証し、内側の 0x11 は内側 KVP が解析できる
-//! 場合だけ検証する (内側の構造破損は Session の `ObjectProperties` に委ねる)。
+//! [`LocProperties::decode`] は最上位と IMMUTABLE_PROPERTIES の内側の両方を検証する。
+//! 内側の構造破損・既知プロパティの値域違反も decode で拒否する。
 //! [`LocProperties::codec_string`] は欠落と不正 UTF-8 を区別して返す。
 //!
 //! [`LocProperties::find_varint`] / [`LocProperties::find_bytes`] と既知プロパティの
 //! accessor は最上位リストを優先し、無ければ IMMUTABLE_PROPERTIES の内側を探索する。
 //! [`LocProperties::iter`] は最上位リストだけを返す。
 
+pub mod video_payload;
+
+use crate::object_properties::ObjectPropertyValue;
 use crate::property::validate_codec_string_utf8;
 use crate::track_properties::PROP_IMMUTABLE_PROPERTIES;
 use crate::{error::MessageError, varint};
@@ -108,6 +111,64 @@ fn validate_codec_strings(properties: &[LocPropertyRef<'_>]) -> Result<(), Messa
             && let LocPropertyValueRef::Bytes(bytes) = property.value
         {
             validate_codec_string_utf8(bytes)?;
+        }
+    }
+    Ok(())
+}
+
+/// Object Properties に含まれる LOC 既知プロパティの値域を検証する
+///
+/// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) は、受信側が Type を
+/// 理解する場合に Value が定義された serialization と一致しなければ MALFORMED_KEY_VALUE で
+/// セッションを閉じることを MUST とする。LOC の Audio Level / Video Frame Marking も
+/// この規則の対象である (draft-ietf-moq-loc-05 §2.3.3.2 / §2.3.2.2)。
+///
+/// mutable リストと IMMUTABLE_PROPERTIES (0x0B) の内側の両方を調べる
+/// (draft-ietf-moq-transport-23 §10.7 (Immutable Properties))。
+pub(crate) fn validate_object_loc_properties(
+    properties: &crate::object_properties::ObjectProperties,
+) -> Result<(), MessageError> {
+    for property in properties.iter() {
+        match property.prop_type {
+            PROP_AUDIO_LEVEL => {
+                let ObjectPropertyValue::VarInt(value) = &property.value else {
+                    return Err(MessageError::MalformedKeyValue(
+                        "Audio Level must be a varint",
+                    ));
+                };
+                validate_known_property(PROP_AUDIO_LEVEL, *value)?;
+            }
+            PROP_VIDEO_FRAME_MARKING => {
+                let ObjectPropertyValue::Bytes(bytes) = &property.value else {
+                    return Err(MessageError::MalformedKeyValue(
+                        "Video Frame Marking must be a byte string",
+                    ));
+                };
+                // FIELD_LENGTH_EXCEEDED は他の分類より優先する (§12.2)
+                if bytes.len() > 65535 {
+                    return Err(MessageError::FieldLengthExceeded(
+                        "object property value length exceeds 65535",
+                    ));
+                }
+                validate_known_property_len(PROP_VIDEO_FRAME_MARKING, bytes.len() as u64)?;
+            }
+            PROP_CODEC_STRING => {
+                if let ObjectPropertyValue::Bytes(bytes) = &property.value {
+                    if bytes.len() > 65535 {
+                        return Err(MessageError::FieldLengthExceeded(
+                            "object property value length exceeds 65535",
+                        ));
+                    }
+                    validate_codec_string_utf8(bytes)?;
+                }
+            }
+            PROP_IMMUTABLE_PROPERTIES => {
+                if let ObjectPropertyValue::Bytes(bytes) = &property.value {
+                    let inner = walk_kv_pairs(bytes, false)?;
+                    validate_codec_strings(&inner)?;
+                }
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -282,8 +343,8 @@ impl LocProperties {
     /// IMMUTABLE_PROPERTIES (0x0B) の値はバイト列としてそのまま書き出す (再エンコードは
     /// しない)。ただしローカル入力の検証として、内側の KVP 列の構造・値域・重複と、
     /// CODEC_STRING (0x11) の UTF-8 を検証し、失敗時はエラーを返す。内側が解析できない
-    /// 場合 (構造破損・入れ子の 0x0B など) は malformed な直列化を生成しないため、
-    /// [`LocProperties::decode`] の「内側の構造破損を検出しない」挙動とは異なる。
+    /// 場合 (構造破損・入れ子の 0x0B など) は malformed な直列化を生成しない。
+    /// [`LocProperties::decode`] も同じ規則で内側を検証する。
     ///
     /// # Errors
     ///
@@ -414,20 +475,14 @@ impl LocProperties {
     /// 未知 ID の複数インスタンスは正当として保持する (draft-ietf-moq-transport-23 §8.4
     /// (Track and Object Properties) の "MUST allow multiple instances of the Property")。
     ///
-    /// IMMUTABLE_PROPERTIES (0x0B) の内側は構造として保持するだけとし、構造・値域・重複 ID の
-    /// 検証は [`LocProperties::find_varint`] / [`LocProperties::find_bytes`] の探索時に、
-    /// この関数と共通の KVP パーサーで行う。内側が破損している場合は探索結果を `None` とし、
-    /// この関数の戻り値とエラー分類は変えない。
+    /// 最上位リストと IMMUTABLE_PROPERTIES (0x0B) の内側を、共通の KVP パーサーで検証する。
+    /// 内側の構造破損・入れ子の 0x0B・単一 ID の重複・Audio Level の値域違反・Video Frame
+    /// Marking の長さ違反は、この関数のエラーとして返す。CODEC_STRING (0x11) の UTF-8 も
+    /// 最上位と内側の両方で検証する (draft-ietf-moq-loc-05 §2.3.1.3 (Codec String) /
+    /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure))。
     ///
-    /// 例外として、CODEC_STRING (0x11) の UTF-8 だけは、最上位リストと、内側 KVP が解析
-    /// できる場合の IMMUTABLE_PROPERTIES の内側で検証する (draft-ietf-moq-loc-05 §2.3.1.3
-    /// (Codec String) / draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure))。
-    /// 内側の KVP が解析できない場合 (構造破損・入れ子の 0x0B・重複 ID・Audio Level の値域
-    /// 違反・Video Frame Marking の長さ違反など) は、その内側に不正な UTF-8 があっても検出
-    /// できないため、この関数を失敗させずに受理する。構造破損と CODEC_STRING の UTF-8 は
-    /// `Session` の `ObjectProperties` も検証するが、LOC 固有の Audio Level の値域・
-    /// Video Frame Marking の長さ規則は `ObjectProperties` では検証しない。この残るギャップは
-    /// `docs/missing-features.md` §4.1 に記録している。
+    /// `ObjectProperties::decode` も `validate_object_loc_properties` で同じ値域規則を
+    /// 適用するため、Session の受信経路でも MALFORMED_KEY_VALUE として通知される。
     ///
     /// # Errors
     ///
@@ -436,17 +491,17 @@ impl LocProperties {
     ///   DELTA_ENCODING_OVERFLOW)
     /// - 単一に限られる既知 ID の重複: `MalformedTrack`
     ///   (draft-ietf-moq-transport-23 §8.4 / §12.1 (Malformed Tracks) 条件 9。呼び出し側は
-    ///   セッション終了ではなく、同じ Track の購読・fetch の取消へ渡す)。本関数が検出するのは
-    ///   最上位 (mutable) リスト内の重複だけであり、最上位と IMMUTABLE_PROPERTIES の内側に
-    ///   同じ既知 ID が現れる場合は検出しない (§10.7 は複数の値を許すプロパティに限り両方への
-    ///   出現を許す。単一値プロパティが両方に現れると §8.4 / §12.1 条件 9 の malformed になるが、
-    ///   その判定は本モジュールの範囲外)
+    ///   セッション終了ではなく、同じ Track の購読・fetch の取消へ渡す)。本関数は最上位
+    ///   (mutable) リスト内と IMMUTABLE_PROPERTIES の内側リスト内をそれぞれ検出するが、
+    ///   両リストをまたぐ同じ既知 ID の重複は検出しない (§10.7 は複数の値を許すプロパティに
+    ///   限り両方への出現を許す。単一値プロパティが両方に現れると §8.4 / §12.1 条件 9 の
+    ///   malformed になるが、その判定は本モジュールの範囲外)
     /// - 奇数 ID の宣言長が 65535 バイトを超える: `FieldLengthExceeded`
     /// - Audio Level が 255 を超える: `MalformedKeyValue`
     /// - Video Frame Marking の宣言長が 1-4 バイトでない: `MalformedKeyValue`
     ///   (宣言長の検証は切り詰め検査 `UnexpectedEof` より先に行う)
     /// - CODEC_STRING (0x11) の値が不正な UTF-8: `MalformedKeyValue`
-    ///   (最上位と、解析できる IMMUTABLE_PROPERTIES の内側)
+    ///   (最上位と IMMUTABLE_PROPERTIES の内側)
     /// - バッファが不足する: `UnexpectedEof`
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), MessageError> {
         let mut pos = 0;
@@ -470,9 +525,11 @@ impl LocProperties {
         let properties = walk_kv_pairs(inner, true)?;
         validate_codec_strings(&properties)?;
 
-        // IMMUTABLE_PROPERTIES の内側の CODEC_STRING は、内側 KVP が解析できる場合だけ検証する。
-        // 内側の構造破損は従来どおりこの関数では検出せず、Session の ObjectProperties に
-        // 検証を委ねる。そのため、ここでの walk_kv_pairs の Err は握り潰す。
+        // IMMUTABLE_PROPERTIES の内側も、最上位と同じ KVP 規則で検証する。
+        // draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) は、受信側が Type を
+        // 理解する場合に Value が定義された serialization と一致しなければ
+        // MALFORMED_KEY_VALUE でセッションを閉じることを MUST とする。内側の構造破損も
+        // ここで検出し、Session の ObjectProperties だけに委ねない。
         if let Some(inner_bytes) = properties
             .iter()
             .find(|p| p.prop_id == PROP_IMMUTABLE_PROPERTIES)
@@ -480,8 +537,8 @@ impl LocProperties {
                 LocPropertyValueRef::Bytes(bytes) => Some(bytes),
                 LocPropertyValueRef::VarInt(_) => None,
             })
-            && let Ok(inner_properties) = walk_kv_pairs(inner_bytes, false)
         {
+            let inner_properties = walk_kv_pairs(inner_bytes, false)?;
             validate_codec_strings(&inner_properties)?;
         }
 

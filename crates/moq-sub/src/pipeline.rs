@@ -12492,63 +12492,59 @@ mod tests {
     /// この既知の制約 (docs/missing-features.md §4.1) を固定し、将来のエラー分類対応で
     /// 挙動が変わったときに気づけるようにする。
     #[test]
-    fn malformed_inner_loc_property_is_reported_as_absent() {
+    fn malformed_inner_loc_property_is_reported_as_error() {
         let mut inner_bytes = Vec::new();
         shiguredo_moqt::varint::encode(PROP_AUDIO_LEVEL, &mut inner_bytes);
         shiguredo_moqt::varint::encode(256, &mut inner_bytes); // 0-255 の範囲外
         let bytes = properties_with_inner_immutable(&inner_bytes, None);
 
-        // 内側の走査が値域違反で失敗するため、どの抽出関数も「値が無い」として扱う。
-        assert_eq!(
-            extract_timestamp_timescale(Some(&bytes)),
-            Ok((None, None)),
-            "内側の値域違反は Timestamp / Timescale 無しとして扱われること"
+        // 内側の値域違反は LocProperties::decode が MalformedKeyValue として拒否するため、
+        // どの抽出関数もエラーを返す (「値が無い」に潰さない)。
+        assert!(
+            extract_timestamp_timescale(Some(&bytes)).is_err(),
+            "内側の値域違反は Timestamp / Timescale の取得エラーになること"
         );
-        assert_eq!(
-            extract_video_config(Some(&bytes)),
-            Ok(None),
-            "内側の値域違反は Video Config 無しとして扱われること"
+        assert!(
+            extract_video_config(Some(&bytes)).is_err(),
+            "内側の値域違反は Video Config の取得エラーになること"
         );
-        assert_eq!(
-            extract_video_keyframe(Some(&bytes)),
-            Ok(None),
-            "内側の値域違反は Video Frame Marking 無しとして扱われること"
+        assert!(
+            extract_video_keyframe(Some(&bytes)).is_err(),
+            "内側の値域違反は Video Frame Marking の取得エラーになること"
         );
-        assert_eq!(
-            extract_audio_config(Some(&bytes)),
-            Ok(None),
-            "内側の値域違反は Audio Config 無しとして扱われること"
+        assert!(
+            extract_audio_config(Some(&bytes)).is_err(),
+            "内側の値域違反は Audio Config の取得エラーになること"
         );
     }
 
-    /// 内側の Video Frame Marking 長さ違反はキーフレーム代用に落ちる
+    /// 内側の Video Frame Marking 長さ違反は取得エラーになる
     ///
-    /// 内側だけの Video Frame Marking が 1-4 バイトの長さ違反を持つ場合、getter が `None` に
-    /// 写すため `extract_video_keyframe` は `Ok(None)` を返し、`is_video_keyframe` は Video
-    /// Config の有無でキーフレームを代用する。この既知の制約 (docs/missing-features.md §4.1)
-    /// がアプリ可視の挙動に与える影響を固定する。
+    /// 内側だけの Video Frame Marking が 1-4 バイトの長さ違反を持つ場合、
+    /// `LocProperties::decode` が MalformedKeyValue を返すため、`extract_video_keyframe` と
+    /// `is_video_keyframe` はエラーを返す。書式違反をキーフレーム代用に潰さないことを固定する。
     #[test]
-    fn malformed_inner_video_frame_marking_falls_back_to_video_config() {
+    fn malformed_inner_video_frame_marking_is_reported_as_error() {
         let mut inner_bytes = Vec::new();
         shiguredo_moqt::varint::encode(PROP_VIDEO_FRAME_MARKING, &mut inner_bytes);
         shiguredo_moqt::varint::encode(5, &mut inner_bytes); // 1-4 バイトの範囲外
         inner_bytes.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05]);
 
-        // 最上位の Video Config は decode も取得もできる (内側の破損とは独立)。
         let bytes = properties_with_inner_immutable(&inner_bytes, Some(&[0xAA]));
 
-        let video_config =
-            extract_video_config(Some(&bytes)).expect("Video Config は取得できること");
-        assert_eq!(video_config, Some(vec![0xAA]));
-        assert_eq!(
-            extract_video_keyframe(Some(&bytes)),
-            Ok(None),
-            "内側の Video Frame Marking 長さ違反は判定不能として扱われること"
+        // 内側の Video Frame Marking 長さ違反は decode 全体を失敗させるため、
+        // 最上位の Video Config も含めて抽出はエラーになる。
+        assert!(
+            extract_video_config(Some(&bytes)).is_err(),
+            "内側の長さ違反は Video Config の取得エラーになること"
         );
         assert!(
-            is_video_keyframe(Some(&bytes), video_config.as_deref())
-                .expect("Video Config があるため判定は成功すること"),
-            "Video Frame Marking を取得できない場合は Video Config の有無で代用されること"
+            extract_video_keyframe(Some(&bytes)).is_err(),
+            "内側の長さ違反は Video Frame Marking の取得エラーになること"
+        );
+        assert!(
+            is_video_keyframe(Some(&bytes), Some(&[0xAA])).is_err(),
+            "内側の長さ違反はキーフレーム判定のエラーになること"
         );
     }
 
