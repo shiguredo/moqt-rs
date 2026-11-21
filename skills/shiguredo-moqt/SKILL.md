@@ -1830,7 +1830,11 @@ fn reset(&mut self)
 `playout::expansion` は出力側で生成する最大 100 ms の続き音を作る。周期が確かな音では `stretch::conceal` の周期補間を使い、それ以外は `playout::predictor` の線形予測へ非周期の励振を入れて合成する。生成した音は最新の実音の RMS とピークを超えないように抑える。
 `playout::predictor` の `generate_unvoiced` は moqt-js の Wasm カーネル (`audioPredictor.c`) を Rust へ移した数値カーネルであり、JavaScript と同じ演算順序で 12 次の積和を行う。
 
-`playout::resample` は出力のサンプルレートへの変換である。`resample_block` は同じレートとアップサンプリングを線形補間し、ダウンサンプリングを `ResampleKernel` の Blackman 窓付き sinc で帯域制限する。`start_output_frame` は入力の先頭に対応する出力のサンプル位置であり、ブロックを連続して変換するときは前のブロックの終端に合わせて進める。フレームをまたぐ連続 PCM のキュー (`AudioRenderQueue`) は持たない。
+`playout::resample` は出力のサンプルレートへの変換である。`resample_block` は同じレートとアップサンプリングを線形補間し、
+ダウンサンプリングを `ResampleKernel` の Blackman 窓付き sinc で帯域制限する。`start_output_frame` は入力の先頭に対応する出力の
+サンプル位置であり、ブロックを連続して変換するときは前のブロックの終端に合わせて進める。同じレート比で繰り返し変換する場合は
+`resample_block_with_kernel` に `ResampleKernel` を渡し、係数の生成を 1 回に抑える。フレームをまたぐ連続 PCM のキュー
+(`AudioRenderQueue`) は持たない。
 
 `playout::gap` は再生の隙間を材料化する。出力が FIFO (積んだ順に鳴らす) の場合は隙間を積まないと後続が早く鳴って出力が枯れるため、`materialize` は要求した隙間の全長ぶんの音を必ず返す。隙間は先頭から `playout::expansion` の続き音で埋め、残りは無音にする。
 隙間の先頭は直前の音の最終サンプル (続き音があるときはその先頭の値) から 0 へ向かう重みで繋ぎ、続き音が隙間の後ろ 2 ms まで続くときは隙間の末尾を 0 へ落とさず `splice_fade::cross_fade_head` で今回の音の先頭へクロスフェードする。`current` の先頭は書き換わるため `&mut` で渡す。

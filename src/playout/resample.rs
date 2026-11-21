@@ -2,8 +2,10 @@
 //!
 //! 復号した PCM を別のサンプルレートの出力格子へ写す。同じレートとアップサンプリングは
 //! 線形補間を使い、ダウンサンプリングは出力のナイキスト周波数を超える成分が折り返さない
-//! よう、Blackman 窓付き sinc で帯域を制限する。フィルタの係数はレート比ごとに一度だけ
-//! 作り、描画中に三角関数や配列の確保を行わない。
+//! よう、Blackman 窓付き sinc で帯域を制限する。フィルタの係数はレート比ごとに
+//! [`ResampleKernel`] として作り、繰り返し変換するときは
+//! [`resample_block_with_kernel`] に渡して再利用する (描画中に三角関数や配列の確保を
+//! 行わない)。
 //!
 //! 根拠: Julius O. Smith, Physical Audio Signal Processing,
 //! "Windowed Sinc Interpolation"。係数の数と遮断周波数は仕様の要求値ではなく、本実装の
@@ -135,7 +137,10 @@ impl ResampleKernel {
         }
         let source_index = libm::floor(position);
         let fraction = position - source_index;
-        let base = source_index as isize - self.radius as isize;
+        // `position` は有限でも isize の範囲外になり得る。`as isize` は飽和するため、
+        // そこから半径を引くと debug ビルドで overflow する。飽和減算で基点を求め、
+        // 各タップの加算も飽和させる (その後の clamp で端のサンプルへ落ちる)。
+        let base = (source_index as isize).saturating_sub(self.radius as isize);
         // 端数は 0 以上 1 未満であるため、位相の添字は RESAMPLE_PHASES 未満になる。
         // 丸め誤差で境界を超えたときは最後の位相へ切る
         let phase = (fraction * RESAMPLE_PHASES as f64).clamp(0.0, RESAMPLE_PHASES as f64);
@@ -145,7 +150,9 @@ impl ResampleKernel {
         let last_index = input.len() - 1;
         let mut value = 0.0f64;
         for tap in 0..self.taps {
-            let index = (base + tap as isize).clamp(0, last_index as isize) as usize;
+            let index = base
+                .saturating_add(tap as isize)
+                .clamp(0, last_index as isize) as usize;
             let weight = f64::from(self.weights[offset + tap]);
             let next_weight = f64::from(self.weights[offset + self.taps + tap]);
             value += f64::from(input[index]) * (weight + (next_weight - weight) * phase_fraction);
@@ -190,6 +197,54 @@ pub fn resample_block(
     start_output_frame: f64,
     output_frames: usize,
 ) -> Vec<Vec<f32>> {
+    // 無効な入力では係数を作らない。極端なレート比では係数の配列が数 MB になるため、
+    // 変換しない入力のために確保しない (resample_block_with_kernel 側の無音判定と同じ条件)。
+    let valid_lengths = !channels.is_empty()
+        && channels
+            .iter()
+            .all(|channel| channel.len() == channels[0].len());
+    if input_rate == 0 || output_rate == 0 || !valid_lengths || output_frames == 0 {
+        return channels
+            .iter()
+            .map(|_| vec![0.0f32; output_frames])
+            .collect();
+    }
+    // 後方互換の入口。呼び出しごとに係数を作るため、同じレート比で繰り返し変換する
+    // 場合は resample_block_with_kernel に ResampleKernel を渡して再利用する。
+    let ratio = f64::from(output_rate) / f64::from(input_rate);
+    let kernel = if ratio < 1.0 {
+        ResampleKernel::new(ratio)
+    } else {
+        None
+    };
+    resample_block_with_kernel(
+        channels,
+        input_rate,
+        output_rate,
+        start_output_frame,
+        output_frames,
+        kernel.as_ref(),
+    )
+}
+
+/// 係数を再利用して 1 ブロックの PCM を変換する
+///
+/// [`resample_block`] と同じ変換を行うが、ダウンサンプリングの係数を呼び出し側が
+/// 保持した [`ResampleKernel`] から取る。同じレート比で繰り返し変換するとき、
+/// [`ResampleKernel::new`] の三角関数と配列確保を毎回行わない。
+///
+/// `kernel` は `output_rate / input_rate` から作ったカーネルを渡すこと。
+/// レート比が 1 以上 (同じレートとアップサンプリング) では `None` を渡し、
+/// 線形補間を使う。`kernel` が `None` のままダウンサンプリングすると帯域制限を
+/// 行わないため、呼び出し側の責務で適切なカーネルを渡す。
+pub fn resample_block_with_kernel(
+    channels: &[Vec<f32>],
+    input_rate: u32,
+    output_rate: u32,
+    start_output_frame: f64,
+    output_frames: usize,
+    kernel: Option<&ResampleKernel>,
+) -> Vec<Vec<f32>> {
     let silent = || -> Vec<Vec<f32>> {
         channels
             .iter()
@@ -212,12 +267,6 @@ pub fn resample_block(
     } else {
         0.0
     };
-    let ratio = f64::from(output_rate) / f64::from(input_rate);
-    let kernel = if ratio < 1.0 {
-        ResampleKernel::new(ratio)
-    } else {
-        None
-    };
     let step = f64::from(input_rate) / f64::from(output_rate);
     channels
         .iter()
@@ -225,7 +274,7 @@ pub fn resample_block(
             (0..output_frames)
                 .map(|frame| {
                     let position = (start_output_frame + frame as f64) * step;
-                    match &kernel {
+                    match kernel {
                         Some(kernel) => kernel.sample(input, position),
                         None => linear_sample(input, position),
                     }

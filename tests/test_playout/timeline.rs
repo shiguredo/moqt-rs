@@ -264,6 +264,24 @@ fn audio_budget_adds_the_jitter_and_the_output_lead() {
     assert_eq!(stats.jitter_us, Some(40_000));
     assert_eq!(stats.target_us, 83_000, "50〜100 ms に切った合計になること");
     assert_eq!(timeline.playout_delay_us(), Some(83_000));
+
+    // 先行量が i64 の上限でも飽和し、到着基準の上限へ切られる
+    timeline.observe_audio_output_lead(i64::MAX, now_us + 1_000_000);
+    assert_eq!(
+        timeline.audio_delay_stats().output_lead_us,
+        Some(i64::MAX),
+        "観測値はそのまま記録されること"
+    );
+    assert_eq!(
+        timeline.audio_delay_stats().target_us,
+        TIMELINE_ARRIVAL_DELAY_US,
+        "飽和した合計は到着基準の上限へ clamp されること"
+    );
+    assert_eq!(
+        timeline.playout_delay_us(),
+        Some(TIMELINE_ARRIVAL_DELAY_US),
+        "表示の遅れも上限を超えないこと"
+    );
 }
 
 /// 一定の遅れは基準へ入るため、揺らぎの予算は上がらないこと

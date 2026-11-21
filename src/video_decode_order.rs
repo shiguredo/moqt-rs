@@ -11,8 +11,9 @@
 //! - 復号中の Group より古い Group の Object は捨てる
 //! - 同じ Group で直前に復号した Object ID 以前の Object は捨てる (重複か遅着)
 //! - キーフレームは参照を持たないため、古い Group でない限り復号を始め直す (復号中の Group より
-//!   新しい Group のキーフレームで新しい Group へ移り、Group の先頭が遅れて届いた場合は同じ
-//!   Group でも前より前の Object ID から始め直す)
+//!   新しい Group のキーフレームで新しい Group へ移る。同じ Group では、直前に復号した
+//!   Object ID より後のキーフレームだけが復号を始め直せる。それ以前のキーフレームは
+//!   重複か遅着として捨てる)
 //! - 同じ Group の delta は、直前に復号した Object の次の Object ID のときだけ通す
 //! - 間の Object ID が欠けている場合は、Prior Object ID Gap (§10.9 (Prior Object ID Gap))
 //!   がその分の Object の非存在を示すときに限り連続とみなす。§2.1.2 は "A gap in the

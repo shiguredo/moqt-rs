@@ -6,7 +6,7 @@
 
 use shiguredo_moqt::playout::resample::{
     RESAMPLE_MAX_RADIUS, RESAMPLE_OUTPUT_RADIUS, RESAMPLE_PHASES, ResampleKernel, linear_sample,
-    resample_block,
+    resample_block, resample_block_with_kernel,
 };
 
 /// 正弦波を作る (振幅 `amplitude`)
@@ -172,6 +172,14 @@ fn kernel_sample_extends_the_endpoints() {
         kernel.sample(&input, f64::NAN) == 0.0,
         "位置が有限でなければ値を伝播させないこと"
     );
+    // isize の範囲外でも基点の計算が overflow せず、端のサンプルへ張り付く
+    for position in [-1e30, 1e30, isize::MIN as f64, isize::MAX as f64] {
+        let value = kernel.sample(&input, position);
+        assert!(
+            value.is_finite() && (value - 0.5).abs() < 1e-4,
+            "範囲外の位置は端のサンプルで延長すること: position={position}, value={value}"
+        );
+    }
 }
 
 #[test]
@@ -179,4 +187,53 @@ fn a_non_finite_start_frame_falls_back_to_the_beginning() {
     let input = vec![0.0f32, 1.0];
     let output = resample_block(&[input], 48_000, 48_000, f64::NAN, 1);
     assert_eq!(output[0][0], 0.0);
+}
+
+/// カーネルを渡す入口が既定の入口と同じ出力を返し、同じカーネルを再利用できること
+///
+/// `resample_block` は呼び出しごとに係数を生成する。同じレート比で繰り返し変換する
+/// 場合は `resample_block_with_kernel` にカーネルを渡すことで、三角関数と配列確保を
+/// 1 回に抑えられる。両者の出力が一致することを固定する。
+#[test]
+fn kernel_variant_matches_the_convenience_function() {
+    let input = vec![0.25f32; 256];
+    let kernel = ResampleKernel::new(44_100.0 / 48_000.0).expect("係数を作れること");
+    let expected = resample_block(core::slice::from_ref(&input), 48_000, 44_100, 0.0, 128);
+    let actual = resample_block_with_kernel(
+        core::slice::from_ref(&input),
+        48_000,
+        44_100,
+        0.0,
+        128,
+        Some(&kernel),
+    );
+    assert_eq!(
+        actual, expected,
+        "カーネルを渡す入口は既定の入口と同じ出力になること"
+    );
+
+    // 同じカーネルを別のブロックにも使える
+    let first = resample_block_with_kernel(
+        core::slice::from_ref(&input),
+        48_000,
+        44_100,
+        0.0,
+        128,
+        Some(&kernel),
+    );
+    let second = resample_block_with_kernel(
+        core::slice::from_ref(&input),
+        48_000,
+        44_100,
+        128.0,
+        128,
+        Some(&kernel),
+    );
+    assert_eq!(first.len(), 1);
+    assert_eq!(second.len(), 1);
+    assert_eq!(
+        resample_block(core::slice::from_ref(&input), 48_000, 44_100, 128.0, 128),
+        second,
+        "2 ブロック目も既定の入口と一致すること"
+    );
 }

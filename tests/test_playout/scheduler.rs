@@ -977,3 +977,27 @@ fn a_lateness_beyond_the_maximum_is_still_played_when_the_sound_is_continuous() 
         AudioPlayoutDecision::Play { .. }
     ));
 }
+
+/// 入力の不感帯が負でも、設定値と同じく 0 として扱い panic しないこと
+///
+/// `AudioPlayoutInput::stretch_min_us` は設定値 [`AudioPlayoutConfig::stretch_min_us`] の
+/// 上書きであり、設定値は負値を 0 に clamp する。上書きだけを負のまま使うと
+/// `-deadband_us` が i64::MIN で overflow する。
+#[test]
+fn the_stretch_deadband_clamps_negative_input() {
+    for deadband in [i64::MIN, -1] {
+        let mut scheduler = AudioPlayoutScheduler::new();
+        schedule_queued_sound(&mut scheduler);
+        let mut request = input(20_000, 20_000, 20_000, Some(100_000));
+        request.stretch_min_us = Some(deadband);
+        let plan = play(scheduler.schedule(request));
+        assert_eq!(
+            plan.compress_us, 10_000,
+            "不感帯 0 として詰め量を決めること: deadband={deadband}"
+        );
+        assert_eq!(
+            plan.expand_us, 0,
+            "timestamp 経路では伸ばさないこと: deadband={deadband}"
+        );
+    }
+}

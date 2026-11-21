@@ -533,7 +533,12 @@ impl AudioPlayoutScheduler {
                 .saturating_sub(self.config.min_lead_us)
                 .max(0)
         });
-        let deadband_us = input.stretch_min_us.unwrap_or(self.config.stretch_min_us);
+        // 入力側の不感帯も設定値と同じく負値を 0 として扱う。負のまま `-deadband_us` を
+        // 計算すると i64::MIN で debug ビルドが overflow し、release では符号が反転する。
+        let deadband_us = input
+            .stretch_min_us
+            .unwrap_or(self.config.stretch_min_us)
+            .max(0);
         // 詰める量は「目標からの遅れ」「音の長さの半分」「キューの余裕」の最小値にする。
         // 到着基準では、隙間を挟む音 (遅れて届いた音) は詰めない。隙間を埋める音と重なると
         // 継ぎ目が崩れるためである

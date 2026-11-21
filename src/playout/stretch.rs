@@ -200,7 +200,10 @@ impl<'a> AnalysisSignal<'a> {
     /// 44.1 kHz は解析用に 48 kHz の格子へ移すため、移した後の長さになる。
     fn input_len(&self) -> usize {
         if self.resample_44100 {
-            (self.reference.len() * 48_000) / 44_100
+            // 32bit の usize では `len * 48_000` が 89,478 サンプル程度で overflow する。
+            // u128 で計算してから usize へ戻す (確保済みスライスの長さなので通常は収まる)。
+            let projected = self.reference.len() as u128 * 48_000 / 44_100;
+            usize::try_from(projected).unwrap_or(usize::MAX)
         } else {
             self.reference.len()
         }

@@ -50,6 +50,11 @@ struct GroupBuffer<T> {
     ///
     /// §6.2 により Group の最初の Object ID は 0 である。
     next_object_id: u64,
+    /// Object ID が `u64::MAX` の Object まで取り出し終えたか
+    ///
+    /// `u64::MAX + 1` は表現できないため、`next_object_id` を進める代わりにこの
+    /// フラグを立てる。以後この Group の Object はすべて重複または遅着として捨てる。
+    exhausted: bool,
     /// 受信済みで、まだ取り出していない Object (Object ID 順)
     pending: BTreeMap<u64, T>,
     /// この Group より新しい Group を受信したため、欠けを待たずに取り出すかどうか
@@ -114,12 +119,13 @@ impl<T> VideoObjectReorderBuffer<T> {
         let group = self.groups.entry(group_id).or_insert_with(|| GroupBuffer {
             // §6.2 (Object Numbering): Group 内の最初の Object ID は 0
             next_object_id: 0,
+            exhausted: false,
             pending: BTreeMap::new(),
             flushing: false,
         });
         // 既に取り出した Object ID は重複か遅着であり、同じ Object ID の再受信は最初の
         // 1 つを使う
-        if object_id >= group.next_object_id {
+        if !group.exhausted && object_id >= group.next_object_id {
             group.pending.entry(object_id).or_insert(value);
         }
 
@@ -173,25 +179,39 @@ impl<T> VideoObjectReorderBuffer<T> {
                 // 受信済みの Object を Object ID 順に取り出す
                 let pending = core::mem::take(&mut group.pending);
                 for (object_id, value) in pending {
-                    group.next_object_id = object_id + 1;
                     ready.push(ReorderedVideoObject {
                         group_id,
                         object_id,
                         value,
                     });
                     self.last_released_group_id = Some(group_id);
+                    // §6.2 (Object Numbering): 次の Object ID は u64 の範囲を超えない。
+                    // u64::MAX を取り出したら、この Group で取り出せる Object はもう無い。
+                    match object_id.checked_add(1) {
+                        Some(next_object_id) => group.next_object_id = next_object_id,
+                        None => {
+                            group.exhausted = true;
+                            break;
+                        }
+                    }
                 }
                 continue;
             }
             while let Some(value) = group.pending.remove(&group.next_object_id) {
                 let object_id = group.next_object_id;
-                group.next_object_id += 1;
                 ready.push(ReorderedVideoObject {
                     group_id,
                     object_id,
                     value,
                 });
                 self.last_released_group_id = Some(group_id);
+                match object_id.checked_add(1) {
+                    Some(next_object_id) => group.next_object_id = next_object_id,
+                    None => {
+                        group.exhausted = true;
+                        break;
+                    }
+                }
             }
         }
         // 配送を終えた古い Group の状態は、遅着 Object を捨てる判定に不要になったら捨てる。
@@ -333,6 +353,43 @@ mod tests {
             released.last().map(|object| object.object_id),
             Some(MAX_PENDING_OBJECTS as u64 + 1),
             "上限を超えた Object まで取り出すこと"
+        );
+    }
+
+    /// `u64::MAX` の Object を取り出した後、同じ Group の Object ID 0 を再受信しても
+    /// 重複として捨てること
+    ///
+    /// `next_object_id` を通常の `+ 1` で進めると `u64::MAX + 1` が 0 に折り返し、
+    /// 取り出し済みの Object 0 を受け付けてしまう。Object ID は u64 全域を表現できるため、
+    /// 上限では「これ以上取り出さない」状態へ遷移する必要がある。
+    #[test]
+    fn object_id_u64_max_is_terminal() {
+        let mut buffer = VideoObjectReorderBuffer::new();
+        // Object 0 は即座に取り出し、1 は欠けたまま 2..=1025 を保留して上限超過を作る
+        assert_eq!(locations(&buffer.insert(10, 0, 0u64)), vec![(10, 0)]);
+        let mut released = Vec::new();
+        for object_id in 2..=(MAX_PENDING_OBJECTS as u64 + 1) {
+            released.extend(buffer.insert(10, object_id, object_id));
+        }
+        assert!(released.is_empty(), "上限ちょうどではまだ取り出さないこと");
+
+        // u64::MAX を追加すると上限を超え、保留分を Object ID 順に取り出す。
+        // 最後に u64::MAX が来るため、この Group は「取り出し済みの終端」になる。
+        released.extend(buffer.insert(10, u64::MAX, u64::MAX));
+        assert_eq!(
+            released.last().map(|object| object.object_id),
+            Some(u64::MAX),
+            "u64::MAX まで取り出すこと"
+        );
+
+        // 折り返した 0 を受け付けると重複配送になる。終端後は捨てること。
+        assert!(
+            buffer.insert(10, 0, 999).is_empty(),
+            "u64::MAX の後に Object ID 0 を再受信しても重複として捨てること"
+        );
+        assert!(
+            buffer.insert(10, u64::MAX, 999).is_empty(),
+            "u64::MAX の再受信も重複として捨てること"
         );
     }
 

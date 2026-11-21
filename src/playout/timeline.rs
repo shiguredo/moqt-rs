@@ -1051,7 +1051,13 @@ impl PlayoutTimeline {
         if self.tracks[Track::Audio.index()].base_us.is_none() {
             return;
         }
-        let learned_us = self.audio_jitter_us.unwrap_or(0) + self.audio_output_lead_us.unwrap_or(0);
+        // jitter は 500 ms 以下に clamp されるが、実出力の先行量は呼び出し側の値であり
+        // 上限が無い。通常の加算では i64 の境界で panic (debug) / 折り返し (release) する
+        // ため、飽和加算してから audio_arrival_delay_us_with_min の上限へ clamp する。
+        let learned_us = self
+            .audio_jitter_us
+            .unwrap_or(0)
+            .saturating_add(self.audio_output_lead_us.unwrap_or(0));
         self.tracks[Track::Audio.index()].delay_us = Some(audio_arrival_delay_us_with_min(
             learned_us,
             self.config.audio_min_delay_us,
