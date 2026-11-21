@@ -14,6 +14,10 @@
 - log / metrics の Track Namespace の tuple と Track Name、payload、Group / Object 規則は MOQLOG-04 / MOQMETRICS-03 を一次資料とする
 - 上流へのフィードバックは本 issue の範囲外とし、必要になった時点で別途判断する
 
+## 優先度
+
+現時点では優先度低。MOQLOG-04 / MOQMETRICS-03 の仕様が安定した後に再評価する。
+
 ## 目的
 
 MSF-02 §9 (Log track) / §10 (Metrics track) が参照する payload 形式に対応し、log / metrics の payload を encode / decode できるようにする。まず payload codec と MOQMETRICS の catalog track を追加し、publishTracks 経路と example への統合は別 issue とする。
