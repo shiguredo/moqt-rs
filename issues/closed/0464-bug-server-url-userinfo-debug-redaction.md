@@ -1,7 +1,7 @@
 # ServerUrl の authority に含まれる userinfo を Debug から隠す
 
 - Created: 2026-11-20
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-21
 - Branch: feature/fix-server-url-userinfo-debug-redaction
 - Polished: 2026-11-20
 
