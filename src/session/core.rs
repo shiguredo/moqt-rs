@@ -2103,7 +2103,7 @@ impl Session {
             Some(RequestTable::PublishNamespace)
             | Some(RequestTable::NamespaceSubscription)
             | Some(RequestTable::TrackSubscription) => Some((
-                crate::message::NAMESPACE_REQUEST_OK_ALLOWED_PARAMS,
+                crate::message::NAMESPACE_INITIAL_OK_ALLOWED_PARAMS,
                 "REQUEST_OK parameter not allowed in this namespace request context",
             )),
             Some(RequestTable::Subscription) => None,
@@ -2469,6 +2469,24 @@ impl Session {
             }
             _ => None,
         };
+        // namespace 系 request の REQUEST_OK は初回応答 (Pending) と REQUEST_UPDATE_OK
+        // (Established) で同じ wire メッセージである。応答が届いた時点の state で
+        // context を確定し、許可パラメータ集合を切り替える。
+        let namespace_update_response = match table {
+            Some(RequestTable::PublishNamespace) => self
+                .publish_namespaces
+                .get(&request_id)
+                .is_some_and(|entry| entry.outstanding_updates > 0),
+            Some(RequestTable::NamespaceSubscription) => self
+                .namespace_subscriptions
+                .get(&request_id)
+                .is_some_and(|entry| entry.outstanding_updates > 0),
+            Some(RequestTable::TrackSubscription) => self
+                .track_subscriptions
+                .get(&request_id)
+                .is_some_and(|entry| entry.outstanding_updates > 0),
+            _ => false,
+        };
         // draft §9.3 (REQUEST_OK): Track Properties を運べるのは TRACK_STATUS_OK と
         // FETCH の初回応答 (FETCH_OK) だけであり、PUBLISH_OK / REQUEST_UPDATE_OK /
         // SUBSCRIBE_NAMESPACE_OK / PUBLISH_NAMESPACE_OK では空でなければならない。
@@ -2506,10 +2524,19 @@ impl Session {
             )),
             Some(RequestTable::PublishNamespace)
             | Some(RequestTable::NamespaceSubscription)
-            | Some(RequestTable::TrackSubscription) => Some((
-                crate::message::NAMESPACE_REQUEST_OK_ALLOWED_PARAMS,
-                "REQUEST_OK parameter not allowed in this namespace request context",
-            )),
+            | Some(RequestTable::TrackSubscription) => {
+                if namespace_update_response {
+                    Some((
+                        crate::message::NAMESPACE_UPDATE_OK_ALLOWED_PARAMS,
+                        "REQUEST_UPDATE_OK parameter not allowed in this namespace request context",
+                    ))
+                } else {
+                    Some((
+                        crate::message::NAMESPACE_INITIAL_OK_ALLOWED_PARAMS,
+                        "REQUEST_OK parameter not allowed in this namespace request context",
+                    ))
+                }
+            }
             Some(RequestTable::Subscription) | None => None,
         };
         if let Some((allowed, message)) = context_allowed
@@ -2535,13 +2562,13 @@ impl Session {
                 self.handle_ok_for_track_status(request_id, &ok.parameters, &ok.track_properties)
             }
             Some(RequestTable::PublishNamespace) => {
-                self.handle_ok_for_publish_namespace(request_id)
+                self.handle_ok_for_publish_namespace(request_id, namespace_update_response)
             }
             Some(RequestTable::NamespaceSubscription) => {
-                self.handle_ok_for_subscribe_namespace(request_id)
+                self.handle_ok_for_subscribe_namespace(request_id, namespace_update_response)
             }
             Some(RequestTable::TrackSubscription) => {
-                self.handle_ok_for_subscribe_tracks(request_id)
+                self.handle_ok_for_subscribe_tracks(request_id, namespace_update_response)
             }
             None => {
                 // 応答先の request を持たない REQUEST_OK は UNEXPECTED_MESSAGE (0x303)。

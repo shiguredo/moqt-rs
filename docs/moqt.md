@@ -184,6 +184,14 @@ draft-ietf-moq-transport-23 §4 (Namespace Discovery) の 6 種を実装する�
 - §3.6.3 (Skipped Tracks) / §9.5.2 (Updating Namespace Subscriptions): `PUBLISH_SKIPPED` を
   送った (受けた) track への PUBLISH と、同じ SUBSCRIBE_TRACKS に対する同じ track の重複
   PUBLISH を `PROTOCOL_VIOLATION` で拒否する
+- §9.5 (REQUEST_UPDATE): namespace 系 request の更新を実装する。許可パラメータは
+  `PUBLISH_NAMESPACE` が AUTHORIZATION_TOKEN、`SUBSCRIBE_NAMESPACE` が
+  AUTHORIZATION_TOKEN と TRACK_NAMESPACE_PREFIX、`SUBSCRIBE_TRACKS` が
+  AUTHORIZATION_TOKEN / PAUSED / TRACK_PROPERTY_FILTER / TRACK_NAMESPACE_PREFIX である。
+  prefix / PAUSED / filter / token の反映は Session が機械的に行い、成功時は
+  REQUEST_UPDATE_OK を自動送出する。REQUEST_UPDATE_OK は EXPIRES と LARGEST_OBJECT を
+  受理する (初回応答の EXPIRES だけの集合と区別する)。予約名前空間への prefix 更新は
+  `DOES_NOT_EXIST` (`0x10`) で拒否し、bidi stream を閉じる (§9.5.1)
 - §9.5.2: `SUBSCRIBE_NAMESPACE` / `SUBSCRIBE_TRACKS` は REQUEST_UPDATE の
   `TRACK_NAMESPACE_PREFIX` で prefix を更新できる。`SUBSCRIBE_NAMESPACE` では新しい prefix に
   一致しなくなった namespace を暗黙の `NAMESPACE_DONE` として通知する

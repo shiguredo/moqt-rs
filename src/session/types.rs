@@ -1036,6 +1036,11 @@ pub struct PublishNamespaceRequest {
     pub parameters: MessageParameters,
     /// request の状態
     pub state: NamespaceRequestState,
+    /// 自側が送信して未応答の REQUEST_UPDATE 数
+    ///
+    /// 同じ wire メッセージ (REQUEST_OK) が初回応答と REQUEST_UPDATE_OK の両方に使われる
+    /// ため、受信時の context 判定に使う (draft-ietf-moq-transport-23 §9.3 / §9.5)。
+    pub outstanding_updates: u64,
 }
 
 /// SUBSCRIBE_NAMESPACE request の状態 (draft-ietf-moq-transport-23 §9.14 (SUBSCRIBE_NAMESPACE))
@@ -1054,6 +1059,8 @@ pub struct NamespaceSubscription {
     pub parameters: MessageParameters,
     /// request の状態
     pub state: NamespaceRequestState,
+    /// 自側が送信して未応答の REQUEST_UPDATE 数
+    pub outstanding_updates: u64,
     /// requester 側で受信済みの完全な namespace (prefix + suffix)
     ///
     /// draft §9.16 (NAMESPACE_DONE): "The publisher MUST NOT send NAMESPACE_DONE for a namespace
@@ -1082,6 +1089,8 @@ pub struct TrackSubscription {
     pub parameters: MessageParameters,
     /// request の状態
     pub state: NamespaceRequestState,
+    /// 自側が送信して未応答の REQUEST_UPDATE 数
+    pub outstanding_updates: u64,
     /// requester 側で PUBLISH を受信済みの track ((完全な Track Namespace, track name))
     ///
     /// draft §9.5.2 (Updating Namespace Subscriptions): publisher は同じ SUBSCRIBE_TRACKS に

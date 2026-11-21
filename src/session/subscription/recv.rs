@@ -11,10 +11,12 @@ use crate::error::{
     SESSION_UNEXPECTED_MESSAGE, STREAM_CANCELLED,
 };
 use crate::message::{
-    ErrorDetail, ErrorDetails, FETCH_UPDATE_ALLOWED_PARAMS, PUBLISH_STATE_NOTIFY_ALLOWED_PARAMS,
-    Publish, PublishDone, PublishStateNotify, ReasonPhrase, RequestUpdate,
-    SUBSCRIBE_OK_ALLOWED_PARAMS, SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe, SubscribeOk,
-    UnsupportedProperty,
+    ErrorDetail, ErrorDetails, FETCH_UPDATE_ALLOWED_PARAMS,
+    PUBLISH_NAMESPACE_UPDATE_ALLOWED_PARAMS, PUBLISH_STATE_NOTIFY_ALLOWED_PARAMS, Publish,
+    PublishDone, PublishStateNotify, ReasonPhrase, RequestUpdate,
+    SUBSCRIBE_NAMESPACE_UPDATE_ALLOWED_PARAMS, SUBSCRIBE_OK_ALLOWED_PARAMS,
+    SUBSCRIBE_TRACKS_UPDATE_ALLOWED_PARAMS, SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe,
+    SubscribeOk, UnsupportedProperty,
     common::{Location, TrackNamespace},
 };
 use crate::message_parameter::{
@@ -949,28 +951,28 @@ impl Session {
                 )
             }
             Some(t @ RequestTable::NamespaceSubscription) => {
-                self.validate_namespace_request_update(request_id)?;
+                self.validate_namespace_request_update(request_id, locally_terminated)?;
                 (
                     t,
-                    crate::message::NAMESPACE_UPDATE_ALLOWED_PARAMS,
+                    SUBSCRIBE_NAMESPACE_UPDATE_ALLOWED_PARAMS,
                     "REQUEST_UPDATE (subscribe_namespace) parameter not allowed in this context",
                 )
             }
             Some(t @ RequestTable::TrackSubscription) => {
-                self.validate_track_subscription_update(request_id)?;
+                self.validate_track_subscription_update(request_id, locally_terminated)?;
                 (
                     t,
-                    crate::message::NAMESPACE_UPDATE_ALLOWED_PARAMS,
+                    SUBSCRIBE_TRACKS_UPDATE_ALLOWED_PARAMS,
                     "REQUEST_UPDATE (subscribe_tracks) parameter not allowed in this context",
                 )
             }
-            Some(RequestTable::PublishNamespace) => {
-                let err = SessionError::new(
-                    SESSION_UNEXPECTED_MESSAGE,
-                    "REQUEST_UPDATE received for PUBLISH_NAMESPACE",
-                );
-                self.fail(err.clone());
-                return Err(err);
+            Some(t @ RequestTable::PublishNamespace) => {
+                self.validate_publish_namespace_request_update(request_id, locally_terminated)?;
+                (
+                    t,
+                    PUBLISH_NAMESPACE_UPDATE_ALLOWED_PARAMS,
+                    "REQUEST_UPDATE (publish_namespace) parameter not allowed in this context",
+                )
             }
             Some(RequestTable::TrackStatus) | None => {
                 let err = SessionError::new(
@@ -1073,7 +1075,25 @@ impl Session {
             // (`handle_update_for_subscription` はこの後に状態遷移せず return する)。
             self.register_fill_request_subscription(update.request_id, request_id);
         }
-        match table {
+        // draft-ietf-moq-transport-23 §2.4.3 (Reserved Namespaces) / §6.5 (Session-Level
+        // Tracks and Namespaces): `.` 単独と `.session` はアプリへ渡さず REQUEST_ERROR の
+        // DOES_NOT_EXIST で拒否する。REQUEST_UPDATE の失敗時は bidi stream を閉じる
+        // (§9.5.1) ため、`reject_request_update` に終端まで任せる。
+        // TRACK_NAMESPACE_PREFIX を持てるのは namespace 系 update だけであり、
+        // subscription / fetch では scope 検証で先に落ちる。
+        if let Some(prefix) = update.parameters.track_namespace_prefix()
+            && (prefix.is_single_period() || prefix.is_session_level())
+        {
+            if !locally_terminated {
+                self.reject_request_update(
+                    request_id,
+                    REQUEST_DOES_NOT_EXIST,
+                    "reserved namespace in REQUEST_UPDATE",
+                )?;
+            }
+            return Ok(());
+        }
+        let result = match table {
             RequestTable::Subscription => self.handle_update_for_subscription(
                 request_id,
                 update.request_id,
@@ -1093,17 +1113,38 @@ impl Session {
                 update.parameters,
                 locally_terminated,
             ),
-            // 上の検証で PUBLISH_NAMESPACE / TRACK_STATUS は UNEXPECTED_MESSAGE として
-            // セッション終了済み (防御)
-            RequestTable::TrackStatus | RequestTable::PublishNamespace => {
+            RequestTable::PublishNamespace => self.handle_update_for_publish_namespace(
+                request_id,
+                update.parameters,
+                locally_terminated,
+            ),
+            // `locate_request` が返す request 種別のうち TRACK_STATUS だけは
+            // REQUEST_UPDATE を受け付けない (§9.5 の列挙に無い)。防御として閉じる。
+            RequestTable::TrackStatus => {
                 let err = SessionError::new(
                     SESSION_UNEXPECTED_MESSAGE,
-                    "REQUEST_UPDATE received for unknown or unsupported request id",
+                    "REQUEST_UPDATE received for TRACK_STATUS",
                 );
                 self.fail(err.clone());
                 Err(err)
             }
+        };
+        result?;
+        // draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): REQUEST_UPDATE の受信側は
+        // REQUEST_UPDATE_OK / REQUEST_UPDATE_ERROR をちょうど 1 通返さなければならない。
+        // namespace 系 update は適用内容が機械的でありアプリの判断を要しないため、
+        // 成功応答を Session が自動送出する。subscription / fetch はアプリが応答する。
+        if !locally_terminated
+            && matches!(
+                table,
+                RequestTable::NamespaceSubscription
+                    | RequestTable::TrackSubscription
+                    | RequestTable::PublishNamespace
+            )
+        {
+            self.respond_update_for_namespace_request(request_id);
         }
+        Ok(())
     }
 
     /// REQUEST_UPDATE を REQUEST_ERROR で拒否するときの終端処理
@@ -1177,16 +1218,16 @@ impl Session {
                     .expect("request update rejection reason must be <= 1024 bytes"),
                 ErrorDetails::new(),
             ),
-            Some(RequestTable::NamespaceSubscription) | Some(RequestTable::TrackSubscription) => {
-                self.send_request_error(
-                    request_id,
-                    error_code,
-                    0,
-                    ReasonPhrase::new(reason)
-                        .expect("request update rejection reason must be <= 1024 bytes"),
-                    ErrorDetails::new(),
-                )
-            }
+            Some(RequestTable::PublishNamespace)
+            | Some(RequestTable::NamespaceSubscription)
+            | Some(RequestTable::TrackSubscription) => self.send_request_error(
+                request_id,
+                error_code,
+                0,
+                ReasonPhrase::new(reason)
+                    .expect("request update rejection reason must be <= 1024 bytes"),
+                ErrorDetails::new(),
+            ),
             Some(RequestTable::Subscription) => {
                 // 先行する未応答グループがあれば、拒否をキューへ積んで OK の後ろに回す
                 let has_pending = self
@@ -1204,7 +1245,7 @@ impl Session {
             // draft §9.5 (REQUEST_UPDATE): 更新できない request への受信は
             // UNEXPECTED_MESSAGE で閉じる。呼び出し元の request 種別判定
             // (`locate_request`) で検出済み (防御)
-            Some(RequestTable::TrackStatus) | Some(RequestTable::PublishNamespace) | None => {
+            Some(RequestTable::TrackStatus) | None => {
                 let err = SessionError::new(
                     SESSION_UNEXPECTED_MESSAGE,
                     "REQUEST_UPDATE received for unknown or unsupported request id",

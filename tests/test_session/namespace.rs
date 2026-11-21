@@ -9,11 +9,12 @@ use shiguredo_moqt::error::{
     SESSION_UNEXPECTED_MESSAGE,
 };
 use shiguredo_moqt::message::{
-    Namespace, NamespaceDone, Publish, PublishNamespace, PublishSkipped, SubscribeNamespace,
-    SubscribeTracks,
+    Namespace, NamespaceDone, Publish, PublishNamespace, PublishSkipped, RequestOk, RequestUpdate,
+    SubscribeNamespace, SubscribeTracks,
 };
 use shiguredo_moqt::message_parameter::{
-    PARAM_INCLUDE_PROPERTIES, PARAM_PAUSED, PARAM_SUBSCRIBE_TRACKS_ID, PARAM_TRACK_NAMESPACE_PREFIX,
+    PARAM_AUTHORIZATION_TOKEN, PARAM_INCLUDE_PROPERTIES, PARAM_LARGEST_OBJECT, PARAM_PAUSED,
+    PARAM_SUBSCRIBE_TRACKS_ID, PARAM_TRACK_NAMESPACE_PREFIX, PARAM_TRACK_PROPERTY_FILTER,
 };
 use shiguredo_moqt::session::types::{NamespaceRequestState, SendRequestError, SessionEvent};
 use shiguredo_moqt::track_properties::{TrackProperty, TrackPropertyValue};
@@ -892,5 +893,381 @@ fn subscribe_tracks_include_properties_zero_empties_publish_properties() {
             .as_slice()
             .is_empty(),
         "INCLUDE_PROPERTIES=0 の resulting PUBLISH は Track Properties が空であること"
+    );
+}
+
+/// SUBSCRIBE_NAMESPACE の REQUEST_UPDATE が REQUEST_UPDATE_OK で応答されること
+///
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): "The receiver of a REQUEST_UPDATE
+/// MUST respond with exactly one REQUEST_UPDATE_OK or REQUEST_UPDATE_ERROR message"。
+/// namespace 系 request の更新は Session が機械的に適用して成功応答を自動送出する。
+#[test]
+fn request_update_for_subscribe_namespace_is_acknowledged() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe_namespace(ns(&[b"live"]), MessageParameters::new())
+        .expect("SUBSCRIBE_NAMESPACE を送信できること");
+    let (_, message) = take_send_request(&mut client);
+    server
+        .recv_request(message)
+        .expect("SUBSCRIBE_NAMESPACE を受理できること");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+        .expect("SUBSCRIBE_NAMESPACE_OK を送信できること");
+    let (_, ok) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok)
+        .expect("SUBSCRIBE_NAMESPACE_OK を受理できること");
+
+    client
+        .send_request_update(
+            rid,
+            params_with(
+                PARAM_TRACK_NAMESPACE_PREFIX,
+                MessageParameterValue::TrackNamespacePrefix(ns(&[b"live", b"mic"])),
+            ),
+        )
+        .expect("REQUEST_UPDATE を送信できること");
+    let (update_stream_id, update) = take_send_on_stream(&mut client);
+    assert_eq!(update_stream_id, rid, "元の request stream に送ること");
+    server
+        .recv_stream_message(rid, update)
+        .expect("REQUEST_UPDATE を受理できること");
+
+    let (ack_stream_id, ack) = take_send_on_stream(&mut server);
+    assert_eq!(ack_stream_id, rid, "元の request stream に応答すること");
+    match &ack {
+        ControlMessage::RequestOk(ok) => {
+            assert!(ok.parameters.is_empty(), "更新応答はパラメータなしでよい");
+            assert!(
+                ok.track_properties.is_empty(),
+                "namespace request の OK は Track Properties を持たない"
+            );
+        }
+        other => panic!("REQUEST_UPDATE_OK が送出されること: {other:?}"),
+    }
+    client
+        .recv_stream_message(rid, ack)
+        .expect("REQUEST_UPDATE_OK を受理できること");
+    assert_eq!(
+        client
+            .namespace_subscription(rid)
+            .expect("購読が登録されていること")
+            .state,
+        NamespaceRequestState::Established,
+        "更新応答後も Established のままであること"
+    );
+}
+
+/// SUBSCRIBE_TRACKS の REQUEST_UPDATE で PAUSED を受理すること
+///
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE) の "SUBSCRIBE_TRACKS:
+/// AUTHORIZATION_TOKEN, PAUSED, TRACK_PROPERTY_FILTER, TRACK_NAMESPACE_PREFIX"。
+#[test]
+fn request_update_for_subscribe_tracks_accepts_paused() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe_tracks(ns(&[b"live"]), MessageParameters::new())
+        .expect("SUBSCRIBE_TRACKS を送信できること");
+    let (_, message) = take_send_request(&mut client);
+    server
+        .recv_request(message)
+        .expect("SUBSCRIBE_TRACKS を受理できること");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+        .expect("SUBSCRIBE_TRACKS_OK を送信できること");
+    let (_, ok) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok)
+        .expect("SUBSCRIBE_TRACKS_OK を受理できること");
+
+    client
+        .send_request_update(
+            rid,
+            params_with(PARAM_PAUSED, MessageParameterValue::Uint8(1)),
+        )
+        .expect("SUBSCRIBE_TRACKS の REQUEST_UPDATE に PAUSED を載せられること");
+    let (_, update) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, update)
+        .expect("PAUSED 付き REQUEST_UPDATE を受理できること");
+    assert_eq!(
+        server
+            .track_subscription(rid)
+            .expect("購読が登録されていること")
+            .parameters
+            .paused(),
+        Some(1),
+        "PAUSED が今後の PUBLISH 用の初期状態へ反映されること"
+    );
+    let (_, ack) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ack)
+        .expect("REQUEST_UPDATE_OK を受理できること");
+}
+
+/// SUBSCRIBE_TRACKS の REQUEST_UPDATE で TRACK_PROPERTY_FILTER を受理すること
+///
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE) の SUBSCRIBE_TRACKS 許可集合。
+/// Range Filter であるため、peer が MAX_FILTER_RANGES を宣言したセッションで検証する。
+#[test]
+fn request_update_for_subscribe_tracks_accepts_track_property_filter() {
+    let (mut client, mut server) = establish_pair_with_options(
+        opts_with(shiguredo_moqt::parameter::SETUP_OPTION_MAX_FILTER_RANGES, 1),
+        opts_with(shiguredo_moqt::parameter::SETUP_OPTION_MAX_FILTER_RANGES, 1),
+    );
+    let rid = client
+        .send_subscribe_tracks(ns(&[b"live"]), MessageParameters::new())
+        .expect("SUBSCRIBE_TRACKS を送信できること");
+    let (_, message) = take_send_request(&mut client);
+    server
+        .recv_request(message)
+        .expect("SUBSCRIBE_TRACKS を受理できること");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+        .expect("SUBSCRIBE_TRACKS_OK を送信できること");
+    let (_, ok) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok)
+        .expect("SUBSCRIBE_TRACKS_OK を受理できること");
+
+    client
+        .send_request_update(
+            rid,
+            params_with(
+                PARAM_TRACK_PROPERTY_FILTER,
+                MessageParameterValue::LengthPrefixed(Vec::new()),
+            ),
+        )
+        .expect("TRACK_PROPERTY_FILTER 付き更新を送信できること");
+    let (_, update) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, update)
+        .expect("TRACK_PROPERTY_FILTER 付き更新を受理できること");
+    let (_, ack) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ack)
+        .expect("REQUEST_UPDATE_OK を受理できること");
+}
+
+/// PUBLISH_NAMESPACE の REQUEST_UPDATE で AUTHORIZATION_TOKEN を受理すること
+///
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE) の "PUBLISH_NAMESPACE:
+/// AUTHORIZATION_TOKEN"。publisher が認可トークンを更新する経路である。
+#[test]
+fn request_update_for_publish_namespace_accepts_authorization_token() {
+    let (mut client, mut server) = establish_pair();
+    let rid = server
+        .send_publish_namespace(ns(&[b"live"]), MessageParameters::new())
+        .expect("PUBLISH_NAMESPACE を送信できること");
+    let (_, message) = take_send_request(&mut server);
+    client
+        .recv_request(message)
+        .expect("PUBLISH_NAMESPACE を受理できること");
+    client
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+        .expect("PUBLISH_NAMESPACE_OK を送信できること");
+    let (_, ok) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, ok)
+        .expect("PUBLISH_NAMESPACE_OK を受理できること");
+    assert_eq!(
+        server
+            .publish_namespace_request(rid)
+            .expect("告知が登録されていること")
+            .state,
+        NamespaceRequestState::Established
+    );
+
+    server
+        .send_request_update(
+            rid,
+            params_with(
+                PARAM_AUTHORIZATION_TOKEN,
+                MessageParameterValue::AuthorizationToken(AuthorizationToken::UseValue {
+                    token_type: 0,
+                    token_value: vec![0x78],
+                }),
+            ),
+        )
+        .expect("PUBLISH_NAMESPACE の REQUEST_UPDATE に AUTHORIZATION_TOKEN を載せられること");
+    let (_, update) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, update)
+        .expect("AUTHORIZATION_TOKEN 付き REQUEST_UPDATE を受理できること");
+    assert_eq!(
+        client
+            .publish_namespace_request(rid)
+            .expect("告知が登録されていること")
+            .state,
+        NamespaceRequestState::Established
+    );
+    let (_, ack) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, ack)
+        .expect("REQUEST_UPDATE_OK を受理できること");
+}
+
+/// namespace 系 request の REQUEST_UPDATE_OK が LARGEST_OBJECT を受理すること
+///
+/// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK) の "REQUEST_UPDATE_OK: EXPIRES,
+/// LARGEST_OBJECT"。初回応答の EXPIRES だけを許可する集合とは区別する。
+#[test]
+fn namespace_update_ok_accepts_largest_object() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe_namespace(ns(&[b"live"]), MessageParameters::new())
+        .expect("SUBSCRIBE_NAMESPACE を送信できること");
+    let (_, message) = take_send_request(&mut client);
+    server
+        .recv_request(message)
+        .expect("SUBSCRIBE_NAMESPACE を受理できること");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+        .expect("SUBSCRIBE_NAMESPACE_OK を送信できること");
+    let (_, ok) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok)
+        .expect("SUBSCRIBE_NAMESPACE_OK を受理できること");
+
+    client
+        .send_request_update(
+            rid,
+            params_with(
+                PARAM_TRACK_NAMESPACE_PREFIX,
+                MessageParameterValue::TrackNamespacePrefix(ns(&[b"live", b"mic"])),
+            ),
+        )
+        .expect("REQUEST_UPDATE を送信できること");
+    let (_, update) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, update)
+        .expect("REQUEST_UPDATE を受理できること");
+
+    let mut ok_parameters = MessageParameters::new();
+    ok_parameters.push(MessageParameter {
+        param_type: PARAM_LARGEST_OBJECT,
+        value: MessageParameterValue::Location {
+            group: 1,
+            object: 2,
+        },
+    });
+    client
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestOk(RequestOk {
+                parameters: ok_parameters,
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect("REQUEST_UPDATE_OK の LARGEST_OBJECT を受理できること");
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "受理後もセッションが Established であること"
+    );
+}
+
+/// namespace 系 request の REQUEST_UPDATE で予約名前空間を拒否すること
+///
+/// draft-ietf-moq-transport-23 §2.4.3 (Reserved Namespaces): `.` 単独への request は
+/// DOES_NOT_EXIST で拒否する。REQUEST_UPDATE の失敗時は bidi stream を閉じる (§9.5.1) が、
+/// セッション全体は閉じない。
+#[test]
+fn namespace_update_to_reserved_prefix_is_rejected_without_closing_session() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe_namespace(ns(&[b"live"]), MessageParameters::new())
+        .expect("SUBSCRIBE_NAMESPACE を送信できること");
+    let (_, message) = take_send_request(&mut client);
+    server
+        .recv_request(message)
+        .expect("SUBSCRIBE_NAMESPACE を受理できること");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+        .expect("SUBSCRIBE_NAMESPACE_OK を送信できること");
+    let (_, ok) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok)
+        .expect("SUBSCRIBE_NAMESPACE_OK を受理できること");
+
+    // 送信 API は予約名前空間への更新をローカルで拒否するため、wire メッセージを直接作る。
+    // request_id は peer (client) が採番する次の偶数値 2 とする。
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(ns(&[b"."])),
+    });
+    server
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestUpdate(RequestUpdate {
+                request_id: 2,
+                parameters,
+            }),
+        )
+        .expect("予約名前空間への更新はセッションを閉じず REQUEST_ERROR にする");
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "セッションは Established のままであること"
+    );
+    let (_, error, fin) = take_send_on_stream_with_fin(&mut server);
+    match error {
+        ControlMessage::RequestError(error) => {
+            assert_eq!(
+                error.error_code, REQUEST_DOES_NOT_EXIST,
+                "予約名前空間は DOES_NOT_EXIST で拒否すること"
+            );
+        }
+        other => panic!("REQUEST_ERROR が送出されること: {other:?}"),
+    }
+    assert!(fin, "REQUEST_UPDATE の失敗では bidi stream を閉じること");
+}
+
+/// namespace 系 REQUEST_UPDATE_OK の受信で CONTROL_MESSAGE_TIMEOUT が解除されること
+///
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): 更新は応答を受けるまで outstanding で
+/// あり、応答受信後は制御メッセージ応答待ちタイマーを残してはならない。
+#[test]
+fn namespace_update_response_clears_control_message_deadline() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe_tracks(ns(&[b"live"]), MessageParameters::new())
+        .expect("SUBSCRIBE_TRACKS を送信できること");
+    let (_, message) = take_send_request(&mut client);
+    server
+        .recv_request(message)
+        .expect("SUBSCRIBE_TRACKS を受理できること");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+        .expect("SUBSCRIBE_TRACKS_OK を送信できること");
+    let (_, ok) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok)
+        .expect("SUBSCRIBE_TRACKS_OK を受理できること");
+
+    // 更新の応答待ちにだけタイマーを掛ける。初期応答は既に受信済みで解除されている。
+    client.set_control_message_timeout_ms(Some(10));
+    client
+        .send_request_update(
+            rid,
+            params_with(PARAM_PAUSED, MessageParameterValue::Uint8(1)),
+        )
+        .expect("REQUEST_UPDATE を送信できること");
+    let (_, update) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, update)
+        .expect("REQUEST_UPDATE を受理できること");
+    let (_, ack) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ack)
+        .expect("REQUEST_UPDATE_OK を受理できること");
+
+    client.tick(1000);
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "応答済みの更新の期限でセッションを閉じないこと"
     );
 }

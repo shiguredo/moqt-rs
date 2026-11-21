@@ -22,8 +22,8 @@ use crate::error::{
 };
 use crate::message::common::TrackNamespace;
 use crate::message::{
-    ControlMessage, Namespace, NamespaceDone, PublishNamespace, PublishSkipped, SubscribeNamespace,
-    SubscribeTracks,
+    ControlMessage, Namespace, NamespaceDone, PublishNamespace, PublishSkipped, RequestOk,
+    SubscribeNamespace, SubscribeTracks,
 };
 use crate::message_parameter::MessageParameters;
 use crate::session::core::Session;
@@ -35,6 +35,7 @@ use crate::session::types::{
     RequestStreamEnd, SendRequestError, SessionEvent, TerminationReason, TrackRole,
     TrackSubscription, terminationreason_from_end,
 };
+use crate::track_properties::TrackProperties;
 
 /// prefix と suffix を結合して完全な Track Namespace を返す
 ///
@@ -150,6 +151,7 @@ impl Session {
                 track_namespace: track_namespace.clone(),
                 parameters: parameters.clone(),
                 state: NamespaceRequestState::Pending,
+                outstanding_updates: 0,
             },
         );
         self.request_streams
@@ -202,6 +204,7 @@ impl Session {
                 track_namespace: track_namespace.clone(),
                 parameters: parameters.clone(),
                 state: NamespaceRequestState::Pending,
+                outstanding_updates: 0,
                 received_namespaces: alloc::collections::BTreeSet::new(),
                 sent_suffixes: alloc::collections::BTreeSet::new(),
             },
@@ -285,6 +288,7 @@ impl Session {
                 track_namespace: track_namespace.clone(),
                 parameters: parameters.clone(),
                 state: NamespaceRequestState::Pending,
+                outstanding_updates: 0,
                 received_published: alloc::collections::BTreeSet::new(),
                 received_skipped: alloc::collections::BTreeSet::new(),
                 sent_published: alloc::collections::BTreeSet::new(),
@@ -536,6 +540,7 @@ impl Session {
                 ));
             }
             entry.parameters.merge_from(parameters);
+            entry.outstanding_updates = entry.outstanding_updates.saturating_add(1);
             if let Some(prefix) = new_prefix {
                 entry.track_namespace = prefix.clone();
                 let mut still_advertised = alloc::collections::BTreeSet::new();
@@ -605,9 +610,48 @@ impl Session {
             ));
         }
         entry.parameters.merge_from(parameters);
+        entry.outstanding_updates = entry.outstanding_updates.saturating_add(1);
         if let Some(prefix) = new_prefix {
             entry.track_namespace = prefix;
         }
+        Ok(())
+    }
+
+    /// PUBLISH_NAMESPACE の REQUEST_UPDATE を送信する (requester 側)
+    ///
+    /// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): PUBLISH_NAMESPACE の sender
+    /// (publisher) は同じ bidi stream 上で REQUEST_UPDATE を送れる。許可パラメータは
+    /// AUTHORIZATION_TOKEN だけである (§9.5 の "PUBLISH_NAMESPACE: AUTHORIZATION_TOKEN")。
+    pub(crate) fn send_update_for_publish_namespace(
+        &mut self,
+        request_id: u64,
+        parameters: &MessageParameters,
+    ) -> Result<(), crate::session::types::SessionError> {
+        let entry = self
+            .publish_namespaces
+            .get_mut(&request_id)
+            .ok_or_else(|| {
+                crate::session::types::SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "PUBLISH_NAMESPACE not found for send_request_update",
+                )
+            })?;
+        if entry.my_role != TrackRole::Publisher {
+            return Err(crate::session::types::SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "REQUEST_UPDATE for PUBLISH_NAMESPACE can only be sent by the requester side",
+            ));
+        }
+        if entry.state != NamespaceRequestState::Established {
+            return Err(crate::session::types::SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "REQUEST_UPDATE requires an established PUBLISH_NAMESPACE",
+            ));
+        }
+        // AUTHORIZATION_TOKEN の値そのものは wire に載るだけであり、送信側の状態に
+        // 保持するのはパラメータの累積だけである。トークンの alias 解決は受信側が行う。
+        entry.parameters.merge_from(parameters);
+        entry.outstanding_updates = entry.outstanding_updates.saturating_add(1);
         Ok(())
     }
 
@@ -621,6 +665,7 @@ impl Session {
     pub(crate) fn validate_namespace_request_update(
         &self,
         request_id: u64,
+        locally_terminated: bool,
     ) -> Result<(), crate::session::types::SessionError> {
         let entry = self
             .namespace_subscriptions
@@ -637,7 +682,9 @@ impl Session {
                 "REQUEST_UPDATE for SUBSCRIBE_NAMESPACE received by the requester side",
             ));
         }
-        if entry.state != NamespaceRequestState::Established {
+        // ローカル終端済みの request は送信方向を reset 済みで応答を送れない。遅延して届いた
+        // 更新は peer の違反ではないため、state だけ緩めて role 検証は維持する。
+        if !locally_terminated && entry.state != NamespaceRequestState::Established {
             return Err(crate::session::types::SessionError::new(
                 SESSION_UNEXPECTED_MESSAGE,
                 "REQUEST_UPDATE requires an established SUBSCRIBE_NAMESPACE",
@@ -650,6 +697,7 @@ impl Session {
     pub(crate) fn validate_track_subscription_update(
         &self,
         request_id: u64,
+        locally_terminated: bool,
     ) -> Result<(), crate::session::types::SessionError> {
         let entry = self.track_subscriptions.get(&request_id).ok_or_else(|| {
             crate::session::types::SessionError::new(
@@ -663,10 +711,38 @@ impl Session {
                 "REQUEST_UPDATE for SUBSCRIBE_TRACKS received by the requester side",
             ));
         }
-        if entry.state != NamespaceRequestState::Established {
+        if !locally_terminated && entry.state != NamespaceRequestState::Established {
             return Err(crate::session::types::SessionError::new(
                 SESSION_UNEXPECTED_MESSAGE,
                 "REQUEST_UPDATE requires an established SUBSCRIBE_TRACKS",
+            ));
+        }
+        Ok(())
+    }
+
+    /// PUBLISH_NAMESPACE の REQUEST_UPDATE を受信できる状態かを検証する
+    pub(crate) fn validate_publish_namespace_request_update(
+        &self,
+        request_id: u64,
+        locally_terminated: bool,
+    ) -> Result<(), crate::session::types::SessionError> {
+        let entry = self.publish_namespaces.get(&request_id).ok_or_else(|| {
+            crate::session::types::SessionError::new(
+                SESSION_UNEXPECTED_MESSAGE,
+                "REQUEST_UPDATE received for unknown PUBLISH_NAMESPACE",
+            )
+        })?;
+        // PUBLISH_NAMESPACE の requester は publisher、responder は subscriber である。
+        if entry.my_role != TrackRole::Subscriber {
+            return Err(crate::session::types::SessionError::new(
+                SESSION_UNEXPECTED_MESSAGE,
+                "REQUEST_UPDATE for PUBLISH_NAMESPACE received by the requester side",
+            ));
+        }
+        if !locally_terminated && entry.state != NamespaceRequestState::Established {
+            return Err(crate::session::types::SessionError::new(
+                SESSION_UNEXPECTED_MESSAGE,
+                "REQUEST_UPDATE requires an established PUBLISH_NAMESPACE",
             ));
         }
         Ok(())
@@ -687,16 +763,9 @@ impl Session {
             return Ok(());
         }
         let new_prefix = parameters.track_namespace_prefix().cloned();
-        if let Some(prefix) = &new_prefix
-            && (prefix.is_single_period() || prefix.is_session_level())
-        {
-            let err = crate::session::types::SessionError::new(
-                SESSION_INVALID_TRACK_NAMESPACE,
-                "reserved namespace in REQUEST_UPDATE",
-            );
-            self.fail(err.clone());
-            return Err(err);
-        }
+        // `.` (single period) / `.session` への prefix 更新は、呼び出し元の
+        // `handle_peer_request_update` が先に REQUEST_ERROR (DOES_NOT_EXIST) で拒否する。
+        // ここへ到達する prefix は予約名前空間ではない。
         let entry = self
             .namespace_subscriptions
             .get_mut(&request_id)
@@ -724,16 +793,9 @@ impl Session {
             return Ok(());
         }
         let new_prefix = parameters.track_namespace_prefix().cloned();
-        if let Some(prefix) = &new_prefix
-            && (prefix.is_single_period() || prefix.is_session_level())
-        {
-            let err = crate::session::types::SessionError::new(
-                SESSION_INVALID_TRACK_NAMESPACE,
-                "reserved namespace in REQUEST_UPDATE",
-            );
-            self.fail(err.clone());
-            return Err(err);
-        }
+        // `.` (single period) / `.session` への prefix 更新は、呼び出し元の
+        // `handle_peer_request_update` が先に REQUEST_ERROR (DOES_NOT_EXIST) で拒否する。
+        // ここへ到達する prefix は予約名前空間ではない。
         let entry = self
             .track_subscriptions
             .get_mut(&request_id)
@@ -743,6 +805,54 @@ impl Session {
             entry.track_namespace = prefix;
         }
         Ok(())
+    }
+
+    /// PUBLISH_NAMESPACE の REQUEST_UPDATE を反映する (responder 側)
+    ///
+    /// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): PUBLISH_NAMESPACE の
+    /// REQUEST_UPDATE が運べるのは AUTHORIZATION_TOKEN だけである。トークンの alias 解決は
+    /// 呼び出し元の `handle_peer_request_update` が cache へ適用済みであり、ここでは
+    /// 要求パラメータの累積だけを更新する。
+    pub(crate) fn handle_update_for_publish_namespace(
+        &mut self,
+        request_id: u64,
+        parameters: MessageParameters,
+        locally_terminated: bool,
+    ) -> Result<(), crate::session::types::SessionError> {
+        if locally_terminated {
+            return Ok(());
+        }
+        let entry = self
+            .publish_namespaces
+            .get_mut(&request_id)
+            .expect("validate_publish_namespace_request_update guarantees key presence");
+        entry.parameters.merge_from(&parameters);
+        Ok(())
+    }
+
+    /// namespace 系 request の REQUEST_UPDATE_OK を応答 stream に積む
+    ///
+    /// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): "The receiver of a REQUEST_UPDATE
+    /// MUST respond with exactly one REQUEST_UPDATE_OK or REQUEST_UPDATE_ERROR message"。
+    /// namespace 系 request の更新は prefix / PAUSED / filter / token の機械的な反映だけであり、
+    /// アプリの判断を必要としないため、Session が成功応答を自動送出する。
+    ///
+    /// `locally_terminated` の request は送信方向を reset 済みで応答を送れないため、
+    /// 呼び出し側が本関数を呼ばない。
+    pub(crate) fn respond_update_for_namespace_request(&mut self, request_id: u64) {
+        self.events.push_back(SessionEvent::SendOnStream {
+            request_id,
+            message: ControlMessage::RequestOk(RequestOk {
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }),
+            // namespace 系 request は REQUEST_UPDATE_OK の後も NAMESPACE / NAMESPACE_DONE を
+            // 送れるため、送信方向を FIN しない。
+            fin: false,
+        });
+        // draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES): 応答送信で peer の
+        // outstanding クレジットを 1 つ回復する。
+        self.restore_incoming_request_update_credit(request_id);
     }
 
     // ─── 応答送信 (responder 側) ───────────────────────────
@@ -779,10 +889,12 @@ impl Session {
                     "REQUEST_OK (subscribe_namespace) can only be sent by the responder side",
                 ));
             }
-            if entry.state == NamespaceRequestState::Terminated {
+            // 初回応答だけを扱う。REQUEST_UPDATE_OK は
+            // `respond_update_for_namespace_request` が自動送出する。
+            if entry.state != NamespaceRequestState::Pending {
                 return Err(crate::session::types::SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
-                    "REQUEST_OK on a terminated SUBSCRIBE_NAMESPACE",
+                    "REQUEST_OK on a SUBSCRIBE_NAMESPACE that is not pending",
                 ));
             }
             entry.state = NamespaceRequestState::Established;
@@ -795,10 +907,12 @@ impl Session {
                     "REQUEST_OK (subscribe_tracks) can only be sent by the responder side",
                 ));
             }
-            if entry.state == NamespaceRequestState::Terminated {
+            // 初回応答だけを扱う。REQUEST_UPDATE_OK は
+            // `respond_update_for_namespace_request` が自動送出する。
+            if entry.state != NamespaceRequestState::Pending {
                 return Err(crate::session::types::SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
-                    "REQUEST_OK on a terminated SUBSCRIBE_TRACKS",
+                    "REQUEST_OK on a SUBSCRIBE_TRACKS that is not pending",
                 ));
             }
             entry.state = NamespaceRequestState::Established;
@@ -933,6 +1047,7 @@ impl Session {
                 track_namespace: msg.track_namespace.clone(),
                 parameters: msg.parameters.clone(),
                 state: NamespaceRequestState::Pending,
+                outstanding_updates: 0,
             },
         );
         self.request_streams
@@ -977,6 +1092,7 @@ impl Session {
                 track_namespace: msg.track_namespace.clone(),
                 parameters: msg.parameters.clone(),
                 state: NamespaceRequestState::Pending,
+                outstanding_updates: 0,
                 received_namespaces: alloc::collections::BTreeSet::new(),
                 sent_suffixes: alloc::collections::BTreeSet::new(),
             },
@@ -1050,6 +1166,7 @@ impl Session {
                 track_namespace: msg.track_namespace.clone(),
                 parameters: msg.parameters.clone(),
                 state: NamespaceRequestState::Pending,
+                outstanding_updates: 0,
                 received_published: alloc::collections::BTreeSet::new(),
                 received_skipped: alloc::collections::BTreeSet::new(),
                 sent_published: alloc::collections::BTreeSet::new(),
@@ -1070,9 +1187,14 @@ impl Session {
     // ─── 応答ハンドラ (requester 側) ────────────────────────
 
     /// PUBLISH_NAMESPACE の REQUEST_OK を反映する
+    ///
+    /// `is_update` が false なら初回応答 (Pending → Established)、true なら
+    /// REQUEST_UPDATE_OK (Established のまま) を表す。両者は同じ wire メッセージであり、
+    /// 受信側の state でしか区別できない。
     pub(crate) fn handle_ok_for_publish_namespace(
         &mut self,
         request_id: u64,
+        is_update: bool,
     ) -> Result<(), crate::session::types::SessionError> {
         let entry = self
             .publish_namespaces
@@ -1089,6 +1211,16 @@ impl Session {
                 "REQUEST_OK for PUBLISH_NAMESPACE received by the responder side",
             ));
         }
+        if is_update {
+            if entry.state != NamespaceRequestState::Established {
+                return Err(crate::session::types::SessionError::new(
+                    SESSION_UNEXPECTED_MESSAGE,
+                    "REQUEST_UPDATE_OK received for a PUBLISH_NAMESPACE that is not established",
+                ));
+            }
+            entry.outstanding_updates = entry.outstanding_updates.saturating_sub(1);
+            return Ok(());
+        }
         if entry.state != NamespaceRequestState::Pending {
             return Err(crate::session::types::SessionError::new(
                 SESSION_UNEXPECTED_MESSAGE,
@@ -1100,9 +1232,12 @@ impl Session {
     }
 
     /// SUBSCRIBE_NAMESPACE の REQUEST_OK を反映する
+    ///
+    /// `is_update` の意味は [`Self::handle_ok_for_publish_namespace`] と同じである。
     pub(crate) fn handle_ok_for_subscribe_namespace(
         &mut self,
         request_id: u64,
+        is_update: bool,
     ) -> Result<(), crate::session::types::SessionError> {
         let entry = self
             .namespace_subscriptions
@@ -1119,12 +1254,20 @@ impl Session {
                 "REQUEST_OK for SUBSCRIBE_NAMESPACE received by the responder side",
             ));
         }
-        // 初回応答 (Pending → Established) と REQUEST_UPDATE_OK (Established のまま) の
-        // 両方を受け付ける。応答の context は self 側の state でしか区別できない。
-        if entry.state == NamespaceRequestState::Terminated {
+        if is_update {
+            if entry.state != NamespaceRequestState::Established {
+                return Err(crate::session::types::SessionError::new(
+                    SESSION_UNEXPECTED_MESSAGE,
+                    "REQUEST_UPDATE_OK received for a SUBSCRIBE_NAMESPACE that is not established",
+                ));
+            }
+            entry.outstanding_updates = entry.outstanding_updates.saturating_sub(1);
+            return Ok(());
+        }
+        if entry.state != NamespaceRequestState::Pending {
             return Err(crate::session::types::SessionError::new(
                 SESSION_UNEXPECTED_MESSAGE,
-                "REQUEST_OK received for a terminated SUBSCRIBE_NAMESPACE",
+                "REQUEST_OK received for a SUBSCRIBE_NAMESPACE that is not pending",
             ));
         }
         entry.state = NamespaceRequestState::Established;
@@ -1132,9 +1275,12 @@ impl Session {
     }
 
     /// SUBSCRIBE_TRACKS の REQUEST_OK を反映する
+    ///
+    /// `is_update` の意味は [`Self::handle_ok_for_publish_namespace`] と同じである。
     pub(crate) fn handle_ok_for_subscribe_tracks(
         &mut self,
         request_id: u64,
+        is_update: bool,
     ) -> Result<(), crate::session::types::SessionError> {
         let entry = self
             .track_subscriptions
@@ -1151,11 +1297,20 @@ impl Session {
                 "REQUEST_OK for SUBSCRIBE_TRACKS received by the responder side",
             ));
         }
-        // 初回応答と REQUEST_UPDATE_OK の両方を受け付ける
-        if entry.state == NamespaceRequestState::Terminated {
+        if is_update {
+            if entry.state != NamespaceRequestState::Established {
+                return Err(crate::session::types::SessionError::new(
+                    SESSION_UNEXPECTED_MESSAGE,
+                    "REQUEST_UPDATE_OK received for a SUBSCRIBE_TRACKS that is not established",
+                ));
+            }
+            entry.outstanding_updates = entry.outstanding_updates.saturating_sub(1);
+            return Ok(());
+        }
+        if entry.state != NamespaceRequestState::Pending {
             return Err(crate::session::types::SessionError::new(
                 SESSION_UNEXPECTED_MESSAGE,
-                "REQUEST_OK received for a terminated SUBSCRIBE_TRACKS",
+                "REQUEST_OK received for a SUBSCRIBE_TRACKS that is not pending",
             ));
         }
         entry.state = NamespaceRequestState::Established;

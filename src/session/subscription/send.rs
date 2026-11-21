@@ -10,9 +10,11 @@ use crate::error::{
 };
 use crate::message::{
     ControlMessage, FETCH_UPDATE_ALLOWED_PARAMS, PUBLISH_ALLOWED_PARAMS,
-    PUBLISH_STATE_NOTIFY_ALLOWED_PARAMS, Publish, PublishDone, PublishStateNotify, ReasonPhrase,
-    RequestUpdate, SUBSCRIBE_ALLOWED_PARAMS, SUBSCRIBE_OK_ALLOWED_PARAMS,
-    SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe, SubscribeOk,
+    PUBLISH_NAMESPACE_UPDATE_ALLOWED_PARAMS, PUBLISH_STATE_NOTIFY_ALLOWED_PARAMS, Publish,
+    PublishDone, PublishStateNotify, ReasonPhrase, RequestUpdate, SUBSCRIBE_ALLOWED_PARAMS,
+    SUBSCRIBE_NAMESPACE_UPDATE_ALLOWED_PARAMS, SUBSCRIBE_OK_ALLOWED_PARAMS,
+    SUBSCRIBE_TRACKS_UPDATE_ALLOWED_PARAMS, SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe,
+    SubscribeOk,
     common::{Location, TrackNamespace},
 };
 use crate::message_parameter::{LocationFilterContext, LocationFilterUpdate, MessageParameters};
@@ -852,13 +854,19 @@ impl Session {
                 FETCH_UPDATE_ALLOWED_PARAMS,
                 "REQUEST_UPDATE (fetch) parameter not allowed in this context",
             )),
-            Some(RequestTable::NamespaceSubscription) | Some(RequestTable::TrackSubscription) => {
-                Some((
-                    crate::message::NAMESPACE_UPDATE_ALLOWED_PARAMS,
-                    "REQUEST_UPDATE (namespace subscription) parameter not allowed in this context",
-                ))
-            }
-            Some(RequestTable::PublishNamespace) | Some(RequestTable::TrackStatus) | None => {
+            Some(RequestTable::NamespaceSubscription) => Some((
+                SUBSCRIBE_NAMESPACE_UPDATE_ALLOWED_PARAMS,
+                "REQUEST_UPDATE (subscribe_namespace) parameter not allowed in this context",
+            )),
+            Some(RequestTable::TrackSubscription) => Some((
+                SUBSCRIBE_TRACKS_UPDATE_ALLOWED_PARAMS,
+                "REQUEST_UPDATE (subscribe_tracks) parameter not allowed in this context",
+            )),
+            Some(RequestTable::PublishNamespace) => Some((
+                PUBLISH_NAMESPACE_UPDATE_ALLOWED_PARAMS,
+                "REQUEST_UPDATE (publish_namespace) parameter not allowed in this context",
+            )),
+            Some(RequestTable::TrackStatus) | None => {
                 return Err(SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
                     "request_update not allowed for this request id",
@@ -882,7 +890,10 @@ impl Session {
             Some(RequestTable::TrackSubscription) => {
                 self.send_update_for_track_subscription(request_id, &parameters)?
             }
-            Some(RequestTable::PublishNamespace) | Some(RequestTable::TrackStatus) | None => {
+            Some(RequestTable::PublishNamespace) => {
+                self.send_update_for_publish_namespace(request_id, &parameters)?
+            }
+            Some(RequestTable::TrackStatus) | None => {
                 return Err(SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
                     "request_update not allowed for this request id",

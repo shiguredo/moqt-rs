@@ -346,21 +346,49 @@ pub(crate) const SUBSCRIBE_TRACKS_ALLOWED_PARAMS: &[u64] = &[
     PARAM_INCLUDE_PROPERTIES,
 ];
 
-/// SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS の REQUEST_UPDATE で許可されるパラメータ型
+/// SUBSCRIBE_NAMESPACE の REQUEST_UPDATE で許可されるパラメータ型
 ///
-/// draft-ietf-moq-transport-23 §9.5.2 (Updating Namespace Subscriptions): Track Namespace
-/// Prefix の更新は TRACK_NAMESPACE_PREFIX (§9.19.20) で行う。AUTHORIZATION_TOKEN (§9.19.2)
-/// は REQUEST_UPDATE に出現できる。それ以外の subscription 向けパラメータは namespace
-/// 単位の購読には定義されていない。
-pub(crate) const NAMESPACE_UPDATE_ALLOWED_PARAMS: &[u64] =
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): "SUBSCRIBE_NAMESPACE:
+/// AUTHORIZATION_TOKEN, TRACK_NAMESPACE_PREFIX"。Track Namespace Prefix の更新は
+/// §9.19.20 (TRACK_NAMESPACE_PREFIX Parameter) で行う。
+pub(crate) const SUBSCRIBE_NAMESPACE_UPDATE_ALLOWED_PARAMS: &[u64] =
     &[PARAM_AUTHORIZATION_TOKEN, PARAM_TRACK_NAMESPACE_PREFIX];
 
+/// SUBSCRIBE_TRACKS の REQUEST_UPDATE で許可されるパラメータ型
+///
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): "SUBSCRIBE_TRACKS:
+/// AUTHORIZATION_TOKEN, PAUSED, TRACK_PROPERTY_FILTER, TRACK_NAMESPACE_PREFIX"。
+/// PAUSED は今後 PUBLISH される track に対する初期状態だけを変え、既存 subscription には
+/// 影響しない (§9.19.18 (PAUSED Parameter))。TRACK_PROPERTY_FILTER は同じく今後の
+/// PUBLISH の選別に使う (§9.19.14 (TRACK PROPERTY FILTER Parameter))。
+pub(crate) const SUBSCRIBE_TRACKS_UPDATE_ALLOWED_PARAMS: &[u64] = &[
+    PARAM_AUTHORIZATION_TOKEN,
+    PARAM_PAUSED,
+    PARAM_TRACK_PROPERTY_FILTER,
+    PARAM_TRACK_NAMESPACE_PREFIX,
+];
+
+/// PUBLISH_NAMESPACE の REQUEST_UPDATE で許可されるパラメータ型
+///
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): "PUBLISH_NAMESPACE:
+/// AUTHORIZATION_TOKEN"。購読者が PUBLISH_NAMESPACE を受理した後に、publisher が認可
+/// トークンを更新するために使う。
+pub(crate) const PUBLISH_NAMESPACE_UPDATE_ALLOWED_PARAMS: &[u64] = &[PARAM_AUTHORIZATION_TOKEN];
+
 /// PUBLISH_NAMESPACE_OK / SUBSCRIBE_NAMESPACE_OK / SUBSCRIBE_TRACKS_OK で許可される
-/// パラメータ型
+/// パラメータ型 (初回応答)
 ///
 /// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): "PUBLISH_NAMESPACE_OK: EXPIRES" /
 /// "SUBSCRIBE_NAMESPACE_OK: EXPIRES" / "SUBSCRIBE_TRACKS_OK: EXPIRES"。
-pub(crate) const NAMESPACE_REQUEST_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES];
+pub(crate) const NAMESPACE_INITIAL_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES];
+
+/// namespace 系 request の REQUEST_UPDATE_OK で許可されるパラメータ型
+///
+/// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): "REQUEST_UPDATE_OK: EXPIRES,
+/// LARGEST_OBJECT"。初回応答 (PUBLISH_NAMESPACE_OK など) は EXPIRES だけを許すため、
+/// 更新応答とは別の集合を使う。
+pub(crate) const NAMESPACE_UPDATE_OK_ALLOWED_PARAMS: &[u64] =
+    &[PARAM_EXPIRES, PARAM_LARGEST_OBJECT];
 
 /// NAMESPACE で許可されるパラメータ型
 ///
