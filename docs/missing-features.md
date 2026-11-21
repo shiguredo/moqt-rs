@@ -48,7 +48,7 @@ relay による namespace の集約・forwarding) は本稿の対象外とする
 | --- | --- | --- | --- |
 | Secure Objects による E2E 暗号化と復号 | LOC §3、MSF §4.3 | 未実装。MSF の signaling フィールドは扱うが、`ENCRYPTED_LIST` (`0x0A`) / `PADDING` (`0x32`) Object Property と暗号処理が無い | `issues/pending/0004-add-secure-objects-encryption.md` |
 | MSF_COMPRESSION property による catalog 圧縮 | MSF §5.5 / §12.1 | 未実装。Track Property ID が TBD のため wire 実装しない | `issues/pending/0002-change-msf-compression-signaling.md` |
-| Log / Metrics track の payload | MSF §9 / §10 | 未実装。`packaging` の値は扱うが payload は未対応 | `issues/pending/0003-add-msf-log-metrics-payload.md` |
+| Log / Metrics track の payload | MSF §9 / §10 | 未実装。`packaging` の値は扱うが payload は未対応 | `issues/0003-add-msf-log-metrics-payload.md` |
 | LOC の Video Payload Format | LOC §2.1 | 部分実装。`loc::video_payload` で 1〜4 バイト length prefix / 3・4 バイト start code / length 1 = start code を扱う。example の annexB 統合と payload 内 parameter set は未対応 | `issues/pending/0005-add-loc-video-payload-format.md` |
 | LOC の Track スコープ Property | LOC §6.1 Table 1 | PUBLISH / SUBSCRIBE_OK で受信した場合、受信側は `Subscription::peer_track_properties` から `TrackProperties::find_varint` / `find_bytes` と `codec_string` (0x11 CODEC_STRING、UTF-8 検証) で取得できる。publisher example からの送信は未対応 | 未起票 |
 | DPoP proof の送信 | C4M §4.2 / §4.3 | CWT 形式 proof の codec と一括検証 API は実装済み。CWT proof を MOQT の AUTHORIZATION_TOKEN に載せる方法は仕様で未定義であり、example の URL 経路も proof を送らない | 未起票 |
