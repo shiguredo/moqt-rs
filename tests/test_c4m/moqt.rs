@@ -1,6 +1,9 @@
 //! C4M の `moqt` クレームと認可のテスト
 
-use shiguredo_moqt::c4m::cat::{CAT_CONTENT_TYPE, CLAIM_EXPIRATION, CatClaims, CatError, CatToken};
+use shiguredo_moqt::c4m::cat::{
+    CAT_CONTENT_TYPE, CLAIM_EXPIRATION, CatClaims, CatError, CatToken, ClaimValidationError,
+    ClaimValidationOptions,
+};
 use shiguredo_moqt::c4m::cbor::{self, Value};
 use shiguredo_moqt::c4m::cose::{
     CoseEncodingOptions, CoseMac0, CoseMessage, HEADER_ALGORITHM, HEADER_TYPE,
@@ -1057,13 +1060,32 @@ fn nil_end_still_applies_track_match() {
 }
 
 #[test]
-fn catdpop_non_finite_window_is_rejected() {
+fn catdpop_invalid_windows_are_rejected() {
     assert_eq!(
         CatDpop::decode(&Value::Map(vec![(
             Value::integer(0),
             Value::Float(f64::NAN)
         )])),
         Err(C4mError::NonFiniteNumber("catdpop window"))
+    );
+    // 負のウィンドウは「受理する時間範囲」として意味を持たない。後段の proof 検証まで
+    // 持ち越すと、すべての proof が期限切れとして扱われ、原因が分かりにくくなる
+    assert_eq!(
+        CatDpop::decode(&Value::Map(vec![(Value::integer(0), Value::integer(-1))])),
+        Err(C4mError::NegativeNumber("catdpop window"))
+    );
+    assert_eq!(
+        CatDpop::new(-1.0, true).encode(),
+        Err(C4mError::NegativeNumber("catdpop window"))
+    );
+
+    let claims = CatClaims {
+        catdpop: Some(CatDpop::new(-1.0, false)),
+        ..CatClaims::default()
+    };
+    assert_eq!(
+        claims.validate(&ClaimValidationOptions::default()),
+        Err(ClaimValidationError::NegativeClaim("catdpop window"))
     );
 }
 
@@ -1099,4 +1121,29 @@ fn allows_rejects_nil_in_the_middle() {
         b"t"
     ));
     assert!(!scope.allows(MoqtAction::Publish, &[b"a".as_slice()], b"t"));
+}
+
+/// 公開 API に手組みの `Value` を渡しても、CWT クレームの重複キーを拒否すること
+///
+/// RFC 8392 §3 のクレームセットは CBOR map であり、RFC 8949 §5.6.1 によりキーは一意で
+/// なければならない。`iss` が 2 つある map はどちらを採用するかで認可判断が変わるため、
+/// last-wins にせず拒否する。
+#[test]
+fn claims_reject_duplicate_integer_keys() {
+    assert!(
+        matches!(
+            CatClaims::decode(&Value::Map(vec![
+                (
+                    Value::integer(-65537),
+                    Value::Map(vec![(Value::integer(0), Value::Array(vec![]))]),
+                ),
+                (
+                    Value::integer(-65537),
+                    Value::Map(vec![(Value::integer(0), Value::Array(vec![]))]),
+                ),
+            ])),
+            Err(CatError::DuplicateClaim(-65537))
+        ),
+        "整数クレームキーの重複を拒否すること"
+    );
 }

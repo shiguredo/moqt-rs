@@ -607,6 +607,9 @@ impl CatDpop {
                     if !window.is_finite() {
                         return Err(C4mError::NonFiniteNumber("catdpop window"));
                     }
+                    if window < 0.0 {
+                        return Err(C4mError::NegativeNumber("catdpop window"));
+                    }
                     catdpop.window_seconds = Some(window);
                 }
                 Some(1) => {
@@ -634,6 +637,9 @@ impl CatDpop {
         if let Some(window) = self.window_seconds {
             if !window.is_finite() {
                 return Err(C4mError::NonFiniteNumber("catdpop window"));
+            }
+            if window < 0.0 {
+                return Err(C4mError::NegativeNumber("catdpop window"));
             }
             entries.push((Value::integer(0), number_value(window)));
         }
@@ -712,6 +718,8 @@ pub enum C4mError {
     TrackWithoutNamespace,
     /// 数値が有限でない (NaN / 無限大)
     NonFiniteNumber(&'static str),
+    /// 数値が負であってはならない
+    NegativeNumber(&'static str),
 }
 
 impl fmt::Display for C4mError {
@@ -737,6 +745,7 @@ impl fmt::Display for C4mError {
                 write!(f, "moqt-scope has a track match without a namespace match")
             }
             Self::NonFiniteNumber(name) => write!(f, "{name} must be finite"),
+            Self::NegativeNumber(name) => write!(f, "{name} must be non-negative"),
         }
     }
 }

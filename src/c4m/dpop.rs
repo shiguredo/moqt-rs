@@ -534,6 +534,12 @@ impl DpopProof {
         if !window_seconds.is_finite() {
             return Err(DpopError::NonFiniteNumber("freshness window"));
         }
+        // CWT 形式の verify_freshness と同じく、負のウィンドウは受理しない
+        // (負のまま比較すると常に ProofExpired / ProofNotYetValid になり、設定の誤りを
+        // 呼び出し側へ伝えられない)。
+        if window_seconds < 0.0 {
+            return Err(DpopError::InvalidFreshnessWindow);
+        }
         if !self.claims.issued_at.is_finite() {
             return Err(DpopError::NonFiniteNumber("iat"));
         }
@@ -1719,7 +1725,7 @@ impl CwtDpopProofCodec {
         self.ath_label
     }
 
-    /// CWT 形式の DPoP proof を発行する
+    /// CWT 形式の DPoP proof を発行する (actx と action の整合を検証する)
     ///
     /// 保護ヘッダに `alg` / `typ` / `kccs` を置き、`kccs` の `cnf` に `key` の公開鍵
     /// だけを入れて署名する。`key` は秘密鍵を含まなければならない
@@ -1727,9 +1733,56 @@ impl CwtDpopProofCodec {
     ///
     /// 対称鍵 (HMAC) では発行しない ([`DpopError::UnsupportedAlgorithm`])。
     /// `actx.type` が "moqt" でない claims も発行しない
-    /// ([`DpopError::ContextTypeMismatch`])。CWT タグ (61) は付けず、COSE_Sign1 タグ
-    /// (18) だけを付ける。
+    /// ([`DpopError::ContextTypeMismatch`])。`actx.action` の target 規則
+    /// (namespace / track の有無) に反する claims も発行しない
+    /// ([`DpopError::MissingActxTarget`] / [`DpopError::UnexpectedActxTarget`])。
+    /// CWT タグ (61) は付けず、COSE_Sign1 タグ (18) だけを付ける。
+    ///
+    /// 受信側の検証を意図的に失敗させる proof を組み立てる場合は
+    /// [`CwtDpopProofCodec::build_unchecked`] を使う。
     pub fn build<C: CoseCrypto>(
+        &self,
+        crypto: &C,
+        key: &CoseKey,
+        claims: &CwtDpopProofClaims,
+    ) -> Result<Vec<u8>, DpopError> {
+        // actx の型は閉じた CDDL の固定値である。受理判定を行う利用側を待たず、
+        // 発行側で MOQT 以外の type の proof を作らない
+        if claims.authorization_context.context_type != MOQT_AUTHORIZATION_CONTEXT_TYPE {
+            return Err(DpopError::ContextTypeMismatch);
+        }
+        // draft-ietf-moq-c4m-02 §4.2: action ごとに actx の namespace / track の有無が
+        // 決まる。自実装の検証 API ([`CwtAuthorizationContext::verify_request`]) が拒否する
+        // proof を発行しないよう、発行側でも同じ規則を適用する。
+        let action = MoqtAction::from_key(claims.authorization_context.action)
+            .ok_or(DpopError::ActionMismatch)?;
+        let (requires_namespace, requires_track) = action_target_requirements(action);
+        if requires_namespace != claims.authorization_context.namespace.is_some() {
+            return Err(if requires_namespace {
+                DpopError::MissingActxTarget("namespace")
+            } else {
+                DpopError::UnexpectedActxTarget("namespace")
+            });
+        }
+        if requires_track != claims.authorization_context.track_name.is_some() {
+            return Err(if requires_track {
+                DpopError::MissingActxTarget("track")
+            } else {
+                DpopError::UnexpectedActxTarget("track")
+            });
+        }
+        self.build_unchecked(crypto, key, claims)
+    }
+
+    /// actx と action の整合を検証せずに CWT 形式の DPoP proof を発行する
+    ///
+    /// 低レベル API。受信側の検証 ([`CwtAuthorizationContext::verify_request`] など) を
+    /// 意図的に失敗させる proof をテストや相互運用の検証で組み立てるために使う。
+    /// 通常の発行経路では [`CwtDpopProofCodec::build`] を使うこと。
+    ///
+    /// `actx.type` と target の整合は検証しない。署名アルゴリズムと鍵の種別
+    /// (対称鍵を拒否する) は本メソッドでも検証する。
+    pub fn build_unchecked<C: CoseCrypto>(
         &self,
         crypto: &C,
         key: &CoseKey,
@@ -1738,11 +1791,6 @@ impl CwtDpopProofCodec {
         let algorithm = default_signing_algorithm(key);
         if algorithm.is_mac() {
             return Err(DpopError::UnsupportedAlgorithm);
-        }
-        // actx の型は閉じた CDDL の固定値である。受理判定を行う利用側を待たず、
-        // 発行側で MOQT 以外の type の proof を作らない
-        if claims.authorization_context.context_type != MOQT_AUTHORIZATION_CONTEXT_TYPE {
-            return Err(DpopError::ContextTypeMismatch);
         }
         let kccs = Value::Map(vec![(
             Value::integer(CLAIM_CONFIRMATION),

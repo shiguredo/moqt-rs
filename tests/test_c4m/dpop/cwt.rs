@@ -1669,3 +1669,64 @@ fn cnf_binding_ignores_uninterpreted_confirmation_methods() {
 
 #[path = "cwt/verification.rs"]
 mod verification;
+
+/// `build` が action と actx の target の整合を検証すること
+///
+/// `CwtAuthorizationContext::verify_request` が拒否する proof を発行側で作らない。
+/// SETUP は target を持たず、SUBSCRIBE は namespace と track の両方を必須とする。
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn build_rejects_actx_targets_inconsistent_with_action() {
+    let crypto = AwsLcRsCrypto::new();
+    let codec = codec();
+    let key = es256_private_key();
+
+    // SETUP に namespace を持たせる
+    let mut setup_with_namespace = claims();
+    setup_with_namespace.authorization_context.action = MoqtAction::Setup.key();
+    setup_with_namespace.authorization_context.namespace = Some(vec![b"ns".to_vec()]);
+    setup_with_namespace.authorization_context.track_name = None;
+    assert_eq!(
+        codec.build(&crypto, &key, &setup_with_namespace),
+        Err(DpopError::UnexpectedActxTarget("namespace")),
+        "SETUP に namespace を持つ proof を発行しないこと"
+    );
+
+    // SUBSCRIBE で namespace を省略する
+    let mut subscribe_without_namespace = claims();
+    subscribe_without_namespace.authorization_context.action = MoqtAction::Subscribe.key();
+    subscribe_without_namespace.authorization_context.namespace = None;
+    assert_eq!(
+        codec.build(&crypto, &key, &subscribe_without_namespace),
+        Err(DpopError::MissingActxTarget("namespace")),
+        "SUBSCRIBE で namespace を省略した proof を発行しないこと"
+    );
+
+    // SUBSCRIBE で track を省略する
+    let mut subscribe_without_track = claims();
+    subscribe_without_track.authorization_context.action = MoqtAction::Subscribe.key();
+    subscribe_without_track.authorization_context.track_name = None;
+    assert_eq!(
+        codec.build(&crypto, &key, &subscribe_without_track),
+        Err(DpopError::MissingActxTarget("track")),
+        "SUBSCRIBE で track を省略した proof を発行しないこと"
+    );
+
+    // PUBLISH_NAMESPACE に track を持たせる
+    let mut publish_namespace_with_track = claims();
+    publish_namespace_with_track.authorization_context.action = MoqtAction::PublishNamespace.key();
+    assert_eq!(
+        codec.build(&crypto, &key, &publish_namespace_with_track),
+        Err(DpopError::UnexpectedActxTarget("track")),
+        "PUBLISH_NAMESPACE に track を持つ proof を発行しないこと"
+    );
+
+    // 未知の action
+    let mut unknown_action = claims();
+    unknown_action.authorization_context.action = 99;
+    assert_eq!(
+        codec.build(&crypto, &key, &unknown_action),
+        Err(DpopError::ActionMismatch),
+        "未知の action を持つ proof を発行しないこと"
+    );
+}

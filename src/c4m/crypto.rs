@@ -448,16 +448,9 @@ fn key_algorithm_value(value: &Value) -> Result<Algorithm, CoseError> {
             .ok_or(CoseError::UnsupportedAlgorithm(identifier));
     }
     match value {
-        Value::TextString(name) => match name.as_str() {
-            "ES256" => Ok(Algorithm::Es256),
-            "ES384" => Ok(Algorithm::Es384),
-            "ES512" => Ok(Algorithm::Es512),
-            "EdDSA" => Ok(Algorithm::EdDsa),
-            "HMAC 256/256" => Ok(Algorithm::HmacSha256),
-            "HMAC 384/384" => Ok(Algorithm::HmacSha384),
-            "HMAC 512/512" => Ok(Algorithm::HmacSha512),
-            _ => Err(CoseError::UnexpectedType("alg")),
-        },
+        Value::TextString(name) => {
+            Algorithm::from_cose_name(name).ok_or(CoseError::UnexpectedType("alg"))
+        }
         _ => Err(CoseError::UnexpectedType("alg")),
     }
 }

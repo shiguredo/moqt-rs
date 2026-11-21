@@ -201,6 +201,7 @@ compact 形式のトークンは COSE 構造ではないため、署名対象は
 | ES512 | -36 | P-521 (secp521r1) |
 | EdDSA | -8 | Ed25519 |
 
+- `alg` は整数のほか、COSE Algorithms レジストリ名 (`"ES256"`、`"HMAC 256/256"` など) の tstr も受理します。tstr は `algorithm_identifier` に整数へ正規化して保持します (RFC 9052 §3.1)
 - 鍵は `CoseKey` の `Symmetric`、`Ec2`、`Okp` で表します。EC2 の座標と秘密鍵はビッグエンディアンの固定長です
 - ECDSA の署名は COSE の固定長 r||s (ES256 は 64 バイト) です
 - draft-02 のベクタは HMAC-SHA256 に `5` を使います。旧 draft-01 の compact ベクタは `-4` を使いますが、IANA では `-4` は A192KW です。**検証では `-4` と `5` の両方を HMAC-SHA256 として受理**し、発行は `5` を使います (`C4M_DRAFT_HMAC_SHA256_ALGORITHM_ID`)
@@ -588,6 +589,7 @@ ath-label = TBD_ATH
 `actx` と `ath` が同じ値になる設定、および CWT の登録済み claim key (1〜8) と衝突する設定は拒否します。
 `verify_against_cat_token` は、proof をデコードした codec と検証に渡した codec の label が一致することも確認します。
 `CwtDpopProofCodec::build` は CWT タグを付けず、COSE_Sign1 タグ (18) だけを付けます。
+`build` は `actx.action` に対する `namespace` / `track` の有無も検証します。受信側の検証を意図的に失敗させる proof を組み立てる場合は `build_unchecked` を使います。
 
 ```rust
 use shiguredo_moqt::c4m::cat::{

@@ -361,19 +361,50 @@ fn key_id_accepts_bytes_and_text() {
     assert_eq!(header.key_id, Some(KeyId::Bytes(vec![0xab])));
 }
 
+/// COSE の `alg` は整数だけでなく COSE Algorithms レジストリ名でも受理すること
+///
+/// RFC 9052 §3.1: `alg` は `int / tstr`。tstr は RFC 9053 §2 / §3 のレジストリ名であり、
+/// 整数と同じアルゴリズムへ解決する。再エンコード時は整数へ正規化する。
+#[test]
+fn header_accepts_cose_registry_algorithm_names() {
+    for (name, algorithm) in [
+        ("ES256", Algorithm::Es256),
+        ("ES384", Algorithm::Es384),
+        ("ES512", Algorithm::Es512),
+        ("EdDSA", Algorithm::EdDsa),
+        ("HMAC 256/256", Algorithm::HmacSha256),
+        ("HMAC 384/384", Algorithm::HmacSha384),
+        ("HMAC 512/512", Algorithm::HmacSha512),
+    ] {
+        let header = Header::decode_protected(&Value::Map(vec![(
+            Value::Unsigned(1),
+            Value::TextString(name.to_string()),
+        )]))
+        .unwrap_or_else(|e| panic!("レジストリ名 {name:?} を受理すること: {e:?}"));
+        assert_eq!(header.algorithm, Some(algorithm), "名前 {name:?} の解決");
+        assert_eq!(
+            header.algorithm_identifier,
+            Some(algorithm.identifier()),
+            "名前 {name:?} を整数へ正規化すること"
+        );
+    }
+
+    // レジストリに無い名前は拒否する
+    assert_eq!(
+        Header::decode_protected(&Value::Map(vec![(
+            Value::Unsigned(1),
+            Value::TextString(String::from("ES999"))
+        )]))
+        .map(|_| ()),
+        Err(CoseError::UnexpectedType("alg"))
+    );
+}
+
 #[test]
 fn header_type_errors() {
     assert_eq!(
         Header::decode_protected(&Value::Unsigned(1)),
         Err(CoseError::UnexpectedType("header map"))
-    );
-    assert_eq!(
-        Header::decode_protected(&Value::Map(vec![(
-            Value::Unsigned(1),
-            Value::TextString(String::from("ES256"))
-        )]))
-        .map(|_| ()),
-        Err(CoseError::UnexpectedType("alg"))
     );
     assert_eq!(
         Header::decode_protected(&Value::Map(vec![(Value::Unsigned(4), Value::Unsigned(1))]))
@@ -1085,5 +1116,33 @@ fn cose_key_thumbprint_rejects_unusable_keys() {
     assert_eq!(
         CoseKey::ed25519(vec![0x01; 31]).cose_key_thumbprint_sha256(&crypto),
         Err(CryptoError::InvalidKey)
+    );
+}
+
+/// 公開 API に手組みの `Value` を渡しても、protected ヘッダの重複ラベルを拒否すること
+///
+/// RFC 9052 §3.1: "Labels in each of the maps MUST be unique. When processing messages,
+/// if a label appears multiple times, the message MUST be rejected as malformed."
+/// ワイヤ経由では `cbor::decode` が拒否するが、API 経由の防御も固定する。
+#[test]
+fn header_rejects_duplicate_labels() {
+    assert_eq!(
+        Header::decode_protected(&Value::Map(vec![
+            (Value::integer(1), Value::integer(-7)),
+            (Value::integer(1), Value::integer(-8)),
+        ]))
+        .map(|_| ()),
+        Err(CoseError::DuplicateHeaderParameter(1)),
+        "alg の重複を拒否すること"
+    );
+    assert!(
+        matches!(
+            Header::decode_protected(&Value::Map(vec![
+                (Value::TextString(String::from("x")), Value::integer(1)),
+                (Value::TextString(String::from("x")), Value::integer(2)),
+            ])),
+            Err(CoseError::InvalidStructure("duplicate header label"))
+        ),
+        "整数でないラベルの重複も拒否すること"
     );
 }

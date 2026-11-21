@@ -1379,3 +1379,21 @@ fn verify_against_token_rejects_window_larger_than_replay_cache() {
     );
     assert_eq!(cache.len(), 0, "拒否した proof は記録しないこと");
 }
+
+/// 負の鮮度ウィンドウは JWT / CWT とも InvalidFreshnessWindow で拒否すること
+///
+/// 負のウィンドウをそのまま比較すると、すべての proof が ProofExpired または
+/// ProofNotYetValid になり、設定の誤りを呼び出し側へ伝えられない。
+#[test]
+fn negative_freshness_windows_are_invalid() {
+    let proof = DpopProof::decode(&unsigned_jwt(
+        r#"{"alg":"ES256","typ":"dpop-proof+jwt","jwk":{"kty":"EC","crv":"P-256","x":"AQ","y":"AQ"}}"#,
+        r#"{"jti":"id","iat":1,"actx":{"type":"moqt","action":"PUB_NS","tns":"a","tn":"b"}}"#,
+    ))
+    .expect("デコードできる");
+    assert_eq!(
+        proof.verify_freshness(1.0, -1.0),
+        Err(DpopError::InvalidFreshnessWindow),
+        "JWT の負のウィンドウを拒否すること"
+    );
+}

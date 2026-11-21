@@ -496,6 +496,19 @@ impl CatClaims {
     /// 整数はエラーにする。
     pub fn decode(value: &Value) -> Result<Self, CatError> {
         let entries = value.as_map().ok_or(CatError::UnexpectedType("claims"))?;
+        // RFC 8392 §3 / RFC 8949 §5.6.1: map のキーは一意でなければならない。
+        // 型付きで解釈する整数キーの重複は、どちらを採用するかで意味が変わるため拒否する
+        // (ワイヤ経由では cbor::decode が先に拒否するが、公開 API の防御として残す)。
+        let mut seen_int_keys: Vec<i64> = Vec::new();
+        for (key, _) in entries {
+            if let Some(key) = key.as_int()
+                && seen_int_keys.contains(&key)
+            {
+                return Err(CatError::DuplicateClaim(key));
+            } else if let Some(key) = key.as_int() {
+                seen_int_keys.push(key);
+            }
+        }
         let mut claims = Self::default();
         for (key, entry) in entries {
             // CWT の claim key は整数またはテキスト文字列 (RFC 8392 §3)。
@@ -747,11 +760,14 @@ impl CatClaims {
             }
         }
         if let Some(catdpop) = &self.catdpop
-            && catdpop
-                .window_seconds
-                .is_some_and(|window| !window.is_finite())
+            && let Some(window) = catdpop.window_seconds
         {
-            return Err(ClaimValidationError::NonFiniteClaim("catdpop window"));
+            if !window.is_finite() {
+                return Err(ClaimValidationError::NonFiniteClaim("catdpop window"));
+            }
+            if window < 0.0 {
+                return Err(ClaimValidationError::NegativeClaim("catdpop window"));
+            }
         }
         // 非有限の moqt-reval は直前の検査で拒否済みのため、ここに届くのは無いか有限値
         validate_moqt_reval(self.moqt_reval, options.revalidation_interval_seconds)?;
@@ -877,6 +893,8 @@ pub enum ClaimValidationError {
     InvalidReferenceTime,
     /// クレームの数値が有限でない (NaN / 無限大)
     NonFiniteClaim(&'static str),
+    /// クレームの数値が負であってはならない
+    NegativeClaim(&'static str),
     /// `moqt-reval` を持つトークンだが、受信者が再検証できない
     /// ([`ClaimValidationOptions::revalidation_interval_seconds`] が `None`)
     RevalidationUnsupported,
@@ -898,6 +916,7 @@ impl fmt::Display for ClaimValidationError {
                 "reference time must be finite and clock tolerance must be finite and non-negative"
             ),
             Self::NonFiniteClaim(name) => write!(f, "{name} must be finite"),
+            Self::NegativeClaim(name) => write!(f, "{name} must be non-negative"),
             Self::RevalidationUnsupported => write!(
                 f,
                 "token has moqt-reval but the recipient cannot revalidate tokens"

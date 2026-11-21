@@ -421,7 +421,9 @@ fn indefinite_text_chunks_must_each_be_valid_utf8() {
 
 #[test]
 fn duplicate_nan_keys_are_rejected() {
-    // RFC 8949 §5.6.1 は同じ内容の NaN のキーを同一視する
+    // RFC 8949 §5.6.1 は「64 bit へ右ゼロ拡張した significand が同じ NaN」を同一視する。
+    // 本実装は半精度 NaN の payload を Value に保持しないため、すべての NaN を安全側に
+    // 倒して重複とみなす (C4M のキーは int / tstr であり実害はない)。
     let value = Value::Map(vec![
         (Value::Float(f64::NAN), Value::Unsigned(1)),
         (Value::Float(f64::NAN), Value::Unsigned(2)),
@@ -459,8 +461,19 @@ fn zero_and_negative_zero_keys_are_equivalent() {
         decode(&decode_hex("a2f9000001f9800002")),
         Err(CborError::DuplicateMapKey)
     );
-    // 片方だけなら通る
-    assert!(encode(&Value::Map(vec![(Value::Float(-0.0), Value::Unsigned(1))])).is_ok());
+    // 片方だけなら通り、-0.0 は最短形 (f9 80 00) のまま出力される
+    // (重複判定のために +0.0 へ書き換えると、トップレベルの -0.0 と挙動が食い違う)
+    let encoded = encode(&Value::Map(vec![(Value::Float(-0.0), Value::Unsigned(1))]))
+        .expect("負のゼロのキーをエンコードできる");
+    assert_eq!(
+        encode_hex(&encoded),
+        "a1f9800001",
+        "map キーの -0.0 を +0.0 に書き換えないこと"
+    );
+    assert_eq!(
+        decode(&encoded),
+        Ok(Value::Map(vec![(Value::Float(-0.0), Value::Unsigned(1))]))
+    );
 }
 
 #[test]

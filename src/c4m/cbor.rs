@@ -482,8 +482,10 @@ fn has_duplicate_keys(entries: &[(Value, Value)]) -> bool {
 
 /// 重複キー検査用にキーを正規化する (RFC 8949 §5.6.1)
 ///
-/// `-0.0` と `0.0` は数値として等しいため同一のキーになる。NaN は実装判断として
-/// すべて同一視する (safe side; 仕様は significand が同じ NaN だけを等価とする)。
+/// `-0.0` と `0.0` は数値として等しいため同一のキーになる (RFC 8949 §5.6.1)。
+/// NaN は significand が同じものだけが等価だが、本実装は `Value::Float(f64)` が
+/// 半精度 NaN の payload を保持しないため、すべての NaN を同一視する (安全側の
+/// 過剰拒否。C4M のキーは int / tstr であり実害はない)。
 fn normalize_key(value: &Value, depth: usize) -> Option<Value> {
     if depth > MAX_DEPTH {
         return None;
@@ -537,23 +539,30 @@ fn encode_value(value: &Value, depth: usize, out: &mut Vec<u8>) -> Result<(), Cb
             }
         }
         Value::Map(entries) => {
-            // 決定論的エンコード: キーのエンコード済みバイト列の昇順に並べる
+            // 決定論的エンコード: キーのエンコード済みバイト列の昇順に並べる。
+            // 重複キーの判定は -0.0 と 0.0 を同一視した正規化キーで行い (RFC 8949
+            // §5.6.1)、出力は元のキーの決定論的エンコードを使う (-0.0 の最短形は
+            // `f9 80 00` であり、`f9 00 00` に書き換えない)。
             let mut encoded_keys = Vec::new();
+            let mut normalized_keys = Vec::new();
             for (key, _) in entries {
                 let mut key_bytes = Vec::new();
-                // -0.0 と 0.0 は同一のキーとして扱う (RFC 8949 §5.6.1)
+                encode_value(key, depth + 1, &mut key_bytes)?;
+                encoded_keys.push(key_bytes);
+
                 let normalized =
                     normalize_key(key, depth + 1).ok_or(CborError::DepthLimitExceeded)?;
-                encode_value(&normalized, depth + 1, &mut key_bytes)?;
-                encoded_keys.push(key_bytes);
+                let mut normalized_bytes = Vec::new();
+                encode_value(&normalized, depth + 1, &mut normalized_bytes)?;
+                normalized_keys.push(normalized_bytes);
+            }
+            // 正規化キーは -0.0 と 0.0 が同じバイト列になるため、隣接比較で重複を検出する
+            normalized_keys.sort();
+            if normalized_keys.windows(2).any(|pair| pair[0] == pair[1]) {
+                return Err(CborError::DuplicateMapKey);
             }
             let mut order: Vec<usize> = (0..entries.len()).collect();
             order.sort_by(|left, right| encoded_keys[*left].cmp(&encoded_keys[*right]));
-            for pair in order.windows(2) {
-                if encoded_keys[pair[0]] == encoded_keys[pair[1]] {
-                    return Err(CborError::DuplicateMapKey);
-                }
-            }
             write_head(5, entries.len() as u64, out);
             for index in order {
                 out.extend_from_slice(&encoded_keys[index]);

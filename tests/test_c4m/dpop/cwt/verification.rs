@@ -17,7 +17,7 @@ use shiguredo_moqt::c4m::crypto::DigestAlgorithm;
 #[cfg(feature = "aws-lc-rs")]
 use shiguredo_moqt::c4m::dpop::{CwtDpopReplayCache, CwtDpopVerification};
 #[cfg(feature = "aws-lc-rs")]
-use shiguredo_moqt::c4m::{CatDpop, MoqtClaim, MoqtScope};
+use shiguredo_moqt::c4m::{C4mError, CatDpop, MoqtClaim, MoqtScope};
 
 /// 受理入口のテストで使う参照時刻 (UNIX 秒)
 #[cfg(feature = "aws-lc-rs")]
@@ -225,6 +225,21 @@ fn cwt_proof_with_key(claims: &CwtDpopProofClaims, key: &CoseKey) -> CwtDpopProo
     let bytes = codec
         .build(&crypto, key, claims)
         .expect("CWT 形式の proof を発行できる");
+    codec
+        .decode(&bytes)
+        .expect("発行した proof をデコードできる")
+}
+
+/// actx と action の整合を検証せずに proof を発行してデコードする
+///
+/// 受信側の検証が不正な actx を拒否することを確かめるため、発行側の検証を迂回する。
+#[cfg(feature = "aws-lc-rs")]
+fn cwt_proof_unchecked(claims: &CwtDpopProofClaims) -> CwtDpopProof {
+    let crypto = AwsLcRsCrypto::new();
+    let codec = codec();
+    let bytes = codec
+        .build_unchecked(&crypto, &es256_private_key(), claims)
+        .expect("検証を迂回して proof を発行できる");
     codec
         .decode(&bytes)
         .expect("発行した proof をデコードできる")
@@ -789,7 +804,7 @@ fn cwt_dpop_setup_accepts_missing_target_and_rejects_extra() {
         CWT_REFERENCE_TIME as i64,
         b"proof-1",
     );
-    let proof = cwt_proof(&claims);
+    let proof = cwt_proof_unchecked(&claims);
     verifier
         .verify(&proof, &token, MoqtAction::Setup, None, None, &mut cache)
         .expect("SETUP は namespace / track を持たなくても受理する");
@@ -803,7 +818,7 @@ fn cwt_dpop_setup_accepts_missing_target_and_rejects_extra() {
         CWT_REFERENCE_TIME as i64,
         b"proof-2",
     );
-    let proof = cwt_proof(&claims);
+    let proof = cwt_proof_unchecked(&claims);
     assert_eq!(
         verifier.verify(&proof, &token, MoqtAction::Setup, None, None, &mut cache),
         Err(DpopError::UnexpectedActxTarget("namespace"))
@@ -818,7 +833,7 @@ fn cwt_dpop_setup_accepts_missing_target_and_rejects_extra() {
         CWT_REFERENCE_TIME as i64,
         b"proof-3",
     );
-    let proof = cwt_proof(&claims);
+    let proof = cwt_proof_unchecked(&claims);
     assert_eq!(
         verifier.verify(&proof, &token, MoqtAction::Setup, None, None, &mut cache),
         Err(DpopError::UnexpectedActxTarget("track"))
@@ -833,7 +848,7 @@ fn cwt_dpop_setup_accepts_missing_target_and_rejects_extra() {
         CWT_REFERENCE_TIME as i64,
         b"proof-4",
     );
-    let proof = cwt_proof(&claims);
+    let proof = cwt_proof_unchecked(&claims);
     let empty_namespace: [&[u8]; 0] = [];
     assert_eq!(
         verifier.verify(
@@ -876,7 +891,7 @@ fn cwt_dpop_namespace_actions_require_namespace_only() {
         CWT_REFERENCE_TIME as i64,
         b"proof-1",
     );
-    let proof = cwt_proof(&claims);
+    let proof = cwt_proof_unchecked(&claims);
     verifier
         .verify(
             &proof,
@@ -897,7 +912,7 @@ fn cwt_dpop_namespace_actions_require_namespace_only() {
         CWT_REFERENCE_TIME as i64,
         b"proof-2",
     );
-    let proof = cwt_proof(&claims);
+    let proof = cwt_proof_unchecked(&claims);
     assert_eq!(
         verifier.verify(
             &proof,
@@ -919,7 +934,7 @@ fn cwt_dpop_namespace_actions_require_namespace_only() {
         CWT_REFERENCE_TIME as i64,
         b"proof-3",
     );
-    let proof = cwt_proof(&claims);
+    let proof = cwt_proof_unchecked(&claims);
     assert_eq!(
         verifier.verify(
             &proof,
@@ -941,7 +956,7 @@ fn cwt_dpop_namespace_actions_require_namespace_only() {
         CWT_REFERENCE_TIME as i64,
         b"proof-4",
     );
-    let proof = cwt_proof(&claims);
+    let proof = cwt_proof_unchecked(&claims);
     assert_eq!(
         verifier.verify(
             &proof,
@@ -963,7 +978,7 @@ fn cwt_dpop_namespace_actions_require_namespace_only() {
         CWT_REFERENCE_TIME as i64,
         b"proof-5",
     );
-    let proof = cwt_proof(&claims);
+    let proof = cwt_proof_unchecked(&claims);
     assert_eq!(
         verifier.verify(
             &proof,
@@ -996,7 +1011,7 @@ fn cwt_dpop_track_actions_require_namespace_and_track() {
         CWT_REFERENCE_TIME as i64,
         b"proof-1",
     );
-    let proof = cwt_proof(&claims);
+    let proof = cwt_proof_unchecked(&claims);
     assert_eq!(
         verifier.verify(
             &proof,
@@ -1031,7 +1046,7 @@ fn cwt_dpop_track_actions_require_namespace_and_track() {
         CWT_REFERENCE_TIME as i64,
         b"proof-2",
     );
-    let proof = cwt_proof(&claims);
+    let proof = cwt_proof_unchecked(&claims);
     assert_eq!(
         verifier.verify(
             &proof,
@@ -1053,7 +1068,7 @@ fn cwt_dpop_track_actions_require_namespace_and_track() {
         CWT_REFERENCE_TIME as i64,
         b"proof-3",
     );
-    let proof = cwt_proof(&claims);
+    let proof = cwt_proof_unchecked(&claims);
     assert_eq!(
         verifier.verify(
             &proof,
@@ -1085,7 +1100,7 @@ fn cwt_dpop_distinguishes_missing_and_empty_targets() {
         CWT_REFERENCE_TIME as i64,
         b"proof-1",
     );
-    let proof = cwt_proof(&claims);
+    let proof = cwt_proof_unchecked(&claims);
     verifier
         .verify(
             &proof,
@@ -1107,7 +1122,7 @@ fn cwt_dpop_distinguishes_missing_and_empty_targets() {
         CWT_REFERENCE_TIME as i64,
         b"proof-2",
     );
-    let proof = cwt_proof(&claims);
+    let proof = cwt_proof_unchecked(&claims);
     assert_eq!(
         verifier.verify(
             &proof,
@@ -1131,7 +1146,7 @@ fn cwt_dpop_distinguishes_missing_and_empty_targets() {
         CWT_REFERENCE_TIME as i64,
         b"proof-3",
     );
-    let proof = cwt_proof(&claims);
+    let proof = cwt_proof_unchecked(&claims);
     assert_eq!(
         verifier.verify(
             &proof,
@@ -1153,7 +1168,7 @@ fn cwt_dpop_distinguishes_missing_and_empty_targets() {
         CWT_REFERENCE_TIME as i64,
         b"proof-4",
     );
-    let proof = cwt_proof(&claims);
+    let proof = cwt_proof_unchecked(&claims);
     assert_eq!(
         verifier.verify(
             &proof,
@@ -1275,29 +1290,39 @@ fn cwt_dpop_freshness_uses_default_window() {
 #[cfg(feature = "aws-lc-rs")]
 #[test]
 fn cwt_dpop_rejects_invalid_freshness_parameters() {
-    let token = cwt_cat_token(
-        Some(cwt_ckt_confirmation()),
-        Some(CatDpop::new(-1.0, false)),
-        &[MoqtAction::Subscribe],
-        CWT_REFERENCE_TIME + 3600.0,
+    // 負の catdpop ウィンドウは CAT の発行時点で拒否する
+    let crypto = AwsLcRsCrypto::new();
+    let invalid_claims = CatClaims {
+        issuer: Some(String::from(CWT_ISSUER)),
+        audience: vec![String::from(CWT_AUDIENCE)],
+        expiration: Some(CWT_REFERENCE_TIME + 3600.0),
+        issued_at: Some(CWT_REFERENCE_TIME - 10.0),
+        cwt_id: Some(b"cat-token-1".to_vec()),
+        confirmation: Some(cwt_ckt_confirmation()),
+        catdpop: Some(CatDpop::new(-1.0, false)),
+        moqt: Some(cwt_scope(&[MoqtAction::Subscribe])),
+        ..CatClaims::default()
+    };
+    let result = CatTokenBuilder {
+        claims: invalid_claims,
+        ..CatTokenBuilder::default()
+    }
+    .build_cose_with(
+        &crypto,
+        &es256_private_key(),
+        &CoseEncodingOptions::default(),
     );
+    assert!(
+        matches!(
+            result,
+            Err(CatError::C4m(C4mError::NegativeNumber("catdpop window")))
+        ),
+        "負の catdpop ウィンドウを持つ CAT を発行しないこと: {result:?}"
+    );
+
     let namespace = cwt_namespace();
     let verifier = CwtVerifier::new();
     let mut cache = verifier.cache();
-    let claims = cwt_subscribe_claims(&token, CWT_REFERENCE_TIME as i64, b"proof-1");
-    let proof = cwt_proof(&claims);
-    assert_eq!(
-        verifier.verify(
-            &proof,
-            &token,
-            MoqtAction::Subscribe,
-            Some(&namespace),
-            Some(CWT_TRACK_NAME),
-            &mut cache,
-        ),
-        Err(DpopError::InvalidFreshnessWindow),
-        "負の catdpop ウィンドウを受理した"
-    );
 
     // catdpop が無く、既定値が負の場合も拒否する
     let token = cwt_cat_token(

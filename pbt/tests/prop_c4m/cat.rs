@@ -442,11 +442,14 @@ fn expected_validation_error(
         }
     }
     if let Some(catdpop) = &claims.catdpop
-        && catdpop
-            .window_seconds
-            .is_some_and(|window| !window.is_finite())
+        && let Some(window) = catdpop.window_seconds
     {
-        return Some(ClaimValidationError::NonFiniteClaim("catdpop window"));
+        if !window.is_finite() {
+            return Some(ClaimValidationError::NonFiniteClaim("catdpop window"));
+        }
+        if window < 0.0 {
+            return Some(ClaimValidationError::NegativeClaim("catdpop window"));
+        }
     }
     // moqt-reval の受理可否 (draft-ietf-moq-c4m-02 §2.2)。
     // 不正な最小間隔はクレームの有無にかかわらず拒否する
@@ -519,6 +522,7 @@ fn claims_validate_matches_model() -> noprop::TestResult {
     let revalidation_unsupported_seen = std::cell::Cell::new(0usize);
     let revalidation_too_short_seen = std::cell::Cell::new(0usize);
     let invalid_revalidation_interval_seen = std::cell::Cell::new(0usize);
+    let negative_claim_seen = std::cell::Cell::new(0usize);
     let mut runner = test_runner()?;
     // 再検証判定が iss / aud の検証より前にあり後段まで届くケースが減るため、
     // 他の検証と同じ 256 回では後段のカウンタが 0 になる seed があり得る。回数を増やす
@@ -533,7 +537,7 @@ fn claims_validate_matches_model() -> noprop::TestResult {
                     ctx,
                     TIME_BOUNDARIES,
                     noprop::Ratio::one_nth(3),
-                    |ctx| noprop::sample_f64_in(ctx, 0.0, 100.0),
+                    |ctx| noprop::sample_f64_in(ctx, -100.0, 100.0),
                 ),
                 noprop::sample_bool(ctx),
             )
@@ -650,6 +654,9 @@ fn claims_validate_matches_model() -> noprop::TestResult {
                 invalid_revalidation_interval_seen
                     .set(invalid_revalidation_interval_seen.get() + 1);
             }
+            Some(ClaimValidationError::NegativeClaim(_)) => {
+                negative_claim_seen.set(negative_claim_seen.get() + 1);
+            }
         }
         Ok(())
     })?;
@@ -688,6 +695,10 @@ fn claims_validate_matches_model() -> noprop::TestResult {
     assert!(
         revalidation_too_short_seen.get() > 0,
         "moqt-reval が最小間隔を下回るケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        negative_claim_seen.get() > 0,
+        "負の数値クレームのケースが生成されなかった\n{runner}"
     );
     assert!(
         invalid_revalidation_interval_seen.get() > 0,

@@ -149,6 +149,24 @@ impl Algorithm {
         }
     }
 
+    /// COSE のレジストリ名 (RFC 9053 §2 / §3) からアルゴリズムを返す
+    ///
+    /// RFC 9052 §3.1 の `alg` は `int / tstr` であり、tstr は COSE Algorithms
+    /// レジストリの名前を使う。JOSE の `HS256` などとは名前が異なるため
+    /// [`Algorithm::from_jose_name`] と分ける。
+    pub fn from_cose_name(name: &str) -> Option<Self> {
+        match name {
+            "ES256" => Some(Self::Es256),
+            "ES384" => Some(Self::Es384),
+            "ES512" => Some(Self::Es512),
+            "EdDSA" => Some(Self::EdDsa),
+            "HMAC 256/256" => Some(Self::HmacSha256),
+            "HMAC 384/384" => Some(Self::HmacSha384),
+            "HMAC 512/512" => Some(Self::HmacSha512),
+            _ => None,
+        }
+    }
+
     /// JOSE の `alg` 名を返す
     pub const fn jose_name(self) -> &'static str {
         match self {
@@ -278,15 +296,41 @@ impl Header {
     }
 
     fn decode_entries(entries: &[(Value, Value)], bucket: HeaderBucket) -> Result<Self, CoseError> {
+        // RFC 9052 §3.1: "Labels in each of the maps MUST be unique. When processing
+        // messages, if a label appears multiple times, the message MUST be rejected as
+        // malformed." ワイヤ経由では cbor::decode が重複キーを拒否するが、公開 API に
+        // 手組みの Value を渡す経路でも同じ契約を守る。
+        for (index, (key, _)) in entries.iter().enumerate() {
+            if entries[..index].iter().any(|(previous, _)| previous == key) {
+                return Err(match key.as_int() {
+                    Some(label) => CoseError::DuplicateHeaderParameter(label),
+                    None => CoseError::InvalidStructure("duplicate header label"),
+                });
+            }
+        }
         let mut header = Self::default();
         for (key, entry) in entries {
             match key.as_int() {
                 Some(HEADER_ALGORITHM) => {
-                    let identifier = entry.as_int().ok_or(CoseError::UnexpectedType("alg"))?;
-                    let algorithm = Algorithm::from_identifier_with_c4m_draft_alias(identifier)
-                        .ok_or(CoseError::UnsupportedAlgorithm(identifier))?;
-                    header.algorithm = Some(algorithm);
-                    header.algorithm_identifier = Some(identifier);
+                    // RFC 9052 §3.1: `alg` は `int / tstr`。tstr は COSE Algorithms
+                    // レジストリの名前であり、整数へ正規化して保持する。
+                    match entry {
+                        Value::TextString(name) => {
+                            let algorithm = Algorithm::from_cose_name(name)
+                                .ok_or(CoseError::UnexpectedType("alg"))?;
+                            header.algorithm = Some(algorithm);
+                            header.algorithm_identifier = Some(algorithm.identifier());
+                        }
+                        _ => {
+                            let identifier =
+                                entry.as_int().ok_or(CoseError::UnexpectedType("alg"))?;
+                            let algorithm =
+                                Algorithm::from_identifier_with_c4m_draft_alias(identifier)
+                                    .ok_or(CoseError::UnsupportedAlgorithm(identifier))?;
+                            header.algorithm = Some(algorithm);
+                            header.algorithm_identifier = Some(identifier);
+                        }
+                    }
                 }
                 Some(HEADER_CRITICAL) => {
                     if bucket == HeaderBucket::Unprotected {
