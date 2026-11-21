@@ -111,26 +111,56 @@ fn request_id_generator_server_yields_odd() {
     assert_eq!(generator.next_id(), 3);
 }
 
+/// Request ID の受理判定が「parity が正しく、未使用」と一致すること
+///
+/// draft-ietf-moq-transport-23 §6.4.2.1 (Request ID) が INVALID_REQUEST_ID を MUST と
+/// するのは parity 違反と重複の 2 条件だけであり、到着順は条件に含まれない。
+/// 0..=9 の ID からなる長さ 4 以下の全列で、前縁の確定・ストラグラの吸収・
+/// 吸収後の重複を網羅する。
 #[test]
-fn peer_request_tracker_rejects_wrong_parity() {
-    let mut tracker = RequestIdTracker::new(Role::Server);
-    let err = tracker
-        .accept(0)
-        .expect_err("parity が一致しない request_id は拒否されるはず");
-    assert_eq!(err.code, SESSION_INVALID_REQUEST_ID);
-    assert!(tracker.accept(1).is_ok());
-}
+fn peer_request_tracker_matches_request_id_spec() {
+    fn check(role: Role, ids: &[u64]) {
+        let parity_base = match role {
+            Role::Client => 0,
+            Role::Server => 1,
+        };
+        let mut tracker = RequestIdTracker::new(role);
+        let mut seen = alloc::collections::BTreeSet::new();
+        for (step, &id) in ids.iter().enumerate() {
+            let expected = id % 2 == parity_base && !seen.contains(&id);
+            let result = tracker.accept(id);
+            assert_eq!(
+                result.is_ok(),
+                expected,
+                "request_id={id} step={step} ids={ids:?} role={role:?}"
+            );
+            if let Err(err) = result {
+                assert_eq!(err.code, SESSION_INVALID_REQUEST_ID);
+            }
+            if expected {
+                seen.insert(id);
+            }
+        }
+        assert_eq!(
+            tracker.seen_count(),
+            seen.len(),
+            "重複を除いた受理数が一致すること: ids={ids:?} role={role:?}"
+        );
+    }
 
-#[test]
-fn peer_request_tracker_rejects_duplicate() {
-    let mut tracker = RequestIdTracker::new(Role::Client);
-    tracker
-        .accept(4)
-        .expect("テストフィクスチャの前提条件を満たす");
-    let err = tracker
-        .accept(4)
-        .expect_err("重複した request_id は拒否されるはず");
-    assert_eq!(err.code, SESSION_INVALID_REQUEST_ID);
+    for role in [Role::Client, Role::Server] {
+        for len in 0..=4usize {
+            let combinations = 10usize.pow(len as u32);
+            for mut code in 0..combinations {
+                let mut ids = Vec::with_capacity(len);
+                for _ in 0..len {
+                    ids.push((code % 10) as u64);
+                    code /= 10;
+                }
+                check(role, &ids);
+            }
+        }
+    }
 }
 
 /// PAUSED パラメータを省略した SUBSCRIBE / PUBLISH は unpaused で始まる
