@@ -3867,8 +3867,8 @@ fn decode_common_track_fields(
         lang: val.to_member("lang")?.map(|v| v.try_into())?,
         track_duration: val.to_member("trackDuration")?.map(parse_u64)?,
         // キー綴りは §5.2.37 に定義がなく §5.6.17 の例に準拠する。
-        // URI 形式検証は行わない (§5.2.36 の妥当性 MUST を含め、接続確立時の振る舞いは
-        // catalog decode の責務外とし transport 層に委ねる)。
+        // URI 形式検証は行わない (§5.2.37 の endpoint URI の妥当性 MUST を含め、
+        // 接続確立時の振る舞いは catalog decode の責務外とし transport 層に委ねる)。
         connection_uri: val.to_member("connectionURI")?.map(|v| v.try_into())?,
         encryption_scheme: val.to_member("encryptionScheme")?.map(|v| v.try_into())?,
         cipher_suite: val.to_member("cipherSuite")?.map(|v| v.try_into())?,
