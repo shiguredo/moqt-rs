@@ -37,6 +37,8 @@ RFC 3986 §3.2.2 の host に一致しない authority は名前解決の前に�
 userinfo を含まない authority の拒否メッセージには、拒否理由と入力した authority が含まれる。
 userinfo を含む authority はパスワードなどの機密値を含み得るため、メッセージに authority を含めない。
 
+`ServerUrl` の `Debug` も authority の userinfo (最後の `@` より前) を実値で表示しない。authority に `@` を含む場合 (空の userinfo を含む) は `authority` に `@` より後ろの host と port を表示し、`userinfo_bytes` に userinfo のバイト長を表示する。
+
 URL と MSF fragment の構文検証エラーのメッセージには、入力 URL 全体とパラメータ値を含めない。query と fragment は認可トークンを含み得るため (draft-ietf-moq-msf-02 §11.5.2 / §11.1.1)、原因を特定できる非機密の成分 (scheme、authority / path などの成分名、track-identifier、パラメータ名、パラメータ位置) だけを示す。
 `connection` や range の値変換エラーは機密値でないため、従来どおり値を示す。
 

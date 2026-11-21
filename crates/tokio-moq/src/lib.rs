@@ -338,17 +338,25 @@ impl core::fmt::Debug for MoqtFragment {
 /// の `connection`、どちらも無ければ native QUIC になる ([`resolve_transport`])。
 ///
 /// query と fragment は認可トークンなどを含み得るため、`Debug` は実値を表示しない。
-/// `authority` と path (`?` より前) を表示し、`query: Option<usize>` に `?` 以降のバイト長、
+/// path (`?` より前) を表示し、`query: Option<usize>` に `?` 以降のバイト長、
 /// [`MoqtFragment`] の `value_bytes` に fragment の value のバイト長、`cat_token_count` に
 /// `cat` の件数、`cat_token_bytes` に各トークンのバイト長の配列を表示する。`msf` の
 /// namespace は [`TrackNamespace`] の `Debug` 表現、track name は十進のバイト列として表示する
 /// (いずれも機密値でない)。
+///
+/// authority の userinfo (`user:password@host` の最後の `@` より前) も実値を表示しない。
+/// `authority` には `@` より後ろの host / port を表示し、userinfo がある場合だけ
+/// `userinfo_bytes` にそのバイト長を表示する。
 #[derive(Clone)]
 pub struct ServerUrl {
-    /// ホスト名または IP アドレス (ポートを含む場合がある)
+    /// authority (userinfo・ホスト名または IP アドレス・ポートを含み得る)
     ///
     /// URL でポートを省略した場合はポートを含まない。接続先の決定では
     /// 既定ポート 443 を補って解釈する。
+    ///
+    /// [`parse_url`] は authority に userinfo (`user:password@host`) を含む URL を拒否しない
+    /// ため、この値は userinfo を含み得る。接続時は userinfo を拒否する。
+    /// `Debug` は userinfo を実値で表示しない。
     pub authority: String,
     /// パス部分 (query を含み、fragment を含まない)
     pub path: String,
@@ -387,6 +395,21 @@ pub struct ServerUrl {
     pub cat_tokens: Vec<Vec<u8>>,
 }
 
+/// `Debug` に出す authority と userinfo のバイト長を決める
+///
+/// authority は userinfo (`user:password@host`) を含み得る。RFC 3986 §3.2.1 は `user:password`
+/// 形式の userinfo を deprecated とし、最初の `:` より後ろのデータを平文で表示しないこと
+/// (SHOULD、`:` より後ろが空の場合を除く) を推奨する。本実装は安全側に倒し、userinfo 全体を
+/// 実値で表示しない。最後の `@` より後ろの host / port だけを返し、`@` を含まない場合は
+/// そのまま返してバイト長を `None` にする。
+fn authority_debug_fields(authority: &str) -> (Option<usize>, &str) {
+    // userinfo の区切りは最後の `@` とする (userinfo に `@` は現れないが、安全側に倒す)
+    match authority.rsplit_once('@') {
+        Some((userinfo, host)) => (Some(userinfo.len()), host),
+        None => (None, authority),
+    }
+}
+
 impl core::fmt::Debug for ServerUrl {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // フィールドを追加したときに表示漏れをコンパイラが検出できるよう、`..` を使わずに分解する
@@ -402,8 +425,16 @@ impl core::fmt::Debug for ServerUrl {
             Some((path, query)) => (path, Some(query.len())),
             None => (path.as_str(), None),
         };
-        f.debug_struct("ServerUrl")
-            .field("authority", authority)
+        // authority は userinfo (`user:password@host`) を含み得るため、最後の `@` より前を
+        // 実値で表示しない。`@` より後ろの host / port は機密値でない
+        let (userinfo_bytes, authority) = authority_debug_fields(authority);
+        let mut debug = f.debug_struct("ServerUrl");
+        debug.field("authority", &authority);
+        // userinfo が無い場合の表示を変えないよう、存在するときだけフィールドを足す
+        if let Some(userinfo_bytes) = userinfo_bytes {
+            debug.field("userinfo_bytes", &userinfo_bytes);
+        }
+        debug
             .field("path", &path_without_query)
             .field("query", &query)
             .field("fragment", fragment)
@@ -2868,10 +2899,119 @@ mod tests {
         );
     }
 
+    /// ServerUrl の Debug は authority の userinfo を表示しない
+    ///
+    /// `parse_url` は userinfo を含む authority を拒否しないため、`Debug` から漏れないように
+    /// `@` より前を実値で表示せず、バイト長だけを表示する (RFC 3986 §3.2.1)。
+    #[test]
+    fn server_url_debug_hides_userinfo() {
+        let url = parse_url("moqt://alice:s3cr3t@relay.example.com:443/live")
+            .expect("URL のパースに成功すること");
+        let debug = format!("{url:?}");
+
+        // 実値は文字列でも十進のバイト列でも現れない。ユーザ名とパスワードも
+        // 個別に検査し、片方だけが漏れる退行も検出する
+        assert_hidden(&debug, "userinfo", b"alice:s3cr3t");
+        assert_hidden(&debug, "userinfo のユーザ名", b"alice");
+        assert_hidden(&debug, "userinfo のパスワード", b"s3cr3t");
+        // host と port は機密値でないため表示する
+        assert!(
+            debug.contains("authority: \"relay.example.com:443\""),
+            "userinfo より後ろの host と port は表示すること"
+        );
+        assert!(
+            debug.contains("userinfo_bytes: 12"),
+            "userinfo のバイト長を表示すること"
+        );
+
+        // バイト長は文字数ではなくバイト数であること
+        let url = parse_url("moqt://利用者:秘密@relay.example.com:443/live")
+            .expect("URL のパースに成功すること");
+        let debug = format!("{url:?}");
+        assert_hidden(&debug, "userinfo のユーザ名", "利用者".as_bytes());
+        assert_hidden(&debug, "userinfo のパスワード", "秘密".as_bytes());
+        // "利用者:秘密" は 9 + 1 + 6 = 16 バイト (文字数は 6)
+        assert!(
+            debug.contains("userinfo_bytes: 16"),
+            "userinfo のバイト長を表示すること"
+        );
+        assert!(
+            debug.contains("path: \"/live\""),
+            "path は従来どおり表示すること"
+        );
+    }
+
+    /// userinfo を含まない authority の表示は変わらないこと
+    #[test]
+    fn server_url_debug_keeps_authority_without_userinfo() {
+        let url =
+            parse_url("moqt://relay.example.com:443/live").expect("URL のパースに成功すること");
+        let debug = format!("{url:?}");
+        assert!(
+            debug.contains("authority: \"relay.example.com:443\""),
+            "userinfo が無ければ authority をそのまま表示すること"
+        );
+        assert!(
+            !debug.contains("userinfo_bytes"),
+            "userinfo が無い場合はフィールドを表示しないこと"
+        );
+    }
+
+    /// authority に複数の `@` がある場合は最後の `@` より前を隠すこと
+    ///
+    /// userinfo の区切りは最後の `@` とする。最初の `@` で区切るとパスワードの後半が
+    /// 表示されてしまう。
+    #[test]
+    fn server_url_debug_hides_userinfo_before_the_last_at_sign() {
+        let url = parse_url("moqt://alice:p@ss@relay.example.com:443/live")
+            .expect("URL のパースに成功すること");
+        let debug = format!("{url:?}");
+        assert_hidden(&debug, "userinfo", b"alice:p@ss");
+        assert_hidden(&debug, "パスワードの一部", b"p@ss");
+        assert!(
+            debug.contains("authority: \"relay.example.com:443\""),
+            "最後の `@` より後ろの host と port は表示すること"
+        );
+        assert!(
+            debug.contains("userinfo_bytes: 10"),
+            "userinfo 全体のバイト長を表示すること"
+        );
+    }
+
+    /// `@` が先頭・末尾にある場合も実値を表示しないこと
+    #[test]
+    fn server_url_debug_hides_userinfo_at_edges() {
+        // `@` が先頭: userinfo は空、host はそのまま
+        let url =
+            parse_url("moqt://@relay.example.com:443/live").expect("URL のパースに成功すること");
+        let debug = format!("{url:?}");
+        assert!(
+            debug.contains("authority: \"relay.example.com:443\""),
+            "先頭の `@` より後ろを host として表示すること"
+        );
+        assert!(
+            debug.contains("userinfo_bytes: 0"),
+            "空の userinfo のバイト長 (0) を表示すること"
+        );
+        // `@` が末尾: authority は userinfo だけになる
+        let url = parse_url("moqt://relay.example.com@/live").expect("URL のパースに成功すること");
+        let debug = format!("{url:?}");
+        assert_hidden(&debug, "userinfo", b"relay.example.com");
+        assert!(
+            debug.contains("authority: \"\""),
+            "`@` より後ろが空なら authority も空にすること"
+        );
+        assert!(
+            debug.contains("userinfo_bytes: 17"),
+            "userinfo のバイト長を表示すること"
+        );
+    }
+
     /// ServerUrl の Debug は query / fragment / cat トークンの実値を表示しない
     ///
     /// ログ出力で `{:?}` を使っても認可トークンが漏れないよう、伏せたフィールドはバイト長を
-    /// 表示する。authority と query より前の path は非機密のため従来どおり表示する。
+    /// 表示する。userinfo を含まない authority と query より前の path は非機密のため
+    /// 従来どおり表示する。
     #[test]
     fn server_url_debug_hides_token_values() {
         let token = [222u8, 173, 190, 239];
@@ -3046,7 +3186,7 @@ mod tests {
         let text = Base64::encode_string(&token);
         let fragment_value = format!("moq-example--video&cat={text}");
         let url = parse_url(&format!(
-            "moqt://example.com/app?token=SECRETQUERY#msf:{fragment_value}"
+            "moqt://alice:s3cr3t@example.com/app?token=SECRETQUERY#msf:{fragment_value}"
         ))
         .expect("URL のパースに成功すること");
         let target = MigrationTarget {
@@ -3054,6 +3194,7 @@ mod tests {
             url: url.clone(),
         };
         let debug = format!("{target:?}");
+        assert_hidden(&debug, "userinfo", b"alice:s3cr3t");
         assert_hidden(&debug, "query の値", b"SECRETQUERY");
         assert_hidden(&debug, "fragment", fragment_value.as_bytes());
         assert_hidden(&debug, "cat トークンの Base64 表現", text.as_bytes());
@@ -3068,6 +3209,7 @@ mod tests {
             datagram_max_size: None,
         };
         let debug = format!("{params:?}");
+        assert_hidden(&debug, "userinfo", b"alice:s3cr3t");
         assert_hidden(&debug, "query の値", b"SECRETQUERY");
         assert_hidden(&debug, "fragment", fragment_value.as_bytes());
         assert_hidden(&debug, "cat トークンの Base64 表現", text.as_bytes());
