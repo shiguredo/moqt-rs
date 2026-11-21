@@ -851,6 +851,16 @@ impl Session {
         self.transport
     }
 
+    /// peer が SETUP で送ったオプションを返す (SETUP 未受信なら `None`)
+    ///
+    /// draft-ietf-moq-transport-23 §6.3.2 (Extension Negotiation): 拡張は SETUP の
+    /// Option でネゴシエートする。アプリは本 API と [`SetupOptions::iter`] で peer が
+    /// 広告した拡張を判定できる。値の解釈はアプリの責務であり、本 API は受信した
+    /// オプションをそのまま返す。
+    pub fn peer_setup_options(&self) -> Option<&SetupOptions> {
+        self.setup.peer.as_ref().map(|setup| &setup.options)
+    }
+
     /// 相手側 Alias Cache (peer が REGISTER したトークンで、自側が保持するもの)
     ///
     /// `max_size()` は自側の `MAX_AUTH_TOKEN_CACHE_SIZE` (draft §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE)) で
@@ -867,16 +877,8 @@ impl Session {
     /// `reset_outgoing_data_stream` に `DataStreamResetReason::ExpiredAuthToken`
     /// (コードは `STREAM_EXPIRED_AUTH_TOKEN`) を渡す。
     /// 詳細は [`AuthTokenCache`] の doc を参照。
-    /// peer が SETUP で送ったオプションを返す (SETUP 未受信なら `None`)
     ///
-    /// draft-ietf-moq-transport-23 §6.3.2 (Extension Negotiation): 拡張は SETUP の
-    /// Option でネゴシエートする。アプリは本 API と [`SetupOptions::iter`] で peer が
-    /// 広告した拡張を判定できる。値の解釈はアプリの責務であり、本 API は受信した
-    /// オプションをそのまま返す。
-    pub fn peer_setup_options(&self) -> Option<&SetupOptions> {
-        self.setup.peer.as_ref().map(|setup| &setup.options)
-    }
-
+    /// 返す [`AuthTokenCache`] の `Debug` は Token Value の実値を表示しない。
     pub fn peer_auth_token_cache(&self) -> &AuthTokenCache {
         &self.auth.peer_token_cache
     }

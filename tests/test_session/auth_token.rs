@@ -17,6 +17,7 @@ use shiguredo_moqt::error::{
 };
 use shiguredo_moqt::message::{Fetch, Publish, RequestUpdate, Subscribe, TrackStatus};
 use shiguredo_moqt::message_parameter::PARAM_AUTHORIZATION_TOKEN;
+use shiguredo_moqt::session::auth_token_cache::AuthTokenCache;
 
 /// 同一 (Token Type, Token Value) の REGISTER 2 件を持つパラメータ
 ///
@@ -1229,5 +1230,41 @@ fn subscribe_with_deleted_alias_is_not_treated_as_duplicate() {
     assert!(
         matches!(server.state(), SessionState::Closing | SessionState::Closed),
         "未登録 alias の適用でセッションが Closing に遷移すること"
+    );
+}
+
+/// AuthTokenCache の Debug が登録済み Token の実値を表示しないこと
+///
+/// `AuthTokenCache` は `Session::peer_auth_token_cache` から公開 API で取り出せ、`Session`
+/// 自身の `Debug` からも到達する。登録された Token Value は認可情報そのものであり、`{:?}`
+/// から漏れると利用者のログに残るため、実値の代わりにバイト長を表示する。
+#[test]
+fn auth_token_cache_debug_hides_token_values() {
+    let mut cache = AuthTokenCache::new(1024);
+    cache
+        .try_register(3, 7, vec![222, 173, 190, 239])
+        .expect("容量内なら登録できること");
+    let debug = format!("{cache:?}");
+    // 漏えいの検査を先に行う。失敗メッセージに Debug 出力を含めると、漏えいした実値を
+    // CI のログへ書いてしまう
+    assert!(
+        !debug.contains("222") && !debug.contains("173"),
+        "AuthTokenCache の Debug に token_value の実値を含めないこと (実値は表示しない)"
+    );
+    assert!(
+        !debug.contains("190") && !debug.contains("239"),
+        "AuthTokenCache の Debug に token_value の実値を含めないこと (実値は表示しない)"
+    );
+    assert!(
+        debug.contains("alias: 3") && debug.contains("token_type: 7"),
+        "alias と token_type は表示すること"
+    );
+    assert!(
+        debug.contains("token_value_bytes: 4"),
+        "AuthTokenCache の Debug でバイト長を表示すること"
+    );
+    assert!(
+        debug.contains("total_size") && debug.contains("max_size"),
+        "容量の情報は従来どおり表示すること"
     );
 }

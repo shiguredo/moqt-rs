@@ -1063,3 +1063,35 @@ mod setup_option_duplicate_policy {
         );
     }
 }
+
+/// SetupOptions の Debug が AuthorizationToken の実値を表示しないこと
+///
+/// `SetupOptions` は `MoqtClient::peer_setup_options` などの公開 API から取り出せるため、
+/// 利用者が `{:?}` をログに出すと認可トークンが残る。内側の `AuthorizationToken` の `Debug`
+/// を通してバイト長だけを表示する。
+#[test]
+fn setup_options_debug_hides_authorization_token_value() {
+    let mut options = SetupOptions::new();
+    options.push(SetupOption {
+        option_type: shiguredo_moqt::parameter::SETUP_OPTION_AUTHORIZATION_TOKEN,
+        value: SetupOptionValue::AuthorizationToken(AuthorizationToken::UseValue {
+            token_type: 1,
+            token_value: vec![222, 173, 190, 239],
+        }),
+    });
+    let debug = format!("{options:?}");
+    // 漏えいの検査を先に行う。失敗メッセージに Debug 出力を含めると、漏えいした実値を
+    // CI のログへ書いてしまう
+    assert!(
+        !debug.contains("222") && !debug.contains("173"),
+        "SetupOptions の Debug に token_value の実値を含めないこと (実値は表示しない)"
+    );
+    assert!(
+        !debug.contains("190") && !debug.contains("239"),
+        "SetupOptions の Debug に token_value の実値を含めないこと (実値は表示しない)"
+    );
+    assert!(
+        debug.contains("token_value_bytes: 4"),
+        "SetupOptions の Debug でもバイト長を表示すること"
+    );
+}

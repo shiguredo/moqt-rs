@@ -37,11 +37,66 @@ use super::types::SessionError;
 /// result in a Session error MUST register the Token Alias in the token cache, even if
 /// the message fails for other reasons" のため、request が別の理由で失敗する場合も
 /// REGISTER は cache に登録する。期限切れを理由に拒否する場合も alias 登録は維持する。
-#[derive(Debug, Clone, Default)]
+///
+/// `Debug` は登録された Token Value の実値を表示しない。Token Value は認可情報そのもので
+/// あり、ログに残ると漏えいになる。各エントリは `alias` と `token_type`、Token Value の
+/// バイト長だけを表示し、`total_size` と `max_size` は従来どおり表示する。
+#[derive(Clone, Default)]
 pub struct AuthTokenCache {
     entries: BTreeMap<u64, (u64, Vec<u8>)>,
     total_size: u64,
     max_size: u64,
+}
+
+impl core::fmt::Debug for AuthTokenCache {
+    /// Token Value の実値を出さず、alias と token_type とバイト長だけを出す
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Token Value は認可情報そのものであり、ログに残ると漏えいになる。
+        // `PendingSubgroupBuffer` と同じく、入れ子の `Debug` でエントリごとの表示を作る
+        struct Entries<'a>(&'a BTreeMap<u64, (u64, Vec<u8>)>);
+
+        impl core::fmt::Debug for Entries<'_> {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                let mut list = f.debug_list();
+                for (alias, (token_type, token_value)) in self.0 {
+                    list.entry(&Entry {
+                        alias,
+                        token_type,
+                        token_value_bytes: token_value.len(),
+                    });
+                }
+                list.finish()
+            }
+        }
+
+        struct Entry<'a> {
+            alias: &'a u64,
+            token_type: &'a u64,
+            token_value_bytes: usize,
+        }
+
+        impl core::fmt::Debug for Entry<'_> {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.debug_struct("AuthTokenEntry")
+                    .field("alias", self.alias)
+                    .field("token_type", self.token_type)
+                    .field("token_value_bytes", &self.token_value_bytes)
+                    .finish()
+            }
+        }
+
+        // フィールドを追加したときに表示漏れをコンパイラが検出できるよう、`..` を使わずに分解する
+        let Self {
+            entries,
+            total_size,
+            max_size,
+        } = self;
+        f.debug_struct("AuthTokenCache")
+            .field("entries", &Entries(entries))
+            .field("total_size", total_size)
+            .field("max_size", max_size)
+            .finish()
+    }
 }
 
 impl AuthTokenCache {

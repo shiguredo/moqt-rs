@@ -3054,3 +3054,92 @@ mod track_property_filter_evaluation {
         );
     }
 }
+
+/// AuthorizationToken の Debug が認可トークンの実値を表示しないこと
+///
+/// Token Value は認可情報そのものであり、`{:?}` から漏れると利用者のログに残る。
+/// 実値の代わりにバイト長 (`token_value_bytes`) を表示する。
+mod authorization_token_debug {
+    use super::*;
+
+    /// 実値が表示されないことを検査する
+    ///
+    /// 失敗時に Debug 出力をそのまま出すと、漏えいした実値を CI のログへ書いてしまうため、
+    /// どの値が漏れたかだけを示す (`crates/tokio-moq/src/lib.rs` の `assert_hidden` と同じ方針)。
+    fn assert_hidden(debug: &str, value: &str, what: &str) {
+        assert!(
+            !debug.contains(value),
+            "{what} を Debug に含めないこと (実値は表示しない)"
+        );
+    }
+
+    /// REGISTER と USE_VALUE が token_value の実値を表示しないこと
+    #[test]
+    fn token_value_is_hidden() {
+        // 十進のバイト列と文字列の両方で検査するため、ASCII のダミーも使う
+        let token = AuthorizationToken::UseValue {
+            token_type: 1,
+            token_value: b"dummy-auth-token".to_vec(),
+        };
+        let debug = format!("{token:?}");
+        // 漏えいの検査を先に行う。`assert_eq!` は失敗時に実際の値を表示するため、
+        // 実値の不在を確かめてから表示形式を固定する
+        assert_hidden(&debug, "dummy-auth-token", "token_value の文字列");
+        assert_hidden(&debug, "100", "token_value の先頭バイトの十進表記");
+        assert!(
+            debug == "UseValue { token_type: 1, token_value_bytes: 16 }",
+            "実値ではなくバイト長を表示すること"
+        );
+
+        // 非 ASCII のバイト列は十進のバイト列として現れないこと
+        let token = AuthorizationToken::UseValue {
+            token_type: 1,
+            token_value: vec![222, 173, 190, 239],
+        };
+        let debug = format!("{token:?}");
+        assert_hidden(&debug, "222", "1 バイト目の十進表記");
+        assert_hidden(&debug, "173", "2 バイト目の十進表記");
+        assert_hidden(&debug, "190", "3 バイト目の十進表記");
+        assert_hidden(&debug, "239", "4 バイト目の十進表記");
+        assert!(
+            debug == "UseValue { token_type: 1, token_value_bytes: 4 }",
+            "非 ASCII でもバイト長だけを表示すること"
+        );
+
+        let token = AuthorizationToken::Register {
+            alias: 7,
+            token_type: 1,
+            token_value: b"dummy-auth-token".to_vec(),
+        };
+        let debug = format!("{token:?}");
+        assert_hidden(
+            &debug,
+            "dummy-auth-token",
+            "REGISTER の token_value の文字列",
+        );
+        assert_hidden(
+            &debug,
+            "100",
+            "REGISTER の token_value の先頭バイトの十進表記",
+        );
+        assert!(
+            debug == "Register { alias: 7, token_type: 1, token_value_bytes: 16 }",
+            "REGISTER も alias と token_type とバイト長だけを表示すること"
+        );
+    }
+
+    /// DELETE と USE_ALIAS は alias を表示すること
+    #[test]
+    fn alias_is_visible() {
+        let delete = AuthorizationToken::Delete { alias: 3 };
+        assert!(
+            format!("{delete:?}") == "Delete { alias: 3 }",
+            "DELETE は alias を表示すること"
+        );
+        let use_alias = AuthorizationToken::UseAlias { alias: 5 };
+        assert!(
+            format!("{use_alias:?}") == "UseAlias { alias: 5 }",
+            "USE_ALIAS は alias を表示すること"
+        );
+    }
+}

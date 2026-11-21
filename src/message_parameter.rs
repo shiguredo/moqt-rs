@@ -188,7 +188,10 @@ fn value_encoding(param_type: u64) -> Result<ValueEncoding, MessageError> {
 ///   REGISTER (0x1):  Token Alias + Token Type + Token Value
 ///   USE_ALIAS (0x2): Token Alias のみ
 ///   USE_VALUE (0x3): Token Type + Token Value (Alias なし)
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Token Value は認可情報そのものであり、ログに残ると漏えいになる。`Debug` は実値を表示せず、
+/// `token_value_bytes` としてバイト長だけを表示する。
+#[derive(Clone, PartialEq)]
 pub enum AuthorizationToken {
     /// DELETE (0x0): 登録済み Alias を削除する
     Delete {
@@ -201,7 +204,7 @@ pub enum AuthorizationToken {
         alias: u64,
         /// Token の種別
         token_type: u64,
-        /// Token の値 (種別固有のバイト列)
+        /// Token の値 (種別固有のバイト列)。`Debug` は実値の代わりにバイト長を表示する
         token_value: Vec<u8>,
     },
     /// USE_ALIAS (0x2): 登録済み Alias を参照する
@@ -213,9 +216,40 @@ pub enum AuthorizationToken {
     UseValue {
         /// Token の種別
         token_type: u64,
-        /// Token の値 (種別固有のバイト列)
+        /// Token の値 (種別固有のバイト列)。`Debug` は実値の代わりにバイト長を表示する
         token_value: Vec<u8>,
     },
+}
+
+impl core::fmt::Debug for AuthorizationToken {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Token Value は認可情報そのものであり、ログに残ると漏えいになる。前例
+        // (`MsfFragmentParameter` / `MsfUri` / `tokio_moq::ServerUrl`) に揃え、実値の代わりに
+        // バイト長を表示する
+        // フィールドを追加したときに表示漏れをコンパイラが検出できるよう、`..` を使わずに分解する
+        match self {
+            Self::Delete { alias } => f.debug_struct("Delete").field("alias", alias).finish(),
+            Self::Register {
+                alias,
+                token_type,
+                token_value,
+            } => f
+                .debug_struct("Register")
+                .field("alias", alias)
+                .field("token_type", token_type)
+                .field("token_value_bytes", &token_value.len())
+                .finish(),
+            Self::UseAlias { alias } => f.debug_struct("UseAlias").field("alias", alias).finish(),
+            Self::UseValue {
+                token_type,
+                token_value,
+            } => f
+                .debug_struct("UseValue")
+                .field("token_type", token_type)
+                .field("token_value_bytes", &token_value.len())
+                .finish(),
+        }
+    }
 }
 
 impl AuthorizationToken {
