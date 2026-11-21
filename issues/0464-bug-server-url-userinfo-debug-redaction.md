@@ -42,3 +42,15 @@ RFC 3986 §3.2.1 は `user:password` 形式の userinfo を deprecated とし、
 - `crates/tokio-moq/README.md` の `ServerUrl` の `Debug` の説明が実装と一致すること。
 - `crates/tokio-moq/src/lib.rs` の `ServerUrl` と `ServerUrl::authority` の doc コメントが、上記の `Debug` の表示と `parse_url` が返す値を説明していること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+`crates/tokio-moq/src/lib.rs` の `ServerUrl` の独自 `Debug` で、authority の userinfo を実値で表示しないようにした。
+
+- authority に `@` を含む場合、最後の `@` より前 (userinfo) を実値で表示せず、`userinfo_bytes` にバイト長だけを表示する。`@` より後ろの host / port は機密値でないため `authority` にそのまま表示する。
+- authority に `@` を含まない場合は `userinfo_bytes` を表示せず、`authority` を含めて従来と同じ表示にする (完了条件「表示が変わらないこと」を満たす)。
+- 判別は private ヘルパ `authority_debug_fields` に切り出した。区切りは最後の `@` とし、userinfo に `@` が含まれる入力でもパスワードの後半が表示されないようにする。
+- `ServerUrl` の型 doc と `ServerUrl::authority` の doc に、`parse_url` が userinfo を含む authority を保持し得ることと、`Debug` が userinfo を実値で表示しないことを書いた。`crates/tokio-moq/README.md` にも同じ内容を追記した。
+- テストは `crates/tokio-moq/src/lib.rs` の `tests` に追加した。`server_url_debug_hides_userinfo` は userinfo の実値が文字列としても十進のバイト列としても現れず、host / port とバイト長 (非 ASCII では文字数でなくバイト数) が表示されることを固定する。
+`server_url_debug_hides_userinfo_before_the_last_at_sign` は複数の `@`、`server_url_debug_hides_userinfo_at_edges` は先頭・末尾の `@` を固定する。`server_url_debug_keeps_authority_without_userinfo` は `@` を含まない場合の表示が変わらないことを固定する。
+`migration_and_connect_params_debug_hide_url_secrets` にも userinfo の検査を足し、`MigrationTarget` と `ConnectParams` の `Debug` が同じ秘匿を通ることを確認する。
