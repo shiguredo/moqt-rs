@@ -2,8 +2,8 @@
 
 調査日: 2026-10-14 (develop の f91baf3 時点)。
 
-最終更新: 2026-11-14 (namespace 発見・告知の 6 メッセージを実装済みとして対象外リストから外し、
-moq-sub の `--subscribe-tracks` を反映した)。
+最終更新: 2026-11-21 (MSF URI の RFC 3986 成分検証、変数置換の範囲、streamMapping、
+altGroup の横断検証、C4M の COSE ヘッダ / クレーム検証を反映した)。
 
 対象仕様は `refs/moq/` の MOQT `draft-ietf-moq-transport-23`、LOC `draft-ietf-moq-loc-05`、
 MSF `draft-ietf-moq-msf-02`、C4M `draft-ietf-moq-c4m-02` である。
@@ -98,7 +98,7 @@ C4M draft-02 の `moqt` クレームの map 化と未知キーの fail-closed、
 | `PUBLISH_STATE_NOTIFY` の送信 | `Session::send_publish_state_notify` に `MoqtClient` のラッパーが無い | §9.10 | publisher から状態変化を通知できない |
 | PUBLISH_OK 前の Object 送信 | `send_subgroup_header` / `send_object_datagram` が `Established` を要求する | §3.1 (MAY) | publisher は PUBLISH_OK を待つ分だけ購読確立が遅れる (違反ではない) |
 | FETCH_OK 前の Object 送信 | `send_fetch_header` が `FetchState::Established` を要求する | §3.2 (MAY) | 応答範囲の終端 (LARGEST_OBJECT が要求範囲内か) が確定するまで FETCH 応答 Object を送れない。fill fetch は `Pending` を許容するため非対称 |
-| moqt URI のパース | `msf::uri` は fragment 必須で `msf:` 以外を拒否する。authority / path / query の分解は example 側の `parse_url` にのみある | §6.1 / §6.1.1 / §6.1.2 | ライブラリ利用者は URI 解釈を毎回自前実装する (意図的に example へ置いている可能性あり) |
+| moqt URI のパース | `msf::uri` は `moqt://authority/path?query#msf:...` を分解し、authority / path / query を RFC 3986 で検証する。fragment なしの endpoint URI を検証する公開 API と catalog の `connectionURI` 検証は無い | §6.1 / §6.1.1 / §6.1.2 | ライブラリ利用者は endpoint URI の解釈と `connectionURI` の検証を自前で行う必要がある |
 
 ## 4. MUST 未達・仕様違反になりうる箇所
 
@@ -165,7 +165,10 @@ MSF §5.2.8 は「A True value MUST never follow a False value.」と定める�
 
 MSF §5.2.37 は `connectionURI` が「valid MOQT endpoint URI でなければならない (MUST)」とし、
 指定時は「購読者が新しい MOQT 接続を確立しなければならない (MUST)」と定める。
-ライブラリは URI 形式の検証を行わないと明記し (`src/msf.rs:2810-2813`)、
+ライブラリは catalog の `connectionURI` の形式検証を行わないと明記し (`src/msf.rs:3869-3872`)、
+`tests/test_msf/track_fields.rs` の `connection_uri_invalid_value_accepted` が
+不正な文字列を受理する現状を固定している。`msf::uri::parse_msf_uri` は MSF URL の
+authority / path / query を検証するが、fragment なしの endpoint URI を検証する API ではない。
 example に `connectionURI` を参照する箇所も無い (grep で 0 件)。
 publishTracks (Log / Metrics) を使う配信で壊れた URI を検出できず、
 購読側も別接続を張らない。
@@ -200,6 +203,22 @@ open な送信 stream を Session が reset する (`Session::reset_open_outgoin
 `SetupOptions::iter` / `moqt_implementation` / `max_filter_ranges` /
 `max_request_updates` で拡張を判定できる。example のラッパーは peer の SETUP を
 読み捨てるが、ライブラリ API としての拡張ネゴシエーションは可能になった。
+
+### 4.9 2026-11-21 の検証で解消した項目
+
+以下は過去の版で「未対応」「MUST 未達」としていたが、現在の実装で解消している。
+
+- MSF: Track Name が空の `msf:` fragment を拒否する (§2.4.1)。`parse_msf_uri` が
+  authority / path / query を RFC 3986 で検証し、userinfo を拒否する (§11.1)。
+  変数置換は JSON の文字列リテラル内だけを対象にし、文字列外・キー・`\u0025` を拒否する
+  (§5.4.1)。`loc` の `streamMapping` は `group` / `object` だけを受理する (§4.1.1)。
+  `accessibleWindowTime` は tracks / publishTracks を横断して検証する (§5.2.45)。
+- C4M: COSE の `alg` でレジストリ名 (tstr) を受理し整数へ正規化する (RFC 9052 §3.1)。
+  COSE ヘッダと CAT クレームの重複ラベルを拒否する (RFC 8949 §5.6.1)。
+  `catdpop` の負のウィンドウを decode / encode / 検証で拒否する。
+  `CwtDpopProofCodec::build` が action に対する target の有無を検証する。
+- playout: `u64::MAX` の Object ID を終端として扱い、音声予算・リサンプラ・不感帯の
+  飽和演算を修正した。これは仕様 MUST ではなく、公開 API の境界での panic / 誤動作の修正である。
 
 ## 5. publisher (moq-pub) に足りない機能
 
@@ -628,8 +647,8 @@ moqt-js (HEAD `f6a171e8`) の playout のうち、次の 2 つは移植してい
 - カメラ経路のエンコーダ (Video Toolbox / libaom / libvpx) が B フレームを出力しうるか
   (パススルーは B フレーム入力を明示的に拒否する)
 - 0-RTT: rustls の `enable_early_data` 既定は false。tobi-quic の `connect_early` を使うかは未検討
-- moqt URI のパースをライブラリに置くか example に置くか (§6.1、URL 系の issue は
-  example 側で closed になっている)
+- fragment なしの MOQT endpoint URI を検証する API を追加し、catalog の `connectionURI` を
+  拒否するか (§5.2.37 / §6.1)。現状は catalog decode の責務外として受理する
 - 送信パラメータ検証の残存ギャップ (`src/session/subscription/send.rs:126` / `:307` /
   `:323` / `:927` のコメント) を encode 前に閉じるか
 - リレー経由でない直接 subscriber の受け入れは、moq-pub が client 専用 (待ち受け API 無し) の
