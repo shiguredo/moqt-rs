@@ -1,0 +1,1792 @@
+
+
+
+
+Media Over QUIC                                            S. Nandakumar
+Internet-Draft                                               C. Jennings
+Intended status: Standards Track                                   Cisco
+Expires: 5 May 2027                                      1 November 2026
+
+
+                     MoQ Load Balancer Architecture
+                       draft-nandakumar-moq-lb-00
+
+Abstract
+
+   This document describes an architecture for load balancing Media Over
+   QUIC Transport (MOQT) requests across a pool of MOQT relays.  It
+   introduces a MOQT-aware Load Balancer (MoQ-LB) that places requests
+   on relays according to their Track Namespace, and describes the
+   control-plane, state, and failure-handling requirements needed for a
+   horizontally scaled deployment.
+
+About This Document
+
+   This note is to be removed before publishing as an RFC.
+
+   The latest revision of this draft can be found at
+   https://suhashere.github.io/moq-lb/.  Status information for this
+   document may be found at https://datatracker.ietf.org/doc/draft-
+   nandakumar-moq-lb/.
+
+   Discussion of this document takes place on the Media Over QUIC
+   mailing list (mailto:moq@ietf.org), which is archived at
+   https://mailarchive.ietf.org/arch/browse/moq/.  Subscribe at
+   https://www.ietf.org/mailman/listinfo/moq/.
+
+   Source for this draft and an issue tracker can be found at
+   https://github.com/suhashere/moq-lb.
+
+Status of This Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at https://datatracker.ietf.org/drafts/current/.
+
+
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                   [Page 1]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on 5 May 2027.
+
+Copyright Notice
+
+   Copyright (c) 2026 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents (https://trustee.ietf.org/
+   license-info) in effect on the date of publication of this document.
+   Please review these documents carefully, as they describe your rights
+   and restrictions with respect to this document.  Code Components
+   extracted from this document must include Revised BSD License text as
+   described in Section 4.e of the Trust Legal Provisions and are
+   provided without warranty as described in the Revised BSD License.
+
+Table of Contents
+
+   1.  Introduction  . . . . . . . . . . . . . . . . . . . . . . . .   3
+     1.1.  Conventions and Definitions . . . . . . . . . . . . . . .   4
+   2.  Architecture  . . . . . . . . . . . . . . . . . . . . . . . .   4
+     2.1.  Example Message Flow  . . . . . . . . . . . . . . . . . .   6
+   3.  Routing Model . . . . . . . . . . . . . . . . . . . . . . . .   7
+     3.1.  Routing Keys  . . . . . . . . . . . . . . . . . . . . . .   7
+     3.2.  Routing Table . . . . . . . . . . . . . . . . . . . . . .   8
+       3.2.1.  Static Routes . . . . . . . . . . . . . . . . . . . .   9
+       3.2.2.  Hashed Routes . . . . . . . . . . . . . . . . . . . .   9
+     3.3.  Prefix Request Resolution . . . . . . . . . . . . . . . .  12
+     3.4.  Example . . . . . . . . . . . . . . . . . . . . . . . . .  12
+   4.  Request Placement . . . . . . . . . . . . . . . . . . . . . .  13
+     4.1.  Rejections  . . . . . . . . . . . . . . . . . . . . . . .  13
+     4.2.  Session Affinity  . . . . . . . . . . . . . . . . . . . .  14
+     4.3.  Relay Health and Failover . . . . . . . . . . . . . . . .  14
+       4.3.1.  Displaced Requests  . . . . . . . . . . . . . . . . .  15
+     4.4.  GOAWAY from Relays  . . . . . . . . . . . . . . . . . . .  15
+   5.  Proxy Mode  . . . . . . . . . . . . . . . . . . . . . . . . .  16
+     5.1.  Session Setup . . . . . . . . . . . . . . . . . . . . . .  16
+     5.2.  Session Mapping State . . . . . . . . . . . . . . . . . .  16
+     5.3.  Session Affinity in Proxy Mode  . . . . . . . . . . . . .  17
+     5.4.  Data Plane  . . . . . . . . . . . . . . . . . . . . . . .  17
+       5.4.1.  Request Streams . . . . . . . . . . . . . . . . . . .  18
+       5.4.2.  Object Data . . . . . . . . . . . . . . . . . . . . .  18
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                   [Page 2]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+     5.5.  Backend Session Sharing and Subscription Coalescing
+           (Optional)  . . . . . . . . . . . . . . . . . . . . . . .  18
+     5.6.  Relay GOAWAY in Proxy Mode  . . . . . . . . . . . . . . .  20
+     5.7.  Moving a Request  . . . . . . . . . . . . . . . . . . . .  20
+     5.8.  Example Proxy-Mode Flow . . . . . . . . . . . . . . . . .  21
+   6.  Redirect Mode . . . . . . . . . . . . . . . . . . . . . . . .  22
+     6.1.  Relay GOAWAY and Failure in Redirect Mode . . . . . . . .  23
+   7.  Configuration . . . . . . . . . . . . . . . . . . . . . . . .  23
+     7.1.  Configuration Rotation  . . . . . . . . . . . . . . . . .  24
+     7.2.  Pool Resizing . . . . . . . . . . . . . . . . . . . . . .  24
+   8.  Interaction with Connection-Level Load Balancing  . . . . . .  25
+   9.  Security Considerations . . . . . . . . . . . . . . . . . . .  25
+     9.1.  Configuration Security  . . . . . . . . . . . . . . . . .  25
+     9.2.  Targeted Load Concentration . . . . . . . . . . . . . . .  26
+     9.3.  Proxy Mode Authorization  . . . . . . . . . . . . . . . .  26
+     9.4.  Redirect Mode Security  . . . . . . . . . . . . . . . . .  26
+     9.5.  Resource Exhaustion . . . . . . . . . . . . . . . . . . .  27
+   10. IANA Considerations . . . . . . . . . . . . . . . . . . . . .  27
+     10.1.  MoQ-LB Hash Profiles . . . . . . . . . . . . . . . . . .  27
+     10.2.  MoQ-LB Route Kinds . . . . . . . . . . . . . . . . . . .  27
+   11. References  . . . . . . . . . . . . . . . . . . . . . . . . .  28
+     11.1.  Normative References . . . . . . . . . . . . . . . . . .  28
+     11.2.  Informative References . . . . . . . . . . . . . . . . .  28
+   Appendix A.  Deployment Examples  . . . . . . . . . . . . . . . .  29
+     A.1.  Interactive Meeting . . . . . . . . . . . . . . . . . . .  30
+     A.2.  Live Broadcast  . . . . . . . . . . . . . . . . . . . . .  31
+   Acknowledgements  . . . . . . . . . . . . . . . . . . . . . . . .  32
+   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .  32
+
+1.  Introduction
+
+   Media Over QUIC Transport (MOQT) [MoQTransport] defines a publish/
+   subscribe protocol in which clients establish a single QUIC [QUIC] or
+   WebTransport [WebTransport] session to a relay and perform subscribe,
+   fetch, or publish operations on one or more tracks identified by a
+   Full Track Name (a tuple of a Track Namespace and a Track Name).
+
+   Larger deployments typically run a horizontally scaled pool of relays
+   fronted by a load balancer.  Existing layer-4 load balancers and QUIC
+   load balancers [QUIC-LB] route QUIC packets based on connection
+   identifiers; they are oblivious to MOQT namespaces and tracks.  As a
+   result, they cannot:
+
+   *  steer MOQT requests for a given Track Namespace to a relay chosen
+      for that namespace;
+
+   *  keep a publisher and all of its subscribers converging on the same
+      relay so that fan-out is efficient;
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                   [Page 3]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+   *  move individual requests when relay membership or health changes.
+
+   This document defines the MoQ Load Balancer (MoQ-LB) architecture.  A
+   MoQ-LB is a MOQT-aware entity that sits between MOQT clients and a
+   pool of MOQT relays.  It inspects MOQT control messages, consults a
+   namespace-to-relay Routing Table, and either forwards or redirects
+   each MOQT request to the appropriate relay.  The MoQ-LB does not
+   define new wire-format messages; it reuses existing MOQT control
+   messages and parameters and specifies how they MUST be used to
+   achieve namespace-aware load balancing.  The architecture complements
+   connection-level load balancing (such as QUIC-LB) with namespace-
+   aware routing at the MOQT layer.
+
+1.1.  Conventions and Definitions
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+   "OPTIONAL" in this document are to be interpreted as described in
+   BCP 14 [RFC2119] [RFC8174] when, and only when, they appear in all
+   capitals, as shown here.
+
+   This document uses the following terms:
+
+   Relay Pool:  The set of MOQT relays behind a MoQ-LB.
+
+   Relay Identifier (RID):  A byte string that identifies a relay within
+      a Relay Pool.
+
+   Routing Table:  The set of Namespace Routes (Section 3.2) that maps
+      Track Namespaces to relays.
+
+   Configuration Agent:  The control-plane component that provisions
+      MoQ-LB instances with the Routing Table, the Relay Pool, and relay
+      health (Section 7).
+
+   Eligible Relay:  A relay that is Healthy (Section 4.3) and, for a
+      hashed route, has a positive weight.
+
+   Selected Relay:  The relay that the MoQ-LB chooses for a request
+      (Section 4).
+
+   Drain Deadline:  A deployment-configured duration after which a
+      proxy-mode MoQ-LB moves or ends requests that remain on a relay no
+      longer selected for them (Section 4.3.1).
+
+2.  Architecture
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                   [Page 4]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+                  +---------------------+
+                  | Configuration Agent |. . . . . . . . . .
+                  +----------+----------+                  .
+                             |                             .
+                             | versioned           health  .
+                             | configuration:  monitoring  .
+                             | routes, relays,             .
+                             | health, keys                .
+                             v                             .
+   +--------+         +-----------+  proxy mode:   +-------+--+
+   |        |  MOQT   |           |  backend MOQT  |  Relay   |<-+
+   | Client +-------->|  MoQ-LB   +--------------->|    R1    |  |
+   |        |         |           |  sessions      +----------+  | relay
+   |        |         +-----------+                +----------+  | net-
+   |        |  redirect mode: client connects to   |  Relay   |  | work
+   |        +------------------------------------->|    R2    |<-+
+   +--------+  Selected Relay directly             +----------+
+
+                        Figure 1: MoQ-LB deployment
+
+   A MoQ-LB operates on MOQT sessions established over QUIC or
+   WebTransport.  It is reachable at one or more addresses discoverable
+   by clients (e.g., via the mechanisms described in [MOQ-URI]).  After
+   the session is set up, the MoQ-LB inspects MOQT control messages that
+   carry a Track Namespace or Full Track Name and consults the Routing
+   Table to select a relay for each request.
+
+   The relays behind a MoQ-LB are assumed to form a relay network in
+   which any relay can serve any request: relays exchange
+   PUBLISH_NAMESPACE, PUBLISH, and subscriptions among themselves so
+   that a subscriber on one relay receives the namespaces, tracks, and
+   objects published on another.  How relays do this (Section 7 of
+   [MoQTransport]) is outside the scope of this document.  Relay
+   selection therefore does not decide whether a request can be served,
+   only where.  The MoQ-LB places publishers and subscribers of the same
+   namespaces on the same relay, which reduces relay-to-relay traffic
+   and latency, and spreads load across the pool according to the
+   Routing Table.
+
+   The Configuration Agent is authoritative for routing and health
+   state; MoQ-LB instances act on the configuration it distributes
+   (Section 7).
+
+   A MoQ-LB operates in one of two modes:
+
+   Proxy mode:  The MoQ-LB terminates the client's MOQT session and
+      opens one or more MOQT sessions to the Selected Relays.  All data
+      objects are forwarded through the MoQ-LB (Section 5).
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                   [Page 5]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+   Redirect mode:  The MoQ-LB redirects each routable request to its
+      Selected Relay with a REQUEST_ERROR carrying the REDIRECT error
+      code.  The client sends the request directly to the relay, so the
+      MoQ-LB is never in the data path, and keeps its session with the
+      MoQ-LB for placing later requests (Section 6).
+
+   Each client session is served in exactly one mode for its whole
+   lifetime.  A MoQ-LB MAY support both modes, for example on different
+   service URIs, but it does not switch a session from one mode to the
+   other.
+
+   A conforming MoQ-LB MUST implement every normative requirement of the
+   mode(s) it supports.  Section 3, Section 4, and Section 7 apply to
+   both modes; Section 5 applies only to proxy mode, and Section 6 only
+   to redirect mode.
+
+2.1.  Example Message Flow
+
+   Below is a non-normative illustration of the end-to-end behavior.  It
+   shows a client subscribing to a track whose Track Namespace matches a
+   hashed route resolving to relay R2, and then to a second track whose
+   namespace resolves to R1, with the MoQ-LB in redirect mode.  Hashed
+   routes are specified in Section 3.2.2 and redirects in Section 6.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                   [Page 6]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+    Client            MoQ-LB            R1            R2          Config
+      |                 |                |             |              |
+      |                 |<------------- Routing Table (v=42) ---------|
+      |                 |                |             |              |
+      | QUIC+WT handshake                |             |              |
+      |<--------------->|                |             |              |
+      | SETUP           |                |             |              |
+      |---------------->|                |             |              |
+      | SETUP           |                |             |              |
+      |<----------------|                |             |              |
+      | SUBSCRIBE(ns=live/sports/game-7, name=audio)   |              |
+      |---------------->|                |             |              |
+      |                 | hash(ns) -> R2 |             |              |
+      | REQUEST_ERROR(REDIRECT, Connect URI=https://r2.example/moq)   |
+      |<----------------|                |             |              |
+      | (connect to R2) SETUP                          |              |
+      |<---------------------------------------------->|              |
+      | SUBSCRIBE (retried)                            |              |
+      |----------------------------------------------->|              |
+      | SUBSCRIBE_OK                                   |              |
+      |<-----------------------------------------------|              |
+      | SUBSCRIBE(ns=live/news/ch-2, name=video)       |              |
+      |---------------->|                |             |              |
+      |                 | hash(ns) -> R1 |             |              |
+      | REQUEST_ERROR(REDIRECT, Connect URI=https://r1.example/moq)   |
+      |<----------------|                |             |              |
+      | (connect to R1) SETUP            |             |              |
+      |<-------------------------------->|             |              |
+      | SUBSCRIBE (retried)              |             |              |
+      |--------------------------------->|             |              |
+      | SUBSCRIBE_OK                     |             |              |
+      |<---------------------------------|             |              |
+
+            Figure 2: Redirect-mode subscription (non-normative)
+
+3.  Routing Model
+
+3.1.  Routing Keys
+
+   The MoQ-LB selects a relay for each MOQT request from its routing
+   key.  Track Namespaces are tuples; prefix matching is performed tuple
+   by tuple.
+
+
+
+
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                   [Page 7]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+       +=====================+====================================+
+       | MOQT Message        | Routing Key                        |
+       +=====================+====================================+
+       | PUBLISH_NAMESPACE   | Track Namespace                    |
+       +---------------------+------------------------------------+
+       | SUBSCRIBE_NAMESPACE | Track Namespace Prefix             |
+       +---------------------+------------------------------------+
+       | SUBSCRIBE_TRACKS    | Track Namespace Prefix             |
+       +---------------------+------------------------------------+
+       | SUBSCRIBE           | Track Namespace of Full Track Name |
+       +---------------------+------------------------------------+
+       | PUBLISH             | Track Namespace of Full Track Name |
+       +---------------------+------------------------------------+
+       | FETCH               | Track Namespace of Full Track Name |
+       +---------------------+------------------------------------+
+       | TRACK_STATUS        | Track Namespace of Full Track Name |
+       +---------------------+------------------------------------+
+       | SETUP, GOAWAY       | None                               |
+       +---------------------+------------------------------------+
+       | All other messages  | The request stream they arrive on  |
+       +---------------------+------------------------------------+
+
+                                 Table 1
+
+   The messages in the first group start requests and are called
+   routable requests.  SUBSCRIBE_NAMESPACE and SUBSCRIBE_TRACKS are
+   routed as specified in Section 3.3.
+
+   SETUP and GOAWAY are session- or request-local and are not routed;
+   GOAWAY handling is specified in Section 4.4.
+
+   All other messages (SUBSCRIBE_OK, FETCH_OK, REQUEST_OK,
+   REQUEST_ERROR, REQUEST_UPDATE, PUBLISH_STATE_NOTIFY, PUBLISH_DONE,
+   PUBLISH_SKIPPED, NAMESPACE, and NAMESPACE_DONE) are not routed by any
+   field they carry but by the request stream on which they arrive.  In
+   proxy mode the MoQ-LB resolves them through the per-session request
+   mapping (Section 5.2); in redirect mode they flow directly between
+   the client and the relay.
+
+3.2.  Routing Table
+
+   The Routing Table is the authoritative input to relay selection.  It
+   is a set of Namespace Routes, whose structure is described using
+   Concise Data Definition Language (CDDL) [CDDL].  The order of routes
+   is not significant.
+
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                   [Page 8]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+   NamespaceRoute = {
+     prefix:  [* bytes],              ; Track Namespace prefix
+     (
+       StaticRoute //
+       HashedRoute //
+       $$NamespaceRouteKind
+     ),
+     ? attributes: { * text => any }  ; implementation-defined
+   }
+
+   StaticRoute = (
+     kind: "static",
+     rid:  bytes                      ; Relay Identifier
+   )
+
+   HashedRoute = (
+     kind: "hashed",
+     ? profile: text,                 ; default "HRW-SHA256"
+     ? key_fields: uint .ge 1,        ; default: all fields
+     rids: [+ (bytes / { rid: bytes, weight: 0..16 })]
+   )
+
+   The kind field discriminates route types.  Additional route kinds can
+   be registered (Section 10.2); a MoQ-LB MUST reject a Routing
+   Table containing a kind it does not support. attributes is an open
+   extension point for implementation-defined metadata.
+
+   A namespace matches a route when its leading tuple fields are equal,
+   field by field, to the route's prefix (an empty prefix matches every
+   namespace).  The MoQ-LB SHALL select the matching route with the
+   longest prefix.  A Routing Table containing duplicate prefixes is
+   invalid.  Route selection MUST be deterministic for a given valid
+   Routing Table.
+
+3.2.1.  Static Routes
+
+   A static route (kind: "static") pins a namespace or prefix to the
+   relay identified by its rid field.  If that relay is not Eligible,
+   the route has no Selected Relay; requests matching it are rejected
+   (Section 4.1) rather than placed on another relay.
+
+3.2.2.  Hashed Routes
+
+   A hashed route (kind: "hashed") maps every namespace that matches
+   prefix to a relay selected by the weighted rendezvous hashing
+   algorithm of Section 3.2.2.1 over the Eligible Relays among its rids.
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                   [Page 9]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+   Each entry in rids is either a plain RID (shorthand for weight 1) or
+   a map carrying an explicit weight.  Candidate RIDs MUST be unique
+   within a route.
+
+   The optional key_fields field sets how many leading fields of a
+   namespace form its hash key, the part of the namespace that is hashed
+   to select a relay.  All namespaces that share the same first
+   key_fields fields therefore select the same relay.  When key_fields
+   is absent, the hash key is the whole namespace.  A namespace with
+   fewer than key_fields fields uses the whole namespace as its hash
+   key. key_fields MUST NOT be less than the number of fields in prefix.
+
+   key_fields lets a deployment choose the unit that is kept together on
+   one relay.  For example, an application whose namespaces have the
+   form (domain, session, participant) can use key_fields: 2 so that all
+   participants of a session reach the same relay, while different
+   sessions are still spread across the pool.
+
+   Weights bias the share of namespace keys assigned to each relay.  A
+   relay with weight 2 receives approximately twice the share of a relay
+   with weight 1 when the keyspace is sufficiently large.  Weights are
+   provisioned by the Configuration Agent and SHOULD reflect measured
+   sustainable capacity, not instantaneous load.  Sixteen levels (0 to
+   16) are enough to express relay capacity ratios in practice and keep
+   the comparator inexpensive.  Deployments SHOULD express capacity
+   ratios using the smallest integer weights that yield the intended
+   distribution, since comparator cost grows with weight magnitude.
+
+   A weight of 0 excludes a relay from selection.  It is the planned way
+   to drain a relay: it is changed in a new Routing Table version and
+   follows the rules of Section 7.1.  The Draining health state
+   (Section 4.3) has the same effect on selection but is an operational
+   state that can change without a route change.  A route with no
+   positive-weight relay is invalid.
+
+3.2.2.1.  Hash Canonicalization
+
+   For a given Track Namespace and set of Eligible candidates, all MoQ-
+   LB instances MUST select the same RID.  A change to the candidate
+   set, or to any weight within it, can change the selection outcome for
+   subsequent assignments.  The procedure specified in this section is
+   deterministic and is independent of platform floating-point behavior.
+
+   For each candidate relay, implementations compute a per-candidate
+   hash as follows:
+
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 10]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+   1.  Take the hash key of the Track Namespace (Section 3.2.2) and
+       encode it as a Track Namespace, as specified in Section 8.7 of
+       [MoQTransport].
+
+   2.  Encode the RID as its length, an MOQT variable-length integer
+       (Section 8.1 of [MoQTransport]), followed by its bytes.
+
+   3.  Compute H = HASH(namespace-encoding || rid-encoding) using the
+       hash algorithm of the route's hash profile (Section 3.2.2.2) and
+       interpret the result as an unsigned big-endian integer of b bits.
+
+   For two positive-weight candidates A and B with hash integers H_A,
+   H_B and weights w_A, w_B, let D be the modulus of the route's hash
+   profile.  Candidate A wins over candidate B if and only if:
+
+   (H_A + 1)^(w_B) * D^(w_A) > (H_B + 1)^(w_A) * D^(w_B)
+
+   All operations MUST use exact non-negative integer arithmetic;
+   floating-point evaluation and truncation of intermediate values are
+   prohibited.  When the two sides are equal, the candidate with the
+   lexicographically smaller RID byte string is the winner.  The
+   relation is a strict total order over the positive-weight candidates.
+   Implementations MAY use any procedure that returns its first-ranked
+   candidate, and the result is independent of iteration order.
+
+   Each side of the comparison is bounded above by 2^((b + 1) * (w_A +
+   w_B)).  Under the weight ceiling of 16, each side therefore occupies
+   at most 8,224 bits (1,028 bytes) for HRW-SHA256 and 2,080 bits (260
+   bytes) for HRW-SHA256-64.
+
+   The comparator is an exact integer form of weighted rendezvous
+   hashing [WEIGHTED-HRW] with score -ln((H + 1) / D) / w, where the
+   lowest score wins.  Over a large keyspace, each relay i receives
+   approximately the share w_i / sum(w_j).
+
+3.2.2.2.  Hash Profiles
+
+   A hash profile specifies a hash algorithm together with its output
+   width in bits b and the associated modulus D = 2^b + 1.  Profiles are
+   registered in the registry defined in Section 10.1.  This document
+   defines two:
+
+   *  HRW-SHA256: H is the full SHA-256 digest; b = 256, D = 2^256 + 1.
+
+   *  HRW-SHA256-64: H is the first 8 bytes of the SHA-256 digest; b =
+      64, D = 2^64 + 1.  Its comparator operands are about a quarter of
+      the size of those of HRW-SHA256, which makes it the better choice
+      where selection cost matters.
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 11]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+   Implementations MUST support both profiles.  Both use the same hash
+   function, so supporting the second adds only a truncation.
+
+   Hash profiles are used only by the Configuration Agent and MoQ-LB
+   instances.  Relays and clients never compute selections, and nothing
+   about the profile appears in MOQT messages.  Each hashed route names
+   its profile in its profile field, and HRW-SHA256 is used when the
+   field is absent.  A MoQ-LB MUST reject a Routing Table that names a
+   profile it does not support.  Changing a route's profile remaps its
+   namespaces in the same way as replacing its relays, and is applied
+   through configuration rotation (Section 7.1).
+
+3.3.  Prefix Request Resolution
+
+   SUBSCRIBE_NAMESPACE and SUBSCRIBE_TRACKS carry a Track Namespace
+   Prefix P rather than a single namespace.  The MoQ-LB routes P as if
+   it were a namespace: it selects the matching route with the longest
+   prefix and, for a hashed route, computes the hash key of P as
+   described in Section 3.2.2.  More-specific routes under P are not
+   consulted.  If no route matches P, the request is rejected
+   (Section 4.1).  In particular, a request with an empty P (all
+   namespaces) is rejected unless the Routing Table contains a route
+   with an empty prefix.
+
+   When P has at least key_fields fields, every namespace under P has
+   the same hash key as P, so the request reaches the relay that serves
+   those namespaces.  Otherwise, namespaces under P can be placed on
+   other relays, and the Selected Relay learns of them through the relay
+   network (Section 2).
+
+3.4.  Example
+
+   The following Routing Table is shown in CBOR diagnostic notation
+   (Section 8 of [CBOR]), in which single-quoted strings are byte
+   strings.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 12]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+   [
+     { "prefix":  ['conf', 'example.com'],
+       "kind":    "static",
+       "rid":     'r-east-07' },
+
+     { "prefix":  ['live', 'sports'],
+       "kind":    "hashed",
+       "rids":    [ {"rid": 'r-east-01', "weight": 2},
+                    {"rid": 'r-east-02', "weight": 2},
+                    {"rid": 'r-east-03', "weight": 1} ] },
+
+     { "prefix":  [],
+       "kind":    "hashed",
+       "rids":    ['r-default-01', 'r-default-02'] }
+   ]
+
+4.  Request Placement
+
+   When a client opens a MOQT session to a MoQ-LB, the MoQ-LB completes
+   the QUIC or WebTransport handshake and the MOQT SETUP exchange
+   (Section 6.3 of [MoQTransport]).  It then selects a relay for each
+   routable request (Section 3.1) under the Routing Table and health
+   state in effect when the request arrives, and forwards (Section 5) or
+   redirects (Section 6) the request to it.
+
+4.1.  Rejections
+
+   A MoQ-LB rejects a routable request with REQUEST_ERROR (Section 9.4
+   of [MoQTransport]) in the following cases:
+
+   *  No route matches the request's routing key: DOES_NOT_EXIST for
+      SUBSCRIBE, FETCH, TRACK_STATUS, SUBSCRIBE_NAMESPACE, and
+      SUBSCRIBE_TRACKS; UNINTERESTED for PUBLISH and PUBLISH_NAMESPACE.
+
+   *  The matching route has no Eligible Relay, or the configuration is
+      too stale to place the request (Section 7): INTERNAL_ERROR with a
+      non-zero Retry Interval.
+
+   *  The client is not authorized for the request (Section 9):
+      UNAUTHORIZED.
+
+   *  A configured resource limit is reached: EXCESSIVE_LOAD.
+
+   A MoQ-LB MUST NOT use an error code that is not registered for MOQT
+   (Section 12.3 of [MoQTransport]).
+
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 13]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+4.2.  Session Affinity
+
+   Requests for the same namespace reach the same relay because
+   selection is deterministic (Section 3.2.2.1): every MoQ-LB instance,
+   for every session, selects the same relay under the same Routing
+   Table and health state.  A client that reconnects after the Relay
+   Pool or the Routing Table has changed can be routed to a different
+   relay.
+
+   In proxy mode, the MoQ-LB additionally binds each namespace to a
+   relay for the lifetime of a client session, so that later requests on
+   that namespace stay on the relay that already serves the session's
+   earlier requests (Section 5.3).  In redirect mode, the MoQ-LB keeps
+   no per-request or per-namespace state; each request is redirected to
+   its current Selected Relay.
+
+4.3.  Relay Health and Failover
+
+   Each relay in a Relay Pool has one of three health states.  The
+   Configuration Agent is authoritative for them and distributes them to
+   every MoQ-LB.
+
+   *  Healthy: eligible for new requests.
+
+   *  Draining: not eligible for new requests, but still serving
+      existing ones (for example, before maintenance).
+
+   *  Unhealthy: not expected to serve traffic.
+
+   A proxy-mode MoQ-LB also changes its local view of a relay on two
+   events: it marks the relay Draining when the relay sends GOAWAY on a
+   backend control stream, and Unhealthy when a backend session to the
+   relay closes abruptly.  It keeps that view until the Configuration
+   Agent reports a newer state.  A redirect-mode MoQ-LB has no backend
+   sessions and only uses the states it receives.  Because local changes
+   are not seen by other instances, instances can briefly select
+   different relays for the same namespace; a MoQ-LB SHOULD report local
+   changes to the Configuration Agent so that it can distribute a
+   consistent view.
+
+   New requests MUST NOT be assigned to relays that are not Eligible.
+   For hashed routes, those relays are excluded from selection, and
+   namespaces whose Selected Relay is unaffected keep it.  For static
+   routes, see Section 3.2.1.
+
+
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 14]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+4.3.1.  Displaced Requests
+
+   A request is displaced when the relay it is on is no longer its
+   Selected Relay: because a new Routing Table version maps its
+   namespace elsewhere (Section 7.1), or because the relay becomes
+   Draining.
+
+   *  Displaced requests MAY continue on their relay until the Drain
+      Deadline.  A proxy-mode MoQ-LB SHOULD move them (Section 5.7)
+      before it.
+
+   *  At the Drain Deadline, or when the relay closes the session or the
+      GOAWAY Timeout expires, whichever comes first, a proxy-mode MoQ-LB
+      moves or ends the remaining requests.
+
+   A redirect-mode MoQ-LB holds no requests and cannot move them.  When
+   a relay becomes Draining, the relay moves its clients with GOAWAY
+   (Section 6.1).  A request displaced by a new Routing Table version
+   while its relay remains Healthy stays on that relay until it ends,
+   the client re-issues it, or the relay sends GOAWAY; the Drain
+   Deadline does not apply to it.  Its relay still serves it through the
+   relay network (Section 2).  A deployment that needs such requests
+   moved can have the relay send GOAWAY for them by means outside the
+   scope of this document.
+
+   Requests on an Unhealthy relay cannot make progress.  A proxy-mode
+   MoQ-LB moves them at once, without waiting for the new relay to
+   accept before switching; in redirect mode, the client detects the
+   failure and returns to the MoQ-LB.
+
+   Requests that are ended because they could not be moved are ended
+   with MOQT mechanisms and registered codes: an established
+   subscription with PUBLISH_DONE and status GOING_AWAY (Section 12.4 of
+   [MoQTransport]), a pending request with REQUEST_ERROR and code
+   GOING_AWAY, and any other request stream with a stream reset using
+   GOING_AWAY.
+
+4.4.  GOAWAY from Relays
+
+   Relays use the MOQT GOAWAY message (Section 9.2 of [MoQTransport]) to
+   move work away from themselves, for example before maintenance or
+   under overload.  A GOAWAY on the control stream moves the whole
+   session; a GOAWAY on a request stream moves only that request.  In
+   both modes, the Routing Table, not the relay, decides where moved
+   work goes: a relay does not know the current Routing Table or what
+   the client is authorized to reach.  Mode-specific handling is
+   specified in Section 5.6 and Section 6.1.
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 15]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+5.  Proxy Mode
+
+   In proxy mode, the MoQ-LB terminates the client's MOQT session, opens
+   backend MOQT sessions to Selected Relays, and forwards traffic in
+   both directions.
+
+5.1.  Session Setup
+
+   When responding to the client's SETUP, the MoQ-LB responds on behalf
+   of the pool, advertising only the MOQT version and extensions
+   (Section 6.3.2 of [MoQTransport]) supported by every relay the client
+   could be routed to.  A deployment that cannot guarantee a non-empty
+   intersection MUST partition the pool so that each MoQ-LB fronts only
+   relays with compatible capabilities.  Limits that the MoQ-LB
+   advertises to the client (such as MAX_REQUEST_UPDATES) MUST NOT
+   exceed what it can honor given the limits its backends advertise.
+
+   The MoQ-LB does not open a backend MOQT session until it receives a
+   routable request, at which point it opens a session to the Selected
+   Relay (if not already open) and forwards the request.  The backend
+   SETUP MUST offer the MOQT version and extensions already agreed with
+   the client.  Session-scoped Setup Options that identify the endpoint
+   or the client (AUTHORITY, PATH, AUTHORIZATION TOKEN,
+   MAX_AUTH_TOKEN_CACHE_SIZE, MOQT IMPLEMENTATION) are set by the MoQ-LB
+   for the backend session, following the authorization model of
+   Section 9.  If a relay does not accept the agreed version and
+   extensions, the MoQ-LB rejects the request (Section 4.1) and SHOULD
+   report the mismatch to the Configuration Agent, since it indicates a
+   misconfigured pool.
+
+   Authorization token aliases (Section 8.9 of [MoQTransport]) are
+   scoped to a session.  The MoQ-LB MUST NOT forward an alias from one
+   session to another; it resolves a client's alias to the token and
+   either sends the token or registers its own alias on the backend
+   session.
+
+   A MoQ-LB MAY multiplex multiple namespace routes onto one client-
+   facing session by maintaining backend sessions to multiple relays.
+   It MUST bound open backend sessions, concurrent requests, and per-
+   session state; when a limit is reached, it rejects new requests
+   (Section 4.1).
+
+5.2.  Session Mapping State
+
+   A proxy-mode MoQ-LB MUST maintain, per client-facing session, a table
+   of request mappings.  Each mapping binds exactly one client-facing
+   request stream to exactly one backend request stream.  The MoQ-LB
+   creates an entry:
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 16]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+   *  when it forwards a request from the client (PUBLISH,
+      PUBLISH_NAMESPACE, SUBSCRIBE, SUBSCRIBE_NAMESPACE,
+      SUBSCRIBE_TRACKS, FETCH, or TRACK_STATUS) to the Selected Relay;
+      and
+
+   *  when a relay opens a request stream toward the MoQ-LB on a backend
+      session, such as a PUBLISH resulting from a SUBSCRIBE_TRACKS
+      (Section 4 of [MoQTransport]) or a PUBLISH_NAMESPACE within a
+      SUBSCRIBE_NAMESPACE prefix.  The MoQ-LB opens a request stream
+      toward the client and forwards the request on it.
+
+   Each entry records:
+
+   *  the paired client-facing and backend request streams;
+
+   *  the Request ID translation between the client-facing and backend
+      sessions;
+
+   *  the Track Alias translation between the two sessions, where the
+      request type carries a Track Alias;
+
+   *  the original routing key (Section 3.1); and
+
+   *  the backend MOQT session carrying the pair, and therefore the
+      Selected Relay.
+
+   Request ID and Track Alias values are per-session and MUST be kept
+   independent across sessions.  An entry is released only after both
+   stream directions and all associated request state have completed.
+
+5.3.  Session Affinity in Proxy Mode
+
+   Once a proxy-mode MoQ-LB has selected a relay for a Track Namespace
+   within a client session, it MUST keep using that relay for every
+   later request on that namespace in the session, unless the relay's
+   requests on that namespace are displaced or the relay is Unhealthy
+   (Section 4.3).  Affinity applies to every request type and to the
+   request's data streams and datagrams.  It keeps REQUEST_UPDATE
+   messages and request cancellations (Section 9.5 of [MoQTransport],
+   Section 6.4.2.3 of [MoQTransport]) on the relay that holds the
+   request state, and keeps publishers and subscribers of a namespace on
+   the same relay.
+
+5.4.  Data Plane
+
+
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 17]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+5.4.1.  Request Streams
+
+   The MoQ-LB MUST forward every control message on a mapped request
+   stream to the paired stream, in both directions, translating Request
+   IDs and Track Aliases (Section 5.2).  It keeps both directions open
+   for as long as the peers do: except for TRACK_STATUS, which ends
+   after its response, requests carry asynchronous messages for their
+   whole lifetime, such as NAMESPACE and NAMESPACE_DONE on a
+   SUBSCRIBE_NAMESPACE, PUBLISH_SKIPPED on a SUBSCRIBE_TRACKS,
+   PUBLISH_STATE_NOTIFY and PUBLISH_DONE on subscriptions, and
+   REQUEST_UPDATE from the request's sender or, on a PUBLISH, from its
+   subscriber.  Relay-initiated GOAWAY is handled as specified in
+   Section 5.6.
+
+5.4.2.  Object Data
+
+   Object data flows from a subscription's publisher to its subscriber
+   on unidirectional streams and, where used, datagrams.  For a
+   SUBSCRIBE or FETCH from the client, and for a relay-initiated
+   PUBLISH, it flows from the relay to the client; for a PUBLISH from
+   the client, it flows from the client to the relay.  For each data
+   stream it receives on one leg, the MoQ-LB opens a corresponding
+   stream on the paired leg.  A client that both publishes and
+   subscribes MUST be supported with independent data paths per request;
+   flow in one direction MUST NOT block flow in the other.
+
+   The MoQ-LB identifies the request a data stream or Object Datagram
+   (Section 11 of [MoQTransport]) belongs to from its header: a Subgroup
+   Header stream or an Object Datagram belongs to the subscription with
+   that Track Alias, and a FETCH Header stream belongs to the FETCH with
+   that Request ID.  When forwarding, the MoQ-LB MUST translate the
+   Request ID and Track Alias using the request mapping and MUST keep
+   everything else, including the objects, intact.
+
+   A stream reset or FIN on one leg MUST be propagated to the paired
+   stream.  The MoQ-LB SHOULD forward datagrams in the order received
+   and MAY drop them under congestion, as a relay would.  Padding
+   streams and datagrams (Section 11.5 of [MoQTransport]) are not
+   forwarded; however, the MoQ-LB MAY send its own padding on either
+   leg.
+
+5.5.  Backend Session Sharing and Subscription Coalescing (Optional)
+
+   By default, a proxy-mode MoQ-LB forwards each client request as its
+   own backend request and opens backend sessions per client session.
+   An implementation MAY reduce the load it places on relays with the
+   two optimizations below.
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 18]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+   Backend session sharing:  A MoQ-LB MAY carry requests from several
+      client sessions on one backend session to the same relay.  It MUST
+      do so only for client sessions that agreed the same MOQT version
+      and extensions as the backend session.  Because relay-initiated
+      requests on a shared session cannot be attributed to one client, a
+      backend session that carries SUBSCRIBE_NAMESPACE or
+      SUBSCRIBE_TRACKS MUST NOT be shared.
+
+   Subscription coalescing:  A MoQ-LB MAY serve several client SUBSCRIBE
+      requests for the same Full Track Name, routed to the same relay,
+      with a single backend SUBSCRIBE, copying each delivered object to
+      every coalesced client subscription.
+
+   Both optimizations apply after relay selection and never change it.
+   Requests are shared or coalesced only when the current Routing
+   Table selects the same relay for each of them; a new subscription is
+   not coalesced onto a backend subscription that is displaced
+   (Section 4.3.1).  Both are subject to the authorization requirements
+   in Section 9.
+
+   When coalescing subscriptions, the MoQ-LB:
+
+   *  MUST give each client subscription its own mapping entry, Request
+      ID, and Track Alias (Section 5.2);
+
+   *  MUST coalesce a subscription only if the shared backend
+      subscription delivers every object the client's subscription would
+      receive, considering its location filter, subgroup, object ID,
+      priority, and property filters, FORWARD state, and group order;
+      otherwise the subscription gets its own backend SUBSCRIBE;
+
+   *  MUST answer a subscription that joins an existing backend
+      subscription with a SUBSCRIBE_OK of its own, using the Track
+      Properties of the backend's SUBSCRIBE_OK and the Largest Object it
+      has observed;
+
+   *  MUST apply each subscriber's priority on its own client-facing
+      leg;
+
+   *  MUST keep cancellations independent: a cancellation from one
+      subscriber MUST NOT affect the others, and the backend SUBSCRIBE
+      is cancelled when the last coalesced subscriber leaves;
+
+   *  MUST NOT let a REQUEST_UPDATE from one subscriber change what the
+      others receive; if the shared backend subscription cannot satisfy
+      the update, the MoQ-LB moves that subscriber to its own backend
+      SUBSCRIBE; and
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 19]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+   *  MUST copy the relay's asynchronous messages on the shared backend
+      subscription (PUBLISH_STATE_NOTIFY and PUBLISH_DONE) to every
+      coalesced client subscription, each carrying that subscriber's
+      Request ID.
+
+   When a coalesced backend subscription is moved (Section 5.7), it is
+   moved once on behalf of all its subscribers.
+
+5.6.  Relay GOAWAY in Proxy Mode
+
+   A proxy-mode MoQ-LB receives a relay's GOAWAY on its backend session.
+   It MUST NOT forward the relay's New Session URI to the client or use
+   it for routing.  On a GOAWAY on the control stream, the MoQ-LB marks
+   the relay Draining (Section 4.3) and moves every request on that
+   backend session; on a GOAWAY on a request stream, it moves only that
+   request.
+
+5.7.  Moving a Request
+
+   To move a request, the MoQ-LB selects a new relay under the current
+   Routing Table and health state, and either re-issues the request
+   itself or asks the client to re-issue it:
+
+   *  SUBSCRIBE: the MoQ-LB MAY re-issue it, following the approach of
+      Section 7.4.1 of [MoQTransport].  Let G be the group after the
+      latest group it has forwarded to the client, or the client's
+      original start if it has forwarded none.  The MoQ-LB sends a
+      SUBSCRIBE for the same Full Track Name to the new relay, with the
+      client's parameters and a filter that starts at G.  It forwards
+      objects of groups before G only from the old relay and objects of
+      group G and later only from the new relay.  Once the new relay
+      accepts and the old relay's streams for groups before G have
+      ended, the MoQ-LB cancels the old subscription.  The client keeps
+      its Request ID and Track Alias and sees no change other than the
+      group boundary.  If the new relay rejects the request, the MoQ-LB
+      asks the client to move instead, so that the client receives the
+      relay's response itself.
+
+   *  TRACK_STATUS: not moved; it ends after its response.
+
+   *  FETCH: not moved.  It completes on the old relay; if the old relay
+      ends it early, the MoQ-LB ends the client's FETCH with an error,
+      and the client may retry.
+
+   *  PUBLISH, PUBLISH_NAMESPACE, SUBSCRIBE_NAMESPACE, and
+      SUBSCRIBE_TRACKS: the MoQ-LB asks the client to move.
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 20]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+   To ask a client to move a request, the MoQ-LB sends a GOAWAY on the
+   client-facing request stream with a zero-length New Session URI, so
+   that the client re-issues the request on the same session
+   (Section 9.2 of [MoQTransport]), where the MoQ-LB routes it under the
+   current Routing Table.  A MoQ-LB MAY do this for any request type; an
+   implementation that never re-issues requests is conformant.  If every
+   request on a client session must move, the MoQ-LB MAY instead send
+   one GOAWAY on the client-facing control stream, also with a zero-
+   length New Session URI, so that the client reconnects to the MoQ-LB.
+
+   Moving a request does not transfer relay state.  Objects in flight
+   when the old relay stops can be lost, a re-issued SUBSCRIBE resumes
+   at a group boundary, and a publisher that is asked to move re-
+   publishes to the new relay.  Implementations SHOULD use the graceful
+   switchover procedures in Sections 7.4.1 and 7.6.1 of [MoQTransport]
+   where clients and relays support them.  Requests that cannot be moved
+   are ended as specified in Section 4.3.1.
+
+5.8.  Example Proxy-Mode Flow
+
+    Client            MoQ-LB                        R2
+      |                 |                            |
+      | QUIC+WT handshake                            |
+      |<--------------->|                            |
+      | SETUP (versions, exts intersected over pool) |
+      |<--------------->|                            |
+      | SUBSCRIBE(ns=live/sports/game-7, name=audio) |
+      |---------------->|                            |
+      |                 | hash(ns) -> R2             |
+      |                 | open backend session       |
+      |                 |<-------- QUIC+WT --------->|
+      |                 | SETUP (same caps)          |
+      |                 |<-------------------------->|
+      |                 | SUBSCRIBE (translated IDs) |
+      |                 |--------------------------->|
+      |                 | SUBSCRIBE_OK               |
+      |                 |<---------------------------|
+      | SUBSCRIBE_OK    |                            |
+      |<----------------|                            |
+      |                 | <objects on new stream>    |
+      |                 |<===========================|
+      | <objects on paired stream, IDs translated>   |
+      |<================|                            |
+
+       Figure 3: Proxy-mode SUBSCRIBE with paired data streams (non-
+                                 normative)
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 21]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+6.  Redirect Mode
+
+   In redirect mode, the MoQ-LB never opens backend sessions.  It
+   redirects each routable request (Section 3.1) to its Selected Relay
+   instead of serving it:
+
+   1.  The MoQ-LB selects the relay (Section 4) and rejects the request
+       with a REQUEST_ERROR carrying the REDIRECT error code and a
+       Redirect structure (Sections 9.4.1 and 12.3 of [MoQTransport]).
+
+   2.  The Redirect's Connect URI is the URI of the Selected Relay from
+       the authenticated configuration (Section 7).  The Redirect target
+       is the request's own Track Namespace and Track Name, with an
+       empty Track Name for PUBLISH_NAMESPACE, SUBSCRIBE_NAMESPACE, and
+       SUBSCRIBE_TRACKS.  The MoQ-LB chooses where a request goes, not
+       what it asks for.
+
+   3.  The Retry Interval is 0, so that the client does not retry the
+       request on the MoQ-LB, and a relay acting as client does not
+       cache the redirect.
+
+   4.  The client connects to the relay and retries the request there.
+       Its session with the MoQ-LB stays open, and the client sends its
+       later requests to the MoQ-LB, which redirects each of them the
+       same way.
+
+   The MoQ-LB redirects each request separately, so every request
+   reaches the relay that the Routing Table selects for its namespace,
+   even when a client's namespaces map to different relays.  In that
+   case, the client has one session to the MoQ-LB and one session to
+   each relay that its requests were redirected to.  If the client
+   already has a session to the Connect URI, it SHOULD retry the request
+   on that session instead of opening a new one.
+
+   A client can also send a request directly to a relay on a session it
+   already has.  The relay serves the request through the relay network
+   (Section 2).  However, the MoQ-LB does not see the request, so the
+   Routing Table does not choose its relay, and the publishers and
+   subscribers of that namespace might be on different relays.
+
+   A redirect adds one round trip to the MoQ-LB before the request
+   reaches the relay.  If the client does not yet have a session to that
+   relay, it also has to set one up.  After the MoQ-LB redirects a
+   request, it keeps no state for it.  A MoQ-LB MAY close a client
+   session that has been idle for a configured time; the client opens a
+   new session to the MoQ-LB when it has another request to send.
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 22]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+   A MoQ-LB MUST NOT use its own service URI as the Connect URI, because
+   that would redirect the client back to itself.  A client SHOULD limit
+   how many redirects it follows for a single request.
+
+6.1.  Relay GOAWAY and Failure in Redirect Mode
+
+   In redirect mode the client receives the relay's GOAWAY itself.
+   Relays fronted by a MoQ-LB SHOULD be configured to send the MoQ-LB
+   service URI as the New Session URI, so that the client re-issues the
+   affected requests to the MoQ-LB, which redirects each of them under
+   the current Routing Table.  This is relay configuration only; relays
+   need nothing specific to MoQ-LB.
+
+   When a relay fails, the client detects the failure of its session to
+   the relay and re-issues its requests to the MoQ-LB.  The MoQ-LB MUST
+   NOT redirect them to a relay that is not Eligible.
+
+7.  Configuration
+
+   The Configuration Agent is responsible for:
+
+   *  maintaining the Relay Pool membership and relay endpoints;
+
+   *  publishing configuration snapshots with monotonically increasing
+      version numbers;
+
+   *  monitoring relay health;
+
+   *  distributing authorization material shared with relays (for
+      example, CAT keys per [CAT-4-MOQT] if used).
+
+   A configuration snapshot has the following structure, using the
+   NamespaceRoute defined in Section 3.2:
+
+   ConfigSnapshot = {
+     version:  uint,                  ; monotonically increasing
+     relays:   [+ Relay],
+     routes:   [+ NamespaceRoute],    ; the Routing Table
+     ? attributes: { * text => any }
+   }
+
+   Relay = {
+     rid:     bytes,                  ; Relay Identifier
+     uri:     text,                   ; MOQT URI of the relay
+     health:  "healthy" / "draining" / "unhealthy",
+     ? attributes: { * text => any }
+   }
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 23]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+   RIDs MUST be unique within a snapshot and SHOULD be stable across
+   versions.  Every RID referenced by a route MUST appear in relays.
+   The uri is the endpoint the MoQ-LB connects to in proxy mode and the
+   Connect URI it sends in redirect mode.  A change in health only is
+   still published as a new version; it is handled by Section 4.3, not
+   as a remap.
+
+   A MoQ-LB and the Configuration Agent MUST validate a snapshot in full
+   and MUST reject an invalid one, including one that violates any
+   constraint in Section 3.  The encoding of snapshots on the wire is
+   out of scope, provided byte strings are preserved exactly.
+
+   The transport between the Configuration Agent and MoQ-LB instances is
+   out of scope, but it MUST authenticate both ends, protect integrity
+   and confidentiality, and deliver complete snapshots inside an
+   integrity-protected signature or equivalent authenticated envelope.
+   Snapshots MUST be applied atomically.
+
+   MoQ-LB instances MUST retain a last-known-good snapshot and report
+   their configuration age and active version to the Configuration
+   Agent, so that version skew across instances can be detected.  A
+   deployment MUST define a maximum configuration age.  Beyond that age,
+   an instance MUST NOT place new requests that depend on the stale
+   health state, and rejects them (Section 4.1).
+
+7.1.  Configuration Rotation
+
+   When a MoQ-LB loads a snapshot with a higher version, it:
+
+   1.  validates it and atomically activates it for new requests;
+
+   2.  treats existing requests whose relay is no longer selected for
+       their namespace as displaced (Section 4.3.1).
+
+   A MoQ-LB MUST NOT apply a snapshot whose version is less than or
+   equal to that of its active snapshot.  Rollback MUST use a new,
+   higher version that contains the desired prior contents and an
+   authenticated operator action.
+
+7.2.  Pool Resizing
+
+   Adding or removing a relay changes assignments for new requests under
+   the new snapshot.  With equal weights across n relays, adding one
+   relay assigns approximately 1/(n+1) of keys to it; removing a relay
+   changes only the keys that were assigned to that relay.  With unequal
+   weights, the moved fraction depends on the weights.  Existing
+   requests are handled as displaced requests (Section 4.3.1).  Planned
+   removals SHOULD first set the relay's weight to 0 or mark it
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 24]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+   Draining, and remove it from the snapshot only after its requests
+   have drained.
+
+8.  Interaction with Connection-Level Load Balancing
+
+   A MoQ-LB operates above the QUIC layer.  MoQ-LB instances do not
+   replicate session or request state.  When MoQ-LB instances are
+   replicated behind a connection-level load balancer, that load
+   balancer MUST deliver all packets of a QUIC connection to the
+   instance holding its state; QUIC-LB [QUIC-LB] is one way to achieve
+   this.  The RID used by the MoQ-LB is unrelated to the server
+   identifier used by QUIC-LB.
+
+   When an instance fails, its client sessions end.  Clients reconnect
+   and re-issue their requests, which are routed under the current
+   Routing Table; because selection is deterministic (Section 3.2.2.1),
+   they reach the same relays as before unless the pool has changed.
+
+   If a backend relay is itself fronted by a per-relay QUIC load
+   balancer, the MoQ-LB can list the URI of that load balancer as one
+   relay only if the servers behind it behave as a single relay for MOQT
+   purposes, so that publishers and subscribers of a namespace still
+   meet.  Otherwise each server SHOULD be listed as a separate relay
+   with its own RID and URI.
+
+9.  Security Considerations
+
+   The MoQ-LB is a security boundary: it terminates client sessions in
+   proxy mode and observes namespace-bearing control messages in both
+   modes.  In proxy mode, it MUST enforce the same authorization policy
+   as the relays for PUBLISH, PUBLISH_NAMESPACE, subscriptions, and
+   fetches before forwarding them.  In redirect mode, the relay
+   authorizes each request it receives, and the MoQ-LB authorizes
+   requests before redirecting them as described in Section 9.4.  Routes
+   MUST be isolated by tenant or authority where required.
+
+9.1.  Configuration Security
+
+   The Configuration Agent can redirect traffic across the deployment.
+   Its credentials and updates MUST be protected against forgery,
+   replay, rollback, and unauthorized route changes (Section 7).  Stale
+   routing state and split-brain route decisions should be treated as
+   security and availability failures.
+
+
+
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 25]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+9.2.  Targeted Load Concentration
+
+   Hashed routing uses an unkeyed deterministic hash.  A party that can
+   choose Track Namespaces can search for names that map to a particular
+   RID in order to concentrate load on one relay.  This search is cheap
+   whatever the hash profile: on average, a relay with weight w out of a
+   total weight W is selected by one name in every W / w tried, so the
+   choice of hash does not protect against it.  The defenses are
+   authorization and resource limits.  Namespace-bearing requests are
+   accepted only after authentication and authorization, so an attacker
+   must hold valid credentials and act within an authorized namespace
+   scope.  Deployments that admit untrusted publishers or tenants SHOULD
+   apply per-tenant quotas and admission control, and MUST NOT rely on
+   hashed routing to prevent targeted load concentration.
+
+9.3.  Proxy Mode Authorization
+
+   In proxy mode, authorization is evaluated across two authenticated
+   session legs.  The deployment MUST specify whether the MoQ-LB
+   forwards a client token, obtains a delegated token, or conveys an
+   authenticated identity to the backend through a protected mechanism.
+   Successful client authentication is not authorization for a backend
+   operation unless the deployment's policy explicitly delegates that
+   decision to the MoQ-LB.  Authorization context and tokens MUST be
+   bound to the intended tenant, operation, and backend service, and
+   tokens MUST NOT be logged.  A MoQ-LB MUST NOT broaden a client's
+   authorization when translating requests or reusing backend sessions.
+   Backend session sharing and subscription coalescing (Section 5.5)
+   MUST be used only when the backend authorization context is valid for
+   every client it represents.
+
+9.4.  Redirect Mode Security
+
+   A redirect reveals the URI of a relay.  A MoQ-LB SHOULD authorize a
+   request before redirecting it, so that unauthorized clients cannot
+   map the Relay Pool and cannot use the MoQ-LB to steer load.  The
+   Connect URI MUST be taken from the authenticated configuration, never
+   from the request or from a relay, so that the MoQ-LB cannot be used
+   as an open redirector.  Each relay MUST present a TLS identity and
+   MOQT authority valid for the service.  Relays MUST still authorize
+   every redirected request themselves; a redirect is not an
+   authorization decision.  Redirect loops are prevented by the rules in
+   Section 6.
+
+
+
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 26]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+9.5.  Resource Exhaustion
+
+   MoQ-LB implementations MUST bound parsing work, route lookups, per-
+   session stream mappings, fan-out, queued bytes, and concurrent
+   backend connections.  They SHOULD expose limits and overload behavior
+   to operators, apply admission control before resource exhaustion, and
+   avoid logging authorization tokens or untrusted full namespace values
+   by default.
+
+10.  IANA Considerations
+
+   This document requests that IANA create two registries in the "Media
+   over QUIC" registry group.
+
+10.1.  MoQ-LB Hash Profiles
+
+   The "MoQ-LB Hash Profiles" registry lists hash profiles for hashed
+   routes (Section 3.2.2.2).  The registration policy is Specification
+   Required (Section 4.6 of [RFC8126]).  Each entry has a Name (a text
+   string), a hash algorithm, an output width b in bits, and a
+   Reference.  The initial contents are:
+
+     +===============+========================+=====+===============+
+     | Name          | Hash Algorithm         | b   | Reference     |
+     +===============+========================+=====+===============+
+     | HRW-SHA256    | SHA-256                | 256 | This document |
+     +---------------+------------------------+-----+---------------+
+     | HRW-SHA256-64 | SHA-256, first 8 bytes | 64  | This document |
+     +---------------+------------------------+-----+---------------+
+
+                                 Table 2
+
+10.2.  MoQ-LB Route Kinds
+
+   The "MoQ-LB Route Kinds" registry lists values of the kind field of a
+   Namespace Route (Section 3.2).  The registration policy is
+   Specification Required (Section 4.6 of [RFC8126]).  Each entry has a
+   Kind (a text string), a description, and a Reference.  The initial
+   contents are:
+
+
+
+
+
+
+
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 27]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+   +========+=========================================+===============+
+   | Kind   | Description                             | Reference     |
+   +========+=========================================+===============+
+   | static | Pins a prefix to one relay              | This document |
+   +--------+-----------------------------------------+---------------+
+   | hashed | Weighted rendezvous hashing over relays | This document |
+   +--------+-----------------------------------------+---------------+
+
+                                 Table 3
+
+11.  References
+
+11.1.  Normative References
+
+   [CDDL]     Birkholz, H., Vigano, C., and C. Bormann, "Concise Data
+              Definition Language (CDDL): A Notational Convention to
+              Express Concise Binary Object Representation (CBOR) and
+              JSON Data Structures", RFC 8610, DOI 10.17487/RFC8610,
+              June 2019, <https://www.rfc-editor.org/rfc/rfc8610>.
+
+   [MoQTransport]
+              Nandakumar, S., Vasiliev, V., Swett, I., and A. Frindell,
+              "Media over QUIC Transport", Work in Progress, Internet-
+              Draft, draft-ietf-moq-transport-22, 1 October 2026,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-moq-
+              transport-22>.
+
+   [QUIC]     Iyengar, J., Ed. and M. Thomson, Ed., "QUIC: A UDP-Based
+              Multiplexed and Secure Transport", RFC 9000,
+              DOI 10.17487/RFC9000, May 2021,
+              <https://www.rfc-editor.org/rfc/rfc9000>.
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119,
+              DOI 10.17487/RFC2119, March 1997,
+              <https://www.rfc-editor.org/rfc/rfc2119>.
+
+   [RFC8174]  Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC
+              2119 Key Words", BCP 14, RFC 8174, DOI 10.17487/RFC8174,
+              May 2017, <https://www.rfc-editor.org/rfc/rfc8174>.
+
+11.2.  Informative References
+
+
+
+
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 28]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+   [CAT-4-MOQT]
+              Law, W., Lemmons, C., Simon, G., and S. Nandakumar,
+              "Authorization scheme for MOQT using Common Access
+              Tokens", Work in Progress, Internet-Draft, draft-ietf-moq-
+              c4m-01, 18 June 2026,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-moq-c4m-
+              01>.
+
+   [CBOR]     Bormann, C. and P. Hoffman, "Concise Binary Object
+              Representation (CBOR)", STD 94, RFC 8949,
+              DOI 10.17487/RFC8949, December 2020,
+              <https://www.rfc-editor.org/rfc/rfc8949>.
+
+   [MOQ-URI]  Jennings, C. F. and S. Nandakumar, "MOQT URI and
+              Discovery", Work in Progress, Internet-Draft, draft-
+              jennings-moq-uri-00, 7 October 2026,
+              <https://datatracker.ietf.org/doc/html/draft-jennings-moq-
+              uri-00>.
+
+   [QUIC-LB]  Duke, M., Banks, N., and C. Huitema, "QUIC-LB: Generating
+              Routable QUIC Connection IDs", Work in Progress, Internet-
+              Draft, draft-ietf-quic-load-balancers-22, 23 October 2026,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-quic-
+              load-balancers-22>.
+
+   [RFC8126]  Cotton, M., Leiba, B., and T. Narten, "Guidelines for
+              Writing an IANA Considerations Section in RFCs", BCP 26,
+              RFC 8126, DOI 10.17487/RFC8126, June 2017,
+              <https://www.rfc-editor.org/rfc/rfc8126>.
+
+   [WebTransport]
+              Frindell, A., Kinnear, E., and V. Vasiliev, "WebTransport
+              over HTTP/3", Work in Progress, Internet-Draft, draft-
+              ietf-webtrans-http3-16, 6 July 2026,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-
+              webtrans-http3-16>.
+
+   [WEIGHTED-HRW]
+              Schindelhauer, C. and G. Schomaker, "Weighted Distributed
+              Hash Tables", SPAA '05 ACM Symposium on Parallelism in
+              Algorithms and Architectures, 2005.
+
+Appendix A.  Deployment Examples
+
+
+
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 29]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+A.1.  Interactive Meeting
+
+   A meeting application gives each participant a namespace of the form
+   (example.com, <meeting>, <participant>).  A participant finds the
+   others with SUBSCRIBE_NAMESPACE (example.com, <meeting>) and learns
+   one participant's tracks with SUBSCRIBE_TRACKS (example.com,
+   <meeting>, <participant>).
+
+   The deployment uses this route:
+
+   { "prefix": ['example.com'], "kind": "hashed", "key_fields": 2,
+     "rids": ['r1', 'r2', 'r3'] }
+
+   With key_fields: 2, every namespace in a meeting has the same hash
+   key, so all of the meeting's publishers and subscribers end up on the
+   same relay, which is where fan-out happens.  Different meetings still
+   spread across the pool.  Both prefix requests above have at least two
+   fields, so they reach that relay too (Section 3.3).  In redirect
+   mode, the flow could look like this:
+
+    Alice          Bob          MoQ-LB                   r2
+      |             |              |                      |
+      | PUBLISH_NAMESPACE (ex,m1,alice)                   |
+      |--------------------------->|                      |
+      |             |              | hash(ex,m1) -> r2    |
+      | REDIRECT (r2)              |                      |
+      |<---------------------------|                      |
+      | PUBLISH_NAMESPACE, then media                     |
+      |-------------------------------------------------->|
+      |             | SUBSCRIBE_NAMESPACE (ex,m1)         |
+      |             |------------->|                      |
+      |             | REDIRECT (r2)|                      |
+      |             |<-------------|                      |
+      |             | SUBSCRIBE_NAMESPACE                 |
+      |             |------------------------------------>|
+      |             | NAMESPACE (ex,m1,alice), media      |
+      |             |<------------------------------------|
+
+        Figure 4: Meeting participants converging on one relay (non-
+                                 normative)
+
+
+
+
+
+
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 30]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+   Each request is redirected to the meeting's relay with a
+   REQUEST_ERROR carrying REDIRECT, and the client retries it there.
+   Bob's later SUBSCRIBE for Alice's tracks goes through the MoQ-LB the
+   same way; it is redirected to r2 as well and reuses Bob's existing
+   session to r2.  A participant who also joins a second meeting, hashed
+   to another relay, gets that meeting's requests redirected there.  In
+   proxy mode, the same requests would flow through the MoQ-LB instead,
+   which could coalesce subscriptions from its clients (Section 5.5).
+
+A.2.  Live Broadcast
+
+   An encoder publishes each camera of a live event as (sports.example,
+   <event>, <camera>), and a large audience subscribes to individual
+   renditions, sometimes using FETCH to rewind a little.
+
+   Routing viewers by namespace would put every viewer of a popular
+   event on one relay, so in this case the MoQ-LB is placed only in
+   front of an origin tier, using the same kind of hashed route with
+   key_fields: 2.  Viewers connect to edge relays chosen by location or
+   load, and the edge relays act as MOQT clients of the MoQ-LB: each
+   edge keeps one session to it and follows the redirect of each event's
+   requests to that event's origin.  MOQT allows a relay to forward a
+   REDIRECT to its downstream subscribers instead of following it
+   (Section 12.3 of [MoQTransport]); edges in this deployment are
+   configured to follow it themselves, since forwarding it would send
+   viewers to the origin tier.
+
+      Encoder                                  Viewers (many)
+         |                                       |  |  |
+         | PUBLISH_NAMESPACE (sp, ev7, cam-1)    v  v  v
+         v                                   +-----------+
+     +--------+   REDIRECT (O2)              |  Edge E7  | chosen by
+     | MoQ-LB |<-----------------------------+-----------+ location/load
+     +--------+   SUBSCRIBE on cache miss          |
+         |                                         |
+         | hash(sp, ev7) -> O2                     |
+         v                                         v
+     +--------------------------------------------------+
+     |        Origin O2 (home relay of event ev7)       |
+     +--------------------------------------------------+
+
+        Figure 5: Live broadcast with an origin tier behind a MoQ-LB
+                              (non-normative)
+
+
+
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 31]
+
+Internet-Draft                   MoQ-LB                    November 2026
+
+
+   All cameras of an event share one origin relay, and each edge pulls a
+   track from it once however many viewers it serves, so the origin's
+   load grows with the number of edges rather than the number of
+   viewers.  A request that spans events, such as SUBSCRIBE_NAMESPACE
+   (sports.example), is sent to the relay selected for that prefix, and
+   the relay network delivers the namespaces of every event to it.
+
+Acknowledgements
+
+   The design borrows from the QUIC-LB architecture [QUIC-LB].
+
+Authors' Addresses
+
+   Suhas Nandakumar
+   Cisco
+   Email: snandaku@cisco.com
+
+
+   Cullen Jennings
+   Cisco
+   Email: fluffy@cisco.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Nandakumar & Jennings      Expires 5 May 2027                  [Page 32]
