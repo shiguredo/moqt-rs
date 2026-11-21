@@ -22,6 +22,9 @@ fn test_catalog_namespace(value: &str) -> TrackNamespace {
 #[path = "test_msf/catalog_decode.rs"]
 mod catalog_decode;
 
+#[path = "test_msf/tracker.rs"]
+mod tracker;
+
 #[path = "test_msf/track_fields.rs"]
 mod track_fields;
 

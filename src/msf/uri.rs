@@ -205,6 +205,41 @@ impl MsfFragment {
             .collect()
     }
 
+    /// wallclock-range パラメータを union した範囲を返す
+    ///
+    /// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) は、同じ URL に同じ
+    /// パラメータが複数ある場合、その値を union すると定める。`wallclock_ranges` が返す
+    /// 出現順の範囲を開始値でソートし、重なる・隣接する範囲を併合する。
+    ///
+    /// # Errors
+    ///
+    /// [`Self::wallclock_ranges`] と同じ。
+    pub fn wallclock_range_union(&self) -> Result<Vec<MsfTimeRange>, MessageError> {
+        Ok(union_time_ranges(self.wallclock_ranges()?))
+    }
+
+    /// mediatime-range パラメータを union した範囲を返す
+    ///
+    /// # Errors
+    ///
+    /// [`Self::mediatime_ranges`] と同じ。
+    pub fn mediatime_range_union(&self) -> Result<Vec<MsfTimeRange>, MessageError> {
+        Ok(union_time_ranges(self.mediatime_ranges()?))
+    }
+
+    /// location-range パラメータを union した範囲を返す
+    ///
+    /// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) は、同じ URL に同じ
+    /// パラメータが複数ある場合、その値を union すると定める。Group ID / Object ID の
+    /// 辞書順で範囲をソートし、重なる・隣接する範囲を併合する。
+    ///
+    /// # Errors
+    ///
+    /// [`Self::location_ranges`] と同じ。
+    pub fn location_range_union(&self) -> Result<Vec<MsfLocationRange>, MessageError> {
+        Ok(union_location_ranges(self.location_ranges()?))
+    }
+
     /// cat パラメータの base64 文字列を出現順に返す
     ///
     /// base64 のデコードや妥当性検証は行わない (利用側の責務)。
@@ -215,6 +250,131 @@ impl MsfFragment {
     pub fn cat_tokens(&self) -> Vec<&str> {
         self.parameter_values("cat")
     }
+}
+
+/// MOQT URI の共通成分 (scheme を除く)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MoqtUriComponents<'a> {
+    authority: &'a str,
+    path: &'a str,
+    query: Option<&'a str>,
+    fragment: Option<&'a str>,
+}
+
+/// `moqt://` URI の scheme を確認し、authority / path / query / fragment に分解する
+///
+/// draft-ietf-moq-transport-23 §6.1 (MOQT URI Scheme) の
+/// `moqt-URI = "moqt" "://" authority path-abempty [ "?" query ]` に従う。
+/// fragment は §6.1.1 (Fragment Identifiers) のとおり optional として返す。
+fn split_moqt_uri(uri: &str) -> Result<MoqtUriComponents<'_>, MessageError> {
+    // バイト境界を跨ぐ slice で panic しないよう get で前方一致を確認する。
+    const SCHEME: &str = "moqt://";
+    let rest = match uri.get(..SCHEME.len()) {
+        Some(prefix) if prefix.eq_ignore_ascii_case(SCHEME) => &uri[SCHEME.len()..],
+        _ => {
+            return Err(MessageError::InvalidCatalog(
+                "MOQT URI must use the 'moqt://' scheme".to_string(),
+            ));
+        }
+    };
+    let (before_fragment, fragment) = match rest.split_once('#') {
+        Some((before, fragment)) => {
+            if fragment.contains('#') {
+                return Err(MessageError::InvalidCatalog(
+                    "MOQT URI must contain at most one '#' separator".to_string(),
+                ));
+            }
+            (before, Some(fragment))
+        }
+        None => (rest, None),
+    };
+    let (before_query, query) = match before_fragment.split_once('?') {
+        Some((before, query)) => (before, Some(query)),
+        None => (before_fragment, None),
+    };
+    let (authority, path) = match before_query.find('/') {
+        Some(idx) => (&before_query[..idx], &before_query[idx..]),
+        None => (before_query, ""),
+    };
+    if authority.is_empty() {
+        return Err(MessageError::InvalidCatalog(
+            "MOQT URI authority is empty".to_string(),
+        ));
+    }
+    // RFC 3986 §3.2.1 (User Information) は "user:password" 形式を deprecated とし、
+    // 受け取った reference 中の userinfo を拒否する選択を許す。MOQT §6.1 の authority は
+    // RFC 3986 の authority であり、本実装は資格情報を URI に載せない。
+    // エラーメッセージに authority の実値を含めない (パスワードを残さない)。
+    if authority.contains('@') {
+        return Err(MessageError::InvalidCatalog(
+            "MOQT URI authority MUST NOT contain userinfo".to_string(),
+        ));
+    }
+    crate::parameter::validate_authority(authority.as_bytes()).map_err(|_| {
+        MessageError::InvalidCatalog(
+            "MOQT URI authority is not a valid RFC 3986 authority".to_string(),
+        )
+    })?;
+    crate::parameter::validate_path_abempty(path.as_bytes()).map_err(|_| {
+        MessageError::InvalidCatalog("MOQT URI path is not a valid RFC 3986 path".to_string())
+    })?;
+    if let Some(query) = query {
+        crate::parameter::validate_query(query.as_bytes()).map_err(|_| {
+            MessageError::InvalidCatalog("MOQT URI query is not a valid RFC 3986 query".to_string())
+        })?;
+    }
+    Ok(MoqtUriComponents {
+        authority,
+        path,
+        query,
+        fragment,
+    })
+}
+
+/// MOQT の endpoint URI を検証する
+///
+/// MSF §5.2.37 (Connection URI) が要求する "valid MOQT endpoint URI" の検証に使う。
+/// `moqt://` scheme、空でない host、RFC 3986 の path / query、optional fragment の
+/// `type:value` 構文を確認する。fragment の値の意味は fragment type ごとに異なるため、
+/// この関数では検証しない。
+///
+/// # Errors
+///
+/// - scheme が `moqt://` でない / authority が空 / userinfo を含む
+/// - authority / path / query が RFC 3986 に違反する
+/// - fragment が `type:value` の構文を満たさない
+pub fn validate_moqt_endpoint_uri(uri: &str) -> Result<(), MessageError> {
+    let components = split_moqt_uri(uri)?;
+    if let Some(fragment) = components.fragment {
+        validate_moqt_fragment_syntax(fragment)?;
+    }
+    Ok(())
+}
+
+/// MOQT URI の fragment が `type:value` の構文を満たすか検証する
+///
+/// draft-ietf-moq-transport-23 §6.1.1 (Fragment Identifiers): fragment type identifier は
+/// ASCII 小文字・数字・ハイフンだけで構成し、`:` の後に type-specific value を続ける。
+/// value の構文は fragment type ごとに定義されるため、ここでは空でないことだけを確認する。
+fn validate_moqt_fragment_syntax(fragment: &str) -> Result<(), MessageError> {
+    let (kind, value) = fragment.split_once(':').ok_or_else(|| {
+        MessageError::InvalidCatalog("MOQT URI fragment must be 'type:value'".to_string())
+    })?;
+    if kind.is_empty() || value.is_empty() {
+        return Err(MessageError::InvalidCatalog(
+            "MOQT URI fragment type and value must be non-empty".to_string(),
+        ));
+    }
+    if !kind
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(MessageError::InvalidCatalog(
+            "MOQT URI fragment type must contain only lower-case letters, digits, and '-'"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// MSF URI 全体をパースする
@@ -228,65 +388,15 @@ impl MsfFragment {
 /// - `moqt://` scheme でない / `#` が無い / authority が空: `InvalidCatalog`
 /// - fragment が `msf:` で始まらない / 形式不正: `InvalidCatalog`
 pub fn parse_msf_uri(uri: &str) -> Result<MsfUri, MessageError> {
-    // draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation):
-    // "Scheme: This case-insensitive scheme defines the underlying transport."
-    // バイト境界を跨ぐ slice で panic しないよう get で前方一致を確認する。
-    const SCHEME: &str = "moqt://";
-    let rest = match uri.get(..SCHEME.len()) {
-        Some(prefix) if prefix.eq_ignore_ascii_case(SCHEME) => &uri[SCHEME.len()..],
-        _ => {
-            return Err(MessageError::InvalidCatalog(
-                "MSF URI must use the 'moqt://' scheme".to_string(),
-            ));
-        }
-    };
-    let (before_fragment, fragment_str) = rest
-        .split_once('#')
+    let components = split_moqt_uri(uri)?;
+    let fragment_str = components
+        .fragment
         .ok_or_else(|| MessageError::InvalidCatalog("MSF URI is missing a fragment".to_string()))?;
-    let (before_query, query) = match before_fragment.split_once('?') {
-        Some((b, q)) => (b, Some(q.to_string())),
-        None => (before_fragment, None),
-    };
-    let (authority, path) = match before_query.find('/') {
-        Some(idx) => (&before_query[..idx], &before_query[idx..]),
-        None => (before_query, ""),
-    };
-    if authority.is_empty() {
-        return Err(MessageError::InvalidCatalog(
-            "MSF URI authority is empty".to_string(),
-        ));
-    }
-    // draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の ABNF は
-    // authority / path-abempty / query を RFC 3986 から import する。ここで成分ごとの
-    // 構文を検証し、transport 層へ不正な URI を渡さない。
-    //
-    // RFC 3986 §3.2.1 (User Information) は "user:password" 形式を deprecated とし、
-    // 受け取った reference 中の userinfo を拒否する選択を許す。MSF §11.1 も authority を
-    // "host and optional port" と説明するため、`@` を含む authority は拒否する。
-    // エラーメッセージに authority の実値を含めない (パスワードを残さない)。
-    if authority.contains('@') {
-        return Err(MessageError::InvalidCatalog(
-            "MSF URI authority MUST NOT contain userinfo".to_string(),
-        ));
-    }
-    crate::parameter::validate_authority(authority.as_bytes()).map_err(|_| {
-        MessageError::InvalidCatalog(
-            "MSF URI authority is not a valid RFC 3986 authority".to_string(),
-        )
-    })?;
-    crate::parameter::validate_path_abempty(path.as_bytes()).map_err(|_| {
-        MessageError::InvalidCatalog("MSF URI path is not a valid RFC 3986 path".to_string())
-    })?;
-    if let Some(query) = query.as_deref() {
-        crate::parameter::validate_query(query.as_bytes()).map_err(|_| {
-            MessageError::InvalidCatalog("MSF URI query is not a valid RFC 3986 query".to_string())
-        })?;
-    }
     let fragment = parse_msf_fragment(fragment_str)?;
     Ok(MsfUri {
-        authority: authority.to_string(),
-        path: path.to_string(),
-        query,
+        authority: components.authority.to_string(),
+        path: components.path.to_string(),
+        query: components.query.map(ToString::to_string),
         fragment,
     })
 }
@@ -497,6 +607,120 @@ fn parse_time_range(value: &str) -> Result<MsfTimeRange, MessageError> {
         )));
     }
     Ok(MsfTimeRange { start_ms, end_ms })
+}
+
+/// ロケーション上の点 (Group ID, Object ID)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct LocationPoint {
+    group_id: u64,
+    object_id: u64,
+}
+
+impl LocationPoint {
+    fn new(group_id: u64, object_id: u64) -> Self {
+        Self {
+            group_id,
+            object_id,
+        }
+    }
+
+    /// 辞書順で次の点を返す
+    fn successor(self) -> Self {
+        if self.object_id < u64::MAX {
+            Self::new(self.group_id, self.object_id + 1)
+        } else if self.group_id < u64::MAX {
+            Self::new(self.group_id + 1, 0)
+        } else {
+            self
+        }
+    }
+}
+
+/// 範囲の内側で使う点の組
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocationSpan {
+    start: LocationPoint,
+    end: Option<LocationPoint>,
+}
+
+/// Group ID / Object ID の範囲を union する
+///
+/// 開始点でソートし、重なる・隣接する範囲を 1 つに併合する。`end` が `None` の範囲は
+/// 終端なしとして、それ以降の範囲をすべて含む。Group ID だけの端点は、開始なら Object 0、
+/// 終端なら Object `u64::MAX` として扱う (draft-ietf-moq-msf-02 §11.1.1)。
+fn union_location_ranges(ranges: Vec<MsfLocationRange>) -> Vec<MsfLocationRange> {
+    let mut spans: Vec<LocationSpan> = ranges
+        .into_iter()
+        .map(|range| LocationSpan {
+            start: LocationPoint::new(range.start_group_id, range.start_object_id.unwrap_or(0)),
+            end: range
+                .end
+                .map(|end| LocationPoint::new(end.group_id, end.object_id.unwrap_or(u64::MAX))),
+        })
+        .collect();
+    spans.sort_by_key(|span| span.start);
+
+    let mut merged: Vec<LocationSpan> = Vec::new();
+    for span in spans {
+        match merged.last_mut() {
+            Some(current) => {
+                let overlaps = match current.end {
+                    None => true,
+                    Some(end) => span.start <= end.successor(),
+                };
+                if overlaps {
+                    current.end = match (current.end, span.end) {
+                        (Some(left), Some(right)) => Some(left.max(right)),
+                        _ => None,
+                    };
+                } else {
+                    merged.push(span);
+                }
+            }
+            None => merged.push(span),
+        }
+    }
+
+    merged
+        .into_iter()
+        .map(|span| MsfLocationRange {
+            start_group_id: span.start.group_id,
+            start_object_id: (span.start.object_id != 0).then_some(span.start.object_id),
+            end: span.end.map(|end| MsfLocationRangeEnd {
+                group_id: end.group_id,
+                object_id: (end.object_id != u64::MAX).then_some(end.object_id),
+            }),
+        })
+        .collect()
+}
+
+/// 時間範囲の列を union する
+///
+/// 開始値でソートし、重なる・隣接する範囲を 1 つに併合する。`end_ms` が `None` の範囲は
+/// 終端なしとして、それ以降の範囲をすべて含む。
+fn union_time_ranges(mut ranges: Vec<MsfTimeRange>) -> Vec<MsfTimeRange> {
+    ranges.sort_by_key(|range| range.start_ms);
+    let mut merged: Vec<MsfTimeRange> = Vec::new();
+    for range in ranges {
+        match merged.last_mut() {
+            Some(current) => {
+                let overlaps = match current.end_ms {
+                    None => true,
+                    Some(end) => range.start_ms <= end.saturating_add(1),
+                };
+                if overlaps {
+                    current.end_ms = match (current.end_ms, range.end_ms) {
+                        (Some(left), Some(right)) => Some(left.max(right)),
+                        _ => None,
+                    };
+                } else {
+                    merged.push(range);
+                }
+            }
+            None => merged.push(range),
+        }
+    }
+    merged
 }
 
 /// location-range の値を範囲へ変換する

@@ -1229,3 +1229,27 @@ fn delta_without_version_is_not_version_gated() {
         MsfCatalogDocument::decode(json).expect("delta は version を持たなくても受理されること");
     assert!(matches!(doc, MsfCatalogDocument::Delta(_)));
 }
+
+/// initDataList が tracks より後にあるカタログは受理されること
+///
+/// draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List): "The Initialization Data List, if
+/// present, MUST be located after the Tracks field."
+#[test]
+fn init_data_list_after_tracks_accepted() {
+    let json = br#"{"version":"draft-02","tracks":[],"initDataList":[{"id":"i","type":"inline","data":"AAEC"}]}"#;
+    let doc = MsfCatalogDocument::decode(json).expect("正しい順序のカタログは受理されること");
+    let MsfCatalogDocument::Full(cat) = doc else {
+        panic!("Full が期待された");
+    };
+    assert_eq!(cat.init_data_list.len(), 1);
+}
+
+/// initDataList が tracks より前にあるカタログは拒否されること
+#[test]
+fn init_data_list_before_tracks_rejected() {
+    let json = br#"{"version":"draft-02","initDataList":[{"id":"i","type":"inline","data":"AAEC"}],"tracks":[]}"#;
+    assert!(matches!(
+        MsfCatalogDocument::decode(json),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}

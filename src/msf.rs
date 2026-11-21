@@ -1870,6 +1870,110 @@ impl DisplayJson for MsfCatalog {
     }
 }
 
+/// カタログ更新をまたいだ `isComplete` / `isLive` の履歴を検証するトラッカー
+///
+/// draft-ietf-moq-msf-02 §5.1.3 (Is Complete) は、`isComplete` を一度 TRUE にしたら
+/// 削除してはならないと定める。§5.2.8 (Is Live) は、FALSE の後に TRUE を続けてはならないと
+/// 定める。`MsfCatalog::apply_delta` は同じカタログ内の delta 更新を検証するが、独立した
+/// Full catalog を順に受信する経路では履歴が失われるため、このトラッカーにカタログを
+/// 順に渡して検証する。
+#[derive(Debug, Clone, Default)]
+pub struct MsfCatalogTracker {
+    /// 一度でも isComplete=true を受信したか
+    is_complete: bool,
+    /// これまでに観測した Full Track Name
+    seen_tracks: hashbrown::HashSet<(Option<TrackNamespace>, Vec<u8>)>,
+    /// isLive=false または削除で終了した Full Track Name
+    ended_tracks: hashbrown::HashSet<(Option<TrackNamespace>, Vec<u8>)>,
+}
+
+impl MsfCatalogTracker {
+    /// 空の履歴を作る
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 次の Full catalog を観測し、履歴に違反しないか検証する
+    ///
+    /// `catalog_namespace` はカタログトラック自身の Track Namespace であり、track が
+    /// namespace を省略した場合の継承先として使う。成功時は履歴を更新する。失敗時は履歴を
+    /// 変更しない。
+    ///
+    /// # Errors
+    ///
+    /// - 一度 TRUE になった `isComplete` が次のカタログで欠落・FALSE: `InvalidCatalog`
+    /// - `isComplete=true` の後に新しい track が現れた: `InvalidCatalog`
+    /// - `isLive=false` だった Full Track Name が `isLive=true` で再登場した: `InvalidCatalog`
+    /// - track の namespace / name が §5.2.2 / §5.2.3 の制約に違反する: `InvalidCatalog`
+    pub fn observe(
+        &mut self,
+        catalog: &MsfCatalog,
+        catalog_namespace: Option<&TrackNamespace>,
+    ) -> Result<(), MessageError> {
+        // 失敗時に履歴を変更しないよう、複製へ適用してから差し替える
+        let mut working = self.clone();
+        working.observe_in_place(catalog, catalog_namespace)?;
+        *self = working;
+        Ok(())
+    }
+
+    fn observe_in_place(
+        &mut self,
+        catalog: &MsfCatalog,
+        catalog_namespace: Option<&TrackNamespace>,
+    ) -> Result<(), MessageError> {
+        if self.is_complete && !catalog.is_complete {
+            return Err(MessageError::InvalidCatalog(
+                "isComplete MUST NOT be removed once it has been added".to_string(),
+            ));
+        }
+
+        // delta で削除済みの track も履歴に含める。削除時点で isLive=false だった track は
+        // 以後 isLive=true で再登場してはならない (§5.2.8)。
+        for (key, track) in &catalog.removed_tracks {
+            if !track.is_live {
+                self.ended_tracks.insert(key.clone());
+            }
+            self.seen_tracks.insert(key.clone());
+        }
+
+        let mut current = Vec::new();
+        for track in catalog.tracks.iter().chain(catalog.publish_tracks.iter()) {
+            current.push((
+                MsfCatalog::track_key(track, catalog_namespace)?,
+                track.is_live,
+            ));
+        }
+
+        if self.is_complete {
+            for (key, _) in &current {
+                if !self.seen_tracks.contains(key) {
+                    return Err(MessageError::InvalidCatalog(
+                        "new track MUST NOT be added after isComplete is true".to_string(),
+                    ));
+                }
+            }
+        }
+
+        for (key, is_live) in current {
+            if is_live && self.ended_tracks.contains(&key) {
+                return Err(MessageError::InvalidCatalog(
+                    "isLive=true MUST NOT follow isLive=false for the same track".to_string(),
+                ));
+            }
+            if !is_live {
+                self.ended_tracks.insert(key.clone());
+            }
+            self.seen_tracks.insert(key);
+        }
+
+        if catalog.is_complete {
+            self.is_complete = true;
+        }
+        Ok(())
+    }
+}
+
 impl MsfCatalog {
     /// デルタ更新をこのカタログへ適用する
     ///
@@ -3365,6 +3469,11 @@ fn validate_loc_stream_mapping(metadata: Option<&str>) -> Result<(), MessageErro
 /// - §5.2.18 (Codec) / §5.2.22 (Maximum Bitrate) / §5.2.28 (Audio sample rate) /
 ///   §5.2.29 (Channel configuration)
 fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
+    // draft-ietf-moq-msf-02 §5.2.37 (Connection URI): connectionURI は
+    // draft-ietf-moq-transport-23 §6.1 (MOQT URI Scheme) の endpoint URI でなければならない。
+    if let Some(ref uri) = track.connection_uri {
+        crate::msf::uri::validate_moqt_endpoint_uri(uri)?;
+    }
     // draft-ietf-moq-msf-02 §5.2.2 (Track namespace) / §5.2.3 (Track name) / §11.2:
     // 手組みの値も decode と同じ写像規則で検証する。
     if let Some(ref metadata) = track.packaging_metadata {
@@ -3459,6 +3568,11 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
 /// - §5.2.8 (Target latency) / §5.2.9 (Buffers)
 /// - §5.2.32 (Language) / §5.2.35 (Track duration)
 fn validate_clone_track_fragment(track: &MsfCloneTrack) -> Result<(), MessageError> {
+    // draft-ietf-moq-msf-02 §5.2.37 (Connection URI): clone で上書きする場合も
+    // MOQT endpoint URI の構文を満たさなければならない。
+    if let Some(ref uri) = track.connection_uri {
+        crate::msf::uri::validate_moqt_endpoint_uri(uri)?;
+    }
     // draft-ietf-moq-msf-02 §5.2.2 (Track namespace) / §5.2.3 (Track name) /
     // §5.2.34 (Parent name) / §5.2.35 (Parent namespace) / §11.2: decode と同じ写像規則。
     if let Some(ref metadata) = track.packaging_metadata {
@@ -3626,9 +3740,21 @@ fn decode_full_catalog(
             .collect::<Result<Vec<_>, _>>()?,
     };
 
-    // draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List): initDataList は tracks 配列より後に出現しなければならない
-    // nojson はキー出現順を提供しないため、順序検証は行わない。
+    // draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List): initDataList は tracks 配列より後に出現しなければならない。
+    // nojson の to_object は JSON の出現順に列挙するため、ここで順序を検証できる。
     // この仕様は将来変更される可能性がある。
+    let mut saw_tracks = false;
+    for (key, _) in val.to_object()? {
+        let key: &str = key.try_into()?;
+        if key == "tracks" {
+            saw_tracks = true;
+        }
+        if key == "initDataList" && !saw_tracks {
+            return Err(MessageError::InvalidCatalog(
+                "initDataList MUST be located after tracks".to_string(),
+            ));
+        }
+    }
     let init_data_list = match val.to_member("initDataList")?.optional() {
         Some(v) => v
             .to_array()?
@@ -3867,8 +3993,9 @@ fn decode_common_track_fields(
         lang: val.to_member("lang")?.map(|v| v.try_into())?,
         track_duration: val.to_member("trackDuration")?.map(parse_u64)?,
         // キー綴りは §5.2.37 に定義がなく §5.6.17 の例に準拠する。
-        // URI 形式検証は行わない (§5.2.37 の endpoint URI の妥当性 MUST を含め、
-        // 接続確立時の振る舞いは catalog decode の責務外とし transport 層に委ねる)。
+        // URI の形式検証は `decode_track` / `decode_clone_track` と encode 前の
+        // `validate_full_track` / `validate_clone_track_fragment` が行い、
+        // 接続確立そのものは transport 層の責務とする。
         connection_uri: val.to_member("connectionURI")?.map(|v| v.try_into())?,
         encryption_scheme: val.to_member("encryptionScheme")?.map(|v| v.try_into())?,
         cipher_suite: val.to_member("cipherSuite")?.map(|v| v.try_into())?,
@@ -4094,6 +4221,11 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
         return Err(MessageError::InvalidCatalog(
             "mediatimeline track MUST have a 'depends' attribute".to_string(),
         ));
+    }
+
+    // draft-ietf-moq-msf-02 §5.2.37 (Connection URI): MOQT endpoint URI の構文を検証する
+    if let Some(ref uri) = connection_uri {
+        crate::msf::uri::validate_moqt_endpoint_uri(uri)?;
     }
 
     let track = MsfTrack {
@@ -4483,6 +4615,11 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
         .or(parsed_parent_namespace.as_ref());
     validate_catalog_full_track_name(effective_namespace, &name_bytes)?;
     validate_catalog_full_track_name(parsed_parent_namespace.as_ref(), &parent_name_bytes)?;
+
+    // draft-ietf-moq-msf-02 §5.2.37 (Connection URI): clone の断片でも URI の構文を検証する
+    if let Some(ref uri) = connection_uri {
+        crate::msf::uri::validate_moqt_endpoint_uri(uri)?;
+    }
 
     Ok(MsfCloneTrack {
         name,

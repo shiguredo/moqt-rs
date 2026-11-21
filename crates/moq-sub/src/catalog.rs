@@ -14,7 +14,7 @@
 //! 弾くことで、delta の二重適用を防ぐ。
 
 use shiguredo_moqt::message::common::{Location, TrackNamespace};
-use shiguredo_moqt::msf::{MsfCatalog, MsfCatalogDocument};
+use shiguredo_moqt::msf::{MsfCatalog, MsfCatalogDocument, MsfCatalogTracker};
 
 use crate::error::{Error, Result};
 
@@ -67,6 +67,8 @@ pub(crate) struct CatalogState {
     latest_group: Option<u64>,
     /// 最後に適用した Location (重複と逆戻りの検出に使う)
     last_applied: Option<Location>,
+    /// 独立した Full catalog をまたいだ isComplete / isLive の履歴
+    tracker: MsfCatalogTracker,
 }
 
 impl CatalogState {
@@ -80,6 +82,7 @@ impl CatalogState {
             catalog: None,
             latest_group: None,
             last_applied: None,
+            tracker: MsfCatalogTracker::new(),
         }
     }
 
@@ -125,6 +128,16 @@ impl CatalogState {
                 // 継承を解決した Full Track Name の一意性を適用前に検査する。
                 full.validate_track_names(Some(&self.catalog_namespace))
                     .map_err(|e| Error::Other(format!("failed to validate MSF catalog: {e}")))?;
+                // 独立した Full catalog をまたいだ isComplete / isLive の履歴を検証する
+                // (draft-ietf-moq-msf-02 §5.1.3 / §5.2.8)。失敗時は tracker と catalog の
+                // どちらも変更しない。
+                let mut tracker = self.tracker.clone();
+                tracker
+                    .observe(full, Some(&self.catalog_namespace))
+                    .map_err(|e| {
+                        Error::Other(format!("failed to validate MSF catalog history: {e}"))
+                    })?;
+                self.tracker = tracker;
                 self.catalog = Some(full.clone());
                 self.latest_group = Some(location.group_id);
                 self.last_applied = Some(location);
@@ -148,17 +161,27 @@ impl CatalogState {
                         "delta from a group without its first object",
                     ));
                 }
-                let catalog = self
+                let mut updated = self
                     .catalog
-                    .as_mut()
-                    .expect("catalog presence checked above");
+                    .as_ref()
+                    .expect("catalog presence checked above")
+                    .clone();
                 // namespace を省略した remove / clone / add は catalog track の namespace を
                 // 継承する (§5.2.2 の MUST)。継承先を渡さないと、namespace を宣言した track と
                 // 省略した操作が一致せず、remove / clone は対象が見つからず失敗し、add は
                 // 重複を検出できず同じ Full Track Name の track が二重に登録される
-                catalog
+                updated
                     .apply_delta(delta, Some(&self.catalog_namespace))
                     .map_err(|e| Error::Other(format!("failed to apply MSF delta catalog: {e}")))?;
+                // delta で isLive=false になった track / 削除された track も履歴へ反映する
+                let mut tracker = self.tracker.clone();
+                tracker
+                    .observe(&updated, Some(&self.catalog_namespace))
+                    .map_err(|e| {
+                        Error::Other(format!("failed to validate MSF catalog history: {e}"))
+                    })?;
+                self.catalog = Some(updated);
+                self.tracker = tracker;
                 self.last_applied = Some(location);
                 Ok(CatalogApplyOutcome::DeltaApplied)
             }
@@ -194,6 +217,20 @@ mod tests {
     fn full_json(version_track: &str) -> Vec<u8> {
         format!(
             r#"{{"version":"draft-02","tracks":[{{"name":"{version_track}","packaging":"loc","isLive":true}}]}}"#
+        )
+        .into_bytes()
+    }
+
+    /// テストで使う isLive / isComplete を指定できる Full カタログの JSON
+    fn full_json_live(name: &str, is_live: bool, is_complete: bool) -> Vec<u8> {
+        let live = if is_live { "true" } else { "false" };
+        let complete = if is_complete {
+            r#""isComplete":true,"#
+        } else {
+            ""
+        };
+        format!(
+            r#"{{"version":"draft-02",{complete}"tracks":[{{"name":"{name}","packaging":"loc","isLive":{live}}}]}}"#
         )
         .into_bytes()
     }
@@ -770,5 +807,105 @@ mod tests {
             "Full Track Name の長さ違反として拒否されること: {error}"
         );
         assert!(state.catalog().is_none(), "カタログを置き換えないこと");
+    }
+    /// 独立した Full catalog をまたいで isLive=false の後に true が来たら拒否すること
+    ///
+    /// draft-ietf-moq-msf-02 §5.2.8 (Is Live): "A True value MUST never follow a False value."
+    #[test]
+    fn full_catalog_is_live_cannot_follow_false() {
+        let mut state = CatalogState::new(test_namespace());
+        let vod = CatalogObject::decode(
+            Location {
+                group_id: 100,
+                object_id: 0,
+            },
+            &full_json_live("video", false, false),
+        )
+        .expect("カタログをデコードできること");
+        state.apply(&vod).expect("VOD カタログを適用できること");
+
+        let live = CatalogObject::decode(
+            Location {
+                group_id: 101,
+                object_id: 0,
+            },
+            &full_json_live("video", true, false),
+        )
+        .expect("カタログをデコードできること");
+        assert!(
+            state.apply(&live).is_err(),
+            "isLive=false の後の isLive=true は拒否すること"
+        );
+    }
+
+    /// delta で isLive=false になった track は、後続の Full catalog で true にできないこと
+    #[test]
+    fn delta_is_live_false_blocks_later_true() {
+        let mut state = CatalogState::new(test_namespace());
+        let full = CatalogObject::decode(
+            Location {
+                group_id: 100,
+                object_id: 0,
+            },
+            &full_json_live("video", true, false),
+        )
+        .expect("カタログをデコードできること");
+        state.apply(&full).expect("Full を適用できること");
+
+        let delta = CatalogObject::decode(
+            Location {
+                group_id: 100,
+                object_id: 1,
+            },
+            br#"{"generatedAt":1,"deltaUpdate":[{"op":"update","tracks":[{"name":"video","parentName":"video","isLive":false}]}]}"#,
+        )
+        .expect("delta をデコードできること");
+        state.apply(&delta).expect("delta を適用できること");
+
+        let live = CatalogObject::decode(
+            Location {
+                group_id: 101,
+                object_id: 0,
+            },
+            &full_json_live("video", true, false),
+        )
+        .expect("カタログをデコードできること");
+        assert!(
+            state.apply(&live).is_err(),
+            "delta で false になった track を true に戻す Full catalog は拒否すること"
+        );
+    }
+
+    /// 一度 TRUE になった isComplete を削除する Full catalog は拒否すること
+    ///
+    /// draft-ietf-moq-msf-02 §5.1.3 (Is Complete): "This field MUST NOT be removed from a
+    /// catalog once it has been added."
+    #[test]
+    fn is_complete_must_not_be_removed() {
+        let mut state = CatalogState::new(test_namespace());
+        let complete = CatalogObject::decode(
+            Location {
+                group_id: 100,
+                object_id: 0,
+            },
+            &full_json_live("video", false, true),
+        )
+        .expect("カタログをデコードできること");
+        state
+            .apply(&complete)
+            .expect("isComplete=true のカタログを適用できること");
+
+        let incomplete = CatalogObject::decode(
+            Location {
+                group_id: 101,
+                object_id: 0,
+            },
+            &full_json_live("video", false, false),
+        )
+        .expect("カタログをデコードできること");
+        assert!(
+            state.apply(&incomplete).is_err(),
+            "isComplete を削除するカタログは拒否すること"
+        );
     }
 }

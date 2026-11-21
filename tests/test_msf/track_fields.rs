@@ -288,28 +288,43 @@ fn connection_uri_decoded_and_token_ignored_in_clone() {
 }
 
 #[test]
-fn connection_uri_invalid_value_accepted() {
-    // URI として不正な文字列も受理する (形式検証は catalog decode の責務外)
+fn connection_uri_invalid_value_rejected() {
+    // draft-ietf-moq-msf-02 §5.2.37: MOQT endpoint URI でない文字列は catalog decode で拒否する
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"moqlog","isLive":true,"connectionURI":"not a uri"}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
-    let MsfCatalogDocument::Full(cat) = doc else {
-        panic!("Full catalog がデコードされること");
-    };
-    assert_eq!(cat.tracks[0].connection_uri.as_deref(), Some("not a uri"));
+    assert!(matches!(
+        MsfCatalogDocument::decode(json),
+        Err(MessageError::InvalidCatalog(_))
+    ));
 }
 
 #[test]
-fn connection_uri_invalid_value_accepted_in_clone() {
-    // clone 経路でも URI として不正な文字列を受理する (形式検証は catalog decode の責務外)
+fn connection_uri_invalid_value_rejected_in_clone() {
+    // clone 経路でも MOQT endpoint URI でない文字列は拒否する
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","connectionURI":"not a uri"}]}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
-    let MsfCatalogDocument::Delta(delta) = doc else {
-        panic!("Delta update がデコードされること");
-    };
-    let MsfDeltaOperation::Clone { tracks } = &delta.operations[0] else {
-        panic!("Clone 操作がデコードされること");
-    };
-    assert_eq!(tracks[0].connection_uri.as_deref(), Some("not a uri"));
+    assert!(matches!(
+        MsfCatalogDocument::decode(json),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+#[test]
+fn connection_uri_spec_examples_accepted() {
+    // draft-ietf-moq-msf-02 §5.2.37 の例はすべて受理する
+    for uri in [
+        "moqt://logs.example.com",
+        "moqt://metrics.example.com:8443",
+        "moqt://logs.example.com/moqt?a=1&b=2",
+    ] {
+        let json = format!(
+            r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"moqlog","isLive":true,"connectionURI":"{uri}"}}]}}"#
+        );
+        let doc = MsfCatalogDocument::decode(json.as_bytes())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let MsfCatalogDocument::Full(cat) = doc else {
+            panic!("Full catalog がデコードされること");
+        };
+        assert_eq!(cat.tracks[0].connection_uri.as_deref(), Some(uri));
+    }
 }
 
 #[test]

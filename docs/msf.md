@@ -32,11 +32,15 @@
   - Video：width / height / displayWidth / displayHeight / framerate / timescale / bitrate / avgBitrate / temporalId / spatialId
   - Audio：samplerate / channelConfig
   - 保護 / アクセシビリティ：connectionURI / encryptionScheme / cipherSuite / keyId / trackBaseKey / authInfo / accessibility
+    - `connectionURI` は `msf::uri::validate_moqt_endpoint_uri` で MOQT endpoint URI として検証する
+      (§5.2.37 / MOQT §6.1)。指定 URI への新規接続は transport / example 層の責務である
 - 名前の変換 API
   - `parse_catalog_namespace`：`/` 区切りのカタログ namespace を `TrackNamespace` に写像する
   - `serialize_catalog_namespace`：`TrackNamespace` を `/` 区切りのカタログ namespace に写像する (UTF-8 でない field・NUL・`/` を含む field は表現できない)
   - `catalog_track_name_bytes`：カタログの track name を MOQT のバイト列に写像する
   - `MsfCatalog::validate_track_names`：基準 namespace を渡して Full Track Name の一意性と 4,096 バイト制限を検証する
+  - `MsfCatalogTracker::observe`：独立した Full catalog を順に観測し、`isComplete` の削除
+    (§5.1.3) と `isLive` の False → True (§5.2.8) を拒否する
 - 関連型
   - clone 用 `MsfCloneTrack` (parentNamespace / packagingMetadata の継承に対応)
   - media timeline は depends 必須で、renderGroup 内の全 track が対象なら renderGroup を参照し個別名を併記しない (§7.2)
@@ -74,6 +78,9 @@
   - authority / path / query は RFC 3986 の構文で検証し、authority の userinfo は拒否する
   - track-identifier の Track Name は 1 バイト以上を必須とする (draft-ietf-moq-transport-23 §2.4.1)
   - 予約パラメータ (`connection` / `wallclock-range` / `mediatime-range` / `location-range` / `cat`) の値型アクセサ
+    - `wallclock-range` / `mediatime-range` / `location-range` は
+      `wallclock_range_union` / `mediatime_range_union` / `location_range_union` で
+      同一 URL 内の複数範囲を union できる (§11.1.1)
 - カタログの変数置換 (`msf::resolve_catalog_variables`)
   - JSON の文字列リテラルの内側 (catalog field value) だけを置換する
   - 文字列の外・オブジェクトのキー・JSON エスケープの `\u0025` に現れる `%` は拒否する (§5.4.1)

@@ -203,7 +203,7 @@ fn sample_track(ctx: &mut noprop::TestCaseContext) -> MsfTrack {
     t.avg_bitrate = avg_bitrate.map(|v| v as u64);
     t.max_gop_duration = max_gop_duration.map(|v| v as u64);
     t.max_group_duration = max_group_duration.map(|v| v as u64);
-    // connectionURI は任意文字列を受理するため、現実形状 (URI) の生成にする
+    // connectionURI は MOQT endpoint URI として検証されるため、有効な URI 形状を生成する
     // (JSON エスケープ要文字の頑健性は sample_catalog_namespace の field で担保)
     t.connection_uri = if noprop::sample_bool(ctx) {
         Some(sample_uri_like(ctx))

@@ -1,7 +1,7 @@
 use super::*;
 use shiguredo_moqt::msf::uri::{
     MsfConnectionType, MsfLocationRange, MsfLocationRangeEnd, MsfTimeRange, parse_msf_fragment,
-    parse_msf_uri,
+    parse_msf_uri, validate_moqt_endpoint_uri,
 };
 
 /// §11.1.3 (Example MSF URLs) のカタログ URL をパースできること
@@ -719,5 +719,189 @@ fn parse_uri_rejects_userinfo_without_leaking() {
     assert!(
         !message.contains("secret") && !message.contains("user@"),
         "エラーメッセージに userinfo の実値を含めないこと: {message}"
+    );
+}
+
+/// MSF の connectionURI が要求する MOQT endpoint URI の受理例
+///
+/// draft-ietf-moq-msf-02 §5.2.37 (Connection URI) の例と、
+/// draft-ietf-moq-transport-23 §6.1 (MOQT URI Scheme) の構文を満たす値を確認する。
+#[test]
+fn moqt_endpoint_uri_examples_are_valid() {
+    for uri in [
+        "moqt://logs.example.com",
+        "moqt://metrics.example.com:8443",
+        "moqt://logs.example.com/moqt?a=1&b=2",
+        "MOQT://example.com",
+        "moqt://example.com/path#msf:ns--catalog",
+        "moqt://[::1]:443/path",
+    ] {
+        assert!(
+            validate_moqt_endpoint_uri(uri).is_ok(),
+            "有効な MOQT endpoint URI として受理すること: {uri}"
+        );
+    }
+}
+
+/// MSF の connectionURI が要求する MOQT endpoint URI の拒否例
+#[test]
+fn moqt_endpoint_uri_invalid_values_are_rejected() {
+    for uri in [
+        "https://example.com",
+        "moqt://",
+        "moqt:///path",
+        "moqt://user:pass@example.com",
+        "moqt://host:abc",
+        "moqt://host/a b",
+        "moqt://host?q=a b",
+        "moqt://[::1/path",
+        "moqt://host#badfragment",
+        "moqt://host#Type:value",
+        "moqt://host#type:",
+        "moqt://host#type:value#extra",
+    ] {
+        assert!(
+            matches!(
+                validate_moqt_endpoint_uri(uri),
+                Err(MessageError::InvalidCatalog(_))
+            ),
+            "不正な MOQT endpoint URI として拒否すること: {uri}"
+        );
+    }
+}
+
+/// 同じ URL に複数の wallclock-range がある場合、仕様どおり union されること
+///
+/// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters)。
+#[test]
+fn wallclock_ranges_are_unioned() {
+    let uri = parse_msf_uri(
+        "moqt://example.com/path#msf:ns--catalog&wallclock-range=0-10&wallclock-range=5-20&wallclock-range=30-40",
+    )
+    .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        uri.fragment
+            .wallclock_range_union()
+            .expect("テストフィクスチャの前提条件を満たす"),
+        vec![
+            MsfTimeRange {
+                start_ms: 0,
+                end_ms: Some(20)
+            },
+            MsfTimeRange {
+                start_ms: 30,
+                end_ms: Some(40)
+            }
+        ]
+    );
+}
+
+/// 隣接する範囲と終端なしの範囲も union されること
+#[test]
+fn adjacent_and_open_time_ranges_are_unioned() {
+    let uri = parse_msf_uri(
+        "moqt://example.com/path#msf:ns--catalog&mediatime-range=0-10&mediatime-range=11-20&mediatime-range=15-",
+    )
+    .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        uri.fragment
+            .mediatime_range_union()
+            .expect("テストフィクスチャの前提条件を満たす"),
+        vec![MsfTimeRange {
+            start_ms: 0,
+            end_ms: None
+        }]
+    );
+}
+
+/// union の対象でも範囲の構文エラーは拒否すること
+#[test]
+fn invalid_time_range_union_is_rejected() {
+    let uri = parse_msf_uri("moqt://example.com/path#msf:ns--catalog&wallclock-range=10-5")
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert!(matches!(
+        uri.fragment.wallclock_range_union(),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+/// 同じ URL に複数の location-range がある場合、Group ID / Object ID の辞書順で union されること
+#[test]
+fn location_ranges_are_unioned() {
+    let uri = parse_msf_uri(
+        "moqt://example.com/path#msf:ns--catalog&location-range=34.0-2145.16&location-range=100-200",
+    )
+    .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        uri.fragment
+            .location_range_union()
+            .expect("テストフィクスチャの前提条件を満たす"),
+        vec![MsfLocationRange {
+            start_group_id: 34,
+            start_object_id: None,
+            end: Some(MsfLocationRangeEnd {
+                group_id: 2145,
+                object_id: Some(16)
+            })
+        }]
+    );
+}
+
+/// 隣接する Group 全体と Object 単位の範囲も union されること
+#[test]
+fn adjacent_location_ranges_are_unioned() {
+    let uri = parse_msf_uri(
+        "moqt://example.com/path#msf:ns--catalog&location-range=16-24&location-range=25-30",
+    )
+    .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        uri.fragment
+            .location_range_union()
+            .expect("テストフィクスチャの前提条件を満たす"),
+        vec![MsfLocationRange {
+            start_group_id: 16,
+            start_object_id: None,
+            end: Some(MsfLocationRangeEnd {
+                group_id: 30,
+                object_id: None
+            })
+        }]
+    );
+
+    let uri = parse_msf_uri(
+        "moqt://example.com/path#msf:ns--catalog&location-range=10.5-10.9&location-range=10.10-10.12",
+    )
+    .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        uri.fragment
+            .location_range_union()
+            .expect("テストフィクスチャの前提条件を満たす"),
+        vec![MsfLocationRange {
+            start_group_id: 10,
+            start_object_id: Some(5),
+            end: Some(MsfLocationRangeEnd {
+                group_id: 10,
+                object_id: Some(12)
+            })
+        }]
+    );
+}
+
+/// 終端なしの location-range が後続の範囲を吸収すること
+#[test]
+fn open_location_range_absorbs_later_ranges() {
+    let uri = parse_msf_uri(
+        "moqt://example.com/path#msf:ns--catalog&location-range=16.24&location-range=17-20",
+    )
+    .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        uri.fragment
+            .location_range_union()
+            .expect("テストフィクスチャの前提条件を満たす"),
+        vec![MsfLocationRange {
+            start_group_id: 16,
+            start_object_id: Some(24),
+            end: None
+        }]
     );
 }
