@@ -9,6 +9,7 @@ use super::fetch::{
     FetchHeader, FetchPriorContext, FetchStreamEntry, FetchStreamObject, FetchSubgroupIdMode,
 };
 use super::subgroup::{SubgroupHeader, SubgroupIdMode, SubgroupObject};
+use crate::decode_buffer::DecodeBuffer;
 use crate::{error::MessageError, object_properties::ObjectProperties};
 use alloc::vec::Vec;
 use hashbrown::HashMap;
@@ -92,7 +93,11 @@ enum SubgroupDecoderState {
 /// }
 /// ```
 pub struct SubgroupStreamDecoder {
-    buf: Vec<u8>,
+    /// 受信済みで未デコードのバイト列
+    ///
+    /// オブジェクトごとに `Vec::drain(..n)` で残りを詰め直すと二乗のコピーになるため、
+    /// 読み出し位置だけを進める。
+    buffer: DecodeBuffer,
     state: SubgroupDecoderState,
     /// SubgroupHeader の has_properties フラグ
     has_properties: bool,
@@ -109,7 +114,7 @@ impl SubgroupStreamDecoder {
     /// 新しいデコーダーを作成する
     pub fn new() -> Self {
         Self {
-            buf: Vec::new(),
+            buffer: DecodeBuffer::new(),
             state: SubgroupDecoderState::AwaitingHeader,
             has_properties: false,
             prev_object_id: None,
@@ -120,7 +125,7 @@ impl SubgroupStreamDecoder {
 
     /// バッファにデータを追加する
     pub fn push(&mut self, data: &[u8]) {
-        self.buf.extend_from_slice(data);
+        self.buffer.push(data);
     }
 
     /// バッファから SubgroupHeader のデコードを試みる
@@ -136,12 +141,12 @@ impl SubgroupStreamDecoder {
                 "subgroup header already decoded",
             ));
         }
-        if self.buf.is_empty() {
+        if self.buffer.is_empty() {
             return Ok(None);
         }
-        match SubgroupHeader::decode(&self.buf) {
+        match SubgroupHeader::decode(self.buffer.available()) {
             Ok((header, consumed)) => {
-                self.buf.drain(..consumed);
+                self.buffer.advance(consumed);
                 // 内部状態を初期化する
                 self.has_properties = header.has_properties;
                 self.is_first_object_id_mode =
@@ -173,12 +178,12 @@ impl SubgroupStreamDecoder {
                 "not ready to decode object (header not decoded or payload not consumed)",
             ));
         }
-        if self.buf.is_empty() {
+        if self.buffer.is_empty() {
             return Ok(None);
         }
-        match SubgroupObject::decode(&self.buf, self.has_properties) {
+        match SubgroupObject::decode(self.buffer.available(), self.has_properties) {
             Ok((obj, properties_bytes, consumed)) => {
-                self.buf.drain(..consumed);
+                self.buffer.advance(consumed);
 
                 // object_id_delta → 絶対 object_id の変換
                 // draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header): 初回 Object の Object ID は
@@ -242,9 +247,8 @@ impl SubgroupStreamDecoder {
                 // remaining は wire 由来の payload_length (u64)。32bit 環境で as usize の
                 // 切り捨てによる誤読を防ぐため、バッファ長と u64 空間で比較してから変換する。
                 // データ不足時は None を返して追加データを待つ意味論のため checked_len は使わない
-                if (self.buf.len() as u64) >= remaining {
-                    let len = remaining as usize;
-                    let payload: Vec<u8> = self.buf.drain(..len).collect();
+                if (self.buffer.len() as u64) >= remaining {
+                    let payload = self.buffer.take(remaining as usize)?;
                     self.state = SubgroupDecoderState::AwaitingObject;
                     Some(payload)
                 } else {
@@ -319,7 +323,7 @@ impl SubgroupStreamDecoder {
                 // 状態が AwaitingObject である時点でヘッダーはデコード済み。
                 // バッファが空ならヘッダーのみの空 Subgroup も含めて完結とみなす
                 // （partial object header はバッファ非空として検出される）。
-                if self.buf.is_empty() {
+                if self.buffer.is_empty() {
                     Ok(())
                 } else {
                     Err(MessageError::UnexpectedEof)
@@ -532,7 +536,8 @@ const FETCH_GROUP_ORDER_DESCENDING: u8 = 0x02;
 /// }
 /// ```
 pub struct FetchStreamDecoder {
-    buf: Vec<u8>,
+    /// 受信済みで未デコードのバイト列 (読み出し位置だけを進める)
+    buffer: DecodeBuffer,
     state: FetchDecoderState,
     /// FETCH response の Group 順序 (draft-ietf-moq-transport-23 §3.2.1 (Fetch Object Delivery) / §9.19.8 (GROUP ORDER Parameter))
     group_order: u8,
@@ -570,7 +575,7 @@ impl FetchStreamDecoder {
 
     fn with_group_order(group_order: u8) -> Self {
         Self {
-            buf: Vec::new(),
+            buffer: DecodeBuffer::new(),
             state: FetchDecoderState::AwaitingHeader,
             group_order,
             prior_context: FetchPriorContext::First,
@@ -639,7 +644,7 @@ impl FetchStreamDecoder {
 
     /// バッファにデータを追加する
     pub fn push(&mut self, data: &[u8]) {
-        self.buf.extend_from_slice(data);
+        self.buffer.push(data);
     }
 
     /// バッファから FetchHeader のデコードを試みる
@@ -653,12 +658,12 @@ impl FetchStreamDecoder {
                 "fetch header already decoded",
             ));
         }
-        if self.buf.is_empty() {
+        if self.buffer.is_empty() {
             return Ok(None);
         }
-        match FetchHeader::decode(&self.buf) {
+        match FetchHeader::decode(self.buffer.available()) {
             Ok((header, consumed)) => {
-                self.buf.drain(..consumed);
+                self.buffer.advance(consumed);
                 self.state = FetchDecoderState::AwaitingEntry;
                 Ok(Some(header))
             }
@@ -690,12 +695,13 @@ impl FetchStreamDecoder {
                 "not ready to decode entry (header not decoded or payload not consumed)",
             ));
         }
-        if self.buf.is_empty() {
+        if self.buffer.is_empty() {
             return Ok(None);
         }
-        match FetchStreamEntry::decode_with_properties(&self.buf, self.prior_context) {
+        match FetchStreamEntry::decode_with_properties(self.buffer.available(), self.prior_context)
+        {
             Ok((entry, properties_bytes, consumed)) => {
-                self.buf.drain(..consumed);
+                self.buffer.advance(consumed);
                 let decoded = self.resolve_and_transition(entry, properties_bytes)?;
                 Ok(Some(decoded))
             }
@@ -1150,9 +1156,8 @@ impl FetchStreamDecoder {
                 // remaining は wire 由来の payload_length (u64)。32bit 環境で as usize の
                 // 切り捨てによる誤読を防ぐため、バッファ長と u64 空間で比較してから変換する。
                 // データ不足時は None を返して追加データを待つ意味論のため checked_len は使わない
-                if (self.buf.len() as u64) >= remaining {
-                    let len = remaining as usize;
-                    let payload: Vec<u8> = self.buf.drain(..len).collect();
+                if (self.buffer.len() as u64) >= remaining {
+                    let payload = self.buffer.take(remaining as usize)?;
                     self.state = FetchDecoderState::AwaitingEntry;
                     Some(payload)
                 } else {
@@ -1212,7 +1217,7 @@ impl FetchStreamDecoder {
                 // 状態が AwaitingEntry である時点でヘッダーはデコード済み。
                 // バッファが空ならヘッダーのみの空 FETCH 応答も含めて完結とみなす
                 // （partial entry header はバッファ非空として検出される）。
-                if self.buf.is_empty() {
+                if self.buffer.is_empty() {
                     Ok(())
                 } else {
                     Err(MessageError::UnexpectedEof)

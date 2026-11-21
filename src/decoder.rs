@@ -7,10 +7,10 @@
 //!
 //! このモジュールは I/O を持たず、バッファ管理とデコード試行のみを提供する。
 //! ストリームからのデータ受信は呼び出し側が行う。
+use crate::decode_buffer::DecodeBuffer;
 use crate::error::MessageError;
 use crate::message::ControlMessage;
 use crate::varint;
-use alloc::vec::Vec;
 
 /// バッファ付きメッセージデコーダー
 ///
@@ -42,7 +42,11 @@ use alloc::vec::Vec;
 /// }
 /// ```
 pub struct MessageDecoder {
-    buf: Vec<u8>,
+    /// 受信済みで未デコードのバイト列
+    ///
+    /// `Vec::drain(..n)` をメッセージごとに呼ばず読み出し位置だけを進めることで、
+    /// 小さなメッセージを大量に含むチャンクでも二乗のコピーを避ける。
+    buffer: DecodeBuffer,
     max_control_message_size: u64,
 }
 
@@ -54,14 +58,14 @@ impl MessageDecoder {
     /// [`MessageError::FieldLengthExceeded`] を返す。
     pub fn new(max_control_message_size: u64) -> Self {
         Self {
-            buf: Vec::new(),
+            buffer: DecodeBuffer::new(),
             max_control_message_size,
         }
     }
 
     /// バッファにデータを追加する
     pub fn push(&mut self, data: &[u8]) {
-        self.buf.extend_from_slice(data);
+        self.buffer.push(data);
     }
 
     /// バッファから制御メッセージのデコードを試みる
@@ -78,17 +82,17 @@ impl MessageDecoder {
     /// - 本文が Length と一致しない: [`MessageError::MalformedMessage`]
     /// - 未知のメッセージ型など、メッセージ固有のデコード検証に失敗した: そのエラー
     pub fn try_decode_message(&mut self) -> Result<Option<ControlMessage>, MessageError> {
-        if self.buf.is_empty() {
+        if self.buffer.is_empty() {
             return Ok(None);
         }
         // Type (vi64) を読む
-        let (_, type_len) = match varint::decode(&self.buf) {
+        let (_, type_len) = match varint::decode(self.buffer.available()) {
             Ok(v) => v,
             Err(MessageError::UnexpectedEof) => return Ok(None),
             Err(e) => return Err(e),
         };
         // Length (vi64) を読む
-        let (payload_len, length_len) = match varint::decode(&self.buf[type_len..]) {
+        let (payload_len, length_len) = match varint::decode(&self.buffer.available()[type_len..]) {
             Ok(v) => v,
             Err(MessageError::UnexpectedEof) => return Ok(None),
             Err(e) => return Err(e),
@@ -108,16 +112,16 @@ impl MessageDecoder {
             ));
         }
         let header_len = type_len + length_len;
-        if payload_len > (self.buf.len() - header_len) as u64 {
+        if payload_len > (self.buffer.len() - header_len) as u64 {
             return Ok(None);
         }
         // 外側フレーム (Type + Length + payload) が揃ったので decode する。
         // ここで返るエラー (本文長の不一致など) は追加データでは回復し得ないため、
         // `Ok(None)` に吸収せず呼び出し側へ返す。吸収するとバッファが drain されず
         // 恒久停止する。
-        match ControlMessage::decode(&self.buf) {
+        match ControlMessage::decode(self.buffer.available()) {
             Ok((msg, consumed)) => {
-                self.buf.drain(..consumed);
+                self.buffer.advance(consumed);
                 Ok(Some(msg))
             }
             Err(e) => Err(e),
@@ -134,12 +138,12 @@ impl MessageDecoder {
     /// - `Ok(None)` — データ不足、追加データが必要
     /// - `Err(e)` — デコードエラー
     pub fn try_decode_varint(&mut self) -> Result<Option<u64>, MessageError> {
-        if self.buf.is_empty() {
+        if self.buffer.is_empty() {
             return Ok(None);
         }
-        match varint::decode(&self.buf) {
+        match varint::decode(self.buffer.available()) {
             Ok((val, consumed)) => {
-                self.buf.drain(..consumed);
+                self.buffer.advance(consumed);
                 Ok(Some(val))
             }
             Err(MessageError::UnexpectedEof) => Ok(None),

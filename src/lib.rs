@@ -8,6 +8,9 @@
 
 extern crate alloc;
 
+// インクリメンタルデコーダが共有する受信バッファ (クレート内部実装)
+mod decode_buffer;
+
 /// README のコード例を doctest で検証するためのフック
 ///
 /// `docs/` ではなく `README.md` を rustdoc の doctest としてコンパイルする。
