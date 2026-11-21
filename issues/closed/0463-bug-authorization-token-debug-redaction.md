@@ -1,7 +1,7 @@
 # AuthorizationToken の Debug が認可トークンの値を出力する
 
 - Created: 2026-11-20
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-21
 - Branch: feature/fix-authorization-token-debug-redaction
 - Polished: 2026-11-20
 
