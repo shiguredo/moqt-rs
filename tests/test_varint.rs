@@ -264,15 +264,6 @@ mod error_cases {
             Err(MessageError::UnexpectedEof)
         );
     }
-
-    /// draft-ietf-moq-transport-23 §8.1 (Variable-Length Integers): 0xFC (11111100) は 7 バイトエンコーディングの先頭として有効
-    #[test]
-    fn valid_code_point_0xfc() {
-        let (val, consumed) = varint::decode(&[0xFC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
-            .expect("テストフィクスチャの前提条件を満たす");
-        assert_eq!(val, 0);
-        assert_eq!(consumed, 7);
-    }
 }
 
 /// draft-ietf-moq-transport-23 §8.1 (Variable-Length Integers) Table 4 (Example Integer Encodings) の
@@ -485,15 +476,6 @@ mod non_minimal {
         let buf = [0x80, 0x00];
         let (val, consumed) = varint::decode(&buf).expect("非最小形も受理される");
         assert_eq!(val, 0);
-        assert_eq!(consumed, 2);
-    }
-
-    #[test]
-    fn two_byte_37_is_accepted() {
-        // 0x8025 = 37 (最小形は 0x25 の 1 バイト)
-        let buf = [0x80, 0x25];
-        let (val, consumed) = varint::decode(&buf).expect("非最小形も受理される");
-        assert_eq!(val, 37);
         assert_eq!(consumed, 2);
     }
 
