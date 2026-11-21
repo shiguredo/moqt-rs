@@ -278,7 +278,7 @@ fn validate_authority_host_port(value: &[u8]) -> Result<(), SetupUriValidationEr
     validate_reg_name(host)
 }
 
-fn validate_path_abempty(value: &[u8]) -> Result<(), SetupUriValidationError> {
+pub(crate) fn validate_path_abempty(value: &[u8]) -> Result<(), SetupUriValidationError> {
     if value.is_empty() {
         return Ok(());
     }
@@ -305,7 +305,7 @@ fn validate_path_abempty(value: &[u8]) -> Result<(), SetupUriValidationError> {
     Ok(())
 }
 
-fn validate_query(value: &[u8]) -> Result<(), SetupUriValidationError> {
+pub(crate) fn validate_query(value: &[u8]) -> Result<(), SetupUriValidationError> {
     validate_chars(value, SetupUriValidationError::Path, |b| {
         is_unreserved(b) || is_sub_delim(b) || matches!(b, b':' | b'@' | b'/' | b'?')
     })
@@ -321,7 +321,7 @@ fn validate_path(value: &[u8]) -> Result<(), SetupUriValidationError> {
     validate_path_abempty(value)
 }
 
-fn validate_authority(value: &[u8]) -> Result<(), SetupUriValidationError> {
+pub(crate) fn validate_authority(value: &[u8]) -> Result<(), SetupUriValidationError> {
     validate_uri_ascii(value, SetupUriValidationError::Authority)?;
     if value.is_empty() {
         return Err(SetupUriValidationError::Authority);

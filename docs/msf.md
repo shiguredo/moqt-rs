@@ -71,7 +71,12 @@
 
 - MSF URI / fragment のパース (`msf::uri`)
   - `parse_msf_uri` / `parse_msf_fragment`
+  - authority / path / query は RFC 3986 の構文で検証し、authority の userinfo は拒否する
+  - track-identifier の Track Name は 1 バイト以上を必須とする (draft-ietf-moq-transport-23 §2.4.1)
   - 予約パラメータ (`connection` / `wallclock-range` / `mediatime-range` / `location-range` / `cat`) の値型アクセサ
+- カタログの変数置換 (`msf::resolve_catalog_variables`)
+  - JSON の文字列リテラルの内側 (catalog field value) だけを置換する
+  - 文字列の外・オブジェクトのキー・JSON エスケープの `\u0025` に現れる `%` は拒否する (§5.4.1)
 
 ## 未対応
 

@@ -417,3 +417,59 @@ fn resolve_name_with_equals_is_kept_undefined() {
         "一致する key がない参照は元のまま保持されること: {text}"
     );
 }
+
+/// JSON の文字列の外やキーに現れた `%` を拒否すること
+///
+/// draft-ietf-moq-msf-02 §5.4 (Variable Substitution) は変数を catalog field value の
+/// 中にだけ置く。生 JSON のバイト列を無条件に走査すると、文字列の外やオブジェクトの
+/// キーを置換して JSON の構造を作り変えられるため、文字列の内側だけを置換する。
+#[test]
+fn resolve_rejects_reference_outside_field_values() {
+    // 文字列の外 (JSON の構造位置) の参照
+    let outside = br#"{"version":"draft-02","generatedAt":%x%,"tracks":[]}"#;
+    assert!(
+        matches!(
+            resolve_catalog_variables(outside, "x=123"),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "文字列の外の変数参照を拒否すること"
+    );
+
+    // オブジェクトのキー (member name) の参照
+    let key = br#"{"version":"draft-02","%x%":"value","tracks":[]}"#;
+    assert!(
+        matches!(
+            resolve_catalog_variables(key, "x=name"),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "オブジェクトのキーの変数参照を拒否すること"
+    );
+}
+
+/// JSON エスケープされた `%` をリテラルとして受理しないこと
+///
+/// `\u0025` は JSON 上は `%` だが、生バイトを走査する実装では変数参照として扱えない。
+/// §5.4.1 は変数参照の一部以外の `%` を MUST NOT とするため、どちらの解釈でも
+/// この入力をそのまま通してはならない。
+#[test]
+fn resolve_rejects_escaped_percent() {
+    let escaped = br#"{"version":"draft-02","label":"100\u0025","tracks":[]}"#;
+    let Err(MessageError::InvalidCatalog(reason)) = resolve_catalog_variables(escaped, "id=bob")
+    else {
+        panic!("エスケープされたリテラル % を拒否すること");
+    };
+    assert!(
+        reason.contains("escaped percent"),
+        "エスケープされた % であることが分かる理由であること: {reason}"
+    );
+
+    // リテラル `%` も変数参照の形でなければ拒否する
+    let literal = br#"{"version":"draft-02","label":"100%","tracks":[]}"#;
+    assert!(
+        matches!(
+            resolve_catalog_variables(literal, "id=bob"),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "変数参照でないリテラル % を拒否すること"
+    );
+}

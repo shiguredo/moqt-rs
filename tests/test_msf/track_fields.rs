@@ -394,3 +394,57 @@ fn stream_mapping_defaults_to_group_and_rejects_unknown_value() {
         Err(MessageError::InvalidCatalog(_))
     ));
 }
+
+/// loc packaging の streamMapping は group / object だけを受理すること
+///
+/// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) は LOC publisher に
+/// Table 1 の mapping mode の選択を MUST とし、§5.2.5 (Packaging metadata) の
+/// streamMapping で通知する。
+#[test]
+fn loc_stream_mapping_values_are_validated() {
+    for (value, expected_ok) in [("group", true), ("object", true), ("bogus", false)] {
+        let json = format!(
+            r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"loc","isLive":true,"packagingMetadata":"streamMapping={value}"}}]}}"#
+        );
+        let result = MsfCatalogDocument::decode(json.as_bytes());
+        assert_eq!(
+            result.is_ok(),
+            expected_ok,
+            "loc の streamMapping={value} の受理結果が仕様と一致すること"
+        );
+    }
+
+    // encode 経路でも同じ値域を検証すること
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true}]}"#;
+    let doc =
+        MsfCatalogDocument::decode(json).expect("streamMapping 省略の loc track を受理すること");
+    let MsfCatalogDocument::Full(mut cat) = doc else {
+        panic!("Full catalog がデコードされること");
+    };
+    cat.tracks[0].packaging_metadata = Some("streamMapping=bogus".to_string());
+    assert!(
+        matches!(
+            MsfCatalogDocument::Full(cat).encode(),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "loc の不正な streamMapping を encode してはならない"
+    );
+}
+
+/// loc 以外の packaging では streamMapping を未知キーとして無視すること
+///
+/// draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata): "Subscribers MUST ignore any key
+/// that is not defined for the current packaging value."
+#[test]
+fn stream_mapping_is_ignored_for_other_packaging() {
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"moqlog","isLive":true,"packagingMetadata":"streamMapping=bogus"}]}"#;
+    let doc = MsfCatalogDocument::decode(json)
+        .expect("loc 以外の packaging では streamMapping を無視すること");
+    let MsfCatalogDocument::Full(cat) = doc else {
+        panic!("Full catalog がデコードされること");
+    };
+    assert!(
+        MsfCatalogDocument::Full(cat).encode().is_ok(),
+        "loc 以外の packaging の streamMapping は encode でも無視すること"
+    );
+}

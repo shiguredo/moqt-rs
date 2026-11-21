@@ -1043,6 +1043,46 @@ fn accessible_window_time_publish_tracks_alt_group_rules() {
     ));
 }
 
+/// tracks と publishTracks をまたいでも同じ altGroup の accessibleWindowTime は一致すること
+///
+/// draft-ietf-moq-msf-02 §5.2.45 (Accessible Window Time) は「同じ alternate group に
+/// 割り当てられた track」に方向の例外を設けていないため、両配列を合わせて検証する。
+#[test]
+fn accessible_window_time_cross_direction_alt_group_rules() {
+    // 方向をまたいで値が異なる場合は拒否する
+    let mismatch = br#"{"version":"draft-02",
+        "tracks":[{"name":"a","packaging":"loc","isLive":true,"altGroup":1,"accessibleWindowTime":60000}],
+        "publishTracks":[{"name":"b","packaging":"loc","isLive":true,"altGroup":1,"accessibleWindowTime":120000}]}"#;
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(mismatch),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "tracks と publishTracks をまたいだ altGroup の値の不一致を拒否すること"
+    );
+
+    // 方向をまたいで同じ値なら受理する
+    let same = br#"{"version":"draft-02",
+        "tracks":[{"name":"a","packaging":"loc","isLive":true,"altGroup":1,"accessibleWindowTime":60000}],
+        "publishTracks":[{"name":"b","packaging":"loc","isLive":true,"altGroup":1,"accessibleWindowTime":60000}]}"#;
+    assert!(
+        MsfCatalogDocument::decode(same).is_ok(),
+        "tracks と publishTracks をまたいだ altGroup の同じ値を受理すること"
+    );
+
+    // 方向をまたいで片方だけが値を持つ場合も拒否する
+    let partial = br#"{"version":"draft-02",
+        "tracks":[{"name":"a","packaging":"loc","isLive":true,"altGroup":1,"accessibleWindowTime":60000}],
+        "publishTracks":[{"name":"b","packaging":"loc","isLive":true,"altGroup":1}]}"#;
+    assert!(
+        matches!(
+            MsfCatalogDocument::decode(partial),
+            Err(MessageError::InvalidCatalog(_))
+        ),
+        "tracks と publishTracks をまたいだ altGroup の一部だけの保持を拒否すること"
+    );
+}
+
 /// track-property / object-property の initData を受理すること
 #[test]
 fn init_data_property_types_accepted() {

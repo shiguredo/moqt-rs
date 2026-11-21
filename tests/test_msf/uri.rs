@@ -641,3 +641,83 @@ fn invalid_catalog_reason(err: &MessageError) -> &str {
         other => panic!("InvalidCatalog になること: {other:?}"),
     }
 }
+
+/// Track Name が空の MSF fragment を拒否すること
+///
+/// draft-ietf-moq-transport-23 §2.4.1 (Track Naming) は Track Name に 1 バイト以上を
+/// MUST とする。§8.8 のシリアライズ表現としては `ns--` も構成できるが、
+/// MSF fragment から購読対象の Full Track Name を作る経路では拒否する。
+#[test]
+fn parse_fragment_rejects_empty_track_name() {
+    for fragment in ["msf:ns--", "msf:--"] {
+        assert!(
+            matches!(
+                parse_msf_fragment(fragment),
+                Err(shiguredo_moqt::error::MessageError::InvalidCatalog(_))
+            ),
+            "空の Track Name を持つ fragment {fragment:?} を拒否すること"
+        );
+    }
+    // 0 フィールド namespace + 非空 Track Name は正当
+    let fragment =
+        parse_msf_fragment("msf:--catalog").expect("0 フィールド namespace は正当である");
+    assert_eq!(fragment.track_name, b"catalog");
+}
+
+/// authority / path / query が RFC 3986 の構文に従うこと
+///
+/// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の ABNF は
+/// RFC 3986 の `authority` / `path-abempty` / `query` を import する。
+/// 不正な成分は transport 層へ渡さず `InvalidCatalog` にする。
+#[test]
+fn parse_uri_rejects_invalid_rfc3986_components() {
+    for uri in [
+        // port が数字でない
+        "moqt://host:abc/p#msf:ns--catalog",
+        // path に空白
+        "moqt://host/a b#msf:ns--catalog",
+        // query に空白
+        "moqt://host/p?q=a b#msf:ns--catalog",
+        // path の percent-encoding が不正
+        "moqt://host/%ZZ#msf:ns--catalog",
+        // IP-literal の `]` が無い
+        "moqt://[::1/p#msf:ns--catalog",
+        // host が空
+        "moqt://:443/p#msf:ns--catalog",
+    ] {
+        assert!(
+            matches!(
+                parse_msf_uri(uri),
+                Err(shiguredo_moqt::error::MessageError::InvalidCatalog(_))
+            ),
+            "不正な RFC 3986 成分を含む URI {uri:?} を拒否すること"
+        );
+    }
+
+    // IPv6 リテラル + port、path / query の `@` は正当
+    let uri = parse_msf_uri("moqt://[::1]:443/a@b?x=a@b#msf:ns--catalog")
+        .expect("正当な RFC 3986 成分の URI を受理すること");
+    assert_eq!(uri.authority, "[::1]:443");
+    assert_eq!(uri.path, "/a@b");
+    assert_eq!(uri.query.as_deref(), Some("x=a@b"));
+
+    // 空 query (`?` の直後が fragment) は `query = *(...)` の範囲で正当
+    parse_msf_uri("moqt://host/p?#msf:ns--catalog").expect("空の query を受理すること");
+}
+
+/// userinfo を含む authority を拒否し、エラーに実値を含めないこと
+///
+/// RFC 3986 §3.2.1 (User Information) は `user:password` 形式を deprecated とし、
+/// 受け取った reference 中の userinfo を拒否する選択を許す。MSF §11.1 の authority は
+/// "host and optional port" であるため、`@` を含む authority を拒否する。
+/// パスワードをログや Debug に残さないため、エラーメッセージには authority を埋め込まない。
+#[test]
+fn parse_uri_rejects_userinfo_without_leaking() {
+    let uri = "moqt://user:secret@host/p#msf:ns--catalog";
+    let error = parse_msf_uri(uri).expect_err("userinfo を含む URI を拒否すること");
+    let message = error.to_string();
+    assert!(
+        !message.contains("secret") && !message.contains("user@"),
+        "エラーメッセージに userinfo の実値を含めないこと: {message}"
+    );
+}

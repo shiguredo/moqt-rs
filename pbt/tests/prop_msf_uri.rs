@@ -19,9 +19,13 @@ fn sample_namespace(ctx: &mut noprop::TestCaseContext) -> TrackNamespace {
     TrackNamespace::new(fields).expect("小さな非空フィールドは正当である")
 }
 
-/// track name (0..=16 バイト、空を含む任意値)
+/// track name (1..=16 バイトの任意値)
+///
+/// draft-ietf-moq-transport-23 §2.4.1 (Track Naming) は Track Name に 1 バイト以上を
+/// MUST とするため、空の Track Name は MSF fragment として受理されない。
+/// 空の拒否は tests/test_msf/uri.rs の単体テストで固定する。
 fn sample_track_name(ctx: &mut noprop::TestCaseContext) -> Vec<u8> {
-    let len = noprop::sample_usize_in(ctx, 0..=16);
+    let len = noprop::sample_usize_in(ctx, 1..=16);
     noprop::sample_bytes_vec(ctx, len)
 }
 

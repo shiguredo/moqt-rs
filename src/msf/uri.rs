@@ -256,6 +256,32 @@ pub fn parse_msf_uri(uri: &str) -> Result<MsfUri, MessageError> {
             "MSF URI authority is empty".to_string(),
         ));
     }
+    // draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の ABNF は
+    // authority / path-abempty / query を RFC 3986 から import する。ここで成分ごとの
+    // 構文を検証し、transport 層へ不正な URI を渡さない。
+    //
+    // RFC 3986 §3.2.1 (User Information) は "user:password" 形式を deprecated とし、
+    // 受け取った reference 中の userinfo を拒否する選択を許す。MSF §11.1 も authority を
+    // "host and optional port" と説明するため、`@` を含む authority は拒否する。
+    // エラーメッセージに authority の実値を含めない (パスワードを残さない)。
+    if authority.contains('@') {
+        return Err(MessageError::InvalidCatalog(
+            "MSF URI authority MUST NOT contain userinfo".to_string(),
+        ));
+    }
+    crate::parameter::validate_authority(authority.as_bytes()).map_err(|_| {
+        MessageError::InvalidCatalog(
+            "MSF URI authority is not a valid RFC 3986 authority".to_string(),
+        )
+    })?;
+    crate::parameter::validate_path_abempty(path.as_bytes()).map_err(|_| {
+        MessageError::InvalidCatalog("MSF URI path is not a valid RFC 3986 path".to_string())
+    })?;
+    if let Some(query) = query.as_deref() {
+        crate::parameter::validate_query(query.as_bytes()).map_err(|_| {
+            MessageError::InvalidCatalog("MSF URI query is not a valid RFC 3986 query".to_string())
+        })?;
+    }
     let fragment = parse_msf_fragment(fragment_str)?;
     Ok(MsfUri {
         authority: authority.to_string(),
@@ -310,6 +336,14 @@ pub fn parse_msf_fragment(fragment: &str) -> Result<MsfFragment, MessageError> {
         .map_err(|e| {
             MessageError::InvalidCatalog(format!("invalid MSF track identifier: {e:?}"))
         })?;
+    // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): "Each Track Name MUST contain at
+    // least one byte." §8.8 の表現としては空の Track Name も表せるが、MSF fragment は
+    // SUBSCRIBE / FETCH に使う Full Track Name を作るため、ここで拒否する。
+    if track_name.is_empty() {
+        return Err(MessageError::InvalidCatalog(
+            "MSF track identifier has an empty Track Name".to_string(),
+        ));
+    }
 
     let mut parameters = Vec::new();
     for (index, element) in parts.enumerate() {

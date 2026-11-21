@@ -2200,8 +2200,7 @@ impl MsfCatalog {
         // draft-ietf-moq-msf-02 §5.2.15 (Dependencies): 適用後の catalog 全体で解決できること
         validate_catalog_dependencies(&self.tracks, &self.publish_tracks)?;
         validate_media_timeline_dependencies(&self.tracks, &self.publish_tracks)?;
-        validate_alt_group_accessible_window_time(&self.tracks)?;
-        validate_alt_group_accessible_window_time(&self.publish_tracks)?;
+        validate_alt_group_accessible_window_time(&self.tracks, &self.publish_tracks)?;
         // draft-ietf-moq-msf-02 §5.2.9 (Target latency) / §5.2.10 (Buffers):
         // 同一 renderGroup / altGroup 内の isLive=true トラックが宣言した値は一致しなければならない (MUST)。
         // 省略は player の裁量 (MAY) のため比較しない。この仕様は将来変更される可能性がある。
@@ -3036,17 +3035,28 @@ fn validate_catalog_dependencies(
     tracks: &[MsfTrack],
     publish_tracks: &[MsfTrack],
 ) -> Result<(), MessageError> {
+    // 依存の解決は「track 数 × 依存数」の線形探索だと catalog の二乗の比較になる。
+    // Track Name の出現数と renderGroup の存在を 1 回だけ索引化し、各依存を O(1) で
+    // 解決する。§5.2.15 (Dependencies) は String 要素が依存元以外の track object の
+    // Track Name にちょうど 1 つ一致し、Number 要素が catalog 内の renderGroup に一致する
+    // ことを要求する。依存元自身の除外は、名前が一致するときだけ出現数から 1 を引く。
+    let all_tracks = tracks.iter().chain(publish_tracks.iter());
+    let mut name_counts: hashbrown::HashMap<&str, usize> = hashbrown::HashMap::new();
+    let mut render_groups: hashbrown::HashSet<u64> = hashbrown::HashSet::new();
+    for track in all_tracks {
+        *name_counts.entry(track.name.as_str()).or_default() += 1;
+        if let Some(render_group) = track.render_group {
+            render_groups.insert(render_group);
+        }
+    }
+
     for source in tracks.iter().chain(publish_tracks.iter()) {
         for dependency in &source.depends {
             match dependency {
                 MsfDependency::TrackName(name) => {
-                    let matches = tracks
-                        .iter()
-                        .chain(publish_tracks.iter())
-                        .filter(|candidate| {
-                            !core::ptr::eq(*candidate, source) && candidate.name == name.as_str()
-                        })
-                        .count();
+                    let total = name_counts.get(name.as_str()).copied().unwrap_or_default();
+                    // 依存元自身は「other track object」に含めない
+                    let matches = total - usize::from(source.name == name.as_str());
                     if matches != 1 {
                         return Err(MessageError::InvalidCatalog(format!(
                             "track '{}' depends on track name '{}' which MUST match exactly one other track (matched {matches})",
@@ -3055,11 +3065,7 @@ fn validate_catalog_dependencies(
                     }
                 }
                 MsfDependency::RenderGroup(render_group) => {
-                    if !tracks
-                        .iter()
-                        .chain(publish_tracks.iter())
-                        .any(|candidate| candidate.render_group == Some(*render_group))
-                    {
+                    if !render_groups.contains(render_group) {
                         return Err(MessageError::InvalidCatalog(format!(
                             "track '{}' depends on renderGroup {render_group} which does not exist in the catalog",
                             source.name
@@ -3078,40 +3084,58 @@ fn validate_catalog_dependencies(
 /// 同じ accessibleWindowTime を持たなければならない (MUST)。全 track が持たない場合と、
 /// 全 track が同じ値を持つ場合のどちらかだけを受理し、一部だけの保持と値の不一致を拒否する。
 /// isLive の値による例外はない。
-fn validate_alt_group_accessible_window_time(tracks: &[MsfTrack]) -> Result<(), MessageError> {
-    let mut groups = Vec::new();
-    for track in tracks {
-        if let Some(group) = track.alt_group
-            && !groups.contains(&group)
-        {
-            groups.push(group);
+fn validate_alt_group_accessible_window_time(
+    tracks: &[MsfTrack],
+    publish_tracks: &[MsfTrack],
+) -> Result<(), MessageError> {
+    // §5.2.45 は「同じ alternate group に割り当てられた track」に例外を設けていないため、
+    // tracks と publishTracks を合わせて 1 つの altGroup として扱う。
+    let mut groups: hashbrown::HashMap<u64, AltGroupWindow> = hashbrown::HashMap::new();
+    for track in tracks.iter().chain(publish_tracks.iter()) {
+        let Some(group) = track.alt_group else {
+            continue;
+        };
+        let entry = groups.entry(group).or_default();
+        entry.members += 1;
+        if let Some(value) = track.accessible_window_time {
+            entry.with_value += 1;
+            match entry.first_value {
+                None => entry.first_value = Some(value),
+                Some(first) if first != value => entry.mismatch = true,
+                Some(_) => {}
+            }
         }
     }
-    for group in groups {
-        let members = tracks
-            .iter()
-            .filter(|track| track.alt_group == Some(group))
-            .collect::<Vec<_>>();
-        let values = members
-            .iter()
-            .map(|track| track.accessible_window_time)
-            .collect::<Vec<_>>();
-        if values.iter().all(Option::is_none) {
+    for (group, entry) in groups {
+        if entry.with_value == 0 {
+            // 全 track が accessibleWindowTime を持たない場合は規則の対象外
             continue;
         }
-        if values.iter().any(Option::is_none) {
+        if entry.with_value != entry.members {
             return Err(MessageError::InvalidCatalog(format!(
                 "tracks in altGroup {group} MUST all specify accessibleWindowTime or all omit it"
             )));
         }
-        let first = values[0];
-        if values.iter().any(|value| *value != first) {
+        if entry.mismatch {
             return Err(MessageError::InvalidCatalog(format!(
                 "tracks in altGroup {group} MUST have the same accessibleWindowTime"
             )));
         }
     }
     Ok(())
+}
+
+/// altGroup ごとの accessibleWindowTime 集計
+#[derive(Debug, Default)]
+struct AltGroupWindow {
+    /// 集計対象の track 数
+    members: usize,
+    /// accessibleWindowTime を持つ track 数
+    with_value: usize,
+    /// 最初に観測した値
+    first_value: Option<u64>,
+    /// 最初の値と異なる値を持つ track があったか
+    mismatch: bool,
 }
 
 /// Media Timeline の depends が renderGroup の参照規則を満たすか検証する
@@ -3307,6 +3331,25 @@ fn validate_packaging_metadata(value: &str) -> Result<(), MessageError> {
     Ok(())
 }
 
+/// LOC packaging の `streamMapping` の値域を検証する
+///
+/// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping): LOC publisher は
+/// Table 1 の mapping mode (`group` / `object`) のいずれかを MUST 選択し、
+/// §5.2.5 (Packaging metadata) の `streamMapping` で通知する。キーが無い場合は
+/// `group` を既定とする。§5.2.5 は packaging ごとに定義されたキーだけを解釈し、
+/// 他の packaging では未知キーとして無視することを MUST とするため、本関数は
+/// packaging が `loc` のときだけ呼ぶ。
+fn validate_loc_stream_mapping(metadata: Option<&str>) -> Result<(), MessageError> {
+    let value = metadata.and_then(|metadata| {
+        metadata
+            .split(';')
+            .filter_map(|element| element.split_once('='))
+            .find(|(key, _)| *key == "streamMapping")
+            .map(|(_, value)| value)
+    });
+    StreamMapping::from_value(value).map(|_| ())
+}
+
 /// 完全カタログのトラック 1 件が満たすべき MUST を検証する (encode 前 / delta add 適用前の検証用)
 ///
 /// `decode_track` の構造体ベース検証と同等の規則を、手組みの `MsfTrack` に対しても
@@ -3326,6 +3369,11 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
     // 手組みの値も decode と同じ写像規則で検証する。
     if let Some(ref metadata) = track.packaging_metadata {
         validate_packaging_metadata(metadata)?;
+    }
+    // draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) / §5.2.5: loc の
+    // streamMapping は group / object のみ。他の packaging では未知キーとして無視する。
+    if matches!(track.packaging, MsfPackaging::Loc) {
+        validate_loc_stream_mapping(track.packaging_metadata.as_deref())?;
     }
     let name = catalog_track_name_bytes(&track.name)?;
     let namespace = match track.namespace.as_deref() {
@@ -3483,8 +3531,7 @@ fn validate_full_catalog_for_encode(catalog: &MsfCatalog) -> Result<(), MessageE
     }
     validate_catalog_dependencies(&catalog.tracks, &catalog.publish_tracks)?;
     validate_media_timeline_dependencies(&catalog.tracks, &catalog.publish_tracks)?;
-    validate_alt_group_accessible_window_time(&catalog.tracks)?;
-    validate_alt_group_accessible_window_time(&catalog.publish_tracks)?;
+    validate_alt_group_accessible_window_time(&catalog.tracks, &catalog.publish_tracks)?;
     // tracks と publishTracks は方向が異なるため group 検証は分離する
     // (draft-ietf-moq-msf-02 §5.1.5 の reverse direction による本実装の解釈)
     validate_group_target_latency(&catalog.tracks, "renderGroup", |t| t.render_group)?;
@@ -3619,8 +3666,7 @@ fn decode_full_catalog(
     // draft-ietf-moq-msf-02 §5.2.15 (Dependencies): 参照先が解決できること
     validate_catalog_dependencies(&tracks, &publish_tracks)?;
     validate_media_timeline_dependencies(&tracks, &publish_tracks)?;
-    validate_alt_group_accessible_window_time(&tracks)?;
-    validate_alt_group_accessible_window_time(&publish_tracks)?;
+    validate_alt_group_accessible_window_time(&tracks, &publish_tracks)?;
 
     let catalog = MsfCatalog {
         version,
@@ -3954,6 +4000,12 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
     } = f;
     let depends = depends.unwrap_or_default();
     let accessibility = accessibility.unwrap_or_default();
+    // draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) / §5.2.5: loc の
+    // streamMapping は group / object のみ。他の packaging では未知キーとして無視する。
+    // clone / update の継承後は validate_full_track が同じ検査を行う。
+    if matches!(packaging, MsfPackaging::Loc) {
+        validate_loc_stream_mapping(packaging_metadata.as_deref())?;
+    }
     // draft-ietf-moq-transport-23 §8.7: Full Track Name の長さ制限
     let parsed_namespace = match namespace.as_deref() {
         Some(value) => Some(parse_catalog_namespace(value)?),
@@ -4849,9 +4901,9 @@ fn split_fragment_pairs_unchecked(fragment: &str) -> Vec<(String, String)> {
 /// fragment 内の予約パラメータ等 (変数以外) は無視し、参照された値のみ文字種検証する。
 /// 重複キーは先勝ちで解決する。
 ///
-/// 制限: 生 JSON を走査するため、キー部や JSON エスケープ (`\u0025` 等) との
-/// 区別はしない。有効なカタログのキーは固定であり `%` を含まないため実害はないが、
-/// 厳密には値限定の仕様より広く置換する。`%` は ASCII のため subslice が
+/// 置換は JSON の文字列リテラルの内側だけで行う。オブジェクトのキー (member name) や
+/// 文字列の外に現れた `%` は catalog field value ではないため拒否し、JSON エスケープの
+/// `\u0025` もリテラル `%` として拒否する (§5.4.1 の MUST)。`%` は ASCII のため subslice が
 /// 文字境界を割ることはない。percent-decode は行わず、値をそのまま使う。
 ///
 /// # Errors
@@ -4870,51 +4922,141 @@ pub fn resolve_catalog_variables(json: &[u8], fragment: &str) -> Result<Vec<u8>,
     }
     let pairs = split_fragment_pairs_unchecked(fragment);
     let bytes = text.as_bytes();
-    let mut out: Vec<u8> = Vec::new();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut pos = 0;
+    // JSON 文字列の内側だけを置換するための状態
+    let mut in_string = false;
+    // 現在の文字列が変数参照を含むか (オブジェクトのキーに現れた参照を拒否するため)
+    let mut string_has_reference = false;
+
     while pos < bytes.len() {
-        if bytes[pos] != b'%' {
-            out.push(bytes[pos]);
+        let byte = bytes[pos];
+
+        if !in_string {
+            if byte == b'"' {
+                in_string = true;
+                string_has_reference = false;
+                out.push(byte);
+                pos += 1;
+                continue;
+            }
+            // §5.4.1: 変数は catalog field value の中にだけ現れる。文字列の外の `%` は
+            // フィールド値ではないため拒否する (置換すると JSON の構造を作り変えられる)。
+            if byte == b'%' {
+                return Err(MessageError::InvalidCatalog(format!(
+                    "percent character outside a catalog field value at byte {pos}"
+                )));
+            }
+            out.push(byte);
             pos += 1;
             continue;
         }
-        // `%` 以降の次 `%` までを変数名として切り出す
-        let rest = &bytes[pos + 1..];
-        let Some(end) = rest.iter().position(|&b| b == b'%') else {
-            return Err(MessageError::InvalidCatalog(format!(
-                "unclosed variable reference at byte {pos}"
-            )));
-        };
-        let name = &rest[..end];
-        // 変数名は fragment の param-name として表現できる文字かつ非空であること。
-        // `%` は次 `%` までを名前として切り出す本ループの構造上ここには現れない。
-        if name.is_empty() || !name.iter().all(|&b| is_variable_name_char(b)) {
-            return Err(MessageError::InvalidCatalog(format!(
-                "invalid variable reference at byte {pos}"
-            )));
-        }
-        let name_str = core::str::from_utf8(name).map_err(|_| {
-            // `%` 区切りのため到達不能のはずだが防御的に残す
-            MessageError::InvalidCatalog(format!("invalid variable reference at byte {pos}"))
-        })?;
-        match pairs.iter().find(|(key, _)| key == name_str) {
-            Some((_, value)) => {
-                // 置換時に値文字種を検証する (予約パラメータ等は参照されなければ不問)
-                if !value.bytes().all(is_variable_value_char) {
+
+        match byte {
+            b'"' => {
+                // 文字列の終端。直後の非空白文字が ':' ならオブジェクトのキーである。
+                // キーは catalog field value ではないため、変数参照を含むキーを拒否する。
+                let mut look = pos + 1;
+                while look < bytes.len() && matches!(bytes[look], b' ' | b'\t' | b'\r' | b'\n') {
+                    look += 1;
+                }
+                if look < bytes.len() && bytes[look] == b':' && string_has_reference {
+                    return Err(MessageError::InvalidCatalog(
+                        "variable reference MUST NOT appear in an object member name".to_string(),
+                    ));
+                }
+                in_string = false;
+                out.push(byte);
+                pos += 1;
+            }
+            b'\\' => {
+                // JSON のエスケープを 1 つ読み飛ばす。`\u0025` は JSON 上の `%` であり、
+                // 生の `%` を走査する本実装では変数参照として扱えない。リテラル `%` は
+                // §5.4.1 で禁止されているため、この形は受理しない。
+                if pos + 5 < bytes.len()
+                    && bytes[pos + 1] == b'u'
+                    && bytes[pos + 2] == b'0'
+                    && bytes[pos + 3] == b'0'
+                    && bytes[pos + 4] == b'2'
+                    && bytes[pos + 5] == b'5'
+                {
                     return Err(MessageError::InvalidCatalog(format!(
-                        "invalid variable value for '{name_str}'"
+                        "escaped percent ('\\u0025') is not a variable reference at byte {pos}"
                     )));
                 }
-                out.extend_from_slice(value.as_bytes());
+                out.push(byte);
+                pos += 1;
+                if pos < bytes.len() {
+                    // `\uXXXX` の残りはそのままコピーしてよい (引用符や `%` を含まない)。
+                    out.push(bytes[pos]);
+                    pos += 1;
+                }
             }
-            // 未定義変数は保持する (§5.4.2 に未定義時の規定がないため)
-            None => {
-                out.push(b'%');
-                out.extend_from_slice(name);
-                out.push(b'%');
+            b'%' => {
+                // 同じ JSON 文字列の内側で閉じる `%` を探す。文字列をまたぐ参照は不正。
+                let mut search = pos + 1;
+                while search < bytes.len() {
+                    match bytes[search] {
+                        b'%' => break,
+                        b'"' => {
+                            return Err(MessageError::InvalidCatalog(format!(
+                                "unclosed variable reference at byte {pos}"
+                            )));
+                        }
+                        // エスケープされた文字は `%` や `"` ではない
+                        b'\\' => search += 1,
+                        _ => {}
+                    }
+                    search += 1;
+                }
+                if search >= bytes.len() {
+                    return Err(MessageError::InvalidCatalog(format!(
+                        "unclosed variable reference at byte {pos}"
+                    )));
+                }
+                let name = &bytes[pos + 1..search];
+                if name.is_empty() || !name.iter().all(|&b| is_variable_name_char(b)) {
+                    return Err(MessageError::InvalidCatalog(format!(
+                        "invalid variable reference at byte {pos}"
+                    )));
+                }
+                let name_str = core::str::from_utf8(name).map_err(|_| {
+                    // `%` 区切りのため到達不能のはずだが防御的に残す
+                    MessageError::InvalidCatalog(format!(
+                        "invalid variable reference at byte {pos}"
+                    ))
+                })?;
+                string_has_reference = true;
+                match pairs.iter().find(|(key, _)| key == name_str) {
+                    Some((_, value)) => {
+                        // 置換時に値文字種を検証する (予約パラメータ等は参照されなければ不問)
+                        if !value.bytes().all(is_variable_value_char) {
+                            return Err(MessageError::InvalidCatalog(format!(
+                                "invalid variable value for '{name_str}'"
+                            )));
+                        }
+                        out.extend_from_slice(value.as_bytes());
+                    }
+                    // 未定義変数は保持する (§5.4.2 に未定義時の規定がないため)
+                    None => {
+                        out.push(b'%');
+                        out.extend_from_slice(name);
+                        out.push(b'%');
+                    }
+                }
+                pos = search + 1;
+            }
+            _ => {
+                out.push(byte);
+                pos += 1;
             }
         }
-        pos += 1 + end + 1;
+    }
+
+    if in_string {
+        return Err(MessageError::InvalidCatalog(
+            "catalog JSON has an unterminated string".to_string(),
+        ));
     }
     Ok(out)
 }
