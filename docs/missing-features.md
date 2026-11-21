@@ -35,13 +35,10 @@ relay による namespace の集約・forwarding) は本稿の対象外とする
    Range Filters を有効にする `MAX_FILTER_RANGES` など。
 3. **アプリ機能として欠けているもの**: REQUEST_ERROR の REDIRECT 追随、トラック選択と切替、
    シーク / 巻き戻し、ライブ中の track 追加への追随、配信終了のシグナリング、統計表示。
-4. **MUST 未達・仕様違反になりうる箇所**: Object 側 `IMMUTABLE_PROPERTIES` 内側の Audio Level /
-   Video Frame Marking 違反の `MALFORMED_KEY_VALUE` によるセッション終了が未対応 (§8.3)、
+4. **MUST 未達・仕様違反になりうる箇所**:
    `isLive=false` の `targetLatency` (MSF §5.2.8)、
-   catalog 更新をまたいだ
-   `isLive` の False → True (MSF §5.2.8)、`connectionURI` の検証と新規接続 (MSF §5.2.37)、
-   range パラメータの union (MSF §11.1.1)、`initDataList` の配置 (§5.1.7)、
-   STOP_SENDING 受信時の open stream の reset (§3.1.2 / §3.2.4)。
+   `connectionURI` の新規接続 (MSF §5.2.37)、
+   範囲指定の購読反映 (MSF §11.1.1)。
 
 以下、根拠となる仕様の節とコード位置を添えて列挙する。
 
@@ -52,7 +49,7 @@ relay による namespace の集約・forwarding) は本稿の対象外とする
 | Secure Objects による E2E 暗号化と復号 | LOC §3、MSF §4.3 | 未実装。MSF の signaling フィールドは扱うが、`ENCRYPTED_LIST` (`0x0A`) / `PADDING` (`0x32`) Object Property と暗号処理が無い | `issues/pending/0004-add-secure-objects-encryption.md` |
 | MSF_COMPRESSION property による catalog 圧縮 | MSF §5.5 / §12.1 | 未実装。Track Property ID が TBD のため wire 実装しない | `issues/pending/0002-change-msf-compression-signaling.md` |
 | Log / Metrics track の payload | MSF §9 / §10 | 未実装。`packaging` の値は扱うが payload は未対応 | `issues/pending/0003-add-msf-log-metrics-payload.md` |
-| LOC の Video Payload Format | LOC §2.1 | 部分実装。`lengthSizeMinusOne` による length prefix のみで、§2.1.3 (length 1 = start code) と §2.1.4 (start code prefix) は未対応 | `issues/pending/0005-add-loc-video-payload-format.md` |
+| LOC の Video Payload Format | LOC §2.1 | 部分実装。`loc::video_payload` で 1〜4 バイト length prefix / 3・4 バイト start code / length 1 = start code を扱う。example の annexB 統合と payload 内 parameter set は未対応 | `issues/pending/0005-add-loc-video-payload-format.md` |
 | LOC の Track スコープ Property | LOC §6.1 Table 1 | PUBLISH / SUBSCRIBE_OK で受信した場合、受信側は `Subscription::peer_track_properties` から `TrackProperties::find_varint` / `find_bytes` と `codec_string` (0x11 CODEC_STRING、UTF-8 検証) で取得できる。publisher example からの送信は未対応 | 未起票 |
 | DPoP proof の送信 | C4M §4.2 / §4.3 | CWT 形式 proof の codec と一括検証 API は実装済み。CWT proof を MOQT の AUTHORIZATION_TOKEN に載せる方法は仕様で未定義であり、example の URL 経路も proof を送らない | 未起票 |
 | C4M の複合クレーム評価 | C4M §2.1.1 / 付録 A.6 | 未実装。`CatClaims::raw` に保持するだけで、nested claim set の or / and / nor を評価しない。複合クレームだけを持つトークンは `moqt` が読めず認可されない。top-level の `moqt` と複合クレームが併存するトークンは top-level だけで認可されるため、複合クレームによる制限を評価する利用側は fail-closed に扱うこと | 未起票 |
@@ -81,7 +78,7 @@ C4M draft-02 の `moqt` クレームの map 化と未知キーの fail-closed、
 | Media / Event Timeline | `msf::encode_media_timeline` / `encode_event_timeline` | MSF §7 / §8 | moq-pub はタイムラインを配信せず、moq-sub も受信しない |
 | Timeline のテンプレート展開 | `MsfTemplate::resolve_entry` | MSF §7.4 | テンプレート形式の Timeline を使えない |
 | MSF の変数置換 | `msf::resolve_catalog_variables` | MSF §5.4 / §5.2.43 | moq-pub が `authInfo` に `"%cat%"` を書くのに、moq-sub が解決しないため認可トークンの受け渡しが example 間で成立しない |
-| MSF fragment の範囲指定 | `msf::uri` の `wallclock_ranges` / `mediatime_ranges` / `location_ranges` | MSF §11.1.1 | 範囲指定を解釈せず全期間を購読する。複数指定の union MUST も未実装 |
+| MSF fragment の範囲指定 | `msf::uri` の `wallclock_ranges` / `mediatime_ranges` / `location_ranges` / 各 `*_range_union` | MSF §11.1.1 | 範囲指定を購読に反映せず全期間を購読する |
 | `MAX_FILTER_RANGES` の宣言 | `SETUP_OPTION_MAX_FILTER_RANGES` | §9.1.6 | 既定 0 のため、購読者は Range Filters (§3.3.2) を送ってはならない。ライブラリのフィルタ評価実装が活きない |
 | `MAX_REQUEST_UPDATES` / `MAX_AUTH_TOKEN_CACHE_SIZE` | `SETUP_OPTION_*` | §9.1.7 / §9.1.3 | 既定値で実害は無いが、上限を宣言しない |
 | パディング | `send_padding_stream` / `send_padding_datagram` / `recv_padding_datagram` | §11.5 | 帯域の押し上げや MTU 探索に使えない (優先度は低い) |
@@ -98,51 +95,31 @@ C4M draft-02 の `moqt` クレームの map 化と未知キーの fail-closed、
 | `PUBLISH_STATE_NOTIFY` の送信 | `Session::send_publish_state_notify` に `MoqtClient` のラッパーが無い | §9.10 | publisher から状態変化を通知できない |
 | PUBLISH_OK 前の Object 送信 | `send_subgroup_header` / `send_object_datagram` が `Established` を要求する | §3.1 (MAY) | publisher は PUBLISH_OK を待つ分だけ購読確立が遅れる (違反ではない) |
 | FETCH_OK 前の Object 送信 | `send_fetch_header` が `FetchState::Established` を要求する | §3.2 (MAY) | 応答範囲の終端 (LARGEST_OBJECT が要求範囲内か) が確定するまで FETCH 応答 Object を送れない。fill fetch は `Pending` を許容するため非対称 |
-| moqt URI のパース | `msf::uri` は `moqt://authority/path?query#msf:...` を分解し、authority / path / query を RFC 3986 で検証する。fragment なしの endpoint URI を検証する公開 API と catalog の `connectionURI` 検証は無い | §6.1 / §6.1.1 / §6.1.2 | ライブラリ利用者は endpoint URI の解釈と `connectionURI` の検証を自前で行う必要がある |
+| moqt URI のパース | `msf::uri` は `moqt://authority/path?query#msf:...` を分解し、authority / path / query を RFC 3986 で検証する。`validate_moqt_endpoint_uri` は fragment なしの endpoint URI も検証し、catalog の `connectionURI` は decode / encode で検証される | §6.1 / §6.1.1 / §6.1.2 | 新規接続の確立は transport / example 層の責務である |
 
 ## 4. MUST 未達・仕様違反になりうる箇所
 
-### 4.1 Object 側 `IMMUTABLE_PROPERTIES` 内側の Audio Level / Video Frame Marking 違反を通知しない (§10.7 / §8.3、ライブラリ)
+### 4.1 Object 側 `IMMUTABLE_PROPERTIES` の LOC 値域検証 (§10.7 / §8.3、ライブラリ)
 
-draft-23 §10.7 は「When looking for the value of a property, processors MUST search both the
-mutable properties and the contents of Immutable Properties.」と定める。
-`ObjectProperties` は内側も探索し、LOC 側の `LocProperties` も `find_varint` / `find_bytes` と
-既知 accessor が最上位リストと `IMMUTABLE_PROPERTIES` の内側を探索する。moq-sub の 4 つの
-抽出関数も accessor 経由で内側の Video Config / Timestamp / Timescale / Audio Config /
-Video Frame Marking を取得できる。
+draft-ietf-moq-transport-23 §10.7 (Immutable Properties) は「When looking for the value of a
+property, processors MUST search both the mutable properties and the contents of Immutable
+Properties.」と定める。§8.3 (Key-Value-Pair Structure) は、受信側が Type を理解する場合に
+Value が定義された serialization と一致しなければ MALFORMED_KEY_VALUE でセッションを閉じる
+ことを MUST とする。本実装は次を行う。
 
-残るギャップは次のとおりである。
-
-1. `IMMUTABLE_PROPERTIES` の内側だけにある LOC 固有の値域・長さ違反 (Audio Level の 8 bit
-   超過、Video Frame Marking の長さ 1-4 バイト違反) は、Session の `ObjectProperties` が
-   LOC 固有の値域・長さ規則を解釈しないため検出されず、`LocProperties` の getter が `None`
-   に写す (検証自体は `walk_kv_pairs` が行うが、エラーを通知しない)。その結果 moq-sub の
-   抽出関数は「プロパティ無し」として `Ok(None)` を返す。§8.3 (Key-Value-Pair Structure) が
-   要求する MALFORMED_KEY_VALUE によるセッション終了が残る MUST 未達であり、
-   Video Frame Marking 欠落時はキーフレーム判定が Video Config の有無で代用される
-   (`crates/moq-sub/src/pipeline.rs` の `is_video_keyframe`)。
-   CODEC_STRING (0x11) の不正 UTF-8 は `LocProperties` の encode / decode と
-   `ObjectProperties` の encode / decode が検証し、MALFORMED_KEY_VALUE として扱う
-   (`LocProperties::decode` の内側は KVP が解析できる場合だけ)。
-2. `LocProperties` 単体では、最上位と `IMMUTABLE_PROPERTIES` の内側に同じ単一値の既知 ID が
-   現れる多重違反を検出しない (§8.4 / §12.1 条件 9)。Session の受信経路では
-   `ObjectProperties::validate` が mutable と内側を合わせて検出し、購読の cancel へ渡す。
-3. 内側の構造破損 (delta-key のオーバーフロー・宣言長超過・切り詰め・入れ子 0x0B) は
-   `LocProperties::decode` では検出しないが、Session の受信経路では `ObjectProperties` の
-   decode / validate が先に拒否し、`terminate_malformed_track` による購読の cancel へ渡す
-   (I/O 層の decode 経路ではセッション終了になる場合がある)。`LocProperties::encode` は
-   0x0B の内側の構造と値域を検証し、CODEC_STRING (0x11) の UTF-8 も検証するため、構造・値域・
-   UTF-8 については malformed な直列化を生成しない (`ObjectProperties::encode` /
-   `TrackProperties::encode` も内側を検証する)。item 2 の cross-list 重複は encode でも
-   検出しない。
-
-Track スコープ側は PUBLISH / SUBSCRIBE_OK で受信した場合に
-`Subscription::peer_track_properties` で公開済みであり、最上位と内側の両方を探索できる。
-FETCH_OK / TRACK_STATUS_OK の Track Properties は公開していない。
-
-また `OBJECT_PROPERTY_FILTER` を持つ購読では、`object_passes_filters` が Object Properties の
-decode エラーをフィルタ不通過 (`FilteredOut`) に畳むため、不正な CODEC_STRING が
-MALFORMED_KEY_VALUE によるセッション終了にならない場合がある (フィルタ設計上の既知の扱い)。
+- `LocProperties::decode` は最上位と `IMMUTABLE_PROPERTIES` の内側を共通の KVP パーサーで
+  検証し、Audio Level の 8 bit 超過、Video Frame Marking の長さ 1-4 バイト違反、構造破損、
+  単一 ID の重複、入れ子の 0x0B を拒否する。CODEC_STRING (0x11) の不正 UTF-8 も検証する
+- `ObjectProperties::decode` / `encode` は `validate_object_loc_properties` で同じ LOC
+  値域を検証する。Session の受信経路は `MalformedKeyValue` を MALFORMED_KEY_VALUE による
+  セッション終了に写す
+- Track スコープ側は PUBLISH / SUBSCRIBE_OK で受信した場合に
+  `Subscription::peer_track_properties` で公開済みであり、最上位と内側の両方を探索できる。
+  FETCH_OK / TRACK_STATUS_OK の Track Properties は公開していない
+- 残る制約: `LocProperties` 単体は最上位と `IMMUTABLE_PROPERTIES` の内側をまたぐ単一 ID の
+  重複を検出しない (§8.4 / §12.1 条件 9)。`ObjectProperties::validate` は両リストを合わせて
+  検出し、購読の cancel へ渡す。`OBJECT_PROPERTY_FILTER` の送信側フィルタは Object Properties
+  の decode エラーをフィルタ不通過に畳む
 
 ### 4.2 `isLive=false` の `targetLatency` を使う (MSF §5.2.8、moq-sub)
 
@@ -151,41 +128,39 @@ moq-sub は `targetLatency` を無条件に再生遅延へ反映する
 (`crates/moq-sub/src/pipeline.rs:727-743`、`2150-2175`)。
 `is_live` は example から参照されていない (grep で 0 件)。VOD のトラックで不要な遅延を入れる。
 
-### 4.3 catalog 更新をまたいだ `isLive` の False → True を拒否しない (MSF §5.2.8、moq-sub)
+### 4.3 catalog 更新をまたいだ `isLive` の False → True (MSF §5.2.8、moq-sub)
 
-MSF §5.2.8 は「A True value MUST never follow a False value.」と定める。
-ライブラリは同一 catalog 内の delta 再追加では検証する (`src/msf.rs:1537` 付近の
-`validate_readded_track`) が、moq-sub は独立カタログ (Full) を受けるたびに
-直前のカタログを捨てて丸ごと差し替える (`crates/moq-sub/src/catalog.rs:118-130`)。
-更新をまたいだ履歴が失われるため、`isLive=false` の後に `isLive=true` の
-カタログを受けても受理する。`isComplete` の「一度 TRUE にしたら削除できない」
-(§5.1.3) も同じ経路で検証されない。
+解消済み。MSF §5.2.8 は「A True value MUST never follow a False value.」と定める。
+ライブラリは同一 catalog 内の delta 再追加を `validate_readded_track` で検証するほか、
+独立した Full catalog を順に観測する `MsfCatalogTracker::observe` を提供する。
+moq-sub の `CatalogState` は Full catalog の置き換え時と delta 適用時に tracker を更新し、
+`isLive` の False → True と `isComplete` の削除を検出する
+(`crates/moq-sub/src/catalog.rs`)。
 
-### 4.4 `connectionURI` の検証と新規接続 (MSF §5.2.37)
+### 4.4 `connectionURI` の新規接続 (MSF §5.2.37)
 
 MSF §5.2.37 は `connectionURI` が「valid MOQT endpoint URI でなければならない (MUST)」とし、
 指定時は「購読者が新しい MOQT 接続を確立しなければならない (MUST)」と定める。
-ライブラリは catalog の `connectionURI` の形式検証を行わないと明記し (`src/msf.rs:3869-3872`)、
-`tests/test_msf/track_fields.rs` の `connection_uri_invalid_value_accepted` が
-不正な文字列を受理する現状を固定している。`msf::uri::parse_msf_uri` は MSF URL の
-authority / path / query を検証するが、fragment なしの endpoint URI を検証する API ではない。
-example に `connectionURI` を参照する箇所も無い (grep で 0 件)。
-publishTracks (Log / Metrics) を使う配信で壊れた URI を検出できず、
-購読側も別接続を張らない。
+ライブラリは `msf::uri::validate_moqt_endpoint_uri` を追加し、catalog の `connectionURI` を
+decode / encode で検証するようにした。一方、購読者が指定 URI へ新しい MOQT 接続を張る処理は
+transport / example 層に無い。publishTracks (Log / Metrics) を使う配信で指定された URI を
+購読側が自動で接続する経路は未実装である。
 
-### 4.5 range パラメータの union を実装していない (MSF §11.1.1)
+### 4.5 range パラメータの購読への反映 (MSF §11.1.1)
 
 MSF §11.1.1 は「If multiple ranges are specified within the same URL for the same parameter,
 the client MUST process the union of those ranges.」と定める。
-アクセサは `src/msf/uri.rs:139-172` にあるが、同じパラメータの複数指定を
-union へ畳む処理も、範囲を購読 / FETCH に反映する経路も無い (example からの呼び出しは 0 件)。
+`MsfFragment::wallclock_range_union` / `mediatime_range_union` / `location_range_union` を
+追加し、重なる・隣接する時間範囲・Group ID / Object ID 範囲と終端なしの範囲を union する
+ようにした。union した範囲を実際の購読 / FETCH に反映する経路は未実装である
+(example からの呼び出しは 0 件)。
 
-### 4.6 `initDataList` の配置 MUST を decode で検証しない (MSF §5.1.7)
+### 4.6 `initDataList` の配置 (MSF §5.1.7)
 
-MSF §5.1.7 は「The Initialization Data List, if present, MUST be located after the
-Tracks field.」と定める。ライブラリは `nojson` がキー出現順を提供しないため
-順序検証を行わないと明記している (`src/msf.rs:2589-2591`)。encode は順序を守る。
-仕様違反のカタログを受理するが実害は小さい。
+解消済み。MSF §5.1.7 は「The Initialization Data List, if present, MUST be located after the
+Tracks field.」と定める。`nojson` の `to_object` が JSON の出現順に列挙することを利用し、
+`MsfCatalogDocument::decode` が `initDataList` より前に `tracks` が現れることを検証する。
+encode も `tracks` → `publishTracks` → `initDataList` の順で出力する。
 
 ### 4.7 STOP_SENDING 受信時の open な stream の reset (§3.1.2 / §3.2.4、ライブラリ)
 
@@ -219,6 +194,13 @@ open な送信 stream を Session が reset する (`Session::reset_open_outgoin
   `CwtDpopProofCodec::build` が action に対する target の有無を検証する。
 - playout: `u64::MAX` の Object ID を終端として扱い、音声予算・リサンプラ・不感帯の
   飽和演算を修正した。これは仕様 MUST ではなく、公開 API の境界での panic / 誤動作の修正である。
+- MSF: `connectionURI` を `validate_moqt_endpoint_uri` で検証し、catalog decode / encode で
+  不正な MOQT endpoint URI を拒否するようにした (§5.2.37 / MOQT §6.1)。
+- namespace 系 REQUEST_UPDATE: `PUBLISH_NAMESPACE` の AUTHORIZATION_TOKEN 更新と、
+  `SUBSCRIBE_TRACKS` の PAUSED / TRACK_PROPERTY_FILTER 更新を受理するようにした (§9.5)。
+  3 種の namespace request の更新成功時は REQUEST_UPDATE_OK を自動送出し、
+  REQUEST_UPDATE_OK の EXPIRES / LARGEST_OBJECT を初回応答と区別して受理する (§9.3)。
+  予約名前空間への prefix 更新は `DOES_NOT_EXIST` で拒否し、セッションを閉じない (§2.4.3)。
 
 ## 5. publisher (moq-pub) に足りない機能
 
@@ -635,11 +617,9 @@ moqt-js (HEAD `f6a171e8`) の playout のうち、次の 2 つは移植してい
 
 ## 10. 要確認
 
-- Object 側 `IMMUTABLE_PROPERTIES` の探索 (4.1) は実装済み。Session の受信経路で残るのは、
-  内側だけの Audio Level の値域違反 / Video Frame Marking の長さ違反を
-  `MALFORMED_KEY_VALUE` によるセッション終了として扱うことである。ライブラリ単体では、
-  cross-list の単一値 ID 重複の検出と `LocProperties::decode` の内側構造検証も残る
-  (Track 側は `Subscription::peer_track_properties` で公開済み)
+- Object 側 `IMMUTABLE_PROPERTIES` の探索と LOC 値域検証 (4.1) は実装済み。`LocProperties`
+  単体では cross-list の単一値 ID 重複の検出が残る (`ObjectProperties::validate` は検出する。
+  Track 側は `Subscription::peer_track_properties` で公開済み)
 - LOC §2.2 (Private Properties) の実害 (`src/loc.rs:12-13` は application 責務としている)
 - `issues/pending/0010` (WebTransport の datagram 受信) が現行コードで再現するか
 - Video Frame Marking の D / B / T / S ビットを使う予定があるか
@@ -647,8 +627,8 @@ moqt-js (HEAD `f6a171e8`) の playout のうち、次の 2 つは移植してい
 - カメラ経路のエンコーダ (Video Toolbox / libaom / libvpx) が B フレームを出力しうるか
   (パススルーは B フレーム入力を明示的に拒否する)
 - 0-RTT: rustls の `enable_early_data` 既定は false。tobi-quic の `connect_early` を使うかは未検討
-- fragment なしの MOQT endpoint URI を検証する API を追加し、catalog の `connectionURI` を
-  拒否するか (§5.2.37 / §6.1)。現状は catalog decode の責務外として受理する
+- `connectionURI` で指定された MOQT endpoint へ新しい接続を張る処理を
+  transport / example 層のどちらに置くか (§5.2.37 / §6.1)
 - 送信パラメータ検証の残存ギャップ (`src/session/subscription/send.rs:126` / `:307` /
   `:323` / `:927` のコメント) を encode 前に閉じるか
 - リレー経由でない直接 subscriber の受け入れは、moq-pub が client 専用 (待ち受け API 無し) の

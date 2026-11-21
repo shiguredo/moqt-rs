@@ -211,17 +211,6 @@ impl MessageError {
         }
     }
 
-    /// `MalformedTrack` の理由を取り出す (他の variant は `None`)
-    ///
-    /// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) の検出かどうかを判定しつつ
-    /// 説明文を取り出すために使う。
-    pub fn malformed_track_reason(&self) -> Option<&'static str> {
-        match self {
-            Self::MalformedTrack(msg) => Some(msg),
-            _ => None,
-        }
-    }
-
     /// このエラーでセッションを閉じる場合の終了コードを返す
     ///
     /// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の分類に従い、
