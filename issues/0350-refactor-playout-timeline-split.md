@@ -1,7 +1,7 @@
 # playout/timeline.rs の A/V 同期の実装を分割する
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/refactor-playout-timeline-split
 - Polished: 2026-11-21
 
@@ -80,3 +80,20 @@ d` は変更しない。`docs/audio-playout.md` は `src/playout/timeline.rs` �
 - `docs/audio-playout.md` の `src/playout/timeline.rs` の説明が分割後のファイル構成と一致していること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` が通ること。
 - `cargo build -p shiguredo_moqt --target thumbv7em-none-eabihf` が通ること。
+
+## 解決方法
+
+- `src/playout/timeline.rs` に `mod config;` / `mod sync;` を宣言し、モジュールルートとして残した。
+- `src/playout/timeline/sync.rs` に A/V 同期と基準の差の判定・解除の `impl PlayoutTimeline`
+  を移した。`timeline.rs` から呼ぶメソッドだけを `pub(super)` にした。
+- `src/playout/timeline/config.rs` に `presentation_cap_us` を移し、`pub(super)` にした。
+  `PlayoutTimeline::presentation_cap_us` と `delay_cap_us` はそこを呼ぶ。
+- 公開定数、公開型、公開 free 関数、`percentile_index`、`percentile_ppm`、
+  `is_catching_up`、同期以外の実装は `timeline.rs` に残した。`mod.rs` と `pub use` は
+  追加していない。
+- `docs/audio-playout.md` のファイル構成の説明を更新した。
+- 公開 API のパス・型・シグネチャと挙動は変えていない。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`RUSTDOCFLAGS="-D warnings" cargo doc`、
+`cargo build -p shiguredo_moqt --target thumbv7em-none-eabihf` が成功した。
