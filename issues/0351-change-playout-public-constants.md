@@ -1,7 +1,7 @@
 # playout と audio_clock の定数を整理する
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/change-playout-public-constants
 - Polished: 2026-11-21
 
@@ -100,3 +100,22 @@ playout と audio_clock の調整定数の多くが `pub` になっており、�
 - `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
 - 公開 doc から `pub(crate)` に下げる定数への intra-doc link が残っておらず、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` が通ること。
 - `cargo doc` の `playout` と `audio_clock` の公開定数が、`pub` のまま残すと決めたものだけであること。
+
+## 解決方法
+
+- 0349 / 0350 完了後に `rg` で参照状況を再確認し、`src/playout/*.rs` と
+  `src/audio_clock.rs` の `pub const` のうち定義ファイル以外のソースから参照されない
+  22 個を `pub(crate)` にした。
+- 未使用の `TIMELINE_P50_PERCENTILE_PPM` を削除した。
+- 公開 doc の intra-doc link を値の記述へ置き換えた。
+  `AUDIO_PUBLISH_CATCH_UP_RESUME_MS` / `AUDIO_SPLICE_FADE_US` /
+  `TIME_STRETCH_CONCEAL_FADE_CORRELATION` / `TIME_STRETCH_CORRELATION_THRESHOLD` /
+  `TIME_STRETCH_MAX_SEAM_STEP_RATIO` / `TIMELINE_LATE_FRAMES_PER_SECOND`。
+- `skills/shiguredo-moqt/SKILL.md` の `AUDIO_SPLICE_FADE_US` の名前参照を 2 ms の
+  記述へ置き換えた。`docs/` は変更していない。
+- `AUDIO_PLAYOUT_BACKLOG_US` は 250_000 のまま `pub` を維持し、
+  `AUDIO_PLAYOUT_MAX_DELAY_US` (300 ms) との関係も維持した。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`RUSTDOCFLAGS="-D warnings" cargo doc`、
+`cargo build -p shiguredo_moqt --target thumbv7em-none-eabihf` が成功した。
