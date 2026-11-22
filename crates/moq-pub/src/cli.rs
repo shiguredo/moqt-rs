@@ -250,7 +250,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         // 必須オプションは help モードでも Opt::None になり `then()` が MissingOpt を返すため、
         // ヘルプ表示のための例を与えて help モードでも先へ進めるようにする (通常の実行では
         // 例は使われず、`--url` の省略は従来どおり MissingOpt になる)
-        .example("moqt://relay.example.com:4433/app")
+        .example("moqt://relay.example.com:4433/app#msf:moq-example--video")
         .take(&mut args)
         .then(|o| Ok::<_, std::convert::Infallible>(o.value().to_string()))?;
     // noargs の InvalidOpt はオプションの生値を表示するため、URL の検証エラーは
@@ -369,9 +369,9 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     let namespace_opt = noargs::opt("namespace")
         .ty("NS")
         .doc("Track namespace (draft-ietf-moq-transport-23 §8.8 form; '-' separates namespace fields, e.g. moq-example). Defaults to the namespace of the MSF fragment in --url")
-        // 省略可能だが、help モードで値が無いと namespace の解決に失敗するため、ヘルプ表示の
-        // ための例を与える (通常の実行では、指定が無いときに例は使われない)
-        .example("moq-example")
+        // `.example()` を与えない。noargs は例を持つオプションを必須として Usage に
+        // 表示するため、省略可能な --namespace に例を与えると必須に見えてしまう。
+        // help モードでは --url の例の MSF fragment から namespace を解決する。
         .take(&mut args);
     let namespace_value: Option<String> = namespace_opt
         .present_and_then(|o| Ok::<_, std::convert::Infallible>(o.value().to_string()))?;

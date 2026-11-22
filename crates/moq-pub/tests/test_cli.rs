@@ -43,6 +43,22 @@ fn help_prints_help_and_exits_successfully() {
             "--audio-redundancy の説明が表示されること ({flag}): {stdout}"
         );
         assert!(
+            stdout.contains("MOQT publisher client"),
+            "アプリの説明が表示されること ({flag}): {stdout}"
+        );
+        let usage = stdout
+            .lines()
+            .find(|line| line.starts_with("Usage:"))
+            .unwrap_or("");
+        assert!(
+            !usage.contains("--namespace"),
+            "省略可能な --namespace が Usage に必須として表示されないこと ({flag}): {usage}"
+        );
+        assert!(
+            stdout.contains("#msf:moq-example--video"),
+            "--url の例が MSF fragment を含むこと ({flag}): {stdout}"
+        );
+        assert!(
             stdout.contains("moqt://"),
             "URL の形式が表示されること ({flag}): {stdout}"
         );

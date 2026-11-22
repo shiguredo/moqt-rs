@@ -5,6 +5,7 @@ edition = "2024"
 # 依存の QUIC バックエンド (s2n-quic / tobi-quic) が MSRV 1.95 を要求するため、
 # それに合わせる (raden の 1.94 要求も包含する)
 rust-version = "1.95"
+description = "MOQT publisher client"
 publish = false
 
 [dependencies]
