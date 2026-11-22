@@ -1,7 +1,7 @@
 # コメントとドキュメントの言語、表記、issue 参照を規約に適合させる
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/update-doc-comment-format-compliance
 - Polished: 2026-11-20
 - Refreshed: 2026-11-04
@@ -102,3 +102,29 @@ shiguredo-doc は全角半角の境界、半角括弧、中黒の扱いを定め
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること (`fuzz/` は独立 workspace のため
   `cargo test --workspace` の対象外であり、コメントのみの変更なのでビルド確認は不要)。
+
+## 解決方法
+
+- `src/` / `tests/` / `pbt/` / `crates/` / `e2e-tests/` / `fuzz/` の英語のみのコメントを
+  日本語にした。仕様の英語引用は `"..."` と `draft-ietf-moq-transport-23 §...` の形で残した。
+- テストコードの panic / assert メッセージを日本語にした。本体コードと `crates/` の
+  ログ / `println!` / `eprintln!` は英語のままにした。
+- 全角括弧 `（）` を半角 `()` に統一し、全角中黒 `・` を並列列挙の 2 項は `/`、3 項以上は
+  `、` に置き換えた。docs / skills の並列列挙も同じ規則にした。
+- ソースコメントから issue 番号・issue パス・「本 issue」への言及を削除し、理由
+  (仕様の節番号・再現条件・設計意図) に置き換えた。draft の changelog PR 番号は削除し、
+  `Appendix A.x (Since draft-ietf-moq-transport-y)` の形にした。
+- `src/msf.rs` の `0342` と `crates/moq-sub/src/pipeline.rs` の `0100` をコメントから削除した。
+- `# Errors` などの rustdoc 見出し、docs の issue 参照、表・コード例・コード断片は変更していない。
+
+次の `rg` がすべて 0 件であることを確認した。
+
+- `rg -n '//.*[（）]' src tests pbt crates e2e-tests fuzz`
+- `rg -n '//.*[A-Za-z0-9]・|//.*・[A-Za-z0-9]' src tests pbt crates e2e-tests fuzz`
+- `rg -n '[A-Za-z0-9]・|・[A-Za-z0-9]' docs skills`
+- `rg -n '[（）]' docs skills`
+- `rg -n '//.*#[0-9]{3,5}|//.*本 issue|//.*issues/' src tests pbt crates e2e-tests fuzz`
+- `rg -n '0342|0100' src/msf.rs crates/moq-sub/src/pipeline.rs`
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`prek run --all-files` が成功した。
