@@ -1,7 +1,7 @@
 # C4M の PBT モデルと fuzz のテストの穴を埋める
 
 - Created: 2026-10-20
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/test-c4m-pbt-model-fuzz-gaps
 - Polished: 2026-10-25
 
@@ -61,3 +61,32 @@ C4M (draft-ietf-moq-c4m-01) の PBT が実装の写経になっており、仕�
 - 0345 / 0346 の完了後に、SETUP のクエリ無し resource、namespace 操作の `tns` / `tn` の扱い、`moqt_reval` の期待値をモデルに取り込んでいること (依存が未完了なら本 issue は完了しない)。
 - `issues/0377-bug-c4m-resource-duplicate-query.md` の完了後に `cargo test -p pbt` が通ること。
 - `cargo test -p pbt` / `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `pbt/tests/prop_c4m/dpop.rs` の `resource_consistent` を、draft-ietf-moq-c4m-01 §3.1.2 / §3.1.3
+  から導いた独立モデルに置き換えた。
+  - SETUP はクエリ無し `moqt://<relay-endpoint>` だけを整合とする。
+  - namespace 操作は `tns` の一致、`tn` は actx にありクエリにもある場合だけ一致を要求する。
+  - track 操作は `tns` の一致と、actx の `tn` に対応するクエリ `tn` の一致を要求する。
+  - 重複 `tns` / `tn` はすべての値が一致する場合だけ整合とした。
+  - 生成器が同じ値の重複・異なる値の重複・欠落・追加パラメータを生成し、重複分岐の
+    到達をカウンタで確認する。
+- `pbt/tests/prop_c4m/cat.rs` の `expected_validation_error` を、仕様条件とライブラリ契約
+  (判定順、`InvalidReferenceTime` / `NonFiniteClaim` を API 前提条件として扱うこと) を
+  分離したモデルに再構成した。`moqt-reval` は draft-ietf-moq-c4m-02 §2.2 から
+  `None` / `0` / 最小間隔との比較を導出し、`exp` / `nbf` / `iss` / `aud` の境界も
+  モデルへ取り込んだ。
+- `fuzz/fuzz_targets/fuzz_c4m_cat_validate.rs` を追加し、`fuzz/Cargo.toml` の `[[bin]]` に
+  登録した。任意の CBOR から `CatClaims::decode` し、任意の `ClaimValidationOptions` で
+  `CatClaims::validate` を呼んで panic しないことを確認する。
+- 変異確認として、resource の重複比較・SETUP のクエリ拒否・action 分類・`moqt-reval` 検証・
+  `exp` 境界・非有限値検査を一時的に変え、対応する PBT が落ちることを確認した。
+- 0329 で `SubgroupTracker::get` を公開面から外した影響で `fuzz_subgroup_tracker` が
+  ビルドできなくなっていたため、削除済み `Get` 操作を fuzz ターゲットから外した。
+
+`cargo test -p pbt`、`cargo test --workspace`、
+`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check`、
+`cargo +nightly check --manifest-path fuzz/Cargo.toml`、
+`cargo +nightly fuzz build fuzz_c4m_cat_validate`、`cargo fuzz list`、
+`prek run --files` が成功した。
