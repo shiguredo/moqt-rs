@@ -21,17 +21,24 @@ fn sample_lang(ctx: &mut noprop::TestCaseContext) -> Option<String> {
     if noprop::sample_ratio(ctx, noprop::Ratio::new(3, 5)) {
         return None;
     }
-    // grandfathered タグは langtag の規則に一致しないものがあるため、
-    // 軽量検証 (src/msf.rs の validate_lang_tag) と encode / decode 往復を PBT で固定する
+    // grandfathered タグ (irregular / regular) も往復させる
     if noprop::sample_ratio(ctx, noprop::Ratio::new(1, 8)) {
         return Some(
             noprop::sample_choice(
                 ctx,
-                &["i-klingon", "I-AMI", "i-default", "en-GB-oed", "zh-min-nan"],
+                &[
+                    "i-klingon",
+                    "I-AMI",
+                    "i-default",
+                    "en-GB-oed",
+                    "zh-min-nan",
+                    "art-lojban",
+                ],
             )
             .to_string(),
         );
     }
+    // RFC 5646 §2.1 の ABNF に一致する primary + 1 サブタグを生成する
     let primary_len = noprop::sample_usize_in(ctx, 2..=3);
     let mut s: String = (0..primary_len)
         .map(|_| {
@@ -39,17 +46,22 @@ fn sample_lang(ctx: &mut noprop::TestCaseContext) -> Option<String> {
                 as char
         })
         .collect();
-    let subtag_count = noprop::sample_usize_in(ctx, 0..=2);
-    for _ in 0..subtag_count {
-        let sub_len = noprop::sample_usize_in(ctx, 1..=8);
-        s.push('-');
-        s.extend((0..sub_len).map(|_| {
-            noprop::sample_choice(
-                ctx,
-                b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-            ) as char
-        }));
-    }
+    let suffix = noprop::sample_choice(
+        ctx,
+        &[
+            "Latn",         // script
+            "US",           // region (2ALPHA)
+            "419",          // region (3DIGIT)
+            "1901",         // variant (DIGIT 3alphanum)
+            "rozaj",        // variant (5*8alphanum)
+            "a-bbb",        // extension
+            "u-ca-gregory", // extension
+            "x-private",    // privateuse
+            "X-FOO",        // privateuse (大文字)
+        ],
+    );
+    s.push('-');
+    s.push_str(suffix);
     Some(s)
 }
 
@@ -504,17 +516,9 @@ fn sample_init_data_kind(ctx: &mut noprop::TestCaseContext) -> MsfInitDataKind {
     noprop::sample_choice(ctx, &[MsfInitDataKind::Inline])
 }
 
-/// base64 ライクな文字列 ([A-Za-z0-9+/=] のみ) を生成する
+/// Base64 (RFC 4648 §4) として有効な文字列を生成する
 fn sample_base64ish(ctx: &mut noprop::TestCaseContext) -> String {
-    let len = noprop::sample_usize_in(ctx, 0..=16);
-    (0..len)
-        .map(|_| {
-            noprop::sample_choice(
-                ctx,
-                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=",
-            ) as char
-        })
-        .collect()
+    noprop::sample_choice(ctx, &["", "AAEC", "QUJD", "YWJjZA==", "AQIDBA=="]).to_string()
 }
 
 /// MsfInitData を生成する

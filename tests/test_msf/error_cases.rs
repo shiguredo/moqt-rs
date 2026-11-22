@@ -473,34 +473,29 @@ fn lang_unknown_single_char_primary_rejected() {
         );
         assert!(
             matches!(
-                MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None),
-                Err(MessageError::InvalidCatalog(reason))
-                    if reason.contains("primary language subtag")
+                MsfCatalogDocument::decode(
+                    json.as_bytes(),
+                    shiguredo_moqt::msf::MsfCompression::None
+                ),
+                Err(MessageError::InvalidCatalog(_))
             ),
-            "irregular 固定リストに無い '{lang}' は primary language subtag の形式検査で拒否されること"
+            "irregular 固定リストに無い '{lang}' は構文検査で拒否されること"
         );
     }
 }
 
-/// privateuse の `x` は小文字のみを受理すること
+/// privateuse の `x` は大文字小文字を区別しないこと
 ///
-/// 大文字小文字を無視するのは irregular 固定リストとの一致判定だけに限定する。
-/// `X-FOO` は privateuse として扱われず、primary language subtag が 1 文字のため
-/// その形式検査で拒否される
+/// RFC 5646 §2.1.1 により ABNF は ASCII 大文字小文字を区別しないため、
+/// `X-FOO` / `X-foo` も privateuse として受理する。
 #[test]
-fn lang_uppercase_privateuse_rejected() {
+fn lang_uppercase_privateuse_accepted() {
     for lang in ["X-FOO", "X-foo"] {
         let json = format!(
             r#"{{"version":"draft-02","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
         );
-        assert!(
-            matches!(
-                MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None),
-                Err(MessageError::InvalidCatalog(reason))
-                    if reason.contains("primary language subtag")
-            ),
-            "大文字 X の privateuse '{lang}' は primary language subtag の形式検査で拒否されること"
-        );
+        MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
+            .expect("大文字 X の privateuse を受理すること");
     }
     // 小文字 `x` は従来どおり受理される (対になる確認)
     let json =

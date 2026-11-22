@@ -10,6 +10,8 @@
 //! # 注意
 //! カタログトラックのトラック名は "catalog" でなければならない (draft-ietf-moq-msf-02 §5 (Catalog))。
 
+use base64ct::{Base64, Encoding};
+
 use crate::error::MessageError;
 use crate::message::common::{MAX_TRACK_NAME_LENGTH, TrackNamespace, validate_full_track_name};
 use alloc::{
@@ -306,70 +308,128 @@ const LANG_IRREGULAR_TAGS: [&str; 17] = [
     "sgn-CH-DE",
 ];
 
-/// lang が RFC 5646 §2.1 (Syntax) の `irregular` タグかどうか (ASCII 大文字小文字を無視)
-fn is_lang_irregular(lang: &str) -> bool {
-    LANG_IRREGULAR_TAGS
-        .iter()
-        .any(|tag| tag.eq_ignore_ascii_case(lang))
-}
+/// RFC 5646 §2.1 (Syntax) の `regular` (grandfathered) タグの固定リスト
+const LANG_REGULAR_TAGS: [&str; 9] = [
+    "art-lojban",
+    "cel-gaulish",
+    "no-bok",
+    "no-nyn",
+    "zh-guoyu",
+    "zh-hakka",
+    "zh-min",
+    "zh-min-nan",
+    "zh-xiang",
+];
 
-/// lang フィールドの軽量構文バリデーション
+/// lang フィールドが RFC 5646 §2.1 (Syntax) の Language-Tag ABNF に一致するかを検証する
 ///
-/// draft-ietf-moq-msf-02 §5.2.33 (Language): lang は BCP 47 言語タグでなければならない (MUST)
-/// この仕様は将来変更される可能性がある。
-/// 完全な BCP 47 準拠は行わず、RFC 5646 §2.1 (Syntax) に沿った簡略ルールで
-/// 明らかに不正な値のみを拒否する:
-/// - irregular (grandfathered) タグ: `LANG_IRREGULAR_TAGS` の 17 タグ (大文字小文字を問わない)。
-///   `i-klingon` のように primary subtag が 1 文字のものも含む
-/// - primary language subtag: 2〜3 文字 / 4 文字 / 5〜8 文字の ASCII 英字 (language)
-/// - privateuse tag: `x` に 1 個以上の `-` 区切りサブタグが続くもの
-/// - 後続サブタグ（任意）: `-` 区切り、各サブタグは 1 文字以上の ASCII 英数字
-///
-/// `irregular` は `langtag` の規則に一致しないため primary subtag の検査より先に判定する。
-/// 大文字小文字を無視するのは `irregular` との一致判定だけに限定する。privateuse の `x` は
-/// 小文字のみを受理し、`X-FOO` のような大文字 `X` は受理しない (RFC 5646 §2.1.1 に合わせた
-/// 大文字小文字無視の全面対応は行わず、軽量構文検査の現行の受理範囲を維持する)。
-/// IANA Language Subtag Registry との照合、primary language subtag 以外のサブタグの最大長
-/// (同節 "All subtags have a maximum length of eight characters.") の検査、
-/// `extlang` / `variant` / `extension` の構造検査は行わない (軽量構文検査の範囲を維持する)。
+/// draft-ietf-moq-msf-02 §5.2.33 (Language): lang は BCP 47 言語タグでなければならない (MUST)。
+/// IANA Language Subtag Registry との照合は行わない (構文のみを検証する)。
 fn validate_lang_tag(lang: &str) -> Result<(), MessageError> {
-    let mut parts = lang.split('-');
-    let primary = parts.next().expect("split never returns an empty iterator");
-    // RFC 5646 §2.1 (Syntax): privateuse = "x" 1*("-" (1*8alphanum))
-    if primary == "x" {
-        let mut has_subtag = false;
-        for subtag in parts {
-            has_subtag = true;
-            if subtag.is_empty() || !subtag.chars().all(|c| c.is_ascii_alphanumeric()) {
-                return Err(MessageError::InvalidCatalog(format!(
-                    "invalid language tag '{lang}': each privateuse subtag must be non-empty ASCII alphanumeric"
-                )));
+    fn is_alpha(subtag: &str) -> bool {
+        !subtag.is_empty() && subtag.bytes().all(|byte| byte.is_ascii_alphabetic())
+    }
+    fn is_alphanum(subtag: &str) -> bool {
+        !subtag.is_empty() && subtag.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    }
+    fn invalid(lang: &str) -> MessageError {
+        MessageError::InvalidCatalog(format!("invalid language tag '{lang}'"))
+    }
+
+    if LANG_IRREGULAR_TAGS
+        .iter()
+        .chain(LANG_REGULAR_TAGS.iter())
+        .any(|tag| tag.eq_ignore_ascii_case(lang))
+    {
+        return Ok(());
+    }
+
+    let parts: Vec<&str> = lang.split('-').collect();
+    if parts.iter().any(|part| part.is_empty()) {
+        return Err(invalid(lang));
+    }
+    let primary = parts[0];
+
+    // privateuse = "x" 1*("-" (1*8alphanum))
+    if primary.eq_ignore_ascii_case("x") {
+        if parts.len() < 2
+            || parts[1..]
+                .iter()
+                .any(|part| part.len() > 8 || !is_alphanum(part))
+        {
+            return Err(invalid(lang));
+        }
+        return Ok(());
+    }
+
+    // language = 2*3ALPHA ["-" extlang] / 4ALPHA / 5*8ALPHA
+    if !is_alpha(primary) || !(2..=8).contains(&primary.len()) {
+        return Err(invalid(lang));
+    }
+    let mut index = 1;
+    if primary.len() <= 3 {
+        // extlang = 3ALPHA *2("-" 3ALPHA)
+        for _ in 0..3 {
+            if index < parts.len() && parts[index].len() == 3 && is_alpha(parts[index]) {
+                index += 1;
+            } else {
+                break;
             }
         }
-        if !has_subtag {
-            return Err(MessageError::InvalidCatalog(format!(
-                "invalid language tag '{lang}': privateuse tag must have at least one subtag"
-            )));
+    }
+    // script = 4ALPHA
+    if index < parts.len() && parts[index].len() == 4 && is_alpha(parts[index]) {
+        index += 1;
+    }
+    // region = 2ALPHA / 3DIGIT
+    if index < parts.len()
+        && ((parts[index].len() == 2 && is_alpha(parts[index]))
+            || (parts[index].len() == 3 && parts[index].bytes().all(|byte| byte.is_ascii_digit())))
+    {
+        index += 1;
+    }
+    // variant = 5*8alphanum / (DIGIT 3alphanum)
+    while index < parts.len()
+        && ((5..=8).contains(&parts[index].len()) && is_alphanum(parts[index])
+            || (parts[index].len() == 4
+                && parts[index].as_bytes()[0].is_ascii_digit()
+                && parts[index]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric())))
+    {
+        index += 1;
+    }
+    // extension = singleton 1*("-" (2*8alphanum))
+    while index < parts.len()
+        && parts[index].len() == 1
+        && is_alphanum(parts[index])
+        && !parts[index].eq_ignore_ascii_case("x")
+    {
+        index += 1;
+        let start = index;
+        while index < parts.len()
+            && (2..=8).contains(&parts[index].len())
+            && is_alphanum(parts[index])
+        {
+            index += 1;
         }
-        return Ok(());
-    }
-    // RFC 5646 §2.1 (Syntax): irregular は langtag の規則に一致しない固定リストのタグ。
-    // 大文字小文字を無視して比較する (§2.1.1)。"I-AMI" は "i-ami" と等価。
-    if is_lang_irregular(lang) {
-        return Ok(());
-    }
-    // RFC 5646 §2.1 (Syntax): language = 2*3ALPHA / 4ALPHA / 5*8ALPHA
-    if primary.len() < 2 || primary.len() > 8 || !primary.chars().all(|c| c.is_ascii_alphabetic()) {
-        return Err(MessageError::InvalidCatalog(format!(
-            "invalid language tag '{lang}': primary language subtag must be 2-8 ASCII letters"
-        )));
-    }
-    for subtag in parts {
-        if subtag.is_empty() || !subtag.chars().all(|c| c.is_ascii_alphanumeric()) {
-            return Err(MessageError::InvalidCatalog(format!(
-                "invalid language tag '{lang}': each subtag must be non-empty ASCII alphanumeric"
-            )));
+        if index == start {
+            return Err(invalid(lang));
         }
+    }
+    // privateuse = "x" 1*("-" (1*8alphanum))
+    if index < parts.len() && parts[index].eq_ignore_ascii_case("x") {
+        index += 1;
+        let start = index;
+        while index < parts.len() && parts[index].len() <= 8 && is_alphanum(parts[index]) {
+            index += 1;
+        }
+        if index == start {
+            return Err(invalid(lang));
+        }
+    }
+    if index != parts.len() {
+        return Err(invalid(lang));
     }
     Ok(())
 }
@@ -643,7 +703,8 @@ impl MsfTemplate {
 ///
 /// `value_raw` は単独の JSON 値でなければならず、`MsfCatalogDocument::encode` で検証する。
 /// 不正値を手構築すると `encode` が `InvalidCatalog` で失敗するため、単一 JSON 値にすること。
-/// 空 object は `Some` の空 `Vec` として保持し、重複 scheme は順序どおりに保持する。
+/// 空 object は `Some` の空 `Vec` として保持する。同一 scheme の重複は RFC 8259 §4 の
+/// 一意性に反するため decode / encode の両方で拒否する。
 ///
 /// `value_raw` は §5.2.43 のとおり変数置換 (§5.4) を行った後の token の実値を含み得るため、`Debug` では値を伏せて
 /// `value_raw_bytes` として長さだけを表示する。
@@ -3900,6 +3961,11 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
         crate::msf::uri::validate_moqt_endpoint_uri(uri)?;
     }
     validate_auth_info_unique(track.auth_info.as_deref())?;
+    if let Some(ref key) = track.track_base_key {
+        base64_decode(key).map_err(|_| {
+            MessageError::InvalidCatalog("trackBaseKey MUST be Base64 encoded".to_string())
+        })?;
+    }
     // draft-ietf-moq-msf-02 §5.2.2 (Track namespace) / §5.2.3 (Track name) / §11.2:
     // 手組みの値も decode と同じ写像規則で検証する。
     if let Some(ref metadata) = track.packaging_metadata {
@@ -3960,6 +4026,11 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
     }
     // authInfo の scheme は RFC 8259 §4 の一意性に従う
     validate_auth_info_unique(track.auth_info.as_deref())?;
+    if let Some(ref key) = track.track_base_key {
+        base64_decode(key).map_err(|_| {
+            MessageError::InvalidCatalog("trackBaseKey MUST be Base64 encoded".to_string())
+        })?;
+    }
     // framerate は有限値でなければならない (JSON の数値として inf / NaN を書けない)
     if let Some(rate) = track.framerate
         && !rate.is_finite()
@@ -4483,6 +4554,11 @@ fn decode_common_track_fields(
     if let Some(ref lang) = fields.lang {
         validate_lang_tag(lang)?;
     }
+    if let Some(ref key) = fields.track_base_key {
+        base64_decode(key).map_err(|_| {
+            MessageError::InvalidCatalog("trackBaseKey MUST be Base64 encoded".to_string())
+        })?;
+    }
     if let Some(ref metadata) = fields.packaging_metadata {
         validate_packaging_metadata(metadata)?;
     }
@@ -4738,8 +4814,19 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
 /// `object-property` の data は property type の hex notation を持つ。仕様は文法を定めないため、
 /// 本実装は `0x` に続く 1〜16 桁の hex digit (大文字小文字を問わない) で、MOQT の property type が
 /// 表現できる 2^62 - 1 以下と定める。`inline` の Base64 検証は 0342 が担当する。
+/// Base64 (RFC 4648 §4) としてデコードできるかを検証する
+fn base64_decode(value: &str) -> Result<Vec<u8>, base64ct::Error> {
+    Base64::decode_vec(value)
+}
+
 fn validate_init_data(entry: &MsfInitData) -> Result<(), MessageError> {
     if matches!(entry.kind, MsfInitDataKind::Inline) {
+        base64_decode(&entry.data).map_err(|_| {
+            MessageError::InvalidCatalog(format!(
+                "initData '{}' with inline type MUST be Base64 encoded",
+                entry.id
+            ))
+        })?;
         return Ok(());
     }
     let Some(hex) = entry.data.strip_prefix("0x") else {

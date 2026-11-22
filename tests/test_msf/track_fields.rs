@@ -677,3 +677,57 @@ fn encode_rejects_non_finite_framerate() {
         "非有限の framerate を encode で拒否すること"
     );
 }
+
+#[test]
+fn inline_init_data_must_be_base64() {
+    let bad = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"initRef":"i"}],"initDataList":[{"id":"i","type":"inline","data":"not base64!"}]}"#;
+    assert!(
+        MsfCatalogDocument::decode(bad, shiguredo_moqt::msf::MsfCompression::None).is_err(),
+        "Base64 でない inline data を拒否すること"
+    );
+    let good = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"initRef":"i"}],"initDataList":[{"id":"i","type":"inline","data":"AAEC"}]}"#;
+    MsfCatalogDocument::decode(good, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("Base64 の inline data を受理すること");
+}
+
+#[test]
+fn track_base_key_must_be_base64() {
+    let bad = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"encryptionScheme":"moq-secure-objects","cipherSuite":"aes-128-gcm-sha256","keyId":"k","trackBaseKey":"not base64!"}]}"#;
+    assert!(
+        MsfCatalogDocument::decode(bad, shiguredo_moqt::msf::MsfCompression::None).is_err(),
+        "Base64 でない trackBaseKey を拒否すること"
+    );
+    let good = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"encryptionScheme":"moq-secure-objects","cipherSuite":"aes-128-gcm-sha256","keyId":"k","trackBaseKey":"AAEC"}]}"#;
+    MsfCatalogDocument::decode(good, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("Base64 の trackBaseKey を受理すること");
+}
+
+#[test]
+fn lang_tag_abnf_is_enforced() {
+    for lang in [
+        "zh-Hant-TW",
+        "de-CH-1901",
+        "sl-rozaj-biske-1994",
+        "en-a-bbb-x-a-ccc",
+        "x-private",
+        "X-FOO",
+        "en-US-u-ca-gregory",
+        "art-lojban",
+    ] {
+        let json = format!(
+            r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
+        );
+        MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
+            .expect("RFC 5646 の ABNF に一致する lang を受理すること");
+    }
+    for lang in ["en-", "en-123456789", "en-a", "en-a-1", "i-unknown"] {
+        let json = format!(
+            r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
+        );
+        assert!(
+            MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
+                .is_err(),
+            "ABNF に一致しない lang を拒否すること: {lang}"
+        );
+    }
+}
