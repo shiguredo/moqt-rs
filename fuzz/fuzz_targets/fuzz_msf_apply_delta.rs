@@ -6,7 +6,9 @@ use shiguredo_moqt::msf::{MsfCatalog, MsfCatalogDocument, parse_catalog_namespac
 
 // 任意の Delta catalog を空の catalog へ適用しても panic しない
 fuzz_target!(|data: &[u8]| {
-    if let Ok(MsfCatalogDocument::Delta(delta)) = MsfCatalogDocument::decode(data) {
+    if let Ok(MsfCatalogDocument::Delta(delta)) =
+        MsfCatalogDocument::decode(data, shiguredo_moqt::msf::MsfCompression::None)
+    {
         let mut catalog = MsfCatalog::new();
         let _ = catalog.apply_delta(&delta, None);
         let mut with_namespace = MsfCatalog::new();

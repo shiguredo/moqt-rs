@@ -2,7 +2,8 @@ use super::*;
 use shiguredo_moqt::msf::MsfCatalogTracker;
 
 fn full_catalog(json: &str) -> MsfCatalog {
-    match MsfCatalogDocument::decode(json.as_bytes()).expect("テストフィクスチャの前提条件を満たす")
+    match MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす")
     {
         MsfCatalogDocument::Full(catalog) => catalog,
         MsfCatalogDocument::Delta(_) => panic!("Full catalog がデコードされること"),

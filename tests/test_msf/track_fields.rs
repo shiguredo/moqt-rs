@@ -24,7 +24,8 @@ fn all_optional_string_fields() {
                 {"id": "init1", "type": "inline", "data": "AAEC"}
             ]
         }"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -71,7 +72,8 @@ fn all_optional_number_fields() {
                 "displayHeight": 720
             }]
         }"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -103,7 +105,8 @@ fn depends_array() {
     let json = br#"{"version":"draft-02","tracks":[{
             "name":"hd","packaging":"loc","isLive":true,"depends":["sd","md"]
         },{"name":"sd","packaging":"loc","isLive":true},{"name":"md","packaging":"loc","isLive":true}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -120,7 +123,8 @@ fn depends_array() {
 fn packaging_values() {
     // loc は最小限のフィールドで OK
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -128,7 +132,8 @@ fn packaging_values() {
 
     // mediatimeline は depends と mimeType=application/json が必須
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"mediatimeline","isLive":true,"depends":["video"],"mimeType":"application/json"},{"name":"video","packaging":"loc","isLive":true}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -136,7 +141,8 @@ fn packaging_values() {
 
     // eventtimeline は eventType, depends, mimeType=application/json が必須
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"eventtimeline","isLive":true,"eventType":"com.example.cue","depends":["video"],"mimeType":"application/json"},{"name":"video","packaging":"loc","isLive":true}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -146,7 +152,8 @@ fn packaging_values() {
     // moqlog は depends / mimeType=application/json を要求しない
     let json =
         br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"moqlog","isLive":true}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -155,7 +162,8 @@ fn packaging_values() {
     // moqmetrics は depends / mimeType=application/json を要求しない
     let json =
         br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"moqmetrics","isLive":true}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -164,7 +172,8 @@ fn packaging_values() {
     // catalog は別のカタログトラックを参照する packaging で、media 向けの必須フィールドを要求しない
     let json =
         br#"{"version":"draft-02","tracks":[{"name":"catalog2","packaging":"catalog","isLive":true}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -175,7 +184,8 @@ fn packaging_values() {
 fn target_latency_ignored_when_is_live_false() {
     // draft-ietf-moq-msf-02 §5.2.9 (Target latency): isLive=false なら targetLatency は無視される
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":false,"targetLatency":500}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -186,7 +196,8 @@ fn target_latency_ignored_when_is_live_false() {
 fn buffers_decoded() {
     // draft-ietf-moq-msf-02 §5.2.10 (Buffers): buffers は {target, min, max} の object
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"buffers":{"target":1000,"min":500,"max":2000}}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -202,7 +213,8 @@ fn buffers_decoded() {
 fn buffers_unknown_keys_ignored() {
     // draft-ietf-moq-msf-02 §5.2.10 (Buffers): 未知 key は無視する
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"buffers":{"target":1000,"unknown":42}}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -218,7 +230,8 @@ fn buffers_unknown_keys_ignored() {
 fn buffers_ignored_when_is_live_false() {
     // draft-ietf-moq-msf-02 §5.2.10 (Buffers): isLive=false なら buffers は無視される
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":false,"buffers":{"target":1000}}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -229,7 +242,8 @@ fn buffers_ignored_when_is_live_false() {
 fn avg_bitrate_decoded() {
     // draft-ietf-moq-msf-02 §5.2.24 (Average Bitrate): avgBitrate
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"bitrate":5000000,"avgBitrate":3000000}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -241,7 +255,8 @@ fn avg_bitrate_decoded() {
 fn max_durations_decoded() {
     // draft-ietf-moq-msf-02 §5.2.25 (Maximum GOP Duration) / §5.2.26 (Maximum Group Duration)
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"maxGopDuration":2000,"maxGroupDuration":4000}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -254,8 +269,11 @@ fn connection_uri_decoded_and_token_ignored() {
     // draft-ietf-moq-msf-02 Appendix A.1.3: track-level token は削除されたため、
     // v01 のカタログに token が現れても未知フィールドとして無視する
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"moqlog","isLive":true,"namespace":"%resourceId%","role":"log","connectionURI":"moqt://logs.example.com:4443","token":"DUMMY-TOKEN"}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
-    let encoded = doc.encode().expect("token を無視して encode できること");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("token を無視して encode できること");
     let text = String::from_utf8(encoded).expect("JSON は UTF-8 であること");
     assert!(
         !text.contains("\"token\""),
@@ -274,7 +292,8 @@ fn connection_uri_decoded_and_token_ignored() {
 fn connection_uri_decoded_and_token_ignored_in_clone() {
     // clone 経路でもワイヤキー名でデコードされること
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","connectionURI":"moqt://logs.example.com:4443","token":"DUMMY-TOKEN"}]}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(delta) = doc else {
         panic!("Delta update がデコードされること");
     };
@@ -292,7 +311,7 @@ fn connection_uri_invalid_value_rejected() {
     // draft-ietf-moq-msf-02 §5.2.37: MOQT endpoint URI でない文字列は catalog decode で拒否する
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"moqlog","isLive":true,"connectionURI":"not a uri"}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -302,7 +321,7 @@ fn connection_uri_invalid_value_rejected_in_clone() {
     // clone 経路でも MOQT endpoint URI でない文字列は拒否する
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","connectionURI":"not a uri"}]}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -318,8 +337,9 @@ fn connection_uri_spec_examples_accepted() {
         let json = format!(
             r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"moqlog","isLive":true,"connectionURI":"{uri}"}}]}}"#
         );
-        let doc = MsfCatalogDocument::decode(json.as_bytes())
-            .expect("テストフィクスチャの前提条件を満たす");
+        let doc =
+            MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
+                .expect("テストフィクスチャの前提条件を満たす");
         let MsfCatalogDocument::Full(cat) = doc else {
             panic!("Full catalog がデコードされること");
         };
@@ -332,12 +352,12 @@ fn connection_uri_wrong_type_rejected_and_token_ignored() {
     // connectionURI の非文字列型は reject し、削除済みの token は未知フィールドとして無視する
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"moqlog","isLive":true,"connectionURI":4443}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"moqlog","isLive":true,"token":{}}]}"#;
     assert!(
-        MsfCatalogDocument::decode(json).is_ok(),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_ok(),
         "削除済みの token は未知フィールドとして無視すること"
     );
 }
@@ -347,7 +367,8 @@ fn max_durations_decoded_in_clone() {
     // draft-ietf-moq-msf-02 §5.2.25 (Maximum GOP Duration) / §5.2.26 (Maximum Group Duration):
     // clone 経路でもワイヤキー名でデコードされること
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","maxGopDuration":2000,"maxGroupDuration":4000}]}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(delta) = doc else {
         panic!("Delta update がデコードされること");
     };
@@ -366,8 +387,9 @@ fn legacy_connection_uri_key_is_ignored() {
     let json = format!(
         r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"moqlog","isLive":true,"{legacy_key}":"moqt://logs.example.com:4443"}}]}}"#
     );
-    let doc = MsfCatalogDocument::decode(json.as_bytes())
-        .expect("旧 key は未知フィールドとして無視されること");
+    let doc =
+        MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
+            .expect("旧 key は未知フィールドとして無視されること");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -380,7 +402,8 @@ fn legacy_connection_uri_key_is_ignored() {
         r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"moqlog","isLive":true,"{legacy_key}":4443}}]}}"#
     );
     assert!(
-        MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
+        MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
+            .is_ok(),
         "旧 key の型違いも未知フィールドとして無視すること"
     );
 }
@@ -421,7 +444,8 @@ fn loc_stream_mapping_values_are_validated() {
         let json = format!(
             r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"loc","isLive":true,"packagingMetadata":"streamMapping={value}"}}]}}"#
         );
-        let result = MsfCatalogDocument::decode(json.as_bytes());
+        let result =
+            MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None);
         assert_eq!(
             result.is_ok(),
             expected_ok,
@@ -431,15 +455,15 @@ fn loc_stream_mapping_values_are_validated() {
 
     // encode 経路でも同じ値域を検証すること
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true}]}"#;
-    let doc =
-        MsfCatalogDocument::decode(json).expect("streamMapping 省略の loc track を受理すること");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("streamMapping 省略の loc track を受理すること");
     let MsfCatalogDocument::Full(mut cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
     cat.tracks[0].packaging_metadata = Some("streamMapping=bogus".to_string());
     assert!(
         matches!(
-            MsfCatalogDocument::Full(cat).encode(),
+            MsfCatalogDocument::Full(cat).encode(shiguredo_moqt::msf::MsfCompression::None),
             Err(MessageError::InvalidCatalog(_))
         ),
         "loc の不正な streamMapping を encode してはならない"
@@ -453,13 +477,15 @@ fn loc_stream_mapping_values_are_validated() {
 #[test]
 fn stream_mapping_is_ignored_for_other_packaging() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"moqlog","isLive":true,"packagingMetadata":"streamMapping=bogus"}]}"#;
-    let doc = MsfCatalogDocument::decode(json)
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
         .expect("loc 以外の packaging では streamMapping を無視すること");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
     assert!(
-        MsfCatalogDocument::Full(cat).encode().is_ok(),
+        MsfCatalogDocument::Full(cat)
+            .encode(shiguredo_moqt::msf::MsfCompression::None)
+            .is_ok(),
         "loc 以外の packaging の streamMapping は encode でも無視すること"
     );
 }

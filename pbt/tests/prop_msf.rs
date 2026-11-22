@@ -663,9 +663,12 @@ fn full_catalog_roundtrip() -> noprop::TestResult {
             removed_tracks: Default::default(),
             init_data_list,
         });
-        let encoded = doc.encode().expect("encode に成功すること");
+        let encoded = doc
+            .encode(shiguredo_moqt::msf::MsfCompression::None)
+            .expect("encode に成功すること");
         let decoded =
-            MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+            MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+                .expect("テストフィクスチャの前提条件を満たす");
         assert_eq!(decoded, doc);
         Ok(())
     })?;
@@ -691,9 +694,12 @@ fn full_catalog_is_complete_roundtrip() -> noprop::TestResult {
             removed_tracks: Default::default(),
             init_data_list: Vec::new(),
         });
-        let encoded = doc.encode().expect("encode に成功すること");
+        let encoded = doc
+            .encode(shiguredo_moqt::msf::MsfCompression::None)
+            .expect("encode に成功すること");
         let decoded =
-            MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+            MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+                .expect("テストフィクスチャの前提条件を満たす");
         assert_eq!(decoded, doc);
         Ok(())
     })?;
@@ -744,9 +750,12 @@ fn delta_roundtrip() -> noprop::TestResult {
             generated_at,
             operations,
         });
-        let encoded = doc.encode().expect("encode に成功すること");
+        let encoded = doc
+            .encode(shiguredo_moqt::msf::MsfCompression::None)
+            .expect("encode に成功すること");
         let decoded =
-            MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+            MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+                .expect("テストフィクスチャの前提条件を満たす");
         assert_eq!(decoded, doc);
         Ok(())
     })?;

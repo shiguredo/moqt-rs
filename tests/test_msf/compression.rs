@@ -51,14 +51,14 @@ fn unsupported_compression_does_not_terminate_the_session() {
 fn catalog_roundtrip_with_gzip_signal() {
     let doc = MsfCatalogDocument::Full(MsfCatalog::new());
     let encoded = doc
-        .encode_with_compression(MsfCompression::Gzip)
+        .encode(MsfCompression::Gzip)
         .expect("catalog を gzip 圧縮できること");
     assert_eq!(
         &encoded[..2],
         &[0x1F, 0x8B],
         "Gzip signal は gzip を出力する"
     );
-    let decoded = MsfCatalogDocument::decode_with_compression(&encoded, MsfCompression::Gzip)
+    let decoded = MsfCatalogDocument::decode(&encoded, MsfCompression::Gzip)
         .expect("gzip 圧縮した catalog を decode できること");
     assert_eq!(decoded, doc);
 }
@@ -71,9 +71,9 @@ fn catalog_roundtrip_with_gzip_signal() {
 fn catalog_decode_without_signal_does_not_decompress_gzip() {
     let doc = MsfCatalogDocument::Full(MsfCatalog::new());
     let encoded = doc
-        .encode_with_compression(MsfCompression::Gzip)
+        .encode(MsfCompression::Gzip)
         .expect("catalog を gzip 圧縮できること");
-    let err = MsfCatalogDocument::decode_with_compression(&encoded, MsfCompression::None)
+    let err = MsfCatalogDocument::decode(&encoded, MsfCompression::None)
         .expect_err("signal なしの gzip は catalog として受理しないこと");
     assert!(
         matches!(err, MessageError::InvalidCatalog(_)),
@@ -86,9 +86,9 @@ fn catalog_decode_without_signal_does_not_decompress_gzip() {
 fn catalog_decode_with_gzip_signal_rejects_plain_json() {
     let doc = MsfCatalogDocument::Full(MsfCatalog::new());
     let encoded = doc
-        .encode_with_compression(MsfCompression::None)
+        .encode(MsfCompression::None)
         .expect("catalog を非圧縮でエンコードできること");
-    let err = MsfCatalogDocument::decode_with_compression(&encoded, MsfCompression::Gzip)
+    let err = MsfCatalogDocument::decode(&encoded, MsfCompression::Gzip)
         .expect_err("Gzip signal の非 gzip 入力は拒否すること");
     assert!(
         matches!(err, MessageError::GzipDecode(_)),

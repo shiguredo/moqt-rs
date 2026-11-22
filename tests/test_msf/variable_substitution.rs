@@ -10,7 +10,8 @@ fn resolve_basic_substitution() {
     assert!(text.contains("cmcdv2-bob"));
     assert!(!text.contains("%id%"));
     let doc =
-        MsfCatalogDocument::decode(text.as_bytes()).expect("テストフィクスチャの前提条件を満たす");
+        MsfCatalogDocument::decode(text.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
+            .expect("テストフィクスチャの前提条件を満たす");
     assert!(matches!(doc, MsfCatalogDocument::Full(_)));
 }
 
@@ -148,7 +149,8 @@ fn resolve_multiple_variables() {
     assert!(!text.contains("%id%"));
     assert!(!text.contains("%event%"));
     let doc =
-        MsfCatalogDocument::decode(text.as_bytes()).expect("テストフィクスチャの前提条件を満たす");
+        MsfCatalogDocument::decode(text.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
+            .expect("テストフィクスチャの前提条件を満たす");
     assert!(matches!(doc, MsfCatalogDocument::Full(_)));
 }
 
@@ -262,7 +264,8 @@ fn resolve_base64_value() {
         text.contains(r#""cat":"eyJhbGciOi+/=.abc""#),
         "Base64 の値 (`+` `/` `=` `.`) がそのまま置換されること: {text}"
     );
-    MsfCatalogDocument::decode(text.as_bytes()).expect("置換後のカタログを decode できること");
+    MsfCatalogDocument::decode(text.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
+        .expect("置換後のカタログを decode できること");
 }
 
 /// 変数値に禁じられた記号を拒否すること

@@ -1118,14 +1118,14 @@ Track Properties はこのフィールドには入らない。
 
 ```rust,no_run
 use shiguredo_moqt::error::MessageError;
-use shiguredo_moqt::msf::MsfCatalogDocument;
+use shiguredo_moqt::msf::{MsfCatalogDocument, MsfCompression};
 
 fn example(bytes: &[u8]) -> Result<(), MessageError> {
     // Full / Delta を自動判別
-    let doc = MsfCatalogDocument::decode(bytes)?;
-    // MSF_COMPRESSION property が Gzip の場合は decode_with_compression(bytes, MsfCompression::Gzip)
-    let gz = doc.encode_with_compression(MsfCompression::Gzip)?;
-    let encoded = doc.encode()?;
+    let doc = MsfCatalogDocument::decode(bytes, MsfCompression::None)?;
+    // MSF_COMPRESSION property が Gzip の場合は decode(bytes, MsfCompression::Gzip) を使う
+    let gz = doc.encode(MsfCompression::Gzip)?;
+    let encoded = doc.encode(MsfCompression::None)?;
     let _ = encoded;
     Ok(())
 }

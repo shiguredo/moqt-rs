@@ -3,7 +3,10 @@ use super::*;
 #[test]
 fn missing_version() {
     assert!(matches!(
-        MsfCatalogDocument::decode(b"{\"tracks\":[]}"),
+        MsfCatalogDocument::decode(
+            b"{\"tracks\":[]}",
+            shiguredo_moqt::msf::MsfCompression::None
+        ),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -11,7 +14,7 @@ fn missing_version() {
 #[test]
 fn version_zero() {
     assert!(matches!(
-        MsfCatalogDocument::decode(b"{\"version\":\"0\",\"tracks\":[]}"),
+        MsfCatalogDocument::decode(b"{\"version\":\"0\",\"tracks\":[]}", shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalogVersion(v)) if v == "0"
     ));
 }
@@ -19,7 +22,7 @@ fn version_zero() {
 #[test]
 fn version_99() {
     assert!(matches!(
-        MsfCatalogDocument::decode(b"{\"version\":\"99\",\"tracks\":[]}"),
+        MsfCatalogDocument::decode(b"{\"version\":\"99\",\"tracks\":[]}", shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalogVersion(v)) if v == "99"
     ));
 }
@@ -28,7 +31,10 @@ fn version_99() {
 fn version_not_string() {
     // draft-ietf-moq-msf-02 §5.1.1 (MSF version): version は JSON Type: String
     assert!(matches!(
-        MsfCatalogDocument::decode(b"{\"version\":1,\"tracks\":[]}"),
+        MsfCatalogDocument::decode(
+            b"{\"version\":1,\"tracks\":[]}",
+            shiguredo_moqt::msf::MsfCompression::None
+        ),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -36,7 +42,10 @@ fn version_not_string() {
 #[test]
 fn missing_tracks() {
     assert!(matches!(
-        MsfCatalogDocument::decode(b"{\"version\":\"draft-02\"}"),
+        MsfCatalogDocument::decode(
+            b"{\"version\":\"draft-02\"}",
+            shiguredo_moqt::msf::MsfCompression::None
+        ),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -45,7 +54,7 @@ fn missing_tracks() {
 fn track_missing_name() {
     let json = br#"{"version":"draft-02","tracks":[{"packaging":"loc"}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -54,7 +63,7 @@ fn track_missing_name() {
 fn track_missing_packaging() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","isLive":true}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -64,7 +73,7 @@ fn track_missing_is_live() {
     // draft-ietf-moq-msf-02 §5.2.8 (Is Live): isLive は必須
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc"}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -72,7 +81,7 @@ fn track_missing_is_live() {
 #[test]
 fn not_json_object() {
     assert!(matches!(
-        MsfCatalogDocument::decode(b"[1,2,3]"),
+        MsfCatalogDocument::decode(b"[1,2,3]", shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -80,7 +89,7 @@ fn not_json_object() {
 #[test]
 fn empty_input() {
     assert!(matches!(
-        MsfCatalogDocument::decode(b""),
+        MsfCatalogDocument::decode(b"", shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -88,7 +97,10 @@ fn empty_input() {
 #[test]
 fn trailing_data() {
     assert!(matches!(
-        MsfCatalogDocument::decode(b"{\"version\":1,\"tracks\":[]}garbage"),
+        MsfCatalogDocument::decode(
+            b"{\"version\":1,\"tracks\":[]}garbage",
+            shiguredo_moqt::msf::MsfCompression::None
+        ),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -144,7 +156,10 @@ fn depends_entry_not_string_or_integer() {
         );
         assert!(
             matches!(
-                MsfCatalogDocument::decode(json.as_bytes()),
+                MsfCatalogDocument::decode(
+                    json.as_bytes(),
+                    shiguredo_moqt::msf::MsfCompression::None
+                ),
                 Err(MessageError::InvalidCatalog(_))
             ),
             "depends の {element} 要素を拒否すること"
@@ -160,7 +175,7 @@ fn render_group_different_target_latency_rejected() {
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":1000}
         ]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -173,7 +188,7 @@ fn alt_group_different_target_latency_rejected() {
             {"name":"b","packaging":"loc","isLive":true,"altGroup":2,"targetLatency":1000}
         ]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -184,7 +199,7 @@ fn render_group_same_target_latency_accepted() {
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500},
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500}
         ]}"#;
-    assert!(MsfCatalogDocument::decode(json).is_ok());
+    assert!(MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_ok());
 }
 
 #[test]
@@ -195,7 +210,8 @@ fn render_group_target_latency_omitted_accepted() {
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500},
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1}
         ]}"#;
-    MsfCatalogDocument::decode(json).expect("省略された targetLatency は拒否されないこと");
+    MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("省略された targetLatency は拒否されないこと");
 }
 
 #[test]
@@ -205,7 +221,7 @@ fn alt_group_target_latency_omitted_accepted() {
             {"name":"a","packaging":"loc","isLive":true,"altGroup":2,"targetLatency":500},
             {"name":"b","packaging":"loc","isLive":true,"altGroup":2}
         ]}"#;
-    MsfCatalogDocument::decode(json)
+    MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
         .expect("altGroup でも省略された targetLatency は拒否されないこと");
 }
 
@@ -217,7 +233,7 @@ fn render_group_target_latency_and_buffers_split_accepted() {
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500},
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":1000}}
         ]}"#;
-    MsfCatalogDocument::decode(json)
+    MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
         .expect("group 内で targetLatency と buffers を使い分けても拒否されないこと");
 }
 
@@ -231,7 +247,7 @@ fn render_group_omitted_between_different_target_latency_rejected() {
             {"name":"c","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":1000}
         ]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -243,7 +259,7 @@ fn lang_invalid_empty() {
     let json =
         br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":""}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -254,7 +270,7 @@ fn lang_invalid_numeric_primary() {
     let json =
         br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"12"}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -267,7 +283,7 @@ fn lang_invalid_single_char() {
     let json =
         br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"e"}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -277,7 +293,7 @@ fn lang_invalid_special_chars() {
     let json =
         br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"eng-!!"}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -287,7 +303,7 @@ fn lang_invalid_leading_dash() {
     let json =
         br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"-en"}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -297,7 +313,7 @@ fn lang_invalid_trailing_dash() {
     let json =
         br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"en-"}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -310,7 +326,8 @@ fn lang_primary_four_to_eight_letters_accepted() {
             r#"{{"version":"draft-02","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
         );
         assert!(
-            MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
+            MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
+                .is_ok(),
             "primary '{lang}' は受理されること"
         );
     }
@@ -322,7 +339,7 @@ fn lang_invalid_primary_too_long() {
     let json =
         br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"abcdefghi"}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -335,7 +352,8 @@ fn lang_privateuse_accepted() {
             r#"{{"version":"draft-02","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
         );
         assert!(
-            MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
+            MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
+                .is_ok(),
             "privateuse '{lang}' は受理されること"
         );
     }
@@ -347,7 +365,7 @@ fn lang_privateuse_without_subtag_rejected() {
     let json =
         br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"x"}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -384,7 +402,8 @@ fn lang_irregular_tags_accepted() {
             r#"{{"version":"draft-02","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
         );
         assert!(
-            MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
+            MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
+                .is_ok(),
             "irregular '{lang}' は受理されること"
         );
     }
@@ -400,7 +419,8 @@ fn lang_irregular_case_insensitive_accepted() {
             r#"{{"version":"draft-02","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
         );
         assert!(
-            MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
+            MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
+                .is_ok(),
             "irregular '{lang}' は大文字小文字を問わず受理されること"
         );
     }
@@ -425,7 +445,8 @@ fn lang_regular_grandfathered_tags_accepted() {
             r#"{{"version":"draft-02","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
         );
         assert!(
-            MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
+            MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
+                .is_ok(),
             "regular '{lang}' は受理されること"
         );
     }
@@ -452,7 +473,7 @@ fn lang_unknown_single_char_primary_rejected() {
         );
         assert!(
             matches!(
-                MsfCatalogDocument::decode(json.as_bytes()),
+                MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None),
                 Err(MessageError::InvalidCatalog(reason))
                     if reason.contains("primary language subtag")
             ),
@@ -474,7 +495,7 @@ fn lang_uppercase_privateuse_rejected() {
         );
         assert!(
             matches!(
-                MsfCatalogDocument::decode(json.as_bytes()),
+                MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None),
                 Err(MessageError::InvalidCatalog(reason))
                     if reason.contains("primary language subtag")
             ),
@@ -485,7 +506,7 @@ fn lang_uppercase_privateuse_rejected() {
     let json =
         br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"x-foo"}]}"#;
     assert!(
-        MsfCatalogDocument::decode(json).is_ok(),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_ok(),
         "小文字 x の privateuse は受理されること"
     );
 }
@@ -495,12 +516,12 @@ fn lang_uppercase_privateuse_rejected() {
 fn lang_irregular_in_delta_add_and_clone_accepted() {
     let add = br#"{"generatedAt":1,"deltaUpdate":[{"op":"add","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"i-klingon"}]}]}"#;
     assert!(
-        MsfCatalogDocument::decode(add).is_ok(),
+        MsfCatalogDocument::decode(add, shiguredo_moqt::msf::MsfCompression::None).is_ok(),
         "delta add の irregular タグは受理されること"
     );
     let clone = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"a","parentName":"parent","lang":"i-klingon"}]}]}"#;
     assert!(
-        MsfCatalogDocument::decode(clone).is_ok(),
+        MsfCatalogDocument::decode(clone, shiguredo_moqt::msf::MsfCompression::None).is_ok(),
         "delta clone の irregular タグは受理されること"
     );
 }
@@ -510,7 +531,7 @@ fn lang_irregular_in_delta_add_and_clone_accepted() {
 fn lang_invalid_in_add_tracks() {
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"add","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"1"}]}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -521,7 +542,7 @@ fn lang_invalid_in_clone_track() {
     let json =
         br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"a","parentName":"parent","lang":"1"}]}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -534,7 +555,7 @@ fn target_latency_and_buffers_together_rejected_when_is_live_true() {
     // isLive=true の同一 track に targetLatency と buffers は共存できない
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"targetLatency":500,"buffers":{"target":1000}}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(reason))
         if reason == "targetLatency and buffers MUST NOT be present together"
     ));
@@ -546,7 +567,7 @@ fn target_latency_and_buffers_together_rejected_when_is_live_false() {
     // (本実装では presence 違反を優先する選択とする)
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":false,"targetLatency":500,"buffers":{"target":1000}}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(reason))
         if reason == "targetLatency and buffers MUST NOT be present together"
     ));
@@ -566,7 +587,7 @@ fn target_latency_or_buffers_alone_ignored_when_is_live_false() {
             br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":false,"buffers":{"target":1000}}]}"#.as_slice(),
         ),
     ] {
-        let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+        let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).expect("テストフィクスチャの前提条件を満たす");
         let MsfCatalogDocument::Full(cat) = doc else {
             panic!("Full catalog がデコードされること");
         };
@@ -591,7 +612,7 @@ fn clone_target_latency_or_buffers_alone_ignored_when_is_live_false() {
             "buffers",
         ),
     ] {
-        let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+        let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).expect("テストフィクスチャの前提条件を満たす");
         let MsfCatalogDocument::Delta(delta) = doc else {
             panic!("Delta update がデコードされること");
         };
@@ -622,7 +643,7 @@ fn target_latency_and_buffers_together_rejected_in_clone() {
     ] {
         assert!(
             matches!(
-                MsfCatalogDocument::decode(json),
+                MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
                 Err(MessageError::InvalidCatalog(reason))
                 if reason == "targetLatency and buffers MUST NOT be present together"
             ),
@@ -639,7 +660,7 @@ fn render_group_different_buffers_rejected() {
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":1000}}
         ]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -650,7 +671,7 @@ fn render_group_same_buffers_accepted() {
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":500}},
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":500}}
         ]}"#;
-    assert!(MsfCatalogDocument::decode(json).is_ok());
+    assert!(MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_ok());
 }
 
 #[test]
@@ -661,7 +682,8 @@ fn render_group_buffers_omitted_accepted() {
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":500}},
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1}
         ]}"#;
-    MsfCatalogDocument::decode(json).expect("省略された buffers は拒否されないこと");
+    MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("省略された buffers は拒否されないこと");
 }
 
 #[test]
@@ -671,7 +693,8 @@ fn alt_group_buffers_omitted_accepted() {
             {"name":"a","packaging":"loc","isLive":true,"altGroup":2,"buffers":{"target":500}},
             {"name":"b","packaging":"loc","isLive":true,"altGroup":2}
         ]}"#;
-    MsfCatalogDocument::decode(json).expect("altGroup でも省略された buffers は拒否されないこと");
+    MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("altGroup でも省略された buffers は拒否されないこと");
 }
 
 #[test]
@@ -684,7 +707,7 @@ fn render_group_omitted_between_different_buffers_rejected() {
             {"name":"c","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":1000}}
         ]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -699,7 +722,8 @@ fn render_group_mixed_live_ignored_for_buffers() {
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":500}},
             {"name":"b","packaging":"loc","isLive":false,"renderGroup":1}
         ]}"#;
-    MsfCatalogDocument::decode(json).expect("isLive=false の省略は拒否されないこと");
+    MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("isLive=false の省略は拒否されないこと");
 }
 
 #[test]
@@ -712,7 +736,8 @@ fn render_group_mixed_live_ignored_for_target_latency() {
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500},
             {"name":"b","packaging":"loc","isLive":false,"renderGroup":1}
         ]}"#;
-    MsfCatalogDocument::decode(json).expect("isLive=false の省略は拒否されないこと");
+    MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("isLive=false の省略は拒否されないこと");
 }
 
 // ─── initDataList ─────────────────────────────────────────────────────────────
@@ -725,7 +750,7 @@ fn init_data_list_duplicate_id_rejected() {
             {"id":"init1","type":"inline","data":"AAED"}
         ]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -734,7 +759,7 @@ fn init_data_list_duplicate_id_rejected() {
 fn init_data_list_unknown_type_rejected() {
     let json = br#"{"version":"draft-02","tracks":[],"initDataList":[{"id":"init1","type":"unknown","data":"AAEC"}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -745,7 +770,7 @@ fn init_ref_missing_id_rejected() {
     // initDataList の id を指すため、一致する id が無ければ reject される
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"initRef":"missing"}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -754,7 +779,7 @@ fn init_ref_missing_id_rejected() {
 fn init_ref_matching_id_accepted() {
     // initRef が initDataList の id と一致すれば受理される
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"initRef":"init1"}],"initDataList":[{"id":"init1","type":"inline","data":"AAEC"}]}"#;
-    assert!(MsfCatalogDocument::decode(json).is_ok());
+    assert!(MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_ok());
 }
 
 // ─── delta update 新構造 ──────────────────────────────────────────────────────
@@ -764,7 +789,7 @@ fn delta_update_empty_array_rejected() {
     // draft-ietf-moq-msf-02 §5.3 (Delta updates): 少なくとも 1 つの操作が必要
     let json = br#"{"generatedAt":1,"deltaUpdate":[]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -773,7 +798,7 @@ fn delta_update_empty_array_rejected() {
 fn delta_update_unknown_op_rejected() {
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"unknown","tracks":[]}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -784,7 +809,7 @@ fn delta_update_contains_version_rejected() {
     let json =
         br#"{"generatedAt":1,"deltaUpdate":[{"op":"add","tracks":[]}],"version":"draft-02"}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -794,7 +819,7 @@ fn delta_update_contains_tracks_rejected() {
     // draft-ietf-moq-msf-02 §5.3 (Delta updates): delta update に tracks は含めない
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"add","tracks":[]}],"tracks":[]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -803,7 +828,7 @@ fn delta_update_contains_tracks_rejected() {
 fn delta_operation_missing_op_rejected() {
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"tracks":[]}]}}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -812,7 +837,7 @@ fn delta_operation_missing_op_rejected() {
 fn delta_operation_missing_tracks_rejected() {
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"add"}]}}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -822,7 +847,7 @@ fn init_data_list_missing_id_rejected() {
     let json =
         br#"{"version":"draft-02","tracks":[],"initDataList":[{"type":"inline","data":"AAEC"}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -832,7 +857,7 @@ fn init_data_list_missing_type_rejected() {
     let json =
         br#"{"version":"draft-02","tracks":[],"initDataList":[{"id":"init1","data":"AAEC"}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -842,7 +867,7 @@ fn init_data_list_missing_data_rejected() {
     let json =
         br#"{"version":"draft-02","tracks":[],"initDataList":[{"id":"init1","type":"inline"}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -851,7 +876,7 @@ fn init_data_list_missing_data_rejected() {
 fn buffers_non_number_value_rejected() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"buffers":{"target":"fast"}}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -864,7 +889,7 @@ fn alt_group_different_buffers_rejected() {
             {"name":"b","packaging":"loc","isLive":true,"altGroup":1,"buffers":{"target":1000}}
         ]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -874,7 +899,7 @@ fn clone_track_target_latency_and_buffers_together_rejected() {
     // draft-ietf-moq-msf-02 §5.2.9 / §5.2.10: clone の isLive:true 共存も reject されること
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","isLive":true,"targetLatency":500,"buffers":{"target":1000}}]}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(reason))
         if reason == "targetLatency and buffers MUST NOT be present together"
     ));
@@ -885,7 +910,7 @@ fn add_target_latency_and_buffers_together_rejected() {
     // draft-ietf-moq-msf-02 §5.2.9 / §5.2.10: delta add 経路の共存も reject されること
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"add","tracks":[{"name":"t","packaging":"loc","isLive":false,"targetLatency":500,"buffers":{"target":1000}}]}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(reason))
         if reason == "targetLatency and buffers MUST NOT be present together"
     ));
@@ -895,7 +920,8 @@ fn add_target_latency_and_buffers_together_rejected() {
 fn clone_omitted_kept() {
     // clone の isLive 省略時は単独値を保持すること
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","targetLatency":500}]}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(delta) = doc else {
         panic!("Delta update がデコードされること");
     };
@@ -909,7 +935,7 @@ fn clone_omitted_kept() {
 fn clone_track_track_duration_when_is_live_true_rejected() {
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","isLive":true,"trackDuration":1000}]}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -918,7 +944,7 @@ fn clone_track_track_duration_when_is_live_true_rejected() {
 fn clone_track_event_type_with_non_eventtimeline_rejected() {
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","packaging":"loc","eventType":"x"}]}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -927,7 +953,7 @@ fn clone_track_event_type_with_non_eventtimeline_rejected() {
 fn event_timeline_missing_event_type_rejected() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"eventtimeline","isLive":true}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -936,7 +962,7 @@ fn event_timeline_missing_event_type_rejected() {
 fn media_timeline_missing_depends_rejected() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"mediatimeline","isLive":true,"mimeType":"application/json"}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -945,14 +971,14 @@ fn media_timeline_missing_depends_rejected() {
 fn media_timeline_arbitrary_mime_type_accepted() {
     // draft-ietf-moq-msf-02 §7.2: mimeType の値は要求しない
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"mediatimeline","isLive":true,"depends":["video"],"mimeType":"text/plain"},{"name":"video","packaging":"loc","isLive":true}]}"#;
-    assert!(MsfCatalogDocument::decode(json).is_ok());
+    assert!(MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_ok());
 }
 
 #[test]
 fn event_type_with_non_eventtimeline_rejected() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"eventType":"x"}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -961,14 +987,14 @@ fn event_type_with_non_eventtimeline_rejected() {
 fn eventtimeline_without_depends_accepted() {
     // draft-ietf-moq-msf-02 §8.3: depends は index が media timeline を参照する場合だけ必須
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"eventtimeline","isLive":true,"eventType":"cue","mimeType":"application/json"}]}"#;
-    assert!(MsfCatalogDocument::decode(json).is_ok());
+    assert!(MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_ok());
 }
 
 #[test]
 fn eventtimeline_arbitrary_mime_type_accepted() {
     // draft-ietf-moq-msf-02 §8.3: mimeType の値は要求しない
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"eventtimeline","isLive":true,"eventType":"cue","mimeType":"text/plain"}]}"#;
-    assert!(MsfCatalogDocument::decode(json).is_ok());
+    assert!(MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_ok());
 }
 
 // ─── codec / role に応じた必須フィールド ──────────────────────────────────────
@@ -977,7 +1003,9 @@ fn eventtimeline_arbitrary_mime_type_accepted() {
 #[test]
 fn video_role_missing_codec_rejected() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"video","framerate":30,"bitrate":1000}]}"#;
-    let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("role 由来の codec 欠如は InvalidCatalog であること");
     };
     assert!(
@@ -990,7 +1018,9 @@ fn video_role_missing_codec_rejected() {
 #[test]
 fn video_role_missing_bitrate_rejected() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"av01"}]}"#;
-    let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("role 由来の bitrate 欠如は InvalidCatalog であること");
     };
     assert!(
@@ -1006,7 +1036,9 @@ fn video_role_missing_bitrate_rejected() {
 #[test]
 fn audiodescription_role_requires_audio_fields_rejected() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"role":"audiodescription","lang":"en","codec":"opus","bitrate":32000,"channelConfig":"2"}]}"#;
-    let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("role 由来の samplerate 欠如は InvalidCatalog であること");
     };
     assert!(
@@ -1014,7 +1046,9 @@ fn audiodescription_role_requires_audio_fields_rejected() {
         "role 由来の samplerate 要求を述べること: {reason}"
     );
     let json = br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"role":"audiodescription","lang":"en","codec":"opus","bitrate":32000,"samplerate":48000}]}"#;
-    let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("role 由来の channelConfig 欠如は InvalidCatalog であること");
     };
     assert!(
@@ -1031,7 +1065,9 @@ fn audiodescription_role_requires_audio_fields_rejected() {
 #[test]
 fn signlanguage_role_is_treated_as_video() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"signlanguage","framerate":30}]}"#;
-    let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("role=signlanguage は codec を要求すること");
     };
     assert!(
@@ -1039,7 +1075,9 @@ fn signlanguage_role_is_treated_as_video() {
         "role 由来の codec 要求を述べること: {reason}"
     );
     let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"signlanguage","framerate":30,"codec":"unregistered"}]}"#;
-    let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("role=signlanguage は bitrate を要求すること");
     };
     assert!(
@@ -1048,7 +1086,7 @@ fn signlanguage_role_is_treated_as_video() {
     );
     let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"signlanguage","framerate":30,"codec":"unregistered","bitrate":1000}]}"#;
     assert!(
-        MsfCatalogDocument::decode(json).is_ok(),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_ok(),
         "role=signlanguage でも必須フィールドを満たせば受理されること"
     );
 }
@@ -1057,7 +1095,9 @@ fn signlanguage_role_is_treated_as_video() {
 #[test]
 fn audio_role_missing_samplerate_rejected() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"role":"audio","codec":"opus","bitrate":32000,"channelConfig":"2"}]}"#;
-    let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("role 由来の samplerate 欠如は InvalidCatalog であること");
     };
     assert!(
@@ -1065,7 +1105,9 @@ fn audio_role_missing_samplerate_rejected() {
         "role 由来の samplerate 要求を述べること: {reason}"
     );
     let json = br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"role":"audio","codec":"opus","bitrate":32000,"samplerate":48000}]}"#;
-    let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("role 由来の channelConfig 欠如は InvalidCatalog であること");
     };
     assert!(
@@ -1078,7 +1120,7 @@ fn audio_role_missing_samplerate_rejected() {
 #[test]
 fn media_role_with_required_fields_accepted() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"av01","bitrate":1000},{"name":"a","packaging":"loc","isLive":true,"role":"audio","codec":"opus","bitrate":32000,"samplerate":48000,"channelConfig":"2"}]}"#;
-    assert!(MsfCatalogDocument::decode(json).is_ok());
+    assert!(MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_ok());
 }
 
 /// codec も role も無いトラックは種別を判定できないため codec / bitrate を要求しない
@@ -1088,7 +1130,7 @@ fn media_role_with_required_fields_accepted() {
 #[test]
 fn missing_role_does_not_require_media_fields() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true}]}"#;
-    assert!(MsfCatalogDocument::decode(json).is_ok());
+    assert!(MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_ok());
 }
 
 /// encode 時にも role に応じた必須フィールドが検証される
@@ -1103,7 +1145,9 @@ fn media_role_missing_fields_rejected_on_encode() {
         tracks: vec![track],
         ..MsfCatalog::new()
     });
-    let Err(MessageError::InvalidCatalog(reason)) = doc.encode() else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("role 由来の bitrate 欠如は InvalidCatalog であること");
     };
     assert!(
@@ -1116,7 +1160,9 @@ fn media_role_missing_fields_rejected_on_encode() {
 #[test]
 fn codec_audio_missing_samplerate_rejected() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"codec":"opus","bitrate":32000,"channelConfig":"2"}]}"#;
-    let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("codec 由来の samplerate 欠如は InvalidCatalog であること");
     };
     assert!(
@@ -1129,7 +1175,9 @@ fn codec_audio_missing_samplerate_rejected() {
 #[test]
 fn codec_audio_missing_channel_config_rejected() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"codec":"opus","bitrate":32000,"samplerate":48000}]}"#;
-    let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("codec 由来の channelConfig 欠如は InvalidCatalog であること");
     };
     assert!(
@@ -1142,7 +1190,9 @@ fn codec_audio_missing_channel_config_rejected() {
 #[test]
 fn codec_audio_missing_bitrate_rejected() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"codec":"opus","samplerate":48000,"channelConfig":"2"}]}"#;
-    let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("codec 由来の bitrate 欠如は InvalidCatalog であること");
     };
     assert!(
@@ -1155,7 +1205,9 @@ fn codec_audio_missing_bitrate_rejected() {
 #[test]
 fn codec_video_missing_bitrate_rejected() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"codec":"av01.0.08M.08"}]}"#;
-    let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("codec 由来の bitrate 欠如は InvalidCatalog であること");
     };
     assert!(
@@ -1170,7 +1222,9 @@ fn codec_video_missing_bitrate_rejected() {
 #[test]
 fn registry_name_only_video_codec_missing_bitrate_rejected() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"codec":"av01"}]}"#;
-    let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("codec 由来の bitrate 欠如は InvalidCatalog であること");
     };
     assert!(
@@ -1183,14 +1237,14 @@ fn registry_name_only_video_codec_missing_bitrate_rejected() {
 #[test]
 fn codec_audio_with_required_fields_accepted() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"codec":"opus","bitrate":32000,"samplerate":48000,"channelConfig":"2"}]}"#;
-    assert!(MsfCatalogDocument::decode(json).is_ok());
+    assert!(MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_ok());
 }
 
 /// role 省略 + codec `av01.0.08M.08` で bitrate を揃えれば受理される
 #[test]
 fn codec_video_with_required_fields_accepted() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"codec":"av01.0.08M.08","bitrate":1000}]}"#;
-    assert!(MsfCatalogDocument::decode(json).is_ok());
+    assert!(MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_ok());
 }
 
 /// 登録名に一致しない codec は audio / video と判定せず、codec に基づく要求を行わない
@@ -1201,7 +1255,8 @@ fn unregistered_codec_does_not_require_media_fields() {
             r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}"}}]}}"#
         );
         assert!(
-            MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
+            MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
+                .is_ok(),
             "登録外の codec '{codec}' は codec に基づく要求を行わない"
         );
     }
@@ -1231,7 +1286,8 @@ fn registry_audio_codec_names_are_classified() {
         let json = format!(
             r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}","bitrate":32000}}]}}"#
         );
-        let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json.as_bytes())
+        let Err(MessageError::InvalidCatalog(reason)) =
+            MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
         else {
             panic!("audio の登録名 '{codec}' は samplerate を要求すること");
         };
@@ -1270,13 +1326,15 @@ fn registry_video_codec_names_are_classified() {
             r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}","bitrate":1000}}]}}"#
         );
         assert!(
-            MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
+            MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
+                .is_ok(),
             "video の登録名 '{codec}' は bitrate だけで受理されること (audio と取り違えない)"
         );
         let json = format!(
             r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}"}}]}}"#
         );
-        let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json.as_bytes())
+        let Err(MessageError::InvalidCatalog(reason)) =
+            MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
         else {
             panic!(
                 "video の登録名 '{codec}' は bitrate を要求すること (未判定なら受理されてしまう)"
@@ -1301,7 +1359,8 @@ fn codec_separator_only_suffix_is_classified() {
         let json = format!(
             r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}","bitrate":32000}}]}}"#
         );
-        let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json.as_bytes())
+        let Err(MessageError::InvalidCatalog(reason)) =
+            MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
         else {
             panic!("登録名 '{codec}' は samplerate を要求すること");
         };
@@ -1316,7 +1375,8 @@ fn codec_separator_only_suffix_is_classified() {
             r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}","bitrate":1000}}]}}"#
         );
         assert!(
-            MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
+            MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
+                .is_ok(),
             "登録名 '{codec}' は bitrate だけで受理されること (audio と取り違えない)"
         );
     }
@@ -1334,7 +1394,8 @@ fn codec_boundary_separator_is_required() {
             r#"{{"version":"draft-02","tracks":[{{"name":"t","packaging":"loc","isLive":true,"codec":"{codec}"}}]}}"#
         );
         assert!(
-            MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
+            MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
+                .is_ok(),
             "区切り文字が無い codec '{codec}' は codec に基づく要求を行わない"
         );
     }
@@ -1348,7 +1409,9 @@ fn codec_boundary_separator_is_required() {
 #[test]
 fn role_and_codec_requirements_are_combined() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"opus","bitrate":32000}]}"#;
-    let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("samplerate 欠如は codec を根拠に拒否されること");
     };
     assert!(
@@ -1356,7 +1419,9 @@ fn role_and_codec_requirements_are_combined() {
         "codec 由来の samplerate 要求を述べること: {reason}"
     );
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"opus","bitrate":32000,"samplerate":48000}]}"#;
-    let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("channelConfig 欠如は codec を根拠に拒否されること");
     };
     assert!(
@@ -1366,7 +1431,7 @@ fn role_and_codec_requirements_are_combined() {
     // 両方の要求を満たせば受理される
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"role":"video","framerate":30,"codec":"opus","bitrate":32000,"samplerate":48000,"channelConfig":"2"}]}"#;
     assert!(
-        MsfCatalogDocument::decode(json).is_ok(),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_ok(),
         "role と codec の要求を満たすカタログは受理されること"
     );
 }
@@ -1383,7 +1448,9 @@ fn codec_audio_missing_bitrate_rejected_on_encode() {
         tracks: vec![track],
         ..MsfCatalog::new()
     });
-    let Err(MessageError::InvalidCatalog(reason)) = doc.encode() else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("codec 由来の bitrate 欠如は InvalidCatalog であること");
     };
     assert!(
@@ -1403,7 +1470,9 @@ fn codec_audio_missing_samplerate_rejected_on_encode() {
         tracks: vec![track],
         ..MsfCatalog::new()
     });
-    let Err(MessageError::InvalidCatalog(reason)) = doc.encode() else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("codec 由来の samplerate 欠如は InvalidCatalog であること");
     };
     assert!(
@@ -1423,7 +1492,9 @@ fn codec_audio_missing_channel_config_rejected_on_encode() {
         tracks: vec![track],
         ..MsfCatalog::new()
     });
-    let Err(MessageError::InvalidCatalog(reason)) = doc.encode() else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("codec 由来の channelConfig 欠如は InvalidCatalog であること");
     };
     assert!(
@@ -1441,7 +1512,9 @@ fn registry_name_only_video_codec_missing_bitrate_rejected_on_encode() {
         tracks: vec![track],
         ..MsfCatalog::new()
     });
-    let Err(MessageError::InvalidCatalog(reason)) = doc.encode() else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("codec 由来の bitrate 欠如は InvalidCatalog であること");
     };
     assert!(
@@ -1461,7 +1534,8 @@ fn raw_track_without_codec_accepted_on_encode() {
         ..MsfCatalog::new()
     });
     assert!(
-        doc.encode().is_ok(),
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None)
+            .is_ok(),
         "codec も role も無いトラックは codec に基づく要求を行わないこと"
     );
 }
@@ -1474,7 +1548,7 @@ fn raw_track_without_codec_accepted_on_encode() {
 fn parent_name_in_track_rejected() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"parentName":"p"}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(ref reason))
             if reason == "parentName MUST only be included inside a clone operation in a delta update"
     ));
@@ -1488,7 +1562,7 @@ fn parent_name_in_track_rejected() {
 fn parent_namespace_in_track_rejected() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"parentNamespace":"ns"}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(ref reason))
             if reason == "parentNamespace MUST only be included inside a clone operation in a delta update"
     ));
@@ -1501,7 +1575,7 @@ fn parent_namespace_in_track_rejected() {
 fn framerate_infinity_rejected() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"framerate":1e400}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -1528,7 +1602,10 @@ fn auth_info_non_utf8_value_rejected_on_encode() {
         init_data_list: Vec::new(),
     });
     assert!(
-        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        matches!(
+            doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+            Err(MessageError::InvalidCatalog(_))
+        ),
         "非 UTF-8 の value_raw は InvalidCatalog で拒否されること"
     );
 }
@@ -1553,7 +1630,10 @@ fn auth_info_non_utf8_value_in_publish_tracks_rejected_on_encode() {
         init_data_list: Vec::new(),
     });
     assert!(
-        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        matches!(
+            doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+            Err(MessageError::InvalidCatalog(_))
+        ),
         "publishTracks の非 UTF-8 value_raw は InvalidCatalog で拒否されること"
     );
 }
@@ -1578,7 +1658,10 @@ fn auth_info_non_json_value_rejected_on_encode() {
         init_data_list: Vec::new(),
     });
     assert!(
-        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        matches!(
+            doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+            Err(MessageError::InvalidCatalog(_))
+        ),
         "単独の JSON 値でない value_raw は InvalidCatalog で拒否されること"
     );
 }
@@ -1609,7 +1692,7 @@ fn encode_full_duplicate_name_within_tracks_rejected() {
     let a = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     let b = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     assert!(matches!(
-        full_doc(vec![a, b], vec![], vec![]).encode(),
+        full_doc(vec![a, b], vec![], vec![]).encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -1621,7 +1704,7 @@ fn encode_full_duplicate_name_across_tracks_and_publish_tracks_rejected() {
     let a = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     let b = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     assert!(matches!(
-        full_doc(vec![a], vec![b], vec![]).encode(),
+        full_doc(vec![a], vec![b], vec![]).encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -1636,7 +1719,8 @@ fn encode_full_duplicate_init_data_list_id_rejected() {
         data: "AAEC".to_string(),
     };
     assert!(matches!(
-        full_doc(vec![], vec![], vec![entry(), entry()]).encode(),
+        full_doc(vec![], vec![], vec![entry(), entry()])
+            .encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -1648,7 +1732,7 @@ fn encode_full_missing_init_ref_rejected() {
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.init_ref = Some("missing".to_string());
     assert!(matches!(
-        full_doc(vec![track], vec![], vec![]).encode(),
+        full_doc(vec![track], vec![], vec![]).encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -1665,7 +1749,7 @@ fn encode_full_target_latency_and_buffers_together_rejected() {
         max: None,
     });
     assert!(matches!(
-        full_doc(vec![track], vec![], vec![]).encode(),
+        full_doc(vec![track], vec![], vec![]).encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(reason))
             if reason == "targetLatency and buffers MUST NOT be present together"
     ));
@@ -1682,7 +1766,7 @@ fn encode_full_group_target_latency_mismatch_rejected() {
     b.render_group = Some(1);
     b.target_latency = Some(1000);
     assert!(matches!(
-        full_doc(vec![a, b], vec![], vec![]).encode(),
+        full_doc(vec![a, b], vec![], vec![]).encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -1706,7 +1790,7 @@ fn encode_full_publish_tracks_group_buffers_mismatch_rejected() {
         max: None,
     });
     assert!(matches!(
-        full_doc(vec![], vec![a, b], vec![]).encode(),
+        full_doc(vec![], vec![a, b], vec![]).encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -1721,7 +1805,7 @@ fn encode_full_group_target_latency_omitted_accepted() {
     let mut b = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
     b.render_group = Some(1);
     full_doc(vec![a, b], vec![], vec![])
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("省略された targetLatency は encode できること");
 }
 
@@ -1739,7 +1823,7 @@ fn encode_full_group_buffers_omitted_accepted() {
     let mut b = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
     b.render_group = Some(1);
     full_doc(vec![a, b], vec![], vec![])
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("省略された buffers は encode できること");
 }
 
@@ -1757,7 +1841,7 @@ fn encode_full_alt_group_buffers_omitted_accepted() {
     let mut b = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
     b.alt_group = Some(2);
     full_doc(vec![a, b], vec![], vec![])
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("altGroup でも省略された buffers は encode できること");
 }
 
@@ -1771,7 +1855,7 @@ fn encode_full_alt_group_target_latency_omitted_accepted() {
     let mut b = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
     b.alt_group = Some(2);
     full_doc(vec![a, b], vec![], vec![])
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("altGroup でも省略された targetLatency は encode できること");
 }
 
@@ -1793,7 +1877,7 @@ fn encode_full_group_render_conflict_rejected() {
     c.target_latency = Some(1000);
     // c は renderGroup 1 で a / b と衝突する (altGroup は異なる)
     assert!(matches!(
-        full_doc(vec![a, b, c], vec![], vec![]).encode(),
+        full_doc(vec![a, b, c], vec![], vec![]).encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(reason)) if reason.contains("renderGroup 1")
     ));
 }
@@ -1812,7 +1896,7 @@ fn encode_full_group_alt_conflict_rejected() {
     b.target_latency = Some(1000);
     // renderGroup は 1 と 2 で衝突せず、altGroup 2 のみが衝突する
     assert!(matches!(
-        full_doc(vec![a, b], vec![], vec![]).encode(),
+        full_doc(vec![a, b], vec![], vec![]).encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(reason)) if reason.contains("altGroup 2")
     ));
 }
@@ -1828,7 +1912,7 @@ fn encode_full_group_zero_target_latency_mismatch_rejected() {
     b.render_group = Some(0);
     b.target_latency = Some(1000);
     assert!(matches!(
-        full_doc(vec![a, b], vec![], vec![]).encode(),
+        full_doc(vec![a, b], vec![], vec![]).encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -1852,7 +1936,7 @@ fn encode_full_group_zero_buffers_mismatch_rejected() {
         max: None,
     });
     assert!(matches!(
-        full_doc(vec![a, b], vec![], vec![]).encode(),
+        full_doc(vec![a, b], vec![], vec![]).encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -1866,7 +1950,7 @@ fn encode_full_without_group_different_target_latency_accepted() {
     let mut b = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
     b.target_latency = Some(1000);
     full_doc(vec![a, b], vec![], vec![])
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("group 未所属のトラックは group 検証の対象外であること");
 }
 
@@ -1881,7 +1965,7 @@ fn encode_full_publish_tracks_group_target_latency_omitted_accepted() {
     let mut b = MsfTrack::new("b".to_string(), MsfPackaging::MoqLog, true);
     b.render_group = Some(1);
     full_doc(vec![], vec![a, b], vec![])
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("publishTracks でも省略された targetLatency は encode できること");
 }
 
@@ -1898,7 +1982,7 @@ fn encode_full_group_omitted_between_different_target_latency_rejected() {
     c.render_group = Some(1);
     c.target_latency = Some(1000);
     assert!(matches!(
-        full_doc(vec![a, b, c], vec![], vec![]).encode(),
+        full_doc(vec![a, b, c], vec![], vec![]).encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -1924,7 +2008,7 @@ fn encode_full_group_omitted_between_different_buffers_rejected() {
         max: None,
     });
     assert!(matches!(
-        full_doc(vec![a, b, c], vec![], vec![]).encode(),
+        full_doc(vec![a, b, c], vec![], vec![]).encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -1942,7 +2026,7 @@ fn encode_full_group_target_latency_is_live_false_ignored() {
     b.render_group = Some(1);
     b.target_latency = Some(1000);
     full_doc(vec![a, b], vec![], vec![])
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("isLive=false の targetLatency は encode の比較対象外であること");
 }
 
@@ -1965,7 +2049,7 @@ fn encode_full_group_buffers_is_live_false_ignored() {
         max: None,
     });
     full_doc(vec![a, b], vec![], vec![])
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("isLive=false の buffers は encode の比較対象外であること");
 }
 
@@ -1976,7 +2060,7 @@ fn encode_full_event_type_with_non_eventtimeline_rejected() {
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.event_type = Some("x".to_string());
     assert!(matches!(
-        full_doc(vec![track], vec![], vec![]).encode(),
+        full_doc(vec![track], vec![], vec![]).encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -1989,7 +2073,7 @@ fn encode_full_event_timeline_missing_event_type_rejected() {
     track.depends = vec![MsfDependency::TrackName("v".to_string())];
     track.mime_type = Some("application/json".to_string());
     assert!(matches!(
-        full_doc(vec![track], vec![], vec![]).encode(),
+        full_doc(vec![track], vec![], vec![]).encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -2001,7 +2085,7 @@ fn encode_full_media_timeline_missing_depends_rejected() {
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::MediaTimeline, true);
     track.mime_type = Some("application/json".to_string());
     assert!(matches!(
-        full_doc(vec![track], vec![], vec![]).encode(),
+        full_doc(vec![track], vec![], vec![]).encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -2013,7 +2097,9 @@ fn encode_full_custom_scheme_without_cipher_suite_accepted() {
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.encryption_scheme = Some("com.example.custom".to_string());
     assert!(
-        full_doc(vec![track], vec![], vec![]).encode().is_ok(),
+        full_doc(vec![track], vec![], vec![])
+            .encode(shiguredo_moqt::msf::MsfCompression::None)
+            .is_ok(),
         "custom scheme は cipherSuite なしで encode できること"
     );
 }
@@ -2027,7 +2113,7 @@ fn encode_full_secure_objects_incomplete_rejected() {
     track.cipher_suite = Some("aes-128-gcm-sha256".to_string());
     // keyId / trackBaseKey を欠く
     assert!(matches!(
-        full_doc(vec![track], vec![], vec![]).encode(),
+        full_doc(vec![track], vec![], vec![]).encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -2039,7 +2125,7 @@ fn encode_full_invalid_lang_rejected() {
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.lang = Some("1".to_string());
     assert!(matches!(
-        full_doc(vec![track], vec![], vec![]).encode(),
+        full_doc(vec![track], vec![], vec![]).encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -2051,9 +2137,10 @@ fn encode_full_irregular_lang_roundtrip() {
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.lang = Some("i-klingon".to_string());
     let bytes = full_doc(vec![track], vec![], vec![])
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("irregular タグは encode できること");
-    let decoded = MsfCatalogDocument::decode(&bytes).expect("encode 結果は decode できること");
+    let decoded = MsfCatalogDocument::decode(&bytes, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode 結果は decode できること");
     let MsfCatalogDocument::Full(catalog) = decoded else {
         panic!("Full catalog に戻ること");
     };
@@ -2071,7 +2158,7 @@ fn encode_full_parent_name_rejected() {
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.parent_name = Some("p".to_string());
     assert!(matches!(
-        full_doc(vec![track], vec![], vec![]).encode(),
+        full_doc(vec![track], vec![], vec![]).encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -2083,7 +2170,7 @@ fn encode_full_track_duration_when_is_live_true_rejected() {
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.track_duration = Some(1000);
     assert!(matches!(
-        full_doc(vec![track], vec![], vec![]).encode(),
+        full_doc(vec![track], vec![], vec![]).encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -2098,7 +2185,10 @@ fn encode_delta_empty_operations_rejected() {
         generated_at: 1,
         operations: Vec::new(),
     });
-    assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+    assert!(matches!(
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
 }
 
 /// delta add の不正トラックは encode でも拒否されること
@@ -2113,7 +2203,10 @@ fn encode_delta_add_invalid_track_rejected() {
             tracks: vec![track],
         }],
     });
-    assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+    assert!(matches!(
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
 }
 
 /// delta clone の targetLatency / buffers 共存は encode でも拒否されること
@@ -2134,7 +2227,7 @@ fn encode_delta_clone_target_latency_and_buffers_rejected() {
         }],
     });
     assert!(matches!(
-        doc.encode(),
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(reason))
             if reason == "targetLatency and buffers MUST NOT be present together"
     ));
@@ -2153,7 +2246,10 @@ fn encode_delta_clone_track_duration_when_is_live_true_rejected() {
             tracks: vec![clone],
         }],
     });
-    assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+    assert!(matches!(
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
 }
 
 /// delta clone の非 eventtimeline packaging + eventType は encode でも拒否されること
@@ -2169,7 +2265,10 @@ fn encode_delta_clone_event_type_with_non_eventtimeline_rejected() {
             tracks: vec![clone],
         }],
     });
-    assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+    assert!(matches!(
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
 }
 
 /// delta clone の不正 lang は encode でも拒否されること
@@ -2184,7 +2283,10 @@ fn encode_delta_clone_invalid_lang_rejected() {
             tracks: vec![clone],
         }],
     });
-    assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+    assert!(matches!(
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
 }
 
 /// delta add / clone の irregular タグは encode でも受理され、decode で同じ値に戻ること
@@ -2205,8 +2307,11 @@ fn encode_delta_irregular_lang_roundtrip() {
             },
         ],
     });
-    let bytes = doc.encode().expect("irregular タグは encode できること");
-    let decoded = MsfCatalogDocument::decode(&bytes).expect("encode 結果は decode できること");
+    let bytes = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("irregular タグは encode できること");
+    let decoded = MsfCatalogDocument::decode(&bytes, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode 結果は decode できること");
     assert_eq!(decoded, doc, "encode / decode で lang が保持されること");
 }
 
@@ -2217,7 +2322,8 @@ fn video_and_signlanguage_roles_require_framerate() {
         let json = format!(
             r#"{{"version":"draft-02","tracks":[{{"name":"v","packaging":"loc","isLive":true,"role":"{role}","codec":"av01","bitrate":1000}}]}}"#
         );
-        let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json.as_bytes())
+        let Err(MessageError::InvalidCatalog(reason)) =
+            MsfCatalogDocument::decode(json.as_bytes(), shiguredo_moqt::msf::MsfCompression::None)
         else {
             panic!("role={role} の framerate 欠如は InvalidCatalog であること");
         };
@@ -2232,7 +2338,9 @@ fn video_and_signlanguage_roles_require_framerate() {
 #[test]
 fn audiodescription_role_requires_lang() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"a","packaging":"loc","isLive":true,"role":"audiodescription","codec":"opus","bitrate":32000,"samplerate":48000,"channelConfig":"2"}]}"#;
-    let Err(MessageError::InvalidCatalog(reason)) = MsfCatalogDocument::decode(json) else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("lang 欠如は InvalidCatalog であること");
     };
     assert!(
@@ -2246,7 +2354,7 @@ fn audiodescription_role_requires_lang() {
 fn data_role_minimal_track_accepted() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"d","packaging":"loc","isLive":true,"role":"data"}]}"#;
     assert!(
-        MsfCatalogDocument::decode(json).is_ok(),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_ok(),
         "data role は codec / bitrate / framerate / lang を要求しないこと"
     );
 }
@@ -2256,7 +2364,7 @@ fn data_role_minimal_track_accepted() {
 fn custom_role_minimal_track_accepted() {
     let json = br#"{"version":"draft-02","tracks":[{"name":"x","packaging":"loc","isLive":true,"role":"foo"}]}"#;
     assert!(
-        MsfCatalogDocument::decode(json).is_ok(),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_ok(),
         "指定 role と衝突しないカスタム role を受理すること"
     );
 }
@@ -2272,7 +2380,9 @@ fn encode_rejects_video_role_without_framerate() {
         tracks: vec![track],
         ..MsfCatalog::new()
     });
-    let Err(MessageError::InvalidCatalog(reason)) = doc.encode() else {
+    let Err(MessageError::InvalidCatalog(reason)) =
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None)
+    else {
         panic!("role 由来の framerate 欠如は InvalidCatalog であること");
     };
     assert!(
@@ -2289,7 +2399,7 @@ fn encode_full_secure_objects_without_cipher_suite_rejected() {
     track.key_id = Some("key-1".to_string());
     track.track_base_key = Some("AAEC".to_string());
     assert!(matches!(
-        full_doc(vec![track], vec![], vec![]).encode(),
+        full_doc(vec![track], vec![], vec![]).encode(shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }

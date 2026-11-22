@@ -177,14 +177,14 @@ MSF は MOQT Streaming Format の略で、MOQT で音声や映像を配信する
 
 ```rust,no_run
 use shiguredo_moqt::error::MessageError;
-use shiguredo_moqt::msf::MsfCatalogDocument;
+use shiguredo_moqt::msf::{MsfCatalogDocument, MsfCompression};
 
 fn main() -> Result<(), MessageError> {
     // 受信したカタログの JSON。配信するトラックの一覧などを含む
     let json: &[u8] = br#"{"version": "draft-02", "tracks": []}"#;
 
     // 全体カタログと差分更新を自動で判別してデコードする
-    let doc = MsfCatalogDocument::decode(json)?;
+    let doc = MsfCatalogDocument::decode(json, MsfCompression::None)?;
 
     // 全体カタログなら、トラックの名前とコーデックを一覧できる
     if let MsfCatalogDocument::Full(catalog) = &doc {
@@ -194,7 +194,7 @@ fn main() -> Result<(), MessageError> {
     }
 
     // JSON に戻す
-    let encoded = doc.encode()?;
+    let encoded = doc.encode(MsfCompression::None)?;
     let _ = encoded;
     Ok(())
 }

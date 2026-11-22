@@ -5,7 +5,7 @@ use libfuzzer_sys::fuzz_target;
 use shiguredo_moqt::loc::LocProperties;
 use shiguredo_moqt::message::ControlMessage;
 use shiguredo_moqt::message_parameter::MessageParameters;
-use shiguredo_moqt::msf::{MsfCatalogDocument, MsfEventTimeline, MsfMediaTimeline};
+use shiguredo_moqt::msf::{MsfCatalogDocument, MsfCompression, MsfEventTimeline, MsfMediaTimeline};
 use shiguredo_moqt::object_properties::ObjectProperties;
 use shiguredo_moqt::parameter::{DEFAULT_MAX_CONTROL_MESSAGE_SIZE, SetupOptions};
 use shiguredo_moqt::stream::datagram::ObjectDatagram;
@@ -60,8 +60,8 @@ fuzz_target!(|data: &[u8]| {
     if let Ok((props, _)) = LocProperties::decode(data) {
         let _ = props.encode();
     }
-    if let Ok(document) = MsfCatalogDocument::decode(data) {
-        let _ = document.encode();
+    if let Ok(document) = MsfCatalogDocument::decode(data, MsfCompression::None) {
+        let _ = document.encode(MsfCompression::None);
     }
     if let Ok(timeline) = MsfMediaTimeline::decode(data) {
         let _ = timeline.encode();

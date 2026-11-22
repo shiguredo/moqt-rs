@@ -2818,25 +2818,19 @@ impl MsfCatalogDocument {
     /// 省略した track が継承する catalog namespace を含む Full Track Name の長さは、継承先が
     /// 不明な範囲 (Track Name 単体) でしか検証できない。継承を解決した完全な検証は受信側の
     /// [`MsfCatalog::validate_track_names`] が担う。
-    pub fn encode(&self) -> Result<Vec<u8>, MessageError> {
-        self.encode_with_compression(MsfCompression::None)
-    }
-
     /// カタログドキュメントを signal に従ってエンコードする
     ///
     /// `compression` は MSF_COMPRESSION property の値である。`Gzip` の場合は JSON を
     /// gzip 圧縮する (draft-ietf-moq-msf-02 §5.5 (Catalog Compression) / §12.1.1)。
-    /// `encode` は非圧縮の便宜 API であり、同じ検証を行ってから
-    /// `MsfCompression::None` でエンコードする。
+    /// 非圧縮として扱う場合は `MsfCompression::None` を渡す。
     ///
     /// # Errors
     ///
-    /// `encode` と同じ検証エラーに加え、gzip 圧縮に失敗した場合は
-    /// [`MessageError::GzipEncode`] を返す。
-    pub fn encode_with_compression(
-        &self,
-        compression: MsfCompression,
-    ) -> Result<Vec<u8>, MessageError> {
+    /// - `authInfo` の値が UTF-8 でない / 単独の JSON 値でない: `InvalidCatalog`
+    /// - 完全カタログが MUST に違反する (一意性、initRef 参照、フィールド整合など): `InvalidCatalog`
+    /// - デルタ更新が空の operations を持つなど MUST に違反する: `InvalidCatalog`
+    /// - gzip 圧縮に失敗した: [`MessageError::GzipEncode`]
+    pub fn encode(&self, compression: MsfCompression) -> Result<Vec<u8>, MessageError> {
         for info in self.auth_infos() {
             validate_auth_info_value_raw(&info.value_raw)?;
         }
@@ -2847,7 +2841,11 @@ impl MsfCatalogDocument {
         compress_json(nojson::Json(self).to_string().into_bytes(), compression)
     }
 
-    /// JSON バイト列からカタログドキュメントをデコードする
+    /// JSON バイト列を signal に従ってカタログドキュメントへデコードする
+    ///
+    /// `compression` は MSF_COMPRESSION property の値である。`Gzip` のときだけ展開し、
+    /// `None` のときは gzip の magic byte があっても自動展開しない
+    /// (draft-ietf-moq-msf-02 §5.5 (Catalog Compression) / §12.1.1)。
     ///
     /// # Errors
     ///
@@ -2855,25 +2853,8 @@ impl MsfCatalogDocument {
     /// - JSON パースエラー: `InvalidCatalog`
     /// - 必須フィールドの欠如: `InvalidCatalog`
     /// - 未対応バージョン: `InvalidCatalogVersion`
-    pub fn decode(buf: &[u8]) -> Result<Self, MessageError> {
-        Self::decode_with_compression(buf, MsfCompression::None)
-    }
-
-    /// カタログドキュメントを signal に従ってデコードする
-    ///
-    /// `compression` は MSF_COMPRESSION property の値である。`Gzip` のときだけ展開し、
-    /// `None` のときは gzip の magic byte があっても自動展開しない
-    /// (draft-ietf-moq-msf-02 §5.5 (Catalog Compression) / §12.1.1)。
-    /// `decode` は非圧縮の便宜 API であり、`MsfCompression::None` でデコードする。
-    ///
-    /// # Errors
-    ///
-    /// `decode` と同じエラーに加え、`Gzip` で展開に失敗した場合は
-    /// [`MessageError::GzipDecode`] を返す。
-    pub fn decode_with_compression(
-        buf: &[u8],
-        compression: MsfCompression,
-    ) -> Result<Self, MessageError> {
+    /// - `Gzip` で展開に失敗した: [`MessageError::GzipDecode`]
+    pub fn decode(buf: &[u8], compression: MsfCompression) -> Result<Self, MessageError> {
         let buf = decompress_payload(buf, compression)?;
         let text = core::str::from_utf8(&buf)
             .map_err(|_| MessageError::InvalidCatalog("catalog is not valid UTF-8".to_string()))?;

@@ -234,7 +234,7 @@ pub fn build_catalog_json(
     let auth_info = auth_info_for_cat_tokens(cat_tokens);
     let catalog = build_catalog(video, audio, sync, auth_info.as_deref())?;
     catalog
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .map_err(|e| Error::Other(format!("catalog encode: {e}")))
 }
 
@@ -438,7 +438,7 @@ mod tests {
         let catalog = build_catalog(Some(&video), Some(&audio), TEST_SYNC, None)
             .expect("カタログを構築できること");
         catalog
-            .encode()
+            .encode(shiguredo_moqt::msf::MsfCompression::None)
             .expect("publisher のカタログが encode に成功すること");
     }
 
@@ -472,10 +472,11 @@ mod tests {
         let catalog = build_catalog(Some(&video), Some(&audio), TEST_SYNC, None)
             .expect("カタログを構築できること");
         let encoded = catalog
-            .encode()
+            .encode(shiguredo_moqt::msf::MsfCompression::None)
             .expect("publisher のカタログが encode に成功すること");
         let decoded =
-            MsfCatalogDocument::decode(&encoded).expect("encode したカタログを decode できること");
+            MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+                .expect("encode したカタログを decode できること");
         let MsfCatalogDocument::Full(full) = decoded else {
             panic!("publisher は Full カタログを送ること");
         };
@@ -577,10 +578,11 @@ mod tests {
         let catalog =
             build_catalog(Some(&video), None, TEST_SYNC, None).expect("カタログを構築できること");
         let encoded = catalog
-            .encode()
+            .encode(shiguredo_moqt::msf::MsfCompression::None)
             .expect("publisher のカタログが encode に成功すること");
         let MsfCatalogDocument::Full(full) =
-            MsfCatalogDocument::decode(&encoded).expect("encode したカタログを decode できること")
+            MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+                .expect("encode したカタログを decode できること")
         else {
             panic!("publisher は Full カタログを送ること");
         };
@@ -600,10 +602,11 @@ mod tests {
         let catalog =
             build_catalog(Some(&video), None, TEST_SYNC, None).expect("カタログを構築できること");
         let encoded = catalog
-            .encode()
+            .encode(shiguredo_moqt::msf::MsfCompression::None)
             .expect("publisher のカタログが encode に成功すること");
         let MsfCatalogDocument::Full(full) =
-            MsfCatalogDocument::decode(&encoded).expect("encode したカタログを decode できること")
+            MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+                .expect("encode したカタログを decode できること")
         else {
             panic!("publisher は Full カタログを送ること");
         };
@@ -634,7 +637,7 @@ mod tests {
         let catalog =
             build_catalog(None, Some(&audio), TEST_SYNC, None).expect("カタログを構築できること");
         catalog
-            .encode()
+            .encode(shiguredo_moqt::msf::MsfCompression::None)
             .expect("AAC-LC の audio codec でも encode に成功すること");
     }
 
@@ -666,10 +669,11 @@ mod tests {
         let catalog = build_catalog(Some(&video), Some(&audio), TEST_SYNC, None)
             .expect("カタログを構築できること");
         let encoded = catalog
-            .encode()
+            .encode(shiguredo_moqt::msf::MsfCompression::None)
             .expect("publisher のカタログが encode に成功すること");
         let decoded =
-            MsfCatalogDocument::decode(&encoded).expect("encode したカタログを decode できること");
+            MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+                .expect("encode したカタログを decode できること");
         let MsfCatalogDocument::Full(full) = decoded else {
             panic!("publisher は Full カタログを送ること");
         };
@@ -687,8 +691,10 @@ mod tests {
         let video_only =
             build_catalog(Some(&video), None, TEST_SYNC, None).expect("カタログを構築できること");
         let MsfCatalogDocument::Full(full) = video_only
-            .encode()
-            .and_then(|encoded| MsfCatalogDocument::decode(&encoded))
+            .encode(shiguredo_moqt::msf::MsfCompression::None)
+            .and_then(|encoded| {
+                MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+            })
             .expect("encode / decode に成功すること")
         else {
             panic!("publisher は Full カタログを送ること");
@@ -701,8 +707,10 @@ mod tests {
         let audio_only =
             build_catalog(None, Some(&audio), TEST_SYNC, None).expect("カタログを構築できること");
         let MsfCatalogDocument::Full(full) = audio_only
-            .encode()
-            .and_then(|encoded| MsfCatalogDocument::decode(&encoded))
+            .encode(shiguredo_moqt::msf::MsfCompression::None)
+            .and_then(|encoded| {
+                MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+            })
             .expect("encode / decode に成功すること")
         else {
             panic!("publisher は Full カタログを送ること");
@@ -735,7 +743,7 @@ mod tests {
             let catalog = build_catalog(Some(&video), None, TEST_SYNC, None)
                 .expect("カタログを構築できること");
             catalog
-                .encode()
+                .encode(shiguredo_moqt::msf::MsfCompression::None)
                 .expect("代替の video codec でも encode に成功すること");
         }
     }
@@ -791,8 +799,9 @@ mod tests {
         // cat が無ければ authInfo を載せない
         let without_tokens = build_catalog_json(None, Some(&audio), TEST_SYNC, &[])
             .expect("cat 無しでもカタログを組み立てられること");
-        let decoded = MsfCatalogDocument::decode(&without_tokens)
-            .expect("組み立てたカタログを decode できること");
+        let decoded =
+            MsfCatalogDocument::decode(&without_tokens, shiguredo_moqt::msf::MsfCompression::None)
+                .expect("組み立てたカタログを decode できること");
         let MsfCatalogDocument::Full(full) = decoded else {
             panic!("publisher は Full カタログを組み立てること");
         };
@@ -805,8 +814,9 @@ mod tests {
         let tokens = vec![b"publisher-token".to_vec()];
         let with_tokens = build_catalog_json(None, Some(&audio), TEST_SYNC, &tokens)
             .expect("cat 有りでもカタログを組み立てられること");
-        let decoded = MsfCatalogDocument::decode(&with_tokens)
-            .expect("組み立てたカタログを decode できること");
+        let decoded =
+            MsfCatalogDocument::decode(&with_tokens, shiguredo_moqt::msf::MsfCompression::None)
+                .expect("組み立てたカタログを decode できること");
         let MsfCatalogDocument::Full(full) = decoded else {
             panic!("publisher は Full カタログを組み立てること");
         };
@@ -879,10 +889,11 @@ mod tests {
         )
         .expect("カタログを構築できること");
         let encoded = catalog
-            .encode()
+            .encode(shiguredo_moqt::msf::MsfCompression::None)
             .expect("publisher のカタログが encode に成功すること");
         let decoded =
-            MsfCatalogDocument::decode(&encoded).expect("encode したカタログを decode できること");
+            MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+                .expect("encode したカタログを decode できること");
         let MsfCatalogDocument::Full(full) = decoded else {
             panic!("publisher は Full カタログを送ること");
         };
@@ -1059,8 +1070,8 @@ mod tests {
             "namespace を '/' 区切りで出力すること: {text}"
         );
 
-        let decoded =
-            MsfCatalogDocument::decode(&json).expect("テストフィクスチャの前提条件を満たす");
+        let decoded = MsfCatalogDocument::decode(&json, shiguredo_moqt::msf::MsfCompression::None)
+            .expect("テストフィクスチャの前提条件を満たす");
         let MsfCatalogDocument::Full(catalog) = decoded else {
             panic!("publisher は Full カタログを組み立てること");
         };
@@ -1121,8 +1132,8 @@ mod tests {
         };
         let json = build_catalog_json(None, Some(&audio), TEST_SYNC, &[])
             .expect("変換した namespace でカタログを組み立てられること");
-        let decoded =
-            MsfCatalogDocument::decode(&json).expect("テストフィクスチャの前提条件を満たす");
+        let decoded = MsfCatalogDocument::decode(&json, shiguredo_moqt::msf::MsfCompression::None)
+            .expect("テストフィクスチャの前提条件を満たす");
         let MsfCatalogDocument::Full(catalog) = decoded else {
             panic!("publisher は Full カタログを組み立てること");
         };

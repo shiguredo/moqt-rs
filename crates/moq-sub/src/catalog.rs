@@ -30,12 +30,14 @@ pub(crate) struct CatalogObject {
 impl CatalogObject {
     /// Object の payload をカタログの 1 Object としてデコードする
     pub(crate) fn decode(location: Location, payload: &[u8]) -> Result<Self> {
-        let document = MsfCatalogDocument::decode(payload).map_err(|e| {
-            Error::Other(format!(
-                "failed to parse MSF catalog: {e}, raw={}",
-                String::from_utf8_lossy(payload),
-            ))
-        })?;
+        let document =
+            MsfCatalogDocument::decode(payload, shiguredo_moqt::msf::MsfCompression::None)
+                .map_err(|e| {
+                    Error::Other(format!(
+                        "failed to parse MSF catalog: {e}, raw={}",
+                        String::from_utf8_lossy(payload),
+                    ))
+                })?;
         Ok(Self { location, document })
     }
 }

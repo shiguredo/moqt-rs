@@ -10,7 +10,7 @@
 - Delta Update (`MsfDeltaUpdate`)
   - deltaUpdate (operation object の配列：`op` = "add" / "remove" / "clone" / "update") / generatedAt (必須)。delta update は他の Root Catalog フィールド (`version` / `isComplete` / `tracks` / `publishTracks` / `initDataList`) を持たず、未知フィールドは無視する
   - Full / Delta の判別は `MsfCatalogDocument` が行う
-  - Catalog の gzip 圧縮は `MsfCatalogDocument::encode_with_compression` / `decode_with_compression` に `MsfCompression` を渡して行う (§5.5 / §12.1.1)。`encode` / `decode` は非圧縮の便宜 API であり、signal に従う場合は `*_with_compression` を使う
+  - Catalog の encode / decode は `MsfCompression` を引数に取る。`Gzip` のときだけ gzip 圧縮・展開し、`None` では magic byte があっても自動展開しない (§5.5 / §12.1.1)
 - Delta 適用 (`MsfCatalog::apply_delta`)
   - clone の継承解決 (`MsfCloneTrack::into_track`) と add / remove / clone / update の順次適用
   - 途中で失敗した場合は適用済みの変更を逆順に巻き戻し、呼び出し前のカタログ (tracks / removedTracks / generatedAt) を保つ

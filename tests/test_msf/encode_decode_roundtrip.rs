@@ -42,9 +42,11 @@ fn full_catalog_with_all_fields() {
         removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
-    let encoded = doc.encode().expect("encode に成功すること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc);
 }
 
@@ -65,13 +67,15 @@ fn full_catalog_with_max_durations_absent() {
         removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
-    let encoded = doc.encode().expect("encode に成功すること");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
     assert!(!encoded.windows(16).any(|w| w == b"\"maxGopDuration\""));
     assert!(!encoded.windows(18).any(|w| w == b"\"maxGroupDuration\""));
     assert!(encoded.windows(12).any(|w| w == b"\"avgBitrate\""));
     assert!(encoded.windows(7).any(|w| w == b"\"width\""));
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc);
 }
 
@@ -102,9 +106,11 @@ fn full_catalog_with_init_data_list_and_buffers() {
             data: "AAEC".to_string(),
         }],
     });
-    let encoded = doc.encode().expect("encode に成功すること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc);
 }
 
@@ -125,9 +131,11 @@ fn full_catalog_with_media_timeline_track() {
         removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
-    let encoded = doc.encode().expect("encode に成功すること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc);
 }
 
@@ -195,9 +203,11 @@ fn delta_all_operations() {
             },
         ],
     });
-    let encoded = doc.encode().expect("encode に成功すること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc);
 }
 
@@ -212,7 +222,9 @@ fn is_complete_not_emitted_when_false() {
         removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
-    let encoded = doc.encode().expect("encode に成功すること");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
     assert!(!encoded.windows(10).any(|w| w == b"isComplete"));
 }
 
@@ -227,7 +239,9 @@ fn is_complete_emitted_when_true() {
         removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
-    let encoded = doc.encode().expect("encode に成功すること");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
     assert!(encoded.windows(10).any(|w| w == b"isComplete"));
 }
 
@@ -329,7 +343,7 @@ fn encode_full_catalog_with_track(track: MsfTrack) -> Vec<u8> {
         removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     })
-    .encode()
+    .encode(shiguredo_moqt::msf::MsfCompression::None)
     .expect("encode に成功すること")
 }
 
@@ -340,7 +354,7 @@ fn encode_delta_with_clone(clone: MsfCloneTrack) -> Vec<u8> {
             tracks: vec![clone],
         }],
     })
-    .encode()
+    .encode(shiguredo_moqt::msf::MsfCompression::None)
     .expect("encode に成功すること")
 }
 
@@ -412,9 +426,11 @@ fn clone_track_roundtrip_all_fields() {
             }],
         }],
     });
-    let encoded = doc.encode().expect("encode に成功すること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc);
 }
 
@@ -471,9 +487,11 @@ fn clone_track_roundtrip_with_target_latency() {
             }],
         }],
     });
-    let encoded = doc.encode().expect("encode に成功すること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc);
 }
 
@@ -530,9 +548,11 @@ fn clone_track_roundtrip_with_track_duration() {
             }],
         }],
     });
-    let encoded = doc.encode().expect("encode に成功すること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc);
 }
 
@@ -547,7 +567,9 @@ fn depends_empty_not_emitted() {
         removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
-    let encoded = doc.encode().expect("encode に成功すること");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
     assert!(!encoded.windows(7).any(|w| w == b"depends"));
 }
 
@@ -562,14 +584,16 @@ fn clone_depends_empty_some_roundtrip() {
             tracks: vec![clone],
         }],
     });
-    let encoded = doc.encode().expect("encode に成功すること");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
     let text = String::from_utf8(encoded.clone()).expect("テストフィクスチャの前提条件を満たす");
     assert!(
         text.contains("\"depends\""),
         "Some([]) はキー付きで出力されること"
     );
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(re_delta) = decoded else {
         panic!("Delta update がデコードされること");
     };
@@ -589,7 +613,9 @@ fn clone_depends_none_omitted() {
             tracks: vec![clone],
         }],
     });
-    let encoded = doc.encode().expect("encode に成功すること");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
     let text = String::from_utf8(encoded).expect("テストフィクスチャの前提条件を満たす");
     assert!(!text.contains("depends"));
 }
@@ -617,9 +643,11 @@ fn publish_tracks_roundtrip() {
         removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
-    let encoded = doc.encode().expect("encode に成功すること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc);
 }
 
@@ -635,10 +663,12 @@ fn publish_tracks_absent_not_emitted() {
         removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
-    let encoded = doc.encode().expect("encode に成功すること");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
     assert!(!encoded.windows(15).any(|w| w == b"\"publishTracks\""));
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc);
 }
 
@@ -647,7 +677,7 @@ fn publish_tracks_non_array_rejected() {
     // publishTracks が配列でない場合は reject されること
     let json = br#"{"version":"draft-02","tracks":[],"publishTracks":{}}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -656,11 +686,14 @@ fn publish_tracks_non_array_rejected() {
 fn publish_tracks_empty_array_roundtrip() {
     // 明示の空配列は受理され、再 encode でキーが消えること
     let json = br#"{"version":"draft-02","tracks":[],"publishTracks":[]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
-    let encoded = doc.encode().expect("encode に成功すること");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
     assert!(!encoded.windows(15).any(|w| w == b"\"publishTracks\""));
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc);
 }
 
@@ -669,7 +702,7 @@ fn publish_tracks_duplicate_with_tracks_rejected() {
     // tracks と publishTracks の間の (namespace, name) 重複は reject されること
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true}],"publishTracks":[{"name":"t","packaging":"moqlog","isLive":true}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -693,7 +726,9 @@ fn publish_tracks_key_order() {
             data: "AAEC".to_string(),
         }],
     });
-    let encoded = doc.encode().expect("encode に成功すること");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
     let text = String::from_utf8(encoded).expect("テストフィクスチャの前提条件を満たす");
     let tracks_pos = text
         .find("\"tracks\"")
@@ -724,9 +759,11 @@ fn connection_uri_roundtrip() {
         removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
-    let encoded = doc.encode().expect("encode に成功すること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc);
 }
 
@@ -734,7 +771,8 @@ fn connection_uri_roundtrip() {
 fn publish_tracks_unknown_fields_ignored() {
     // 未知フィールドは無視され受理されること (§5 の MUST ignore)
     let json = br#"{"version":"draft-02","tracks":[],"publishTracks":[{"name":"6","packaging":"moqlog","isLive":true,"unknownFutureKey":"x","role":"log"}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -746,7 +784,7 @@ fn publish_tracks_unknown_fields_ignored() {
 fn group_validation_separated_between_tracks_and_publish_tracks() {
     // tracks と publishTracks で同一 group 番号・異なる値でも受理されること (分離の意図固定)
     let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":100}],"publishTracks":[{"name":"m","packaging":"moqlog","isLive":true,"renderGroup":1,"targetLatency":200}]}"#;
-    assert!(MsfCatalogDocument::decode(json).is_ok());
+    assert!(MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_ok());
 }
 
 #[test]
@@ -754,7 +792,7 @@ fn group_validation_inside_publish_tracks_rejected() {
     // publishTracks 内部の同一 group 不一致は reject されること
     let json = br#"{"version":"draft-02","tracks":[],"publishTracks":[{"name":"a","packaging":"moqlog","isLive":true,"renderGroup":1,"targetLatency":100},{"name":"b","packaging":"moqlog","isLive":true,"renderGroup":1,"targetLatency":200}]}"#;
     assert!(matches!(
-        MsfCatalogDocument::decode(json),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }
@@ -778,9 +816,11 @@ fn encryption_signaling_roundtrip() {
         removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
-    let encoded = doc.encode().expect("encode に成功すること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc);
 }
 
@@ -788,7 +828,8 @@ fn encryption_signaling_roundtrip() {
 fn encryption_clone_partial_accepted() {
     // clone の継承時 (欠如あり) は reject されないこと (親未知のため断定不可)
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","encryptionScheme":"moq-secure-objects"}]}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(delta) = doc else {
         panic!("Delta update がデコードされること");
     };
@@ -806,7 +847,8 @@ fn encryption_clone_partial_accepted() {
 fn encryption_orphan_field_accepted() {
     // encryptionScheme なしの cipherSuite 単独は受理され roundtrip すること (片方向 MUST のみ)
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"cipherSuite":"aes-128-gcm-sha256"}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -815,10 +857,10 @@ fn encryption_orphan_field_accepted() {
         Some("aes-128-gcm-sha256")
     );
     let encoded = MsfCatalogDocument::Full(cat)
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("encode に成功すること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(re_cat) = decoded else {
         panic!("Full catalog がデコードされること");
     };
@@ -832,7 +874,8 @@ fn encryption_orphan_field_accepted() {
 fn encryption_custom_scheme_without_cipher_suite_accepted() {
     // draft-ietf-moq-msf-02 §5.2.39: cipherSuite は moq-secure-objects のときだけ必須
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"encryptionScheme":"com.example.custom"}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("custom scheme は受理されること");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("custom scheme は受理されること");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -842,7 +885,7 @@ fn encryption_custom_scheme_without_cipher_suite_accepted() {
     );
     assert_eq!(cat.tracks[0].cipher_suite, None);
     let encoded = MsfCatalogDocument::Full(cat)
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("cipherSuite なしの custom scheme を encode できること");
     assert!(
         !String::from_utf8(encoded)
@@ -869,7 +912,10 @@ fn encryption_secure_objects_incomplete_rejected() {
         );
         assert!(
             matches!(
-                MsfCatalogDocument::decode(json.as_bytes()),
+                MsfCatalogDocument::decode(
+                    json.as_bytes(),
+                    shiguredo_moqt::msf::MsfCompression::None
+                ),
                 Err(MessageError::InvalidCatalog(_))
             ),
             "{missing} の欠如で reject されること"
@@ -881,7 +927,8 @@ fn encryption_secure_objects_incomplete_rejected() {
 fn encryption_custom_scheme_accepted() {
     // 未知 scheme は任意文字列として受理されること (custom 許容。 RDNN 検証なし)
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"encryptionScheme":"com.example.custom","cipherSuite":"custom-suite"}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -890,10 +937,10 @@ fn encryption_custom_scheme_accepted() {
         Some("com.example.custom")
     );
     let encoded = MsfCatalogDocument::Full(cat)
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("encode に成功すること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(re_cat) = decoded else {
         panic!("Full catalog がデコードされること");
     };
@@ -912,7 +959,8 @@ fn auth_info_roundtrip() {
     // §5.6.15 を適用した例 (version を draft-02 化、`%...%` は文字列として保持) が
     // decode / encode で roundtrip すること。両エントリとも文字列値とする
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"%cat-token%","privacy-pass":"%pp-token%"}}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -930,10 +978,10 @@ fn auth_info_roundtrip() {
         b"\"%pp-token%\"".as_slice()
     );
     let encoded = MsfCatalogDocument::Full(cat)
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("encode に成功すること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(re_cat) = decoded else {
         panic!("Full catalog がデコードされること");
     };
@@ -955,7 +1003,8 @@ fn auth_info_roundtrip() {
 fn auth_info_object_value_roundtrip() {
     // object 値も生 JSON として保持され roundtrip すること
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":{"token":"%cat-token%"}}}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -968,10 +1017,10 @@ fn auth_info_object_value_roundtrip() {
         b"{\"token\":\"%cat-token%\"}".as_slice()
     );
     let encoded = MsfCatalogDocument::Full(cat)
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("encode に成功すること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(re_cat) = decoded else {
         panic!("Full catalog がデコードされること");
     };
@@ -1001,7 +1050,7 @@ fn auth_info_non_object_rejected() {
     ] {
         assert!(
             matches!(
-                MsfCatalogDocument::decode(json),
+                MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
                 Err(MessageError::InvalidCatalog(_))
             ),
             "非 object の authInfo は reject されること"
@@ -1013,16 +1062,17 @@ fn auth_info_non_object_rejected() {
 fn auth_info_null_value_accepted() {
     // 値 null も受理され roundtrip すること (値位置の型は問わない)
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":null}}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
     assert_eq!(find_auth_value_track(&cat.tracks, "cat"), b"null");
     let encoded = MsfCatalogDocument::Full(cat)
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("encode に成功すること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(re_cat) = decoded else {
         panic!("Full catalog がデコードされること");
     };
@@ -1044,16 +1094,17 @@ fn find_auth_value_track<'a>(tracks: &'a [MsfTrack], scheme: &str) -> &'a [u8] {
 fn auth_info_empty_object_accepted() {
     // 空 object は空 Vec として受理され roundtrip すること
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{}}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
     assert_eq!(cat.tracks[0].auth_info, Some(Vec::new()));
     let encoded = MsfCatalogDocument::Full(cat)
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("encode に成功すること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(re_cat) = decoded else {
         panic!("Full catalog がデコードされること");
     };
@@ -1064,7 +1115,8 @@ fn auth_info_empty_object_accepted() {
 fn auth_info_duplicate_scheme_kept_in_order() {
     // 重複 scheme は順序どおりに保持されること
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"a","cat":"b"}}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -1076,10 +1128,10 @@ fn auth_info_duplicate_scheme_kept_in_order() {
     assert_eq!(entries[0].value_raw.as_slice(), b"\"a\"".as_slice());
     assert_eq!(entries[1].value_raw.as_slice(), b"\"b\"".as_slice());
     let encoded = MsfCatalogDocument::Full(cat)
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("encode に成功すること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(re_cat) = decoded else {
         panic!("Full catalog がデコードされること");
     };
@@ -1096,7 +1148,8 @@ fn auth_info_duplicate_scheme_kept_in_order() {
 fn auth_info_clone_roundtrip() {
     // clone 経路でも authInfo が roundtrip すること
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","authInfo":{"cat":"%cat-token%"}}]}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(delta) = doc else {
         panic!("Delta update がデコードされること");
     };
@@ -1106,9 +1159,11 @@ fn auth_info_clone_roundtrip() {
     assert_eq!(find_auth_value(tracks, "cat"), b"\"%cat-token%\"");
     // clone 経路の encode 往復でも値が保たれること
     let doc = MsfCatalogDocument::Delta(delta);
-    let encoded = doc.encode().expect("encode に成功すること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(re_delta) = decoded else {
         panic!("Delta update がデコードされること");
     };
@@ -1142,7 +1197,8 @@ fn accessibility_roundtrip() {
     // §5.6.11 と §5.6.12 の記述子を併せた合成例 (version のみ draft-02 化) が decode / encode で
     // roundtrip すること。608 と 708 の両記述子を含む
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[{"scheme":"urn:scte:dash:cc:cea-608:2015","value":"CC1=eng;CC3=spa"},{"scheme":"urn:scte:dash:cc:cea-708:2015","value":"1=lang:eng;2=lang:spa;3=lang:fra"}]}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
@@ -1161,10 +1217,10 @@ fn accessibility_roundtrip() {
         "1=lang:eng;2=lang:spa;3=lang:fra"
     );
     let encoded = MsfCatalogDocument::Full(cat)
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("encode に成功すること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(re_cat) = decoded else {
         panic!("Full catalog がデコードされること");
     };
@@ -1188,7 +1244,8 @@ fn accessibility_roundtrip() {
 fn accessibility_clone_roundtrip() {
     // clone 経路でも accessibility が roundtrip すること
     let json = br#"{"generatedAt":1,"deltaUpdate":[{"op":"clone","tracks":[{"name":"c","parentName":"p","accessibility":[{"scheme":"urn:scte:dash:cc:cea-608:2015","value":"CC1=eng"}]}]}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(delta) = doc else {
         panic!("Delta update がデコードされること");
     };
@@ -1203,10 +1260,10 @@ fn accessibility_clone_roundtrip() {
     assert_eq!(descs[0].scheme, "urn:scte:dash:cc:cea-608:2015");
     assert_eq!(descs[0].value, "CC1=eng");
     let encoded = MsfCatalogDocument::Delta(delta)
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("encode に成功すること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(re_delta) = decoded else {
         panic!("Delta update がデコードされること");
     };
@@ -1277,12 +1334,14 @@ fn accessibility_empty_some_roundtrip() {
             tracks: vec![track],
         }],
     });
-    let encoded = doc.encode().expect("encode に成功すること");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
     let text = String::from_utf8(encoded.clone()).expect("テストフィクスチャの前提条件を満たす");
     // Some([]) はキー付きで出力されること (書式は実装定義のためキー存在のみ見る)
     assert!(text.contains("\"accessibility\""));
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Delta(re_delta) = decoded else {
         panic!("Delta update がデコードされること");
     };
@@ -1346,7 +1405,9 @@ fn accessibility_clone_none_omitted() {
             }],
         }],
     });
-    let encoded = doc.encode().expect("encode に成功すること");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode に成功すること");
     let text = String::from_utf8(encoded.clone()).expect("テストフィクスチャの前提条件を満たす");
     assert!(!text.contains("accessibility"));
 }
@@ -1355,13 +1416,14 @@ fn accessibility_clone_none_omitted() {
 fn accessibility_full_empty_normalized() {
     // Full の明示 [] は受理され、再 encode で省略されること
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"accessibility":[]}]}"#;
-    let doc = MsfCatalogDocument::decode(json).expect("テストフィクスチャの前提条件を満たす");
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     let MsfCatalogDocument::Full(cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
     assert_eq!(cat.tracks[0].accessibility, Vec::new());
     let encoded = MsfCatalogDocument::Full(cat)
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("encode に成功すること");
     let text = String::from_utf8(encoded.clone()).expect("テストフィクスチャの前提条件を満たす");
     assert!(!text.contains("accessibility"));
@@ -1382,7 +1444,7 @@ fn accessibility_missing_field_rejected() {
     ] {
         assert!(
             matches!(
-                MsfCatalogDocument::decode(json),
+                MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
                 Err(MessageError::InvalidCatalog(_))
             ),
             "記述子内の必須欠如は reject されること"
@@ -1404,15 +1466,17 @@ fn catalog_namespace_v02_roundtrip() {
         removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
-    let encoded = doc.encode().expect("v02 の namespace を encode できること");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("v02 の namespace を encode できること");
     let text = String::from_utf8(encoded.clone()).expect("JSON は UTF-8 であること");
     assert!(
         text.contains(r#""namespace":"customer/livestream/123""#),
         "JSON に '/' 区切りの namespace を出力すること: {text}"
     );
 
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc, "decode / encode が往復すること");
 }
 
@@ -1434,7 +1498,10 @@ fn encode_rejects_invalid_catalog_names() {
         init_data_list: Vec::new(),
     });
     assert!(
-        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        matches!(
+            doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+            Err(MessageError::InvalidCatalog(_))
+        ),
         "空の track name を encode しないこと"
     );
 
@@ -1450,7 +1517,10 @@ fn encode_rejects_invalid_catalog_names() {
         init_data_list: Vec::new(),
     });
     assert!(
-        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        matches!(
+            doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+            Err(MessageError::InvalidCatalog(_))
+        ),
         "NUL を含む track name を encode しないこと"
     );
 
@@ -1467,7 +1537,10 @@ fn encode_rejects_invalid_catalog_names() {
         init_data_list: Vec::new(),
     });
     assert!(
-        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        matches!(
+            doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+            Err(MessageError::InvalidCatalog(_))
+        ),
         "不正な namespace を encode しないこと"
     );
 
@@ -1484,7 +1557,10 @@ fn encode_rejects_invalid_catalog_names() {
         init_data_list: Vec::new(),
     });
     assert!(
-        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        matches!(
+            doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+            Err(MessageError::InvalidCatalog(_))
+        ),
         "NUL を含む namespace を encode しないこと"
     );
 
@@ -1497,7 +1573,10 @@ fn encode_rejects_invalid_catalog_names() {
         }],
     });
     assert!(
-        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        matches!(
+            doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+            Err(MessageError::InvalidCatalog(_))
+        ),
         "空の parentName を encode しないこと"
     );
 
@@ -1509,7 +1588,10 @@ fn encode_rejects_invalid_catalog_names() {
         }],
     });
     assert!(
-        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        matches!(
+            doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+            Err(MessageError::InvalidCatalog(_))
+        ),
         "空の removeTracks name を encode しないこと"
     );
 }
@@ -1530,7 +1612,10 @@ fn encode_rejects_invalid_clone_and_remove_names() {
             }],
         });
         assert!(
-            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            matches!(
+                doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+                Err(MessageError::InvalidCatalog(_))
+            ),
             "clone の不正な name を encode しないこと"
         );
     }
@@ -1552,7 +1637,10 @@ fn encode_rejects_invalid_clone_and_remove_names() {
             }],
         });
         assert!(
-            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            matches!(
+                doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+                Err(MessageError::InvalidCatalog(_))
+            ),
             "clone の不正な namespace を encode しないこと"
         );
     }
@@ -1568,7 +1656,10 @@ fn encode_rejects_invalid_clone_and_remove_names() {
             }],
         });
         assert!(
-            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            matches!(
+                doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+                Err(MessageError::InvalidCatalog(_))
+            ),
             "clone の不正な depends 要素を encode しないこと"
         );
     }
@@ -1588,7 +1679,10 @@ fn encode_rejects_invalid_clone_and_remove_names() {
             }],
         });
         assert!(
-            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            matches!(
+                doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+                Err(MessageError::InvalidCatalog(_))
+            ),
             "remove の不正な name / namespace を encode しないこと"
         );
     }
@@ -1607,7 +1701,10 @@ fn encode_rejects_invalid_clone_and_remove_names() {
             init_data_list: Vec::new(),
         });
         assert!(
-            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            matches!(
+                doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+                Err(MessageError::InvalidCatalog(_))
+            ),
             "publishTracks の不正な name / namespace を encode しないこと"
         );
     }
@@ -1626,7 +1723,10 @@ fn encode_rejects_invalid_clone_and_remove_names() {
             init_data_list: Vec::new(),
         });
         assert!(
-            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            matches!(
+                doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+                Err(MessageError::InvalidCatalog(_))
+            ),
             "full track の不正な depends 要素を encode しないこと"
         );
     }
@@ -1650,7 +1750,10 @@ fn encode_rejects_overlong_delta_full_track_names() {
         }],
     });
     assert!(
-        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        matches!(
+            doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+            Err(MessageError::InvalidCatalog(_))
+        ),
         "clone の Full Track Name 4,097 バイトを encode しないこと"
     );
 
@@ -1664,7 +1767,10 @@ fn encode_rejects_overlong_delta_full_track_names() {
         }],
     });
     assert!(
-        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        matches!(
+            doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+            Err(MessageError::InvalidCatalog(_))
+        ),
         "clone の親 Full Track Name 4,097 バイトを encode しないこと"
     );
 
@@ -1677,7 +1783,10 @@ fn encode_rejects_overlong_delta_full_track_names() {
         }],
     });
     assert!(
-        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        matches!(
+            doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+            Err(MessageError::InvalidCatalog(_))
+        ),
         "clone の parentName 4,097 バイトを encode しないこと"
     );
 
@@ -1692,7 +1801,10 @@ fn encode_rejects_overlong_delta_full_track_names() {
         }],
     });
     assert!(
-        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        matches!(
+            doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+            Err(MessageError::InvalidCatalog(_))
+        ),
         "clone が親 namespace を継承した Full Track Name 4,097 バイトを encode しないこと"
     );
 
@@ -1706,7 +1818,10 @@ fn encode_rejects_overlong_delta_full_track_names() {
         }],
     });
     assert!(
-        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        matches!(
+            doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+            Err(MessageError::InvalidCatalog(_))
+        ),
         "delta add の Full Track Name 4,097 バイトを encode しないこと"
     );
 
@@ -1720,7 +1835,10 @@ fn encode_rejects_overlong_delta_full_track_names() {
         }],
     });
     assert!(
-        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        matches!(
+            doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+            Err(MessageError::InvalidCatalog(_))
+        ),
         "remove の Full Track Name 4,097 バイトを encode しないこと"
     );
 }
@@ -1799,7 +1917,8 @@ fn encode_accepts_exact_full_track_name_boundaries() {
         }],
     });
     assert!(
-        doc.encode().is_ok(),
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None)
+            .is_ok(),
         "add の name 単体 4,096 バイトを encode できること"
     );
 
@@ -1811,7 +1930,8 @@ fn encode_accepts_exact_full_track_name_boundaries() {
         }],
     });
     assert!(
-        doc.encode().is_ok(),
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None)
+            .is_ok(),
         "clone の name 単体 4,096 バイトを encode できること"
     );
 
@@ -1823,7 +1943,8 @@ fn encode_accepts_exact_full_track_name_boundaries() {
         }],
     });
     assert!(
-        doc.encode().is_ok(),
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None)
+            .is_ok(),
         "remove の name 単体 4,096 バイトを encode できること"
     );
 }
@@ -1841,7 +1962,10 @@ fn encode_rejects_clone_parent_full_track_name_overflow() {
         }],
     });
     assert!(
-        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        matches!(
+            doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+            Err(MessageError::InvalidCatalog(_))
+        ),
         "親の Full Track Name 4,097 バイトを encode しないこと"
     );
 }
@@ -1860,15 +1984,15 @@ fn catalog_packaging_roundtrip() {
         init_data_list: Vec::new(),
     });
     let encoded = doc
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("catalog packaging を encode できること");
     let text = String::from_utf8(encoded.clone()).expect("JSON は UTF-8 であること");
     assert!(
         text.contains(r#""packaging":"catalog""#),
         "JSON に packaging=catalog を出力すること: {text}"
     );
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc, "decode / encode が往復すること");
 }
 
@@ -1905,10 +2029,10 @@ fn table_6_required_fields_roundtrip() {
         init_data_list: Vec::new(),
     });
     let encoded = doc
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("Table 6 の必須フィールドを encode できること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc, "decode / encode が往復すること");
 }
 
@@ -1927,15 +2051,15 @@ fn packaging_metadata_roundtrip() {
         init_data_list: Vec::new(),
     });
     let encoded = doc
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("packagingMetadata を encode できること");
     let text = String::from_utf8(encoded.clone()).expect("JSON は UTF-8 であること");
     assert!(
         text.contains(r#""packagingMetadata":"streamMapping=object;key=value""#),
         "JSON に packagingMetadata を出力すること: {text}"
     );
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc, "decode / encode が往復すること");
 }
 
@@ -1955,7 +2079,10 @@ fn encode_rejects_invalid_packaging_metadata() {
             init_data_list: Vec::new(),
         });
         assert!(
-            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            matches!(
+                doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+                Err(MessageError::InvalidCatalog(_))
+            ),
             "不正な packagingMetadata {metadata:?} を encode しないこと"
         );
     }
@@ -1969,7 +2096,10 @@ fn encode_rejects_invalid_packaging_metadata() {
         }],
     });
     assert!(
-        matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+        matches!(
+            doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+            Err(MessageError::InvalidCatalog(_))
+        ),
         "clone の不正な packagingMetadata を encode しないこと"
     );
 }
@@ -1988,7 +2118,10 @@ fn encode_rejects_unresolved_depends() {
         removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
-    assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+    assert!(matches!(
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
 }
 
 /// media timeline の renderGroup 参照規則違反を encode しないこと
@@ -2012,7 +2145,10 @@ fn encode_rejects_media_timeline_naming_all_render_group_tracks() {
         removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
-    assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+    assert!(matches!(
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
 }
 
 /// accessibleWindowTime が encode / decode を往復すること
@@ -2031,15 +2167,15 @@ fn accessible_window_time_roundtrip() {
         init_data_list: Vec::new(),
     });
     let encoded = doc
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("accessibleWindowTime を encode できること");
     let text = String::from_utf8(encoded.clone()).expect("JSON は UTF-8 であること");
     assert!(
         text.contains(r#""accessibleWindowTime":60000"#),
         "JSON に accessibleWindowTime を出力すること: {text}"
     );
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc, "decode / encode が往復すること");
 }
 
@@ -2061,7 +2197,10 @@ fn encode_rejects_alt_group_accessible_window_time_mismatch() {
         removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
-    assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+    assert!(matches!(
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
 }
 
 /// track-property / object-property の initData が encode / decode を往復すること
@@ -2090,10 +2229,10 @@ fn init_data_property_types_roundtrip() {
         ],
     });
     let encoded = doc
-        .encode()
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
         .expect("property type の initData を encode できること");
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc, "decode / encode が往復すること");
 }
 
@@ -2115,7 +2254,10 @@ fn encode_rejects_invalid_init_data_property_type() {
             }],
         });
         assert!(
-            matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))),
+            matches!(
+                doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+                Err(MessageError::InvalidCatalog(_))
+            ),
             "不正な hex {data:?} を encode しないこと"
         );
     }
@@ -2136,14 +2278,16 @@ fn delta_update_roundtrip() {
             tracks: vec![MsfUpdateTrack { track: update }],
         }],
     });
-    let encoded = doc.encode().expect("update 操作を encode できること");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("update 操作を encode できること");
     let text = String::from_utf8(encoded.clone()).expect("JSON は UTF-8 であること");
     assert!(
         text.contains(r#""op":"update""#),
         "op=update を出力すること: {text}"
     );
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc, "decode / encode が往復すること");
 }
 
@@ -2158,7 +2302,10 @@ fn encode_rejects_invalid_update() {
             tracks: vec![MsfUpdateTrack { track: mismatch }],
         }],
     });
-    assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+    assert!(matches!(
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
 
     let mut namespace_mismatch = MsfCloneTrack::new("v".to_string(), "v".to_string());
     namespace_mismatch.parent_namespace = Some("a".to_string());
@@ -2171,7 +2318,10 @@ fn encode_rejects_invalid_update() {
             }],
         }],
     });
-    assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+    assert!(matches!(
+        doc.encode(shiguredo_moqt::msf::MsfCompression::None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
 }
 
 /// keyframeSpacing が encode / decode を往復し、altGroup だけのカタログも受理されること
@@ -2189,20 +2339,22 @@ fn keyframe_spacing_roundtrip() {
         removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
-    let encoded = doc.encode().expect("keyframeSpacing を encode できること");
+    let encoded = doc
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("keyframeSpacing を encode できること");
     let text = String::from_utf8(encoded.clone()).expect("JSON は UTF-8 であること");
     assert!(
         text.contains(r#""keyframeSpacing":30"#),
         "JSON に keyframeSpacing を出力すること: {text}"
     );
-    let decoded =
-        MsfCatalogDocument::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, doc, "decode / encode が往復すること");
 
     // altGroup だけを持ち keyframeSpacing を持たない既存カタログは引き続き受理する
     let json = br#"{"version":"draft-02","tracks":[{"name":"v","packaging":"loc","isLive":true,"altGroup":1}]}"#;
     assert!(
-        MsfCatalogDocument::decode(json).is_ok(),
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_ok(),
         "keyframeSpacing は任意であり、共通検証で要求しないこと"
     );
 }
