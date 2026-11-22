@@ -1194,7 +1194,7 @@ fn spawn_stream_task(
     permit: tokio::sync::OwnedSemaphorePermit,
     stream_slots: &std::sync::Arc<tokio::sync::Semaphore>,
     stream_num: u64,
-    track_map: &HashMap<u64, TrackKind>,
+    track_map: HashMap<u64, TrackKind>,
     fetch_targets: &SharedFetchTargets,
     data_plane: &DataPlaneHandle,
     frame_tx: &std::sync::mpsc::Sender<DecodedVideoFrame>,
@@ -1220,7 +1220,6 @@ fn spawn_stream_task(
     playback: bool,
     recorder: Option<&RecorderSender>,
 ) {
-    let track_map = track_map.clone();
     // 対応表は side session の再発行で書き換わるため、参照ではなく Arc を clone して
     // 配送先の判定をヘッダを読んだ時点の内容で行う
     let fetch_targets = std::sync::Arc::clone(fetch_targets);
@@ -3344,7 +3343,7 @@ async fn run_side_session(
                 permit,
                 &shared.stream_slots,
                 stream_num,
-                &track_map,
+                track_map.clone(),
                 &fetch_targets,
                 &data_plane,
                 &shared.frame_tx,
@@ -4597,7 +4596,7 @@ pub async fn run(
                 permit,
                 &stream_slots,
                 total_streams,
-                &track_map_snapshot,
+                track_map_snapshot,
                 &fetch_targets,
                 &data_plane,
                 &frame_tx,
@@ -7982,14 +7981,18 @@ fn extract_video_info(
         .codec
         .clone()
         .ok_or_else(|| Error::Other("catalog video track missing codec".to_string()))?;
-    let width = track
-        .width
-        .ok_or_else(|| Error::Other("catalog track missing width".to_string()))?
-        as u32;
-    let height = track
-        .height
-        .ok_or_else(|| Error::Other("catalog track missing height".to_string()))?
-        as u32;
+    let width = u32::try_from(
+        track
+            .width
+            .ok_or_else(|| Error::Other("catalog track missing width".to_string()))?,
+    )
+    .map_err(|_| Error::Other("catalog track width is out of u32 range".to_string()))?;
+    let height = u32::try_from(
+        track
+            .height
+            .ok_or_else(|| Error::Other("catalog track missing height".to_string()))?,
+    )
+    .map_err(|_| Error::Other("catalog track height is out of u32 range".to_string()))?;
     let fps = track.framerate.map(|f| f as u32).unwrap_or(30);
     // draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) / §5.2.5 (Packaging
     // metadata): streamMapping がない場合は group。不正値はカタログ不正として扱う
@@ -8018,10 +8021,12 @@ fn extract_audio_info(
         .codec
         .clone()
         .ok_or_else(|| Error::Other("catalog audio track missing codec".to_string()))?;
-    let samplerate = track
-        .samplerate
-        .ok_or_else(|| Error::Other("catalog audio track missing samplerate".to_string()))?
-        as u32;
+    let samplerate = u32::try_from(
+        track
+            .samplerate
+            .ok_or_else(|| Error::Other("catalog audio track missing samplerate".to_string()))?,
+    )
+    .map_err(|_| Error::Other("catalog track samplerate is out of u32 range".to_string()))?;
     let channel_config = track
         .channel_config
         .clone()
@@ -11466,6 +11471,36 @@ mod tests {
             info.namespace,
             test_namespace("moq-example/video"),
             "宣言された namespace を使うこと"
+        );
+    }
+
+    /// 映像の width / height が u32 の範囲外ならエラーにすること
+    #[test]
+    fn video_track_info_rejects_out_of_range_dimensions() {
+        let mut track = track_with_namespace("av01.0.04M.08", None);
+        track.width = Some(u64::from(u32::MAX) + 1);
+        track.height = Some(1080);
+        assert!(
+            extract_video_info(&track, &test_namespace("moq-example")).is_err(),
+            "width の切り捨ては行わないこと"
+        );
+        track.width = Some(1920);
+        track.height = Some(u64::from(u32::MAX) + 1);
+        assert!(
+            extract_video_info(&track, &test_namespace("moq-example")).is_err(),
+            "height の切り捨ては行わないこと"
+        );
+    }
+
+    /// 音声の samplerate が u32 の範囲外ならエラーにすること
+    #[test]
+    fn audio_track_info_rejects_out_of_range_samplerate() {
+        let mut track = track_with_namespace("opus", None);
+        track.channel_config = Some("2".to_string());
+        track.samplerate = Some(u64::from(u32::MAX) + 1);
+        assert!(
+            extract_audio_info(&track, &test_namespace("moq-example")).is_err(),
+            "samplerate の切り捨ては行わないこと"
         );
     }
 

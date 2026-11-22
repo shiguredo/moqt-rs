@@ -234,10 +234,11 @@ impl MediaCache {
         properties: &LocProperties,
         payload: &[u8],
     ) -> Result<()> {
-        self.evict_expired();
-
-        // Properties Length varint を含む生バイト列 (Properties が空でも長さ 0 を含む)
+        // Properties Length varint を含む生バイト列 (Properties が空でも長さ 0 を含む)。
+        // encode に失敗した場合はキャッシュを変えないよう、evict より先に検証する。
         let properties_data = properties.encode()?;
+
+        self.evict_expired();
 
         let now = Instant::now();
         let track = self
@@ -460,6 +461,35 @@ mod tests {
             value: LocPropertyValue::VarInt(timestamp),
         });
         props
+    }
+
+    /// 期限切れの Group があっても、Properties のエンコード失敗で evict しないこと
+    #[test]
+    fn insert_encoding_failure_does_not_evict_expired_groups() {
+        // TTL 0 では既存 Group が期限切れになる
+        let mut cache = MediaCache::new(0);
+        insert(&mut cache, loc(1, 0), b"a");
+
+        let mut props = LocProperties::new();
+        props.push(LocProperty {
+            prop_id: PROP_TIMESTAMP,
+            value: LocPropertyValue::VarInt(1),
+        });
+        props.push(LocProperty {
+            prop_id: PROP_TIMESTAMP,
+            value: LocPropertyValue::VarInt(2),
+        });
+        assert!(
+            cache
+                .insert(&namespace(), TRACK, loc(2, 0), &props, b"c")
+                .is_err(),
+            "不正な Properties はエラーにすること"
+        );
+        assert_eq!(
+            cache.largest(&namespace(), TRACK),
+            Some(loc(1, 0)),
+            "エラー時は期限切れ Group の evict も行わないこと"
+        );
     }
 
     /// Object を保持する (失敗はテストの失敗として扱う)
@@ -780,7 +810,7 @@ mod tests {
 
     /// LOC Properties のエンコードに失敗した場合は保持を変えないこと
     ///
-    /// `insert` は期限切れの評価のあとにエンコードするため、エラー時に保持だけが
+    /// `insert` はエンコードしてから期限切れを評価するため、エラー時に保持だけが
     /// 中途半端に変わることはない (`# Errors` の契約)。
     #[test]
     fn insert_rejects_invalid_properties_without_changing_the_cache() {

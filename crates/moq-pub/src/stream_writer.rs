@@ -13,7 +13,7 @@ use shiguredo_moqt::{
     stream::subgroup::SubgroupObject,
 };
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use tokio_moq::moqt_client::{DataPlaneHandle, ObjectFilterOutcome};
 use tokio_moq::transport;
 
@@ -115,16 +115,20 @@ impl SubgroupObjectState {
     ///
     /// 省略の理由 (PAUSED=1 / Location Filter / Range Filter) は区別しない。
     /// 呼び出し側は Object ID の昇順で呼ぶため、保持するのは最後の Location だけでよい。
-    fn on_skip(&mut self) {
+    fn on_skip(&mut self) -> Result<()> {
         self.max_skipped_location = Some(Location {
             group_id: self.group_id,
             object_id: self.next_object_id,
         });
-        self.next_object_id += 1;
+        self.next_object_id = self
+            .next_object_id
+            .checked_add(1)
+            .ok_or_else(|| Error::Other("Object ID space is exhausted".to_string()))?;
+        Ok(())
     }
 
     /// Pass した Object を記録し、最初の Pass なら送信すべき `first_object` を返す
-    fn on_pass(&mut self) -> Option<bool> {
+    fn on_pass(&mut self) -> Result<Option<bool>> {
         let object_id = self.next_object_id;
         let first_object = if self.header_sent {
             None
@@ -133,8 +137,10 @@ impl SubgroupObjectState {
             Some(object_id == self.first_object_id)
         };
         self.prev_object_id = Some(object_id);
-        self.next_object_id = object_id + 1;
-        first_object
+        self.next_object_id = object_id
+            .checked_add(1)
+            .ok_or_else(|| Error::Other("Object ID space is exhausted".to_string()))?;
+        Ok(first_object)
     }
 
     /// Subgroup の終端方法を決める
@@ -335,12 +341,12 @@ impl SubgroupWriter {
                 self.stream_id.0,
                 object_id,
             );
-            self.object_state.on_skip();
+            self.object_state.on_skip()?;
             return Ok(ObjectFilterOutcome::Skip);
         }
 
         // 最初の Pass まで SUBGROUP_HEADER を遅延し、FIRST_OBJECT bit を確定させる
-        if let Some(first_object) = self.object_state.on_pass() {
+        if let Some(first_object) = self.object_state.on_pass()? {
             let header = self.build_header(first_object);
             let encoded = header.encode();
             self.stream.send(Bytes::from(encoded)).await?;
@@ -509,8 +515,11 @@ mod tests {
         let mut state = state_unfiltered();
         assert_eq!(state.current_object_id(), 0);
         assert_eq!(state.current_object_id_delta(), 0);
-        assert_eq!(state.on_pass(), Some(true));
-        assert_eq!(state.on_pass(), None);
+        assert_eq!(
+            state.on_pass().expect("Object ID を進められること"),
+            Some(true)
+        );
+        assert_eq!(state.on_pass().expect("Object ID を進められること"), None);
         assert_eq!(state.termination(None), SubgroupTermination::Fin);
     }
 
@@ -518,12 +527,15 @@ mod tests {
     #[test]
     fn first_object_false_when_object_zero_is_skipped() {
         let mut state = state_unfiltered();
-        state.on_skip();
+        state.on_skip().expect("Object ID を進められること");
         assert_eq!(state.current_object_id(), 1);
         // 最初の Pass は絶対 ID が delta になる
         assert_eq!(state.current_object_id_delta(), 1);
-        assert_eq!(state.on_pass(), Some(false));
-        assert_eq!(state.on_pass(), None);
+        assert_eq!(
+            state.on_pass().expect("Object ID を進められること"),
+            Some(false)
+        );
+        assert_eq!(state.on_pass().expect("Object ID を進められること"), None);
         // Start Location が無い購読では Object 0 も配送対象なので reset 側になる
         assert_eq!(state.termination(None), SubgroupTermination::Reset);
     }
@@ -532,20 +544,26 @@ mod tests {
     #[test]
     fn object_id_delta_is_zero_for_consecutive_passes() {
         let mut state = state_unfiltered();
-        assert_eq!(state.on_pass(), Some(true));
+        assert_eq!(
+            state.on_pass().expect("Object ID を進められること"),
+            Some(true)
+        );
         assert_eq!(state.current_object_id_delta(), 0);
-        assert_eq!(state.on_pass(), None);
+        assert_eq!(state.on_pass().expect("Object ID を進められること"), None);
     }
 
     // Pass の間に Skip が挟まっても delta は直前の Pass 済み ID 基準になる
     #[test]
     fn object_id_delta_counts_skipped_gap() {
         let mut state = state_unfiltered();
-        assert_eq!(state.on_pass(), Some(true));
-        state.on_skip();
+        assert_eq!(
+            state.on_pass().expect("Object ID を進められること"),
+            Some(true)
+        );
+        state.on_skip().expect("Object ID を進められること");
         assert_eq!(state.current_object_id(), 2);
         assert_eq!(state.current_object_id_delta(), 1);
-        assert_eq!(state.on_pass(), None);
+        assert_eq!(state.on_pass().expect("Object ID を進められること"), None);
     }
 
     // 配送可能な Object が 1 つも無かった Writer は reset で終端する
@@ -556,7 +574,7 @@ mod tests {
         let state = state_unfiltered();
         assert_eq!(state.termination(None), SubgroupTermination::Reset);
         let mut skipped = state_unfiltered();
-        skipped.on_skip();
+        skipped.on_skip().expect("Object ID を進められること");
         assert_eq!(skipped.termination(None), SubgroupTermination::Reset);
     }
 
@@ -564,8 +582,11 @@ mod tests {
     #[test]
     fn termination_is_fin_when_nothing_is_skipped() {
         let mut state = state_at(3);
-        assert_eq!(state.on_pass(), Some(true));
-        assert_eq!(state.on_pass(), None);
+        assert_eq!(
+            state.on_pass().expect("Object ID を進められること"),
+            Some(true)
+        );
+        assert_eq!(state.on_pass().expect("Object ID を進められること"), None);
         assert_eq!(state.termination(Some(loc(7, 3))), SubgroupTermination::Fin);
     }
 
@@ -576,11 +597,14 @@ mod tests {
     fn termination_is_fin_when_only_objects_before_start_are_skipped() {
         let mut state = state_at(3);
         // Object 0 / 1 / 2 は Start Location (Object 3) より前なので省略してよい
-        state.on_skip();
-        state.on_skip();
-        state.on_skip();
+        state.on_skip().expect("Object ID を進められること");
+        state.on_skip().expect("Object ID を進められること");
+        state.on_skip().expect("Object ID を進められること");
         // 最初の Pass は Object 3 なので FIRST_OBJECT は false
-        assert_eq!(state.on_pass(), Some(false));
+        assert_eq!(
+            state.on_pass().expect("Object ID を進められること"),
+            Some(false)
+        );
         assert_eq!(state.termination(Some(loc(7, 3))), SubgroupTermination::Fin);
     }
 
@@ -591,14 +615,17 @@ mod tests {
     fn termination_is_reset_when_object_at_start_is_skipped() {
         let mut state = state_at(5);
         // Object 0 を配送してヘッダを送り、Object 1..5 を省略する
-        assert_eq!(state.on_pass(), Some(true));
+        assert_eq!(
+            state.on_pass().expect("Object ID を進められること"),
+            Some(true)
+        );
         for _ in 0..4 {
-            state.on_skip();
+            state.on_skip().expect("Object ID を進められること");
         }
         // 省略した最後の Object は Start Location (Object 5) の 1 つ前なので FIN
         assert_eq!(state.termination(Some(loc(7, 5))), SubgroupTermination::Fin);
         // Object 5 (= Start Location) を省略すると reset 側になる
-        state.on_skip();
+        state.on_skip().expect("Object ID を進められること");
         assert_eq!(
             state.termination(Some(loc(7, 5))),
             SubgroupTermination::Reset
@@ -613,13 +640,16 @@ mod tests {
     fn termination_is_reset_when_object_after_start_is_skipped() {
         let mut state = state_at(3);
         // Object 0 / 1 / 2 を省略し、Object 3 / 4 を配送する
-        state.on_skip();
-        state.on_skip();
-        state.on_skip();
-        assert_eq!(state.on_pass(), Some(false));
-        assert_eq!(state.on_pass(), None);
+        state.on_skip().expect("Object ID を進められること");
+        state.on_skip().expect("Object ID を進められること");
+        state.on_skip().expect("Object ID を進められること");
+        assert_eq!(
+            state.on_pass().expect("Object ID を進められること"),
+            Some(false)
+        );
+        assert_eq!(state.on_pass().expect("Object ID を進められること"), None);
         // Object 5 を省略すると reset 側になる
-        state.on_skip();
+        state.on_skip().expect("Object ID を進められること");
         assert_eq!(
             state.termination(Some(loc(7, 3))),
             SubgroupTermination::Reset
@@ -630,8 +660,11 @@ mod tests {
     #[test]
     fn termination_is_fin_when_later_skip_is_before_start() {
         let mut state = state_at(10);
-        assert_eq!(state.on_pass(), Some(true));
-        state.on_skip();
+        assert_eq!(
+            state.on_pass().expect("Object ID を進められること"),
+            Some(true)
+        );
+        state.on_skip().expect("Object ID を進められること");
         assert_eq!(
             state.termination(Some(loc(7, 10))),
             SubgroupTermination::Fin
@@ -647,12 +680,15 @@ mod tests {
     fn termination_is_reset_when_start_location_grows_after_skip() {
         let mut state = state_at(0);
         // Object 0..4 を配送し、Object 5..7 を省略する
-        assert_eq!(state.on_pass(), Some(true));
+        assert_eq!(
+            state.on_pass().expect("Object ID を進められること"),
+            Some(true)
+        );
         for _ in 0..4 {
-            state.on_pass();
+            state.on_pass().expect("Object ID を進められること");
         }
         for _ in 0..3 {
-            state.on_skip();
+            state.on_skip().expect("Object ID を進められること");
         }
         // 終端時点の Start Location は Object 8 まで拡大しており、省略した Object 5..7 は現在の
         // Start Location より前だが、省略した時点では配送対象 (Object 0 以降) だったため reset 側
@@ -670,14 +706,17 @@ mod tests {
     fn termination_is_reset_when_filter_is_added_after_skip() {
         let mut state = state_unfiltered();
         // Object 0..4 を配送し、Object 5 / 6 / 7 を省略する
-        assert_eq!(state.on_pass(), Some(true));
+        assert_eq!(
+            state.on_pass().expect("Object ID を進められること"),
+            Some(true)
+        );
         for _ in 0..4 {
-            state.on_pass();
+            state.on_pass().expect("Object ID を進められること");
         }
         for _ in 0..3 {
-            state.on_skip();
+            state.on_skip().expect("Object ID を進められること");
         }
-        assert_eq!(state.on_pass(), None);
+        assert_eq!(state.on_pass().expect("Object ID を進められること"), None);
         // 終端時点で Start Location が Object 8 に追加されていても、省略時点では配送対象だった
         assert_eq!(
             state.termination(Some(loc(7, 8))),
@@ -696,9 +735,12 @@ mod tests {
         let mut state = state_at(10);
         // Object 0..9 を省略し、Object 10 から配送する
         for _ in 0..10 {
-            state.on_skip();
+            state.on_skip().expect("Object ID を進められること");
         }
-        assert_eq!(state.on_pass(), Some(false));
+        assert_eq!(
+            state.on_pass().expect("Object ID を進められること"),
+            Some(false)
+        );
         // 開始時点の Start Location より前の省略だけだったとしても、終端時点で縮小していれば
         // 省略した Object が配送対象に含まれる
         assert_eq!(
@@ -712,9 +754,12 @@ mod tests {
     fn termination_is_reset_when_filter_is_removed_after_skip() {
         let mut state = state_at(10);
         for _ in 0..10 {
-            state.on_skip();
+            state.on_skip().expect("Object ID を進められること");
         }
-        assert_eq!(state.on_pass(), Some(false));
+        assert_eq!(
+            state.on_pass().expect("Object ID を進められること"),
+            Some(false)
+        );
         assert_eq!(state.termination(None), SubgroupTermination::Reset);
     }
 
@@ -724,8 +769,11 @@ mod tests {
     #[test]
     fn termination_is_fin_when_skipped_group_is_before_start() {
         let mut state = state_in_group(5, Some(loc(7, 0)));
-        assert_eq!(state.on_pass(), Some(true));
-        state.on_skip();
+        assert_eq!(
+            state.on_pass().expect("Object ID を進められること"),
+            Some(true)
+        );
+        state.on_skip().expect("Object ID を進められること");
         assert_eq!(state.termination(Some(loc(7, 0))), SubgroupTermination::Fin);
     }
 
@@ -740,7 +788,10 @@ mod tests {
         let mut state = SubgroupObjectState::new(7, 3, None);
         assert_eq!(state.current_object_id(), 3);
         assert_eq!(state.current_object_id_delta(), 3);
-        assert_eq!(state.on_pass(), Some(true));
+        assert_eq!(
+            state.on_pass().expect("Object ID を進められること"),
+            Some(true)
+        );
         assert_eq!(state.termination(None), SubgroupTermination::Fin);
     }
 
@@ -753,4 +804,19 @@ mod tests {
             Some(DataStreamResetReason::Cancelled.error_code())
         );
     }
+}
+
+/// Object ID の上限では wrap せずエラーにすること
+#[test]
+fn object_id_exhaustion_is_an_error() {
+    let mut skipped = SubgroupObjectState::new(7, u64::MAX, None);
+    assert!(
+        skipped.on_skip().is_err(),
+        "skip の Object ID 加算はエラーにすること"
+    );
+    let mut passed = SubgroupObjectState::new(7, u64::MAX, None);
+    assert!(
+        passed.on_pass().is_err(),
+        "pass の Object ID 加算はエラーにすること"
+    );
 }
