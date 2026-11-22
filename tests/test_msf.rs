@@ -19,6 +19,23 @@ fn test_catalog_namespace(value: &str) -> TrackNamespace {
         .expect("テスト用 namespace は v02 の制約を満たすこと")
 }
 
+/// テスト用の Full カタログドキュメントを組み立てる
+fn full_doc(
+    tracks: Vec<MsfTrack>,
+    publish_tracks: Vec<MsfTrack>,
+    init_data_list: Vec<MsfInitData>,
+) -> MsfCatalogDocument {
+    MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: false,
+        tracks,
+        publish_tracks,
+        removed_tracks: Default::default(),
+        init_data_list,
+    })
+}
+
 #[path = "test_msf/catalog_decode.rs"]
 mod catalog_decode;
 
@@ -34,8 +51,35 @@ mod track_fields;
 #[path = "test_msf/encode_decode_roundtrip.rs"]
 mod encode_decode_roundtrip;
 
-#[path = "test_msf/error_cases.rs"]
-mod error_cases;
+#[path = "test_msf/catalog_structure.rs"]
+mod catalog_structure;
+
+#[path = "test_msf/lang_validation.rs"]
+mod lang_validation;
+
+#[path = "test_msf/target_latency_buffers.rs"]
+mod target_latency_buffers;
+
+#[path = "test_msf/init_data_list.rs"]
+mod init_data_list;
+
+#[path = "test_msf/delta_update_structure.rs"]
+mod delta_update_structure;
+
+#[path = "test_msf/codec_role_requirements.rs"]
+mod codec_role_requirements;
+
+#[path = "test_msf/framerate_validation.rs"]
+mod framerate_validation;
+
+#[path = "test_msf/auth_info_encode.rs"]
+mod auth_info_encode;
+
+#[path = "test_msf/encode_full_catalog.rs"]
+mod encode_full_catalog;
+
+#[path = "test_msf/encode_delta_update.rs"]
+mod encode_delta_update;
 
 #[path = "test_msf/media_timeline.rs"]
 mod media_timeline;
