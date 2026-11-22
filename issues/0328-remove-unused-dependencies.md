@@ -1,7 +1,7 @@
 # 未使用の依存関係を削除し、重複したテストと不要な公開項目を整理する
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/remove-unused-dependencies
 - Polished: 2026-11-20
 
@@ -78,3 +78,19 @@
 - `crates/README.md` と `crates/tokio-moq/README.md` の依存・バックエンドの記述が実態と食い違わないこと。今回の変更では `tokio-moq` が引き続き `s2n-quic` / `shiguredo_http3` / `tracing` を使うため、これらの README の依存の記述は変更不要である。
 - `CHANGES.md` にエントリを追加していないこと。
 - `Branch:` のブランチを作らず、1 コミットにまとめていること。
+
+## 解決方法
+
+- `crates/moq-pub` / `crates/moq-sub` の `shiguredo_http3` を `[dev-dependencies]` へ移し、
+  テストでの `ErrorCode::AlpnError` 使用をコメントで明記した。
+- `e2e-tests` から未使用の `tracing` を削除した。
+- `pbt` の空の `[dev-dependencies]` を削除し、dev 依存が不要な理由を `[dependencies]` に移した。
+- `crates/tokio-moq/src/lib.rs` の `split_authority_path` / `host_from_authority` と、
+  `metrics.rs` の `TASK_METRICS_LOG_INTERVAL` を非公開にした。
+- moq-pub / moq-sub の `migration_target_tests` を削除し、moq-pub 固有の 4 テストと
+  空 URI のテストを `tokio-moq` 側の `migration_target` テストへ統合した。
+  3 本の重複テストは `tokio-moq` の既存テストで担保する。
+
+`cargo check --workspace` / `cargo test --workspace` /
+`cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` と
+`prek run --files` が成功した。
