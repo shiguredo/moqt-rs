@@ -443,7 +443,7 @@ pub struct TimelineConfig {
     /// 表示の遅れの上限 (ミリ秒)
     pub max_presentation_delay_ms: i64,
     /// MSF の `targetLatency` (ミリ秒、draft-ietf-moq-msf-02 §5.2.9 (Target latency))。
-    /// 0 のときは下限にしない (moqt-js の null に相当する)
+    /// 0 以下のときは下限にしない (moqt-js の null に相当する)
     pub target_latency_ms: i64,
     /// 音声の待ち時間の下限 (マイクロ秒)
     ///
@@ -823,14 +823,17 @@ impl PlayoutTimeline {
 
     /// 設定を決めて作る
     ///
-    /// 負のミリ秒の値は 0 として扱う。
+    /// 負のミリ秒の値は 0 として扱う。`target_latency_ms` は音声と映像の表示の遅れの
+    /// 下限になり、`set_target_latency_ms` で設定した場合と同じ処理で適用する。0 以下は
+    /// 下限を外す。
     pub fn with_config(mut config: TimelineConfig) -> Self {
         config.max_presentation_delay_ms = config.max_presentation_delay_ms.max(0);
         config.target_latency_ms = config.target_latency_ms.max(0);
         config.audio_min_delay_us = config
             .audio_min_delay_us
             .clamp(0, TIMELINE_ARRIVAL_DELAY_US);
-        Self {
+        let target_latency_ms = config.target_latency_ms;
+        let mut timeline = Self {
             config,
             tracks: [TrackState::new(), TrackState::new()],
             audio_jitter_us: None,
@@ -855,13 +858,17 @@ impl PlayoutTimeline {
             base_difference_quiet_since_us: None,
             base_difference_first_at_us: None,
             base_difference_drifted_value: false,
-            target_latency_ms: config.target_latency_ms,
+            target_latency_ms,
             limited_us: 0,
             generation: 0,
             presented: [None, None],
             audio_playout_correction_us: 0,
             audio_playout_correction_at_us: None,
-        }
+        };
+        // `set_target_latency_ms` と同じ処理で、構築直後の `limited_us` と
+        // `config().target_latency_ms` を揃える
+        timeline.apply_target_latency_ms(target_latency_ms);
+        timeline
     }
 
     /// 使っている設定
@@ -1080,9 +1087,20 @@ impl PlayoutTimeline {
     /// 同じ render group の track は同じ値でなければならない (draft-ietf-moq-msf-02
     /// §5.2.8) ため、音声と映像で 1 つの値を使う。解決の規則は呼び出し側が持ち、ここへは
     /// 確定した値だけを渡す。値は同期の基準の遅延になり、2 つのトラックの表示の遅れの
-    /// 下限になる。0 は「下限にしない」の意味であり、moqt-js の null に相当する。
+    /// 下限になる。0 以下は「下限にしない」の意味であり、moqt-js の null に相当する。
+    /// 設定した値は [`PlayoutTimeline::config`] の `target_latency_ms` にも反映する。
     pub fn set_target_latency_ms(&mut self, target_latency_ms: i64) {
-        self.target_latency_ms = target_latency_ms.max(0);
+        self.apply_target_latency_ms(target_latency_ms);
+    }
+
+    /// `targetLatency` を適用する
+    ///
+    /// [`PlayoutTimeline::with_config`] と [`PlayoutTimeline::set_target_latency_ms`] で
+    /// 共通に使う。0 以下は 0 に丸め、`config` と表示の遅れの計算に同じ値を反映する。
+    fn apply_target_latency_ms(&mut self, target_latency_ms: i64) {
+        let target_latency_ms = target_latency_ms.max(0);
+        self.target_latency_ms = target_latency_ms;
+        self.config.target_latency_ms = target_latency_ms;
         // moqt-js は同期の自然な表示の遅れを求める中で解除の判定も更新する。同じ順序で
         // 保持の状態を先に更新する
         self.refresh_unshared_state();

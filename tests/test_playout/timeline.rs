@@ -2089,3 +2089,82 @@ fn audio_min_delay_is_capped_by_the_arrival_limit() {
         TIMELINE_ARRIVAL_DELAY_US
     );
 }
+
+/// `with_config` と `set_target_latency_ms` で targetLatency の適用が一致すること
+///
+/// 構築直後の `target_latency_limited_us` と `config().target_latency_ms`、同じ観測列を
+/// 与えた後の表示の遅れが一致する。正の値 (表示の遅れの上限を超える値を含む) と 0 以下を
+/// 確認する。
+#[test]
+fn with_config_and_setter_apply_target_latency_identically() {
+    for target in [90i64, 600, 0, -100] {
+        let mut from_config = PlayoutTimeline::with_config(TimelineConfig {
+            target_latency_ms: target,
+            ..TimelineConfig::default()
+        });
+        let mut from_setter = PlayoutTimeline::new();
+        from_setter.set_target_latency_ms(target);
+
+        let expected = target.max(0);
+        assert_eq!(
+            from_config.target_latency_ms(),
+            expected,
+            "with_config の target_latency_ms: target={target}"
+        );
+        assert_eq!(
+            from_config.config().target_latency_ms,
+            expected,
+            "with_config の config().target_latency_ms: target={target}"
+        );
+        assert_eq!(
+            from_setter.target_latency_ms(),
+            expected,
+            "setter の target_latency_ms: target={target}"
+        );
+        assert_eq!(
+            from_setter.config().target_latency_ms,
+            expected,
+            "setter の config().target_latency_ms: target={target}"
+        );
+        assert_eq!(
+            from_config.target_latency_limited_us(),
+            from_setter.target_latency_limited_us(),
+            "構築直後の切り下げが一致すること: target={target}"
+        );
+
+        // 同じ観測列を与える
+        for timeline in [&mut from_config, &mut from_setter] {
+            observe_pair(timeline, EPOCH_US, 0);
+            for index in 0..30i64 {
+                let media_us = index * FRAME_US;
+                timeline.observe(Track::Video, EPOCH_US + media_us, timestamp_of(media_us));
+            }
+        }
+
+        assert_eq!(
+            from_config.presentation_delay_us(),
+            from_setter.presentation_delay_us(),
+            "presentation_delay_us が一致すること: target={target}"
+        );
+        assert_eq!(
+            from_config.presentation_extra_delay_us(),
+            from_setter.presentation_extra_delay_us(),
+            "presentation_extra_delay_us が一致すること: target={target}"
+        );
+        assert_eq!(
+            from_config.video_delay_us(),
+            from_setter.video_delay_us(),
+            "video_delay_us が一致すること: target={target}"
+        );
+        assert_eq!(
+            from_config.target_latency_limited_us(),
+            from_setter.target_latency_limited_us(),
+            "観測後の切り下げが一致すること: target={target}"
+        );
+        assert_eq!(
+            from_config.audio_delay_stats().target_us,
+            from_setter.audio_delay_stats().target_us,
+            "audio_delay_stats().target_us が一致すること: target={target}"
+        );
+    }
+}
