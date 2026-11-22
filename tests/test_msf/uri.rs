@@ -397,6 +397,25 @@ fn parse_uri_invalid_rejected() {
     ));
 }
 
+/// fragment 内の 2 個目の `#` は拒否され、正規形を案内すること
+///
+/// RFC 3986 §3.5 の fragment に `#` は含まれない。track-identifier では `.23`、
+/// `&` 区切りのパラメータ値では `%23` と書く必要がある。
+#[test]
+fn parse_uri_second_hash_is_rejected_with_guidance() {
+    let error = parse_msf_uri("moqt://example.com/path#msf:track#foo")
+        .expect_err("2 個目の # を拒否すること");
+    let message = error.to_string();
+    assert!(
+        message.contains(".23"),
+        "track-identifier の正規形を案内すること: {message}"
+    );
+    assert!(
+        message.contains("%23"),
+        "パラメータ値の正規形を案内すること: {message}"
+    );
+}
+
 /// track-identifier の `%XX` (RFC 3986 §2.1 (Percent-Encoding)) をデータバイトへデコードすること
 ///
 /// draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation) の ABNF は

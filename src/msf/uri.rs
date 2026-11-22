@@ -284,7 +284,7 @@ fn split_moqt_uri(uri: &str) -> Result<MoqtUriComponents<'_>, MessageError> {
         Some((before, fragment)) => {
             if fragment.contains('#') {
                 return Err(MessageError::InvalidCatalog(
-                    "MOQT URI must contain at most one '#' separator".to_string(),
+                    "MOQT URI must contain at most one '#' separator; encode '#' as '.23' in the track identifier or '%23' in a parameter value".to_string(),
                 ));
             }
             (before, Some(fragment))
