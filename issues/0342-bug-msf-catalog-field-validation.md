@@ -1,7 +1,7 @@
 # MSF カタログのフィールド検証を draft-ietf-moq-msf-02 の MUST / SHOULD に合わせる
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/fix-msf-catalog-field-validation
 - Polished: 2026-11-21
 
@@ -66,3 +66,23 @@ draft-ietf-moq-msf-02 のカタログは複数のフィールドに MUST / SHOUL
 - encode 側の §5.1.7 を MUST としているコメントが SHOULD に修正されていること。
 - encode したカタログを自身の decode で roundtrip できること。
 - `cargo test --workspace` / `cargo test -p pbt` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `connectionURI` は `validate_moqt_endpoint_uri` で `moqt://` の endpoint URI 構文を検証する
+  (decode / encode / clone の各経路)。
+- `moq-secure-objects` の `cipherSuite` は §5.2.39 の定義値 3 種に限定した。
+- `authInfo` の scheme 重複を decode / encode の両方で拒否した。
+- `initDataList` の `tracks` より後の順序は既存の decode 検証で固定されていることを確認した。
+- `lang` を RFC 5646 §2.1 の Language-Tag ABNF 全体で検証し、irregular / regular の
+  grandfathered タグと大文字の privateuse も受理するようにした。IANA の Subtag Registry との
+  照合は行わない。
+- `initDataList` の `inline` data と `trackBaseKey` を Base64 (RFC 4648 §4) として検証する。
+- encode 時に `version` が `draft-02` であることと `framerate` が有限値であることを検証する。
+- `validate_full_track` / `validate_clone_track_fragment` / `apply_delta` などの doc の
+  節番号とフィールド名を draft-ietf-moq-msf-02 に合わせた
+  (Codec §5.2.19、Maximum Bitrate §5.2.23、Channel configuration §5.2.30 など)。
+- PBT の lang / initData / authInfo 生成器を新しい検証に適合させた。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`RUSTDOCFLAGS="-D warnings" cargo doc` が成功した。
