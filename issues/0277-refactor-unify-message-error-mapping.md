@@ -1,7 +1,7 @@
 # メッセージエラーからセッション終了コードへの写像を共通化する
 
 - Created: 2026-10-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/refactor-unify-message-error-mapping
 - Polished: 2026-10-25
 
@@ -34,3 +34,19 @@
 - 既存の終了コードの対応が変わっていないことがテストで確認できること。少なくとも `ProtocolViolation` / `MalformedTrack` → `SESSION_PROTOCOL_VIOLATION`、`KeyValueFormattingError` → `SESSION_KEY_VALUE_FORMATTING_ERROR`、catch-all → `SESSION_PROTOCOL_VIOLATION` を共通写像に対して固定するテストを追加し、既存テストもそのまま通ること。
 - `crates` 側の写像を共通化する場合としない場合のどちらでも、`crates/tokio-moq/src/error.rs` の doc が実際の写像と一致していること（共通化しない場合は `MalformedAuthToken` を 0x16 に写す理由と library の共通写像との差、共通化する場合は共通写像を使う旨）。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+現行実装では `MessageError` から終了コードへの分類が `src/error.rs` の
+`session_termination_code` に集約され、data plane 固有の `UnexpectedEof` の扱いだけを
+`data_plane_session_termination_code` が上書きする形になっている。
+`src/session/core.rs` の `session_error_from_request_body` は既に無く、制御メッセージは
+`session_error_from_message`、data plane は `session_error_from_data_message` が同じ
+`MessageError` の分類を使う。`crates/tokio-moq/src/error.rs` の `session_error_code` も
+`session_termination_code` に委譲し、`MalformedAuthToken` を 0x16 に写す理由を doc に残している。
+
+したがって 2 箇所に重複していた写像は既に 1 箇所へ統合済みであり、
+`ProtocolViolation` / `MalformedTrack` → `PROTOCOL_VIOLATION`、
+`KeyValueFormattingError` → `KEY_VALUE_FORMATTING_ERROR`、catch-all →
+`PROTOCOL_VIOLATION` は `tests/test_error.rs` の `session_termination_codes_match_iana_registry`
+で固定されている。追加のコード変更は不要である。
