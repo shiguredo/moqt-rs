@@ -419,83 +419,208 @@ fn cose_token_roundtrip() -> noprop::TestResult {
     Ok(())
 }
 
-/// `CatClaims::validate` の判定順をそのまま実装したモデル
-fn expected_validation_error(
-    claims: &CatClaims,
+/// 検証に使う現在時刻と許容ずれが、時間比較の前提条件を満たすかを判定するモデル
+///
+/// これらはトークンのクレームではなく、公開 API の入力の前提条件である。有限でない
+/// 値や負の許容ずれを時間比較に使うと、`NaN` の比較が常に偽になるなどして `exp` /
+/// `nbf` の検証を素通りする。そのためライブラリの契約として
+/// `InvalidReferenceTime` で拒否する。
+fn model_invalid_reference_time(
     options: &ClaimValidationOptions<'_>,
 ) -> Option<ClaimValidationError> {
     if !options.reference_time_seconds.is_finite()
         || !options.clock_tolerance_seconds.is_finite()
         || options.clock_tolerance_seconds < 0.0
     {
-        return Some(ClaimValidationError::InvalidReferenceTime);
+        Some(ClaimValidationError::InvalidReferenceTime)
+    } else {
+        None
     }
-    // 公開フィールドのため、デコード以外の経路で非有限値が入り得る
-    for (number, name) in [
+}
+
+/// 数値クレームが有限であるという API 前提条件を判定するモデル
+///
+/// クレームは公開フィールドのため、CBOR のデコード以外の経路でも値を設定できる。
+/// `NaN` / 無限大は期限の比較を素通りさせるため、ライブラリの契約として
+/// `NonFiniteClaim` で拒否する。`iat` は仕様上トークンの発行時刻を示すだけで、
+/// `validate` は `exp` / `nbf` のような時刻比較を行わない (有限性だけを検査する)。
+/// 判定順はライブラリの契約であり、`exp` → `nbf` → `iat` → `moqt-reval` の順に
+/// 最初の非有限クレームを返す。
+fn model_non_finite_claim(claims: &CatClaims) -> Option<ClaimValidationError> {
+    [
         (claims.expiration, "exp"),
         (claims.not_before, "nbf"),
         (claims.issued_at, "iat"),
         (claims.moqt_reval, "moqt-reval"),
-    ] {
-        if number.is_some_and(|number| !number.is_finite()) {
-            return Some(ClaimValidationError::NonFiniteClaim(name));
-        }
+    ]
+    .into_iter()
+    .find_map(|(number, name)| {
+        number
+            .is_some_and(|number| !number.is_finite())
+            .then_some(ClaimValidationError::NonFiniteClaim(name))
+    })
+}
+
+/// `catdpop` のウィンドウが有効な値かを判定するモデル
+///
+/// `catdpop` のウィンドウは proof の鮮度を判定する秒数である (CTA-5007-B §4.8 /
+/// draft-ietf-moq-c4m-02 §4.1)。有限でない値は比較を素通りし、負の値はすべての
+/// proof を期限切れにするため、ライブラリの契約として拒否する。
+fn model_invalid_catdpop_window(claims: &CatClaims) -> Option<ClaimValidationError> {
+    let window = claims.catdpop.as_ref()?.window_seconds?;
+    if !window.is_finite() {
+        return Some(ClaimValidationError::NonFiniteClaim("catdpop window"));
     }
-    if let Some(catdpop) = &claims.catdpop
-        && let Some(window) = catdpop.window_seconds
-    {
-        if !window.is_finite() {
-            return Some(ClaimValidationError::NonFiniteClaim("catdpop window"));
-        }
-        if window < 0.0 {
-            return Some(ClaimValidationError::NegativeClaim("catdpop window"));
-        }
+    if window < 0.0 {
+        return Some(ClaimValidationError::NegativeClaim("catdpop window"));
     }
-    // moqt-reval の受理可否 (draft-ietf-moq-c4m-02 §2.2)。
-    // 不正な最小間隔はクレームの有無にかかわらず拒否する
+    None
+}
+
+/// `moqt-reval` の受理可否を draft-ietf-moq-c4m-02 §2.2 の MUST から判定するモデル
+///
+/// - 再検証できない受信者 (`None`) は `moqt-reval` を持つトークンを値にかかわらず
+///   すべて拒否する (§2.2 の "it MUST reject all tokens with a "moqt-reval" claim")
+/// - 再検証できる受信者 (`Some(x)`) でも、再検証間隔が `x` を下回る場合は拒否する
+///   (§2.2 の "If the revalidation interval is smaller than the recipient is prepared
+///   or able to revalidate, the recipient MUST reject the token.")
+/// - `moqt-reval` の値が 0 の場合は再検証間隔ではなく「再検証してはならない」指示
+///   なので、`Some(x)` の受信者は受理する (§2.2 の "When the value of this claim is
+///   zero, the token MUST NOT be revalidated.")
+/// - `x` が有限でない / 負である場合は `moqt_reval < x` の比較が fail-open になる
+///   ため、クレームの有無にかかわらずライブラリの契約として拒否する
+///
+/// `moqt_reval` は呼び出し前に有限性が検査されている。
+fn model_moqt_reval(
+    claims: &CatClaims,
+    options: &ClaimValidationOptions<'_>,
+) -> Option<ClaimValidationError> {
     if let Some(interval) = options.revalidation_interval_seconds
         && (!interval.is_finite() || interval < 0.0)
     {
         return Some(ClaimValidationError::InvalidRevalidationInterval);
     }
-    if let Some(moqt_reval) = claims.moqt_reval {
-        match options.revalidation_interval_seconds {
-            // 再検証できない受信者は値が 0 でも拒否する
-            None => return Some(ClaimValidationError::RevalidationUnsupported),
-            // 0 は再検証しない指示のため受理し、非ゼロは最小間隔未満を拒否する
-            Some(interval) if moqt_reval != 0.0 && moqt_reval < interval => {
-                return Some(ClaimValidationError::RevalidationIntervalTooShort);
-            }
-            Some(_) => {}
-        }
+    let moqt_reval = claims.moqt_reval?;
+    let Some(interval) = options.revalidation_interval_seconds else {
+        return Some(ClaimValidationError::RevalidationUnsupported);
+    };
+    if moqt_reval == 0.0 {
+        return None;
     }
-    if let Some(expiration) = claims.expiration
-        && options.reference_time_seconds > expiration + options.clock_tolerance_seconds
-    {
-        return Some(ClaimValidationError::Expired);
+    if moqt_reval < interval {
+        return Some(ClaimValidationError::RevalidationIntervalTooShort);
     }
-    if let Some(not_before) = claims.not_before
-        && options.reference_time_seconds + options.clock_tolerance_seconds < not_before
-    {
-        return Some(ClaimValidationError::NotYetValid);
+    None
+}
+
+/// `exp` の期限判定を RFC 8392 §3.1.4 / RFC 7519 §4.1.4 から導くモデル
+///
+/// `exp` は「この時刻以降はトークンを受理してはならない」期限である。RFC 7519
+/// §4.1.4 は実装が小さな時計ずれの許容を認めている。ライブラリは許容値を期限に
+/// 加えた時刻を境界とし、参照時刻が境界を厳密に超えた場合だけ `Expired` とする
+/// (境界と等しい場合は受理する)。
+fn model_expiration(
+    claims: &CatClaims,
+    options: &ClaimValidationOptions<'_>,
+) -> Option<ClaimValidationError> {
+    let expiration = claims.expiration?;
+    (options.reference_time_seconds > expiration + options.clock_tolerance_seconds)
+        .then_some(ClaimValidationError::Expired)
+}
+
+/// `nbf` の開始時刻判定を RFC 8392 §3.1.5 / RFC 7519 §4.1.5 から導くモデル
+///
+/// RFC 7519 §4.1.5 は、現在時刻が `nbf` より前の場合はトークンを受理してはならない
+/// とする。ライブラリは許容値を引いた時刻を境界とし、参照時刻に許容値を加えた時刻が
+/// `nbf` を厳密に下回る場合だけ `NotYetValid` とする (境界と等しい場合は受理する)。
+fn model_not_before(
+    claims: &CatClaims,
+    options: &ClaimValidationOptions<'_>,
+) -> Option<ClaimValidationError> {
+    let not_before = claims.not_before?;
+    (options.reference_time_seconds + options.clock_tolerance_seconds < not_before)
+        .then_some(ClaimValidationError::NotYetValid)
+}
+
+/// `iss` の一致判定を RFC 8392 §3.1.1 / RFC 7519 §4.1.1 から導くモデル
+///
+/// `iss` の処理はアプリケーション依存である (RFC 7519 §4.1.1)。このライブラリは
+/// 期待する発行者のリストが空でない場合に、`iss` が存在してリストのいずれかと
+/// 一致することを要求する。`iss` が無い場合は一致しないものとして拒否する。
+fn model_issuer(
+    claims: &CatClaims,
+    options: &ClaimValidationOptions<'_>,
+) -> Option<ClaimValidationError> {
+    if options.expected_issuers.is_empty() {
+        return None;
     }
-    if !options.expected_issuers.is_empty() {
-        let matches = claims
-            .issuer
-            .as_deref()
-            .is_some_and(|issuer| options.expected_issuers.contains(&issuer));
-        if !matches {
-            return Some(ClaimValidationError::IssuerMismatch);
-        }
+    let matches = claims
+        .issuer
+        .as_deref()
+        .is_some_and(|issuer| options.expected_issuers.contains(&issuer));
+    (!matches).then_some(ClaimValidationError::IssuerMismatch)
+}
+
+/// `aud` の一致判定を RFC 8392 §3.1.3 / RFC 7519 §4.1.3 から導くモデル
+///
+/// RFC 7519 §4.1.3 は、トークンを処理する主体が `aud` の値のいずれかで自分を識別
+/// できなければトークンを拒否する MUST を定める。このライブラリは期待する宛先の
+/// リストが空でない場合に、`aud` のいずれかがリストに含まれることを要求する。
+/// `aud` が無い / 空の場合は一致しないものとして拒否する。
+fn model_audience(
+    claims: &CatClaims,
+    options: &ClaimValidationOptions<'_>,
+) -> Option<ClaimValidationError> {
+    if options.expected_audiences.is_empty() {
+        return None;
     }
-    if !options.expected_audiences.is_empty() {
-        let matches = claims
-            .audience
-            .iter()
-            .any(|audience| options.expected_audiences.contains(&audience.as_str()));
-        if !matches {
-            return Some(ClaimValidationError::AudienceMismatch);
-        }
+    let matches = claims
+        .audience
+        .iter()
+        .any(|audience| options.expected_audiences.contains(&audience.as_str()));
+    (!matches).then_some(ClaimValidationError::AudienceMismatch)
+}
+
+/// `CatClaims::validate` の判定結果を、仕様から導いた条件とライブラリの契約から組み立てるモデル
+///
+/// 判定順は RFC 8392 §7.2 が「The order of the steps is not significant ...」と
+/// しているため仕様では定まらない。ライブラリの契約として次の順に固定する。
+///
+/// 1. 参照時刻 / 許容ずれの妥当性 (公開 API の前提条件)
+/// 2. 数値クレームの有限性 (公開 API の前提条件)
+/// 3. `catdpop` のウィンドウの有限性と非負性
+/// 4. `moqt-reval` の受理可否 (draft-ietf-moq-c4m-02 §2.2)
+/// 5. `exp` (RFC 8392 §3.1.4)
+/// 6. `nbf` (RFC 8392 §3.1.5)
+/// 7. `iss` (RFC 8392 §3.1.1)
+/// 8. `aud` (RFC 8392 §3.1.3)
+fn expected_validation_error(
+    claims: &CatClaims,
+    options: &ClaimValidationOptions<'_>,
+) -> Option<ClaimValidationError> {
+    if let Some(error) = model_invalid_reference_time(options) {
+        return Some(error);
+    }
+    if let Some(error) = model_non_finite_claim(claims) {
+        return Some(error);
+    }
+    if let Some(error) = model_invalid_catdpop_window(claims) {
+        return Some(error);
+    }
+    if let Some(error) = model_moqt_reval(claims, options) {
+        return Some(error);
+    }
+    if let Some(error) = model_expiration(claims, options) {
+        return Some(error);
+    }
+    if let Some(error) = model_not_before(claims, options) {
+        return Some(error);
+    }
+    if let Some(error) = model_issuer(claims, options) {
+        return Some(error);
+    }
+    if let Some(error) = model_audience(claims, options) {
+        return Some(error);
     }
     None
 }
@@ -527,6 +652,136 @@ fn claims_validate_matches_model() -> noprop::TestResult {
     // 再検証判定が iss / aud の検証より前にあり後段まで届くケースが減るため、
     // 他の検証と同じ 256 回では後段のカウンタが 0 になる seed があり得る。回数を増やす
     runner.run(512, |ctx| {
+        // 期限 / 開始時刻 / moqt-reval の等号境界は一様な生成ではほぼ踏めない。
+        // 浮動小数点で正確に表せる整数を使って境界ちょうどと境界の外側を明示的に
+        // 生成し、モデルと実装の判定を比較する
+        if noprop::sample_ratio(ctx, noprop::Ratio::one_nth(4)) {
+            let reference = noprop::sample_usize_in(ctx, 0..=1000) as f64;
+            let tolerance = noprop::sample_usize_in(ctx, 0..=16) as f64;
+            let boundary_options = ClaimValidationOptions {
+                reference_time_seconds: reference,
+                clock_tolerance_seconds: tolerance,
+                expected_issuers: &[],
+                expected_audiences: &[],
+                revalidation_interval_seconds: None,
+            };
+            let at_boundary = CatClaims {
+                expiration: Some(reference - tolerance),
+                not_before: Some(reference + tolerance),
+                ..CatClaims::default()
+            };
+            assert_eq!(
+                at_boundary.validate(&boundary_options),
+                Ok(()),
+                "期限 / 開始時刻が境界ちょうどのクレームが拒否された: reference={reference} tolerance={tolerance}"
+            );
+            assert_eq!(
+                expected_validation_error(&at_boundary, &boundary_options),
+                None,
+                "モデルが境界ちょうどの期限 / 開始時刻を拒否した"
+            );
+            ok_seen.set(ok_seen.get() + 1);
+
+            let expired = CatClaims {
+                expiration: Some(reference - tolerance - 1.0),
+                ..at_boundary.clone()
+            };
+            assert_eq!(
+                expired.validate(&boundary_options),
+                Err(ClaimValidationError::Expired),
+                "期限を 1 秒でも超えたクレームが受理された"
+            );
+            assert_eq!(
+                expected_validation_error(&expired, &boundary_options),
+                Some(ClaimValidationError::Expired),
+                "モデルが期限切れのクレームを受理した"
+            );
+            expired_seen.set(expired_seen.get() + 1);
+
+            let not_yet_valid = CatClaims {
+                expiration: None,
+                not_before: Some(reference + tolerance + 1.0),
+                ..CatClaims::default()
+            };
+            assert_eq!(
+                not_yet_valid.validate(&boundary_options),
+                Err(ClaimValidationError::NotYetValid),
+                "開始時刻より前のクレームが受理された"
+            );
+            assert_eq!(
+                expected_validation_error(&not_yet_valid, &boundary_options),
+                Some(ClaimValidationError::NotYetValid),
+                "モデルが開始時刻より前のクレームを受理した"
+            );
+            not_yet_valid_seen.set(not_yet_valid_seen.get() + 1);
+
+            // moqt-reval が受信者の最小間隔と等しい場合は受理する (§2.2 の
+            // "smaller than the recipient is prepared or able to revalidate" の境界)
+            let interval = noprop::sample_usize_in(ctx, 1..=300) as f64;
+            let revalidation_options = ClaimValidationOptions {
+                reference_time_seconds: 0.0,
+                clock_tolerance_seconds: 0.0,
+                expected_issuers: &[],
+                expected_audiences: &[],
+                revalidation_interval_seconds: Some(interval),
+            };
+            let at_interval = CatClaims {
+                moqt_reval: Some(interval),
+                ..CatClaims::default()
+            };
+            assert_eq!(
+                at_interval.validate(&revalidation_options),
+                Ok(()),
+                "moqt-reval が最小間隔と等しいクレームが拒否された"
+            );
+            assert_eq!(
+                expected_validation_error(&at_interval, &revalidation_options),
+                None,
+                "モデルが moqt-reval の等号境界を拒否した"
+            );
+            ok_seen.set(ok_seen.get() + 1);
+
+            // 0 は再検証しない指示のため、最小間隔にかかわらず受理する
+            let zero_reval = CatClaims {
+                moqt_reval: Some(0.0),
+                ..CatClaims::default()
+            };
+            assert_eq!(
+                zero_reval.validate(&revalidation_options),
+                Ok(()),
+                "moqt-reval が 0 のクレームが拒否された"
+            );
+            assert_eq!(
+                expected_validation_error(&zero_reval, &revalidation_options),
+                None,
+                "モデルが moqt-reval が 0 のクレームを拒否した"
+            );
+            ok_seen.set(ok_seen.get() + 1);
+
+            // 非ゼロで最小間隔を下回る場合は拒否する
+            let shorter = if interval > 1.0 {
+                interval - 1.0
+            } else {
+                0.5
+            };
+            let too_short = CatClaims {
+                moqt_reval: Some(shorter),
+                ..CatClaims::default()
+            };
+            assert_eq!(
+                too_short.validate(&revalidation_options),
+                Err(ClaimValidationError::RevalidationIntervalTooShort),
+                "最小間隔を下回る moqt-reval のクレームが受理された: interval={interval} shorter={shorter}"
+            );
+            assert_eq!(
+                expected_validation_error(&too_short, &revalidation_options),
+                Some(ClaimValidationError::RevalidationIntervalTooShort),
+                "モデルが最小間隔を下回る moqt-reval のクレームを受理した"
+            );
+            revalidation_too_short_seen.set(revalidation_too_short_seen.get() + 1);
+            return Ok(());
+        }
+
         let expiration = sample_optional_number(ctx);
         let not_before = sample_optional_number(ctx);
         let issued_at = sample_optional_number(ctx);

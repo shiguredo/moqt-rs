@@ -202,6 +202,11 @@ path = "fuzz_targets/fuzz_decode_c4m_cat_claims.rs"
 
 [[bin]]
 doc = false
+name = "fuzz_c4m_cat_validate"
+path = "fuzz_targets/fuzz_c4m_cat_validate.rs"
+
+[[bin]]
+doc = false
 name = "fuzz_decode_c4m_cose_message"
 path = "fuzz_targets/fuzz_decode_c4m_cose_message.rs"
 

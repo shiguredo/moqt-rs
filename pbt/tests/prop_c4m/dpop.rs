@@ -62,24 +62,29 @@ struct GeneratedContext {
     tn_value: Option<String>,
     /// `resource` (対象リソース)
     resource: Option<String>,
+    /// `resource` に含めた重複パラメータのモデル上の分類
+    resource_duplicate: ResourceDuplicateModel,
     /// 重複メンバーを含むかどうか
     duplicate: bool,
 }
 
 /// resource 検証の action の分類 (モデル側)
 ///
-/// draft-ietf-moq-c4m-01 §3.1.3 の action 別の resource 形式を、実装とは別に列挙する。
+/// draft-ietf-moq-c4m-01 §3.1.3 は action ごとに resource の形を定める。接続確立は
+/// `moqt://<relay-endpoint>`、namespace 操作は `moqt://<relay-endpoint>?tns=<namespace>`、
+/// track 操作は `moqt://<relay-endpoint>?tns=<namespace>&tn=<track>` である。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResourceModelKind {
-    /// SETUP。authority だけの形式を検証する
+    /// SETUP。クエリを持たない形式だけを整合とする
     Setup,
-    /// namespace 操作。`tns` を必須とし、`tn` は両方にある場合だけ比較する
+    /// namespace 操作。`tns` を必須とし、actx に `tn` がありクエリにも `tn` が
+    /// ある場合だけ比較する
     Namespace,
     /// track 操作。`tns` を必須とし、actx に `tn` があれば `tn` も必須とする
     Track,
 }
 
-/// action を resource 検証の分類へ変換するモデル
+/// action を resource 検証の分類へ変換するモデル (draft-ietf-moq-c4m-01 §3.1.3)
 fn resource_model_kind(action: MoqtAction) -> ResourceModelKind {
     match action {
         MoqtAction::Setup => ResourceModelKind::Setup,
@@ -94,11 +99,76 @@ fn resource_model_kind(action: MoqtAction) -> ResourceModelKind {
     }
 }
 
+/// §3.1.3 の resource 形式として読んだ `moqt://<relay-endpoint>` の後続部分
+#[derive(Debug, Clone, Copy)]
+enum ResourceForm<'a> {
+    /// クエリを持たない。接続確立の resource だけがこの形を取る
+    WithoutQuery,
+    /// `?` に続くクエリを持つ。namespace / track 操作の resource
+    WithQuery(&'a str),
+}
+
+/// resource を §3.1.3 の `moqt://<relay-endpoint>[?<query>]` として読むモデル
+///
+/// §3.1.3 は resource を小文字の `moqt://` で始まる URI として定義する。
+/// `<relay-endpoint>` は空でなく、URI の区切り (`/` `?` `#`)、userinfo (`@`)、
+/// 空白、制御文字を含まないものとする。パーセントエンコーディングは解釈しない。
+fn parse_resource_form(resource: &str) -> Option<ResourceForm<'_>> {
+    let rest = resource.strip_prefix("moqt://")?;
+    let (authority, query) = match rest.split_once('?') {
+        Some((authority, query)) => (authority, Some(query)),
+        None => (rest, None),
+    };
+    let authority_is_valid = !authority.is_empty()
+        && !authority.chars().any(|character| {
+            character.is_whitespace()
+                || character.is_control()
+                || matches!(character, '#' | '/' | '@' | '?')
+        });
+    if !authority_is_valid {
+        return None;
+    }
+    Some(match query {
+        Some(query) => ResourceForm::WithQuery(query),
+        None => ResourceForm::WithoutQuery,
+    })
+}
+
+/// クエリから指定した名前のパラメータ値をすべて取り出すモデル
+///
+/// §3.1.3 はクエリを `tns=<namespace>` と `&` 区切りの `tn=<track>` として示す。
+/// 名前と値はパーセントデコードせず、文字列のまま比較する。`=` を含まない
+/// パラメータは名前と値の組として解釈しない。
+fn query_parameter_values<'a>(query: &'a str, name: &str) -> Vec<&'a str> {
+    query
+        .split('&')
+        .filter_map(|parameter| {
+            let (parameter_name, value) = parameter.split_once('=')?;
+            (parameter_name == name).then_some(value)
+        })
+        .collect()
+}
+
+/// 各クエリパラメータのすべての値が期待値と一致するかを返すモデル
+///
+/// §3.1.2 は resource の `tns` / `tn` が actx の対応フィールドと整合することを MUST
+/// とする。重複したパラメータの意味を仕様は明示していないため、出現するすべての値が
+/// 一致する場合だけ整合とする保守的な解釈を採る。値が 1 つも無い場合は整合しない。
+fn resource_parameter_matches(values: &[&str], expected: &str) -> bool {
+    !values.is_empty() && values.iter().all(|value| *value == expected)
+}
+
 /// 仕様 (draft-ietf-moq-c4m-01 §3.1.2 / §3.1.3) の規則で `resource` の整合を判定するモデル
 ///
-/// `verify_resource_consistency` と同じく、クエリを文字列として分割し、
-/// パーセントエンコーディングは解釈しない。SETUP は `moqt://<authority>` の形式だけを
-/// 検証し、namespace と track 操作はクエリの `tns` / `tn` を検証する。
+/// - SETUP: クエリを持たない `moqt://<relay-endpoint>` だけを整合とする。`tns` / `tn`
+///   は比較しない (§3.1.3 の接続確立用 resource はクエリを持たない)
+/// - namespace 操作: クエリのすべての `tns` が actx の `tns` と一致することを要求する。
+///   actx に `tn` があり、クエリにも `tn` がある場合だけ、すべての `tn` の一致を要求する
+///   (§3.1.3 の namespace 用 resource は `tn` を持たない)
+/// - track 操作: クエリのすべての `tns` の一致を要求し、actx に `tn` がある場合は
+///   クエリのすべての `tn` の一致も要求する
+///
+/// `resource` が無い場合は任意のため整合とする。パーセントエンコーディングは解釈しない。
 fn resource_consistent(
     action: MoqtAction,
     resource: &Option<String>,
@@ -108,39 +178,260 @@ fn resource_consistent(
     let Some(resource) = resource else {
         return true;
     };
-    let kind = resource_model_kind(action);
-    if kind == ResourceModelKind::Setup {
-        let Some(authority) = resource.strip_prefix("moqt://") else {
-            return false;
-        };
-        return !authority.is_empty()
-            && !authority.chars().any(|character| {
-                character.is_whitespace()
-                    || character.is_control()
-                    || matches!(character, '?' | '#' | '/' | '@')
-            });
-    }
-    let query = resource.split_once('?').map_or("", |(_, query)| query);
-    let mut parsed_tns = None;
-    let mut parsed_tn = None;
-    for pair in query.split('&') {
-        match pair.split_once('=') {
-            Some(("tns", value)) => parsed_tns = Some(value),
-            Some(("tn", value)) => parsed_tn = Some(value),
-            _ => {}
+    let Some(form) = parse_resource_form(resource) else {
+        return false;
+    };
+
+    match resource_model_kind(action) {
+        ResourceModelKind::Setup => matches!(form, ResourceForm::WithoutQuery),
+        ResourceModelKind::Namespace => {
+            let ResourceForm::WithQuery(query) = form else {
+                return false;
+            };
+            if !resource_parameter_matches(&query_parameter_values(query, "tns"), tns) {
+                return false;
+            }
+            let Some(tn) = tn else {
+                return true;
+            };
+            // §3.1.3 の namespace 用 resource は tn を持たない。actx に tn があり
+            // クエリにも tn がある場合だけ §3.1.2 の一致要求を適用する
+            let tn_values = query_parameter_values(query, "tn");
+            tn_values.is_empty() || resource_parameter_matches(&tn_values, tn)
+        }
+        ResourceModelKind::Track => {
+            let ResourceForm::WithQuery(query) = form else {
+                return false;
+            };
+            if !resource_parameter_matches(&query_parameter_values(query, "tns"), tns) {
+                return false;
+            }
+            let Some(tn) = tn else {
+                return true;
+            };
+            // track 用 resource は tn を持つ。actx に tn がある場合は必須であり、
+            // クエリに tn が無い場合も整合しない
+            resource_parameter_matches(&query_parameter_values(query, "tn"), tn)
         }
     }
-    if parsed_tns != Some(tns) {
-        return false;
+}
+
+/// resource に含めた重複パラメータのモデル上の分類
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResourceDuplicateModel {
+    /// 比較対象のパラメータに重複が無い
+    None,
+    /// 比較対象のパラメータに同じ値の重複がある (すべて一致するため整合)
+    SameValue,
+    /// 比較対象のパラメータに異なる値の重複がある (一致しないため不整合)
+    DifferentValue,
+}
+
+/// resource の生成結果
+///
+/// `duplicate` は、生成した resource がモデルのどの重複分岐を踏むかを表す。
+struct GeneratedResource {
+    /// 生成した resource。`None` は resource を省略する
+    resource: Option<String>,
+    /// 比較対象の重複パラメータの分類
+    duplicate: ResourceDuplicateModel,
+}
+
+impl GeneratedResource {
+    /// 重複の無い resource を作る
+    fn new(resource: String) -> Self {
+        Self {
+            resource: Some(resource),
+            duplicate: ResourceDuplicateModel::None,
+        }
     }
-    let Some(tn) = tn else {
-        return true;
-    };
-    match parsed_tn {
-        Some(parsed_tn) => parsed_tn == tn.as_str(),
-        // actx に tn がありクエリに無い場合、namespace 操作では比較を省略し、
-        // track 操作では整合しない (§3.1.3 の namespace 形式は tn を持たない)
-        None => kind == ResourceModelKind::Namespace,
+
+    /// 比較対象のパラメータに同じ値の重複を持つ resource を作る
+    fn same_value_duplicate(resource: String) -> Self {
+        Self {
+            resource: Some(resource),
+            duplicate: ResourceDuplicateModel::SameValue,
+        }
+    }
+
+    /// 比較対象のパラメータに異なる値の重複を持つ resource を作る
+    fn different_value_duplicate(resource: String) -> Self {
+        Self {
+            resource: Some(resource),
+            duplicate: ResourceDuplicateModel::DifferentValue,
+        }
+    }
+
+    /// resource を省略する
+    fn absent() -> Self {
+        Self {
+            resource: None,
+            duplicate: ResourceDuplicateModel::None,
+        }
+    }
+}
+
+/// 文字列と確実に異なる文字列を作る (重複の「異なる値」生成用)
+fn different_text(value: &str) -> String {
+    format!("{value}x")
+}
+
+/// §3.1.3 の形式に合わない resource を生成する
+///
+/// scheme の不一致、空の authority、パス、フラグメント、userinfo、空白、制御文字を
+/// 混ぜる。クエリを付けてもこれらの誤りは解消しない。
+fn sample_invalid_resource(ctx: &mut noprop::TestCaseContext) -> String {
+    let base = noprop::sample_choice(
+        ctx,
+        &[
+            String::from("https://relay.example"),
+            String::from("MOQT://relay.example"),
+            String::from("moqt://"),
+            String::from("moqt://relay.example/path"),
+            String::from("moqt://relay.example#fragment"),
+            String::from("moqt://user@relay.example"),
+            String::from("moqt://relay example"),
+            String::from("moqt://relay.example\u{7f}"),
+        ],
+    );
+    if noprop::sample_bool(ctx) {
+        format!("{base}?tns=example&tn=track")
+    } else {
+        base
+    }
+}
+
+/// SETUP の resource として不正な形式を生成する
+///
+/// §3.1.3 の接続確立用 resource はクエリを持たない。scheme の不一致、空の authority、
+/// クエリ、フラグメント、パス、userinfo、空白、制御文字を混ぜる。
+fn sample_invalid_setup_resource(ctx: &mut noprop::TestCaseContext) -> String {
+    // `sample_choice` の引数を組み立てる前に乱数を使う (借用の衝突を避ける)
+    let garbage = sample_safe_text(ctx, 12);
+    noprop::sample_choice(
+        ctx,
+        &[
+            String::from("https://relay.example"),
+            String::from("MOQT://relay.example"),
+            String::from("moqt://"),
+            String::from("moqt://relay.example?tns=example.2ecom"),
+            String::from("moqt://relay.example#fragment"),
+            String::from("moqt://relay.example/path"),
+            String::from("moqt://user@relay.example"),
+            String::from("moqt://relay example"),
+            String::from("moqt://relay.example\u{7f}"),
+            garbage,
+        ],
+    )
+}
+
+/// namespace 操作の resource を生成する
+///
+/// §3.1.3 の `moqt://<relay-endpoint>?tns=<namespace>` を基本に、同じ値 / 異なる値の
+/// 重複、追加パラメータ、`tn` の有無、パラメータの欠落、不正な形式を生成する。
+fn sample_namespace_resource(
+    ctx: &mut noprop::TestCaseContext,
+    tns: &str,
+    tn: Option<&str>,
+) -> GeneratedResource {
+    let different_tns = different_text(tns);
+    let any_tn = tn.map_or_else(|| sample_safe_text(ctx, 8), String::from);
+    let different_tn = tn.map_or_else(|| sample_safe_text(ctx, 8), different_text);
+    let endpoint = "moqt://relay.example";
+    match noprop::sample_weighted_index(ctx, &[4, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1]) {
+        // §3.1.3 の namespace 形式。actx の tn は比較しない
+        0 => GeneratedResource::new(format!("{endpoint}?tns={tns}")),
+        // 追加パラメータと順序が違うだけの形式
+        1 => GeneratedResource::new(format!("{endpoint}?extra=1&tns={tns}")),
+        // 同じ値の重複した tns はすべて一致するため整合する
+        2 => GeneratedResource::same_value_duplicate(format!("{endpoint}?tns={tns}&tns={tns}")),
+        // actx とクエリの両方に tn がある場合は比較する
+        3 => GeneratedResource::new(format!("{endpoint}?tns={tns}&tn={any_tn}")),
+        // 異なる値の重複した tns。後ろの値だけが一致する
+        4 => GeneratedResource::different_value_duplicate(format!(
+            "{endpoint}?tns={different_tns}&tns={tns}"
+        )),
+        // 異なる値の重複した tns。前の値だけが一致する
+        5 => GeneratedResource::different_value_duplicate(format!(
+            "{endpoint}?tns={tns}&tns={different_tns}"
+        )),
+        // tns が無いため actx の tns と一致しない
+        6 => GeneratedResource::new(format!("{endpoint}?tn={any_tn}")),
+        // クエリが無いため tns が無い
+        7 => GeneratedResource::new(String::from(endpoint)),
+        // 同じ値の重複した tn は、actx に tn がある場合だけ比較される
+        8 => match tn {
+            Some(tn) => GeneratedResource::same_value_duplicate(format!(
+                "{endpoint}?tns={tns}&tn={tn}&tn={tn}"
+            )),
+            None => GeneratedResource::new(format!("{endpoint}?tns={tns}&tn={any_tn}")),
+        },
+        // 異なる値の重複した tn。後ろの値だけが actx と一致する
+        9 => match tn {
+            Some(tn) => GeneratedResource::different_value_duplicate(format!(
+                "{endpoint}?tns={tns}&tn={different_tn}&tn={tn}"
+            )),
+            // actx に tn が無い場合は tn を比較しないため整合する
+            None => GeneratedResource::new(format!("{endpoint}?tns={tns}&tn={any_tn}")),
+        },
+        // actx に tn がある場合の tn の不一致
+        10 => GeneratedResource::new(format!("{endpoint}?tns={tns}&tn={different_tn}")),
+        // §3.1.3 の形式に合わない resource
+        _ => GeneratedResource::new(sample_invalid_resource(ctx)),
+    }
+}
+
+/// track 操作の resource を生成する
+///
+/// §3.1.3 の `moqt://<relay-endpoint>?tns=<namespace>&tn=<track>` を基本に、同じ値 /
+/// 異なる値の重複、追加パラメータ、パラメータの欠落、不正な形式を生成する。
+fn sample_track_resource(
+    ctx: &mut noprop::TestCaseContext,
+    tns: &str,
+    tn: Option<&str>,
+) -> GeneratedResource {
+    let different_tns = different_text(tns);
+    let any_tn = tn.map_or_else(|| sample_safe_text(ctx, 8), String::from);
+    let different_tn = tn.map_or_else(|| sample_safe_text(ctx, 8), different_text);
+    let endpoint = "moqt://relay.example";
+    match noprop::sample_weighted_index(ctx, &[4, 2, 2, 2, 2, 2, 1, 2, 2, 1, 1]) {
+        // §3.1.3 の track 形式
+        0 => GeneratedResource::new(format!("{endpoint}?tns={tns}&tn={any_tn}")),
+        // 追加パラメータと順序が違うだけの形式
+        1 => GeneratedResource::new(format!("{endpoint}?extra=1&tn={any_tn}&tns={tns}")),
+        // 同じ値の重複した tns はすべて一致するため整合する
+        2 => GeneratedResource::same_value_duplicate(format!(
+            "{endpoint}?tns={tns}&tns={tns}&tn={any_tn}"
+        )),
+        // 同じ値の重複した tn は、actx に tn がある場合だけ比較される
+        3 => match tn {
+            Some(tn) => GeneratedResource::same_value_duplicate(format!(
+                "{endpoint}?tns={tns}&tn={tn}&tn={tn}"
+            )),
+            None => GeneratedResource::new(format!("{endpoint}?tns={tns}&tn={any_tn}")),
+        },
+        // 異なる値の重複した tns。後ろの値だけが一致する
+        4 => GeneratedResource::different_value_duplicate(format!(
+            "{endpoint}?tns={different_tns}&tns={tns}&tn={any_tn}"
+        )),
+        // 異なる値の重複した tn。後ろの値だけが actx と一致する
+        5 => match tn {
+            Some(tn) => GeneratedResource::different_value_duplicate(format!(
+                "{endpoint}?tns={tns}&tn={different_tn}&tn={tn}"
+            )),
+            // actx に tn が無い場合は tn を比較しないため整合する
+            None => GeneratedResource::new(format!("{endpoint}?tns={tns}&tn={any_tn}")),
+        },
+        // actx に tn がある場合、クエリに tn が無いと整合しない
+        6 => GeneratedResource::new(format!("{endpoint}?tns={tns}")),
+        // tns が無いため actx の tns と一致しない
+        7 => GeneratedResource::new(format!("{endpoint}?tn={any_tn}")),
+        // tns の不一致
+        8 => GeneratedResource::new(format!("{endpoint}?tns={different_tns}&tn={any_tn}")),
+        // actx に tn がある場合の tn の不一致
+        9 => GeneratedResource::new(format!("{endpoint}?tns={tns}&tn={different_tn}")),
+        // §3.1.3 の形式に合わない resource
+        _ => GeneratedResource::new(sample_invalid_resource(ctx)),
     }
 }
 
@@ -178,72 +469,30 @@ fn sample_authorization_context(
         1 => Some(sample_safe_text(ctx, 8)),
         _ => None,
     };
-    // action に応じた resource の形式と、整合する / しないケースを生成する
-    let resource = match resource_model_kind(action) {
-        ResourceModelKind::Setup => match noprop::sample_weighted_index(ctx, &[3, 1, 3]) {
+    // action に応じた resource の形式と、整合する / しないケースを生成する。
+    // SETUP の resource はクエリを持たない形式だけを受理する
+    let generated_resource = match resource_model_kind(action) {
+        ResourceModelKind::Setup => match noprop::sample_weighted_index(ctx, &[2, 1, 4]) {
             // §3.1.3 の SETUP 用 resource。tns / tn は比較しない
-            0 => Some(String::from("moqt://relay.example")),
+            0 => GeneratedResource::new(String::from("moqt://relay.example")),
             // resource は任意
-            1 => None,
-            // SETUP の resource として不正な形式
+            1 => GeneratedResource::absent(),
+            // SETUP の resource として不正な形式。クエリ付きの resource を主に生成する
             _ => {
-                let garbage = sample_safe_text(ctx, 12);
-                Some(noprop::sample_choice(
-                    ctx,
-                    &[
-                        String::from("https://relay.example"),
-                        String::from("MOQT://relay.example"),
-                        String::from("moqt://"),
-                        String::from("moqt://relay.example?tns=example.2ecom"),
-                        String::from("moqt://relay.example#fragment"),
-                        String::from("moqt://relay.example/path"),
-                        String::from("moqt://user@relay.example"),
-                        String::from("moqt://relay example"),
-                        String::from("moqt://relay.example\u{7f}"),
-                        garbage,
-                    ],
-                ))
+                if noprop::sample_ratio(ctx, noprop::Ratio::new(3, 4)) {
+                    GeneratedResource::new(String::from("moqt://relay.example?tns=example.2ecom"))
+                } else {
+                    GeneratedResource::new(sample_invalid_setup_resource(ctx))
+                }
             }
         },
         ResourceModelKind::Namespace => {
-            let tn = tn_value.clone().unwrap_or_default();
-            match noprop::sample_weighted_index(ctx, &[3, 3, 1, 1, 2]) {
-                // §3.1.3 の namespace 形式 (クエリに tn を持たない)
-                0 => Some(format!("moqt://relay.example?tns={tns_value}")),
-                // 順序と追加パラメータを変えた形式。actx に tn がある場合だけ比較される
-                1 => Some(format!(
-                    "moqt://relay.example?extra=1&tn={tn}&tns={tns_value}"
-                )),
-                // tns が一致しない
-                2 => Some(format!(
-                    "moqt://relay.example?tns={}&tn={tn}",
-                    sample_safe_text(ctx, 8)
-                )),
-                // クエリ無し (tns が無いため整合しない)
-                3 => Some(String::from("moqt://relay.example")),
-                _ => None,
-            }
+            sample_namespace_resource(ctx, &tns_value, tn_value.as_deref())
         }
-        ResourceModelKind::Track => {
-            let tn = tn_value.clone().unwrap_or_default();
-            match noprop::sample_weighted_index(ctx, &[3, 3, 1, 1, 2]) {
-                // tns と tn が一致する
-                0 => Some(format!("moqt://relay.example?tns={tns_value}&tn={tn}")),
-                // 順序と追加パラメータを変えた一致
-                1 => Some(format!(
-                    "moqt://relay.example?extra=1&tn={tn}&tns={tns_value}"
-                )),
-                // tn が無い。actx に tn がある場合は整合しない
-                2 => Some(format!("moqt://relay.example?tns={tns_value}")),
-                // tn が一致しない
-                3 => Some(format!(
-                    "moqt://relay.example?tns={tns_value}&tn={}",
-                    sample_safe_text(ctx, 8)
-                )),
-                _ => None,
-            }
-        }
+        ResourceModelKind::Track => sample_track_resource(ctx, &tns_value, tn_value.as_deref()),
     };
+    let resource = generated_resource.resource;
+    let resource_duplicate = generated_resource.duplicate;
     // 重複メンバーはデコード自体を失敗させる
     let duplicate = noprop::sample_ratio(ctx, noprop::Ratio::one_nth(8));
     let mut members = vec![
@@ -267,6 +516,7 @@ fn sample_authorization_context(
         tns_value,
         tn_value,
         resource,
+        resource_duplicate,
         duplicate,
     }
 }
@@ -383,6 +633,8 @@ fn authorization_context_matches_model() -> noprop::TestResult {
     let missing_track_name_seen = std::cell::Cell::new(0usize);
     let resource_ok_seen = std::cell::Cell::new(0usize);
     let resource_error_seen = std::cell::Cell::new(0usize);
+    let same_value_duplicate_seen = std::cell::Cell::new(0usize);
+    let different_value_duplicate_seen = std::cell::Cell::new(0usize);
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
         let namespace = sample_namespace(ctx);
@@ -475,6 +727,29 @@ fn authorization_context_matches_model() -> noprop::TestResult {
             "resource の検証がモデルと一致しない: generated={generated:?} action={action:?}"
         );
 
+        // 重複したパラメータのモデル分岐を踏み、判定が分岐と対応することを確認する。
+        // 同じ値の重複はすべて一致するため整合し、異なる値の重複は 1 つでも一致しない
+        // 値があれば不整合になる (§3.1.2 の整合要求の保守的な解釈)
+        match generated.resource_duplicate {
+            ResourceDuplicateModel::None => {}
+            ResourceDuplicateModel::SameValue => {
+                assert_eq!(
+                    expected_resource,
+                    Ok(()),
+                    "同じ値の重複を不整合と判定した: generated={generated:?} action={action:?}"
+                );
+                same_value_duplicate_seen.set(same_value_duplicate_seen.get() + 1);
+            }
+            ResourceDuplicateModel::DifferentValue => {
+                assert_eq!(
+                    expected_resource,
+                    Err(DpopError::ResourceInconsistent),
+                    "異なる値の重複を整合と判定した: generated={generated:?} action={action:?}"
+                );
+                different_value_duplicate_seen.set(different_value_duplicate_seen.get() + 1);
+            }
+        }
+
         // 到達した分岐を数える
         if expected_type.is_err() {
             type_mismatch_seen.set(type_mismatch_seen.get() + 1);
@@ -531,6 +806,14 @@ fn authorization_context_matches_model() -> noprop::TestResult {
     assert!(
         resource_error_seen.get() > 0,
         "resource が整合しないケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        same_value_duplicate_seen.get() > 0,
+        "同じ値の重複したパラメータのケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        different_value_duplicate_seen.get() > 0,
+        "異なる値の重複したパラメータのケースが生成されなかった\n{runner}"
     );
     Ok(())
 }

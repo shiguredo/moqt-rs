@@ -42,11 +42,6 @@ enum Op {
         subgroup_id: u64,
         object_id: u64,
     },
-    Get {
-        track_alias: u64,
-        group_id: u64,
-        subgroup_id: u64,
-    },
     RemoveTrackAlias {
         track_alias: u64,
     },
@@ -103,13 +98,6 @@ fuzz_target!(|ops: Vec<Op>| {
             } => {
                 let _ =
                     tracker.check_object_after_fin(track_alias, group_id, subgroup_id, object_id);
-            }
-            Op::Get {
-                track_alias,
-                group_id,
-                subgroup_id,
-            } => {
-                let _ = tracker.get(track_alias, group_id, subgroup_id);
             }
             Op::RemoveTrackAlias { track_alias } => {
                 tracker.remove_track_alias(track_alias);
