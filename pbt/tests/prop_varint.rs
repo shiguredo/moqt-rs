@@ -38,7 +38,7 @@ fn leading_ones_indicate_length() -> noprop::TestResult {
             4 => 3u32,
             5 => 4u32,
             6 => 5u32,
-            7 => 6u32, // 1111110x: draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1595 で追加
+            7 => 6u32, // 1111110x: draft-ietf-moq-transport-23 Appendix A.6
             8 => 7u32, // 11111110
             9 => 8u32,
             _ => unreachable!("vi64 encoded length is always 1..=9"),

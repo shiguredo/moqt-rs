@@ -13,8 +13,23 @@ use shiguredo_moqt::stream::fetch::{
 };
 use shiguredo_moqt::stream::subgroup::{SubgroupHeader, SubgroupIdMode, SubgroupObject};
 
-use crate::length_prefixed_properties;
+use shiguredo_moqt::object_properties::{
+    ObjectProperties, ObjectProperty, ObjectPropertyValue, PROP_PRIOR_GROUP_ID_GAP,
+};
 
+/// デコード時に検証を通る非空の Properties blob (Properties Length を含む) を作る
+fn sample_properties_blob(ctx: &mut noprop::TestCaseContext) -> Vec<u8> {
+    let mut properties = ObjectProperties::new();
+    properties.push(ObjectProperty {
+        prop_type: PROP_PRIOR_GROUP_ID_GAP,
+        value: ObjectPropertyValue::VarInt(noprop::sample_u64_in(ctx, 0..=100)),
+    });
+    let mut buf = Vec::new();
+    properties
+        .encode(&mut buf)
+        .expect("valid な Object Properties はエンコードできる");
+    buf
+}
 /// Subgroup のワイヤバイト列を valid-by-construction で生成する
 fn sample_subgroup_stream(ctx: &mut noprop::TestCaseContext) -> Vec<u8> {
     let has_properties = noprop::sample_bool(ctx);
@@ -45,9 +60,7 @@ fn sample_subgroup_stream(ctx: &mut noprop::TestCaseContext) -> Vec<u8> {
             (0, Some(noprop::sample_choice(ctx, &[0u64, 3, 4])))
         };
         let properties_data = if has_properties {
-            Some(length_prefixed_properties(&noprop::sample_bytes_vec(
-                ctx, 0,
-            )))
+            Some(sample_properties_blob(ctx))
         } else {
             None
         };
@@ -180,13 +193,18 @@ fn sample_fetch_stream(ctx: &mut noprop::TestCaseContext) -> Vec<u8> {
             } else {
                 None
             },
-            has_properties: false,
+            has_properties: noprop::sample_bool(ctx),
             is_datagram_origin: false,
             payload_length: noprop::sample_u64_in(ctx, 0..=16),
         };
         let payload_length = object.payload_length;
+        let properties_data = if object.has_properties {
+            Some(sample_properties_blob(ctx))
+        } else {
+            None
+        };
         FetchStreamEntry::Object(object)
-            .encode(None, prior_context, &mut bytes)
+            .encode(properties_data.as_deref(), prior_context, &mut bytes)
             .expect("valid-by-construction な FetchStreamObject はエンコードできる");
         let payload = noprop::sample_bytes_vec(ctx, payload_length as usize);
         bytes.extend_from_slice(&payload);
@@ -408,5 +426,70 @@ fn fetch_decoder_split_invariance_with_markers() -> noprop::TestResult {
         track_end_seen.get(),
         "End of Track を含むケースが生成されなかった\n{runner}"
     );
+    Ok(())
+}
+
+/// 非空 Properties の切り出しを観測すること
+#[test]
+fn subgroup_decoder_extracts_non_empty_properties() -> noprop::TestResult {
+    let seen = std::cell::Cell::new(false);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let bytes = sample_subgroup_stream(ctx);
+        for (object, _) in drive_subgroup(&[&bytes]).expect("生成した stream をデコードできること")
+        {
+            if let Some(properties) = object.properties_bytes {
+                assert!(
+                    !properties.is_empty(),
+                    "Properties 付き Object の生バイトが空でないこと"
+                );
+                assert!(properties.len() > 1, "Properties Length varint を含むこと");
+                seen.set(true);
+            }
+        }
+        Ok(())
+    })?;
+    assert!(
+        seen.get(),
+        "非空 Properties の Object が 1 件以上観測されること"
+    );
+    Ok(())
+}
+
+/// 非空 Properties の切り出しを観測すること (Fetch)
+#[test]
+fn fetch_decoder_extracts_non_empty_properties() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    let seen = std::cell::Cell::new(false);
+    runner.run(256, |ctx| {
+        let mut bytes = FetchHeader { request_id: 1 }.encode();
+        let properties = sample_properties_blob(ctx);
+        let object = FetchStreamObject {
+            group_id: Some(0),
+            subgroup_id: FetchSubgroupIdMode::Zero,
+            object_id: Some(0),
+            publisher_priority: Some(128),
+            has_properties: true,
+            is_datagram_origin: false,
+            payload_length: 1,
+        };
+        FetchStreamEntry::Object(object)
+            .encode(Some(&properties), FetchPriorContext::First, &mut bytes)
+            .expect("valid な Fetch Object はエンコードできる");
+        bytes.push(b'x');
+
+        for (entry, _) in drive_fetch(&[&bytes]).expect("生成した stream をデコードできること")
+        {
+            if let DecodedFetchEntry::Object(object) = entry
+                && let Some(decoded) = object.properties_bytes
+            {
+                assert_eq!(decoded, properties, "Properties の生バイトが往復すること");
+                assert!(decoded.len() > 1, "Properties Length varint を含むこと");
+                seen.set(true);
+            }
+        }
+        Ok(())
+    })?;
+    assert!(seen.get(), "非空 Properties の Object が観測されること");
     Ok(())
 }

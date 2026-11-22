@@ -1,7 +1,7 @@
-/// SubgroupTracker の単体テスト
-///
-/// draft-ietf-moq-transport-23 §2.2 (Subgroups) / draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams) に基づく再オープン禁止検証の
-/// 境界条件・エラーパスを PBT とは別に厳密化する。
+//! SubgroupTracker の単体テスト
+//!
+//! draft-ietf-moq-transport-23 §2.2 (Subgroups) / §11.3.2 (Closing Subgroup Streams) に基づく
+//! 再オープン禁止検証の境界条件・エラーパスを PBT とは別に厳密化する。
 use shiguredo_moqt::error::MessageError;
 use shiguredo_moqt::subgroup_tracker::{
     MAX_TRACKED_SUBGROUP_KEYS_PER_TRACK_ALIAS, SubgroupStreamState, SubgroupTracker,

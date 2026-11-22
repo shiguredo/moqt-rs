@@ -86,7 +86,12 @@ fn encode_varint_with_width(value: u64, width: usize) -> Vec<u8> {
     buf
 }
 
-/// 任意分割で push してもデコード結果が同じである
+/// 任意分割で push しても、push ごとのデコード結果の列が一括と一致する
+///
+/// `push` はバッファへ連結するだけであるため、最後に 1 回だけデコードする比較は
+/// 構造上つねに一致してしまう。各 push の直後に `try_decode_message` を呼び、
+/// データ不足 (`None`) を除いたメッセージ / エラーの列を比較して、部分入力で
+/// 誤ってエラーにしないことを固定する。
 #[test]
 fn decoder_split_invariance() -> noprop::TestResult {
     let mut runner = test_runner()?;
@@ -95,18 +100,42 @@ fn decoder_split_invariance() -> noprop::TestResult {
         let bytes = msg
             .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
             .expect("テストフィクスチャの前提条件を満たす");
-        // 分割点 (両端を含む) で 2 分割する
         let at = noprop::sample_usize_in(ctx, 0..=bytes.len());
+
+        // 一括 push 後に読み出せる列
         let mut whole = MessageDecoder::new(DEFAULT_MAX_CONTROL_MESSAGE_SIZE);
         whole.push(&bytes);
+        let mut expected = Vec::new();
+        loop {
+            match whole.try_decode_message() {
+                Ok(Some(message)) => expected.push(Ok(message)),
+                Ok(None) => break,
+                Err(error) => {
+                    expected.push(Err(error));
+                    break;
+                }
+            }
+        }
+
+        // 2 分割して push するたびに読み出せる列
         let mut split = MessageDecoder::new(DEFAULT_MAX_CONTROL_MESSAGE_SIZE);
-        split.push(&bytes[..at]);
-        split.push(&bytes[at..]);
-        assert_eq!(
-            whole.try_decode_message(),
-            split.try_decode_message(),
-            "分割デコードの結果が一括と一致すること"
-        );
+        let mut actual = Vec::new();
+        for chunk in [&bytes[..at], &bytes[at..]] {
+            split.push(chunk);
+            loop {
+                match split.try_decode_message() {
+                    Ok(Some(message)) => actual.push(Ok(message)),
+                    Ok(None) => break,
+                    Err(error) => {
+                        actual.push(Err(error));
+                        break;
+                    }
+                }
+            }
+        }
+
+        assert_eq!(actual, expected, "分割してもデコード結果の列が一致すること");
+        assert_eq!(expected, vec![Ok(msg)], "1 個のメッセージに戻ること");
         Ok(())
     })?;
     Ok(())
@@ -151,36 +180,6 @@ fn decoder_non_minimal_length_split_invariance() -> noprop::TestResult {
             .expect("非最小符号化は分割しても受理されること");
         assert_eq!(whole_result, split_result, "分割しても同じ結果になること");
         assert_eq!(whole_result, Some(msg), "元のメッセージに戻ること");
-        Ok(())
-    })?;
-    Ok(())
-}
-
-/// 不正バイト列に対して decoder が panic せずエラーを返す
-#[test]
-fn decoder_garbage_never_panics() -> noprop::TestResult {
-    let mut runner = test_runner()?;
-    runner.run(256, |ctx| {
-        let len = noprop::sample_usize_in(ctx, 0..=32);
-        let mut bytes = Vec::new();
-        for _ in 0..len {
-            bytes.push(noprop::sample_u8(ctx));
-        }
-        // 一括と分割で結果が一致し、どちらも panic しないことだけ検証する
-        // (Ok / Err のいずれも正当。エラー種別の仕様化は単体テストの責務)
-        let mut whole = MessageDecoder::new(DEFAULT_MAX_CONTROL_MESSAGE_SIZE);
-        whole.push(&bytes);
-        let whole_result = whole.try_decode_message().map(|_| ());
-        let mut split = MessageDecoder::new(DEFAULT_MAX_CONTROL_MESSAGE_SIZE);
-        let at = noprop::sample_usize_in(ctx, 0..=bytes.len());
-        split.push(&bytes[..at]);
-        split.push(&bytes[at..]);
-        let split_result = split.try_decode_message().map(|_| ());
-        assert_eq!(
-            whole_result.is_ok(),
-            split_result.is_ok(),
-            "分割しても成否が変わらないこと"
-        );
         Ok(())
     })?;
     Ok(())

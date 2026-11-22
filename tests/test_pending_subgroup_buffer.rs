@@ -650,6 +650,8 @@ fn caller_dropped_objects_are_not_retained() {
     assert_eq!(buffer.total_bytes(), 0, "捨てる Object は push しない");
     // Discarded / FilteredOut として entry を作ってしまった場合の後始末
     let id = buffer.add(1, 0);
+    buffer.push(id, &[1, 2, 3]);
+    assert_eq!(buffer.total_bytes(), 3, "push したバイトが集計される");
     buffer.remove(id);
     assert_eq!(buffer.stream_count(), 0, "remove で entry は残らない");
     assert_eq!(buffer.total_bytes(), 0, "remove で集計は 0 に戻る");

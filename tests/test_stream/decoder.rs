@@ -1133,6 +1133,66 @@ fn test_fetch_rejects_ascending_group_in_descending_mode() {
     ));
 }
 
+/// Descending の Group ID Delta が 0 の成功境界と、prev_group と等しい delta の underflow を固定する
+#[test]
+fn test_fetch_descending_group_order_boundaries() {
+    let header = FetchHeader { request_id: 1 };
+
+    // Group 10 の次に Group 9 を送る。Descending の delta は 10 - 9 - 1 = 0 になる
+    let data = encode_fetch_stream(
+        &header,
+        &[
+            (descending_fetch_object(Some(10), Some(0)), None, Some(b"a")),
+            (descending_fetch_object(Some(0), Some(0)), None, Some(b"b")),
+        ],
+    );
+    let mut decoder =
+        FetchStreamDecoder::new_with_group_order(0x02).expect("Descending は有効な Group Order");
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    for expected_group in [10, 9] {
+        let entry = decoder
+            .try_decode_entry()
+            .expect("delta 0 の Group 降順を受理すること")
+            .expect("エントリがあること");
+        match entry {
+            DecodedFetchEntry::Object(object) => {
+                assert_eq!(object.group_id, expected_group);
+                drain_fetch_payload(&mut decoder, 1);
+            }
+            other => panic!("Object が期待された: {other:?}"),
+        }
+    }
+
+    // Group 10 の次に delta 10 を送ると 10 - 10 - 1 が underflow する
+    let data = encode_fetch_stream(
+        &header,
+        &[
+            (descending_fetch_object(Some(10), Some(0)), None, Some(b"a")),
+            (descending_fetch_object(Some(10), Some(0)), None, Some(b"b")),
+        ],
+    );
+    let mut decoder =
+        FetchStreamDecoder::new_with_group_order(0x02).expect("Descending は有効な Group Order");
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    let _ = decoder
+        .try_decode_entry()
+        .expect("最初の Object を受理すること")
+        .expect("エントリがあること");
+    drain_fetch_payload(&mut decoder, 1);
+    assert!(matches!(
+        decoder.try_decode_entry(),
+        Err(MessageError::DeltaEncodingOverflow(_))
+    ));
+}
+
 /// Descending (0x02) テスト用の FetchStreamObject エントリを作る
 ///
 /// `group_id` は Group ID Delta (None は prior と同じ Group)、`object_id` は Group が
