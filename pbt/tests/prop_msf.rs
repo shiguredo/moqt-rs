@@ -125,6 +125,43 @@ fn sample_packaging_metadata(ctx: &mut noprop::TestCaseContext) -> Option<String
     )
 }
 
+/// MSF の codec 文字列を生成する
+///
+/// 登録済みの audio / video codec、登録外 codec、codec 無しを混ぜる。
+fn sample_codec(ctx: &mut noprop::TestCaseContext) -> Option<String> {
+    noprop::sample_choice(
+        ctx,
+        &[
+            None,
+            Some("opus"),
+            Some("mp4a.40.2"),
+            Some("pcm-s16"),
+            Some("av01.0.08M.08"),
+            Some("avc1.640028"),
+            Some("vp8"),
+            Some("vp09.00.40.08"),
+            Some("ac-3"),
+            Some("custom-codec"),
+        ],
+    )
+    .map(str::to_string)
+}
+
+/// MSF の予約 role を生成する
+fn sample_role(ctx: &mut noprop::TestCaseContext) -> Option<String> {
+    noprop::sample_choice(
+        ctx,
+        &[
+            None,
+            Some("video"),
+            Some("signlanguage"),
+            Some("audio"),
+            Some("audiodescription"),
+        ],
+    )
+    .map(str::to_string)
+}
+
 /// 通常トラック (tracks / publishTracks / addTracks 用) を生成する
 ///
 /// - parentName は含めない (tracks/addTracks では禁止)
@@ -203,6 +240,21 @@ fn sample_track(ctx: &mut noprop::TestCaseContext) -> MsfTrack {
     t.avg_bitrate = avg_bitrate.map(|v| v as u64);
     t.max_gop_duration = max_gop_duration.map(|v| v as u64);
     t.max_group_duration = max_group_duration.map(|v| v as u64);
+    // codec / role を持つトラックも生成し、種別に応じた MUST を満たす値を揃える。
+    // codec の登録名判定に依存せず、media の必須フィールドをすべて生成する。
+    t.codec = sample_codec(ctx);
+    t.role = sample_role(ctx);
+    if t.role.is_some() && t.codec.is_none() {
+        t.codec = Some("custom-codec".to_string());
+    }
+    if t.codec.is_some() || t.role.is_some() {
+        t.bitrate = Some(u64::from(noprop::sample_u32(ctx)).max(1));
+        t.samplerate = Some(u64::from(noprop::sample_u32(ctx)).max(1));
+        t.channel_config = Some("2".to_string());
+    }
+    if matches!(t.role.as_deref(), Some("video" | "signlanguage")) {
+        t.framerate = Some(30.0);
+    }
     // connectionURI は MOQT endpoint URI として検証されるため、有効な URI 形状を生成する
     // (JSON エスケープ要文字の頑健性は sample_catalog_namespace の field で担保)
     t.connection_uri = if noprop::sample_bool(ctx) {
@@ -221,6 +273,9 @@ fn sample_track(ctx: &mut noprop::TestCaseContext) -> MsfTrack {
         t.track_base_key = Some("AAEC".to_string());
     }
     t.lang = lang;
+    if t.role.as_deref() == Some("audiodescription") {
+        t.lang = Some("en".to_string());
+    }
     t
 }
 
