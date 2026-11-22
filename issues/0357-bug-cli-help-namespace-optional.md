@@ -1,7 +1,7 @@
 # moq-pub / moq-sub の --help で省略可能な --namespace の必須表示と説明行を修正する
 
 - Created: 2026-10-20
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/fix-cli-help-namespace-optional
 - Polished: 2026-10-25
 
@@ -37,3 +37,19 @@
 - `moq-pub --help` の先頭に `MOQT publisher client` が表示されること
 - 上記の help 表示を `crates/moq-pub/tests/test_cli.rs` / `crates/moq-sub/tests/test_cli.rs` で固定すること
 - `cargo test -p moq-pub -p moq-sub` / `cargo clippy -p moq-pub -p moq-sub --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること
+
+## 解決方法
+
+- `--namespace` から `.example("moq-example")` を削除した。noargs は `.example` を持つ
+  オプションを必須として `Usage:` に表示するため、省略可能なオプションには例を与えない。
+- `--url` の `.example` を `moqt://relay.example.com:4433/app#msf:moq-example--video` に
+  変更した。help モードでは `--namespace` の指定が無いため、この MSF fragment から
+  namespace を解決する。
+- `crates/moq-pub/Cargo.toml` に `description = "MOQT publisher client"` を追加し、
+  `moq-pub --help` の説明行が出るようにした。
+- `crates/moq-pub/tests/test_cli.rs` / `crates/moq-sub/tests/test_cli.rs` で、`Usage:` 行に
+  `--namespace` が含まれないこと、`Example:` が `#msf:moq-example--video` を含むこと、
+  moq-pub / moq-sub の説明行が出ることを固定した。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check` が成功した。
