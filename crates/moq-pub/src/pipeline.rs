@@ -3024,30 +3024,11 @@ struct NextEventContext<'a> {
 /// session のイベント 1 件を処理する
 /// control stream の GOAWAY を処理する
 /// 同じ session で request を再発行する GOAWAY を処理する
-async fn republish_request_on_goaway(
-    context: &mut NextEventContext<'_>,
+/// GOAWAY の request から再発行対象の track を解決する
+fn resolve_goaway_republish_kind(
+    context: &NextEventContext<'_>,
     request_id: u64,
-) -> Result<bool> {
-    // draft-ietf-moq-transport-23 §9.2 (GOAWAY): 空の
-    // New Session URI は「現在の session で当該 request を
-    // 再発行する」ことを意味する。session は維持する
-    //
-    // session 全体の移行が進行中なら、当該 request は移行先の
-    // session で張り直される。drain 中の session に新しい
-    // request を作らないよう、ここでは再発行しない
-    // (§9.2: control stream の GOAWAY を受けた側は新しい
-    // request を開始しないことが SHOULD)
-    if context.migration_rx.is_some() {
-        tracing::info!(
-            "Ignoring a request-scoped GOAWAY while a session migration is in progress: request_id={request_id}"
-        );
-        return Ok(false);
-    }
-    // request 単位移行で side session へ PUBLISH を移した
-    // track は、main ループが持つ request id が side
-    // session のものになっている。旧 session の GOAWAY
-    // は移行前の request id で届くため、移行済みの
-    // track は `PublishTarget` が保持する旧 id で照合する
+) -> Option<PublishTrack> {
     let kind = publish_track_for_main_goaway(
         request_id,
         *context.video_request_id,
@@ -3075,7 +3056,7 @@ async fn republish_request_on_goaway(
         tracing::info!(
             "Ignoring a request-scoped GOAWAY for a track that was migrated to another session: request_id={request_id}, kind={kind:?}"
         );
-        return Ok(false);
+        return None;
     }
     // 移行の確立中は旧 session で当該 PUBLISH を
     // 再発行しない (同じ track を 2 か所で PUBLISH しない)
@@ -3083,8 +3064,17 @@ async fn republish_request_on_goaway(
         tracing::info!(
             "Ignoring a request-scoped GOAWAY for a track that is being migrated to another session: request_id={request_id}, kind={kind:?}"
         );
-        return Ok(false);
+        return None;
     }
+    Some(kind)
+}
+
+/// 同じ session で再発行した request の後処理を行う
+async fn apply_republished_request(
+    context: &mut NextEventContext<'_>,
+    request_id: u64,
+    kind: PublishTrack,
+) {
     match republish_request_on_current_session(
         context.client,
         context.config,
@@ -3138,34 +3128,45 @@ async fn republish_request_on_goaway(
             tracing::warn!("Failed to re-issue the request after a request-scoped GOAWAY: {e}");
         }
     }
+}
+
+async fn republish_request_on_goaway(
+    context: &mut NextEventContext<'_>,
+    request_id: u64,
+) -> Result<bool> {
+    // draft-ietf-moq-transport-23 §9.2 (GOAWAY): 空の
+    // New Session URI は「現在の session で当該 request を
+    // 再発行する」ことを意味する。session は維持する
+    //
+    // session 全体の移行が進行中なら、当該 request は移行先の
+    // session で張り直される。drain 中の session に新しい
+    // request を作らないよう、ここでは再発行しない
+    // (§9.2: control stream の GOAWAY を受けた側は新しい
+    // request を開始しないことが SHOULD)
+    if context.migration_rx.is_some() {
+        tracing::info!(
+            "Ignoring a request-scoped GOAWAY while a session migration is in progress: request_id={request_id}"
+        );
+        return Ok(false);
+    }
+    // request 単位移行で side session へ PUBLISH を移した
+    // track は、main ループが持つ request id が side
+    // session のものになっている。旧 session の GOAWAY
+    // は移行前の request id で届くため、移行済みの
+    // track は `PublishTarget` が保持する旧 id で照合する
+    let Some(kind) = resolve_goaway_republish_kind(context, request_id) else {
+        return Ok(false);
+    };
+    apply_republished_request(context, request_id, kind).await;
     Ok(false)
 }
 
 /// request 単位移行の side session へ PUBLISH を移す GOAWAY を処理する
-async fn migrate_request_on_goaway(
-    context: &mut NextEventContext<'_>,
+/// GOAWAY の request から移行対象の track を解決する
+fn resolve_goaway_migration_kind(
+    context: &NextEventContext<'_>,
     request_id: u64,
-    target: tokio_moq::MigrationTarget,
-    timeout: u64,
-) -> Result<bool> {
-    // draft-ietf-moq-transport-23 §9.2 (GOAWAY): request
-    // stream の GOAWAY の New Session URI が別の URL を
-    // 指す場合、当該 request だけをその session で再発行
-    // する。この example の main ループは 1 つの
-    // `MoqtClient` しか所有できないため、専用タスクが
-    // side session を確立して PUBLISH を張り、main ループ
-    // がその session へ Object を送る (§9.2)。同じ移行先
-    // URL を指す複数の PUBLISH は 1 本の side session を
-    // 共有する
-    if context.migration_rx.is_some() {
-        // session 全体の移行が進行中なら、その移行先で
-        // 全 track を張り直す。drain 中の session で
-        // side session を作らない
-        tracing::info!(
-            "Ignoring a request-scoped GOAWAY with a new session URI while a session migration is in progress: request_id={request_id}"
-        );
-        return Ok(false);
-    }
+) -> Option<PublishTrack> {
     let kind = publish_track_for_main_goaway(
         request_id,
         *context.video_request_id,
@@ -3188,7 +3189,7 @@ async fn migrate_request_on_goaway(
         tracing::warn!(
             "Ignoring a request-scoped GOAWAY with a new session URI for a request that is not a publisher request: request_id={request_id}"
         );
-        return Ok(false);
+        return None;
     }
     if track_migrated(
         kind,
@@ -3199,7 +3200,7 @@ async fn migrate_request_on_goaway(
         tracing::info!(
             "Ignoring a request-scoped GOAWAY for a track that was already migrated to another session: request_id={request_id}, kind={kind:?}"
         );
-        return Ok(false);
+        return None;
     }
     if context.migrating_tracks.contains(&kind) {
         // 移行の確立中に 2 回目の GOAWAY が来ても二重に
@@ -3207,8 +3208,19 @@ async fn migrate_request_on_goaway(
         tracing::info!(
             "Ignoring a request-scoped GOAWAY for a track that is already being migrated: request_id={request_id}, kind={kind:?}"
         );
-        return Ok(false);
+        return None;
     }
+    Some(kind)
+}
+
+/// request 単位移行を side session へ委ねる
+async fn dispatch_track_migration(
+    context: &mut NextEventContext<'_>,
+    kind: PublishTrack,
+    request_id: u64,
+    target: tokio_moq::MigrationTarget,
+    timeout: u64,
+) -> Result<bool> {
     // 移行先 URI の msf fragment の connection が
     // 現在の接続経路と矛盾する場合は移行しない
     // (draft-ietf-moq-msf-02 §11.1.1)
@@ -3273,6 +3285,36 @@ async fn migrate_request_on_goaway(
     // 新 session の PUBLISH が成立するまで旧 session の
     // 配信を止めない (§7.7.1)
     Ok(false)
+}
+
+async fn migrate_request_on_goaway(
+    context: &mut NextEventContext<'_>,
+    request_id: u64,
+    target: tokio_moq::MigrationTarget,
+    timeout: u64,
+) -> Result<bool> {
+    // draft-ietf-moq-transport-23 §9.2 (GOAWAY): request
+    // stream の GOAWAY の New Session URI が別の URL を
+    // 指す場合、当該 request だけをその session で再発行
+    // する。この example の main ループは 1 つの
+    // `MoqtClient` しか所有できないため、専用タスクが
+    // side session を確立して PUBLISH を張り、main ループ
+    // がその session へ Object を送る (§9.2)。同じ移行先
+    // URL を指す複数の PUBLISH は 1 本の side session を
+    // 共有する
+    if context.migration_rx.is_some() {
+        // session 全体の移行が進行中なら、その移行先で
+        // 全 track を張り直す。drain 中の session で
+        // side session を作らない
+        tracing::info!(
+            "Ignoring a request-scoped GOAWAY with a new session URI while a session migration is in progress: request_id={request_id}"
+        );
+        return Ok(false);
+    }
+    let Some(kind) = resolve_goaway_migration_kind(context, request_id) else {
+        return Ok(false);
+    };
+    dispatch_track_migration(context, kind, request_id, target, timeout).await
 }
 
 /// session 全体の移行を開始する GOAWAY を処理する
