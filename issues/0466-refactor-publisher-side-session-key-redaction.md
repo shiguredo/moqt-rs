@@ -1,7 +1,7 @@
 # moq-pub の side session キーを認可トークンの実値を含まない形にする
 
 - Created: 2026-11-20
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/refactor-publisher-side-session-key-redaction
 - Polished: 2026-11-20
 
@@ -35,3 +35,20 @@
 - `side_session_key` の doc コメントが、キーが query / fragment の実値を含まず、同一性判定とイベントの照合にだけ使い、ログには表示用の関数を使うことを説明していること。
 - 上記のうち、キーと表示用の値の振る舞いの条件を `crates/moq-pub/src/pipeline.rs` の単体テストで固定すること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `side_session_key` は authority の userinfo を除き、path は `?` より前を使い、
+  query と fragment (type / value) を `DefaultHasher` のハッシュに置き換えた。
+  query の有無 (`?` あり / なし) もキーで区別する。
+- `side_session_url_display` を追加し、ログには userinfo を除いた authority、`?` より前の path、
+  query / fragment のハッシュだけを出すようにした。
+- side session の移行ログ (`Failed to send` / `Requested` / `Starting` / `Migrated` /
+  `ended` / `Failed to migrate`) は `authority` ではなく表示用の値を使うようにした。
+- `crates/moq-pub/src/pipeline.rs` のテストに、query / fragment のダミートークンと
+  userinfo を含む URL を追加し、キーと表示に実値が残らないこと、query の有無・値の違いで
+  キーが変わることを固定した。
+- 既存の移行期限切れテストのログ needle を新しい表示形式に合わせた。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check` が成功した。
