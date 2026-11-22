@@ -622,3 +622,58 @@ fn codec_classification_public_api_matches_registry() {
         assert!(!is_video_codec(codec), "video と判定しないこと: {codec}");
     }
 }
+
+#[test]
+fn cipher_suite_must_be_supported_with_moq_secure_objects() {
+    let bad = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"encryptionScheme":"moq-secure-objects","cipherSuite":"bad-suite","keyId":"k","trackBaseKey":"AAEC"}]}"#;
+    assert!(
+        MsfCatalogDocument::decode(bad, shiguredo_moqt::msf::MsfCompression::None).is_err(),
+        "未対応の cipherSuite を拒否すること"
+    );
+    let good = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"encryptionScheme":"moq-secure-objects","cipherSuite":"aes-128-gcm-sha256","keyId":"k","trackBaseKey":"AAEC"}]}"#;
+    MsfCatalogDocument::decode(good, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("対応 cipherSuite を受理すること");
+}
+
+#[test]
+fn auth_info_scheme_must_not_be_duplicated() {
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"c4m":"AA","c4m":"BB"}}]}"#;
+    assert!(
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_err(),
+        "重複した authInfo scheme を拒否すること"
+    );
+}
+
+#[test]
+fn encode_rejects_unsupported_catalog_version() {
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true}]}"#;
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let MsfCatalogDocument::Full(mut cat) = doc else {
+        panic!("Full catalog がデコードされること");
+    };
+    cat.version = "unknown".to_string();
+    assert!(
+        MsfCatalogDocument::Full(cat)
+            .encode(shiguredo_moqt::msf::MsfCompression::None)
+            .is_err(),
+        "未対応 version の encode を拒否すること"
+    );
+}
+
+#[test]
+fn encode_rejects_non_finite_framerate() {
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"codec":"av01.0.08M.08","bitrate":500000,"width":640,"height":480,"framerate":30}]}"#;
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let MsfCatalogDocument::Full(mut cat) = doc else {
+        panic!("Full catalog がデコードされること");
+    };
+    cat.tracks[0].framerate = Some(f64::NAN);
+    assert!(
+        MsfCatalogDocument::Full(cat)
+            .encode(shiguredo_moqt::msf::MsfCompression::None)
+            .is_err(),
+        "非有限の framerate を encode で拒否すること"
+    );
+}

@@ -66,6 +66,9 @@
   - role `signlanguage` は §5.2.7 Table 7 の visual track のため video として扱い、codec / bitrate を要求する
   - codec / role / mimeType の判定が食い違う場合は両方の要求を満たす
   - codec なし・登録外 codec は mimeType が種別を示さない限り codec に基づく要求を行わない
+  - `moq-secure-objects` の cipherSuite は `aes-128-gcm-sha256` / `aes-256-gcm-sha512` / `aes-128-ctr-hmac-sha256-80` のみ
+  - authInfo の scheme は重複禁止
+  - encode 時は version が `draft-02` であり、framerate が有限値であること
   - lang の BCP 47 簡易検証 (RFC 5646 §2.1 の grandfathered タグを含む。`irregular` は固定リスト、`regular` は langtag 規則で受理する)
 
 ## Timeline

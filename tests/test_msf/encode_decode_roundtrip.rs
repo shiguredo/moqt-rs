@@ -1112,38 +1112,38 @@ fn auth_info_empty_object_accepted() {
 }
 
 #[test]
-fn auth_info_duplicate_scheme_kept_in_order() {
-    // 重複 scheme は順序どおりに保持されること
+fn auth_info_duplicate_scheme_rejected() {
+    // 重複 scheme は RFC 8259 §4 の一意性に反するため decode で拒否する
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"a","cat":"b"}}]}"#;
+    assert!(
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_err(),
+        "重複した authInfo scheme を拒否すること"
+    );
+
+    // encode でも手組みの重複 scheme を拒否する
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"authInfo":{"cat":"a"}}]}"#;
     let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
         .expect("テストフィクスチャの前提条件を満たす");
-    let MsfCatalogDocument::Full(cat) = doc else {
+    let MsfCatalogDocument::Full(mut cat) = doc else {
         panic!("Full catalog がデコードされること");
     };
-    let entries = cat.tracks[0]
+    let duplicate = cat.tracks[0]
         .auth_info
         .as_ref()
-        .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].value_raw.as_slice(), b"\"a\"".as_slice());
-    assert_eq!(entries[1].value_raw.as_slice(), b"\"b\"".as_slice());
-    let encoded = MsfCatalogDocument::Full(cat)
-        .encode(shiguredo_moqt::msf::MsfCompression::None)
-        .expect("encode に成功すること");
-    let decoded = MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
-        .expect("テストフィクスチャの前提条件を満たす");
-    let MsfCatalogDocument::Full(re_cat) = decoded else {
-        panic!("Full catalog がデコードされること");
-    };
-    let re_entries = re_cat.tracks[0]
+        .expect("authInfo があること")[0]
+        .clone();
+    cat.tracks[0]
         .auth_info
-        .as_ref()
-        .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(re_entries.len(), 2);
-    assert_eq!(re_entries[0].value_raw.as_slice(), b"\"a\"".as_slice());
-    assert_eq!(re_entries[1].value_raw.as_slice(), b"\"b\"".as_slice());
+        .as_mut()
+        .expect("authInfo があること")
+        .push(duplicate);
+    assert!(
+        MsfCatalogDocument::Full(cat)
+            .encode(shiguredo_moqt::msf::MsfCompression::None)
+            .is_err(),
+        "encode でも重複 scheme を拒否すること"
+    );
 }
-
 #[test]
 fn auth_info_clone_roundtrip() {
     // clone 経路でも authInfo が roundtrip すること

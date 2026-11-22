@@ -434,24 +434,25 @@ fn sample_auth_info(ctx: &mut noprop::TestCaseContext) -> Option<Vec<MsfAuthInfo
         }
     }
     let count = noprop::sample_usize_in(ctx, 1..=2);
-    let entries = (0..count)
-        .map(|_| {
-            // string / object / 数値 / 真偽値 / null / 配列 / エスケープ付きを混ぜる
-            let value_raw = match noprop::sample_usize_in(ctx, 0..=6) {
-                0 => b"\"x\"".to_vec(),
-                1 => b"{}".to_vec(),
-                2 => b"123".to_vec(),
-                3 => b"true".to_vec(),
-                4 => b"null".to_vec(),
-                5 => b"[1,\"a\"]".to_vec(),
-                _ => b"{\"token\":\"%id%\"}".to_vec(),
-            };
-            MsfAuthInfo {
-                scheme: sample_scheme(ctx),
-                value_raw,
-            }
-        })
-        .collect();
+    let mut entries: Vec<MsfAuthInfo> = Vec::new();
+    for _ in 0..count {
+        // string / object / 数値 / 真偽値 / null / 配列 / エスケープ付きを混ぜる
+        let value_raw = match noprop::sample_usize_in(ctx, 0..=6) {
+            0 => b"\"x\"".to_vec(),
+            1 => b"{}".to_vec(),
+            2 => b"123".to_vec(),
+            3 => b"true".to_vec(),
+            4 => b"null".to_vec(),
+            5 => b"[1,\"a\"]".to_vec(),
+            _ => b"{\"token\":\"%id%\"}".to_vec(),
+        };
+        // authInfo の scheme は一意でなければならない (RFC 8259 §4)
+        let mut scheme = sample_scheme(ctx);
+        if entries.iter().any(|entry| entry.scheme == scheme) {
+            scheme = format!("{scheme}-{}", entries.len());
+        }
+        entries.push(MsfAuthInfo { scheme, value_raw });
+    }
     Some(entries)
 }
 

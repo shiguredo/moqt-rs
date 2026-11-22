@@ -29,6 +29,13 @@ pub mod uri;
 /// この仕様は将来変更される可能性がある。
 pub const MSF_VERSION: &str = "draft-02";
 
+/// moq-secure-objects が定義する cipher suite (draft-ietf-moq-msf-02 §5.2.39 (Cipher suite))
+const SUPPORTED_CIPHER_SUITES: [&str; 3] = [
+    "aes-128-gcm-sha256",
+    "aes-256-gcm-sha512",
+    "aes-128-ctr-hmac-sha256-80",
+];
+
 /// カタログトラックの Track Name (draft-ietf-moq-msf-02 §5 (Catalog))
 ///
 /// "The catalog track MUST have a case-sensitive Track Name of 'catalog'."
@@ -1723,6 +1730,14 @@ impl MsfCloneTrack {
             return Err(MessageError::InvalidCatalog(
                 "cipherSuite MUST be present with moq-secure-objects".to_string(),
             ));
+        }
+        if encryption_scheme.as_deref() == Some("moq-secure-objects")
+            && let Some(ref suite) = cipher_suite
+            && !SUPPORTED_CIPHER_SUITES.contains(&suite.as_str())
+        {
+            return Err(MessageError::InvalidCatalog(format!(
+                "unsupported cipherSuite '{suite}' with moq-secure-objects"
+            )));
         }
         if encryption_scheme.as_deref() == Some("moq-secure-objects")
             && (key_id.is_none() || track_base_key.is_none())
@@ -3884,6 +3899,7 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
     if let Some(ref uri) = track.connection_uri {
         crate::msf::uri::validate_moqt_endpoint_uri(uri)?;
     }
+    validate_auth_info_unique(track.auth_info.as_deref())?;
     // draft-ietf-moq-msf-02 §5.2.2 (Track namespace) / §5.2.3 (Track name) / §11.2:
     // 手組みの値も decode と同じ写像規則で検証する。
     if let Some(ref metadata) = track.packaging_metadata {
@@ -3932,6 +3948,24 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
     {
         return Err(MessageError::InvalidCatalog(
             "cipherSuite MUST be present with moq-secure-objects".to_string(),
+        ));
+    }
+    if track.encryption_scheme.as_deref() == Some("moq-secure-objects")
+        && let Some(ref suite) = track.cipher_suite
+        && !SUPPORTED_CIPHER_SUITES.contains(&suite.as_str())
+    {
+        return Err(MessageError::InvalidCatalog(format!(
+            "unsupported cipherSuite '{suite}' with moq-secure-objects"
+        )));
+    }
+    // authInfo の scheme は RFC 8259 §4 の一意性に従う
+    validate_auth_info_unique(track.auth_info.as_deref())?;
+    // framerate は有限値でなければならない (JSON の数値として inf / NaN を書けない)
+    if let Some(rate) = track.framerate
+        && !rate.is_finite()
+    {
+        return Err(MessageError::InvalidCatalog(
+            "framerate MUST be finite".to_string(),
         ));
     }
     if track.encryption_scheme.as_deref() == Some("moq-secure-objects")
@@ -4038,6 +4072,9 @@ fn validate_clone_track_fragment(track: &MsfCloneTrack) -> Result<(), MessageErr
 ///
 /// `decode_full_catalog` が行う検証と同等の規則を、手組みの `MsfCatalog` にも適用する。
 fn validate_full_catalog_for_encode(catalog: &MsfCatalog) -> Result<(), MessageError> {
+    if catalog.version != MSF_VERSION {
+        return Err(MessageError::InvalidCatalogVersion(catalog.version.clone()));
+    }
     for entry in &catalog.init_data_list {
         validate_init_data(entry)?;
     }
@@ -4594,6 +4631,14 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
         ));
     }
     if encryption_scheme.as_deref() == Some("moq-secure-objects")
+        && let Some(ref suite) = cipher_suite
+        && !SUPPORTED_CIPHER_SUITES.contains(&suite.as_str())
+    {
+        return Err(MessageError::InvalidCatalog(format!(
+            "unsupported cipherSuite '{suite}' with moq-secure-objects"
+        )));
+    }
+    if encryption_scheme.as_deref() == Some("moq-secure-objects")
         && (key_id.is_none() || track_base_key.is_none())
     {
         return Err(MessageError::InvalidCatalog(
@@ -4758,15 +4803,39 @@ fn decode_buffers(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfBuffers, Messa
 /// scheme 名と値の生 JSON を順序どおりに保持する。非 object は reject する。
 /// 空 object は空 `Vec` として受理する。`null` は非 object として reject する。
 fn decode_auth_info(val: nojson::RawJsonValue<'_, '_>) -> Result<Vec<MsfAuthInfo>, MessageError> {
-    let mut entries = Vec::new();
+    let mut entries: Vec<MsfAuthInfo> = Vec::new();
     for (key, value) in val.to_object()? {
         let key_str: &str = key.try_into()?;
+        if entries.iter().any(|entry| entry.scheme == key_str) {
+            return Err(MessageError::InvalidCatalog(format!(
+                "authInfo scheme '{key_str}' MUST NOT be duplicated"
+            )));
+        }
         entries.push(MsfAuthInfo {
             scheme: key_str.to_string(),
             value_raw: value.as_raw_str().as_bytes().to_vec(),
         });
     }
     Ok(entries)
+}
+
+/// authInfo の scheme が重複していないことを検証する
+fn validate_auth_info_unique(auth_info: Option<&[MsfAuthInfo]>) -> Result<(), MessageError> {
+    let Some(entries) = auth_info else {
+        return Ok(());
+    };
+    for (index, entry) in entries.iter().enumerate() {
+        if entries[..index]
+            .iter()
+            .any(|earlier| earlier.scheme == entry.scheme)
+        {
+            return Err(MessageError::InvalidCatalog(format!(
+                "authInfo scheme '{}' MUST NOT be duplicated",
+                entry.scheme
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// accessibility 配列をデコードする (draft-ietf-moq-msf-02 §5.2.44 (Accessibility))
