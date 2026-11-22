@@ -819,6 +819,20 @@ pub struct WtH2SendStream {
     session_state: watch::Receiver<WtSessionState>,
 }
 
+/// WebTransport の Application Error Code が 32 ビットに収まるか検証する
+///
+/// draft-ietf-webtrans-http2-16 §6.2 / §6.3 は WT_RESET_STREAM / WT_STOP_SENDING の
+/// Application Error Code を 0x00000000-0xffffffff に限る。MOQT のエラーコードは varint
+/// 全域を取り得るため、WebTransport 経路では 32 ビットを超える値を送信前に拒否する。
+fn validate_wt_application_error_code(error_code: u64) -> Result<()> {
+    u32::try_from(error_code).map(|_| ()).map_err(|_| {
+        TransportError::Internal(format!(
+            "WebTransport application error code {error_code:#x} is outside 0x00000000-0xffffffff \
+             (draft-ietf-webtrans-http2-16 §6.2 / §6.3)"
+        ))
+    })
+}
+
 impl WtH2SendStream {
     /// データを送信する
     ///
@@ -905,11 +919,15 @@ impl WtH2SendStream {
     /// 送らず、[`TransportError::StreamReset`] または [`TransportError::StreamClosed`] を返す
     /// ([`Self::finish`] と同じ扱い)。
     ///
+    /// Application Error Code は 32 ビット (`0x00000000-0xffffffff`) に限る
+    /// (draft-ietf-webtrans-http2-16 §6.2)。超える値は [`TransportError::Internal`] を返す。
+    ///
     /// `reliable_size` が `Some` の場合は [`TransportError::Unsupported`] を返す。
     /// `WT_RESET_STREAM` capsule は Reliable Size を運ばないため、RESET_STREAM_AT 相当は
     /// この transport では実装しない。reply が既に完成している場合は reply の結果を
     /// 先に返す点も [`Self::send`] と同じである。
     pub async fn reset(&mut self, error_code: u64, reliable_size: Option<u64>) -> Result<()> {
+        validate_wt_application_error_code(error_code)?;
         if reliable_size.is_some() {
             return Err(TransportError::Unsupported(
                 "RESET_STREAM_AT is not supported by WebTransport over HTTP/2".to_string(),
@@ -1030,7 +1048,12 @@ impl WtH2RecvStream {
     ///
     /// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection): 受信方向の
     /// cancel は STOP_SENDING で行う。
+    ///
+    /// Application Error Code は 32 ビット (`0x00000000-0xffffffff`) に限る
+    /// (draft-ietf-webtrans-http2-16 §6.3)。超える値は driver へ送らずに
+    /// [`TransportError::Internal`] を返す。
     pub fn stop_sending(&mut self, error_code: u64) -> Result<()> {
+        validate_wt_application_error_code(error_code)?;
         self.cmd_tx
             .send(Command::StopSending {
                 stream_id: self.stream_id,
@@ -4413,5 +4436,26 @@ mod tests {
             FlowControlObservation::Data(b"x".to_vec()),
         )
         .await;
+    }
+
+    /// 32 ビット超の Application Error Code は送信前に拒否する
+    ///
+    /// draft-ietf-webtrans-http2-16 §6.2 / §6.3 は WT_RESET_STREAM / WT_STOP_SENDING の
+    /// Application Error Code を 0x00000000-0xffffffff に限る。
+    #[test]
+    fn wt_application_error_code_rejects_values_beyond_32_bits() {
+        for code in [u64::from(u32::MAX) + 1, u64::MAX] {
+            let error = validate_wt_application_error_code(code).expect_err("エラーになること");
+            assert!(
+                matches!(error, TransportError::Internal(_)),
+                "内部エラーとして返ること: {error:?}"
+            );
+            assert!(
+                error.to_string().contains(&format!("{code:#x}")),
+                "元のコードがエラーメッセージに含まれること: {error}"
+            );
+        }
+        validate_wt_application_error_code(u64::from(u32::MAX))
+            .expect("32 ビット上限は受理すること");
     }
 }

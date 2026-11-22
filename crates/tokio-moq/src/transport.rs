@@ -98,6 +98,11 @@ impl SendStream {
     /// `reliable_size` が `Some(n)` の場合は `RESET_STREAM_AT` を使い、MOQT の data stream の
     /// 先頭 `n` バイトまでの配送を保証する。WebTransport over HTTP/3 だけが対応し、他の
     /// transport では [`TransportError::Unsupported`] を返す。`None` は従来の RESET_STREAM である。
+    ///
+    /// QUIC 経路はエラーコードを QUIC varint の上限 (`2^62 - 1`) まで送れる。WebTransport
+    /// 経路は draft-ietf-webtrans-http3-17 §4.4 と draft-ietf-webtrans-http2-16 §6.2 / §6.3 が
+    /// Application Error Code を 32 ビット (`0x00000000-0xffffffff`) に限るため、
+    /// それを超える値は [`TransportError::Internal`] で拒否する。
     pub async fn reset(
         &mut self,
         error_code: u64,
@@ -231,6 +236,11 @@ impl RecvStream {
     /// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection): 受信方向の
     /// cancel は STOP_SENDING で行う。error code は §12.5 (Stream Reset Error Codes) から選ぶ。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+    ///
+    /// QUIC 経路はエラーコードを QUIC varint の上限 (`2^62 - 1`) まで送れる。WebTransport
+    /// 経路は draft-ietf-webtrans-http3-17 §4.4 と draft-ietf-webtrans-http2-16 §6.2 / §6.3 が
+    /// Application Error Code を 32 ビット (`0x00000000-0xffffffff`) に限るため、
+    /// それを超える値は [`TransportError::Internal`] で拒否する。
     pub async fn stop_sending(&mut self, error_code: u64) -> Result<(), TransportError> {
         match self {
             RecvStream::Quic(stream) => stream
