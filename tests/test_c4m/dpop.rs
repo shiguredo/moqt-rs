@@ -1397,3 +1397,146 @@ fn negative_freshness_windows_are_invalid() {
         "JWT の負のウィンドウを拒否すること"
     );
 }
+
+/// 重複した `tns` / `tn` はすべて actx と一致しなければならないこと
+///
+/// draft-ietf-moq-c4m-01 §3.1.2 は resource が `tns` / `tn` と整合することを MUST と
+/// する。最後の値だけを見ると、先行する不一致値を見逃して MUST を満たさない resource を
+/// 受理してしまう。
+#[test]
+fn resource_consistency_checks_every_duplicate_parameter() {
+    let context = authorization_context();
+
+    // 同じ値の重複は整合する
+    let mut duplicated_ok = context.clone();
+    duplicated_ok.resource = Some(String::from(
+        "moqt://relay.example.com?tns=example.2ecom&tns=example.2ecom&tn=live&tn=live",
+    ));
+    for action in [
+        MoqtAction::PublishNamespace,
+        MoqtAction::SubscribeNamespace,
+        MoqtAction::SubscribeTracks,
+    ] {
+        duplicated_ok
+            .verify_resource_consistency(action)
+            .expect("同じ値の tns / tn の重複は整合すること");
+    }
+    for action in [
+        MoqtAction::Subscribe,
+        MoqtAction::RequestUpdate,
+        MoqtAction::Publish,
+        MoqtAction::Fetch,
+        MoqtAction::TrackStatus,
+    ] {
+        duplicated_ok
+            .verify_resource_consistency(action)
+            .expect("同じ値の tns / tn の重複は整合すること");
+    }
+
+    // tns の重複のうち最後だけが actx と一致する resource は拒否する
+    let mut tns_mismatch = context.clone();
+    tns_mismatch.resource = Some(String::from(
+        "moqt://relay.example.com?tns=other&tns=example.2ecom&tn=live",
+    ));
+    for action in [
+        MoqtAction::PublishNamespace,
+        MoqtAction::SubscribeNamespace,
+        MoqtAction::SubscribeTracks,
+        MoqtAction::Subscribe,
+        MoqtAction::RequestUpdate,
+        MoqtAction::Publish,
+        MoqtAction::Fetch,
+        MoqtAction::TrackStatus,
+    ] {
+        assert_eq!(
+            tns_mismatch.verify_resource_consistency(action),
+            Err(DpopError::ResourceInconsistent),
+            "最後の値だけが一致する tns の重複を受理した: {action:?}"
+        );
+    }
+
+    // tn の重複のうち最後だけが actx と一致する resource は拒否する
+    let mut tn_mismatch = context.clone();
+    tn_mismatch.resource = Some(String::from(
+        "moqt://relay.example.com?tns=example.2ecom&tn=other&tn=live",
+    ));
+    for action in [
+        MoqtAction::PublishNamespace,
+        MoqtAction::SubscribeNamespace,
+        MoqtAction::SubscribeTracks,
+    ] {
+        assert_eq!(
+            tn_mismatch.verify_resource_consistency(action),
+            Err(DpopError::ResourceInconsistent),
+            "namespace 操作で最後の値だけが一致する tn の重複を受理した: {action:?}"
+        );
+    }
+    for action in [
+        MoqtAction::Subscribe,
+        MoqtAction::RequestUpdate,
+        MoqtAction::Publish,
+        MoqtAction::Fetch,
+        MoqtAction::TrackStatus,
+    ] {
+        assert_eq!(
+            tn_mismatch.verify_resource_consistency(action),
+            Err(DpopError::ResourceInconsistent),
+            "track 操作で最後の値だけが一致する tn の重複を受理した: {action:?}"
+        );
+    }
+
+    // tns が無い resource は SETUP 以外で拒否する
+    let mut without_tns = context.clone();
+    without_tns.resource = Some(String::from("moqt://relay.example.com?tn=live"));
+    for action in [
+        MoqtAction::PublishNamespace,
+        MoqtAction::SubscribeNamespace,
+        MoqtAction::SubscribeTracks,
+        MoqtAction::Subscribe,
+        MoqtAction::RequestUpdate,
+        MoqtAction::Publish,
+        MoqtAction::Fetch,
+        MoqtAction::TrackStatus,
+    ] {
+        assert_eq!(
+            without_tns.verify_resource_consistency(action),
+            Err(DpopError::ResourceInconsistent),
+            "tns の無い resource を受理した: {action:?}"
+        );
+    }
+
+    // track 操作で actx に tn がありクエリに tn が無い場合は拒否する
+    let mut without_tn = context.clone();
+    without_tn.resource = Some(String::from("moqt://relay.example.com?tns=example.2ecom"));
+    for action in [
+        MoqtAction::Subscribe,
+        MoqtAction::RequestUpdate,
+        MoqtAction::Publish,
+        MoqtAction::Fetch,
+        MoqtAction::TrackStatus,
+    ] {
+        assert_eq!(
+            without_tn.verify_resource_consistency(action),
+            Err(DpopError::ResourceInconsistent),
+            "track 操作で tn の無い resource を受理した: {action:?}"
+        );
+    }
+
+    // actx に tn が無ければ、track 操作でもクエリの tn を比較しない
+    let mut without_actx_tn = context.clone();
+    without_actx_tn.track_name = None;
+    without_actx_tn.resource = Some(String::from(
+        "moqt://relay.example.com?tns=example.2ecom&tn=other&tn=live",
+    ));
+    for action in [
+        MoqtAction::Subscribe,
+        MoqtAction::RequestUpdate,
+        MoqtAction::Publish,
+        MoqtAction::Fetch,
+        MoqtAction::TrackStatus,
+    ] {
+        without_actx_tn
+            .verify_resource_consistency(action)
+            .expect("actx に tn が無ければクエリの tn を比較しないこと");
+    }
+}

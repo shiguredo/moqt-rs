@@ -192,8 +192,9 @@ impl AuthorizationContext {
     ///   後段の [`AuthorizationContext::verify_target`] が
     ///   [`DpopError::MissingTrackName`] で拒否する
     ///
-    /// `resource` が無い場合は受理する (任意)。クエリパラメータの重複は現行どおり
-    /// 最後の値を使う。パーセントエンコーディングは解釈しない。endpoint の値
+    /// `resource` が無い場合は受理する (任意)。比較対象のクエリパラメータに重複がある
+    /// 場合は、すべての値が actx と一致することを要求する。パーセントエンコーディングは
+    /// 解釈しない。endpoint の値
     /// (host / port) が接続先と一致することや、authority の完全な RFC 3986 検証は
     /// 行わない。resource の値は proof のクレームとして保持されるため、接続先と
     /// 比較する必要がある利用側は [`AuthorizationContext::resource`] を自分で確認すること。
@@ -209,15 +210,19 @@ impl AuthorizationContext {
             ResourceTargetKind::Setup => verify_setup_resource(resource),
             ResourceTargetKind::Namespace => {
                 verify_resource_prefix(resource)?;
-                let (tns, tn) = resource_query_parameters(resource);
-                if tns != Some(self.track_namespace.as_str()) {
+                // 重複した `tns` はすべて actx と一致しなければならない。クエリに
+                // `tns` が無い場合は一致しない
+                let tns_values = resource_query_parameter_values(resource, "tns");
+                if !resource_values_match(&tns_values, self.track_namespace.as_str()) {
                     return Err(DpopError::ResourceInconsistent);
                 }
                 // §3.1.3 の namespace 操作の resource は `tn` を持たない。actx と
                 // クエリの両方に `tn` がある場合だけ比較し、片方にしか無い場合は
-                // 比較しない
-                if let (Some(expected), Some(actual)) = (&self.track_name, tn)
-                    && expected != actual
+                // 比較しない。重複した `tn` はすべて actx と一致しなければならない
+                let tn_values = resource_query_parameter_values(resource, "tn");
+                if let Some(expected) = &self.track_name
+                    && !tn_values.is_empty()
+                    && !resource_values_match(&tn_values, expected)
                 {
                     return Err(DpopError::ResourceInconsistent);
                 }
@@ -225,15 +230,18 @@ impl AuthorizationContext {
             }
             ResourceTargetKind::Track => {
                 verify_resource_prefix(resource)?;
-                let (tns, tn) = resource_query_parameters(resource);
-                if tns != Some(self.track_namespace.as_str()) {
+                // 重複した `tns` はすべて actx と一致しなければならない
+                let tns_values = resource_query_parameter_values(resource, "tns");
+                if !resource_values_match(&tns_values, self.track_namespace.as_str()) {
                     return Err(DpopError::ResourceInconsistent);
                 }
                 // track 操作の resource は actx の `tn` と一致しなければならない。
-                // actx に `tn` が無い場合はここでは比較せず、verify_target が
-                // MissingTrackName で拒否する
+                // 重複した `tn` はすべて一致し、クエリに `tn` が無い場合も一致しない
+                // ものとして拒否する。actx に `tn` が無い場合はここでは比較せず、
+                // verify_target が MissingTrackName で拒否する
+                let tn_values = resource_query_parameter_values(resource, "tn");
                 if let Some(expected) = &self.track_name
-                    && tn != Some(expected.as_str())
+                    && !resource_values_match(&tn_values, expected)
                 {
                     return Err(DpopError::ResourceInconsistent);
                 }
@@ -316,22 +324,26 @@ fn verify_setup_resource(resource: &str) -> Result<(), DpopError> {
     Ok(())
 }
 
-/// `resource` のクエリから `tns` と `tn` の最後の値を取り出す
+/// `resource` のクエリから指定した名前の値をすべて取り出す
 ///
-/// クエリが無い場合も空のクエリとして扱う (どちらも `None`)。パーセントエンコーディング
-/// は解釈しない。重複したパラメータは最後の値を使う。
-fn resource_query_parameters(resource: &str) -> (Option<&str>, Option<&str>) {
+/// クエリが無い場合は空を返す。パーセントエンコーディングは解釈しない。重複した
+/// パラメータは出現順にすべて返す。
+fn resource_query_parameter_values<'a>(resource: &'a str, name: &str) -> Vec<&'a str> {
     let query = resource.split_once('?').map_or("", |(_, query)| query);
-    let mut tns = None;
-    let mut tn = None;
-    for pair in query.split('&') {
-        match pair.split_once('=') {
-            Some(("tns", value)) => tns = Some(value),
-            Some(("tn", value)) => tn = Some(value),
-            _ => {}
-        }
-    }
-    (tns, tn)
+    query
+        .split('&')
+        .filter_map(|pair| match pair.split_once('=') {
+            Some((key, value)) if key == name => Some(value),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 値が 1 つ以上あり、すべて期待値と一致するかを返す
+///
+/// `resource` に比較対象のパラメータが無い場合は「一致しない」として扱う。
+fn resource_values_match(values: &[&str], expected: &str) -> bool {
+    !values.is_empty() && values.iter().all(|value| *value == expected)
 }
 
 /// 旧 JWT 形式の DPoP proof のペイロード
