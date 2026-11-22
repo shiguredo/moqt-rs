@@ -2883,6 +2883,61 @@ struct SideSessionRuntime<'a> {
     insecure: bool,
 }
 
+/// side session へ渡す共有状態を main ループの状態から組み立てる
+///
+/// 世代は side session を起動する時点で決まるため、ここでは 0 を入れておき
+/// [`dispatch_side_session_command`] が起動直前に実際の世代へ更新する。
+fn build_side_session_shared(state: &PipelineState) -> RequestMigrationShared {
+    let PipelineState {
+        frame_tx,
+        audio_tx,
+        catalog_tx,
+        termination_tx,
+        audio_decoder,
+        video_decode_order,
+        video_delivery_order,
+        object_mode_video,
+        display_backlog,
+        group_switch,
+        audio_catch_up,
+        audio_delivery_order,
+        last_received_locations,
+        audio_config_validated_generation,
+        pending_subgroups,
+        recorder_sender,
+        playback,
+        video_codec,
+        audio_codec,
+        audio_params,
+        stream_slots,
+        ..
+    } = state;
+    RequestMigrationShared {
+        frame_tx: frame_tx.clone(),
+        audio_tx: audio_tx.clone(),
+        catalog_tx: catalog_tx.clone(),
+        termination_tx: termination_tx.clone(),
+        audio_decoder: audio_decoder.clone(),
+        video_decode_order: std::sync::Arc::clone(video_decode_order),
+        video_delivery_order: std::sync::Arc::clone(video_delivery_order),
+        object_mode_video: std::sync::Arc::clone(object_mode_video),
+        display_backlog: std::sync::Arc::clone(display_backlog),
+        group_switch: std::sync::Arc::clone(group_switch),
+        audio_catch_up: std::sync::Arc::clone(audio_catch_up),
+        audio_delivery_order: std::sync::Arc::clone(audio_delivery_order),
+        last_received_locations: std::sync::Arc::clone(last_received_locations),
+        audio_config_validated_generation: std::sync::Arc::clone(audio_config_validated_generation),
+        generation: 0,
+        pending_subgroups: std::sync::Arc::clone(pending_subgroups),
+        recorder: recorder_sender.clone(),
+        playback: *playback,
+        video_codec: video_codec.clone(),
+        audio_codec: audio_codec.clone(),
+        audio_params: *audio_params,
+        stream_slots: std::sync::Arc::clone(stream_slots),
+    }
+}
+
 /// side session を開始して main ループの slot に登録する
 ///
 /// 世代は side session の識別子として使う。main ループは side session を起動するたびに
@@ -2934,15 +2989,13 @@ fn start_side_session(
 /// side session を起動するときだけ、世代を 1 つ進めてから `build_shared` で共有状態を
 /// 組み立てる。Audio Config の検証済み世代と比べる世代は session ごとに新しくする必要が
 /// あるため、相乗りする場合は現在の世代を消費しない。
-async fn dispatch_side_session_command<F>(
+async fn dispatch_side_session_command(
     runtime: &mut SideSessionRuntime<'_>,
     url: tokio_moq::ServerUrl,
     command: SideSessionCommand,
     session_generation: &mut u64,
-    build_shared: F,
-) where
-    F: Fn(u64) -> RequestMigrationShared,
-{
+    mut shared: RequestMigrationShared,
+) {
     let key = side_session_url_key(&url);
     if let Some(slot) = runtime.sessions.get_mut(&key) {
         tracing::info!(
@@ -2961,12 +3014,14 @@ async fn dispatch_side_session_command<F>(
             );
             runtime.sessions.remove(&key);
             *session_generation = session_generation.saturating_add(1);
-            start_side_session(runtime, url, command, build_shared(*session_generation));
+            shared.generation = *session_generation;
+            start_side_session(runtime, url, command, shared);
         }
         return;
     }
     *session_generation = session_generation.saturating_add(1);
-    start_side_session(runtime, url, command, build_shared(*session_generation));
+    shared.generation = *session_generation;
+    start_side_session(runtime, url, command, shared);
 }
 
 /// 再発行の失敗を `Failed` として main ループへ送る
@@ -5692,717 +5747,867 @@ fn handle_catalog_object(state: &mut PipelineState, object: catalog::CatalogObje
 ///
 /// `?` を async ブロックに閉じ込め、transport のエラーを致命エラーへ写すかどうかを
 /// イベントの種別ごとに決める。戻り値が [`LoopFlow::Break`] のときは受信ループを抜ける。
-async fn handle_client_event(
+/// GOAWAY を受信したときの処理を行う
+///
+/// control stream の GOAWAY では session 全体の移行を、request stream の GOAWAY では
+/// 当該 request だけの移行をバックグラウンドで開始する。移行を行わない場合は
+/// `goaway_received` を立てて、購読の終了 (STOP_SENDING) を送る経路へ乗せる。
+/// control stream の GOAWAY による session 全体の移行を開始する
+///
+/// 移行の連鎖を抑え、移行中は二重に移行しない。移行を開始したらバックグラウンドの
+/// タスクへ委ね、main ループは旧 session の受信を続ける。
+async fn handle_session_goaway(
     state: &mut PipelineState,
-    notable: std::result::Result<Option<ClientEvent>, TransportError>,
-) -> LoopFlow {
+    target: tokio_moq::MigrationTarget,
+    timeout: u64,
+) -> Result<bool> {
     let PipelineState {
-        url,
+        url: _,
         transport,
         cert,
         insecure,
         task_monitor,
-        frame_tx,
-        audio_tx,
-        display_backlog,
-        playback,
-        client,
-        data_plane,
-        active_requests,
         publish_done_pending,
         permanently_ended_tracks,
-        migration_pending_tracks,
-        track_map,
-        fetch_targets,
-        fetch_requests,
-        video_codec,
-        video_request_id,
-        audio_request_id,
-        video_alias,
-        audio_alias,
-        video_decode_order,
-        group_switch,
-        object_mode_video,
-        audio_params,
-        audio_codec,
-        subscribed_tracks,
-        tracks_request_id,
-        ignored_publish_requests,
         resubscribe_plan,
-        catalog_request_id,
-        catalog_alias,
-        catalog_compression,
-        audio_decoder,
-        recorder: _,
-        recorder_sender,
-        session_generation,
-        audio_config_validated_generation,
-        audio_catch_up,
-        audio_delivery_order,
-        video_delivery_order,
-        stream_slots,
-        pending_subgroups,
-        termination_tx,
-        catalog_tx,
         last_received_locations,
-        datagram_session_tx,
-        peer_ended,
         goaway_received,
-        session_terminated,
-        fatal_error,
         migration_rx,
         migration_in_progress,
         migration_task,
         migration_boundary_snapshot,
         migration_limiter,
+        ..
+    } = state;
+    // 移行の連鎖を抑え、移行中は二重に移行しない
+    match begin_migration(*migration_in_progress, migration_limiter, Instant::now()) {
+        MigrationStart::AlreadyInProgress => {
+            tracing::debug!("Ignoring a GOAWAY received while a migration is in progress");
+            return Ok(false);
+        }
+        MigrationStart::RateLimited => {
+            tracing::warn!(
+                "Refusing to migrate the session: too many migrations within {:?}",
+                MIGRATION_LIMIT_WINDOW,
+            );
+            *goaway_received = true;
+            return Ok(true);
+        }
+        MigrationStart::Start => {}
+    }
+    // 移行先 URI の msf fragment の connection が現在の
+    // 接続経路と矛盾する場合は移行しない
+    // (draft-ietf-moq-msf-02 §11.1.1)
+    if let Err(e) = tokio_moq::resolve_transport(Some(*transport), &target.url) {
+        tracing::warn!("GOAWAY migration target conflicts with the current transport: {e}");
+        // GOAWAY を受けた後に終了するため、購読の終了
+        // (STOP_SENDING) を送る経路に乗せる
+        *goaway_received = true;
+        return Ok(true);
+    }
+    {
+        // control stream の GOAWAY: 移行先の確立と購読の
+        // 張り直しはバックグラウンドのタスクへ移す。main
+        // ループは旧 session の受信、catalog の適用、stream
+        // の accept を続ける (§6.6.1)
+        let deadline = MigrationDeadline::after_goaway(Instant::now(), timeout);
+        let last_locations = *last_received_locations
+            .lock()
+            .expect("last locations の lock が poison されていないこと");
+        let request = MigrationRequest {
+            url: target.url,
+            transport: *transport,
+            cert: cert.clone(),
+            insecure: *insecure,
+            plan: {
+                let (plan, resolve_as_ended) = plan_for_migration(
+                    resubscribe_plan,
+                    permanently_ended_tracks,
+                    publish_done_pending,
+                );
+                for (request_id, kind) in resolve_as_ended {
+                    // 移行開始時点で恒久終了扱いに切り替える
+                    // (cleanup 完了を待たずに plan から外す)
+                    publish_done_pending.remove(&request_id);
+                    permanently_ended_tracks.insert(kind);
+                }
+                plan
+            },
+            last_locations,
+            deadline,
+        };
+        *migration_boundary_snapshot = Some(last_locations);
+        let (task, receiver) = spawn_migration(task_monitor, request);
+        *migration_task = Some(task);
+        *migration_rx = Some(receiver);
+        *migration_in_progress = true;
+        tracing::info!(
+            "Started a background migration: timeout={}ms, local_default={}, last_locations={:?}",
+            timeout,
+            deadline.uses_local_default(),
+            last_locations,
+        );
+        Ok(false)
+    }
+}
+
+/// request stream の GOAWAY による request 単位の移行を行う
+///
+/// session は維持し、当該 request だけを別 URL の side session で再発行するか、
+/// 同じ URL なら現在の session で再発行する。
+/// request stream の GOAWAY の移行先と期限
+struct GoawayRequestContext {
+    /// 移行先の session
+    target: tokio_moq::MigrationTarget,
+    /// GOAWAY を受けた request の Request ID
+    request_id: u64,
+    /// GOAWAY の Timeout (移行期限に使う)
+    timeout: u64,
+    /// この request の移行期限
+    deadline: MigrationDeadline,
+    /// 移行先が別 URL か (false なら同じ session で再発行する)
+    new_session_url: bool,
+}
+
+/// SUBSCRIBE 系 request の GOAWAY を処理する
+///
+/// request 単位移行の side session で再発行するか、同じ session で再発行して購読状態を
+/// 差し替える。
+/// SUBSCRIBE 系 request の移行を side session へ委ねる
+///
+/// 移行先 URL の side session を確立し、同じ URL の session が既にあれば相乗りさせる。
+async fn dispatch_subscribe_migration(
+    state: &mut PipelineState,
+    context: &GoawayRequestContext,
+    kind: TrackKind,
+    shared: RequestMigrationShared,
+) -> Result<bool> {
+    let GoawayRequestContext {
+        ref target,
+        request_id,
+        timeout,
+        deadline,
+        ..
+    } = *context;
+    let PipelineState {
+        transport,
+        cert,
+        insecure,
+        task_monitor,
+        resubscribe_plan,
+        last_received_locations,
+        request_migration_sessions,
+        request_migration_tasks,
+        request_migration_tx,
+        session_generation,
+        ..
+    } = state;
+    let last_locations = *last_received_locations
+        .lock()
+        .expect("last locations の lock が poison されていないこと");
+    tracing::info!(
+        "Requesting a request migration to a new session: kind={kind:?}, request_id={request_id}, timeout={timeout}ms, local_default={}, last_location={:?}",
+        deadline.uses_local_default(),
+        last_locations.get(kind),
+    );
+    // side session の世代は旧 session より
+    // 新しくする。Audio Config の検証済み
+    // 世代と比べ、side session で最初に届いた
+    // Audio Config を処理させる。世代は
+    // dispatch が session を起動するときだけ
+    // 1 本のカウンタから払い出す
+    let mut side_session_runtime = SideSessionRuntime {
+        sessions: request_migration_sessions,
+        tasks: request_migration_tasks,
+        task_monitor,
+        events: request_migration_tx,
+        transport: *transport,
+        cert: cert.clone(),
+        insecure: *insecure,
+    };
+    dispatch_side_session_command(
+        &mut side_session_runtime,
+        target.url.clone(),
+        SideSessionCommand::Reissue {
+            kind,
+            old_request_id: request_id,
+            plan: resubscribe_plan.clone(),
+            last_locations,
+            deadline,
+        },
+        session_generation,
+        shared,
+    )
+    .await;
+    Ok(false)
+}
+
+/// 同じ session で SUBSCRIBE 系 request を再発行し、購読状態を差し替える
+///
+/// 再発行に成功したら alias・境界・FETCH の対応表・active / pending 管理を更新する。
+/// 失敗しても session は維持し、当該購読だけを失う。
+/// 同じ session で SUBSCRIBE 系 request を再発行する
+///
+/// 再発行に成功したら購読状態の差し替えへ進み、失敗しても session は維持する。
+async fn reissue_subscribe_in_session(
+    state: &mut PipelineState,
+    kind: TrackKind,
+    request_id: u64,
+    last_locations: LastReceivedLocations,
+) -> Result<bool> {
+    let reissued = {
+        let PipelineState {
+            client,
+            publish_done_pending,
+            permanently_ended_tracks,
+            migration_pending_tracks,
+            resubscribe_plan,
+            ..
+        } = state;
+        tracing::info!(
+            "Re-issuing the {kind:?} request after a request-scoped GOAWAY: request_id={request_id}"
+        );
+        // PUBLISH_DONE 済みの購読 (GoingAway の entry あり)
+        // は `Session::stop_sending` が Terminated を拒否する
+        // ため送らない (tick 解消済みの移行待ちも送らない)
+        let send_stop_sending = reissue_send_stop_sending(
+            publish_done_pending
+                .get(&request_id)
+                .map(|(_, disposition)| *disposition),
+            permanently_ended_tracks,
+            migration_pending_tracks,
+            kind,
+        );
+        reissue_request(
+            client,
+            kind,
+            request_id,
+            resubscribe_plan,
+            &last_locations,
+            send_stop_sending,
+        )
+        .await
+    };
+    match reissued {
+        Ok(reissued) => {
+            apply_reissued_subscription(state, kind, request_id, last_locations, reissued).await
+        }
+        Err(e) => {
+            let PipelineState {
+                active_requests, ..
+            } = state;
+            active_requests.remove(&request_id);
+            tracing::warn!(
+                "Failed to re-issue request {request_id} after a request-scoped GOAWAY: {e}"
+            );
+            Ok(false)
+        }
+    }
+}
+
+/// 再発行した購読の種別ごとに、購読状態と境界を更新する
+fn apply_reissued_kind(
+    state: &mut PipelineState,
+    kind: TrackKind,
+    request_id: u64,
+    last_locations: LastReceivedLocations,
+    subscription: &SubscribeResult,
+    new_alias: u64,
+) {
+    let PipelineState {
+        catalog_request_id,
+        catalog_alias,
+        video_request_id,
+        video_alias,
+        audio_request_id,
+        audio_alias,
+        video_delivery_order,
+        audio_delivery_order,
+        last_received_locations,
+        ..
+    } = state;
+    match kind {
+        TrackKind::Catalog => {
+            *catalog_request_id = Some(subscription.request_id);
+            *catalog_alias = Some(new_alias);
+        }
+        TrackKind::Video => {
+            *video_request_id = Some(subscription.request_id);
+            *video_alias = Some(new_alias);
+            // 同じ session で購読を張り直した
+            // ため、復号順と購読境界の状態は
+            // 引き継ぎ、境界だけを更新する。
+            // 候補は再発行の前に取得した最後の
+            // 受信位置である (選び方は
+            // select_video_subscription_boundary)
+            let video_boundary_candidates = VideoBoundaryCandidates {
+                snapshot: last_locations.get(TrackKind::Video),
+                reread: last_received_locations
+                    .lock()
+                    .expect("last locations の lock が poison されていないこと")
+                    .get(TrackKind::Video),
+            };
+            let video_boundary_candidate = select_video_subscription_boundary(
+                ResubscribeRoute::RequestReissue,
+                video_boundary_candidates,
+            );
+            let video_boundary = {
+                let mut order = video_delivery_order
+                    .lock()
+                    .expect("video delivery order lock is not poisoned");
+                order.advance_boundary(video_boundary_candidate);
+                order.boundary()
+            };
+            tracing::info!(
+                "Updated the video subscription boundary for the re-issued request: candidates={video_boundary_candidates:?}, candidate={video_boundary_candidate:?}, boundary={video_boundary:?}"
+            );
+        }
+        TrackKind::Audio => {
+            *audio_request_id = Some(subscription.request_id);
+            *audio_alias = Some(new_alias);
+            // 同じ session で購読を張り直した
+            // ため、送出順の状態は引き継ぎ、
+            // 境界だけを再発行前の最後の受信
+            // 位置へ更新する。新しい購読の Largest
+            // Object を使うと再発行中に届いた音声を
+            // 境界以下として捨ててしまう
+            audio_delivery_order
+                .lock()
+                .expect("audio delivery order の lock が poison されていないこと")
+                .set_boundary(last_locations.get(TrackKind::Audio));
+        }
+        TrackKind::Discard => {
+            // `reissue_request` は PUBLISH 起点の
+            // 購読を再発行しないため到達しない。
+            // 万一到達しても状態を変えない
+            tracing::warn!(
+                "Re-issued a PUBLISH-originated subscription unexpectedly: request_id={request_id}"
+            );
+        }
+    }
+}
+
+/// 再発行した購読の alias と FETCH の対応表、active / pending 管理を更新する
+async fn apply_reissued_subscription(
+    state: &mut PipelineState,
+    kind: TrackKind,
+    request_id: u64,
+    last_locations: LastReceivedLocations,
+    reissued: ReissuedRequest,
+) -> Result<bool> {
+    let new_alias = {
+        let PipelineState {
+            track_map,
+            catalog_alias,
+            video_alias,
+            audio_alias,
+            ignored_publish_requests,
+            ..
+        } = state;
+        // 旧 alias を外して新しい alias を登録する
+        // (alias は peer が決めるため変わりうる)
+        let old_alias = match kind {
+            TrackKind::Catalog => *catalog_alias,
+            TrackKind::Video => *video_alias,
+            TrackKind::Audio => *audio_alias,
+            // 再発行は catalog / 映像 / 音声だけを
+            // 対象とするため通常は到達しない
+            TrackKind::Discard => ignored_publish_requests.get(&request_id).copied(),
+        };
+        let new_alias = reissued.subscription.track_alias;
+        {
+            let mut map = track_map
+                .write()
+                .expect("track_map lock must not be poisoned");
+            if let Some(alias) = old_alias {
+                map.remove(&alias);
+            }
+            map.insert(new_alias, kind);
+        }
+        new_alias
+    };
+    apply_reissued_kind(
+        state,
+        kind,
+        request_id,
+        last_locations,
+        &reissued.subscription,
+        new_alias,
+    );
+    {
+        let PipelineState {
+            client,
+            data_plane,
+            active_requests,
+            publish_done_pending,
+            migration_pending_tracks,
+            track_map,
+            fetch_targets,
+            fetch_requests,
+            datagram_session_tx,
+            session_generation,
+            ..
+        } = state;
+        // 再発行に伴う FETCH の対応表を足す。同じ
+        // track の旧 Request ID は、遅延して届く
+        // FETCH / fill stream を誤配送しないよう先に外す
+        {
+            let mut targets = lock_fetch_targets(fetch_targets);
+            targets.retain(|_, target| Some(*target) != fetch_target_of(kind));
+            targets.extend(reissued.fetch_targets);
+        }
+        // 映像の購読を張り直すと、その再発行に伴う
+        // FETCH は上の表へ入る。旧 session の映像
+        // FETCH の再発行用の指定は対象が入れ替わるため
+        // 捨てる
+        if kind == TrackKind::Video {
+            fetch_requests.clear();
+        }
+        fetch_requests.extend(reissued.fetch_requests);
+        // datagram 受信タスクへ新しい alias 表を渡す
+        let datagram_map = Arc::new(
+            track_map
+                .read()
+                .expect("track_map lock must not be poisoned")
+                .clone(),
+        );
+        let _ = datagram_session_tx.send(DatagramSession {
+            handle: client.handle(),
+            data_plane: data_plane.clone(),
+            track_map: datagram_map,
+            generation: *session_generation,
+        });
+        // 再発行後の request の active と pending 管理
+        active_requests.remove(&request_id);
+        active_requests.insert(reissued.subscription.request_id);
+        publish_done_pending.remove(&request_id);
+        // 移行待ち (GoingAway 済み) の track は再発行で
+        // active に戻るため、集合から外す
+        migration_pending_tracks.remove(&kind);
+        tracing::info!(
+            "Re-issued the {kind:?} request: alias={new_alias}, request_id={}",
+            reissued.subscription.request_id,
+        );
+    }
+    Ok(false)
+}
+
+async fn handle_goaway_subscribe(
+    state: &mut PipelineState,
+    context: GoawayRequestContext,
+    kind: TrackKind,
+    shared: RequestMigrationShared,
+) -> Result<bool> {
+    let request_id = context.request_id;
+    let new_session_url = context.new_session_url;
+    let PipelineState {
+        url: _,
+        transport: _,
+        cert: _,
+        insecure: _,
+        task_monitor: _,
+        client: _,
+        data_plane: _,
+        active_requests: _,
+        publish_done_pending,
+        permanently_ended_tracks,
+        migration_pending_tracks: _,
+        track_map: _,
+        fetch_targets: _,
+        fetch_requests: _,
+        video_request_id: _,
+        audio_request_id: _,
+        video_alias: _,
+        audio_alias: _,
+        ignored_publish_requests: _,
+        resubscribe_plan: _,
+        catalog_request_id: _,
+        catalog_alias: _,
+        session_generation: _,
+        audio_delivery_order: _,
+        video_delivery_order: _,
+        last_received_locations,
+        datagram_session_tx: _,
+        request_migration_sessions: _,
+        request_migration_tasks: _,
+        request_migration_tx: _,
+        ..
+    } = state;
+    // 終端済み購読の request stream GOAWAY の扱いを
+    // 1 か所で決める (`reissue_request_target` 参照)。
+    // tick の entry 解消と後着 GOAWAY の順序で
+    // `publish_done_pending` が空になっても、
+    // `permanently_ended_tracks` /
+    // `migration_pending_tracks` の状態で判定が
+    // 崩れない
+    let Some(kind) = reissue_request_target(
+        kind,
+        publish_done_pending
+            .get(&request_id)
+            .map(|(_, disposition)| *disposition),
+        permanently_ended_tracks,
+    ) else {
+        return Ok(false);
+    };
+    let last_locations = *last_received_locations
+        .lock()
+        .expect("last locations の lock が poison されていないこと");
+    if new_session_url {
+        return dispatch_subscribe_migration(state, &context, kind, shared).await;
+    }
+    reissue_subscribe_in_session(state, kind, request_id, last_locations).await
+}
+
+/// メディア FETCH の GOAWAY を処理する
+///
+/// request 単位移行の side session で FETCH を再発行するか、同じ session で再発行する。
+async fn handle_goaway_fetch(
+    state: &mut PipelineState,
+    context: GoawayRequestContext,
+    shared: RequestMigrationShared,
+) -> Result<bool> {
+    let GoawayRequestContext {
+        target,
+        request_id,
+        timeout,
+        deadline,
+        new_session_url,
+    } = context;
+    let PipelineState {
+        url: _,
+        transport,
+        cert,
+        insecure,
+        task_monitor,
+        client,
+        permanently_ended_tracks,
+        fetch_targets,
+        fetch_requests,
+        session_generation,
         request_migration_sessions,
         request_migration_tasks,
         request_migration_tx,
         ..
     } = state;
-    // 分岐本体を async ブロックに閉じ込め、`?` が `run` を抜けないようにする。
-    // `client.next_event()` の結果とピア要求への応答 (`send_request_error`) は
-    // どちらも transport I/O を行い、セッション終了後は
-    // `TransportError::ConnectionClosed` を返す。`?` を `run` まで通すと
-    // `Fatal: session closed` で異常終了し、終了時の後始末 (`close(0, "")` が
-    // 送る CONNECT stream の送信側の FIN) に到達しない。
-    // `break 'main` はブロックの外に出す (ブロックの中では外側のループを
-    // 抜けられない) ため、ブロックは「受信ループを抜けるか」を返す。
-    let outcome: Result<bool> = async {
-                    match notable? {
-                        Some(ClientEvent::Session(SessionEvent::GoawayReceived {
-                            new_session_uri,
-                            timeout,
-                            on_request_stream,
-                        })) => {
-                            tracing::info!(
-                                "Received GOAWAY (timeout={timeout}, on_request_stream={on_request_stream:?})"
-                            );
-                            // 移行の判断は tokio-moq の共通関数が持つ
-                            // (draft-ietf-moq-transport-23 §6.6.1 (Graceful Session Migration) /
-                            // §9.2 (GOAWAY)。draft 由来の仕様であり将来変更されうる)
-                            match tokio_moq::migration_target(
-                                &new_session_uri,
-                                on_request_stream,
-                                url,
-                            ) {
-                                // request stream の GOAWAY で New Session URI を解釈できない
-                                // 場合は session を維持する (該当 request の終端は Session の
-                                // deadline に任せる)
-                                Ok(None) => Ok(false),
-                                Ok(Some(target)) => match target.scope {
-                                    MigrationScope::Session => {
-                                        // 移行の連鎖を抑え、移行中は二重に移行しない
-                                        match begin_migration(
-                                            *migration_in_progress,
-                                            migration_limiter,
-                                            Instant::now(),
-                                        ) {
-                                            MigrationStart::AlreadyInProgress => {
-                                                tracing::debug!(
-                                                    "Ignoring a GOAWAY received while a migration is in progress"
-                                                );
-                                                return Ok(false);
-                                            }
-                                            MigrationStart::RateLimited => {
-                                                tracing::warn!(
-                                                    "Refusing to migrate the session: too many migrations within {:?}",
-                                                    MIGRATION_LIMIT_WINDOW,
-                                                );
-                                                *goaway_received = true;
-                                                return Ok(true);
-                                            }
-                                            MigrationStart::Start => {}
-                                        }
-                                        // 移行先 URI の msf fragment の connection が現在の
-                                        // 接続経路と矛盾する場合は移行しない
-                                        // (draft-ietf-moq-msf-02 §11.1.1)
-                                        if let Err(e) = tokio_moq::resolve_transport(
-                                            Some(*transport),
-                                            &target.url,
-                                        ) {
-                                            tracing::warn!(
-                                                "GOAWAY migration target conflicts with the current transport: {e}"
-                                            );
-                                            // GOAWAY を受けた後に終了するため、購読の終了
-                                            // (STOP_SENDING) を送る経路に乗せる
-                                            *goaway_received = true;
-                                            return Ok(true);
-                                        }
-                                        {
-                                            // control stream の GOAWAY: 移行先の確立と購読の
-                                            // 張り直しはバックグラウンドのタスクへ移す。main
-                                            // ループは旧 session の受信、catalog の適用、stream
-                                            // の accept を続ける (§6.6.1)
-                                            let deadline = MigrationDeadline::after_goaway(
-                                                Instant::now(),
-                                                timeout,
-                                            );
-                                            let last_locations = *last_received_locations
-                                                .lock()
-                                                .expect(
-                                                    "last locations の lock が poison されていないこと",
-                                                );
-                                            let request = MigrationRequest {
-                                                url: target.url,
-                                                transport: *transport,
-                                                cert: cert.clone(),
-                                                insecure: *insecure,
-                                                plan: {
-                                                    let (plan, resolve_as_ended) =
-                                                        plan_for_migration(
-                                                            resubscribe_plan,
-                                                            permanently_ended_tracks,
-                                                            publish_done_pending,
-                                                        );
-                                                    for (request_id, kind) in
-                                                        resolve_as_ended
-                                                    {
-                                                        // 移行開始時点で恒久終了扱いに切り替える
-                                                        // (cleanup 完了を待たずに plan から外す)
-                                                        publish_done_pending
-                                                            .remove(&request_id);
-                                                        permanently_ended_tracks.insert(kind);
-                                                    }
-                                                    plan
-                                                },
-                                                last_locations,
-                                                deadline,
-                                            };
-                                            *migration_boundary_snapshot = Some(last_locations);
-                                            let (task, receiver) =
-                                                spawn_migration(task_monitor, request);
-                                            *migration_task = Some(task);
-                                            *migration_rx = Some(receiver);
-                                            *migration_in_progress = true;
-                                            tracing::info!(
-                                                "Started a background migration: timeout={}ms, local_default={}, last_locations={:?}",
-                                                timeout,
-                                                deadline.uses_local_default(),
-                                                last_locations,
-                                            );
-                                            Ok(false)
-                                        }
-                                    }
-                                    MigrationScope::Request(request_id) => {
-                                        // request stream の GOAWAY は当該 request だけの移行で
-                                        // あり、session は維持する (§9.2)
-                                        if *migration_in_progress {
-                                            tracing::debug!(
-                                                "Ignoring a request-scoped GOAWAY received while a migration is in progress: request_id={request_id}"
-                                            );
-                                            return Ok(false);
-                                        }
-                                        if ignored_publish_requests.contains_key(&request_id) {
-                                            // SUBSCRIBE_TRACKS の結果として受理した PUBLISH は
-                                            // publisher 起点の購読であり、自側からは再発行できない。
-                                            // 当該 request の終端は Session の期限に任せる
-                                            tracing::info!(
-                                                "Ignoring a request-scoped GOAWAY for a PUBLISH-originated subscription: request_id={request_id}"
-                                            );
-                                            return Ok(false);
-                                        }
-                                        // SUBSCRIBE 系の request とメディア FETCH のどちらか
-                                        let Some(request_target) = goaway_request_target(
-                                            request_id,
-                                            *catalog_request_id,
-                                            *video_request_id,
-                                            *audio_request_id,
-                                            fetch_requests,
-                                        ) else {
-                                            tracing::warn!(
-                                                "Ignoring a request-scoped GOAWAY for an unknown request: request_id={request_id}"
-                                            );
-                                            return Ok(false);
-                                        };
-                                        let deadline =
-                                            MigrationDeadline::after_goaway(Instant::now(), timeout);
-                                        // 移行先が別 URL の場合は、当該 request だけを
-                                        // 専用タスクが確立した side session で受信する。
-                                        // 旧 session はそのまま維持し、他の request と
-                                        // data plane の受信を続ける (§9.2)。同じ URL を指す
-                                        // GOAWAY は現在の session での再発行を意味する
-                                        // (`migration_target` の契約)
-                                        let new_session_url =
-                                            !same_session_url(&target.url, url);
-                                        // 移行先 URI の msf fragment の connection が現在の
-                                        // 接続経路と矛盾する場合は移行しない
-                                        // (draft-ietf-moq-msf-02 §11.1.1)
-                                        if new_session_url
-                                            && let Err(e) = tokio_moq::resolve_transport(
-                                                Some(*transport),
-                                                &target.url,
-                                            )
-                                        {
-                                            tracing::warn!(
-                                                "GOAWAY migration target conflicts with the current transport: {e}"
-                                            );
-                                            return Ok(false);
-                                        }
-                                        // side session へ渡す共有状態を組み立てる。世代だけは
-                                        // side session の起動時に決まるため引数で受ける
-                                        let shared_for_side_session =
-                                            |generation: u64| RequestMigrationShared {
-                                                frame_tx: frame_tx.clone(),
-                                                audio_tx: audio_tx.clone(),
-                                                catalog_tx: catalog_tx.clone(),
-                                                termination_tx: termination_tx.clone(),
-                                                audio_decoder: audio_decoder.clone(),
-                                                video_decode_order: std::sync::Arc::clone(
-                                                    video_decode_order,
-                                                ),
-                                                video_delivery_order: std::sync::Arc::clone(
-                                                    video_delivery_order,
-                                                ),
-                                                object_mode_video: std::sync::Arc::clone(
-                                                    object_mode_video,
-                                                ),
-                                                display_backlog: std::sync::Arc::clone(
-                                                    display_backlog,
-                                                ),
-                                                group_switch: std::sync::Arc::clone(group_switch),
-                                                audio_catch_up: std::sync::Arc::clone(
-                                                    audio_catch_up,
-                                                ),
-                                                audio_delivery_order: std::sync::Arc::clone(
-                                                    audio_delivery_order,
-                                                ),
-                                                last_received_locations: std::sync::Arc::clone(
-                                                    last_received_locations,
-                                                ),
-                                                audio_config_validated_generation:
-                                                    std::sync::Arc::clone(
-                                                        audio_config_validated_generation,
-                                                    ),
-                                                generation,
-                                                pending_subgroups: std::sync::Arc::clone(
-                                                    pending_subgroups,
-                                                ),
-                                                recorder: recorder_sender.clone(),
-                                                playback: *playback,
-                                                video_codec: video_codec.clone(),
-                                                audio_codec: audio_codec.clone(),
-                                                audio_params: *audio_params,
-                                                stream_slots: std::sync::Arc::clone(stream_slots),
-                                            };
-                                        match request_target {
-                                            GoawayRequestTarget::Subscribe(kind) => {
-                                                // 終端済み購読の request stream GOAWAY の扱いを
-                                                // 1 か所で決める (`reissue_request_target` 参照)。
-                                                // tick の entry 解消と後着 GOAWAY の順序で
-                                                // `publish_done_pending` が空になっても、
-                                                // `permanently_ended_tracks` /
-                                                // `migration_pending_tracks` の状態で判定が
-                                                // 崩れない
-                                                let Some(kind) = reissue_request_target(
-                                                    kind,
-                                                    publish_done_pending
-                                                        .get(&request_id)
-                                                        .map(|(_, disposition)| *disposition),
-                                                    permanently_ended_tracks,
-                                                ) else {
-                                                    return Ok(false);
-                                                };
-                                                let last_locations = *last_received_locations
-                                                    .lock()
-                                                    .expect(
-                                                        "last locations の lock が poison されていないこと",
-                                                    );
-                                                if new_session_url {
-                                                    tracing::info!(
-                                                        "Requesting a request migration to a new session: kind={kind:?}, request_id={request_id}, timeout={timeout}ms, local_default={}, last_location={:?}",
-                                                        deadline.uses_local_default(),
-                                                        last_locations.get(kind),
-                                                    );
-                                                    // side session の世代は旧 session より
-                                                    // 新しくする。Audio Config の検証済み
-                                                    // 世代と比べ、side session で最初に届いた
-                                                    // Audio Config を処理させる。世代は
-                                                    // dispatch が session を起動するときだけ
-                                                    // 1 本のカウンタから払い出す
-                                                    let mut side_session_runtime = SideSessionRuntime {
-                                                        sessions: request_migration_sessions,
-                                                        tasks: request_migration_tasks,
-                                                        task_monitor,
-                                                        events: request_migration_tx,
-                                                        transport: *transport,
-                                                        cert: cert.clone(),
-                                                        insecure: *insecure,
-                                                    };
-                                                    dispatch_side_session_command(
-                                                        &mut side_session_runtime,
-                                                        target.url.clone(),
-                                                        SideSessionCommand::Reissue {
-                                                            kind,
-                                                            old_request_id: request_id,
-                                                            plan: resubscribe_plan.clone(),
-                                                            last_locations,
-                                                            deadline,
-                                                        },
-                                                        session_generation,
-                                                        shared_for_side_session,
-                                                    )
-                                                    .await;
-                                                    return Ok(false);
-                                                }
-                                                tracing::info!(
-                                                    "Re-issuing the {kind:?} request after a request-scoped GOAWAY: request_id={request_id}"
-                                                );
-                                                // PUBLISH_DONE 済みの購読 (GoingAway の entry あり)
-                                                // は `Session::stop_sending` が Terminated を拒否する
-                                                // ため送らない (tick 解消済みの移行待ちも送らない)
-                                                let send_stop_sending = reissue_send_stop_sending(
-                                                    publish_done_pending
-                                                        .get(&request_id)
-                                                        .map(|(_, disposition)| *disposition),
-                                                    permanently_ended_tracks,
-                                                    migration_pending_tracks,
-                                                    kind,
-                                                );
-                                                match reissue_request(
-                                                    client,
-                                                    kind,
-                                                    request_id,
-                                                    resubscribe_plan,
-                                                    &last_locations,
-                                                    send_stop_sending,
-                                                )
-                                                .await
-                                                {
-                                                Ok(reissued) => {
-                                                    // 旧 alias を外して新しい alias を登録する
-                                                    // (alias は peer が決めるため変わりうる)
-                                                    let old_alias = match kind {
-                                                        TrackKind::Catalog => *catalog_alias,
-                                                        TrackKind::Video => *video_alias,
-                                                        TrackKind::Audio => *audio_alias,
-                                                        // 再発行は catalog / 映像 / 音声だけを
-                                                        // 対象とするため通常は到達しない
-                                                        TrackKind::Discard => ignored_publish_requests
-                                                            .get(&request_id)
-                                                            .copied(),
-                                                    };
-                                                    let new_alias =
-                                                        reissued.subscription.track_alias;
-                                                    {
-                                                        let mut map = track_map
-                                                            .write()
-                                                            .expect(
-                                                                "track_map lock must not be poisoned",
-                                                            );
-                                                        if let Some(alias) = old_alias {
-                                                            map.remove(&alias);
-                                                        }
-                                                        map.insert(new_alias, kind);
-                                                    }
-                                                    match kind {
-                                                        TrackKind::Catalog => {
-                                                            *catalog_request_id =
-                                                                Some(reissued.subscription.request_id);
-                                                            *catalog_alias = Some(new_alias);
-                                                        }
-                                                        TrackKind::Video => {
-                                                            *video_request_id = Some(
-                                                                reissued.subscription.request_id,
-                                                            );
-                                                            *video_alias = Some(new_alias);
-                                                            // 同じ session で購読を張り直した
-                                                            // ため、復号順と購読境界の状態は
-                                                            // 引き継ぎ、境界だけを更新する。
-                                                            // 候補は再発行の前に取得した最後の
-                                                            // 受信位置である (選び方は
-                                                            // select_video_subscription_boundary)
-                                                            let video_boundary_candidates =
-                                                                VideoBoundaryCandidates {
-                                                                    snapshot: last_locations
-                                                                        .get(TrackKind::Video),
-                                                                    reread: last_received_locations
-                                                                        .lock()
-                                                                        .expect(
-                                                                            "last locations の lock が poison されていないこと",
-                                                                        )
-                                                                        .get(TrackKind::Video),
-                                                                };
-                                                            let video_boundary_candidate =
-                                                                select_video_subscription_boundary(
-                                                                    ResubscribeRoute::RequestReissue,
-                                                                    video_boundary_candidates,
-                                                                );
-                                                            let video_boundary = {
-                                                                let mut order = video_delivery_order
-                                                                    .lock()
-                                                                    .expect(
-                                                                        "video delivery order lock is not poisoned",
-                                                                    );
-                                                                order.advance_boundary(
-                                                                    video_boundary_candidate,
-                                                                );
-                                                                order.boundary()
-                                                            };
-                                                            tracing::info!(
-                                                                "Updated the video subscription boundary for the re-issued request: candidates={video_boundary_candidates:?}, candidate={video_boundary_candidate:?}, boundary={video_boundary:?}"
-                                                            );
-                                                        }
-                                                        TrackKind::Audio => {
-                                                            *audio_request_id = Some(
-                                                                reissued.subscription.request_id,
-                                                            );
-                                                            *audio_alias = Some(new_alias);
-                                                            // 同じ session で購読を張り直した
-                                                            // ため、送出順の状態は引き継ぎ、
-                                                            // 境界だけを再発行前の最後の受信
-                                                            // 位置へ更新する。新しい購読の Largest
-                                                            // Object を使うと再発行中に届いた音声を
-                                                            // 境界以下として捨ててしまう
-                                                            audio_delivery_order
-                                                                .lock()
-                                                                .expect(
-                                                                    "audio delivery order の lock が poison されていないこと",
-                                                                )
-                                                                .set_boundary(
-                                                                    last_locations
-                                                                        .get(TrackKind::Audio),
-                                                                );
-                                                        }
-                                                        TrackKind::Discard => {
-                                                            // `reissue_request` は PUBLISH 起点の
-                                                            // 購読を再発行しないため到達しない。
-                                                            // 万一到達しても状態を変えない
-                                                            tracing::warn!(
-                                                                "Re-issued a PUBLISH-originated subscription unexpectedly: request_id={request_id}"
-                                                            );
-                                                        }
-                                                    }
-                                                    // 再発行に伴う FETCH の対応表を足す。同じ
-                                                    // track の旧 Request ID は、遅延して届く
-                                                    // FETCH / fill stream を誤配送しないよう先に外す
-                                                    {
-                                                        let mut targets =
-                                                            lock_fetch_targets(fetch_targets);
-                                                        targets.retain(|_, target| {
-                                                            Some(*target) != fetch_target_of(kind)
-                                                        });
-                                                        targets.extend(reissued.fetch_targets);
-                                                    }
-                                                    // 映像の購読を張り直すと、その再発行に伴う
-                                                    // FETCH は上の表へ入る。旧 session の映像
-                                                    // FETCH の再発行用の指定は対象が入れ替わるため
-                                                    // 捨てる
-                                                    if kind == TrackKind::Video {
-                                                        fetch_requests.clear();
-                                                    }
-                                                    fetch_requests.extend(reissued.fetch_requests);
-                                                    // datagram 受信タスクへ新しい alias 表を渡す
-                                                    let datagram_map = Arc::new(
-                                                        track_map
-                                                            .read()
-                                                            .expect(
-                                                                "track_map lock must not be poisoned",
-                                                            )
-                                                            .clone(),
-                                                    );
-                                                    let _ = datagram_session_tx.send(DatagramSession {
-                                                        handle: client.handle(),
-                                                        data_plane: data_plane.clone(),
-                                                        track_map: datagram_map,
-                                                        generation: *session_generation,
-                                                    });
-                                                    // 再発行後の request の active と pending 管理
-                                                    active_requests.remove(&request_id);
-                                                    active_requests
-                                                        .insert(reissued.subscription.request_id);
-                                                    publish_done_pending.remove(&request_id);
-                                                    // 移行待ち (GoingAway 済み) の track は再発行で
-                                                    // active に戻るため、集合から外す
-                                                    migration_pending_tracks.remove(&kind);
-                                                    tracing::info!(
-                                                        "Re-issued the {kind:?} request: alias={new_alias}, request_id={}",
-                                                        reissued.subscription.request_id,
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    // 再発行に失敗しても session は維持する
-                                                    // (当該購読だけが失われ、live の受信は他の
-                                                    // 購読で続く)。旧 request の購読は再発行の前の
-                                                    // STOP_SENDING 送信で終端済みであるため、
-                                                    // shutdown 時の STOP_SENDING 対象から外す
-                                                    active_requests.remove(&request_id);
-                                                    tracing::warn!(
-                                                        "Failed to re-issue request {request_id} after a request-scoped GOAWAY: {e}"
-                                                    );
-                                                }
-                                                }
-                                            }
-                                            GoawayRequestTarget::Fetch => {
-                                                // 映像トラックが恒久終了している場合、FETCH は
-                                                // 発行し直さない (応答を使う経路が無い)
-                                                if permanently_ended_tracks
-                                                    .contains(&TrackKind::Video)
-                                                {
-                                                    tracing::info!(
-                                                        "Ignoring a request-scoped GOAWAY for a FETCH of the permanently ended video track: request_id={request_id}"
-                                                    );
-                                                    return Ok(false);
-                                                }
-                                                let Some(fetch_request) =
-                                                    fetch_requests.get(&request_id).cloned()
-                                                else {
-                                                    // `goaway_request_target` が存在を確認して
-                                                    // いるため到達しない
-                                                    return Ok(false);
-                                                };
-                                                if new_session_url {
-                                                    tracing::info!(
-                                                        "Requesting a FETCH migration to a new session: request_id={request_id}, timeout={timeout}ms, local_default={}",
-                                                        deadline.uses_local_default(),
-                                                    );
-                                                    let mut side_session_runtime = SideSessionRuntime {
-                                                        sessions: request_migration_sessions,
-                                                        tasks: request_migration_tasks,
-                                                        task_monitor,
-                                                        events: request_migration_tx,
-                                                        transport: *transport,
-                                                        cert: cert.clone(),
-                                                        insecure: *insecure,
-                                                    };
-                                                    dispatch_side_session_command(
-                                                        &mut side_session_runtime,
-                                                        target.url.clone(),
-                                                        SideSessionCommand::ReissueFetch {
-                                                            old_request_id: request_id,
-                                                            target: fetch_request.target,
-                                                            parameters: fetch_request.parameters,
-                                                            deadline,
-                                                        },
-                                                        session_generation,
-                                                        shared_for_side_session,
-                                                    )
-                                                    .await;
-                                                    return Ok(false);
-                                                }
-                                                // 同じ URL を指す GOAWAY は現在の session での
-                                                // 再発行を意味するため、旧 request を終端して
-                                                // 同じ要求内容で発行し直す
-                                                let reissued = reissue_fetch(
-                                                    client,
-                                                    request_id,
-                                                    &fetch_request.target,
-                                                    &fetch_request.parameters,
-                                                    true,
-                                                )
-                                                .await;
-                                                // 旧 Request ID の応答を誤配送しないよう先に外す
-                                                lock_fetch_targets(fetch_targets)
-                                                    .remove(&request_id);
-                                                fetch_requests.remove(&request_id);
-                                                match reissued {
-                                                    Ok(new_request_id) => {
-                                                        lock_fetch_targets(fetch_targets)
-                                                            .insert(
-                                                                new_request_id,
-                                                                FetchTarget::Video,
-                                                            );
-                                                        fetch_requests
-                                                            .insert(new_request_id, fetch_request);
-                                                        tracing::info!(
-                                                            "Re-issued the FETCH after a request-scoped GOAWAY: old_request_id={request_id}, new_request_id={new_request_id}"
-                                                        );
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::warn!(
-                                                            "Failed to re-issue FETCH request {request_id} after a request-scoped GOAWAY: {e}"
-                                                        );
-                                                    }
-                                                }
-                                                return Ok(false);
-                                            }
-                                        }
-                                        Ok(false)
-                                    }
-                                },
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "GOAWAY carried an unusable New Session URI; terminating without migration: {e}"
-                                    );
-                                    *goaway_received = true;
-                                    Ok(true)
-                                }
-                            }
-                        }
-                        Some(ClientEvent::Session(SessionEvent::PublishDoneReceived {
-                            request_id,
-                            status_code,
-                            stream_count,
-                            ..
-                        })) => {
-                            // draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE) はその
-                            // subscription の終端であり、§12.4 (Publish Done Codes) は
-                            // status ごとに意味が異なる。1 track の終了でパイプライン全体を
-                            // 停止させない。Session は終端済み subscription を drain timer
-                            // と Stream Count の完了条件を持って回収するため、example 側は
-                            // それを待ってから track を終端させる
-                            let disposition = publish_done_disposition(
-                                normalize_publish_done_code(status_code),
-                            );
-                            tracing::info!(
-                                "Received PUBLISH_DONE (status_code={status_code}, \
+    // 映像トラックが恒久終了している場合、FETCH は
+    // 発行し直さない (応答を使う経路が無い)
+    if permanently_ended_tracks.contains(&TrackKind::Video) {
+        tracing::info!(
+            "Ignoring a request-scoped GOAWAY for a FETCH of the permanently ended video track: request_id={request_id}"
+        );
+        return Ok(false);
+    }
+    let Some(fetch_request) = fetch_requests.get(&request_id).cloned() else {
+        // `goaway_request_target` が存在を確認して
+        // いるため到達しない
+        return Ok(false);
+    };
+    if new_session_url {
+        tracing::info!(
+            "Requesting a FETCH migration to a new session: request_id={request_id}, timeout={timeout}ms, local_default={}",
+            deadline.uses_local_default(),
+        );
+        let mut side_session_runtime = SideSessionRuntime {
+            sessions: request_migration_sessions,
+            tasks: request_migration_tasks,
+            task_monitor,
+            events: request_migration_tx,
+            transport: *transport,
+            cert: cert.clone(),
+            insecure: *insecure,
+        };
+        dispatch_side_session_command(
+            &mut side_session_runtime,
+            target.url.clone(),
+            SideSessionCommand::ReissueFetch {
+                old_request_id: request_id,
+                target: fetch_request.target,
+                parameters: fetch_request.parameters,
+                deadline,
+            },
+            session_generation,
+            shared,
+        )
+        .await;
+        return Ok(false);
+    }
+    // 同じ URL を指す GOAWAY は現在の session での
+    // 再発行を意味するため、旧 request を終端して
+    // 同じ要求内容で発行し直す
+    let reissued = reissue_fetch(
+        client,
+        request_id,
+        &fetch_request.target,
+        &fetch_request.parameters,
+        true,
+    )
+    .await;
+    // 旧 Request ID の応答を誤配送しないよう先に外す
+    lock_fetch_targets(fetch_targets).remove(&request_id);
+    fetch_requests.remove(&request_id);
+    match reissued {
+        Ok(new_request_id) => {
+            lock_fetch_targets(fetch_targets).insert(new_request_id, FetchTarget::Video);
+            fetch_requests.insert(new_request_id, fetch_request);
+            tracing::info!(
+                "Re-issued the FETCH after a request-scoped GOAWAY: old_request_id={request_id}, new_request_id={new_request_id}"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to re-issue FETCH request {request_id} after a request-scoped GOAWAY: {e}"
+            );
+        }
+    }
+    Ok(false)
+}
+
+async fn handle_request_goaway(
+    state: &mut PipelineState,
+    target: tokio_moq::MigrationTarget,
+    request_id: u64,
+    timeout: u64,
+) -> Result<bool> {
+    // side session へ渡す共有状態は、state を分解する前に組み立てる
+    let shared = build_side_session_shared(state);
+    let PipelineState {
+        url,
+        transport,
+        fetch_requests,
+        video_request_id,
+        audio_request_id,
+        ignored_publish_requests,
+        catalog_request_id,
+        migration_in_progress,
+        ..
+    } = state;
+    // request stream の GOAWAY は当該 request だけの移行で
+    // あり、session は維持する (§9.2)
+    if *migration_in_progress {
+        tracing::debug!(
+            "Ignoring a request-scoped GOAWAY received while a migration is in progress: request_id={request_id}"
+        );
+        return Ok(false);
+    }
+    if ignored_publish_requests.contains_key(&request_id) {
+        // SUBSCRIBE_TRACKS の結果として受理した PUBLISH は
+        // publisher 起点の購読であり、自側からは再発行できない。
+        // 当該 request の終端は Session の期限に任せる
+        tracing::info!(
+            "Ignoring a request-scoped GOAWAY for a PUBLISH-originated subscription: request_id={request_id}"
+        );
+        return Ok(false);
+    }
+    // SUBSCRIBE 系の request とメディア FETCH のどちらか
+    let Some(request_target) = goaway_request_target(
+        request_id,
+        *catalog_request_id,
+        *video_request_id,
+        *audio_request_id,
+        fetch_requests,
+    ) else {
+        tracing::warn!(
+            "Ignoring a request-scoped GOAWAY for an unknown request: request_id={request_id}"
+        );
+        return Ok(false);
+    };
+    let deadline = MigrationDeadline::after_goaway(Instant::now(), timeout);
+    // 移行先が別 URL の場合は、当該 request だけを
+    // 専用タスクが確立した side session で受信する。
+    // 旧 session はそのまま維持し、他の request と
+    // data plane の受信を続ける (§9.2)。同じ URL を指す
+    // GOAWAY は現在の session での再発行を意味する
+    // (`migration_target` の契約)
+    let new_session_url = !same_session_url(&target.url, url);
+    // 移行先 URI の msf fragment の connection が現在の
+    // 接続経路と矛盾する場合は移行しない
+    // (draft-ietf-moq-msf-02 §11.1.1)
+    if new_session_url && let Err(e) = tokio_moq::resolve_transport(Some(*transport), &target.url) {
+        tracing::warn!("GOAWAY migration target conflicts with the current transport: {e}");
+        return Ok(false);
+    }
+    // side session へ渡す共有状態を組み立てる。世代だけは
+    // side session の起動時に決まるため引数で受ける
+
+    let context = GoawayRequestContext {
+        target,
+        request_id,
+        timeout,
+        deadline,
+        new_session_url,
+    };
+    match request_target {
+        GoawayRequestTarget::Subscribe(kind) => {
+            handle_goaway_subscribe(state, context, kind, shared).await
+        }
+        GoawayRequestTarget::Fetch => handle_goaway_fetch(state, context, shared).await,
+    }
+}
+
+async fn handle_goaway_received(
+    state: &mut PipelineState,
+    new_session_uri: Vec<u8>,
+    timeout: u64,
+    on_request_stream: Option<u64>,
+) -> Result<bool> {
+    let PipelineState {
+        url,
+        transport: _,
+        cert: _,
+        insecure: _,
+        task_monitor: _,
+        frame_tx: _,
+        audio_tx: _,
+        display_backlog: _,
+        playback: _,
+        client: _,
+        data_plane: _,
+        active_requests: _,
+        publish_done_pending: _,
+        permanently_ended_tracks: _,
+        migration_pending_tracks: _,
+        track_map: _,
+        fetch_targets: _,
+        fetch_requests: _,
+        video_codec: _,
+        video_request_id: _,
+        audio_request_id: _,
+        video_alias: _,
+        audio_alias: _,
+        video_decode_order: _,
+        group_switch: _,
+        object_mode_video: _,
+        audio_params: _,
+        audio_codec: _,
+        ignored_publish_requests: _,
+        resubscribe_plan: _,
+        catalog_request_id: _,
+        catalog_alias: _,
+        audio_decoder: _,
+        recorder: _,
+        recorder_sender: _,
+        session_generation: _,
+        audio_config_validated_generation: _,
+        audio_catch_up: _,
+        audio_delivery_order: _,
+        video_delivery_order: _,
+        stream_slots: _,
+        pending_subgroups: _,
+        termination_tx: _,
+        catalog_tx: _,
+        last_received_locations: _,
+        datagram_session_tx: _,
+        goaway_received,
+        migration_rx: _,
+        migration_in_progress: _,
+        migration_task: _,
+        migration_boundary_snapshot: _,
+        migration_limiter: _,
+        request_migration_sessions: _,
+        request_migration_tasks: _,
+        request_migration_tx: _,
+        ..
+    } = state;
+    tracing::info!("Received GOAWAY (timeout={timeout}, on_request_stream={on_request_stream:?})");
+    // 移行の判断は tokio-moq の共通関数が持つ
+    // (draft-ietf-moq-transport-23 §6.6.1 (Graceful Session Migration) /
+    // §9.2 (GOAWAY)。draft 由来の仕様であり将来変更されうる)
+    match tokio_moq::migration_target(&new_session_uri, on_request_stream, url) {
+        // request stream の GOAWAY で New Session URI を解釈できない
+        // 場合は session を維持する (該当 request の終端は Session の
+        // deadline に任せる)
+        Ok(None) => Ok(false),
+        Ok(Some(target)) => match target.scope {
+            MigrationScope::Session => handle_session_goaway(state, target, timeout).await,
+            MigrationScope::Request(request_id) => {
+                handle_request_goaway(state, target, request_id, timeout).await
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                "GOAWAY carried an unusable New Session URI; terminating without migration: {e}"
+            );
+            *goaway_received = true;
+            Ok(true)
+        }
+    }
+}
+
+/// PUBLISH_DONE を受信した購読の終端を記録し、drain の完了を待つ
+///
+/// `GOING_AWAY` は session 移行に伴う終端であり、移行後に購読を張り直す。
+async fn handle_publish_done_received(
+    state: &mut PipelineState,
+    request_id: u64,
+    status_code: u64,
+    stream_count: u64,
+) -> Result<bool> {
+    let PipelineState {
+        active_requests,
+        publish_done_pending,
+        video_request_id,
+        audio_request_id,
+        ignored_publish_requests,
+        catalog_request_id,
+        ..
+    } = state;
+    // draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE) はその
+    // subscription の終端であり、§12.4 (Publish Done Codes) は
+    // status ごとに意味が異なる。1 track の終了でパイプライン全体を
+    // 停止させない。Session は終端済み subscription を drain timer
+    // と Stream Count の完了条件を持って回収するため、example 側は
+    // それを待ってから track を終端させる
+    let disposition = publish_done_disposition(normalize_publish_done_code(status_code));
+    tracing::info!(
+        "Received PUBLISH_DONE (status_code={status_code}, \
                                  normalized_status_code={}, stream_count={stream_count}, \
                                  disposition={:?}, request_id={request_id})",
-                                normalize_publish_done_code(status_code),
-                                disposition,
-                            );
-                            // SUBSCRIBE_TRACKS の結果として受理した購読の PUBLISH_DONE は、
-                            // 映像・音声の終了判定に使わない。Session の drain が終わるまで
-                            // alias を残し、tick で track_map から外す
-                            if ignored_publish_requests.contains_key(&request_id) {
-                                publish_done_pending
-                                    .insert(request_id, (TrackKind::Discard, disposition));
-                                tracing::info!(
-                                    "PUBLISH_DONE for a PUBLISH-originated subscription: \
+        normalize_publish_done_code(status_code),
+        disposition,
+    );
+    // SUBSCRIBE_TRACKS の結果として受理した購読の PUBLISH_DONE は、
+    // 映像・音声の終了判定に使わない。Session の drain が終わるまで
+    // alias を残し、tick で track_map から外す
+    if ignored_publish_requests.contains_key(&request_id) {
+        publish_done_pending.insert(request_id, (TrackKind::Discard, disposition));
+        tracing::info!(
+            "PUBLISH_DONE for a PUBLISH-originated subscription: \
                                      request_id={request_id}, disposition={disposition:?}"
-                                );
-                                return Ok(false);
-                            }
-                            match goaway_request_kind(
-                                request_id,
-                                *catalog_request_id,
-                                *video_request_id,
-                                *audio_request_id,
-                            ) {
-                                Some(kind) => {
-                                    // 終了待ちの request を Session の cleanup_ready の
-                                    // 完了まで追う。shutdown 時の STOP_SENDING はこの
-                                    // request に送らないため active_requests から外す
-                                    active_requests.remove(&request_id);
-                                    match publish_done_pending.get(&request_id) {
-                                        Some((_, existing)) if *existing == disposition => {
-                                            // 同じ request に重複した PUBLISH_DONE。
-                                            // 既存の disposition は維持する
-                                        }
-                                        Some((_, existing)) => {
-                                            // disposition が変わった (通常は起こらない)。
-                                            // 既存の disposition と異なる PUBLISH_DONE であった
-                                            // 場合は新しい disposition で上書きする
-                                            tracing::warn!(
-                                                "PUBLISH_DONE disposition conflicts with a pending PUBLISH_DONE: request_id={request_id}, existing={existing:?}, new={:?}",
-                                                disposition,
-                                            );
-                                            publish_done_pending.insert(
-                                                request_id,
-                                                (kind, disposition),
-                                            );
-                                        }
-                                        None => {
-                                            publish_done_pending.insert(
-                                                request_id,
-                                                (kind, disposition),
-                                            );
-                                        }
-                                    }
-                                    if let Some((_, disposition)) =
-                                        publish_done_pending.get(&request_id)
-                                    {
-                                        let message = match disposition {
+        );
+        return Ok(false);
+    }
+    match goaway_request_kind(
+        request_id,
+        *catalog_request_id,
+        *video_request_id,
+        *audio_request_id,
+    ) {
+        Some(kind) => {
+            // 終了待ちの request を Session の cleanup_ready の
+            // 完了まで追う。shutdown 時の STOP_SENDING はこの
+            // request に送らないため active_requests から外す
+            active_requests.remove(&request_id);
+            match publish_done_pending.get(&request_id) {
+                Some((_, existing)) if *existing == disposition => {
+                    // 同じ request に重複した PUBLISH_DONE。
+                    // 既存の disposition は維持する
+                }
+                Some((_, existing)) => {
+                    // disposition が変わった (通常は起こらない)。
+                    // 既存の disposition と異なる PUBLISH_DONE であった
+                    // 場合は新しい disposition で上書きする
+                    tracing::warn!(
+                        "PUBLISH_DONE disposition conflicts with a pending PUBLISH_DONE: request_id={request_id}, existing={existing:?}, new={:?}",
+                        disposition,
+                    );
+                    publish_done_pending.insert(request_id, (kind, disposition));
+                }
+                None => {
+                    publish_done_pending.insert(request_id, (kind, disposition));
+                }
+            }
+            if let Some((_, disposition)) = publish_done_pending.get(&request_id) {
+                let message = match disposition {
                                             PublishDoneDisposition::Error => {
                                                 "error status; the track will end after drain".to_string()
                                             }
@@ -6413,295 +6618,345 @@ async fn handle_client_event(
                                                 "the session is going away; the track will be re-established after a migration".to_string()
                                             }
                                         };
-                                        // エラーだけを warn にする (正常終端と移行待ちは info)。
-                                        // PUBLISH_DONE 送信直後に GOAWAY が届くことがあるため、
-                                        // PUBLISH_DONE を移行のトリガーにしない
-                                        if PublishDoneDisposition::Error == *disposition {
-                                            tracing::warn!("PUBLISH_DONE error: {message}");
-                                        } else {
-                                            tracing::info!("PUBLISH_DONE: {message}");
-                                        }
-                                    }
-                                }
-                                // 移行で request_id は session ごとに変わりうるため、現在の
-                                // request_id に対応しないものは無視する。
-                                None => {
-                                    tracing::debug!(
-                                        "Ignoring a PUBLISH_DONE for an unknown request: request_id={request_id}"
-                                    );
-                                }
-                            }
-                            Ok(false)
-                        }
-                        Some(ClientEvent::Session(SessionEvent::RequestOkReceived {
-                            request_id,
-                            track_properties,
-                            ..
-                        })) => {
-                            // catalog 購読の SUBSCRIBE_OK が MSF_COMPRESSION を運んだ場合、
-                            // catalog の data stream を正しくデコードするために保持する。
-                            if *catalog_request_id == Some(request_id) {
-                                *catalog_compression = match track_properties.msf_compression() {
-                                    Some(value) => match MsfCompression::try_from(value) {
-                                        Ok(compression) => compression,
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                "Unsupported catalog MSF_COMPRESSION: {e}"
-                                            );
-                                            MsfCompression::None
-                                        }
-                                    },
-                                    None => MsfCompression::None,
-                                };
-                            }
-                            Ok(false)
-                        }
-                        Some(ClientEvent::Session(SessionEvent::FetchOkReceived {
-                            request_id,
-                            end_location,
-                            ..
-                        })) => {
-                            // 自側が発行したメディア FETCH の応答である。FETCH_OK は応答範囲の
-                            // 終端 (LARGEST_OBJECT または要求の End Location) だけを示し、
-                            // Track / Group の終端はデータストリームの End of Track /
-                            // End of Group で通知される (draft-ietf-moq-transport-23
-                            // §3.2.2 (Gaps in a Fetch Stream) / §11.4.2.2 (Prior Object
-                            // Fields))。そのため旧 FETCH_OK の End of Track フラグは読まず、
-                            // 対応表への記録は応答 stream が FETCH_OK より先に届きうるため
-                            // FETCH の発行時に行っておく。
-                            // 配送先は共有の対応表で引く。request 単位移行の side session が
-                            // 再発行した FETCH は side session 側の表にだけ入るため、ここで
-                            // 見つからなくても異常ではない
-                            let kind = lock_fetch_targets(fetch_targets)
-                                .get(&request_id)
-                                .copied();
-                            tracing::info!(
-                                "Received FETCH_OK: request_id={request_id}, kind={kind:?}, \
+                // エラーだけを warn にする (正常終端と移行待ちは info)。
+                // PUBLISH_DONE 送信直後に GOAWAY が届くことがあるため、
+                // PUBLISH_DONE を移行のトリガーにしない
+                if PublishDoneDisposition::Error == *disposition {
+                    tracing::warn!("PUBLISH_DONE error: {message}");
+                } else {
+                    tracing::info!("PUBLISH_DONE: {message}");
+                }
+            }
+        }
+        // 移行で request_id は session ごとに変わりうるため、現在の
+        // request_id に対応しないものは無視する。
+        None => {
+            tracing::debug!(
+                "Ignoring a PUBLISH_DONE for an unknown request: request_id={request_id}"
+            );
+        }
+    }
+    Ok(false)
+}
+
+/// REQUEST_OK を受信した request の応答処理と、購読の track 情報を確認する
+async fn handle_request_ok_received(
+    state: &mut PipelineState,
+    request_id: u64,
+    track_properties: TrackProperties,
+) -> Result<bool> {
+    let PipelineState {
+        catalog_request_id,
+        catalog_compression,
+        ..
+    } = state;
+    // catalog 購読の SUBSCRIBE_OK が MSF_COMPRESSION を運んだ場合、
+    // catalog の data stream を正しくデコードするために保持する。
+    if *catalog_request_id == Some(request_id) {
+        *catalog_compression = match track_properties.msf_compression() {
+            Some(value) => match MsfCompression::try_from(value) {
+                Ok(compression) => compression,
+                Err(e) => {
+                    tracing::warn!("Unsupported catalog MSF_COMPRESSION: {e}");
+                    MsfCompression::None
+                }
+            },
+            None => MsfCompression::None,
+        };
+    }
+    Ok(false)
+}
+
+/// FETCH_OK を受信したメディア FETCH の応答範囲を記録する
+async fn handle_fetch_ok_received(
+    state: &mut PipelineState,
+    request_id: u64,
+    end_location: Location,
+) -> Result<bool> {
+    let PipelineState { fetch_targets, .. } = state;
+    // 自側が発行したメディア FETCH の応答である。FETCH_OK は応答範囲の
+    // 終端 (LARGEST_OBJECT または要求の End Location) だけを示し、
+    // Track / Group の終端はデータストリームの End of Track /
+    // End of Group で通知される (draft-ietf-moq-transport-23
+    // §3.2.2 (Gaps in a Fetch Stream) / §11.4.2.2 (Prior Object
+    // Fields))。そのため旧 FETCH_OK の End of Track フラグは読まず、
+    // 対応表への記録は応答 stream が FETCH_OK より先に届きうるため
+    // FETCH の発行時に行っておく。
+    // 配送先は共有の対応表で引く。request 単位移行の side session が
+    // 再発行した FETCH は side session 側の表にだけ入るため、ここで
+    // 見つからなくても異常ではない
+    let kind = lock_fetch_targets(fetch_targets).get(&request_id).copied();
+    tracing::info!(
+        "Received FETCH_OK: request_id={request_id}, kind={kind:?}, \
                                  end_location=({}, {})",
-                                end_location.group_id,
-                                end_location.object_id,
-                            );
-                            Ok(false)
-                        }
-                        Some(ClientEvent::Session(SessionEvent::RequestErrorReceived {
-                            request_id,
-                            error_code,
-                            retry_interval,
-                            reason,
-                            error_details,
-                        })) => {
-                            // 自側が送った request が peer に拒否された
-                            // (draft-ietf-moq-transport-23 §9.4 (REQUEST_ERROR))。映像のメディア
-                            // FETCH の拒否なら応答 stream は届かないため、対応表から外す。
-                            // 対応表には catalog の購読 (`FetchTarget::Catalog`) の Request ID も
-                            // 入るため、値で映像 FETCH かを判定する。それ以外 (映像 SUBSCRIBE への
-                            // REQUEST_UPDATE の失敗など) はログに残すだけで、対応表を変えない。
-                            // この example はリダイレクトに追随せず、再試行もしない
-                            let video_fetch = {
-                                let mut targets = lock_fetch_targets(fetch_targets);
-                                if matches!(targets.get(&request_id), Some(FetchTarget::Video)) {
-                                    targets.remove(&request_id);
-                                    true
-                                } else {
-                                    false
-                                }
-                            };
-                            if video_fetch {
-                                fetch_requests.remove(&request_id);
-                            }
-                            // SUBSCRIBE_TRACKS が拒否された場合は、以後に同じ
-                            // SUBSCRIBE_TRACKS_ID を持つ PUBLISH を受理しないよう対応を外す
-                            if *tracks_request_id == Some(request_id) {
-                                *tracks_request_id = None;
-                            }
-                            tracing::warn!(
-                                "Received REQUEST_ERROR: request_id={request_id}, \
+        end_location.group_id,
+        end_location.object_id,
+    );
+    Ok(false)
+}
+
+/// REQUEST_ERROR を受信した request の失敗を記録し、必要なら再発行する
+async fn handle_request_error_received(
+    state: &mut PipelineState,
+    request_id: u64,
+    error_code: u64,
+    retry_interval: u64,
+    reason: shiguredo_moqt::message::ReasonPhrase,
+    error_details: shiguredo_moqt::message::ErrorDetails,
+) -> Result<bool> {
+    let PipelineState {
+        fetch_targets,
+        fetch_requests,
+        tracks_request_id,
+        ..
+    } = state;
+    // 自側が送った request が peer に拒否された
+    // (draft-ietf-moq-transport-23 §9.4 (REQUEST_ERROR))。映像のメディア
+    // FETCH の拒否なら応答 stream は届かないため、対応表から外す。
+    // 対応表には catalog の購読 (`FetchTarget::Catalog`) の Request ID も
+    // 入るため、値で映像 FETCH かを判定する。それ以外 (映像 SUBSCRIBE への
+    // REQUEST_UPDATE の失敗など) はログに残すだけで、対応表を変えない。
+    // この example はリダイレクトに追随せず、再試行もしない
+    let video_fetch = {
+        let mut targets = lock_fetch_targets(fetch_targets);
+        if matches!(targets.get(&request_id), Some(FetchTarget::Video)) {
+            targets.remove(&request_id);
+            true
+        } else {
+            false
+        }
+    };
+    if video_fetch {
+        fetch_requests.remove(&request_id);
+    }
+    // SUBSCRIBE_TRACKS が拒否された場合は、以後に同じ
+    // SUBSCRIBE_TRACKS_ID を持つ PUBLISH を受理しないよう対応を外す
+    if *tracks_request_id == Some(request_id) {
+        *tracks_request_id = None;
+    }
+    tracing::warn!(
+        "Received REQUEST_ERROR: request_id={request_id}, \
                                  video_fetch={video_fetch}, error_code={error_code:#x}, \
                                  retry_interval={retry_interval}, reason={}, redirect={}",
-                                reason.as_str(),
-                                error_details.redirect().is_some(),
-                            );
-                            Ok(false)
-                        }
-                        Some(ClientEvent::Session(SessionEvent::CloseSession(err))) => {
-                            tracing::warn!("Session closed: {:#x} {}", err.code, err.reason);
-                            Ok(true)
-                        }
-                        Some(ClientEvent::Session(SessionEvent::PeerClosed(err))) => {
-                            // peer 起点の終了。peer の transport は既に閉じているため
-                            // 終了コードを送り返さず、終了理由を記録して後始末へ進む
-                            tracing::warn!(
-                                "Session closed by peer: {:#x} {}",
-                                err.code,
-                                err.reason
-                            );
-                            Ok(true)
-                        }
-                        Some(ClientEvent::Session(SessionEvent::ResetDataStream {
-                            stream_id,
-                            error_code,
-                            ..
-                        })) => {
-                            // subscriber は outgoing data stream (subgroup / fill fetch) を
-                            // 開かないため、reset すべき stream を持たない。届いた場合は
-                            // 観測できるようにログだけ残す (draft-ietf-moq-transport-23
-                            // §5.2 (Delivery Timeouts and Data Reliability))。
-                            tracing::debug!(
-                                "Ignoring ResetDataStream for a stream this example does not own: \
+        reason.as_str(),
+        error_details.redirect().is_some(),
+    );
+    Ok(false)
+}
+
+/// 自側から終了コード付きでセッションを閉じる
+async fn handle_close_session(state: &mut PipelineState, err: SessionError) -> Result<bool> {
+    let PipelineState { .. } = state;
+    tracing::warn!("Session closed: {:#x} {}", err.code, err.reason);
+    Ok(true)
+}
+
+/// peer が transport 層でセッションを終了したことを記録する
+async fn handle_peer_closed(state: &mut PipelineState, err: SessionError) -> Result<bool> {
+    let PipelineState { .. } = state;
+    // peer 起点の終了。peer の transport は既に閉じているため
+    // 終了コードを送り返さず、終了理由を記録して後始末へ進む
+    tracing::warn!("Session closed by peer: {:#x} {}", err.code, err.reason);
+    Ok(true)
+}
+
+/// RESET_STREAM を受信した data stream の状態を更新する
+async fn handle_reset_data_stream(
+    state: &mut PipelineState,
+    stream_id: DataStreamId,
+    error_code: u64,
+) -> Result<bool> {
+    let PipelineState { .. } = state;
+    // subscriber は outgoing data stream (subgroup / fill fetch) を
+    // 開かないため、reset すべき stream を持たない。届いた場合は
+    // 観測できるようにログだけ残す (draft-ietf-moq-transport-23
+    // §5.2 (Delivery Timeouts and Data Reliability))。
+    tracing::debug!(
+        "Ignoring ResetDataStream for a stream this example does not own: \
                                  stream_id={}, error_code={:#x}",
-                                stream_id.0,
-                                error_code
-                            );
-                            Ok(false)
-                        }
-                        Some(ClientEvent::Request(request)) => {
-                            // SUBSCRIBE_TRACKS の結果として届いた PUBLISH だけは受理する。
-                            //
-                            // draft-ietf-moq-transport-23 §3.6 (Subscribing to Tracks by
-                            // Prefix) / §9.8 (PUBLISH): publisher は namespace prefix に一致
-                            // する track を PUBLISH し、購読者は PUBLISH_OK (REQUEST_OK) で
-                            // 応答する。Track Alias は PUBLISH が運ぶ値をそのまま使う。
-                            if let ControlMessage::Publish(publish) = &request.message
-                                && accepts_subscribe_tracks_publish(publish, *tracks_request_id)
-                            {
-                                let alias = publish.track_alias;
-                                let namespace = publish.track_namespace.clone();
-                                let track_name = publish.track_name.clone();
-                                let duplicate = is_already_subscribed_publish(
-                                    publish,
-                                    subscribed_tracks,
-                                );
-                                // 既存の購読と同じ alias が使われると、data stream がどちらの
-                                // 購読のものか alias だけでは区別できない。同じ track に対する
-                                // alias の共有は §3.1.3 が許可しているため、既存の再生経路を
-                                // 壊さないよう、この PUBLISH は受理しない
-                                let alias_taken = track_map
-                                    .read()
-                                    .expect("track_map lock must not be poisoned")
-                                    .contains_key(&alias);
-                                if alias_taken {
-                                    tracing::warn!(
-                                        "Rejecting a PUBLISH that reuses an existing track alias: \
+        stream_id.0,
+        error_code
+    );
+    Ok(false)
+}
+
+/// peer から届いた要求 (SUBSCRIBE / FETCH など) へ応答する
+async fn handle_incoming_request(
+    state: &mut PipelineState,
+    request: tokio_moq::moqt_client::IncomingRequest,
+) -> Result<bool> {
+    let PipelineState {
+        client,
+        data_plane,
+        track_map,
+        subscribed_tracks,
+        tracks_request_id,
+        ignored_publish_requests,
+        session_generation,
+        datagram_session_tx,
+        ..
+    } = state;
+    // SUBSCRIBE_TRACKS の結果として届いた PUBLISH だけは受理する。
+    //
+    // draft-ietf-moq-transport-23 §3.6 (Subscribing to Tracks by
+    // Prefix) / §9.8 (PUBLISH): publisher は namespace prefix に一致
+    // する track を PUBLISH し、購読者は PUBLISH_OK (REQUEST_OK) で
+    // 応答する。Track Alias は PUBLISH が運ぶ値をそのまま使う。
+    if let ControlMessage::Publish(publish) = &request.message
+        && accepts_subscribe_tracks_publish(publish, *tracks_request_id)
+    {
+        let alias = publish.track_alias;
+        let namespace = publish.track_namespace.clone();
+        let track_name = publish.track_name.clone();
+        let duplicate = is_already_subscribed_publish(publish, subscribed_tracks);
+        // 既存の購読と同じ alias が使われると、data stream がどちらの
+        // 購読のものか alias だけでは区別できない。同じ track に対する
+        // alias の共有は §3.1.3 が許可しているため、既存の再生経路を
+        // 壊さないよう、この PUBLISH は受理しない
+        let alias_taken = track_map
+            .read()
+            .expect("track_map lock must not be poisoned")
+            .contains_key(&alias);
+        if alias_taken {
+            tracing::warn!(
+                "Rejecting a PUBLISH that reuses an existing track alias: \
                                          request_id={}, namespace={}, track={}, alias={alias}",
-                                        request.request_id,
-                                        serialize_namespace(&namespace),
-                                        serialize_track_name(&track_name),
-                                    );
-                                    client
-                                        .send_request_error(
-                                            request.request_id,
-                                            shiguredo_moqt::error::REQUEST_UNINTERESTED,
-                                            "track alias is already used by another subscription",
-                                        )
-                                        .await?;
-                                    return Ok(false);
-                                }
-                                // PUBLISH_OK を送る前に alias を登録する。publisher は
-                                // PUBLISH_OK の直後に data stream を開きうるため、登録が
-                                // 遅れると未知 alias として保留されてしまう
-                                let datagram_map = {
-                                    let mut map = track_map
-                                        .write()
-                                        .expect("track_map lock must not be poisoned");
-                                    map.insert(alias, TrackKind::Discard);
-                                    Arc::new(map.clone())
-                                };
-                                match client.send_request_ok(request.request_id).await {
-                                    Ok(()) => {
-                                        ignored_publish_requests.insert(request.request_id, alias);
-                                        // datagram 受信タスクの alias 表も差し替える
-                                        let _ = datagram_session_tx.send(DatagramSession {
-                                            handle: client.handle(),
-                                            data_plane: data_plane.clone(),
-                                            track_map: datagram_map,
-                                            generation: *session_generation,
-                                        });
-                                        tracing::info!(
-                                            "Accepted PUBLISH for SUBSCRIBE_TRACKS: request_id={}, \
+                request.request_id,
+                serialize_namespace(&namespace),
+                serialize_track_name(&track_name),
+            );
+            client
+                .send_request_error(
+                    request.request_id,
+                    shiguredo_moqt::error::REQUEST_UNINTERESTED,
+                    "track alias is already used by another subscription",
+                )
+                .await?;
+            return Ok(false);
+        }
+        // PUBLISH_OK を送る前に alias を登録する。publisher は
+        // PUBLISH_OK の直後に data stream を開きうるため、登録が
+        // 遅れると未知 alias として保留されてしまう
+        let datagram_map = {
+            let mut map = track_map
+                .write()
+                .expect("track_map lock must not be poisoned");
+            map.insert(alias, TrackKind::Discard);
+            Arc::new(map.clone())
+        };
+        match client.send_request_ok(request.request_id).await {
+            Ok(()) => {
+                ignored_publish_requests.insert(request.request_id, alias);
+                // datagram 受信タスクの alias 表も差し替える
+                let _ = datagram_session_tx.send(DatagramSession {
+                    handle: client.handle(),
+                    data_plane: data_plane.clone(),
+                    track_map: datagram_map,
+                    generation: *session_generation,
+                });
+                tracing::info!(
+                    "Accepted PUBLISH for SUBSCRIBE_TRACKS: request_id={}, \
                                              namespace={}, track={}, alias={alias}, \
                                              duplicate={duplicate}",
-                                            request.request_id,
-                                            serialize_namespace(&namespace),
-                                            serialize_track_name(&track_name),
-                                        );
-                                    }
-                                    Err(e) => {
-                                        // 受理に失敗した PUBLISH の alias を残すと、届いた
-                                        // stream を読み捨てる対象として保持し続けるため、
-                                        // 登録を取り消す
-                                        let datagram_map = {
-                                            let mut map = track_map
-                                                .write()
-                                                .expect("track_map lock must not be poisoned");
-                                            map.remove(&alias);
-                                            Arc::new(map.clone())
-                                        };
-                                        let _ = datagram_session_tx.send(DatagramSession {
-                                            handle: client.handle(),
-                                            data_plane: data_plane.clone(),
-                                            track_map: datagram_map,
-                                            generation: *session_generation,
-                                        });
-                                        tracing::warn!(
-                                            "Failed to accept PUBLISH for SUBSCRIBE_TRACKS: \
+                    request.request_id,
+                    serialize_namespace(&namespace),
+                    serialize_track_name(&track_name),
+                );
+            }
+            Err(e) => {
+                // 受理に失敗した PUBLISH の alias を残すと、届いた
+                // stream を読み捨てる対象として保持し続けるため、
+                // 登録を取り消す
+                let datagram_map = {
+                    let mut map = track_map
+                        .write()
+                        .expect("track_map lock must not be poisoned");
+                    map.remove(&alias);
+                    Arc::new(map.clone())
+                };
+                let _ = datagram_session_tx.send(DatagramSession {
+                    handle: client.handle(),
+                    data_plane: data_plane.clone(),
+                    track_map: datagram_map,
+                    generation: *session_generation,
+                });
+                tracing::warn!(
+                    "Failed to accept PUBLISH for SUBSCRIBE_TRACKS: \
                                              request_id={}, {e}",
-                                            request.request_id,
-                                        );
-                                    }
-                                }
-                                return Ok(false);
-                            }
-                            // subscriber は上記以外の peer request を処理しない。PUBLISH は
-                            // 「不要」、それ以外は「未対応」として拒否する。
-                            let (code, reason) = request_rejection(&request.message);
-                            tracing::warn!(
-                                "Rejecting unexpected peer request: request_id={} code={code:#x}",
-                                request.request_id
-                            );
-                            client
-                                .send_request_error(request.request_id, code, reason)
-                                .await?;
-                            Ok(false)
-                        }
-                        Some(ClientEvent::RequestUpdate(update)) => {
-                            // draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE):
-                            // 受信側は必ず 1 通の REQUEST_OK / REQUEST_ERROR で応答する MUST。
-                            // 本 example が受信する更新は、publisher から PUBLISH で確立した
-                            // 購読に対するものであり (SUBSCRIBE 起点の購読では publisher は
-                            // REQUEST_UPDATE を送れない)、session 層の検証を通った更新は
-                            // 購読状態へ反映済みである。
-                            tracing::info!(
-                                "Received REQUEST_UPDATE: request_id={}",
-                                update.request_id
-                            );
-                            if let Err(e) = client.send_request_ok(update.request_id).await {
-                                tracing::warn!(
-                                    "Failed to send REQUEST_OK for request {}: {e}",
-                                    update.request_id
-                                );
-                            }
-                            Ok(false)
-                        }
-                        Some(ClientEvent::Session(SessionEvent::PublishSkippedReceived {
-                            request_id,
-                            track_namespace,
-                            track_name,
-                        })) => {
-                            // draft-ietf-moq-transport-23 §9.18 (PUBLISH_SKIPPED):
-                            // SUBSCRIBE_TRACKS に一致したが購読を作らなかった track である。
-                            // 状態は変えず、観測できるようにログだけ残す
-                            tracing::info!(
-                                "Received PUBLISH_SKIPPED: request_id={request_id}, \
+                    request.request_id,
+                );
+            }
+        }
+        return Ok(false);
+    }
+    // subscriber は上記以外の peer request を処理しない。PUBLISH は
+    // 「不要」、それ以外は「未対応」として拒否する。
+    let (code, reason) = request_rejection(&request.message);
+    tracing::warn!(
+        "Rejecting unexpected peer request: request_id={} code={code:#x}",
+        request.request_id
+    );
+    client
+        .send_request_error(request.request_id, code, reason)
+        .await?;
+    Ok(false)
+}
+
+/// peer から届いた REQUEST_UPDATE へ応答する
+async fn handle_incoming_request_update(
+    state: &mut PipelineState,
+    update: tokio_moq::moqt_client::IncomingRequestUpdate,
+) -> Result<bool> {
+    let PipelineState { client, .. } = state;
+    // draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE):
+    // 受信側は必ず 1 通の REQUEST_OK / REQUEST_ERROR で応答する MUST。
+    // 本 example が受信する更新は、publisher から PUBLISH で確立した
+    // 購読に対するものであり (SUBSCRIBE 起点の購読では publisher は
+    // REQUEST_UPDATE を送れない)、session 層の検証を通った更新は
+    // 購読状態へ反映済みである。
+    tracing::info!("Received REQUEST_UPDATE: request_id={}", update.request_id);
+    if let Err(e) = client.send_request_ok(update.request_id).await {
+        tracing::warn!(
+            "Failed to send REQUEST_OK for request {}: {e}",
+            update.request_id
+        );
+    }
+    Ok(false)
+}
+
+/// SUBSCRIBE_TRACKS で購読を作らなかった track を記録する
+async fn handle_publish_skipped_received(
+    state: &mut PipelineState,
+    request_id: u64,
+    track_namespace: TrackNamespace,
+    track_name: Vec<u8>,
+) -> Result<bool> {
+    let PipelineState { .. } = state;
+    // draft-ietf-moq-transport-23 §9.18 (PUBLISH_SKIPPED):
+    // SUBSCRIBE_TRACKS に一致したが購読を作らなかった track である。
+    // 状態は変えず、観測できるようにログだけ残す
+    tracing::info!(
+        "Received PUBLISH_SKIPPED: request_id={request_id}, \
                                  namespace={}, track={}",
-                                serialize_namespace(&track_namespace),
-                                serialize_track_name(&track_name),
-                            );
-                            Ok(false)
-                        }
-                        _ => Ok(false),
-                    }
-                }
-                .await;
+        serialize_namespace(&track_namespace),
+        serialize_track_name(&track_name),
+    );
+    Ok(false)
+}
+
+/// `client.next_event` の結果をループの流れへ写す
+///
+/// transport の終了・MOQT メッセージの書式違反・session の終了依頼を、受信ループを
+/// 抜けるか継続するかへ分類する。
+async fn apply_client_event_outcome(state: &mut PipelineState, outcome: Result<bool>) -> LoopFlow {
+    let PipelineState {
+        goaway_received,
+        peer_ended,
+        client,
+        session_terminated,
+        fatal_error,
+        ..
+    } = state;
     match outcome {
         // peer が subscription / session を終了させた
         Ok(true) => {
@@ -6752,6 +7007,88 @@ async fn handle_client_event(
         }
     }
     LoopFlow::Continue
+}
+
+async fn handle_client_event(
+    state: &mut PipelineState,
+    notable: std::result::Result<Option<ClientEvent>, TransportError>,
+) -> LoopFlow {
+    // 分岐本体を async ブロックに閉じ込め、`?` が `run` を抜けないようにする。
+    // `client.next_event()` の結果とピア要求への応答 (`send_request_error`) は
+    // どちらも transport I/O を行い、セッション終了後は
+    // `TransportError::ConnectionClosed` を返す。`?` を `run` まで通すと
+    // `Fatal: session closed` で異常終了し、終了時の後始末 (`close(0, "")` が
+    // 送る CONNECT stream の送信側の FIN) に到達しない。
+    // `break 'main` はブロックの外に出す (ブロックの中では外側のループを
+    // 抜けられない) ため、ブロックは「受信ループを抜けるか」を返す。
+    let outcome: Result<bool> = async {
+        match notable? {
+            Some(ClientEvent::Session(SessionEvent::GoawayReceived {
+                new_session_uri,
+                timeout,
+                on_request_stream,
+            })) => handle_goaway_received(state, new_session_uri, timeout, on_request_stream).await,
+            Some(ClientEvent::Session(SessionEvent::PublishDoneReceived {
+                request_id,
+                status_code,
+                stream_count,
+                ..
+            })) => handle_publish_done_received(state, request_id, status_code, stream_count).await,
+            Some(ClientEvent::Session(SessionEvent::RequestOkReceived {
+                request_id,
+                track_properties,
+                ..
+            })) => handle_request_ok_received(state, request_id, track_properties).await,
+            Some(ClientEvent::Session(SessionEvent::FetchOkReceived {
+                request_id,
+                end_location,
+                ..
+            })) => handle_fetch_ok_received(state, request_id, end_location).await,
+            Some(ClientEvent::Session(SessionEvent::RequestErrorReceived {
+                request_id,
+                error_code,
+                retry_interval,
+                reason,
+                error_details,
+            })) => {
+                handle_request_error_received(
+                    state,
+                    request_id,
+                    error_code,
+                    retry_interval,
+                    reason,
+                    error_details,
+                )
+                .await
+            }
+            Some(ClientEvent::Session(SessionEvent::CloseSession(err))) => {
+                handle_close_session(state, err).await
+            }
+            Some(ClientEvent::Session(SessionEvent::PeerClosed(err))) => {
+                handle_peer_closed(state, err).await
+            }
+            Some(ClientEvent::Session(SessionEvent::ResetDataStream {
+                stream_id,
+                error_code,
+                ..
+            })) => handle_reset_data_stream(state, stream_id, error_code).await,
+            Some(ClientEvent::Request(request)) => handle_incoming_request(state, request).await,
+            Some(ClientEvent::RequestUpdate(update)) => {
+                handle_incoming_request_update(state, update).await
+            }
+            Some(ClientEvent::Session(SessionEvent::PublishSkippedReceived {
+                request_id,
+                track_namespace,
+                track_name,
+            })) => {
+                handle_publish_skipped_received(state, request_id, track_namespace, track_name)
+                    .await
+            }
+            _ => Ok(false),
+        }
+    }
+    .await;
+    apply_client_event_outcome(state, outcome).await
 }
 
 /// バックグラウンドの session 移行の結果を受けて、移行先へ切り替える
@@ -7074,12 +7411,18 @@ async fn handle_migration_result(
 ///
 /// 再発行の成功 / 失敗に応じて購読の状態を更新し、side session の終了では同じ URL の slot を
 /// 捨てる。
-async fn handle_side_session_event(
+/// side session で request の再発行に成功したときの処理
+///
+/// side session の進行状態を確立済みへ進め、移行済みの購読を新しい Request ID / alias へ
+/// 差し替える。
+async fn handle_side_session_migrated(
     state: &mut PipelineState,
-    event: RequestMigrationEvent,
+    url: String,
+    request: MigratedRequest,
+    old_request_id: u64,
+    new_request_id: u64,
 ) -> LoopFlow {
     let PipelineState {
-        url: _,
         client,
         data_plane,
         active_requests,
@@ -7101,9 +7444,324 @@ async fn handle_side_session_event(
         datagram_session_tx,
         peer_ended,
         request_migration_sessions,
-        wt_session_state_rx: _,
         ..
     } = state;
+    let url_display = side_session_url_display(&url);
+    // side session の進行状態を「確立済み」へ進める。同じ URL の次の
+    // request はこの session に相乗りする
+    if let Some(slot) = request_migration_sessions.get_mut(&url) {
+        slot.state = SideSessionState::Established;
+    }
+    match request {
+        MigratedRequest::Subscribe(kind) => {
+            // 旧 session の request stream を閉じる (§9.2 の "close the
+            // old request stream using the appropriate mechanism")。
+            // 購読が既に Terminated の場合は状態機械に拒否されるが、
+            // 移行自体は成功しているため警告に留める
+            if let Err(e) = client.stop_sending(old_request_id).await {
+                tracing::warn!(
+                    "Failed to send STOP_SENDING for the migrated request {old_request_id}: {e}"
+                );
+            }
+            // 旧 alias を外す。以後の Object は side session が配送する
+            let old_alias = match kind {
+                TrackKind::Catalog => catalog_alias.take(),
+                TrackKind::Video => video_alias.take(),
+                TrackKind::Audio => audio_alias.take(),
+                // 移行は catalog / 映像 / 音声だけを対象とするため
+                // 到達しない
+                TrackKind::Discard => None,
+            };
+            {
+                let mut map = track_map
+                    .write()
+                    .expect("track_map lock must not be poisoned");
+                if let Some(alias) = old_alias {
+                    map.remove(&alias);
+                }
+            }
+            // 以後その track は side session が配送するため、main ループの
+            // 再発行・期限処理の対象から外す。request id を `None` にすると
+            // `goaway_request_kind` の照合対象からも外れる
+            match kind {
+                TrackKind::Catalog => *catalog_request_id = None,
+                TrackKind::Video => *video_request_id = None,
+                TrackKind::Audio => *audio_request_id = None,
+                TrackKind::Discard => {}
+            }
+            active_requests.remove(&old_request_id);
+            // 移行の開始から成功までの間に旧 session で PUBLISH_DONE を
+            // 受けていた場合は disposition を引き継ぐ。track の恒久終了を
+            // 移行成功で失わないようにするためである
+            let pending_disposition = publish_done_pending
+                .remove(&old_request_id)
+                .map(|(_, disposition)| disposition);
+            migration_pending_tracks.remove(&kind);
+            // 旧 session のこの track の FETCH は side session の再発行で
+            // 置き換わるため、main ループの対応表から外す
+            lock_fetch_targets(fetch_targets)
+                .retain(|_, target| Some(*target) != fetch_target_of(kind));
+            // 映像の購読を移行すると、それに伴う FETCH も side session が
+            // 発行し直す。main ループに残った FETCH の再発行用の指定は
+            // 対象を失っているため捨てる
+            if kind == TrackKind::Video {
+                fetch_requests.clear();
+            }
+            match pending_disposition {
+                Some(PublishDoneDisposition::TrackEnded | PublishDoneDisposition::Error) => {
+                    tracing::warn!(
+                        "The {kind:?} track ended permanently during the request migration"
+                    );
+                    permanently_ended_tracks.insert(kind);
+                    if all_media_tracks_ended(
+                        *subscribe_video,
+                        *subscribe_audio,
+                        permanently_ended_tracks,
+                        migration_pending_tracks,
+                    ) {
+                        tracing::info!("All media tracks ended permanently: ending the pipeline");
+                        *peer_ended = true;
+                        return LoopFlow::Break;
+                    }
+                }
+                Some(PublishDoneDisposition::GoingAway) | None => {}
+            }
+            // datagram 受信タスクへ新しい alias 表を渡す。旧 session の
+            // 遅延した datagram を移行後の track として配送しないためである
+            let datagram_map = Arc::new(
+                track_map
+                    .read()
+                    .expect("track_map lock must not be poisoned")
+                    .clone(),
+            );
+            let _ = datagram_session_tx.send(DatagramSession {
+                handle: client.handle(),
+                data_plane: data_plane.clone(),
+                track_map: datagram_map,
+                generation: *session_generation,
+            });
+            tracing::info!(
+                "Migrated the {kind:?} request to the new session: \
+                                     *url={url_display}, old_request_id={old_request_id}, \
+                                     new_request_id={new_request_id}"
+            );
+        }
+        MigratedRequest::Fetch => {
+            // 旧 session の request stream を閉じる。応答は side session が
+            // 受けるため、main ループの対応表から外す
+            stop_fetch_request_stream(client, old_request_id).await;
+            lock_fetch_targets(fetch_targets).remove(&old_request_id);
+            fetch_requests.remove(&old_request_id);
+            tracing::info!(
+                "Migrated the media FETCH request to the new session: \
+                                     *url={url_display}, old_request_id={old_request_id}, \
+                                     new_request_id={new_request_id}"
+            );
+        }
+    }
+    LoopFlow::Continue
+}
+
+/// side session で request の再発行に失敗したときの処理
+async fn handle_side_session_failed(
+    state: &mut PipelineState,
+    url: String,
+    request: MigratedRequest,
+    old_request_id: u64,
+    reason: String,
+) -> LoopFlow {
+    let PipelineState {
+        client,
+        fetch_targets,
+        fetch_requests,
+        ..
+    } = state;
+    let url_display = side_session_url_display(&url);
+    match request {
+        MigratedRequest::Subscribe(kind) => {
+            // 期限切れ・接続失敗・再発行失敗である。control GOAWAY の移行
+            // 失敗と同じく警告を出し、旧 session の終了経路へ進む
+            tracing::warn!(
+                "Failed to migrate the {kind:?} request to a new session: \
+                                     *url={url_display}, request_id={old_request_id}: {reason}"
+            );
+            return LoopFlow::Break;
+        }
+        MigratedRequest::Fetch => {
+            // FETCH は欠落した Group を補う補助であり、移行に失敗しても購読は
+            // 続く。旧 session の request を終端し、対応表から外す
+            tracing::warn!(
+                "Failed to migrate the FETCH request to a new session: \
+                                     *url={url_display}, request_id={old_request_id}: {reason}"
+            );
+            stop_fetch_request_stream(client, old_request_id).await;
+            lock_fetch_targets(fetch_targets).remove(&old_request_id);
+            fetch_requests.remove(&old_request_id);
+        }
+    }
+    LoopFlow::Continue
+}
+
+/// side session で観測した session イベントを処理する
+async fn handle_side_session_session_event(
+    state: &mut PipelineState,
+    url: String,
+    kind: Option<TrackKind>,
+    event: SessionEvent,
+) -> LoopFlow {
+    let PipelineState {
+        permanently_ended_tracks,
+        migration_pending_tracks,
+        subscribe_video,
+        subscribe_audio,
+        peer_ended,
+        ..
+    } = state;
+    let url_display = side_session_url_display(&url);
+    match event {
+        SessionEvent::PublishDoneReceived {
+            request_id,
+            status_code,
+            stream_count,
+            ..
+        } => {
+            // 移行済みの購読の終端である。main ループの PUBLISH_DONE と同じ
+            // 分類でログに残し、恒久終了だけ状態へ反映する。side session の
+            // 購読の cleanup は main ループが所有する `MoqtClient` では観測
+            // できないため、drain 完了は待たない
+            let disposition = publish_done_disposition(normalize_publish_done_code(status_code));
+            tracing::info!(
+                "Received PUBLISH_DONE on the request migration side session: \
+                                     *url={url_display}, kind={kind:?}, request_id={request_id}, \
+                                     status_code={status_code}, \
+                                     normalized_status_code={}, \
+                                     stream_count={stream_count}, \
+                                     disposition={disposition:?}",
+                normalize_publish_done_code(status_code),
+            );
+            match (kind, disposition) {
+                (
+                    Some(kind),
+                    PublishDoneDisposition::TrackEnded | PublishDoneDisposition::Error,
+                ) => {
+                    permanently_ended_tracks.insert(kind);
+                    // 全 media track が終了したら pipeline を終える
+                    // (main ループの tick の終了判定と同じ規則)
+                    if matches!(kind, TrackKind::Video | TrackKind::Audio)
+                        && all_media_tracks_ended(
+                            *subscribe_video,
+                            *subscribe_audio,
+                            permanently_ended_tracks,
+                            migration_pending_tracks,
+                        )
+                    {
+                        tracing::info!("All media tracks ended permanently: ending the pipeline");
+                        *peer_ended = true;
+                        return LoopFlow::Break;
+                    }
+                }
+                (Some(kind), PublishDoneDisposition::GoingAway) => {
+                    // request stream の GOAWAY は受けるが、side session の
+                    // 購読をさらに移行する経路は持たない
+                    tracing::info!(
+                        "The migrated {kind:?} track is going away on the side session: url={url_display}"
+                    );
+                }
+                (None, _) => {
+                    tracing::warn!(
+                        "PUBLISH_DONE on the side session does not belong to a migrated subscription: url={url_display}, request_id={request_id}"
+                    );
+                }
+            }
+        }
+        SessionEvent::RequestErrorReceived {
+            request_id,
+            error_code,
+            retry_interval,
+            reason,
+            ..
+        } => {
+            tracing::warn!(
+                "Received REQUEST_ERROR on the request migration side session: \
+                                     *url={url_display}, kind={kind:?}, request_id={request_id}, \
+                                     error_code={error_code:#x}, \
+                                     retry_interval={retry_interval}, reason={}",
+                reason.as_str(),
+            );
+        }
+        SessionEvent::GoawayReceived {
+            new_session_uri,
+            timeout,
+            on_request_stream,
+        } => {
+            tracing::warn!(
+                "Received GOAWAY on the request migration side session: \
+                                     *url={url_display}, timeout={timeout}, \
+                                     on_request_stream={on_request_stream:?}, \
+                                     new_session_uri_len={}",
+                new_session_uri.len(),
+            );
+        }
+        SessionEvent::CloseSession(err) => {
+            tracing::warn!(
+                "The request migration side session closed: url={url_display}, \
+                                     {:#x} {}",
+                err.code,
+                err.reason,
+            );
+        }
+        SessionEvent::PeerClosed(err) => {
+            tracing::warn!(
+                "The request migration side session was closed by peer: url={url_display}, \
+                                     {:#x} {}",
+                err.code,
+                err.reason,
+            );
+        }
+        other => {
+            tracing::debug!(
+                "Ignoring a session event on the request migration side session: \
+                                     *url={url_display}, event={other:?}"
+            );
+        }
+    }
+    LoopFlow::Continue
+}
+
+/// side session のタスクが終了したときの処理
+///
+/// 同じ URL で作り直した side session の slot を誤って捨てないよう世代を照合する。
+async fn handle_side_session_ended(
+    state: &mut PipelineState,
+    url: String,
+    generation: u64,
+    reason: String,
+) -> LoopFlow {
+    let PipelineState {
+        request_migration_sessions,
+        ..
+    } = state;
+    let url_display = side_session_url_display(&url);
+    // 同じ URL で作り直した side session の slot を消さないよう、
+    // 世代が一致する場合だけ slot を捨てる
+    let same_session = request_migration_sessions
+        .get(&url)
+        .is_some_and(|slot| slot.generation == generation);
+    if same_session {
+        request_migration_sessions.remove(&url);
+    }
+    // 移行済みの track は配送されなくなるが、他の track の受信は続ける
+    tracing::warn!(
+        "The request migration side session ended: url={url_display}, \
+                             generation={generation}, same_session={same_session}: {reason}"
+    );
+    LoopFlow::Continue
+}
+
+async fn handle_side_session_event(
+    state: &mut PipelineState,
+    event: RequestMigrationEvent,
+) -> LoopFlow {
     match event {
         RequestMigrationEvent::Migrated {
             url,
@@ -7111,289 +7769,23 @@ async fn handle_side_session_event(
             old_request_id,
             new_request_id,
         } => {
-            let url_display = side_session_url_display(&url);
-            // side session の進行状態を「確立済み」へ進める。同じ URL の次の
-            // request はこの session に相乗りする
-            if let Some(slot) = request_migration_sessions.get_mut(&url) {
-                slot.state = SideSessionState::Established;
-            }
-            match request {
-                MigratedRequest::Subscribe(kind) => {
-                    // 旧 session の request stream を閉じる (§9.2 の "close the
-                    // old request stream using the appropriate mechanism")。
-                    // 購読が既に Terminated の場合は状態機械に拒否されるが、
-                    // 移行自体は成功しているため警告に留める
-                    if let Err(e) = client.stop_sending(old_request_id).await {
-                        tracing::warn!(
-                            "Failed to send STOP_SENDING for the migrated request {old_request_id}: {e}"
-                        );
-                    }
-                    // 旧 alias を外す。以後の Object は side session が配送する
-                    let old_alias = match kind {
-                        TrackKind::Catalog => catalog_alias.take(),
-                        TrackKind::Video => video_alias.take(),
-                        TrackKind::Audio => audio_alias.take(),
-                        // 移行は catalog / 映像 / 音声だけを対象とするため
-                        // 到達しない
-                        TrackKind::Discard => None,
-                    };
-                    {
-                        let mut map = track_map
-                            .write()
-                            .expect("track_map lock must not be poisoned");
-                        if let Some(alias) = old_alias {
-                            map.remove(&alias);
-                        }
-                    }
-                    // 以後その track は side session が配送するため、main ループの
-                    // 再発行・期限処理の対象から外す。request id を `None` にすると
-                    // `goaway_request_kind` の照合対象からも外れる
-                    match kind {
-                        TrackKind::Catalog => *catalog_request_id = None,
-                        TrackKind::Video => *video_request_id = None,
-                        TrackKind::Audio => *audio_request_id = None,
-                        TrackKind::Discard => {}
-                    }
-                    active_requests.remove(&old_request_id);
-                    // 移行の開始から成功までの間に旧 session で PUBLISH_DONE を
-                    // 受けていた場合は disposition を引き継ぐ。track の恒久終了を
-                    // 移行成功で失わないようにするためである
-                    let pending_disposition = publish_done_pending
-                        .remove(&old_request_id)
-                        .map(|(_, disposition)| disposition);
-                    migration_pending_tracks.remove(&kind);
-                    // 旧 session のこの track の FETCH は side session の再発行で
-                    // 置き換わるため、main ループの対応表から外す
-                    lock_fetch_targets(fetch_targets)
-                        .retain(|_, target| Some(*target) != fetch_target_of(kind));
-                    // 映像の購読を移行すると、それに伴う FETCH も side session が
-                    // 発行し直す。main ループに残った FETCH の再発行用の指定は
-                    // 対象を失っているため捨てる
-                    if kind == TrackKind::Video {
-                        fetch_requests.clear();
-                    }
-                    match pending_disposition {
-                        Some(
-                            PublishDoneDisposition::TrackEnded | PublishDoneDisposition::Error,
-                        ) => {
-                            tracing::warn!(
-                                "The {kind:?} track ended permanently during the request migration"
-                            );
-                            permanently_ended_tracks.insert(kind);
-                            if all_media_tracks_ended(
-                                *subscribe_video,
-                                *subscribe_audio,
-                                permanently_ended_tracks,
-                                migration_pending_tracks,
-                            ) {
-                                tracing::info!(
-                                    "All media tracks ended permanently: ending the pipeline"
-                                );
-                                *peer_ended = true;
-                                return LoopFlow::Break;
-                            }
-                        }
-                        Some(PublishDoneDisposition::GoingAway) | None => {}
-                    }
-                    // datagram 受信タスクへ新しい alias 表を渡す。旧 session の
-                    // 遅延した datagram を移行後の track として配送しないためである
-                    let datagram_map = Arc::new(
-                        track_map
-                            .read()
-                            .expect("track_map lock must not be poisoned")
-                            .clone(),
-                    );
-                    let _ = datagram_session_tx.send(DatagramSession {
-                        handle: client.handle(),
-                        data_plane: data_plane.clone(),
-                        track_map: datagram_map,
-                        generation: *session_generation,
-                    });
-                    tracing::info!(
-                        "Migrated the {kind:?} request to the new session: \
-                                     *url={url_display}, old_request_id={old_request_id}, \
-                                     new_request_id={new_request_id}"
-                    );
-                }
-                MigratedRequest::Fetch => {
-                    // 旧 session の request stream を閉じる。応答は side session が
-                    // 受けるため、main ループの対応表から外す
-                    stop_fetch_request_stream(client, old_request_id).await;
-                    lock_fetch_targets(fetch_targets).remove(&old_request_id);
-                    fetch_requests.remove(&old_request_id);
-                    tracing::info!(
-                        "Migrated the media FETCH request to the new session: \
-                                     *url={url_display}, old_request_id={old_request_id}, \
-                                     new_request_id={new_request_id}"
-                    );
-                }
-            }
+            handle_side_session_migrated(state, url, request, old_request_id, new_request_id).await
         }
         RequestMigrationEvent::Failed {
             url,
             request,
             old_request_id,
             reason,
-        } => {
-            let url_display = side_session_url_display(&url);
-            match request {
-                MigratedRequest::Subscribe(kind) => {
-                    // 期限切れ・接続失敗・再発行失敗である。control GOAWAY の移行
-                    // 失敗と同じく警告を出し、旧 session の終了経路へ進む
-                    tracing::warn!(
-                        "Failed to migrate the {kind:?} request to a new session: \
-                                     *url={url_display}, request_id={old_request_id}: {reason}"
-                    );
-                    return LoopFlow::Break;
-                }
-                MigratedRequest::Fetch => {
-                    // FETCH は欠落した Group を補う補助であり、移行に失敗しても購読は
-                    // 続く。旧 session の request を終端し、対応表から外す
-                    tracing::warn!(
-                        "Failed to migrate the FETCH request to a new session: \
-                                     *url={url_display}, request_id={old_request_id}: {reason}"
-                    );
-                    stop_fetch_request_stream(client, old_request_id).await;
-                    lock_fetch_targets(fetch_targets).remove(&old_request_id);
-                    fetch_requests.remove(&old_request_id);
-                }
-            }
-        }
+        } => handle_side_session_failed(state, url, request, old_request_id, reason).await,
         RequestMigrationEvent::SessionEvent { url, kind, event } => {
-            let url_display = side_session_url_display(&url);
-            match event {
-                SessionEvent::PublishDoneReceived {
-                    request_id,
-                    status_code,
-                    stream_count,
-                    ..
-                } => {
-                    // 移行済みの購読の終端である。main ループの PUBLISH_DONE と同じ
-                    // 分類でログに残し、恒久終了だけ状態へ反映する。side session の
-                    // 購読の cleanup は main ループが所有する `MoqtClient` では観測
-                    // できないため、drain 完了は待たない
-                    let disposition =
-                        publish_done_disposition(normalize_publish_done_code(status_code));
-                    tracing::info!(
-                        "Received PUBLISH_DONE on the request migration side session: \
-                                     *url={url_display}, kind={kind:?}, request_id={request_id}, \
-                                     status_code={status_code}, \
-                                     normalized_status_code={}, \
-                                     stream_count={stream_count}, \
-                                     disposition={disposition:?}",
-                        normalize_publish_done_code(status_code),
-                    );
-                    match (kind, disposition) {
-                        (
-                            Some(kind),
-                            PublishDoneDisposition::TrackEnded | PublishDoneDisposition::Error,
-                        ) => {
-                            permanently_ended_tracks.insert(kind);
-                            // 全 media track が終了したら pipeline を終える
-                            // (main ループの tick の終了判定と同じ規則)
-                            if matches!(kind, TrackKind::Video | TrackKind::Audio)
-                                && all_media_tracks_ended(
-                                    *subscribe_video,
-                                    *subscribe_audio,
-                                    permanently_ended_tracks,
-                                    migration_pending_tracks,
-                                )
-                            {
-                                tracing::info!(
-                                    "All media tracks ended permanently: ending the pipeline"
-                                );
-                                *peer_ended = true;
-                                return LoopFlow::Break;
-                            }
-                        }
-                        (Some(kind), PublishDoneDisposition::GoingAway) => {
-                            // request stream の GOAWAY は受けるが、side session の
-                            // 購読をさらに移行する経路は持たない
-                            tracing::info!(
-                                "The migrated {kind:?} track is going away on the side session: url={url_display}"
-                            );
-                        }
-                        (None, _) => {
-                            tracing::warn!(
-                                "PUBLISH_DONE on the side session does not belong to a migrated subscription: url={url_display}, request_id={request_id}"
-                            );
-                        }
-                    }
-                }
-                SessionEvent::RequestErrorReceived {
-                    request_id,
-                    error_code,
-                    retry_interval,
-                    reason,
-                    ..
-                } => {
-                    tracing::warn!(
-                        "Received REQUEST_ERROR on the request migration side session: \
-                                     *url={url_display}, kind={kind:?}, request_id={request_id}, \
-                                     error_code={error_code:#x}, \
-                                     retry_interval={retry_interval}, reason={}",
-                        reason.as_str(),
-                    );
-                }
-                SessionEvent::GoawayReceived {
-                    new_session_uri,
-                    timeout,
-                    on_request_stream,
-                } => {
-                    tracing::warn!(
-                        "Received GOAWAY on the request migration side session: \
-                                     *url={url_display}, timeout={timeout}, \
-                                     on_request_stream={on_request_stream:?}, \
-                                     new_session_uri_len={}",
-                        new_session_uri.len(),
-                    );
-                }
-                SessionEvent::CloseSession(err) => {
-                    tracing::warn!(
-                        "The request migration side session closed: url={url_display}, \
-                                     {:#x} {}",
-                        err.code,
-                        err.reason,
-                    );
-                }
-                SessionEvent::PeerClosed(err) => {
-                    tracing::warn!(
-                        "The request migration side session was closed by peer: url={url_display}, \
-                                     {:#x} {}",
-                        err.code,
-                        err.reason,
-                    );
-                }
-                other => {
-                    tracing::debug!(
-                        "Ignoring a session event on the request migration side session: \
-                                     *url={url_display}, event={other:?}"
-                    );
-                }
-            }
+            handle_side_session_session_event(state, url, kind, event).await
         }
         RequestMigrationEvent::Ended {
             url,
             generation,
             reason,
-        } => {
-            let url_display = side_session_url_display(&url);
-            // 同じ URL で作り直した side session の slot を消さないよう、
-            // 世代が一致する場合だけ slot を捨てる
-            let same_session = request_migration_sessions
-                .get(&url)
-                .is_some_and(|slot| slot.generation == generation);
-            if same_session {
-                request_migration_sessions.remove(&url);
-            }
-            // 移行済みの track は配送されなくなるが、他の track の受信は続ける
-            tracing::warn!(
-                "The request migration side session ended: url={url_display}, \
-                             generation={generation}, same_session={same_session}: {reason}"
-            );
-        }
+        } => handle_side_session_ended(state, url, generation, reason).await,
     }
-    LoopFlow::Continue
 }
 
 /// WebTransport の drain / close の状態変化を処理する
