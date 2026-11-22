@@ -2481,6 +2481,158 @@ async fn encode_audio_chunk(
     Ok(Some((encoded, timestamp)))
 }
 
+struct AudioDeliverContext<'a> {
+    config: &'a mut Config,
+    namespace: &'a mut TrackNamespace,
+    audio_config_sent: &'a mut bool,
+    media_cache: &'a mut cache::MediaCache,
+    audio_publish_catch_up: &'a mut AudioPublishCatchUp,
+    audio_publish_target: &'a mut Option<PublishTarget>,
+    audio_request_id: &'a mut Option<u64>,
+    audio_group_id: &'a mut u64,
+    audio_frame_count: &'a mut u64,
+    handle: &'a mut StreamHandle,
+    data_plane: &'a mut DataPlaneHandle,
+    client: &'a mut MoqtClient,
+    peer_subscriptions: &'a mut Vec<PeerSubscription>,
+    audio_timescale: &'a mut Option<u64>,
+    audio_config: &'a mut Option<Vec<u8>>,
+}
+
+/// エンコード済み音声 1 チャンクを送信し、購読・カウンタを更新する
+async fn deliver_audio_chunk(
+    context: AudioDeliverContext<'_>,
+    encoded: &[u8],
+    timestamp: u64,
+    send_timestamp_us: i64,
+    send_duration_us: i64,
+    is_reencode: bool,
+) -> Result<()> {
+    let AudioDeliverContext {
+        config,
+        namespace,
+        audio_config_sent,
+        media_cache,
+        audio_publish_catch_up,
+        audio_publish_target,
+        audio_request_id,
+        audio_group_id,
+        audio_frame_count,
+        handle,
+        data_plane,
+        client,
+        peer_subscriptions,
+        audio_timescale,
+        audio_config,
+    } = context;
+    let audio_config = if *audio_config_sent {
+        None
+    } else {
+        audio_config.as_deref()
+    };
+    let properties = build_audio_loc_properties(timestamp, *audio_timescale, audio_config);
+    // LOC draft-ietf-moq-loc-05 §4.1 (Application with one audio track): 1 音声フレーム = 1 Object = 1 Group
+    send_audio_object(
+        AudioSendContext {
+            config: &mut *config,
+            namespace: &mut *namespace,
+            audio_config_sent: &mut *audio_config_sent,
+            media_cache: &mut *media_cache,
+            audio_publish_catch_up: &mut *audio_publish_catch_up,
+            audio_publish_target: &mut *audio_publish_target,
+            audio_request_id: &mut *audio_request_id,
+            audio_group_id: &mut *audio_group_id,
+            handle: &mut *handle,
+            data_plane: &mut *data_plane,
+            client: &mut *client,
+        },
+        encoded,
+        &properties,
+        send_timestamp_us,
+        send_duration_us,
+        is_reencode,
+    )
+    .await?;
+    // 受信 SUBSCRIBE の購読 (音声) にも同じ Object を送る
+    // (draft-ietf-moq-transport-23 §3.1 の MUST)。フィルタと PAUSED は
+    // Session が subscription ごとに評価する。Audio Config は購読ごとの
+    // 最初の Object に付与する (`audio_config_sent` を購読ごとに持つ)。
+    // datagram モードの購読は Object ごとに writer を作り、subgroup
+    // モードの購読は 1 object = 1 stream で PUBLISH 側と同じ形で送る。
+    // 送信統計 (`record_audio_send`) は PUBLISH 購読の Pass を基準に
+    // するためここでは行わない
+    let peer_context = AudioPeerContext {
+        config: &mut *config,
+        audio_timescale: &mut *audio_timescale,
+        peer_subscriptions: &mut *peer_subscriptions,
+        handle: &mut *handle,
+        audio_group_id: &mut *audio_group_id,
+        data_plane: &mut *data_plane,
+        client: &mut *client,
+    };
+    send_audio_to_peer_subscriptions(peer_context, timestamp, audio_config, &properties, encoded)
+        .await?;
+    *audio_group_id = group_id::next_group_id(*audio_group_id)?;
+    *audio_frame_count += 1;
+    Ok(())
+}
+
+struct AudioTimingContext<'a> {
+    audio_timescale: &'a mut Option<u64>,
+    audio_publish_catch_up: &'a mut AudioPublishCatchUp,
+    audio_timeline: &'a mut AudioCaptureTimeline,
+}
+
+/// チャンクのタイムスタンプと追いつき判定を行う
+fn prepare_audio_chunk_timing(
+    context: AudioTimingContext<'_>,
+    mut next_chunk_timestamp: Option<u64>,
+    samples_per_frame: usize,
+    is_reencode: bool,
+) -> Result<(u64, Option<u64>, u64, i64, i64, bool)> {
+    let AudioTimingContext {
+        audio_timescale,
+        audio_publish_catch_up,
+        audio_timeline,
+    } = context;
+    let timestamp = match next_chunk_timestamp {
+        Some(timestamp) => {
+            // 再エンコードの入力音声トラックのタイムスケール
+            let timescale = audio_timescale.expect("re-encode audio input has a timescale");
+            let step = samples_per_frame as u64 * timescale / (AUDIO_SAMPLE_RATE as u64);
+            next_chunk_timestamp = Some(timestamp.saturating_add(step));
+            timestamp
+        }
+        // live capture はバッファ先頭の時刻から切り出し位置までを
+        // サンプル数で進める。同じ capture フレーム由来の複数 Object が
+        // 同じ Timestamp にならない
+        None => audio_timeline.next_chunk_timestamp_us(samples_per_frame as u64, AUDIO_SAMPLE_RATE),
+    };
+    // 読み出しの遅れと符号化のキューから、このチャンクを符号化するかを
+    // 決める。live capture の TIMESTAMP は音声の時計の補正を通した epoch
+    // マイクロ秒であるため、補正は 0 として渡す
+    let now_us = wall_clock_now_us()?;
+    let duration_us = samples_to_micros(samples_per_frame as u64, AUDIO_SAMPLE_RATE);
+    // TIMESTAMP と長さは、判定・符号化・送信の記録で同じ値を使う
+    let send_timestamp_us = i64::try_from(timestamp).unwrap_or(i64::MAX);
+    let send_duration_us = i64::try_from(duration_us).unwrap_or(i64::MAX);
+    let accepted = audio_publish_catch_up.evaluate(AudioPublishCatchUpFrame {
+        now_ms: now_us / 1_000,
+        timestamp_us: send_timestamp_us,
+        read_wall_clock_us: now_us,
+        applied_offset_us: if is_reencode { None } else { Some(0) },
+        duration_us: Some(send_duration_us),
+    });
+    Ok((
+        timestamp,
+        next_chunk_timestamp,
+        duration_us,
+        send_timestamp_us,
+        send_duration_us,
+        accepted,
+    ))
+}
+
 async fn process_audio_chunks(
     context: AudioProcessContext<'_>,
     samples_per_frame: usize,
@@ -2511,40 +2663,27 @@ async fn process_audio_chunks(
         audio_encoder,
     } = context;
     let encoder = audio_encoder.as_mut().expect("audio encoder enabled");
-    let mut next_chunk_timestamp = input_timestamp;
+    let next_chunk_timestamp = input_timestamp;
     while audio_pcm_buf.len() >= samples_per_frame {
         // TIMESTAMP を先に決める。読み出しの遅れは「読んだ壁時計 − TIMESTAMP」
         // であり、判定に要る
-        let timestamp = match next_chunk_timestamp {
-            Some(timestamp) => {
-                // 再エンコードの入力音声トラックのタイムスケール
-                let timescale = audio_timescale.expect("re-encode audio input has a timescale");
-                let step = samples_per_frame as u64 * timescale / (AUDIO_SAMPLE_RATE as u64);
-                next_chunk_timestamp = Some(timestamp.saturating_add(step));
-                timestamp
-            }
-            // live capture はバッファ先頭の時刻から切り出し位置までを
-            // サンプル数で進める。同じ capture フレーム由来の複数 Object が
-            // 同じ Timestamp にならない
-            None => {
-                audio_timeline.next_chunk_timestamp_us(samples_per_frame as u64, AUDIO_SAMPLE_RATE)
-            }
-        };
-        // 読み出しの遅れと符号化のキューから、このチャンクを符号化するかを
-        // 決める。live capture の TIMESTAMP は音声の時計の補正を通した epoch
-        // マイクロ秒であるため、補正は 0 として渡す
-        let now_us = wall_clock_now_us()?;
-        let duration_us = samples_to_micros(samples_per_frame as u64, AUDIO_SAMPLE_RATE);
-        // TIMESTAMP と長さは、判定・符号化・送信の記録で同じ値を使う
-        let send_timestamp_us = i64::try_from(timestamp).unwrap_or(i64::MAX);
-        let send_duration_us = i64::try_from(duration_us).unwrap_or(i64::MAX);
-        let accepted = audio_publish_catch_up.evaluate(AudioPublishCatchUpFrame {
-            now_ms: now_us / 1_000,
-            timestamp_us: send_timestamp_us,
-            read_wall_clock_us: now_us,
-            applied_offset_us: if is_reencode { None } else { Some(0) },
-            duration_us: Some(send_duration_us),
-        });
+        let (
+            timestamp,
+            _next_chunk_timestamp,
+            duration_us,
+            send_timestamp_us,
+            send_duration_us,
+            accepted,
+        ) = prepare_audio_chunk_timing(
+            AudioTimingContext {
+                audio_timescale: &mut *audio_timescale,
+                audio_publish_catch_up: &mut *audio_publish_catch_up,
+                audio_timeline: &mut *audio_timeline,
+            },
+            next_chunk_timestamp,
+            samples_per_frame,
+            is_reencode,
+        )?;
         // 捨てる場合もバッファからは取り出す (符号化へ渡さない)
         let Some((encoded, timestamp)) = encode_audio_chunk(
             encoder,
@@ -2564,15 +2703,8 @@ async fn process_audio_chunks(
         else {
             continue;
         };
-        let audio_config = if *audio_config_sent {
-            None
-        } else {
-            audio_config.as_deref()
-        };
-        let properties = build_audio_loc_properties(timestamp, *audio_timescale, audio_config);
-        // LOC draft-ietf-moq-loc-05 §4.1 (Application with one audio track): 1 音声フレーム = 1 Object = 1 Group
-        send_audio_object(
-            AudioSendContext {
+        deliver_audio_chunk(
+            AudioDeliverContext {
                 config: &mut *config,
                 namespace: &mut *namespace,
                 audio_config_sent: &mut *audio_config_sent,
@@ -2581,44 +2713,21 @@ async fn process_audio_chunks(
                 audio_publish_target: &mut *audio_publish_target,
                 audio_request_id: &mut *audio_request_id,
                 audio_group_id: &mut *audio_group_id,
+                audio_frame_count: &mut *audio_frame_count,
                 handle: &mut *handle,
                 data_plane: &mut *data_plane,
                 client: &mut *client,
+                peer_subscriptions: &mut *peer_subscriptions,
+                audio_timescale: &mut *audio_timescale,
+                audio_config: &mut *audio_config,
             },
             &encoded,
-            &properties,
+            timestamp,
             send_timestamp_us,
             send_duration_us,
             is_reencode,
         )
         .await?;
-        // 受信 SUBSCRIBE の購読 (音声) にも同じ Object を送る
-        // (draft-ietf-moq-transport-23 §3.1 の MUST)。フィルタと PAUSED は
-        // Session が subscription ごとに評価する。Audio Config は購読ごとの
-        // 最初の Object に付与する (`audio_config_sent` を購読ごとに持つ)。
-        // datagram モードの購読は Object ごとに writer を作り、subgroup
-        // モードの購読は 1 object = 1 stream で PUBLISH 側と同じ形で送る。
-        // 送信統計 (`record_audio_send`) は PUBLISH 購読の Pass を基準に
-        // するためここでは行わない
-        let peer_context = AudioPeerContext {
-            config: &mut *config,
-            audio_timescale: &mut *audio_timescale,
-            peer_subscriptions: &mut *peer_subscriptions,
-            handle: &mut *handle,
-            audio_group_id: &mut *audio_group_id,
-            data_plane: &mut *data_plane,
-            client: &mut *client,
-        };
-        send_audio_to_peer_subscriptions(
-            peer_context,
-            timestamp,
-            audio_config,
-            &properties,
-            &encoded,
-        )
-        .await?;
-        *audio_group_id = group_id::next_group_id(*audio_group_id)?;
-        *audio_frame_count += 1;
     }
     Ok(())
 }
