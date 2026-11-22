@@ -680,6 +680,188 @@ fn rewrite_dependencies(
     }
 }
 
+/// カタログ内のグループ割当を一貫させる
+///
+/// renderGroup ごとに targetLatency 形と buffers 形のどちらかに揃え、同じグループの
+/// トラックには同じ値を宣言させる。宣言する側と省略する側を混ぜ、省略が比較対象外で
+/// あることも往復で確かめられるようにする (draft-ietf-moq-msf-02 §5.2.8 / §5.2.9)。
+fn normalize_group_members(tracks: &mut [MsfTrack]) {
+    let count = tracks.len();
+    if count < 2 {
+        return;
+    }
+    let split = count.div_ceil(2);
+    for (index, track) in tracks.iter_mut().enumerate() {
+        track.is_live = true;
+        track.track_duration = None;
+        let (render_group, alt_group, buffers_form) = if index < split {
+            (Some(0), Some(2), false)
+        } else {
+            (Some(1), Some(3), true)
+        };
+        track.render_group = render_group;
+        track.alt_group = alt_group;
+        let local_index = if index < split { index } else { index - split };
+        // グループの先頭は必ず宣言し、以降は宣言と省略を交互にする
+        let declare = local_index == 0 || local_index % 2 == 0;
+        if declare {
+            if buffers_form {
+                track.target_latency = None;
+                track.buffers = Some(MsfBuffers {
+                    target: Some(100),
+                    min: None,
+                    max: None,
+                });
+            } else {
+                track.target_latency = Some(100);
+                track.buffers = None;
+            }
+        } else {
+            track.target_latency = None;
+            track.buffers = None;
+        }
+    }
+}
+
+/// グループの宣言値が異なるカタログを JSON で組み立てる
+fn conflicting_group_catalog_json(group_field: &str, buffers_form: bool, publish: bool) -> Vec<u8> {
+    let value_a = if buffers_form {
+        r#""buffers":{"target":100}"#
+    } else {
+        r#""targetLatency":100"#
+    };
+    let value_b = if buffers_form {
+        r#""buffers":{"target":200}"#
+    } else {
+        r#""targetLatency":200"#
+    };
+    let tracks = format!(
+        r#"[{{"name":"a","packaging":"loc","isLive":true,"{group_field}":1,{value_a}}},{{"name":"b","packaging":"loc","isLive":true,"{group_field}":1,{value_b}}}]"#
+    );
+    let body = if publish {
+        format!(r#""tracks":[],"publishTracks":{tracks}"#)
+    } else {
+        format!(r#""tracks":{tracks}"#)
+    };
+    format!(r#"{{"version":"{MSF_VERSION}",{body}}}"#).into_bytes()
+}
+
+/// グループ内で片方だけが値を宣言するカタログを JSON で組み立てる
+fn omitted_group_catalog_json(group_field: &str, buffers_form: bool, publish: bool) -> Vec<u8> {
+    let value = if buffers_form {
+        r#""buffers":{"target":100}"#
+    } else {
+        r#""targetLatency":100"#
+    };
+    let tracks = format!(
+        r#"[{{"name":"a","packaging":"loc","isLive":true,"{group_field}":1,{value}}},{{"name":"b","packaging":"loc","isLive":true,"{group_field}":1}}]"#
+    );
+    let body = if publish {
+        format!(r#""tracks":[],"publishTracks":{tracks}"#)
+    } else {
+        format!(r#""tracks":{tracks}"#)
+    };
+    format!(r#"{{"version":"{MSF_VERSION}",{body}}}"#).into_bytes()
+}
+
+/// グループの宣言値が異なるカタログは encode と decode の両方が拒否する
+#[test]
+fn group_declaration_conflicts_are_rejected() {
+    for group_field in ["renderGroup", "altGroup"] {
+        for buffers_form in [false, true] {
+            for publish in [false, true] {
+                let json = conflicting_group_catalog_json(group_field, buffers_form, publish);
+                assert!(
+                    MsfCatalogDocument::decode(&json, MsfCompression::None).is_err(),
+                    "decode は {group_field} の宣言値の不一致を拒否すること (buffers={buffers_form}, publish={publish})"
+                );
+
+                let a = {
+                    let mut track = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
+                    if group_field == "renderGroup" {
+                        track.render_group = Some(1);
+                    } else {
+                        track.alt_group = Some(1);
+                    }
+                    if buffers_form {
+                        track.buffers = Some(MsfBuffers {
+                            target: Some(100),
+                            min: None,
+                            max: None,
+                        });
+                    } else {
+                        track.target_latency = Some(100);
+                    }
+                    track
+                };
+                let b = {
+                    let mut track = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
+                    if group_field == "renderGroup" {
+                        track.render_group = Some(1);
+                    } else {
+                        track.alt_group = Some(1);
+                    }
+                    if buffers_form {
+                        track.buffers = Some(MsfBuffers {
+                            target: Some(200),
+                            min: None,
+                            max: None,
+                        });
+                    } else {
+                        track.target_latency = Some(200);
+                    }
+                    track
+                };
+                let mut catalog = MsfCatalog {
+                    version: MSF_VERSION.to_string(),
+                    generated_at: None,
+                    is_complete: false,
+                    tracks: Vec::new(),
+                    publish_tracks: Vec::new(),
+                    removed_tracks: Default::default(),
+                    init_data_list: Vec::new(),
+                };
+                if publish {
+                    catalog.publish_tracks = vec![a, b];
+                } else {
+                    catalog.tracks = vec![a, b];
+                }
+                let document = MsfCatalogDocument::Full(catalog);
+                assert!(
+                    document.encode(MsfCompression::None).is_err(),
+                    "encode は {group_field} の宣言値の不一致を拒否すること (buffers={buffers_form}, publish={publish})"
+                );
+            }
+        }
+    }
+}
+
+/// グループ内の省略は比較対象外として受理する
+#[test]
+fn group_omissions_are_accepted() {
+    for group_field in ["renderGroup", "altGroup"] {
+        for buffers_form in [false, true] {
+            for publish in [false, true] {
+                let json = omitted_group_catalog_json(group_field, buffers_form, publish);
+                eprintln!("JSON={:?}", String::from_utf8_lossy(&json));
+                let decoded = MsfCatalogDocument::decode(&json, MsfCompression::None)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "省略との混在は受理すること: {e}; json={}",
+                            String::from_utf8_lossy(&json)
+                        )
+                    });
+                let encoded = decoded
+                    .encode(MsfCompression::None)
+                    .expect("省略との混在は encode できること");
+                let redecoded = MsfCatalogDocument::decode(&encoded, MsfCompression::None)
+                    .expect("encode したカタログを decode できること");
+                assert_eq!(redecoded, decoded);
+            }
+        }
+    }
+}
+
 /// Full catalog の encode → decode ラウンドトリップ
 ///
 /// - トラック名は catalog 通して (tracks / publishTracks) namespace ごとに一意でなければならない (draft-ietf-moq-msf-02 §5.2.3 (Track name))
@@ -688,7 +870,7 @@ fn rewrite_dependencies(
 fn full_catalog_roundtrip() -> noprop::TestResult {
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
-        let track_count = noprop::sample_usize_in(ctx, 0..=5);
+        let track_count = noprop::sample_usize_in(ctx, 4..=8);
         let tracks = (0..track_count)
             .map(|_| sample_track(ctx))
             .collect::<Vec<_>>();
@@ -706,12 +888,14 @@ fn full_catalog_roundtrip() -> noprop::TestResult {
         };
 
         // publish_tracks も tracks と同じ (namespace, name) 重複排除を適用する (seen を共有)
-        let publish_count = noprop::sample_usize_in(ctx, 0..=2);
+        let publish_count = noprop::sample_usize_in(ctx, 2..=4);
         let mut publish_tracks: Vec<_> = (0..publish_count)
             .map(|_| sample_track(ctx))
             .filter(|t| seen.insert((t.namespace.clone(), t.name.clone())))
             .collect();
         let mut unique_tracks = unique_tracks;
+        normalize_group_members(&mut unique_tracks);
+        normalize_group_members(&mut publish_tracks);
         rewrite_dependencies(&mut unique_tracks, &mut publish_tracks, ctx);
         let doc = MsfCatalogDocument::Full(MsfCatalog {
             version: MSF_VERSION.to_string(),
