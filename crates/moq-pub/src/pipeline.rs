@@ -1411,7 +1411,7 @@ pub async fn run(
                                 );
                             }
                             tracing::debug!("Started new video group {}", video_group_id);
-                            video_group_id += 1;
+                            video_group_id = group_id::next_group_id(video_group_id)?;
                         }
                         let properties = build_video_loc_properties(&ef, video_timescale);
                         // object モードでこの Object に割り当てる Group 内の Object ID。
@@ -1570,7 +1570,7 @@ pub async fn run(
                         // 使うと `send_subgroup_header` が拒否される
                         current_video_writer = None;
                         if config.stream_mapping == StreamMapping::Group {
-                            video_group_id += 1;
+                            video_group_id = group_id::next_group_id(video_group_id)?;
                             tracing::info!(
                                 "Subgroup stream was reset by peer; dropping the current video group"
                             );
@@ -2047,7 +2047,7 @@ pub async fn run(
                                 }
                             }
                         }
-                        audio_group_id += 1;
+                        audio_group_id = group_id::next_group_id(audio_group_id)?;
                         audio_frame_count += 1;
                     }
                     Ok(())
@@ -2064,7 +2064,7 @@ pub async fn run(
                         // peer が音声の subgroup stream を cancel した (§11.3.2)。該当ストリーム
                         // だけを終端し、次のフレームから新しい group で再開する。同じ group id を
                         // 使うと再オープン禁止で拒否されるため、通常経路と同じくここで進める
-                        audio_group_id += 1;
+                        audio_group_id = group_id::next_group_id(audio_group_id)?;
                         tracing::info!(
                             "Audio subgroup stream was reset by peer; continuing with the next frame"
                         );
@@ -3832,7 +3832,7 @@ async fn republish_catalog_at_next_group(
     catalog_location: &mut Location,
     peer_subscriptions: &[PeerSubscription],
 ) -> Result<ObjectFilterOutcome> {
-    let next_group_id = group_id::next_group_id(*catalog_group_id);
+    let next_group_id = group_id::next_group_id(*catalog_group_id)?;
     *catalog_group_id = next_group_id;
     let published = republish_catalog_at_group(
         client,
@@ -4957,7 +4957,7 @@ async fn serve_media_fetch(
     if fetch.parameters.has_range_filters() {
         tracing::warn!(
             "Rejecting media FETCH with a range filter (request_id={request_id}, track={}): filters are not supported",
-            fetch.track_name.len(),
+            String::from_utf8_lossy(&fetch.track_name),
         );
         client
             .send_request_error(

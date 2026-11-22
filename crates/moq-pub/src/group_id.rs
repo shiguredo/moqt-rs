@@ -36,19 +36,22 @@ static LAST_INITIAL_GROUP_ID: AtomicU64 = AtomicU64::new(0);
 /// システム時刻が Unix epoch より前、または u64 のミリ秒で表現できない場合はエラーになる。
 pub fn allocate_initial_group_id() -> Result<u64> {
     let candidate = wall_clock_ms()?;
-    Ok(next_initial_group_id(candidate, &LAST_INITIAL_GROUP_ID))
+    next_initial_group_id(candidate, &LAST_INITIAL_GROUP_ID)
 }
 
 /// 候補値と前回値から次の開始 Group ID を決める (単調増加ガード)
 ///
-/// 候補値が前回値以下なら前回 + 1 を返す。`u64::MAX` まで使い切った場合は飽和させ、
-/// 同じ値を返す (送れない値を作らない)。
-fn next_initial_group_id(candidate: u64, last: &AtomicU64) -> u64 {
+/// 候補値が前回値以下なら前回 + 1 を返す。`u64::MAX` まで使い切った場合は
+/// 重複する開始 Group ID を返さずエラーにする。
+fn next_initial_group_id(candidate: u64, last: &AtomicU64) -> Result<u64> {
     let mut previous = last.load(Ordering::Relaxed);
     loop {
-        let next = candidate.max(previous.saturating_add(1));
+        let incremented = previous
+            .checked_add(1)
+            .ok_or_else(|| Error::Other("initial Group ID space is exhausted".to_string()))?;
+        let next = candidate.max(incremented);
         match last.compare_exchange_weak(previous, next, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => return next,
+            Ok(_) => return Ok(next),
             Err(observed) => previous = observed,
         }
     }
@@ -59,8 +62,10 @@ fn next_initial_group_id(candidate: u64, last: &AtomicU64) -> u64 {
 /// draft-ietf-moq-msf-02 §6.1 (Group numbering): "Within a continuous publishing session,
 /// each subsequent Group ID SHOULD increase by 1."。また、独立したカタログは新しい Group の
 /// 先頭に置かなければならない (§5 (Catalog))。
-pub fn next_group_id(current: u64) -> u64 {
-    current.saturating_add(1)
+pub fn next_group_id(current: u64) -> Result<u64> {
+    current
+        .checked_add(1)
+        .ok_or_else(|| Error::Other("Group ID space is exhausted".to_string()))
 }
 
 /// 現在時刻を Unix epoch からのミリ秒で返す
@@ -83,7 +88,7 @@ mod tests {
     fn next_initial_group_id_uses_the_candidate_when_it_is_greater() {
         let last = AtomicU64::new(1_000);
         assert_eq!(
-            next_initial_group_id(2_000, &last),
+            next_initial_group_id(2_000, &last).expect("Group ID を払い出せること"),
             2_000,
             "候補値が前回値を上回るときは候補値を使うこと"
         );
@@ -102,30 +107,29 @@ mod tests {
     fn next_initial_group_id_stays_above_the_previous_value() {
         let last = AtomicU64::new(1_000);
         assert_eq!(
-            next_initial_group_id(500, &last),
+            next_initial_group_id(500, &last).expect("Group ID を払い出せること"),
             1_001,
             "候補値が前回値以下なら前回 + 1 を返すこと"
         );
         assert_eq!(
-            next_initial_group_id(500, &last),
+            next_initial_group_id(500, &last).expect("Group ID を払い出せること"),
             1_002,
             "同じ候補値で繰り返し呼んでも単調増加すること"
         );
         assert_eq!(
-            next_initial_group_id(1_002, &last),
+            next_initial_group_id(1_002, &last).expect("Group ID を払い出せること"),
             1_003,
             "候補値が前回値と等しいときも前回 + 1 を返すこと (Location を重複させない)"
         );
     }
 
-    /// u64 の上限では飽和し、同じ値を返すこと
+    /// u64 の上限ではエラーにすること
     #[test]
-    fn next_initial_group_id_saturates_at_the_maximum() {
+    fn next_initial_group_id_rejects_at_the_maximum() {
         let last = AtomicU64::new(u64::MAX);
-        assert_eq!(
-            next_initial_group_id(u64::MAX, &last),
-            u64::MAX,
-            "上限では飽和させること"
+        assert!(
+            next_initial_group_id(u64::MAX, &last).is_err(),
+            "上限では重複する Group ID を返さないこと"
         );
     }
 
@@ -136,9 +140,12 @@ mod tests {
     /// 送り直しでは必ず進める。
     #[test]
     fn next_group_id_increases_by_one() {
-        assert_eq!(next_group_id(0), 1);
-        assert_eq!(next_group_id(1_760_000_000_000), 1_760_000_000_001);
-        assert_eq!(next_group_id(u64::MAX), u64::MAX, "上限では飽和させること");
+        assert_eq!(next_group_id(0).expect("Group ID を進められること"), 1);
+        assert_eq!(
+            next_group_id(1_760_000_000_000).expect("Group ID を進められること"),
+            1_760_000_000_001
+        );
+        assert!(next_group_id(u64::MAX).is_err(), "上限ではエラーにすること");
     }
 
     /// 現在時刻が Unix epoch ミリ秒として取得できること
