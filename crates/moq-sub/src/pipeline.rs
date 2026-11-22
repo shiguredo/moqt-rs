@@ -7613,7 +7613,11 @@ async fn read_catalog_fetch_objects(
             group_id: obj.group_id,
             object_id: obj.object_id,
         };
-        objects.push(catalog::CatalogObject::decode(location, &payload)?);
+        objects.push(catalog::CatalogObject::decode_with_object_properties(
+            location,
+            &payload,
+            obj.properties_bytes.as_deref(),
+        )?);
     }
     Ok(objects)
 }
@@ -7727,7 +7731,11 @@ async fn read_catalog_objects(
             group_id: header.group_id,
             object_id: object.object_id,
         };
-        objects.push(catalog::CatalogObject::decode(location, &payload)?);
+        objects.push(catalog::CatalogObject::decode_with_object_properties(
+            location,
+            &payload,
+            object.properties_bytes.as_deref(),
+        )?);
     }
     Ok(objects)
 }
