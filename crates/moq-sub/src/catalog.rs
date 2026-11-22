@@ -944,4 +944,22 @@ mod compression_tests {
         .expect("Gzip signal の catalog をデコードできること");
         assert_eq!(object.document, document);
     }
+
+    /// signal なしでは gzip 圧縮された catalog を受理しないこと
+    #[test]
+    fn decode_without_signal_rejects_gzip_catalog() {
+        let document = MsfCatalogDocument::Full(MsfCatalog::new());
+        let encoded = document
+            .encode(MsfCompression::Gzip)
+            .expect("catalog を gzip 圧縮できること");
+        CatalogObject::decode_with_compression(
+            Location {
+                group_id: 1,
+                object_id: 0,
+            },
+            &encoded,
+            MsfCompression::None,
+        )
+        .expect_err("signal なしの gzip は catalog として受理しないこと");
+    }
 }
