@@ -1,7 +1,7 @@
 # moq-pub のカタログテストが encoder の codec 定数を二重管理している
 
 - Created: 2026-09-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/refactor-publisher-codec-constant-reference
 - Polished: 2026-11-14
 - Updated: 2026-11-14
@@ -48,3 +48,16 @@
 - `catalog.rs` のテストが、対象 4 定数に対応する codec 文字列 (`av01.0.08M.08` / `avc1.640028` / `hvc1.1.6.L120.B0` / `opus`) のリテラルを持たず、encoder の定数を参照していること
 - リファクタリング前後で `build_catalog` が生成するカタログと送信経路の挙動が変わらないこと
 - `cargo test -p moq-pub` / `make test` / `make clippy` / `make fmt` が通ること
+
+## 解決方法
+
+- `AV1_CATALOG_CODEC_STRING` / `OPUS_CATALOG_CODEC_STRING` /
+  `DEFAULT_AVC_CATALOG_CODEC_STRING` / `DEFAULT_HEVC_CATALOG_CODEC_STRING` を
+  `pub(crate)` にした。
+- `crates/moq-pub/src/catalog.rs` のテストは codec 文字列のリテラルをやめ、encoder の
+  定数を参照するようにした。
+- h264 / h265 の定数を持つモジュールは macOS 限定のため、
+  `publisher_alternate_video_codecs_encode` も `#[cfg(target_os = "macos")]` にした。
+
+`cargo test -p moq-pub`、`cargo clippy -p moq-pub --all-targets -- -D warnings`、
+`cargo fmt --all -- --check` が成功した。
