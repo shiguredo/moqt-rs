@@ -2489,340 +2489,331 @@ struct NextEventContext<'a> {
 
 /// session のイベント 1 件を処理する
 /// control stream の GOAWAY を処理する
+/// 同じ session で request を再発行する GOAWAY を処理する
+async fn republish_request_on_goaway(
+    context: &mut NextEventContext<'_>,
+    request_id: u64,
+) -> Result<bool> {
+    // draft-ietf-moq-transport-23 §9.2 (GOAWAY): 空の
+    // New Session URI は「現在の session で当該 request を
+    // 再発行する」ことを意味する。session は維持する
+    //
+    // session 全体の移行が進行中なら、当該 request は移行先の
+    // session で張り直される。drain 中の session に新しい
+    // request を作らないよう、ここでは再発行しない
+    // (§9.2: control stream の GOAWAY を受けた側は新しい
+    // request を開始しないことが SHOULD)
+    if context.migration_rx.is_some() {
+        tracing::info!(
+            "Ignoring a request-scoped GOAWAY while a session migration is in progress: request_id={request_id}"
+        );
+        return Ok(false);
+    }
+    // request 単位移行で side session へ PUBLISH を移した
+    // track は、main ループが持つ request id が side
+    // session のものになっている。旧 session の GOAWAY
+    // は移行前の request id で届くため、移行済みの
+    // track は `PublishTarget` が保持する旧 id で照合する
+    let kind = publish_track_for_main_goaway(
+        request_id,
+        *context.video_request_id,
+        *context.audio_request_id,
+        *context.catalog_request_id,
+        context
+            .video_publish_target
+            .as_ref()
+            .map(|target| target.old_request_id),
+        context
+            .audio_publish_target
+            .as_ref()
+            .map(|target| target.old_request_id),
+        context
+            .catalog_publish_target
+            .as_ref()
+            .map(|target| target.old_request_id),
+    );
+    if track_migrated(
+        kind,
+        context.video_publish_target.is_some(),
+        context.audio_publish_target.is_some(),
+        context.catalog_publish_target.is_some(),
+    ) {
+        tracing::info!(
+            "Ignoring a request-scoped GOAWAY for a track that was migrated to another session: request_id={request_id}, kind={kind:?}"
+        );
+        return Ok(false);
+    }
+    // 移行の確立中は旧 session で当該 PUBLISH を
+    // 再発行しない (同じ track を 2 か所で PUBLISH しない)
+    if context.migrating_tracks.contains(&kind) {
+        tracing::info!(
+            "Ignoring a request-scoped GOAWAY for a track that is being migrated to another session: request_id={request_id}, kind={kind:?}"
+        );
+        return Ok(false);
+    }
+    match republish_request_on_current_session(
+        context.client,
+        context.config,
+        context.namespace,
+        request_id,
+        kind,
+        context.video_request_id,
+        context.audio_request_id,
+        context.catalog_request_id,
+        context.current_video_writer,
+        context.gop_tracker,
+    )
+    .await
+    {
+        Ok(PublishTrack::Catalog) => {
+            // カタログは購読を新しく張り直すため、Object を
+            // 次の Group で送り直す
+            // (draft-ietf-moq-msf-02 §5 (Catalog) /
+            // §6.1 (Group numbering))
+            let sink = catalog_sink(
+                context.client,
+                context.catalog_publish_target.as_ref(),
+                context.handle,
+                context.data_plane,
+                *context.catalog_request_id,
+            );
+            if let Err(e) = republish_catalog_at_next_group(
+                context.client,
+                sink,
+                context.handle,
+                context.data_plane,
+                *context.catalog_request_id,
+                context.catalog_json,
+                context.catalog_group_id,
+                context.catalog_location,
+                context.peer_subscriptions,
+            )
+            .await
+            {
+                tracing::warn!("Failed to republish the catalog after re-issuing its PUBLISH: {e}");
+            }
+        }
+        Ok(PublishTrack::Audio) => {
+            // 新しい購読の最初の音声 Object に Audio Config を
+            // 載せ直す
+            *context.audio_config_sent = false;
+        }
+        Ok(PublishTrack::Video) => {}
+        Ok(PublishTrack::Unknown) => {}
+        Err(e) => {
+            tracing::warn!("Failed to re-issue the request after a request-scoped GOAWAY: {e}");
+        }
+    }
+    Ok(false)
+}
+
+/// request 単位移行の side session へ PUBLISH を移す GOAWAY を処理する
+async fn migrate_request_on_goaway(
+    context: &mut NextEventContext<'_>,
+    request_id: u64,
+    target: tokio_moq::MigrationTarget,
+    timeout: u64,
+) -> Result<bool> {
+    // draft-ietf-moq-transport-23 §9.2 (GOAWAY): request
+    // stream の GOAWAY の New Session URI が別の URL を
+    // 指す場合、当該 request だけをその session で再発行
+    // する。この example の main ループは 1 つの
+    // `MoqtClient` しか所有できないため、専用タスクが
+    // side session を確立して PUBLISH を張り、main ループ
+    // がその session へ Object を送る (§9.2)。同じ移行先
+    // URL を指す複数の PUBLISH は 1 本の side session を
+    // 共有する
+    if context.migration_rx.is_some() {
+        // session 全体の移行が進行中なら、その移行先で
+        // 全 track を張り直す。drain 中の session で
+        // side session を作らない
+        tracing::info!(
+            "Ignoring a request-scoped GOAWAY with a new session URI while a session migration is in progress: request_id={request_id}"
+        );
+        return Ok(false);
+    }
+    let kind = publish_track_for_main_goaway(
+        request_id,
+        *context.video_request_id,
+        *context.audio_request_id,
+        *context.catalog_request_id,
+        context
+            .video_publish_target
+            .as_ref()
+            .map(|target| target.old_request_id),
+        context
+            .audio_publish_target
+            .as_ref()
+            .map(|target| target.old_request_id),
+        context
+            .catalog_publish_target
+            .as_ref()
+            .map(|target| target.old_request_id),
+    );
+    if kind == PublishTrack::Unknown {
+        tracing::warn!(
+            "Ignoring a request-scoped GOAWAY with a new session URI for a request that is not a publisher request: request_id={request_id}"
+        );
+        return Ok(false);
+    }
+    if track_migrated(
+        kind,
+        context.video_publish_target.is_some(),
+        context.audio_publish_target.is_some(),
+        context.catalog_publish_target.is_some(),
+    ) {
+        tracing::info!(
+            "Ignoring a request-scoped GOAWAY for a track that was already migrated to another session: request_id={request_id}, kind={kind:?}"
+        );
+        return Ok(false);
+    }
+    if context.migrating_tracks.contains(&kind) {
+        // 移行の確立中に 2 回目の GOAWAY が来ても二重に
+        // 開始しない
+        tracing::info!(
+            "Ignoring a request-scoped GOAWAY for a track that is already being migrated: request_id={request_id}, kind={kind:?}"
+        );
+        return Ok(false);
+    }
+    // 移行先 URI の msf fragment の connection が
+    // 現在の接続経路と矛盾する場合は移行しない
+    // (draft-ietf-moq-msf-02 §11.1.1)
+    if let Err(e) = tokio_moq::resolve_transport(Some(context.config.transport), &target.url) {
+        tracing::warn!("GOAWAY migration target conflicts with the current transport: {e}");
+        return Ok(false);
+    }
+    // 期限は GOAWAY の Timeout (0 はローカル既定値)。
+    // 接続は期限まで再試行されるが、PUBLISH の再発行は
+    // 1 回だけ試す
+    let deadline = MigrationDeadline::after_goaway(Instant::now(), timeout);
+    let command = SideSessionCommand::Publish {
+        kind,
+        old_request_id: request_id,
+        deadline,
+    };
+    // 同じ移行先 URL の side session が既にあれば、その
+    // session で PUBLISH を再発行する。1 本の side session
+    // を同じ URL を指す複数の track で共有する
+    let key = side_session_key(&target.url);
+    let existing = context
+        .request_migration_sessions
+        .get(&key)
+        .map(|slot| slot.commands.clone());
+    if let Some(commands) = existing {
+        // 受信側のタスクが既に終了している場合は送信に
+        // 失敗する。Ended の到着を待たずに終了経路へ進む
+        if commands.send(command).await.is_err() {
+            tracing::warn!(
+                "Failed to send a PUBLISH migration command to the existing side session: url={}, kind={kind:?}",
+                side_session_url_display(&target.url)
+            );
+            context.request_migration_sessions.remove(&key);
+            return Ok(true);
+        }
+        tracing::info!(
+            "Requested the {kind:?} PUBLISH migration on the existing side session: url={}, request_id={request_id}",
+            side_session_url_display(&target.url)
+        );
+    } else {
+        tracing::info!(
+            "Starting a background request migration to {}: kind={kind:?}, request_id={request_id}, timeout={timeout}ms, local_default={}",
+            side_session_url_display(&target.url),
+            deadline.uses_local_default(),
+        );
+        let (task, commands) = spawn_request_migration(
+            context.task_monitor,
+            RequestMigrationRequest {
+                url: target.url,
+                config: context.config.clone(),
+                namespace: context.namespace.clone(),
+            },
+            command,
+            context.request_migration_tx.clone(),
+        );
+        context.request_migration_tasks.push(task);
+        context
+            .request_migration_sessions
+            .insert(key, SideSessionSlot { commands });
+    }
+    context.migrating_tracks.push(kind);
+    // 新 session の PUBLISH が成立するまで旧 session の
+    // 配信を止めない (§7.7.1)
+    Ok(false)
+}
+
+/// session 全体の移行を開始する GOAWAY を処理する
+async fn migrate_session_on_goaway(
+    context: &mut NextEventContext<'_>,
+    target: tokio_moq::MigrationTarget,
+    timeout: u64,
+) -> Result<bool> {
+    if context.migration_rx.is_some() {
+        // 移行の最中に 2 回目の GOAWAY が来ても二重移行しない
+        tracing::info!("Ignoring a GOAWAY while a session migration is in progress");
+        return Ok(false);
+    }
+    // 移行の連鎖を制限する。拒否したら既存の終了経路へ進む
+    if !context.migration_limiter.check_and_record(Instant::now()) {
+        tracing::warn!("Refusing to migrate: too many session migrations in the configured window");
+        return Ok(true);
+    }
+    // 移行先 URI の msf fragment の connection が現在の接続経路と
+    // 矛盾しないかを確認する (draft-ietf-moq-msf-02 §11.1.1)。
+    // 矛盾する場合は移行せず、従来どおり終了する
+    if let Err(e) = tokio_moq::resolve_transport(Some(context.config.transport), &target.url) {
+        tracing::warn!("GOAWAY migration target conflicts with the current transport: {e}");
+        return Ok(true);
+    }
+    // draft-ietf-moq-transport-23 §6.6.1 (Graceful Session
+    // Migration) / §9.2 (GOAWAY) / §7.7.1 (Graceful Publisher
+    // Relay Switchover): 新しい session の確立と PUBLISH の
+    // 再発行はバックグラウンドのタスクで行い、その間も旧 session
+    // で Object を送り続ける。結果は oneshot で受け取る。
+    // 期限は GOAWAY の Timeout (0 はローカル既定値)。
+    // draft 由来の規則であり将来の draft 改版で変わる可能性がある
+    let deadline = MigrationDeadline::after_goaway(Instant::now(), timeout);
+    tracing::info!(
+        "Starting a background session migration to {} (timeout={timeout}ms)",
+        target.url.authority
+    );
+    let (task, receiver) = spawn_migration_task(
+        context.config.clone(),
+        context.namespace.clone(),
+        target.url,
+        deadline,
+        context.task_monitor.clone(),
+    );
+    *context.migration_task = Some(task);
+    *context.migration_rx = Some(receiver);
+    // 新 session の PUBLISH が成立するまで旧 session の配信を
+    // 止めない (§7.7.1)
+    Ok(false)
+}
+
 async fn handle_goaway_event(
-    context: NextEventContext<'_>,
+    context: &mut NextEventContext<'_>,
     new_session_uri: Vec<u8>,
     timeout: u64,
     on_request_stream: Option<u64>,
 ) -> Result<bool> {
-    let NextEventContext {
-        task_monitor,
-        config,
-        namespace,
-        handle,
-        catalog_group_id,
-        catalog_location,
-        catalog_json,
-        current_video_writer,
-        peer_subscriptions,
-        gop_tracker,
-        audio_config_sent,
-        migration_task,
-        request_migration_tx,
-        request_migration_tasks,
-        request_migration_sessions,
-        migrating_tracks,
-        video_publish_target,
-        audio_publish_target,
-        catalog_publish_target,
-        migration_limiter,
-        catalog_request_id,
-        audio_request_id,
-        video_request_id,
-        data_plane,
-        client,
-        migration_rx,
-        ..
-    } = context;
     tracing::info!("Received GOAWAY (timeout={timeout}, on_request_stream={on_request_stream:?})");
-    match tokio_moq::migration_target(&new_session_uri, on_request_stream, &config.url) {
+    match tokio_moq::migration_target(&new_session_uri, on_request_stream, &context.config.url) {
         // request stream 単位の GOAWAY で URI が不正な場合は session を
         // 維持し、当該 request の終端は peer の reset に任せる
         Ok(None) => Ok(false),
         Ok(Some(target)) => {
             match goaway_action(
                 target.scope,
-                tokio_moq::same_session_url(&target.url, &config.url),
+                tokio_moq::same_session_url(&target.url, &context.config.url),
             ) {
                 GoawayAction::RepublishRequest(request_id) => {
-                    // draft-ietf-moq-transport-23 §9.2 (GOAWAY): 空の
-                    // New Session URI は「現在の session で当該 request を
-                    // 再発行する」ことを意味する。session は維持する
-                    //
-                    // session 全体の移行が進行中なら、当該 request は移行先の
-                    // session で張り直される。drain 中の session に新しい
-                    // request を作らないよう、ここでは再発行しない
-                    // (§9.2: control stream の GOAWAY を受けた側は新しい
-                    // request を開始しないことが SHOULD)
-                    if migration_rx.is_some() {
-                        tracing::info!(
-                            "Ignoring a request-scoped GOAWAY while a session migration is in progress: request_id={request_id}"
-                        );
-                        return Ok(false);
-                    }
-                    // request 単位移行で side session へ PUBLISH を移した
-                    // track は、main ループが持つ request id が side
-                    // session のものになっている。旧 session の GOAWAY
-                    // は移行前の request id で届くため、移行済みの
-                    // track は `PublishTarget` が保持する旧 id で照合する
-                    let kind = publish_track_for_main_goaway(
-                        request_id,
-                        *video_request_id,
-                        *audio_request_id,
-                        *catalog_request_id,
-                        video_publish_target
-                            .as_ref()
-                            .map(|target| target.old_request_id),
-                        audio_publish_target
-                            .as_ref()
-                            .map(|target| target.old_request_id),
-                        catalog_publish_target
-                            .as_ref()
-                            .map(|target| target.old_request_id),
-                    );
-                    if track_migrated(
-                        kind,
-                        video_publish_target.is_some(),
-                        audio_publish_target.is_some(),
-                        catalog_publish_target.is_some(),
-                    ) {
-                        tracing::info!(
-                            "Ignoring a request-scoped GOAWAY for a track that was migrated to another session: request_id={request_id}, kind={kind:?}"
-                        );
-                        return Ok(false);
-                    }
-                    // 移行の確立中は旧 session で当該 PUBLISH を
-                    // 再発行しない (同じ track を 2 か所で PUBLISH しない)
-                    if migrating_tracks.contains(&kind) {
-                        tracing::info!(
-                            "Ignoring a request-scoped GOAWAY for a track that is being migrated to another session: request_id={request_id}, kind={kind:?}"
-                        );
-                        return Ok(false);
-                    }
-                    match republish_request_on_current_session(
-                        client,
-                        config,
-                        namespace,
-                        request_id,
-                        kind,
-                        video_request_id,
-                        audio_request_id,
-                        catalog_request_id,
-                        current_video_writer,
-                        gop_tracker,
-                    )
-                    .await
-                    {
-                        Ok(PublishTrack::Catalog) => {
-                            // カタログは購読を新しく張り直すため、Object を
-                            // 次の Group で送り直す
-                            // (draft-ietf-moq-msf-02 §5 (Catalog) /
-                            // §6.1 (Group numbering))
-                            let sink = catalog_sink(
-                                client,
-                                catalog_publish_target.as_ref(),
-                                handle,
-                                data_plane,
-                                *catalog_request_id,
-                            );
-                            if let Err(e) = republish_catalog_at_next_group(
-                                client,
-                                sink,
-                                handle,
-                                data_plane,
-                                *catalog_request_id,
-                                catalog_json,
-                                catalog_group_id,
-                                catalog_location,
-                                peer_subscriptions,
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    "Failed to republish the catalog after re-issuing its PUBLISH: {e}"
-                                );
-                            }
-                        }
-                        Ok(PublishTrack::Audio) => {
-                            // 新しい購読の最初の音声 Object に Audio Config を
-                            // 載せ直す
-                            *audio_config_sent = false;
-                        }
-                        Ok(PublishTrack::Video) => {}
-                        Ok(PublishTrack::Unknown) => {}
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to re-issue the request after a request-scoped GOAWAY: {e}"
-                            );
-                        }
-                    }
-                    Ok(false)
+                    republish_request_on_goaway(context, request_id).await
                 }
                 GoawayAction::MigrateRequest(request_id) => {
-                    // draft-ietf-moq-transport-23 §9.2 (GOAWAY): request
-                    // stream の GOAWAY の New Session URI が別の URL を
-                    // 指す場合、当該 request だけをその session で再発行
-                    // する。この example の main ループは 1 つの
-                    // `MoqtClient` しか所有できないため、専用タスクが
-                    // side session を確立して PUBLISH を張り、main ループ
-                    // がその session へ Object を送る (§9.2)。同じ移行先
-                    // URL を指す複数の PUBLISH は 1 本の side session を
-                    // 共有する
-                    if migration_rx.is_some() {
-                        // session 全体の移行が進行中なら、その移行先で
-                        // 全 track を張り直す。drain 中の session で
-                        // side session を作らない
-                        tracing::info!(
-                            "Ignoring a request-scoped GOAWAY with a new session URI while a session migration is in progress: request_id={request_id}"
-                        );
-                        return Ok(false);
-                    }
-                    let kind = publish_track_for_main_goaway(
-                        request_id,
-                        *video_request_id,
-                        *audio_request_id,
-                        *catalog_request_id,
-                        video_publish_target
-                            .as_ref()
-                            .map(|target| target.old_request_id),
-                        audio_publish_target
-                            .as_ref()
-                            .map(|target| target.old_request_id),
-                        catalog_publish_target
-                            .as_ref()
-                            .map(|target| target.old_request_id),
-                    );
-                    if kind == PublishTrack::Unknown {
-                        tracing::warn!(
-                            "Ignoring a request-scoped GOAWAY with a new session URI for a request that is not a publisher request: request_id={request_id}"
-                        );
-                        return Ok(false);
-                    }
-                    if track_migrated(
-                        kind,
-                        video_publish_target.is_some(),
-                        audio_publish_target.is_some(),
-                        catalog_publish_target.is_some(),
-                    ) {
-                        tracing::info!(
-                            "Ignoring a request-scoped GOAWAY for a track that was already migrated to another session: request_id={request_id}, kind={kind:?}"
-                        );
-                        return Ok(false);
-                    }
-                    if migrating_tracks.contains(&kind) {
-                        // 移行の確立中に 2 回目の GOAWAY が来ても二重に
-                        // 開始しない
-                        tracing::info!(
-                            "Ignoring a request-scoped GOAWAY for a track that is already being migrated: request_id={request_id}, kind={kind:?}"
-                        );
-                        return Ok(false);
-                    }
-                    // 移行先 URI の msf fragment の connection が
-                    // 現在の接続経路と矛盾する場合は移行しない
-                    // (draft-ietf-moq-msf-02 §11.1.1)
-                    if let Err(e) =
-                        tokio_moq::resolve_transport(Some(config.transport), &target.url)
-                    {
-                        tracing::warn!(
-                            "GOAWAY migration target conflicts with the current transport: {e}"
-                        );
-                        return Ok(false);
-                    }
-                    // 期限は GOAWAY の Timeout (0 はローカル既定値)。
-                    // 接続は期限まで再試行されるが、PUBLISH の再発行は
-                    // 1 回だけ試す
-                    let deadline = MigrationDeadline::after_goaway(Instant::now(), timeout);
-                    let command = SideSessionCommand::Publish {
-                        kind,
-                        old_request_id: request_id,
-                        deadline,
-                    };
-                    // 同じ移行先 URL の side session が既にあれば、その
-                    // session で PUBLISH を再発行する。1 本の side session
-                    // を同じ URL を指す複数の track で共有する
-                    let key = side_session_key(&target.url);
-                    let existing = request_migration_sessions
-                        .get(&key)
-                        .map(|slot| slot.commands.clone());
-                    if let Some(commands) = existing {
-                        // 受信側のタスクが既に終了している場合は送信に
-                        // 失敗する。Ended の到着を待たずに終了経路へ進む
-                        if commands.send(command).await.is_err() {
-                            tracing::warn!(
-                                "Failed to send a PUBLISH migration command to the existing side session: url={}, kind={kind:?}",
-                                side_session_url_display(&target.url)
-                            );
-                            request_migration_sessions.remove(&key);
-                            return Ok(true);
-                        }
-                        tracing::info!(
-                            "Requested the {kind:?} PUBLISH migration on the existing side session: url={}, request_id={request_id}",
-                            side_session_url_display(&target.url)
-                        );
-                    } else {
-                        tracing::info!(
-                            "Starting a background request migration to {}: kind={kind:?}, request_id={request_id}, timeout={timeout}ms, local_default={}",
-                            side_session_url_display(&target.url),
-                            deadline.uses_local_default(),
-                        );
-                        let (task, commands) = spawn_request_migration(
-                            task_monitor,
-                            RequestMigrationRequest {
-                                url: target.url,
-                                config: config.clone(),
-                                namespace: namespace.clone(),
-                            },
-                            command,
-                            request_migration_tx.clone(),
-                        );
-                        request_migration_tasks.push(task);
-                        request_migration_sessions.insert(key, SideSessionSlot { commands });
-                    }
-                    migrating_tracks.push(kind);
-                    // 新 session の PUBLISH が成立するまで旧 session の
-                    // 配信を止めない (§7.7.1)
-                    Ok(false)
+                    migrate_request_on_goaway(context, request_id, target, timeout).await
                 }
                 GoawayAction::MigrateSession => {
-                    if migration_rx.is_some() {
-                        // 移行の最中に 2 回目の GOAWAY が来ても二重移行しない
-                        tracing::info!(
-                            "Ignoring a GOAWAY while a session migration is in progress"
-                        );
-                        return Ok(false);
-                    }
-                    // 移行の連鎖を制限する。拒否したら既存の終了経路へ進む
-                    if !migration_limiter.check_and_record(Instant::now()) {
-                        tracing::warn!(
-                            "Refusing to migrate: too many session migrations in the configured window"
-                        );
-                        return Ok(true);
-                    }
-                    // 移行先 URI の msf fragment の connection が現在の接続経路と
-                    // 矛盾しないかを確認する (draft-ietf-moq-msf-02 §11.1.1)。
-                    // 矛盾する場合は移行せず、従来どおり終了する
-                    if let Err(e) =
-                        tokio_moq::resolve_transport(Some(config.transport), &target.url)
-                    {
-                        tracing::warn!(
-                            "GOAWAY migration target conflicts with the current transport: {e}"
-                        );
-                        return Ok(true);
-                    }
-                    // draft-ietf-moq-transport-23 §6.6.1 (Graceful Session
-                    // Migration) / §9.2 (GOAWAY) / §7.7.1 (Graceful Publisher
-                    // Relay Switchover): 新しい session の確立と PUBLISH の
-                    // 再発行はバックグラウンドのタスクで行い、その間も旧 session
-                    // で Object を送り続ける。結果は oneshot で受け取る。
-                    // 期限は GOAWAY の Timeout (0 はローカル既定値)。
-                    // draft 由来の規則であり将来の draft 改版で変わる可能性がある
-                    let deadline = MigrationDeadline::after_goaway(Instant::now(), timeout);
-                    tracing::info!(
-                        "Starting a background session migration to {} (timeout={timeout}ms)",
-                        target.url.authority
-                    );
-                    let (task, receiver) = spawn_migration_task(
-                        config.clone(),
-                        namespace.clone(),
-                        target.url,
-                        deadline,
-                        task_monitor.clone(),
-                    );
-                    *migration_task = Some(task);
-                    *migration_rx = Some(receiver);
-                    // 新 session の PUBLISH が成立するまで旧 session の配信を
-                    // 止めない (§7.7.1)
-                    Ok(false)
+                    migrate_session_on_goaway(context, target, timeout).await
                 }
             }
         }
@@ -2885,7 +2876,7 @@ async fn handle_notable_event(
                             on_request_stream,
                         })) => {
                             handle_goaway_event(
-                                NextEventContext {
+                                &mut NextEventContext {
                                     task_monitor: &mut *task_monitor,
                                     config: &mut *config,
                                     namespace: &mut *namespace,
