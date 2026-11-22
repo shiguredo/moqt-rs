@@ -8251,12 +8251,12 @@ mod tests {
             decoder
                 .finish()
                 .expect("FIN までに全 Object を読み切ること");
-            (
-                header.track_alias,
-                header.group_id,
-                decoder.resolved_subgroup_id(),
-                objects,
-            )
+            let subgroup_id = match header.subgroup_id {
+                SubgroupIdMode::Zero => Some(0),
+                SubgroupIdMode::Explicit(id) => Some(id),
+                SubgroupIdMode::FirstObjectId => objects.first().map(|object| object.object_id),
+            };
+            (header.track_alias, header.group_id, subgroup_id, objects)
         }
 
         /// 映像の Subgroup が届くまで uni stream を読み、その Object 一覧を返す

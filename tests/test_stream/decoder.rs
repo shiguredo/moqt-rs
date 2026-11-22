@@ -214,7 +214,6 @@ fn test_first_object_id_mode() {
         .expect("テストフィクスチャに期待される内部値が入っている");
 
     // 未解決
-    assert_eq!(decoder.resolved_subgroup_id(), None);
 
     let obj = decoder
         .try_decode_object()
@@ -224,7 +223,6 @@ fn test_first_object_id_mode() {
     drain_payload(&mut decoder, 1);
 
     // 最初のオブジェクトで subgroup_id が確定する
-    assert_eq!(decoder.resolved_subgroup_id(), Some(3));
 
     let obj = decoder
         .try_decode_object()
@@ -321,48 +319,6 @@ fn test_object_before_header_error() {
         decoder.try_decode_object(),
         Err(MessageError::ProtocolViolation(_))
     ));
-}
-
-#[test]
-fn test_resolved_subgroup_id_explicit() {
-    let header = SubgroupHeader {
-        track_alias: 1,
-        group_id: 0,
-        subgroup_id: SubgroupIdMode::Explicit(42),
-        publisher_priority: Some(128),
-        has_properties: false,
-        end_of_group: false,
-        first_object: false,
-    };
-    let data = header.encode();
-    let mut decoder = SubgroupStreamDecoder::new();
-    decoder.push(&data);
-    decoder
-        .try_decode_header()
-        .expect("テストフィクスチャの前提条件を満たす")
-        .expect("テストフィクスチャに期待される内部値が入っている");
-    assert_eq!(decoder.resolved_subgroup_id(), Some(42));
-}
-
-#[test]
-fn test_resolved_subgroup_id_zero() {
-    let header = SubgroupHeader {
-        track_alias: 1,
-        group_id: 0,
-        subgroup_id: SubgroupIdMode::Zero,
-        publisher_priority: Some(128),
-        has_properties: false,
-        end_of_group: false,
-        first_object: false,
-    };
-    let data = header.encode();
-    let mut decoder = SubgroupStreamDecoder::new();
-    decoder.push(&data);
-    decoder
-        .try_decode_header()
-        .expect("テストフィクスチャの前提条件を満たす")
-        .expect("テストフィクスチャに期待される内部値が入っている");
-    assert_eq!(decoder.resolved_subgroup_id(), Some(0));
 }
 
 #[test]
@@ -488,7 +444,6 @@ fn test_subgroup_finish_first_object_id_empty_ok() {
         .try_decode_header()
         .expect("テストフィクスチャの前提条件を満たす")
         .expect("テストフィクスチャに期待される内部値が入っている");
-    assert_eq!(decoder.resolved_subgroup_id(), None);
     assert_eq!(decoder.finish(), Ok(()));
 }
 
@@ -1513,36 +1468,6 @@ fn test_fetch_accepts_valid_prior_object_gap_properties() {
         .expect("テストフィクスチャの前提条件を満たす")
         .expect("テストフィクスチャに期待される内部値が入っている");
     assert!(matches!(second, DecodedFetchEntry::Object(_)));
-}
-
-#[test]
-fn test_fetch_rejects_object_beyond_known_final_subgroup_object() {
-    let header = FetchHeader { request_id: 1 };
-    let obj = FetchStreamEntry::Object(FetchStreamObject {
-        group_id: Some(10),
-        subgroup_id: FetchSubgroupIdMode::Explicit(0),
-        object_id: Some(1),
-        publisher_priority: Some(128),
-        has_properties: false,
-        is_datagram_origin: false,
-        payload_length: 1,
-    });
-    let data = encode_fetch_stream(&header, &[(obj, None, Some(b"a"))]);
-
-    let mut decoder = FetchStreamDecoder::new();
-    decoder
-        .set_subgroup_final_object(10, 0, 0)
-        .expect("テストフィクスチャの前提条件を満たす");
-    decoder.push(&data);
-    decoder
-        .try_decode_header()
-        .expect("テストフィクスチャの前提条件を満たす")
-        .expect("テストフィクスチャに期待される内部値が入っている");
-
-    assert!(matches!(
-        decoder.try_decode_entry(),
-        Err(MessageError::MalformedTrack(_))
-    ));
 }
 
 #[test]

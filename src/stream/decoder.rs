@@ -307,7 +307,8 @@ impl SubgroupStreamDecoder {
     /// - `SubgroupIdMode::Zero` → `Some(0)`
     /// - `SubgroupIdMode::Explicit(id)` → `Some(id)`
     /// - `SubgroupIdMode::FirstObjectId` → 最初のオブジェクト受信後は `Some(object_id)`、未受信は `None`
-    pub fn resolved_subgroup_id(&self) -> Option<u64> {
+    #[cfg(test)]
+    pub(crate) fn resolved_subgroup_id(&self) -> Option<u64> {
         self.resolved_subgroup_id
     }
 
@@ -503,8 +504,6 @@ struct FetchActualObjectState {
 struct FetchValidationState {
     last_object: Option<FetchActualObjectState>,
     subgroup_priorities: HashMap<(u64, u64), u8>,
-    subgroup_max_objects: HashMap<(u64, u64), u64>,
-    subgroup_final_objects: HashMap<(u64, u64), u64>,
 }
 
 const FETCH_GROUP_ORDER_ASCENDING: u8 = 0x01;
@@ -605,31 +604,6 @@ impl FetchStreamDecoder {
         }
     }
 
-    /// 特定 subgroup の final object を登録する
-    ///
-    /// FETCH wire format 自体は subgroup の終端を直接伝えないため、呼び出し側が
-    /// 既に知っている final object (たとえば cache や Subgroup stream の FIN 由来)
-    /// を与えるための hook。
-    pub fn set_subgroup_final_object(
-        &mut self,
-        group_id: u64,
-        subgroup_id: u64,
-        final_object_id: u64,
-    ) -> Result<(), MessageError> {
-        let key = (group_id, subgroup_id);
-        if let Some(max_seen) = self.validation.subgroup_max_objects.get(&key)
-            && *max_seen > final_object_id
-        {
-            return Err(MessageError::MalformedTrack(
-                "object ID exceeds the known final object for the subgroup",
-            ));
-        }
-        self.validation
-            .subgroup_final_objects
-            .insert(key, final_object_id);
-        Ok(())
-    }
-
     /// group 境界での prune: 過去 group の per-group 検証状態をクリアする
     ///
     /// draft-ietf-moq-transport-23 §3.2.1 (Fetch Object Delivery):
@@ -642,22 +616,10 @@ impl FetchStreamDecoder {
             self.validation
                 .subgroup_priorities
                 .retain(|&(g, _), _| g >= current_group);
-            self.validation
-                .subgroup_max_objects
-                .retain(|&(g, _), _| g >= current_group);
-            self.validation
-                .subgroup_final_objects
-                .retain(|&(g, _), _| g >= current_group);
         } else {
             // current_group 超過の group を削除
             self.validation
                 .subgroup_priorities
-                .retain(|&(g, _), _| g <= current_group);
-            self.validation
-                .subgroup_max_objects
-                .retain(|&(g, _), _| g <= current_group);
-            self.validation
-                .subgroup_final_objects
                 .retain(|&(g, _), _| g <= current_group);
         }
     }
@@ -1136,19 +1098,9 @@ impl FetchStreamDecoder {
                     "publisher priority changed within the same subgroup in a FETCH response",
                 ));
             }
-            if let Some(final_object_id) = self.validation.subgroup_final_objects.get(&key)
-                && obj.object_id > *final_object_id
-            {
-                return Err(MessageError::MalformedTrack(
-                    "object ID exceeds the known final object for the subgroup",
-                ));
-            }
             self.validation
                 .subgroup_priorities
                 .insert(key, obj.publisher_priority);
-            self.validation
-                .subgroup_max_objects
-                .insert(key, obj.object_id);
         }
 
         // Properties の書式 (長さと KVP 構造) と Property のスコープ・多重可否は
@@ -1275,5 +1227,48 @@ fn validate_fetch_group_order(group_order: u8) -> Result<(), MessageError> {
         _ => Err(MessageError::ProtocolViolation(
             "FETCH group order must be 1 (Ascending) or 2 (Descending)",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
+
+    fn decode_header(decoder: &mut SubgroupStreamDecoder, mode: SubgroupIdMode) {
+        let header = SubgroupHeader {
+            track_alias: 1,
+            group_id: 0,
+            subgroup_id: mode,
+            publisher_priority: Some(128),
+            has_properties: false,
+            end_of_group: false,
+            first_object: false,
+        };
+        decoder.push(&header.encode());
+        decoder
+            .try_decode_header()
+            .expect("テストフィクスチャの前提条件を満たす")
+            .expect("ヘッダーがあること");
+    }
+
+    /// Explicit / Zero はヘッダーで subgroup_id が確定する
+    #[test]
+    fn resolved_subgroup_id_is_fixed_for_explicit_and_zero() {
+        let mut decoder = SubgroupStreamDecoder::new();
+        decode_header(&mut decoder, SubgroupIdMode::Explicit(42));
+        assert_eq!(decoder.resolved_subgroup_id(), Some(42));
+
+        let mut decoder = SubgroupStreamDecoder::new();
+        decode_header(&mut decoder, SubgroupIdMode::Zero);
+        assert_eq!(decoder.resolved_subgroup_id(), Some(0));
+    }
+
+    /// FirstObjectId は最初の Object を受信するまで未解決である
+    #[test]
+    fn resolved_subgroup_id_is_unresolved_for_first_object_id() {
+        let mut decoder = SubgroupStreamDecoder::new();
+        decode_header(&mut decoder, SubgroupIdMode::FirstObjectId);
+        assert_eq!(decoder.resolved_subgroup_id(), None);
     }
 }
