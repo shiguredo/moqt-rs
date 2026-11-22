@@ -12,7 +12,7 @@ use super::EncodedFrame;
 use crate::error::{Error, Result};
 
 /// MSF catalog の AV1 codec 文字列 (Profile 0 / Level 4.0 / Main tier 相当)
-const AV1_CATALOG_CODEC_STRING: &str = "av01.0.08M.08";
+pub(crate) const AV1_CATALOG_CODEC_STRING: &str = "av01.0.08M.08";
 
 /// AV1 OBU_SEQUENCE_HEADER の type
 ///

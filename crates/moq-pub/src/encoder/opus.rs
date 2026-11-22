@@ -8,7 +8,7 @@ use shiguredo_opus::{Application, Encoder, EncoderConfig, FrameDuration};
 use crate::error::Result;
 
 /// MSF catalog の Opus codec 文字列 (RFC 6381)
-const OPUS_CATALOG_CODEC_STRING: &str = "opus";
+pub(crate) const OPUS_CATALOG_CODEC_STRING: &str = "opus";
 
 /// Opus フレーム長 (ミリ秒)
 ///

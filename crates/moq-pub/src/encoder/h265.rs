@@ -26,7 +26,7 @@ type ToolboxEncodeResult = std::result::Result<shiguredo_video_toolbox::EncodedF
 ///
 /// `H265Encoder::new` 時点では SPS が得られないため Main@L4.0 相当を仮置きし、
 /// 最初のキーフレームで SPS の profile_tier_level から `hvc1.PPP.CCCCCCCC.LLL.CC` 形式に置き換える。
-const DEFAULT_HEVC_CATALOG_CODEC_STRING: &str = "hvc1.1.6.L120.B0";
+pub(crate) const DEFAULT_HEVC_CATALOG_CODEC_STRING: &str = "hvc1.1.6.L120.B0";
 
 /// HEVC NAL の長さプレフィックスサイズ (HVCC 4 バイト前提)
 ///

@@ -400,6 +400,12 @@ pub fn catalog_fetch_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoder::av1::AV1_CATALOG_CODEC_STRING;
+    #[cfg(target_os = "macos")]
+    use crate::encoder::h264::DEFAULT_AVC_CATALOG_CODEC_STRING;
+    #[cfg(target_os = "macos")]
+    use crate::encoder::h265::DEFAULT_HEVC_CATALOG_CODEC_STRING;
+    use crate::encoder::opus::OPUS_CATALOG_CODEC_STRING;
 
     /// テストで使う同期用メタデータ
     ///
@@ -419,7 +425,7 @@ mod tests {
         let video = VideoTrackParams {
             track_name: "video",
             namespace: "ns",
-            codec: "av01.0.08M.08",
+            codec: AV1_CATALOG_CODEC_STRING,
             width: 1920,
             height: 1080,
             fps: 30,
@@ -430,7 +436,7 @@ mod tests {
         let audio = AudioTrackParams {
             track_name: "audio",
             namespace: "ns",
-            codec: "opus",
+            codec: OPUS_CATALOG_CODEC_STRING,
             samplerate: 48_000,
             channel_config: "2",
             bitrate: 128,
@@ -453,7 +459,7 @@ mod tests {
         let video = VideoTrackParams {
             track_name: "video",
             namespace: "ns",
-            codec: "av01.0.08M.08",
+            codec: AV1_CATALOG_CODEC_STRING,
             width: 1920,
             height: 1080,
             fps: 30,
@@ -464,7 +470,7 @@ mod tests {
         let audio = AudioTrackParams {
             track_name: "audio",
             namespace: "ns",
-            codec: "opus",
+            codec: OPUS_CATALOG_CODEC_STRING,
             samplerate: 48_000,
             channel_config: "1",
             bitrate: 64,
@@ -528,7 +534,7 @@ mod tests {
             let video = VideoTrackParams {
                 track_name: "video",
                 namespace: "ns",
-                codec: "av01.0.08M.08",
+                codec: AV1_CATALOG_CODEC_STRING,
                 width: 1920,
                 height: 1080,
                 fps: 30,
@@ -567,7 +573,7 @@ mod tests {
         let mut video = VideoTrackParams {
             track_name: "video",
             namespace: "ns",
-            codec: "av01.0.08M.08",
+            codec: AV1_CATALOG_CODEC_STRING,
             width: 1920,
             height: 1080,
             fps: 30,
@@ -650,7 +656,7 @@ mod tests {
         let video = VideoTrackParams {
             track_name: "video",
             namespace: "ns",
-            codec: "av01.0.08M.08",
+            codec: AV1_CATALOG_CODEC_STRING,
             width: 1920,
             height: 1080,
             fps: 30,
@@ -661,7 +667,7 @@ mod tests {
         let audio = AudioTrackParams {
             track_name: "audio",
             namespace: "ns",
-            codec: "opus",
+            codec: OPUS_CATALOG_CODEC_STRING,
             samplerate: 48_000,
             channel_config: "2",
             bitrate: 128,
@@ -726,9 +732,15 @@ mod tests {
     ///
     /// `avc1.640028` / `hvc1.1.6.L120.B0` / `vp8` / `vp09.00.40.08` が video と判定されることは、
     /// library 側の登録名テストで固定している。
+    #[cfg(target_os = "macos")]
     #[test]
     fn publisher_alternate_video_codecs_encode() {
-        for codec in ["avc1.640028", "hvc1.1.6.L120.B0", "vp8", "vp09.00.40.08"] {
+        for codec in [
+            DEFAULT_AVC_CATALOG_CODEC_STRING,
+            DEFAULT_HEVC_CATALOG_CODEC_STRING,
+            "vp8",
+            "vp09.00.40.08",
+        ] {
             let video = VideoTrackParams {
                 track_name: "video",
                 namespace: "ns",
@@ -790,7 +802,7 @@ mod tests {
         let audio = AudioTrackParams {
             track_name: "audio",
             namespace: "ns",
-            codec: "opus",
+            codec: OPUS_CATALOG_CODEC_STRING,
             samplerate: 48_000,
             channel_config: "1",
             bitrate: 64,
@@ -850,7 +862,7 @@ mod tests {
         let video = VideoTrackParams {
             track_name: "video",
             namespace: "ns",
-            codec: "av01.0.08M.08",
+            codec: AV1_CATALOG_CODEC_STRING,
             width: 1920,
             height: 1080,
             fps: 30,
@@ -861,7 +873,7 @@ mod tests {
         let audio = AudioTrackParams {
             track_name: "audio",
             namespace: "ns",
-            codec: "opus",
+            codec: OPUS_CATALOG_CODEC_STRING,
             samplerate: 48_000,
             channel_config: "2",
             bitrate: 128,
@@ -1054,7 +1066,7 @@ mod tests {
         let video = VideoTrackParams {
             track_name: "video",
             namespace: "customer/livestream/123",
-            codec: "av01.0.08M.08",
+            codec: AV1_CATALOG_CODEC_STRING,
             width: 1920,
             height: 1080,
             fps: 30,
@@ -1095,7 +1107,7 @@ mod tests {
         let audio = AudioTrackParams {
             track_name: "audio",
             namespace: "a//b",
-            codec: "opus",
+            codec: OPUS_CATALOG_CODEC_STRING,
             samplerate: 48_000,
             channel_config: "1",
             bitrate: 64,
@@ -1125,7 +1137,7 @@ mod tests {
         let audio = AudioTrackParams {
             track_name: "audio",
             namespace: &namespace_text,
-            codec: "opus",
+            codec: OPUS_CATALOG_CODEC_STRING,
             samplerate: 48_000,
             channel_config: "1",
             bitrate: 64,

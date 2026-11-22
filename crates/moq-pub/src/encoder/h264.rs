@@ -26,7 +26,7 @@ type ToolboxEncodeResult = std::result::Result<shiguredo_video_toolbox::EncodedF
 ///
 /// H264Encoder::new 時点では SPS が得られないため High@L4.0 相当を仮置きし、
 /// 最初のキーフレームで SPS 先頭 3 バイトから `avc1.PPCCLL` 形式に置き換える。
-const DEFAULT_AVC_CATALOG_CODEC_STRING: &str = "avc1.640028";
+pub(crate) const DEFAULT_AVC_CATALOG_CODEC_STRING: &str = "avc1.640028";
 
 /// H.264 NAL の長さプレフィックスサイズ (AVCC 4 バイト前提)
 ///
