@@ -3373,7 +3373,8 @@ fn codec_matches_registry_name(codec: &str, name: &str, separator: u8) -> bool {
 /// WEBCODECS-CODEC-REGISTRY (Registry Draft, 2026-02-12) §3 (Audio Codec Registry) の
 /// 登録名 (`flac` / `mp3` / `opus` / `vorbis` / `ulaw` / `alaw` / `mp4a.*` / `pcm-*`) に
 /// 一致する場合に true を返す。登録内容は WEBCODECS-CODEC-REGISTRY (Registry Draft, 2026-02-12) §3 (Audio Codec Registry)
-/// に基づく。既存エントリは削除・非推奨にできないため、新規登録があれば同じ定数表に追記する。
+/// に基づく。本文は `refs/webcodecs/webcodecs-codec-registry-20260212.txt` に保存している。
+/// 既存エントリは削除・非推奨にできないため、新規登録があれば同じ定数表に追記する。
 pub fn is_audio_codec(codec: &str) -> bool {
     // 登録表記が名前だけの codec (`flac` / `mp3` / `opus` / `vorbis` / `ulaw` / `alaw`) は完全一致のみ
     const EXACT_NAMES: [&str; 6] = ["flac", "mp3", "opus", "vorbis", "ulaw", "alaw"];
@@ -3390,7 +3391,8 @@ pub fn is_audio_codec(codec: &str) -> bool {
 /// WEBCODECS-CODEC-REGISTRY (Registry Draft, 2026-02-12) §4 (Video Codec Registry) の
 /// 登録名 (`vp8` / `av01.*` / `avc1.*` / `avc3.*` / `hev1.*` / `hvc1.*` / `vp09.*`) に
 /// 一致する場合に true を返す。登録内容は WEBCODECS-CODEC-REGISTRY (Registry Draft, 2026-02-12) §4 (Video Codec Registry)
-/// に基づく。既存エントリは削除・非推奨にできないため、新規登録があれば同じ定数表に追記する。
+/// に基づく。本文は `refs/webcodecs/webcodecs-codec-registry-20260212.txt` に保存している。
+/// 既存エントリは削除・非推奨にできないため、新規登録があれば同じ定数表に追記する。
 pub fn is_video_codec(codec: &str) -> bool {
     // 登録表記が名前だけの codec (`vp8`) は完全一致のみ
     if codec == "vp8" {
