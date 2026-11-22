@@ -22,7 +22,7 @@ draft-ietf-moq-transport-23 に基づく Sans I/O / no_std な Media over QUIC T
 - crate 名: `shiguredo_moqt`
 - バージョン: 2026.0.0
 - Rust Edition: 2024
-- 最小 Rust バージョン: 1.93
+- 最小 Rust バージョン: 1.95
 - ライセンス: Apache-2.0
 
 **重要**: このライブラリは re-export を行わない。型は定義元モジュールから直接 import すること。

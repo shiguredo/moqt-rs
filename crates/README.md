@@ -16,7 +16,7 @@ WebTransport over HTTP/3 は tobi-quic の実装を使うため、s2n-quic を�
 詳細は [tokio-moq](tokio-moq/README.md) を参照してください。
 接続先となる MoQ リレーは別途用意してください。
 
-Rust 1.95 以降が必要です (s2n-quic と、Windows 以外のビルドで使う tobi-quic の要求。ライブラリと pbt は 1.93 でビルドできます)。macOS ではカメラとマイクへのアクセス許可が必要です。
+Rust 1.95 以降が必要です (ライブラリの MSRV と、s2n-quic および Windows 以外のビルドで使う tobi-quic の要求)。macOS ではカメラとマイクへのアクセス許可が必要です。
 
 ## 実行例
 
