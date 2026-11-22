@@ -4388,6 +4388,98 @@ mod tests {
         );
     }
 
+    /// New Session URI が空のときは現在の URL を再利用すること
+    ///
+    /// draft-ietf-moq-transport-23 §9.2 (GOAWAY) は「URI が 0 バイトなら現在の URI を
+    /// 再利用する」と定める。
+    #[test]
+    fn migration_target_empty_uri_reuses_current_url() {
+        let current =
+            parse_url("moqt://relay.example:443/live?token=abc#msf:moq-example--video&cat=QUJD")
+                .expect("現在の URL をパースできること");
+        let target = migration_target(&[], None, &current)
+            .expect("判断に失敗しないこと")
+            .expect("移行先があること");
+        assert_eq!(target.scope, MigrationScope::Session);
+        assert_eq!(target.url.authority, current.authority);
+        assert_eq!(target.url.path, current.path);
+        assert_eq!(target.url.cat_tokens, current.cat_tokens);
+    }
+
+    /// 同一 origin の New Session URI で cat が無いときは元のトークンを引き継ぐこと
+    ///
+    /// draft-ietf-moq-msf-02 §11.5.3 は track に紐づくトークンを同じ track の制御
+    /// メッセージへ載せる MUST を課すため、移行先でも載せ続ける必要がある。
+    #[test]
+    fn migration_target_same_origin_uri_without_cat_carries_tokens() {
+        let current =
+            parse_url("moqt://relay.example:443/live?token=abc#msf:moq-example--video&cat=QUJD")
+                .expect("現在の URL をパースできること");
+        let target = migration_target(
+            b"moqt://relay.example:443/other#msf:moq-example--video",
+            None,
+            &current,
+        )
+        .expect("判断に失敗しないこと")
+        .expect("移行先があること");
+        assert_eq!(target.url.authority, "relay.example:443");
+        assert_eq!(target.url.path, "/other");
+        assert_eq!(
+            target.url.cat_tokens, current.cat_tokens,
+            "同一 origin なら移行先に cat が無くても元のトークンを引き継ぐこと"
+        );
+    }
+
+    /// 別 origin の New Session URI には cat を引き継がないこと
+    ///
+    /// 移行先が別ホストのときは認可トークンを送らない。移行先で別途取得する
+    /// (draft-ietf-moq-msf-02 §11.5.4)。
+    #[test]
+    fn migration_target_different_origin_does_not_carry_tokens() {
+        let current =
+            parse_url("moqt://relay.example:443/live?token=abc#msf:moq-example--video&cat=QUJD")
+                .expect("現在の URL をパースできること");
+        let target = migration_target(
+            b"moqt://other.example:443/live#msf:moq-example--video",
+            None,
+            &current,
+        )
+        .expect("判断に失敗しないこと")
+        .expect("移行先があること");
+        assert_eq!(target.url.authority, "other.example:443");
+        assert!(
+            target.url.cat_tokens.is_empty(),
+            "別 origin へ認可トークンを送らないこと"
+        );
+    }
+
+    /// New Session URI の fragment に cat があるときはそちらを使うこと
+    #[test]
+    fn migration_target_uri_with_cat_uses_its_own_tokens() {
+        let current =
+            parse_url("moqt://relay.example:443/live?token=abc#msf:moq-example--video&cat=QUJD")
+                .expect("現在の URL をパースできること");
+        let target = migration_target(
+            b"moqt://other.example:443/live#msf:moq-example--video&cat=WFla",
+            None,
+            &current,
+        )
+        .expect("判断に失敗しないこと")
+        .expect("移行先があること");
+        assert_eq!(target.url.cat_tokens, vec![b"XYZ".to_vec()]);
+    }
+
+    /// UTF-8 でない New Session URI はエラーにすること
+    #[test]
+    fn migration_target_non_utf8_uri_is_rejected() {
+        let current = parse_url("moqt://relay.example/live").expect("URL をパースできること");
+        let err = migration_target(&[0xff, 0xfe], None, &current).expect_err("エラーになること");
+        assert!(
+            err.to_string().contains("not UTF-8"),
+            "UTF-8 でない URI として報告すること: {err}"
+        );
+    }
+
     /// request stream の GOAWAY で URI が不正なら session を維持できるよう None にすること
     #[test]
     fn migration_target_keeps_session_for_invalid_request_uri() {

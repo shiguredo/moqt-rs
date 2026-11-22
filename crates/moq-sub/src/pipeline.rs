@@ -10690,62 +10690,6 @@ mod tests {
         }
     }
 
-    /// GOAWAY の New Session URI から移行先を決める判断を固定する
-    ///
-    /// 移行の判断そのものは tokio-moq の共通関数が持つ。subscriber 側でも
-    /// 「request stream の GOAWAY では移行しない」「空 URI は現在の URL の再利用」
-    /// 「解釈できない URI は移行しない」を固定する。
-    mod migration_target_tests {
-        use tokio_moq::parse_url;
-
-        /// 現在の URL (移行前の接続先)
-        fn current_url() -> tokio_moq::ServerUrl {
-            parse_url("moqt://relay.example:443/live#msf:moq-example--video")
-                .expect("現在の URL をパースできること")
-        }
-
-        /// request stream の GOAWAY は当該 request だけの移行対象として返すこと
-        #[test]
-        fn request_stream_goaway_reports_the_request_scope() {
-            let target = tokio_moq::migration_target(
-                b"moqt://other.example:443/live",
-                Some(3),
-                &current_url(),
-            )
-            .expect("判断に失敗しないこと")
-            .expect("移行先があること");
-            assert_eq!(
-                target.scope,
-                tokio_moq::MigrationScope::Request(3),
-                "request 単位の移行対象として返すこと"
-            );
-        }
-
-        /// New Session URI が空のときは現在の URL を再利用すること
-        #[test]
-        fn empty_uri_reuses_the_current_url() {
-            let current = current_url();
-            let target = tokio_moq::migration_target(&[], None, &current)
-                .expect("判断に失敗しないこと")
-                .expect("移行先があること");
-            assert_eq!(target.scope, tokio_moq::MigrationScope::Session);
-            assert_eq!(target.url.authority, current.authority);
-            assert_eq!(target.url.path, current.path);
-        }
-
-        /// 解釈できない New Session URI では移行しないこと
-        #[test]
-        fn invalid_uri_is_rejected() {
-            let err =
-                tokio_moq::migration_target(b"https://other.example/live", None, &current_url())
-                    .expect_err("エラーになること");
-            assert!(
-                err.to_string().contains("invalid new session URI"),
-                "解釈できない URI として報告すること: {err}"
-            );
-        }
-    }
-
     use shiguredo_moqt::error::SESSION_MALFORMED_KEY_VALUE;
     use shiguredo_moqt::loc::LocProperty;
     use shiguredo_moqt::message_parameter::LocationFilterUpdate;
