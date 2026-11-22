@@ -33,6 +33,7 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 use crate::error::{Result, TransportError};
+use crate::transport::PeerSessionClose;
 use crate::webtransport::{
     MoqtCloseCode, WtSessionState, session_policy, update_session_state, wait_until_terminated,
 };
@@ -392,10 +393,11 @@ fn process_h3_result(
 fn process_h3_outcome(
     outcome: H3FeedOutcome,
     session_state: &watch::Sender<WtSessionState>,
+    peer_close: &Arc<StdMutex<Option<PeerSessionClose>>>,
     handle: &tobi_quic::Connection,
     stream_kind: &str,
 ) -> Result<()> {
-    let _ = process_h3_events(outcome.events, session_state);
+    let _ = process_h3_events(outcome.events, session_state, peer_close);
     process_h3_result(outcome.result, session_state, handle, stream_kind)
 }
 
@@ -417,6 +419,7 @@ fn process_h3_outcome(
 fn process_h3_events(
     events: Vec<Event>,
     session_state: &watch::Sender<WtSessionState>,
+    peer_close: &Arc<StdMutex<Option<PeerSessionClose>>>,
 ) -> Vec<Vec<u8>> {
     let mut datagrams = Vec::new();
     for event in events {
@@ -441,6 +444,20 @@ fn process_h3_events(
                 tracing::info!(
                     "WebTransport session closed: session_id={session_id}, error_code={error_code:#x}, close_error_code={close_error_code:#x}, close_message={close_message:?}"
                 );
+                // 自側の close では h3 層が SessionClosed を発行しない想定だが、発行された
+                // 場合に自側の終了コードを peer 起点として記録しないよう状態で防御する。
+                // SessionClosed の close_error_code は peer の WT_CLOSE_SESSION の
+                // Application Error Code であり、WT_SESSION_GONE などの HTTP/3 コードとは
+                // 別の値である (§6)。そのまま MOQT の終了コードとして保持する。
+                if *session_state.borrow() != WtSessionState::ClosedLocally {
+                    *peer_close
+                        .lock()
+                        .expect("peer close info mutex must not be poisoned") =
+                        Some(PeerSessionClose {
+                            code: u64::from(close_error_code),
+                            reason: close_message,
+                        });
+                }
                 update_session_state(session_state, WtSessionState::ClosedByPeer);
             }
             Event::WebTransport(WebTransportEvent::SessionDraining { session_id }) => {
@@ -481,6 +498,7 @@ fn process_h3_events(
 fn feed_stream_to_h3(
     state: &Arc<StdMutex<ClientConnectionState>>,
     session_state: &watch::Sender<WtSessionState>,
+    peer_close: &Arc<StdMutex<Option<PeerSessionClose>>>,
     handle: &tobi_quic::Connection,
     stream_id: u64,
     data: &[u8],
@@ -492,7 +510,7 @@ fn feed_stream_to_h3(
             .expect("connection state mutex must not be poisoned");
         s.feed_stream_and_drain(stream_id, data, fin)
     };
-    process_h3_outcome(outcome, session_state, handle, "HTTP/3 stream")
+    process_h3_outcome(outcome, session_state, peer_close, handle, "HTTP/3 stream")
 }
 
 // ---------------------------------------------------------------------------
@@ -1038,6 +1056,10 @@ impl WtClient {
         // 初期値の receiver は受け取らず必要とするタスクが `subscribe()` で作る。理由は
         // [`WtSessionState`] を参照する。
         let (session_state_tx, _) = watch::channel(WtSessionState::Active);
+        // peer の WT_CLOSE_SESSION が運んだ終了コードと理由を、接続確立前から共有する。
+        // SessionClosed を処理するタスクは複数あり、WtSession の生成前にも動くため
+        // (CONNECT stream の受信タスク・datagram 受信タスク)、`WtSession` とは独立に持つ。
+        let peer_close: Arc<StdMutex<Option<PeerSessionClose>>> = Arc::new(StdMutex::new(None));
         // ルーティングタスクが共有するハンドル (ストリームごとのタスクへ clone して渡す)
         let route_context = RouteContext {
             state: Arc::clone(&state),
@@ -1045,6 +1067,7 @@ impl WtClient {
             handle: handle.clone(),
             reset_stream_at_supported,
             session_state: session_state_tx.clone(),
+            peer_close: Arc::clone(&peer_close),
         };
 
         // 単方向ストリーム受信タスク
@@ -1195,6 +1218,7 @@ impl WtClient {
             let state_for_datagram = Arc::clone(&state);
             let handle_for_datagram = handle.clone();
             let session_state_for_datagram = session_state_tx.clone();
+            let peer_close_for_datagram = Arc::clone(&peer_close);
             // セッション終了を観測するための receiver (タスクが終了すると、このタスクが持つ
             // `watch::Sender` の clone も drop される)
             let mut session_state_rx_for_datagram = session_state_tx.subscribe();
@@ -1230,6 +1254,7 @@ impl WtClient {
                             if process_h3_outcome(
                                 outcome,
                                 &session_state_for_datagram,
+                                &peer_close_for_datagram,
                                 &handle_for_datagram,
                                 "HTTP/3 datagram",
                             )
@@ -1281,6 +1306,7 @@ impl WtClient {
                             reset_connect_stream(
                                 &state,
                                 &session_state_tx,
+                                &peer_close,
                                 &handle,
                                 connect_stream_id,
                                 error_code,
@@ -1304,6 +1330,7 @@ impl WtClient {
                     let feed_result = process_h3_outcome(
                         outcome,
                         &session_state_tx,
+                        &peer_close,
                         &handle,
                         "WebTransport CONNECT stream",
                     );
@@ -1330,6 +1357,7 @@ impl WtClient {
                     let feed_result = process_h3_outcome(
                         outcome,
                         &session_state_tx,
+                        &peer_close,
                         &handle,
                         "WebTransport CONNECT setup",
                     );
@@ -1354,6 +1382,7 @@ impl WtClient {
         // `SessionClosed` が永久に発火しなかった)。
         let state_for_connect = Arc::clone(&state);
         let session_state_for_connect = session_state_tx.clone();
+        let peer_close_for_connect = Arc::clone(&peer_close);
         let handle_for_connect = handle.clone();
         tokio::spawn(async move {
             // セッション状態の変化も待つ。自発 close (`WtSession::close`) では peer が
@@ -1367,6 +1396,7 @@ impl WtClient {
                             if let Err(e) = feed_connect_stream(
                                 &state_for_connect,
                                 &session_state_for_connect,
+                                &peer_close_for_connect,
                                 &handle_for_connect,
                                 connect_stream_id,
                                 &data,
@@ -1405,6 +1435,7 @@ impl WtClient {
                             if feed_connect_stream(
                                 &state_for_connect,
                                 &session_state_for_connect,
+                                &peer_close_for_connect,
                                 &handle_for_connect,
                                 connect_stream_id,
                                 &[],
@@ -1426,6 +1457,7 @@ impl WtClient {
                             reset_connect_stream(
                                 &state_for_connect,
                                 &session_state_for_connect,
+                                &peer_close_for_connect,
                                 &handle_for_connect,
                                 connect_stream_id,
                                 error_code,
@@ -1479,6 +1511,7 @@ impl WtClient {
             stop_sending_rx: Some(stop_sending_rx),
             state,
             session_state: session_state_tx,
+            peer_close,
             _close_guard: close_guard,
         })
     }
@@ -1507,12 +1540,21 @@ async fn hold_h3_critical_streams(handle: tobi_quic::Connection, streams: [SendS
 fn feed_connect_stream(
     state: &Arc<StdMutex<ClientConnectionState>>,
     session_state: &watch::Sender<WtSessionState>,
+    peer_close: &Arc<StdMutex<Option<PeerSessionClose>>>,
     handle: &tobi_quic::Connection,
     stream_id: u64,
     data: &[u8],
     fin: bool,
 ) -> Result<()> {
-    feed_stream_to_h3(state, session_state, handle, stream_id, data, fin)
+    feed_stream_to_h3(
+        state,
+        session_state,
+        peer_close,
+        handle,
+        stream_id,
+        data,
+        fin,
+    )
 }
 
 /// CONNECT stream がセッション終了後の追加データで `H3_MESSAGE_ERROR` になったかを返す
@@ -1564,6 +1606,7 @@ async fn abort_connect_stream_with_message_error(recv_stream: &mut QuicRecvStrea
 fn reset_connect_stream(
     state: &Arc<StdMutex<ClientConnectionState>>,
     session_state: &watch::Sender<WtSessionState>,
+    peer_close: &Arc<StdMutex<Option<PeerSessionClose>>>,
     handle: &tobi_quic::Connection,
     stream_id: u64,
     error_code: u64,
@@ -1577,6 +1620,7 @@ fn reset_connect_stream(
     let _ = process_h3_outcome(
         outcome,
         session_state,
+        peer_close,
         handle,
         "WebTransport CONNECT stream RESET_STREAM",
     );
@@ -1703,6 +1747,8 @@ pub struct WtSession {
     state: Arc<StdMutex<ClientConnectionState>>,
     /// セッション状態 (§6 の終了 / §4.7 の drain / h3 層が返した接続エラー) を配る sender
     session_state: watch::Sender<WtSessionState>,
+    /// peer の WT_CLOSE_SESSION が運んだ終了コードと理由 (観測前は `None`)
+    peer_close: Arc<StdMutex<Option<PeerSessionClose>>>,
     /// 接続の所有者が drop されたときに接続を閉じるガード
     _close_guard: ConnectionCloseGuard,
 }
@@ -1731,6 +1777,19 @@ impl WtSession {
     /// 観測するために使う。既に終了している場合は `wait_until_terminated` がすぐに返る。
     pub(crate) fn session_state_receiver(&self) -> watch::Receiver<WtSessionState> {
         self.session_state.subscribe()
+    }
+
+    /// peer が WT_CLOSE_SESSION で通知した終了コードと理由を返す
+    ///
+    /// 観測前は `None` を返す。`close_error_code` は WT_CLOSE_SESSION の Application Error
+    /// Code であり、`error_code` (WT_SESSION_GONE などの HTTP/3 のコード) ではない。
+    /// WT_CLOSE_SESSION を伴わない終了 (CONNECT stream の FIN / RESET_STREAM) では
+    /// コード 0・空文字列として記録される。
+    pub(crate) fn peer_session_close(&self) -> Option<PeerSessionClose> {
+        self.peer_close
+            .lock()
+            .expect("peer close info mutex must not be poisoned")
+            .clone()
     }
 
     /// 新しいストリームを開ける状態かを確認する
@@ -1857,6 +1916,7 @@ impl WtSession {
         process_h3_outcome(
             outcome,
             &self.session_state,
+            &self.peer_close,
             &self.handle,
             "WebTransport STOP_SENDING",
         )
@@ -1988,7 +2048,7 @@ impl WtSession {
             };
             (events, s.take_datagrams())
         };
-        let _ = process_h3_events(events, &self.session_state);
+        let _ = process_h3_events(events, &self.session_state, &self.peer_close);
         resolve_buffered_datagrams(datagrams, self.session_state())
     }
 
@@ -2650,6 +2710,12 @@ struct RouteContext {
     /// MOQT 層へ渡す `WtSendStream` / `WtRecvStream` には `subscribe()` で作った receiver を
     /// 渡す。ストリームを所有する側がセッション終了を観測して中断できるようにするためである (§6)。
     session_state: watch::Sender<WtSessionState>,
+    /// peer の WT_CLOSE_SESSION が運んだ終了コードと理由
+    ///
+    /// ルーティングタスクは h3 層へ流したイベントを drain するため、CONNECT stream の
+    /// 受信タスクと同じく SessionClosed を最初に観測し得る。観測した値を
+    /// `WtSession` と共有する。
+    peer_close: Arc<StdMutex<Option<PeerSessionClose>>>,
 }
 
 /// 単方向ストリームをタイプで判別してルーティングする
@@ -2713,6 +2779,7 @@ async fn route_uni_stream(
                 let _ = feed_stream_to_h3(
                     &context.state,
                     &context.session_state,
+                    &context.peer_close,
                     &context.handle,
                     stream_id,
                     &[],
@@ -2757,6 +2824,7 @@ async fn route_uni_stream(
             let fed = feed_stream_to_h3(
                 &context.state,
                 &context.session_state,
+                &context.peer_close,
                 &context.handle,
                 stream_id,
                 &type_buf,
@@ -2775,6 +2843,7 @@ async fn route_uni_stream(
                 let fed = feed_stream_to_h3(
                     &context.state,
                     &context.session_state,
+                    &context.peer_close,
                     &context.handle,
                     stream_id,
                     &data,
@@ -2791,6 +2860,7 @@ async fn route_uni_stream(
             let _ = feed_stream_to_h3(
                 &context.state,
                 &context.session_state,
+                &context.peer_close,
                 &context.handle,
                 stream_id,
                 &[],
@@ -2891,6 +2961,7 @@ async fn route_bi_stream(
             let _ = feed_stream_to_h3(
                 &context.state,
                 &context.session_state,
+                &context.peer_close,
                 &context.handle,
                 stream_id,
                 &header_buf,
@@ -3745,12 +3816,13 @@ mod tests {
             .send_response(session_id, &response, false)
             .expect("サーバーが CONNECT を受理できること");
         let (session_state, _session_receiver) = watch::channel(WtSessionState::Active);
+        let peer_close = Arc::new(StdMutex::new(None));
         let mut observation = ConnectObservation::default();
         while let Some((data, fin)) = server.take_stream_data(session_id) {
             let outcome = state.feed_stream_and_drain(session_id, &data, fin);
             outcome.result.expect("CONNECT 応答を受信できること");
             observation.observe_events(&outcome.events);
-            let _ = process_h3_events(outcome.events, &session_state);
+            let _ = process_h3_events(outcome.events, &session_state, &peer_close);
         }
         assert_eq!(
             connect_outcome(&observation),
@@ -3810,6 +3882,7 @@ mod tests {
     fn background_event_processing_keeps_received_datagrams_until_consumed() {
         let (mut state, mut server, session_id) = established_connect_state();
         let (session_state, session_receiver) = watch::channel(WtSessionState::Active);
+        let peer_close = Arc::new(StdMutex::new(None));
 
         // 空の payload も含め、受信順と一度だけ取り出す性質を確認する。
         let payloads = vec![vec![0xaa, 0xbb], vec![], vec![0xcc]];
@@ -3819,7 +3892,7 @@ mod tests {
                 .expect("サーバーが datagram を生成できること");
             let outcome = state.feed_datagram(&datagram);
             outcome.result.expect("datagram を受信できること");
-            let _ = process_h3_events(outcome.events, &session_state);
+            let _ = process_h3_events(outcome.events, &session_state, &peer_close);
         }
 
         // 購読側が取り出す前に終了イベントを処理しても、直前までの受信分は捨てない。
@@ -3829,7 +3902,7 @@ mod tests {
         while let Some((data, fin)) = server.take_stream_data(session_id) {
             let outcome = state.feed_stream_and_drain(session_id, &data, fin);
             outcome.result.expect("CONNECT の FIN を受信できること");
-            let _ = process_h3_events(outcome.events, &session_state);
+            let _ = process_h3_events(outcome.events, &session_state, &peer_close);
         }
         assert_eq!(
             *session_receiver.borrow(),
@@ -5034,6 +5107,7 @@ mod tests {
     #[test]
     fn process_h3_events_terminates_session_and_keeps_datagrams() {
         let (state_tx, state_rx) = watch::channel(WtSessionState::Active);
+        let peer_close = Arc::new(StdMutex::new(None));
         let datagrams = process_h3_events(
             vec![
                 Event::WebTransport(WebTransportEvent::Datagram {
@@ -5044,13 +5118,14 @@ mod tests {
                     session_id: 0,
                     reset_streams: Vec::new(),
                     error_code: WT_SESSION_GONE,
-                    close_error_code: 0,
-                    close_message: String::new(),
+                    close_error_code: 0x11,
+                    close_message: "control message timeout".to_string(),
                 }),
                 // 終了後に遅れて届いた drain で状態を戻さない
                 Event::WebTransport(WebTransportEvent::SessionDraining { session_id: 0 }),
             ],
             &state_tx,
+            &peer_close,
         );
         assert_eq!(
             datagrams,
@@ -5062,17 +5137,59 @@ mod tests {
             WtSessionState::ClosedByPeer,
             "SessionClosed で終了へ遷移すること"
         );
+        assert_eq!(
+            peer_close
+                .lock()
+                .expect("peer close info mutex must not be poisoned")
+                .clone(),
+            Some(PeerSessionClose {
+                code: 0x11,
+                reason: "control message timeout".to_string(),
+            }),
+            "WT_CLOSE_SESSION の Application Error Code と理由を記録すること"
+        );
+    }
+
+    /// 自側の close に伴う SessionClosed を peer 起点として記録しない
+    ///
+    /// h3 層は自側の WT_CLOSE_SESSION 送信では SessionClosed を発行しない想定だが、
+    /// 発行された場合に自側の終了コードを peer の終了コードとしてアプリへ見せない。
+    #[test]
+    fn process_h3_events_does_not_record_peer_close_when_closed_locally() {
+        let (state_tx, _state_rx) = watch::channel(WtSessionState::Active);
+        update_session_state(&state_tx, WtSessionState::ClosedLocally);
+        let peer_close = Arc::new(StdMutex::new(None));
+        let _ = process_h3_events(
+            vec![Event::WebTransport(WebTransportEvent::SessionClosed {
+                session_id: 0,
+                reset_streams: Vec::new(),
+                error_code: WT_SESSION_GONE,
+                close_error_code: 0x11,
+                close_message: "local close".to_string(),
+            })],
+            &state_tx,
+            &peer_close,
+        );
+        assert!(
+            peer_close
+                .lock()
+                .expect("peer close info mutex must not be poisoned")
+                .is_none(),
+            "自側の close では peer 起点の終了情報を記録しないこと"
+        );
     }
 
     /// drain の通知ではセッションを終了させない (§4.7)
     #[test]
     fn process_h3_events_marks_draining_without_terminating() {
         let (state_tx, state_rx) = watch::channel(WtSessionState::Active);
+        let peer_close = Arc::new(StdMutex::new(None));
         let datagrams = process_h3_events(
             vec![Event::WebTransport(WebTransportEvent::SessionDraining {
                 session_id: 3,
             })],
             &state_tx,
+            &peer_close,
         );
         assert!(
             datagrams.is_empty(),

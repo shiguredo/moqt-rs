@@ -1,7 +1,7 @@
 # peer 起点のセッション終了をコードと理由付きで通知できるようにする
 
 - Created: 2026-10-09
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/add-peer-session-close
 - Polished: 2026-10-25
 - Refreshed: 2026-11-04
@@ -85,3 +85,86 @@ CONNECTION_CLOSE、WebTransport では CLOSE_WEBTRANSPORT_SESSION カプセル�
 - ローカル起点 (`close` / `fail`) と peer 起点が区別できること。
 - 既存の `recv_control_stream_closed` の挙動 (固定コード・固定理由・セッション状態) が変わらないこと。
 - 新 API の呼び出し後に届く control stream の終了通知が no-op であること。
+
+## 解決方法
+
+peer 起点のセッション終了を終了コードと理由付きで通知する API を追加し、イベントの起点を
+variant で区別した。`recv_control_stream_closed` は従来どおりローカル起点の §6.3 違反として
+扱い、コード・理由・状態遷移を変えていない。
+
+### 公開 API の変更
+
+- `Session::recv_session_closed(code, reason)` を追加した。`code` は transport が通知した値を
+  そのまま保持し、`reason` は取得できた場合だけ渡す (取得できない場合は空文字列)。
+  呼び出し後は `Closing` になり、`poll_event` で `SessionEvent::PeerClosed` を取り出した時点で
+  `Closed` になる。`Closing` / `Closed` での呼び出しは no-op であり、後続の
+  `recv_control_stream_closed` も no-op になる。
+- `SessionEvent::PeerClosed(SessionError)` を追加した。`CloseSession` は自側が決めた終了、
+  `PeerClosed` は peer が transport 層で終了した通知である。
+- `SessionError.reason` を `&'static str` から `Cow<'static, str>` に変更した。
+  `SessionError::new` は `impl Into<Cow<'static, str>>` を受け取り、動的な理由も保持できる。
+  `Session::close` / `MoqtClient::close` の `reason` も同様に動的な文字列を受け付ける。
+- 理由の長さと UTF-8 の扱いを次のように決めた。`Cow<'static, str>` により UTF-8 であることは
+  型で保証する。長さの上限は設けない (transport が運ぶ値であり、MOQT §8.5 の Reason Phrase の
+  1024 バイト上限は適用しない)。WebTransport の `WT_CLOSE_SESSION` は transport 側の上限
+  (1024 バイト) で切り詰められた値をそのまま保持し、native QUIC では理由を取得できないため
+  空文字列にする。
+
+### 設計の比較と選択
+
+`SessionEvent::CloseSession` に起点を表すフィールドを追加する案と、peer 起点専用の variant を
+追加する案を比較し、後者を選んだ。
+
+- `CloseSession` は I/O 層が `error.code` / `error.reason` を使って transport へ終了コードを
+  送るイベントである。peer 起点の終了は transport が既に閉じているため送り返してはならない。
+  起点フィールドを追加する案では、既存のすべてのハンドラが起点を判定する必要があり、
+  peer の終了コードを自側の終了コードとして送り返す誤りを型で防げない。
+- 専用 variant にすると、peer 起点の終了を扱わない I/O 層・アプリが variant の網羅性検査で
+  コンパイルエラーになり、追随漏れを検出できる。
+- `SessionError` は本来「本ライブラリが決めた終了のコードと理由」を表す。peer から届く任意の
+  transport コードと理由を同じイベントに混ぜず、`PeerClosed` 専用の payload として保持する。
+- 一方でセッション終了イベントが 2 種類になるため、`poll_event` の `Closing` → `Closed` 遷移、
+  I/O 層の配送対象判定 (`is_notable_event`)、moq-pub / moq-sub のイベント処理を両方に対応させ、
+  doc でも両者が終了イベントであることを明記した。
+
+### I/O 層 (`crates/tokio-moq`)
+
+- `TransportError::PeerSessionClosed { error_code }` を追加し、native QUIC のストリーム受信 /
+  受理 API が返す peer の `CONNECTION_CLOSE` (application error) のコードを保持する。
+  `StreamHandle::peer_session_close` は transport が観測した終了コードと理由を返す。
+- QUIC 直接接続はコードのみを渡し、理由は空文字列にした。
+  - s2n-quic は `connection::Error::Application` の `initiator` が `Remote` の場合に
+    `QuicError::PeerClosed` へ写し、ストリーム受信・送信・受理の各経路でコードを失わない。
+  - tobi-quic は `ConnectionError::Application` を `QuicError::PeerClosed` へ写す。起点を公開
+    しない API のため、自側 close のコードは `Session` が Closing / Closed であることで
+    I/O 層が除外する。
+  - ngtcp2 はストリーム API がコードを公開しないため、ドライバが記録した接続終了理由から
+    application error code を取り出す。
+- WebTransport は `WT_CLOSE_SESSION` の終了コードと理由を保持する。
+  - h3 は `WebTransportEvent::SessionClosed` の `close_error_code` / `close_message` を
+    `WtSession` と共有し、`error_code` (WT_SESSION_GONE などの HTTP/3 コード) は使わない。
+  - h2 は `WtEvent::SessionClosed` の `error_code` / `reason` を保持する。
+  - 自側の close に伴う `SessionClosed` は起点として記録しないよう状態で防御する。
+- `MoqtClient` は制御ストリームの終端 / 受信エラーのほか、WebTransport のセッション状態の
+  変化を直接待ち、peer 起点の終了を `recv_session_closed` で Session に通知する。
+  `WT_CLOSE_SESSION` の処理と制御ストリームの `RESET_STREAM` の到着順に依存せず、終了コードを
+  失わないためである。制御ストリームが transport 終了を伴わずに閉じた場合は、従来どおり
+  `recv_control_stream_closed` で `CLOSED_CONTROL_STREAM` を通知する。
+- `CloseSession` は従来どおり transport へ終了コードを送り、`PeerClosed` では送り返さない。
+
+### テスト
+
+- `tests/test_session/session_close.rs`: コードと理由の観測、peer 起点とローカル起点の区別、
+  `recv_session_closed` 後の `recv_control_stream_closed` の no-op、1024 バイトを超える UTF-8 の
+  理由が切り詰められないことを固定した。
+- `crates/tokio-moq/src/peer_harness.rs`: 実 QUIC 接続で peer が `CONNECTION_CLOSE` を送った
+  とき、client が `PeerClosed` を終了コード付きで観測し、理由が空文字列になることを固定した。
+- `crates/tokio-moq/src/webtransport_h3.rs`: `SessionClosed` の `close_error_code` /
+  `close_message` が記録されること、自側 close では記録しないことを固定した。
+
+### 確認
+
+`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+`cargo fmt --all -- --check` /
+`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt -p tokio-moq` /
+`prek run --files <変更した全ファイル>` が通ることを確認した。

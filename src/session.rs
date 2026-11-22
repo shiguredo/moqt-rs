@@ -29,7 +29,9 @@
 //! - 出力: [`crate::session::core::Session::poll_event`] で [`crate::session::types::SessionEvent`] を取り出す
 //! - 呼び出し側は [`crate::session::types::SessionEvent::SendControl`] を I/O 層に渡して送信し、
 //!   [`crate::session::types::SessionEvent::CloseSession`] で QUIC CONNECTION_CLOSE や WebTransport
-//!   session close を発行する
+//!   session close を発行する。peer 起点の終了は
+//!   [`crate::session::core::Session::recv_session_closed`] で通知し、
+//!   [`crate::session::types::SessionEvent::PeerClosed`] として観測する
 //!
 //! # 実装範囲
 //!
@@ -51,7 +53,10 @@
 //! 本モジュールではこれを以下の API / Event で表現する:
 //!
 //! - `recv_control(msg)` / `recv_control_stream_closed(end)` /
-//!   `SessionEvent::SendControl` — 制御ストリーム用 (SETUP / GOAWAY / transport close)
+//!   `recv_session_closed(code, reason)` / `SessionEvent::SendControl` —
+//!   制御ストリーム用 (SETUP / GOAWAY / transport close)。
+//!   `recv_session_closed` は peer 起点の transport 終了をコードと理由付きで
+//!   `SessionEvent::PeerClosed` として通知する
 //! - `recv_request(msg)` / `SessionEvent::SendRequest { request_id, message }` —
 //!   bidi request stream の最初のメッセージ (Request ID を含む)
 //! - `recv_stream_message(request_id, msg)` / `SessionEvent::SendOnStream { request_id, message, fin }` —

@@ -680,8 +680,8 @@ impl TestPeer {
                     fin,
                 }) if id == request_id => break (message, fin),
                 // セッション終了は応答を送れない原因として返す (無視すると、以後の送信の失敗
-                // だけが残って原因が分からなくなる)
-                Some(SessionEvent::CloseSession(error)) => {
+                // だけが残って原因が分からなくなる)。peer 起点の終了も同じ扱いにする
+                Some(SessionEvent::CloseSession(error) | SessionEvent::PeerClosed(error)) => {
                     return Err(TransportError::Internal(format!(
                         "session closed before responding to request {request_id}: {error}"
                     )));
@@ -867,7 +867,7 @@ impl TestPeer {
         let message = loop {
             match self.session.poll_event() {
                 Some(SessionEvent::SendControl(message)) => break message,
-                Some(SessionEvent::CloseSession(error)) => {
+                Some(SessionEvent::CloseSession(error) | SessionEvent::PeerClosed(error)) => {
                     return Err(TransportError::Internal(format!(
                         "session closed before sending GOAWAY: {error}"
                     )));
@@ -1123,6 +1123,15 @@ impl TestPeer {
             ))),
         }
     }
+
+    /// peer 側から transport を終了コード付きで閉じる
+    ///
+    /// client が peer 起点のセッション終了を観測する経路をテストするために使う。
+    /// QUIC では `CONNECTION_CLOSE` (application error) になり、WT_CLOSE_SESSION の
+    /// 理由に相当する値は送らない。
+    pub async fn close(&mut self, code: u64) -> Result<()> {
+        self.handle.close(code, "").await
+    }
 }
 
 #[cfg(test)]
@@ -1131,10 +1140,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use shiguredo_moqt::error::{
-        SESSION_CLOSED_CONTROL_STREAM, SESSION_FIELD_LENGTH_EXCEEDED, SESSION_INVALID_FIELD,
-        SESSION_INVALID_PATH, SESSION_INVALID_REQUEST_ID, SESSION_INVALID_STREAM_HEADER,
-        SESSION_MALFORMED_AUTH_TOKEN, SESSION_MALFORMED_KEY_VALUE, SESSION_ROLE_VIOLATION,
-        SESSION_UNEXPECTED_MESSAGE,
+        SESSION_CLOSED_CONTROL_STREAM, SESSION_CONTROL_MESSAGE_TIMEOUT,
+        SESSION_FIELD_LENGTH_EXCEEDED, SESSION_INVALID_FIELD, SESSION_INVALID_PATH,
+        SESSION_INVALID_REQUEST_ID, SESSION_INVALID_STREAM_HEADER, SESSION_MALFORMED_AUTH_TOKEN,
+        SESSION_MALFORMED_KEY_VALUE, SESSION_ROLE_VIOLATION, SESSION_UNEXPECTED_MESSAGE,
     };
     use shiguredo_moqt::message::RequestOk;
     use shiguredo_moqt::message::Subscribe;
@@ -1433,6 +1442,35 @@ mod tests {
                 datagrams,
                 vec![b"pending-datagram".to_vec()],
                 "引き渡し済みの datagram が取り出せること"
+            );
+        })
+        .await;
+    }
+
+    /// peer が CONNECTION_CLOSE で終了したら、終了コード付きの PeerClosed を観測する
+    ///
+    /// native QUIC は `CONNECTION_CLOSE` の reason phrase を公開 API から取得できないため、
+    /// 理由は空文字列になる。peer 起点の終了が自側起点の `CloseSession` と取り違えられず、
+    /// transport へ終了コードを送り返さないことをイベントの variant で確認する。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_connection_close_is_reported_as_peer_closed() {
+        run_with_timeout(async {
+            let (mut peer, mut client) = connect_pair().await;
+            peer.close(SESSION_CONTROL_MESSAGE_TIMEOUT)
+                .await
+                .expect("peer が終了コード付きで接続を閉じられること");
+
+            let event = client.next_event().await.expect("イベントを取得できること");
+            let Some(ClientEvent::Session(SessionEvent::PeerClosed(error))) = event else {
+                panic!("peer 起点のセッション終了が届くこと: {event:?}");
+            };
+            assert_eq!(
+                error.code, SESSION_CONTROL_MESSAGE_TIMEOUT,
+                "peer が載せた終了コードがそのまま観測できること"
+            );
+            assert_eq!(
+                error.reason, "",
+                "native QUIC は理由を取得できないため空文字列になること"
             );
         })
         .await;

@@ -77,6 +77,17 @@ pub enum TransportError {
     Qmux(shiguredo_tokio_qmux::Error),
     /// 接続がクローズ済み
     ConnectionClosed,
+    /// peer が transport 層でセッションを終了した (終了コード付き)
+    ///
+    /// QUIC 直接接続のストリーム受信 / 受理 API が返す。`error_code` は peer が
+    /// `CONNECTION_CLOSE` に載せた application error code であり、
+    /// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) のコードとして
+    /// そのまま扱える。WebTransport 経路は `WT_CLOSE_SESSION` の終了コードと理由を
+    /// セッション終了イベントとして観測できるため、この variant を使わない。
+    PeerSessionClosed {
+        /// peer が載せた application error code
+        error_code: u64,
+    },
     /// peer がこのストリームの送信方向を終端した (STOP_SENDING)
     ///
     /// tobi-quic は peer の STOP_SENDING を受信したストリームの送信 API (send / finish /
@@ -188,6 +199,9 @@ impl std::fmt::Display for TransportError {
             Self::WtH2(e) => write!(f, "webtransport over http2 error: {e}"),
             Self::Qmux(e) => write!(f, "QMux error: {e}"),
             Self::ConnectionClosed => write!(f, "connection closed"),
+            Self::PeerSessionClosed { error_code } => {
+                write!(f, "session closed by peer (error code {error_code:#x})")
+            }
             Self::StreamReset { error_code } => {
                 write!(f, "stream reset by peer (error code {error_code:#x})")
             }

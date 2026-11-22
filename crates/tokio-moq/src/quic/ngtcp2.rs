@@ -145,6 +145,23 @@ impl Connection {
             .ok_or(QuicError::ConnectionClosed)
     }
 
+    /// peer 起点のセッション終了コード (取得できた場合のみ)
+    ///
+    /// ngtcp2 のストリーム受信 API は接続終了を `ConnectionClosed` に畳んでコードを
+    /// 公開しないため、ドライバが記録した接続終了理由から application error code を取り出す。
+    /// 自側の close でも同じ記録が残るが、`Session` が Closing / Closed であれば I/O 層は
+    /// 新しいセッション終了イベントを発行しない。
+    pub(crate) fn peer_session_close(&self) -> Option<u64> {
+        let record = self
+            .close_record
+            .lock()
+            .expect("the close record must not be poisoned");
+        match record.as_ref()? {
+            CloseReason::Application { code } => Some(*code),
+            _ => None,
+        }
+    }
+
     /// 接続が終了するまで待ち、終了理由を返す
     pub async fn closed(&self) -> Option<CloseReason> {
         loop {

@@ -37,6 +37,7 @@ use tokio_rustls::TlsConnector;
 
 use crate::error::{Result, TransportError};
 use crate::quic::{StopSendingObserved, StopSendingReceiver};
+use crate::transport::PeerSessionClose;
 use crate::webtransport::{
     WtSessionState, session_policy, update_session_state, wait_until_terminated,
 };
@@ -396,9 +397,12 @@ impl WtH2Client {
         // remap は不要である (draft-ietf-webtrans-http2-16 §6.3)。
         let (stop_sending_tx, stop_sending_rx) = mpsc::unbounded_channel();
         let (session_state_tx, _) = watch::channel(WtSessionState::Active);
+        // peer の WT_CLOSE_SESSION が運んだ終了コードと理由を driver とアプリ側で共有する
+        let peer_close: Arc<StdMutex<Option<PeerSessionClose>>> = Arc::new(StdMutex::new(None));
         let datagrams = Arc::new(StdMutex::new(VecDeque::new()));
 
         let driver_session_state = session_state_tx.clone();
+        let driver_peer_close = Arc::clone(&peer_close);
         let driver_datagrams = Arc::clone(&datagrams);
         let driver_cmd_tx = cmd_tx.clone();
         let receive_datagrams = config.receive_datagrams;
@@ -414,6 +418,7 @@ impl WtH2Client {
                 datagrams: driver_datagrams,
                 receive_datagrams,
                 session_state: driver_session_state,
+                peer_close: driver_peer_close,
                 streams: HashMap::new(),
                 pending_sends: HashMap::new(),
                 wt_out_pending: Vec::new(),
@@ -431,6 +436,7 @@ impl WtH2Client {
             bi_rx: Some(bi_rx),
             stop_sending_rx: Some(stop_sending_rx),
             session_state: session_state_tx,
+            peer_close,
             datagrams,
             _driver: AbortOnDrop(driver),
         })
@@ -648,6 +654,8 @@ pub struct WtH2Session {
     stop_sending_rx: Option<StopSendingReceiver>,
     /// セッション状態 (§6.12 の終了 / §6.13 の drain / 接続エラー) を配る sender
     session_state: watch::Sender<WtSessionState>,
+    /// peer の WT_CLOSE_SESSION が運んだ終了コードと理由 (観測前は `None`)
+    peer_close: Arc<StdMutex<Option<PeerSessionClose>>>,
     /// 受信した datagram のバッファ
     datagrams: Arc<StdMutex<VecDeque<Vec<u8>>>>,
     /// driver タスクの JoinHandle (drop で abort する)。
@@ -667,6 +675,18 @@ impl WtH2Session {
     /// セッション状態の変更を観測する receiver を作る
     pub(crate) fn session_state_receiver(&self) -> watch::Receiver<WtSessionState> {
         self.session_state.subscribe()
+    }
+
+    /// peer が WT_CLOSE_SESSION で通知した終了コードと理由を返す
+    ///
+    /// 観測前は `None` を返す。`reason` は capsule が運んだ UTF-8 文字列をそのまま保持する。
+    /// WT_CLOSE_SESSION を伴わない終了 (CONNECT stream の close / 接続エラー) では
+    /// 終了コードを取得できないため `None` のままになる。
+    pub(crate) fn peer_session_close(&self) -> Option<PeerSessionClose> {
+        self.peer_close
+            .lock()
+            .expect("peer close info mutex must not be poisoned")
+            .clone()
     }
 
     /// 単方向送信ストリームを開く
@@ -1203,6 +1223,8 @@ struct DriverState {
     datagrams: Arc<StdMutex<VecDeque<Vec<u8>>>>,
     receive_datagrams: bool,
     session_state: watch::Sender<WtSessionState>,
+    /// peer の WT_CLOSE_SESSION が運んだ終了コードと理由
+    peer_close: Arc<StdMutex<Option<PeerSessionClose>>>,
     streams: HashMap<WtStreamId, StreamState>,
     /// 送信待ちのデータ (ストリームごと、FIFO)
     pending_sends: HashMap<WtStreamId, VecDeque<PendingSend>>,
@@ -1692,6 +1714,18 @@ impl DriverState {
                 tracing::info!(
                     "WebTransport session closed by peer: error_code={error_code:#x}, reason={reason:?}"
                 );
+                // WT_CLOSE_SESSION の Application Error Code と理由を保持する。draft §6.12 は
+                // この capsule を受信したらセッションを終了することを定めるため、この経路は
+                // peer 起点である (自側の close は `WtSession::close` が送るのみで、
+                // このイベントを発行しない)。
+                *self
+                    .peer_close
+                    .lock()
+                    .expect("peer close info mutex must not be poisoned") =
+                    Some(PeerSessionClose {
+                        code: u64::from(error_code),
+                        reason,
+                    });
                 update_session_state(&self.session_state, WtSessionState::ClosedByPeer);
                 let _ = self
                     .io

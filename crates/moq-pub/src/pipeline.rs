@@ -2411,6 +2411,16 @@ pub async fn run(
                             tracing::warn!("Session closed: {:#x} {}", err.code, err.reason);
                             Ok(true)
                         }
+                        Some(ClientEvent::Session(SessionEvent::PeerClosed(err))) => {
+                            // peer 起点の終了。peer の transport は既に閉じているため
+                            // 終了コードを送り返さず、終了理由を記録して後始末へ進む
+                            tracing::warn!(
+                                "Session closed by peer: {:#x} {}",
+                                err.code,
+                                err.reason
+                            );
+                            Ok(true)
+                        }
                         Some(ClientEvent::Session(SessionEvent::PublishDoneReceived {
                             request_id,
                             ..
@@ -3019,6 +3029,14 @@ pub async fn run(
                             SessionEvent::CloseSession(err) => {
                                 tracing::warn!(
                                     "The request migration side session closed: authority={}, {:#x} {}",
+                                    url.authority,
+                                    err.code,
+                                    err.reason,
+                                );
+                            }
+                            SessionEvent::PeerClosed(err) => {
+                                tracing::warn!(
+                                    "The request migration side session was closed by peer: authority={}, {:#x} {}",
                                     url.authority,
                                     err.code,
                                     err.reason,
@@ -7441,6 +7459,12 @@ mod tests {
         assert!(
             is_transport_session_end(&Error::from(TransportError::ConnectionClosed)),
             "接続クローズはセッション終了として扱うこと"
+        );
+        assert!(
+            is_transport_session_end(&Error::from(TransportError::PeerSessionClosed {
+                error_code: shiguredo_moqt::error::SESSION_CONTROL_MESSAGE_TIMEOUT,
+            })),
+            "peer 起点のセッション終了もセッション終了として扱うこと"
         );
 
         for error in [

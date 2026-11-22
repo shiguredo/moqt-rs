@@ -1857,8 +1857,11 @@ impl Session {
         {
             Ok(properties) => properties,
             Err(msg_err) => {
+                // Malformed Track の cancel 理由は静的な文言を要求するため、
+                // SessionError へ包む前に取り出しておく
+                let reason = msg_err.reason();
                 let err = session_error_from_data_message(msg_err);
-                self.terminate_malformed_track(object_request_id, Some(stream_id), err.reason);
+                self.terminate_malformed_track(object_request_id, Some(stream_id), reason);
                 return Err(err);
             }
         };
@@ -3688,8 +3691,11 @@ impl Session {
         let decoded_properties = match decode_object_properties(properties_bytes) {
             Ok(properties) => properties,
             Err(msg_err) => {
+                // Malformed Track の cancel 理由は静的な文言を要求するため、
+                // SessionError へ包む前に取り出しておく
+                let reason = msg_err.reason();
                 let err = session_error_from_data_message(msg_err);
-                self.terminate_malformed_track(request_id, None, err.reason);
+                self.terminate_malformed_track(request_id, None, reason);
                 return Err(err);
             }
         };

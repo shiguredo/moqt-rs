@@ -1372,7 +1372,7 @@ fn send_object_datagram_rejected_for_status_with_end_of_group() {
             "status={status}"
         );
         assert_eq!(
-            err.as_session_error().map(|e| e.reason),
+            err.as_session_error().map(|e| e.reason.as_ref()),
             Some("STATUS and END_OF_GROUP cannot both be set"),
             "status={status}"
         );

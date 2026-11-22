@@ -209,7 +209,7 @@ fn new_client(transport: Transport, options: SetupOptions) -> Result<Session, Se
 fn new_server(transport: Transport, options: SetupOptions) -> Result<Session, SessionError>
 fn poll_event(&mut self) -> Option<SessionEvent>
 fn tick(&mut self, now_ms: u64)
-fn close(&mut self, code: u64, reason: &'static str)
+fn close(&mut self, code: u64, reason: impl Into<Cow<'static, str>>)
 fn state(&self) -> SessionState
 fn role(&self) -> Role
 fn transport(&self) -> Transport
@@ -309,7 +309,8 @@ End of Unknown Range (`0x10C`、§11.4.2 (End of Range)) を示したうえで�
 | `SendRequest { request_id, message }` | 新規 bidi request stream を開いて書く |
 | `SendOnStream { request_id, message, fin }` | 既存 bidi request stream に書く (`fin` で FIN) |
 | `Established` | 両側 SETUP 完了 |
-| `CloseSession(SessionError)` | 接続を閉じる |
+| `CloseSession(SessionError)` | 自側が決めたセッション終了。`error.code` / `error.reason` で接続を閉じる |
+| `PeerClosed(SessionError)` | peer が transport 層で終了した通知。接続は既に閉じているため送り返さず、`error.code` / `error.reason` をアプリで観測する。理由を取得できない transport では `error.reason` は空文字列 |
 | `RequestUpdateReceived { request_id, parameters }` | REQUEST_UPDATE 受信 |
 | `PublishStateNotifyReceived { request_id, parameters }` | PUBLISH_STATE_NOTIFY 受信 |
 | `PublishNamespaceReceived { request_id, track_namespace, parameters }` | PUBLISH_NAMESPACE 受信 (subscriber 側。REQUEST_OK / REQUEST_ERROR で応答する) |
@@ -372,6 +373,7 @@ request (`forget_*` 後) へのメッセージは request 種別と状態が失�
 fn recv_control(&mut self, msg: ControlMessage) -> Result<(), SessionError>
 fn recv_control_stream_type(&mut self, stream_type: u64) -> Result<(), SessionError>
 fn recv_control_stream_closed(&mut self, end: RequestStreamEnd) -> Result<(), SessionError>
+fn recv_session_closed(&mut self, code: u64, reason: impl Into<Cow<'static, str>>)
 fn recv_request(&mut self, msg: ControlMessage) -> Result<(), RecvRequestError>
 fn recv_request_stream_closed(&mut self, request_id: u64, end: RequestStreamEnd) -> Result<(), SessionError>
 fn recv_stream_message(&mut self, request_id: u64, msg: ControlMessage) -> Result<(), SessionError>
@@ -413,6 +415,13 @@ fn report_mid_object_fin(&mut self, stream_id: DataStreamId) -> Result<(), Sessi
 ```
 
 `DataStreamId(pub u64)` は受信 uni data stream を呼び出し側が管理するための識別子。
+
+`recv_session_closed(code, reason)` は peer が transport 層でセッションを終了した通知である
+(QUIC の CONNECTION_CLOSE / WebTransport の WT_CLOSE_SESSION)。呼ぶと状態が `Closing` になり、
+`poll_event` で `SessionEvent::PeerClosed` を取り出した時点で `Closed` になる。`Closing` /
+`Closed` では no-op であり、後続の `recv_control_stream_closed` も no-op になる。`code` は
+transport が通知した値のままで、`reason` は取得できた場合だけ渡す (取得できない transport は
+空文字列)。自側の終了 (`close` / プロトコル違反の検出) は `SessionEvent::CloseSession` で通知する。
 
 `recv_subgroup_object()` は Object 単位のフィルタ再適用結果を `TrackDataAcceptance` で返す。
 `FilteredOut` / `Discarded` の Object は Application へ渡さないが、wire 上の payload は
@@ -664,7 +673,7 @@ id は破棄対象の保持集合へ移るため、その後に届く FIN / RESE
 ```rust
 pub struct SessionError {
     pub code: u64,
-    pub reason: &'static str,
+    pub reason: Cow<'static, str>,
 }
 
 pub enum SendRequestError {

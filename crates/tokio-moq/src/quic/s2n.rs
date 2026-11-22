@@ -294,6 +294,15 @@ impl Connection {
         .await
     }
 
+    /// peer 起点のセッション終了コード (取得できた場合のみ)
+    ///
+    /// s2n-quic の接続ハンドルからは peer の application error code を同期的に取得できない。
+    /// 本バックエンドではストリーム受信 / 受理 API のエラー (`QuicError::PeerClosed`) が
+    /// コードを運ぶため、ここでは保持しない。
+    pub(crate) fn peer_session_close(&self) -> Option<u64> {
+        None
+    }
+
     /// 接続が終了するまで待ち、終了理由を返す
     ///
     /// s2n-quic の公開 API には接続の終了理由を待つ手段が無い。サーバー側で購読者が
@@ -382,6 +391,11 @@ impl RecvStream {
                 error_code: u64::from(error),
                 reliable_size: None,
             }),
+            // 接続終了はストリームの受信でも `ConnectionError` として返る。peer が
+            // application error で閉じた場合は終了コードを失わずに伝える
+            Err(s2n_quic::stream::Error::ConnectionError { error, .. }) => {
+                Err(map_connection_error(error))
+            }
             Err(e) => Err(QuicError::Other(format!("{e}"))),
         }
     }
@@ -444,8 +458,22 @@ impl StreamAcceptor {
 }
 
 /// 接続エラーを共通の QUIC エラーへ写す
+///
+/// peer 起点の application error (RFC 9000 §19.19 の `CONNECTION_CLOSE` type 0x1d) は、
+/// MOQT のセッション終了コードとして使えるため [`QuicError::PeerClosed`] でコードを保つ。
+/// 自側が閉じた application error は `initiator` が `Local` になるため写像しない。
+/// s2n-quic の公開 API からは reason phrase を取得できないため、理由は保持しない。
 fn map_connection_error(error: s2n_quic::connection::Error) -> QuicError {
-    QuicError::Other(format!("{error}"))
+    match error {
+        s2n_quic::connection::Error::Application {
+            error,
+            initiator: s2n_quic::provider::event::Location::Remote,
+            ..
+        } => QuicError::PeerClosed {
+            error_code: u64::from(error),
+        },
+        error => QuicError::Other(format!("{error}")),
+    }
 }
 
 /// 送信 API のエラーを共通の QUIC エラーへ写す
@@ -456,6 +484,8 @@ fn map_send_error(error: s2n_quic::stream::Error) -> QuicError {
         s2n_quic::stream::Error::StreamReset { error, .. } => QuicError::Stopped {
             error_code: u64::from(error),
         },
+        // 送信 API でも接続終了は `ConnectionError` として返る
+        s2n_quic::stream::Error::ConnectionError { error, .. } => map_connection_error(error),
         e => QuicError::Other(format!("{e}")),
     }
 }

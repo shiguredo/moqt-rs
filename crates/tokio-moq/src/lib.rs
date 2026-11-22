@@ -1553,6 +1553,7 @@ pub fn is_retryable_connect_error(error: &TransportError) -> bool {
         | TransportError::WtH2(_)
         | TransportError::Qmux(_)
         | TransportError::ConnectionClosed
+        | TransportError::PeerSessionClosed { .. }
         | TransportError::StreamReset { .. }
         | TransportError::StreamClosed => true,
     }

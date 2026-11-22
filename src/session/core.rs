@@ -5,6 +5,7 @@
 //! - ライフサイクル (作成 / `poll_event` / `close` / `fail`)
 //! - SETUP ハンドシェイク (draft §9.1 (SETUP))
 //! - 制御ストリーム受信 dispatcher (`recv_control` / `recv_request` / `recv_stream_message`)
+//! - peer 起点のセッション終了通知 (`recv_session_closed`)
 //! - Request ID API (`next_local_request_id`)
 //! - REQUEST_OK / REQUEST_ERROR の送受信 (共通 dispatcher)
 //!
@@ -16,6 +17,7 @@
 //! 送受信処理は兄弟モジュール (`subscription.rs` / `fetch.rs` / `track_status.rs` /
 //! `namespace.rs` / `goaway.rs`) に分離している。relay 全体の routing / fan-out / cache / policy はこの型の責務ではない。
 
+use alloc::borrow::Cow;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use hashbrown::{HashMap, HashSet};
@@ -996,9 +998,12 @@ impl Session {
     /// 呼び出し側は `None` が返るまで繰り返し呼び出して I/O 層と同期する。
     pub fn poll_event(&mut self) -> Option<SessionEvent> {
         let event = self.events.pop_front();
-        // CloseSession を取り出したタイミングで Closing → Closed
-        if matches!(event, Some(SessionEvent::CloseSession(_)))
-            && self.state == SessionState::Closing
+        // セッション終了イベントを取り出したタイミングで Closing → Closed
+        // (CloseSession は自側起点、PeerClosed は peer 起点であり、どちらも終了イベント)
+        if matches!(
+            event,
+            Some(SessionEvent::CloseSession(_) | SessionEvent::PeerClosed(_))
+        ) && self.state == SessionState::Closing
         {
             self.state = SessionState::Closed;
         }
@@ -1067,6 +1072,11 @@ impl Session {
     /// (draft-ietf-moq-transport-23 §6.3 (Session initialization) / §12.2
     /// (Session Termination Codes))。
     ///
+    /// この経路は §6.3 違反の検出であり、自側が `CLOSED_CONTROL_STREAM` でセッションを
+    /// 終了させるローカル起点の終了である ([`SessionEvent::CloseSession`] を発行する)。
+    /// peer が transport 層でセッションを終了した場合は、I/O 層が
+    /// [`Self::recv_session_closed`] で通知すること。
+    ///
     /// クローズ処理中 / クローズ済みの呼び出しは `Ok(())` で no-op。
     pub fn recv_control_stream_closed(
         &mut self,
@@ -1090,13 +1100,39 @@ impl Session {
         Err(err)
     }
 
+    /// peer が transport 層でセッションを終了したことを、終了コードと理由付きで通知する
+    ///
+    /// I/O 層が transport 層から peer 起点のセッション終了を観測したときに呼ぶ
+    /// (native QUIC の `CONNECTION_CLOSE` / WebTransport の `WT_CLOSE_SESSION`)。
+    /// `code` は transport が通知した値をそのまま保持し、正規化しない (既知コードとして
+    /// 扱うかは [`crate::error::normalize_session_termination_code`] でアプリが判定する)。
+    /// `reason` は transport が取得できた場合だけ渡し、取得できない場合は空文字列にする。
+    /// UTF-8 文字列であれば長さの上限はなく、空文字列も受理する。
+    ///
+    /// 本 API は [`SessionEvent::PeerClosed`] を発行し、状態を [`SessionState::Closing`] に
+    /// する。`poll_event` で [`SessionEvent::PeerClosed`] を取り出した時点で
+    /// [`SessionState::Closed`] へ遷移する。クローズ処理中 / クローズ済みの呼び出しは
+    /// no-op であり、後続の [`Self::recv_control_stream_closed`] も no-op になる。
+    pub fn recv_session_closed(&mut self, code: u64, reason: impl Into<Cow<'static, str>>) {
+        if matches!(self.state, SessionState::Closing | SessionState::Closed) {
+            return;
+        }
+        // peer の終了コードは transport 由来の値であり、ローカル専用コードの置換は行わない。
+        // ローカル専用コードは wire に載らない値であるため peer が通知することはなく、
+        // 観測した値をそのままアプリへ渡すことを優先する。
+        self.state = SessionState::Closing;
+        self.events
+            .push_back(SessionEvent::PeerClosed(SessionError::new(code, reason)));
+    }
+
     /// セッションを明示的にクローズする
     ///
     /// [`SessionEvent::CloseSession`] を発行し、状態を [`SessionState::Closing`] にする。
     /// 既に Closing / Closed の場合は何もしない。
     /// ローカル専用コード (`SESSION_LOCAL_FILTER_MISMATCH` / `SESSION_LOCAL_DATAGRAM_TIMEOUT`) を
     /// 渡した場合は `SESSION_INTERNAL_ERROR` に置換し、未登録値を wire に出さない。
-    pub fn close(&mut self, code: u64, reason: &'static str) {
+    /// `reason` には静的な英語文言だけでなく、動的な文字列も渡せる。
+    pub fn close(&mut self, code: u64, reason: impl Into<Cow<'static, str>>) {
         // 公開 API の契約として、ローカル専用コードを Session Termination レジストリの
         // INTERNAL_ERROR に置換する (`fail` の最終防御とは独立に行う)
         let code = if is_local_error_code(code) {

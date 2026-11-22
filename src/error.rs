@@ -178,8 +178,8 @@ impl MessageError {
     /// 人間可読の説明文を取り出す
     ///
     /// テキスト付きの variant はその文字列を、それ以外は `Display` の表現を返す。
-    /// `SessionError` の `reason` は `&'static str` のため、動的生成された文字列は
-    /// 汎用の文言に置き換わる。
+    /// `SessionError` の `reason` は動的な文字列も保持できるが、本関数は静的な文言だけを
+    /// 返す (動的生成された説明は汎用の文言に置き換わる)。
     pub fn reason(&self) -> &'static str {
         match self {
             Self::ProtocolViolation(msg)
@@ -633,10 +633,11 @@ const KNOWN_STREAM_RESET_CODES: &[u64] = &[
 
 /// Session Termination 文脈の未知コードを INTERNAL_ERROR 相当に正規化する
 ///
-/// draft-ietf-moq-transport-23 §13 (Grease) の MUST。`code` はアプリケーションの transport 層が
-/// 観測した接続終了コード (peer の CONNECTION_CLOSE / WebTransport close code) を想定する。
-/// ライブラリは peer の Session Termination コードをイベントとして公開しないため、本関数は
-/// アプリが transport 層から得た値を分類するために使う。
+/// draft-ietf-moq-transport-23 §13 (Grease) の MUST。`code` は peer の
+/// CONNECTION_CLOSE / WebTransport close code を想定する。`Session` は
+/// [`crate::session::types::SessionEvent::PeerClosed`] の `code` を transport が通知した
+/// 生の値のまま公開するため、アプリは本関数で既知コードか未知コード (greasing 値) かを
+/// 判定してから分岐する。
 pub fn normalize_session_termination_code(code: u64) -> u64 {
     if KNOWN_SESSION_TERMINATION_CODES.contains(&code) {
         code

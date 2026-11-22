@@ -139,6 +139,16 @@ pub enum QuicError {
     },
     /// 接続が終了した
     ConnectionClosed,
+    /// peer が application error で接続を終了した
+    ///
+    /// RFC 9000 §19.19 の `CONNECTION_CLOSE` (type 0x1d) が運ぶ application error code を
+    /// 保持する。draft-ietf-moq-transport-23 §6.6 (Termination) の transport 層の終了であり、
+    /// コードは §12.2 (Session Termination Codes) の値として扱える。理由 (reason phrase) は
+    /// バックエンドの公開 API から取得できないため保持しない。
+    PeerClosed {
+        /// peer が載せた application error code
+        error_code: u64,
+    },
     /// 上記以外のエラー
     Other(String),
 }
@@ -160,6 +170,9 @@ impl std::fmt::Display for QuicError {
                 None => write!(f, "stream reset by peer: error_code={error_code:#x}"),
             },
             Self::ConnectionClosed => write!(f, "connection closed"),
+            Self::PeerClosed { error_code } => {
+                write!(f, "session closed by peer: error_code={error_code:#x}")
+            }
             Self::Other(message) => write!(f, "{message}"),
         }
     }
@@ -169,7 +182,11 @@ impl std::error::Error for QuicError {}
 
 impl From<QuicError> for TransportError {
     fn from(e: QuicError) -> Self {
-        Self::Quic(e.to_string())
+        match e {
+            // peer 起点の終了コードは I/O 層がセッション終了として扱えるよう variant を保つ
+            QuicError::PeerClosed { error_code } => Self::PeerSessionClosed { error_code },
+            e => Self::Quic(e.to_string()),
+        }
     }
 }
 
@@ -191,12 +208,28 @@ impl From<tobi_quic::Error> for QuicError {
                 error_code,
                 reliable_size,
             },
-            tobi_quic::Error::Connection(_) => Self::ConnectionClosed,
-            tobi_quic::Error::Stream(tobi_quic::StreamError::ConnectionLost(_)) => {
-                Self::ConnectionClosed
+            tobi_quic::Error::Connection(reason) => connection_lost(reason),
+            tobi_quic::Error::Stream(tobi_quic::StreamError::ConnectionLost(reason)) => {
+                connection_lost(reason)
             }
             e => Self::Other(e.to_string()),
         }
+    }
+}
+
+/// tobi-quic の接続終了理由を共通の QUIC エラーへ写す
+///
+/// tobi-quic の `ConnectionError` は終了の起点 (自側 / peer) を公開しないため、
+/// application error による終了は起点を問わず [`QuicError::PeerClosed`] にする。
+/// 自側の close 後にこの値が現れても、`Session` は既に Closing / Closed であり
+/// I/O 層は新しいセッション終了イベントを発行しない。
+#[cfg(not(windows))]
+fn connection_lost(reason: tobi_quic::ConnectionError) -> QuicError {
+    match reason {
+        tobi_quic::ConnectionError::Application { code, .. } => {
+            QuicError::PeerClosed { error_code: code }
+        }
+        _ => QuicError::ConnectionClosed,
     }
 }
 

@@ -911,6 +911,8 @@ mod property_scope;
 mod request_stream;
 #[path = "test_session/send_prevalidation.rs"]
 mod send_prevalidation;
+#[path = "test_session/session_close.rs"]
+mod session_close;
 #[path = "test_session/setup.rs"]
 mod setup;
 #[path = "test_session/shared_track_alias.rs"]

@@ -883,7 +883,10 @@ fn stream_diag_enabled() -> bool {
 /// 失敗しても `?` では伝播させない (閉じた事実を `Session closed: {:#x} {}` の形式で
 /// 記録して終了する)。呼び出し側は「送信して閉じた」ことを `session_terminated` に反映する。
 async fn close_session(client: &mut MoqtClient, termination: SessionError) {
-    if let Err(e) = client.close(termination.code, termination.reason).await {
+    if let Err(e) = client
+        .close(termination.code, termination.reason.clone())
+        .await
+    {
         tracing::warn!("Failed to close session: {e}");
     }
     tracing::warn!(
@@ -5442,6 +5445,16 @@ pub async fn run(
                             tracing::warn!("Session closed: {:#x} {}", err.code, err.reason);
                             Ok(true)
                         }
+                        Some(ClientEvent::Session(SessionEvent::PeerClosed(err))) => {
+                            // peer 起点の終了。peer の transport は既に閉じているため
+                            // 終了コードを送り返さず、終了理由を記録して後始末へ進む
+                            tracing::warn!(
+                                "Session closed by peer: {:#x} {}",
+                                err.code,
+                                err.reason
+                            );
+                            Ok(true)
+                        }
                         Some(ClientEvent::Session(SessionEvent::ResetDataStream {
                             stream_id,
                             error_code,
@@ -6187,6 +6200,14 @@ pub async fn run(
                             SessionEvent::CloseSession(err) => {
                                 tracing::warn!(
                                     "The request migration side session closed: url={url_display}, \
+                                     {:#x} {}",
+                                    err.code,
+                                    err.reason,
+                                );
+                            }
+                            SessionEvent::PeerClosed(err) => {
+                                tracing::warn!(
+                                    "The request migration side session was closed by peer: url={url_display}, \
                                      {:#x} {}",
                                     err.code,
                                     err.reason,
@@ -13119,6 +13140,12 @@ mod tests {
         assert!(
             is_transport_session_end(&Error::from(TransportError::ConnectionClosed)),
             "接続クローズはセッション終了として扱うこと"
+        );
+        assert!(
+            is_transport_session_end(&Error::from(TransportError::PeerSessionClosed {
+                error_code: shiguredo_moqt::error::SESSION_CONTROL_MESSAGE_TIMEOUT,
+            })),
+            "peer 起点のセッション終了もセッション終了として扱うこと"
         );
 
         for error in [

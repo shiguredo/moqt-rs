@@ -169,8 +169,11 @@ impl From<tokio_moq::error::TransportError> for Error {
             // catch-all に落とすと WebTransport variant になり `WebTransport:` が付くため明示する
             tokio_moq::error::TransportError::InvalidAuthority(msg)
             | tokio_moq::error::TransportError::ResolutionFailed(msg) => Self::Other(msg),
-            // セッション終了は表示文字列ではなく variant で判定できるように専用にする
-            tokio_moq::error::TransportError::ConnectionClosed => Self::ConnectionClosed,
+            // セッション終了は表示文字列ではなく variant で判定できるように専用にする。
+            // peer 起点の終了コードは `SessionEvent::PeerClosed` としてアプリへ届くため、
+            // transport のエラーとしてはセッション終了だけを伝える
+            tokio_moq::error::TransportError::ConnectionClosed
+            | tokio_moq::error::TransportError::PeerSessionClosed { .. } => Self::ConnectionClosed,
             // peer の STOP_SENDING によるストリーム終端も、セッション終了と区別して
             // 判定できるように専用にする (pipeline は致命エラーにしない)
             tokio_moq::error::TransportError::StreamReset { error_code } => {

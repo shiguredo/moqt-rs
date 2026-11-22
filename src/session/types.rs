@@ -12,6 +12,7 @@ use crate::message_parameter::{LocationFilter, MessageParameters, RangeFilterSet
 use crate::msf::MsfCompression;
 use crate::object_properties::ObjectProperties;
 use crate::track_properties::TrackProperties;
+use alloc::borrow::Cow;
 use alloc::collections::{BTreeSet, VecDeque};
 use alloc::vec::Vec;
 use hashbrown::HashMap;
@@ -54,9 +55,9 @@ pub enum SessionState {
     LocalSetupSent,
     /// 両側 SETUP 完了
     Established,
-    /// セッション終了処理中 (close() 後、CloseSession イベント発行済み、ただしまだ poll されていない)
+    /// セッション終了処理中 (`close` / `recv_session_closed` 後、終了イベント発行済み、ただしまだ poll されていない)
     Closing,
-    /// 完全終了 (CloseSession イベントが poll された後)
+    /// 完全終了 (CloseSession / PeerClosed イベントが poll された後)
     Closed,
 }
 
@@ -90,19 +91,48 @@ impl PeerControlMessageSizeLimit {
     }
 }
 
-/// セッション終了エラー (draft-ietf-moq-transport-23 §16.12.1 (Session Termination Error Codes))
+/// セッション終了のコードと理由
+///
+/// ローカル起点のセッション終了 ([`SessionEvent::CloseSession`]) では、本ライブラリが
+/// 決めた終了コード (`draft-ietf-moq-transport-23 §16.12.1 (Session Termination Error Codes)`)
+/// と、その理由を表す静的な英語文言を保持する。peer 起点のセッション終了
+/// ([`SessionEvent::PeerClosed`]) では、peer の transport 層が通知した終了コードと理由を
+/// そのまま保持する。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionError {
-    /// Session Termination Error Code (draft-ietf-moq-transport-23 §16.12.1 (Session Termination Error Codes))
+    /// Session Termination Error Code
+    /// (draft-ietf-moq-transport-23 §16.12.1 (Session Termination Error Codes))
+    ///
+    /// peer 起点の終了では、peer が transport 層で通知した値をそのまま保持する。
+    /// `draft-ietf-moq-transport-23 §12.2 (Session Termination Codes)` の既知コードか
+    /// 未知の greasing 値かは区別せず、正規化もしない。既知コードとして扱うかは
+    /// [`crate::error::normalize_session_termination_code`] を使ってアプリが判定する。
     pub code: u64,
-    /// 人間が読むための説明 (英語、静的文字列)
-    pub reason: &'static str,
+    /// 人間が読むための説明
+    ///
+    /// ローカル起点の終了では静的な英語文言が入り、peer 起点の終了では transport 層から
+    /// 取得できた理由がそのまま入る。理由を取得できない transport (native QUIC など) では
+    /// 空文字列になる。
+    ///
+    /// UTF-8 文字列であることは型で保証される。長さの上限は設けない。transport が運ぶ
+    /// 終了理由は MOQT のメッセージとして符号化される Reason Phrase ではなく、
+    /// draft-ietf-moq-transport-23 §8.5 (Reason Phrase Structure) の 1024 バイト上限は
+    /// 適用されないため、transport が受け取った値 (WebTransport では最大 1024 バイト) を
+    /// 切り詰めずに保持する。この扱いは transport の仕様 (draft-ietf-webtrans-http3-16 §6 /
+    /// draft-ietf-webtrans-http2-16 §6.12) に由来し、将来の改定で変わる可能性がある。
+    pub reason: Cow<'static, str>,
 }
 
 impl SessionError {
-    /// セッション終了エラーを作る
-    pub const fn new(code: u64, reason: &'static str) -> Self {
-        Self { code, reason }
+    /// セッション終了のコードと理由を作る
+    ///
+    /// `reason` には静的な英語文言だけでなく、transport から取得した動的な理由
+    /// ([`alloc::string::String`] など) も渡せる。
+    pub fn new(code: u64, reason: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            code,
+            reason: reason.into(),
+        }
     }
 }
 
@@ -261,8 +291,31 @@ pub enum SessionEvent {
     },
     /// セッションが確立した (両側の SETUP 完了)
     Established,
-    /// セッションをクローズすべき (I/O 層は接続を閉じる)
+    /// 自側が決めたセッション終了 (I/O 層は接続を閉じる)
+    ///
+    /// [`crate::session::core::Session::close`] と、プロトコル違反を検出した
+    /// [`crate::session::core::Session::recv_control_stream_closed`] などの受信 API が
+    /// 発行する。I/O 層はこのイベントを受け取ったら、`error.code` / `error.reason` を
+    /// 使って transport 層の接続を閉じる。
+    ///
+    /// peer が transport 層でセッションを終了した場合は [`SessionEvent::PeerClosed`] で通知する。
+    /// 両者を variant で分けるのは、I/O 層の動作が異なるためである。`CloseSession` は自側が
+    /// 決めた終了なので終了コードを transport へ送るが、`PeerClosed` は既に transport が
+    /// 閉じているため送り返してはならない。同一の variant に起点の情報を足す設計では、
+    /// 既存のすべてのハンドラが起点を判定する必要があり、peer の終了コードを自側の終了コードと
+    /// して送り返す誤りを型で防げない。
     CloseSession(SessionError),
+    /// peer が transport 層でセッションを終了した (peer 起点のセッション終了)
+    ///
+    /// I/O 層が transport の終了 (QUIC の `CONNECTION_CLOSE` / WebTransport の
+    /// `WT_CLOSE_SESSION`) を観測し、取得できた終了コードと理由を
+    /// [`crate::session::core::Session::recv_session_closed`] に渡したときに発行する。
+    /// 理由を取得できない transport (native QUIC など) では `error.reason` が空文字列になる。
+    ///
+    /// I/O 層はこのイベントをアプリへ配送するだけで、接続を閉じる必要はない (既に閉じている)。
+    /// このイベントを取り出した時点でセッション状態は
+    /// [`SessionState::Closed`] になる。
+    PeerClosed(SessionError),
     /// peer からの REQUEST_UPDATE を受信した (アプリは send_request_ok / send_request_error で応答する)
     ///
     /// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): 複数の更新の処理を合体できるため、

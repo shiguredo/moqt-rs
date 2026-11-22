@@ -142,6 +142,15 @@ impl Connection {
         self.inner.receive_datagram().await.map_err(tobi::map_error)
     }
 
+    /// peer 起点のセッション終了コード (取得できた場合のみ)
+    ///
+    /// tobi-quic の接続ハンドルからは peer の application error code を同期的に取得できない。
+    /// 本バックエンドではストリーム受信 / 受理 API のエラー (`QuicError::PeerClosed`) が
+    /// コードを運ぶため、ここでは保持しない。
+    pub(crate) fn peer_session_close(&self) -> Option<u64> {
+        None
+    }
+
     /// 接続が終了するまで待ち、終了理由を返す
     pub async fn closed(&self) -> Option<CloseReason> {
         self.inner.closed().await.map(|reason| match reason {

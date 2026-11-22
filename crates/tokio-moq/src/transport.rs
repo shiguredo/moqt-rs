@@ -31,6 +31,19 @@ pub enum RecvChunk {
     End(RequestStreamEnd),
 }
 
+/// peer が transport 層でセッションを終了したときに観測した終了コードと理由
+///
+/// WebTransport の `WT_CLOSE_SESSION` は application error code と UTF-8 の理由を運ぶ。
+/// native QUIC は `CONNECTION_CLOSE` の application error code だけを取得でき、理由は
+/// 取得できないため空文字列になる。理由は transport が取得できた場合だけ設定する。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PeerSessionClose {
+    /// peer が載せた application error code
+    pub(crate) code: u64,
+    /// peer が載せた理由 (取得できない transport では空文字列)
+    pub(crate) reason: String,
+}
+
 /// 送信ストリーム
 pub enum SendStream {
     /// QUIC 直接接続の送信ストリーム
@@ -192,7 +205,9 @@ impl RecvStream {
                         reliable_size,
                     }))
                 }
-                Err(e) => Err(TransportError::Quic(format!("{e}"))),
+                // QUIC のコード空間の情報 (peer の application error など) を失わないよう、
+                // 文字列へ畳まずに共通の写像を通す
+                Err(e) => Err(TransportError::from(e)),
             },
             #[cfg(not(windows))]
             RecvStream::WtH3(s) => match s.recv_chunk().await? {
@@ -464,6 +479,36 @@ impl StreamHandle {
         }
     }
 
+    /// peer が transport 層でセッションを終了したときの終了コードと理由を返す
+    ///
+    /// WebTransport は `WT_CLOSE_SESSION` が運んだ application error code と理由を返す。
+    /// native QUIC は `CONNECTION_CLOSE` の application error code だけを返し、理由は
+    /// 空文字列になる (`Connection::peer_session_close` の doc を参照)。QMux は接続終了の
+    /// コードを MOQT 層へ公開しないため常に `None` を返し、制御ストリームの終端は従来どおり
+    /// `CLOSED_CONTROL_STREAM` として扱う。
+    ///
+    /// peer の終了をまだ観測していない場合も `None` を返す。
+    pub(crate) async fn peer_session_close(&self) -> Option<PeerSessionClose> {
+        match self {
+            StreamHandle::Quic(handle) => {
+                handle.peer_session_close().map(|code| PeerSessionClose {
+                    code,
+                    reason: String::new(),
+                })
+            }
+            #[cfg(not(windows))]
+            StreamHandle::WtH3(session) => {
+                let session = session.lock().await;
+                session.peer_session_close()
+            }
+            StreamHandle::WtH2(session) => {
+                let session = session.lock().await;
+                session.peer_session_close()
+            }
+            StreamHandle::Qmux(_) => None,
+        }
+    }
+
     /// 接続をクローズする
     ///
     /// QUIC では application error code を、WebTransport では CLOSE_SESSION capsule を送信する。
@@ -650,7 +695,8 @@ impl StreamAcceptor {
                 Ok(stream) => Ok(Some(RecvStream::new_quic(stream))),
                 // 接続終了は「これ以上ストリームが来ない」として扱う
                 Err(e) if crate::quic::is_connection_closed(&e) => Ok(None),
-                Err(e) => Err(TransportError::Quic(format!("{e}"))),
+                // peer の application error は終了コードを保ったまま返す
+                Err(e) => Err(TransportError::from(e)),
             },
             #[cfg(not(windows))]
             StreamAcceptor::WtH3 {
@@ -760,7 +806,8 @@ impl BidiStreamAcceptor {
                     }
                     // 接続終了は「これ以上ストリームが来ない」として扱う
                     Err(e) if crate::quic::is_connection_closed(&e) => Ok(None),
-                    Err(e) => Err(TransportError::Quic(format!("{e}"))),
+                    // peer の application error は終了コードを保ったまま返す
+                    Err(e) => Err(TransportError::from(e)),
                 }
             }
             #[cfg(not(windows))]

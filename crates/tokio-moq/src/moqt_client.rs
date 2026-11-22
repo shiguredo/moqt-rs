@@ -10,6 +10,7 @@
 //! - data stream: 各バイナリが [`DataPlaneHandle`] 経由で `Session` に通知する
 //! - 受信は `tokio::spawn` した task で行い、`mpsc` 経由でメインループに集約する
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
@@ -48,7 +49,8 @@ use crate::error::{Result, TransportError, normalize_request_error_code, session
 use crate::qmux::QmuxSession;
 use crate::quic::{StopSendingObserved, StopSendingReceiver};
 use crate::transport::{
-    BidiStreamAcceptor, RecvChunk, RecvStream, SendStream, StreamAcceptor, StreamHandle,
+    BidiStreamAcceptor, PeerSessionClose, RecvChunk, RecvStream, SendStream, StreamAcceptor,
+    StreamHandle,
 };
 use crate::webtransport_h2::WtH2Session;
 // WebTransport over HTTP/3 は tobi-quic を使うため、tobi-quic 非対応の Windows では
@@ -1268,6 +1270,8 @@ enum DriverInput {
     Control(Option<ControlIncoming>),
     Bidi(Option<BidiMessage>),
     StopSending(Option<StopSendingObserved>),
+    /// WebTransport セッションが終了状態へ遷移した (drain では通知しない)
+    WtSessionTerminated,
     LocalEvents,
 }
 
@@ -1316,6 +1320,12 @@ struct SessionDriver {
     control_rx: mpsc::Receiver<ControlIncoming>,
     bidi_tx: mpsc::Sender<BidiMessage>,
     bidi_rx: mpsc::Receiver<BidiMessage>,
+    /// WebTransport セッションの終了を直接待つための receiver (QUIC / QMux では `None`)
+    ///
+    /// `WT_CLOSE_SESSION` の終了コードと理由は制御ストリームの終端より先に観測できる。
+    /// セッション状態の変化を直接待つことで、制御ストリームの RESET_STREAM が先に届く
+    /// 順序でも終了コードを失わない。終了を 1 度処理したら `None` にして待機を止める。
+    wt_session_state: Option<watch::Receiver<crate::webtransport::WtSessionState>>,
     task_monitor: tokio_metrics::TaskMonitor,
 }
 
@@ -1326,8 +1336,8 @@ struct SessionDriver {
 /// 配送対象から漏れたイベントはアプリへ届かない。
 ///
 /// 配送対象の判定は `drain_events` の arm の列挙が行う。この述語は同じ集合を表し、
-/// notable / 非配送の 2 つの arm が debug ビルドで一致を検査する (`CloseSession` は
-/// 専用 arm で配送するため、単体テストで notable であることを固定する)。
+/// notable / 非配送の 2 つの arm が debug ビルドで一致を検査する (`CloseSession` /
+/// `PeerClosed` は専用 arm で配送するため、単体テストで notable であることを固定する)。
 /// variant を追加するときは arm の列挙とこの述語の両方を更新する (リリースビルドでは
 /// arm の debug_assert は実行されない)。
 fn is_notable_event(event: &SessionEvent) -> bool {
@@ -1336,6 +1346,7 @@ fn is_notable_event(event: &SessionEvent) -> bool {
         SessionEvent::GoawayReceived { .. }
             | SessionEvent::GoawayDrainReady
             | SessionEvent::CloseSession(_)
+            | SessionEvent::PeerClosed(_)
             | SessionEvent::PublishDoneReceived { .. }
             // ResetDataStream は「I/O 層が当該 uni data stream を RESET_STREAM で閉じる」指示であり、
             // ワイヤを閉じるのも Session へ終端を通知するのも I/O 層 (example) の責務である。
@@ -1371,6 +1382,23 @@ fn is_notable_event(event: &SessionEvent) -> bool {
             | SessionEvent::NamespaceDoneReceived { .. }
             | SessionEvent::PublishSkippedReceived { .. }
     )
+}
+
+/// transport のエラーが peer 起点のセッション終了コードを運んでいるかを取り出す
+///
+/// native QUIC はストリーム受信 / 受理 API のエラーに `CONNECTION_CLOSE` の
+/// application error code を載せる ([`TransportError::PeerSessionClosed`])。
+/// 理由はバックエンドの公開 API から取得できないため空文字列になる。
+/// WebTransport 経路はこの variant を使わず、[`StreamHandle::peer_session_close`] で
+/// `WT_CLOSE_SESSION` の終了コードと理由を取得する。
+fn peer_session_close_from_error(error: &TransportError) -> Option<PeerSessionClose> {
+    match error {
+        TransportError::PeerSessionClosed { error_code } => Some(PeerSessionClose {
+            code: *error_code,
+            reason: String::new(),
+        }),
+        _ => None,
+    }
 }
 
 /// 終端済み subscription を破棄してよいか
@@ -1447,6 +1475,19 @@ impl TerminatedRequestStreams {
     /// 記録は通知に成功したときだけ行う (失敗した場合は後着の close 通知で再試行する)。
     fn mark_notified(&mut self, request_id: u64) {
         self.notified.insert(request_id);
+    }
+}
+
+/// WebTransport セッションの終了を待つ
+///
+/// QUIC 直接接続と QMux は WebTransport のセッションを持たないため、完了しない future を
+/// 返す (他の受信経路だけで駆動する)。
+async fn wait_wt_session_terminated(
+    state: &mut Option<watch::Receiver<crate::webtransport::WtSessionState>>,
+) {
+    match state {
+        Some(state) => crate::webtransport::wait_until_terminated(state).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -2215,6 +2256,7 @@ impl MoqtClient {
             control_rx,
             bidi_tx,
             bidi_rx,
+            wt_session_state: wt_session_state.clone(),
             task_monitor,
         });
         Ok(Self {
@@ -2694,7 +2736,7 @@ impl MoqtClient {
 
     /// 次のイベントを返す
     ///
-    /// session の注目イベント (GoawayReceived / GoawayDrainReady / CloseSession /
+    /// session の注目イベント (GoawayReceived / GoawayDrainReady / CloseSession / PeerClosed /
     /// PublishDoneReceived / ResetDataStream / OpenFillFetchStream / FetchOkReceived /
     /// TrackStatusUnsupported / RequestErrorReceived) に加えて、peer (MOQT relay) から届いた要求を
     /// [`ClientEvent::Request`]、REQUEST_UPDATE を [`ClientEvent::RequestUpdate`] として返す。
@@ -3153,11 +3195,13 @@ impl MoqtClient {
     /// セッションを明示的にクローズする
     ///
     /// `Session::close` を呼び出し、`CloseSession` イベントを drain して
-    /// transport 層に接続クローズを伝える。
-    pub async fn close(&mut self, code: u64, reason: &'static str) -> Result<()> {
+    /// transport 層に接続クローズを伝える。`reason` には静的な英語文言だけでなく、
+    /// アプリが組み立てた動的な文字列も渡せる。
+    pub async fn close(&mut self, code: u64, reason: impl Into<Cow<'static, str>>) -> Result<()> {
+        let reason = reason.into();
         {
             let mut session = lock_session(&self.session);
-            session.close(code, reason);
+            session.close(code, reason.clone());
         }
         self.drain_events().await?;
         // コード 0 以外はエラー終了なので "gracefully" とは出さない。
@@ -3318,7 +3362,37 @@ impl SessionDriver {
                     None => std::future::pending().await,
                 }
             } => DriverInput::StopSending(observed),
+            // WebTransport の WT_CLOSE_SESSION は制御ストリームの終端より先に観測できる。
+            // セッション状態の変化を直接待ち、終了コードを失わずに終了イベントを発行する
+            () = wait_wt_session_terminated(&mut self.wt_session_state) => {
+                DriverInput::WtSessionTerminated
+            }
         }
+    }
+
+    /// peer 起点のセッション終了を Session へ通知する
+    ///
+    /// transport のエラーが QUIC の application error code を運んでいればそのコードを、
+    /// 運んでいなければ transport が観測した `WT_CLOSE_SESSION` の終了コードと理由を使う。
+    /// コードを取得できない場合と、Session が既に Closing / Closed の場合は何もせず `false` を
+    /// 返す (後続の control stream 終了通知を no-op にする既存のガードが働く)。
+    async fn notify_peer_session_closed(&self, error: Option<&TransportError>) -> bool {
+        let close = match error.and_then(peer_session_close_from_error) {
+            Some(close) => Some(close),
+            None => self.handle.peer_session_close().await,
+        };
+        let Some(close) = close else {
+            return false;
+        };
+        let mut session = lock_session(&self.session);
+        if matches!(
+            session.state(),
+            SessionState::Closing | SessionState::Closed
+        ) {
+            return false;
+        }
+        session.recv_session_closed(close.code, close.reason);
+        true
     }
 
     /// 受信した入力を Session に渡し、その結果を I/O に反映する。
@@ -3326,10 +3400,16 @@ impl SessionDriver {
         match input {
             DriverInput::Control(maybe) => {
                 let Some(res) = maybe else {
+                    // 制御チャネルが閉じた。peer 起点のセッション終了を観測していれば、
+                    // 終了イベントをアプリへ届ける (以降の呼び出しはエラーになる)
+                    if self.notify_peer_session_closed(None).await {
+                        self.drain_events().await?;
+                        return Ok(());
+                    }
                     return Err(TransportError::Internal("control channel closed".into()));
                 };
-                match res? {
-                    StreamRead::Value(msg) => {
+                match res {
+                    Ok(StreamRead::Value(msg)) => {
                         let recv_result = {
                             let mut session = lock_session(&self.session);
                             session.recv_control(msg)
@@ -3345,11 +3425,33 @@ impl SessionDriver {
                             return Err(TransportError::Internal(format!("recv_control: {e}")));
                         }
                     }
-                    StreamRead::Closed(end) => {
-                        let mut session = lock_session(&self.session);
-                        let _ = session.recv_control_stream_closed(end);
+                    Ok(StreamRead::Closed(end)) => {
+                        // peer が transport 層でセッションを終了していれば、その終了コードと
+                        // 理由をセッション終了として扱う。単なる control stream の不正終端
+                        // (§6.3 違反) は従来どおり CLOSED_CONTROL_STREAM として扱う。
+                        if !self.notify_peer_session_closed(None).await {
+                            let mut session = lock_session(&self.session);
+                            let _ = session.recv_control_stream_closed(end);
+                        }
+                    }
+                    Err(e) => {
+                        // peer の接続終了 (QUIC の CONNECTION_CLOSE / WebTransport の
+                        // WT_CLOSE_SESSION に伴うストリーム中断) は control stream の
+                        // 受信エラーとして現れる。終了コードを取得できた場合はセッション終了
+                        // イベントとしてアプリへ届け、エラーを返さない。
+                        if !self.notify_peer_session_closed(Some(&e)).await {
+                            return Err(e);
+                        }
                     }
                 }
+                self.drain_events().await?;
+            }
+            DriverInput::WtSessionTerminated => {
+                // peer 起点の終了 (ClosedByPeer) なら終了コードと理由が記録されている。
+                // 自側の close や接続エラーでは通知しない (それぞれ CloseSession / 受信エラーが扱う)。
+                self.notify_peer_session_closed(None).await;
+                // 同じ終了状態で `receive` が完了し続けないよう、待機を終える
+                self.wt_session_state = None;
                 self.drain_events().await?;
             }
             DriverInput::Bidi(maybe) => {
@@ -3845,7 +3947,7 @@ impl SessionDriver {
                     // transport の close 失敗で終了理由の配送を落とさないよう、エラーは
                     // warn に留める (QUIC の close は失敗しないが、WebTransport の
                     // close は接続断や FIN 済みで失敗しうる)。
-                    if let Err(e) = self.handle.close(err.code, err.reason).await {
+                    if let Err(e) = self.handle.close(err.code, err.reason.as_ref()).await {
                         tracing::warn!(
                             "Failed to close the transport with the session error (code={:#x}): {e}",
                             err.code
@@ -3856,6 +3958,17 @@ impl SessionDriver {
                     // 閉じた後は Session のイベントを I/O へ変換できないため drain を終える。
                     // キューが空である観測を伴う通常の回収 (`forget_ready_requests`) には
                     // 到達しないため、ここで回収を済ませる
+                    self.cleanup_closed_requests().await;
+                    return Ok(());
+                }
+                SessionEvent::PeerClosed(error) => {
+                    // peer 起点の終了は transport が既に閉じているため、`CloseSession` の
+                    // ように `handle.close` で終了コードを送り返さない。終了理由をアプリへ
+                    // 届けるため配送キューへ積む。
+                    self.notable_events
+                        .push_back(SessionEvent::PeerClosed(error));
+                    // 以後の Session イベントは I/O へ変換できないため drain を終える。
+                    // 回収は `CloseSession` と同じ理由でここで済ませる
                     self.cleanup_closed_requests().await;
                     return Ok(());
                 }
@@ -4105,10 +4218,10 @@ async fn close_handshake_session(
     }
     let (code, reason) = match close_session {
         Some(error) => (error.code, error.reason),
-        None => (fallback_code, fallback_reason),
+        None => (fallback_code, std::borrow::Cow::Borrowed(fallback_reason)),
     };
     tracing::warn!("Closing session during SETUP exchange: {code:#x} {reason}");
-    if let Err(e) = handle.close(code, reason).await {
+    if let Err(e) = handle.close(code, reason.as_ref()).await {
         tracing::warn!("Failed to close session during SETUP exchange: {e}");
     }
 }
@@ -4202,7 +4315,7 @@ mod tests {
     use base64ct::{Base64UrlUnpadded, Encoding};
     use shiguredo_moqt::c4m::cat::{CatToken, MOQT_AUTH_TOKEN_TYPE_CAT};
     use shiguredo_moqt::c4m::{CLAIM_MOQT, MoqtAction, MoqtClaim, MoqtScope, cbor};
-    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    use shiguredo_moqt::error::{SESSION_CONTROL_MESSAGE_TIMEOUT, SESSION_PROTOCOL_VIOLATION};
     use shiguredo_moqt::session::types::SessionError;
 
     /// 共通ヘルパが、渡したトークンをすべて入力順に付与すること
@@ -4411,6 +4524,18 @@ mod tests {
             is_notable_event(&event),
             "CloseSession は notable であること"
         );
+    }
+
+    /// peer 起点のセッション終了もアプリが観測する notable イベントである
+    ///
+    /// `CloseSession` と同じく、アプリが終了コードと理由をログに残せるようにする。
+    #[test]
+    fn peer_closed_is_notable_event() {
+        let event = SessionEvent::PeerClosed(SessionError::new(
+            SESSION_CONTROL_MESSAGE_TIMEOUT,
+            "control message timeout",
+        ));
+        assert!(is_notable_event(&event), "PeerClosed は notable であること");
     }
 
     /// 受信 data stream の STOP_SENDING 指示は、待機中のタスクを起こす
