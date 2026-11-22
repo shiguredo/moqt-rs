@@ -400,14 +400,16 @@ async fn start_subscriber(
         let video_subscribed = Arc::new(AtomicBool::new(true));
         let task = tokio::spawn(moq_sub::pipeline::run(
             config,
-            frame_tx,
-            audio_tx,
+            moq_sub::pipeline::PipelineIo {
+                frame_tx,
+                audio_tx,
+                display_backlog: Arc::clone(&backlog),
+                target_latency_ms,
+                video_subscribed,
+                player_stop: player_stop_rx,
+            },
             tokio_metrics::TaskMonitor::new(),
             shutdown.subscribe(),
-            Arc::clone(&backlog),
-            target_latency_ms,
-            video_subscribed,
-            player_stop_rx,
         ));
 
         // フレームの受信はブロッキングなので、他のタスクを止めないようにする

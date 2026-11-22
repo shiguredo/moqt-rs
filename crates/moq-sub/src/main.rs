@@ -187,14 +187,16 @@ fn main() {
 
             pipeline::run(
                 config,
-                frame_tx,
-                audio_tx,
+                pipeline::PipelineIo {
+                    frame_tx,
+                    audio_tx,
+                    display_backlog: display_backlog_for_pipeline,
+                    target_latency_ms: target_latency_ms_for_pipeline,
+                    video_subscribed: video_subscribed_for_pipeline,
+                    player_stop: player_stop_rx,
+                },
                 task_monitor,
                 shutdown_monitor,
-                display_backlog_for_pipeline,
-                target_latency_ms_for_pipeline,
-                video_subscribed_for_pipeline,
-                player_stop_rx,
             )
             .await
         });

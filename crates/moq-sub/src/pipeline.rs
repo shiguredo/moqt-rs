@@ -1185,103 +1185,82 @@ fn lock_fetch_targets(
         .expect("fetch targets lock is not poisoned")
 }
 
+/// data stream の処理タスクが使う購読の状態
+///
+/// stream ごとに変わる値 (stream そのもの、処理枠、stream 番号) はタスク起動時に別引数で
+/// 渡し、購読で 1 つだけ作る状態とチャネルをここへまとめる。stream task はこの構造体を
+/// 所有するため、タスクの生存中は参照が有効である。
+struct StreamTaskContext {
+    /// 受信した data stream を Session へ登録するためのハンドル
+    data_plane: DataPlaneHandle,
+    /// Track Alias から track 種別を引く表 (session 移行のたびに差し替える)
+    track_map: HashMap<u64, TrackKind>,
+    /// 自側が発行した FETCH の配送先 (Request ID → 配送先)
+    fetch_targets: SharedFetchTargets,
+    /// 映像の codec (catalog の値)
+    video_codec: Option<String>,
+    /// 音声の codec (catalog の値)
+    audio_codec: Option<String>,
+    /// 音声のサンプルレートとチャンネル数 (catalog の値)
+    audio_params: Option<(u32, u8)>,
+    /// デコード済み映像フレームの送り先
+    frame_tx: std::sync::mpsc::Sender<DecodedVideoFrame>,
+    /// デコード済み音声フレームの送り先
+    audio_tx: std::sync::mpsc::Sender<DecodedAudioFrame>,
+    /// このタスクが処理する stream の通し番号
+    stream_num: u64,
+    /// 表示待ちの映像フレーム数
+    display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    /// 映像の復号順の判定 (購読で 1 つ共有する)
+    video_decode_order: std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
+    /// 映像の購読境界と送出順の判定 (購読で 1 つ共有する)
+    video_delivery_order: std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
+    /// object モードの並べ替えと復号器の共有状態 (購読で 1 つ共有する)
+    object_mode_video: std::sync::Arc<ObjectModeVideo>,
+    /// Group の切り替え gate (購読で 1 つ共有する)
+    group_switch: GroupSwitchHandle,
+    /// 音声デコーダ (購読で 1 つ共有する)
+    audio_decoder: Option<std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
+    /// Audio Config の処理を試みた session の世代 (購読で 1 つ共有する)
+    audio_config_validated_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// このタスクが読む session の世代
+    session_generation: u64,
+    /// 受信側の音声の追いつき (購読で 1 つ共有する)
+    audio_catch_up: std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
+    /// 音声の購読境界と送出順の判定 (購読で 1 つ共有する)
+    audio_delivery_order: std::sync::Arc<std::sync::Mutex<AudioDeliveryOrder>>,
+    /// track ごとに最後に受信した Object の位置 (再購読の Location Filter に使う)
+    last_received_locations: std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
+    /// 書式違反によるセッション終了を main ループへ依頼するチャネル
+    termination_tx: tokio::sync::mpsc::Sender<SessionError>,
+    /// カタログの Object を main ループへ渡すチャネル
+    catalog_tx: tokio::sync::mpsc::Sender<catalog::CatalogObject>,
+    /// catalog の圧縮方式
+    catalog_compression: MsfCompression,
+    /// Track Alias 未確立の Subgroup ストリームの保留バッファ
+    pending_subgroups: SharedPendingSubgroupBuffer,
+    /// 再生するか
+    playback: bool,
+    /// 録画先 (`--mp4` 指定時のみ)
+    recorder: Option<RecorderSender>,
+}
+
 /// 受け入れた data stream の処理タスクを起動する。
 ///
 /// `permit` はこの stream の処理枠である。タスクの終了時に手放すので、
 /// 処理中は同時実行数が `MAX_CONCURRENT_STREAMS` を超えない。
-#[expect(clippy::too_many_arguments)]
 fn spawn_stream_task(
     join_set: &mut tokio::task::JoinSet<()>,
     task_monitor: &tokio_metrics::TaskMonitor,
     stream: transport::RecvStream,
     permit: tokio::sync::OwnedSemaphorePermit,
     stream_slots: &std::sync::Arc<tokio::sync::Semaphore>,
-    stream_num: u64,
-    track_map: HashMap<u64, TrackKind>,
-    fetch_targets: &SharedFetchTargets,
-    data_plane: &DataPlaneHandle,
-    frame_tx: &std::sync::mpsc::Sender<DecodedVideoFrame>,
-    audio_tx: &std::sync::mpsc::Sender<DecodedAudioFrame>,
-    video_codec: Option<&str>,
-    audio_codec: Option<&str>,
-    audio_params: Option<(u32, u8)>,
-    display_backlog: &std::sync::Arc<std::sync::atomic::AtomicI64>,
-    video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
-    video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
-    object_mode_video: &std::sync::Arc<ObjectModeVideo>,
-    group_switch: &std::sync::Arc<SharedGroupSwitchGate>,
-    audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
-    audio_config_validated_generation: &std::sync::Arc<std::sync::atomic::AtomicU64>,
-    session_generation: u64,
-    audio_catch_up: &std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
-    audio_delivery_order: &std::sync::Arc<std::sync::Mutex<AudioDeliveryOrder>>,
-    last_received_locations: &std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
-    termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
-    catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
-    catalog_compression: MsfCompression,
-    pending_subgroups: &SharedPendingSubgroupBuffer,
-    playback: bool,
-    recorder: Option<&RecorderSender>,
+    context: StreamTaskContext,
 ) {
-    // 対応表は side session の再発行で書き換わるため、参照ではなく Arc を clone して
-    // 配送先の判定をヘッダを読んだ時点の内容で行う
-    let fetch_targets = std::sync::Arc::clone(fetch_targets);
-    let data_plane = data_plane.clone();
-    let frame_tx = frame_tx.clone();
-    let audio_tx = audio_tx.clone();
-    let codec = video_codec.map(str::to_owned);
-    let audio_codec = audio_codec.map(str::to_owned);
-    let backlog = std::sync::Arc::clone(display_backlog);
-    let video_decode_order = std::sync::Arc::clone(video_decode_order);
-    let video_delivery_order = std::sync::Arc::clone(video_delivery_order);
-    let object_mode_video = std::sync::Arc::clone(object_mode_video);
-    // 世代は stream task を作った時点で固定する。session 移行で世代を進めた後に旧い task が
-    // 呼んでも、新しい世代の判定に影響しないようにするためである
-    let group_switch = GroupSwitchHandle::new(std::sync::Arc::clone(group_switch));
-    let audio_decoder = audio_decoder.cloned();
-    let audio_config_validated_generation =
-        std::sync::Arc::clone(audio_config_validated_generation);
-    let audio_catch_up = std::sync::Arc::clone(audio_catch_up);
-    let audio_delivery_order = std::sync::Arc::clone(audio_delivery_order);
-    let last_received_locations = std::sync::Arc::clone(last_received_locations);
-    let termination_tx = termination_tx.clone();
-    let catalog_tx = catalog_tx.clone();
-    let pending_subgroups = std::sync::Arc::clone(pending_subgroups);
-    let recorder = recorder.cloned();
     let slots = std::sync::Arc::clone(stream_slots);
     join_set.spawn(task_monitor.clone().instrument(async move {
         let mut slot = StreamSlot::new(slots, permit);
-        handle_incoming_stream(
-            stream,
-            data_plane,
-            &track_map,
-            &fetch_targets,
-            codec.as_deref(),
-            audio_codec.as_deref(),
-            audio_params,
-            &frame_tx,
-            &audio_tx,
-            stream_num,
-            &mut slot,
-            backlog,
-            &video_decode_order,
-            &video_delivery_order,
-            &object_mode_video,
-            &group_switch,
-            audio_decoder.as_ref(),
-            &audio_config_validated_generation,
-            session_generation,
-            &audio_catch_up,
-            &audio_delivery_order,
-            &last_received_locations,
-            &termination_tx,
-            &catalog_tx,
-            catalog_compression,
-            &pending_subgroups,
-            playback,
-            recorder.as_ref(),
-        )
-        .await;
+        handle_incoming_stream(stream, &mut slot, &context).await;
         // stream の処理が終わるまで枠を保持する
         drop(slot);
     }));
@@ -2882,19 +2861,34 @@ fn spawn_side_session(
     (handle, command_tx)
 }
 
+/// side session の起動と要求の送信に使う main ループ側の状態
+///
+/// URL ごとの side session の管理 (slot とタスク) と、移行先へ接続するときの設定を
+/// まとめる。side session を起動する経路と、既存の session へ要求を送る経路が同じ設定を
+/// 使うため、引数で個別に渡さずここへ集約する。
+struct SideSessionRuntime<'a> {
+    /// URL ごとの side session の slot
+    sessions: &'a mut HashMap<String, SideSessionSlot>,
+    /// 起動した side session のタスク (main ループの終了時に abort する)
+    tasks: &'a mut Vec<tokio::task::JoinHandle<()>>,
+    /// タスクメトリクスの monitor
+    task_monitor: &'a tokio_metrics::TaskMonitor,
+    /// 移行の進行を main ループへ通知するチャネル
+    events: &'a tokio::sync::mpsc::Sender<RequestMigrationEvent>,
+    /// 接続経路 (現在の接続と同じものを使う)
+    transport: Transport,
+    /// TLS の CA 証明書パス (現在の接続と同じものを使う)
+    cert: Option<String>,
+    /// 証明書検証をスキップするか (現在の接続と同じものを使う)
+    insecure: bool,
+}
+
 /// side session を開始して main ループの slot に登録する
 ///
 /// 世代は side session の識別子として使う。main ループは side session を起動するたびに
 /// 新しい世代を払い出す。
-#[expect(clippy::too_many_arguments)]
 fn start_side_session(
-    sessions: &mut HashMap<String, SideSessionSlot>,
-    tasks: &mut Vec<tokio::task::JoinHandle<()>>,
-    task_monitor: &tokio_metrics::TaskMonitor,
-    transport: Transport,
-    cert: Option<String>,
-    insecure: bool,
-    events: &tokio::sync::mpsc::Sender<RequestMigrationEvent>,
+    runtime: &mut SideSessionRuntime<'_>,
     url: tokio_moq::ServerUrl,
     initial: SideSessionCommand,
     shared: RequestMigrationShared,
@@ -2908,20 +2902,20 @@ fn start_side_session(
         initial.describe(),
     );
     let (handle, commands) = spawn_side_session(
-        task_monitor,
+        runtime.task_monitor,
         SideSessionRequest {
             url,
-            transport,
-            cert,
-            insecure,
+            transport: runtime.transport,
+            cert: runtime.cert.clone(),
+            insecure: runtime.insecure,
             deadline,
             initial,
         },
         shared,
-        events.clone(),
+        runtime.events.clone(),
     );
-    tasks.push(handle);
-    sessions.insert(
+    runtime.tasks.push(handle);
+    runtime.sessions.insert(
         key,
         SideSessionSlot {
             commands,
@@ -2940,15 +2934,8 @@ fn start_side_session(
 /// side session を起動するときだけ、世代を 1 つ進めてから `build_shared` で共有状態を
 /// 組み立てる。Audio Config の検証済み世代と比べる世代は session ごとに新しくする必要が
 /// あるため、相乗りする場合は現在の世代を消費しない。
-#[expect(clippy::too_many_arguments)]
 async fn dispatch_side_session_command<F>(
-    sessions: &mut HashMap<String, SideSessionSlot>,
-    tasks: &mut Vec<tokio::task::JoinHandle<()>>,
-    task_monitor: &tokio_metrics::TaskMonitor,
-    transport: Transport,
-    cert: Option<String>,
-    insecure: bool,
-    events: &tokio::sync::mpsc::Sender<RequestMigrationEvent>,
+    runtime: &mut SideSessionRuntime<'_>,
     url: tokio_moq::ServerUrl,
     command: SideSessionCommand,
     session_generation: &mut u64,
@@ -2957,7 +2944,7 @@ async fn dispatch_side_session_command<F>(
     F: Fn(u64) -> RequestMigrationShared,
 {
     let key = side_session_url_key(&url);
-    if let Some(slot) = sessions.get_mut(&key) {
+    if let Some(slot) = runtime.sessions.get_mut(&key) {
         tracing::info!(
             "Sharing the request migration side session: url={}, state={:?}, request={}",
             side_session_url_display(&key),
@@ -2972,36 +2959,14 @@ async fn dispatch_side_session_command<F>(
                 "Replacing a closed request migration side session: url={}",
                 side_session_url_display(&key)
             );
-            sessions.remove(&key);
+            runtime.sessions.remove(&key);
             *session_generation = session_generation.saturating_add(1);
-            start_side_session(
-                sessions,
-                tasks,
-                task_monitor,
-                transport,
-                cert,
-                insecure,
-                events,
-                url,
-                command,
-                build_shared(*session_generation),
-            );
+            start_side_session(runtime, url, command, build_shared(*session_generation));
         }
         return;
     }
     *session_generation = session_generation.saturating_add(1);
-    start_side_session(
-        sessions,
-        tasks,
-        task_monitor,
-        transport,
-        cert,
-        insecure,
-        events,
-        url,
-        command,
-        build_shared(*session_generation),
-    );
+    start_side_session(runtime, url, command, build_shared(*session_generation));
 }
 
 /// 再発行の失敗を `Failed` として main ループへ送る
@@ -3356,32 +3321,38 @@ async fn run_side_session(
                 stream,
                 permit,
                 &shared.stream_slots,
-                stream_num,
-                track_map.clone(),
-                &fetch_targets,
-                &data_plane,
-                &shared.frame_tx,
-                &shared.audio_tx,
-                shared.video_codec.as_deref(),
-                shared.audio_codec.as_deref(),
-                shared.audio_params,
-                &shared.display_backlog,
-                &shared.video_decode_order,
-                &shared.video_delivery_order,
-                &shared.object_mode_video,
-                &shared.group_switch,
-                shared.audio_decoder.as_ref(),
-                &shared.audio_config_validated_generation,
-                shared.generation,
-                &shared.audio_catch_up,
-                &shared.audio_delivery_order,
-                &shared.last_received_locations,
-                &side_termination_tx,
-                &shared.catalog_tx,
-                MsfCompression::None,
-                &shared.pending_subgroups,
-                shared.playback,
-                shared.recorder.as_ref(),
+                StreamTaskContext {
+                    data_plane: data_plane.clone(),
+                    track_map: track_map.clone(),
+                    fetch_targets: std::sync::Arc::clone(&fetch_targets),
+                    video_codec: shared.video_codec.clone(),
+                    audio_codec: shared.audio_codec.clone(),
+                    audio_params: shared.audio_params,
+                    frame_tx: shared.frame_tx.clone(),
+                    audio_tx: shared.audio_tx.clone(),
+                    stream_num,
+                    display_backlog: std::sync::Arc::clone(&shared.display_backlog),
+                    video_decode_order: std::sync::Arc::clone(&shared.video_decode_order),
+                    video_delivery_order: std::sync::Arc::clone(&shared.video_delivery_order),
+                    object_mode_video: std::sync::Arc::clone(&shared.object_mode_video),
+                    group_switch: GroupSwitchHandle::new(std::sync::Arc::clone(
+                        &shared.group_switch,
+                    )),
+                    audio_decoder: shared.audio_decoder.clone(),
+                    audio_config_validated_generation: std::sync::Arc::clone(
+                        &shared.audio_config_validated_generation,
+                    ),
+                    session_generation: shared.generation,
+                    audio_catch_up: std::sync::Arc::clone(&shared.audio_catch_up),
+                    audio_delivery_order: std::sync::Arc::clone(&shared.audio_delivery_order),
+                    last_received_locations: std::sync::Arc::clone(&shared.last_received_locations),
+                    termination_tx: side_termination_tx.clone(),
+                    catalog_tx: shared.catalog_tx.clone(),
+                    catalog_compression: MsfCompression::None,
+                    pending_subgroups: std::sync::Arc::clone(&shared.pending_subgroups),
+                    playback: shared.playback,
+                    recorder: shared.recorder.clone(),
+                },
             );
         }
 
@@ -3674,41 +3645,314 @@ async fn run_side_session(
     drain_failed_side_session_commands(&events, &url, &end_reason, &mut commands).await;
 }
 
-/// パイプラインを実行する
+/// datagram 受信タスクが読む session の宛先
 ///
-/// `config` は接続先・トランスポート・購読するトラック・録画と再生の指定を持つ。
-/// `frame_tx` と `audio_tx` はデコード済みフレームの受け渡しに使う。再生しない
-/// 呼び出し側は受け取ったフレームを破棄すればよい。
-/// `task_monitor` は生成されるタスクのメトリクスを収集する。
-/// `shutdown_monitor` は graceful shutdown の契機を受信する。
-/// `display_backlog` は表示待ちの映像フレーム数であり、閾値を超えると古い group を捨てる。
-/// 録画中は読み切って保存するため捨てない。
-/// `player_stop` は再生側の終了を伝える。sender が drop されるとパイプラインは停止する。
-/// `target_latency_ms` はカタログの `targetLatency` を渡すセルであり、値があるときだけ格納する
-/// (対象は実際に購読する track の `renderGroup` に属する track。§5.2.8)。購読する group が
-/// 複数あるときは最大値をすべての購読 track に掛ける。
-/// `video_subscribed` は映像トラックを購読しているかをプレイヤーへ渡すセルであり、
-/// カタログを読み終えて購読の有無が決まった時点で格納する。プレイヤーは音声だけの購読で
-/// 到着基準の再生の遅れに下限を足し、目標の時刻を守らない並べ方にする。カタログを読む前の
-/// 初期値は呼び出し側が決める (映像があるものとして扱う)。
-#[expect(clippy::too_many_arguments)]
-pub async fn run(
-    mut config: Config,
-    frame_tx: std::sync::mpsc::Sender<DecodedVideoFrame>,
-    audio_tx: std::sync::mpsc::Sender<DecodedAudioFrame>,
-    task_monitor: tokio_metrics::TaskMonitor,
-    mut shutdown_monitor: tokio_utils::ShutdownMonitor,
-    display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
-    target_latency_ms: std::sync::Arc<std::sync::atomic::AtomicI64>,
-    video_subscribed: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    mut player_stop: tokio::sync::oneshot::Receiver<()>,
-) -> Result<()> {
-    // 再生を行わない場合はデコードをスキップし、録画だけを行う
-    let playback = !config.no_play;
-    // 録画は専用スレッドが所有する。run の早期 return でも Recorder の Drop が finalize する。
-    // 録画対象のトラック情報はカタログ取得後に確定するため、起動はその時点で行う。
-    let recording_requested = config.mp4.is_some();
+/// session 移行のたびに handle / data_plane / alias 表 / 世代が同時に変わるため、1 つの値と
+/// して watch チャネルで受け渡す。別々に更新すると、旧 session の datagram を新しい表で
+/// 解釈する窓ができる。
+#[derive(Clone)]
+struct DatagramSession {
+    /// datagram を受信する handle
+    handle: transport::StreamHandle,
+    /// datagram を Session へ登録するための handle
+    data_plane: DataPlaneHandle,
+    /// Track Alias から track 種別を引く表 (session ごとに変わる)
+    track_map: std::sync::Arc<HashMap<u64, TrackKind>>,
+    /// この session の世代 (Audio Config の検証状態の判定に使う)
+    generation: u64,
+}
 
+/// datagram 受信タスクが使う購読の状態
+///
+/// datagram で届く音声 Object の配送は、subgroup stream と同じデコーダ・Audio Config の
+/// 検証状態・追いつき・購読境界を共有する。session 移行のたびに handle と alias 表が
+/// 変わるため、それらは watch チャネルで受け取る。
+struct DatagramTaskContext {
+    /// 音声デコーダ (購読で 1 つ共有する)
+    audio_decoder: Option<std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
+    /// Audio Config の処理を試みた session の世代 (購読で 1 つ共有する)
+    audio_config_validated_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// 音声の codec (catalog の値)
+    audio_codec: Option<String>,
+    /// 録画先 (`--mp4` 指定時のみ)
+    recorder: Option<RecorderSender>,
+    /// 書式違反によるセッション終了を main ループへ依頼するチャネル
+    termination_tx: tokio::sync::mpsc::Sender<SessionError>,
+    /// デコード済み音声フレームの送り先
+    audio_tx: std::sync::mpsc::Sender<DecodedAudioFrame>,
+    /// 受信側の音声の追いつき (購読で 1 つ共有する)
+    audio_catch_up: std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
+    /// 音声の購読境界と送出順の判定 (購読で 1 つ共有する)
+    audio_delivery_order: std::sync::Arc<std::sync::Mutex<AudioDeliveryOrder>>,
+    /// track ごとに最後に受信した Object の位置 (再購読の Location Filter に使う)
+    last_received_locations: std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
+    /// 音声のサンプルレートとチャンネル数 (catalog の値)
+    audio_params: Option<(u32, u8)>,
+}
+
+/// datagram を受信し、音声 Object を subgroup stream と同じ配送経路へ流す
+///
+/// OBJECT_DATAGRAM の type 分岐と wire の書式検証は Session が行う (`recv_datagram`)。
+/// Session は payload をアプリへ返さないため、メディアとして使う Object はこのタスクで
+/// decode する。
+///
+/// session 移行で handle / data_plane / alias 表を差し替えるときは、その 3 つと世代を
+/// 1 つの値として watch チャネルで受け取る。別々に更新すると、旧 session の datagram を
+/// 新しい表で解釈する窓ができるためである。タスクを起動し直さないのは、デコーダと
+/// 配送経路の状態をそのまま引き継ぐためである。
+async fn run_datagram_task(
+    context: DatagramTaskContext,
+    mut session: tokio::sync::watch::Receiver<DatagramSession>,
+) {
+    // Audio Config の処理とデコードは subgroup stream と共有する。datagram の音声は
+    // 購読した audio track でしか届かないため、catalog の値はここで確定できる
+    // (audio track を購読していなければ audio_params は None だが、その場合
+    //  track_map に Audio が入らないため配送経路には来ない)。
+    // メディアとして扱えないトラックの datagram を 1 回だけ記録するための alias
+    let mut unsupported_aliases: HashSet<u64> = HashSet::new();
+    // 最初の datagram を受け取ったことを 1 回だけ記録する。届いていないのか、届いて
+    // いるのに配送経路へ流れていないのかを切り分けるために出す
+    let mut datagram_received = false;
+    let mut current = session.borrow_and_update().clone();
+    // `recv_datagrams` は transport から datagram を取り出した後に await しないため
+    // (`StreamHandle::recv_datagrams`)、select が `changed()` を選んで future を捨てても
+    // 取り出し済みの datagram は失われない。新 session の datagram は新 handle 側に残る
+    'receive: loop {
+        let received = tokio::select! {
+            received = current.handle.recv_datagrams() => received,
+            changed = session.changed() => {
+                if changed.is_err() {
+                    // 送信側 (`run`) がこのタスクを abort する前に drop した場合に限り到達する。
+                    // 受信タスクは `run` の終了時に abort されるため、通常はここへ来ない
+                    break 'receive;
+                }
+                current = session.borrow_and_update().clone();
+                tracing::info!("Datagram receive task switched to the migrated session");
+                continue 'receive;
+            }
+        };
+        let datagrams = match received {
+            Ok(datagrams) => datagrams,
+            Err(e) => {
+                // セッション終了 (§6) と接続クローズは期待される終了であるため、
+                // 異常 (warn) ではなく info に揃える
+                if matches!(e, TransportError::ConnectionClosed) {
+                    tracing::info!("Datagram receive error: {e}");
+                } else {
+                    tracing::warn!("Datagram receive error: {e}");
+                }
+                // 旧 session のエラーでタスクを終わらせない。GOAWAY の移行中に旧接続が
+                // 閉じることは §9.2 が許容しており (timeout 前の close)、ここで終了すると
+                // 移行後の datagram (音声) を受信する者が居なくなる。
+                // 移行の通知 (watch の更新) を待って新しい session へ切り替える。
+                // 送信側 (`run`) が drop された場合だけ終わる (run は終了時に abort する)
+                if session.changed().await.is_err() {
+                    break 'receive;
+                }
+                current = session.borrow_and_update().clone();
+                tracing::info!(
+                    "Datagram receive task switched to the migrated session after a receive error"
+                );
+                continue 'receive;
+            }
+        };
+        if !datagram_received && !datagrams.is_empty() {
+            datagram_received = true;
+            tracing::info!(
+                "Received the first datagram batch from the relay: count={}",
+                datagrams.len()
+            );
+        }
+        // 空のバッチのときだけ受信ループを休める。`recv_datagrams` は QUIC と QMux では
+        // 1 件以上届くまで待つため、バッチがあるときの sleep はそのまま受信から再生までの
+        // 遅延になる。WebTransport の `take_buffered_datagrams` はバッファが空でも即座に
+        // 返りうるため、空のときだけ sleep して空回りを防ぐ
+        let batch_len = datagrams.len();
+        for raw in datagrams {
+            if !deliver_datagram(&raw, &current, &context, &mut unsupported_aliases).await {
+                break 'receive;
+            }
+        }
+        if should_sleep_after_datagram_batch(batch_len) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+}
+
+/// datagram 1 つを Session へ渡し、音声 Object なら配送経路へ流す
+///
+/// 戻り値は受信ループを続けるかどうかである。`false` は LOC Properties の書式違反で
+/// セッション終了を依頼したか、再生側が終了したことを表す。`unsupported_aliases` は、
+/// メディアとして扱えない track の datagram を 1 回だけ記録するために使う。
+async fn deliver_datagram(
+    raw: &[u8],
+    session: &DatagramSession,
+    context: &DatagramTaskContext,
+    unsupported_aliases: &mut HashSet<u64>,
+) -> bool {
+    // type 分岐は Session が行う。未知 type は
+    // draft-ietf-moq-transport-23 §11 (Data Streams and Datagrams) に従いセッションクローズになる。
+    // アプリ側で decode を代行せず raw を渡すのは、wire の検証順序と終了コードを
+    // Session に一本化するためである (payload は改めて decode する)
+    let acceptance = match session.data_plane.recv_datagram(raw) {
+        Ok(acceptance) => acceptance,
+        Err(e) => {
+            // Session がセッションを閉じる経路である。close は main ループが送る
+            tracing::warn!("Failed to process datagram: {e}");
+            return true;
+        }
+    };
+    // Padding Datagram と、フィルタを通過しなかった Object / キャンセル済み
+    // subscription の Object はメディアとして扱わない
+    // (draft-ietf-moq-transport-23 §3.1 (Subscriptions) / §11.5.2 (Padding Datagrams))
+    let DatagramAcceptance::Object(TrackDataAcceptance::Accepted) = acceptance else {
+        return true;
+    };
+    // 種別の判定には、この handle と同時に受け取った表を使う
+    match plan_datagram(raw, &session.track_map) {
+        DatagramAction::DeliverAudio { datagram, payload } => {
+            // session の世代は切り替えのたびに変わるため、配送のたびに作る
+            let delivery = AudioDelivery {
+                audio_tx: &context.audio_tx,
+                audio_config_validated_generation: &context.audio_config_validated_generation,
+                session_generation: session.generation,
+                is_opus_codec: context
+                    .audio_codec
+                    .as_deref()
+                    .is_some_and(decoder::is_opus_codec),
+                catalog_sample_rate: context
+                    .audio_params
+                    .map_or(0, |(sample_rate, _)| sample_rate),
+                catalog_channels: context.audio_params.map_or(0, |(_, channels)| channels),
+                recorder: context.recorder.as_ref(),
+                termination_tx: &context.termination_tx,
+                catch_up: context.audio_catch_up.as_ref(),
+                delivery_order: context.audio_delivery_order.as_ref(),
+            };
+            // デコーダは subscription で 1 つを共有する。stream task と同じく
+            // デコードが終わるまでロックを保持する
+            let mut decoder = match context.audio_decoder.as_ref() {
+                Some(decoder) => Some(decoder.lock().await),
+                None => None,
+            };
+            // 移行後の再購読で使う「最後に受信した位置」を記録する
+            let location = datagram_object_location(&datagram);
+            record_last_location(&context.last_received_locations, TrackKind::Audio, location);
+            delivery
+                .deliver(
+                    Some(location),
+                    datagram.properties_data.as_deref(),
+                    payload,
+                    decoder.as_deref_mut(),
+                )
+                .await
+        }
+        // 映像とカタログの datagram は本 example では扱わない。LOC の映像は
+        // 1 group = 1 unidirectional stream で配送され (draft-ietf-moq-loc-05 §4.2)、
+        // moq-pub も datagram では送らない
+        DatagramAction::Unsupported { track_alias } => {
+            if unsupported_aliases.insert(track_alias) {
+                tracing::warn!(
+                    "Ignoring media delivered as a datagram on an unsupported track: alias={track_alias}"
+                );
+            }
+            true
+        }
+        DatagramAction::Ignore => true,
+    }
+}
+
+/// 接続とカタログ購読の結果
+///
+/// [`run`] の前半 (接続・タイムアウト設定・カタログ購読・カタログの解決) で作り、後半
+/// (トラックの購読・録画器とチャネルの準備) へ渡す。
+struct CatalogSession {
+    /// 現在の session を駆動するクライアント
+    client: MoqtClient,
+    /// 現在の session の data stream の受信口
+    recv_acceptor: transport::StreamAcceptor,
+    /// 受信 stream を Session へ登録するためのハンドル
+    data_plane: DataPlaneHandle,
+    /// SUBSCRIBE_TRACKS に使う namespace prefix
+    subscribe_tracks_namespace: TrackNamespace,
+    /// session 移行で catalog を張り直すときに使う namespace
+    catalog_namespace_for_migration: TrackNamespace,
+    /// catalog 購読の結果
+    catalog_sub: SubscribeResult,
+    /// 起動時の catalog の圧縮方式
+    initial_catalog_compression: MsfCompression,
+    /// 適用済みのカタログ状態
+    catalog_state: catalog::CatalogState,
+    /// catalog から解決したビデオトラック情報
+    video_info: Option<VideoTrackInfo>,
+    /// catalog から解決したオーディオトラック情報
+    audio_info: Option<AudioTrackInfo>,
+    /// 映像トラックを購読するか
+    subscribe_video: bool,
+    /// 音声トラックを購読するか
+    subscribe_audio: bool,
+    /// 現在受信前提の購読の request id
+    active_requests: HashSet<u64>,
+    /// PUBLISH_DONE の終端待ち
+    publish_done_pending: HashMap<u64, (TrackKind, PublishDoneDisposition)>,
+    /// 恒久的に終了した track
+    permanently_ended_tracks: HashSet<TrackKind>,
+    /// 移行待ち (GOING_AWAY) の track
+    migration_pending_tracks: HashSet<TrackKind>,
+}
+
+/// トラック購読と実行時状態の準備に使う入力
+///
+/// [`prepare_runtime`] へ、[`run`] の引数のうち購読の確立後に受け取るものをまとめて渡す。
+struct RuntimeSetup<'a> {
+    /// パイプラインの設定
+    config: &'a Config,
+    /// 再生するか
+    playback: bool,
+    /// 生成するタスクのメトリクスを収集する monitor
+    task_monitor: &'a tokio_metrics::TaskMonitor,
+    /// デコード済み映像フレームの送り先
+    frame_tx: std::sync::mpsc::Sender<DecodedVideoFrame>,
+    /// デコード済み音声フレームの送り先
+    audio_tx: std::sync::mpsc::Sender<DecodedAudioFrame>,
+    /// 表示待ちの映像フレーム数
+    display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    /// graceful shutdown の契機を受信する monitor
+    shutdown_monitor: tokio_utils::ShutdownMonitor,
+    /// 再生側の終了を伝える受信器
+    player_stop: tokio::sync::oneshot::Receiver<()>,
+}
+
+/// 接続を確立し、タイムアウトを設定してカタログを購読・解決する
+///
+/// カタログの購読は FILL_PARAMETERS 付き SUBSCRIBE で行い、fill fetch stream と購読で
+/// 届くカタログを解決する。解決した track の選択 (映像 / 音声の購読可否) と
+/// `targetLatency` の反映までを担う。
+/// 接続を確立した session の状態
+///
+/// カタログ購読の前に確定する値をまとめ、カタログ購読の関数へ渡す。
+struct ConnectedSession {
+    /// 現在の session を駆動するクライアント
+    client: MoqtClient,
+    /// 現在の session の data stream の受信口
+    recv_acceptor: transport::StreamAcceptor,
+    /// 受信 stream を Session へ登録するためのハンドル
+    data_plane: DataPlaneHandle,
+    /// SUBSCRIBE_TRACKS に使う namespace prefix
+    subscribe_tracks_namespace: TrackNamespace,
+    /// catalog 購読に使う namespace
+    catalog_namespace: TrackNamespace,
+}
+
+/// 接続を確立し、SETUP ハンドシェイクとタイムアウト設定を行う
+///
+/// 名前解決、解決したアドレスのフォールバック、transport ごとの分岐は tokio_moq の共通の
+/// 接続経路が担う (GOAWAY 後の移行でも同じ経路を使う)。
+async fn connect_subscriber(
+    config: &Config,
+    namespace: TrackNamespace,
+    task_monitor: &tokio_metrics::TaskMonitor,
+) -> Result<ConnectedSession> {
     // QMux 経路も experimental である。DATAGRAM は経路での損失を下位の TCP が再送するため
     // 起きないが、TCP の再送で遅延が伸びる。QMux は速やかに配送できない DATAGRAM の破棄を
     // 許すため (draft-ietf-quic-qmux-02 Section 6)、受信側のバッファが溢れると欠落しうる
@@ -3730,7 +3974,7 @@ pub async fn run(
     //
     // 名前解決、解決したアドレスのフォールバック、transport ごとの分岐は
     // tokio_moq の共通の接続経路が担う (GOAWAY 後の移行でも同じ経路を使う)。
-    let (mut client, mut recv_acceptor) = tokio_moq::connect(
+    let (mut client, recv_acceptor) = tokio_moq::connect(
         &tokio_moq::ConnectParams {
             url: &config.url,
             transport: config.transport,
@@ -3743,18 +3987,17 @@ pub async fn run(
             datagram_max_size: None,
             happy_eyeballs: happy_eyeballs::Config::default(),
         },
-        &task_monitor,
+        task_monitor,
     )
     .await?;
 
     // CLI で §8.8 表現としてパース済みの namespace をそのまま使う
     // `config` から move して受け取る。購読呼び出しを catalog track の namespace に変える 1 行の
     // 変更は、move 済みの値の再利用としてコンパイルエラーになる
-    let namespace = config.namespace;
     // SUBSCRIBE_TRACKS の prefix と、GOAWAY 移行後に同じ prefix で送り直すための複製。
     // `namespace` は catalog の購読で move するため、先に複製を取っておく
     let subscribe_tracks_namespace = namespace.clone();
-    let mut data_plane = client.data_plane();
+    let data_plane = client.data_plane();
 
     // 2. タイムアウト設定
     client.set_control_message_timeout_ms(Some(30000));
@@ -3764,6 +4007,33 @@ pub async fn run(
         client.control_message_timeout_ms(),
         client.data_stream_timeout_ms(),
     );
+
+    Ok(ConnectedSession {
+        client,
+        recv_acceptor,
+        data_plane,
+        subscribe_tracks_namespace,
+        catalog_namespace: namespace,
+    })
+}
+
+/// FILL_PARAMETERS 付き SUBSCRIBE でカタログを取得し、購読する track を決める
+///
+/// カタログを購読して fill fetch stream と購読で届くカタログを解決し、映像 / 音声の
+/// 購読可否と `targetLatency` の反映までを担う。
+async fn subscribe_catalog(
+    connected: ConnectedSession,
+    config: &Config,
+    target_latency_ms: &std::sync::Arc<std::sync::atomic::AtomicI64>,
+    video_subscribed: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<CatalogSession> {
+    let ConnectedSession {
+        mut client,
+        mut recv_acceptor,
+        data_plane,
+        subscribe_tracks_namespace,
+        catalog_namespace: namespace,
+    } = connected;
 
     // 3. カタログを FILL_PARAMETERS 付き SUBSCRIBE で取得する
     //
@@ -3814,8 +4084,7 @@ pub async fn run(
     // `peer_ended` を立ててパイプライン全体を終了させるのではなく、終了待ちの
     // request を Session の cleanup_ready の完了まで追い、cleanup できた track だけを
     // 終了させる
-    let mut publish_done_pending: HashMap<u64, (TrackKind, PublishDoneDisposition)> =
-        HashMap::new();
+    let publish_done_pending: HashMap<u64, (TrackKind, PublishDoneDisposition)> = HashMap::new();
     // 恒久的に終了した track (media に加えて catalog も) と、移行待ち
     // (GOING_AWAY) の track。全 media 終了の判定は video / audio のみを見るため、
     // catalog がこの集合に載っても media の終了判定には影響しない
@@ -3823,8 +4092,8 @@ pub async fn run(
     // 起動時の購読 (catalog / video / audio) は、購読を確立したときに active_requests へ
     // 登録する。reissue / session 移行の経路は張り直した new request_id を登録する。reissue
     // 成功時 / session 移行成功時に `migration_pending_tracks` は解除される
-    let mut permanently_ended_tracks: HashSet<TrackKind> = HashSet::new();
-    let mut migration_pending_tracks: HashSet<TrackKind> = HashSet::new();
+    let permanently_ended_tracks: HashSet<TrackKind> = HashSet::new();
+    let migration_pending_tracks: HashSet<TrackKind> = HashSet::new();
 
     // fill fetch stream と購読で届くカタログを読み、MSF の配置規則で適用する
     let initial_catalog_compression = resolve_catalog_compression(&catalog_sub.track_properties);
@@ -3838,7 +4107,7 @@ pub async fn run(
     )
     .await?;
     let CatalogResolution {
-        state: mut catalog_state,
+        state: catalog_state,
         video: video_info,
         audio: audio_info,
         video_latency,
@@ -3908,260 +4177,283 @@ pub async fn run(
         tracing::info!("Using catalog targetLatency: {catalog_target_latency_ms}ms");
     }
 
-    let mut track_map: HashMap<u64, TrackKind> = HashMap::new();
-    // カタログの購読は TrackKind::Catalog として登録し、届いた Object は main ループが適用する
-    track_map.insert(catalog_sub.track_alias, TrackKind::Catalog);
-    // 自側が発行した FETCH (映像と catalog の fill) の対応表 (Request ID → 配送先)。
-    // 応答 Object は通常の再生経路へ流すが、どの track の応答かは FETCH 応答 stream の
-    // FETCH_HEADER が運ぶ Request ID でしか分からないため、ここで記録する。
-    // catalog 購読の Request ID も登録する。FILL_PARAMETERS 付き SUBSCRIBE には publisher が
-    // fill fetch stream を返し (draft-ietf-moq-transport-23 §3.4 (Fill Semantics))、その
-    // FETCH_HEADER は起因 SUBSCRIBE の Request ID を運ぶ。移行後に catalog を張り直したとき
-    // の fill をカタログとして適用するため、種別をここで対応づける。
-    // 移行 (GOAWAY) では、張り直した購読に対して発行した FETCH の対応表へ差し替える
-    // (Request ID は session ごとに払い出される)
-    //
-    // request 単位移行の side session は、再発行のたびに新しい Request ID をこの表へ足す。
-    // stream task がヘッダを読んだ時点の内容で配送先を決められるよう、`Arc<Mutex<...>>`
-    // で共有する (ロックは await をまたがない)。
-    let mut fetch_targets: SharedFetchTargets =
-        std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
-    lock_fetch_targets(&fetch_targets).insert(catalog_sub.request_id, FetchTarget::Catalog);
-    // 自側が発行したメディア FETCH の再発行に必要な指定 (Request ID → 要求内容)。
-    // request stream の GOAWAY で同じ namespace / track name / range の FETCH を
-    // 発行し直せるようにする
-    let mut fetch_requests: HashMap<u64, FetchRequestTarget> = HashMap::new();
-    let mut video_codec: Option<String> = None;
-    let mut video_request_id: Option<u64> = None;
-    let mut audio_request_id: Option<u64> = None;
-    // peer が SUBSCRIBE_OK で決める track alias は移行で変わりうるため、現在の値を保持する
-    let mut video_alias: Option<u64> = None;
-    let mut audio_alias: Option<u64> = None;
-    // 音声の購読境界 (SUBSCRIBE_OK の Largest Object)。境界以下は購読より前に publish された
-    // 音声であり、Audio Config の検証だけを行い、送出も録画も復号もしない
-    let mut audio_largest_object: Option<Location> = None;
-    // 映像の購読境界 (SUBSCRIBE_OK の Largest Object)。境界以下は購読より前に publish された
-    // 映像であり、復号はするが表示しない
-    let mut video_largest_object: Option<Location> = None;
-    // 映像 Object を復号してよいかの判定状態は購読で 1 つ持つ。Group ごとに別の Subgroup
-    // ストリームで届くため (draft-ietf-moq-transport-23 §2.2 (Subgroups))、stream ごとに
-    // 判定を持つと「前の Group の Object が次の Group のキーフレームより後に届く」場合を
-    // 判定できない。映像のトラックを切り替えて decoder を作り直す経路を足すときは、
-    // この状態を reset してから次のキーフレームで復号を始め直すこと。
-    let video_decode_order = std::sync::Arc::new(tokio::sync::Mutex::new(VideoDecodeOrder::new()));
-    // Group の切り替えで次の Group の映像 Object を保留する gate は購読で 1 つ持つ。
-    // stream task 間で共有し、session 移行の直前に世代を進めて状態を捨てる
-    let group_switch = std::sync::Arc::new(SharedGroupSwitchGate::new());
-    // object モードの並べ替えと復号器の共有状態は購読で 1 つ持つ。Group モードでは
-    // 並べ替えも復号器の共有もしない (既存の stream ごとの復号を変えない)
-    let object_mode_video = std::sync::Arc::new(ObjectModeVideo::new(
-        video_info
-            .as_ref()
-            .filter(|_| subscribe_video)
-            .map(|video| video.stream_mapping)
-            .unwrap_or(StreamMapping::Group),
+    Ok(CatalogSession {
+        client,
+        recv_acceptor,
+        data_plane,
+        subscribe_tracks_namespace,
+        catalog_namespace_for_migration,
+        catalog_sub,
+        initial_catalog_compression,
+        catalog_state,
+        video_info,
+        audio_info,
+        subscribe_video,
+        subscribe_audio,
+        active_requests,
+        publish_done_pending,
+        permanently_ended_tracks,
+        migration_pending_tracks,
+    })
+}
+
+async fn connect_and_subscribe_catalog(
+    config: &Config,
+    namespace: TrackNamespace,
+    task_monitor: &tokio_metrics::TaskMonitor,
+    target_latency_ms: &std::sync::Arc<std::sync::atomic::AtomicI64>,
+    video_subscribed: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<CatalogSession> {
+    let connected = connect_subscriber(config, namespace, task_monitor).await?;
+    subscribe_catalog(connected, config, target_latency_ms, video_subscribed).await
+}
+
+/// トラックを購読し、録画器・デコーダ・チャネルを用意して受信ループの状態を組み立てる
+///
+/// カタログが示す映像 / 音声トラックを購読し、MP4 録画とデコーダを準備する。その後、
+/// stream task と datagram 受信タスクが使うチャネルと共有状態を作り、[`PipelineState`] を返す。
+/// 映像トラックの購読に使う main ループ側の状態
+struct SubscribeVideoContext<'a> {
+    /// 現在の session を駆動するクライアント
+    client: &'a mut MoqtClient,
+    /// catalog から解決した映像トラック情報
+    video_info: &'a Option<VideoTrackInfo>,
+    /// パイプラインの設定
+    config: &'a Config,
+    /// Track Alias から track 種別を引く表
+    track_map: &'a mut HashMap<u64, TrackKind>,
+    /// 現在受信前提の購読の request id
+    active_requests: &'a mut HashSet<u64>,
+    /// 自側が発行した FETCH の配送先
+    fetch_targets: &'a SharedFetchTargets,
+    /// 再発行に使うメディア FETCH の要求内容
+    fetch_requests: &'a mut HashMap<u64, FetchRequestTarget>,
+    /// 映像購読の request id
+    video_request_id: &'a mut Option<u64>,
+    /// 映像購読の track alias
+    video_alias: &'a mut Option<u64>,
+    /// 映像の購読境界 (SUBSCRIBE_OK の Largest Object)
+    video_largest_object: &'a mut Option<Location>,
+    /// 映像の codec (catalog の値)
+    video_codec: &'a mut Option<String>,
+    /// 再生するか
+    playback: bool,
+    /// 録画するか
+    recording_requested: bool,
+}
+
+/// 映像トラックを購読し、直近の Group の FETCH と復号器の確認を行う
+///
+/// 購読より前に publish された Group は購読では届かないため、SUBSCRIBE_OK の Largest Object を
+/// 基準に直近の Group を FETCH で要求する。再生する場合は復号器を 1 つ作って利用可能か
+/// 確認する (録画のみの場合は復号器が無くても録画を続ける)。
+async fn subscribe_video_track(context: SubscribeVideoContext<'_>) -> Result<()> {
+    let SubscribeVideoContext {
+        client,
+        video_info,
+        config,
+        track_map,
+        active_requests,
+        fetch_targets,
+        fetch_requests,
+        video_request_id,
+        video_alias,
+        video_largest_object,
+        video_codec,
         playback,
-        video_info
-            .as_ref()
-            .filter(|_| subscribe_video)
-            .map(|video| video.codec.as_str()),
-    ));
+        recording_requested,
+    } = context;
 
-    if subscribe_video {
-        let v = video_info.as_ref().expect("video_info is Some");
-        let video_sub = client
-            .subscribe_track_with_parameters(
-                v.namespace.clone(),
-                v.track_name.as_bytes().to_vec(),
-                // 起動時は前の session が無いため Location Filter を載せない
-                with_rendezvous_timeout(
-                    video_subscribe_parameters(None),
-                    config.rendezvous_timeout_ms,
-                ),
-            )
-            .await?;
-        tracing::info!(
-            "Subscribed to video track: alias={}, request_id={}",
-            video_sub.track_alias,
-            video_sub.request_id,
-        );
-        track_map.insert(video_sub.track_alias, TrackKind::Video);
-        video_alias = Some(video_sub.track_alias);
-        video_request_id = Some(video_sub.request_id);
-        active_requests.insert(video_sub.request_id);
-        video_largest_object = video_sub.largest_object;
-
-        // REQUEST_UPDATE で video subscription の subscriber priority を変更するサンプル
-        //
-        // C4M 認可トークンは `MoqtClient::send_request_update` が付けるため、ここでは
-        // 指定しない (draft-ietf-moq-msf-02 §11.5.3)。SUBSCRIBE と同じトークンを
-        // REQUEST_UPDATE にも MUST 付与する。
-        let mut params = shiguredo_moqt::message_parameter::MessageParameters::new();
-        params.push(shiguredo_moqt::message_parameter::MessageParameter {
-            param_type: shiguredo_moqt::message_parameter::PARAM_SUBSCRIBER_PRIORITY,
-            value: shiguredo_moqt::message_parameter::MessageParameterValue::Uint8(192),
-        });
-        if let Err(e) = client
-            .send_request_update(video_sub.request_id, params)
-            .await
-        {
-            tracing::warn!("Failed to send REQUEST_UPDATE for video subscription: {e}");
-        }
-
-        // 購読より前に publish された Group は購読では届かない。SUBSCRIBE_OK の
-        // Largest Object を基準に直近の Group を FETCH で要求し、映像はその範囲の
-        // キーフレームから復号を始められるようにする (draft-ietf-moq-transport-23 §3.5.1)。
-        // 購読の優先度を変えたあとに発行する (§9.19.7 の SUBSCRIBER PRIORITY を
-        // FETCH 応答にも効かせるため)
-        if let Some((request_id, request)) = fetch_recent_video_groups(
-            &mut client,
-            &SubscribeTarget {
-                namespace: v.namespace.clone(),
-                track_name: v.track_name.as_bytes().to_vec(),
-            },
-            video_sub.largest_object,
+    let v = video_info.as_ref().expect("video_info is Some");
+    let video_sub = client
+        .subscribe_track_with_parameters(
+            v.namespace.clone(),
+            v.track_name.as_bytes().to_vec(),
+            // 起動時は前の session が無いため Location Filter を載せない
+            with_rendezvous_timeout(
+                video_subscribe_parameters(None),
+                config.rendezvous_timeout_ms,
+            ),
         )
+        .await?;
+    tracing::info!(
+        "Subscribed to video track: alias={}, request_id={}",
+        video_sub.track_alias,
+        video_sub.request_id,
+    );
+    track_map.insert(video_sub.track_alias, TrackKind::Video);
+    *video_alias = Some(video_sub.track_alias);
+    *video_request_id = Some(video_sub.request_id);
+    active_requests.insert(video_sub.request_id);
+    *video_largest_object = video_sub.largest_object;
+
+    // REQUEST_UPDATE で video subscription の subscriber priority を変更するサンプル
+    //
+    // C4M 認可トークンは `MoqtClient::send_request_update` が付けるため、ここでは
+    // 指定しない (draft-ietf-moq-msf-02 §11.5.3)。SUBSCRIBE と同じトークンを
+    // REQUEST_UPDATE にも MUST 付与する。
+    let mut params = shiguredo_moqt::message_parameter::MessageParameters::new();
+    params.push(shiguredo_moqt::message_parameter::MessageParameter {
+        param_type: shiguredo_moqt::message_parameter::PARAM_SUBSCRIBER_PRIORITY,
+        value: shiguredo_moqt::message_parameter::MessageParameterValue::Uint8(192),
+    });
+    if let Err(e) = client
+        .send_request_update(video_sub.request_id, params)
         .await
-        {
-            lock_fetch_targets(&fetch_targets).insert(request_id, FetchTarget::Video);
-            fetch_requests.insert(request_id, request);
-        }
-
-        // ビデオデコーダの初期化確認 (再生を行わない場合はデコードしないため省略する)。
-        // 録画中はデコーダが使えなくても録画を続けるため、警告に留める。
-        if playback {
-            match decoder::build_video_decoder(&v.codec) {
-                Ok(_probe) => {
-                    drop(_probe);
-                    tracing::info!("Video decoder available (codec={})", v.codec);
-                }
-                Err(e) if recording_requested => {
-                    tracing::warn!(
-                        "Video decoder is unavailable; recording without video playback: {e}"
-                    );
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        video_codec = Some(v.codec.clone());
+    {
+        tracing::warn!("Failed to send REQUEST_UPDATE for video subscription: {e}");
     }
 
-    let audio_params: Option<(u32, u8)> = if subscribe_audio {
-        let a = audio_info.as_ref().expect("audio_info is Some");
-        let audio_sub = client
-            .subscribe_track_with_parameters(
-                a.namespace.clone(),
-                a.track_name.as_bytes().to_vec(),
-                // 起動時は前の session が無く、パイプラインが載せるパラメータは無い
-                with_rendezvous_timeout(
-                    audio_subscribe_parameters(None),
-                    config.rendezvous_timeout_ms,
-                ),
-            )
-            .await?;
-        tracing::info!(
-            "Subscribed to audio track: alias={}, request_id={}",
-            audio_sub.track_alias,
-            audio_sub.request_id,
-        );
-        track_map.insert(audio_sub.track_alias, TrackKind::Audio);
-        audio_alias = Some(audio_sub.track_alias);
-        audio_request_id = Some(audio_sub.request_id);
-        active_requests.insert(audio_sub.request_id);
-        audio_largest_object = audio_sub.largest_object;
-
-        let channels = match a.channel_config.as_str() {
-            "1" => 1u8,
-            "2" => 2u8,
-            other => {
-                return Err(Error::Other(format!(
-                    "unsupported audio channel_config: {other}"
-                )));
-            }
-        };
-        Some((a.samplerate, channels))
-    } else {
-        None
-    };
-    // Audio Config の解釈 (codec 判定) と音声デコーダの生成に使う catalog の audio codec
-    let audio_codec = audio_info.as_ref().map(|a| a.codec.clone());
-
-    // SUBSCRIBE_TRACKS は catalog / 映像 / 音声の購読を確立したあとに送る。この example は
-    // catalog が示す track だけを再生するため、受理する PUBLISH は既存の購読と重複する
-    // track が中心になるが、catalog に載らない track も受理して観測できる。
-    // 付加的な購読であり、失敗しても既存の再生は止めない。
-    //
-    // 既に SUBSCRIBE している Full Track Name を PUBLISH でも購読すると同じ Object を
-    // 2 系統で受け取るため、重複判定に使う一覧をここで作る。
-    let mut subscribed_tracks: Vec<(TrackNamespace, Vec<u8>)> = vec![(
-        subscribe_tracks_namespace.clone(),
-        MSF_CATALOG_TRACK_NAME.to_vec(),
-    )];
-    if subscribe_video && let Some(info) = &video_info {
-        subscribed_tracks.push((info.namespace.clone(), info.track_name.as_bytes().to_vec()));
+    // 購読より前に publish された Group は購読では届かない。SUBSCRIBE_OK の
+    // Largest Object を基準に直近の Group を FETCH で要求し、映像はその範囲の
+    // キーフレームから復号を始められるようにする (draft-ietf-moq-transport-23 §3.5.1)。
+    // 購読の優先度を変えたあとに発行する (§9.19.7 の SUBSCRIBER PRIORITY を
+    // FETCH 応答にも効かせるため)
+    if let Some((request_id, request)) = fetch_recent_video_groups(
+        client,
+        &SubscribeTarget {
+            namespace: v.namespace.clone(),
+            track_name: v.track_name.as_bytes().to_vec(),
+        },
+        video_sub.largest_object,
+    )
+    .await
+    {
+        lock_fetch_targets(fetch_targets).insert(request_id, FetchTarget::Video);
+        fetch_requests.insert(request_id, request);
     }
-    if subscribe_audio && let Some(info) = &audio_info {
-        subscribed_tracks.push((info.namespace.clone(), info.track_name.as_bytes().to_vec()));
-    }
-    let mut tracks_request_id: Option<u64> = None;
-    if config.subscribe_tracks {
-        match client
-            .subscribe_tracks(subscribe_tracks_namespace.clone(), MessageParameters::new())
-            .await
-        {
-            Ok(request_id) => {
-                tracks_request_id = Some(request_id);
-                tracing::info!(
-                    "Sent SUBSCRIBE_TRACKS: request_id={request_id}, namespace={}",
-                    serialize_namespace(&subscribe_tracks_namespace),
-                );
+
+    // ビデオデコーダの初期化確認 (再生を行わない場合はデコードしないため省略する)。
+    // 録画中はデコーダが使えなくても録画を続けるため、警告に留める。
+    if playback {
+        match decoder::build_video_decoder(&v.codec) {
+            Ok(_probe) => {
+                drop(_probe);
+                tracing::info!("Video decoder available (codec={})", v.codec);
             }
-            Err(e) => {
+            Err(e) if recording_requested => {
                 tracing::warn!(
-                    "Failed to send SUBSCRIBE_TRACKS; continuing without the namespace subscription: {e}"
+                    "Video decoder is unavailable; recording without video playback: {e}"
                 );
             }
+            Err(e) => return Err(e),
         }
     }
-    // SUBSCRIBE_TRACKS の結果として受理した PUBLISH の Request ID → Track Alias。
-    // PUBLISH_DONE の drain 完了後に alias を track_map から外すために保持する
-    let mut ignored_publish_requests: HashMap<u64, u64> = HashMap::new();
+    *video_codec = Some(v.codec.clone());
+    Ok(())
+}
 
-    // 移行 (GOAWAY) で購読を張り直すための指定と、現在の session の Request ID / alias
-    //
-    // catalog は移行時に読み直さない。購読済みの指定をそのまま使えば、移行先の session で
-    // 届く Object から同じ `CatalogState` が再び更新される。catalog が PUBLISH_DONE で
-    // 恒久終了した場合は catalog_namespace を `None` にして張り直さない
-    // (`permanently_ended_tracks` は本時点では空のため初期は購読を継続する)
-    let resubscribe_plan = ResubscribePlan {
-        catalog_namespace: Some(catalog_namespace_for_migration),
-        // `subscribe_video` / `subscribe_audio` は catalog から得た track がある場合だけ真に
-        // なるため、ここで `Option` の条件と購読の有無が一致する
-        video: video_info
-            .as_ref()
-            .filter(|_| subscribe_video)
-            .map(|info| SubscribeTarget {
-                namespace: info.namespace.clone(),
-                track_name: info.track_name.as_bytes().to_vec(),
-            }),
-        audio: audio_info
-            .as_ref()
-            .filter(|_| subscribe_audio)
-            .map(|info| SubscribeTarget {
-                namespace: info.namespace.clone(),
-                track_name: info.track_name.as_bytes().to_vec(),
-            }),
-        rendezvous_timeout_ms: config.rendezvous_timeout_ms,
+/// 音声トラックの購読に使う main ループ側の状態
+struct SubscribeAudioContext<'a> {
+    /// 現在の session を駆動するクライアント
+    client: &'a mut MoqtClient,
+    /// catalog から解決した音声トラック情報
+    audio_info: &'a Option<AudioTrackInfo>,
+    /// パイプラインの設定
+    config: &'a Config,
+    /// Track Alias から track 種別を引く表
+    track_map: &'a mut HashMap<u64, TrackKind>,
+    /// 現在受信前提の購読の request id
+    active_requests: &'a mut HashSet<u64>,
+    /// 音声購読の request id
+    audio_request_id: &'a mut Option<u64>,
+    /// 音声購読の track alias
+    audio_alias: &'a mut Option<u64>,
+    /// 音声の購読境界 (SUBSCRIBE_OK の Largest Object)
+    audio_largest_object: &'a mut Option<Location>,
+}
+
+/// 音声トラックを購読し、catalog の channelConfig をサンプルレートとチャンネル数へ解決する
+async fn subscribe_audio_track(context: SubscribeAudioContext<'_>) -> Result<Option<(u32, u8)>> {
+    let SubscribeAudioContext {
+        client,
+        audio_info,
+        config,
+        track_map,
+        active_requests,
+        audio_request_id,
+        audio_alias,
+        audio_largest_object,
+    } = context;
+
+    let a = audio_info.as_ref().expect("audio_info is Some");
+    let audio_sub = client
+        .subscribe_track_with_parameters(
+            a.namespace.clone(),
+            a.track_name.as_bytes().to_vec(),
+            // 起動時は前の session が無く、パイプラインが載せるパラメータは無い
+            with_rendezvous_timeout(
+                audio_subscribe_parameters(None),
+                config.rendezvous_timeout_ms,
+            ),
+        )
+        .await?;
+    tracing::info!(
+        "Subscribed to audio track: alias={}, request_id={}",
+        audio_sub.track_alias,
+        audio_sub.request_id,
+    );
+    track_map.insert(audio_sub.track_alias, TrackKind::Audio);
+    *audio_alias = Some(audio_sub.track_alias);
+    *audio_request_id = Some(audio_sub.request_id);
+    active_requests.insert(audio_sub.request_id);
+    *audio_largest_object = audio_sub.largest_object;
+
+    let channels = match a.channel_config.as_str() {
+        "1" => 1u8,
+        "2" => 2u8,
+        other => {
+            return Err(Error::Other(format!(
+                "unsupported audio channel_config: {other}"
+            )));
+        }
     };
-    // 現在の catalog 購読の request id と alias。恒久終了後に session 移行で張り直さない
-    // 場合は旧 session の値が新 session の request id (0 から採番) と衝突するため、
-    // `None` にして照合対象から外す (media の `video_request_id` / `audio_request_id` と
-    // 同じ `Option` の契約にする)
-    let mut catalog_request_id: Option<u64> = Some(catalog_sub.request_id);
-    let mut catalog_alias: Option<u64> = Some(catalog_sub.track_alias);
-    // catalog track の MSF_COMPRESSION。SUBSCRIBE_OK の Track Property から解決する。
-    // catalog の data stream はこの値で gzip かどうかを決める。
-    let mut catalog_compression = initial_catalog_compression;
+    Ok(Some((a.samplerate, channels)))
+}
+
+/// 録音器とデコーダの準備に使う入力
+struct RecorderSetup<'a> {
+    /// パイプラインの設定
+    config: &'a Config,
+    /// 再生するか
+    playback: bool,
+    /// 録画するか
+    recording_requested: bool,
+    /// 映像トラックを購読するか
+    subscribe_video: bool,
+    /// catalog から解決した映像トラック情報
+    video_info: &'a Option<VideoTrackInfo>,
+    /// 音声のサンプルレートとチャンネル数 (catalog の値)
+    audio_params: Option<(u32, u8)>,
+    /// 音声の codec (catalog の値)
+    audio_codec: Option<&'a str>,
+}
+
+/// 録音器と共有デコーダを準備した結果
+struct PreparedResources {
+    /// 購読で共有する音声デコーダ
+    audio_decoder: Option<std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
+    /// 録画先の録画器 (`--mp4` 指定時のみ)
+    recorder: Option<Recorder>,
+    /// 録画器への送り口 (`--mp4` 指定時のみ)
+    recorder_sender: Option<RecorderSender>,
+}
+
+/// 音声デコーダ、MP4 録画のセットアップ、録画器を準備する
+///
+/// デコーダは録画のセットアップより先に作る。AAC は AudioToolbox の出力がステレオ固定で
+/// catalog の channelConfig と食い違うことがあり、再生と録画に渡すチャンネル数を
+/// デコーダの出力に合わせるためである。
+fn prepare_recorders_and_decoders(inputs: RecorderSetup<'_>) -> Result<PreparedResources> {
+    let RecorderSetup {
+        config,
+        playback,
+        recording_requested,
+        subscribe_video,
+        video_info,
+        audio_params,
+        audio_codec,
+    } = inputs;
 
     // 音声は 1 object = 1 subgroup stream で届く (LOC draft-ietf-moq-loc-05 §4.1)。
     // stream ごとにデコーダを作り直すと 20 ms ごとにデコーダ状態が失われ、
@@ -4172,7 +4464,7 @@ pub async fn run(
     // デコーダは録画のセットアップより先に作る。AAC は AudioToolbox の出力がステレオ固定で
     // catalog の channelConfig と食い違うことがあり、再生と録画に渡すチャンネル数を
     // デコーダの出力に合わせるためである。
-    let audio_decoder = match (playback, audio_params, audio_codec.as_deref()) {
+    let audio_decoder = match (playback, audio_params, audio_codec) {
         (true, Some((sample_rate, channels)), Some(codec)) => {
             match AudioDecoder::build(codec, sample_rate, channels) {
                 Ok(decoder) => {
@@ -4227,7 +4519,7 @@ pub async fn run(
     // Opus のサンプルエントリーを構築し、録画するデータは圧縮 payload そのものであるため、
     // AAC を録画するとコンテナの表記と実際のペイロードが食い違う。AAC のトラックでは
     // 音声を録画せず警告する (映像のみの MP4 になる)
-    let audio_setup = match (audio_params, audio_codec.as_deref()) {
+    let audio_setup = match (audio_params, audio_codec) {
         (Some((sample_rate, channels)), Some(codec)) if decoder::is_opus_codec(codec) => {
             Some(AudioSetup {
                 sample_rate,
@@ -4257,9 +4549,148 @@ pub async fn run(
     // stream task は `Arc<Mutex<...>>` でデコーダを共有する
     let audio_decoder =
         audio_decoder.map(|decoder| std::sync::Arc::new(tokio::sync::Mutex::new(decoder)));
-    // session の世代。移行のたびに進め、Audio Config の検証済み世代と比べる。
-    // 1 から始め、検証済み世代は 0 (未検証) から始めることで、最初の Audio Config を処理する
-    let mut session_generation: u64 = 1;
+    Ok(PreparedResources {
+        audio_decoder,
+        recorder,
+        recorder_sender,
+    })
+}
+
+/// チャネル生成に使う、購読の確立後に用意できる値
+struct ChannelSetupInputs<'a> {
+    /// 現在の session を駆動するクライアント
+    client: &'a MoqtClient,
+    /// 受信 stream を Session へ登録するためのハンドル
+    data_plane: &'a DataPlaneHandle,
+    /// 生成するタスクのメトリクスを収集する monitor
+    task_monitor: &'a tokio_metrics::TaskMonitor,
+    /// Track Alias から track 種別を引く表 (Arc で共有する前のもの)
+    track_map: HashMap<u64, TrackKind>,
+    /// デコード済み音声フレームの送り先
+    audio_tx: &'a std::sync::mpsc::Sender<DecodedAudioFrame>,
+    /// 購読で共有する音声デコーダ
+    audio_decoder: Option<std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
+    /// 音声のサンプルレートとチャンネル数
+    audio_params: Option<(u32, u8)>,
+    /// 音声の codec
+    audio_codec: Option<String>,
+    /// 録画先の録画器
+    recorder: Option<Recorder>,
+    /// 録画器への送り口
+    recorder_sender: Option<RecorderSender>,
+    /// 音声の購読境界
+    audio_largest_object: Option<Location>,
+    /// 映像の購読境界
+    video_largest_object: Option<Location>,
+}
+
+/// 受信ループと stream task が使うチャネル・共有状態
+struct StreamChannels {
+    /// session の世代
+    session_generation: u64,
+    /// Audio Config の処理を試みた session の世代
+    audio_config_validated_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// 受信側の音声の追いつき
+    audio_catch_up: std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
+    /// 音声の購読境界と送出順の判定
+    audio_delivery_order: std::sync::Arc<std::sync::Mutex<AudioDeliveryOrder>>,
+    /// 映像の購読境界と送出順の判定
+    video_delivery_order: std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
+    /// Track Alias から track 種別を引く表
+    track_map: std::sync::Arc<std::sync::RwLock<HashMap<u64, TrackKind>>>,
+    /// パイプライン開始時刻
+    start: Instant,
+    /// 100 ms 周期の tick
+    tick_interval: tokio::time::Interval,
+    /// 受信した data stream の通し番号
+    total_streams: u64,
+    /// stream task の join 集合
+    join_set: tokio::task::JoinSet<()>,
+    /// data stream の同時処理枠
+    stream_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Track Alias 未確立の Subgroup の保留バッファ
+    pending_subgroups: SharedPendingSubgroupBuffer,
+    /// 処理枠が空くのを待つ data stream
+    pending_streams: std::collections::VecDeque<transport::RecvStream>,
+    /// 書式違反によるセッション終了の依頼
+    termination_tx: tokio::sync::mpsc::Sender<SessionError>,
+    /// 書式違反によるセッション終了の依頼の受信
+    termination_rx: tokio::sync::mpsc::Receiver<SessionError>,
+    /// catalog Object を main ループへ渡すチャネル
+    catalog_tx: tokio::sync::mpsc::Sender<catalog::CatalogObject>,
+    /// catalog Object の受信
+    catalog_rx: tokio::sync::mpsc::Receiver<catalog::CatalogObject>,
+    /// track ごとに最後に受信した Object の位置
+    last_received_locations: std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
+    /// datagram 受信タスクへ session を差し替える通知
+    datagram_session_tx: tokio::sync::watch::Sender<DatagramSession>,
+    /// datagram 受信タスク
+    datagram_task: tokio::task::JoinHandle<()>,
+    /// peer が購読 / session を終了させたか
+    peer_ended: bool,
+    /// GOAWAY を受信したか
+    goaway_received: bool,
+    /// 自側でセッションを閉じたか
+    session_terminated: bool,
+    /// パイプラインを異常終了させるエラー
+    fatal_error: Option<Error>,
+    /// 前回ログを出した音声配送の累計
+    logged_audio_delivery_counters: AudioDeliveryCounters,
+    /// 前回ログを出した映像境界の累計
+    logged_video_boundary_objects: u64,
+    /// session 移行の結果の受信器
+    migration_rx: Option<tokio::sync::oneshot::Receiver<MigrationResult>>,
+    /// session 移行が進行中か
+    migration_in_progress: bool,
+    /// session 移行タスク
+    migration_task: Option<tokio::task::JoinHandle<()>>,
+    /// 移行開始時点の受信位置
+    migration_boundary_snapshot: Option<LastReceivedLocations>,
+    /// 移行の回数を抑える limiter
+    migration_limiter: MigrationLimiter,
+    /// 旧 session を閉じるタスク
+    old_session_closers: Vec<tokio::task::JoinHandle<()>>,
+    /// URL ごとの side session の slot
+    request_migration_sessions: HashMap<String, SideSessionSlot>,
+    /// 起動した side session のタスク
+    request_migration_tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// side session からの移行結果の送信
+    request_migration_tx: tokio::sync::mpsc::Sender<RequestMigrationEvent>,
+    /// side session からの移行結果の受信
+    request_migration_rx: tokio::sync::mpsc::Receiver<RequestMigrationEvent>,
+    /// WebTransport の drain 状態の受信器
+    wt_session_state_rx: Option<tokio::sync::watch::Receiver<WtSessionState>>,
+    /// 購読で共有する音声デコーダ
+    audio_decoder: Option<std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
+    /// 録画先の録画器 (`--mp4` 指定時のみ)
+    recorder: Option<Recorder>,
+    /// 録画器への送り口 (`--mp4` 指定時のみ)
+    recorder_sender: Option<RecorderSender>,
+    /// 音声のサンプルレートとチャンネル数
+    audio_params: Option<(u32, u8)>,
+    /// 音声の codec
+    audio_codec: Option<String>,
+}
+
+/// 受信ループと stream task のチャネル、共有状態、datagram 受信タスクを用意する
+///
+/// `run` の終了時に datagram 受信タスクを止められるよう、タスクのハンドルも返す。
+fn prepare_stream_channels(inputs: ChannelSetupInputs<'_>) -> StreamChannels {
+    let ChannelSetupInputs {
+        client,
+        data_plane,
+        task_monitor,
+        track_map,
+        audio_tx,
+        audio_decoder,
+        audio_params,
+        audio_codec,
+        recorder,
+        recorder_sender,
+        audio_largest_object,
+        video_largest_object,
+    } = inputs;
+    let session_generation: u64 = 1;
     let audio_config_validated_generation =
         std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     // 受信側の追いつきの状態。ストリーム経路と datagram 経路で共有する
@@ -4282,8 +4713,8 @@ pub async fn run(
     let start = Instant::now();
     let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(100));
     tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut total_streams: u64 = 0;
-    let mut join_set = tokio::task::JoinSet::new();
+    let total_streams: u64 = 0;
+    let join_set = tokio::task::JoinSet::new();
     // 同時に処理する data stream 数を制限する。
     //
     // 制限しないと AV1 / Opus のデコードが CPU を使い切り、同じ runtime で動く
@@ -4312,15 +4743,15 @@ pub async fn run(
             DEFAULT_PENDING_SUBGROUP_BUFFER_OPTIONS,
         )));
     // 枠待ちの stream。accept 済みだがまだ処理を開始していない
-    let mut pending_streams: std::collections::VecDeque<transport::RecvStream> =
+    let pending_streams: std::collections::VecDeque<transport::RecvStream> =
         std::collections::VecDeque::new();
     // stream task からのセッション終了依頼。close は I/O 層である main ループが行う。
     // 送信側の原本を main ループが保持するため、受信ループが動いている間このチャネルは
     // 閉じない (`select!` の受信分岐は `Some` のみを受ける)。
-    let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel::<SessionError>(1);
+    let (termination_tx, termination_rx) = tokio::sync::mpsc::channel::<SessionError>(1);
     // catalog の更新は状態を所有する main ループが適用する。stream task は読み出した
     // Object をこのチャネルへ渡す
-    let (catalog_tx, mut catalog_rx) =
+    let (catalog_tx, catalog_rx) =
         tokio::sync::mpsc::channel::<catalog::CatalogObject>(CATALOG_CHANNEL_SIZE);
 
     // 6. datagram 受信タスク
@@ -4346,226 +4777,68 @@ pub async fn run(
         Arc::new(std::sync::Mutex::new(LastReceivedLocations::default()));
     // 最後の値は session 移行のたびに進む epoch である。datagram 受信タスクは、届いた
     // Object をどの session のものとして Audio Config の検証状態に反映するかをこの値で決める。
-    let (datagram_session_tx, mut datagram_session_rx) = tokio::sync::watch::channel((
-        client.handle(),
-        data_plane.clone(),
-        Arc::clone(&datagram_track_map),
-        session_generation,
-    ));
-    let audio_decoder_for_datagram = audio_decoder.clone();
-    let audio_config_validated_generation_for_datagram =
-        Arc::clone(&audio_config_validated_generation);
-    let audio_codec_for_datagram = audio_codec.clone();
-    let recorder_for_datagram = recorder_sender.clone();
-    let termination_tx_for_datagram = termination_tx.clone();
-    let audio_tx_for_datagram = audio_tx.clone();
-    let audio_catch_up_for_datagram = Arc::clone(&audio_catch_up);
-    let audio_delivery_order_for_datagram = Arc::clone(&audio_delivery_order);
-    let last_received_locations_for_datagram = Arc::clone(&last_received_locations);
-    let datagram_task = tokio::spawn(task_monitor.clone().instrument(async move {
-        // Audio Config の処理とデコードは subgroup stream と共有する。datagram の音声は
-        // 購読した audio track でしか届かないため、catalog の値はここで確定できる
-        // (audio track を購読していなければ audio_params は None だが、その場合
-        //  track_map に Audio が入らないため配送経路には来ない)。
-        // メディアとして扱えないトラックの datagram を 1 回だけ記録するための alias
-        let mut unsupported_aliases: HashSet<u64> = HashSet::new();
-        // 最初の datagram を受け取ったことを 1 回だけ記録する。届いていないのか、届いて
-        // いるのに配送経路へ流れていないのかを切り分けるために出す
-        let mut datagram_received = false;
-        let (
-            mut handle_for_datagram,
-            mut data_plane_for_datagram,
-            mut track_map_for_datagram,
-            mut generation_for_datagram,
-        ) = datagram_session_rx.borrow_and_update().clone();
-        // `recv_datagrams` は transport から datagram を取り出した後に await しないため
-        // (`StreamHandle::recv_datagrams`)、select が `changed()` を選んで future を捨てても
-        // 取り出し済みの datagram は失われない。新 session の datagram は新 handle 側に残る
-        'receive: loop {
-            let received = tokio::select! {
-                received = handle_for_datagram.recv_datagrams() => received,
-                changed = datagram_session_rx.changed() => {
-                    if changed.is_err() {
-                        // 送信側 (`run`) がこのタスクを abort する前に drop した場合に限り到達する。
-                        // 受信タスクは `run` の終了時に abort されるため、通常はここへ来ない
-                        break 'receive;
-                    }
-                    let (handle, data_plane, map, epoch) =
-                        datagram_session_rx.borrow_and_update().clone();
-                    handle_for_datagram = handle;
-                    data_plane_for_datagram = data_plane;
-                    track_map_for_datagram = map;
-                    generation_for_datagram = epoch;
-                    tracing::info!("Datagram receive task switched to the migrated session");
-                    continue 'receive;
-                }
-            };
-            let datagrams = match received {
-                Ok(datagrams) => datagrams,
-                Err(e) => {
-                    // セッション終了 (§6) と接続クローズは期待される終了であるため、
-                    // 異常 (warn) ではなく info に揃える
-                    if matches!(e, TransportError::ConnectionClosed) {
-                        tracing::info!("Datagram receive error: {e}");
-                    } else {
-                        tracing::warn!("Datagram receive error: {e}");
-                    }
-                    // 旧 session のエラーでタスクを終わらせない。GOAWAY の移行中に旧接続が
-                    // 閉じることは §9.2 が許容しており (timeout 前の close)、ここで終了すると
-                    // 移行後の datagram (音声) を受信する者が居なくなる。
-                    // 移行の通知 (watch の更新) を待って新しい session へ切り替える。
-                    // 送信側 (`run`) が drop された場合だけ終わる (run は終了時に abort する)
-                    if datagram_session_rx.changed().await.is_err() {
-                        break 'receive;
-                    }
-                    let (handle, data_plane, map, epoch) =
-                        datagram_session_rx.borrow_and_update().clone();
-                    handle_for_datagram = handle;
-                    data_plane_for_datagram = data_plane;
-                    track_map_for_datagram = map;
-                    generation_for_datagram = epoch;
-                    tracing::info!(
-                        "Datagram receive task switched to the migrated session after a receive error"
-                    );
-                    continue 'receive;
-                }
-            };
-            if !datagram_received && !datagrams.is_empty() {
-                datagram_received = true;
-                tracing::info!(
-                    "Received the first datagram batch from the relay: count={}",
-                    datagrams.len()
-                );
-            }
-            // 空のバッチのときだけ受信ループを休める。`recv_datagrams` は QUIC と QMux では
-            // 1 件以上届くまで待つため、バッチがあるときの sleep はそのまま受信から再生までの
-            // 遅延になる。WebTransport の `take_buffered_datagrams` はバッファが空でも即座に
-            // 返りうるため、空のときだけ sleep して空回りを防ぐ
-            let batch_len = datagrams.len();
-            for raw in datagrams {
-                // type 分岐は Session が行う。未知 type は
-                // draft-ietf-moq-transport-23 §11 (Data Streams and Datagrams) に従いセッションクローズになる。
-                // アプリ側で decode を代行せず raw を渡すのは、wire の検証順序と終了コードを
-                // Session に一本化するためである (payload は改めて decode する)
-                let acceptance = match data_plane_for_datagram.recv_datagram(&raw) {
-                    Ok(acceptance) => acceptance,
-                    Err(e) => {
-                        // Session がセッションを閉じる経路である。close は main ループが送る
-                        tracing::warn!("Failed to process datagram: {e}");
-                        continue;
-                    }
-                };
-                // Padding Datagram と、フィルタを通過しなかった Object / キャンセル済み
-                // subscription の Object はメディアとして扱わない
-                // (draft-ietf-moq-transport-23 §3.1 (Subscriptions) / §11.5.2 (Padding Datagrams))
-                let DatagramAcceptance::Object(TrackDataAcceptance::Accepted) = acceptance else {
-                    continue;
-                };
-                // 種別の判定には、この handle と同時に受け取った表を使う
-                let action = plan_datagram(&raw, &track_map_for_datagram);
-                match action {
-                    DatagramAction::DeliverAudio { datagram, payload } => {
-                        // session の世代 は切り替えのたびに変わるため、配送のたびに作る
-                        let delivery = AudioDelivery {
-                            audio_tx: &audio_tx_for_datagram,
-                            audio_config_validated_generation:
-                                &audio_config_validated_generation_for_datagram,
-                            session_generation: generation_for_datagram,
-                            is_opus_codec: audio_codec_for_datagram
-                                .as_deref()
-                                .is_some_and(decoder::is_opus_codec),
-                            catalog_sample_rate: audio_params
-                                .map_or(0, |(sample_rate, _)| sample_rate),
-                            catalog_channels: audio_params.map_or(0, |(_, channels)| channels),
-                            recorder: recorder_for_datagram.as_ref(),
-                            termination_tx: &termination_tx_for_datagram,
-                            catch_up: audio_catch_up_for_datagram.as_ref(),
-                            delivery_order: audio_delivery_order_for_datagram.as_ref(),
-                        };
-                        // デコーダは subscription で 1 つを共有する。stream task と同じく
-                        // デコードが終わるまでロックを保持する
-                        let mut decoder = match audio_decoder_for_datagram.as_ref() {
-                            Some(decoder) => Some(decoder.lock().await),
-                            None => None,
-                        };
-                        // 移行後の再購読で使う「最後に受信した位置」を記録する
-                        let location = datagram_object_location(&datagram);
-                        record_last_location(
-                            &last_received_locations_for_datagram,
-                            TrackKind::Audio,
-                            location,
-                        );
-                        if !delivery
-                            .deliver(
-                                Some(location),
-                                datagram.properties_data.as_deref(),
-                                payload,
-                                decoder.as_deref_mut(),
-                            )
-                            .await
-                        {
-                            // LOC Properties の書式違反でセッション終了を依頼したか、
-                            // 再生側が終了した。malformed Track はこの Object を捨てて
-                            // 継続するため `true` が返る
-                            break 'receive;
-                        }
-                    }
-                    // 映像とカタログの datagram は本 example では扱わない。LOC の映像は
-                    // 1 group = 1 unidirectional stream で配送され (draft-ietf-moq-loc-05 §4.2)、
-                    // moq-pub も datagram では送らない
-                    DatagramAction::Unsupported { track_alias } => {
-                        if unsupported_aliases.insert(track_alias) {
-                            tracing::warn!(
-                                "Ignoring media delivered as a datagram on an unsupported track: alias={track_alias}"
-                            );
-                        }
-                    }
-                    DatagramAction::Ignore => {}
-                }
-            }
-            if should_sleep_after_datagram_batch(batch_len) {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        }
-    }));
+    let (datagram_session_tx, datagram_session_rx) = tokio::sync::watch::channel(DatagramSession {
+        handle: client.handle(),
+        data_plane: data_plane.clone(),
+        track_map: Arc::clone(&datagram_track_map),
+        generation: session_generation,
+    });
+    // datagram の受信は専用タスクへ分け、音声 Object の配送状態は stream task と同じものを
+    // 共有する。session 移行のたびに handle / data_plane / alias 表と世代を watch チャネルで
+    // まとめて渡し、タスクは起動し直さない (デコーダと配送経路の状態を引き継ぐため)。
+    let datagram_task = tokio::spawn(task_monitor.clone().instrument(run_datagram_task(
+        DatagramTaskContext {
+            audio_decoder: audio_decoder.clone(),
+            audio_config_validated_generation: Arc::clone(&audio_config_validated_generation),
+            audio_codec: audio_codec.clone(),
+            recorder: recorder_sender.clone(),
+            termination_tx: termination_tx.clone(),
+            audio_tx: audio_tx.clone(),
+            audio_catch_up: Arc::clone(&audio_catch_up),
+            audio_delivery_order: Arc::clone(&audio_delivery_order),
+            last_received_locations: Arc::clone(&last_received_locations),
+            audio_params,
+        },
+        datagram_session_rx,
+    )));
 
     // peer が subscription / session を終了させて受信ループを抜けたか。
     // この場合の subscription は Terminated であり、STOP_SENDING は不要である
-    let mut peer_ended = false;
+    let peer_ended = false;
     // GOAWAY を受信したか。GOAWAY は subscription state に影響しないため、peer_ended とは
     // 分けて扱う (購読は Established のままなので cleanup で STOP_SENDING を送れる)
-    let mut goaway_received = false;
+    let goaway_received = false;
     // 自側の判断 (LOC の書式違反など) でセッションを閉じて受信ループを抜けたか。
     // 閉じた session への GOAWAY / 正常 close は状態機械に拒否され、誤解を招く
     // 警告ログになるため送らない
-    let mut session_terminated = false;
+    let session_terminated = false;
     // transport 自体のエラーで受信ループを抜けたか。後始末 (stream task の join と録画の
     // finalize) を終えてから `run` の戻り値として返す
-    let mut fatal_error: Option<Error> = None;
+    let fatal_error: Option<Error> = None;
     // 音声配送の累計を最後にログへ出した時点の値。100 ms の tick で増えたときだけ出す
-    let mut logged_audio_delivery_counters = AudioDeliveryCounters::default();
+    let logged_audio_delivery_counters = AudioDeliveryCounters::default();
     // 映像の購読境界以下として落とした Object の累計を最後にログへ出した値。同じく tick で
     // 増えたときだけ出す
-    let mut logged_video_boundary_objects: u64 = 0;
+    let logged_video_boundary_objects: u64 = 0;
 
     // バックグラウンド移行の状態
     //
     // 移行の結果は oneshot で main ループへ返す。移行のたびに作るため、受信器は `Option` で
     // 保持し、`migration_in_progress` が真の間だけ受信分岐を有効にする。
-    let mut migration_rx: Option<tokio::sync::oneshot::Receiver<MigrationResult>> = None;
+    let migration_rx: Option<tokio::sync::oneshot::Receiver<MigrationResult>> = None;
     // 移行の確立と購読の張り直しが進行中か。真の間は 2 回目の GOAWAY / drain で移行しない
-    let mut migration_in_progress = false;
+    let migration_in_progress = false;
     // 進行中の移行タスク。run の終了時に打ち切る
-    let mut migration_task: Option<tokio::task::JoinHandle<()>> = None;
+    let migration_task: Option<tokio::task::JoinHandle<()>> = None;
     // 進行中の移行で再購読の Location Filter に渡したスナップショット。
     // VideoBoundaryCandidates の snapshot として選択関数へ渡し、選ばれた候補と実効境界は
     // 切替時にログへ出す (session 移行では再読み値が選ばれるため境界の決定には影響しない。
     // select_video_subscription_boundary を参照)
-    let mut migration_boundary_snapshot: Option<LastReceivedLocations> = None;
+    let migration_boundary_snapshot: Option<LastReceivedLocations> = None;
     // 短期間に連続する移行を制限する (移行先がまた GOAWAY を返す構成への防御)
-    let mut migration_limiter = MigrationLimiter::new(MIGRATION_LIMIT_WINDOW, MIGRATION_LIMIT_MAX);
+    let migration_limiter = MigrationLimiter::new(MIGRATION_LIMIT_WINDOW, MIGRATION_LIMIT_MAX);
     // 移行後に旧 session を終了するタスク。run の終了時に打ち切る
-    let mut old_session_closers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    let old_session_closers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     // request 単位の移行 (別 URL の request stream GOAWAY) の状態
     //
@@ -4573,126 +4846,929 @@ pub async fn run(
     // session のイベントは共有の mpsc で main ループへ返す。side session は接続先 URL
     // ごとに 1 本であり、同じ URL を指す複数の request の移行を 1 本の session に
     // 相乗りさせる。別の URL の side session は同時に何本あってもよい。
-    let mut request_migration_sessions: HashMap<String, SideSessionSlot> = HashMap::new();
+    let request_migration_sessions: HashMap<String, SideSessionSlot> = HashMap::new();
     // 進行中の side session のタスク。run の終了時と、session 全体の移行に成功した
     // ときにすべて打ち切る
-    let mut request_migration_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    let request_migration_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     // 全 side session のイベントを 1 本に集約する。受信器は main ループが 1 つだけ持つ。
     // session 全体の移行に成功したときは、abort 済みの side session が送信済みのイベントを
     // 捨てるため、チャネルを作り直す (sender は main ループだけが持つ)
-    let (mut request_migration_tx, mut request_migration_rx) =
+    let (request_migration_tx, request_migration_rx) =
         tokio::sync::mpsc::channel::<RequestMigrationEvent>(REQUEST_MIGRATION_EVENT_CHANNEL_SIZE);
     // WebTransport の drain (WT_DRAIN_SESSION / HTTP/3 GOAWAY) を観測する。
     // QUIC 直接接続と QMux では drain の通知が無いため `None` になる
-    let mut wt_session_state_rx: Option<tokio::sync::watch::Receiver<WtSessionState>> =
+    let wt_session_state_rx: Option<tokio::sync::watch::Receiver<WtSessionState>> =
         client.wt_session_state();
+    StreamChannels {
+        session_generation,
+        audio_config_validated_generation,
+        audio_catch_up,
+        audio_delivery_order,
+        video_delivery_order,
+        track_map,
+        start,
+        tick_interval,
+        total_streams,
+        join_set,
+        stream_slots,
+        pending_subgroups,
+        pending_streams,
+        termination_tx,
+        termination_rx,
+        catalog_tx,
+        catalog_rx,
+        last_received_locations,
+        datagram_session_tx,
+        datagram_task,
+        peer_ended,
+        goaway_received,
+        session_terminated,
+        fatal_error,
+        logged_audio_delivery_counters,
+        logged_video_boundary_objects,
+        migration_rx,
+        migration_in_progress,
+        migration_task,
+        migration_boundary_snapshot,
+        migration_limiter,
+        old_session_closers,
+        request_migration_sessions,
+        request_migration_tasks,
+        request_migration_tx,
+        request_migration_rx,
+        wt_session_state_rx,
+        audio_decoder,
+        recorder,
+        recorder_sender,
+        audio_params,
+        audio_codec,
+    }
+}
 
-    'main: loop {
-        // 空いた枠のぶんだけ待機中の stream を処理へ回す。permit は使った分だけ
-        // 取るので、枠が無いときは 1 つも取らずにすぐ抜ける
-        while let Ok(permit) = std::sync::Arc::clone(&stream_slots).try_acquire_owned() {
-            let Some(stream) = pending_streams.pop_front() else {
-                // 枠を余分に取ってしまったので返す
-                drop(permit);
-                break;
-            };
-            total_streams += 1;
-            // alias の対応表はタスクごとに複製する (移行で書き換わっても
-            // 既に処理中の stream の解釈は変わらない)
-            let track_map_snapshot = track_map
-                .read()
-                .expect("track_map lock must not be poisoned")
-                .clone();
-            spawn_stream_task(
-                &mut join_set,
-                &task_monitor,
-                stream,
-                permit,
-                &stream_slots,
-                total_streams,
-                track_map_snapshot,
-                &fetch_targets,
-                &data_plane,
-                &frame_tx,
-                &audio_tx,
-                video_codec.as_deref(),
-                audio_codec.as_deref(),
-                audio_params,
-                &display_backlog,
-                &video_decode_order,
-                &video_delivery_order,
-                &object_mode_video,
-                &group_switch,
-                audio_decoder.as_ref(),
-                &audio_config_validated_generation,
-                session_generation,
-                &audio_catch_up,
-                &audio_delivery_order,
-                &last_received_locations,
-                &termination_tx,
-                &catalog_tx,
-                catalog_compression,
-                &pending_subgroups,
-                playback,
-                recorder_sender.as_ref(),
-            );
-        }
+async fn prepare_runtime(
+    session: CatalogSession,
+    inputs: RuntimeSetup<'_>,
+) -> Result<PipelineState> {
+    let CatalogSession {
+        mut client,
+        recv_acceptor,
+        data_plane,
+        subscribe_tracks_namespace,
+        catalog_namespace_for_migration,
+        catalog_sub,
+        initial_catalog_compression,
+        catalog_state,
+        video_info,
+        audio_info,
+        subscribe_video,
+        subscribe_audio,
+        mut active_requests,
+        publish_done_pending,
+        permanently_ended_tracks,
+        migration_pending_tracks,
+    } = session;
+    let RuntimeSetup {
+        config,
+        playback,
+        task_monitor,
+        frame_tx,
+        audio_tx,
+        display_backlog,
+        shutdown_monitor,
+        player_stop,
+    } = inputs;
+    let recording_requested = config.mp4.is_some();
+    let mut track_map: HashMap<u64, TrackKind> = HashMap::new();
+    // カタログの購読は TrackKind::Catalog として登録し、届いた Object は main ループが適用する
+    track_map.insert(catalog_sub.track_alias, TrackKind::Catalog);
+    // 自側が発行した FETCH (映像と catalog の fill) の対応表 (Request ID → 配送先)。
+    // 応答 Object は通常の再生経路へ流すが、どの track の応答かは FETCH 応答 stream の
+    // FETCH_HEADER が運ぶ Request ID でしか分からないため、ここで記録する。
+    // catalog 購読の Request ID も登録する。FILL_PARAMETERS 付き SUBSCRIBE には publisher が
+    // fill fetch stream を返し (draft-ietf-moq-transport-23 §3.4 (Fill Semantics))、その
+    // FETCH_HEADER は起因 SUBSCRIBE の Request ID を運ぶ。移行後に catalog を張り直したとき
+    // の fill をカタログとして適用するため、種別をここで対応づける。
+    // 移行 (GOAWAY) では、張り直した購読に対して発行した FETCH の対応表へ差し替える
+    // (Request ID は session ごとに払い出される)
+    //
+    // request 単位移行の side session は、再発行のたびに新しい Request ID をこの表へ足す。
+    // stream task がヘッダを読んだ時点の内容で配送先を決められるよう、`Arc<Mutex<...>>`
+    // で共有する (ロックは await をまたがない)。
+    let fetch_targets: SharedFetchTargets =
+        std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+    lock_fetch_targets(&fetch_targets).insert(catalog_sub.request_id, FetchTarget::Catalog);
+    // 自側が発行したメディア FETCH の再発行に必要な指定 (Request ID → 要求内容)。
+    // request stream の GOAWAY で同じ namespace / track name / range の FETCH を
+    // 発行し直せるようにする
+    let mut fetch_requests: HashMap<u64, FetchRequestTarget> = HashMap::new();
+    let mut video_codec: Option<String> = None;
+    let mut video_request_id: Option<u64> = None;
+    let mut audio_request_id: Option<u64> = None;
+    // peer が SUBSCRIBE_OK で決める track alias は移行で変わりうるため、現在の値を保持する
+    let mut video_alias: Option<u64> = None;
+    let mut audio_alias: Option<u64> = None;
+    // 音声の購読境界 (SUBSCRIBE_OK の Largest Object)。境界以下は購読より前に publish された
+    // 音声であり、Audio Config の検証だけを行い、送出も録画も復号もしない
+    let mut audio_largest_object: Option<Location> = None;
+    // 映像の購読境界 (SUBSCRIBE_OK の Largest Object)。境界以下は購読より前に publish された
+    // 映像であり、復号はするが表示しない
+    let mut video_largest_object: Option<Location> = None;
+    // 映像 Object を復号してよいかの判定状態は購読で 1 つ持つ。Group ごとに別の Subgroup
+    // ストリームで届くため (draft-ietf-moq-transport-23 §2.2 (Subgroups))、stream ごとに
+    // 判定を持つと「前の Group の Object が次の Group のキーフレームより後に届く」場合を
+    // 判定できない。映像のトラックを切り替えて decoder を作り直す経路を足すときは、
+    // この状態を reset してから次のキーフレームで復号を始め直すこと。
+    let video_decode_order = std::sync::Arc::new(tokio::sync::Mutex::new(VideoDecodeOrder::new()));
+    // Group の切り替えで次の Group の映像 Object を保留する gate は購読で 1 つ持つ。
+    // stream task 間で共有し、session 移行の直前に世代を進めて状態を捨てる
+    let group_switch = std::sync::Arc::new(SharedGroupSwitchGate::new());
+    // object モードの並べ替えと復号器の共有状態は購読で 1 つ持つ。Group モードでは
+    // 並べ替えも復号器の共有もしない (既存の stream ごとの復号を変えない)
+    let object_mode_video = std::sync::Arc::new(ObjectModeVideo::new(
+        video_info
+            .as_ref()
+            .filter(|_| subscribe_video)
+            .map(|video| video.stream_mapping)
+            .unwrap_or(StreamMapping::Group),
+        playback,
+        video_info
+            .as_ref()
+            .filter(|_| subscribe_video)
+            .map(|video| video.codec.as_str()),
+    ));
 
-        // 水が多すぎるときは accept を止める。select! の分岐に入らなければ
-        // 接続が stream を保持する
-        let accepting = pending_streams.len() < MAX_CONCURRENT_STREAMS * 4;
+    if subscribe_video {
+        subscribe_video_track(SubscribeVideoContext {
+            client: &mut client,
+            video_info: &video_info,
+            config,
+            track_map: &mut track_map,
+            active_requests: &mut active_requests,
+            fetch_targets: &fetch_targets,
+            fetch_requests: &mut fetch_requests,
+            video_request_id: &mut video_request_id,
+            video_alias: &mut video_alias,
+            video_largest_object: &mut video_largest_object,
+            video_codec: &mut video_codec,
+            playback,
+            recording_requested,
+        })
+        .await?;
+    }
 
-        tokio::select! {
-            result = recv_acceptor.accept_recv_stream(), if accepting => {
-                let stream = match result {
-                    Ok(Some(s)) => s,
-                    Ok(None) => {
-                        tracing::info!("No more data streams");
-                        peer_ended = true;
-                        break 'main;
-                    }
-                    Err(e) => {
-                        // WebTransport のセッション終了 (§6 の CONNECT stream の close /
-                        // WT_CLOSE_SESSION) と接続クローズは期待される終了であるため、
-                        // QUIC の `Ok(None)` ("No more data streams") と同じ info に揃える。
-                        // この分岐は変換前の `TransportError` を持つため、variant で直接判定して
-                        // 他の accept 失敗のエラーメッセージを変えない
-                        if matches!(e, TransportError::ConnectionClosed) {
-                            tracing::info!("Session closed by transport");
-                        } else {
-                            tracing::error!("Failed to accept data stream: {e}");
-                        }
-                        peer_ended = true;
-                        break 'main;
-                    }
-                };
-                pending_streams.push_back(stream);
-            }
-            Some(object) = catalog_rx.recv() => {
-                // 購読で届いた catalog の更新を MSF の配置規則で適用する
-                // (draft-ietf-moq-msf-02 §5 (Catalog))。起動時に解決したトラックは
-                // 変更しないが、カタログの状態は購読が続く限り最新に保つ
-                // 移行後の再購読の Location Filter に使うため、配送した catalog Object の
-                // 位置も記録する
-                record_last_location(
-                    &last_received_locations,
-                    TrackKind::Catalog,
-                    object.location,
+    let audio_params: Option<(u32, u8)> = if subscribe_audio {
+        subscribe_audio_track(SubscribeAudioContext {
+            client: &mut client,
+            audio_info: &audio_info,
+            config,
+            track_map: &mut track_map,
+            active_requests: &mut active_requests,
+            audio_request_id: &mut audio_request_id,
+            audio_alias: &mut audio_alias,
+            audio_largest_object: &mut audio_largest_object,
+        })
+        .await?
+    } else {
+        None
+    };
+    // Audio Config の解釈 (codec 判定) と音声デコーダの生成に使う catalog の audio codec
+    let audio_codec = audio_info.as_ref().map(|a| a.codec.clone());
+
+    // SUBSCRIBE_TRACKS は catalog / 映像 / 音声の購読を確立したあとに送る。この example は
+    // catalog が示す track だけを再生するため、受理する PUBLISH は既存の購読と重複する
+    // track が中心になるが、catalog に載らない track も受理して観測できる。
+    // 付加的な購読であり、失敗しても既存の再生は止めない。
+    //
+    // 既に SUBSCRIBE している Full Track Name を PUBLISH でも購読すると同じ Object を
+    // 2 系統で受け取るため、重複判定に使う一覧をここで作る。
+    let mut subscribed_tracks: Vec<(TrackNamespace, Vec<u8>)> = vec![(
+        subscribe_tracks_namespace.clone(),
+        MSF_CATALOG_TRACK_NAME.to_vec(),
+    )];
+    if subscribe_video && let Some(info) = &video_info {
+        subscribed_tracks.push((info.namespace.clone(), info.track_name.as_bytes().to_vec()));
+    }
+    if subscribe_audio && let Some(info) = &audio_info {
+        subscribed_tracks.push((info.namespace.clone(), info.track_name.as_bytes().to_vec()));
+    }
+    let mut tracks_request_id: Option<u64> = None;
+    if config.subscribe_tracks {
+        match client
+            .subscribe_tracks(subscribe_tracks_namespace.clone(), MessageParameters::new())
+            .await
+        {
+            Ok(request_id) => {
+                tracks_request_id = Some(request_id);
+                tracing::info!(
+                    "Sent SUBSCRIBE_TRACKS: request_id={request_id}, namespace={}",
+                    serialize_namespace(&subscribe_tracks_namespace),
                 );
-                if let Err(e) = apply_catalog_object(&mut catalog_state, &object) {
-                    tracing::warn!("Failed to apply MSF catalog update: {e}");
-                }
             }
-            notable = client.next_event() => {
-                // 分岐本体を async ブロックに閉じ込め、`?` が `run` を抜けないようにする。
-                // `client.next_event()` の結果とピア要求への応答 (`send_request_error`) は
-                // どちらも transport I/O を行い、セッション終了後は
-                // `TransportError::ConnectionClosed` を返す。`?` を `run` まで通すと
-                // `Fatal: session closed` で異常終了し、終了時の後始末 (`close(0, "")` が
-                // 送る CONNECT stream の送信側の FIN) に到達しない。
-                // `break 'main` はブロックの外に出す (ブロックの中では外側のループを
-                // 抜けられない) ため、ブロックは「受信ループを抜けるか」を返す。
-                let outcome: Result<bool> = async {
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to send SUBSCRIBE_TRACKS; continuing without the namespace subscription: {e}"
+                );
+            }
+        }
+    }
+    // SUBSCRIBE_TRACKS の結果として受理した PUBLISH の Request ID → Track Alias。
+    // PUBLISH_DONE の drain 完了後に alias を track_map から外すために保持する
+    let ignored_publish_requests: HashMap<u64, u64> = HashMap::new();
+
+    // 移行 (GOAWAY) で購読を張り直すための指定と、現在の session の Request ID / alias
+    //
+    // catalog は移行時に読み直さない。購読済みの指定をそのまま使えば、移行先の session で
+    // 届く Object から同じ `CatalogState` が再び更新される。catalog が PUBLISH_DONE で
+    // 恒久終了した場合は catalog_namespace を `None` にして張り直さない
+    // (`permanently_ended_tracks` は本時点では空のため初期は購読を継続する)
+    let resubscribe_plan = ResubscribePlan {
+        catalog_namespace: Some(catalog_namespace_for_migration),
+        // `subscribe_video` / `subscribe_audio` は catalog から得た track がある場合だけ真に
+        // なるため、ここで `Option` の条件と購読の有無が一致する
+        video: video_info
+            .as_ref()
+            .filter(|_| subscribe_video)
+            .map(|info| SubscribeTarget {
+                namespace: info.namespace.clone(),
+                track_name: info.track_name.as_bytes().to_vec(),
+            }),
+        audio: audio_info
+            .as_ref()
+            .filter(|_| subscribe_audio)
+            .map(|info| SubscribeTarget {
+                namespace: info.namespace.clone(),
+                track_name: info.track_name.as_bytes().to_vec(),
+            }),
+        rendezvous_timeout_ms: config.rendezvous_timeout_ms,
+    };
+    // 現在の catalog 購読の request id と alias。恒久終了後に session 移行で張り直さない
+    // 場合は旧 session の値が新 session の request id (0 から採番) と衝突するため、
+    // `None` にして照合対象から外す (media の `video_request_id` / `audio_request_id` と
+    // 同じ `Option` の契約にする)
+    let catalog_request_id: Option<u64> = Some(catalog_sub.request_id);
+    let catalog_alias: Option<u64> = Some(catalog_sub.track_alias);
+    // catalog track の MSF_COMPRESSION。SUBSCRIBE_OK の Track Property から解決する。
+    // catalog の data stream はこの値で gzip かどうかを決める。
+    let catalog_compression = initial_catalog_compression;
+
+    let resources = prepare_recorders_and_decoders(RecorderSetup {
+        config,
+        playback,
+        recording_requested,
+        subscribe_video,
+        video_info: &video_info,
+        audio_params,
+        audio_codec: audio_codec.as_deref(),
+    })?;
+    let audio_decoder = resources.audio_decoder;
+    let recorder = resources.recorder;
+    let recorder_sender = resources.recorder_sender;
+    // session の世代。移行のたびに進め、Audio Config の検証済み世代と比べる。
+    // 1 から始め、検証済み世代は 0 (未検証) から始めることで、最初の Audio Config を処理する
+    let channels = prepare_stream_channels(ChannelSetupInputs {
+        client: &client,
+        data_plane: &data_plane,
+        task_monitor,
+        track_map,
+        audio_tx: &audio_tx,
+        audio_decoder,
+        audio_params,
+        audio_codec,
+        recorder,
+        recorder_sender,
+        audio_largest_object,
+        video_largest_object,
+    });
+    let StreamChannels {
+        session_generation,
+        audio_config_validated_generation,
+        audio_catch_up,
+        audio_delivery_order,
+        video_delivery_order,
+        track_map,
+        start,
+        tick_interval,
+        total_streams,
+        join_set,
+        stream_slots,
+        pending_subgroups,
+        pending_streams,
+        termination_tx,
+        termination_rx,
+        catalog_tx,
+        catalog_rx,
+        last_received_locations,
+        datagram_session_tx,
+        datagram_task,
+        peer_ended,
+        goaway_received,
+        session_terminated,
+        fatal_error,
+        logged_audio_delivery_counters,
+        logged_video_boundary_objects,
+        migration_rx,
+        migration_in_progress,
+        migration_task,
+        migration_boundary_snapshot,
+        migration_limiter,
+        old_session_closers,
+        request_migration_sessions,
+        request_migration_tasks,
+        request_migration_tx,
+        request_migration_rx,
+        wt_session_state_rx,
+        audio_decoder,
+        recorder,
+        recorder_sender,
+        audio_params,
+        audio_codec,
+    } = channels;
+
+    let state = PipelineState {
+        url: config.url.clone(),
+        transport: config.transport,
+        cert: config.cert.clone(),
+        insecure: config.insecure,
+        subscribe_tracks: config.subscribe_tracks,
+        task_monitor: task_monitor.clone(),
+        shutdown_monitor,
+        player_stop,
+        frame_tx,
+        audio_tx,
+        display_backlog,
+        playback,
+        client,
+        recv_acceptor,
+        subscribe_tracks_namespace,
+        catalog_state,
+        data_plane,
+        active_requests,
+        publish_done_pending,
+        permanently_ended_tracks,
+        migration_pending_tracks,
+        subscribe_video,
+        subscribe_audio,
+        track_map,
+        fetch_targets,
+        fetch_requests,
+        video_codec,
+        video_request_id,
+        audio_request_id,
+        video_alias,
+        audio_alias,
+        video_decode_order,
+        group_switch,
+        object_mode_video,
+        audio_params,
+        audio_codec,
+        subscribed_tracks,
+        tracks_request_id,
+        ignored_publish_requests,
+        resubscribe_plan,
+        catalog_request_id,
+        catalog_alias,
+        catalog_compression,
+        audio_decoder,
+        recorder_sender,
+        session_generation,
+        audio_config_validated_generation,
+        audio_catch_up,
+        audio_delivery_order,
+        video_delivery_order,
+        start,
+        tick_interval,
+        total_streams,
+        join_set,
+        stream_slots,
+        pending_subgroups,
+        pending_streams,
+        termination_tx,
+        termination_rx,
+        catalog_tx,
+        catalog_rx,
+        last_received_locations,
+        datagram_session_tx,
+        datagram_task,
+        peer_ended,
+        goaway_received,
+        session_terminated,
+        fatal_error,
+        logged_audio_delivery_counters,
+        logged_video_boundary_objects,
+        migration_rx,
+        migration_in_progress,
+        migration_task,
+        migration_boundary_snapshot,
+        migration_limiter,
+        old_session_closers,
+        request_migration_sessions,
+        request_migration_tasks,
+        request_migration_tx,
+        request_migration_rx,
+        recorder,
+        wt_session_state_rx,
+    };
+    Ok(state)
+}
+
+/// データストリーム受信ループに必要な main ループの状態
+///
+/// 接続の確立・カタログの取得・購読・録画器とチャネルの準備が済んだ後に作る。受信ループは
+/// この状態をすべて受け取り、select! の各分岐で更新する。setup の各段階を関数へ分けるときも
+/// この型を返す段階ごとの構造体の集まりとして扱えるよう、状態を 1 か所にまとめている。
+struct PipelineState {
+    /// 接続先 URL (session 移行で移行先に差し替わる)
+    url: tokio_moq::ServerUrl,
+    /// 接続経路
+    transport: Transport,
+    /// TLS の CA 証明書パス
+    cert: Option<String>,
+    /// 証明書検証をスキップするか
+    insecure: bool,
+    /// SUBSCRIBE_TRACKS を送るか
+    subscribe_tracks: bool,
+    /// 生成するタスクのメトリクスを収集する monitor
+    task_monitor: tokio_metrics::TaskMonitor,
+    /// graceful shutdown の契機を受信する monitor
+    shutdown_monitor: tokio_utils::ShutdownMonitor,
+    /// 再生側の終了を伝える受信器
+    player_stop: tokio::sync::oneshot::Receiver<()>,
+    /// デコード済み映像フレームの送り先
+    frame_tx: std::sync::mpsc::Sender<DecodedVideoFrame>,
+    /// デコード済み音声フレームの送り先
+    audio_tx: std::sync::mpsc::Sender<DecodedAudioFrame>,
+    /// 表示待ちの映像フレーム数
+    display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    /// 再生するか
+    playback: bool,
+    /// 現在の session を駆動するクライアント
+    client: MoqtClient,
+    /// 現在の session の data stream の受信口
+    recv_acceptor: transport::StreamAcceptor,
+    /// SUBSCRIBE_TRACKS に使う namespace prefix
+    subscribe_tracks_namespace: TrackNamespace,
+    /// 受信 stream を Session へ登録するためのハンドル
+    data_plane: DataPlaneHandle,
+    /// 現在受信前提の購読の request id
+    active_requests: HashSet<u64>,
+    /// PUBLISH_DONE の終端待ち
+    publish_done_pending: HashMap<u64, (TrackKind, PublishDoneDisposition)>,
+    /// 恒久的に終了した track
+    permanently_ended_tracks: HashSet<TrackKind>,
+    /// 移行待ち (GOING_AWAY) の track
+    migration_pending_tracks: HashSet<TrackKind>,
+    /// 映像トラックを購読するか
+    subscribe_video: bool,
+    /// 音声トラックを購読するか
+    subscribe_audio: bool,
+    /// Track Alias から track 種別を引く表
+    /// 適用済みのカタログ状態 (購読で届く更新の適用に引き継ぐ)
+    catalog_state: catalog::CatalogState,
+    track_map: std::sync::Arc<std::sync::RwLock<HashMap<u64, TrackKind>>>,
+    /// 自側が発行した FETCH の配送先
+    fetch_targets: SharedFetchTargets,
+    /// 再発行に使うメディア FETCH の要求内容
+    fetch_requests: HashMap<u64, FetchRequestTarget>,
+    /// 映像の codec (catalog の値)
+    video_codec: Option<String>,
+    /// 映像購読の request id
+    video_request_id: Option<u64>,
+    /// 音声購読の request id
+    audio_request_id: Option<u64>,
+    /// 映像購読の track alias
+    video_alias: Option<u64>,
+    /// 音声購読の track alias
+    audio_alias: Option<u64>,
+    /// 映像の復号順の判定 (購読で 1 つ共有する)
+    video_decode_order: std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
+    /// Group の切り替え gate (購読で 1 つ共有する)
+    group_switch: std::sync::Arc<SharedGroupSwitchGate>,
+    /// object モードの並べ替えと復号器の共有状態
+    object_mode_video: std::sync::Arc<ObjectModeVideo>,
+    /// 音声のサンプルレートとチャンネル数 (catalog の値)
+    audio_params: Option<(u32, u8)>,
+    /// 音声の codec (catalog の値)
+    audio_codec: Option<String>,
+    /// SUBSCRIBE_TRACKS で購読する track の一覧
+    subscribed_tracks: Vec<(TrackNamespace, Vec<u8>)>,
+    /// SUBSCRIBE_TRACKS の request id
+    tracks_request_id: Option<u64>,
+    /// PUBLISH 起点の購読の request id と alias
+    ignored_publish_requests: HashMap<u64, u64>,
+    /// 再購読 / 再発行の計画
+    resubscribe_plan: ResubscribePlan,
+    /// catalog 購読の request id
+    catalog_request_id: Option<u64>,
+    /// catalog 購読の track alias
+    catalog_alias: Option<u64>,
+    /// catalog の圧縮方式
+    catalog_compression: MsfCompression,
+    /// 音声デコーダ (購読で 1 つ共有する)
+    audio_decoder: Option<std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
+    /// 録画先の録画器 (`--mp4` 指定時のみ)
+    recorder: Option<Recorder>,
+    /// 録画器への送り口 (`--mp4` 指定時のみ)
+    recorder_sender: Option<RecorderSender>,
+    /// 現在の session の世代
+    session_generation: u64,
+    /// Audio Config の処理を試みた session の世代
+    audio_config_validated_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// 受信側の音声の追いつき (購読で 1 つ共有する)
+    audio_catch_up: std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
+    /// 音声の購読境界と送出順の判定
+    audio_delivery_order: std::sync::Arc<std::sync::Mutex<AudioDeliveryOrder>>,
+    /// 映像の購読境界と送出順の判定
+    video_delivery_order: std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
+    /// パイプライン開始時刻
+    start: Instant,
+    /// 100 ms 周期の tick
+    tick_interval: tokio::time::Interval,
+    /// 受信した data stream の通し番号
+    total_streams: u64,
+    /// stream task の join 集合
+    join_set: tokio::task::JoinSet<()>,
+    /// data stream の同時処理枠
+    stream_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Track Alias 未確立の Subgroup の保留バッファ
+    pending_subgroups: SharedPendingSubgroupBuffer,
+    /// 処理枠が空くのを待つ data stream
+    pending_streams: std::collections::VecDeque<transport::RecvStream>,
+    /// 書式違反によるセッション終了の依頼
+    termination_tx: tokio::sync::mpsc::Sender<SessionError>,
+    /// 書式違反によるセッション終了の依頼の受信
+    termination_rx: tokio::sync::mpsc::Receiver<SessionError>,
+    /// catalog Object を main ループへ渡すチャネル
+    catalog_tx: tokio::sync::mpsc::Sender<catalog::CatalogObject>,
+    /// catalog Object の受信
+    catalog_rx: tokio::sync::mpsc::Receiver<catalog::CatalogObject>,
+    /// track ごとに最後に受信した Object の位置
+    last_received_locations: std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
+    /// datagram 受信タスクへ session を差し替える通知
+    datagram_session_tx: tokio::sync::watch::Sender<DatagramSession>,
+    /// datagram 受信タスク
+    datagram_task: tokio::task::JoinHandle<()>,
+    /// peer が購読 / session を終了させたか
+    peer_ended: bool,
+    /// GOAWAY を受信したか
+    goaway_received: bool,
+    /// 自側でセッションを閉じたか
+    session_terminated: bool,
+    /// パイプラインを異常終了させるエラー
+    fatal_error: Option<Error>,
+    /// 前回ログを出した音声配送の累計
+    logged_audio_delivery_counters: AudioDeliveryCounters,
+    /// 前回ログを出した映像境界の累計
+    logged_video_boundary_objects: u64,
+    /// session 移行の結果の受信器
+    migration_rx: Option<tokio::sync::oneshot::Receiver<MigrationResult>>,
+    /// session 移行が進行中か
+    migration_in_progress: bool,
+    /// session 移行タスク
+    migration_task: Option<tokio::task::JoinHandle<()>>,
+    /// 移行開始時点の受信位置
+    migration_boundary_snapshot: Option<LastReceivedLocations>,
+    /// 移行の回数を抑える limiter
+    migration_limiter: MigrationLimiter,
+    /// 旧 session を閉じるタスク
+    old_session_closers: Vec<tokio::task::JoinHandle<()>>,
+    /// URL ごとの side session の slot
+    request_migration_sessions: HashMap<String, SideSessionSlot>,
+    /// 起動した side session のタスク
+    request_migration_tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// side session からの移行結果の送信
+    request_migration_tx: tokio::sync::mpsc::Sender<RequestMigrationEvent>,
+    /// side session からの移行結果の受信
+    request_migration_rx: tokio::sync::mpsc::Receiver<RequestMigrationEvent>,
+    /// WebTransport の drain 状態の受信器
+    wt_session_state_rx: Option<tokio::sync::watch::Receiver<WtSessionState>>,
+}
+
+/// パイプラインとプレイヤー (呼び出し側) の間で受け渡す入出力
+///
+/// デコード済みフレームの送り先と、再生側と共有する状態をまとめる。再生しない呼び出し側は
+/// 受け取ったフレームを破棄すればよい。
+pub struct PipelineIo {
+    /// デコード済み映像フレームの送り先
+    pub frame_tx: std::sync::mpsc::Sender<DecodedVideoFrame>,
+    /// デコード済み音声フレームの送り先
+    pub audio_tx: std::sync::mpsc::Sender<DecodedAudioFrame>,
+    /// 表示待ちの映像フレーム数
+    ///
+    /// 閾値を超えると古い group を捨てる。録画中は読み切って保存するため捨てない。
+    pub display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    /// カタログの `targetLatency` を渡すセル
+    ///
+    /// 値があるときだけ格納する (対象は実際に購読する track の `renderGroup` に属する
+    /// track。§5.2.8)。購読する group が複数あるときは最大値をすべての購読 track に掛ける。
+    pub target_latency_ms: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    /// 映像トラックを購読しているかをプレイヤーへ渡すセル
+    ///
+    /// カタログを読み終えて購読の有無が決まった時点で格納する。プレイヤーは音声だけの購読で
+    /// 到着基準の再生の遅れに下限を足し、目標の時刻を守らない並べ方にする。カタログを読む
+    /// 前の初期値は呼び出し側が決める (映像があるものとして扱う)。
+    pub video_subscribed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// 再生側の終了を伝える受信器
+    ///
+    /// sender が drop されるとパイプラインは停止する。
+    pub player_stop: tokio::sync::oneshot::Receiver<()>,
+}
+
+/// パイプラインを実行する
+///
+/// `config` は接続先・トランスポート・購読するトラック・録画と再生の指定を持つ。
+/// `io` はデコード済みフレームの送り先と、プレイヤーと共有する状態である。
+/// `task_monitor` は生成されるタスクのメトリクスを収集する。
+/// `shutdown_monitor` は graceful shutdown の契機を受信する。
+pub async fn run(
+    config: Config,
+    io: PipelineIo,
+    task_monitor: tokio_metrics::TaskMonitor,
+    shutdown_monitor: tokio_utils::ShutdownMonitor,
+) -> Result<()> {
+    // 再生を行わない場合はデコードをスキップし、録画だけを行う
+    let playback = !config.no_play;
+    // catalog の namespace は catalog 購読へ move するが、購読の確立後も `config` を
+    // 参照するため、ここでは複製を渡す
+    let namespace = config.namespace.clone();
+    let session = connect_and_subscribe_catalog(
+        &config,
+        namespace,
+        &task_monitor,
+        &io.target_latency_ms,
+        &io.video_subscribed,
+    )
+    .await?;
+    let PipelineIo {
+        frame_tx,
+        audio_tx,
+        display_backlog,
+        player_stop,
+        ..
+    } = io;
+    let state = prepare_runtime(
+        session,
+        RuntimeSetup {
+            config: &config,
+            playback,
+            task_monitor: &task_monitor,
+            frame_tx,
+            audio_tx,
+            display_backlog,
+            shutdown_monitor,
+            player_stop,
+        },
+    )
+    .await?;
+    run_data_stream_loop(state).await
+}
+
+/// データストリームを受信し、main ループと終了処理を実行する
+///
+/// 受け取った状態を分解してローカル変数として扱い、stream の accept・session イベント・
+/// 移行の結果・tick を select! で待つ。ループを抜けた後は stream task と移行タスクを止め、
+/// 録画を finalize して結果を返す。
+/// 受信ループの 1 つの分岐を処理した後の流れ
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopFlow {
+    /// 受信を続ける
+    Continue,
+    /// 受信ループを抜けて終了処理へ進む
+    Break,
+}
+
+/// 空いた処理枠のぶんだけ、待機中の data stream の処理タスクを起動する
+///
+/// `permit` は使った分だけ取るため、枠が無いときは 1 つも取らずにすぐ戻る。
+fn spawn_pending_streams(state: &mut PipelineState) {
+    let PipelineState {
+        task_monitor,
+        frame_tx,
+        audio_tx,
+        display_backlog,
+        playback,
+        data_plane,
+        track_map,
+        fetch_targets,
+        video_codec,
+        video_decode_order,
+        group_switch,
+        object_mode_video,
+        audio_params,
+        audio_codec,
+        catalog_compression,
+        audio_decoder,
+        recorder_sender,
+        session_generation,
+        audio_config_validated_generation,
+        audio_catch_up,
+        audio_delivery_order,
+        video_delivery_order,
+        total_streams,
+        join_set,
+        stream_slots,
+        pending_subgroups,
+        pending_streams,
+        termination_tx,
+        catalog_tx,
+        last_received_locations,
+        ..
+    } = state;
+    // 空いた枠のぶんだけ待機中の stream を処理へ回す。permit は使った分だけ
+    // 取るので、枠が無いときは 1 つも取らずにすぐ抜ける
+    while let Ok(permit) = std::sync::Arc::clone(stream_slots).try_acquire_owned() {
+        let Some(stream) = pending_streams.pop_front() else {
+            // 枠を余分に取ってしまったので返す
+            drop(permit);
+            break;
+        };
+        *total_streams += 1;
+        // alias の対応表はタスクごとに複製する (移行で書き換わっても
+        // 既に処理中の stream の解釈は変わらない)
+        let track_map_snapshot = track_map
+            .read()
+            .expect("track_map lock must not be poisoned")
+            .clone();
+        spawn_stream_task(
+            join_set,
+            task_monitor,
+            stream,
+            permit,
+            stream_slots,
+            StreamTaskContext {
+                data_plane: data_plane.clone(),
+                track_map: track_map_snapshot,
+                fetch_targets: std::sync::Arc::clone(fetch_targets),
+                video_codec: video_codec.clone(),
+                audio_codec: audio_codec.clone(),
+                audio_params: *audio_params,
+                frame_tx: frame_tx.clone(),
+                audio_tx: audio_tx.clone(),
+                stream_num: *total_streams,
+                display_backlog: std::sync::Arc::clone(display_backlog),
+                video_decode_order: std::sync::Arc::clone(video_decode_order),
+                video_delivery_order: std::sync::Arc::clone(video_delivery_order),
+                object_mode_video: std::sync::Arc::clone(object_mode_video),
+                group_switch: GroupSwitchHandle::new(std::sync::Arc::clone(group_switch)),
+                audio_decoder: audio_decoder.clone(),
+                audio_config_validated_generation: std::sync::Arc::clone(
+                    audio_config_validated_generation,
+                ),
+                session_generation: *session_generation,
+                audio_catch_up: std::sync::Arc::clone(audio_catch_up),
+                audio_delivery_order: std::sync::Arc::clone(audio_delivery_order),
+                last_received_locations: std::sync::Arc::clone(last_received_locations),
+                termination_tx: termination_tx.clone(),
+                catalog_tx: catalog_tx.clone(),
+                catalog_compression: *catalog_compression,
+                pending_subgroups: std::sync::Arc::clone(pending_subgroups),
+                playback: *playback,
+                recorder: recorder_sender.clone(),
+            },
+        );
+    }
+}
+
+/// 受け入れた data stream を処理待ちの列へ積む、または受信ループを終了する
+///
+/// 枠が空くたびに呼ばれる。stream の受入終了と transport の終了では `peer_ended` を立てて
+/// ループを抜ける (WebTransport のセッション終了は異常ではないため info に揃える)。
+fn handle_accepted_stream(
+    state: &mut PipelineState,
+    result: std::result::Result<Option<transport::RecvStream>, TransportError>,
+) -> LoopFlow {
+    let PipelineState {
+        pending_streams,
+        peer_ended,
+        ..
+    } = state;
+    let stream = match result {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            tracing::info!("No more data streams");
+            *peer_ended = true;
+            return LoopFlow::Break;
+        }
+        Err(e) => {
+            // WebTransport のセッション終了 (§6 の CONNECT stream の close /
+            // WT_CLOSE_SESSION) と接続クローズは期待される終了であるため、
+            // QUIC の `Ok(None)` ("No more data streams") と同じ info に揃える。
+            // この分岐は変換前の `TransportError` を持つため、variant で直接判定して
+            // 他の accept 失敗のエラーメッセージを変えない
+            if matches!(e, TransportError::ConnectionClosed) {
+                tracing::info!("Session closed by transport");
+            } else {
+                tracing::error!("Failed to accept data stream: {e}");
+            }
+            *peer_ended = true;
+            return LoopFlow::Break;
+        }
+    };
+    pending_streams.push_back(stream);
+    LoopFlow::Continue
+}
+
+/// 購読で届いた catalog の更新を状態へ適用する
+///
+/// 移行後の再購読の Location Filter に使うため、配送した catalog Object の位置も記録する。
+fn handle_catalog_object(state: &mut PipelineState, object: catalog::CatalogObject) -> LoopFlow {
+    let PipelineState {
+        catalog_state,
+        last_received_locations,
+        ..
+    } = state;
+    // 購読で届いた catalog の更新を MSF の配置規則で適用する
+    // (draft-ietf-moq-msf-02 §5 (Catalog))。起動時に解決したトラックは
+    // 変更しないが、カタログの状態は購読が続く限り最新に保つ
+    // 移行後の再購読の Location Filter に使うため、配送した catalog Object の
+    // 位置も記録する
+    record_last_location(last_received_locations, TrackKind::Catalog, object.location);
+    if let Err(e) = apply_catalog_object(catalog_state, &object) {
+        tracing::warn!("Failed to apply MSF catalog update: {e}");
+    }
+    LoopFlow::Continue
+}
+
+/// session のイベント (GOAWAY / 購読の応答 / PUBLISH など) を処理する
+///
+/// `?` を async ブロックに閉じ込め、transport のエラーを致命エラーへ写すかどうかを
+/// イベントの種別ごとに決める。戻り値が [`LoopFlow::Break`] のときは受信ループを抜ける。
+async fn handle_client_event(
+    state: &mut PipelineState,
+    notable: std::result::Result<Option<ClientEvent>, TransportError>,
+) -> LoopFlow {
+    let PipelineState {
+        url,
+        transport,
+        cert,
+        insecure,
+        task_monitor,
+        frame_tx,
+        audio_tx,
+        display_backlog,
+        playback,
+        client,
+        data_plane,
+        active_requests,
+        publish_done_pending,
+        permanently_ended_tracks,
+        migration_pending_tracks,
+        track_map,
+        fetch_targets,
+        fetch_requests,
+        video_codec,
+        video_request_id,
+        audio_request_id,
+        video_alias,
+        audio_alias,
+        video_decode_order,
+        group_switch,
+        object_mode_video,
+        audio_params,
+        audio_codec,
+        subscribed_tracks,
+        tracks_request_id,
+        ignored_publish_requests,
+        resubscribe_plan,
+        catalog_request_id,
+        catalog_alias,
+        catalog_compression,
+        audio_decoder,
+        recorder: _,
+        recorder_sender,
+        session_generation,
+        audio_config_validated_generation,
+        audio_catch_up,
+        audio_delivery_order,
+        video_delivery_order,
+        stream_slots,
+        pending_subgroups,
+        termination_tx,
+        catalog_tx,
+        last_received_locations,
+        datagram_session_tx,
+        peer_ended,
+        goaway_received,
+        session_terminated,
+        fatal_error,
+        migration_rx,
+        migration_in_progress,
+        migration_task,
+        migration_boundary_snapshot,
+        migration_limiter,
+        request_migration_sessions,
+        request_migration_tasks,
+        request_migration_tx,
+        ..
+    } = state;
+    // 分岐本体を async ブロックに閉じ込め、`?` が `run` を抜けないようにする。
+    // `client.next_event()` の結果とピア要求への応答 (`send_request_error`) は
+    // どちらも transport I/O を行い、セッション終了後は
+    // `TransportError::ConnectionClosed` を返す。`?` を `run` まで通すと
+    // `Fatal: session closed` で異常終了し、終了時の後始末 (`close(0, "")` が
+    // 送る CONNECT stream の送信側の FIN) に到達しない。
+    // `break 'main` はブロックの外に出す (ブロックの中では外側のループを
+    // 抜けられない) ため、ブロックは「受信ループを抜けるか」を返す。
+    let outcome: Result<bool> = async {
                     match notable? {
                         Some(ClientEvent::Session(SessionEvent::GoawayReceived {
                             new_session_uri,
@@ -4708,7 +5784,7 @@ pub async fn run(
                             match tokio_moq::migration_target(
                                 &new_session_uri,
                                 on_request_stream,
-                                &config.url,
+                                url,
                             ) {
                                 // request stream の GOAWAY で New Session URI を解釈できない
                                 // 場合は session を維持する (該当 request の終端は Session の
@@ -4718,8 +5794,8 @@ pub async fn run(
                                     MigrationScope::Session => {
                                         // 移行の連鎖を抑え、移行中は二重に移行しない
                                         match begin_migration(
-                                            migration_in_progress,
-                                            &mut migration_limiter,
+                                            *migration_in_progress,
+                                            migration_limiter,
                                             Instant::now(),
                                         ) {
                                             MigrationStart::AlreadyInProgress => {
@@ -4733,7 +5809,7 @@ pub async fn run(
                                                     "Refusing to migrate the session: too many migrations within {:?}",
                                                     MIGRATION_LIMIT_WINDOW,
                                                 );
-                                                goaway_received = true;
+                                                *goaway_received = true;
                                                 return Ok(true);
                                             }
                                             MigrationStart::Start => {}
@@ -4742,7 +5818,7 @@ pub async fn run(
                                         // 接続経路と矛盾する場合は移行しない
                                         // (draft-ietf-moq-msf-02 §11.1.1)
                                         if let Err(e) = tokio_moq::resolve_transport(
-                                            Some(config.transport),
+                                            Some(*transport),
                                             &target.url,
                                         ) {
                                             tracing::warn!(
@@ -4750,7 +5826,7 @@ pub async fn run(
                                             );
                                             // GOAWAY を受けた後に終了するため、購読の終了
                                             // (STOP_SENDING) を送る経路に乗せる
-                                            goaway_received = true;
+                                            *goaway_received = true;
                                             return Ok(true);
                                         }
                                         {
@@ -4769,15 +5845,15 @@ pub async fn run(
                                                 );
                                             let request = MigrationRequest {
                                                 url: target.url,
-                                                transport: config.transport,
-                                                cert: config.cert.clone(),
-                                                insecure: config.insecure,
+                                                transport: *transport,
+                                                cert: cert.clone(),
+                                                insecure: *insecure,
                                                 plan: {
                                                     let (plan, resolve_as_ended) =
                                                         plan_for_migration(
-                                                            &resubscribe_plan,
-                                                            &permanently_ended_tracks,
-                                                            &publish_done_pending,
+                                                            resubscribe_plan,
+                                                            permanently_ended_tracks,
+                                                            publish_done_pending,
                                                         );
                                                     for (request_id, kind) in
                                                         resolve_as_ended
@@ -4793,12 +5869,12 @@ pub async fn run(
                                                 last_locations,
                                                 deadline,
                                             };
-                                            migration_boundary_snapshot = Some(last_locations);
+                                            *migration_boundary_snapshot = Some(last_locations);
                                             let (task, receiver) =
-                                                spawn_migration(&task_monitor, request);
-                                            migration_task = Some(task);
-                                            migration_rx = Some(receiver);
-                                            migration_in_progress = true;
+                                                spawn_migration(task_monitor, request);
+                                            *migration_task = Some(task);
+                                            *migration_rx = Some(receiver);
+                                            *migration_in_progress = true;
                                             tracing::info!(
                                                 "Started a background migration: timeout={}ms, local_default={}, last_locations={:?}",
                                                 timeout,
@@ -4811,7 +5887,7 @@ pub async fn run(
                                     MigrationScope::Request(request_id) => {
                                         // request stream の GOAWAY は当該 request だけの移行で
                                         // あり、session は維持する (§9.2)
-                                        if migration_in_progress {
+                                        if *migration_in_progress {
                                             tracing::debug!(
                                                 "Ignoring a request-scoped GOAWAY received while a migration is in progress: request_id={request_id}"
                                             );
@@ -4829,10 +5905,10 @@ pub async fn run(
                                         // SUBSCRIBE 系の request とメディア FETCH のどちらか
                                         let Some(request_target) = goaway_request_target(
                                             request_id,
-                                            catalog_request_id,
-                                            video_request_id,
-                                            audio_request_id,
-                                            &fetch_requests,
+                                            *catalog_request_id,
+                                            *video_request_id,
+                                            *audio_request_id,
+                                            fetch_requests,
                                         ) else {
                                             tracing::warn!(
                                                 "Ignoring a request-scoped GOAWAY for an unknown request: request_id={request_id}"
@@ -4848,13 +5924,13 @@ pub async fn run(
                                         // GOAWAY は現在の session での再発行を意味する
                                         // (`migration_target` の契約)
                                         let new_session_url =
-                                            !same_session_url(&target.url, &config.url);
+                                            !same_session_url(&target.url, url);
                                         // 移行先 URI の msf fragment の connection が現在の
                                         // 接続経路と矛盾する場合は移行しない
                                         // (draft-ietf-moq-msf-02 §11.1.1)
                                         if new_session_url
                                             && let Err(e) = tokio_moq::resolve_transport(
-                                                Some(config.transport),
+                                                Some(*transport),
                                                 &target.url,
                                             )
                                         {
@@ -4873,41 +5949,41 @@ pub async fn run(
                                                 termination_tx: termination_tx.clone(),
                                                 audio_decoder: audio_decoder.clone(),
                                                 video_decode_order: std::sync::Arc::clone(
-                                                    &video_decode_order,
+                                                    video_decode_order,
                                                 ),
                                                 video_delivery_order: std::sync::Arc::clone(
-                                                    &video_delivery_order,
+                                                    video_delivery_order,
                                                 ),
                                                 object_mode_video: std::sync::Arc::clone(
-                                                    &object_mode_video,
+                                                    object_mode_video,
                                                 ),
                                                 display_backlog: std::sync::Arc::clone(
-                                                    &display_backlog,
+                                                    display_backlog,
                                                 ),
-                                                group_switch: std::sync::Arc::clone(&group_switch),
+                                                group_switch: std::sync::Arc::clone(group_switch),
                                                 audio_catch_up: std::sync::Arc::clone(
-                                                    &audio_catch_up,
+                                                    audio_catch_up,
                                                 ),
                                                 audio_delivery_order: std::sync::Arc::clone(
-                                                    &audio_delivery_order,
+                                                    audio_delivery_order,
                                                 ),
                                                 last_received_locations: std::sync::Arc::clone(
-                                                    &last_received_locations,
+                                                    last_received_locations,
                                                 ),
                                                 audio_config_validated_generation:
                                                     std::sync::Arc::clone(
-                                                        &audio_config_validated_generation,
+                                                        audio_config_validated_generation,
                                                     ),
                                                 generation,
                                                 pending_subgroups: std::sync::Arc::clone(
-                                                    &pending_subgroups,
+                                                    pending_subgroups,
                                                 ),
                                                 recorder: recorder_sender.clone(),
-                                                playback,
+                                                playback: *playback,
                                                 video_codec: video_codec.clone(),
                                                 audio_codec: audio_codec.clone(),
-                                                audio_params,
-                                                stream_slots: std::sync::Arc::clone(&stream_slots),
+                                                audio_params: *audio_params,
+                                                stream_slots: std::sync::Arc::clone(stream_slots),
                                             };
                                         match request_target {
                                             GoawayRequestTarget::Subscribe(kind) => {
@@ -4923,7 +5999,7 @@ pub async fn run(
                                                     publish_done_pending
                                                         .get(&request_id)
                                                         .map(|(_, disposition)| *disposition),
-                                                    &permanently_ended_tracks,
+                                                    permanently_ended_tracks,
                                                 ) else {
                                                     return Ok(false);
                                                 };
@@ -4944,14 +6020,17 @@ pub async fn run(
                                                     // Audio Config を処理させる。世代は
                                                     // dispatch が session を起動するときだけ
                                                     // 1 本のカウンタから払い出す
+                                                    let mut side_session_runtime = SideSessionRuntime {
+                                                        sessions: request_migration_sessions,
+                                                        tasks: request_migration_tasks,
+                                                        task_monitor,
+                                                        events: request_migration_tx,
+                                                        transport: *transport,
+                                                        cert: cert.clone(),
+                                                        insecure: *insecure,
+                                                    };
                                                     dispatch_side_session_command(
-                                                        &mut request_migration_sessions,
-                                                        &mut request_migration_tasks,
-                                                        &task_monitor,
-                                                        config.transport,
-                                                        config.cert.clone(),
-                                                        config.insecure,
-                                                        &request_migration_tx,
+                                                        &mut side_session_runtime,
                                                         target.url.clone(),
                                                         SideSessionCommand::Reissue {
                                                             kind,
@@ -4960,7 +6039,7 @@ pub async fn run(
                                                             last_locations,
                                                             deadline,
                                                         },
-                                                        &mut session_generation,
+                                                        session_generation,
                                                         shared_for_side_session,
                                                     )
                                                     .await;
@@ -4976,15 +6055,15 @@ pub async fn run(
                                                     publish_done_pending
                                                         .get(&request_id)
                                                         .map(|(_, disposition)| *disposition),
-                                                    &permanently_ended_tracks,
-                                                    &migration_pending_tracks,
+                                                    permanently_ended_tracks,
+                                                    migration_pending_tracks,
                                                     kind,
                                                 );
                                                 match reissue_request(
-                                                    &mut client,
+                                                    client,
                                                     kind,
                                                     request_id,
-                                                    &resubscribe_plan,
+                                                    resubscribe_plan,
                                                     &last_locations,
                                                     send_stop_sending,
                                                 )
@@ -4994,9 +6073,9 @@ pub async fn run(
                                                     // 旧 alias を外して新しい alias を登録する
                                                     // (alias は peer が決めるため変わりうる)
                                                     let old_alias = match kind {
-                                                        TrackKind::Catalog => catalog_alias,
-                                                        TrackKind::Video => video_alias,
-                                                        TrackKind::Audio => audio_alias,
+                                                        TrackKind::Catalog => *catalog_alias,
+                                                        TrackKind::Video => *video_alias,
+                                                        TrackKind::Audio => *audio_alias,
                                                         // 再発行は catalog / 映像 / 音声だけを
                                                         // 対象とするため通常は到達しない
                                                         TrackKind::Discard => ignored_publish_requests
@@ -5018,15 +6097,15 @@ pub async fn run(
                                                     }
                                                     match kind {
                                                         TrackKind::Catalog => {
-                                                            catalog_request_id =
+                                                            *catalog_request_id =
                                                                 Some(reissued.subscription.request_id);
-                                                            catalog_alias = Some(new_alias);
+                                                            *catalog_alias = Some(new_alias);
                                                         }
                                                         TrackKind::Video => {
-                                                            video_request_id = Some(
+                                                            *video_request_id = Some(
                                                                 reissued.subscription.request_id,
                                                             );
-                                                            video_alias = Some(new_alias);
+                                                            *video_alias = Some(new_alias);
                                                             // 同じ session で購読を張り直した
                                                             // ため、復号順と購読境界の状態は
                                                             // 引き継ぎ、境界だけを更新する。
@@ -5065,10 +6144,10 @@ pub async fn run(
                                                             );
                                                         }
                                                         TrackKind::Audio => {
-                                                            audio_request_id = Some(
+                                                            *audio_request_id = Some(
                                                                 reissued.subscription.request_id,
                                                             );
-                                                            audio_alias = Some(new_alias);
+                                                            *audio_alias = Some(new_alias);
                                                             // 同じ session で購読を張り直した
                                                             // ため、送出順の状態は引き継ぎ、
                                                             // 境界だけを再発行前の最後の受信
@@ -5099,7 +6178,7 @@ pub async fn run(
                                                     // FETCH / fill stream を誤配送しないよう先に外す
                                                     {
                                                         let mut targets =
-                                                            lock_fetch_targets(&fetch_targets);
+                                                            lock_fetch_targets(fetch_targets);
                                                         targets.retain(|_, target| {
                                                             Some(*target) != fetch_target_of(kind)
                                                         });
@@ -5122,12 +6201,12 @@ pub async fn run(
                                                             )
                                                             .clone(),
                                                     );
-                                                    let _ = datagram_session_tx.send((
-                                                        client.handle(),
-                                                        data_plane.clone(),
-                                                        datagram_map,
-                                                        session_generation,
-                                                    ));
+                                                    let _ = datagram_session_tx.send(DatagramSession {
+                                                        handle: client.handle(),
+                                                        data_plane: data_plane.clone(),
+                                                        track_map: datagram_map,
+                                                        generation: *session_generation,
+                                                    });
                                                     // 再発行後の request の active と pending 管理
                                                     active_requests.remove(&request_id);
                                                     active_requests
@@ -5177,14 +6256,17 @@ pub async fn run(
                                                         "Requesting a FETCH migration to a new session: request_id={request_id}, timeout={timeout}ms, local_default={}",
                                                         deadline.uses_local_default(),
                                                     );
+                                                    let mut side_session_runtime = SideSessionRuntime {
+                                                        sessions: request_migration_sessions,
+                                                        tasks: request_migration_tasks,
+                                                        task_monitor,
+                                                        events: request_migration_tx,
+                                                        transport: *transport,
+                                                        cert: cert.clone(),
+                                                        insecure: *insecure,
+                                                    };
                                                     dispatch_side_session_command(
-                                                        &mut request_migration_sessions,
-                                                        &mut request_migration_tasks,
-                                                        &task_monitor,
-                                                        config.transport,
-                                                        config.cert.clone(),
-                                                        config.insecure,
-                                                        &request_migration_tx,
+                                                        &mut side_session_runtime,
                                                         target.url.clone(),
                                                         SideSessionCommand::ReissueFetch {
                                                             old_request_id: request_id,
@@ -5192,7 +6274,7 @@ pub async fn run(
                                                             parameters: fetch_request.parameters,
                                                             deadline,
                                                         },
-                                                        &mut session_generation,
+                                                        session_generation,
                                                         shared_for_side_session,
                                                     )
                                                     .await;
@@ -5202,7 +6284,7 @@ pub async fn run(
                                                 // 再発行を意味するため、旧 request を終端して
                                                 // 同じ要求内容で発行し直す
                                                 let reissued = reissue_fetch(
-                                                    &mut client,
+                                                    client,
                                                     request_id,
                                                     &fetch_request.target,
                                                     &fetch_request.parameters,
@@ -5210,12 +6292,12 @@ pub async fn run(
                                                 )
                                                 .await;
                                                 // 旧 Request ID の応答を誤配送しないよう先に外す
-                                                lock_fetch_targets(&fetch_targets)
+                                                lock_fetch_targets(fetch_targets)
                                                     .remove(&request_id);
                                                 fetch_requests.remove(&request_id);
                                                 match reissued {
                                                     Ok(new_request_id) => {
-                                                        lock_fetch_targets(&fetch_targets)
+                                                        lock_fetch_targets(fetch_targets)
                                                             .insert(
                                                                 new_request_id,
                                                                 FetchTarget::Video,
@@ -5242,7 +6324,7 @@ pub async fn run(
                                     tracing::warn!(
                                         "GOAWAY carried an unusable New Session URI; terminating without migration: {e}"
                                     );
-                                    goaway_received = true;
+                                    *goaway_received = true;
                                     Ok(true)
                                 }
                             }
@@ -5283,9 +6365,9 @@ pub async fn run(
                             }
                             match goaway_request_kind(
                                 request_id,
-                                catalog_request_id,
-                                video_request_id,
-                                audio_request_id,
+                                *catalog_request_id,
+                                *video_request_id,
+                                *audio_request_id,
                             ) {
                                 Some(kind) => {
                                     // 終了待ちの request を Session の cleanup_ready の
@@ -5358,8 +6440,8 @@ pub async fn run(
                         })) => {
                             // catalog 購読の SUBSCRIBE_OK が MSF_COMPRESSION を運んだ場合、
                             // catalog の data stream を正しくデコードするために保持する。
-                            if catalog_request_id == Some(request_id) {
-                                catalog_compression = match track_properties.msf_compression() {
+                            if *catalog_request_id == Some(request_id) {
+                                *catalog_compression = match track_properties.msf_compression() {
                                     Some(value) => match MsfCompression::try_from(value) {
                                         Ok(compression) => compression,
                                         Err(e) => {
@@ -5390,7 +6472,7 @@ pub async fn run(
                             // 配送先は共有の対応表で引く。request 単位移行の side session が
                             // 再発行した FETCH は side session 側の表にだけ入るため、ここで
                             // 見つからなくても異常ではない
-                            let kind = lock_fetch_targets(&fetch_targets)
+                            let kind = lock_fetch_targets(fetch_targets)
                                 .get(&request_id)
                                 .copied();
                             tracing::info!(
@@ -5416,7 +6498,7 @@ pub async fn run(
                             // REQUEST_UPDATE の失敗など) はログに残すだけで、対応表を変えない。
                             // この example はリダイレクトに追随せず、再試行もしない
                             let video_fetch = {
-                                let mut targets = lock_fetch_targets(&fetch_targets);
+                                let mut targets = lock_fetch_targets(fetch_targets);
                                 if matches!(targets.get(&request_id), Some(FetchTarget::Video)) {
                                     targets.remove(&request_id);
                                     true
@@ -5429,8 +6511,8 @@ pub async fn run(
                             }
                             // SUBSCRIBE_TRACKS が拒否された場合は、以後に同じ
                             // SUBSCRIBE_TRACKS_ID を持つ PUBLISH を受理しないよう対応を外す
-                            if tracks_request_id == Some(request_id) {
-                                tracks_request_id = None;
+                            if *tracks_request_id == Some(request_id) {
+                                *tracks_request_id = None;
                             }
                             tracing::warn!(
                                 "Received REQUEST_ERROR: request_id={request_id}, \
@@ -5480,14 +6562,14 @@ pub async fn run(
                             // する track を PUBLISH し、購読者は PUBLISH_OK (REQUEST_OK) で
                             // 応答する。Track Alias は PUBLISH が運ぶ値をそのまま使う。
                             if let ControlMessage::Publish(publish) = &request.message
-                                && accepts_subscribe_tracks_publish(publish, tracks_request_id)
+                                && accepts_subscribe_tracks_publish(publish, *tracks_request_id)
                             {
                                 let alias = publish.track_alias;
                                 let namespace = publish.track_namespace.clone();
                                 let track_name = publish.track_name.clone();
                                 let duplicate = is_already_subscribed_publish(
                                     publish,
-                                    &subscribed_tracks,
+                                    subscribed_tracks,
                                 );
                                 // 既存の購読と同じ alias が使われると、data stream がどちらの
                                 // 購読のものか alias だけでは区別できない。同じ track に対する
@@ -5528,12 +6610,12 @@ pub async fn run(
                                     Ok(()) => {
                                         ignored_publish_requests.insert(request.request_id, alias);
                                         // datagram 受信タスクの alias 表も差し替える
-                                        let _ = datagram_session_tx.send((
-                                            client.handle(),
-                                            data_plane.clone(),
-                                            datagram_map,
-                                            session_generation,
-                                        ));
+                                        let _ = datagram_session_tx.send(DatagramSession {
+                                            handle: client.handle(),
+                                            data_plane: data_plane.clone(),
+                                            track_map: datagram_map,
+                                            generation: *session_generation,
+                                        });
                                         tracing::info!(
                                             "Accepted PUBLISH for SUBSCRIBE_TRACKS: request_id={}, \
                                              namespace={}, track={}, alias={alias}, \
@@ -5554,12 +6636,12 @@ pub async fn run(
                                             map.remove(&alias);
                                             Arc::new(map.clone())
                                         };
-                                        let _ = datagram_session_tx.send((
-                                            client.handle(),
-                                            data_plane.clone(),
-                                            datagram_map,
-                                            session_generation,
-                                        ));
+                                        let _ = datagram_session_tx.send(DatagramSession {
+                                            handle: client.handle(),
+                                            data_plane: data_plane.clone(),
+                                            track_map: datagram_map,
+                                            generation: *session_generation,
+                                        });
                                         tracing::warn!(
                                             "Failed to accept PUBLISH for SUBSCRIBE_TRACKS: \
                                              request_id={}, {e}",
@@ -5620,931 +6702,1084 @@ pub async fn run(
                     }
                 }
                 .await;
-                match outcome {
-                    // peer が subscription / session を終了させた
-                    Ok(true) => {
-                        // GOAWAY は subscription state に影響しないため peer_ended にしない
-                        // (cleanup で STOP_SENDING を送り、peer に stream を reset させる)
-                        if !goaway_received {
-                            peer_ended = true;
-                        }
-                        break 'main;
-                    }
-                    Ok(false) => {}
-                    // transport がセッション終了 (§6) や接続クローズを検知した。accept 経路と
-                    // 同じ正常終了として扱う (`is_transport_session_end`)。
-                    // session_terminated は立てないため、GOAWAY と `close(0, "")` は送られる
-                    Err(e) if is_transport_session_end(&e) => {
-                        tracing::info!("Session closed by transport");
-                        peer_ended = true;
-                        break 'main;
-                    }
-                    // MOQT メッセージの encode / decode 失敗。draft-ietf-moq-transport-23 §9
-                    // (Control Messages) と §9.19.1 (Parameter Scope) は不正なメッセージの受信を
-                    // 終了コード付きで閉じることを MUST で要求する。decode は codec 層で完結し
-                    // Session はこの違反を観測できないため、I/O 層である main ループが終了コードを
-                    // 決めて閉じる
-                    Err(Error::Moqt(e)) => {
-                        let code = session_error_code(&e);
-                        tracing::warn!("Closing session on MOQT message error: {code:#x} {e}");
-                        close_session(&mut client, SessionError::new(code, e.reason())).await;
-                        session_terminated = true;
-                        // 終了コード付きで閉じた後も `run` の戻り値はエラーとして返す
-                        // (moq-pub と同じ扱い。閉じた理由を呼び出し側が観測できるようにする)
-                        fatal_error = Some(Error::Moqt(e));
-                        break 'main;
-                    }
-                    // peer が bidi request stream を cancel した (§6.4.2.3)。該当 request
-                    // だけが終端するため、受信と再生は継続する。subscriber は uni data stream を
-                    // 送らないため、STOP_SENDING を受ける送信経路はこの bidi request stream だけである
-                    Err(e) if is_peer_stream_reset(&e) => {
-                        tracing::info!("Request stream was reset by peer; continuing");
-                    }
-                    // transport 自体のエラーは後始末 (stream task の join と録画の
-                    // finalize) を終えてから `run` の戻り値として返す。接続が死んでいるため
-                    // 終了コード付きの close は送れず、後段の終了依頼の回収も行わない
-                    // (既知の限界)。
-                    Err(e) => {
-                        fatal_error = Some(e);
-                        break 'main;
-                    }
-                }
+    match outcome {
+        // peer が subscription / session を終了させた
+        Ok(true) => {
+            // GOAWAY は subscription state に影響しないため peer_ended にしない
+            // (cleanup で STOP_SENDING を送り、peer に stream を reset させる)
+            if !*goaway_received {
+                *peer_ended = true;
             }
-            result = async {
-                // 移行の結果は oneshot で届く。移行していないときは発火しない
-                match migration_rx.as_mut() {
-                    Some(rx) => rx.await.map_err(|_| ()),
-                    None => std::future::pending().await,
+            return LoopFlow::Break;
+        }
+        Ok(false) => {}
+        // transport がセッション終了 (§6) や接続クローズを検知した。accept 経路と
+        // 同じ正常終了として扱う (`is_transport_session_end`)。
+        // session_terminated は立てないため、GOAWAY と `close(0, "")` は送られる
+        Err(e) if is_transport_session_end(&e) => {
+            tracing::info!("Session closed by transport");
+            *peer_ended = true;
+            return LoopFlow::Break;
+        }
+        // MOQT メッセージの encode / decode 失敗。draft-ietf-moq-transport-23 §9
+        // (Control Messages) と §9.19.1 (Parameter Scope) は不正なメッセージの受信を
+        // 終了コード付きで閉じることを MUST で要求する。decode は codec 層で完結し
+        // Session はこの違反を観測できないため、I/O 層である main ループが終了コードを
+        // 決めて閉じる
+        Err(Error::Moqt(e)) => {
+            let code = session_error_code(&e);
+            tracing::warn!("Closing session on MOQT message error: {code:#x} {e}");
+            close_session(client, SessionError::new(code, e.reason())).await;
+            *session_terminated = true;
+            // 終了コード付きで閉じた後も `run` の戻り値はエラーとして返す
+            // (moq-pub と同じ扱い。閉じた理由を呼び出し側が観測できるようにする)
+            *fatal_error = Some(Error::Moqt(e));
+            return LoopFlow::Break;
+        }
+        // peer が bidi request stream を cancel した (§6.4.2.3)。該当 request
+        // だけが終端するため、受信と再生は継続する。subscriber は uni data stream を
+        // 送らないため、STOP_SENDING を受ける送信経路はこの bidi request stream だけである
+        Err(e) if is_peer_stream_reset(&e) => {
+            tracing::info!("Request stream was reset by peer; continuing");
+        }
+        // transport 自体のエラーは後始末 (stream task の join と録画の
+        // finalize) を終えてから `run` の戻り値として返す。接続が死んでいるため
+        // 終了コード付きの close は送れず、後段の終了依頼の回収も行わない
+        // (既知の限界)。
+        Err(e) => {
+            *fatal_error = Some(e);
+            return LoopFlow::Break;
+        }
+    }
+    LoopFlow::Continue
+}
+
+/// バックグラウンドの session 移行の結果を受けて、移行先へ切り替える
+///
+/// 移行に成功した場合は、旧 session の購読と stream task を止めて、移行先の session と
+/// 再発行済みの要求へ状態を差し替える。
+async fn handle_migration_result(
+    state: &mut PipelineState,
+    result: std::result::Result<MigrationResult, ()>,
+) -> LoopFlow {
+    let PipelineState {
+        url,
+        subscribe_tracks,
+        task_monitor,
+        client,
+        recv_acceptor,
+        subscribe_tracks_namespace,
+        data_plane,
+        active_requests,
+        publish_done_pending,
+        migration_pending_tracks,
+        track_map,
+        fetch_targets,
+        fetch_requests,
+        video_request_id,
+        audio_request_id,
+        video_alias,
+        audio_alias,
+        video_decode_order,
+        group_switch,
+        object_mode_video,
+        tracks_request_id,
+        ignored_publish_requests,
+        catalog_request_id,
+        catalog_alias,
+        session_generation,
+        audio_catch_up,
+        audio_delivery_order,
+        video_delivery_order,
+        join_set,
+        pending_subgroups,
+        pending_streams,
+        last_received_locations,
+        datagram_session_tx,
+        migration_rx,
+        migration_in_progress,
+        migration_task,
+        migration_boundary_snapshot,
+        old_session_closers,
+        request_migration_sessions,
+        request_migration_tasks,
+        request_migration_tx,
+        request_migration_rx,
+        wt_session_state_rx,
+        ..
+    } = state;
+    // バックグラウンドの移行タスクの結果を受ける。成功した場合はここで 1 か所に
+    // まとめて移行先へ切り替える
+    *migration_in_progress = false;
+    *migration_rx = None;
+    *migration_task = None;
+    match result {
+        Ok(Ok(outcome)) => {
+            // request 単位移行の side session をすべて止める。移行先の session は
+            // 全 track を張り直すため、同じ track を 2 つの session から受信
+            // しないようにする
+            let side_session_count = request_migration_tasks.len();
+            for handle in request_migration_tasks.drain(..) {
+                handle.abort();
+                let _ = handle.await;
+            }
+            request_migration_sessions.clear();
+            // abort 済みの side session が送信済みのイベントは、移行後の状態を
+            // 壊しうる (古い request id で購読の状態を消すなど)。集約チャネルを
+            // 作り直して、これらのイベントを捨てる
+            let (new_tx, new_rx) = tokio::sync::mpsc::channel::<RequestMigrationEvent>(
+                REQUEST_MIGRATION_EVENT_CHANNEL_SIZE,
+            );
+            *request_migration_tx = new_tx;
+            *request_migration_rx = new_rx;
+            if side_session_count > 0 {
+                tracing::info!(
+                    "Stopped the request migration side sessions after a full session migration: count={side_session_count}"
+                );
+            }
+            // 旧 session の stream task を止める。abort したあとに回収することで、
+            // 切替のあと旧 data_plane しか持たない task が sink へ書かないことを
+            // 保証する (§6.6.1 の移行をアプリへ透過にするため)
+            join_set.abort_all();
+            let drained = tokio::time::timeout(MIGRATION_STREAM_DRAIN_TIMEOUT, async {
+                while join_set.join_next().await.is_some() {}
+            })
+            .await;
+            if drained.is_err() {
+                tracing::warn!(
+                    "Timed out waiting for the old stream tasks to stop; switching the session anyway"
+                );
+            }
+            // 旧 session で受理済みの stream は新しい data_plane では処理できない
+            pending_streams.clear();
+            // 旧 session の Track Alias で保留中の Subgroup も捨てる。alias は
+            // session ごとに払い直されるため、残すと新 session の stream が
+            // 保留枠を奪われたうえ、別の track の chunk として解釈されうる
+            pending_subgroups.lock().await.reset();
+            // 旧 session の復号順と追いつきの状態を捨てる。新 session の live を
+            // 古い Group として誤って拒否しないためである
+            video_decode_order.lock().await.reset();
+            // object モードの並べ替えも捨てる。復号器は同じコーデックを
+            // 続けて復号できるため残す
+            object_mode_video.reset().await;
+            // Group の切り替え gate も初期化する。旧 session の stream task は
+            // abort しても await 点でしか止まらず、drain の打ち切り後も動き得る
+            // ため、世代を進めて旧い task の begin_stream / end_stream /
+            // admit を無視する
+            group_switch.reset();
+            audio_catch_up
+                .lock()
+                .expect("audio catch up の lock が poison されていないこと")
+                .reset();
+            // 音声の購読境界を「旧 session で最後に受信した Location」へ更新する。
+            // 移行先の購読はその位置を Location Filter の Absolute Start (0x02) に
+            // して張り直すため、境界と同じ位置だけが再送される。移行先の Largest
+            // Object を境界にすると、移行中に抜けた音声 (最後の受信位置より後) を
+            // 境界以下として捨ててしまう (draft-ietf-moq-transport-23 §9.19.9
+            // (LOCATION FILTER Parameter) Table 6。draft 由来の仕様であり将来
+            // 変更されうる)
+            let audio_boundary = last_received_locations
+                .lock()
+                .expect("last locations の lock が poison されていないこと")
+                .audio;
+            audio_delivery_order
+                .lock()
+                .expect("audio delivery order の lock が poison されていないこと")
+                .reset_for_migration(audio_boundary);
+            tracing::info!(
+                "Updated the audio subscription boundary for the migrated session: audio_boundary={audio_boundary:?}"
+            );
+            // 映像の購読境界も更新する。候補は旧 session の stream task を止めた
+            // あとに読み直した最後の受信位置である (選び方は
+            // select_video_subscription_boundary)
+            let video_boundary_candidates = VideoBoundaryCandidates {
+                snapshot: migration_boundary_snapshot
+                    .take()
+                    .and_then(|locations| locations.video),
+                reread: last_received_locations
+                    .lock()
+                    .expect("last locations の lock が poison されていないこと")
+                    .video,
+            };
+            let video_boundary_candidate = select_video_subscription_boundary(
+                ResubscribeRoute::SessionMigration,
+                video_boundary_candidates,
+            );
+            let video_boundary = {
+                let mut order = video_delivery_order
+                    .lock()
+                    .expect("video delivery order lock is not poisoned");
+                order.advance_boundary(video_boundary_candidate);
+                order.boundary()
+            };
+            tracing::info!(
+                "Updated the video subscription boundary for the migrated session: candidates={video_boundary_candidates:?}, candidate={video_boundary_candidate:?}, boundary={video_boundary:?}"
+            );
+            // alias 表を移行先のものへ差し替える (alias は peer が決めるため変わる)
+            let datagram_map = {
+                let mut map = track_map
+                    .write()
+                    .expect("track_map lock must not be poisoned");
+                map.clear();
+                if let Some(ref sub) = outcome.resubscribed.catalog {
+                    map.insert(sub.track_alias, TrackKind::Catalog);
                 }
-            }, if migration_in_progress => {
-                // バックグラウンドの移行タスクの結果を受ける。成功した場合はここで 1 か所に
-                // まとめて移行先へ切り替える
-                migration_in_progress = false;
-                migration_rx = None;
-                migration_task = None;
-                match result {
-                    Ok(Ok(outcome)) => {
-                        // request 単位移行の side session をすべて止める。移行先の session は
-                        // 全 track を張り直すため、同じ track を 2 つの session から受信
-                        // しないようにする
-                        let side_session_count = request_migration_tasks.len();
-                        for handle in request_migration_tasks.drain(..) {
-                            handle.abort();
-                            let _ = handle.await;
-                        }
-                        request_migration_sessions.clear();
-                        // abort 済みの side session が送信済みのイベントは、移行後の状態を
-                        // 壊しうる (古い request id で購読の状態を消すなど)。集約チャネルを
-                        // 作り直して、これらのイベントを捨てる
-                        let (new_tx, new_rx) = tokio::sync::mpsc::channel::<RequestMigrationEvent>(
-                            REQUEST_MIGRATION_EVENT_CHANNEL_SIZE,
-                        );
-                        request_migration_tx = new_tx;
-                        request_migration_rx = new_rx;
-                        if side_session_count > 0 {
-                            tracing::info!(
-                                "Stopped the request migration side sessions after a full session migration: count={side_session_count}"
-                            );
-                        }
-                        // 旧 session の stream task を止める。abort したあとに回収することで、
-                        // 切替のあと旧 data_plane しか持たない task が sink へ書かないことを
-                        // 保証する (§6.6.1 の移行をアプリへ透過にするため)
-                        join_set.abort_all();
-                        let drained = tokio::time::timeout(
-                            MIGRATION_STREAM_DRAIN_TIMEOUT,
-                            async {
-                                while join_set.join_next().await.is_some() {}
-                            },
-                        )
-                        .await;
-                        if drained.is_err() {
-                            tracing::warn!(
-                                "Timed out waiting for the old stream tasks to stop; switching the session anyway"
-                            );
-                        }
-                        // 旧 session で受理済みの stream は新しい data_plane では処理できない
-                        pending_streams.clear();
-                        // 旧 session の Track Alias で保留中の Subgroup も捨てる。alias は
-                        // session ごとに払い直されるため、残すと新 session の stream が
-                        // 保留枠を奪われたうえ、別の track の chunk として解釈されうる
-                        pending_subgroups.lock().await.reset();
-                        // 旧 session の復号順と追いつきの状態を捨てる。新 session の live を
-                        // 古い Group として誤って拒否しないためである
-                        video_decode_order.lock().await.reset();
-                        // object モードの並べ替えも捨てる。復号器は同じコーデックを
-                        // 続けて復号できるため残す
-                        object_mode_video.reset().await;
-                        // Group の切り替え gate も初期化する。旧 session の stream task は
-                        // abort しても await 点でしか止まらず、drain の打ち切り後も動き得る
-                        // ため、世代を進めて旧い task の begin_stream / end_stream /
-                        // admit を無視する
-                        group_switch.reset();
-                        audio_catch_up
-                            .lock()
-                            .expect("audio catch up の lock が poison されていないこと")
-                            .reset();
-                        // 音声の購読境界を「旧 session で最後に受信した Location」へ更新する。
-                        // 移行先の購読はその位置を Location Filter の Absolute Start (0x02) に
-                        // して張り直すため、境界と同じ位置だけが再送される。移行先の Largest
-                        // Object を境界にすると、移行中に抜けた音声 (最後の受信位置より後) を
-                        // 境界以下として捨ててしまう (draft-ietf-moq-transport-23 §9.19.9
-                        // (LOCATION FILTER Parameter) Table 6。draft 由来の仕様であり将来
-                        // 変更されうる)
-                        let audio_boundary = last_received_locations
-                            .lock()
-                            .expect("last locations の lock が poison されていないこと")
-                            .audio;
-                        audio_delivery_order
-                            .lock()
-                            .expect("audio delivery order の lock が poison されていないこと")
-                            .reset_for_migration(audio_boundary);
+                if let Some(ref sub) = outcome.resubscribed.video {
+                    map.insert(sub.track_alias, TrackKind::Video);
+                }
+                if let Some(ref sub) = outcome.resubscribed.audio {
+                    map.insert(sub.track_alias, TrackKind::Audio);
+                }
+                Arc::new(map.clone())
+            };
+            // 移行先の WebTransport の drain を観測できるよう、receiver を差し替える
+            let new_wt_session_state = outcome.client.wt_session_state();
+            // datagram 受信タスクには、旧 session を閉じる前に新しい handle /
+            // data_plane / alias 表を渡す。閉じた後だと旧接続の受信エラーでタスクが
+            // 終了してしまう
+            // 新しい session の世代 を進める。Audio Config の検証済み世代 と
+            // 比べることで、移行前の session の遅延 Object が新しい session の
+            // 検証状態を進めないようにする
+            let new_generation = {
+                *session_generation = session_generation.saturating_add(1);
+                session_generation
+            };
+            let _ = datagram_session_tx.send(DatagramSession {
+                handle: outcome.client.handle(),
+                data_plane: outcome.data_plane.clone(),
+                track_map: datagram_map,
+                generation: *new_generation,
+            });
+            // 旧 session は STOP_SENDING を送ってから NO_ERROR で閉じる (§6.6.1 /
+            // §9.2)。GOAWAY の Timeout は待たず、main ループを塞がないよう別タスクで
+            // 行う。PUBLISH_DONE で Terminated になった購読と Session が回収済み
+            // の購読は STOP_SENDING を送らない (active_requests から外れている)
+            let old_request_ids: Vec<u64> = active_requests.iter().copied().collect();
+            // 終了待ち entry は Session 入れ替えで request_id がすべて新しくなるため
+            // 解消する (張り直した track と旧 request_id のどちらも、移行後の poll で
+            // 誤って終了しない)
+            publish_done_pending.clear();
+            let old_client = std::mem::replace(client, outcome.client);
+            old_session_closers.push(spawn_old_session_close(
+                task_monitor,
+                old_client,
+                old_request_ids,
+            ));
+            // ここから先が移行先への切替である。関連する状態を 1 か所でまとめて
+            // 差し替え、旧 session の値と混ざらないようにする
+            *url = outcome.url;
+            *recv_acceptor = outcome.recv_acceptor;
+            *data_plane = outcome.data_plane;
+            *catalog_request_id = outcome
+                .resubscribed
+                .catalog
+                .as_ref()
+                .map(|sub| sub.request_id);
+            *catalog_alias = outcome
+                .resubscribed
+                .catalog
+                .as_ref()
+                .map(|sub| sub.track_alias);
+            *video_request_id = outcome
+                .resubscribed
+                .video
+                .as_ref()
+                .map(|sub| sub.request_id);
+            *video_alias = outcome
+                .resubscribed
+                .video
+                .as_ref()
+                .map(|sub| sub.track_alias);
+            *audio_request_id = outcome
+                .resubscribed
+                .audio
+                .as_ref()
+                .map(|sub| sub.request_id);
+            *audio_alias = outcome
+                .resubscribed
+                .audio
+                .as_ref()
+                .map(|sub| sub.track_alias);
+            // メディア FETCH の対応表を移行先のものへ差し替える。Request ID は
+            // session ごとに払い出されるため、旧 session の表で移行先の FETCH 応答
+            // stream を振り分けることはできない
+            *fetch_targets =
+                std::sync::Arc::new(std::sync::Mutex::new(outcome.resubscribed.fetch_targets));
+            *fetch_requests = outcome.resubscribed.fetch_requests;
+            // 移行先の subscription を active 側に載せ替える
+            active_requests.clear();
+            if let Some(ref sub) = outcome.resubscribed.catalog {
+                active_requests.insert(sub.request_id);
+            }
+            if let Some(ref sub) = outcome.resubscribed.video {
+                active_requests.insert(sub.request_id);
+            }
+            if let Some(ref sub) = outcome.resubscribed.audio {
+                active_requests.insert(sub.request_id);
+            }
+            // 移行先で張り直した media track は再開したため、移行待ちをクリアする
+            // (恒久終了の track は維持する)
+            migration_pending_tracks.clear();
+            *wt_session_state_rx = new_wt_session_state;
+            tracing::info!("Migrated the session to {}", url.authority);
+            // SUBSCRIBE_TRACKS は session 単位の namespace 要求であり、移行先で
+            // 張り直す必要がある。PUBLISH 起点の購読と Request ID は旧 session の
+            // ものなので破棄する (track_map は上の差し替えで catalog / 映像 / 音声
+            // だけになっている)
+            ignored_publish_requests.clear();
+            *tracks_request_id = None;
+            if *subscribe_tracks {
+                match client
+                    .subscribe_tracks(subscribe_tracks_namespace.clone(), MessageParameters::new())
+                    .await
+                {
+                    Ok(request_id) => {
+                        *tracks_request_id = Some(request_id);
                         tracing::info!(
-                            "Updated the audio subscription boundary for the migrated session: audio_boundary={audio_boundary:?}"
-                        );
-                        // 映像の購読境界も更新する。候補は旧 session の stream task を止めた
-                        // あとに読み直した最後の受信位置である (選び方は
-                        // select_video_subscription_boundary)
-                        let video_boundary_candidates = VideoBoundaryCandidates {
-                            snapshot: migration_boundary_snapshot
-                                .take()
-                                .and_then(|locations| locations.video),
-                            reread: last_received_locations
-                                .lock()
-                                .expect("last locations の lock が poison されていないこと")
-                                .video,
-                        };
-                        let video_boundary_candidate = select_video_subscription_boundary(
-                            ResubscribeRoute::SessionMigration,
-                            video_boundary_candidates,
-                        );
-                        let video_boundary = {
-                            let mut order = video_delivery_order
-                                .lock()
-                                .expect("video delivery order lock is not poisoned");
-                            order.advance_boundary(video_boundary_candidate);
-                            order.boundary()
-                        };
-                        tracing::info!(
-                            "Updated the video subscription boundary for the migrated session: candidates={video_boundary_candidates:?}, candidate={video_boundary_candidate:?}, boundary={video_boundary:?}"
-                        );
-                        // alias 表を移行先のものへ差し替える (alias は peer が決めるため変わる)
-                        let datagram_map = {
-                            let mut map = track_map
-                                .write()
-                                .expect("track_map lock must not be poisoned");
-                            map.clear();
-                            if let Some(ref sub) = outcome.resubscribed.catalog {
-                                map.insert(sub.track_alias, TrackKind::Catalog);
-                            }
-                            if let Some(ref sub) = outcome.resubscribed.video {
-                                map.insert(sub.track_alias, TrackKind::Video);
-                            }
-                            if let Some(ref sub) = outcome.resubscribed.audio {
-                                map.insert(sub.track_alias, TrackKind::Audio);
-                            }
-                            Arc::new(map.clone())
-                        };
-                        // 移行先の WebTransport の drain を観測できるよう、receiver を差し替える
-                        let new_wt_session_state = outcome.client.wt_session_state();
-                        // datagram 受信タスクには、旧 session を閉じる前に新しい handle /
-                        // data_plane / alias 表を渡す。閉じた後だと旧接続の受信エラーでタスクが
-                        // 終了してしまう
-                        // 新しい session の世代 を進める。Audio Config の検証済み世代 と
-                        // 比べることで、移行前の session の遅延 Object が新しい session の
-                        // 検証状態を進めないようにする
-                        let new_generation = {
-                            session_generation = session_generation.saturating_add(1);
-                            session_generation
-                        };
-                        let _ = datagram_session_tx.send((
-                            outcome.client.handle(),
-                            outcome.data_plane.clone(),
-                            datagram_map,
-                            new_generation,
-                        ));
-                        // 旧 session は STOP_SENDING を送ってから NO_ERROR で閉じる (§6.6.1 /
-                        // §9.2)。GOAWAY の Timeout は待たず、main ループを塞がないよう別タスクで
-                        // 行う。PUBLISH_DONE で Terminated になった購読と Session が回収済み
-                        // の購読は STOP_SENDING を送らない (active_requests から外れている)
-                        let old_request_ids: Vec<u64> =
-                            active_requests.iter().copied().collect();
-                        // 終了待ち entry は Session 入れ替えで request_id がすべて新しくなるため
-                        // 解消する (張り直した track と旧 request_id のどちらも、移行後の poll で
-                        // 誤って終了しない)
-                        publish_done_pending.clear();
-                        let old_client = std::mem::replace(&mut client, outcome.client);
-                        old_session_closers.push(spawn_old_session_close(
-                            &task_monitor,
-                            old_client,
-                            old_request_ids,
-                        ));
-                        // ここから先が移行先への切替である。関連する状態を 1 か所でまとめて
-                        // 差し替え、旧 session の値と混ざらないようにする
-                        config.url = outcome.url;
-                        recv_acceptor = outcome.recv_acceptor;
-                        data_plane = outcome.data_plane;
-                        catalog_request_id = outcome
-                            .resubscribed
-                            .catalog
-                            .as_ref()
-                            .map(|sub| sub.request_id);
-                        catalog_alias = outcome
-                            .resubscribed
-                            .catalog
-                            .as_ref()
-                            .map(|sub| sub.track_alias);
-                        video_request_id = outcome
-                            .resubscribed
-                            .video
-                            .as_ref()
-                            .map(|sub| sub.request_id);
-                        video_alias = outcome
-                            .resubscribed
-                            .video
-                            .as_ref()
-                            .map(|sub| sub.track_alias);
-                        audio_request_id = outcome
-                            .resubscribed
-                            .audio
-                            .as_ref()
-                            .map(|sub| sub.request_id);
-                        audio_alias = outcome
-                            .resubscribed
-                            .audio
-                            .as_ref()
-                            .map(|sub| sub.track_alias);
-                        // メディア FETCH の対応表を移行先のものへ差し替える。Request ID は
-                        // session ごとに払い出されるため、旧 session の表で移行先の FETCH 応答
-                        // stream を振り分けることはできない
-                        fetch_targets = std::sync::Arc::new(std::sync::Mutex::new(
-                            outcome.resubscribed.fetch_targets,
-                        ));
-                        fetch_requests = outcome.resubscribed.fetch_requests;
-                        // 移行先の subscription を active 側に載せ替える
-                        active_requests.clear();
-                        if let Some(ref sub) = outcome.resubscribed.catalog {
-                            active_requests.insert(sub.request_id);
-                        }
-                        if let Some(ref sub) = outcome.resubscribed.video {
-                            active_requests.insert(sub.request_id);
-                        }
-                        if let Some(ref sub) = outcome.resubscribed.audio {
-                            active_requests.insert(sub.request_id);
-                        }
-                        // 移行先で張り直した media track は再開したため、移行待ちをクリアする
-                        // (恒久終了の track は維持する)
-                        migration_pending_tracks.clear();
-                        wt_session_state_rx = new_wt_session_state;
-                        tracing::info!(
-                            "Migrated the session to {}",
-                            config.url.authority
-                        );
-                        // SUBSCRIBE_TRACKS は session 単位の namespace 要求であり、移行先で
-                        // 張り直す必要がある。PUBLISH 起点の購読と Request ID は旧 session の
-                        // ものなので破棄する (track_map は上の差し替えで catalog / 映像 / 音声
-                        // だけになっている)
-                        ignored_publish_requests.clear();
-                        tracks_request_id = None;
-                        if config.subscribe_tracks {
-                            match client
-                                .subscribe_tracks(
-                                    subscribe_tracks_namespace.clone(),
-                                    MessageParameters::new(),
-                                )
-                                .await
-                            {
-                                Ok(request_id) => {
-                                    tracks_request_id = Some(request_id);
-                                    tracing::info!(
-                                        "Re-sent SUBSCRIBE_TRACKS on the migrated session: \
+                            "Re-sent SUBSCRIBE_TRACKS on the migrated session: \
                                          request_id={request_id}"
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Failed to re-send SUBSCRIBE_TRACKS on the migrated \
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to re-send SUBSCRIBE_TRACKS on the migrated \
                                          session: {e}"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    Ok(Err(failure)) => {
-                        // 期限超過・再試行不能なエラーである。旧 session はまだ生きており、
-                        // GOAWAY は subscription state に影響しない
-                        // (draft-ietf-moq-transport-23 §9.2。draft 由来の仕様であり将来変更
-                        // されうる) ため、購読を STOP_SENDING で終了してから GOAWAY /
-                        // 正常 close を送る既存の後始末へ進む (peer_ended は立てない。この分岐は
-                        // 直接受信ループを抜けるため、後始末の判定に使う `goaway_received` は
-                        // 立てる必要がない)
-                        tracing::warn!("Failed to migrate the session: {failure}");
-                        break 'main;
-                    }
-                    Err(()) => {
-                        // 移行タスクが結果を送らずに終了した。移行を続けられないため、
-                        // 旧 session の終了経路へ進む
-                        tracing::warn!("The migration task ended without a result");
-                        break 'main;
+                        );
                     }
                 }
             }
-            Some(event) = request_migration_rx.recv() => {
-                match event {
-                    RequestMigrationEvent::Migrated {
-                        url,
-                        request,
-                        old_request_id,
-                        new_request_id,
-                    } => {
-                        let url_display = side_session_url_display(&url);
-                        // side session の進行状態を「確立済み」へ進める。同じ URL の次の
-                        // request はこの session に相乗りする
-                        if let Some(slot) = request_migration_sessions.get_mut(&url) {
-                            slot.state = SideSessionState::Established;
-                        }
-                        match request {
-                            MigratedRequest::Subscribe(kind) => {
-                                // 旧 session の request stream を閉じる (§9.2 の "close the
-                                // old request stream using the appropriate mechanism")。
-                                // 購読が既に Terminated の場合は状態機械に拒否されるが、
-                                // 移行自体は成功しているため警告に留める
-                                if let Err(e) = client.stop_sending(old_request_id).await {
-                                    tracing::warn!(
-                                        "Failed to send STOP_SENDING for the migrated request {old_request_id}: {e}"
-                                    );
-                                }
-                                // 旧 alias を外す。以後の Object は side session が配送する
-                                let old_alias = match kind {
-                                    TrackKind::Catalog => catalog_alias.take(),
-                                    TrackKind::Video => video_alias.take(),
-                                    TrackKind::Audio => audio_alias.take(),
-                                    // 移行は catalog / 映像 / 音声だけを対象とするため
-                                    // 到達しない
-                                    TrackKind::Discard => None,
-                                };
-                                {
-                                    let mut map = track_map
-                                        .write()
-                                        .expect("track_map lock must not be poisoned");
-                                    if let Some(alias) = old_alias {
-                                        map.remove(&alias);
-                                    }
-                                }
-                                // 以後その track は side session が配送するため、main ループの
-                                // 再発行・期限処理の対象から外す。request id を `None` にすると
-                                // `goaway_request_kind` の照合対象からも外れる
-                                match kind {
-                                    TrackKind::Catalog => catalog_request_id = None,
-                                    TrackKind::Video => video_request_id = None,
-                                    TrackKind::Audio => audio_request_id = None,
-                                    TrackKind::Discard => {}
-                                }
-                                active_requests.remove(&old_request_id);
-                                // 移行の開始から成功までの間に旧 session で PUBLISH_DONE を
-                                // 受けていた場合は disposition を引き継ぐ。track の恒久終了を
-                                // 移行成功で失わないようにするためである
-                                let pending_disposition = publish_done_pending
-                                    .remove(&old_request_id)
-                                    .map(|(_, disposition)| disposition);
-                                migration_pending_tracks.remove(&kind);
-                                // 旧 session のこの track の FETCH は side session の再発行で
-                                // 置き換わるため、main ループの対応表から外す
-                                lock_fetch_targets(&fetch_targets).retain(|_, target| {
-                                    Some(*target) != fetch_target_of(kind)
-                                });
-                                // 映像の購読を移行すると、それに伴う FETCH も side session が
-                                // 発行し直す。main ループに残った FETCH の再発行用の指定は
-                                // 対象を失っているため捨てる
-                                if kind == TrackKind::Video {
-                                    fetch_requests.clear();
-                                }
-                                match pending_disposition {
-                                    Some(
-                                        PublishDoneDisposition::TrackEnded
-                                        | PublishDoneDisposition::Error,
-                                    ) => {
-                                        tracing::warn!(
-                                            "The {kind:?} track ended permanently during the request migration"
-                                        );
-                                        permanently_ended_tracks.insert(kind);
-                                        if all_media_tracks_ended(
-                                            subscribe_video,
-                                            subscribe_audio,
-                                            &permanently_ended_tracks,
-                                            &migration_pending_tracks,
-                                        ) {
-                                            tracing::info!(
-                                                "All media tracks ended permanently: ending the pipeline"
-                                            );
-                                            peer_ended = true;
-                                            break 'main;
-                                        }
-                                    }
-                                    Some(PublishDoneDisposition::GoingAway) | None => {}
-                                }
-                                // datagram 受信タスクへ新しい alias 表を渡す。旧 session の
-                                // 遅延した datagram を移行後の track として配送しないためである
-                                let datagram_map = Arc::new(
-                                    track_map
-                                        .read()
-                                        .expect("track_map lock must not be poisoned")
-                                        .clone(),
-                                );
-                                let _ = datagram_session_tx.send((
-                                    client.handle(),
-                                    data_plane.clone(),
-                                    datagram_map,
-                                    session_generation,
-                                ));
-                                tracing::info!(
-                                    "Migrated the {kind:?} request to the new session: \
-                                     url={url_display}, old_request_id={old_request_id}, \
-                                     new_request_id={new_request_id}"
-                                );
-                            }
-                            MigratedRequest::Fetch => {
-                                // 旧 session の request stream を閉じる。応答は side session が
-                                // 受けるため、main ループの対応表から外す
-                                stop_fetch_request_stream(&mut client, old_request_id).await;
-                                lock_fetch_targets(&fetch_targets).remove(&old_request_id);
-                                fetch_requests.remove(&old_request_id);
-                                tracing::info!(
-                                    "Migrated the media FETCH request to the new session: \
-                                     url={url_display}, old_request_id={old_request_id}, \
-                                     new_request_id={new_request_id}"
-                                );
-                            }
+        }
+        Ok(Err(failure)) => {
+            // 期限超過・再試行不能なエラーである。旧 session はまだ生きており、
+            // GOAWAY は subscription state に影響しない
+            // (draft-ietf-moq-transport-23 §9.2。draft 由来の仕様であり将来変更
+            // されうる) ため、購読を STOP_SENDING で終了してから GOAWAY /
+            // 正常 close を送る既存の後始末へ進む (peer_ended は立てない。この分岐は
+            // 直接受信ループを抜けるため、後始末の判定に使う `goaway_received` は
+            // 立てる必要がない)
+            tracing::warn!("Failed to migrate the session: {failure}");
+            return LoopFlow::Break;
+        }
+        Err(()) => {
+            // 移行タスクが結果を送らずに終了した。移行を続けられないため、
+            // 旧 session の終了経路へ進む
+            tracing::warn!("The migration task ended without a result");
+            return LoopFlow::Break;
+        }
+    }
+    LoopFlow::Continue
+}
+
+/// request 単位移行の side session から届いたイベントを処理する
+///
+/// 再発行の成功 / 失敗に応じて購読の状態を更新し、side session の終了では同じ URL の slot を
+/// 捨てる。
+async fn handle_side_session_event(
+    state: &mut PipelineState,
+    event: RequestMigrationEvent,
+) -> LoopFlow {
+    let PipelineState {
+        url: _,
+        client,
+        data_plane,
+        active_requests,
+        publish_done_pending,
+        permanently_ended_tracks,
+        migration_pending_tracks,
+        subscribe_video,
+        subscribe_audio,
+        track_map,
+        fetch_targets,
+        fetch_requests,
+        video_request_id,
+        audio_request_id,
+        video_alias,
+        audio_alias,
+        catalog_request_id,
+        catalog_alias,
+        session_generation,
+        datagram_session_tx,
+        peer_ended,
+        request_migration_sessions,
+        wt_session_state_rx: _,
+        ..
+    } = state;
+    match event {
+        RequestMigrationEvent::Migrated {
+            url,
+            request,
+            old_request_id,
+            new_request_id,
+        } => {
+            let url_display = side_session_url_display(&url);
+            // side session の進行状態を「確立済み」へ進める。同じ URL の次の
+            // request はこの session に相乗りする
+            if let Some(slot) = request_migration_sessions.get_mut(&url) {
+                slot.state = SideSessionState::Established;
+            }
+            match request {
+                MigratedRequest::Subscribe(kind) => {
+                    // 旧 session の request stream を閉じる (§9.2 の "close the
+                    // old request stream using the appropriate mechanism")。
+                    // 購読が既に Terminated の場合は状態機械に拒否されるが、
+                    // 移行自体は成功しているため警告に留める
+                    if let Err(e) = client.stop_sending(old_request_id).await {
+                        tracing::warn!(
+                            "Failed to send STOP_SENDING for the migrated request {old_request_id}: {e}"
+                        );
+                    }
+                    // 旧 alias を外す。以後の Object は side session が配送する
+                    let old_alias = match kind {
+                        TrackKind::Catalog => catalog_alias.take(),
+                        TrackKind::Video => video_alias.take(),
+                        TrackKind::Audio => audio_alias.take(),
+                        // 移行は catalog / 映像 / 音声だけを対象とするため
+                        // 到達しない
+                        TrackKind::Discard => None,
+                    };
+                    {
+                        let mut map = track_map
+                            .write()
+                            .expect("track_map lock must not be poisoned");
+                        if let Some(alias) = old_alias {
+                            map.remove(&alias);
                         }
                     }
-                    RequestMigrationEvent::Failed {
-                        url,
-                        request,
-                        old_request_id,
-                        reason,
-                    } => {
-                        let url_display = side_session_url_display(&url);
-                        match request {
-                            MigratedRequest::Subscribe(kind) => {
-                                // 期限切れ・接続失敗・再発行失敗である。control GOAWAY の移行
-                                // 失敗と同じく警告を出し、旧 session の終了経路へ進む
-                                tracing::warn!(
-                                    "Failed to migrate the {kind:?} request to a new session: \
-                                     url={url_display}, request_id={old_request_id}: {reason}"
+                    // 以後その track は side session が配送するため、main ループの
+                    // 再発行・期限処理の対象から外す。request id を `None` にすると
+                    // `goaway_request_kind` の照合対象からも外れる
+                    match kind {
+                        TrackKind::Catalog => *catalog_request_id = None,
+                        TrackKind::Video => *video_request_id = None,
+                        TrackKind::Audio => *audio_request_id = None,
+                        TrackKind::Discard => {}
+                    }
+                    active_requests.remove(&old_request_id);
+                    // 移行の開始から成功までの間に旧 session で PUBLISH_DONE を
+                    // 受けていた場合は disposition を引き継ぐ。track の恒久終了を
+                    // 移行成功で失わないようにするためである
+                    let pending_disposition = publish_done_pending
+                        .remove(&old_request_id)
+                        .map(|(_, disposition)| disposition);
+                    migration_pending_tracks.remove(&kind);
+                    // 旧 session のこの track の FETCH は side session の再発行で
+                    // 置き換わるため、main ループの対応表から外す
+                    lock_fetch_targets(fetch_targets)
+                        .retain(|_, target| Some(*target) != fetch_target_of(kind));
+                    // 映像の購読を移行すると、それに伴う FETCH も side session が
+                    // 発行し直す。main ループに残った FETCH の再発行用の指定は
+                    // 対象を失っているため捨てる
+                    if kind == TrackKind::Video {
+                        fetch_requests.clear();
+                    }
+                    match pending_disposition {
+                        Some(
+                            PublishDoneDisposition::TrackEnded | PublishDoneDisposition::Error,
+                        ) => {
+                            tracing::warn!(
+                                "The {kind:?} track ended permanently during the request migration"
+                            );
+                            permanently_ended_tracks.insert(kind);
+                            if all_media_tracks_ended(
+                                *subscribe_video,
+                                *subscribe_audio,
+                                permanently_ended_tracks,
+                                migration_pending_tracks,
+                            ) {
+                                tracing::info!(
+                                    "All media tracks ended permanently: ending the pipeline"
                                 );
-                                break 'main;
-                            }
-                            MigratedRequest::Fetch => {
-                                // FETCH は欠落した Group を補う補助であり、移行に失敗しても購読は
-                                // 続く。旧 session の request を終端し、対応表から外す
-                                tracing::warn!(
-                                    "Failed to migrate the FETCH request to a new session: \
-                                     url={url_display}, request_id={old_request_id}: {reason}"
-                                );
-                                stop_fetch_request_stream(&mut client, old_request_id).await;
-                                lock_fetch_targets(&fetch_targets).remove(&old_request_id);
-                                fetch_requests.remove(&old_request_id);
+                                *peer_ended = true;
+                                return LoopFlow::Break;
                             }
                         }
+                        Some(PublishDoneDisposition::GoingAway) | None => {}
                     }
-                    RequestMigrationEvent::SessionEvent { url, kind, event } => {
-                        let url_display = side_session_url_display(&url);
-                        match event {
-                            SessionEvent::PublishDoneReceived {
-                                request_id,
-                                status_code,
-                                stream_count,
-                                ..
-                            } => {
-                                // 移行済みの購読の終端である。main ループの PUBLISH_DONE と同じ
-                                // 分類でログに残し、恒久終了だけ状態へ反映する。side session の
-                                // 購読の cleanup は main ループが所有する `MoqtClient` では観測
-                                // できないため、drain 完了は待たない
-                                let disposition = publish_done_disposition(
-                                    normalize_publish_done_code(status_code),
-                                );
-                                tracing::info!(
-                                    "Received PUBLISH_DONE on the request migration side session: \
-                                     url={url_display}, kind={kind:?}, request_id={request_id}, \
+                    // datagram 受信タスクへ新しい alias 表を渡す。旧 session の
+                    // 遅延した datagram を移行後の track として配送しないためである
+                    let datagram_map = Arc::new(
+                        track_map
+                            .read()
+                            .expect("track_map lock must not be poisoned")
+                            .clone(),
+                    );
+                    let _ = datagram_session_tx.send(DatagramSession {
+                        handle: client.handle(),
+                        data_plane: data_plane.clone(),
+                        track_map: datagram_map,
+                        generation: *session_generation,
+                    });
+                    tracing::info!(
+                        "Migrated the {kind:?} request to the new session: \
+                                     *url={url_display}, old_request_id={old_request_id}, \
+                                     new_request_id={new_request_id}"
+                    );
+                }
+                MigratedRequest::Fetch => {
+                    // 旧 session の request stream を閉じる。応答は side session が
+                    // 受けるため、main ループの対応表から外す
+                    stop_fetch_request_stream(client, old_request_id).await;
+                    lock_fetch_targets(fetch_targets).remove(&old_request_id);
+                    fetch_requests.remove(&old_request_id);
+                    tracing::info!(
+                        "Migrated the media FETCH request to the new session: \
+                                     *url={url_display}, old_request_id={old_request_id}, \
+                                     new_request_id={new_request_id}"
+                    );
+                }
+            }
+        }
+        RequestMigrationEvent::Failed {
+            url,
+            request,
+            old_request_id,
+            reason,
+        } => {
+            let url_display = side_session_url_display(&url);
+            match request {
+                MigratedRequest::Subscribe(kind) => {
+                    // 期限切れ・接続失敗・再発行失敗である。control GOAWAY の移行
+                    // 失敗と同じく警告を出し、旧 session の終了経路へ進む
+                    tracing::warn!(
+                        "Failed to migrate the {kind:?} request to a new session: \
+                                     *url={url_display}, request_id={old_request_id}: {reason}"
+                    );
+                    return LoopFlow::Break;
+                }
+                MigratedRequest::Fetch => {
+                    // FETCH は欠落した Group を補う補助であり、移行に失敗しても購読は
+                    // 続く。旧 session の request を終端し、対応表から外す
+                    tracing::warn!(
+                        "Failed to migrate the FETCH request to a new session: \
+                                     *url={url_display}, request_id={old_request_id}: {reason}"
+                    );
+                    stop_fetch_request_stream(client, old_request_id).await;
+                    lock_fetch_targets(fetch_targets).remove(&old_request_id);
+                    fetch_requests.remove(&old_request_id);
+                }
+            }
+        }
+        RequestMigrationEvent::SessionEvent { url, kind, event } => {
+            let url_display = side_session_url_display(&url);
+            match event {
+                SessionEvent::PublishDoneReceived {
+                    request_id,
+                    status_code,
+                    stream_count,
+                    ..
+                } => {
+                    // 移行済みの購読の終端である。main ループの PUBLISH_DONE と同じ
+                    // 分類でログに残し、恒久終了だけ状態へ反映する。side session の
+                    // 購読の cleanup は main ループが所有する `MoqtClient` では観測
+                    // できないため、drain 完了は待たない
+                    let disposition =
+                        publish_done_disposition(normalize_publish_done_code(status_code));
+                    tracing::info!(
+                        "Received PUBLISH_DONE on the request migration side session: \
+                                     *url={url_display}, kind={kind:?}, request_id={request_id}, \
                                      status_code={status_code}, \
                                      normalized_status_code={}, \
                                      stream_count={stream_count}, \
                                      disposition={disposition:?}",
-                                    normalize_publish_done_code(status_code),
+                        normalize_publish_done_code(status_code),
+                    );
+                    match (kind, disposition) {
+                        (
+                            Some(kind),
+                            PublishDoneDisposition::TrackEnded | PublishDoneDisposition::Error,
+                        ) => {
+                            permanently_ended_tracks.insert(kind);
+                            // 全 media track が終了したら pipeline を終える
+                            // (main ループの tick の終了判定と同じ規則)
+                            if matches!(kind, TrackKind::Video | TrackKind::Audio)
+                                && all_media_tracks_ended(
+                                    *subscribe_video,
+                                    *subscribe_audio,
+                                    permanently_ended_tracks,
+                                    migration_pending_tracks,
+                                )
+                            {
+                                tracing::info!(
+                                    "All media tracks ended permanently: ending the pipeline"
                                 );
-                                match (kind, disposition) {
-                                    (
-                                        Some(kind),
-                                        PublishDoneDisposition::TrackEnded
-                                        | PublishDoneDisposition::Error,
-                                    ) => {
-                                        permanently_ended_tracks.insert(kind);
-                                        // 全 media track が終了したら pipeline を終える
-                                        // (main ループの tick の終了判定と同じ規則)
-                                        if matches!(kind, TrackKind::Video | TrackKind::Audio)
-                                            && all_media_tracks_ended(
-                                                subscribe_video,
-                                                subscribe_audio,
-                                                &permanently_ended_tracks,
-                                                &migration_pending_tracks,
-                                            )
-                                        {
-                                            tracing::info!(
-                                                "All media tracks ended permanently: ending the pipeline"
-                                            );
-                                            peer_ended = true;
-                                            break 'main;
-                                        }
-                                    }
-                                    (Some(kind), PublishDoneDisposition::GoingAway) => {
-                                        // request stream の GOAWAY は受けるが、side session の
-                                        // 購読をさらに移行する経路は持たない
-                                        tracing::info!(
-                                            "The migrated {kind:?} track is going away on the side session: url={url_display}"
-                                        );
-                                    }
-                                    (None, _) => {
-                                        tracing::warn!(
-                                            "PUBLISH_DONE on the side session does not belong to a migrated subscription: url={url_display}, request_id={request_id}"
-                                        );
-                                    }
-                                }
+                                *peer_ended = true;
+                                return LoopFlow::Break;
                             }
-                            SessionEvent::RequestErrorReceived {
-                                request_id,
-                                error_code,
-                                retry_interval,
-                                reason,
-                                ..
-                            } => {
-                                tracing::warn!(
-                                    "Received REQUEST_ERROR on the request migration side session: \
-                                     url={url_display}, kind={kind:?}, request_id={request_id}, \
+                        }
+                        (Some(kind), PublishDoneDisposition::GoingAway) => {
+                            // request stream の GOAWAY は受けるが、side session の
+                            // 購読をさらに移行する経路は持たない
+                            tracing::info!(
+                                "The migrated {kind:?} track is going away on the side session: url={url_display}"
+                            );
+                        }
+                        (None, _) => {
+                            tracing::warn!(
+                                "PUBLISH_DONE on the side session does not belong to a migrated subscription: url={url_display}, request_id={request_id}"
+                            );
+                        }
+                    }
+                }
+                SessionEvent::RequestErrorReceived {
+                    request_id,
+                    error_code,
+                    retry_interval,
+                    reason,
+                    ..
+                } => {
+                    tracing::warn!(
+                        "Received REQUEST_ERROR on the request migration side session: \
+                                     *url={url_display}, kind={kind:?}, request_id={request_id}, \
                                      error_code={error_code:#x}, \
                                      retry_interval={retry_interval}, reason={}",
-                                    reason.as_str(),
-                                );
-                            }
-                            SessionEvent::GoawayReceived {
-                                new_session_uri,
-                                timeout,
-                                on_request_stream,
-                            } => {
-                                tracing::warn!(
-                                    "Received GOAWAY on the request migration side session: \
-                                     url={url_display}, timeout={timeout}, \
+                        reason.as_str(),
+                    );
+                }
+                SessionEvent::GoawayReceived {
+                    new_session_uri,
+                    timeout,
+                    on_request_stream,
+                } => {
+                    tracing::warn!(
+                        "Received GOAWAY on the request migration side session: \
+                                     *url={url_display}, timeout={timeout}, \
                                      on_request_stream={on_request_stream:?}, \
                                      new_session_uri_len={}",
-                                    new_session_uri.len(),
-                                );
-                            }
-                            SessionEvent::CloseSession(err) => {
-                                tracing::warn!(
-                                    "The request migration side session closed: url={url_display}, \
+                        new_session_uri.len(),
+                    );
+                }
+                SessionEvent::CloseSession(err) => {
+                    tracing::warn!(
+                        "The request migration side session closed: url={url_display}, \
                                      {:#x} {}",
-                                    err.code,
-                                    err.reason,
-                                );
-                            }
-                            SessionEvent::PeerClosed(err) => {
-                                tracing::warn!(
-                                    "The request migration side session was closed by peer: url={url_display}, \
+                        err.code,
+                        err.reason,
+                    );
+                }
+                SessionEvent::PeerClosed(err) => {
+                    tracing::warn!(
+                        "The request migration side session was closed by peer: url={url_display}, \
                                      {:#x} {}",
-                                    err.code,
-                                    err.reason,
-                                );
-                            }
-                            other => {
-                                tracing::debug!(
-                                    "Ignoring a session event on the request migration side session: \
-                                     url={url_display}, event={other:?}"
-                                );
-                            }
-                        }
-                    }
-                    RequestMigrationEvent::Ended {
-                        url,
-                        generation,
-                        reason,
-                    } => {
-                        let url_display = side_session_url_display(&url);
-                        // 同じ URL で作り直した side session の slot を消さないよう、
-                        // 世代が一致する場合だけ slot を捨てる
-                        let same_session = request_migration_sessions
-                            .get(&url)
-                            .is_some_and(|slot| slot.generation == generation);
-                        if same_session {
-                            request_migration_sessions.remove(&url);
-                        }
-                        // 移行済みの track は配送されなくなるが、他の track の受信は続ける
-                        tracing::warn!(
-                            "The request migration side session ended: url={url_display}, \
+                        err.code,
+                        err.reason,
+                    );
+                }
+                other => {
+                    tracing::debug!(
+                        "Ignoring a session event on the request migration side session: \
+                                     *url={url_display}, event={other:?}"
+                    );
+                }
+            }
+        }
+        RequestMigrationEvent::Ended {
+            url,
+            generation,
+            reason,
+        } => {
+            let url_display = side_session_url_display(&url);
+            // 同じ URL で作り直した side session の slot を消さないよう、
+            // 世代が一致する場合だけ slot を捨てる
+            let same_session = request_migration_sessions
+                .get(&url)
+                .is_some_and(|slot| slot.generation == generation);
+            if same_session {
+                request_migration_sessions.remove(&url);
+            }
+            // 移行済みの track は配送されなくなるが、他の track の受信は続ける
+            tracing::warn!(
+                "The request migration side session ended: url={url_display}, \
                              generation={generation}, same_session={same_session}: {reason}"
+            );
+        }
+    }
+    LoopFlow::Continue
+}
+
+/// WebTransport の drain / close の状態変化を処理する
+///
+/// drain を観測したら session 移行を開始する。QUIC 直接接続と QMux では
+/// `wt_session_state_rx` が `None` になり、この関数は呼ばれない。
+fn handle_webtransport_state_change(
+    state: &mut PipelineState,
+    changed: std::result::Result<(), ()>,
+) -> LoopFlow {
+    let PipelineState {
+        url,
+        transport,
+        cert,
+        insecure,
+        task_monitor,
+        publish_done_pending,
+        permanently_ended_tracks,
+        resubscribe_plan,
+        last_received_locations,
+        migration_rx,
+        migration_in_progress,
+        migration_task,
+        migration_boundary_snapshot,
+        migration_limiter,
+        wt_session_state_rx,
+        ..
+    } = state;
+    if changed.is_err() {
+        // 送信側 (セッションを所有するタスク) が消えた。以後の changed() は
+        // 即座に Err を返して空回りするため、分岐を無効化する
+        tracing::debug!(
+            "The WebTransport session state watch is closed; drain detection is disabled"
+        );
+        *wt_session_state_rx = None;
+    } else if let Some(state) = wt_session_state_rx
+        .as_mut()
+        .map(|rx| *rx.borrow_and_update())
+    {
+        match state {
+            WtSessionState::Draining => {
+                // drain だけが届いた場合は、現在の URL を移行先として移行を
+                // 始める。GOAWAY はまだ届いていないため Timeout 0 (ローカルの
+                // 既定値) を使う
+                match begin_migration(*migration_in_progress, migration_limiter, Instant::now()) {
+                    MigrationStart::AlreadyInProgress => {
+                        tracing::debug!(
+                            "Ignoring a transport drain while a migration is in progress"
                         );
                     }
-                }
-            }
-            changed = async {
-                // WebTransport の drain (WT_DRAIN_SESSION / HTTP/3 GOAWAY) を観測する
-                // (draft-ietf-webtrans-http3-16 §4.7 / draft-ietf-webtrans-http2-16 §6.13)。
-                // draft 由来の仕様であり将来変更されうる。QUIC 直接接続と QMux では
-                // `wt_session_state_rx` が `None` になり、この分岐は発火しない
-                match wt_session_state_rx.as_mut() {
-                    Some(rx) => rx.changed().await.map_err(|_| ()),
-                    None => std::future::pending().await,
-                }
-            } => {
-                if changed.is_err() {
-                    // 送信側 (セッションを所有するタスク) が消えた。以後の changed() は
-                    // 即座に Err を返して空回りするため、分岐を無効化する
-                    tracing::debug!(
-                        "The WebTransport session state watch is closed; drain detection is disabled"
-                    );
-                    wt_session_state_rx = None;
-                } else if let Some(state) = wt_session_state_rx
-                    .as_mut()
-                    .map(|rx| *rx.borrow_and_update())
-                {
-                    match state {
-                        WtSessionState::Draining => {
-                            // drain だけが届いた場合は、現在の URL を移行先として移行を
-                            // 始める。GOAWAY はまだ届いていないため Timeout 0 (ローカルの
-                            // 既定値) を使う
-                            match begin_migration(
-                                migration_in_progress,
-                                &mut migration_limiter,
-                                Instant::now(),
-                            ) {
-                                MigrationStart::AlreadyInProgress => {
-                                    tracing::debug!(
-                                        "Ignoring a transport drain while a migration is in progress"
-                                    );
-                                }
-                                MigrationStart::RateLimited => {
-                                    // drain は session の利用を禁じない (MAY continue)
-                                    // ため、移行を始めずに GOAWAY か通常の終了を待つ
-                                    tracing::warn!(
-                                        "Refusing to migrate on transport drain: too many migrations within {:?}",
-                                        MIGRATION_LIMIT_WINDOW,
-                                    );
-                                }
-                                MigrationStart::Start => {
-                                    let deadline =
-                                        MigrationDeadline::after_goaway(Instant::now(), 0);
-                                    let last_locations = *last_received_locations
-                                        .lock()
-                                        .expect("last locations の lock が poison されていないこと");
-                                    let request = MigrationRequest {
-                                        url: config.url.clone(),
-                                        transport: config.transport,
-                                        cert: config.cert.clone(),
-                                        insecure: config.insecure,
-                                        plan: {
-                                            let (plan, resolve_as_ended) = plan_for_migration(
-                                                &resubscribe_plan,
-                                                &permanently_ended_tracks,
-                                                &publish_done_pending,
-                                            );
-                                            for (request_id, kind) in resolve_as_ended {
-                                                // 移行開始時点で恒久終了扱いに切り替える
-                                                // (cleanup 完了を待たずに plan から外す)
-                                                publish_done_pending.remove(&request_id);
-                                                permanently_ended_tracks.insert(kind);
-                                            }
-                                            plan
-                                        },
-                                        last_locations,
-                                        deadline,
-                                    };
-                                    migration_boundary_snapshot = Some(last_locations);
-                                    let (task, receiver) =
-                                        spawn_migration(&task_monitor, request);
-                                    migration_task = Some(task);
-                                    migration_rx = Some(receiver);
-                                    migration_in_progress = true;
-                                    tracing::info!(
-                                        "Started a background migration on transport drain: local_default={}, last_locations={:?}",
-                                        deadline.uses_local_default(),
-                                        last_locations,
-                                    );
-                                }
-                            }
-                        }
-                        // 終了の通知は通常の終了経路 (accept の終了 / next_event のエラー) に
-                        // 任せる
-                        WtSessionState::ClosedByPeer
-                        | WtSessionState::ClosedLocally
-                        | WtSessionState::ConnectionFailed => {
-                            tracing::debug!(
-                                "Observed the WebTransport session state {state:?}; the normal termination path handles it"
-                            );
-                        }
-                        WtSessionState::Active => {}
+                    MigrationStart::RateLimited => {
+                        // drain は session の利用を禁じない (MAY continue)
+                        // ため、移行を始めずに GOAWAY か通常の終了を待つ
+                        tracing::warn!(
+                            "Refusing to migrate on transport drain: too many migrations within {:?}",
+                            MIGRATION_LIMIT_WINDOW,
+                        );
                     }
-                }
-            }
-            Some(termination) = termination_rx.recv() => {
-                // 自側から終了コード付きで閉じる
-                close_session(&mut client, termination).await;
-                session_terminated = true;
-                break 'main;
-            }
-            _ = tick_interval.tick() => {
-                let now_ms = Instant::now().duration_since(start).as_millis() as u64;
-                client.tick_now();
-                // 停滞の切り分け用の任意診断。MOQT_STREAM_DIAG=1 のときだけ出す。
-                // 100ms ごとに、stream 枠の残数・映像の表示待ち・受信済み object 数を
-                // 記録し、どこで止まったかを後から追えるようにする。
-                if stream_diag_enabled() {
-                    let free_slots = MAX_CONCURRENT_STREAMS.saturating_sub(stream_slots.available_permits());
-                    tracing::info!(
-                        "STREAMDIAG t={}ms total_streams={} free_slots={} display_backlog={} active_tasks={}",
-                        now_ms,
-                        total_streams,
-                        free_slots,
-                        display_backlog.load(Ordering::Relaxed),
-                        join_set.len(),
-                    );
-                }
-                // 音声の配送で落とした Object の累計が、前回のログから増えていれば出す。
-                // 1 件ごとの debug ログは既定の RUST_LOG で消えるため、原因の切り分けには
-                // 増えたときだけ info で出す
-                let counters = audio_delivery_order
-                    .lock()
-                    .expect("audio delivery order の lock が poison されていないこと")
-                    .counters();
-                log_audio_delivery_counters(&mut logged_audio_delivery_counters, counters);
-                // 映像の購読境界以下として落とした Object の累計も、増えていれば出す
-                let video_before_boundary = video_delivery_order
-                    .lock()
-                    .expect("video delivery order lock is not poisoned")
-                    .before_boundary_objects();
-                log_video_boundary_counter(
-                    &mut logged_video_boundary_objects,
-                    video_before_boundary,
-                );
-
-                // PUBLISH_DONE で Terminated になった購読の cleanup 状態を 100 ms tick で
-                // 観測する。`Some(true)` (drain timer 満了または Stream Count 超過かつ open
-                // stream 0) または `None` (Session が回収済み) になった時点で track を終了させる
-                let mut ready_to_end: Vec<(u64, TrackKind, PublishDoneDisposition)> = Vec::new();
-                for (request_id, (kind, disposition)) in publish_done_pending.iter() {
-                    match client.subscription_cleanup_ready(*request_id) {
-                        Some(true) | None => {
-                            ready_to_end.push((*request_id, *kind, *disposition));
-                        }
-                        Some(false) => {
-                            // drain 中。late-arriving object を受信経路で処理して待つ
-                        }
-                    }
-                }
-                for (request_id, kind, disposition) in ready_to_end {
-                    publish_done_pending.remove(&request_id);
-                    let alias = match kind {
-                        TrackKind::Catalog => catalog_alias,
-                        TrackKind::Video => video_alias,
-                        TrackKind::Audio => audio_alias,
-                        TrackKind::Discard => {
-                            ignored_publish_requests.get(&request_id).copied()
-                        }
-                    };
-                    // track_map と datagram 受信タスクの alias 表の両方から該当 alias を
-                    // 除去する。catalog は fill fetch stream が Request ID で振り分けられる
-                    // ため `fetch_targets` からも除去する
-                    {
-                        let mut map = track_map
-                            .write()
-                            .expect("track_map lock must not be poisoned");
-                        if let Some(alias) = alias {
-                            map.remove(&alias);
-                        }
-                        let map_for_datagram = map.clone();
-                        let _ = datagram_session_tx.send((
-                            client.handle(),
-                            data_plane.clone(),
-                            Arc::new(map_for_datagram),
-                            session_generation,
-                        ));
-                    }
-                    match kind {
-                        TrackKind::Catalog => {
-                            // fill fetch stream は Request ID で振り分けられるため、
-                            // 対応表から外す
-                            lock_fetch_targets(&fetch_targets).remove(&request_id);
-                            // catalog も恒久終了の状態機械に乗せる (`TrackEnded` / `Error`
-                            // は恒久終了として記録し、移行先で購読し直さない。最後の
-                            // `catalog_state` を使う)。`GoingAway` は移行待ちとして
-                            // `migration_pending_tracks` に登録する (後着の request stream
-                            // GOAWAY で tick で解消済みの Terminated 済み購読へ STOP_SENDING
-                            // を送らないための記録。再発行成功時と session 移行成功時に集合から
-                            // 外れる。全 media 終了の判定は video / audio のみを見るため
-                            // catalog の登録は media の終了判定に影響しない)
-                            match disposition {
-                                PublishDoneDisposition::TrackEnded
-                                | PublishDoneDisposition::Error => {
+                    MigrationStart::Start => {
+                        let deadline = MigrationDeadline::after_goaway(Instant::now(), 0);
+                        let last_locations = *last_received_locations
+                            .lock()
+                            .expect("last locations の lock が poison されていないこと");
+                        let request = MigrationRequest {
+                            url: url.clone(),
+                            transport: *transport,
+                            cert: cert.clone(),
+                            insecure: *insecure,
+                            plan: {
+                                let (plan, resolve_as_ended) = plan_for_migration(
+                                    resubscribe_plan,
+                                    permanently_ended_tracks,
+                                    publish_done_pending,
+                                );
+                                for (request_id, kind) in resolve_as_ended {
+                                    // 移行開始時点で恒久終了扱いに切り替える
+                                    // (cleanup 完了を待たずに plan から外す)
+                                    publish_done_pending.remove(&request_id);
                                     permanently_ended_tracks.insert(kind);
                                 }
-                                PublishDoneDisposition::GoingAway => {
-                                    migration_pending_tracks.insert(kind);
-                                }
-                            }
-                            tracing::info!(
-                                "Catalog subscription ended by PUBLISH_DONE (disposition={:?}, request_id={request_id})",
-                                disposition,
-                            );
-                        }
-                        TrackKind::Video | TrackKind::Audio => match disposition {
-                            PublishDoneDisposition::TrackEnded
-                            | PublishDoneDisposition::Error => {
-                                permanently_ended_tracks.insert(kind);
-                                tracing::info!(
-                                    "Track ended permanently by PUBLISH_DONE: kind={kind:?}, \
-                                     request_id={request_id}"
-                                );
-                            }
-                            PublishDoneDisposition::GoingAway => {
-                                migration_pending_tracks.insert(kind);
-                                tracing::info!(
-                                    "Track pending migration by PUBLISH_DONE: kind={kind:?}, \
-                                     request_id={request_id}"
-                                );
-                            }
-                        },
-                        TrackKind::Discard => {
-                            // 映像・音声の終了判定には使わない。後続の PUBLISH_DONE を
-                            // 別の購読として扱わないよう、対応表から外す
-                            ignored_publish_requests.remove(&request_id);
-                            tracing::info!(
-                                "PUBLISH-originated subscription ended: \
-                                 request_id={request_id}, disposition={disposition:?}"
-                            );
-                        }
-                    }
-                    // 全 media track が恒久的に終了し、移行待ちも無ければ pipeline を終える
-                    if matches!(kind, TrackKind::Video | TrackKind::Audio)
-                        && all_media_tracks_ended(
-                            subscribe_video,
-                            subscribe_audio,
-                            &permanently_ended_tracks,
-                            &migration_pending_tracks,
-                        )
-                    {
+                                plan
+                            },
+                            last_locations,
+                            deadline,
+                        };
+                        *migration_boundary_snapshot = Some(last_locations);
+                        let (task, receiver) = spawn_migration(task_monitor, request);
+                        *migration_task = Some(task);
+                        *migration_rx = Some(receiver);
+                        *migration_in_progress = true;
                         tracing::info!(
-                            "All media tracks ended permanently: ending the pipeline"
+                            "Started a background migration on transport drain: local_default={}, last_locations={:?}",
+                            deadline.uses_local_default(),
+                            last_locations,
                         );
-                        peer_ended = true;
-                        break 'main;
                     }
                 }
-                // SUBSCRIBE_TRACKS 由来の購読は PUBLISH_DONE だけでなく、publisher による
-                // request stream の reset でも終端しうる。PUBLISH_DONE の drain 待ちに載って
-                // いるものは上のループが扱うため、それ以外で Session の回収が済んだ購読の
-                // alias を track_map から外す
-                let ended_discard: Vec<u64> = ignored_publish_requests
-                    .iter()
-                    .filter(|(request_id, _)| !publish_done_pending.contains_key(request_id))
-                    .filter(|(request_id, _)| {
-                        matches!(
-                            client.subscription_cleanup_ready(**request_id),
-                            Some(true) | None
-                        )
-                    })
-                    .map(|(request_id, _)| *request_id)
-                    .collect();
-                if !ended_discard.is_empty() {
-                    let datagram_map = {
-                        let mut map = track_map
-                            .write()
-                            .expect("track_map lock must not be poisoned");
-                        for request_id in &ended_discard {
-                            if let Some(alias) = ignored_publish_requests.remove(request_id) {
-                                map.remove(&alias);
-                            }
-                        }
-                        Arc::new(map.clone())
-                    };
-                    let _ = datagram_session_tx.send((
-                        client.handle(),
-                        data_plane.clone(),
-                        datagram_map,
-                        session_generation,
-                    ));
-                    tracing::info!(
-                        "Removed the ended PUBLISH-originated subscriptions: request_ids={ended_discard:?}"
-                    );
-                }
             }
-            _ = shutdown_monitor.recv() => {
-                tracing::info!("Shutdown signal received");
-                break 'main;
+            // 終了の通知は通常の終了経路 (accept の終了 / next_event のエラー) に
+            // 任せる
+            WtSessionState::ClosedByPeer
+            | WtSessionState::ClosedLocally
+            | WtSessionState::ConnectionFailed => {
+                tracing::debug!(
+                    "Observed the WebTransport session state {state:?}; the normal termination path handles it"
+                );
             }
-            _ = &mut player_stop => {
-                // プレイヤーの終了 (ウィンドウを閉じた等) でも録画を finalize するため、
-                // pipeline を止めて run の後始末 (Recorder の join) へ進む
-                tracing::info!("Player stopped, stopping pipeline");
-                break 'main;
+            WtSessionState::Active => {}
+        }
+    }
+    LoopFlow::Continue
+}
+
+/// 自側からセッションを終了コード付きで閉じる
+///
+/// 書式違反を検出した stream task からの依頼を受けて呼ばれる。
+async fn handle_session_termination(
+    state: &mut PipelineState,
+    termination: SessionError,
+) -> LoopFlow {
+    let PipelineState {
+        client,
+        session_terminated,
+        ..
+    } = state;
+    // 自側から終了コード付きで閉じる
+    close_session(client, termination).await;
+    *session_terminated = true;
+    LoopFlow::Break
+}
+
+/// 100 ms 周期の tick で session の時計と統計を進める
+///
+/// 停滞の切り分け用の診断ログ、購読の終端待ちの解消、映像の受信位置の後退の検出、
+/// datagram 受信タスクへの session の差し替え通知をまとめて行う。
+/// 100 ms 周期の tick で session の時計と統計を進める
+///
+/// 停滞の切り分け用の診断ログ、配送の累計ログ、購読の終端待ちの解消、
+/// datagram 受信タスクへの session の差し替え通知を行う。
+fn handle_tick(state: &mut PipelineState) -> LoopFlow {
+    let now_ms = Instant::now().duration_since(state.start).as_millis() as u64;
+    state.client.tick_now();
+    // 停滞の切り分け用の任意診断。MOQT_STREAM_DIAG=1 のときだけ出す。
+    // 100ms ごとに、stream 枠の残数・映像の表示待ち・受信済み object 数を
+    // 記録し、どこで止まったかを後から追えるようにする。
+    if stream_diag_enabled() {
+        let free_slots =
+            MAX_CONCURRENT_STREAMS.saturating_sub(state.stream_slots.available_permits());
+        tracing::info!(
+            "STREAMDIAG t={}ms total_streams={} free_slots={} display_backlog={} active_tasks={}",
+            now_ms,
+            state.total_streams,
+            free_slots,
+            state.display_backlog.load(Ordering::Relaxed),
+            state.join_set.len(),
+        );
+    }
+    // 音声の配送で落とした Object の累計が、前回のログから増えていれば出す。
+    // 1 件ごとの debug ログは既定の RUST_LOG で消えるため、原因の切り分けには
+    // 増えたときだけ info で出す
+    let counters = state
+        .audio_delivery_order
+        .lock()
+        .expect("audio delivery order の lock が poison されていないこと")
+        .counters();
+    log_audio_delivery_counters(&mut state.logged_audio_delivery_counters, counters);
+    // 映像の購読境界以下として落とした Object の累計も、増えていれば出す
+    let video_before_boundary = state
+        .video_delivery_order
+        .lock()
+        .expect("video delivery order lock is not poisoned")
+        .before_boundary_objects();
+    log_video_boundary_counter(
+        &mut state.logged_video_boundary_objects,
+        video_before_boundary,
+    );
+    if resolve_publish_done_pending(state) {
+        return LoopFlow::Break;
+    }
+    remove_ended_discard_subscriptions(state);
+    LoopFlow::Continue
+}
+
+/// PUBLISH_DONE で終端待ちになった購読の cleanup 状態を確認し、終了できる track を閉じる
+fn resolve_publish_done_pending(state: &mut PipelineState) -> bool {
+    let PipelineState {
+        client,
+        data_plane,
+        publish_done_pending,
+        permanently_ended_tracks,
+        migration_pending_tracks,
+        subscribe_video,
+        subscribe_audio,
+        track_map,
+        fetch_targets,
+        video_alias,
+        audio_alias,
+        ignored_publish_requests,
+        catalog_alias,
+        session_generation,
+        datagram_session_tx,
+        peer_ended,
+        ..
+    } = state;
+    // PUBLISH_DONE で Terminated になった購読の cleanup 状態を 100 ms tick で
+    // 観測する。`Some(true)` (drain timer 満了または Stream Count 超過かつ open
+    // stream 0) または `None` (Session が回収済み) になった時点で track を終了させる
+    let mut ready_to_end: Vec<(u64, TrackKind, PublishDoneDisposition)> = Vec::new();
+    for (request_id, (kind, disposition)) in publish_done_pending.iter() {
+        match client.subscription_cleanup_ready(*request_id) {
+            Some(true) | None => {
+                ready_to_end.push((*request_id, *kind, *disposition));
+            }
+            Some(false) => {
+                // drain 中。late-arriving object を受信経路で処理して待つ
             }
         }
     }
+    for (request_id, kind, disposition) in ready_to_end {
+        publish_done_pending.remove(&request_id);
+        let alias = match kind {
+            TrackKind::Catalog => *catalog_alias,
+            TrackKind::Video => *video_alias,
+            TrackKind::Audio => *audio_alias,
+            TrackKind::Discard => ignored_publish_requests.get(&request_id).copied(),
+        };
+        // track_map と datagram 受信タスクの alias 表の両方から該当 alias を
+        // 除去する。catalog は fill fetch stream が Request ID で振り分けられる
+        // ため `fetch_targets` からも除去する
+        {
+            let mut map = track_map
+                .write()
+                .expect("track_map lock must not be poisoned");
+            if let Some(alias) = alias {
+                map.remove(&alias);
+            }
+            let map_for_datagram = map.clone();
+            let _ = datagram_session_tx.send(DatagramSession {
+                handle: client.handle(),
+                data_plane: data_plane.clone(),
+                track_map: Arc::new(map_for_datagram),
+                generation: *session_generation,
+            });
+        }
+        match kind {
+            TrackKind::Catalog => {
+                // fill fetch stream は Request ID で振り分けられるため、
+                // 対応表から外す
+                lock_fetch_targets(fetch_targets).remove(&request_id);
+                // catalog も恒久終了の状態機械に乗せる (`TrackEnded` / `Error`
+                // は恒久終了として記録し、移行先で購読し直さない。最後の
+                // `catalog_state` を使う)。`GoingAway` は移行待ちとして
+                // `migration_pending_tracks` に登録する (後着の request stream
+                // GOAWAY で tick で解消済みの Terminated 済み購読へ STOP_SENDING
+                // を送らないための記録。再発行成功時と session 移行成功時に集合から
+                // 外れる。全 media 終了の判定は video / audio のみを見るため
+                // catalog の登録は media の終了判定に影響しない)
+                match disposition {
+                    PublishDoneDisposition::TrackEnded | PublishDoneDisposition::Error => {
+                        permanently_ended_tracks.insert(kind);
+                    }
+                    PublishDoneDisposition::GoingAway => {
+                        migration_pending_tracks.insert(kind);
+                    }
+                }
+                tracing::info!(
+                    "Catalog subscription ended by PUBLISH_DONE (disposition={:?}, request_id={request_id})",
+                    disposition,
+                );
+            }
+            TrackKind::Video | TrackKind::Audio => match disposition {
+                PublishDoneDisposition::TrackEnded | PublishDoneDisposition::Error => {
+                    permanently_ended_tracks.insert(kind);
+                    tracing::info!(
+                        "Track ended permanently by PUBLISH_DONE: kind={kind:?}, \
+                                     request_id={request_id}"
+                    );
+                }
+                PublishDoneDisposition::GoingAway => {
+                    migration_pending_tracks.insert(kind);
+                    tracing::info!(
+                        "Track pending migration by PUBLISH_DONE: kind={kind:?}, \
+                                     request_id={request_id}"
+                    );
+                }
+            },
+            TrackKind::Discard => {
+                // 映像・音声の終了判定には使わない。後続の PUBLISH_DONE を
+                // 別の購読として扱わないよう、対応表から外す
+                ignored_publish_requests.remove(&request_id);
+                tracing::info!(
+                    "PUBLISH-originated subscription ended: \
+                                 request_id={request_id}, disposition={disposition:?}"
+                );
+            }
+        }
+        // 全 media track が恒久的に終了し、移行待ちも無ければ pipeline を終える
+        if matches!(kind, TrackKind::Video | TrackKind::Audio)
+            && all_media_tracks_ended(
+                *subscribe_video,
+                *subscribe_audio,
+                permanently_ended_tracks,
+                migration_pending_tracks,
+            )
+        {
+            tracing::info!("All media tracks ended permanently: ending the pipeline");
+            *peer_ended = true;
+            return true;
+        }
+    }
+    false
+}
+
+/// 終端した SUBSCRIBE_TRACKS 由来の購読の alias を track_map から外す
+fn remove_ended_discard_subscriptions(state: &mut PipelineState) {
+    let PipelineState {
+        client,
+        data_plane,
+        publish_done_pending,
+        track_map,
+        ignored_publish_requests,
+        session_generation,
+        datagram_session_tx,
+        ..
+    } = state;
+    // SUBSCRIBE_TRACKS 由来の購読は PUBLISH_DONE だけでなく、publisher による
+    // request stream の reset でも終端しうる。PUBLISH_DONE の drain 待ちに載って
+    // いるものは上のループが扱うため、それ以外で Session の回収が済んだ購読の
+    // alias を track_map から外す
+    let ended_discard: Vec<u64> = ignored_publish_requests
+        .iter()
+        .filter(|(request_id, _)| !publish_done_pending.contains_key(request_id))
+        .filter(|(request_id, _)| {
+            matches!(
+                client.subscription_cleanup_ready(**request_id),
+                Some(true) | None
+            )
+        })
+        .map(|(request_id, _)| *request_id)
+        .collect();
+    if !ended_discard.is_empty() {
+        let datagram_map = {
+            let mut map = track_map
+                .write()
+                .expect("track_map lock must not be poisoned");
+            for request_id in &ended_discard {
+                if let Some(alias) = ignored_publish_requests.remove(request_id) {
+                    map.remove(&alias);
+                }
+            }
+            Arc::new(map.clone())
+        };
+        let _ = datagram_session_tx.send(DatagramSession {
+            handle: client.handle(),
+            data_plane: data_plane.clone(),
+            track_map: datagram_map,
+            generation: *session_generation,
+        });
+        tracing::info!(
+            "Removed the ended PUBLISH-originated subscriptions: request_ids={ended_discard:?}"
+        );
+    }
+}
+
+/// 受信ループを抜けた後に、移行タスクと stream task を止め、セッションと録画を閉じる
+///
+/// どの終了経路からも録画の finalize に到達できるよう、stream task の join には上限を設ける。
+async fn finish_pipeline(mut state: PipelineState) -> Result<()> {
+    abort_background_tasks(&mut state).await;
+    stop_subscriptions(&mut state).await;
+    join_stream_tasks(&mut state).await;
+    close_session_and_finalize(&mut state).await
+}
+
+/// 進行中の移行タスクと side session、旧 session の終了タスクを打ち切る
+///
+/// 確立済みの移行先 session は `MoqtClient` の drop で transport が閉じる。ここでの打ち切りは
+/// 異常ではない (run 自体の終了が先に決まった)。
+async fn abort_background_tasks(state: &mut PipelineState) {
+    let PipelineState {
+        migration_task,
+        old_session_closers,
+        request_migration_sessions,
+        request_migration_tasks,
+        ..
+    } = state;
 
     // 進行中の移行タスクを打ち切る。確立済みの移行先 session は `MoqtClient` の drop で
     // transport が閉じる。ここでの打ち切りは異常ではない (run 自体の終了が先に決まった)
@@ -6571,21 +7806,38 @@ pub async fn run(
     for handle in old_session_closers.drain(..) {
         handle.abort();
     }
+}
 
+/// 受信中の購読へ STOP_SENDING を送り、終了待ちの購読を整理する
+///
+/// peer が購読を終了させた場合は送信先が既に Terminated であり、STOP_SENDING は state machine に
+/// 拒否されるため送らない。stream task の join より先に送るのは、受信待ちの live stream で
+/// join が終わらないことを防ぐためである。
+async fn stop_subscriptions(state: &mut PipelineState) {
+    let PipelineState {
+        client,
+        active_requests,
+        video_request_id,
+        audio_request_id,
+        catalog_request_id,
+        termination_rx,
+        peer_ended,
+        session_terminated,
+        fatal_error,
+        ..
+    } = state;
     // select! で別の終了要因 (accept の終了 / GOAWAY / PUBLISH_DONE / peer の close /
     // shutdown など) が先に成立していても、既に届いている終了依頼があればそのコードで閉じる
     // (draft-ietf-moq-transport-23 §8.3 の MUST を終了コード 0x0 で上書きしない)。
     if fatal_error.is_none()
-        && !session_terminated
+        && !*session_terminated
         && let Ok(termination) = termination_rx.try_recv()
     {
-        close_session(&mut client, termination).await;
-        session_terminated = true;
+        close_session(client, termination).await;
+        *session_terminated = true;
     }
 
     // transport 自体のエラーで抜けた場合は接続が死んでいるため、GOAWAY / 正常 close は送らない
-    let session_alive = fatal_error.is_none();
-
     // peer が subscription を終了させた場合は送信先の購読が既に Terminated であり、
     // STOP_SENDING は state machine に拒否される (draft-ietf-moq-transport-23 §3.1
     // (Subscriptions) は Pending / Established のみ STOP_SENDING を認める)。
@@ -6595,15 +7847,15 @@ pub async fn run(
     // 接続死活の判定と独立に best-effort で送る。
     // GOAWAY 起因の停止に GOING_AWAY (§12.5) ではなく CANCELLED を使うのは、
     // tokio-moq の stop_sending API がコードを指定できないためである。
-    if should_stop_sending(peer_ended, session_terminated) {
+    if should_stop_sending(*peer_ended, *session_terminated) {
         // 対象は「まだ active な購読」だけである ([`stop_sending_targets`] を参照)。PUBLISH
         // DONE で Terminated になった購読と Session が回収済みの購読は拒否されるため、
         // STOP_SENDING 失敗の警告を出さない
         for (kind, rid) in stop_sending_targets(
-            video_request_id,
-            audio_request_id,
-            catalog_request_id,
-            &active_requests,
+            *video_request_id,
+            *audio_request_id,
+            *catalog_request_id,
+            active_requests,
         ) {
             if let Err(e) = client.stop_sending(rid).await {
                 // `should_stop_sending` のガードにより、ここでは peer_ended / session_terminated は
@@ -6615,7 +7867,17 @@ pub async fn run(
             }
         }
     }
+}
 
+/// stream task の終了を待つ
+///
+/// peer が STOP_SENDING に従わない場合でも録画の finalize に到達できるよう上限を設ける。
+async fn join_stream_tasks(state: &mut PipelineState) {
+    let PipelineState {
+        join_set,
+        fatal_error,
+        ..
+    } = state;
     // transport 自体のエラーで抜けた場合は、live stream の FIN を待たずにタスクを打ち切る
     if fatal_error.is_some() {
         join_set.abort_all();
@@ -6638,21 +7900,38 @@ pub async fn run(
             }
         }
     }
+}
 
+/// session を正常終了し、datagram 受信タスクと録画を停止する
+///
+/// 自側で終了コード付きに閉じた場合は、閉じた session へ GOAWAY / 正常 close を送らない。
+async fn close_session_and_finalize(state: &mut PipelineState) -> Result<()> {
+    let PipelineState {
+        client,
+        recorder,
+        datagram_task,
+        peer_ended,
+        session_terminated,
+        fatal_error,
+        total_streams,
+        ..
+    } = state;
+    // transport 自体のエラーで抜けた場合は接続が死んでいるため、GOAWAY / 正常 close は送らない
+    let session_alive = fatal_error.is_none();
     // 自側で終了コード付きに閉じた場合は、閉じた session へ GOAWAY / 正常 close を送らない
-    if session_alive && should_close_gracefully(session_terminated) {
+    if session_alive && should_close_gracefully(*session_terminated) {
         if let Err(e) = client.send_goaway(Vec::new(), 5000).await {
             // `should_close_gracefully` のガードにより session_terminated はここでは偽である
             log_failure(
                 format_args!("Failed to send GOAWAY: {e}"),
-                peer_ended || is_connection_closed(&e),
+                *peer_ended || is_connection_closed(&e),
             );
         }
 
         if let Err(e) = client.close(0, "").await {
             log_failure(
                 format_args!("Failed to close session gracefully: {e}"),
-                peer_ended || is_connection_closed(&e),
+                *peer_ended || is_connection_closed(&e),
             );
         }
     }
@@ -6665,21 +7944,117 @@ pub async fn run(
 
     // 録画を finalize してライタースレッドの終了を待つ。ここまでで stream task はすべて
     // 終了している
-    if let Some(recorder) = recorder
+    if let Some(recorder) = recorder.take()
         && let Err(e) = recorder.finish()
     {
         tracing::error!("Failed to finalize MP4 recording: {e}");
         if fatal_error.is_none() {
-            fatal_error = Some(e);
+            *fatal_error = Some(e);
         }
     }
 
-    if let Some(e) = fatal_error {
+    if let Some(e) = fatal_error.take() {
         return Err(e);
     }
 
     tracing::info!("Pipeline stopped: {total_streams} streams received");
     Ok(())
+}
+
+async fn run_data_stream_loop(mut state: PipelineState) -> Result<()> {
+    'main: loop {
+        spawn_pending_streams(&mut state);
+
+        // 水が多すぎるときは accept を止める。select! の分岐に入らなければ
+        // 接続が stream を保持する
+        let accepting = state.pending_streams.len() < MAX_CONCURRENT_STREAMS * 4;
+
+        tokio::select! {
+            result = state.recv_acceptor.accept_recv_stream(), if accepting => {
+                if matches!(
+                    handle_accepted_stream(&mut state, result),
+                    LoopFlow::Break
+                ) {
+                    break 'main;
+                }
+            }
+            Some(object) = state.catalog_rx.recv() => {
+                handle_catalog_object(&mut state, object);
+            }
+            notable = state.client.next_event() => {
+                if matches!(
+                    handle_client_event(&mut state, notable).await,
+                    LoopFlow::Break
+                ) {
+                    break 'main;
+                }
+            }
+            result = async {
+                // 移行の結果は oneshot で届く。移行していないときは発火しない
+                match state.migration_rx.as_mut() {
+                    Some(rx) => rx.await.map_err(|_| ()),
+                    None => std::future::pending().await,
+                }
+            }, if state.migration_in_progress => {
+                if matches!(
+                    handle_migration_result(&mut state, result).await,
+                    LoopFlow::Break
+                ) {
+                    break 'main;
+                }
+            }
+            Some(event) = state.request_migration_rx.recv() => {
+                if matches!(
+                    handle_side_session_event(&mut state, event).await,
+                    LoopFlow::Break
+                ) {
+                    break 'main;
+                }
+            }
+            changed = async {
+                // WebTransport の drain (WT_DRAIN_SESSION / HTTP/3 GOAWAY) を観測する
+                // (draft-ietf-webtrans-http3-16 §4.7 / draft-ietf-webtrans-http2-16 §6.13)。
+                // draft 由来の仕様であり将来変更されうる。QUIC 直接接続と QMux では
+                // `wt_session_state_rx` が `None` になり、この分岐は発火しない
+                match state.wt_session_state_rx.as_mut() {
+                    Some(rx) => rx.changed().await.map_err(|_| ()),
+                    None => std::future::pending().await,
+                }
+            } => {
+                if matches!(
+                    handle_webtransport_state_change(&mut state, changed),
+                    LoopFlow::Break
+                ) {
+                    break 'main;
+                }
+            }
+            Some(termination) = state.termination_rx.recv() => {
+                if matches!(
+                    handle_session_termination(&mut state, termination).await,
+                    LoopFlow::Break
+                ) {
+                    break 'main;
+                }
+            }
+            _ = state.tick_interval.tick() => {
+                if matches!(handle_tick(&mut state), LoopFlow::Break) {
+                    break 'main;
+                }
+            }
+            _ = state.shutdown_monitor.recv() => {
+                tracing::info!("Shutdown signal received");
+                break 'main;
+            }
+            _ = &mut state.player_stop => {
+                // プレイヤーの終了 (ウィンドウを閉じた等) でも録画を finalize するため、
+                // pipeline を止めて run の後始末 (Recorder の join) へ進む
+                tracing::info!("Player stopped, stopping pipeline");
+                break 'main;
+            }
+        }
+    }
+
+    finish_pipeline(state).await
 }
 
 /// transport がセッション終了 (WebTransport の CONNECT stream の close / WT_CLOSE_SESSION) や
@@ -8118,82 +9493,313 @@ fn extract_audio_info(
     })
 }
 
-#[expect(clippy::too_many_arguments)]
+/// 受け入れた 1 本の data stream を処理する
+///
+/// stream の入口と出口で診断ログと Session の会計の後始末を行う。処理の本体は
+/// [`handle_stream_body`] に分け、早期 return があっても入口と出口を 1 か所で記録できる
+/// ようにしている。
 async fn handle_incoming_stream(
     mut stream: transport::RecvStream,
-    data_plane: DataPlaneHandle,
-    track_map: &HashMap<u64, TrackKind>,
-    fetch_targets: &SharedFetchTargets,
-    video_codec: Option<&str>,
-    audio_codec: Option<&str>,
-    audio_params: Option<(u32, u8)>,
-    frame_tx: &std::sync::mpsc::Sender<DecodedVideoFrame>,
-    audio_tx: &std::sync::mpsc::Sender<DecodedAudioFrame>,
-    stream_num: u64,
     slot: &mut StreamSlot,
-    display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
-    video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
-    video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
-    object_mode_video: &std::sync::Arc<ObjectModeVideo>,
-    group_switch: &GroupSwitchHandle,
-    audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
-    audio_config_validated_generation: &std::sync::Arc<std::sync::atomic::AtomicU64>,
-    session_generation: u64,
-    audio_catch_up: &std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
-    audio_delivery_order: &std::sync::Arc<std::sync::Mutex<AudioDeliveryOrder>>,
-    last_received_locations: &std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
-    termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
-    catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
-    catalog_compression: MsfCompression,
-    pending_subgroups: &SharedPendingSubgroupBuffer,
-    playback: bool,
-    recorder: Option<&RecorderSender>,
+    ctx: &StreamTaskContext,
 ) {
     let started = Instant::now();
     let raw_stream_id = stream.stream_id();
     if stream_diag_enabled() {
-        tracing::info!("STREAMDIAG stream #{stream_num} enter: stream_id={raw_stream_id}");
+        tracing::info!(
+            "STREAMDIAG stream #{} enter: stream_id={raw_stream_id}",
+            ctx.stream_num
+        );
     }
-    handle_stream_body(
-        &mut stream,
-        &data_plane,
-        track_map,
-        fetch_targets,
-        video_codec,
-        audio_codec,
-        audio_params,
-        frame_tx,
-        audio_tx,
-        stream_num,
-        slot,
-        display_backlog,
-        video_decode_order,
-        video_delivery_order,
-        object_mode_video,
-        group_switch,
-        audio_decoder,
-        audio_config_validated_generation,
-        session_generation,
-        audio_catch_up,
-        audio_delivery_order,
-        last_received_locations,
-        termination_tx,
-        catalog_tx,
-        catalog_compression,
-        pending_subgroups,
-        playback,
-        recorder,
-    )
-    .await;
+    handle_stream_body(&mut stream, slot, ctx).await;
     // stream の読みが終わったら STOP_SENDING 指示の登録を破棄する (登録を残すと
     // 指示が出た stream 数に比例してメモリが増える)
-    data_plane.clear_data_stream_stop_sending(DataStreamId(raw_stream_id));
+    ctx.data_plane
+        .clear_data_stream_stop_sending(DataStreamId(raw_stream_id));
     // 診断時は stream ごとの滞在時間を残す。枠を長時間占有する stream を特定する
     if stream_diag_enabled() {
         tracing::info!(
-            "STREAMDIAG stream #{stream_num} exit: stream_id={raw_stream_id} elapsed_ms={}",
+            "STREAMDIAG stream #{} exit: stream_id={raw_stream_id} elapsed_ms={}",
+            ctx.stream_num,
             started.elapsed().as_millis()
         );
+    }
+}
+
+/// 受信した data stream の種別を読み、種別ごとの処理へ振り分ける
+///
+/// `stream_reader::peek_stream_type` が読んだバイトは `buffered` に残るため、種別ごとの
+/// 処理は decoder へそのまま渡して先頭のヘッダを復号できる。
+async fn handle_stream_body(
+    stream: &mut transport::RecvStream,
+    slot: &mut StreamSlot,
+    ctx: &StreamTaskContext,
+) {
+    let stream_id = DataStreamId(stream.stream_id());
+    let mut buffered = Vec::new();
+    let (stream_type_id, stream_type) =
+        match stream_reader::peek_stream_type(stream, &mut buffered).await {
+            Ok(StreamRead::Value(value)) => value,
+            Ok(StreamRead::Closed(end)) => {
+                tracing::debug!("Stream #{}: closed before type: {end:?}", ctx.stream_num);
+                return;
+            }
+            Err(e) => {
+                log_failure(
+                    format_args!(
+                        "Stream #{}: failed to peek stream type: {e}",
+                        ctx.stream_num
+                    ),
+                    is_transport_session_end(&e),
+                );
+                return;
+            }
+        };
+    if let Err(e) = ctx
+        .data_plane
+        .recv_data_stream_type(stream_id, stream_type_id)
+    {
+        // MoqtClient の登録 API は全エラーを `TransportError::Internal` に写すため、
+        // ここはセッション終了でも warn のままにする
+        tracing::warn!(
+            "Stream #{}: failed to register data stream type: {e}",
+            ctx.stream_num
+        );
+        return;
+    }
+    match stream_type {
+        StreamType::Fetch => handle_fetch_stream(stream, stream_id, &buffered, slot, ctx).await,
+        // draft-ietf-moq-transport-23 §11.5.1 (Padding Streams):
+        // パディングバイトを読み捨てる。session には recv_data_stream_type で登録済み。
+        StreamType::Padding => {
+            let _ = drain_registered_stream_to_end(stream, &ctx.data_plane, stream_id).await;
+        }
+        StreamType::Subgroup => handle_subgroup_stream(stream, stream_id, &buffered, ctx).await,
+    }
+}
+
+/// FETCH 応答 stream を処理する
+///
+/// ヘッダの登録を配送先の判定より先に行い、配送先ごとの処理へ振り分ける。配送先が無い
+/// 応答は Session の会計だけを閉じて読み捨てる。
+async fn handle_fetch_stream(
+    stream: &mut transport::RecvStream,
+    stream_id: DataStreamId,
+    buffered: &[u8],
+    slot: &mut StreamSlot,
+    ctx: &StreamTaskContext,
+) {
+    let Some((mut fetch_decoder, fetch_header)) =
+        register_fetch_stream(stream, stream_id, buffered, slot, ctx).await
+    else {
+        return;
+    };
+    // 配送先の判定は、FETCH ヘッダを読んだ時点の対応表で行う。request 単位移行の
+    // side session では再発行のたびに表が増えるため、ロックを取って複製する
+    // (ロックは await をまたがない)
+    let fetch_targets = lock_fetch_targets(&ctx.fetch_targets).clone();
+    match fetch_stream_action(fetch_header.request_id, &fetch_targets) {
+        // Session は受理したが、このアプリに配送先が無い FETCH 応答である。読み捨てる
+        FetchStreamAction::Ignore => {
+            tracing::debug!(
+                "Stream #{}: dropping a fetch stream (request_id={} does not belong to this subscriber)",
+                ctx.stream_num,
+                fetch_header.request_id,
+            );
+            let _ = drain_registered_stream_to_end(stream, &ctx.data_plane, stream_id).await;
+        }
+        FetchStreamAction::DeliverVideo => {
+            deliver_video_fetch_response(stream, stream_id, &mut fetch_decoder, ctx).await;
+        }
+        FetchStreamAction::DeliverCatalog => {
+            deliver_catalog_fetch_response(stream, stream_id, &mut fetch_decoder, ctx).await;
+        }
+    }
+}
+
+/// FETCH 応答 stream のヘッダを読み、Session へ登録する
+///
+/// 登録に成功したときだけ decoder とヘッダを返す。保留の期限・上限の超過で Session が
+/// 破棄した場合も `None` を返す (Session の会計も解放済み)。
+async fn register_fetch_stream(
+    stream: &mut transport::RecvStream,
+    stream_id: DataStreamId,
+    buffered: &[u8],
+    slot: &mut StreamSlot,
+    ctx: &StreamTaskContext,
+) -> Option<(FetchStreamDecoder, FetchHeader)> {
+    let mut fetch_decoder = FetchStreamDecoder::new();
+    fetch_decoder.push(buffered);
+    let fetch_header = loop {
+        match fetch_decoder.try_decode_header() {
+            Ok(Some(header)) => break header,
+            Ok(None) => {
+                match receive_registered_stream_data(stream, &ctx.data_plane, stream_id).await {
+                    Ok(Some(data)) => fetch_decoder.push(&data),
+                    Ok(None) => return None,
+                    Err(e) => {
+                        log_failure(
+                            format_args!(
+                                "Stream #{}: failed to read fetch header: {e}",
+                                ctx.stream_num
+                            ),
+                            is_transport_session_end(&e),
+                        );
+                        return None;
+                    }
+                }
+            }
+            Err(e) => {
+                request_session_termination_for_decode_error(&ctx.termination_tx, &e);
+                tracing::warn!(
+                    "Stream #{}: failed to decode fetch header: {e}",
+                    ctx.stream_num
+                );
+                let _ = drain_registered_stream_to_end(stream, &ctx.data_plane, stream_id).await;
+                return None;
+            }
+        }
+    };
+    // Session への登録を配送先の判定より先に行う。fill fetch stream の Request ID は
+    // 起因メッセージのものであり、PUBLISH 起点の初回 fill は fetch_targets に現れない
+    // (fetch_targets は自側が発行した要求の Request ID だけを持つ)。登録を先に行うことで、
+    // PUBLISH の受理待ちの保留・会計の解放を DataPlaneHandle に一任できる。
+    // 保留待ちは PUBLISH の到着を最長 5 秒待つため、その間は stream の同時処理枠を
+    // 手放す。枠を保持したまま待つと、保留が MAX_CONCURRENT_STREAMS 本そろったときに
+    // 他の stream の処理が保留の期限まで止まる。
+    slot.release();
+    let registered =
+        match register_fetch_header(stream, &ctx.data_plane, stream_id, &fetch_header).await {
+            Ok(registered) => registered,
+            Err(e) => {
+                // MoqtClient の登録 API は全エラーを `TransportError::Internal` に
+                // 写すため、ここはセッション終了でも warn のままにする
+                tracing::warn!(
+                    "Stream #{}: failed to register fetch header (request_id={}): {e}",
+                    ctx.stream_num,
+                    fetch_header.request_id,
+                );
+                let _ = drain_registered_stream_to_end(stream, &ctx.data_plane, stream_id).await;
+                return None;
+            }
+        };
+    slot.reacquire().await;
+    if !registered {
+        // 保留の期限・上限の超過で破棄済みである。Session の会計も解放済み
+        return None;
+    }
+    Some((fetch_decoder, fetch_header))
+}
+
+/// 映像の FETCH 応答を live と同じ配送経路へ流す
+async fn deliver_video_fetch_response(
+    stream: &mut transport::RecvStream,
+    stream_id: DataStreamId,
+    fetch_decoder: &mut FetchStreamDecoder,
+    ctx: &StreamTaskContext,
+) {
+    let Some(codec) = ctx.video_codec.as_deref() else {
+        tracing::warn!(
+            "Stream #{}: video FETCH response arrived but video is not configured",
+            ctx.stream_num
+        );
+        let _ = ctx.data_plane.send_data_stream_stop_sending(stream_id);
+        let _ = drain_registered_stream_to_end(stream, &ctx.data_plane, stream_id).await;
+        return;
+    };
+    // 復号器は live の Subgroup stream と同じく stream ごとに作る。
+    // 表示待ちが上限を超えているときは live と同じ規則でデコードだけを
+    // スキップし、読み切って録画は続ける
+    let skip_decode = ctx.display_backlog.load(Ordering::Relaxed) > MAX_DISPLAY_BACKLOG;
+    let mut video_decoder = match build_stream_video_decoder(
+        ctx.playback,
+        skip_decode,
+        codec,
+        ctx.stream_num,
+        ctx.recorder.is_some(),
+    ) {
+        Ok(decoder) => decoder,
+        Err(e) => {
+            tracing::warn!(
+                "Stream #{}: failed to create video decoder: {e}",
+                ctx.stream_num
+            );
+            let _ = ctx.data_plane.send_data_stream_stop_sending(stream_id);
+            let _ = drain_registered_stream_to_end(stream, &ctx.data_plane, stream_id).await;
+            return;
+        }
+    };
+    let sink = FrameSink {
+        frame_tx: &ctx.frame_tx,
+        display_backlog: &ctx.display_backlog,
+    };
+    let delivery = VideoObjectDelivery {
+        video_decode_order: &ctx.video_decode_order,
+        video_delivery_order: &ctx.video_delivery_order,
+        sink: &sink,
+        recorder: ctx.recorder.as_ref(),
+        last_received_locations: &ctx.last_received_locations,
+        termination_tx: &ctx.termination_tx,
+    };
+    read_video_fetch_stream(
+        stream,
+        &ctx.data_plane,
+        stream_id,
+        fetch_decoder,
+        ctx.stream_num,
+        video_decoder.as_mut(),
+        &delivery,
+    )
+    .await;
+}
+
+/// catalog の fill fetch 応答をカタログの状態へ適用する
+///
+/// fill fetch stream で届く完全な catalog を、購読で届く catalog と同じ `CatalogState` へ
+/// 適用するため main ループへ渡す (draft-ietf-moq-msf-02 §5 (Catalog))。
+async fn deliver_catalog_fetch_response(
+    stream: &mut transport::RecvStream,
+    stream_id: DataStreamId,
+    fetch_decoder: &mut FetchStreamDecoder,
+    ctx: &StreamTaskContext,
+) {
+    match read_catalog_fetch_objects(
+        stream,
+        &ctx.data_plane,
+        stream_id,
+        fetch_decoder,
+        ctx.catalog_compression,
+    )
+    .await
+    {
+        Ok(objects) => {
+            for object in objects {
+                // 移行後の再購読の Location Filter に使う位置も記録する
+                record_last_location(
+                    &ctx.last_received_locations,
+                    TrackKind::Catalog,
+                    object.location,
+                );
+                if ctx.catalog_tx.send(object).await.is_err() {
+                    // main ループが終了した
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            if let Error::Moqt(error) = &e {
+                request_session_termination_for_decode_error(&ctx.termination_tx, error);
+            }
+            tracing::warn!(
+                "Stream #{}: failed to read catalog fetch stream: {e}",
+                ctx.stream_num
+            );
+            // 読み切れなかった stream を Session の会計から外す
+            // (既存の Fetch 失敗経路と同じ扱い。残すと timeout まで open のままで
+            // cleanup が進まない)
+            let _ = ctx.data_plane.send_data_stream_stop_sending(stream_id);
+            let _ = drain_registered_stream_to_end(stream, &ctx.data_plane, stream_id).await;
+        }
     }
 }
 
@@ -8226,531 +9832,354 @@ fn build_stream_video_decoder(
     }
 }
 
-/// `handle_incoming_stream` の本体。
+/// Subgroup stream を処理する
 ///
-/// 早期 return が多いため、呼び出し側で入口と出口を 1 か所にまとめて記録できる
-/// ように本体を分けている。
-#[expect(clippy::too_many_arguments)]
-async fn handle_stream_body(
+/// ヘッダを読んで Session へ登録し、Track Alias から決まる track 種別ごとの処理へ
+/// 振り分ける。映像の Group 破棄 (表示待ちの超過) は、track 種別が分かってから行う。
+async fn handle_subgroup_stream(
     stream: &mut transport::RecvStream,
-    data_plane: &DataPlaneHandle,
-    track_map: &HashMap<u64, TrackKind>,
-    fetch_targets: &SharedFetchTargets,
-    video_codec: Option<&str>,
-    audio_codec: Option<&str>,
-    audio_params: Option<(u32, u8)>,
-    frame_tx: &std::sync::mpsc::Sender<DecodedVideoFrame>,
-    audio_tx: &std::sync::mpsc::Sender<DecodedAudioFrame>,
-    stream_num: u64,
-    slot: &mut StreamSlot,
-    display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
-    video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
-    video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
-    object_mode_video: &std::sync::Arc<ObjectModeVideo>,
-    group_switch: &GroupSwitchHandle,
-    audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
-    audio_config_validated_generation: &std::sync::Arc<std::sync::atomic::AtomicU64>,
-    session_generation: u64,
-    audio_catch_up: &std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
-    audio_delivery_order: &std::sync::Arc<std::sync::Mutex<AudioDeliveryOrder>>,
-    last_received_locations: &std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
-    termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
-    catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
-    catalog_compression: MsfCompression,
-    pending_subgroups: &SharedPendingSubgroupBuffer,
-    playback: bool,
-    recorder: Option<&RecorderSender>,
+    stream_id: DataStreamId,
+    buffered: &[u8],
+    ctx: &StreamTaskContext,
 ) {
-    let stream_id = DataStreamId(stream.stream_id());
-    let mut buf = Vec::new();
-    let (stream_type_id, stream_type) =
-        match stream_reader::peek_stream_type(stream, &mut buf).await {
-            Ok(StreamRead::Value(value)) => value,
-            Ok(StreamRead::Closed(end)) => {
-                tracing::debug!("Stream #{stream_num}: closed before type: {end:?}");
-                return;
-            }
-            Err(e) => {
-                log_failure(
-                    format_args!("Stream #{stream_num}: failed to peek stream type: {e}"),
-                    is_transport_session_end(&e),
-                );
-                return;
-            }
-        };
-    if let Err(e) = data_plane.recv_data_stream_type(stream_id, stream_type_id) {
-        // MoqtClient の登録 API は全エラーを `TransportError::Internal` に写すため、
-        // ここはセッション終了でも warn のままにする
-        tracing::warn!("Stream #{stream_num}: failed to register data stream type: {e}");
+    let mut sg_decoder = SubgroupStreamDecoder::new();
+    sg_decoder.push(buffered);
+    let Some(header) = read_subgroup_header(stream, stream_id, &mut sg_decoder, ctx).await else {
+        return;
+    };
+    // 再生の間引きで video group を破棄するのは録画していない場合だけにする。
+    // 録画中は group を読み切って録画し、デコードだけをスキップする。
+    //
+    // object モードでは Subgroup を破棄しない。1 つの Subgroup は 1 Object であり、
+    // 破棄すると Group 内の Object ID が欠けて、以降の delta を復号できなくなる
+    // (次の Group のキーフレームまで復号が止まる)。
+    let skip_decode = !ctx.object_mode_video.is_object_mode()
+        && ctx.track_map.get(&header.track_alias) == Some(&TrackKind::Video)
+        && ctx.display_backlog.load(Ordering::Relaxed) > MAX_DISPLAY_BACKLOG;
+    if skip_decode && ctx.recorder.is_none() {
+        tracing::debug!(
+            "Stream #{}: dropping video group (display backlog={})",
+            ctx.stream_num,
+            ctx.display_backlog.load(Ordering::Relaxed)
+        );
+        let _ = ctx.data_plane.send_data_stream_stop_sending(stream_id);
+        let _ = drain_registered_stream_to_end(stream, &ctx.data_plane, stream_id).await;
         return;
     }
-    match stream_type {
-        StreamType::Fetch => {
-            // FETCH 応答 stream は、自側が発行したメディア FETCH の応答と、catalog 購読への
-            // fill fetch stream (draft-ietf-moq-transport-23 §3.4 (Fill Semantics)) を配送経路へ
-            // 流す。移行後に catalog を張り直すと fill で完全なカタログが届くため、これを
-            // CatalogState へ適用する。どちらでもない stream は Session へ登録だけ行って
-            // 読み捨てる (読み捨ての判定を登録より先に行うと、自側が発行していない
-            // Request ID を載せた PUBLISH 起点の初回 fill を失う。§3.4.1 (Opening and Closing
-            // Fill Fetch Streams))
-            let mut fetch_decoder = FetchStreamDecoder::new();
-            fetch_decoder.push(&buf);
-            let fetch_header = loop {
-                match fetch_decoder.try_decode_header() {
-                    Ok(Some(header)) => break header,
-                    Ok(None) => {
-                        match receive_registered_stream_data(stream, data_plane, stream_id).await {
-                            Ok(Some(data)) => fetch_decoder.push(&data),
-                            Ok(None) => return,
-                            Err(e) => {
-                                log_failure(
-                                    format_args!(
-                                        "Stream #{stream_num}: failed to read fetch header: {e}"
-                                    ),
-                                    is_transport_session_end(&e),
-                                );
-                                return;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        request_session_termination_for_decode_error(termination_tx, &e);
-                        tracing::warn!("Stream #{stream_num}: failed to decode fetch header: {e}");
-                        let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
-                        return;
-                    }
-                }
-            };
-            // Session への登録を配送先の判定より先に行う。fill fetch stream の Request ID は
-            // 起因メッセージのものであり、PUBLISH 起点の初回 fill は fetch_targets に現れない
-            // (fetch_targets は自側が発行した要求の Request ID だけを持つ)。登録を先に行うことで、
-            // PUBLISH の受理待ちの保留・会計の解放を DataPlaneHandle に一任できる。
-            // 保留待ちは PUBLISH の到着を最長 5 秒待つため、その間は stream の同時処理枠を
-            // 手放す。枠を保持したまま待つと、保留が MAX_CONCURRENT_STREAMS 本そろったときに
-            // 他の stream の処理が保留の期限まで止まる。
-            slot.release();
-            let registered =
-                match register_fetch_header(stream, data_plane, stream_id, &fetch_header).await {
-                    Ok(registered) => registered,
-                    Err(e) => {
-                        // MoqtClient の登録 API は全エラーを `TransportError::Internal` に
-                        // 写すため、ここはセッション終了でも warn のままにする
-                        tracing::warn!(
-                            "Stream #{stream_num}: failed to register fetch header \
-                             (request_id={}): {e}",
-                            fetch_header.request_id,
-                        );
-                        let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
-                        return;
-                    }
-                };
-            slot.reacquire().await;
-            if !registered {
-                // 保留の期限・上限の超過で破棄済みである。Session の会計も解放済み
-                return;
-            }
-            // 配送先の判定は、FETCH ヘッダを読んだ時点の対応表で行う。request 単位移行の
-            // side session では再発行のたびに表が増えるため、ロックを取って複製する
-            // (ロックは await をまたがない)
-            let fetch_targets = lock_fetch_targets(fetch_targets).clone();
-            match fetch_stream_action(fetch_header.request_id, &fetch_targets) {
-                // Session は受理したが、このアプリに配送先が無い FETCH 応答である。読み捨てる
-                FetchStreamAction::Ignore => {
-                    tracing::debug!(
-                        "Stream #{stream_num}: dropping a fetch stream \
-                         (request_id={} does not belong to this subscriber)",
-                        fetch_header.request_id,
-                    );
-                    let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
-                }
-                action @ (FetchStreamAction::DeliverVideo | FetchStreamAction::DeliverCatalog) => {
-                    match action {
-                        FetchStreamAction::DeliverVideo => {
-                            let Some(codec) = video_codec else {
-                                tracing::warn!(
-                                    "Stream #{stream_num}: video FETCH response arrived \
-                                     but video is not configured"
-                                );
-                                let _ = data_plane.send_data_stream_stop_sending(stream_id);
-                                let _ =
-                                    drain_registered_stream_to_end(stream, data_plane, stream_id)
-                                        .await;
-                                return;
-                            };
-                            // 復号器は live の Subgroup stream と同じく stream ごとに作る。
-                            // 表示待ちが上限を超えているときは live と同じ規則でデコードだけを
-                            // スキップし、読み切って録画は続ける
-                            let skip_decode =
-                                display_backlog.load(Ordering::Relaxed) > MAX_DISPLAY_BACKLOG;
-                            let mut video_decoder = match build_stream_video_decoder(
-                                playback,
-                                skip_decode,
-                                codec,
-                                stream_num,
-                                recorder.is_some(),
-                            ) {
-                                Ok(decoder) => decoder,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Stream #{stream_num}: failed to create video decoder: {e}"
-                                    );
-                                    let _ = data_plane.send_data_stream_stop_sending(stream_id);
-                                    let _ = drain_registered_stream_to_end(
-                                        stream, data_plane, stream_id,
-                                    )
-                                    .await;
-                                    return;
-                                }
-                            };
-                            read_video_fetch_stream(
-                                stream,
-                                data_plane,
-                                stream_id,
-                                &mut fetch_decoder,
-                                stream_num,
-                                video_decoder.as_mut(),
-                                &FrameSink {
-                                    frame_tx,
-                                    display_backlog: &display_backlog,
-                                },
-                                video_decode_order,
-                                video_delivery_order,
-                                last_received_locations,
-                                recorder,
-                                termination_tx,
-                            )
-                            .await;
-                        }
-                        FetchStreamAction::DeliverCatalog => {
-                            // fill fetch stream で届く完全な catalog を、購読で届く catalog と
-                            // 同じ `CatalogState` へ適用するため main ループへ渡す
-                            // (draft-ietf-moq-msf-02 §5 (Catalog))。移行後に catalog 購読を
-                            // 張り直すと、移行中に更新された catalog が fill で届く
-                            match read_catalog_fetch_objects(
-                                stream,
-                                data_plane,
-                                stream_id,
-                                &mut fetch_decoder,
-                                catalog_compression,
-                            )
-                            .await
-                            {
-                                Ok(objects) => {
-                                    for object in objects {
-                                        // 移行後の再購読の Location Filter に使う位置も記録する
-                                        record_last_location(
-                                            last_received_locations,
-                                            TrackKind::Catalog,
-                                            object.location,
-                                        );
-                                        if catalog_tx.send(object).await.is_err() {
-                                            // main ループが終了した
-                                            return;
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    if let Error::Moqt(error) = &e {
-                                        request_session_termination_for_decode_error(
-                                            termination_tx,
-                                            error,
-                                        );
-                                    }
-                                    tracing::warn!(
-                                        "Stream #{stream_num}: failed to read catalog fetch stream: {e}"
-                                    );
-                                    // 読み切れなかった stream を Session の会計から外す
-                                    // (既存の Fetch 失敗経路と同じ扱い。残すと timeout まで
-                                    // open のままで cleanup が進まない)
-                                    let _ = data_plane.send_data_stream_stop_sending(stream_id);
-                                    let _ = drain_registered_stream_to_end(
-                                        stream, data_plane, stream_id,
-                                    )
-                                    .await;
-                                }
-                            }
-                        }
-                        // 上の or パターンで配送先は決まっている
-                        FetchStreamAction::Ignore => {}
-                    }
-                }
-            }
+    if !register_subgroup_header(
+        stream,
+        &ctx.data_plane,
+        stream_id,
+        &header,
+        &mut sg_decoder,
+        ctx.stream_num,
+        &ctx.pending_subgroups,
+    )
+    .await
+    {
+        return;
+    }
+    let kind = ctx.track_map.get(&header.track_alias);
+    tracing::debug!(
+        "Stream #{}: alias={}, group={}, kind={kind:?}",
+        ctx.stream_num,
+        header.track_alias,
+        header.group_id,
+    );
+    match kind {
+        Some(TrackKind::Video) => {
+            handle_subgroup_video_stream(stream, stream_id, &header, &mut sg_decoder, ctx).await
         }
-        StreamType::Padding => {
-            // draft-ietf-moq-transport-23 §11.5.1 (Padding Streams):
-            // パディングバイトを読み捨てる。session には recv_data_stream_type で登録済み。
-            let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
+        Some(TrackKind::Audio) => {
+            handle_subgroup_audio_stream(stream, stream_id, &header, &mut sg_decoder, ctx).await
         }
-        StreamType::Subgroup => {
-            let mut sg_decoder = SubgroupStreamDecoder::new();
-            sg_decoder.push(&buf);
-            let header = loop {
-                match sg_decoder.try_decode_header() {
-                    Ok(Some(h)) => break h,
-                    Ok(None) => {
-                        match receive_registered_stream_data(stream, data_plane, stream_id).await {
-                            Ok(Some(data)) => sg_decoder.push(&data),
-                            Ok(None) => return,
-                            Err(e) => {
-                                log_failure(
-                                    format_args!(
-                                        "Stream #{stream_num}: failed to read subgroup header: {e}"
-                                    ),
-                                    is_transport_session_end(&e),
-                                );
-                                return;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        request_session_termination_for_decode_error(termination_tx, &e);
-                        tracing::warn!("Stream #{stream_num}: failed to read subgroup header: {e}");
-                        let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
-                        return;
-                    }
-                }
-            };
-            // 再生の間引きで video group を破棄するのは録画していない場合だけにする。
-            // 録画中は group を読み切って録画し、デコードだけをスキップする。
-            //
-            // object モードでは Subgroup を破棄しない。1 つの Subgroup は 1 Object であり、
-            // 破棄すると Group 内の Object ID が欠けて、以降の delta を復号できなくなる
-            // (次の Group のキーフレームまで復号が止まる)。
-            let skip_decode = !object_mode_video.is_object_mode()
-                && track_map.get(&header.track_alias) == Some(&TrackKind::Video)
-                && display_backlog.load(Ordering::Relaxed) > MAX_DISPLAY_BACKLOG;
-            if skip_decode && recorder.is_none() {
-                tracing::debug!(
-                    "Stream #{stream_num}: dropping video group (display backlog={})",
-                    display_backlog.load(Ordering::Relaxed)
-                );
-                let _ = data_plane.send_data_stream_stop_sending(stream_id);
-                let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
-                return;
-            }
-            if !register_subgroup_header(
-                stream,
-                data_plane,
-                stream_id,
-                &header,
-                &mut sg_decoder,
-                stream_num,
-                pending_subgroups,
-            )
-            .await
-            {
-                return;
-            }
-            let kind = track_map.get(&header.track_alias);
+        Some(TrackKind::Catalog) => {
+            handle_subgroup_catalog_stream(stream, stream_id, &header, &mut sg_decoder, ctx).await
+        }
+        Some(TrackKind::Discard) => {
+            // SUBSCRIBE_TRACKS の結果として受理した購読である。Session への header 登録と
+            // stream の会計は済んでいるため、Object を読み捨てて会計だけ閉じる
             tracing::debug!(
-                "Stream #{stream_num}: alias={}, group={}, kind={kind:?}",
+                "Stream #{}: discarding objects for a PUBLISH-originated subscription: alias={}",
+                ctx.stream_num,
                 header.track_alias,
-                header.group_id,
             );
-            match kind {
-                Some(TrackKind::Video) => {
-                    let Some(codec) = video_codec else {
-                        tracing::warn!(
-                            "Stream #{stream_num}: video stream arrived but video is not configured"
+            let _ = drain_registered_stream_to_end(stream, &ctx.data_plane, stream_id).await;
+        }
+        None => {
+            tracing::warn!(
+                "Stream #{}: unknown track alias={}",
+                ctx.stream_num,
+                header.track_alias,
+            );
+            let _ = drain_registered_stream_to_end(stream, &ctx.data_plane, stream_id).await;
+        }
+    }
+}
+
+/// Subgroup stream のヘッダを読む
+///
+/// ヘッダが読めるまで Session からデータを受け取る。stream の終端と読み取りエラーでは
+/// `None` を返し、復号エラーではセッション終了を依頼して stream を読み捨てる。
+async fn read_subgroup_header(
+    stream: &mut transport::RecvStream,
+    stream_id: DataStreamId,
+    sg_decoder: &mut SubgroupStreamDecoder,
+    ctx: &StreamTaskContext,
+) -> Option<SubgroupHeader> {
+    let header = loop {
+        match sg_decoder.try_decode_header() {
+            Ok(Some(header)) => break header,
+            Ok(None) => {
+                match receive_registered_stream_data(stream, &ctx.data_plane, stream_id).await {
+                    Ok(Some(data)) => sg_decoder.push(&data),
+                    Ok(None) => return None,
+                    Err(e) => {
+                        log_failure(
+                            format_args!(
+                                "Stream #{}: failed to read subgroup header: {e}",
+                                ctx.stream_num
+                            ),
+                            is_transport_session_end(&e),
                         );
-                        let _ = data_plane.send_data_stream_stop_sending(stream_id);
-                        let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
-                        return;
-                    };
-                    if object_mode_video.is_object_mode() {
-                        // object モードでは 1 Group の複数 Subgroup を Object ID 順に並べ替え、
-                        // 購読で共有する 1 つの復号器へ直列に流す。stream ごとに復号器を
-                        // 作らない
-                        let frames = decode_object_mode_video_stream(
-                            stream,
-                            data_plane,
-                            stream_id,
-                            header.group_id,
-                            &mut sg_decoder,
-                            object_mode_video,
-                            &ObjectModeVideoDelivery {
-                                video_decode_order,
-                                video_delivery_order,
-                                sink: &FrameSink {
-                                    frame_tx,
-                                    display_backlog: &display_backlog,
-                                },
-                                recorder,
-                                last_received_locations,
-                                termination_tx,
-                            },
-                        )
-                        .await;
-                        tracing::debug!(
-                            "Stream #{stream_num}: video object group {} complete ({frames} frames)",
-                            header.group_id,
-                        );
-                        return;
+                        return None;
                     }
-                    let mut decoder = match build_stream_video_decoder(
-                        playback,
-                        skip_decode,
-                        codec,
-                        stream_num,
-                        recorder.is_some(),
-                    ) {
-                        Ok(decoder) => decoder,
-                        Err(e) => {
-                            tracing::warn!(
-                                "Stream #{stream_num}: failed to create video decoder: {e}"
-                            );
-                            let _ = data_plane.send_data_stream_stop_sending(stream_id);
-                            let _ =
-                                drain_registered_stream_to_end(stream, data_plane, stream_id).await;
-                            return;
-                        }
-                    };
-                    // gate を通すのは再生する (decoder を持つ) stream だけである。録画のみの
-                    // 場合は復号しないため、保留する理由が無い
-                    let gate_enabled = decoder.is_some();
-                    if gate_enabled {
-                        group_switch.begin_stream(header.group_id, stream_id.0);
-                    }
-                    let frames = decode_video_stream(
-                        stream,
-                        data_plane,
-                        stream_id,
-                        header.group_id,
-                        &mut sg_decoder,
-                        video_decode_order,
-                        video_delivery_order,
-                        group_switch,
-                        decoder.as_mut(),
-                        &FrameSink {
-                            frame_tx,
-                            display_backlog: &display_backlog,
-                        },
-                        last_received_locations,
-                        recorder,
-                        termination_tx,
-                    )
-                    .await;
-                    // decode_video_stream の return 経路 (FIN / RESET_STREAM / STOP_SENDING /
-                    // 読み取りエラー / 配送の打ち切り) はすべてここで吸収し、begin と end を
-                    // 1 対 1 にする
-                    if gate_enabled {
-                        group_switch.end_stream(header.group_id, stream_id.0);
-                    }
-                    tracing::debug!(
-                        "Stream #{stream_num}: video group {} complete ({frames} frames)",
-                        header.group_id,
-                    );
-                }
-                Some(TrackKind::Audio) => {
-                    let Some((sample_rate, channels)) = audio_params else {
-                        tracing::warn!(
-                            "Stream #{stream_num}: audio stream arrived but audio is not configured"
-                        );
-                        let _ = data_plane.send_data_stream_stop_sending(stream_id);
-                        let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
-                        return;
-                    };
-                    // デコーダは subscription で共有する。stream ごとに作ると 20 ms ごとに
-                    // 状態が失われ、フレーム境界で波形が不連続になる。
-                    // 再生を行わない場合はロックを取らずに録画だけを行う。
-                    let mut decoder = match audio_decoder {
-                        Some(decoder) => Some(decoder.lock().await),
-                        None => None,
-                    };
-                    // Audio Config の中身はコーデック依存 (LOC draft-ietf-moq-loc-05 §2.3.3.1 (Audio Config)) のため、
-                    // catalog の codec が opus の場合のみ OpusHead として解釈する。AAC (mp4a.*) の
-                    // Audio Config は AudioSpecificConfig であり、AudioToolbox のデコーダは
-                    // 入力のサンプルレートとチャンネル数だけで構成できるため解釈しない。
-                    // 検証済み世代は subscription で共有する: decode_audio_stream は
-                    // subgroup stream ごとに呼ばれるが、OpusHead はセッションで 1 回しか
-                    // 送られないため、共有しないと 2 本目以降の stream が OpusHead を
-                    // 待ち続けて音声が途切れる。datagram 配送の音声とも共有する。
-                    let chunks = decode_audio_stream(
-                        stream,
-                        data_plane,
-                        stream_id,
-                        &header,
-                        &mut sg_decoder,
-                        decoder.as_deref_mut(),
-                        &AudioDelivery {
-                            audio_tx,
-                            audio_config_validated_generation,
-                            session_generation,
-                            is_opus_codec: audio_codec.is_some_and(decoder::is_opus_codec),
-                            catalog_sample_rate: sample_rate,
-                            catalog_channels: channels,
-                            recorder,
-                            termination_tx,
-                            catch_up: audio_catch_up.as_ref(),
-                            delivery_order: audio_delivery_order.as_ref(),
-                        },
-                        last_received_locations,
-                    )
-                    .await;
-                    tracing::debug!(
-                        "Stream #{stream_num}: audio group {} complete ({chunks} chunks)",
-                        header.group_id,
-                    );
-                }
-                Some(TrackKind::Catalog) => {
-                    // 購読の確立後に配られたカタログ。読み出した Object を main ループへ渡し、
-                    // 状態 (CatalogState) を所有する main ループが MSF の配置規則で適用する。
-                    // 状態を stream task 側に持たせないのは、複数の Group の stream が
-                    // 同時に走りうるためである。
-                    // ヘッダは既に `register_subgroup_header` が登録済みであるため、
-                    // `read_catalog_subgroup_stream` (ヘッダ登録を含む入口) は呼ばない。
-                    // 呼ぶと同じ stream へ再登録となり `session error 0x3` になる。
-                    // `buf` (ヘッダを含む) も渡さない。
-                    match read_catalog_objects(
-                        stream,
-                        data_plane,
-                        stream_id,
-                        &mut sg_decoder,
-                        &header,
-                        catalog_compression,
-                    )
-                    .await
-                    {
-                        Ok(objects) => {
-                            for object in objects {
-                                if catalog_tx.send(object).await.is_err() {
-                                    // main ループが終了した
-                                    return;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            if let Error::Moqt(error) = &e {
-                                request_session_termination_for_decode_error(termination_tx, error);
-                            }
-                            tracing::warn!(
-                                "Stream #{stream_num}: failed to read catalog stream: {e}"
-                            );
-                            // 読み切れなかった stream を Session の会計から外す。残すと timeout まで
-                            // open_incoming_subgroup_count が戻らず、cleanup_ready() が false のまま
-                            // になって forget_subscription と GOAWAY drain が進まない
-                            // (fill fetch の失敗経路と同じ扱い)
-                            let _ = data_plane.send_data_stream_stop_sending(stream_id);
-                        }
-                    }
-                }
-                Some(TrackKind::Discard) => {
-                    // SUBSCRIBE_TRACKS の結果として受理した購読である。Session への header 登録と
-                    // stream の会計は済んでいるため、Object を読み捨てて会計だけ閉じる
-                    tracing::debug!(
-                        "Stream #{stream_num}: discarding objects for a PUBLISH-originated subscription: alias={}",
-                        header.track_alias,
-                    );
-                    let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
-                }
-                None => {
-                    tracing::warn!(
-                        "Stream #{stream_num}: unknown track alias={}",
-                        header.track_alias,
-                    );
-                    let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
                 }
             }
+            Err(e) => {
+                request_session_termination_for_decode_error(&ctx.termination_tx, &e);
+                tracing::warn!(
+                    "Stream #{}: failed to read subgroup header: {e}",
+                    ctx.stream_num
+                );
+                let _ = drain_registered_stream_to_end(stream, &ctx.data_plane, stream_id).await;
+                return None;
+            }
+        }
+    };
+    Some(header)
+}
+
+/// Subgroup stream で届く映像 Object を処理する
+///
+/// object モードでは購読で共有する並べ替えバッファと復号器へ流し、group モードでは
+/// stream ごとに復号器を作って Group の切り替え gate を通す。
+async fn handle_subgroup_video_stream(
+    stream: &mut transport::RecvStream,
+    stream_id: DataStreamId,
+    header: &SubgroupHeader,
+    sg_decoder: &mut SubgroupStreamDecoder,
+    ctx: &StreamTaskContext,
+) {
+    let Some(codec) = ctx.video_codec.as_deref() else {
+        tracing::warn!(
+            "Stream #{}: video stream arrived but video is not configured",
+            ctx.stream_num
+        );
+        let _ = ctx.data_plane.send_data_stream_stop_sending(stream_id);
+        let _ = drain_registered_stream_to_end(stream, &ctx.data_plane, stream_id).await;
+        return;
+    };
+    let sink = FrameSink {
+        frame_tx: &ctx.frame_tx,
+        display_backlog: &ctx.display_backlog,
+    };
+    let delivery = VideoObjectDelivery {
+        video_decode_order: &ctx.video_decode_order,
+        video_delivery_order: &ctx.video_delivery_order,
+        sink: &sink,
+        recorder: ctx.recorder.as_ref(),
+        last_received_locations: &ctx.last_received_locations,
+        termination_tx: &ctx.termination_tx,
+    };
+    if ctx.object_mode_video.is_object_mode() {
+        // object モードでは 1 Group の複数 Subgroup を Object ID 順に並べ替え、
+        // 購読で共有する 1 つの復号器へ直列に流す。stream ごとに復号器を
+        // 作らない
+        let frames = decode_object_mode_video_stream(
+            stream,
+            &ctx.data_plane,
+            stream_id,
+            header.group_id,
+            sg_decoder,
+            &ctx.object_mode_video,
+            &delivery,
+        )
+        .await;
+        tracing::debug!(
+            "Stream #{}: video object group {} complete ({frames} frames)",
+            ctx.stream_num,
+            header.group_id,
+        );
+        return;
+    }
+    // 表示待ちが上限を超えているときは復号器を作らず、読み切って録画だけを続ける
+    let skip_decode = ctx.display_backlog.load(Ordering::Relaxed) > MAX_DISPLAY_BACKLOG;
+    let mut decoder = match build_stream_video_decoder(
+        ctx.playback,
+        skip_decode,
+        codec,
+        ctx.stream_num,
+        ctx.recorder.is_some(),
+    ) {
+        Ok(decoder) => decoder,
+        Err(e) => {
+            tracing::warn!(
+                "Stream #{}: failed to create video decoder: {e}",
+                ctx.stream_num
+            );
+            let _ = ctx.data_plane.send_data_stream_stop_sending(stream_id);
+            let _ = drain_registered_stream_to_end(stream, &ctx.data_plane, stream_id).await;
+            return;
+        }
+    };
+    // gate を通すのは再生する (decoder を持つ) stream だけである。録画のみの
+    // 場合は復号しないため、保留する理由が無い
+    let gate_enabled = decoder.is_some();
+    if gate_enabled {
+        ctx.group_switch.begin_stream(header.group_id, stream_id.0);
+    }
+    let video_context = VideoStreamContext {
+        delivery,
+        group_switch: &ctx.group_switch,
+    };
+    let frames = decode_video_stream(
+        stream,
+        &ctx.data_plane,
+        stream_id,
+        header.group_id,
+        sg_decoder,
+        decoder.as_mut(),
+        &video_context,
+    )
+    .await;
+    // decode_video_stream の return 経路 (FIN / RESET_STREAM / STOP_SENDING /
+    // 読み取りエラー / 配送の打ち切り) はすべてここで吸収し、begin と end を
+    // 1 対 1 にする
+    if gate_enabled {
+        ctx.group_switch.end_stream(header.group_id, stream_id.0);
+    }
+    tracing::debug!(
+        "Stream #{}: video group {} complete ({frames} frames)",
+        ctx.stream_num,
+        header.group_id,
+    );
+}
+
+/// Subgroup stream で届く音声 Object を処理する
+///
+/// デコーダは subscription で 1 つを共有する。stream ごとに作ると 20 ms ごとに
+/// 状態が失われ、フレーム境界で波形が不連続になる。
+async fn handle_subgroup_audio_stream(
+    stream: &mut transport::RecvStream,
+    stream_id: DataStreamId,
+    header: &SubgroupHeader,
+    sg_decoder: &mut SubgroupStreamDecoder,
+    ctx: &StreamTaskContext,
+) {
+    let Some((sample_rate, channels)) = ctx.audio_params else {
+        tracing::warn!(
+            "Stream #{}: audio stream arrived but audio is not configured",
+            ctx.stream_num
+        );
+        let _ = ctx.data_plane.send_data_stream_stop_sending(stream_id);
+        let _ = drain_registered_stream_to_end(stream, &ctx.data_plane, stream_id).await;
+        return;
+    };
+    // 再生を行わない場合はロックを取らずに録画だけを行う
+    let mut decoder = match ctx.audio_decoder.as_ref() {
+        Some(decoder) => Some(decoder.lock().await),
+        None => None,
+    };
+    // Audio Config の中身はコーデック依存 (draft-ietf-moq-loc-05 §2.3.3.1 (Audio Config))
+    // のため、catalog の codec が opus の場合のみ OpusHead として解釈する。AAC (mp4a.*)
+    // の Audio Config は AudioSpecificConfig であり、AudioToolbox のデコーダは入力の
+    // サンプルレートとチャンネル数だけで構成できるため解釈しない。
+    // 検証済み世代は subscription で共有する: decode_audio_stream は subgroup stream
+    // ごとに呼ばれるが、OpusHead はセッションで 1 回しか送られないため、共有しないと
+    // 2 本目以降の stream が OpusHead を待ち続けて音声が途切れる。datagram 配送の
+    // 音声とも共有する。
+    let delivery = AudioDelivery {
+        audio_tx: &ctx.audio_tx,
+        audio_config_validated_generation: &ctx.audio_config_validated_generation,
+        session_generation: ctx.session_generation,
+        is_opus_codec: ctx
+            .audio_codec
+            .as_deref()
+            .is_some_and(decoder::is_opus_codec),
+        catalog_sample_rate: sample_rate,
+        catalog_channels: channels,
+        recorder: ctx.recorder.as_ref(),
+        termination_tx: &ctx.termination_tx,
+        catch_up: ctx.audio_catch_up.as_ref(),
+        delivery_order: ctx.audio_delivery_order.as_ref(),
+    };
+    let audio_context = AudioSubgroupContext {
+        header,
+        delivery: &delivery,
+        last_received_locations: &ctx.last_received_locations,
+    };
+    let chunks = decode_audio_stream(
+        stream,
+        &ctx.data_plane,
+        stream_id,
+        sg_decoder,
+        decoder.as_deref_mut(),
+        &audio_context,
+    )
+    .await;
+    tracing::debug!(
+        "Stream #{}: audio group {} complete ({chunks} chunks)",
+        ctx.stream_num,
+        header.group_id,
+    );
+}
+
+/// Subgroup stream で届くカタログを main ループへ渡す
+///
+/// 購読の確立後に配られたカタログを読み、状態 (`CatalogState`) を所有する main ループへ
+/// 渡す。状態を stream task 側に持たせないのは、複数の Group の stream が同時に
+/// 走りうるためである。ヘッダは既に登録済みであるため、ヘッダ登録を含む
+/// `read_catalog_subgroup_stream` は呼ばない (同じ stream への再登録は session error 0x3 に
+/// なる)。
+async fn handle_subgroup_catalog_stream(
+    stream: &mut transport::RecvStream,
+    stream_id: DataStreamId,
+    header: &SubgroupHeader,
+    sg_decoder: &mut SubgroupStreamDecoder,
+    ctx: &StreamTaskContext,
+) {
+    match read_catalog_objects(
+        stream,
+        &ctx.data_plane,
+        stream_id,
+        sg_decoder,
+        header,
+        ctx.catalog_compression,
+    )
+    .await
+    {
+        Ok(objects) => {
+            for object in objects {
+                if ctx.catalog_tx.send(object).await.is_err() {
+                    // main ループが終了した
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            if let Error::Moqt(error) = &e {
+                request_session_termination_for_decode_error(&ctx.termination_tx, error);
+            }
+            tracing::warn!(
+                "Stream #{}: failed to read catalog stream: {e}",
+                ctx.stream_num
+            );
+            // 読み切れなかった stream を Session の会計から外す。残すと timeout まで
+            // open_incoming_subgroup_count が戻らず、cleanup_ready() が false のまま
+            // になって forget_subscription と GOAWAY drain が進まない
+            // (fill fetch の失敗経路と同じ扱い)
+            let _ = ctx.data_plane.send_data_stream_stop_sending(stream_id);
         }
     }
 }
@@ -9161,6 +10590,105 @@ fn monotonic_now_us() -> i64 {
     i64::try_from(start.elapsed().as_micros()).unwrap_or(i64::MAX)
 }
 
+/// Subgroup stream から配送対象の Object を 1 つ読んだ結果
+///
+/// 読み取りの終端とエラーは、呼び出し側が track 種別ごとの文言でログへ出す。復号エラーでは
+/// セッション終了を依頼し、stream の読み捨てもこの関数内で始めている。
+enum SubgroupObjectRead {
+    /// 配送対象の Object と、Application へ渡すかどうか
+    Object {
+        object: DecodedSubgroupObject,
+        deliver: bool,
+    },
+    /// stream の終端 (FIN / RESET_STREAM / Session からの STOP_SENDING 指示)
+    Ended,
+    /// Object の復号エラー (セッション終了を依頼済み)
+    DecodeFailed(MessageError),
+    /// Session への帰属登録の失敗
+    RegisterFailed(TransportError),
+    /// 読み取りエラー
+    ReadFailed(Error),
+}
+
+/// Subgroup stream から次の Object を 1 つ読み、Session へ帰属を登録する
+///
+/// 戻り値の `deliver` は Application へ渡すかどうかである。`FilteredOut` / `Discarded` の
+/// Object も payload は wire 上に存在するため、呼び出し側が読み捨てる。
+async fn read_subgroup_object(
+    stream: &mut transport::RecvStream,
+    data_plane: &DataPlaneHandle,
+    stream_id: DataStreamId,
+    sg_decoder: &mut SubgroupStreamDecoder,
+    termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
+) -> SubgroupObjectRead {
+    loop {
+        match sg_decoder.try_decode_object() {
+            Ok(Some(object)) => {
+                let deliver = match data_plane.recv_subgroup_object(stream_id, &object) {
+                    Ok(TrackDataAcceptance::Accepted) => true,
+                    // header 受理済み stream では `UnknownTrackAlias` は返らない契約だが、
+                    // 型上あり得るため防御的に破棄する
+                    Ok(
+                        TrackDataAcceptance::UnknownTrackAlias
+                        | TrackDataAcceptance::FilteredOut
+                        | TrackDataAcceptance::Discarded,
+                    ) => false,
+                    Err(e) => return SubgroupObjectRead::RegisterFailed(e),
+                };
+                return SubgroupObjectRead::Object { object, deliver };
+            }
+            Ok(None) => {
+                match receive_registered_stream_data_outcome(stream, data_plane, stream_id).await {
+                    Ok(RegisteredStreamData::Data(data)) => sg_decoder.push(&data),
+                    Ok(RegisteredStreamData::End(end)) => {
+                        report_mid_object_fin_if_needed(
+                            data_plane,
+                            stream_id,
+                            &end,
+                            &sg_decoder.finish(),
+                        );
+                        return SubgroupObjectRead::Ended;
+                    }
+                    Ok(RegisteredStreamData::StoppedBySession) => {
+                        return SubgroupObjectRead::Ended;
+                    }
+                    Err(e) => return SubgroupObjectRead::ReadFailed(e),
+                }
+            }
+            Err(e) => {
+                request_session_termination_for_decode_error(termination_tx, &e);
+                let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
+                return SubgroupObjectRead::DecodeFailed(e);
+            }
+        }
+    }
+}
+
+/// Subgroup stream から Object の payload を読み切る
+///
+/// `Ok(None)` は stream の終端 (FIN / RESET_STREAM / Session からの STOP_SENDING 指示) を
+/// 表す。呼び出し側は読み取りを打ち切る。
+async fn read_subgroup_payload(
+    stream: &mut transport::RecvStream,
+    data_plane: &DataPlaneHandle,
+    stream_id: DataStreamId,
+    sg_decoder: &mut SubgroupStreamDecoder,
+) -> Result<Option<Vec<u8>>> {
+    loop {
+        if let Some(payload) = sg_decoder.try_read_payload() {
+            return Ok(Some(payload));
+        }
+        match receive_registered_stream_data_outcome(stream, data_plane, stream_id).await? {
+            RegisteredStreamData::Data(data) => sg_decoder.push(&data),
+            RegisteredStreamData::End(end) => {
+                report_mid_object_fin_if_needed(data_plane, stream_id, &end, &sg_decoder.finish());
+                return Ok(None);
+            }
+            RegisteredStreamData::StoppedBySession => return Ok(None),
+        }
+    }
+}
+
 /// object モードで並べ替える映像 Object
 ///
 /// 受信した Subgroup の Object を、Group ID と Object ID が付いたまま並べ替えバッファへ
@@ -9177,10 +10705,11 @@ struct ObjectModeVideoObject {
     payload: Vec<u8>,
 }
 
-/// object モードの映像 Object の配送に使う購読の状態
+/// 映像 Object の配送に使う購読の状態
 ///
-/// stream task ごとに借用で渡す。並べ替えと復号器は [`ObjectModeVideo`] が共有する。
-struct ObjectModeVideoDelivery<'a> {
+/// live の Subgroup stream、FETCH 応答 stream、object モードの配送が共有する。stream task
+/// ごとに借用で渡す。並べ替えと復号器は [`ObjectModeVideo`] が共有する。
+struct VideoObjectDelivery<'a> {
     /// 映像の復号順の判定 (購読で共有する)
     video_decode_order: &'a std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
     /// 映像の購読境界と送出順の判定 (購読で共有する)
@@ -9193,6 +10722,18 @@ struct ObjectModeVideoDelivery<'a> {
     last_received_locations: &'a std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
     /// 書式違反によるセッション終了を依頼するチャネル
     termination_tx: &'a tokio::sync::mpsc::Sender<SessionError>,
+}
+
+/// group モードの Subgroup stream で映像 Object を配送するときに使う購読の状態
+///
+/// [`VideoObjectDelivery`] に Group の切り替え gate を加えたものである。gate は live の
+/// Subgroup stream だけで使うため、FETCH 応答と object モードは [`VideoObjectDelivery`] を
+/// そのまま受け取る。
+struct VideoStreamContext<'a> {
+    /// Object の配送経路
+    delivery: VideoObjectDelivery<'a>,
+    /// Group の切り替え gate (購読で 1 つ共有する)
+    group_switch: &'a GroupSwitchHandle,
 }
 
 /// object モードの映像 Object の並べ替えと復号器の共有状態
@@ -9278,7 +10819,7 @@ impl ObjectModeVideo {
     async fn deliver_object(
         &self,
         object: ObjectModeVideoObject,
-        delivery: &ObjectModeVideoDelivery<'_>,
+        delivery: &VideoObjectDelivery<'_>,
     ) -> VideoDelivery {
         // 並べ替えと配送を同じロックで直列化する。配送中に別の stream task が Object を
         // 追加しても、Object ID 順の配送が崩れない
@@ -9300,12 +10841,8 @@ impl ObjectModeVideo {
                 object.object_id,
                 object.value.properties_bytes.as_deref(),
                 &object.value.payload,
-                delivery.video_decode_order,
-                delivery.video_delivery_order,
                 state.decoder.as_mut(),
-                delivery.sink,
-                delivery.recorder,
-                delivery.termination_tx,
+                delivery,
             )
             .await;
             match result {
@@ -9330,88 +10867,50 @@ async fn decode_object_mode_video_stream(
     group_id: u64,
     sg_decoder: &mut SubgroupStreamDecoder,
     object_mode_video: &ObjectModeVideo,
-    delivery: &ObjectModeVideoDelivery<'_>,
+    delivery: &VideoObjectDelivery<'_>,
 ) -> u64 {
     let mut frames: u64 = 0;
     loop {
-        let (obj, deliver) = loop {
-            match sg_decoder.try_decode_object() {
-                Ok(Some(object)) => {
-                    let deliver = match data_plane.recv_subgroup_object(stream_id, &object) {
-                        Ok(TrackDataAcceptance::Accepted) => true,
-                        // header 受理済み stream では `UnknownTrackAlias` は返らない契約だが、
-                        // 型上あり得るため防御的に破棄する
-                        Ok(
-                            TrackDataAcceptance::UnknownTrackAlias
-                            | TrackDataAcceptance::FilteredOut
-                            | TrackDataAcceptance::Discarded,
-                        ) => false,
-                        Err(e) => {
-                            tracing::warn!("Failed to register video object: {e}");
-                            return frames;
-                        }
-                    };
-                    break (object, deliver);
-                }
-                Ok(None) => {
-                    match receive_registered_stream_data_outcome(stream, data_plane, stream_id)
-                        .await
-                    {
-                        Ok(RegisteredStreamData::Data(data)) => sg_decoder.push(&data),
-                        Ok(RegisteredStreamData::End(end)) => {
-                            report_mid_object_fin_if_needed(
-                                data_plane,
-                                stream_id,
-                                &end,
-                                &sg_decoder.finish(),
-                            );
-                            return frames;
-                        }
-                        Ok(RegisteredStreamData::StoppedBySession) => return frames,
-                        Err(e) => {
-                            log_failure(
-                                format_args!("Failed to read object: {e}"),
-                                is_transport_session_end(&e),
-                            );
-                            return frames;
-                        }
-                    }
-                }
-                Err(e) => {
-                    request_session_termination_for_decode_error(delivery.termination_tx, &e);
-                    tracing::warn!("Failed to decode object: {e}");
-                    let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
-                    return frames;
-                }
+        let (object, deliver) = match read_subgroup_object(
+            stream,
+            data_plane,
+            stream_id,
+            sg_decoder,
+            delivery.termination_tx,
+        )
+        .await
+        {
+            SubgroupObjectRead::Object { object, deliver } => (object, deliver),
+            SubgroupObjectRead::Ended => return frames,
+            SubgroupObjectRead::DecodeFailed(e) => {
+                tracing::warn!("Failed to decode object: {e}");
+                return frames;
+            }
+            SubgroupObjectRead::RegisterFailed(e) => {
+                tracing::warn!("Failed to register video object: {e}");
+                return frames;
+            }
+            SubgroupObjectRead::ReadFailed(e) => {
+                log_failure(
+                    format_args!("Failed to read object: {e}"),
+                    is_transport_session_end(&e),
+                );
+                return frames;
             }
         };
-        if obj.payload_length == 0 {
+        if object.payload_length == 0 {
             continue;
         }
         // 配送しない Object でも payload は wire 上に存在するため読み出して消費する
-        let payload = loop {
-            if let Some(payload) = sg_decoder.try_read_payload() {
-                break payload;
-            }
-            match receive_registered_stream_data_outcome(stream, data_plane, stream_id).await {
-                Ok(RegisteredStreamData::Data(data)) => sg_decoder.push(&data),
-                Ok(RegisteredStreamData::End(end)) => {
-                    report_mid_object_fin_if_needed(
-                        data_plane,
-                        stream_id,
-                        &end,
-                        &sg_decoder.finish(),
-                    );
-                    return frames;
-                }
-                Ok(RegisteredStreamData::StoppedBySession) => return frames,
-                Err(e) => {
-                    log_failure(
-                        format_args!("Failed to read object payload: {e}"),
-                        is_transport_session_end(&e),
-                    );
-                    return frames;
-                }
+        let payload = match read_subgroup_payload(stream, data_plane, stream_id, sg_decoder).await {
+            Ok(Some(payload)) => payload,
+            Ok(None) => return frames,
+            Err(e) => {
+                log_failure(
+                    format_args!("Failed to read object payload: {e}"),
+                    is_transport_session_end(&e),
+                );
+                return frames;
             }
         };
         if !deliver {
@@ -9421,9 +10920,9 @@ async fn decode_object_mode_video_stream(
             .deliver_object(
                 ObjectModeVideoObject {
                     group_id,
-                    object_id: obj.object_id,
-                    properties_bytes: obj.properties_bytes.clone(),
-                    payload: payload.to_vec(),
+                    object_id: object.object_id,
+                    properties_bytes: object.properties_bytes.clone(),
+                    payload,
                 },
                 delivery,
             )
@@ -9440,112 +10939,67 @@ async fn decode_object_mode_video_stream(
 /// `group_id` は Subgroup ヘッダの Group ID である。Subgroup ストリームの Object はすべて
 /// 同じ Group に属する (draft-ietf-moq-transport-23 §2.2 (Subgroups)) ため、Object ごとに
 /// 読む必要はない。
-/// `video_decode_order` は購読で共有する復号順の判定である。復号の直前に通し、復号してよい
-/// Object だけを decoder へ渡す。
-/// `video_delivery_order` は購読で共有する購読境界の判定である。復号の後、`frame_tx` への
-/// 送出前に通す。
-/// `group_switch` は購読で共有する Group の切り替え gate である。前の Group の stream が
-/// 開いている間は、この Object を payload ごと保持したまま待ち、解除後に同じ decoder で
-/// 復号する。保留中は「最後に受信した位置」を記録しない (移行で保留を捨てたときに、新しい
-/// 購読の Location Filter がその位置から取り直せるようにするため)。
-#[expect(clippy::too_many_arguments)]
+/// `context` の `video_decode_order` は購読で共有する復号順の判定である。復号の直前に
+/// 通し、復号してよい Object だけを decoder へ渡す。
+/// `context` の `video_delivery_order` は購読で共有する購読境界の判定である。復号の後、
+/// `frame_tx` への送出前に通す。
+/// `context.group_switch` は購読で共有する Group の切り替え gate である。前の Group の
+/// stream が開いている間は、この Object を payload ごと保持したまま待ち、解除後に同じ
+/// decoder で復号する。保留中は「最後に受信した位置」を記録しない (移行で保留を捨てた
+/// ときに、新しい購読の Location Filter がその位置から取り直せるようにするため)。
 async fn decode_video_stream(
     stream: &mut transport::RecvStream,
     data_plane: &DataPlaneHandle,
     stream_id: DataStreamId,
     group_id: u64,
     sg_decoder: &mut SubgroupStreamDecoder,
-    video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
-    video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
-    group_switch: &GroupSwitchHandle,
     mut video_decoder: Option<&mut decoder::VideoDecoder>,
-    sink: &FrameSink<'_>,
-    last_received_locations: &std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
-    recorder: Option<&RecorderSender>,
-    termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
+    context: &VideoStreamContext<'_>,
 ) -> u64 {
+    let delivery = &context.delivery;
     let mut frames: u64 = 0;
     loop {
-        // 帰属判定の結果。`FilteredOut` / `Discarded` の Object は Application へ渡さない。
-        let (obj, deliver) = loop {
-            match sg_decoder.try_decode_object() {
-                Ok(Some(o)) => {
-                    let deliver = match data_plane.recv_subgroup_object(stream_id, &o) {
-                        Ok(TrackDataAcceptance::Accepted) => true,
-                        // header 受理済み stream では `UnknownTrackAlias` は返らない契約だが、
-                        // 型上あり得るため防御的に破棄する
-                        Ok(
-                            TrackDataAcceptance::UnknownTrackAlias
-                            | TrackDataAcceptance::FilteredOut
-                            | TrackDataAcceptance::Discarded,
-                        ) => false,
-                        Err(e) => {
-                            tracing::warn!("Failed to register video object: {e}");
-                            return frames;
-                        }
-                    };
-                    break (o, deliver);
-                }
-                Ok(None) => {
-                    match receive_registered_stream_data_outcome(stream, data_plane, stream_id)
-                        .await
-                    {
-                        Ok(RegisteredStreamData::Data(data)) => sg_decoder.push(&data),
-                        Ok(RegisteredStreamData::End(end)) => {
-                            report_mid_object_fin_if_needed(
-                                data_plane,
-                                stream_id,
-                                &end,
-                                &sg_decoder.finish(),
-                            );
-                            return frames;
-                        }
-                        Ok(RegisteredStreamData::StoppedBySession) => return frames,
-                        Err(e) => {
-                            log_failure(
-                                format_args!("Failed to read object: {e}"),
-                                is_transport_session_end(&e),
-                            );
-                            return frames;
-                        }
-                    }
-                }
-                Err(e) => {
-                    request_session_termination_for_decode_error(termination_tx, &e);
-                    tracing::warn!("Failed to decode object: {e}");
-                    let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
-                    return frames;
-                }
+        let (object, deliver) = match read_subgroup_object(
+            stream,
+            data_plane,
+            stream_id,
+            sg_decoder,
+            delivery.termination_tx,
+        )
+        .await
+        {
+            SubgroupObjectRead::Object { object, deliver } => (object, deliver),
+            SubgroupObjectRead::Ended => return frames,
+            SubgroupObjectRead::DecodeFailed(e) => {
+                tracing::warn!("Failed to decode object: {e}");
+                return frames;
+            }
+            SubgroupObjectRead::RegisterFailed(e) => {
+                tracing::warn!("Failed to register video object: {e}");
+                return frames;
+            }
+            SubgroupObjectRead::ReadFailed(e) => {
+                log_failure(
+                    format_args!("Failed to read object: {e}"),
+                    is_transport_session_end(&e),
+                );
+                return frames;
             }
         };
-        if obj.payload_length == 0 {
+        if object.payload_length == 0 {
             continue;
         }
         // `FilteredOut` / `Discarded` の Object でも payload は wire 上に存在するため
         // 読み出して消費する。残すと次の `try_decode_object` が ProtocolViolation になる。
-        let payload = loop {
-            if let Some(p) = sg_decoder.try_read_payload() {
-                break p;
-            }
-            match receive_registered_stream_data_outcome(stream, data_plane, stream_id).await {
-                Ok(RegisteredStreamData::Data(data)) => sg_decoder.push(&data),
-                Ok(RegisteredStreamData::End(end)) => {
-                    report_mid_object_fin_if_needed(
-                        data_plane,
-                        stream_id,
-                        &end,
-                        &sg_decoder.finish(),
-                    );
-                    return frames;
-                }
-                Ok(RegisteredStreamData::StoppedBySession) => return frames,
-                Err(e) => {
-                    log_failure(
-                        format_args!("Failed to read object payload: {e}"),
-                        is_transport_session_end(&e),
-                    );
-                    return frames;
-                }
+        let payload = match read_subgroup_payload(stream, data_plane, stream_id, sg_decoder).await {
+            Ok(Some(payload)) => payload,
+            Ok(None) => return frames,
+            Err(e) => {
+                log_failure(
+                    format_args!("Failed to read object payload: {e}"),
+                    is_transport_session_end(&e),
+                );
+                return frames;
             }
         };
         // 配送しない Object (`FilteredOut` / `Discarded`) は Properties を解釈しない。
@@ -9560,34 +11014,30 @@ async fn decode_video_stream(
         // Location Filter がその位置から取り直せるようにするため)
         if video_decoder.is_some() {
             wait_until_video_deliverable(
-                group_switch,
+                context.group_switch,
                 group_id,
-                obj.object_id,
-                last_received_locations,
+                object.object_id,
+                delivery.last_received_locations,
             )
             .await;
         } else {
             record_last_location(
-                last_received_locations,
+                delivery.last_received_locations,
                 TrackKind::Video,
                 Location {
                     group_id,
-                    object_id: obj.object_id,
+                    object_id: object.object_id,
                 },
             );
         }
         // 配送は live の Subgroup stream と FETCH 応答 stream で同じ関数を通す
         match deliver_video_object(
             group_id,
-            obj.object_id,
-            obj.properties_bytes.as_deref(),
+            object.object_id,
+            object.properties_bytes.as_deref(),
             &payload,
-            video_decode_order,
-            video_delivery_order,
             video_decoder.as_deref_mut(),
-            sink,
-            recorder,
-            termination_tx,
+            delivery,
         )
         .await
         {
@@ -9663,29 +11113,24 @@ fn video_delivery_on_properties_error(
 /// Group であり、Subgroup stream ではヘッダの Group ID、FETCH 応答 stream では entry の
 /// Group ID を使う。
 ///
-/// `video_decode_order` は購読で共有する復号順の判定であり、`video_decoder` は stream ごとに
-/// 作る復号器である。判定が `Skip` の Object (`Stale` / `MissingReference`) は復号しない
+/// `delivery` は購読で共有する復号順・購読境界の判定と、録画・送出の経路をまとめたもので
+/// ある。復号順の判定が `Skip` の Object (`Stale` / `MissingReference`) は復号しない
 /// (キーフレームから復号を始める規則は [`VideoDecodeOrder`] が持つ)。録画は復号の可否に
-/// 関わらず行う。`video_decode_order` は FETCH 応答でも live と共有するため、live で復号中の
+/// 関わらず行う。復号順の判定は FETCH 応答でも live と共有するため、live で復号中の
 /// Group より古い Group を FETCH で取得した場合、その Object は `Stale` として復号されない
 /// (取得した範囲は、live の録画が始まる前に届いた分だけが録画に残る。録画は最初の
 /// キーフレームを基準時刻にし、それより前の時刻の Object を破棄するためである)。
 ///
-/// `video_delivery_order` は購読で共有する購読境界の判定である。境界以下の Object は復号は
-/// するが `frame_tx` へ送出しない ([`VideoDeliveryOrder`])。録画は境界の判定より前に行うため、
-/// 境界以下の Object も録画の対象になる。
-#[expect(clippy::too_many_arguments)]
+/// 購読境界の判定も `delivery` が共有する。境界以下の Object は復号はするが `frame_tx` へ
+/// 送出しない ([`VideoDeliveryOrder`])。録画は境界の判定より前に行うため、境界以下の
+/// Object も録画の対象になる。
 async fn deliver_video_object(
     group_id: u64,
     object_id: u64,
     properties_bytes: Option<&[u8]>,
     payload: &[u8],
-    video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
-    video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
     video_decoder: Option<&mut decoder::VideoDecoder>,
-    sink: &FrameSink<'_>,
-    recorder: Option<&RecorderSender>,
-    termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
+    delivery: &VideoObjectDelivery<'_>,
 ) -> VideoDelivery {
     // 表示時刻を決めるために LOC の Timestamp も取り出す
     // (書式違反は配送の有無や処理済みフラグに関わらず毎 Object で検出する)
@@ -9694,17 +11139,17 @@ async fn deliver_video_object(
             loc_timestamp_us(timestamp, timescale),
             timestamp_kind_of(timestamp, timescale),
         ),
-        Err(e) => return video_delivery_on_properties_error(termination_tx, &e),
+        Err(e) => return video_delivery_on_properties_error(delivery.termination_tx, &e),
     };
     let video_config = match extract_video_config(properties_bytes) {
         Ok(config) => config,
-        Err(e) => return video_delivery_on_properties_error(termination_tx, &e),
+        Err(e) => return video_delivery_on_properties_error(delivery.termination_tx, &e),
     };
-    if let Some(recorder) = recorder
+    if let Some(recorder) = delivery.recorder
         && let Err(e) =
             record_video_object(recorder, properties_bytes, video_config.as_deref(), payload)
     {
-        return video_delivery_on_properties_error(termination_tx, &e);
+        return video_delivery_on_properties_error(delivery.termination_tx, &e);
     }
     // 再生しない指定と、表示待ちの超過でデコードをスキップする場合は復号器が無い。
     // 録画だけを行って配送を終える
@@ -9715,18 +11160,18 @@ async fn deliver_video_object(
     // 映像も復号できるように、PROP_VIDEO_CONFIG の有無で代用する。
     let is_key_frame = match is_video_keyframe(properties_bytes, video_config.as_deref()) {
         Ok(keyframe) => keyframe,
-        Err(e) => return video_delivery_on_properties_error(termination_tx, &e),
+        Err(e) => return video_delivery_on_properties_error(delivery.termination_tx, &e),
     };
     // Prior Object ID Gap は Object Properties から読む (Property が無ければ 0)
     let prior_object_id_gap = match prior_object_id_gap_of(properties_bytes) {
         Ok(gap) => gap,
-        Err(e) => return video_delivery_on_properties_error(termination_tx, &e),
+        Err(e) => return video_delivery_on_properties_error(delivery.termination_tx, &e),
     };
     // 復号してよい Object か判定する。Group ごとに別の stream で届くため、判定の状態は
     // 購読で共有する (draft-ietf-moq-transport-23 §2.2 (Subgroups))。ロックは判定の
     // 間だけ持ち、復号 (block_in_place) の間は持たない。
     let admission = {
-        let mut decode_order = video_decode_order.lock().await;
+        let mut decode_order = delivery.video_decode_order.lock().await;
         decode_order.admit(&VideoObjectPosition {
             group_id,
             object_id,
@@ -9750,7 +11195,8 @@ async fn deliver_video_object(
     // 購読の境界の判定は復号の後、`frame_tx` への送出前に行う。境界以下は購読より前に
     // publish された Object であり、表示しない (録画は境界の判定より前に行うため残る)
     let (before_boundary, boundary) = {
-        let mut order = video_delivery_order
+        let mut order = delivery
+            .video_delivery_order
             .lock()
             .expect("video delivery order lock is not poisoned");
         let boundary = order.boundary();
@@ -9768,7 +11214,7 @@ async fn deliver_video_object(
         );
         return VideoDelivery::Delivered(0);
     }
-    let frames = send_decoded_frames(decoded, timestamp_us, timestamp_kind, sink);
+    let frames = send_decoded_frames(decoded, timestamp_us, timestamp_kind, delivery.sink);
     VideoDelivery::Delivered(frames)
 }
 
@@ -10218,109 +11664,82 @@ fn plan_datagram<'a>(raw: &'a [u8], track_map: &HashMap<u64, TrackKind>) -> Data
     }
 }
 
+/// 音声の Subgroup stream を処理するときに使う購読の状態
+///
+/// `header` は Group ID と Track Alias を持つ Subgroup ヘッダである。音声の配送は
+/// [`AudioDelivery`] が担い、track ごとに最後に受信した位置は stream task 間で共有する。
+struct AudioSubgroupContext<'a> {
+    /// この stream の Subgroup ヘッダ
+    header: &'a SubgroupHeader,
+    /// 音声 Object の配送経路
+    delivery: &'a AudioDelivery<'a>,
+    /// track ごとに最後に受信した Object の位置
+    last_received_locations: &'a std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
+}
+
 /// 1 本の audio subgroup ストリームから音声パケットを順次デコードする
 ///
-/// LOC draft-ietf-moq-loc-05 §4.1 (Application with one audio track) では「1 audio chunk = 1 Object = 1 Group」と例示されているが、
-/// 防御的に subgroup 内の object をすべて処理する。
+/// LOC draft-ietf-moq-loc-05 §4.1 (Application with one audio track) では「1 audio chunk = 1
+/// Object = 1 Group」と例示されているが、防御的に subgroup 内の object をすべて処理する。
 ///
 /// 配送 (録画、Audio Config の検証、デコード、フレーム送出) は [`AudioDelivery::deliver`] が
 /// 行う。datagram で届く音声も同じ関数を通る。
-#[expect(clippy::too_many_arguments)]
 async fn decode_audio_stream(
     stream: &mut transport::RecvStream,
     data_plane: &DataPlaneHandle,
     stream_id: DataStreamId,
-    header: &SubgroupHeader,
     sg_decoder: &mut SubgroupStreamDecoder,
     mut audio_decoder: Option<&mut AudioDecoder>,
-    delivery: &AudioDelivery<'_>,
-    last_received_locations: &std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
+    context: &AudioSubgroupContext<'_>,
 ) -> u64 {
+    let delivery = context.delivery;
     let mut chunks: u64 = 0;
     loop {
         // 帰属判定の結果。`FilteredOut` / `Discarded` の Object は Application へ渡さない。
-        let (obj, deliver) = loop {
-            match sg_decoder.try_decode_object() {
-                Ok(Some(o)) => {
-                    let deliver = match data_plane.recv_subgroup_object(stream_id, &o) {
-                        Ok(TrackDataAcceptance::Accepted) => true,
-                        // header 受理済み stream では `UnknownTrackAlias` は返らない契約だが、
-                        // 型上あり得るため防御的に破棄する
-                        Ok(
-                            TrackDataAcceptance::UnknownTrackAlias
-                            | TrackDataAcceptance::FilteredOut
-                            | TrackDataAcceptance::Discarded,
-                        ) => false,
-                        Err(e) => {
-                            tracing::warn!("Failed to register audio object: {e}");
-                            return chunks;
-                        }
-                    };
-                    break (o, deliver);
-                }
-                Ok(None) => {
-                    match receive_registered_stream_data_outcome(stream, data_plane, stream_id)
-                        .await
-                    {
-                        Ok(RegisteredStreamData::Data(data)) => sg_decoder.push(&data),
-                        Ok(RegisteredStreamData::End(end)) => {
-                            report_mid_object_fin_if_needed(
-                                data_plane,
-                                stream_id,
-                                &end,
-                                &sg_decoder.finish(),
-                            );
-                            return chunks;
-                        }
-                        Ok(RegisteredStreamData::StoppedBySession) => return chunks,
-                        Err(e) => {
-                            log_failure(
-                                format_args!("Failed to read audio object: {e}"),
-                                is_transport_session_end(&e),
-                            );
-                            return chunks;
-                        }
-                    }
-                }
-                Err(e) => {
-                    request_session_termination_for_decode_error(delivery.termination_tx, &e);
-                    tracing::warn!("Failed to decode audio object: {e}");
-                    let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
-                    return chunks;
-                }
+        let (object, deliver) = match read_subgroup_object(
+            stream,
+            data_plane,
+            stream_id,
+            sg_decoder,
+            delivery.termination_tx,
+        )
+        .await
+        {
+            SubgroupObjectRead::Object { object, deliver } => (object, deliver),
+            SubgroupObjectRead::Ended => return chunks,
+            SubgroupObjectRead::DecodeFailed(e) => {
+                tracing::warn!("Failed to decode audio object: {e}");
+                return chunks;
+            }
+            SubgroupObjectRead::RegisterFailed(e) => {
+                tracing::warn!("Failed to register audio object: {e}");
+                return chunks;
+            }
+            SubgroupObjectRead::ReadFailed(e) => {
+                log_failure(
+                    format_args!("Failed to read audio object: {e}"),
+                    is_transport_session_end(&e),
+                );
+                return chunks;
             }
         };
         // payload_length == 0 のオブジェクト (Object Status のみ) は実データが無く、
         // Audio Config を付与する意味がない (現行 publisher は実 payload 付きオブジェクトに
         // 付与する) ため、検証の前にスキップする
-        if obj.payload_length == 0 {
+        if object.payload_length == 0 {
             continue;
         }
         // `FilteredOut` / `Discarded` の Object でも payload は wire 上に存在するため
         // 読み出して消費する。残すと次の `try_decode_object` が ProtocolViolation になる。
-        let payload = loop {
-            if let Some(p) = sg_decoder.try_read_payload() {
-                break p;
-            }
-            match receive_registered_stream_data_outcome(stream, data_plane, stream_id).await {
-                Ok(RegisteredStreamData::Data(data)) => sg_decoder.push(&data),
-                Ok(RegisteredStreamData::End(end)) => {
-                    report_mid_object_fin_if_needed(
-                        data_plane,
-                        stream_id,
-                        &end,
-                        &sg_decoder.finish(),
-                    );
-                    return chunks;
-                }
-                Ok(RegisteredStreamData::StoppedBySession) => return chunks,
-                Err(e) => {
-                    log_failure(
-                        format_args!("Failed to read audio payload: {e}"),
-                        is_transport_session_end(&e),
-                    );
-                    return chunks;
-                }
+        let payload = match read_subgroup_payload(stream, data_plane, stream_id, sg_decoder).await {
+            Ok(Some(payload)) => payload,
+            Ok(None) => return chunks,
+            Err(e) => {
+                log_failure(
+                    format_args!("Failed to read audio payload: {e}"),
+                    is_transport_session_end(&e),
+                );
+                return chunks;
             }
         };
         // 配送しない Object (`FilteredOut` / `Discarded`) と payload を持たない Object は
@@ -10329,12 +11748,12 @@ async fn decode_audio_stream(
             continue;
         }
         // 移行後の再購読で使う「最後に受信した位置」を記録する
-        let location = subgroup_object_location(header, &obj);
-        record_last_location(last_received_locations, TrackKind::Audio, location);
+        let location = subgroup_object_location(context.header, &object);
+        record_last_location(context.last_received_locations, TrackKind::Audio, location);
         if !delivery
             .deliver(
                 Some(location),
-                obj.properties_bytes.as_deref(),
+                object.properties_bytes.as_deref(),
                 &payload,
                 audio_decoder.as_deref_mut(),
             )
@@ -10518,7 +11937,6 @@ fn log_fetch_boundary(stream_num: u64, entry: &DecodedFetchEntry) {
 /// Group より古い場合、その Object は `Stale` として復号されない (録画は live の録画が
 /// 始まる前に届いた分だけが残る)。購読の境界の判定も live と共有する
 /// ([`VideoDeliveryOrder`])。
-#[expect(clippy::too_many_arguments)]
 async fn read_video_fetch_stream(
     stream: &mut transport::RecvStream,
     data_plane: &DataPlaneHandle,
@@ -10526,12 +11944,7 @@ async fn read_video_fetch_stream(
     decoder: &mut FetchStreamDecoder,
     stream_num: u64,
     mut video_decoder: Option<&mut decoder::VideoDecoder>,
-    sink: &FrameSink<'_>,
-    video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
-    video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
-    last_received_locations: &std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
-    recorder: Option<&RecorderSender>,
-    termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
+    delivery: &VideoObjectDelivery<'_>,
 ) {
     loop {
         let (entry, payload) = match read_fetch_entry(stream, data_plane, stream_id, decoder).await
@@ -10564,27 +11977,23 @@ async fn read_video_fetch_stream(
         }
         // 移行後の再購読で使う「最後に受信した位置」を記録する
         record_last_location(
-            last_received_locations,
+            delivery.last_received_locations,
             TrackKind::Video,
             Location {
                 group_id: obj.group_id,
                 object_id: obj.object_id,
             },
         );
-        let delivery = deliver_video_object(
+        let outcome = deliver_video_object(
             obj.group_id,
             obj.object_id,
             obj.properties_bytes.as_deref(),
             &payload,
-            video_decode_order,
-            video_delivery_order,
             video_decoder.as_deref_mut(),
-            sink,
-            recorder,
-            termination_tx,
+            delivery,
         )
         .await;
-        if video_fetch_stream_needs_cleanup(delivery) {
+        if video_fetch_stream_needs_cleanup(outcome) {
             // malformed Track はセッション終了ではなく購読 / fetch の cancel で済ませるが
             // (draft-ietf-moq-transport-23 §12.1 (Malformed Tracks))、FETCH 応答 stream を
             // Session の会計に残したままだと DATA_STREAM_TIMEOUT でセッションが閉じる
@@ -10596,7 +12005,7 @@ async fn read_video_fetch_stream(
         }
         // セッション終了を依頼した場合は main ループが接続を閉じる。依頼が通らなかった
         // 場合も main ループは既に停止しているため、stream の後始末は要らない
-        if matches!(delivery, VideoDelivery::Terminated) {
+        if matches!(outcome, VideoDelivery::Terminated) {
             return;
         }
     }
@@ -14143,19 +15552,19 @@ mod tests {
         shiguredo_moqt::varint::encode(inner.len() as u64, &mut properties);
         properties.extend_from_slice(&inner);
 
-        let result = deliver_video_object(
-            10,
-            0,
-            Some(&properties),
-            b"payload",
-            &decode_order,
-            &delivery_order,
-            None,
-            &sink,
-            None,
-            &termination_tx,
-        )
-        .await;
+        // deliver_video_object は位置の記録を行わないため、この経路では空の状態を渡す
+        let last_received_locations =
+            std::sync::Arc::new(std::sync::Mutex::new(LastReceivedLocations::default()));
+        let delivery = VideoObjectDelivery {
+            video_decode_order: &decode_order,
+            video_delivery_order: &delivery_order,
+            sink: &sink,
+            recorder: None,
+            last_received_locations: &last_received_locations,
+            termination_tx: &termination_tx,
+        };
+        let result =
+            deliver_video_object(10, 0, Some(&properties), b"payload", None, &delivery).await;
 
         assert!(
             matches!(result, VideoDelivery::MalformedTrack),
@@ -15573,7 +16982,7 @@ mod tests {
                 }));
             let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
             let object_mode_video = ObjectModeVideo::new(StreamMapping::Object, true, Some("vp8"));
-            let delivery = ObjectModeVideoDelivery {
+            let delivery = VideoObjectDelivery {
                 video_decode_order: &video_decode_order,
                 video_delivery_order: &video_delivery_order,
                 sink: &sink,
@@ -15786,17 +17195,24 @@ mod tests {
             let properties = video_loc_properties(timestamp, timescale, video_config, is_keyframe)
                 .encode()
                 .expect("LOC プロパティを encode できること");
+            // deliver_video_object は位置の記録を行わないため、この経路では空の状態を渡す
+            let last_received_locations =
+                std::sync::Arc::new(std::sync::Mutex::new(LastReceivedLocations::default()));
+            let delivery = VideoObjectDelivery {
+                video_decode_order: decode_order,
+                video_delivery_order: delivery_order,
+                sink,
+                recorder,
+                last_received_locations: &last_received_locations,
+                termination_tx,
+            };
             deliver_video_object(
                 location.group_id,
                 location.object_id,
                 Some(&properties),
                 payload,
-                decode_order,
-                delivery_order,
                 decoder,
-                sink,
-                recorder,
-                termination_tx,
+                &delivery,
             )
             .await
         }
@@ -17708,14 +19124,22 @@ mod tests {
                 let handle = tokio::spawn(async move {
                     run(
                         config,
-                        frame_tx,
-                        audio_tx,
+                        PipelineIo {
+                            frame_tx,
+                            audio_tx,
+                            display_backlog: std::sync::Arc::new(
+                                std::sync::atomic::AtomicI64::new(0),
+                            ),
+                            target_latency_ms: std::sync::Arc::new(
+                                std::sync::atomic::AtomicI64::new(-1),
+                            ),
+                            video_subscribed: std::sync::Arc::new(
+                                std::sync::atomic::AtomicBool::new(true),
+                            ),
+                            player_stop: player_stop_rx,
+                        },
                         task_monitor,
                         shutdown_monitor,
-                        std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
-                        std::sync::Arc::new(std::sync::atomic::AtomicI64::new(-1)),
-                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-                        player_stop_rx,
                     )
                     .await
                 });
