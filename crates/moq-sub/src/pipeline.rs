@@ -47,9 +47,9 @@ use shiguredo_moqt::{
     message_parameter::MessageParameters, message_parameter::PARAM_FILL_PARAMETERS,
     message_parameter::PARAM_LOCATION_FILTER, message_parameter::PARAM_NEW_GROUP_REQUEST,
     message_parameter::PARAM_RENDEZVOUS_TIMEOUT, message_parameter::PARAM_SUBSCRIBER_PRIORITY,
-    msf::MSF_CATALOG_TRACK_NAME, msf::MsfTrack, msf::StreamMapping, msf::parse_catalog_namespace,
-    name::serialize_namespace, name::serialize_track_name, session::types::DataStreamId,
-    session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
+    msf::MSF_CATALOG_TRACK_NAME, msf::MsfCompression, msf::MsfTrack, msf::StreamMapping,
+    msf::parse_catalog_namespace, name::serialize_namespace, name::serialize_track_name,
+    session::types::DataStreamId, session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
     stream::decoder::DecodedSubgroupObject, stream::decoder::FetchStreamDecoder,
     stream::decoder::SubgroupStreamDecoder, stream::fetch::FetchHeader,
 };
@@ -1214,6 +1214,7 @@ fn spawn_stream_task(
     last_received_locations: &std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
     catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
+    catalog_compression: MsfCompression,
     pending_subgroups: &SharedPendingSubgroupBuffer,
     playback: bool,
     recorder: Option<&RecorderSender>,
@@ -1272,6 +1273,7 @@ fn spawn_stream_task(
             &last_received_locations,
             &termination_tx,
             &catalog_tx,
+            catalog_compression,
             &pending_subgroups,
             playback,
             recorder.as_ref(),
@@ -3362,6 +3364,7 @@ async fn run_side_session(
                 &shared.last_received_locations,
                 &side_termination_tx,
                 &shared.catalog_tx,
+                MsfCompression::None,
                 &shared.pending_subgroups,
                 shared.playback,
                 shared.recorder.as_ref(),
@@ -4139,6 +4142,9 @@ pub async fn run(
     // 同じ `Option` の契約にする)
     let mut catalog_request_id: Option<u64> = Some(catalog_sub.request_id);
     let mut catalog_alias: Option<u64> = Some(catalog_sub.track_alias);
+    // catalog track の MSF_COMPRESSION。SUBSCRIBE_OK の Track Property から解決する。
+    // catalog の data stream はこの値で gzip かどうかを決める。
+    let mut catalog_compression = MsfCompression::None;
 
     // 音声は 1 object = 1 subgroup stream で届く (LOC draft-ietf-moq-loc-05 §4.1)。
     // stream ごとにデコーダを作り直すと 20 ms ごとにデコーダ状態が失われ、
@@ -4609,6 +4615,7 @@ pub async fn run(
                 &last_received_locations,
                 &termination_tx,
                 &catalog_tx,
+                catalog_compression,
                 &pending_subgroups,
                 playback,
                 recorder_sender.as_ref(),
@@ -5322,6 +5329,29 @@ pub async fn run(
                                         "Ignoring a PUBLISH_DONE for an unknown request: request_id={request_id}"
                                     );
                                 }
+                            }
+                            Ok(false)
+                        }
+                        Some(ClientEvent::Session(SessionEvent::RequestOkReceived {
+                            request_id,
+                            track_properties,
+                            ..
+                        })) => {
+                            // catalog 購読の SUBSCRIBE_OK が MSF_COMPRESSION を運んだ場合、
+                            // catalog の data stream を正しくデコードするために保持する。
+                            if catalog_request_id == Some(request_id) {
+                                catalog_compression = match track_properties.msf_compression() {
+                                    Some(value) => match MsfCompression::try_from(value) {
+                                        Ok(compression) => compression,
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "Unsupported catalog MSF_COMPRESSION: {e}"
+                                            );
+                                            MsfCompression::None
+                                        }
+                                    },
+                                    None => MsfCompression::None,
+                                };
                             }
                             Ok(false)
                         }
@@ -7313,6 +7343,7 @@ async fn receive_catalog(
                         stream_id,
                         &buf,
                         fill_request_id,
+                        MsfCompression::None,
                     ),
                 )
                 .await
@@ -7349,6 +7380,7 @@ async fn receive_catalog(
                         stream_id,
                         &buf,
                         catalog_alias,
+                        MsfCompression::None,
                     ),
                 )
                 .await
@@ -7519,6 +7551,7 @@ async fn read_catalog_fetch_stream(
     stream_id: DataStreamId,
     buf: &[u8],
     expected_request_id: u64,
+    compression: MsfCompression,
 ) -> Result<Vec<catalog::CatalogObject>> {
     let mut decoder = FetchStreamDecoder::new();
     decoder.push(buf);
@@ -7550,7 +7583,7 @@ async fn read_catalog_fetch_stream(
             fetch_header.request_id,
         )));
     }
-    read_catalog_fetch_objects(stream, data_plane, stream_id, &mut decoder).await
+    read_catalog_fetch_objects(stream, data_plane, stream_id, &mut decoder, compression).await
 }
 
 /// FETCH_HEADER を登録済みの fetch stream から catalog Object を読み切る
@@ -7566,6 +7599,7 @@ async fn read_catalog_fetch_objects(
     data_plane: &DataPlaneHandle,
     stream_id: DataStreamId,
     decoder: &mut FetchStreamDecoder,
+    compression: MsfCompression,
 ) -> Result<Vec<catalog::CatalogObject>> {
     let mut objects = Vec::new();
     loop {
@@ -7617,6 +7651,7 @@ async fn read_catalog_fetch_objects(
             location,
             &payload,
             obj.properties_bytes.as_deref(),
+            compression,
         )?);
     }
     Ok(objects)
@@ -7631,6 +7666,7 @@ async fn read_catalog_subgroup_stream(
     stream_id: DataStreamId,
     buf: &[u8],
     catalog_alias: u64,
+    compression: MsfCompression,
 ) -> Result<Vec<catalog::CatalogObject>> {
     let mut decoder = SubgroupStreamDecoder::new();
     decoder.push(buf);
@@ -7673,7 +7709,15 @@ async fn read_catalog_subgroup_stream(
             )));
         }
     }
-    read_catalog_objects(stream, data_plane, stream_id, &mut decoder, &header).await
+    read_catalog_objects(
+        stream,
+        data_plane,
+        stream_id,
+        &mut decoder,
+        &header,
+        compression,
+    )
+    .await
 }
 
 /// 登録済みの catalog の Subgroup stream から Object を読み切る
@@ -7690,6 +7734,7 @@ async fn read_catalog_objects(
     stream_id: DataStreamId,
     decoder: &mut SubgroupStreamDecoder,
     header: &SubgroupHeader,
+    compression: MsfCompression,
 ) -> Result<Vec<catalog::CatalogObject>> {
     let mut objects = Vec::new();
     loop {
@@ -7735,6 +7780,7 @@ async fn read_catalog_objects(
             location,
             &payload,
             object.properties_bytes.as_deref(),
+            compression,
         )?);
     }
     Ok(objects)
@@ -7994,6 +8040,7 @@ async fn handle_incoming_stream(
     last_received_locations: &std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
     catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
+    catalog_compression: MsfCompression,
     pending_subgroups: &SharedPendingSubgroupBuffer,
     playback: bool,
     recorder: Option<&RecorderSender>,
@@ -8028,6 +8075,7 @@ async fn handle_incoming_stream(
         last_received_locations,
         termination_tx,
         catalog_tx,
+        catalog_compression,
         pending_subgroups,
         playback,
         recorder,
@@ -8104,6 +8152,7 @@ async fn handle_stream_body(
     last_received_locations: &std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
     catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
+    catalog_compression: MsfCompression,
     pending_subgroups: &SharedPendingSubgroupBuffer,
     playback: bool,
     recorder: Option<&RecorderSender>,
@@ -8278,6 +8327,7 @@ async fn handle_stream_body(
                                 data_plane,
                                 stream_id,
                                 &mut fetch_decoder,
+                                catalog_compression,
                             )
                             .await
                             {
@@ -8553,6 +8603,7 @@ async fn handle_stream_body(
                         stream_id,
                         &mut sg_decoder,
                         &header,
+                        catalog_compression,
                     )
                     .await
                     {
@@ -17762,6 +17813,7 @@ mod tests {
                     stream_id,
                     &buf,
                     catalog.request_id,
+                    MsfCompression::None,
                 )
                 .await
                 .expect_err("request ID が一致しない fill は Err になること");
@@ -17792,6 +17844,7 @@ mod tests {
                     stream_id,
                     &buf,
                     catalog.request_id,
+                    MsfCompression::None,
                 )
                 .await
                 .expect_err("カタログでない payload は Err になること");
@@ -17834,6 +17887,7 @@ mod tests {
                     stream_id,
                     &buf,
                     catalog.request_id,
+                    MsfCompression::None,
                 )
                 .await
                 .expect_err("FETCH_HEADER の前の RESET_STREAM は Err になること");
@@ -18055,6 +18109,7 @@ mod tests {
                     stream_id,
                     &buf,
                     catalog.track_alias,
+                    MsfCompression::None,
                 )
                 .await
                 .expect("別 alias の subgroup stream は Err にせず読み捨てること");

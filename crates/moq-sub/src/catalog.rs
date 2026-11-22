@@ -47,6 +47,7 @@ impl CatalogObject {
         location: Location,
         payload: &[u8],
         properties_bytes: Option<&[u8]>,
+        track_compression: MsfCompression,
     ) -> Result<Self> {
         let compression = match properties_bytes {
             Some(bytes) => {
@@ -57,10 +58,10 @@ impl CatalogObject {
                     Some(value) => MsfCompression::try_from(value).map_err(|e| {
                         Error::Other(format!("unsupported catalog compression: {e}"))
                     })?,
-                    None => MsfCompression::None,
+                    None => track_compression,
                 }
             }
-            None => MsfCompression::None,
+            None => track_compression,
         };
         Self::decode_with_compression(location, payload, compression)
     }
@@ -1003,6 +1004,7 @@ mod compression_tests {
             },
             &encoded,
             Some(&property_bytes),
+            MsfCompression::None,
         )
         .expect("Object Property の Gzip signal でデコードできること");
         assert_eq!(object.document, document);
@@ -1022,6 +1024,7 @@ mod compression_tests {
             },
             &encoded,
             None,
+            MsfCompression::None,
         )
         .expect_err("signal なしの gzip は catalog として受理しないこと");
     }
@@ -1052,8 +1055,61 @@ mod compression_tests {
             },
             &encoded,
             Some(&property_bytes),
+            MsfCompression::None,
         )
         .expect_err("未サポートの値は拒否すること");
+    }
+
+    /// Track Property の Gzip signal で catalog をデコードできること
+    #[test]
+    fn decode_with_object_properties_reads_track_gzip() {
+        let document = MsfCatalogDocument::Full(MsfCatalog::new());
+        let encoded = document
+            .encode(MsfCompression::Gzip)
+            .expect("catalog を gzip 圧縮できること");
+        let object = CatalogObject::decode_with_object_properties(
+            Location {
+                group_id: 1,
+                object_id: 0,
+            },
+            &encoded,
+            None,
+            MsfCompression::Gzip,
+        )
+        .expect("Track Property の Gzip signal でデコードできること");
+        assert_eq!(object.document, document);
+    }
+
+    /// Object Property の signal が Track Property より優先されること
+    #[test]
+    fn object_property_overrides_track_compression() {
+        use shiguredo_moqt::object_properties::{ObjectProperty, ObjectPropertyValue};
+        use shiguredo_moqt::track_properties::PROP_MSF_COMPRESSION;
+
+        let document = MsfCatalogDocument::Full(MsfCatalog::new());
+        let encoded = document
+            .encode(MsfCompression::None)
+            .expect("非圧縮でエンコードできること");
+        let mut properties = ObjectProperties::new();
+        properties.push(ObjectProperty {
+            prop_type: PROP_MSF_COMPRESSION,
+            value: ObjectPropertyValue::VarInt(0),
+        });
+        let mut property_bytes = Vec::new();
+        properties
+            .encode(&mut property_bytes)
+            .expect("Object Properties をエンコードできること");
+        let object = CatalogObject::decode_with_object_properties(
+            Location {
+                group_id: 1,
+                object_id: 0,
+            },
+            &encoded,
+            Some(&property_bytes),
+            MsfCompression::Gzip,
+        )
+        .expect("Object Property の値 0 が Track の Gzip より優先されること");
+        assert_eq!(object.document, document);
     }
 
     /// 非圧縮の catalog Object を decode できること
