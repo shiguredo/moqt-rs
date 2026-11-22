@@ -1,7 +1,7 @@
 # docs / README / SKILL.md / crates の記述を実装に合わせる
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/update-user-facing-docs-consistency
 - Polished: 2026-11-20
 
@@ -120,3 +120,20 @@ docs と README / SKILL.md / crates の記述が実装と食い違い、利用�
   `playout::stretch` の一覧に `compress_with_history` があること
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること
 - `markdownlint-cli2` が変更した Markdown で通ること
+
+## 解決方法
+
+- `--audio-datagram` の記述を削除し、音声 datagram が既定で `--audio-subgroup` を指定すると
+  subgroup stream になることを moq-sub / moq-pub の README とエラーメッセージ、pipeline の
+  コメントに反映した。
+- moq-pub README の `--audio-subgroup` の説明から `--datagram-max-size` の上限説明を外した。
+- ルート README の docs / crates へのリンクを GitHub の絶対 URL にした。
+- `docs/moqt.md` のモジュール構成に `audio_clock` / `media_clock` /
+  `pending_subgroup_buffer` / `video_decode_order` / `video_object_reorder` /
+  `group_switch_gate` を追加し、playout の一覧に `publish_catch_up` を追加した。
+- `skills/shiguredo-moqt/SKILL.md` のモジュール構成に同じ公開モジュールを追加し、
+  `playout::timeline` の `audio_arrival_delay_us_with_min` と
+  `playout::stretch` の `compress_with_history` を API 一覧へ追加した。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`prek run --files` (markdownlint を含む) が成功した。
