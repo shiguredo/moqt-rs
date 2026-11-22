@@ -1,7 +1,7 @@
 # pipeline のキーフレーム要求・Group 観測・カタログ宣言の結線をテストで守る
 
 - Created: 2026-10-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/test-pipeline-gop-wiring
 - Polished: 2026-10-25
 
@@ -72,3 +72,33 @@
   - カタログ宣言: `catalog_video_track` の `max_group_duration_ms` を `None` に固定する
 - `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
   `cargo fmt --all -- --check` が通ること
+
+## 解決方法
+
+- `crates/moq-pub/src/pipeline.rs` に次の関数を抽出した。
+  - `observe_encoded_frames(tracker, frames, timescale) -> Vec<Option<u64>>`
+    - キーフレームを出したフレームで `frame_timestamp_us` を通して `observe_keyframe` を呼ぶ。
+  - `encode_video_input(encoder, tracker, frame, timestamp_us) -> Result<Vec<EncodedFrame>>`
+    - `request_keyframe_if_due` の判定とエンコーダへのキーフレーム強制の受け渡しをまとめる。
+    - live capture と MP4 再エンコードの両経路から呼ぶ。
+  - `catalog_video_track(codec, width, height, fps, bitrate, gop_duration_ms, stream_mapping)`
+    - `max_group_duration_ms` に `gop::catalog_max_duration_ms` の値を宣言する。
+    - `stream_mapping` は `CatalogVideoTrack` の必須フィールドであり、`--stream-mapping` の
+      既存挙動を変えないため引数に加えた (issue の例は 6 引数だが「例」であり、
+      完了条件はシグネチャを指定していない)。
+- `#[cfg(test)]` に実 AV1 エンコーダと `encoder::test_frame` を使う 4 テストを追加した。
+  - 強制した入力がキーフレームとして出力されること
+  - `frame_timestamp_us` によるマイクロ秒換算と次の要求基準
+  - 観測したキーフレームを基準に時間判定が進むこと
+  - `max_group_duration_ms` の宣言値
+- 次の 4 変異を一時的に入れて `cargo test -p moq-pub` が落ちることを確認し、元に戻した。
+  - `encode_video_input` の強制引数を `false` 固定: 1 件失敗
+  - `frame_timestamp_us` を通さず `EncodedFrame::timestamp` を使う: 1 件失敗
+  - `observe_keyframe` の呼び出し削除: 3 件失敗
+  - `max_group_duration_ms` を `None` 固定: 1 件失敗
+- `run` からの呼び出し行自体の削除は単体テストでは検出しないため、テストモジュールの
+  コメントにレビュー確認方針を明記した。
+
+`cargo test -p moq-pub`、`cargo test --workspace`、
+`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check`、
+`prek run --files` が成功した。
