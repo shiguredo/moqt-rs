@@ -157,10 +157,11 @@ impl From<std::io::Error> for Error {
 
 impl From<tokio_moq::error::TransportError> for Error {
     fn from(e: tokio_moq::error::TransportError) -> Self {
-        // Quic だけを app の Quic variant に振り分ける。トランスポート種別に依存しない
-        // 失敗 (Internal / InvalidAuthority / ResolutionFailed) は Other にして
-        // `QUIC:` を付けない。セッション終了は専用の ConnectionClosed に分け、
-        // それ以外は WebTransport variant に畳む (HTTP/3 と HTTP/2 の両方)。
+        // トランスポート種別に依存しない失敗 (Internal / InvalidAuthority /
+        // ResolutionFailed / Transport / Unsupported) は Other にして `QUIC:` や
+        // `WebTransport:` を付けない。セッション終了とストリーム終端は専用 variant に分け、
+        // WebTransport 系は表示を保ったまま明示 match する。catch-all を置かないことで、
+        // TransportError に variant が増えたときにコンパイルエラーになる。
         match e {
             tokio_moq::error::TransportError::Quic(msg) => Self::Quic(msg),
             // 統合した MoqtClient 由来の内部エラーは従来の Other 表示に合わせる
@@ -180,7 +181,36 @@ impl From<tokio_moq::error::TransportError> for Error {
             tokio_moq::error::TransportError::Moqt(e) => Self::Moqt(e),
             // QMux 経路のエラーは WebTransport と区別して表示する
             tokio_moq::error::TransportError::Qmux(e) => Self::Other(format!("QMux: {e}")),
-            other => Self::WebTransport(other.to_string()),
+            // 下位トランスポートと未実装操作は特定のトランスポートに紐づかないため Other
+            tokio_moq::error::TransportError::Transport(e) => Self::Other(e.to_string()),
+            tokio_moq::error::TransportError::Unsupported(msg) => Self::Other(msg),
+            // WebTransport 系は表示を変えずに明示する
+            tokio_moq::error::TransportError::Http3(e) => {
+                Self::WebTransport(format!("http3 error: {e}"))
+            }
+            tokio_moq::error::TransportError::Http2(e) => {
+                Self::WebTransport(format!("http2 error: {e}"))
+            }
+            tokio_moq::error::TransportError::WtH2(e) => {
+                Self::WebTransport(format!("webtransport over http2 error: {e}"))
+            }
+            tokio_moq::error::TransportError::ConnectFailed { status } => {
+                Self::WebTransport(match status {
+                    Some(status) => format!("CONNECT failed with status {status}"),
+                    None => "CONNECT failed with no :status header".to_string(),
+                })
+            }
+            tokio_moq::error::TransportError::ProtocolNegotiationFailed { error_code } => {
+                Self::WebTransport(format!(
+                    "application protocol negotiation failed (error code {error_code:#010x})"
+                ))
+            }
+            tokio_moq::error::TransportError::StreamClosed => {
+                Self::WebTransport("stream closed".to_string())
+            }
+            tokio_moq::error::TransportError::InvalidState(msg) => {
+                Self::WebTransport(format!("invalid state: {msg}"))
+            }
         }
     }
 }
@@ -290,5 +320,37 @@ mod tests {
             err.to_string(),
             "MOQT: protocol violation: out of scope parameter"
         );
+    }
+
+    /// 下位トランスポートと未実装操作は `Other` になり `WebTransport:` を付けない
+    #[test]
+    fn transport_error_mapping_uses_other_for_transport_and_unsupported() {
+        let unsupported = Error::from(TransportError::Unsupported("not supported".to_string()));
+        assert!(matches!(unsupported, Error::Other(_)));
+        assert_eq!(unsupported.to_string(), "not supported");
+        let transport = Error::from(TransportError::Transport(Box::new(std::io::Error::other(
+            "transport boom",
+        ))));
+        assert!(matches!(transport, Error::Other(_)));
+        assert!(!transport.to_string().contains("WebTransport:"));
+    }
+
+    /// WebTransport 系の variant は `WebTransport:` を付けたままにする
+    #[test]
+    fn transport_error_mapping_keeps_webtransport_prefix() {
+        let cases = [
+            TransportError::ConnectFailed { status: Some(404) },
+            TransportError::ProtocolNegotiationFailed { error_code: 1 },
+            TransportError::StreamClosed,
+            TransportError::InvalidState("bad state".to_string()),
+        ];
+        for case in cases {
+            let err = Error::from(case);
+            assert!(
+                matches!(err, Error::WebTransport(_)),
+                "WebTransport に振り分けられること: {err}"
+            );
+            assert!(err.to_string().starts_with("WebTransport: "), "{err}");
+        }
     }
 }
