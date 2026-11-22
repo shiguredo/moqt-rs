@@ -1,7 +1,7 @@
 # example の細部の不具合と二重 clone を修正する
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/fix-example-small-fixes
 - Polished: 2026-11-20
 
@@ -32,3 +32,20 @@ example に残る小さな不具合 (キャッシュの非原子的更新、整�
 - 上記の各項目が修正され、必要なテストが追加されていること。少なくとも、cache の evict 非実行、width / height / samplerate の範囲外エラー、framerate の小数保持、Group ID / Object ID の上限エラーを確認するテストを含むこと。clone の削除、ログの track 名はコードレビューで確認する。
 - 飽和を期待している既存テスト (`next_initial_group_id_saturates_at_the_maximum` / `next_group_id_increases_by_one` の `u64::MAX` ケース) はエラー期待に更新すること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `MediaCache::insert` で Properties の encode を期限切れ evict より先に行い、encode 失敗時に
+  保持を変えないようにした。TTL 0 の期限切れ Group と不正 Properties を組み合わせたテストを
+  追加した。
+- `VideoTrackInfo` / `VideoSetup` の fps を `f64` にし、MP4 の期待尺を
+  `(1_000_000.0 / fps).round()` で計算するようにした。29.97 fps で 33_367 us になるテストを
+  追加した。
+- width / height / samplerate は `u32::try_from` で変換し、範囲外はエラーにした。
+- 開始 Group ID と次の Group ID は `checked_add` で進め、`u64::MAX` ではエラーにした。
+- SubgroupObjectState の Object ID 加算は `checked_add` で行い、上限ではエラーにした。
+- `serve_media_fetch` の警告ログは track 名を出すようにした。
+- moq-sub の `spawn_stream_task` は track_map を所有権で受け取り、二重 clone を無くした。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check` が成功した。
