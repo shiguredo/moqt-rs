@@ -157,4 +157,29 @@ private use 値 (128 以上) の相互合意サポートは仕様が想定する
 
 ## 解決方法
 
-(実装後に記載)
+MSF_COMPRESSION (0x78) を MOQT の Track / Object Property として実装し、MOQT 層の
+signaling から payload の圧縮を決めるようにした。
+
+- `MsfCompression` (`None` = 0 / `Gzip` = 1) と `MessageError::UnsupportedCompression` を
+  追加した。2 以上の値は未サポートとしてセッションを閉じない。
+- `TrackProperties::msf_compression` / `ObjectProperties::msf_compression` と
+  `PropertyScope::Both` を追加し、スコープ検証と多重検証の対象にした。
+- Timeline の encode / decode と `MsfCatalogDocument::encode` / `decode` は
+  `MsfCompression` を引数に取る。`None` は magic byte を展開せず、`Gzip` は必ず展開する。
+- Publisher は送信した Track Property を request ごとに保持し、Track Property 設定時に
+  Object Property を併用した送信を `ProtocolViolation` で拒否する。
+- Subscriber は Track / Object の両方に property がある受信を `MalformedTrack` として
+  購読 cancel にし、未サポート値は Object を処理しない。
+- `INCLUDE_PROPERTIES=0` の SUBSCRIBE_OK / FETCH_OK / resulting PUBLISH でも
+  MSF_COMPRESSION を残す (`retain_msf_compression`)。
+- `SessionEvent::RequestOkReceived` に Track Properties を追加し、catalog 購読の
+  MSF_COMPRESSION を pipeline が保持する。`crates/moq-sub` の catalog 読み出しは
+  Track Property または Object Property の signal で gzip をデコードする。
+- `docs/msf.md` / `docs/missing-features.md` を更新し、Event Timeline data format の
+  参照を §8.2 に直した。
+- Lean では `MsfCompression/Signaling.lean` に値の分類、両機構の排他、decode 時の
+  signal の扱いを 17 定理 + 10 有限例で検証した。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`cargo doc`、`cargo +nightly check --manifest-path
+fuzz/Cargo.toml`、`lake build` が成功した。
