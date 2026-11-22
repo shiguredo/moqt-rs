@@ -4,10 +4,13 @@
 //! 全 public 型をまとめる。draft-ietf-moq-transport-23 由来の実装のため将来変更される
 //! 可能性がある。
 
+use crate::error::MessageError;
 use crate::message::{
     ControlMessage, ErrorDetails, ReasonPhrase, common::Location, common::TrackNamespace,
 };
 use crate::message_parameter::{LocationFilter, MessageParameters, RangeFilterSet};
+use crate::msf::MsfCompression;
+use crate::object_properties::ObjectProperties;
 use crate::track_properties::TrackProperties;
 use alloc::collections::{BTreeSet, VecDeque};
 use alloc::vec::Vec;
@@ -2124,6 +2127,29 @@ pub const PUBLISHER_PRIORITY_DEFAULT: u8 = 128;
 pub const DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING: u8 = 0x1;
 
 impl Subscription {
+    /// peer が PUBLISH / SUBSCRIBE_OK で送った MSF_COMPRESSION を解決する
+    ///
+    /// draft-ietf-moq-msf-02 §12.1.1 (Compression Signaling): subscriber は Track
+    /// Property が無ければ payload を非圧縮として扱う。値 2 以上は
+    /// [`MessageError::UnsupportedCompression`] を返す。
+    pub fn peer_msf_compression(&self) -> Result<Option<MsfCompression>, MessageError> {
+        crate::session::compression::track_compression(&self.peer_track_properties)
+    }
+
+    /// Track Property と Object Property から payload の圧縮方式を決める
+    ///
+    /// track と object の両方に MSF_COMPRESSION があると §12.1 の MUST NOT に反するため
+    /// [`MessageError::MalformedTrack`] を返す。両方とも無ければ
+    /// [`MsfCompression::None`] (非圧縮) を返す。
+    pub fn msf_compression_for_object(
+        &self,
+        properties: &ObjectProperties,
+    ) -> Result<MsfCompression, MessageError> {
+        let track = self.peer_msf_compression()?;
+        let object = crate::session::compression::object_compression(properties)?;
+        crate::session::compression::resolve(track, object)
+    }
+
     /// header 明示値 → Track Property → 既定値 128 の順で解決する (draft §10.4 (DEFAULT PUBLISHER PRIORITY))
     ///
     /// SUBGROUP_HEADER の DEFAULT_PRIORITY bit が立っている場合は `header_priority` に
@@ -2554,5 +2580,30 @@ impl GoawayDrainSnapshot {
         self.blocking_subscription_request_ids.is_empty()
             && self.blocking_fetch_request_ids.is_empty()
             && self.blocking_track_status_request_ids.is_empty()
+    }
+}
+
+impl Fetch {
+    /// peer が FETCH_OK で送った MSF_COMPRESSION を解決する
+    ///
+    /// draft-ietf-moq-msf-02 §12.1.1 (Compression Signaling): subscriber は Track
+    /// Property が無ければ payload を非圧縮として扱う。値 2 以上は
+    /// [`MessageError::UnsupportedCompression`] を返す。
+    pub fn peer_msf_compression(&self) -> Result<Option<MsfCompression>, MessageError> {
+        crate::session::compression::track_compression(&self.track_properties)
+    }
+
+    /// Track Property と Object Property から payload の圧縮方式を決める
+    ///
+    /// track と object の両方に MSF_COMPRESSION があると §12.1 の MUST NOT に反するため
+    /// [`MessageError::MalformedTrack`] を返す。両方とも無ければ
+    /// [`MsfCompression::None`] (非圧縮) を返す。
+    pub fn msf_compression_for_object(
+        &self,
+        properties: &ObjectProperties,
+    ) -> Result<MsfCompression, MessageError> {
+        let track = self.peer_msf_compression()?;
+        let object = crate::session::compression::object_compression(properties)?;
+        crate::session::compression::resolve(track, object)
     }
 }

@@ -341,3 +341,143 @@ fn invalid_include_properties_closes_session_for_fetch_and_track_status() {
         }
     }
 }
+
+/// MSF_COMPRESSION を含む Track Properties を構築する
+///
+/// draft-ietf-moq-msf-02 §12.1.1 の MSF_COMPRESSION (0x78) と、空化で落ちる
+/// DYNAMIC_GROUPS を併せ持つ。
+fn track_properties_with_msf_compression() -> TrackProperties {
+    use shiguredo_moqt::track_properties::{
+        PROP_MSF_COMPRESSION, TrackProperty, TrackPropertyValue,
+    };
+    let mut properties = non_empty_track_properties();
+    properties.push(TrackProperty {
+        prop_type: PROP_MSF_COMPRESSION,
+        value: TrackPropertyValue::VarInt(1),
+    });
+    properties
+}
+
+/// INCLUDE_PROPERTIES=0 でも SUBSCRIBE_OK に MSF_COMPRESSION を残す
+///
+/// draft-ietf-moq-transport-23 §9.19.22 の空化は SHOULD、draft-ietf-moq-msf-02
+/// §12.1.1 の MSF_COMPRESSION は MUST include であるため、MSF の MUST を優先する。
+#[test]
+fn subscribe_include_properties_zero_keeps_msf_compression() {
+    use shiguredo_moqt::msf::MsfCompression;
+
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            include_properties_params(0),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(
+            rid,
+            5,
+            MessageParameters::new(),
+            track_properties_with_msf_compression(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    match ok_msg {
+        ControlMessage::SubscribeOk(ref ok) => {
+            assert_eq!(
+                ok.track_properties.msf_compression(),
+                Some(1),
+                "MSF_COMPRESSION は INCLUDE_PROPERTIES=0 でも保持されること"
+            );
+            assert_eq!(
+                ok.track_properties.dynamic_groups(),
+                None,
+                "MSF_COMPRESSION 以外の Track Property は空化されること"
+            );
+        }
+        other => panic!("SUBSCRIBE_OK が期待されたが {other:?} を受け取った"),
+    }
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .peer_msf_compression()
+            .expect("値 1 はサポートされる"),
+        Some(MsfCompression::Gzip)
+    );
+}
+
+/// INCLUDE_PROPERTIES=0 でも FETCH_OK に MSF_COMPRESSION を残す
+#[test]
+fn fetch_include_properties_zero_keeps_msf_compression() {
+    use shiguredo_moqt::message::common::Location;
+    use shiguredo_moqt::message_parameter::LocationFilter;
+    use shiguredo_moqt::message_parameter::PARAM_LOCATION_FILTER;
+    use shiguredo_moqt::msf::MsfCompression;
+
+    let (mut client, mut server) = establish_pair();
+    let mut params = include_properties_params(0);
+    params.push(MessageParameter {
+        param_type: PARAM_LOCATION_FILTER,
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRangeWithEnd {
+            start: Location {
+                group_id: 0,
+                object_id: 0,
+            },
+            end_group_delta: 5,
+            end_object: 0,
+        }),
+    });
+    let rid = client
+        .send_fetch(ns(&[b"live"]), b"cam".to_vec(), params)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, fetch_msg) = take_send_request(&mut client);
+    server
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_fetch_ok(
+            rid,
+            fetch_ok_params(Some(Location {
+                group_id: 5,
+                object_id: 0,
+            })),
+            track_properties_with_msf_compression(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    match ok_msg {
+        ControlMessage::RequestOk(ref ok) => {
+            assert_eq!(
+                ok.track_properties.msf_compression(),
+                Some(1),
+                "MSF_COMPRESSION は INCLUDE_PROPERTIES=0 でも保持されること"
+            );
+            assert_eq!(
+                ok.track_properties.dynamic_groups(),
+                None,
+                "MSF_COMPRESSION 以外の Track Property は空化されること"
+            );
+        }
+        other => panic!("FETCH_OK が期待されたが {other:?} を受け取った"),
+    }
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .fetch(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .peer_msf_compression()
+            .expect("値 1 はサポートされる"),
+        Some(MsfCompression::Gzip)
+    );
+}

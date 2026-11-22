@@ -576,13 +576,16 @@ impl Session {
         // draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter): SUBSCRIBE_TRACKS
         // が INCLUDE_PROPERTIES=0 を指定した場合、resulting PUBLISH の Track Properties は
         // 存在するが空にする SHOULD。指定が無い場合はアプリが渡した値を使う。
+        // draft-ietf-moq-msf-02 §12.1.1 の MSF_COMPRESSION は MUST include のため、
+        // 空化しても MSF_COMPRESSION だけは残す。
         if let Some(request_id) = parameters.subscribe_tracks_id()
             && self
                 .track_subscriptions
                 .get(&request_id)
                 .is_some_and(|entry| entry.parameters.include_properties() == Some(0))
         {
-            track_properties = TrackProperties::new();
+            track_properties =
+                crate::session::compression::retain_msf_compression(&track_properties);
         }
         let msg = ControlMessage::Publish(Publish {
             request_id,
@@ -753,8 +756,10 @@ impl Session {
         // peer が SUBSCRIBE で INCLUDE_PROPERTIES=0 を指定したとき、SUBSCRIBE_OK の
         // Track Properties は存在するが空にする (SHOULD)。状態への反映
         // (dynamic_groups 等) には元の発行値を使い、wire 上の値だけ空化する。
+        // ただし draft-ietf-moq-msf-02 §12.1.1 は MSF_COMPRESSION を MUST include と
+        // するため、空化しても MSF_COMPRESSION だけは残す。
         let track_properties = if subscription.include_properties == Some(0) {
-            TrackProperties::new()
+            crate::session::compression::retain_msf_compression(&track_properties)
         } else {
             track_properties
         };

@@ -1271,3 +1271,73 @@ fn namespace_update_response_clears_control_message_deadline() {
         "応答済みの更新の期限でセッションを閉じないこと"
     );
 }
+
+/// INCLUDE_PROPERTIES=0 でも resulting PUBLISH に MSF_COMPRESSION を残す
+///
+/// draft-ietf-moq-msf-02 §12.1.1 は PUBLISH に MSF_COMPRESSION を含めることを MUST と
+/// するため、SUBSCRIBE_TRACKS の INCLUDE_PROPERTIES=0 による空化よりも優先する。
+#[test]
+fn subscribe_tracks_include_properties_zero_keeps_publish_msf_compression() {
+    use shiguredo_moqt::msf::MsfCompression;
+    use shiguredo_moqt::track_properties::PROP_MSF_COMPRESSION;
+
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe_tracks(
+            ns(&[b"live"]),
+            params_with(PARAM_INCLUDE_PROPERTIES, MessageParameterValue::Uint8(0)),
+        )
+        .expect("SUBSCRIBE_TRACKS を送信できること");
+    let (_, message) = take_send_request(&mut client);
+    server
+        .recv_request(message)
+        .expect("SUBSCRIBE_TRACKS を受理できること");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+        .expect("SUBSCRIBE_TRACKS_OK を送信できること");
+    let (_, ok) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok)
+        .expect("SUBSCRIBE_TRACKS_OK を受理できること");
+
+    let mut properties = TrackProperties::new();
+    properties.push(TrackProperty {
+        prop_type: PROP_MSF_COMPRESSION,
+        value: TrackPropertyValue::VarInt(1),
+    });
+    properties.push(TrackProperty {
+        prop_type: 0x02, // OBJECT_DELIVERY_TIMEOUT
+        value: TrackPropertyValue::VarInt(1000),
+    });
+    let publish_rid = server
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            10,
+            params_with(
+                PARAM_SUBSCRIBE_TRACKS_ID,
+                MessageParameterValue::VarInt(rid),
+            ),
+            properties,
+        )
+        .expect("PUBLISH を送信できること");
+    let (_, publish) = take_send_request(&mut server);
+    client
+        .recv_request(publish)
+        .expect("PUBLISH を受理できること");
+    let subscription = client
+        .subscription(publish_rid)
+        .expect("購読が登録されていること");
+    assert_eq!(
+        subscription
+            .peer_msf_compression()
+            .expect("値 1 はサポートされる"),
+        Some(MsfCompression::Gzip),
+        "MSF_COMPRESSION は INCLUDE_PROPERTIES=0 でも保持されること"
+    );
+    assert_eq!(
+        subscription.peer_track_properties.find_varint(0x02),
+        None,
+        "MSF_COMPRESSION 以外の Track Property は空化されること"
+    );
+}

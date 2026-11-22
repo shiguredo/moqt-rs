@@ -80,6 +80,7 @@
 //! - `goaway`: GOAWAY / tick 関連
 
 pub mod auth_token_cache;
+pub(crate) mod compression;
 pub mod core;
 pub mod data;
 pub mod fetch;

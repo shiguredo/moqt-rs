@@ -541,9 +541,11 @@ impl Session {
         fetch.expires_ms = parameters.expires();
         // draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
         // peer が FETCH で INCLUDE_PROPERTIES=0 を指定したとき、FETCH_OK の
-        // Track Properties は存在するが空にする (SHOULD)。
+        // Track Properties は存在するが空にする (SHOULD)。ただし
+        // draft-ietf-moq-msf-02 §12.1.1 は MSF_COMPRESSION を MUST include と
+        // するため、空化しても MSF_COMPRESSION だけは残す。
         let track_properties = if fetch.include_properties == Some(0) {
-            TrackProperties::new()
+            crate::session::compression::retain_msf_compression(&track_properties)
         } else {
             track_properties
         };
