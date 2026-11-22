@@ -128,6 +128,14 @@ pub enum MessageError {
     GzipDecode(String),
     /// MSF Timeline の gzip 圧縮に失敗した (draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload) / §8.1 (Event Timeline data format))
     GzipEncode(String),
+    /// MSF_COMPRESSION property の値が未サポート
+    ///
+    /// draft-ietf-moq-msf-02 §12.1.1 (Compression Signaling) / §12.1.2 は、値 0
+    /// (uncompressed) と 1 (GZIP) を全実装が MUST support すると定める。値 2 以上は
+    /// 未サポートであり、subscriber は payload を処理してはならない。Track Property の
+    /// 場合は track の unsubscribe を促し、Object Property の場合は当該 object だけを
+    /// 処理しない。セッションは閉じない。
+    UnsupportedCompression(u64),
 }
 
 impl core::fmt::Display for MessageError {
@@ -157,6 +165,9 @@ impl core::fmt::Display for MessageError {
             Self::InvalidCatalogVersion(v) => write!(f, "unsupported MSF catalog version: {v}"),
             Self::GzipDecode(msg) => write!(f, "MSF timeline gzip decode failed: {msg}"),
             Self::GzipEncode(msg) => write!(f, "MSF timeline gzip encode failed: {msg}"),
+            Self::UnsupportedCompression(value) => {
+                write!(f, "unsupported MSF compression value: {value}")
+            }
         }
     }
 }
@@ -193,6 +204,7 @@ impl MessageError {
             Self::InvalidCatalogVersion(_) => "unsupported MSF catalog version",
             Self::GzipDecode(_) => "MSF timeline gzip decode failed",
             Self::GzipEncode(_) => "MSF timeline gzip encode failed",
+            Self::UnsupportedCompression(_) => "unsupported MSF compression value",
         }
     }
 
@@ -249,7 +261,8 @@ impl MessageError {
             | Self::InvalidCatalog(_)
             | Self::InvalidCatalogVersion(_)
             | Self::GzipDecode(_)
-            | Self::GzipEncode(_) => None,
+            | Self::GzipEncode(_)
+            | Self::UnsupportedCompression(_) => None,
         }
     }
 }

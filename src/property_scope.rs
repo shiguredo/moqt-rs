@@ -82,6 +82,10 @@ pub(crate) fn known_property_scope(prop_type: u64) -> Option<PropertyScope> {
         PROP_TIMESCALE | PROP_VIDEO_CONFIG | PROP_AUDIO_CONFIG => Some(PropertyScope::Both),
         // draft-ietf-moq-msf-02 §12.3.1: MSF_EVENT_TIMELINE_HEADER は Track のみ
         crate::track_properties::PROP_MSF_EVENT_TIMELINE_HEADER => Some(PropertyScope::Track),
+        // draft-ietf-moq-msf-02 §12.1.1 / §12.1.2: MSF_COMPRESSION は Track と Object の
+        // 両方。publisher は同じ track で両方を使ってはならない (§12.1 の MUST NOT) が、
+        // 個々の property のスコープは Both である
+        crate::track_properties::PROP_MSF_COMPRESSION => Some(PropertyScope::Both),
         // draft-ietf-moq-loc-05 §6.1 Table 1: Track と Object の両方。LOC の他の 6 型は
         // transport-23 §16.8 Table 16 にも載るが、0x11 は同 Table 1 だけに載る。
         PROP_CODEC_STRING => Some(PropertyScope::Both),
@@ -234,6 +238,27 @@ mod tests {
             assert!(!is_track_only(grease));
             assert!(!is_object_only(grease));
         }
+    }
+
+    /// MSF_COMPRESSION (0x78) は Track / Object の両方で単一に限られること
+    ///
+    /// draft-ietf-moq-msf-02 §12.1.1 / §12.1.2 は Track Property と Object Property の
+    /// 両方に 0x78 を定義する。同じ track で両方を使ってはならない (§12.1 の MUST NOT) が、
+    /// property 自体のスコープは Both であり、単一インスタンスに限られる。
+    #[test]
+    fn msf_compression_scope_is_both_and_single() {
+        assert_eq!(
+            known_property_scope(crate::track_properties::PROP_MSF_COMPRESSION),
+            Some(PropertyScope::Both)
+        );
+        assert!(
+            !allows_multiple_instances(crate::track_properties::PROP_MSF_COMPRESSION),
+            "MSF_COMPRESSION は複数インスタンスを許さないこと"
+        );
+        assert!(has_duplicate_single_property([
+            crate::track_properties::PROP_MSF_COMPRESSION,
+            crate::track_properties::PROP_MSF_COMPRESSION
+        ]));
     }
 
     /// Track-only / Object-only の述語が相互排他であること

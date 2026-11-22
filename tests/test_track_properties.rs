@@ -1,6 +1,6 @@
 use shiguredo_moqt::{
-    error::MessageError, track_properties::TrackProperties, track_properties::TrackProperty,
-    track_properties::TrackPropertyValue,
+    error::MessageError, track_properties::PROP_MSF_COMPRESSION, track_properties::TrackProperties,
+    track_properties::TrackProperty, track_properties::TrackPropertyValue,
 };
 
 mod delta_encoding {
@@ -1780,4 +1780,32 @@ fn msf_event_timeline_header_accessor_and_multiplicity() {
         ),
         "0x7B の重複を malformed Track として拒否すること"
     );
+}
+
+mod msf_compression {
+    use super::*;
+
+    /// MSF_COMPRESSION (0x78) の Track Property を往復できること
+    #[test]
+    fn track_property_roundtrip() {
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_MSF_COMPRESSION,
+            value: TrackPropertyValue::VarInt(1),
+        });
+        let mut buf = Vec::new();
+        props
+            .encode(&mut buf)
+            .expect("正当なテスト入力の encode は成功する");
+        let decoded = TrackProperties::decode(&buf).expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(decoded.msf_compression(), Some(1));
+        assert_eq!(decoded.find_varint(0x78), Some(1));
+    }
+
+    /// MSF_COMPRESSION が無ければ None を返すこと
+    #[test]
+    fn absent_returns_none() {
+        let props = TrackProperties::new();
+        assert_eq!(props.msf_compression(), None);
+    }
 }

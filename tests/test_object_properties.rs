@@ -9,7 +9,7 @@ use shiguredo_moqt::object_properties::{
     DeliveryMode, ObjectFieldTracker, ObjectProperties, ObjectProperty, ObjectPropertyTracker,
     ObjectPropertyValue, PROP_PRIOR_GROUP_ID_GAP, PROP_PRIOR_OBJECT_ID_GAP,
 };
-use shiguredo_moqt::track_properties::PROP_IMMUTABLE_PROPERTIES;
+use shiguredo_moqt::track_properties::{PROP_IMMUTABLE_PROPERTIES, PROP_MSF_COMPRESSION};
 use shiguredo_moqt::varint;
 
 #[test]
@@ -1476,4 +1476,23 @@ fn encode_rejects_invalid_inner_audio_level() {
         ),
         "内側の Audio Level 値域違反は MalformedKeyValue になること"
     );
+}
+
+/// MSF_COMPRESSION (0x78) の Object Property を往復できること
+#[test]
+fn msf_compression_object_property_roundtrip() {
+    let mut props = ObjectProperties::new();
+    props.push(ObjectProperty {
+        prop_type: PROP_MSF_COMPRESSION,
+        value: ObjectPropertyValue::VarInt(1),
+    });
+    let mut buf = Vec::new();
+    props
+        .encode(&mut buf)
+        .expect("正当なテスト入力の encode は成功する");
+    let (decoded, consumed) =
+        ObjectProperties::decode(&buf).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(consumed, buf.len());
+    assert_eq!(decoded.msf_compression(), Some(1));
+    assert_eq!(ObjectProperties::new().msf_compression(), None);
 }

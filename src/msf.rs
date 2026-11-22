@@ -5099,8 +5099,52 @@ fn validate_event_data_raw(data_raw: &[u8]) -> Result<(), MessageError> {
 //
 // §7.1 (Media Timeline track payload) および §8.1 (Event Timeline data format) は
 // payload の compression を許容する。本実装は gzip (RFC 1952) magic byte 検出による
-// 自動復号と任意の gzip 圧縮を提供する。-01 で導入された MSF_COMPRESSION property
-// signaling 機構 (§12.1 (Compression Signaling)) には未対応 (将来の draft 改訂時に実装予定)。
+// 自動復号と任意の gzip 圧縮を提供する。MSF_COMPRESSION property (§12.1
+// (Compression Signaling)) の値型と property アクセサは実装済みだが、codec はまだ
+// signal を引数で受け取らず、magic byte 検出と [`TimelineEncodingOptions`] を使う。
+// signal に基づく codec への移行は別途行う。
+
+/// MSF_COMPRESSION property の値 (draft-ietf-moq-msf-02 §12.1.1 / §12.1.2)
+///
+/// Table 14 (MSF Compression Values) の 0 / 1 を表す。§12.1 は 0 (uncompressed) と
+/// 1 (GZIP) を全実装が MUST support すると定める。0x78 は draft-ietf-moq-transport-23
+/// §8.4 の application-specific range であり、IANA への登録は要求されない
+/// (draft-ietf-moq-msf-02 §14.3)。この値と節番号は draft 由来であり、将来の改版で
+/// 変わる可能性がある。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MsfCompression {
+    /// 非圧縮 (value 0)。property が無い場合と同じ扱いである
+    #[default]
+    None,
+    /// GZIP 圧縮 (value 1、RFC 1952)
+    Gzip,
+}
+
+impl MsfCompression {
+    /// property の値 (0 / 1)
+    pub const fn value(self) -> u64 {
+        match self {
+            Self::None => 0,
+            Self::Gzip => 1,
+        }
+    }
+}
+
+impl TryFrom<u64> for MsfCompression {
+    type Error = MessageError;
+
+    /// property の値から圧縮方式を決める
+    ///
+    /// 0 と 1 は §12.1 の MUST support の範囲である。2 以上は未サポートであり、
+    /// [`MessageError::UnsupportedCompression`] を返して payload を処理しない。
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::None),
+            1 => Ok(Self::Gzip),
+            other => Err(MessageError::UnsupportedCompression(other)),
+        }
+    }
+}
 
 /// Media / Event Timeline のエンコードオプション
 ///

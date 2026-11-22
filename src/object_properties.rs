@@ -368,6 +368,14 @@ impl ObjectProperties {
         self.find_varint(PROP_SUBGROUP_DELIVERY_TIMEOUT)
     }
 
+    /// MSF_COMPRESSION (Property Type 0x78) の値を返す
+    ///
+    /// draft-ietf-moq-msf-02 §12.1.2 (Compression Signaling)。圧縮する Object にだけ
+    /// publisher が載せる。値は [`crate::msf::MsfCompression`] で解釈する。
+    pub fn msf_compression(&self) -> Option<u64> {
+        self.find_varint(crate::track_properties::PROP_MSF_COMPRESSION)
+    }
+
     /// PRIOR_GROUP_ID_GAP の値を返す
     pub fn prior_group_id_gap(&self) -> Option<u64> {
         self.find_varint(PROP_PRIOR_GROUP_ID_GAP)

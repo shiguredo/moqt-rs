@@ -67,6 +67,15 @@ pub const PROP_DYNAMIC_GROUPS: u64 = 0x30;
 /// application-specific range である。
 pub const PROP_MSF_EVENT_TIMELINE_HEADER: u64 = 0x7B;
 
+/// MSF_COMPRESSION (Property Type 0x78, draft-ietf-moq-msf-02 §12.1.1 (Compression Signaling))
+///
+/// Track Property と Object Property の両方で使う。値は Table 14 (MSF Compression Values)
+/// の 0 (uncompressed) / 1 (GZIP) を [`crate::msf::MsfCompression`] で解釈する。
+/// 0x78 は draft-ietf-moq-transport-23 §8.4 の application-specific range (0x78-0x7F) に
+/// 属し、IANA への登録は要求されない (draft-ietf-moq-msf-02 §14.3)。この値と節番号は
+/// draft 由来であり、将来の改版で変わる可能性がある。
+pub const PROP_MSF_COMPRESSION: u64 = 0x78;
+
 /// IMMUTABLE_PROPERTIES (Property Type 0x0B, draft-ietf-moq-transport-23 §10.7 (Immutable Properties))
 ///
 /// 奇数型だが値は「入れ子の Track Property Key-Value-Pair 列」。Original Publisher のみが
@@ -547,6 +556,15 @@ impl TrackProperties {
     /// サポートすることを示す。parameter が含まれない場合は `None`。
     pub fn dynamic_groups(&self) -> Option<u64> {
         self.find_varint(PROP_DYNAMIC_GROUPS)
+    }
+
+    /// MSF_COMPRESSION (Property Type 0x78) の値を返す
+    ///
+    /// draft-ietf-moq-msf-02 §12.1.1 (Compression Signaling)。track の全 Object を圧縮する
+    /// 場合に publisher が PUBLISH / SUBSCRIBE_OK / FETCH_OK へ載せる。値は
+    /// [`crate::msf::MsfCompression`] で解釈する。
+    pub fn msf_compression(&self) -> Option<u64> {
+        self.find_varint(PROP_MSF_COMPRESSION)
     }
 
     /// DEFAULT_PUBLISHER_PRIORITY (Property Type 0x0E) の値を返す

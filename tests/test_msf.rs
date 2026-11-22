@@ -3,8 +3,8 @@ use shiguredo_moqt::{
     message::common::TrackNamespace,
     msf::{
         MSF_VERSION, MsfAuthInfo, MsfBuffers, MsfCatalog, MsfCatalogDocument, MsfCloneTrack,
-        MsfDeltaOperation, MsfDeltaUpdate, MsfDependency, MsfEventIndex, MsfEventTimeline,
-        MsfEventTimelineEntry, MsfInitData, MsfInitDataKind, MsfMediaTimeline,
+        MsfCompression, MsfDeltaOperation, MsfDeltaUpdate, MsfDependency, MsfEventIndex,
+        MsfEventTimeline, MsfEventTimelineEntry, MsfInitData, MsfInitDataKind, MsfMediaTimeline,
         MsfMediaTimelineEntry, MsfPackaging, MsfRemoveTrack, MsfTemplate, MsfTrack, MsfUpdateTrack,
         StreamMapping, TimelineEncodingOptions, decode_event_timeline, decode_media_timeline,
         encode_event_timeline, encode_media_timeline, parse_catalog_namespace,
@@ -21,6 +21,9 @@ fn test_catalog_namespace(value: &str) -> TrackNamespace {
 
 #[path = "test_msf/catalog_decode.rs"]
 mod catalog_decode;
+
+#[path = "test_msf/compression.rs"]
+mod compression;
 
 #[path = "test_msf/tracker.rs"]
 mod tracker;
