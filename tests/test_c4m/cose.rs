@@ -145,6 +145,340 @@ fn tag_and_algorithm_class_must_match() {
     );
 }
 
+/// メッセージ種別と alg の class が食い違うメッセージの encode を拒否すること
+///
+/// decode がタグ付きメッセージに [`CoseError::AlgorithmClassMismatch`] を返すのと
+/// 同じ組み合わせを、encode もタグ付き / タグ無しのどちらでも拒否する。CWT タグは
+/// COSE タグ付きオブジェクトにだけ付けられる (RFC 8392 §6) ため、CWT タグを付ける
+/// 組み合わせでは COSE タグも付ける。
+#[test]
+fn encode_rejects_algorithm_class_mismatch() {
+    let tag_cases = [(false, false), (true, false), (true, true)];
+    let option_cases = [
+        CoseEncodingOptions {
+            cose_tag: false,
+            cwt_tag: false,
+        },
+        CoseEncodingOptions {
+            cose_tag: true,
+            cwt_tag: false,
+        },
+        CoseEncodingOptions {
+            cose_tag: true,
+            cwt_tag: true,
+        },
+    ];
+    for (cose_tagged, cwt_tagged) in tag_cases {
+        for options in option_cases {
+            // COSE_Sign1 に MAC alg を設定する
+            let sign1 = CoseMessage::Sign1(CoseSign1 {
+                protected: protected_header(Algorithm::HmacSha256.identifier()),
+                unprotected: Vec::new(),
+                payload: Some(b"payload".to_vec()),
+                signature: vec![0x01],
+                cose_tagged,
+                cwt_tagged,
+            });
+            assert_eq!(
+                sign1.encode(&options),
+                Err(CoseError::AlgorithmClassMismatch),
+                "COSE_Sign1 に MAC alg を設定した encode を受理した \
+                 (cose_tagged={cose_tagged}, cwt_tagged={cwt_tagged}, options={options:?})"
+            );
+
+            // COSE_Mac0 に署名 alg を設定する
+            let mac0 = CoseMessage::Mac0(CoseMac0 {
+                protected: protected_header(Algorithm::Es256.identifier()),
+                unprotected: Vec::new(),
+                payload: Some(b"payload".to_vec()),
+                tag: vec![0x01],
+                cose_tagged,
+                cwt_tagged,
+            });
+            assert_eq!(
+                mac0.encode(&options),
+                Err(CoseError::AlgorithmClassMismatch),
+                "COSE_Mac0 に署名 alg を設定した encode を受理した \
+                 (cose_tagged={cose_tagged}, cwt_tagged={cwt_tagged}, options={options:?})"
+            );
+        }
+    }
+}
+
+/// 種別と alg の class が一致するメッセージの encode をタグの有無によらず受理すること
+#[test]
+fn encode_accepts_matching_algorithm_class() {
+    let option_cases = [
+        CoseEncodingOptions {
+            cose_tag: false,
+            cwt_tag: false,
+        },
+        CoseEncodingOptions {
+            cose_tag: true,
+            cwt_tag: false,
+        },
+        CoseEncodingOptions {
+            cose_tag: true,
+            cwt_tag: true,
+        },
+    ];
+    for options in option_cases {
+        // COSE_Sign1 には署名 alg (ES256) を設定する
+        let bytes = CoseMessage::Sign1(CoseSign1 {
+            protected: protected_header(Algorithm::Es256.identifier()),
+            unprotected: Vec::new(),
+            payload: Some(b"payload".to_vec()),
+            signature: vec![0x01],
+            cose_tagged: false,
+            cwt_tagged: false,
+        })
+        .encode(&options)
+        .expect("COSE_Sign1 をエンコードできる");
+        assert!(
+            matches!(
+                CoseMessage::decode(&bytes).expect("デコードできる"),
+                CoseMessage::Sign1(_)
+            ),
+            "COSE_Sign1 が別の種別に解釈された: {options:?}"
+        );
+
+        // COSE_Mac0 には MAC alg (HMAC 256/256) を設定する
+        let bytes = CoseMessage::Mac0(CoseMac0 {
+            protected: protected_header(Algorithm::HmacSha256.identifier()),
+            unprotected: Vec::new(),
+            payload: Some(b"payload".to_vec()),
+            tag: vec![0x01],
+            cose_tagged: false,
+            cwt_tagged: false,
+        })
+        .encode(&options)
+        .expect("COSE_Mac0 をエンコードできる");
+        assert!(
+            matches!(
+                CoseMessage::decode(&bytes).expect("デコードできる"),
+                CoseMessage::Mac0(_)
+            ),
+            "COSE_Mac0 が別の種別に解釈された: {options:?}"
+        );
+    }
+}
+
+/// alg が無く、COSE タグも CWT タグも付かないメッセージの encode を拒否すること
+///
+/// decode はタグ無しメッセージの種別を alg から決めるため、alg 無しでは
+/// [`CoseError::MissingAlgorithm`] で拒否する。encode の受理範囲もこれに合わせる。
+#[test]
+fn encode_rejects_missing_algorithm_without_tags() {
+    let untagged = CoseEncodingOptions {
+        cose_tag: false,
+        cwt_tag: false,
+    };
+    for message in [
+        CoseMessage::Sign1(CoseSign1 {
+            protected: Vec::new(),
+            unprotected: Vec::new(),
+            payload: Some(b"payload".to_vec()),
+            signature: vec![0x01],
+            cose_tagged: false,
+            cwt_tagged: false,
+        }),
+        CoseMessage::Mac0(CoseMac0 {
+            protected: Vec::new(),
+            unprotected: Vec::new(),
+            payload: Some(b"payload".to_vec()),
+            tag: vec![0x01],
+            cose_tagged: false,
+            cwt_tagged: false,
+        }),
+    ] {
+        assert_eq!(
+            message.encode(&untagged),
+            Err(CoseError::MissingAlgorithm),
+            "alg が無くタグも無いメッセージの encode を受理した"
+        );
+    }
+
+    // CWT タグの検証は alg の検証より先に行う (既存の InvalidStructure の挙動を保つ)
+    let message = CoseMessage::Sign1(CoseSign1 {
+        protected: Vec::new(),
+        unprotected: Vec::new(),
+        payload: Some(b"payload".to_vec()),
+        signature: vec![0x01],
+        cose_tagged: false,
+        cwt_tagged: false,
+    });
+    assert!(
+        matches!(
+            message.encode(&CoseEncodingOptions {
+                cose_tag: false,
+                cwt_tag: true,
+            }),
+            Err(CoseError::InvalidStructure(_))
+        ),
+        "CWT タグだけを付ける encode を alg の検証より先に拒否しなかった"
+    );
+}
+
+/// unprotected ヘッダにしか alg が無いメッセージの encode を拒否すること
+///
+/// RFC 9052 §3.1 は alg を protected ヘッダに置くことを MUST とする。decode は
+/// [`CoseError::UnprotectedAlgorithm`] を返すため、encode も同じ規則で拒否する。
+#[test]
+fn encode_rejects_algorithm_in_unprotected_header() {
+    let unprotected = vec![(Value::Unsigned(1), Value::integer(-7))];
+    for message in [
+        CoseMessage::Sign1(CoseSign1 {
+            protected: Vec::new(),
+            unprotected: unprotected.clone(),
+            payload: Some(b"payload".to_vec()),
+            signature: vec![0x01],
+            cose_tagged: true,
+            cwt_tagged: true,
+        }),
+        CoseMessage::Mac0(CoseMac0 {
+            protected: Vec::new(),
+            unprotected: unprotected.clone(),
+            payload: Some(b"payload".to_vec()),
+            tag: vec![0x01],
+            cose_tagged: true,
+            cwt_tagged: true,
+        }),
+    ] {
+        assert_eq!(
+            message.encode(&CoseEncodingOptions::default()),
+            Err(CoseError::UnprotectedAlgorithm),
+            "unprotected ヘッダにしか alg が無いメッセージの encode を受理した"
+        );
+    }
+}
+
+/// alg が無いタグ付きメッセージの encode を受理し、decode で同じ種別に戻ること
+///
+/// decode はタグ付きメッセージの種別を COSE タグから決めるため、alg が無くても
+/// COSE_Sign1 / COSE_Mac0 として受理する。encode も同じ受理範囲に合わせる。
+#[test]
+fn encode_accepts_tagged_messages_without_algorithm() {
+    // メッセージ自身のタグでタグ付きになる場合と、オプションでタグを付ける場合の両方
+    let cases = [
+        (false, false, CoseEncodingOptions::default()),
+        (
+            true,
+            true,
+            CoseEncodingOptions {
+                cose_tag: false,
+                cwt_tag: false,
+            },
+        ),
+    ];
+    for (cose_tagged, cwt_tagged, options) in cases {
+        let bytes = CoseMessage::Sign1(CoseSign1 {
+            protected: Vec::new(),
+            unprotected: Vec::new(),
+            payload: Some(b"payload".to_vec()),
+            signature: vec![0x01],
+            cose_tagged,
+            cwt_tagged,
+        })
+        .encode(&options)
+        .expect("alg が無いタグ付き COSE_Sign1 をエンコードできる");
+        assert_eq!(
+            CoseMessage::decode(&bytes).expect("デコードできる"),
+            CoseMessage::Sign1(CoseSign1 {
+                protected: Vec::new(),
+                unprotected: Vec::new(),
+                payload: Some(b"payload".to_vec()),
+                signature: vec![0x01],
+                cose_tagged: true,
+                cwt_tagged: true,
+            }),
+            "alg が無い COSE_Sign1 が decode で同じ種別に戻らない \
+             (cose_tagged={cose_tagged}, cwt_tagged={cwt_tagged})"
+        );
+
+        let bytes = CoseMessage::Mac0(CoseMac0 {
+            protected: Vec::new(),
+            unprotected: Vec::new(),
+            payload: Some(b"payload".to_vec()),
+            tag: vec![0x01],
+            cose_tagged,
+            cwt_tagged,
+        })
+        .encode(&options)
+        .expect("alg が無いタグ付き COSE_Mac0 をエンコードできる");
+        assert_eq!(
+            CoseMessage::decode(&bytes).expect("デコードできる"),
+            CoseMessage::Mac0(CoseMac0 {
+                protected: Vec::new(),
+                unprotected: Vec::new(),
+                payload: Some(b"payload".to_vec()),
+                tag: vec![0x01],
+                cose_tagged: true,
+                cwt_tagged: true,
+            }),
+            "alg が無い COSE_Mac0 が decode で同じ種別に戻らない \
+             (cose_tagged={cose_tagged}, cwt_tagged={cwt_tagged})"
+        );
+    }
+}
+
+/// decode が拒否する protected ヘッダを encode でも拒否すること
+///
+/// encode は先頭で [`CoseMessage::header`] と同じ検証を行うため、公開フィールドに
+/// 手組みした CBOR を渡しても decode 不能なメッセージは生成されない。
+#[test]
+fn encode_validates_protected_header_like_decode() {
+    // 未知の alg
+    let message = CoseMessage::Sign1(CoseSign1 {
+        protected: protected_header(42),
+        unprotected: Vec::new(),
+        payload: Some(b"payload".to_vec()),
+        signature: vec![0x01],
+        cose_tagged: true,
+        cwt_tagged: true,
+    });
+    assert_eq!(
+        message.encode(&CoseEncodingOptions::default()),
+        Err(CoseError::UnsupportedAlgorithm(42)),
+        "未知の alg を持つメッセージの encode を受理した"
+    );
+
+    // 同じヘッダラベルが protected と unprotected の両方にある
+    let message = CoseMessage::Sign1(CoseSign1 {
+        protected: protected_header(-7),
+        unprotected: vec![(Value::Unsigned(1), Value::integer(5))],
+        payload: Some(b"payload".to_vec()),
+        signature: vec![0x01],
+        cose_tagged: true,
+        cwt_tagged: true,
+    });
+    assert_eq!(
+        message.encode(&CoseEncodingOptions::default()),
+        Err(CoseError::DuplicateHeaderParameter(1)),
+        "重複したヘッダラベルを持つメッセージの encode を受理した"
+    );
+
+    // 理解できない crit
+    let protected = cbor::encode(&Value::Map(vec![
+        (Value::Unsigned(1), Value::integer(-7)),
+        (Value::Unsigned(2), Value::Array(vec![Value::Unsigned(99)])),
+        (Value::Unsigned(99), Value::Unsigned(1)),
+    ]))
+    .expect("エンコードできる");
+    let message = CoseMessage::Sign1(CoseSign1 {
+        protected,
+        unprotected: Vec::new(),
+        payload: Some(b"payload".to_vec()),
+        signature: vec![0x01],
+        cose_tagged: true,
+        cwt_tagged: true,
+    });
+    assert_eq!(
+        message.encode(&CoseEncodingOptions::default()),
+        Err(CoseError::UnsupportedCriticalHeader),
+        "理解できない crit を持つメッセージの encode を受理した"
+    );
+}
+
 #[test]
 fn unsupported_algorithm_is_rejected() {
     let bytes = cbor::encode(&cose_array(&protected_header(42), Some(b"p"), b"s"))

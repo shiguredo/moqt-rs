@@ -394,7 +394,7 @@ use shiguredo_moqt::c4m::cat::{
 #[cfg(feature = "aws-lc-rs")]
 use shiguredo_moqt::c4m::cose::{
     Algorithm, CoseEncodingOptions, CoseError, CoseMessage, CoseSign1, HEADER_ALGORITHM,
-    HEADER_CRITICAL, HEADER_KCCS, HEADER_TYPE,
+    HEADER_CRITICAL, HEADER_KCCS, HEADER_TYPE, TAG_COSE_SIGN1,
 };
 #[cfg(feature = "aws-lc-rs")]
 use shiguredo_moqt::c4m::crypto::aws_lc_rs::AwsLcRsCrypto;
@@ -616,7 +616,8 @@ fn rejects_symmetric_algorithm() {
         .expect("COSE_Mac0 をエンコードできる");
     assert_eq!(codec.decode(&bytes), Err(DpopError::NotCoseSign1));
 
-    // 受理: COSE_Sign1 でも alg が対称なら拒否する
+    // 受理: COSE_Sign1 でも alg が対称なら拒否する。encode はヘッダを検証して
+    // COSE_Sign1 と MAC alg の組み合わせを拒否するため、COSE の CBOR を直接組み立てる
     let protected = cbor::encode(&protected_header(
         Algorithm::HmacSha256,
         Some(kccs(es256_cose_key_value())),
@@ -628,17 +629,7 @@ fn rejects_symmetric_algorithm() {
             .expect("クレームをエンコードできる"),
     )
     .expect("claims をエンコードできる");
-    let message = CoseMessage::Sign1(shiguredo_moqt::c4m::cose::CoseSign1 {
-        protected,
-        unprotected: Vec::new(),
-        payload: Some(payload),
-        signature: vec![0x00; 64],
-        cose_tagged: true,
-        cwt_tagged: false,
-    });
-    let bytes = message
-        .encode(&CoseEncodingOptions::default())
-        .expect("COSE_Sign1 をエンコードできる");
+    let bytes = cose_sign1_bytes(protected, Vec::new(), payload, vec![0x00; 64]);
     assert_eq!(
         codec.decode(&bytes),
         Err(DpopError::Cose(CoseError::AlgorithmClassMismatch))
@@ -1061,7 +1052,33 @@ fn rejects_tampered_or_wrong_key_signature() {
     );
 }
 
+/// COSE_Sign1 の CBOR を直接組み立てる (COSE タグ 18 付き)
+///
+/// [`CoseMessage::encode`] は protected / unprotected ヘッダを検証するため、
+/// ヘッダの欠落や誤配置など decode 側のエラーを確認するための不正なメッセージを
+/// encode では作れない。ここでは COSE の配列とタグを直接エンコードする。
+#[cfg(feature = "aws-lc-rs")]
+fn cose_sign1_bytes(
+    protected: Vec<u8>,
+    unprotected: Vec<(Value, Value)>,
+    payload: Vec<u8>,
+    signature: Vec<u8>,
+) -> Vec<u8> {
+    let cose = Value::Array(vec![
+        Value::ByteString(protected),
+        Value::Map(unprotected),
+        Value::ByteString(payload),
+        Value::ByteString(signature),
+    ]);
+    cbor::encode(&Value::Tag(TAG_COSE_SIGN1, Box::new(cose)))
+        .expect("COSE_Sign1 の CBOR をエンコードできる")
+}
+
 /// 指定した鍵とアルゴリズムで COSE_Sign1 を組み立てる
+///
+/// ヘッダの欠落や誤配置など、通常の発行 API では作れない proof を作るために使う。
+/// 署名対象は [`CoseMessage::signing_input`] で組み立て、COSE の CBOR は
+/// [`cose_sign1_bytes`] で直接エンコードするため、encode のヘッダ検証は経由しない。
 #[cfg(feature = "aws-lc-rs")]
 fn sign_proof_with_key(
     protected: Value,
@@ -1073,10 +1090,10 @@ fn sign_proof_with_key(
     let crypto = AwsLcRsCrypto::new();
     let protected = cbor::encode(&protected).expect("protected ヘッダをエンコードできる");
     let payload = cbor::encode(&claims).expect("claims をエンコードできる");
-    let mut message = CoseMessage::Sign1(CoseSign1 {
-        protected,
-        unprotected,
-        payload: Some(payload),
+    let message = CoseMessage::Sign1(CoseSign1 {
+        protected: protected.clone(),
+        unprotected: unprotected.clone(),
+        payload: Some(payload.clone()),
         signature: Vec::new(),
         cose_tagged: true,
         cwt_tagged: false,
@@ -1085,15 +1102,7 @@ fn sign_proof_with_key(
     let signature = crypto
         .sign(algorithm, key, &signing_input)
         .expect("署名できる");
-    if let CoseMessage::Sign1(sign1) = &mut message {
-        sign1.signature = signature;
-    }
-    message
-        .encode(&CoseEncodingOptions {
-            cose_tag: true,
-            cwt_tag: false,
-        })
-        .expect("COSE メッセージをエンコードできる")
+    cose_sign1_bytes(protected, unprotected, payload, signature)
 }
 
 /// MOQT 以外の `actx.type` を持つ proof を発行しないこと

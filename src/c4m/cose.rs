@@ -620,7 +620,27 @@ impl CoseMessage {
     /// メッセージに [`CoseEncodingOptions::default`] を渡すと CWT タグ (61) と
     /// COSE タグ (17 / 18) が付与される。CWT タグを付ける場合は COSE タグも
     /// 必要になる (RFC 8392 §6)。
+    ///
+    /// エンコードの前に protected / unprotected ヘッダを [`CoseMessage::decode`] と
+    /// 同じ規則で検証する。そのため [`CoseMessage::header`] が返すエラー (未知の
+    /// `alg`、[`CoseError::UnprotectedAlgorithm`]、重複したヘッダラベル
+    /// ([`CoseError::DuplicateHeaderParameter`])、不正な `crit` など) はエンコード
+    /// でも返る。さらに次を検証する。
+    ///
+    /// - [`CoseMessage::Sign1`] の `alg` は署名アルゴリズム、[`CoseMessage::Mac0`]
+    ///   の `alg` は MAC アルゴリズムでなければならない。一致しない場合は
+    ///   [`CoseError::AlgorithmClassMismatch`] を返す。
+    /// - `alg` が無い場合、decode は COSE タグから種別を決めるため COSE タグが
+    ///   必要である。タグ無しのメッセージは [`CoseError::MissingAlgorithm`] を
+    ///   返す。
+    /// - CWT タグを付ける場合は COSE タグが必要である
+    ///   ([`CoseError::InvalidStructure`])。
     pub fn encode(&self, options: &CoseEncodingOptions) -> Result<Vec<u8>, CoseError> {
+        // decode が拒否するヘッダ (未知の alg、unprotected の alg、重複ラベル、
+        // 不正な crit など) を同じ規則で拒否し、decode 不能なメッセージを
+        // 生成しないようにする。alg の class 判定には C4M ドラフトの別名 (-4) を
+        // 解決した後の Algorithm を使う。
+        let header = self.header()?;
         let tagged = match self {
             Self::Sign1(message) => message.cose_tagged || options.cose_tag,
             Self::Mac0(message) => message.cose_tagged || options.cose_tag,
@@ -634,6 +654,24 @@ impl CoseMessage {
             return Err(CoseError::InvalidStructure(
                 "CWT tag requires the COSE tag (RFC 8392 §6)",
             ));
+        }
+        match header.algorithm {
+            // COSE タグはメッセージ種別から決まるため (AlgorithmClass::tag)、
+            // タグと種別の整合は常に保たれる。検証するのは alg の class と種別の対応。
+            Some(algorithm) => {
+                let expected = match self {
+                    Self::Sign1(_) => AlgorithmClass::Signature,
+                    Self::Mac0(_) => AlgorithmClass::Mac,
+                };
+                if algorithm.class() != expected {
+                    return Err(CoseError::AlgorithmClassMismatch);
+                }
+            }
+            // タグ付きメッセージは decode がタグから種別を決めて受理するため、
+            // alg が無くても encode を受理する。タグ無しは decode が alg から
+            // 種別を決められないため、encode でも拒否する。
+            None if !tagged => return Err(CoseError::MissingAlgorithm),
+            None => {}
         }
         let array = match self {
             Self::Sign1(message) => message.array_value(),
