@@ -44,24 +44,19 @@ pub struct CachedObject {
 
 /// FETCH への応答内容
 ///
-/// 判定の順序は「要求の GROUP_ORDER」→「cache に一度も入っていない track」→「保持内容」である。
+/// 判定の順序は「cache に一度も入っていない track」→「要求の GROUP_ORDER」→「保持内容」である。
 /// PUBLISH していない track の FETCH は、呼び出し側が [`MediaCache::plan`] より前に拒否する。Session が
 /// 受理した FETCH だけが呼び出し側へ届くため、受理の判定 (publish 実績の有無、空 range、
 /// Start Location が Largest Object を上回るか) はここでやり直さない。やり直すと、拒否済みの
 /// request に応答して致命終了するか、受理済みの request に無応答になる。
 #[derive(Debug)]
 pub enum FetchPlan<'a> {
-    /// PUBLISH している track だが、一度も cache に Object を入れていない
-    ///
-    /// 呼び出し側が `REQUEST_DOES_NOT_EXIST` で拒否する。Session は publish 実績の無い track の
-    /// FETCH を受理するため、応答が必要になる。
-    UnknownTrack,
-    /// PUBLISH しているが、まだ 1 件も Object を publish していない
+    /// 配信中の track だが、まだ 1 件も Object を cache に入れていない
     ///
     /// 呼び出し側が `REQUEST_INVALID_RANGE` で拒否する (draft-ietf-moq-transport-23 §3.2 は
     /// 「Object が publish されていない」場合に INVALID_RANGE を返す MUST を課す)。
-    /// Session が自側 subscription の Largest Object を観測していれば Session が先に拒否する
-    /// ため、通常この分岐には到達しない (防御)。
+    /// 呼び出し側は配信中の track だけを渡すため、ここに来るのは「配信中だが Object が
+    /// 1 件も cache に無い」場合である。要求の GROUP_ORDER より先に判定する。
     NoPublishedObjects,
     /// 要求された GROUP_ORDER では応答しない
     ///
@@ -158,7 +153,7 @@ pub enum FetchResponseEntry<'a> {
 impl FetchPlan<'_> {
     /// 応答に書く entry の並びを返す
     ///
-    /// `UnknownTrack` / `NoPublishedObjects` / `UnsupportedGroupOrder` は応答を書かないため
+    /// `NoPublishedObjects` / `UnsupportedGroupOrder` は応答を書かないため
     /// 空を返す。`EmptyRange` は FETCH_HEADER だけを書くため空を返す (§3.2.1)。
     pub fn entries(&self) -> Vec<FetchResponseEntry<'_>> {
         match self {
@@ -293,7 +288,8 @@ impl MediaCache {
     ///
     /// 呼び出し側は、FETCH の Full Track Name がこの example の PUBLISH している track である
     /// ことを検証してから呼ぶ。その track の Object を一度も cache に入れていなければ
-    /// `UnknownTrack` を返す (Object を入れた後に期限切れで全て evict した track は対象外にしない)。
+    /// `NoPublishedObjects` を返す (Object を入れた後に期限切れで全て evict した track は
+    /// 対象外にしない)。要求の GROUP_ORDER が Descending でも、Object が無いことを先に判定する。
     ///
     /// `start` / `end` は要求の LOCATION_FILTER を解決した要求 range で、`end` は publish 済みの
     /// Largest Object でクランプした値である。Session が受理した FETCH の要求 range は空でない
@@ -308,26 +304,28 @@ impl MediaCache {
         start: Location,
         end: Location,
     ) -> FetchPlan<'_> {
+        // 期限切れの評価は track の有無と GROUP_ORDER の判定より先に行う
+        self.evict_expired();
+        // 呼び出し側は配信中の track だけを渡す。cache に一度も入っていない track は
+        // 「Object が publish されていない」ため、GROUP_ORDER より先に INVALID_RANGE の
+        // 判断にする (draft-ietf-moq-transport-23 §3.2 (Fetch))。
+        let Some(track) = self
+            .tracks
+            .get(namespace)
+            .and_then(|tracks| tracks.get(track_name))
+        else {
+            return FetchPlan::NoPublishedObjects;
+        };
+        let Some(first_published) = track.first_published else {
+            return FetchPlan::NoPublishedObjects;
+        };
+
         // draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter) / §3.2.1 (Fetch):
         // 要求された group order で送る MUST があるため、Descending の要求に昇順の
         // 保持範囲を返さない
         if group_order == Some(GROUP_ORDER_DESCENDING) {
             return FetchPlan::UnsupportedGroupOrder;
         }
-        self.evict_expired();
-        let Some(track) = self
-            .tracks
-            .get(namespace)
-            .and_then(|tracks| tracks.get(track_name))
-        else {
-            return FetchPlan::UnknownTrack;
-        };
-
-        // 一度も publish していない範囲は「存在しない」ため、End of Range を書かずに
-        // FETCH_HEADER だけの stream を返す (draft-ietf-moq-transport-23 §3.2.1)
-        let Some(first_published) = track.first_published else {
-            return FetchPlan::NoPublishedObjects;
-        };
         if end < first_published {
             return FetchPlan::EmptyRange;
         }
@@ -498,20 +496,37 @@ mod tests {
         objects.iter().map(|object| object.location).collect()
     }
 
-    /// 一度も cache に入れていない track は対象外として扱うこと
+    /// 一度も cache に入れていない track は NoPublishedObjects として扱うこと
     ///
-    /// Session は publish 実績の無い track の FETCH を受理するため、応答の判断で
-    /// `REQUEST_DOES_NOT_EXIST` を返す経路が必要になる。PUBLISH していない track の FETCH は
-    /// 呼び出し元が `plan` より前に拒否する。
+    /// 呼び出し元は配信中の track だけを `plan` に渡す。その track の Object を 1 件も
+    /// cache に入れていなければ、draft-ietf-moq-transport-23 §3.2 (Fetch) の MUST に従い
+    /// 呼び出し側が `REQUEST_INVALID_RANGE` で拒否する。
     #[test]
-    fn plan_reports_a_never_cached_track_as_unknown() {
+    fn plan_reports_a_track_without_objects_as_no_published_objects() {
         let mut cache = MediaCache::new(60_000);
         insert(&mut cache, loc(1, 0), b"video");
 
         let plan = cache.plan(&namespace(), b"audio", None, loc(1, 0), loc(1, 0));
         assert!(
-            matches!(plan, FetchPlan::UnknownTrack),
-            "一度も cache に入れていない track は対象外として扱うこと: {plan:?}"
+            matches!(plan, FetchPlan::NoPublishedObjects),
+            "一度も cache に入れていない track は NoPublishedObjects として扱うこと: {plan:?}"
+        );
+    }
+
+    /// Object が無い track では GROUP_ORDER の判定より NoPublishedObjects を優先すること
+    ///
+    /// draft-ietf-moq-transport-23 §3.2 (Fetch) の INVALID_RANGE は GROUP_ORDER の
+    /// 対応可否より先に決まる。Descending の要求でも Object が無ければ
+    /// `NoPublishedObjects` を返す。
+    #[test]
+    fn plan_prefers_no_published_objects_over_a_descending_group_order() {
+        let mut cache = MediaCache::new(60_000);
+        insert(&mut cache, loc(1, 0), b"video");
+
+        let plan = cache.plan(&namespace(), b"audio", Some(0x02), loc(1, 0), loc(1, 0));
+        assert!(
+            matches!(plan, FetchPlan::NoPublishedObjects),
+            "Object が無い track では GROUP_ORDER より NoPublishedObjects を優先すること: {plan:?}"
         );
     }
 

@@ -4900,8 +4900,9 @@ fn fetch_ok_parameters(largest_in_range: Option<Location>) -> MessageParameters 
 /// であるため、`end` は Largest Object でクランプする。
 ///
 /// Largest Object が無い (まだ 1 件も publish していない) track でも、境界の解決を Session と
-/// 揃えて先頭側に解決する。この場合に配れる Object は無く、応答は cache に一度も入っていない
-/// track ([`cache::FetchPlan::UnknownTrack`]) として決まる。
+/// 揃えて先頭側に解決する。この場合に配れる Object は無く、応答は
+/// [`cache::FetchPlan::NoPublishedObjects`] として決まり、呼び出し側が
+/// `REQUEST_INVALID_RANGE` で拒否する (draft-ietf-moq-transport-23 §3.2 (Fetch))。
 ///
 /// 戻り値の `end` は Largest Object でクランプ済みなので、`largest == end` が
 /// 「Largest Object が要求範囲内」の判定になる。範囲内なら FETCH_OK に LARGEST_OBJECT を
@@ -5032,15 +5033,6 @@ async fn serve_media_fetch(
                 "Served media FETCH with an empty range (request_id={request_id}, track={}, end={end:?})",
                 String::from_utf8_lossy(track_name),
             );
-        }
-        cache::FetchPlan::UnknownTrack => {
-            tracing::warn!(
-                "Rejecting FETCH for a track that has never been cached: {}",
-                String::from_utf8_lossy(track_name),
-            );
-            client
-                .send_request_error(request_id, REQUEST_DOES_NOT_EXIST, "unknown track")
-                .await?;
         }
         cache::FetchPlan::UnsupportedGroupOrder => {
             // draft-ietf-moq-transport-23 §3.2.1 (Fetch) は要求された group order で送る MUST を
@@ -8967,8 +8959,8 @@ mod tests {
             .await;
         }
 
-        /// media の FETCH が unknown track / empty range / descending group order /
-        /// range filter の各応答になること
+        /// media の FETCH が unknown track / 未 cache の配信中 track / empty range /
+        /// descending group order / range filter の各応答になること
         ///
         /// draft-ietf-moq-transport-23 §3.2 (Fetch) / §3.2.1 (Fetch Object Delivery) /
         /// §3.3.2 (Range Filters) / §9.19.8 (GROUP ORDER Parameter) に基づく。
@@ -9002,6 +8994,43 @@ mod tests {
                     "配信していない track への FETCH は DOES_NOT_EXIST で拒否すること"
                 );
 
+                // (2) 配信中だが cache に Object を 1 件も入れていない track: INVALID_RANGE
+                //
+                // draft-ietf-moq-transport-23 §3.2 (Fetch) は、Object が publish されて
+                // いない track への FETCH に INVALID_RANGE を返す MUST を課す。
+                let (_, _, response) = serve_fetch(
+                    &mut peer,
+                    &mut client,
+                    &mut state,
+                    &config,
+                    &config.namespace,
+                    config.track_name.as_bytes(),
+                    MessageParameters::new(),
+                )
+                .await;
+                assert_eq!(
+                    expect_request_error(response).error_code,
+                    REQUEST_INVALID_RANGE,
+                    "cache に Object が無い配信中 track への FETCH は INVALID_RANGE で拒否すること"
+                );
+
+                // (3) 同じ状態で GROUP_ORDER = Descending でも、Object が無いことを優先する
+                let (_, _, response) = serve_fetch(
+                    &mut peer,
+                    &mut client,
+                    &mut state,
+                    &config,
+                    &config.namespace,
+                    config.track_name.as_bytes(),
+                    group_order_parameters(0x02),
+                )
+                .await;
+                assert_eq!(
+                    expect_request_error(response).error_code,
+                    REQUEST_INVALID_RANGE,
+                    "Object が無い track では GROUP_ORDER より INVALID_RANGE を優先すること"
+                );
+
                 // 以降のケースで使う保持を 1 件だけ入れる。first_published は {10, 0} になる
                 let mut cached_properties = LocProperties::new();
                 cached_properties.push(LocProperty {
@@ -9022,7 +9051,7 @@ mod tests {
                     )
                     .expect("Object を保持できること");
 
-                // (2) 保持より前の range: FETCH_OK と FETCH_HEADER だけを返す
+                // (4) 保持より前の range: FETCH_OK と FETCH_HEADER だけを返す
                 let (request_id, _, response) = serve_fetch(
                     &mut peer,
                     &mut client,
@@ -9049,7 +9078,7 @@ mod tests {
                 );
                 assert!(entries.is_empty(), "empty range では Object を載せないこと");
 
-                // (3) GROUP_ORDER = Descending: 昇順の保持範囲を返さず REQUEST_NOT_SUPPORTED
+                // (5) GROUP_ORDER = Descending: 昇順の保持範囲を返さず REQUEST_NOT_SUPPORTED
                 let (_, _, response) = serve_fetch(
                     &mut peer,
                     &mut client,
@@ -9066,7 +9095,7 @@ mod tests {
                     "降順の GROUP_ORDER は NOT_SUPPORTED で拒否すること"
                 );
 
-                // (4) Range Filter 付き: フィルタ評価を持たないため REQUEST_NOT_SUPPORTED
+                // (6) Range Filter 付き: フィルタ評価を持たないため REQUEST_NOT_SUPPORTED
                 let (_, _, response) = serve_fetch(
                     &mut peer,
                     &mut client,

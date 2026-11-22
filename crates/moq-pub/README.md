@@ -152,8 +152,9 @@ moq-pub は FETCH を次のように扱う。
 - 保持している Object を要求 range の分だけ 1 本の応答 stream に載せて返す。要求 range は FETCH の `LOCATION_FILTER` で指定され、省略時は track の先頭から publish 済みの Largest Object までになる
 - 要求 range の一部が窓を過ぎて捨てられている場合、その範囲を `End of Unknown Range` として返す。捨てた Object は「存在しない」ではなく「不明」であるため、購読者は必要なら後で取得し直せる
 - 要求 range の Object を 1 つも保持していない場合も `End of Unknown Range` だけを返す
+- 配信中でも、まだ 1 件も Object を publish していない track への FETCH は `REQUEST_INVALID_RANGE` で拒否する (draft-ietf-moq-transport-23 §3.2)。これは `GROUP_ORDER` の対応可否より優先する
 - `--cache-duration` と同じ値を Track Property の `MAX_CACHE_DURATION` として PUBLISH と SUBSCRIBE_OK で告知する
-- `GROUP_ORDER` が Descending の FETCH は昇順の保持範囲を返せないため、`REQUEST_NOT_SUPPORTED` で拒否する
+- Object を保持している track で `GROUP_ORDER` が Descending の FETCH は、昇順の保持範囲を返せないため `REQUEST_NOT_SUPPORTED` で拒否する
 - catalog の FETCH には、従来どおり最後に publish したカタログ 1 件を返す
 
 保持は Group 単位である。時間窓で捨てられるのは古い側だけなので、保持している範囲の内部に欠落はできない。
