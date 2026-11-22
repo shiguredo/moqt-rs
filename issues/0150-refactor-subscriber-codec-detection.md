@@ -1,7 +1,7 @@
 # moq-sub の codec 種別判定を library の判定に寄せる
 
 - Created: 2026-09-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/refactor-subscriber-codec-detection
 - Polished: 2026-11-14
 - Updated: 2026-11-14
@@ -73,3 +73,20 @@ audio / video の種別判定を library に一本化し、example 側に種別�
 - library が種別を判定しない `av01x` / `avc1x` / `hvc1x` / `hev1x` / `opusx` / `opus.2` だけのカタログでは、該当する video / audio トラックを選択しないこと
 - `receive_catalog` の `no usable tracks` エラーメッセージが現在の選択対象 codec を列挙していること
 - `make test` / `make clippy` / `make fmt` が通ること
+
+## 解決方法
+
+- `src/msf.rs` の `is_audio_codec` / `is_video_codec` を公開 API にした。
+  WEBCODECS-CODEC-REGISTRY の完全一致・区切り文字付き前方一致の判定を library に一本化した。
+- `crates/moq-sub/src/decoder.rs` に `is_supported_video_codec` を追加し、
+  example のデコード可否 (AV1 / H.264 / H.265 / VP8 / VP9) を種別判定から分離した。
+- `receive_catalog` の選択を `select_video_track` / `select_audio_track` に切り出し、
+  library の種別判定とデコード可否の両方を満たす track だけを選ぶようにした。
+- `tests/test_msf/track_fields.rs` に公開 API の判定表テストを追加し、
+  登録名の完全一致・`av01.*` などの前方一致・`av01x` / `opusx` / `opus.2` の非該当を固定した。
+- `crates/moq-sub/src/pipeline.rs` のテストで、`avc3` / `flac` (library は種別を判定するが
+  デコード不可) と `av01x` / `opusx` (library が判定しない) を選ばないことを固定した。
+- 選択対象 codec を列挙する既存の `no usable tracks` エラーメッセージは変更していない。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check` が成功した。
