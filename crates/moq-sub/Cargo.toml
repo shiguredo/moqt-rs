@@ -16,8 +16,6 @@ happy-eyeballs = { path = "../happy-eyeballs" }
 raw_player = "2026.3"
 # AV1 デコーダ (dav1d)
 shiguredo_dav1d = "2026.3"
-# HTTP/3 / WebTransport クライアント
-shiguredo_http3 = "2026.1.0-canary.14"
 # VP8 / VP9 デコーダ (libvpx)。Windows は x86_64-pc-windows-msvc のみ対応する
 shiguredo_libvpx = "2026.2.0-canary.3"
 # MOQT 本体 (ローカル参照)
@@ -48,6 +46,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
+# テストで WebTransport の終了コード (ErrorCode::AlpnError) を使う
+shiguredo_http3 = "2026.1.0-canary.14"
 # テストで tokio の時計を止める (start_paused / advance) ため test-util を有効にする。
 # full は通常依存で有効なため、ここでは足りない feature だけを足す
 tokio = { version = "1.54", features = ["test-util"] }

@@ -21,8 +21,6 @@ shiguredo_aom = "2026.3"
 shiguredo_audio_device = "2026.4"
 # AV1 デコーダ (dav1d、MP4 再エンコード配信の入力デコード)
 shiguredo_dav1d = "2026.3"
-# HTTP/3 / WebTransport クライアント
-shiguredo_http3 = "2026.1.0-canary.14"
 # VP8 / VP9 エンコーダ・デコーダ (libvpx)。Windows は x86_64-pc-windows-msvc のみ対応する
 shiguredo_libvpx = "2026.2.0-canary.3"
 # MOQT 本体 (ローカル参照)
@@ -55,6 +53,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
+# テストで WebTransport の終了コード (ErrorCode::AlpnError) を使う
+shiguredo_http3 = "2026.1.0-canary.14"
 # in-process の peer harness (実 QUIC 接続で peer 役を駆動する) を統合テストから使う。
 # default-features = false は必須である。省略すると tokio-moq の既定 quic-s2n が有効になり、
 # --no-default-features --features quic-tobi / quic-ngtcp2 のテストビルドで

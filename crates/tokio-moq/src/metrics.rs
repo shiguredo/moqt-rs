@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 /// タスクメトリクスのログ出力間隔
-pub const TASK_METRICS_LOG_INTERVAL: Duration = Duration::from_secs(5);
+const TASK_METRICS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
 /// `TaskMonitor` のメトリクスを一定間隔でログ出力するタスクを起動する。
 ///

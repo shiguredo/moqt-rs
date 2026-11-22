@@ -956,7 +956,7 @@ fn hex_digit(byte: u8) -> u8 {
 /// path が空の場合は `/` を補う。RFC 3986 §6.2.3 は
 /// "a URI that uses the generic syntax for authority with an empty path should be normalized to
 /// a path of \"/\"" と定めるため、query のみの場合も `/` を補う。
-pub fn split_authority_path(rest: &str) -> (String, String) {
+fn split_authority_path(rest: &str) -> (String, String) {
     // authority は最初の `/` / `?` / `#` まで (RFC 3986 §3.2)
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = rest[..end].to_string();
@@ -983,7 +983,7 @@ pub fn split_authority_path(rest: &str) -> (String, String) {
 /// TLS の SNI / 証明書検証に使う server_name はポートを含まないため、ここで分離する。
 /// IPv6 リテラルは `[` から `]` までを host とし、`]` が無い場合は authority 全体を返す。
 /// IPv4 / ホスト名は最後の `:` より前を host とし、ポートが無い場合は authority 全体を返す。
-pub fn host_from_authority(authority: &str) -> &str {
+fn host_from_authority(authority: &str) -> &str {
     if let Some(rest) = authority.strip_prefix('[') {
         return match rest.find(']') {
             Some(end) => &rest[..end],
