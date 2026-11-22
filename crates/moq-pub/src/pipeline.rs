@@ -2826,317 +2826,264 @@ async fn handle_goaway_event(
     }
 }
 
+/// peer からの REQUEST を処理する
+async fn handle_publisher_request_event(
+    context: &mut NextEventContext<'_>,
+    request: IncomingRequest,
+) -> Result<bool> {
+    let accepted = serve_peer_request(
+        context.client,
+        request,
+        context.config,
+        CatalogState {
+            json: context.catalog_json,
+            location: *context.catalog_location,
+        },
+        context.gop_tracker,
+        *context.started_video_group_id,
+        context.media_cache,
+        context.next_peer_alias,
+    )
+    .await?;
+    if let Some(accepted) = accepted {
+        context.peer_subscriptions.push(PeerSubscription {
+            request_id: accepted.request_id,
+            track: accepted.track,
+            alias: accepted.alias,
+            writer: None,
+            audio_config_sent: false,
+            ended: false,
+        });
+        // カタログの購読は、受理した時点で現在のカタログ Object を
+        // 新しい Group で送り直す (draft-ietf-moq-msf-02 §5: 独立した
+        // カタログは新しい Group の先頭に置く MUST)。次の定周期の
+        // republish を待つと購読直後の相手にカタログが届かない
+        if accepted.track == PublishedTrack::Catalog
+            && let Err(e) = republish_catalog_at_next_group(
+                context.client,
+                catalog_sink(
+                    context.client,
+                    context.catalog_publish_target.as_ref(),
+                    context.handle,
+                    context.data_plane,
+                    *context.catalog_request_id,
+                ),
+                context.handle,
+                context.data_plane,
+                *context.catalog_request_id,
+                context.catalog_json,
+                context.catalog_group_id,
+                context.catalog_location,
+                context.peer_subscriptions,
+            )
+            .await
+        {
+            tracing::warn!("Failed to send the catalog to a newly accepted peer subscription: {e}");
+        }
+    }
+    Ok(false)
+}
+
+/// peer からの REQUEST_UPDATE を処理する
+async fn handle_publisher_update_event(
+    context: &mut NextEventContext<'_>,
+    update: tokio_moq::moqt_client::IncomingRequestUpdate,
+) -> Result<bool> {
+    // draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE):
+    // 受信側は必ず 1 通の REQUEST_OK / REQUEST_ERROR で応答する MUST。
+    // PAUSED / LOCATION_FILTER / Range Filters の検証と購読状態への
+    // 反映は session 層が受信時に済ませているため、ここでは受理する。
+    tracing::info!("Received REQUEST_UPDATE: request_id={}", update.request_id);
+    // NEW_GROUP_REQUEST (§9.19.19) は新しい Group の開始
+    // (ランダムアクセス点) を要求する。映像の購読に限るのは、他の
+    // トラックの要求で映像のキーフレームを強制しないためである
+    // (`parameters` は購読の累積パラメータであり、複数の更新が合体すると
+    // 以前の要求が再び現れ得る。値 0 は常に受け付けのため、その場合も
+    // 要求として扱う)
+    // 対象の購読が映像トラックかどうかは Track 名で解決する。購読は
+    // 自側の PUBLISH と peer の SUBSCRIBE の両方で確立し得るため、
+    // Request ID の空間では判定できない
+    let is_video_subscription = context
+        .client
+        .subscription_track_name(update.request_id)
+        .is_some_and(|track_name| track_name.as_slice() == context.config.track_name.as_bytes());
+    let new_group_request = accepted_new_group_request(
+        is_video_subscription && context.config.input_mp4.is_none(),
+        &update.parameters,
+        *context.started_video_group_id,
+    );
+    match context.client.send_request_ok(update.request_id).await {
+        Ok(()) => {
+            // 購読が成立している要求だけを受け付ける
+            if let Some(next_group_id) = new_group_request {
+                context.gop_tracker.request_new_group();
+                tracing::info!("Received NEW_GROUP_REQUEST: next_group_id={next_group_id}");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to send REQUEST_OK for request {}: {e}",
+                update.request_id
+            );
+        }
+    }
+    Ok(false)
+}
+
+/// PUBLISH_DONE / RESET_STREAM / FILL_FETCH のセッションイベントを処理する
+async fn handle_publisher_session_event(
+    context: &mut NextEventContext<'_>,
+    event: SessionEvent,
+) -> Result<bool> {
+    match event {
+        SessionEvent::PublishDoneReceived { request_id, .. } => {
+            tracing::info!("Peer sent PUBLISH_DONE for request {request_id}");
+            Ok(false)
+        }
+        SessionEvent::ResetDataStream {
+            stream_id,
+            error_code,
+            reliable_size,
+            tracking,
+        } => {
+            // I/O 層 (この example) が当該 uni data stream を RESET_STREAM で閉じ、
+            // その後に Session へ終端を通知する。通知が保留 PUBLISH_DONE の
+            // flush 条件 (全 outgoing stream の終端) を満たす
+            // (draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability))。
+            reset_open_subgroup_stream(
+                context.current_video_writer,
+                stream_id,
+                error_code,
+                reliable_size,
+                tracking,
+            )
+            .await
+        }
+        SessionEvent::OpenFillFetchStream {
+            request_id,
+            subscription_request_id,
+            start,
+            end,
+        } => {
+            // draft-ietf-moq-transport-23 §3.4 (Fill Semantics) / §3.4.1:
+            // FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE を受けた publisher は
+            // uni stream を開き、起因メッセージの Request ID を載せた FETCH_HEADER に
+            // 続けて fill range の Object を送り、FIN で閉じる (FETCH_OK は送らない)。
+            // 応答できない場合は FETCH_HEADER の直後で reset して失敗を伝える
+            // (無応答にすると peer が fill を待ち続ける)
+            match context
+                .client
+                .subscription_track_name(subscription_request_id)
+            {
+                Some(track) if track == MSF_CATALOG_TRACK_NAME => {
+                    // 送るのは現在のカタログ Object 1 つだけである。これが fill range に
+                    // 入らない場合 (過去 Group だけを指す range など) は応答できないため
+                    // reset で失敗を伝える
+                    let location = *context.catalog_location;
+                    if location < start || location > end {
+                        tracing::info!(
+                            "Rejecting catalog fill fetch outside the requested range: request_id={request_id}, location={:?}",
+                            location,
+                        );
+                        reject_fill_fetch(context.client, request_id).await;
+                    } else if let Err(e) = context
+                        .client
+                        .send_fill_fetch_response(
+                            request_id,
+                            location.group_id,
+                            location.object_id,
+                            context.catalog_json,
+                            catalog::CATALOG_PUBLISHER_PRIORITY,
+                        )
+                        .await
+                    {
+                        // 失敗しても publisher は停止しない。Terminated / 回収済みの
+                        // subscription は通常の失敗条件である (§3.4.1)
+                        tracing::warn!(
+                            "Failed to serve catalog fill fetch (request_id={request_id}): {e}"
+                        );
+                    } else {
+                        tracing::info!(
+                            "Served catalog fill fetch (request_id={request_id}, group={})",
+                            location.group_id,
+                        );
+                    }
+                }
+                Some(track) => {
+                    // moq-pub はカタログ以外の fill range を判定できないため、
+                    // FETCH_HEADER の直後で reset する (§3.4.1)。
+                    // video / audio への FILL_PARAMETERS 付き SUBSCRIBE もここへ来る
+                    tracing::warn!(
+                        "Rejecting fill fetch for an unsupported track: track={}",
+                        String::from_utf8_lossy(&track),
+                    );
+                    reject_fill_fetch(context.client, request_id).await;
+                }
+                None => {
+                    // subscription を引けない経路 (回収済みなど) も reset で伝える
+                    tracing::warn!(
+                        "Rejecting fill fetch for an unresolved subscription: request_id={request_id}",
+                    );
+                    reject_fill_fetch(context.client, request_id).await;
+                }
+            }
+            Ok(false)
+        }
+        _ => Ok(false),
+    }
+}
+
 async fn handle_notable_event(
-    context: NextEventContext<'_>,
+    context: &mut NextEventContext<'_>,
     notable: std::result::Result<Option<ClientEvent>, TransportError>,
 ) -> Result<LoopFlow> {
-    let NextEventContext {
-        task_monitor,
-        config,
-        namespace,
-        handle,
-        catalog_group_id,
-        catalog_location,
-        catalog_json,
-        started_video_group_id,
-        current_video_writer,
-        peer_subscriptions,
-        next_peer_alias,
-        gop_tracker,
-        session_ended,
-        audio_config_sent,
-        media_cache,
-        migration_task,
-        request_migration_tx,
-        request_migration_tasks,
-        request_migration_sessions,
-        migrating_tracks,
-        video_publish_target,
-        audio_publish_target,
-        catalog_publish_target,
-        migration_limiter,
-        catalog_request_id,
-        audio_request_id,
-        video_request_id,
-        data_plane,
-        client,
-        migration_rx,
-    } = context;
     // 分岐本体を async ブロックに閉じ込め、`?` が `run` を抜けないようにする。
-    // `client.next_event()` の結果とピア要求への応答 (`serve_peer_request`) は
+    // `context.client.next_event()` の結果とピア要求への応答 (`serve_peer_request`) は
     // どちらも transport I/O を行い、セッション終了後は
     // `TransportError::ConnectionClosed` を返す。
     // `break 'main` はブロックの外に出す (ブロックの中では外側のループを
     // 抜けられない) ため、ブロックは「ループを抜けるか」を返す。
     let outcome: Result<bool> = async {
-                    match notable? {
-                        Some(ClientEvent::Session(SessionEvent::GoawayReceived {
-                            new_session_uri,
-                            timeout,
-                            on_request_stream,
-                        })) => {
-                            handle_goaway_event(
-                                &mut NextEventContext {
-                                    task_monitor: &mut *task_monitor,
-                                    config: &mut *config,
-                                    namespace: &mut *namespace,
-                                    handle: &mut *handle,
-                                    catalog_group_id: &mut *catalog_group_id,
-                                    catalog_location: &mut *catalog_location,
-                                    catalog_json: &mut *catalog_json,
-                                    current_video_writer: &mut *current_video_writer,
-                                    peer_subscriptions: &mut *peer_subscriptions,
-                                    gop_tracker: &mut *gop_tracker,
-                                    audio_config_sent: &mut *audio_config_sent,
-                                    migration_task: &mut *migration_task,
-                                    request_migration_tx: &mut *request_migration_tx,
-                                    request_migration_tasks: &mut *request_migration_tasks,
-                                    request_migration_sessions: &mut *request_migration_sessions,
-                                    migrating_tracks: &mut *migrating_tracks,
-                                    video_publish_target: &mut *video_publish_target,
-                                    audio_publish_target: &mut *audio_publish_target,
-                                    catalog_publish_target: &mut *catalog_publish_target,
-                                    migration_limiter: &mut *migration_limiter,
-                                    catalog_request_id: &mut *catalog_request_id,
-                                    audio_request_id: &mut *audio_request_id,
-                                    video_request_id: &mut *video_request_id,
-                                    data_plane: &mut *data_plane,
-                                    client: &mut *client,
-                                    migration_rx: &mut *migration_rx,
-                                    started_video_group_id: &mut *started_video_group_id,
-                                    next_peer_alias: &mut *next_peer_alias,
-                                    session_ended: &mut *session_ended,
-                                    media_cache: &mut *media_cache,
-                                },
-                                new_session_uri,
-                                timeout,
-                                on_request_stream,
-                            )
-                            .await
-                        }
-                        Some(ClientEvent::Session(SessionEvent::CloseSession(err))) => {
-                            tracing::warn!("Session closed: {:#x} {}", err.code, err.reason);
-                            Ok(true)
-                        }
-                        Some(ClientEvent::Session(SessionEvent::PeerClosed(err))) => {
-                            // peer 起点の終了。peer の transport は既に閉じているため
-                            // 終了コードを送り返さず、終了理由を記録して後始末へ進む
-                            tracing::warn!(
-                                "Session closed by peer: {:#x} {}",
-                                err.code,
-                                err.reason
-                            );
-                            Ok(true)
-                        }
-                        Some(ClientEvent::Session(SessionEvent::PublishDoneReceived {
-                            request_id,
-                            ..
-                        })) => {
-                            tracing::info!("Peer sent PUBLISH_DONE for request {request_id}");
-                            Ok(false)
-                        }
-                        Some(ClientEvent::Session(SessionEvent::ResetDataStream {
-                            stream_id,
-                            error_code,
-                            reliable_size,
-                            tracking,
-                        })) => {
-                            // I/O 層 (この example) が当該 uni data stream を RESET_STREAM で閉じ、
-                            // その後に Session へ終端を通知する。通知が保留 PUBLISH_DONE の
-                            // flush 条件 (全 outgoing stream の終端) を満たす
-                            // (draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability))。
-                            reset_open_subgroup_stream(
-                                current_video_writer,
-                                stream_id,
-                                error_code,
-                                reliable_size,
-                                tracking,
-                            )
-                            .await
-                        }
-                        Some(ClientEvent::Request(request)) => {
-                            let accepted = serve_peer_request(
-                                client,
-                                request,
-                                config,
-                                CatalogState {
-                                    json: catalog_json,
-                                    location: *catalog_location,
-                                },
-                                gop_tracker,
-                                *started_video_group_id,
-                                media_cache,
-                                next_peer_alias,
-                            )
-                            .await?;
-                            if let Some(accepted) = accepted {
-                                peer_subscriptions.push(PeerSubscription {
-                                    request_id: accepted.request_id,
-                                    track: accepted.track,
-                                    alias: accepted.alias,
-                                    writer: None,
-                                    audio_config_sent: false,
-                                    ended: false,
-                                });
-                                // カタログの購読は、受理した時点で現在のカタログ Object を
-                                // 新しい Group で送り直す (draft-ietf-moq-msf-02 §5: 独立した
-                                // カタログは新しい Group の先頭に置く MUST)。次の定周期の
-                                // republish を待つと購読直後の相手にカタログが届かない
-                                if accepted.track == PublishedTrack::Catalog
-                                    && let Err(e) = republish_catalog_at_next_group(
-                                        client,
-                                        catalog_sink(
-                                            client,
-                                            catalog_publish_target.as_ref(),
-                                            handle,
-                                            data_plane,
-                                            *catalog_request_id,
-                                        ),
-                                        handle,
-                                        data_plane,
-                                        *catalog_request_id,
-                                        catalog_json,
-                                        catalog_group_id,
-                                        catalog_location,
-                                        peer_subscriptions,
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!(
-                                        "Failed to send the catalog to a newly accepted peer subscription: {e}"
-                                    );
-                                }
-                            }
-                            Ok(false)
-                        }
-                        Some(ClientEvent::Session(SessionEvent::OpenFillFetchStream {
-                            request_id,
-                            subscription_request_id,
-                            start,
-                            end,
-                        })) => {
-                            // draft-ietf-moq-transport-23 §3.4 (Fill Semantics) / §3.4.1:
-                            // FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE を受けた publisher は
-                            // uni stream を開き、起因メッセージの Request ID を載せた FETCH_HEADER に
-                            // 続けて fill range の Object を送り、FIN で閉じる (FETCH_OK は送らない)。
-                            // 応答できない場合は FETCH_HEADER の直後で reset して失敗を伝える
-                            // (無応答にすると peer が fill を待ち続ける)
-                            match client.subscription_track_name(subscription_request_id) {
-                                Some(track) if track == MSF_CATALOG_TRACK_NAME => {
-                                    // 送るのは現在のカタログ Object 1 つだけである。これが fill range に
-                                    // 入らない場合 (過去 Group だけを指す range など) は応答できないため
-                                    // reset で失敗を伝える
-                                    let location = *catalog_location;
-                                    if location < start || location > end {
-                                        tracing::info!(
-                                            "Rejecting catalog fill fetch outside the requested range: request_id={request_id}, location={:?}",
-                                            location,
-                                        );
-                                        reject_fill_fetch(client, request_id).await;
-                                    } else if let Err(e) = client
-                                        .send_fill_fetch_response(
-                                            request_id,
-                                            location.group_id,
-                                            location.object_id,
-                                            catalog_json,
-                                            catalog::CATALOG_PUBLISHER_PRIORITY,
-                                        )
-                                        .await
-                                    {
-                                        // 失敗しても publisher は停止しない。Terminated / 回収済みの
-                                        // subscription は通常の失敗条件である (§3.4.1)
-                                        tracing::warn!(
-                                            "Failed to serve catalog fill fetch (request_id={request_id}): {e}"
-                                        );
-                                    } else {
-                                        tracing::info!(
-                                            "Served catalog fill fetch (request_id={request_id}, group={})",
-                                            location.group_id,
-                                        );
-                                    }
-                                }
-                                Some(track) => {
-                                    // moq-pub はカタログ以外の fill range を判定できないため、
-                                    // FETCH_HEADER の直後で reset する (§3.4.1)。
-                                    // video / audio への FILL_PARAMETERS 付き SUBSCRIBE もここへ来る
-                                    tracing::warn!(
-                                        "Rejecting fill fetch for an unsupported track: track={}",
-                                        String::from_utf8_lossy(&track),
-                                    );
-                                    reject_fill_fetch(client, request_id).await;
-                                }
-                                None => {
-                                    // subscription を引けない経路 (回収済みなど) も reset で伝える
-                                    tracing::warn!(
-                                        "Rejecting fill fetch for an unresolved subscription: request_id={request_id}",
-                                    );
-                                    reject_fill_fetch(client, request_id).await;
-                                }
-                            }
-                            Ok(false)
-                        }
-                        Some(ClientEvent::RequestUpdate(update)) => {
-                            // draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE):
-                            // 受信側は必ず 1 通の REQUEST_OK / REQUEST_ERROR で応答する MUST。
-                            // PAUSED / LOCATION_FILTER / Range Filters の検証と購読状態への
-                            // 反映は session 層が受信時に済ませているため、ここでは受理する。
-                            tracing::info!(
-                                "Received REQUEST_UPDATE: request_id={}",
-                                update.request_id
-                            );
-                            // NEW_GROUP_REQUEST (§9.19.19) は新しい Group の開始
-                            // (ランダムアクセス点) を要求する。映像の購読に限るのは、他の
-                            // トラックの要求で映像のキーフレームを強制しないためである
-                            // (`parameters` は購読の累積パラメータであり、複数の更新が合体すると
-                            // 以前の要求が再び現れ得る。値 0 は常に受け付けのため、その場合も
-                            // 要求として扱う)
-                            // 対象の購読が映像トラックかどうかは Track 名で解決する。購読は
-                            // 自側の PUBLISH と peer の SUBSCRIBE の両方で確立し得るため、
-                            // Request ID の空間では判定できない
-                            let is_video_subscription = client
-                                .subscription_track_name(update.request_id)
-                                .is_some_and(|track_name| {
-                                    track_name.as_slice() == config.track_name.as_bytes()
-                                });
-                            let new_group_request = accepted_new_group_request(
-                                is_video_subscription && config.input_mp4.is_none(),
-                                &update.parameters,
-                                *started_video_group_id,
-                            );
-                            match client.send_request_ok(update.request_id).await {
-                                Ok(()) => {
-                                    // 購読が成立している要求だけを受け付ける
-                                    if let Some(next_group_id) = new_group_request {
-                                        gop_tracker.request_new_group();
-                                        tracing::info!(
-                                            "Received NEW_GROUP_REQUEST: next_group_id={next_group_id}"
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Failed to send REQUEST_OK for request {}: {e}",
-                                        update.request_id
-                                    );
-                                }
-                            }
-                            Ok(false)
-                        }
-                        _ => Ok(false),
-                    }
-                }
-                .await;
+        match notable? {
+            Some(ClientEvent::Session(SessionEvent::GoawayReceived {
+                new_session_uri,
+                timeout,
+                on_request_stream,
+            })) => handle_goaway_event(context, new_session_uri, timeout, on_request_stream).await,
+            Some(ClientEvent::Session(SessionEvent::CloseSession(err))) => {
+                tracing::warn!("Session closed: {:#x} {}", err.code, err.reason);
+                Ok(true)
+            }
+            Some(ClientEvent::Session(SessionEvent::PeerClosed(err))) => {
+                // peer 起点の終了。peer の transport は既に閉じているため
+                // 終了コードを送り返さず、終了理由を記録して後始末へ進む
+                tracing::warn!("Session closed by peer: {:#x} {}", err.code, err.reason);
+                Ok(true)
+            }
+            Some(ClientEvent::Request(request)) => {
+                handle_publisher_request_event(context, request).await
+            }
+            Some(ClientEvent::Session(event)) => {
+                handle_publisher_session_event(context, event).await
+            }
+            Some(ClientEvent::RequestUpdate(update)) => {
+                handle_publisher_update_event(context, update).await
+            }
+            _ => Ok(false),
+        }
+    }
+    .await;
     match outcome {
         // セッションが終了した (peer 起点の終了通知 / 自側で検出した違反の双方)。
         // 終了時の後始末へ進む
         Ok(true) => {
-            *session_ended = true;
+            *context.session_ended = true;
             return Ok(LoopFlow::Break);
         }
         Ok(false) => {}
         Err(e) if is_transport_session_end(&e) => {
             tracing::info!("Session closed by transport");
-            *session_ended = true;
+            *context.session_ended = true;
             return Ok(LoopFlow::Break);
         }
         Err(e) if is_peer_stream_reset(&e) => {
@@ -3146,7 +3093,7 @@ async fn handle_notable_event(
         }
         Err(e) => {
             // MOQT メッセージの encode / decode 失敗は終了コード付きで閉じる
-            close_on_message_error(client, &e).await;
+            close_on_message_error(context.client, &e).await;
             return Err(e);
         }
     }
@@ -3810,7 +3757,7 @@ async fn run_publisher_loop(state: PublisherPipelineState<'_>) -> Result<()> {
             }
             notable = client.next_event() => {
                 match handle_notable_event(
-                    NextEventContext {
+                    &mut NextEventContext {
                         task_monitor,
                         config,
                         namespace,
