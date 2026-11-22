@@ -1169,26 +1169,30 @@ impl MsfCatalog {
 
 ```rust
 use shiguredo_moqt::msf::{
-    TimelineEncodingOptions, MsfMediaTimeline, MsfEventTimeline,
+    MsfCompression, MsfMediaTimeline, MsfEventTimeline,
     encode_media_timeline, decode_media_timeline,
     encode_event_timeline, decode_event_timeline,
 };
 
-pub struct TimelineEncodingOptions { pub gzip: bool }
-
 fn encode_media_timeline(
     timeline: &MsfMediaTimeline,
-    options: TimelineEncodingOptions,
+    compression: MsfCompression,
 ) -> Result<Vec<u8>, MessageError>
-fn decode_media_timeline(data: &[u8]) -> Result<MsfMediaTimeline, MessageError>
+fn decode_media_timeline(
+    data: &[u8],
+    compression: MsfCompression,
+) -> Result<MsfMediaTimeline, MessageError>
 fn encode_event_timeline(
     timeline: &MsfEventTimeline,
-    options: TimelineEncodingOptions,
+    compression: MsfCompression,
 ) -> Result<Vec<u8>, MessageError>
-fn decode_event_timeline(data: &[u8]) -> Result<MsfEventTimeline, MessageError>
+fn decode_event_timeline(
+    data: &[u8],
+    compression: MsfCompression,
+) -> Result<MsfEventTimeline, MessageError>
 ```
 
-`decode_*` は先頭の gzip magic (`0x1F 0x8B`) を検出すると自動展開する。
+`compression` は MSF_COMPRESSION property (0x78) の値である。`MsfCompression::Gzip` のときだけ gzip 圧縮・展開し、`None` のときは magic byte があっても自動展開しない (draft-ietf-moq-msf-02 §12.1.1)。
 
 ### URI
 

@@ -6,10 +6,10 @@ use shiguredo_moqt::{
         MsfCompression, MsfDeltaOperation, MsfDeltaUpdate, MsfDependency, MsfEventIndex,
         MsfEventTimeline, MsfEventTimelineEntry, MsfInitData, MsfInitDataKind, MsfMediaTimeline,
         MsfMediaTimelineEntry, MsfPackaging, MsfRemoveTrack, MsfTemplate, MsfTrack, MsfUpdateTrack,
-        StreamMapping, TimelineEncodingOptions, decode_event_timeline, decode_media_timeline,
-        encode_event_timeline, encode_media_timeline, parse_catalog_namespace,
-        parse_fragment_pairs, resolve_catalog_variables, serialize_catalog_namespace,
-        validate_event_timeline_depends, validate_media_timeline_format,
+        StreamMapping, decode_event_timeline, decode_media_timeline, encode_event_timeline,
+        encode_media_timeline, parse_catalog_namespace, parse_fragment_pairs,
+        resolve_catalog_variables, serialize_catalog_namespace, validate_event_timeline_depends,
+        validate_media_timeline_format,
     },
 };
 

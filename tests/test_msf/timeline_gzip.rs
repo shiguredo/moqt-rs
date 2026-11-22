@@ -64,11 +64,12 @@ fn sample_event_timeline() -> MsfEventTimeline {
 #[test]
 fn media_timeline_roundtrip_gzip_false() {
     let tl = sample_media_timeline();
-    let encoded = encode_media_timeline(&tl, TimelineEncodingOptions { gzip: false })
+    let encoded = encode_media_timeline(&tl, MsfCompression::None)
         .expect("テストフィクスチャの前提条件を満たす");
     // 生 JSON は "[" で始まる
     assert_eq!(encoded[0], b'[');
-    let decoded = decode_media_timeline(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = decode_media_timeline(&encoded, MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, tl);
 }
 
@@ -79,17 +80,18 @@ fn encode_event_timeline_gzip_propagates_data_raw_error() {
         index: MsfEventIndex::WallclockMs(1000),
         data_raw: vec![0x80, 0x81],
     }]);
-    let err = encode_event_timeline(&tl, TimelineEncodingOptions { gzip: true }).unwrap_err();
+    let err = encode_event_timeline(&tl, MsfCompression::Gzip).unwrap_err();
     assert!(matches!(err, MessageError::InvalidCatalog(_)));
 }
 
 #[test]
 fn event_timeline_roundtrip_gzip_false() {
     let tl = sample_event_timeline();
-    let encoded = encode_event_timeline(&tl, TimelineEncodingOptions { gzip: false })
+    let encoded = encode_event_timeline(&tl, MsfCompression::None)
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(encoded[0], b'[');
-    let decoded = decode_event_timeline(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    let decoded = decode_event_timeline(&encoded, MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(decoded, tl);
 }
 
@@ -98,14 +100,14 @@ fn decode_rejects_corrupted_gzip() {
     // gzip magic を付けた壊れたペイロード
     let mut bad = vec![0x1F, 0x8B, 0x08, 0x00];
     bad.extend_from_slice(&[0xFF; 16]);
-    let err = decode_media_timeline(&bad).unwrap_err();
+    let err = decode_media_timeline(&bad, MsfCompression::Gzip).unwrap_err();
     assert!(matches!(err, MessageError::GzipDecode(_)));
 }
 
 #[test]
 fn decode_empty_buffer_as_raw_json_fails() {
     // 空バッファは gzip magic 判定で non-gzip となり、JSON パースで失敗する
-    let err = decode_media_timeline(&[]).unwrap_err();
+    let err = decode_media_timeline(&[], MsfCompression::None).unwrap_err();
     assert!(matches!(err, MessageError::InvalidCatalog(_)));
 }
 
@@ -116,7 +118,7 @@ fn decode_rejects_truncated_gzip() {
     compressed.extend_from_slice(&[0x63, 0x60, 0x60, 0x60, 0x00, 0x00, 0x00]);
     // trailer を切り落とす
     compressed.truncate(compressed.len() - 4);
-    let err = decode_media_timeline(&compressed).unwrap_err();
+    let err = decode_media_timeline(&compressed, MsfCompression::Gzip).unwrap_err();
     assert!(matches!(err, MessageError::GzipDecode(_)));
 }
 
@@ -133,7 +135,7 @@ fn decode_rejects_gzip_bomb() {
         bomb.len()
     );
 
-    let err = decode_media_timeline(&bomb).unwrap_err();
+    let err = decode_media_timeline(&bomb, MsfCompression::Gzip).unwrap_err();
     assert!(
         matches!(err, MessageError::GzipDecode(_)),
         "gzip bomb は GzipDecode エラーになる: got {err:?}"
@@ -152,14 +154,71 @@ fn gzip_is_smaller_for_many_entries() {
             pts_ms: 0,
         });
     }
-    let raw = encode_media_timeline(&tl, TimelineEncodingOptions { gzip: false })
+    let raw = encode_media_timeline(&tl, MsfCompression::None)
         .expect("テストフィクスチャの前提条件を満たす");
-    let gz = encode_media_timeline(&tl, TimelineEncodingOptions { gzip: true })
+    let gz = encode_media_timeline(&tl, MsfCompression::Gzip)
         .expect("テストフィクスチャの前提条件を満たす");
     assert!(
         gz.len() < raw.len() / 2,
         "gzip should compress repetitive payload: raw={} gz={}",
         raw.len(),
         gz.len()
+    );
+}
+
+#[test]
+fn media_timeline_roundtrip_gzip_true() {
+    let tl = sample_media_timeline();
+    let encoded = encode_media_timeline(&tl, MsfCompression::Gzip)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        &encoded[..2],
+        &[0x1F, 0x8B],
+        "Gzip signal は gzip を出力する"
+    );
+    let decoded = decode_media_timeline(&encoded, MsfCompression::Gzip)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(decoded, tl);
+}
+
+#[test]
+fn event_timeline_roundtrip_gzip_true() {
+    let tl = sample_event_timeline();
+    let encoded = encode_event_timeline(&tl, MsfCompression::Gzip)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        &encoded[..2],
+        &[0x1F, 0x8B],
+        "Gzip signal は gzip を出力する"
+    );
+    let decoded = decode_event_timeline(&encoded, MsfCompression::Gzip)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(decoded, tl);
+}
+
+#[test]
+fn decode_without_signal_does_not_decompress_gzip() {
+    // draft-ietf-moq-msf-02 §12.1.1: property が無ければ payload を非圧縮として扱う。
+    // gzip の magic byte があっても自動展開しない。
+    let tl = sample_media_timeline();
+    let compressed = encode_media_timeline(&tl, MsfCompression::Gzip)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let err = decode_media_timeline(&compressed, MsfCompression::None).unwrap_err();
+    assert!(
+        matches!(err, MessageError::InvalidCatalog(_)),
+        "signal なしでは gzip を展開せず JSON パースで失敗する: got {err:?}"
+    );
+}
+
+#[test]
+fn decode_with_gzip_signal_rejects_plain_json() {
+    // Gzip signal は magic byte を再検出せず必ず展開する。非圧縮 JSON は展開できない。
+    let tl = sample_media_timeline();
+    let raw = encode_media_timeline(&tl, MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let err = decode_media_timeline(&raw, MsfCompression::Gzip).unwrap_err();
+    assert!(
+        matches!(err, MessageError::GzipDecode(_)),
+        "Gzip signal で非 gzip を渡した場合は GzipDecode になる: got {err:?}"
     );
 }

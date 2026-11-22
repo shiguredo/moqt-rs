@@ -90,7 +90,7 @@ fn media_timeline_rejects_descending_media_time() {
         },
     ]);
     assert!(matches!(
-        encode_media_timeline(&timeline, TimelineEncodingOptions { gzip: false }),
+        encode_media_timeline(&timeline, MsfCompression::None),
         Err(MessageError::InvalidCatalog(_))
     ));
 }

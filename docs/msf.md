@@ -69,8 +69,9 @@
 
 - Media Timeline (`[[pts_ms, [group_id, object_id], wallclock_ms], ...]` 形式)。pts_ms は非降順で、`validate_media_timeline_format` が template 属性との併用を拒否する
 - Event Timeline (`{T / L / M + data}` 形式、`data` は任意の JSON 値の生バイト列)。header data は MSF_EVENT_TIMELINE_HEADER (0x7B) Track property で運び、track の寿命を通じて不変である。`TrackProperties::event_timeline_header` で取得し、`MsfEventTimeline::decode_with_header` は header を解釈せず entry 列だけを decode する
-- Gzip 圧縮と自動展開 (`msf::TimelineEncodingOptions` / `encode_media_timeline` 等)
-  - `TimelineEncodingOptions` と Timeline の encode / decode 関数は `msf` モジュール経由で利用する
+- Gzip 圧縮と signal に基づく展開 (`msf::MsfCompression` / `encode_media_timeline` 等)
+  - Timeline の encode / decode 関数は `MsfCompression` を引数に取る。これは MSF_COMPRESSION property (0x78) の値であり、`Gzip` のときだけ gzip 圧縮・展開する
+  - property が無い場合 (`MsfCompression::None`) は payload を非圧縮として扱い、gzip の magic byte があっても自動展開しない (draft-ietf-moq-msf-02 §12.1.1)
 
 ## URI
 

@@ -1,11 +1,11 @@
 use pbt::common::test_runner;
 use shiguredo_moqt::msf::{
     MSF_VERSION, MsfAccessibility, MsfAuthInfo, MsfBuffers, MsfCatalog, MsfCatalogDocument,
-    MsfCloneTrack, MsfDeltaOperation, MsfDeltaUpdate, MsfDependency, MsfEventIndex,
+    MsfCloneTrack, MsfCompression, MsfDeltaOperation, MsfDeltaUpdate, MsfDependency, MsfEventIndex,
     MsfEventTimeline, MsfEventTimelineEntry, MsfInitData, MsfInitDataKind, MsfMediaTimeline,
     MsfMediaTimelineEntry, MsfPackaging, MsfRemoveTrack, MsfTemplate, MsfTrack,
-    TimelineEncodingOptions, decode_event_timeline, decode_media_timeline, encode_event_timeline,
-    encode_media_timeline, parse_catalog_namespace, serialize_catalog_namespace,
+    decode_event_timeline, decode_media_timeline, encode_event_timeline, encode_media_timeline,
+    parse_catalog_namespace, serialize_catalog_namespace,
 };
 
 // ─── 生成ヘルパー ─────────────────────────────────────────────────────────────
@@ -806,11 +806,11 @@ fn media_timeline_gzip_roundtrip() -> noprop::TestResult {
             .collect::<Vec<_>>();
         entries.sort_by_key(|entry| entry.pts_ms);
         let tl = MsfMediaTimeline(entries);
-        let encoded = encode_media_timeline(&tl, TimelineEncodingOptions { gzip: true })
+        let encoded = encode_media_timeline(&tl, MsfCompression::Gzip)
             .expect("テストフィクスチャの前提条件を満たす");
         assert_eq!(&encoded[..2], &[0x1F, 0x8B]);
-        let decoded =
-            decode_media_timeline(&encoded).expect("テストフィクスチャの前提条件を満たす");
+        let decoded = decode_media_timeline(&encoded, MsfCompression::Gzip)
+            .expect("テストフィクスチャの前提条件を満たす");
         assert_eq!(decoded, tl);
         Ok(())
     })?;
@@ -827,11 +827,11 @@ fn event_timeline_gzip_roundtrip() -> noprop::TestResult {
             .map(|_| sample_event_timeline_entry(ctx))
             .collect();
         let tl = MsfEventTimeline(entries);
-        let encoded = encode_event_timeline(&tl, TimelineEncodingOptions { gzip: true })
+        let encoded = encode_event_timeline(&tl, MsfCompression::Gzip)
             .expect("テストフィクスチャの前提条件を満たす");
         assert_eq!(&encoded[..2], &[0x1F, 0x8B]);
-        let decoded =
-            decode_event_timeline(&encoded).expect("テストフィクスチャの前提条件を満たす");
+        let decoded = decode_event_timeline(&encoded, MsfCompression::Gzip)
+            .expect("テストフィクスチャの前提条件を満たす");
         assert_eq!(decoded, tl);
         Ok(())
     })?;

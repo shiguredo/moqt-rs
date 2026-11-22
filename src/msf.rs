@@ -5098,11 +5098,10 @@ fn validate_event_data_raw(data_raw: &[u8]) -> Result<(), MessageError> {
 // ─── Timeline の gzip 圧縮・自動復号 ────────────────────────────────────────
 //
 // §7.1 (Media Timeline track payload) および §8.1 (Event Timeline data format) は
-// payload の compression を許容する。本実装は gzip (RFC 1952) magic byte 検出による
-// 自動復号と任意の gzip 圧縮を提供する。MSF_COMPRESSION property (§12.1
-// (Compression Signaling)) の値型と property アクセサは実装済みだが、codec はまだ
-// signal を引数で受け取らず、magic byte 検出と [`TimelineEncodingOptions`] を使う。
-// signal に基づく codec への移行は別途行う。
+// payload の compression を許容する。codec は [`MsfCompression`] を signal として受け取り、
+// `Gzip` のときだけ gzip (RFC 1952) 圧縮・復号する。property が無い場合は圧縮されて
+// いないものとして扱う (draft-ietf-moq-msf-02 §12.1.1)。magic byte による自動判定は
+// 行わない。
 
 /// MSF_COMPRESSION property の値 (draft-ietf-moq-msf-02 §12.1.1 / §12.1.2)
 ///
@@ -5146,21 +5145,6 @@ impl TryFrom<u64> for MsfCompression {
     }
 }
 
-/// Media / Event Timeline のエンコードオプション
-///
-/// `gzip == true` の場合、JSON バイト列を gzip で圧縮してから返す
-/// (draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload) / §8.1 (Event Timeline data format))。
-#[derive(Debug, Clone, Copy, Default)]
-pub struct TimelineEncodingOptions {
-    /// true の場合は JSON バイト列を gzip 圧縮する
-    pub gzip: bool,
-}
-
-/// gzip magic `0x1F 0x8B` を検出して圧縮済みか判定する
-fn is_gzip_compressed(data: &[u8]) -> bool {
-    matches!(noflate::Format::detect(data), Some(noflate::Format::Gzip))
-}
-
 /// gzip 展開後の累計出力サイズの上限 (16 MiB)
 ///
 /// この上限は実装が定める防御的上限であり、仕様で規定された値ではない。
@@ -5188,17 +5172,13 @@ const MAX_DECOMPRESSED_TIMELINE_BYTES: usize = 16 * 1024 * 1024;
 /// FEED_CHUNK = 4096 で 1 feed あたりの transient は約 4 MiB。
 const FEED_CHUNK: usize = 4096;
 
-/// 必要に応じて gzip 展開し、生 JSON バイト列を返す
+/// gzip を展開して生 JSON バイト列を返す
 ///
-/// ストリーミング展開により、展開後サイズを
-/// `MAX_DECOMPRESSED_TIMELINE_BYTES` 以内に制限する。
-/// 上限を超えた場合は `MessageError::GzipDecode` を返す。
-/// 非 gzip 入力はそのままコピーして返す。
-fn maybe_decompress_gzip(data: &[u8]) -> Result<Vec<u8>, MessageError> {
-    if !is_gzip_compressed(data) {
-        return Ok(data.to_vec());
-    }
-
+/// `MsfCompression::Gzip` の signal を受けた場合だけ呼ぶ。magic byte の再検出は行わず、
+/// 入力が gzip として復号できなければ `MessageError::GzipDecode` を返す。
+/// ストリーミング展開により、展開後サイズを `MAX_DECOMPRESSED_TIMELINE_BYTES` 以内に
+/// 制限する。上限を超えた場合も `MessageError::GzipDecode` を返す。
+fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>, MessageError> {
     let mut decoder = noflate::gzip::Decoder::new();
     let mut out = Vec::new();
 
@@ -5226,52 +5206,79 @@ fn maybe_decompress_gzip(data: &[u8]) -> Result<Vec<u8>, MessageError> {
     Ok(out)
 }
 
-/// JSON バイト列を必要に応じて gzip 圧縮する
-fn maybe_compress_gzip(
-    json: Vec<u8>,
-    options: TimelineEncodingOptions,
-) -> Result<Vec<u8>, MessageError> {
-    if options.gzip {
-        noflate::gzip::compress(&json).map_err(|e| MessageError::GzipEncode(format!("{e}")))
-    } else {
-        Ok(json)
+/// JSON バイト列を signal に従って gzip 圧縮する
+fn compress_json(json: Vec<u8>, compression: MsfCompression) -> Result<Vec<u8>, MessageError> {
+    match compression {
+        MsfCompression::None => Ok(json),
+        MsfCompression::Gzip => {
+            noflate::gzip::compress(&json).map_err(|e| MessageError::GzipEncode(format!("{e}")))
+        }
     }
 }
 
-/// Media Timeline を JSON にシリアライズし、オプションで gzip 圧縮する
+/// signal に従って payload を展開する
+///
+/// `None` は非圧縮として扱い、gzip の magic byte があっても展開しない
+/// (draft-ietf-moq-msf-02 §12.1.1 の "the subscriber MUST treat the payload as
+/// uncompressed")。この場合、gzip 入力は後段の JSON / UTF-8 検証で失敗する。
+fn decompress_payload(data: &[u8], compression: MsfCompression) -> Result<Vec<u8>, MessageError> {
+    match compression {
+        MsfCompression::None => Ok(data.to_vec()),
+        MsfCompression::Gzip => decompress_gzip(data),
+    }
+}
+
+/// Media Timeline を JSON にシリアライズし、signal に従って gzip 圧縮する
+///
+/// `compression` は MSF_COMPRESSION property の値であり、caller が property から
+/// 解決して渡す。`Gzip` の場合は JSON バイト列を gzip 圧縮する。
 ///
 /// draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload) に準拠。
 pub fn encode_media_timeline(
     timeline: &MsfMediaTimeline,
-    options: TimelineEncodingOptions,
+    compression: MsfCompression,
 ) -> Result<Vec<u8>, MessageError> {
     validate_media_time_order(&timeline.0)?;
-    maybe_compress_gzip(timeline.encode(), options)
+    compress_json(timeline.encode(), compression)
 }
 
-/// Media Timeline バイト列をデコードする。先頭に gzip magic があれば自動展開する
+/// Media Timeline バイト列を signal に従ってデコードする
 ///
-/// draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload) に準拠。
-pub fn decode_media_timeline(data: &[u8]) -> Result<MsfMediaTimeline, MessageError> {
-    let json = maybe_decompress_gzip(data)?;
+/// `compression` は MSF_COMPRESSION property の値であり、caller が property から
+/// 解決して渡す。`Gzip` のときだけ展開し、magic byte による自動判定は行わない。
+/// `None` のときに gzip バイトを渡すと、展開せずに JSON パースで `InvalidCatalog` になる。
+///
+/// draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload) / §12.1.1
+/// (Compression Signaling) に準拠。
+pub fn decode_media_timeline(
+    data: &[u8],
+    compression: MsfCompression,
+) -> Result<MsfMediaTimeline, MessageError> {
+    let json = decompress_payload(data, compression)?;
     MsfMediaTimeline::decode(&json)
 }
 
-/// Event Timeline を JSON にシリアライズし、オプションで gzip 圧縮する
+/// Event Timeline を JSON にシリアライズし、signal に従って gzip 圧縮する
 ///
 /// draft-ietf-moq-msf-02 §8.1 (Event Timeline data format) に準拠。
 pub fn encode_event_timeline(
     timeline: &MsfEventTimeline,
-    options: TimelineEncodingOptions,
+    compression: MsfCompression,
 ) -> Result<Vec<u8>, MessageError> {
-    maybe_compress_gzip(timeline.encode()?, options)
+    compress_json(timeline.encode()?, compression)
 }
 
-/// Event Timeline バイト列をデコードする。先頭に gzip magic があれば自動展開する
+/// Event Timeline バイト列を signal に従ってデコードする
 ///
-/// draft-ietf-moq-msf-02 §8.1 (Event Timeline data format) に準拠。
-pub fn decode_event_timeline(data: &[u8]) -> Result<MsfEventTimeline, MessageError> {
-    let json = maybe_decompress_gzip(data)?;
+/// `Gzip` のときだけ展開し、magic byte による自動判定は行わない。
+///
+/// draft-ietf-moq-msf-02 §8.1 (Event Timeline data format) / §12.1.1
+/// (Compression Signaling) に準拠。
+pub fn decode_event_timeline(
+    data: &[u8],
+    compression: MsfCompression,
+) -> Result<MsfEventTimeline, MessageError> {
+    let json = decompress_payload(data, compression)?;
     MsfEventTimeline::decode(&json)
 }
 
