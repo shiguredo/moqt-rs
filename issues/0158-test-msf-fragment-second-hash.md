@@ -1,7 +1,7 @@
 # MSF URI の fragment 内の 2 個目の `#` の拒否をテストで固定する
 
 - Created: 2026-09-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/test-msf-fragment-second-hash
 - Polished: 2026-11-14
 - Updated: 2026-11-14
@@ -45,3 +45,14 @@ example 経路 (`crates/tokio-moq/src/lib.rs`) には `#` の明示検査があ�
 - `tests/test_msf/uri.rs` に 2 個目の `#` の拒否テストがあり、メッセージを固定していること
 - 既存の MSF URI テスト (scheme 大文字小文字、query、authority 空、fragment 形式) が変わらないこと
 - RFC 3986 §3.5 と draft-ietf-moq-msf-01 §11.1 / §11.1.2 の引用をコメントに残すこと
+
+## 解決方法
+
+- `split_moqt_uri` の 2 個目の `#` の検査メッセージを、track-identifier では `.23`、
+  `&` 区切りのパラメータ値では `%23` と書くよう案内する内容に変更した。
+- `tests/test_msf/uri.rs` に `parse_uri_second_hash_is_rejected_with_guidance` を追加し、
+  `moqt://example.com/path#msf:track#foo` が拒否され、メッセージに `.23` と `%23` が
+  含まれることを固定した。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check` が成功した。
