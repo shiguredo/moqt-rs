@@ -1,7 +1,7 @@
 # SubgroupStreamDecoder / FetchStreamDecoder の consume_payload 契約を明確化する
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/change-consume-payload-contract
 - Polished: 2026-11-20
 
@@ -73,3 +73,18 @@
 - `tests/test_stream/decoder.rs` の `encode_subgroup_stream` の doc コメントが実装と一致すること。
 - `CHANGES.md` を更新していないこと（`CODEBASE.md` の現方針）。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `SubgroupStreamDecoder::consume_payload` と `FetchStreamDecoder::consume_payload` は、
+  `ConsumingPayload` 状態・長さ一致・バッファが空であることをすべて検査し、滿たさない場合は
+  `ProtocolViolation` を返して状態とバッファを変えないようにした。
+- 両デコーダの doc に、外部読み出し専用であること、バッファが空であること、
+  `payload_length` が 0 の Object と marker エントリでは呼ばないことを明記した。
+- `tests/test_stream/decoder.rs` に、正常系・長さ不一致・状態違い・バッファ非空の
+  4 経路を両デコーダで固定するテストを追加した。
+- モジュール doc、`try_decode_object` / `try_decode_entry` の doc、疑似コード、
+  `skills/shiguredo-moqt/SKILL.md` を新しい契約に合わせた。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`RUSTDOCFLAGS="-D warnings" cargo doc` が成功した。
