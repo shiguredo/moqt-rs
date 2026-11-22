@@ -143,6 +143,22 @@ impl From<shiguredo_opus::Error> for Error {
     }
 }
 
+impl From<moq_codec::error::Error> for Error {
+    fn from(e: moq_codec::error::Error) -> Self {
+        // 共有 crate の variant を既存の variant へ写し、表示 (decode: / video toolbox: /
+        // opus: ...) を保つ。初期化前の H.264 / H.265 は既存どおり Other にする
+        // (表示は「H.264 decoder is not initialized; ...」のまま)。
+        match e {
+            moq_codec::error::Error::Decode(e) => Self::Decode(e),
+            #[cfg(target_os = "macos")]
+            moq_codec::error::Error::VideoToolbox(e) => Self::VideoToolbox(e),
+            moq_codec::error::Error::Opus(e) => Self::Opus(e),
+            e @ moq_codec::error::Error::NotInitialized { .. } => Self::Other(e.to_string()),
+            moq_codec::error::Error::Other(msg) => Self::Other(msg),
+        }
+    }
+}
+
 impl From<shiguredo_audio_device::Error> for Error {
     fn from(e: shiguredo_audio_device::Error) -> Self {
         Self::AudioCapture(e)

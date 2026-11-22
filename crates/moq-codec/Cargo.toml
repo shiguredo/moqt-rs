@@ -1,0 +1,22 @@
+[package]
+name = "moq-codec"
+version = "2026.0.0"
+edition = "2024"
+# workspace の Rust に合わせる
+rust-version = "1.95"
+description = "Shared codec decoders for the MOQT examples"
+publish = false
+
+[dependencies]
+# 時雨堂クレート
+
+# AV1 デコーダ (dav1d)
+shiguredo_dav1d = "2026.3"
+# Opus デコーダ
+shiguredo_opus = "2026.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# H.264 / H.265 ハードウェアデコーダ (Apple Video Toolbox)
+# workspace では shiguredo_video_toolbox が 1 つのバージョンに解決されるため、
+# moq-pub / moq-sub と同じバージョン指定にする
+shiguredo_video_toolbox = "2026.2.0-canary.4"

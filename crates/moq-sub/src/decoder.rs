@@ -1,18 +1,20 @@
 //! デコーダの Enum 抽象化
 //!
 //! codec ごとの実装を `VideoDecoder` / `AudioDecoder` の variant に持ち、`match` で分岐する。
-//! 具体実装は codec 別サブモジュールに分離する。
+//! AV1 / H.264 / H.265 / Opus の実装は共有 crate (`moq-codec`) にあり、subscriber 固有の
+//! VP8 / VP9 / AAC は codec 別サブモジュールに持つ。
+
+use moq_codec::av1::Av1Decoder;
+#[cfg(target_os = "macos")]
+use moq_codec::h264::H264Decoder;
+#[cfg(target_os = "macos")]
+use moq_codec::h265::H265Decoder;
+use moq_codec::opus::OpusDecoder;
 
 use crate::error::{Error, Result};
 
 #[cfg(target_os = "macos")]
 pub(crate) mod aac;
-pub(crate) mod av1;
-#[cfg(target_os = "macos")]
-pub(crate) mod h264;
-#[cfg(target_os = "macos")]
-pub(crate) mod h265;
-pub(crate) mod opus;
 pub(crate) mod vpx;
 
 /// LOC の TIMESTAMP の種類
@@ -86,19 +88,40 @@ pub struct DecodedAudioFrame {
     pub timestamp_kind: TimestampKind,
 }
 
+/// 共有 crate のフレームを subscriber のフレームへ変換する
+///
+/// 共有 crate のフレームは I420 プレーンだけを持つ。表示時刻は Object の Properties から
+/// pipeline が載せるため、ここでは `None` / [`TimestampKind::None`] にする。
+fn into_decoded_video_frame(frame: moq_codec::DecodedVideoFrame) -> DecodedVideoFrame {
+    DecodedVideoFrame {
+        y: frame.y,
+        u: frame.u,
+        v: frame.v,
+        width: frame.width,
+        height: frame.height,
+        timestamp_us: None,
+        timestamp_kind: TimestampKind::None,
+    }
+}
+
+/// 共有 crate のフレーム列を subscriber のフレーム列へ変換する
+fn into_decoded_video_frames(frames: Vec<moq_codec::DecodedVideoFrame>) -> Vec<DecodedVideoFrame> {
+    frames.into_iter().map(into_decoded_video_frame).collect()
+}
+
 /// サンプル subscriber が扱うビデオデコーダ
 ///
 /// codec ごとの実装を variant に持つ Enum とし、呼び出し側は本型のメソッド経由で
 /// 利用する。macOS 限定の codec は variant 単位で `cfg` を付ける。
 pub(crate) enum VideoDecoder {
     /// AV1 デコーダ (dav1d)
-    Av1(av1::Av1Decoder),
+    Av1(Av1Decoder),
     /// H.264 デコーダ (Apple Video Toolbox、macOS 限定)
     #[cfg(target_os = "macos")]
-    H264(h264::H264Decoder),
+    H264(H264Decoder),
     /// H.265 デコーダ (Apple Video Toolbox、macOS 限定)
     #[cfg(target_os = "macos")]
-    H265(h265::H265Decoder),
+    H265(H265Decoder),
     /// VP8 デコーダ (libvpx)
     Vp8(vpx::VpxDecoder),
     /// VP9 デコーダ (libvpx)
@@ -119,11 +142,27 @@ impl VideoDecoder {
         video_config: Option<&[u8]>,
     ) -> Result<Vec<DecodedVideoFrame>> {
         match self {
-            VideoDecoder::Av1(d) => d.decode(payload, video_config),
+            VideoDecoder::Av1(d) => Ok(into_decoded_video_frames(d.decode(payload, video_config)?)),
             #[cfg(target_os = "macos")]
-            VideoDecoder::H264(d) => d.decode(payload, video_config),
+            VideoDecoder::H264(d) => match d.decode(payload, video_config) {
+                Ok(frames) => Ok(into_decoded_video_frames(frames)),
+                Err(moq_codec::error::Error::NotInitialized { .. }) => {
+                    // avcC 未到達: キーフレーム前の受信なので破棄して次を待つ
+                    tracing::warn!("H.264 decoder not initialized yet (waiting for avcC)");
+                    Ok(Vec::new())
+                }
+                Err(e) => Err(e.into()),
+            },
             #[cfg(target_os = "macos")]
-            VideoDecoder::H265(d) => d.decode(payload, video_config),
+            VideoDecoder::H265(d) => match d.decode(payload, video_config) {
+                Ok(frames) => Ok(into_decoded_video_frames(frames)),
+                Err(moq_codec::error::Error::NotInitialized { .. }) => {
+                    // hvcC 未到達: キーフレーム前の受信なので破棄して次を待つ
+                    tracing::warn!("H.265 decoder not initialized yet (waiting for hvcC)");
+                    Ok(Vec::new())
+                }
+                Err(e) => Err(e.into()),
+            },
             VideoDecoder::Vp8(d) => d.decode(payload, video_config),
             VideoDecoder::Vp9(d) => d.decode(payload, video_config),
         }
@@ -133,11 +172,11 @@ impl VideoDecoder {
 /// catalog の RFC 6381 codec 文字列からビデオデコーダを生成する
 pub(crate) fn build_video_decoder(codec: &str) -> Result<VideoDecoder> {
     if codec.starts_with("av01") {
-        Ok(VideoDecoder::Av1(av1::Av1Decoder::new()?))
+        Ok(VideoDecoder::Av1(Av1Decoder::new()?))
     } else if codec.starts_with("avc1") {
         #[cfg(target_os = "macos")]
         {
-            Ok(VideoDecoder::H264(h264::H264Decoder::new()?))
+            Ok(VideoDecoder::H264(H264Decoder::new()?))
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -148,7 +187,7 @@ pub(crate) fn build_video_decoder(codec: &str) -> Result<VideoDecoder> {
     } else if codec.starts_with("hvc1") || codec.starts_with("hev1") {
         #[cfg(target_os = "macos")]
         {
-            Ok(VideoDecoder::H265(h265::H265Decoder::new()?))
+            Ok(VideoDecoder::H265(H265Decoder::new()?))
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -173,7 +212,7 @@ pub(crate) fn build_video_decoder(codec: &str) -> Result<VideoDecoder> {
 /// 利用する。macOS 限定の codec は variant 単位で `cfg` を付ける。
 pub(crate) enum AudioDecoder {
     /// Opus デコーダ
-    Opus(opus::OpusDecoder),
+    Opus(OpusDecoder),
     /// AAC-LC デコーダ (Apple Audio Toolbox、macOS 限定)
     #[cfg(target_os = "macos")]
     Aac(aac::AacDecoder),
@@ -200,10 +239,7 @@ impl AudioDecoder {
                 )))
             }
         } else if is_opus_codec(codec) {
-            Ok(AudioDecoder::Opus(opus::OpusDecoder::new(
-                sample_rate,
-                channels,
-            )?))
+            Ok(AudioDecoder::Opus(OpusDecoder::new(sample_rate, channels)?))
         } else {
             Err(Error::Other(format!("unsupported audio codec: {codec}")))
         }
@@ -214,7 +250,7 @@ impl AudioDecoder {
     /// AAC はデコードを専用スレッドが行うため、完了を待って返す。
     pub(crate) async fn decode(&mut self, data: &[u8]) -> Result<Vec<i16>> {
         match self {
-            AudioDecoder::Opus(d) => d.decode(data),
+            AudioDecoder::Opus(d) => Ok(d.decode(data)?),
             #[cfg(target_os = "macos")]
             AudioDecoder::Aac(d) => d.decode(data).await,
         }
@@ -226,7 +262,7 @@ impl AudioDecoder {
     /// ときに使う ([`crate::pipeline`] を参照)。
     pub(crate) fn reset(&mut self) -> Result<()> {
         match self {
-            AudioDecoder::Opus(d) => d.reset(),
+            AudioDecoder::Opus(d) => Ok(d.reset()?),
             #[cfg(target_os = "macos")]
             AudioDecoder::Aac(d) => d.reset(),
         }
@@ -271,11 +307,7 @@ pub(crate) fn is_aac_codec(codec: &str) -> bool {
     codec == "mp4a" || codec.starts_with("mp4a.")
 }
 
-/// catalog の RFC 6381 codec 文字列が本 example でデコードできる音声 codec かを判定する
-///
-/// 購読する audio track の選択に使う。デコードできない codec を選ぶと、録画中でも
-/// 再生時にデコーダを生成できずに失敗するため、対応する codec だけを対象にする。
-/// この example がデコードできる video codec か
+/// catalog の RFC 6381 codec 文字列が本 example でデコードできるビデオ codec かを判定する
 ///
 /// library の [`shiguredo_moqt::msf::is_video_codec`] は登録名全体を判定するが、
 /// この example のデコーダは AV1 / H.264 / H.265 / VP8 / VP9 だけを扱う。
@@ -290,40 +322,12 @@ pub(crate) fn is_supported_video_codec(codec: &str) -> bool {
         || codec.starts_with("vp09.")
 }
 
+/// catalog の RFC 6381 codec 文字列が本 example でデコードできる音声 codec かを判定する
+///
+/// 購読する audio track の選択に使う。デコードできない codec を選ぶと、録画中でも
+/// 再生時にデコーダを生成できずに失敗するため、対応する codec だけを対象にする。
 pub(crate) fn is_supported_audio_codec(codec: &str) -> bool {
     is_opus_codec(codec) || is_aac_codec(codec)
-}
-
-/// stride 付きプレーンを連続バッファにコピーする
-pub(crate) fn copy_plane(src: &[u8], stride: usize, width: usize, height: usize) -> Vec<u8> {
-    if stride == width {
-        return src[..width * height].to_vec();
-    }
-    let mut dst = Vec::with_capacity(width * height);
-    for row in 0..height {
-        let start = row * stride;
-        dst.extend_from_slice(&src[start..start + width]);
-    }
-    dst
-}
-
-/// `u16 length + NAL` を読み出す
-///
-/// `codec_label` はエラーメッセージ用 (例: "AVCDecoderConfigurationRecord")。
-pub(crate) fn read_ps_nal(buf: &[u8], pos: &mut usize, codec_label: &str) -> Result<Vec<u8>> {
-    if buf.len() < *pos + 2 {
-        return Err(Error::Other(format!("{codec_label}: truncated NAL length")));
-    }
-    let len = u16::from_be_bytes([buf[*pos], buf[*pos + 1]]) as usize;
-    *pos += 2;
-    if buf.len() < *pos + len {
-        return Err(Error::Other(format!(
-            "{codec_label}: truncated NAL payload"
-        )));
-    }
-    let nal = buf[*pos..*pos + len].to_vec();
-    *pos += len;
-    Ok(nal)
 }
 
 #[cfg(test)]

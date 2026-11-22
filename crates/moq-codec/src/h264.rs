@@ -1,6 +1,7 @@
 //! Apple Video Toolbox による H.264 デコーダ実装
 //!
 //! macOS 専用。`shiguredo_video_toolbox` を用いた AVC (H.264) デコードを提供する。
+//! 入力は MP4 のサンプル (length-prefixed NAL) で、avcC のレコード本体を設定として渡す。
 
 use std::sync::mpsc;
 
@@ -8,8 +9,8 @@ use shiguredo_video_toolbox::{
     DecodedFrame, Decoder, DecoderCodec, DecoderConfig, FnDecodeHandler, PixelFormat,
 };
 
-use crate::decoder::{DecodedVideoFrame, TimestampKind, copy_plane, read_ps_nal};
 use crate::error::{Error, Result};
+use crate::{DecodedVideoFrame, copy_plane, read_ps_nal, skip_ps_nal};
 
 /// ISO/IEC 14496-15 §5.2.4.1.1 AVCDecoderConfigurationRecord 最小サイズ (lengthSizeMinusOne まで)
 const AVC_CONFIG_MIN_LEN: usize = 7;
@@ -21,7 +22,7 @@ const AVC_CONFIG_MIN_LEN: usize = 7;
 /// 得られなかった」を意味する。
 type DecodeResult = std::result::Result<Option<DecodedVideoFrame>, Error>;
 
-/// 最初のキーフレーム到達までデコーダを遅延初期化する H.264 デコーダ
+/// avcC の到着時に初期化する H.264 デコーダ
 pub struct H264Decoder {
     decoder: Option<Decoder<FnDecodeHandler<(), Error>>>,
     /// デコード結果を受け取るチャネルの受信側
@@ -31,18 +32,19 @@ pub struct H264Decoder {
     /// デコーダを (再) 構築するたびに複製してハンドラへ渡す。すべての送信側が破棄されると
     /// チャネルが切断され、受信側で結果を待てなくなるため本構造体でも保持する。
     results_tx: mpsc::Sender<DecodeResult>,
-    nalu_len_bytes: u32,
     last_config: Vec<u8>,
 }
 
 impl H264Decoder {
+    /// H.264 デコーダを作成する
+    ///
+    /// 実際のデコーダは avcC が渡るまで初期化しない。
     pub fn new() -> Result<Self> {
         let (results_tx, results) = mpsc::channel();
         Ok(Self {
             decoder: None,
             results,
             results_tx,
-            nalu_len_bytes: 4,
             last_config: Vec::new(),
         })
     }
@@ -69,14 +71,15 @@ impl H264Decoder {
                 self.decoder = Some(Decoder::new(cfg, decode_handler(&self.results_tx))?);
             }
         }
-        self.nalu_len_bytes = nalu_len_bytes;
         self.last_config = config.to_vec();
         Ok(())
     }
 }
 
 impl H264Decoder {
-    /// 1 オブジェクト分のエンコード済みペイロードをデコードする
+    /// 1 サンプル分のエンコード済みペイロードをデコードする
+    ///
+    /// avcC がまだ渡っていない場合は [`Error::NotInitialized`] を返す。
     pub fn decode(
         &mut self,
         payload: &[u8],
@@ -88,9 +91,11 @@ impl H264Decoder {
             self.apply_config(config)?;
         }
         let Some(decoder) = self.decoder.as_mut() else {
-            // avcC 未到達: キーフレーム前の受信なので破棄して次を待つ
-            tracing::warn!("H.264 decoder not initialized yet (waiting for avcC)");
-            return Ok(Vec::new());
+            // avcC 未到達ではデコーダを初期化できない
+            return Err(Error::NotInitialized {
+                codec: "H.264",
+                record: "avcC",
+            });
         };
         decoder.decode(payload, ())?;
         // Video Toolbox はデコード完了をコールバックスレッドから通知し、1 つの入力について
@@ -143,9 +148,6 @@ fn convert_decoded_frame(result: std::result::Result<DecodedFrame<()>, Error>) -
                 v,
                 width: w as i32,
                 height: h as i32,
-                // Timestamp は Object の Properties から pipeline が載せる
-                timestamp_us: None,
-                timestamp_kind: TimestampKind::None,
             }))
         }
         Ok(DecodedFrame::Nv12 { .. }) => Err(Error::Other(
@@ -155,15 +157,19 @@ fn convert_decoded_frame(result: std::result::Result<DecodedFrame<()>, Error>) -
     }
 }
 
+/// avcC から取り出した SPS / PPS と NAL 長フィールド幅
 struct AvcConfig {
+    /// Sequence Parameter Set
     sps: Vec<u8>,
+    /// Picture Parameter Set
     pps: Vec<u8>,
+    /// NAL 長フィールドのバイト数
     nalu_len_bytes: u32,
 }
 
 /// ISO/IEC 14496-15 §5.2.4.1.1 `AVCDecoderConfigurationRecord` をパースする
 ///
-/// 最初の SPS / PPS のみ取り出す (複数 SPS / PPS は想定外として捨てる)。
+/// 最初の SPS / PPS のみ取り出す (複数 SPS / PPS は先頭のみ採用する)。
 fn parse_avc_config(buf: &[u8]) -> Result<AvcConfig> {
     if buf.len() < AVC_CONFIG_MIN_LEN {
         return Err(Error::Other(format!(
@@ -186,9 +192,8 @@ fn parse_avc_config(buf: &[u8]) -> Result<AvcConfig> {
     }
     let mut pos = 6;
     let sps = read_ps_nal(buf, &mut pos, "AVCDecoderConfigurationRecord")?;
-    // 追加 SPS は 14496-15 で許容されるが subscriber では先頭のみを採用
     for _ in 1..num_sps {
-        skip_ps_nal(buf, &mut pos)?;
+        skip_ps_nal(buf, &mut pos, "AVCDecoderConfigurationRecord")?;
     }
     if pos >= buf.len() {
         return Err(Error::Other(
@@ -204,28 +209,11 @@ fn parse_avc_config(buf: &[u8]) -> Result<AvcConfig> {
     }
     let pps = read_ps_nal(buf, &mut pos, "AVCDecoderConfigurationRecord")?;
     for _ in 1..num_pps {
-        skip_ps_nal(buf, &mut pos)?;
+        skip_ps_nal(buf, &mut pos, "AVCDecoderConfigurationRecord")?;
     }
     Ok(AvcConfig {
         sps,
         pps,
         nalu_len_bytes,
     })
-}
-
-/// `u16 length + NAL` を読み飛ばす
-fn skip_ps_nal(buf: &[u8], pos: &mut usize) -> Result<()> {
-    if buf.len() < *pos + 2 {
-        return Err(Error::Other(
-            "AVCDecoderConfigurationRecord: truncated NAL length".to_string(),
-        ));
-    }
-    let len = u16::from_be_bytes([buf[*pos], buf[*pos + 1]]) as usize;
-    *pos += 2 + len;
-    if buf.len() < *pos {
-        return Err(Error::Other(
-            "AVCDecoderConfigurationRecord: truncated NAL payload".to_string(),
-        ));
-    }
-    Ok(())
 }

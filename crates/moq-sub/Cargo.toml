@@ -12,9 +12,11 @@ publish = false
 
 # Happy Eyeballs v3 の設定値
 happy-eyeballs = { path = "../happy-eyeballs" }
+# 共有する codec デコーダ (AV1 / H.264 / H.265 / Opus)
+moq-codec = { path = "../moq-codec" }
 # 映像プレイヤー (メインスレッド実行)
 raw_player = "2026.3"
-# AV1 デコーダ (dav1d)
+# AV1 デコーダのエラー型 (デコード処理は moq-codec)
 shiguredo_dav1d = "2026.3"
 # VP8 / VP9 デコーダ (libvpx)。Windows は x86_64-pc-windows-msvc のみ対応する
 shiguredo_libvpx = "2026.2.0-canary.3"
@@ -22,7 +24,7 @@ shiguredo_libvpx = "2026.2.0-canary.3"
 shiguredo_moqt = { path = "../../" }
 # MP4 mux (録画)
 shiguredo_mp4 = "2026.6.0-canary.2"
-# Opus デコーダ
+# Opus デコーダのエラー型 (デコード処理は moq-codec)
 shiguredo_opus = "2026.4"
 
 # crates 配下で共有するトランスポート crate (QUIC / WebTransport / QMux)
@@ -62,7 +64,7 @@ tokio-moq = { path = "../tokio-moq", default-features = false, features = ["test
 # 2026.1.0 は 1 回の AudioConverterFillComplexBuffer で同じパケットを再入力する不具合があり、
 # 音声が重複するため、修正が入った canary を使う
 shiguredo_audio_toolbox = "2026.2.0-canary.2"
-# H.264 / H.265 ハードウェアデコーダ (Apple Video Toolbox)
+# H.264 / H.265 ハードウェアデコーダのエラー型 (Apple Video Toolbox、デコード処理は moq-codec)
 # 2026.1.1 は NV12 入力の UV プレーンの大きさをバイト数とピクセル数で比較する不具合があり、
 # 同じ workspace の moq-pub のエンコードが失敗するため、修正が入った canary を使う
 # (workspace では shiguredo_video_toolbox が 1 つのバージョンに解決される)

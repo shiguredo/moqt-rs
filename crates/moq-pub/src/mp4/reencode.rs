@@ -23,8 +23,15 @@ use shiguredo_mp4::demux::Mp4FileDemuxer;
 use shiguredo_video_device::{PixelFormat as VideoPixelFormat, VideoFrameOwned};
 use tokio::sync::mpsc;
 
-use crate::decoder::opus::OpusDecoder;
-use crate::decoder::{self, DecodedVideoFrame, VideoDecoder, interleave_uv};
+use moq_codec::DecodedVideoFrame;
+use moq_codec::av1::Av1Decoder;
+#[cfg(target_os = "macos")]
+use moq_codec::h264::H264Decoder;
+#[cfg(target_os = "macos")]
+use moq_codec::h265::H265Decoder;
+use moq_codec::opus::OpusDecoder;
+
+use crate::decoder::{VideoDecoder, interleave_uv};
 use crate::error::{Error, Result};
 use crate::pipeline::{AudioInput, VideoInput};
 
@@ -984,11 +991,11 @@ fn run_reader(
 /// 入力コーデックに対応するビデオデコーダを生成する
 fn build_video_decoder(codec: Mp4VideoCodec) -> Result<VideoDecoder> {
     match codec {
-        Mp4VideoCodec::Av1 => Ok(VideoDecoder::Av1(decoder::av1::Av1Decoder::new()?)),
+        Mp4VideoCodec::Av1 => Ok(VideoDecoder::Av1(Av1Decoder::new()?)),
         #[cfg(target_os = "macos")]
-        Mp4VideoCodec::H264 => Ok(VideoDecoder::H264(decoder::h264::H264Decoder::new()?)),
+        Mp4VideoCodec::H264 => Ok(VideoDecoder::H264(H264Decoder::new()?)),
         #[cfg(target_os = "macos")]
-        Mp4VideoCodec::H265 => Ok(VideoDecoder::H265(decoder::h265::H265Decoder::new()?)),
+        Mp4VideoCodec::H265 => Ok(VideoDecoder::H265(H265Decoder::new()?)),
         #[cfg(not(target_os = "macos"))]
         Mp4VideoCodec::H264 | Mp4VideoCodec::H265 => Err(Error::Other(
             "H.264 / H.265 input MP4 is only supported on macOS; rebuild on macOS or use an AV1 MP4"

@@ -1,6 +1,7 @@
 //! Apple Video Toolbox による H.265 (HEVC) デコーダ実装
 //!
 //! macOS 専用。`shiguredo_video_toolbox` を用いた HEVC (hvc1 / hev1) デコードを提供する。
+//! 入力は MP4 のサンプル (length-prefixed NAL) で、hvcC のレコード本体を設定として渡す。
 
 use std::sync::mpsc;
 
@@ -8,8 +9,8 @@ use shiguredo_video_toolbox::{
     DecodedFrame, Decoder, DecoderCodec, DecoderConfig, FnDecodeHandler, PixelFormat,
 };
 
-use crate::decoder::{DecodedVideoFrame, TimestampKind, copy_plane, read_ps_nal};
 use crate::error::{Error, Result};
+use crate::{DecodedVideoFrame, copy_plane, read_ps_nal};
 
 /// ISO/IEC 14496-15 §8.3.3.1.2 `HEVCDecoderConfigurationRecord` 固定部サイズ
 const HVC_CONFIG_MIN_LEN: usize = 23;
@@ -26,7 +27,7 @@ const HEVC_NAL_PPS: u8 = 34;
 /// 得られなかった」を意味する。
 type DecodeResult = std::result::Result<Option<DecodedVideoFrame>, Error>;
 
-/// 最初のキーフレーム到達までデコーダを遅延初期化する H.265 デコーダ
+/// hvcC の到着時に初期化する H.265 デコーダ
 pub struct H265Decoder {
     decoder: Option<Decoder<FnDecodeHandler<(), Error>>>,
     /// デコード結果を受け取るチャネルの受信側
@@ -36,18 +37,19 @@ pub struct H265Decoder {
     /// デコーダを (再) 構築するたびに複製してハンドラへ渡す。すべての送信側が破棄されると
     /// チャネルが切断され、受信側で結果を待てなくなるため本構造体でも保持する。
     results_tx: mpsc::Sender<DecodeResult>,
-    nalu_len_bytes: u32,
     last_config: Vec<u8>,
 }
 
 impl H265Decoder {
+    /// H.265 デコーダを作成する
+    ///
+    /// 実際のデコーダは hvcC が渡るまで初期化しない。
     pub fn new() -> Result<Self> {
         let (results_tx, results) = mpsc::channel();
         Ok(Self {
             decoder: None,
             results,
             results_tx,
-            nalu_len_bytes: 4,
             last_config: Vec::new(),
         })
     }
@@ -76,14 +78,15 @@ impl H265Decoder {
                 self.decoder = Some(Decoder::new(cfg, decode_handler(&self.results_tx))?);
             }
         }
-        self.nalu_len_bytes = nalu_len_bytes;
         self.last_config = config.to_vec();
         Ok(())
     }
 }
 
 impl H265Decoder {
-    /// 1 オブジェクト分のエンコード済みペイロードをデコードする
+    /// 1 サンプル分のエンコード済みペイロードをデコードする
+    ///
+    /// hvcC がまだ渡っていない場合は [`Error::NotInitialized`] を返す。
     pub fn decode(
         &mut self,
         payload: &[u8],
@@ -95,8 +98,11 @@ impl H265Decoder {
             self.apply_config(config)?;
         }
         let Some(decoder) = self.decoder.as_mut() else {
-            tracing::warn!("H.265 decoder not initialized yet (waiting for hvcC)");
-            return Ok(Vec::new());
+            // hvcC 未到達ではデコーダを初期化できない
+            return Err(Error::NotInitialized {
+                codec: "H.265",
+                record: "hvcC",
+            });
         };
         decoder.decode(payload, ())?;
         // Video Toolbox はデコード完了をコールバックスレッドから通知し、1 つの入力について
@@ -149,9 +155,6 @@ fn convert_decoded_frame(result: std::result::Result<DecodedFrame<()>, Error>) -
                 v,
                 width: w as i32,
                 height: h as i32,
-                // Timestamp は Object の Properties から pipeline が載せる
-                timestamp_us: None,
-                timestamp_kind: TimestampKind::None,
             }))
         }
         Ok(DecodedFrame::Nv12 { .. }) => Err(Error::Other(
@@ -161,14 +164,21 @@ fn convert_decoded_frame(result: std::result::Result<DecodedFrame<()>, Error>) -
     }
 }
 
+/// hvcC から取り出した VPS / SPS / PPS と NAL 長フィールド幅
 struct HvcConfig {
+    /// Video Parameter Set
     vps: Vec<u8>,
+    /// Sequence Parameter Set
     sps: Vec<u8>,
+    /// Picture Parameter Set
     pps: Vec<u8>,
+    /// NAL 長フィールドのバイト数
     nalu_len_bytes: u32,
 }
 
 /// ISO/IEC 14496-15 §8.3.3.1.2 `HEVCDecoderConfigurationRecord` をパースする
+///
+/// VPS / SPS / PPS はそれぞれ先頭の 1 個を採用する。
 fn parse_hvc_config(buf: &[u8]) -> Result<HvcConfig> {
     if buf.len() < HVC_CONFIG_MIN_LEN {
         return Err(Error::Other(format!(

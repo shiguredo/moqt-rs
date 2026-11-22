@@ -4,9 +4,10 @@
 //! [`VpxCodec`] で切り替える。デコード結果は既存のコーデックと同じく stride を詰めた
 //! I420 (`DecodedVideoFrame`) にする。
 
+use moq_codec::copy_plane;
 use shiguredo_libvpx::{Decoder, DecoderCodec, DecoderConfig};
 
-use crate::decoder::{DecodedVideoFrame, TimestampKind, copy_plane};
+use crate::decoder::{DecodedVideoFrame, TimestampKind};
 use crate::error::{Error, Result};
 
 /// 扱う VP8 / VP9 の種別

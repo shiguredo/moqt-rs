@@ -26,7 +26,8 @@ use shiguredo_mp4::bitstream::opus::{ChannelCount, OpusSampleEntryConfig, build_
 use shiguredo_mp4::boxes::SampleEntry;
 use shiguredo_mp4::mux::{Mp4FileMuxer, Sample};
 
-use crate::decoder::read_ps_nal;
+use moq_codec::read_ps_nal;
+
 use crate::error::{Error, Result};
 
 /// MP4 のトラックタイムスケール (マイクロ秒)

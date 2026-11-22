@@ -13,13 +13,15 @@ publish = false
 
 # Happy Eyeballs v3 の設定値
 happy-eyeballs = { path = "../happy-eyeballs" }
+# 共有する codec デコーダ (AV1 / H.264 / H.265 / Opus)
+moq-codec = { path = "../moq-codec" }
 # 疑似キャプチャ用 2D ベクターグラフィックス
 raden = "2026.2"
 # AV1 エンコーダ (libaom)
 shiguredo_aom = "2026.3"
 # 音声キャプチャ
 shiguredo_audio_device = "2026.4"
-# AV1 デコーダ (dav1d、MP4 再エンコード配信の入力デコード)
+# AV1 デコーダのエラー型 (デコード処理は moq-codec、MP4 再エンコード配信の入力)
 shiguredo_dav1d = "2026.3"
 # VP8 / VP9 エンコーダ・デコーダ (libvpx)。Windows は x86_64-pc-windows-msvc のみ対応する
 shiguredo_libvpx = "2026.2.0-canary.3"

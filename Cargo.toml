@@ -12,6 +12,7 @@ include = ["/LICENSE", "/README.md", "/src/**"]
 [workspace]
 members = [
   "crates/happy-eyeballs",
+  "crates/moq-codec",
   "crates/moq-pub",
   "crates/moq-sub",
   "crates/tokio-moq",

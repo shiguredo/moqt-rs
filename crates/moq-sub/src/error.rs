@@ -99,6 +99,22 @@ impl From<shiguredo_opus::Error> for Error {
     }
 }
 
+impl From<moq_codec::error::Error> for Error {
+    fn from(e: moq_codec::error::Error) -> Self {
+        // 共有 crate の variant を既存の variant へ写し、表示 (decode: / video toolbox: /
+        // opus: ...) を保つ。初期化前の H.264 / H.265 は VideoDecoder が警告ログに変えるが、
+        // その他の経路から届いた場合も既存の Other 表示にする。
+        match e {
+            moq_codec::error::Error::Decode(e) => Self::Decode(e),
+            #[cfg(target_os = "macos")]
+            moq_codec::error::Error::VideoToolbox(e) => Self::VideoToolbox(e),
+            moq_codec::error::Error::Opus(e) => Self::Opus(e),
+            e @ moq_codec::error::Error::NotInitialized { .. } => Self::Other(e.to_string()),
+            moq_codec::error::Error::Other(msg) => Self::Other(msg),
+        }
+    }
+}
+
 impl From<raw_player::error::Error> for Error {
     fn from(e: raw_player::error::Error) -> Self {
         Self::Player(e)

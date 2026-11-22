@@ -1,9 +1,9 @@
 //! AV1 デコーダ (dav1d)
 //!
-//! MP4 再エンコード配信の入力 AV1 をデコードする。
+//! MP4 再エンコード配信の入力 AV1 と、subscriber が受信した AV1 をデコードする。
 
-use crate::decoder::{DecodedVideoFrame, copy_plane};
 use crate::error::Result;
+use crate::{DecodedVideoFrame, copy_plane};
 
 /// dav1d を用いた AV1 デコーダ
 pub struct Av1Decoder {

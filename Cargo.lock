@@ -901,11 +901,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-codec"
+version = "2026.0.0"
+dependencies = [
+ "shiguredo_dav1d",
+ "shiguredo_opus",
+ "shiguredo_video_toolbox",
+]
+
+[[package]]
 name = "moq-pub"
 version = "2026.0.0"
 dependencies = [
  "bytes",
  "happy-eyeballs",
+ "moq-codec",
  "noargs",
  "raden",
  "shiguredo_aom",
@@ -933,6 +943,7 @@ version = "2026.0.0"
 dependencies = [
  "bytes",
  "happy-eyeballs",
+ "moq-codec",
  "noargs",
  "raw_player",
  "shiguredo_audio_toolbox",
