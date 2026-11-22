@@ -2008,7 +2008,7 @@ async fn flush_audio_fade(context: AudioFadeContext<'_>) -> Result<()> {
     Ok(())
 }
 
-async fn finish_audio_input(context: AudioInputContext<'_>) -> Result<()> {
+async fn finish_audio_input(context: &mut AudioInputContext<'_>) -> Result<()> {
     let AudioInputContext {
         config,
         namespace,
@@ -2040,20 +2040,20 @@ async fn finish_audio_input(context: AudioInputContext<'_>) -> Result<()> {
     // フェードのために符号化へ渡すチャンクを 1 つ保持している。送らないと
     // 最後の 1 フレームが失われるため、符号化してから閉じる
     let outcome = flush_audio_fade(AudioFadeContext {
-        config: &mut *config,
-        audio_fade_pending: &mut *audio_fade_pending,
-        audio_encoder: &mut *audio_encoder,
-        audio_config_sent: &mut *audio_config_sent,
-        audio_timescale: &mut *audio_timescale,
-        audio_publish_target: &mut *audio_publish_target,
-        handle: &mut *handle,
-        data_plane: &mut *data_plane,
-        audio_request_id: &mut *audio_request_id,
-        audio_group_id: &mut *audio_group_id,
-        namespace: &mut *namespace,
-        media_cache: &mut *media_cache,
-        audio_config: &mut *audio_config,
-        client: &mut *client,
+        config,
+        audio_fade_pending,
+        audio_encoder,
+        audio_config_sent,
+        audio_timescale,
+        audio_publish_target,
+        handle,
+        data_plane,
+        audio_request_id,
+        audio_group_id,
+        namespace,
+        media_cache,
+        audio_config,
+        client,
     })
     .await;
     if let Err(e) = outcome {
@@ -2853,7 +2853,7 @@ async fn process_audio_chunks(
 }
 
 async fn run_audio_input_body(
-    context: AudioInputContext<'_>,
+    context: &mut AudioInputContext<'_>,
     audio_input: AudioInput,
 ) -> Result<()> {
     let AudioInputContext {
@@ -2915,27 +2915,27 @@ async fn run_audio_input_body(
     let is_reencode = input_timestamp.is_some();
     let samples_per_frame = audio_samples_per_frame.expect("audio samples_per_frame enabled");
     let process_context = AudioProcessContext {
-        config: &mut *config,
-        namespace: &mut *namespace,
-        audio_publish_catch_up: &mut *audio_publish_catch_up,
-        audio_catch_up_logged_dropped_frames: &mut *audio_catch_up_logged_dropped_frames,
-        audio_timescale: &mut *audio_timescale,
-        audio_config: &mut *audio_config,
-        handle: &mut *handle,
-        audio_group_id: &mut *audio_group_id,
-        audio_frame_count: &mut *audio_frame_count,
-        peer_subscriptions: &mut *peer_subscriptions,
-        audio_pcm_buf: &mut *audio_pcm_buf,
-        audio_fade_pending: &mut *audio_fade_pending,
-        audio_fade_next_head: &mut *audio_fade_next_head,
-        audio_timeline: &mut *audio_timeline,
-        audio_config_sent: &mut *audio_config_sent,
-        media_cache: &mut *media_cache,
-        audio_publish_target: &mut *audio_publish_target,
-        audio_request_id: &mut *audio_request_id,
-        data_plane: &mut *data_plane,
-        client: &mut *client,
-        audio_encoder: &mut *audio_encoder,
+        config,
+        namespace,
+        audio_publish_catch_up,
+        audio_catch_up_logged_dropped_frames,
+        audio_timescale,
+        audio_config,
+        handle,
+        audio_group_id,
+        audio_frame_count,
+        peer_subscriptions,
+        audio_pcm_buf,
+        audio_fade_pending,
+        audio_fade_next_head,
+        audio_timeline,
+        audio_config_sent,
+        media_cache,
+        audio_publish_target,
+        audio_request_id,
+        data_plane,
+        client,
+        audio_encoder,
     };
     process_audio_chunks(
         process_context,
@@ -2947,107 +2947,23 @@ async fn run_audio_input_body(
 }
 
 async fn handle_audio_input(
-    context: AudioInputContext<'_>,
+    mut context: AudioInputContext<'_>,
     audio_input: Option<AudioInput>,
 ) -> Result<LoopFlow> {
-    let AudioInputContext {
-        config,
-        namespace,
-        audio_encoder,
-        audio_publish_catch_up,
-        audio_catch_up_logged_dropped_frames,
-        audio_samples_per_frame,
-        audio_timescale,
-        audio_config,
-        handle,
-        audio_group_id,
-        audio_frame_count,
-        peer_subscriptions,
-        session_ended,
-        audio_pcm_buf,
-        audio_fade_pending,
-        audio_fade_next_head,
-        audio_clock,
-        capture_residuals,
-        audio_timeline,
-        audio_config_sent,
-        media_cache,
-        audio_publish_target,
-        audio_request_id,
-        data_plane,
-        client,
-    } = context;
     let Some(audio_input) = audio_input else {
         tracing::info!("Audio input channel closed");
-        finish_audio_input(AudioInputContext {
-            config: &mut *config,
-            namespace: &mut *namespace,
-            audio_encoder: &mut *audio_encoder,
-            audio_publish_catch_up: &mut *audio_publish_catch_up,
-            audio_catch_up_logged_dropped_frames: &mut *audio_catch_up_logged_dropped_frames,
-            audio_samples_per_frame: &mut *audio_samples_per_frame,
-            audio_timescale: &mut *audio_timescale,
-            audio_config: &mut *audio_config,
-            handle: &mut *handle,
-            audio_group_id: &mut *audio_group_id,
-            audio_frame_count: &mut *audio_frame_count,
-            peer_subscriptions: &mut *peer_subscriptions,
-            session_ended: &mut *session_ended,
-            audio_pcm_buf: &mut *audio_pcm_buf,
-            audio_fade_pending: &mut *audio_fade_pending,
-            audio_fade_next_head: &mut *audio_fade_next_head,
-            audio_clock: &mut *audio_clock,
-            capture_residuals: &mut *capture_residuals,
-            audio_timeline: &mut *audio_timeline,
-            audio_config_sent: &mut *audio_config_sent,
-            media_cache: &mut *media_cache,
-            audio_publish_target: &mut *audio_publish_target,
-            audio_request_id: &mut *audio_request_id,
-            data_plane: &mut *data_plane,
-            client: &mut *client,
-        })
-        .await?;
+        finish_audio_input(&mut context).await?;
         return Ok(LoopFlow::Break);
     };
     // 扱いは video 分岐と同じである。音声は 20 ms ごとに新しいストリームを開くため、
     // セッション終了後に `SubgroupWriter::new` が `ConnectionClosed` を返す経路に
     // 入りやすい。
-    let outcome = run_audio_input_body(
-        AudioInputContext {
-            config: &mut *config,
-            namespace: &mut *namespace,
-            audio_encoder: &mut *audio_encoder,
-            audio_publish_catch_up: &mut *audio_publish_catch_up,
-            audio_catch_up_logged_dropped_frames: &mut *audio_catch_up_logged_dropped_frames,
-            audio_samples_per_frame: &mut *audio_samples_per_frame,
-            audio_timescale: &mut *audio_timescale,
-            audio_config: &mut *audio_config,
-            handle: &mut *handle,
-            audio_group_id: &mut *audio_group_id,
-            audio_frame_count: &mut *audio_frame_count,
-            peer_subscriptions: &mut *peer_subscriptions,
-            session_ended: &mut *session_ended,
-            audio_pcm_buf: &mut *audio_pcm_buf,
-            audio_fade_pending: &mut *audio_fade_pending,
-            audio_fade_next_head: &mut *audio_fade_next_head,
-            audio_clock: &mut *audio_clock,
-            capture_residuals: &mut *capture_residuals,
-            audio_timeline: &mut *audio_timeline,
-            audio_config_sent: &mut *audio_config_sent,
-            media_cache: &mut *media_cache,
-            audio_publish_target: &mut *audio_publish_target,
-            audio_request_id: &mut *audio_request_id,
-            data_plane: &mut *data_plane,
-            client: &mut *client,
-        },
-        audio_input,
-    )
-    .await;
+    let outcome = run_audio_input_body(&mut context, audio_input).await;
     match outcome {
         Ok(()) => {}
         Err(e) if is_transport_session_end(&e) => {
             tracing::info!("Session closed by transport");
-            *session_ended = true;
+            *context.session_ended = true;
             return Ok(LoopFlow::Break);
         }
         Err(e) if is_peer_stream_reset(&e) => {
@@ -3056,14 +2972,14 @@ async fn handle_audio_input(
             // 使うと再オープン禁止で拒否されるため、通常経路と同じくここで進める。
             // この分岐に届く writer の `write_object` / `finish` は、失敗を返す前に
             // Session へ終端を通知済みであり、writer を捨てても追跡は終端される
-            *audio_group_id = group_id::next_group_id(*audio_group_id)?;
+            *context.audio_group_id = group_id::next_group_id(*context.audio_group_id)?;
             tracing::info!(
                 "Audio subgroup stream was reset by peer; continuing with the next frame"
             );
         }
         Err(e) => {
             // MOQT メッセージの encode / decode 失敗は終了コード付きで閉じる
-            close_on_message_error(client, &e).await;
+            close_on_message_error(context.client, &e).await;
             return Err(e);
         }
     }
