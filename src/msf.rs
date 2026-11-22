@@ -1678,9 +1678,9 @@ impl MsfCloneTrack {
     ///
     /// # Errors
     ///
-    /// 継承後のトラックが §5.2.5 (Event timeline type) / §5.2.7 (Is Live) /
-    /// §5.2.32 (Language) / §5.2.35 (Track duration) / §5.2.39 (Cipher suite) /
-    /// §4.3.3 (Recommended encryption scheme) / §7.2 (Media Timeline Catalog requirements) /
+    /// 継承後のトラックが §5.2.6 (Event timeline type) / §5.2.8 (Is Live) /
+    /// §5.2.33 (Language) / §5.2.36 (Track duration) / §5.2.39 (Cipher suite) /
+    /// §4.4.3 (Recommended encryption scheme) / §7.2 (Media Timeline Catalog requirements) /
     /// §8.2 (Event Timeline Catalog requirements) の制約に違反する場合、
     /// `InvalidCatalog` を返す。検証は `validate_full_track` に一本化しており、
     /// add 経路と同じ範囲を検査する。
@@ -1855,7 +1855,7 @@ impl MsfCloneTrack {
             accessibility,
         };
         // add 経路 (validate_full_track) と揃える。clone の継承結果にも
-        // §5.2.32 (Language) などの検証を適用し、encode 時まで不正に気付けない
+        // §5.2.33 (Language) などの検証を適用し、encode 時まで不正に気付けない
         // 非対称をなくす
         validate_full_track(&track)?;
         Ok(track)
@@ -2369,18 +2369,18 @@ impl MsfCatalog {
     /// - `isComplete` が true のカタログへの add / clone: `InvalidCatalog`
     ///   (draft-ietf-moq-msf-02 §5.1.3 (Is Complete))
     /// - add / clone のトラック名が既存と重複する: `InvalidCatalog`
-    /// - add するトラックが §5.2 の各フィールド / §4.3.3 / §7.2 / §8.2 / §5.2.33 の MUST に違反する: `InvalidCatalog`
+    /// - add するトラックが §5.2 の各フィールド / §4.4.3 / §7.2 / §8.2 / §5.2.33 の MUST に違反する: `InvalidCatalog`
     /// - namespace / track name が §5.2.2 / §5.2.3 / §11.2 の制約に違反する: `InvalidCatalog`
     /// - Full Track Name が 4,096 バイトを超える (draft-ietf-moq-transport-23 §8.7): `InvalidCatalog`
     /// - remove / clone の対象トラックが見つからない: `InvalidCatalog`
     /// - clone の継承結果がトラックの制約に違反する: `InvalidCatalog`
     /// - 適用後のカタログがグループ内で宣言された targetLatency / buffers の一致
-    ///   (§5.2.8 (Target latency) / §5.2.9 (Buffers)) に違反する: `InvalidCatalog`
+    ///   (§5.2.9 (Target latency) / §5.2.10 (Buffers)) に違反する: `InvalidCatalog`
     ///   (省略されたトラックは player の裁量 (MAY) のため比較対象外、`isLive=false` は無視)
     /// - 適用後の initRef が initDataList の id を指さない: `InvalidCatalog`
-    ///   (§5.2.13 (Initialization reference))
+    ///   (§5.2.14 (Initialization reference))
     /// - 削除済みの同じ Full Track Name を `isLive=false` から `true` で再追加する: `InvalidCatalog`
-    ///   (§5.2.7 (Is Live))
+    ///   (§5.2.8 (Is Live))
     ///
     /// 失敗時はカタログを変更しない。変更のたびに巻き戻しログを記録し、途中で失敗した
     /// 場合は変更を逆順に戻してからエラーを返す。全操作と適用後検証が成功したときだけ
@@ -2585,7 +2585,7 @@ impl MsfCatalog {
                                 update.track.name
                             )));
                         }
-                        // §5.2.7 (Is Live): False から True への変更は禁止
+                        // §5.2.8 (Is Live): False から True への変更は禁止
                         if update.track.is_live == Some(true) && !parent.is_live {
                             return Err(MessageError::InvalidCatalog(format!(
                                 "delta update: track '{}' isLive MUST NOT change from false to true",
@@ -3406,7 +3406,7 @@ pub fn is_video_codec(codec: &str) -> bool {
 /// codec / bitrate / samplerate / channelConfig の必須フィールドを検証する
 ///
 /// draft-ietf-moq-msf-02 §5.2.19 (Codec) / §5.2.23 (Maximum Bitrate) /
-/// §5.2.28 (Audio sample rate) / §5.2.29 (Channel configuration)。
+/// §5.2.29 (Audio sample rate) / §5.2.30 (Channel configuration)。
 /// 必須条件は codec が定まるトラック (audio / video) に課され、role の有無には依存しない。
 /// そのため codec 文字列から audio / video を判定して要求する。role が `video` / `audio` /
 /// `audiodescription` (§5.2.7 Table 7 の予約 role のうち audio / video に対応するもの) の
@@ -3947,13 +3947,13 @@ fn validate_loc_stream_mapping(metadata: Option<&str>) -> Result<(), MessageErro
 /// 構造体では両フィールドが `Some` であることで判定する。
 ///
 /// - draft-ietf-moq-msf-02 §5.2.6 (Event timeline type)
-/// - §5.2.8 (Target latency) / §5.2.9 (Buffers)
-/// - §5.2.13 (Initialization reference) は呼び出し側で catalog 全体を検査する
-/// - §5.2.32 (Language) / §5.2.33 (Parent name) / §5.2.35 (Track duration)
-/// - §5.2.39 (Cipher suite) / §4.3.3 (Recommended encryption scheme)
+/// - §5.2.9 (Target latency) / §5.2.10 (Buffers)
+/// - §5.2.14 (Initialization reference) は呼び出し側で catalog 全体を検査する
+/// - §5.2.33 (Language) / §5.2.34 (Parent name) / §5.2.36 (Track duration)
+/// - §5.2.39 (Cipher suite) / §4.4.3 (Recommended encryption scheme)
 /// - §7.2 (Media Timeline Catalog requirements) / §8.2 (Event Timeline Catalog requirements)
-/// - §5.2.18 (Codec) / §5.2.22 (Maximum Bitrate) / §5.2.28 (Audio sample rate) /
-///   §5.2.29 (Channel configuration)
+/// - §5.2.19 (Codec) / §5.2.23 (Maximum Bitrate) / §5.2.29 (Audio sample rate) /
+///   §5.2.30 (Channel configuration)
 fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
     // draft-ietf-moq-msf-02 §5.2.37 (Connection URI): connectionURI は
     // draft-ietf-moq-transport-23 §6.1 (MOQT URI Scheme) の endpoint URI でなければならない。
@@ -4080,8 +4080,8 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
 /// clone は親から属性を継承し得るため、欠如側の必須検査は行わない。
 ///
 /// - draft-ietf-moq-msf-02 §5.2.6 (Event timeline type)
-/// - §5.2.8 (Target latency) / §5.2.9 (Buffers)
-/// - §5.2.32 (Language) / §5.2.35 (Track duration)
+/// - §5.2.9 (Target latency) / §5.2.10 (Buffers)
+/// - §5.2.33 (Language) / §5.2.36 (Track duration)
 fn validate_clone_track_fragment(track: &MsfCloneTrack) -> Result<(), MessageError> {
     // draft-ietf-moq-msf-02 §5.2.37 (Connection URI): clone で上書きする場合も
     // MOQT endpoint URI の構文を満たさなければならない。
