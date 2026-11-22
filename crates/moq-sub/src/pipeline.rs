@@ -4287,8 +4287,7 @@ pub async fn run(
     // per-session の上限が per-stream の上限としてしか働かず、未知 alias のストリームが
     // 枠の数だけ同時に届いたときに合計を抑えられないため、session で 1 つ共有する。
     // 各 task は自分の entry の識別子を保持して `take_ready_for` を呼ぶため、他の task の
-    // entry を引き取ることはない (バッファ全体を返す `take_ready` は 1 つの待ち手だけが
-    // 使う API であり、この example では使わない)。
+    // entry を引き取ることはない。
     //
     // `Mutex` を使うのは、バッファが複数の stream task から共有され、どの操作も await を
     // またがない短い同期処理で完結するためである。状態を 1 つのタスクへ所有させてチャネルで
@@ -8820,9 +8819,7 @@ async fn register_subgroup_header(
     }
 
     // 保留経路。バッファは session で共有し、この task は自分の entry の識別子だけを保持する。
-    // 引き取りは `take_ready_for` で行うため、他の task の entry を引き取ることはない
-    // (バッファ全体を返す `take_ready` は 1 つの待ち手だけが使う API であり、この example
-    // では使わない)。
+    // 引き取りは `take_ready_for` で行うため、他の task の entry を引き取ることはない。
     let options = DEFAULT_PENDING_SUBGROUP_BUFFER_OPTIONS;
     let added_us = monotonic_now_us();
     let id = {

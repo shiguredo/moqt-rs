@@ -69,11 +69,7 @@ fn empty_buffer_has_zero_counters() {
         0,
         "entry が 1 つも無ければ 0 バイトである"
     );
-    let mut buffer = buffer;
-    assert!(
-        buffer.take_ready(0).is_none(),
-        "引き取り可能な entry が無ければ None を返す"
-    );
+    let _buffer = buffer;
 }
 
 /// 既定値は 1 MiB / 16 MiB / 5 秒
@@ -103,7 +99,7 @@ fn default_options_match_documented_limits() {
     assert_eq!(buffer.total_bytes(), 3, "既定値でもチャンクを保持できる");
     buffer.note_subscriber(1);
     let ready = buffer
-        .take_ready(1)
+        .take_ready_for(id, 1)
         .expect("購読の確立で引き取れるはずである");
     assert_eq!(ready.reason, PendingNotifyReason::Subscriber);
     buffer.remove(ready.id);
@@ -141,7 +137,7 @@ fn push_accumulates_chunks_in_order() {
     assert_eq!(buffer.total_bytes(), 5, "積んだチャンクの合計が集計される");
     buffer.note_subscriber(1);
     let ready = buffer
-        .take_ready(0)
+        .take_ready_for(id, 0)
         .expect("購読の確立で引き取れるはずである");
     assert_eq!(
         ready.chunks,
@@ -174,7 +170,7 @@ fn per_stream_overflow_abandons_and_releases_bytes() {
         "破棄した entry のバイトは集計から外れる"
     );
     let ready = buffer
-        .take_ready(0)
+        .take_ready_for(id, 0)
         .expect("上限超過で通知済みになるはずである");
     assert_eq!(ready.reason, PendingNotifyReason::OverflowPerStream);
     assert!(ready.chunks.is_empty(), "破棄したチャンクは引き取れない");
@@ -205,7 +201,7 @@ fn per_session_overflow_discards_last_pushed_entry_only() {
         "破棄しても entry は remove まで残る"
     );
     let ready = buffer
-        .take_ready(0)
+        .take_ready_for(second, 0)
         .expect("上限超過で通知済みになるはずである");
     assert_eq!(ready.id, second, "破棄されたのは最後に積んだ entry である");
     assert_eq!(ready.reason, PendingNotifyReason::OverflowPerSession);
@@ -213,7 +209,7 @@ fn per_session_overflow_discards_last_pushed_entry_only() {
     buffer.remove(ready.id);
     // 巻き込まれなかった entry は通知されていない
     assert!(
-        buffer.take_ready(0).is_none(),
+        buffer.take_ready_for(first, 0).is_none(),
         "関係のない entry は引き取り待ちにならない"
     );
     assert_eq!(buffer.total_bytes(), 5, "関係のない entry のバイトは残る");
@@ -234,7 +230,7 @@ fn discarded_entry_accepts_no_more_chunks() {
     buffer.push(id, &[0; 5]);
     buffer.push(id, &[0; 5]);
     let ready = buffer
-        .take_ready(0)
+        .take_ready_for(id, 0)
         .expect("上限超過で通知済みになるはずである");
     assert_eq!(ready.reason, PendingNotifyReason::OverflowPerStream);
     // 上限に触れない小さなチャンクは、破棄済みでなければ加算される大きさである。
@@ -257,7 +253,7 @@ fn discarded_entry_accepts_no_more_chunks() {
         "破棄後の大きなチャンクも集計を変えない"
     );
     assert!(
-        buffer.take_ready(0).is_none(),
+        buffer.take_ready_for(id, 0).is_none(),
         "同じ entry が 2 度引き取られることはない"
     );
     buffer.remove(ready.id);
@@ -276,7 +272,7 @@ fn discarded_entry_does_not_overflow_other_stream() {
     buffer.push(abandoned, &[0; 40]);
     buffer.push(abandoned, &[0; 40]);
     let ready = buffer
-        .take_ready(0)
+        .take_ready_for(abandoned, 0)
         .expect("上限超過で通知済みになるはずである");
     assert_eq!(ready.reason, PendingNotifyReason::OverflowPerStream);
     assert_eq!(buffer.total_bytes(), 0, "破棄で集計は 0 に戻る");
@@ -292,7 +288,7 @@ fn discarded_entry_does_not_overflow_other_stream() {
     buffer.push(healthy, &[0; 15]);
     assert_eq!(buffer.total_bytes(), 15, "健在なストリームは保持できる");
     assert!(
-        buffer.take_ready(0).is_none(),
+        buffer.take_ready_for(healthy, 0).is_none(),
         "健在なストリームは上限超過していない"
     );
     buffer.remove(ready.id);
@@ -320,7 +316,7 @@ fn remove_after_take_is_noop() {
     buffer.push(id, &[0; 10]);
     buffer.note_subscriber(1);
     let ready = buffer
-        .take_ready(0)
+        .take_ready_for(id, 0)
         .expect("購読の確立で引き取れるはずである");
     buffer.remove(ready.id);
     buffer.remove(ready.id);
@@ -350,7 +346,7 @@ fn push_after_take_is_ignored() {
     buffer.push(id, &[0; 3]);
     buffer.note_subscriber(1);
     let ready = buffer
-        .take_ready(0)
+        .take_ready_for(id, 0)
         .expect("購読の確立で引き取れるはずである");
     assert_eq!(ready.chunks, vec![vec![0, 0, 0]], "引き取ったチャンク");
     buffer.push(id, &[0; 100]);
@@ -369,12 +365,12 @@ fn note_subscriber_releases_only_that_alias() {
     buffer.push(second, &[0; 3]);
     buffer.note_subscriber(1);
     let ready = buffer
-        .take_ready(0)
+        .take_ready_for(first, 0)
         .expect("alias=1 の entry が引き取れるはずである");
     assert_eq!(ready.id, first, "引き取ったのは alias=1 の entry である");
     assert_eq!(ready.reason, PendingNotifyReason::Subscriber);
     assert!(
-        buffer.take_ready(0).is_none(),
+        buffer.take_ready_for(second, 0).is_none(),
         "alias=2 の entry は通知されていない"
     );
     assert_eq!(
@@ -384,7 +380,7 @@ fn note_subscriber_releases_only_that_alias() {
     );
     buffer.note_subscriber(2);
     let ready = buffer
-        .take_ready(0)
+        .take_ready_for(second, 0)
         .expect("alias=2 の entry が引き取れるはずである");
     assert_eq!(ready.id, second, "引き取ったのは alias=2 の entry である");
 }
@@ -399,19 +395,17 @@ fn multiple_entries_on_same_alias_are_released_together() {
     buffer.push(second, &[0; 3]);
     buffer.note_subscriber(5);
     let ready = buffer
-        .take_ready(0)
+        .take_ready_for(first, 0)
         .expect("1 つ目の entry が引き取れるはずである");
     assert_eq!(ready.id, first, "追加順に引き取る");
     assert_eq!(ready.reason, PendingNotifyReason::Subscriber);
     let ready = buffer
-        .take_ready(0)
+        .take_ready_for(second, 0)
         .expect("2 つ目の entry が引き取れるはずである");
     assert_eq!(ready.id, second, "同じ alias の残りも引き取れる");
     assert_eq!(ready.chunks, vec![vec![0, 0, 0]], "チャンクも引き取れる");
-    assert!(
-        buffer.take_ready(0).is_none(),
-        "引き取り済みの entry は 2 度返らない"
-    );
+    assert!(buffer.take_ready_for(first, 0).is_none());
+    assert!(buffer.take_ready_for(second, 0).is_none());
 }
 
 /// note_session_close は全 entry を引き取り待ちにする
@@ -424,12 +418,12 @@ fn note_session_close_releases_all_entries() {
     buffer.push(second, &[0; 5]);
     buffer.note_session_close();
     let ready = buffer
-        .take_ready(0)
+        .take_ready_for(first, 0)
         .expect("1 つ目の entry が引き取れるはずである");
     assert_eq!(ready.reason, PendingNotifyReason::SessionClose);
     assert_eq!(ready.chunks, vec![vec![0, 0, 0, 0]], "チャンクは残っている");
     let ready = buffer
-        .take_ready(0)
+        .take_ready_for(second, 0)
         .expect("2 つ目の entry が引き取れるはずである");
     assert_eq!(ready.reason, PendingNotifyReason::SessionClose);
     buffer.remove(ready.id);
@@ -548,7 +542,7 @@ fn note_end_of_stream_ignores_removed_and_notified_entries() {
 
 /// 期限を過ぎた entry だけが Timeout で引き取れる
 ///
-/// moqt-js の `setTimeout` による期限を、Sans I/O では `take_ready(now_us)` の
+/// moqt-js の `setTimeout` による期限を、Sans I/O では `take_ready_for(id, now_us)` の
 /// 期限判定に置き換えている。
 #[test]
 fn timeout_releases_only_expired_entries() {
@@ -558,11 +552,11 @@ fn timeout_releases_only_expired_entries() {
     buffer.push(first, &[0; 3]);
     buffer.push(second, &[0; 3]);
     assert!(
-        buffer.take_ready(99).is_none(),
+        buffer.take_ready_for(first, 99).is_none(),
         "期限前の entry は引き取れない"
     );
     let ready = buffer
-        .take_ready(100)
+        .take_ready_for(first, 100)
         .expect("期限を過ぎた entry が引き取れるはずである");
     assert_eq!(
         ready.id, first,
@@ -575,11 +569,11 @@ fn timeout_releases_only_expired_entries() {
         "期限切れでもチャンクは残る"
     );
     assert!(
-        buffer.take_ready(149).is_none(),
+        buffer.take_ready_for(second, 149).is_none(),
         "2 つ目の entry はまだ期限前である"
     );
     let ready = buffer
-        .take_ready(150)
+        .take_ready_for(second, 150)
         .expect("2 つ目の entry も期限を過ぎれば引き取れる");
     assert_eq!(ready.id, second);
     assert_eq!(ready.reason, PendingNotifyReason::Timeout);
@@ -599,7 +593,7 @@ fn overflow_reason_is_not_overwritten_by_later_notification() {
     buffer.note_session_close();
     buffer.note_end_of_stream(id);
     let ready = buffer
-        .take_ready(0)
+        .take_ready_for(id, 0)
         .expect("上限超過で通知済みになるはずである");
     assert_eq!(
         ready.reason,
@@ -607,7 +601,7 @@ fn overflow_reason_is_not_overwritten_by_later_notification() {
         "最初に確定した理由 (上限超過) が残る"
     );
     assert!(
-        buffer.take_ready(0).is_none(),
+        buffer.take_ready_for(id, 0).is_none(),
         "同じ entry が 2 度引き取られることはない"
     );
 }
@@ -626,7 +620,7 @@ fn subscriber_notified_entry_keeps_chunks_until_take() {
     buffer.push(id, &[0; 2]);
     assert_eq!(buffer.total_bytes(), 5, "通知後もチャンクは保持される");
     let ready = buffer
-        .take_ready(0)
+        .take_ready_for(id, 0)
         .expect("購読の確立で引き取れるはずである");
     assert_eq!(
         ready.chunks,
@@ -656,7 +650,7 @@ fn caller_dropped_objects_are_not_retained() {
     assert_eq!(buffer.stream_count(), 0, "remove で entry は残らない");
     assert_eq!(buffer.total_bytes(), 0, "remove で集計は 0 に戻る");
     assert!(
-        buffer.take_ready(i64::MAX).is_none(),
+        buffer.take_ready_for(id, i64::MAX).is_none(),
         "削除済みの entry は期限が来ても引き取れない"
     );
 }
@@ -674,7 +668,7 @@ fn reset_clears_entries_and_totals() {
     assert_eq!(buffer.stream_count(), 0, "reset で entry が消える");
     assert_eq!(buffer.total_bytes(), 0, "reset で集計が 0 に戻る");
     assert!(
-        buffer.take_ready(i64::MAX).is_none(),
+        buffer.take_ready_for(first, i64::MAX).is_none(),
         "reset 後の entry は引き取れない"
     );
     let third = buffer.add(1, 0);
@@ -739,7 +733,7 @@ fn take_ready_for_returns_only_the_specified_entry() {
     assert_eq!(buffer.stream_count(), 0, "remove で entry が消える");
 }
 
-/// take_ready_for は他の entry を引き取らず、take_ready と混在しても二重に返らない
+/// take_ready_for は他の entry を引き取らず、同じ entry を 2 度返さない
 #[test]
 fn take_ready_for_does_not_consume_other_entries() {
     let mut buffer = PendingSubgroupBuffer::new(options(1024, 4096));
@@ -754,18 +748,11 @@ fn take_ready_for_does_not_consume_other_entries() {
         .expect("通知済みの指定 entry は引き取れるはずである");
     assert_eq!(ready.id, second, "指定した entry が返る");
     assert_eq!(ready.reason, PendingNotifyReason::SessionClose);
-    // バッファ全体の take_ready は、まだ引き取っていない entry だけを返す
     let ready = buffer
-        .take_ready(0)
+        .take_ready_for(first, 0)
         .expect("残った entry が引き取れるはずである");
-    assert_eq!(
-        ready.id, first,
-        "take_ready_for で引き取った entry は take_ready に返らない"
-    );
-    assert!(
-        buffer.take_ready(0).is_none(),
-        "同じ entry が 2 度引き取られることはない"
-    );
+    assert_eq!(ready.id, first, "指定した残りの entry が返る");
+    assert!(buffer.take_ready_for(first, 0).is_none());
     assert_eq!(buffer.total_bytes(), 0, "引き取りで集計が 0 に戻る");
     // 引き取り済みの entry を指定しても返らない
     assert!(
@@ -785,7 +772,7 @@ fn take_ready_for_does_not_consume_other_entries() {
 /// take_ready_for は未通知・引き取り済み・削除済みの entry に None を返す
 ///
 /// 本モジュールの「破棄済み」は上限超過でチャンクを捨てた状態を指すが、その状態は
-/// [`PendingSubgroupBuffer::take_ready`] と同じく `Some` で理由を返す (理由を返さないと
+/// [`PendingSubgroupBuffer::take_ready_for`] と同じく `Some` で理由を返す (理由を返さないと
 /// 所有者が上限超過を観測できない)。ここではバッファから削除済みの entry を確かめる。
 #[test]
 fn take_ready_for_returns_none_for_unnotified_taken_and_removed_entries() {
@@ -873,7 +860,7 @@ fn take_ready_for_expires_only_the_specified_entry() {
 
 /// 上限超過で破棄した entry を指定すると、理由と空のチャンクが返る
 ///
-/// [`PendingSubgroupBuffer::take_ready`] と同じ挙動である。`None` を返すと、所有者が
+/// [`PendingSubgroupBuffer::take_ready_for`] と同じ挙動である。`None` を返すと、所有者が
 /// 上限超過を観測して entry を削除する手段を失う。
 #[test]
 fn take_ready_for_returns_overflow_reason_for_discarded_entry() {
@@ -891,10 +878,6 @@ fn take_ready_for_returns_overflow_reason_for_discarded_entry() {
     assert!(
         buffer.take_ready_for(id, 0).is_none(),
         "引き取り済みの entry は 2 度引き取れない"
-    );
-    assert!(
-        buffer.take_ready(0).is_none(),
-        "take_ready にも同じ entry は返らない"
     );
     buffer.remove(ready.id);
     assert_eq!(buffer.stream_count(), 0, "remove で entry が消える");

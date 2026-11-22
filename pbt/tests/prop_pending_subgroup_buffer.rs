@@ -12,8 +12,7 @@
 //!   `per_stream_max_bytes` 以下である)
 //! - 集計バイト数が、実際に保持しているチャンクの合計と一致する
 //!   (追加・破棄・引き取り・削除のどの操作の後でもずれない)
-//! - 引き取った entry は 2 度引き取れない (バッファ全体の `take_ready` と、entry を
-//!   指定する `take_ready_for` を混ぜても成り立つ)
+//! - 引き取った entry は 2 度引き取れない (`take_ready_for` を繰り返しても成り立つ)
 //! - `Timeout` が返るのは追加から `timeout_us` を過ぎた entry だけである
 //!
 //! ストリームの終端の通知は entry 単位であり、同じ Track Alias の別 entry の理由を変えない
@@ -100,8 +99,6 @@ enum Command {
     NoteEndOfStream { index: usize },
     /// session の終了を通知する
     NoteSessionClose,
-    /// 引き取り可能な entry を取り出す (バッファ全体)
-    Take,
     /// 指定した entry だけを取り出す
     TakeFor { index: usize },
     /// entry を削除する
@@ -117,9 +114,8 @@ fn sample_alias(ctx: &mut noprop::TestCaseContext) -> u64 {
 
 /// 状態に依存してオペレーションを選ぶ
 ///
-/// entry が 1 つも無いときは `Push` / `TakeFor` / `Remove` が成立しないため、`Add` と
-/// `Take` だけを選ぶ。成立しないオペレーションを生成して捨てるより、状態に合うものだけを
-/// 選ぶ。
+/// entry が 1 つも無いときは `Push` / `TakeFor` / `Remove` が成立しないため、`Add` だけを
+/// 選ぶ。成立しないオペレーションを生成して捨てるより、状態に合うものだけを選ぶ。
 ///
 /// `open_sibling_indexes` は、同じ Track Alias に未通知の別 entry を持つ未通知 entry の
 /// 位置である。一様に選ぶだけでは「1 本の終端が同じ alias の別ストリームを巻き込まない」
@@ -134,19 +130,14 @@ fn sample_command(
     open_aliases: &[u64],
 ) -> Command {
     if entry_count == 0 {
-        return match noprop::sample_weighted_index(ctx, &[3, 1]) {
-            0 => Command::Add {
-                track_alias: sample_alias(ctx),
-            },
-            _ => Command::Take,
+        return Command::Add {
+            track_alias: sample_alias(ctx),
         };
     }
-    // 重み: 追加 3 / 積む 6 / 購読の確立 2 / 終端 2 / session close 1 / 引き取り 5 /
+    // 重み: 追加 3 / 積む 6 / 購読の確立 2 / 終端 2 / session close 1 /
     // entry 指定の引き取り 4 / 削除 2。上限超過は「積む」の連投で、タイムアウトは時刻の
     // 前進と「引き取り」の組み合わせで到達するため、どちらも 1 ケースあたり数回は通る。
-    // entry 指定の引き取りは、指定した entry が引き取れずに他の entry は引き取れる場面を
-    // 通すために、全体の引き取りと同じくらいの重みを与える
-    match noprop::sample_weighted_index(ctx, &[3, 6, 2, 2, 1, 5, 4, 2]) {
+    match noprop::sample_weighted_index(ctx, &[3, 6, 2, 2, 1, 4, 2]) {
         0 => Command::Add {
             track_alias: if !open_aliases.is_empty()
                 && noprop::sample_weighted_index(ctx, &[1, 3]) == 1
@@ -175,8 +166,7 @@ fn sample_command(
             },
         },
         4 => Command::NoteSessionClose,
-        5 => Command::Take,
-        6 => Command::TakeFor {
+        5 => Command::TakeFor {
             index: noprop::sample_usize_in(ctx, 0..entry_count),
         },
         _ => Command::Remove {
@@ -349,30 +339,6 @@ impl Model {
         }
     }
 
-    /// 期限を過ぎた entry を `Timeout` として確定させ、確定させた件数を返す
-    fn expire(&mut self, now_us: i64) -> usize {
-        let mut expired = 0;
-        for entry in &mut self.entries {
-            if entry.reason.is_none() && now_us >= entry.deadline_us {
-                entry.reason = Some(PendingNotifyReason::Timeout);
-                expired += 1;
-            }
-        }
-        expired
-    }
-
-    /// 引き取り可能な entry を 1 つ返し、引き渡したチャンクを集計から外す
-    ///
-    /// 戻り値の 1 つ目はこの呼び出しで期限切れにした entry 数である。
-    fn take_ready(&mut self, now_us: i64) -> (usize, Option<TakenEntry>) {
-        let expired = self.expire(now_us);
-        let index = self
-            .entries
-            .iter()
-            .position(|entry| entry.reason.is_some() && !entry.taken);
-        self.take_entry(index, expired)
-    }
-
     /// 指定した entry だけを期限切れの対象にして引き取る
     ///
     /// 期限切れの確定も指定した entry だけを対象にする (他の entry の状態を変えない)。
@@ -435,7 +401,7 @@ impl Model {
 
 /// 引き取りの結果がモデルと一致することを確かめ、引き取った場合は理由ごとの到達を数える
 ///
-/// `take_ready` (バッファ全体) と `take_ready_for` (entry 指定) で共通に使う。モデルが
+/// `take_ready_for` (entry 指定) で使う。モデルが
 /// 引き取れると判定した entry の内容 (識別子・Track Alias・理由・チャンク) が一致すること、
 /// `Timeout` で引き取れるのは期限を過ぎた entry だけであること、同じ entry を 2 度
 /// 引き取らないことを確かめる。戻り値は実際に引き取ったかどうか。
@@ -513,10 +479,8 @@ fn pending_subgroup_buffer_matches_model() -> noprop::TestResult {
     let ignored_pushes = Cell::new(0usize);
     let discarded_pushes = Cell::new(0usize);
     // 期限切れで `Timeout` を確定させた entry 数 (バッファ全体 / entry 指定)
-    let expired_entries = Cell::new(0usize);
     let expired_entries_for = Cell::new(0usize);
     // 引き取りを試して entry が無かった回数 (バッファ全体 / entry 指定) と、entry を削除した回数
-    let empty_takes = Cell::new(0usize);
     let empty_takes_for = Cell::new(0usize);
     let entry_removals = Cell::new(0usize);
     // entry 指定の引き取りで entry を引き取った回数
@@ -627,35 +591,10 @@ fn pending_subgroup_buffer_matches_model() -> noprop::TestResult {
                     sut.note_session_close();
                     model.note_all(PendingNotifyReason::SessionClose);
                 }
-                Command::Take => {
-                    // 期限ちょうどの境界 (`now_us == deadline_us`) を通すため、たまに時刻を
-                    // entry の期限へ合わせる。単調増加の前提を壊さないよう前にだけ進める
-                    if !model.entries.is_empty() && noprop::sample_weighted_index(ctx, &[3, 2]) == 1
-                    {
-                        let index = noprop::sample_usize_in(ctx, 0..model.entries.len());
-                        now_us = now_us.max(model.entries[index].deadline_us);
-                        bump(&deadline_snaps);
-                    }
-                    let ready = sut.take_ready(now_us);
-                    let (expired, expected) = model.take_ready(now_us);
-                    expired_entries.set(expired_entries.get() + expired);
-                    if assert_taken(
-                        ready,
-                        expected,
-                        now_us,
-                        step,
-                        &mut taken_ids,
-                        &reason_takes,
-                        &deadline_boundary_takes,
-                    ) {
-                        bump(&taken_ids_checked);
-                    } else {
-                        bump(&empty_takes);
-                    }
-                }
                 Command::TakeFor { index } => {
-                    // 指定した entry の期限へ時刻を合わせ、期限ちょうどの境界も通す
-                    if noprop::sample_weighted_index(ctx, &[3, 2]) == 1 {
+                    // 指定した entry の期限へ時刻を合わせ、期限ちょうどの境界も通す。
+                    // 未通知の entry を選んだときは必ず期限へ進め、Timeout の経路を確保する
+                    if model.entries[index].reason.is_none() && !model.entries[index].taken {
                         now_us = now_us.max(model.entries[index].deadline_us);
                         bump(&deadline_snaps);
                     }
@@ -687,10 +626,13 @@ fn pending_subgroup_buffer_matches_model() -> noprop::TestResult {
                         step,
                         &mut taken_ids,
                         &reason_takes,
-                        &deadline_boundary_takes,
+                        &deadline_boundary_takes_for,
                     ) {
                         bump(&taken_ids_checked);
                         bump(&taken_for_entries);
+                        if deadline_boundary_takes_for.get() > 0 {
+                            deadline_boundary_takes.set(deadline_boundary_takes.get() + 1);
+                        }
                     } else {
                         bump(&empty_takes_for);
                     }
@@ -759,16 +701,8 @@ fn pending_subgroup_buffer_matches_model() -> noprop::TestResult {
         "上限超過で破棄する経路が観測されなかった\n{runner}"
     );
     assert!(
-        expired_entries.get() > 0,
-        "期限切れで Timeout を確定させる経路が観測されなかった\n{runner}"
-    );
-    assert!(
         expired_entries_for.get() > 0,
         "entry 指定の引き取りで期限切れを確定させる経路が観測されなかった\n{runner}"
-    );
-    assert!(
-        empty_takes.get() > 0,
-        "引き取れる entry が無い状態が観測されなかった\n{runner}"
     );
     assert!(
         empty_takes_for.get() > 0,

@@ -17,9 +17,8 @@
 //! バイトが session の集計に残り、無関係な stream を巻き添えで上限超過させる。
 //!
 //! このモジュールは sans I/O である。時刻は引数 (マイクロ秒の `i64`) で受け、
-//! タイムアウトの判定は [`PendingSubgroupBuffer::take_ready`] と
-//! [`PendingSubgroupBuffer::take_ready_for`] の中だけで行う。呼び出し側は I/O の
-//! 待ち受けと同じ周期でどちらかを呼ぶこと。
+//! タイムアウトの判定は [`PendingSubgroupBuffer::take_ready_for`] の中だけで行う。
+//! 呼び出し側は I/O の待ち受けと同じ周期でこれを呼ぶこと。
 //!
 //! # entry のライフサイクル
 //!
@@ -32,21 +31,19 @@
 //! - 購読の確立は alias 単位の `note_subscriber` で、session の終了は全 entry への
 //!   `note_session_close` で、ストリームの終端は entry 単位の `note_end_of_stream` で通知する。
 //!   終端は Subgroup ストリーム 1 本の事象であり、同じ alias の別ストリームの entry には
-//!   及ばない。通知した entry は `take_ready` または `take_ready_for` が引き取り待ちとして返す
-//! - `take_ready` はバッファ全体で 1 つの entry を、`take_ready_for` は指定した識別子の
-//!   entry だけを返す。1 つのバッファを複数の主体で共有する場合は、各主体が自分の entry の
-//!   識別子を保持して `take_ready_for` を呼ぶこと
-//! - どちらも引き取った entry のチャンクを所有権ごと呼び出し側へ移す (バイト数は移した分だけ
+//!   及ばない。通知した entry は `take_ready_for` が引き取り待ちとして返す
+//! - `take_ready_for` は指定した識別子の entry だけを返す。1 つのバッファを複数の主体で
+//!   共有する場合も、各主体が自分の entry の識別子を保持してこれを呼ぶ
+//! - 引き取った entry のチャンクは所有権ごと呼び出し側へ移す (バイト数は移した分だけ
 //!   集計から外れる)。entry 自体は削除せず、削除は `remove` に委ねる。同じ entry を 2 度
 //!   返すことはない
 //!
 //! # タイムアウトと通知の順序
 //!
-//! `take_ready(now_us)` は、まず全 entry のうち期限を過ぎたものを `Timeout` として確定させ、
-//! そのうえで引き取り可能な entry を追加順に 1 つ返す。`take_ready_for(id, now_us)` は、
-//! 指定した entry だけを期限切れの確定の対象にし、その entry だけを返す。他の entry の状態を
-//! 変えないのは、entry の所有者が別の主体であり得るためである (期限切れの確定は、所有者が
-//! 自分の周期で `take_ready_for` を呼ぶことでも行われる)。通知は最初の 1 回だけ有効であり、
+//! `take_ready_for(id, now_us)` は、指定した entry だけを期限切れの確定の対象にし、その
+//! entry だけを返す。他の entry の状態を変えないのは、entry の所有者が別の主体であり得る
+//! ためである (期限切れの確定は、所有者が自分の周期で `take_ready_for` を呼ぶことでも
+//! 行われる)。通知は最初の 1 回だけ有効であり、
 //! 後から別の理由で `note_*` を呼んでも理由は上書きしない (moqt-js の `notify` と同じ)。
 //!
 //! `Subscriber` と `Timeout` で引き取った entry は「破棄済み」とは扱わない。所有者がまだ
@@ -77,7 +74,7 @@ pub struct PendingSubgroupBufferOptions {
     /// "buffer it briefly" の上限マイクロ秒
     ///
     /// 追加からこの時間が経過した entry は [`PendingNotifyReason::Timeout`] になる。
-    /// 判定は [`PendingSubgroupBuffer::take_ready`] と
+    /// 判定は [`PendingSubgroupBuffer::take_ready_for`] と
     /// [`PendingSubgroupBuffer::take_ready_for`] でだけ行う。
     pub timeout_us: i64,
 }
@@ -96,7 +93,7 @@ pub const DEFAULT_PENDING_SUBGROUP_BUFFER_OPTIONS: PendingSubgroupBufferOptions 
 
 /// entry を引き取る理由
 ///
-/// [`PendingSubgroupBuffer::take_ready`] と [`PendingSubgroupBuffer::take_ready_for`] が
+/// [`PendingSubgroupBuffer::take_ready_for`] と [`PendingSubgroupBuffer::take_ready_for`] が
 /// `Some` で返す値に含まれる。moqt-js の `PendingNotifyReason` と同じ意味を持つ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PendingNotifyReason {
@@ -127,7 +124,7 @@ pub enum PendingNotifyReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PendingSubgroupEntryId(u64);
 
-/// [`PendingSubgroupBuffer::take_ready`] または
+/// [`PendingSubgroupBuffer::take_ready_for`] または
 /// [`PendingSubgroupBuffer::take_ready_for`] が返す引き取り済み entry
 ///
 /// チャンクの所有権は呼び出し側へ移っており、バッファの集計からは既に外れている。
@@ -187,7 +184,7 @@ impl PendingEntry {
 /// 使い方はモジュールドキュメントの「entry のライフサイクル」を参照すること。
 /// 1 つのバッファを複数の主体で共有する場合は、各主体が自分の entry の識別子を保持し、
 /// [`PendingSubgroupBuffer::take_ready_for`] で自分の entry だけを引き取ること。
-/// [`PendingSubgroupBuffer::take_ready`] はバッファ全体で 1 つの entry を返すため、
+/// [`PendingSubgroupBuffer::take_ready_for`] はバッファ全体で 1 つの entry を返すため、
 /// 1 つの待ち手だけが使う場合の API である。
 pub struct PendingSubgroupBuffer {
     /// 識別子から entry を引く表
@@ -218,7 +215,7 @@ impl PendingSubgroupBuffer {
     ///
     /// `now_us` は呼び出し側の単調増加するマイクロ秒時刻であり、entry の期限は
     /// `now_us + timeout_us` になる (`i64` の範囲へ飽和させる)。期限の判定は
-    /// [`PendingSubgroupBuffer::take_ready`] と [`PendingSubgroupBuffer::take_ready_for`] で
+    /// [`PendingSubgroupBuffer::take_ready_for`] と [`PendingSubgroupBuffer::take_ready_for`] で
     /// だけ行う。
     ///
     /// 同じ Track Alias に対して何度でも呼べる。返る識別子は entry ごとに異なる。
@@ -255,7 +252,7 @@ impl PendingSubgroupBuffer {
     ///
     /// - 識別子が未登録、または [`PendingSubgroupBuffer::remove`] 済み
     /// - entry が上限超過で破棄済み (破棄したバイトを集計へ戻さないため)
-    /// - entry のチャンクを [`PendingSubgroupBuffer::take_ready`] または
+    /// - entry のチャンクを [`PendingSubgroupBuffer::take_ready_for`] または
     ///   [`PendingSubgroupBuffer::take_ready_for`] で引き渡し済み
     ///
     /// 積んだ結果が per-stream の上限を超える場合は、その entry を破棄する
@@ -295,7 +292,7 @@ impl PendingSubgroupBuffer {
 
     /// チャンクを捨てて集計から外し、entry を通知済みにする
     ///
-    /// entry 自体は残す。所有者が [`PendingSubgroupBuffer::take_ready`] または
+    /// entry 自体は残す。所有者が [`PendingSubgroupBuffer::take_ready_for`] または
     /// [`PendingSubgroupBuffer::take_ready_for`] で理由を受け取り、
     /// [`PendingSubgroupBuffer::remove`] で削除するまで保持する。
     fn discard(&mut self, id: PendingSubgroupEntryId, reason: PendingNotifyReason) {
@@ -315,7 +312,7 @@ impl PendingSubgroupBuffer {
 
     /// 該当 Track Alias の全 entry に購読の確立を通知する
     ///
-    /// 通知された entry は [`PendingSubgroupBuffer::take_ready`] または
+    /// 通知された entry は [`PendingSubgroupBuffer::take_ready_for`] または
     /// [`PendingSubgroupBuffer::take_ready_for`] で引き取れるようになる。
     /// バッファからの削除は entry の所有者が [`PendingSubgroupBuffer::remove`] で行う。
     pub fn note_subscriber(&mut self, track_alias: u64) {
@@ -369,13 +366,6 @@ impl PendingSubgroupBuffer {
         }
     }
 
-    /// 全 entry の期限を判定し、過ぎたものを `Timeout` として確定させる
-    fn expire(&mut self, now_us: i64) {
-        for entry in self.entries.values_mut() {
-            entry.expire(now_us);
-        }
-    }
-
     /// 通知済みの entry を 1 つ引き取り、チャンクを呼び出し側へ移す
     ///
     /// 未登録・未通知・引き取り済みの entry に対しては `None` を返す。
@@ -398,36 +388,9 @@ impl PendingSubgroupBuffer {
         })
     }
 
-    /// 引き取り可能な entry を 1 つ返す
-    ///
-    /// まず全 entry のうち期限を過ぎたものを `Timeout` として確定させ、そのうえで通知済みかつ
-    /// 未引き取りの entry を追加順に 1 つ返す。返した entry のチャンクは所有権ごと呼び出し側へ
-    /// 移り、バイト数は集計から外れる。entry 自体は [`PendingSubgroupBuffer::remove`] を呼ぶ
-    /// まで残り、同じ entry が 2 度返ることはない。
-    ///
-    /// 呼び出し側は I/O の待ち受けと同じ周期でこの関数を呼ぶこと。呼ばないと期限切れの
-    /// entry のチャンクが集計に残り続ける。
-    ///
-    /// 1 つのバッファを複数の主体で共有する場合は、他の主体の entry を引き取ってしまうため
-    /// この関数ではなく [`PendingSubgroupBuffer::take_ready_for`] を使うこと。
-    ///
-    /// `now_us` は単調増加するマイクロ秒時刻を前提とする。
-    pub fn take_ready(&mut self, now_us: i64) -> Option<PendingSubgroupReady> {
-        self.expire(now_us);
-        // 引き取り可能な entry のうち、識別子が最も小さいもの (= 追加が最も早いもの) を返す。
-        // hashbrown の反復順は不定であるため、最小値で順序を決める。
-        let id = self
-            .entries
-            .iter()
-            .filter(|(_, entry)| entry.reason.is_some() && !entry.taken)
-            .map(|(id, _)| *id)
-            .min()?;
-        self.take_entry(id)
-    }
-
     /// 指定した entry が引き取り可能なら引き取る
     ///
-    /// [`PendingSubgroupBuffer::take_ready`] がバッファ全体で 1 つの entry を返すのに対し、
+    /// [`PendingSubgroupBuffer::take_ready_for`] がバッファ全体で 1 つの entry を返すのに対し、
     /// こちらは `id` の entry だけを返す。1 つのバッファを複数の主体で共有する場合は、各主体が
     /// 自分の entry の識別子を保持してこれを呼ぶことで、他の主体の entry を引き取らずに済む。
     ///
@@ -435,7 +398,7 @@ impl PendingSubgroupBuffer {
     /// 状態を勝手に変えない方が安全である。代わりに、それぞれの主体が自分の周期でこの関数を
     /// 呼ばないと自分の entry は期限切れにならない。
     ///
-    /// 上限超過でチャンクを破棄した entry は、[`PendingSubgroupBuffer::take_ready`] と同じく
+    /// 上限超過でチャンクを破棄した entry は、[`PendingSubgroupBuffer::take_ready_for`] と同じく
     /// `Some` で理由 (`OverflowPerStream` / `OverflowPerSession`) を返す (チャンクは空)。
     /// ここで `None` を返すと、所有者が上限超過を観測して `remove` する手段を失うためである。
     ///
@@ -443,7 +406,7 @@ impl PendingSubgroupBuffer {
     ///
     /// - 識別子が未登録、または [`PendingSubgroupBuffer::remove`] で削除済み
     /// - entry がまだ通知されていない
-    /// - entry を [`PendingSubgroupBuffer::take_ready`] または本関数で引き取り済み
+    /// - entry を [`PendingSubgroupBuffer::take_ready_for`] または本関数で引き取り済み
     ///
     /// `now_us` は単調増加するマイクロ秒時刻を前提とする。
     pub fn take_ready_for(
@@ -460,11 +423,11 @@ impl PendingSubgroupBuffer {
 
     /// entry をバッファから削除する
     ///
-    /// 保持していたチャンクのバイト数を集計から外す ([`PendingSubgroupBuffer::take_ready`] または
+    /// 保持していたチャンクのバイト数を集計から外す ([`PendingSubgroupBuffer::take_ready_for`] または
     /// [`PendingSubgroupBuffer::take_ready_for`] で引き取り済みなら 0 である)。未登録または
     /// 削除済みの識別子に対する呼び出しは no-op。
     ///
-    /// 所有者は [`PendingSubgroupBuffer::take_ready`] または
+    /// 所有者は [`PendingSubgroupBuffer::take_ready_for`] または
     /// [`PendingSubgroupBuffer::take_ready_for`] で引き取ったあと、必ずこれを呼ぶこと。
     pub fn remove(&mut self, id: PendingSubgroupEntryId) {
         let Some(entry) = self.entries.remove(&id) else {
@@ -496,7 +459,7 @@ impl PendingSubgroupBuffer {
 
     /// 保持しているチャンクの合計バイト数
     ///
-    /// 上限超過で破棄したチャンクと、[`PendingSubgroupBuffer::take_ready`] または
+    /// 上限超過で破棄したチャンクと、[`PendingSubgroupBuffer::take_ready_for`] または
     /// [`PendingSubgroupBuffer::take_ready_for`] で引き渡したチャンクは含まない。
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
