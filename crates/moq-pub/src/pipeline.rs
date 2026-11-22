@@ -1979,6 +1979,114 @@ struct AudioPeerContext<'a> {
 }
 
 /// 受信 SUBSCRIBE の peer へ音声 Object を送る
+/// peer へ音声 Object を datagram で送る
+async fn send_audio_to_peer_datagram(
+    config: &mut Config,
+    handle: &mut StreamHandle,
+    data_plane: &mut DataPlaneHandle,
+    audio_group_id: &mut u64,
+    peer: &mut PeerSubscription,
+    encoded: &[u8],
+    properties: &LocProperties,
+) -> Result<()> {
+    let mut writer = DatagramWriter::new(
+        handle,
+        data_plane,
+        peer.request_id,
+        peer.alias,
+        *audio_group_id,
+        DEFAULT_PUBLISHER_PRIORITY,
+        config.datagram_max_size,
+        config.audio_redundancy,
+    );
+    let outcome = writer.write_object(encoded, properties).await;
+    match outcome {
+        Ok(outcome) => {
+            if outcome == ObjectFilterOutcome::Pass {
+                peer.audio_config_sent = true;
+            }
+        }
+        Err(e) => {
+            if is_peer_stream_reset(&e) {
+                // datagram は Session の outgoing stream 追跡
+                // (`data_streams.outgoing`) を持たないため、
+                // 終端通知 (`send_data_stream_closed`) の対象外である
+                tracing::info!(
+                    "Peer audio datagram was reset by peer; dropping the subscription: request_id={}",
+                    peer.request_id
+                );
+                peer.ended = true;
+            } else {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// peer へ音声 Object を stream で送る
+async fn send_audio_to_peer_stream(
+    handle: &mut StreamHandle,
+    data_plane: &mut DataPlaneHandle,
+    audio_group_id: &mut u64,
+    client: &mut MoqtClient,
+    peer: &mut PeerSubscription,
+    encoded: &[u8],
+    properties: &LocProperties,
+) -> Result<()> {
+    let writer_result = SubgroupWriter::new(
+        handle,
+        data_plane,
+        peer.request_id,
+        peer.alias,
+        *audio_group_id,
+        SubgroupIdMode::Zero,
+        0,
+        DEFAULT_PUBLISHER_PRIORITY,
+        true,
+        client.subscription_filter_start(peer.request_id),
+    )
+    .await;
+    match writer_result {
+        Ok(mut writer) => {
+            let (write_error, write_passed) = match writer.write_object(encoded, properties).await {
+                Ok(outcome) => (None, outcome == ObjectFilterOutcome::Pass),
+                Err(e) => (Some(e), false),
+            };
+            let finish_error = writer
+                .finish(client.subscription_filter_start(peer.request_id))
+                .await
+                .err();
+            if let Some(e) = write_error.or(finish_error) {
+                if is_peer_stream_reset(&e) {
+                    // writer の `write_object` / `finish` は、失敗を
+                    // 返す前に Session へ終端を通知済みである。writer を
+                    // 捨てても Session の追跡は終端される
+                    tracing::info!(
+                        "Peer audio stream was reset by peer; dropping the subscription: request_id={}",
+                        peer.request_id
+                    );
+                    peer.ended = true;
+                } else {
+                    return Err(e);
+                }
+            } else if write_passed {
+                peer.audio_config_sent = true;
+            }
+        }
+        Err(e) => {
+            if is_transport_session_end(&e) {
+                return Err(e);
+            }
+            tracing::warn!(
+                "Failed to open a peer audio stream: request_id={}, {e}",
+                peer.request_id
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn send_audio_to_peer_subscriptions(
     context: AudioPeerContext<'_>,
     timestamp: u64,
@@ -2007,90 +2115,27 @@ async fn send_audio_to_peer_subscriptions(
         let peer_properties =
             build_audio_loc_properties(timestamp, *audio_timescale, audio_config_for_peer);
         if config.audio_datagram {
-            let mut writer = DatagramWriter::new(
+            send_audio_to_peer_datagram(
+                config,
                 handle,
                 data_plane,
-                peer.request_id,
-                peer.alias,
-                *audio_group_id,
-                DEFAULT_PUBLISHER_PRIORITY,
-                config.datagram_max_size,
-                config.audio_redundancy,
-            );
-            let outcome = writer.write_object(encoded, &peer_properties).await;
-            match outcome {
-                Ok(outcome) => {
-                    if outcome == ObjectFilterOutcome::Pass {
-                        peer.audio_config_sent = true;
-                    }
-                }
-                Err(e) => {
-                    if is_peer_stream_reset(&e) {
-                        // datagram は Session の outgoing stream 追跡
-                        // (`data_streams.outgoing`) を持たないため、
-                        // 終端通知 (`send_data_stream_closed`) の対象外である
-                        tracing::info!(
-                            "Peer audio datagram was reset by peer; dropping the subscription: request_id={}",
-                            peer.request_id
-                        );
-                        peer.ended = true;
-                    } else {
-                        return Err(e);
-                    }
-                }
-            }
-        } else {
-            let writer_result = SubgroupWriter::new(
-                handle,
-                data_plane,
-                peer.request_id,
-                peer.alias,
-                *audio_group_id,
-                SubgroupIdMode::Zero,
-                0,
-                DEFAULT_PUBLISHER_PRIORITY,
-                true,
-                client.subscription_filter_start(peer.request_id),
+                audio_group_id,
+                peer,
+                encoded,
+                &peer_properties,
             )
-            .await;
-            match writer_result {
-                Ok(mut writer) => {
-                    let (write_error, write_passed) =
-                        match writer.write_object(encoded, &peer_properties).await {
-                            Ok(outcome) => (None, outcome == ObjectFilterOutcome::Pass),
-                            Err(e) => (Some(e), false),
-                        };
-                    let finish_error = writer
-                        .finish(client.subscription_filter_start(peer.request_id))
-                        .await
-                        .err();
-                    if let Some(e) = write_error.or(finish_error) {
-                        if is_peer_stream_reset(&e) {
-                            // writer の `write_object` / `finish` は、失敗を
-                            // 返す前に Session へ終端を通知済みである。writer を
-                            // 捨てても Session の追跡は終端される
-                            tracing::info!(
-                                "Peer audio stream was reset by peer; dropping the subscription: request_id={}",
-                                peer.request_id
-                            );
-                            peer.ended = true;
-                        } else {
-                            return Err(e);
-                        }
-                    } else if write_passed {
-                        peer.audio_config_sent = true;
-                    }
-                }
-                Err(e) => {
-                    if is_transport_session_end(&e) {
-                        return Err(e);
-                    }
-                    tracing::warn!(
-                        "Failed to open a peer audio stream: request_id={}, {e}",
-                        peer.request_id
-                    );
-                }
-            }
+            .await?;
+        } else {
+            send_audio_to_peer_stream(
+                handle,
+                data_plane,
+                audio_group_id,
+                client,
+                peer,
+                encoded,
+                &peer_properties,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -2111,6 +2156,175 @@ struct AudioSendContext<'a> {
 }
 
 /// 音声 Object を datagram または stream で送信する
+/// 音声 Object を datagram で送信する
+async fn send_audio_datagram(
+    context: AudioDatagramContext<'_>,
+    encoded: &[u8],
+    properties: &LocProperties,
+    send_timestamp_us: i64,
+    send_duration_us: i64,
+    is_reencode: bool,
+) -> Result<()> {
+    let AudioDatagramContext {
+        config,
+        namespace,
+        audio_config_sent,
+        media_cache,
+        audio_publish_catch_up,
+        audio_publish_target,
+        audio_request_id,
+        audio_group_id,
+        handle,
+        data_plane,
+    } = context;
+    let (audio_handle, audio_data_plane) =
+        publish_sink(audio_publish_target.as_ref(), handle, data_plane);
+    let audio_request_id = audio_request_id.expect("audio request id enabled");
+    // datagram の送信は完了が返らない (fire-and-forget)。書き込みの
+    // 戻りを完了とみなすため、投入の直前の時刻を控える
+    let queued_wall_clock_ms = wall_clock_now_us()? / 1_000;
+    let mut writer = DatagramWriter::new(
+        audio_handle,
+        audio_data_plane,
+        audio_request_id,
+        AUDIO_TRACK_ALIAS,
+        *audio_group_id,
+        DEFAULT_PUBLISHER_PRIORITY,
+        config.datagram_max_size,
+        config.audio_redundancy,
+    );
+    let object_location = writer.next_object_location();
+    let outcome = writer.write_object(encoded, properties).await?;
+    if outcome == ObjectFilterOutcome::Pass {
+        *audio_config_sent = true;
+        media_cache.insert(
+            namespace,
+            AUDIO_TRACK_NAME.as_bytes(),
+            object_location,
+            properties,
+            encoded,
+        )?;
+        // 送れなかった Object (フィルタで Skip) は送信のキューへ
+        // 入っていないため記録しない。TIMESTAMP が壁時計でない
+        // (再エンコード) 音も、読んだ時刻との差が遅れにならない
+        // ため記録しない
+        if !is_reencode {
+            record_audio_send(
+                audio_publish_catch_up,
+                send_timestamp_us,
+                send_duration_us,
+                queued_wall_clock_ms,
+                wall_clock_now_us()? / 1_000,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// 音声 Object を stream で送信する
+async fn send_audio_stream(
+    context: AudioStreamContext<'_>,
+    encoded: &[u8],
+    properties: &LocProperties,
+    send_timestamp_us: i64,
+    send_duration_us: i64,
+    is_reencode: bool,
+) -> Result<()> {
+    let AudioStreamContext {
+        namespace,
+        audio_config_sent,
+        media_cache,
+        audio_publish_catch_up,
+        audio_publish_target,
+        audio_request_id,
+        audio_group_id,
+        handle,
+        data_plane,
+        client,
+    } = context;
+    let (audio_handle, audio_data_plane) =
+        publish_sink(audio_publish_target.as_ref(), handle, data_plane);
+    let audio_request_id = audio_request_id.expect("audio request id enabled");
+    let start_location =
+        publish_start_location(client, audio_publish_target.as_ref(), audio_request_id);
+    // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
+    // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
+    // 音声ストリームには毎フレーム LOC プロパティを付与するため true を渡す
+    // ストリームの生成と書き込みの待ち (backpressure) を含めて測る
+    let queued_wall_clock_ms = wall_clock_now_us()? / 1_000;
+    let mut writer = SubgroupWriter::new(
+        audio_handle,
+        audio_data_plane,
+        audio_request_id,
+        AUDIO_TRACK_ALIAS,
+        *audio_group_id,
+        SubgroupIdMode::Zero,
+        0,
+        DEFAULT_PUBLISHER_PRIORITY,
+        true,
+        start_location,
+    )
+    .await?;
+    let object_location = writer.next_object_location();
+    let outcome = writer.write_object(encoded, properties).await?;
+    if outcome == ObjectFilterOutcome::Pass {
+        *audio_config_sent = true;
+        media_cache.insert(
+            namespace,
+            AUDIO_TRACK_NAME.as_bytes(),
+            object_location,
+            properties,
+            encoded,
+        )?;
+    }
+    writer
+        .finish(publish_start_location(
+            client,
+            audio_publish_target.as_ref(),
+            audio_request_id,
+        ))
+        .await?;
+    // 送れなかった Object (フィルタで Skip) は記録しない。TIMESTAMP が
+    // 壁時計でない (再エンコード) 音も、読んだ時刻との差が遅れに
+    // ならないため記録しない
+    if outcome == ObjectFilterOutcome::Pass && !is_reencode {
+        record_audio_send(
+            audio_publish_catch_up,
+            send_timestamp_us,
+            send_duration_us,
+            queued_wall_clock_ms,
+            wall_clock_now_us()? / 1_000,
+        );
+    }
+    Ok(())
+}
+
+struct AudioDatagramContext<'a> {
+    config: &'a mut Config,
+    namespace: &'a mut TrackNamespace,
+    audio_config_sent: &'a mut bool,
+    media_cache: &'a mut cache::MediaCache,
+    audio_publish_catch_up: &'a mut AudioPublishCatchUp,
+    audio_publish_target: &'a mut Option<PublishTarget>,
+    audio_request_id: &'a mut Option<u64>,
+    audio_group_id: &'a mut u64,
+    handle: &'a mut StreamHandle,
+    data_plane: &'a mut DataPlaneHandle,
+}
+
+struct AudioStreamContext<'a> {
+    namespace: &'a mut TrackNamespace,
+    audio_config_sent: &'a mut bool,
+    media_cache: &'a mut cache::MediaCache,
+    audio_publish_catch_up: &'a mut AudioPublishCatchUp,
+    audio_publish_target: &'a mut Option<PublishTarget>,
+    audio_request_id: &'a mut Option<u64>,
+    audio_group_id: &'a mut u64,
+    handle: &'a mut StreamHandle,
+    data_plane: &'a mut DataPlaneHandle,
+    client: &'a mut MoqtClient,
+}
+
 async fn send_audio_object(
     context: AudioSendContext<'_>,
     encoded: &[u8],
@@ -2132,100 +2346,139 @@ async fn send_audio_object(
         data_plane,
         client,
     } = context;
-    let (audio_handle, audio_data_plane) =
+    let (_audio_handle, _audio_data_plane) =
         publish_sink(audio_publish_target.as_ref(), handle, data_plane);
     if config.audio_datagram {
-        // datagram の送信は完了が返らない (fire-and-forget)。書き込みの
-        // 戻りを完了とみなすため、投入の直前の時刻を控える
-        let queued_wall_clock_ms = wall_clock_now_us()? / 1_000;
-        let mut writer = DatagramWriter::new(
-            audio_handle,
-            audio_data_plane,
-            audio_request_id.expect("audio request_id enabled"),
-            AUDIO_TRACK_ALIAS,
-            *audio_group_id,
-            DEFAULT_PUBLISHER_PRIORITY,
-            config.datagram_max_size,
-            config.audio_redundancy,
-        );
-        let object_location = writer.next_object_location();
-        let outcome = writer.write_object(encoded, properties).await?;
-        if outcome == ObjectFilterOutcome::Pass {
-            *audio_config_sent = true;
-            media_cache.insert(
-                namespace,
-                AUDIO_TRACK_NAME.as_bytes(),
-                object_location,
-                properties,
-                encoded,
-            )?;
-            // 送れなかった Object (フィルタで Skip) は送信のキューへ
-            // 入っていないため記録しない。TIMESTAMP が壁時計でない
-            // (再エンコード) 音も、読んだ時刻との差が遅れにならない
-            // ため記録しない
-            if !is_reencode {
-                record_audio_send(
-                    audio_publish_catch_up,
-                    send_timestamp_us,
-                    send_duration_us,
-                    queued_wall_clock_ms,
-                    wall_clock_now_us()? / 1_000,
-                );
-            }
-        }
-    } else {
-        // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
-        // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
-        // 音声ストリームには毎フレーム LOC プロパティを付与するため true を渡す
-        let audio_request_id = audio_request_id.expect("audio request_id enabled");
-        // ストリームの生成と書き込みの待ち (backpressure) を含めて測る
-        let queued_wall_clock_ms = wall_clock_now_us()? / 1_000;
-        let mut writer = SubgroupWriter::new(
-            audio_handle,
-            audio_data_plane,
-            audio_request_id,
-            AUDIO_TRACK_ALIAS,
-            *audio_group_id,
-            SubgroupIdMode::Zero,
-            0,
-            DEFAULT_PUBLISHER_PRIORITY,
-            true,
-            publish_start_location(client, audio_publish_target.as_ref(), audio_request_id),
+        send_audio_datagram(
+            AudioDatagramContext {
+                config: &mut *config,
+                namespace: &mut *namespace,
+                audio_config_sent: &mut *audio_config_sent,
+                media_cache: &mut *media_cache,
+                audio_publish_catch_up: &mut *audio_publish_catch_up,
+                audio_publish_target: &mut *audio_publish_target,
+                audio_request_id: &mut *audio_request_id,
+                audio_group_id: &mut *audio_group_id,
+                handle: &mut *handle,
+                data_plane: &mut *data_plane,
+            },
+            encoded,
+            properties,
+            send_timestamp_us,
+            send_duration_us,
+            is_reencode,
         )
         .await?;
-        let object_location = writer.next_object_location();
-        let outcome = writer.write_object(encoded, properties).await?;
-        if outcome == ObjectFilterOutcome::Pass {
-            *audio_config_sent = true;
-            media_cache.insert(
-                namespace,
-                AUDIO_TRACK_NAME.as_bytes(),
-                object_location,
-                properties,
-                encoded,
-            )?;
-        }
-        writer
-            .finish(publish_start_location(
-                client,
-                audio_publish_target.as_ref(),
-                audio_request_id,
-            ))
-            .await?;
-        // 送れなかった Object (フィルタで Skip) は記録しない。TIMESTAMP が
-        // 壁時計でない (再エンコード) 音も、読んだ時刻との差が遅れに
-        // ならないため記録しない
-        if outcome == ObjectFilterOutcome::Pass && !is_reencode {
-            record_audio_send(
-                audio_publish_catch_up,
-                send_timestamp_us,
-                send_duration_us,
-                queued_wall_clock_ms,
-                wall_clock_now_us()? / 1_000,
+    } else {
+        send_audio_stream(
+            AudioStreamContext {
+                namespace: &mut *namespace,
+                audio_config_sent: &mut *audio_config_sent,
+                media_cache: &mut *media_cache,
+                audio_publish_catch_up: &mut *audio_publish_catch_up,
+                audio_publish_target: &mut *audio_publish_target,
+                audio_request_id: &mut *audio_request_id,
+                audio_group_id: &mut *audio_group_id,
+                handle: &mut *handle,
+                data_plane: &mut *data_plane,
+                client: &mut *client,
+            },
+            encoded,
+            properties,
+            send_timestamp_us,
+            send_duration_us,
+            is_reencode,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+struct AudioEncodeContext<'a> {
+    audio_pcm_buf: &'a mut Vec<i16>,
+    audio_publish_catch_up: &'a mut AudioPublishCatchUp,
+    audio_catch_up_logged_dropped_frames: &'a mut u64,
+    audio_fade_pending: &'a mut Option<(Vec<i16>, u64)>,
+    audio_fade_next_head: &'a mut bool,
+}
+
+/// バッファから 1 チャンクを取り出してエンコードする
+async fn encode_audio_chunk(
+    encoder: &mut AudioEncoder,
+    context: AudioEncodeContext<'_>,
+    samples_per_frame: usize,
+    accepted: bool,
+    timestamp: u64,
+    duration_us: u64,
+) -> Result<Option<(Vec<u8>, u64)>> {
+    let AudioEncodeContext {
+        audio_pcm_buf,
+        audio_publish_catch_up,
+        audio_catch_up_logged_dropped_frames,
+        audio_fade_pending,
+        audio_fade_next_head,
+    } = context;
+    let chunk: Vec<i16> = audio_pcm_buf.drain(..samples_per_frame).collect();
+    if !accepted {
+        let stats = audio_publish_catch_up.snapshot();
+        // 状態が変わったときだけログに出す (毎フレーム出すとログが埋まる)
+        if stats.dropped_frames != *audio_catch_up_logged_dropped_frames {
+            *audio_catch_up_logged_dropped_frames = stats.dropped_frames;
+            tracing::warn!(
+                "Dropping audio chunks to catch up (dropped_frames={}, dropped_ms={}, lag_ms={:?}, pending_ms={}, starts={})",
+                stats.dropped_frames,
+                stats.dropped_ms,
+                stats.lag_ms,
+                stats.pending_ms,
+                stats.catch_up_starts,
             );
         }
     }
-    Ok(())
+    // 棄却で飛んだ境目をフェードで繋ぐ。保持しているチャンクを符号化する
+    // 直前に、次のチャンクの判定を見て末尾を落とす。捨てた直後のチャンクは
+    // 先頭を落とす
+    let to_encode = match (audio_fade_pending.take(), accepted) {
+        (Some((mut held, held_timestamp)), false) => {
+            fade_splice_edge_i16(
+                &mut [held.as_mut_slice()],
+                AUDIO_SAMPLE_RATE,
+                AudioSpliceEdge::Tail,
+            );
+            *audio_fade_next_head = true;
+            Some((held, held_timestamp))
+        }
+        (Some((held, held_timestamp)), true) => {
+            *audio_fade_pending = Some((
+                fade_chunk_head_if_dropped(chunk, audio_fade_next_head),
+                timestamp,
+            ));
+            Some((held, held_timestamp))
+        }
+        (None, false) => {
+            *audio_fade_next_head = true;
+            None
+        }
+        (None, true) => {
+            *audio_fade_pending = Some((
+                fade_chunk_head_if_dropped(chunk, audio_fade_next_head),
+                timestamp,
+            ));
+            None
+        }
+    };
+    let Some((chunk, timestamp)) = to_encode else {
+        return Ok(None);
+    };
+    let encoded = encoder.encode(&chunk).await?;
+    audio_publish_catch_up.record_encoded_chunk(AudioPublishCatchUpChunk {
+        timestamp_us: i64::try_from(timestamp).unwrap_or(i64::MAX),
+        duration_us: Some(i64::try_from(duration_us).unwrap_or(i64::MAX)),
+    });
+    // 最初の audio object にだけ Audio Config を付与する。
+    // フィルタ不通過で Skip された場合は次回のオブジェクトに付与し直す
+    // (Skip 時に audio_config_sent を立てると Audio Config が永遠に届かず、
+    // フィルタを通過する後続フレームが Opus デコード不能になる)。
+    Ok(Some((encoded, timestamp)))
 }
 
 async fn process_audio_chunks(
@@ -2293,66 +2546,24 @@ async fn process_audio_chunks(
             duration_us: Some(send_duration_us),
         });
         // 捨てる場合もバッファからは取り出す (符号化へ渡さない)
-        let chunk: Vec<i16> = audio_pcm_buf.drain(..samples_per_frame).collect();
-        if !accepted {
-            let stats = audio_publish_catch_up.snapshot();
-            // 状態が変わったときだけログに出す (毎フレーム出すとログが埋まる)
-            if stats.dropped_frames != *audio_catch_up_logged_dropped_frames {
-                *audio_catch_up_logged_dropped_frames = stats.dropped_frames;
-                tracing::warn!(
-                    "Dropping audio chunks to catch up (dropped_frames={}, dropped_ms={}, lag_ms={:?}, pending_ms={}, starts={})",
-                    stats.dropped_frames,
-                    stats.dropped_ms,
-                    stats.lag_ms,
-                    stats.pending_ms,
-                    stats.catch_up_starts,
-                );
-            }
-        }
-        // 棄却で飛んだ境目をフェードで繋ぐ。保持しているチャンクを符号化する
-        // 直前に、次のチャンクの判定を見て末尾を落とす。捨てた直後のチャンクは
-        // 先頭を落とす
-        let to_encode = match (audio_fade_pending.take(), accepted) {
-            (Some((mut held, held_timestamp)), false) => {
-                fade_splice_edge_i16(
-                    &mut [held.as_mut_slice()],
-                    AUDIO_SAMPLE_RATE,
-                    AudioSpliceEdge::Tail,
-                );
-                *audio_fade_next_head = true;
-                Some((held, held_timestamp))
-            }
-            (Some((held, held_timestamp)), true) => {
-                *audio_fade_pending = Some((
-                    fade_chunk_head_if_dropped(chunk, audio_fade_next_head),
-                    timestamp,
-                ));
-                Some((held, held_timestamp))
-            }
-            (None, false) => {
-                *audio_fade_next_head = true;
-                None
-            }
-            (None, true) => {
-                *audio_fade_pending = Some((
-                    fade_chunk_head_if_dropped(chunk, audio_fade_next_head),
-                    timestamp,
-                ));
-                None
-            }
-        };
-        let Some((chunk, timestamp)) = to_encode else {
+        let Some((encoded, timestamp)) = encode_audio_chunk(
+            encoder,
+            AudioEncodeContext {
+                audio_pcm_buf: &mut *audio_pcm_buf,
+                audio_publish_catch_up: &mut *audio_publish_catch_up,
+                audio_catch_up_logged_dropped_frames: &mut *audio_catch_up_logged_dropped_frames,
+                audio_fade_pending: &mut *audio_fade_pending,
+                audio_fade_next_head: &mut *audio_fade_next_head,
+            },
+            samples_per_frame,
+            accepted,
+            timestamp,
+            duration_us,
+        )
+        .await?
+        else {
             continue;
         };
-        let encoded = encoder.encode(&chunk).await?;
-        audio_publish_catch_up.record_encoded_chunk(AudioPublishCatchUpChunk {
-            timestamp_us: i64::try_from(timestamp).unwrap_or(i64::MAX),
-            duration_us: Some(i64::try_from(duration_us).unwrap_or(i64::MAX)),
-        });
-        // 最初の audio object にだけ Audio Config を付与する。
-        // フィルタ不通過で Skip された場合は次回のオブジェクトに付与し直す
-        // (Skip 時に audio_config_sent を立てると Audio Config が永遠に届かず、
-        // フィルタを通過する後続フレームが Opus デコード不能になる)。
         let audio_config = if *audio_config_sent {
             None
         } else {
