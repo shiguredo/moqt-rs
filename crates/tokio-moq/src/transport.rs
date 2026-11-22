@@ -25,16 +25,20 @@ use crate::webtransport_h3::{WtRecvStream, WtSendStream, WtSession};
 
 /// 受信ストリームから取り出した 1 要素
 pub enum RecvChunk {
+    /// 受信したデータ
     Data(Bytes),
+    /// peer によるストリームの終端
     End(RequestStreamEnd),
 }
 
 /// 送信ストリーム
 pub enum SendStream {
+    /// QUIC 直接接続の送信ストリーム
     Quic(crate::quic::SendStream),
     /// WebTransport over HTTP/3 の送信ストリーム (Windows ビルドでは持たない)
     #[cfg(not(windows))]
     WtH3(WtSendStream),
+    /// WebTransport over HTTP/2 の送信ストリーム
     WtH2(WtH2SendStream),
     /// QMux (draft-ietf-quic-qmux-02)
     Qmux(shiguredo_tokio_qmux::SendStream),
@@ -139,11 +143,12 @@ pub enum RecvStream {
     /// WebTransport over HTTP/3 の受信ストリーム (Windows ビルドでは持たない)
     #[cfg(not(windows))]
     WtH3(WtRecvStream),
+    /// WebTransport over HTTP/2 の受信ストリーム
     WtH2(WtH2RecvStream),
     /// QMux (draft-ietf-quic-qmux-02)
     ///
     /// `shiguredo_tokio_qmux::RecvStream::read` は呼び出し側のバッファへ書くため、読み出しごとの
-    /// 確保を避けてストリームごとに 1 本持つ ([`RecvStream::new_qmux`])。
+    /// 確保を避けてストリームごとに 1 本持つ (`RecvStream::new_qmux`)。
     Qmux {
         /// QMux の受信ストリーム
         stream: shiguredo_tokio_qmux::RecvStream,
@@ -322,6 +327,7 @@ pub enum StreamHandle {
     /// WebTransport over HTTP/3 の接続ハンドル (Windows ビルドでは持たない)
     #[cfg(not(windows))]
     WtH3(Arc<Mutex<WtSession>>),
+    /// WebTransport over HTTP/2 の接続ハンドル
     WtH2(Arc<Mutex<WtH2Session>>),
     /// QMux (draft-ietf-quic-qmux-02)
     ///
@@ -602,6 +608,7 @@ pub enum StreamAcceptor {
         /// セッション状態 (§6 の終了 / h3 層が返した接続エラー) の観測用 (ロック外で待つ)
         session_state: watch::Receiver<WtSessionState>,
     },
+    /// WebTransport over HTTP/2 の単方向ストリーム受理
     WtH2 {
         /// ストリームを開く側で使う session。accept ではロックを取らない
         session: Arc<Mutex<WtH2Session>>,
@@ -703,6 +710,7 @@ pub enum BidiStreamAcceptor {
         /// セッション状態 (§6 の終了 / h3 層が返した接続エラー) の観測用 (ロック外で待つ)
         session_state: watch::Receiver<WtSessionState>,
     },
+    /// WebTransport over HTTP/2 の双方向ストリーム受理
     WtH2 {
         /// ストリームを開く側で使う session。accept ではロックを取らない
         session: Arc<Mutex<WtH2Session>>,

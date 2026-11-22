@@ -300,7 +300,9 @@ pub type ControlIncoming = Result<StreamRead<ControlMessage>>;
 
 /// SUBSCRIBE_OK の結果
 pub struct SubscribeResult {
+    /// SUBSCRIBE の Request ID
     pub request_id: u64,
+    /// SUBSCRIBE_OK が割り当てた Track Alias
     pub track_alias: u64,
     /// SUBSCRIBE_OK が広告した LARGEST_OBJECT (未広告なら `None`)
     ///
@@ -487,7 +489,9 @@ impl FetchResponseWriter {
 /// 制御ストリームから読み出した値または終端
 #[derive(Debug)]
 pub enum StreamRead<T> {
+    /// ストリームから 1 要素を読み出した
     Value(T),
+    /// peer がストリームを終端した
     Closed(RequestStreamEnd),
 }
 
@@ -1765,7 +1769,7 @@ impl MoqtClient {
     /// SETUP の AUTHORIZATION_TOKEN として送り、同じトークンを PUBLISH / SUBSCRIBE /
     /// FETCH / REQUEST_UPDATE の AUTHORIZATION_TOKEN としても付与する。
     ///
-    /// `stop_sending_rx` は [`crate::quic::connect`] が返す peer の STOP_SENDING の観測で、
+    /// `stop_sending_rx` は `crate::quic::connect` が返す peer の STOP_SENDING の観測で、
     /// 該当する送信ストリームの終端として扱う。QUIC の code space のコードがそのまま流れる。
     ///
     /// 戻り値の [`StreamAcceptor`] は data stream を受信する側 (subscriber) が使う。
@@ -1843,7 +1847,7 @@ impl MoqtClient {
     /// native QUIC に限る。QMux は WebTransport ではないため、QUIC 直接接続と同じく
     /// PATH / AUTHORITY を送る (この扱いは同節の範囲外である)。
     ///
-    /// `stop_sending_rx` は [`crate::qmux::connect`] が起動した観測タスクが流す peer の
+    /// `stop_sending_rx` は `crate::qmux::connect` が起動した観測タスクが流す peer の
     /// STOP_SENDING で、該当する送信ストリームの終端として扱う。QMux は QUIC version 1 の
     /// code space を共有するため、QUIC のコードがそのまま流れる。
     ///
@@ -2235,7 +2239,7 @@ impl MoqtClient {
     /// WebTransport セッションの drain 状態を購読する receiver を返す
     ///
     /// draft-ietf-webtrans-http3-16 §4.7 / draft-ietf-webtrans-http2-16 §6.13: HTTP/3 /
-    /// HTTP/2 の GOAWAY や `WT_DRAIN_SESSION` を受けると [`WtSessionState::Draining`] へ
+    /// HTTP/2 の GOAWAY や `WT_DRAIN_SESSION` を受けると `crate::webtransport::WtSessionState::Draining` へ
     /// 遷移する。アプリはこの変化を観測し、MOQT の GOAWAY より先に移行を始められる。
     /// QUIC 直接接続と QMux では drain の通知が無いため `None` を返す。
     pub fn wt_session_state(&self) -> Option<watch::Receiver<crate::webtransport::WtSessionState>> {
@@ -3036,7 +3040,7 @@ impl MoqtClient {
     /// クライアント生成時からの経過時間で [`Session::tick`] を呼び出す
     ///
     /// `tick` は呼び出し側が単調増加ミリ秒を渡す設計だが、受信待ちの内部ループ
-    /// ([`Self::wait_subscription_resolved`]) はアプリの tick 周期に依存できない。
+    /// (`Self::wait_subscription_resolved`) はアプリの tick 周期に依存できない。
     /// 本メソッドでクライアント自身の起点から時刻を進める。
     pub fn tick_now(&mut self) {
         let now_ms = self.tick_epoch.elapsed().as_millis() as u64;

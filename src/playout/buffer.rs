@@ -288,6 +288,9 @@ impl<T> PlayoutBuffer<T> {
     /// moqt-js に対応する呼び出しが無く (`videoDelayMs` を返すのは意味が違う)、音声の
     /// 表示の遅れのうち基準を除いた分
     /// ([`PlayoutTimeline::presentation_extra_delay_us`]) を返す。
+    ///
+    /// 名前は似ているが、[`PlayoutTimeline::playout_delay_us`] は音声の自動予算だけを返し、
+    /// 映像のキューや同期の制御による下限を含まない点が異なる。
     pub fn playout_delay_us(&self, timeline: &PlayoutTimeline) -> Option<i64> {
         match self.track {
             Track::Audio => timeline.presentation_extra_delay_us(),

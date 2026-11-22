@@ -1077,6 +1077,9 @@ impl PlayoutTimeline {
     /// 壁時計の TIMESTAMP を持たない音を到着基準で並べるときの再生の遅れに使う。
     /// `target_latency` と同期の制御による下限は含まない
     /// ([`PlayoutTimeline::presentation_extra_delay_us`] を使う)。
+    ///
+    /// トラックを指定して再生の遅れを返す [`crate::playout::buffer::PlayoutBuffer::playout_delay_us`] とは異なり、
+    /// このメソッドは音声の自動予算だけを返す。
     pub fn playout_delay_us(&self) -> Option<i64> {
         let own_delay_us = self.tracks[Track::Audio.index()].delay_us?;
         Some(own_delay_us.min(self.presentation_cap_us()))

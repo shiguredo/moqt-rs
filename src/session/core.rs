@@ -12,9 +12,9 @@
 //! `send_data_stream_closed` / `recv_data_stream_stop_sending` / `recv_data_stream_type` /
 //! `recv_subgroup_header` / `recv_subgroup_object` / `recv_fetch_header` /
 //! `recv_object_datagram`) は `data.rs` に分離している。
-//! 各メッセージ種別 (SUBSCRIBE / PUBLISH / FETCH / NAMESPACE 系 / GOAWAY) の送受信処理は
-//! 兄弟モジュール (`subscription.rs` / `fetch.rs` / `namespace.rs` / `goaway.rs`) に
-//! 分離している。relay 全体の routing / fan-out / cache / policy はこの型の責務ではない。
+//! 各メッセージ種別 (SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS / NAMESPACE 系 / GOAWAY) の
+//! 送受信処理は兄弟モジュール (`subscription.rs` / `fetch.rs` / `track_status.rs` /
+//! `namespace.rs` / `goaway.rs`) に分離している。relay 全体の routing / fan-out / cache / policy はこの型の責務ではない。
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;

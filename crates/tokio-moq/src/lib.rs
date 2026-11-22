@@ -1145,14 +1145,14 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// `tokio::net::lookup_host` で解決した結果を解決順のまま列にする。ポートが省略された
 /// authority は既定ポート 443 を使う (draft-ietf-moq-transport-23 §6.1.2)。
 ///
-/// 名前解決は [`RESOLVE_TIMEOUT`] で打ち切る。打ち切った場合は
+/// 名前解決は `RESOLVE_TIMEOUT` で打ち切る。打ち切った場合は
 /// [`TransportError::ResolutionFailed`] になり、接続を試みずに終わる。
 /// IP リテラルは OS のリゾルバを通さないため、このタイムアウトの影響を受けない。
 ///
 /// # Errors
 ///
 /// authority を解釈できない場合は [`TransportError::InvalidAuthority`]、
-/// 名前解決が失敗した場合・[`RESOLVE_TIMEOUT`] を超えた場合・解決結果が
+/// 名前解決が失敗した場合・`RESOLVE_TIMEOUT` を超えた場合・解決結果が
 /// 0 件の場合は [`TransportError::ResolutionFailed`] になる。
 // テスト方針: IP リテラルと `localhost` の経路は単体テストで固定し、タイムアウトの
 // 行使は resolver を差し替える単体テスト (応答しない resolver を future で置き換える) と、
@@ -1167,7 +1167,7 @@ pub async fn resolve_socket_addrs(authority: &str) -> Result<Vec<SocketAddr>, Tr
 /// resolver を差し替えてタイムアウト経路を決定的に固定する単体テストは
 /// [`resolve_socket_addrs_with`] を直接使うため、この関数は既存の呼び出し点を
 /// 変えないためのラッパーである。
-/// 公開 API は [`RESOLVE_TIMEOUT`] を渡す [`resolve_socket_addrs`] だけにする。
+/// 公開 API は `RESOLVE_TIMEOUT` を渡す [`resolve_socket_addrs`] だけにする。
 async fn resolve_socket_addrs_within(
     authority: &str,
     timeout: Duration,
@@ -3981,7 +3981,7 @@ mod tests {
     /// テストの前提をそのまま表す fixture である (応答を偽装しない)。
     /// hanging future は 100ns のタイムアウトより早く完成しないため、タイムアウト経路が
     /// 全環境で決定的に勝つ。
-    /// タイムアウト ([`RESOLVE_TIMEOUT`]) を超える前に解決が失敗すれば従来どおり
+    /// タイムアウト (`RESOLVE_TIMEOUT`) を超える前に解決が失敗すれば従来どおり
     /// 解決に失敗することも [`resolve_socket_addrs_reports_resolution_failure`]
     /// (`example.invalid` を使う) で固定する。
     #[tokio::test]

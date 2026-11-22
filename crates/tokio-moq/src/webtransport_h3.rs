@@ -48,6 +48,7 @@ const H3_ALPN: &[u8] = b"h3";
 
 /// WebTransport クライアント設定
 pub struct ClientConfig {
+    /// 接続先のアドレス
     pub remote_addr: SocketAddr,
     /// SNI / 証明書検証に使うサーバー名 (ポートを含まない)
     pub server_name: String,
@@ -55,8 +56,11 @@ pub struct ClientConfig {
     ///
     /// URL でポートを省略した場合はポートを含まない。
     pub authority: String,
+    /// 追加で信頼する CA 証明書 (PEM)
     pub ca_cert_pem: Option<String>,
+    /// 証明書検証を無効化する (開発用)
     pub disable_cert_validation: bool,
+    /// HTTP/3 の SETTINGS
     pub h3_settings: H3Settings,
     /// datagram 継続受信のバックグラウンドタスクを起動するか
     ///
@@ -76,6 +80,9 @@ pub(crate) fn wt_h3_settings() -> shiguredo_http3::webtransport::Settings {
 }
 
 impl ClientConfig {
+    /// 既定値でクライアント設定を作る
+    ///
+    /// 証明書検証は有効、datagram の受信は無効で初期化する。
     pub fn new(remote_addr: SocketAddr, server_name: impl Into<String>) -> Self {
         let server_name = server_name.into();
         Self {
@@ -100,6 +107,9 @@ impl ClientConfig {
         self
     }
 
+    /// 追加で信頼する CA 証明書 (PEM) を設定する
+    ///
+    /// システムのルートストアに加えて、この証明書を信頼する。
     pub fn ca_cert(mut self, pem: impl Into<String>) -> Self {
         self.ca_cert_pem = Some(pem.into());
         self

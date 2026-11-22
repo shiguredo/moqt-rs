@@ -105,14 +105,20 @@ pub enum TransportError {
     Moqt(shiguredo_moqt::error::MessageError),
     /// CONNECT レスポンスが 2xx 以外、または :status ヘッダー不在でセッション確立に失敗した
     /// (draft-ietf-webtrans-http3-16 §3.2)
-    ConnectFailed { status: Option<u16> },
+    ConnectFailed {
+        /// CONNECT レスポンスの `:status` (応答が無い場合は `None`)
+        status: Option<u16>,
+    },
     /// アプリケーションプロトコル交渉に失敗した (draft-ietf-webtrans-http3-16 §3.3)
     ///
     /// 成功応答の `WT-Protocol` が無い / 不正 / `WT-Available-Protocols` に無い値だったことを
     /// 表す。h3 層が `WebTransportEvent::SessionClosed` で通知した終了コードを保持し、
     /// 2xx 以外の応答を表す [`Self::ConnectFailed`] と区別する。
     /// 交渉失敗では `error_code` は `WT_ALPN_ERROR` になる。
-    ProtocolNegotiationFailed { error_code: u64 },
+    ProtocolNegotiationFailed {
+        /// h3 層が通知した WT の終了コード (`WT_ALPN_ERROR` など)
+        error_code: u64,
+    },
     /// ストリームがクローズ済み
     StreamClosed,
     /// 無効な状態
@@ -242,6 +248,7 @@ impl From<shiguredo_moqt::session::types::SessionError> for TransportError {
     }
 }
 
+/// transport 層の処理結果
 pub type Result<T> = std::result::Result<T, TransportError>;
 
 #[cfg(test)]

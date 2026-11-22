@@ -88,6 +88,9 @@ pub struct ClientConfig {
 }
 
 impl ClientConfig {
+    /// 既定値でクライアント設定を作る
+    ///
+    /// 証明書検証は有効、datagram の受信は無効で初期化する。
     pub fn new(remote_addr: SocketAddr, server_name: impl Into<String>) -> Self {
         let server_name = server_name.into();
         Self {

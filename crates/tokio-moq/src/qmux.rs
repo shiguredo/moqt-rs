@@ -141,7 +141,7 @@ impl QmuxHandle {
 
 /// 接続確立済みの QMux 接続と、そこから生まれる受け入れ口
 ///
-/// [`connect`] が作り、`MoqtClient::establish_qmux` が制御ストリームを取り出してから
+/// `connect` が作り、`MoqtClient::establish_qmux` が制御ストリームを取り出してから
 /// 残りを `StreamAcceptor` / `BidiStreamAcceptor` へ渡す。
 pub struct QmuxSession {
     /// ストリームの open と DATAGRAM、close に使うハンドル
@@ -190,7 +190,7 @@ pub(crate) async fn connect(
 /// テスト用に、ピアのトランスポートパラメータを待たずに QMux 接続を作る
 ///
 /// ピアが QMux を話さない場合のドライバ終了を確認するテストで使う。通常の接続経路では
-/// [`connect`] を使い、この関数は使わない。
+/// `connect` を使い、この関数は使わない。
 #[cfg(test)]
 pub(crate) async fn connect_without_peer_parameters(
     socket_addr: SocketAddr,
@@ -283,7 +283,7 @@ async fn wait_for_peer_transport_parameters(
 /// 確立済みの QMux 接続から、MOQT 層が使う資源を組み立てる
 ///
 /// accept 系と STOP_SENDING の待ちは `&self` を取るため、接続を共有した別タスクで待ち、
-/// 結果をチャネルへ流す。client は [`connect`] から呼び、テストの peer は接続を作った側から
+/// 結果をチャネルへ流す。client は `connect` から呼び、テストの peer は接続を作った側から
 /// 呼ぶ (client / server で扱いは同じ)。
 pub(crate) fn split_connection(
     connection: Arc<shiguredo_tokio_qmux::Connection>,
@@ -599,7 +599,7 @@ mod tests {
 
     /// QMux のテスト peer と client を接続し、SETUP 交換まで進める
     ///
-    /// TCP + TLS + QMux のテスト peer を立て、[`connect`] と
+    /// TCP + TLS + QMux のテスト peer を立て、`connect` と
     /// [`MoqtClient::establish_qmux`] でクライアントを確立する。戻り値は peer、client、
     /// data stream のアクセプター、client の QMux ハンドルである。
     async fn connect_pair() -> (TestPeer, MoqtClient, StreamAcceptor, Arc<QmuxHandle>) {
