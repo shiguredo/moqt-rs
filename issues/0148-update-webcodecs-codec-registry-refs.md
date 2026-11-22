@@ -1,7 +1,7 @@
 # WEBCODECS-CODEC-REGISTRY を refs/ に保存する
 
 - Created: 2026-09-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/update-webcodecs-codec-registry-refs
 - Polished: 2026-11-14
 - Updated: 2026-10-11
@@ -42,3 +42,18 @@ MSF の codec 判定は draft-ietf-moq-msf-01 §5.2.18 (Codec) が LOC packaged 
 - `src/msf.rs` の判定表が保存したレジストリの登録名と一致することを確認し、解決方法に記録していること
 - 保存先と版が `src/msf.rs` の判定表コメントから辿れること
 - `make test` / `make clippy` / `make fmt` が通ること
+
+## 解決方法
+
+- `https://www.w3.org/TR/2026/DRY-webcodecs-codec-registry-20260212/` から
+  2026-02-12 版の WEBCODECS-CODEC-REGISTRY を取得し、HTML のまま
+  `refs/webcodecs/webcodecs-codec-registry-20260212.txt` に保存した。
+- 保存した本文で audio の `flac` / `mp3` / `mp4a.*` / `opus` / `vorbis` / `ulaw` /
+  `alaw` / `pcm-*` と video の `av01.*` / `avc1.*` / `avc3.*` / `hev1.*` / `hvc1.*` /
+  `vp8` / `vp09.*` の登録名を確認し、`src/msf.rs` の `is_audio_codec` /
+  `is_video_codec` の判定表と一致していることを確かめた。
+- `src/msf.rs` の判定表コメントに保存先を追記し、版と節から本文を辿れるようにした。
+  `docs/msf.md` は既に版と節を参照しているため変更していない。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`prek run --files` が成功した。
