@@ -1352,86 +1352,70 @@ async fn handle_catalog_republish(context: CatalogRepublishContext<'_>) -> Resul
     Ok(LoopFlow::Continue)
 }
 
-async fn run_publisher_loop(state: PublisherPipelineState<'_>) -> Result<()> {
-    let PublisherPipelineState {
-        task_monitor,
-        shutdown_monitor,
+struct VideoInputContext<'a> {
+    config: &'a mut Config,
+    namespace: &'a mut TrackNamespace,
+    video_encoder: &'a mut Option<encoder::VideoEncoder>,
+    video_timescale: &'a mut Option<u64>,
+    reencode_video_timescale: &'a mut Option<u64>,
+    handle: &'a mut StreamHandle,
+    video_group_id: &'a mut u64,
+    started_video_group_id: &'a mut Option<u64>,
+    current_video_writer: &'a mut Option<SubgroupWriter>,
+    video_object_id: &'a mut u64,
+    peer_subscriptions: &'a mut Vec<PeerSubscription>,
+    gop_tracker: &'a mut gop::GopTracker,
+    session_ended: &'a mut bool,
+    video_clock: &'a mut WallClockMapper,
+    capture_residuals: &'a mut CaptureClockResiduals,
+    pending_video_timestamps: &'a mut VecDeque<u64>,
+    media_cache: &'a mut cache::MediaCache,
+    video_publish_target: &'a mut Option<PublishTarget>,
+    video_request_id: &'a mut Option<u64>,
+    data_plane: &'a mut DataPlaneHandle,
+    client: &'a mut MoqtClient,
+}
+
+/// 映像入力 1 件をエンコードして送信する
+async fn handle_video_input(
+    context: VideoInputContext<'_>,
+    video_input: Option<VideoInput>,
+) -> Result<LoopFlow> {
+    let VideoInputContext {
         config,
         namespace,
         video_encoder,
         video_timescale,
         reencode_video_timescale,
-        audio_encoder,
-        audio_publish_catch_up,
-        audio_catch_up_logged_dropped_frames,
-        audio_samples_per_frame,
-        audio_timescale,
-        audio_config,
         handle,
-        catalog_group_id,
-        catalog_location,
-        catalog_context,
-        catalog_json,
-        video_input_rx,
-        audio_input_rx,
-        start,
         video_group_id,
         started_video_group_id,
-        audio_group_id,
-        audio_frame_count,
         current_video_writer,
         video_object_id,
         peer_subscriptions,
-        next_peer_alias,
         gop_tracker,
         session_ended,
-        audio_pcm_buf,
-        audio_fade_pending,
-        audio_fade_next_head,
         video_clock,
-        audio_clock,
         capture_residuals,
-        audio_timeline,
         pending_video_timestamps,
-        audio_config_sent,
-        audio_stats_logged_ms,
         media_cache,
-        tick_interval,
-        catalog_republish_interval,
-        migration_rx,
-        migration_task,
-        request_migration_tx,
-        request_migration_rx,
-        request_migration_tasks,
-        request_migration_sessions,
-        migrating_tracks,
         video_publish_target,
-        audio_publish_target,
-        catalog_publish_target,
-        old_session_closers,
-        migration_limiter,
-        wt_session_state_rx,
-        client,
-        data_plane,
         video_request_id,
-        audio_request_id,
-        catalog_request_id,
-    } = state;
-    'main: loop {
-        tokio::select! {
-            video_input = video_input_rx.recv(), if config.video_enabled => {
-                let Some(video_input) = video_input else {
-                    tracing::info!("Video input channel closed");
-                    break;
-                };
-                // エンコードとフレーム送信を async ブロックに閉じ込め、`?` が `run` を
-                // 抜けないようにする。フレーム送信経路 (`SubgroupWriter::new` /
-                // `SubgroupWriter::write_object` / `DatagramWriter::write_object` など) は
-                // セッション終了後に `TransportError::ConnectionClosed` を返すため、`?` を
-                // `run` まで通すと終了時の後始末 (`PUBLISH_DONE` / `close(0, "")`) に到達しない。
-                // ループを抜ける制御 (`let Some(..) = .. else { break }`) はブロックの
-                // 外に出す (ブロックの中では外側のループを抜けられない)。
-                let outcome: Result<()> = async {
+        data_plane,
+        client,
+    } = context;
+    let Some(video_input) = video_input else {
+        tracing::info!("Video input channel closed");
+        return Ok(LoopFlow::Break);
+    };
+    // エンコードとフレーム送信を async ブロックに閉じ込め、`?` が `run` を
+    // 抜けないようにする。フレーム送信経路 (`SubgroupWriter::new` /
+    // `SubgroupWriter::write_object` / `DatagramWriter::write_object` など) は
+    // セッション終了後に `TransportError::ConnectionClosed` を返すため、`?` を
+    // `run` まで通すと終了時の後始末 (`PUBLISH_DONE` / `close(0, "")`) に到達しない。
+    // ループを抜ける制御 (`let Some(..) = .. else { break }`) はブロックの
+    // 外に出す (ブロックの中では外側のループを抜けられない)。
+    let outcome: Result<()> = async {
                     // カメラ / 疑似キャプチャは生フレームをエンコードし、MP4 パススルーは
                     // エンコード済みサンプルをそのまま送り、MP4 再エンコードはデコード済みの
                     // 生フレームをエンコードする
@@ -1753,146 +1737,198 @@ async fn run_publisher_loop(state: PublisherPipelineState<'_>) -> Result<()> {
                     Ok(())
                 }
                 .await;
-                // セッション終了は異常ではなく期待される終了である (`is_transport_session_end`)。
-                // `?` で `run` を抜けず、終了時の後始末へ進む
-                match outcome {
-                    Ok(()) => {}
-                    Err(e) if is_transport_session_end(&e) => {
-                        tracing::info!("Session closed by transport");
-                        *session_ended = true;
-                        break 'main;
-                    }
-                    Err(e) if is_peer_stream_reset(&e) => {
-                        // peer が subgroup stream を cancel した (§11.3.2)。該当ストリームの
-                        // writer を捨て、次の group id へ進める。STOP_SENDING を受けた
-                        // Subgroup の再オープンは購読を再開する REQUEST_UPDATE (PAUSED 1→0) の受理まで
-                        // 禁止されるため、同じ group id (この example は subgroup id 0 固定) を
-                        // 使うと `send_subgroup_header` が拒否される。
-                        // writer の `write_object` / `finish` は、失敗を返す前に Session へ終端
-                        // (`send_data_stream_closed(Reset)`) を通知済みである。writer を捨てても
-                        // Session の追跡は終端され、保留 PUBLISH_DONE の flush 条件を満たす
-                        *current_video_writer = None;
-                        if config.stream_mapping == StreamMapping::Group {
-                            *video_group_id = group_id::next_group_id(*video_group_id)?;
-                            tracing::info!(
-                                "Subgroup stream was reset by peer; dropping the current video group"
-                            );
-                        } else {
-                            // object モードでは Subgroup は 1 Object ごとに閉じる。peer が reset
-                            // したのはその Object だけであり、Group の残りは別の Subgroup で
-                            // 送り続けられる
-                            tracing::info!(
-                                "Subgroup stream was reset by peer; dropping the current video object"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        // MOQT メッセージの encode / decode 失敗は終了コード付きで閉じる
-                        close_on_message_error(client, &e).await;
-                        return Err(e);
-                    }
-                }
+    // セッション終了は異常ではなく期待される終了である (`is_transport_session_end`)。
+    // `?` で `run` を抜けず、終了時の後始末へ進む
+    match outcome {
+        Ok(()) => {}
+        Err(e) if is_transport_session_end(&e) => {
+            tracing::info!("Session closed by transport");
+            *session_ended = true;
+            return Ok(LoopFlow::Break);
+        }
+        Err(e) if is_peer_stream_reset(&e) => {
+            // peer が subgroup stream を cancel した (§11.3.2)。該当ストリームの
+            // writer を捨て、次の group id へ進める。STOP_SENDING を受けた
+            // Subgroup の再オープンは購読を再開する REQUEST_UPDATE (PAUSED 1→0) の受理まで
+            // 禁止されるため、同じ group id (この example は subgroup id 0 固定) を
+            // 使うと `send_subgroup_header` が拒否される。
+            // writer の `write_object` / `finish` は、失敗を返す前に Session へ終端
+            // (`send_data_stream_closed(Reset)`) を通知済みである。writer を捨てても
+            // Session の追跡は終端され、保留 PUBLISH_DONE の flush 条件を満たす
+            *current_video_writer = None;
+            if config.stream_mapping == StreamMapping::Group {
+                *video_group_id = group_id::next_group_id(*video_group_id)?;
+                tracing::info!(
+                    "Subgroup stream was reset by peer; dropping the current video group"
+                );
+            } else {
+                // object モードでは Subgroup は 1 Object ごとに閉じる。peer が reset
+                // したのはその Object だけであり、Group の残りは別の Subgroup で
+                // 送り続けられる
+                tracing::info!(
+                    "Subgroup stream was reset by peer; dropping the current video object"
+                );
             }
-            audio_input = audio_input_rx.recv(), if config.audio_enabled => {
-                let Some(audio_input) = audio_input else {
-                    tracing::info!("Audio input channel closed");
-                    // フェードのために符号化へ渡すチャンクを 1 つ保持している。送らないと
-                    // 最後の 1 フレームが失われるため、符号化してから閉じる
-                    let outcome: Result<()> = async {
-                        let Some((chunk, timestamp)) = audio_fade_pending.take() else {
-                            return Ok(());
-                        };
-                        let encoder = audio_encoder.as_mut().expect("audio encoder enabled");
-                        let encoded = encoder.encode(&chunk).await?;
-                        let audio_config = if *audio_config_sent {
-                            None
-                        } else {
-                            audio_config.as_deref()
-                        };
-                        let properties =
-                            build_audio_loc_properties(timestamp, *audio_timescale, audio_config);
-                        // request 単位移行で side session へ移した track は、その session の
-                        // handle / data plane で Object を送る ([`publish_sink`])
-                        let (audio_handle, audio_data_plane) = publish_sink(
-                            audio_publish_target.as_ref(),
-                            handle,
-                            data_plane,
-                        );
-                        if config.audio_datagram {
-                            let mut writer = DatagramWriter::new(
-                                audio_handle,
-                                audio_data_plane,
-                                audio_request_id.expect("audio request_id enabled"),
-                                AUDIO_TRACK_ALIAS,
-                                *audio_group_id,
-                                DEFAULT_PUBLISHER_PRIORITY,
-                                config.datagram_max_size,
-                                config.audio_redundancy,
-                            );
-                            let object_location = writer.next_object_location();
-                            let outcome = writer.write_object(&encoded, &properties).await?;
-                            if outcome == ObjectFilterOutcome::Pass {
-                                *audio_config_sent = true;
-                                media_cache.insert(
-                                    namespace,
-                                    AUDIO_TRACK_NAME.as_bytes(),
-                                    object_location,
-                                    &properties,
-                                    &encoded,
-                                )?;
-                            }
-                        } else {
-                            let audio_request_id =
-                                audio_request_id.expect("audio request_id enabled");
-                            let mut writer = SubgroupWriter::new(
-                                audio_handle,
-                                audio_data_plane,
-                                audio_request_id,
-                                AUDIO_TRACK_ALIAS,
-                                *audio_group_id,
-                                SubgroupIdMode::Zero,
-                                0,
-                                DEFAULT_PUBLISHER_PRIORITY,
-                                true,
-                                publish_start_location(
-                                    client,
-                                    audio_publish_target.as_ref(),
-                                    audio_request_id,
-                                ),
-                            )
-                            .await?;
-                            let object_location = writer.next_object_location();
-                            let outcome = writer.write_object(&encoded, &properties).await?;
-                            if outcome == ObjectFilterOutcome::Pass {
-                                *audio_config_sent = true;
-                                media_cache.insert(
-                                    namespace,
-                                    AUDIO_TRACK_NAME.as_bytes(),
-                                    object_location,
-                                    &properties,
-                                    &encoded,
-                                )?;
-                            }
-                            writer
-                                .finish(publish_start_location(
-                                    client,
-                                    audio_publish_target.as_ref(),
-                                    audio_request_id,
-                                ))
-                                .await?;
-                        }
-                        Ok(())
-                    }
-                    .await;
-                    if let Err(e) = outcome {
-                        tracing::warn!("Failed to flush the held audio chunk: {e}");
-                    }
-                    break;
-                };
-                // 扱いは video 分岐と同じである。音声は 20 ms ごとに新しいストリームを開くため、
-                // セッション終了後に `SubgroupWriter::new` が `ConnectionClosed` を返す経路に
-                // 入りやすい。
-                let outcome: Result<()> = async {
+        }
+        Err(e) => {
+            // MOQT メッセージの encode / decode 失敗は終了コード付きで閉じる
+            close_on_message_error(client, &e).await;
+            return Err(e);
+        }
+    }
+    Ok(LoopFlow::Continue)
+}
+
+struct AudioInputContext<'a> {
+    config: &'a mut Config,
+    namespace: &'a mut TrackNamespace,
+    audio_encoder: &'a mut Option<AudioEncoder>,
+    audio_publish_catch_up: &'a mut AudioPublishCatchUp,
+    audio_catch_up_logged_dropped_frames: &'a mut u64,
+    audio_samples_per_frame: &'a mut Option<usize>,
+    audio_timescale: &'a mut Option<u64>,
+    audio_config: &'a mut Option<Vec<u8>>,
+    handle: &'a mut StreamHandle,
+    audio_group_id: &'a mut u64,
+    audio_frame_count: &'a mut u64,
+    peer_subscriptions: &'a mut Vec<PeerSubscription>,
+    session_ended: &'a mut bool,
+    audio_pcm_buf: &'a mut Vec<i16>,
+    audio_fade_pending: &'a mut Option<(Vec<i16>, u64)>,
+    audio_fade_next_head: &'a mut bool,
+    audio_clock: &'a mut AudioTimestampClock,
+    capture_residuals: &'a mut CaptureClockResiduals,
+    audio_timeline: &'a mut AudioCaptureTimeline,
+    audio_config_sent: &'a mut bool,
+    media_cache: &'a mut cache::MediaCache,
+    audio_publish_target: &'a mut Option<PublishTarget>,
+    audio_request_id: &'a mut Option<u64>,
+    data_plane: &'a mut DataPlaneHandle,
+    client: &'a mut MoqtClient,
+}
+
+/// 音声入力 1 件をエンコードして送信する
+async fn handle_audio_input(
+    context: AudioInputContext<'_>,
+    audio_input: Option<AudioInput>,
+) -> Result<LoopFlow> {
+    let AudioInputContext {
+        config,
+        namespace,
+        audio_encoder,
+        audio_publish_catch_up,
+        audio_catch_up_logged_dropped_frames,
+        audio_samples_per_frame,
+        audio_timescale,
+        audio_config,
+        handle,
+        audio_group_id,
+        audio_frame_count,
+        peer_subscriptions,
+        session_ended,
+        audio_pcm_buf,
+        audio_fade_pending,
+        audio_fade_next_head,
+        audio_clock,
+        capture_residuals,
+        audio_timeline,
+        audio_config_sent,
+        media_cache,
+        audio_publish_target,
+        audio_request_id,
+        data_plane,
+        client,
+    } = context;
+    let Some(audio_input) = audio_input else {
+        tracing::info!("Audio input channel closed");
+        // フェードのために符号化へ渡すチャンクを 1 つ保持している。送らないと
+        // 最後の 1 フレームが失われるため、符号化してから閉じる
+        let outcome: Result<()> = async {
+            let Some((chunk, timestamp)) = audio_fade_pending.take() else {
+                return Ok(());
+            };
+            let encoder = audio_encoder.as_mut().expect("audio encoder enabled");
+            let encoded = encoder.encode(&chunk).await?;
+            let audio_config = if *audio_config_sent {
+                None
+            } else {
+                audio_config.as_deref()
+            };
+            let properties = build_audio_loc_properties(timestamp, *audio_timescale, audio_config);
+            // request 単位移行で side session へ移した track は、その session の
+            // handle / data plane で Object を送る ([`publish_sink`])
+            let (audio_handle, audio_data_plane) =
+                publish_sink(audio_publish_target.as_ref(), handle, data_plane);
+            if config.audio_datagram {
+                let mut writer = DatagramWriter::new(
+                    audio_handle,
+                    audio_data_plane,
+                    audio_request_id.expect("audio request_id enabled"),
+                    AUDIO_TRACK_ALIAS,
+                    *audio_group_id,
+                    DEFAULT_PUBLISHER_PRIORITY,
+                    config.datagram_max_size,
+                    config.audio_redundancy,
+                );
+                let object_location = writer.next_object_location();
+                let outcome = writer.write_object(&encoded, &properties).await?;
+                if outcome == ObjectFilterOutcome::Pass {
+                    *audio_config_sent = true;
+                    media_cache.insert(
+                        namespace,
+                        AUDIO_TRACK_NAME.as_bytes(),
+                        object_location,
+                        &properties,
+                        &encoded,
+                    )?;
+                }
+            } else {
+                let audio_request_id = audio_request_id.expect("audio request_id enabled");
+                let mut writer = SubgroupWriter::new(
+                    audio_handle,
+                    audio_data_plane,
+                    audio_request_id,
+                    AUDIO_TRACK_ALIAS,
+                    *audio_group_id,
+                    SubgroupIdMode::Zero,
+                    0,
+                    DEFAULT_PUBLISHER_PRIORITY,
+                    true,
+                    publish_start_location(client, audio_publish_target.as_ref(), audio_request_id),
+                )
+                .await?;
+                let object_location = writer.next_object_location();
+                let outcome = writer.write_object(&encoded, &properties).await?;
+                if outcome == ObjectFilterOutcome::Pass {
+                    *audio_config_sent = true;
+                    media_cache.insert(
+                        namespace,
+                        AUDIO_TRACK_NAME.as_bytes(),
+                        object_location,
+                        &properties,
+                        &encoded,
+                    )?;
+                }
+                writer
+                    .finish(publish_start_location(
+                        client,
+                        audio_publish_target.as_ref(),
+                        audio_request_id,
+                    ))
+                    .await?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(e) = outcome {
+            tracing::warn!("Failed to flush the held audio chunk: {e}");
+        }
+        return Ok(LoopFlow::Break);
+    };
+    // 扱いは video 分岐と同じである。音声は 20 ms ごとに新しいストリームを開くため、
+    // セッション終了後に `SubgroupWriter::new` が `ConnectionClosed` を返す経路に
+    // 入りやすい。
+    let outcome: Result<()> = async {
                     let encoder = audio_encoder.as_mut().expect("audio encoder enabled");
                     let samples_per_frame =
                         audio_samples_per_frame.expect("audio samples_per_frame enabled");
@@ -2262,39 +2298,112 @@ async fn run_publisher_loop(state: PublisherPipelineState<'_>) -> Result<()> {
                     Ok(())
                 }
                 .await;
-                match outcome {
-                    Ok(()) => {}
-                    Err(e) if is_transport_session_end(&e) => {
-                        tracing::info!("Session closed by transport");
-                        *session_ended = true;
-                        break 'main;
-                    }
-                    Err(e) if is_peer_stream_reset(&e) => {
-                        // peer が音声の subgroup stream を cancel した (§11.3.2)。該当ストリーム
-                        // だけを終端し、次のフレームから新しい group で再開する。同じ group id を
-                        // 使うと再オープン禁止で拒否されるため、通常経路と同じくここで進める。
-                        // この分岐に届く writer の `write_object` / `finish` は、失敗を返す前に
-                        // Session へ終端を通知済みであり、writer を捨てても追跡は終端される
-                        *audio_group_id = group_id::next_group_id(*audio_group_id)?;
-                        tracing::info!(
-                            "Audio subgroup stream was reset by peer; continuing with the next frame"
-                        );
-                    }
-                    Err(e) => {
-                        // MOQT メッセージの encode / decode 失敗は終了コード付きで閉じる
-                        close_on_message_error(client, &e).await;
-                        return Err(e);
-                    }
-                }
-            }
-            notable = client.next_event() => {
-                // 分岐本体を async ブロックに閉じ込め、`?` が `run` を抜けないようにする。
-                // `client.next_event()` の結果とピア要求への応答 (`serve_peer_request`) は
-                // どちらも transport I/O を行い、セッション終了後は
-                // `TransportError::ConnectionClosed` を返す。
-                // `break 'main` はブロックの外に出す (ブロックの中では外側のループを
-                // 抜けられない) ため、ブロックは「ループを抜けるか」を返す。
-                let outcome: Result<bool> = async {
+    match outcome {
+        Ok(()) => {}
+        Err(e) if is_transport_session_end(&e) => {
+            tracing::info!("Session closed by transport");
+            *session_ended = true;
+            return Ok(LoopFlow::Break);
+        }
+        Err(e) if is_peer_stream_reset(&e) => {
+            // peer が音声の subgroup stream を cancel した (§11.3.2)。該当ストリーム
+            // だけを終端し、次のフレームから新しい group で再開する。同じ group id を
+            // 使うと再オープン禁止で拒否されるため、通常経路と同じくここで進める。
+            // この分岐に届く writer の `write_object` / `finish` は、失敗を返す前に
+            // Session へ終端を通知済みであり、writer を捨てても追跡は終端される
+            *audio_group_id = group_id::next_group_id(*audio_group_id)?;
+            tracing::info!(
+                "Audio subgroup stream was reset by peer; continuing with the next frame"
+            );
+        }
+        Err(e) => {
+            // MOQT メッセージの encode / decode 失敗は終了コード付きで閉じる
+            close_on_message_error(client, &e).await;
+            return Err(e);
+        }
+    }
+    Ok(LoopFlow::Continue)
+}
+
+struct NextEventContext<'a> {
+    task_monitor: &'a mut tokio_metrics::TaskMonitor,
+    config: &'a mut Config,
+    namespace: &'a mut TrackNamespace,
+    handle: &'a mut StreamHandle,
+    catalog_group_id: &'a mut u64,
+    catalog_location: &'a mut Location,
+    catalog_json: &'a mut Vec<u8>,
+    started_video_group_id: &'a mut Option<u64>,
+    current_video_writer: &'a mut Option<SubgroupWriter>,
+    peer_subscriptions: &'a mut Vec<PeerSubscription>,
+    next_peer_alias: &'a mut u64,
+    gop_tracker: &'a mut gop::GopTracker,
+    session_ended: &'a mut bool,
+    audio_config_sent: &'a mut bool,
+    media_cache: &'a mut cache::MediaCache,
+    migration_task: &'a mut Option<tokio::task::JoinHandle<()>>,
+    request_migration_tx: &'a mut tokio::sync::mpsc::Sender<RequestMigrationEvent>,
+    request_migration_tasks: &'a mut Vec<tokio::task::JoinHandle<()>>,
+    request_migration_sessions: &'a mut HashMap<String, SideSessionSlot>,
+    migrating_tracks: &'a mut Vec<PublishTrack>,
+    video_publish_target: &'a mut Option<PublishTarget>,
+    audio_publish_target: &'a mut Option<PublishTarget>,
+    catalog_publish_target: &'a mut Option<PublishTarget>,
+    migration_limiter: &'a mut MigrationLimiter,
+    catalog_request_id: &'a mut u64,
+    audio_request_id: &'a mut Option<u64>,
+    video_request_id: &'a mut Option<u64>,
+    data_plane: &'a mut DataPlaneHandle,
+    client: &'a mut MoqtClient,
+    migration_rx: &'a mut Option<
+        tokio::sync::oneshot::Receiver<std::result::Result<MigratedSession, String>>,
+    >,
+}
+
+/// session のイベント 1 件を処理する
+async fn handle_notable_event(
+    context: NextEventContext<'_>,
+    notable: std::result::Result<Option<ClientEvent>, TransportError>,
+) -> Result<LoopFlow> {
+    let NextEventContext {
+        task_monitor,
+        config,
+        namespace,
+        handle,
+        catalog_group_id,
+        catalog_location,
+        catalog_json,
+        started_video_group_id,
+        current_video_writer,
+        peer_subscriptions,
+        next_peer_alias,
+        gop_tracker,
+        session_ended,
+        audio_config_sent,
+        media_cache,
+        migration_task,
+        request_migration_tx,
+        request_migration_tasks,
+        request_migration_sessions,
+        migrating_tracks,
+        video_publish_target,
+        audio_publish_target,
+        catalog_publish_target,
+        migration_limiter,
+        catalog_request_id,
+        audio_request_id,
+        video_request_id,
+        data_plane,
+        client,
+        migration_rx,
+    } = context;
+    // 分岐本体を async ブロックに閉じ込め、`?` が `run` を抜けないようにする。
+    // `client.next_event()` の結果とピア要求への応答 (`serve_peer_request`) は
+    // どちらも transport I/O を行い、セッション終了後は
+    // `TransportError::ConnectionClosed` を返す。
+    // `break 'main` はブロックの外に出す (ブロックの中では外側のループを
+    // 抜けられない) ため、ブロックは「ループを抜けるか」を返す。
+    let outcome: Result<bool> = async {
                     match notable? {
                         Some(ClientEvent::Session(SessionEvent::GoawayReceived {
                             new_session_uri,
@@ -2829,39 +2938,108 @@ async fn run_publisher_loop(state: PublisherPipelineState<'_>) -> Result<()> {
                     }
                 }
                 .await;
-                match outcome {
-                    // セッションが終了した (peer 起点の終了通知 / 自側で検出した違反の双方)。
-                    // 終了時の後始末へ進む
-                    Ok(true) => {
-                        *session_ended = true;
-                        break 'main;
-                    }
-                    Ok(false) => {}
-                    Err(e) if is_transport_session_end(&e) => {
-                        tracing::info!("Session closed by transport");
-                        *session_ended = true;
-                        break 'main;
-                    }
-                    Err(e) if is_peer_stream_reset(&e) => {
-                        // peer が bidi request stream を cancel した (§6.4.2.3)。該当 request
-                        // だけが終端するため、パイプラインは継続する
-                        tracing::info!("Request stream was reset by peer; continuing");
-                    }
-                    Err(e) => {
-                        // MOQT メッセージの encode / decode 失敗は終了コード付きで閉じる
-                        close_on_message_error(client, &e).await;
-                        return Err(e);
-                    }
-                }
-            }
-            migration_outcome = wait_migration_result(migration_rx) => {
-                match migration_outcome {
-                    Some(Ok(migrated)) => {
-                        // 移行完了: 旧 session から新 session へ参照先をここでまとめて差し替える。
-                        // draft-ietf-moq-transport-23 §7.7.1 (Graceful Publisher Relay Switchover):
-                        // 新 session で PUBLISH が成立するまで旧 session の配信を止めない。
-                        // ここに来た時点で PUBLISH は成立している
-                        async {
+    match outcome {
+        // セッションが終了した (peer 起点の終了通知 / 自側で検出した違反の双方)。
+        // 終了時の後始末へ進む
+        Ok(true) => {
+            *session_ended = true;
+            return Ok(LoopFlow::Break);
+        }
+        Ok(false) => {}
+        Err(e) if is_transport_session_end(&e) => {
+            tracing::info!("Session closed by transport");
+            *session_ended = true;
+            return Ok(LoopFlow::Break);
+        }
+        Err(e) if is_peer_stream_reset(&e) => {
+            // peer が bidi request stream を cancel した (§6.4.2.3)。該当 request
+            // だけが終端するため、パイプラインは継続する
+            tracing::info!("Request stream was reset by peer; continuing");
+        }
+        Err(e) => {
+            // MOQT メッセージの encode / decode 失敗は終了コード付きで閉じる
+            close_on_message_error(client, &e).await;
+            return Err(e);
+        }
+    }
+    Ok(LoopFlow::Continue)
+}
+
+struct MigrationResultContext<'a> {
+    task_monitor: &'a mut tokio_metrics::TaskMonitor,
+    config: &'a mut Config,
+    handle: &'a mut StreamHandle,
+    catalog_group_id: &'a mut u64,
+    catalog_location: &'a mut Location,
+    catalog_context: &'a mut CatalogContext,
+    catalog_json: &'a mut Vec<u8>,
+    current_video_writer: &'a mut Option<SubgroupWriter>,
+    peer_subscriptions: &'a mut Vec<PeerSubscription>,
+    gop_tracker: &'a mut gop::GopTracker,
+    session_ended: &'a mut bool,
+    audio_config_sent: &'a mut bool,
+    migration_task: &'a mut Option<tokio::task::JoinHandle<()>>,
+    request_migration_rx: &'a mut tokio::sync::mpsc::Receiver<RequestMigrationEvent>,
+    request_migration_tasks: &'a mut Vec<tokio::task::JoinHandle<()>>,
+    request_migration_sessions: &'a mut HashMap<String, SideSessionSlot>,
+    migrating_tracks: &'a mut Vec<PublishTrack>,
+    video_publish_target: &'a mut Option<PublishTarget>,
+    audio_publish_target: &'a mut Option<PublishTarget>,
+    catalog_publish_target: &'a mut Option<PublishTarget>,
+    old_session_closers: &'a mut Vec<tokio::task::JoinHandle<()>>,
+    wt_session_state_rx: &'a mut Option<tokio::sync::watch::Receiver<WtSessionState>>,
+    catalog_request_id: &'a mut u64,
+    audio_request_id: &'a mut Option<u64>,
+    video_request_id: &'a mut Option<u64>,
+    data_plane: &'a mut DataPlaneHandle,
+    client: &'a mut MoqtClient,
+    migration_rx: &'a mut Option<
+        tokio::sync::oneshot::Receiver<std::result::Result<MigratedSession, String>>,
+    >,
+}
+
+/// バックグラウンドの session 移行の結果を処理する
+async fn handle_migration_outcome(
+    context: MigrationResultContext<'_>,
+    migration_outcome: Option<MigrationTaskResult>,
+) -> Result<LoopFlow> {
+    let MigrationResultContext {
+        task_monitor,
+        config,
+        handle,
+        catalog_group_id,
+        catalog_location,
+        catalog_context,
+        catalog_json,
+        current_video_writer,
+        peer_subscriptions,
+        gop_tracker,
+        session_ended,
+        audio_config_sent,
+        migration_task,
+        request_migration_rx,
+        request_migration_tasks,
+        request_migration_sessions,
+        migrating_tracks,
+        video_publish_target,
+        audio_publish_target,
+        catalog_publish_target,
+        old_session_closers,
+        wt_session_state_rx,
+        catalog_request_id,
+        audio_request_id,
+        video_request_id,
+        data_plane,
+        client,
+        migration_rx,
+    } = context;
+    match migration_outcome {
+        Some(Ok(migrated)) => {
+            // 移行完了: 旧 session から新 session へ参照先をここでまとめて差し替える。
+            // draft-ietf-moq-transport-23 §7.7.1 (Graceful Publisher Relay Switchover):
+            // 新 session で PUBLISH が成立するまで旧 session の配信を止めない。
+            // ここに来た時点で PUBLISH は成立している
+            async {
                             // 旧 session の映像 writer を終端する (§11.3.2)。終端しないと
                             // open 中の outgoing stream が残り、旧 session の PUBLISH_DONE が
                             // 拒否される (§9.9)。filter start は差し替え前の client から取る
@@ -3038,226 +3216,524 @@ async fn run_publisher_loop(state: PublisherPipelineState<'_>) -> Result<()> {
                             }
                         }
                         .await;
-                        // 結果を受け取ったタスクは完了している。JoinHandle を手放してよい
-                        *migration_task = None;
-                        *migration_rx = None;
+            // 結果を受け取ったタスクは完了している。JoinHandle を手放してよい
+            *migration_task = None;
+            *migration_rx = None;
+        }
+        Some(Err(reason)) => {
+            tracing::warn!("Session migration failed: {reason}");
+            *migration_task = None;
+            // 移行を諦め、既存の終了経路 (後始末) へ進む
+            *session_ended = true;
+            return Ok(LoopFlow::Break);
+        }
+        None => {}
+    }
+    Ok(LoopFlow::Continue)
+}
+
+struct RequestMigrationContext<'a> {
+    handle: &'a mut StreamHandle,
+    catalog_group_id: &'a mut u64,
+    catalog_location: &'a mut Location,
+    catalog_json: &'a mut Vec<u8>,
+    current_video_writer: &'a mut Option<SubgroupWriter>,
+    peer_subscriptions: &'a mut Vec<PeerSubscription>,
+    gop_tracker: &'a mut gop::GopTracker,
+    session_ended: &'a mut bool,
+    audio_config_sent: &'a mut bool,
+    request_migration_sessions: &'a mut HashMap<String, SideSessionSlot>,
+    migrating_tracks: &'a mut Vec<PublishTrack>,
+    video_publish_target: &'a mut Option<PublishTarget>,
+    audio_publish_target: &'a mut Option<PublishTarget>,
+    catalog_publish_target: &'a mut Option<PublishTarget>,
+    catalog_request_id: &'a mut u64,
+    audio_request_id: &'a mut Option<u64>,
+    video_request_id: &'a mut Option<u64>,
+    data_plane: &'a mut DataPlaneHandle,
+    client: &'a mut MoqtClient,
+}
+
+/// request 単位移行の side session から届いたイベントを処理する
+async fn handle_request_migration_event(
+    context: RequestMigrationContext<'_>,
+    event: RequestMigrationEvent,
+) -> Result<LoopFlow> {
+    let RequestMigrationContext {
+        handle,
+        catalog_group_id,
+        catalog_location,
+        catalog_json,
+        current_video_writer,
+        peer_subscriptions,
+        gop_tracker,
+        session_ended,
+        audio_config_sent,
+        request_migration_sessions,
+        migrating_tracks,
+        video_publish_target,
+        audio_publish_target,
+        catalog_publish_target,
+        catalog_request_id,
+        audio_request_id,
+        video_request_id,
+        data_plane,
+        client,
+    } = context;
+    match event {
+        RequestMigrationEvent::Migrated {
+            url,
+            kind,
+            old_request_id,
+            new_request_id,
+            new_track_alias,
+            data_plane: migrated_data_plane,
+            handle: migrated_handle,
+        } => {
+            // side session の確立と PUBLISH の再発行に成功した。旧 session の
+            // 当該 PUBLISH を終端し、以降の Object は side session へ送る
+            // draft-ietf-moq-transport-23 §9.2 (GOAWAY) の "close the old
+            // request stream using the appropriate mechanism"
+            match kind {
+                PublishTrack::Video => {
+                    // open 中の subgroup stream が残っていると PUBLISH_DONE が
+                    // 拒否されるため (§9.9)、先に writer を終端する
+                    if let Some(writer) = current_video_writer.take() {
+                        let start_location = video_request_id
+                            .and_then(|request_id| client.subscription_filter_start(request_id));
+                        if let Err(e) = writer.finish(start_location).await {
+                            tracing::debug!(
+                                "Failed to finish the outgoing video subgroup stream after a request migration: {e}"
+                            );
+                        }
                     }
-                    Some(Err(reason)) => {
-                        tracing::warn!("Session migration failed: {reason}");
-                        *migration_task = None;
-                        // 移行を諦め、既存の終了経路 (後始末) へ進む
-                        *session_ended = true;
-                        break 'main;
+                    send_publish_done_best_effort(client, old_request_id, "video").await;
+                    *video_request_id = Some(new_request_id);
+                    // 新しい session では旧 Group を継続できないため、次の
+                    // キーフレームで新しい Group を開始する。映像の writer は
+                    // Group の先頭 (キーフレーム) でだけ作るため、ここでは
+                    // 作らず、次のキーフレームで side session の handle /
+                    // data plane から作り直す
+                    gop_tracker.request_new_group();
+                    *video_publish_target = Some(PublishTarget {
+                        old_request_id,
+                        handle: migrated_handle,
+                        data_plane: migrated_data_plane,
+                    });
+                }
+                PublishTrack::Audio => {
+                    send_publish_done_best_effort(client, old_request_id, "audio").await;
+                    *audio_request_id = Some(new_request_id);
+                    // 新しい session の最初の音声 Object に Audio Config を
+                    // 載せ直す
+                    *audio_config_sent = false;
+                    *audio_publish_target = Some(PublishTarget {
+                        old_request_id,
+                        handle: migrated_handle,
+                        data_plane: migrated_data_plane,
+                    });
+                }
+                PublishTrack::Catalog => {
+                    send_publish_done_best_effort(client, old_request_id, "catalog").await;
+                    *catalog_request_id = new_request_id;
+                    *catalog_publish_target = Some(PublishTarget {
+                        old_request_id,
+                        handle: migrated_handle,
+                        data_plane: migrated_data_plane,
+                    });
+                    // 新しい session でカタログを次の Group で送り直す
+                    // (draft-ietf-moq-msf-02 §5 (Catalog) /
+                    // §6.1 (Group numbering))
+                    let sink = catalog_sink(
+                        client,
+                        catalog_publish_target.as_ref(),
+                        handle,
+                        data_plane,
+                        *catalog_request_id,
+                    );
+                    if let Err(e) = republish_catalog_at_next_group(
+                        client,
+                        sink,
+                        handle,
+                        data_plane,
+                        *catalog_request_id,
+                        catalog_json,
+                        catalog_group_id,
+                        catalog_location,
+                        peer_subscriptions,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            "Failed to republish the catalog on the request migration side session: {e}"
+                        );
                     }
-                    None => {}
+                }
+                PublishTrack::Unknown => {}
+            }
+            migrating_tracks.retain(|track| *track != kind);
+            tracing::info!(
+                "Migrated the {kind:?} PUBLISH to another session: url={}, old_request_id={old_request_id}, new_request_id={new_request_id}, track_alias={new_track_alias}",
+                side_session_url_display(&url)
+            );
+        }
+        RequestMigrationEvent::Ended { url } => {
+            // side session を共有するすべての track が送れなくなる。対象 URL の
+            // slot を削除し、パイプラインを終了する。`*_publish_target` を
+            // `None` にすると「未移行」の意味になり、main session の別 request
+            // の id で送信してしまうため、control GOAWAY の移行失敗と同じく
+            // パイプラインを終了する扱いにする
+            request_migration_sessions.remove(&side_session_key(&url));
+            tracing::warn!(
+                "The request migration side session ended: url={}; ending the pipeline",
+                side_session_url_display(&url)
+            );
+            *session_ended = true;
+            return Ok(LoopFlow::Break);
+        }
+        RequestMigrationEvent::Failed {
+            url,
+            kind,
+            old_request_id,
+            reason,
+        } => {
+            // 1 本の PUBLISH の再発行失敗である。control GOAWAY の移行失敗と
+            // 同じく警告を出し、旧 session の終了経路へ進む
+            //
+            // テスト (peer_integration_tests の移行期限切れ) はこの文言の
+            // "Failed to migrate the" を待って期限切れを観測する。文言を
+            // 変えるときはテストの needle も更新する
+            tracing::warn!(
+                "Failed to migrate the {kind:?} PUBLISH to another session: url={}, request_id={old_request_id}: {reason}",
+                side_session_url_display(&url)
+            );
+            *session_ended = true;
+            return Ok(LoopFlow::Break);
+        }
+        RequestMigrationEvent::SessionEvent { url, event } => {
+            // 移行済みの PUBLISH について side session で観測したイベントを
+            // ログに残す。side session の後始末は main ループが所有する
+            // `MoqtClient` では行えないため、記録だけに留める
+            match event {
+                SessionEvent::PublishDoneReceived {
+                    request_id,
+                    status_code,
+                    stream_count,
+                    reason,
+                } => {
+                    tracing::info!(
+                        "Received PUBLISH_DONE on the request migration side session: authority={}, request_id={request_id}, status_code={status_code}, stream_count={stream_count}, reason={}",
+                        url.authority,
+                        reason.as_str(),
+                    );
+                }
+                SessionEvent::RequestErrorReceived {
+                    request_id,
+                    error_code,
+                    retry_interval,
+                    reason,
+                    ..
+                } => {
+                    tracing::warn!(
+                        "Received REQUEST_ERROR on the request migration side session: authority={}, request_id={request_id}, error_code={error_code:#x}, retry_interval={retry_interval}, reason={}",
+                        url.authority,
+                        reason.as_str(),
+                    );
+                }
+                SessionEvent::GoawayReceived {
+                    new_session_uri,
+                    timeout,
+                    on_request_stream,
+                } => {
+                    // side session の GOAWAY はさらに移行しない。移行対象の
+                    // 購読は relay が管理するため、ログだけ残す
+                    tracing::warn!(
+                        "Received GOAWAY on the request migration side session: authority={}, timeout={timeout}, on_request_stream={on_request_stream:?}, new_session_uri_len={}",
+                        url.authority,
+                        new_session_uri.len(),
+                    );
+                }
+                SessionEvent::CloseSession(err) => {
+                    tracing::warn!(
+                        "The request migration side session closed: authority={}, {:#x} {}",
+                        url.authority,
+                        err.code,
+                        err.reason,
+                    );
+                }
+                SessionEvent::PeerClosed(err) => {
+                    tracing::warn!(
+                        "The request migration side session was closed by peer: authority={}, {:#x} {}",
+                        url.authority,
+                        err.code,
+                        err.reason,
+                    );
+                }
+                other => {
+                    tracing::debug!(
+                        "Ignoring a session event on the request migration side session: authority={}, event={other:?}",
+                        url.authority,
+                    );
+                }
+            }
+        }
+    }
+    Ok(LoopFlow::Continue)
+}
+
+async fn run_publisher_loop(state: PublisherPipelineState<'_>) -> Result<()> {
+    let PublisherPipelineState {
+        task_monitor,
+        shutdown_monitor,
+        config,
+        namespace,
+        video_encoder,
+        video_timescale,
+        reencode_video_timescale,
+        audio_encoder,
+        audio_publish_catch_up,
+        audio_catch_up_logged_dropped_frames,
+        audio_samples_per_frame,
+        audio_timescale,
+        audio_config,
+        handle,
+        catalog_group_id,
+        catalog_location,
+        catalog_context,
+        catalog_json,
+        video_input_rx,
+        audio_input_rx,
+        start,
+        video_group_id,
+        started_video_group_id,
+        audio_group_id,
+        audio_frame_count,
+        current_video_writer,
+        video_object_id,
+        peer_subscriptions,
+        next_peer_alias,
+        gop_tracker,
+        session_ended,
+        audio_pcm_buf,
+        audio_fade_pending,
+        audio_fade_next_head,
+        video_clock,
+        audio_clock,
+        capture_residuals,
+        audio_timeline,
+        pending_video_timestamps,
+        audio_config_sent,
+        audio_stats_logged_ms,
+        media_cache,
+        tick_interval,
+        catalog_republish_interval,
+        migration_rx,
+        migration_task,
+        request_migration_tx,
+        request_migration_rx,
+        request_migration_tasks,
+        request_migration_sessions,
+        migrating_tracks,
+        video_publish_target,
+        audio_publish_target,
+        catalog_publish_target,
+        old_session_closers,
+        migration_limiter,
+        wt_session_state_rx,
+        client,
+        data_plane,
+        video_request_id,
+        audio_request_id,
+        catalog_request_id,
+    } = state;
+    'main: loop {
+        tokio::select! {
+            video_input = video_input_rx.recv(), if config.video_enabled => {
+                match handle_video_input(
+                    VideoInputContext {
+                        config,
+                        namespace,
+                        video_encoder,
+                        video_timescale,
+                        reencode_video_timescale,
+                        handle,
+                        video_group_id,
+                        started_video_group_id,
+                        current_video_writer,
+                        video_object_id,
+                        peer_subscriptions,
+                        gop_tracker,
+                        session_ended,
+                        video_clock,
+                        capture_residuals,
+                        pending_video_timestamps,
+                        media_cache,
+                        video_publish_target,
+                        video_request_id,
+                        data_plane,
+                        client,
+                    },
+                    video_input,
+                )
+                .await
+                {
+                    Ok(LoopFlow::Continue) => {}
+                    Ok(LoopFlow::Break) => break 'main,
+                    Err(e) => return Err(e),
+                }
+            }
+            audio_input = audio_input_rx.recv(), if config.audio_enabled => {
+                match handle_audio_input(
+                    AudioInputContext {
+                        config,
+                        namespace,
+                        audio_encoder,
+                        audio_publish_catch_up,
+                        audio_catch_up_logged_dropped_frames,
+                        audio_samples_per_frame,
+                        audio_timescale,
+                        audio_config,
+                        handle,
+                        audio_group_id,
+                        audio_frame_count,
+                        peer_subscriptions,
+                        session_ended,
+                        audio_pcm_buf,
+                        audio_fade_pending,
+                        audio_fade_next_head,
+                        audio_clock,
+                        capture_residuals,
+                        audio_timeline,
+                        audio_config_sent,
+                        media_cache,
+                        audio_publish_target,
+                        audio_request_id,
+                        data_plane,
+                        client,
+                    },
+                    audio_input,
+                )
+                .await
+                {
+                    Ok(LoopFlow::Continue) => {}
+                    Ok(LoopFlow::Break) => break 'main,
+                    Err(e) => return Err(e),
+                }
+            }
+            notable = client.next_event() => {
+                match handle_notable_event(
+                    NextEventContext {
+                        task_monitor,
+                        config,
+                        namespace,
+                        handle,
+                        catalog_group_id,
+                        catalog_location,
+                        catalog_json,
+                        started_video_group_id,
+                        current_video_writer,
+                        peer_subscriptions,
+                        next_peer_alias,
+                        gop_tracker,
+                        session_ended,
+                        audio_config_sent,
+                        media_cache,
+                        migration_task,
+                        request_migration_tx,
+                        request_migration_tasks,
+                        request_migration_sessions,
+                        migrating_tracks,
+                        video_publish_target,
+                        audio_publish_target,
+                        catalog_publish_target,
+                        migration_limiter,
+                        catalog_request_id,
+                        audio_request_id,
+                        video_request_id,
+                        data_plane,
+                        client,
+                        migration_rx,
+                    },
+                    notable,
+                )
+                .await
+                {
+                    Ok(LoopFlow::Continue) => {}
+                    Ok(LoopFlow::Break) => break 'main,
+                    Err(e) => return Err(e),
+                }
+            }
+            migration_outcome = wait_migration_result(migration_rx) => {
+                match handle_migration_outcome(
+                    MigrationResultContext {
+                        task_monitor,
+                        config,
+                        handle,
+                        catalog_group_id,
+                        catalog_location,
+                        catalog_context,
+                        catalog_json,
+                        current_video_writer,
+                        peer_subscriptions,
+                        gop_tracker,
+                        session_ended,
+                        audio_config_sent,
+                        migration_task,
+                        request_migration_rx,
+                        request_migration_tasks,
+                        request_migration_sessions,
+                        migrating_tracks,
+                        video_publish_target,
+                        audio_publish_target,
+                        catalog_publish_target,
+                        old_session_closers,
+                        wt_session_state_rx,
+                        catalog_request_id,
+                        audio_request_id,
+                        video_request_id,
+                        data_plane,
+                        client,
+                        migration_rx,
+                    },
+                    migration_outcome,
+                )
+                .await
+                {
+                    Ok(LoopFlow::Continue) => {}
+                    Ok(LoopFlow::Break) => break 'main,
+                    Err(e) => return Err(e),
                 }
             }
             Some(event) = request_migration_rx.recv() => {
-                match event {
-                    RequestMigrationEvent::Migrated {
-                        url,
-                        kind,
-                        old_request_id,
-                        new_request_id,
-                        new_track_alias,
-                        data_plane: migrated_data_plane,
-                        handle: migrated_handle,
-                    } => {
-                        // side session の確立と PUBLISH の再発行に成功した。旧 session の
-                        // 当該 PUBLISH を終端し、以降の Object は side session へ送る
-                        // draft-ietf-moq-transport-23 §9.2 (GOAWAY) の "close the old
-                        // request stream using the appropriate mechanism"
-                        match kind {
-                            PublishTrack::Video => {
-                                // open 中の subgroup stream が残っていると PUBLISH_DONE が
-                                // 拒否されるため (§9.9)、先に writer を終端する
-                                if let Some(writer) = current_video_writer.take() {
-                                    let start_location = video_request_id.and_then(|request_id| {
-                                        client.subscription_filter_start(request_id)
-                                    });
-                                    if let Err(e) = writer.finish(start_location).await {
-                                        tracing::debug!(
-                                            "Failed to finish the outgoing video subgroup stream after a request migration: {e}"
-                                        );
-                                    }
-                                }
-                                send_publish_done_best_effort(client, old_request_id, "video")
-                                    .await;
-                                *video_request_id = Some(new_request_id);
-                                // 新しい session では旧 Group を継続できないため、次の
-                                // キーフレームで新しい Group を開始する。映像の writer は
-                                // Group の先頭 (キーフレーム) でだけ作るため、ここでは
-                                // 作らず、次のキーフレームで side session の handle /
-                                // data plane から作り直す
-                                gop_tracker.request_new_group();
-                                *video_publish_target = Some(PublishTarget {
-                                    old_request_id,
-                                    handle: migrated_handle,
-                                    data_plane: migrated_data_plane,
-                                });
-                            }
-                            PublishTrack::Audio => {
-                                send_publish_done_best_effort(client, old_request_id, "audio")
-                                    .await;
-                                *audio_request_id = Some(new_request_id);
-                                // 新しい session の最初の音声 Object に Audio Config を
-                                // 載せ直す
-                                *audio_config_sent = false;
-                                *audio_publish_target = Some(PublishTarget {
-                                    old_request_id,
-                                    handle: migrated_handle,
-                                    data_plane: migrated_data_plane,
-                                });
-                            }
-                            PublishTrack::Catalog => {
-                                send_publish_done_best_effort(
-                                    client,
-                                    old_request_id,
-                                    "catalog",
-                                )
-                                .await;
-                                *catalog_request_id = new_request_id;
-                                *catalog_publish_target = Some(PublishTarget {
-                                    old_request_id,
-                                    handle: migrated_handle,
-                                    data_plane: migrated_data_plane,
-                                });
-                                // 新しい session でカタログを次の Group で送り直す
-                                // (draft-ietf-moq-msf-02 §5 (Catalog) /
-                                // §6.1 (Group numbering))
-                                let sink = catalog_sink(
-                                    client,
-                                    catalog_publish_target.as_ref(),
-                                    handle,
-                                    data_plane,
-                                    *catalog_request_id,
-                                );
-                                if let Err(e) = republish_catalog_at_next_group(
-                                    client,
-                                    sink,
-                                    handle,
-                                    data_plane,
-                                    *catalog_request_id,
-                                    catalog_json,
-                                    catalog_group_id,
-                                    catalog_location,
-                                    peer_subscriptions,
-                                )
-                                .await
-                                {
-                                    tracing::warn!(
-                                        "Failed to republish the catalog on the request migration side session: {e}"
-                                    );
-                                }
-                            }
-                            PublishTrack::Unknown => {}
-                        }
-                        migrating_tracks.retain(|track| *track != kind);
-                        tracing::info!(
-                            "Migrated the {kind:?} PUBLISH to another session: url={}, old_request_id={old_request_id}, new_request_id={new_request_id}, track_alias={new_track_alias}",
-                            side_session_url_display(&url)
-                        );
-                    }
-                    RequestMigrationEvent::Ended { url } => {
-                        // side session を共有するすべての track が送れなくなる。対象 URL の
-                        // slot を削除し、パイプラインを終了する。`*_publish_target` を
-                        // `None` にすると「未移行」の意味になり、main session の別 request
-                        // の id で送信してしまうため、control GOAWAY の移行失敗と同じく
-                        // パイプラインを終了する扱いにする
-                        request_migration_sessions.remove(&side_session_key(&url));
-                        tracing::warn!(
-                            "The request migration side session ended: url={}; ending the pipeline",
-                            side_session_url_display(&url)
-                        );
-                        *session_ended = true;
-                        break 'main;
-                    }
-                    RequestMigrationEvent::Failed {
-                        url,
-                        kind,
-                        old_request_id,
-                        reason,
-                    } => {
-                        // 1 本の PUBLISH の再発行失敗である。control GOAWAY の移行失敗と
-                        // 同じく警告を出し、旧 session の終了経路へ進む
-                        //
-                        // テスト (peer_integration_tests の移行期限切れ) はこの文言の
-                        // "Failed to migrate the" を待って期限切れを観測する。文言を
-                        // 変えるときはテストの needle も更新する
-                        tracing::warn!(
-                            "Failed to migrate the {kind:?} PUBLISH to another session: url={}, request_id={old_request_id}: {reason}",
-                            side_session_url_display(&url)
-                        );
-                        *session_ended = true;
-                        break 'main;
-                    }
-                    RequestMigrationEvent::SessionEvent { url, event } => {
-                        // 移行済みの PUBLISH について side session で観測したイベントを
-                        // ログに残す。side session の後始末は main ループが所有する
-                        // `MoqtClient` では行えないため、記録だけに留める
-                        match event {
-                            SessionEvent::PublishDoneReceived {
-                                request_id,
-                                status_code,
-                                stream_count,
-                                reason,
-                            } => {
-                                tracing::info!(
-                                    "Received PUBLISH_DONE on the request migration side session: authority={}, request_id={request_id}, status_code={status_code}, stream_count={stream_count}, reason={}",
-                                    url.authority,
-                                    reason.as_str(),
-                                );
-                            }
-                            SessionEvent::RequestErrorReceived {
-                                request_id,
-                                error_code,
-                                retry_interval,
-                                reason,
-                                ..
-                            } => {
-                                tracing::warn!(
-                                    "Received REQUEST_ERROR on the request migration side session: authority={}, request_id={request_id}, error_code={error_code:#x}, retry_interval={retry_interval}, reason={}",
-                                    url.authority,
-                                    reason.as_str(),
-                                );
-                            }
-                            SessionEvent::GoawayReceived {
-                                new_session_uri,
-                                timeout,
-                                on_request_stream,
-                            } => {
-                                // side session の GOAWAY はさらに移行しない。移行対象の
-                                // 購読は relay が管理するため、ログだけ残す
-                                tracing::warn!(
-                                    "Received GOAWAY on the request migration side session: authority={}, timeout={timeout}, on_request_stream={on_request_stream:?}, new_session_uri_len={}",
-                                    url.authority,
-                                    new_session_uri.len(),
-                                );
-                            }
-                            SessionEvent::CloseSession(err) => {
-                                tracing::warn!(
-                                    "The request migration side session closed: authority={}, {:#x} {}",
-                                    url.authority,
-                                    err.code,
-                                    err.reason,
-                                );
-                            }
-                            SessionEvent::PeerClosed(err) => {
-                                tracing::warn!(
-                                    "The request migration side session was closed by peer: authority={}, {:#x} {}",
-                                    url.authority,
-                                    err.code,
-                                    err.reason,
-                                );
-                            }
-                            other => {
-                                tracing::debug!(
-                                    "Ignoring a session event on the request migration side session: authority={}, event={other:?}",
-                                    url.authority,
-                                );
-                            }
-                        }
-                    }
+                match handle_request_migration_event(
+                    RequestMigrationContext {
+                        handle,
+                        catalog_group_id,
+                        catalog_location,
+                        catalog_json,
+                        current_video_writer,
+                        peer_subscriptions,
+                        gop_tracker,
+                        session_ended,
+                        audio_config_sent,
+                        request_migration_sessions,
+                        migrating_tracks,
+                        video_publish_target,
+                        audio_publish_target,
+                        catalog_publish_target,
+                        catalog_request_id,
+                        audio_request_id,
+                        video_request_id,
+                        data_plane,
+                        client,
+                    },
+                    event,
+                )
+                .await
+                {
+                    Ok(LoopFlow::Continue) => {}
+                    Ok(LoopFlow::Break) => break 'main,
+                    Err(e) => return Err(e),
                 }
             }
             wt_state = wait_wt_session_change(wt_session_state_rx) => {
