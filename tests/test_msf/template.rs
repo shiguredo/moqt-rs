@@ -199,7 +199,7 @@ fn resolve_entry_single_series_overflow() {
 fn resolve_entry_media_series_overflow() {
     // media 系列のみ overflow しても全体が None になること
     let template = MsfTemplate {
-        start_media_time: u64::MAX,
+        start_media_time: i64::MAX,
         delta_media_time: 1,
         start_group_id: 0,
         start_object_id: 0,
@@ -232,4 +232,45 @@ fn resolve_entry_zero_delta_wallclock() {
     });
     assert_eq!(template.resolve_entry(0), expected);
     assert_eq!(template.resolve_entry(2), expected);
+}
+
+#[test]
+fn template_media_time_accepts_negative_and_decimal() {
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[0.0,-2002.0,[0,0],[1,0],0.0,0]}]}"#;
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テンプレートをデコードできること");
+    let MsfCatalogDocument::Full(cat) = &doc else {
+        panic!("Full catalog がデコードされること");
+    };
+    let template = cat.tracks[0].template.expect("template があること");
+    assert_eq!(template.start_media_time, 0);
+    assert_eq!(template.delta_media_time, -2002);
+    let entry = template.resolve_entry(1).expect("範囲内で解決できること");
+    assert_eq!(entry.pts_ms, -2002);
+}
+
+#[test]
+fn resolve_entry_handles_u64_max_index() {
+    let template = MsfTemplate {
+        start_media_time: 0,
+        delta_media_time: 0,
+        start_group_id: 0,
+        start_object_id: 0,
+        delta_group_id: 0,
+        delta_object_id: 0,
+        start_wallclock: 0,
+        delta_wallclock: 0,
+    };
+    // n = u64::MAX でも全系列が範囲内なら Some
+    let entry = template
+        .resolve_entry(u64::MAX)
+        .expect("範囲内で解決できること");
+    assert_eq!(entry.pts_ms, 0);
+    // delta_media_time を 1 にすると i64 範囲を超えて None
+    let overflowing = MsfTemplate {
+        start_media_time: i64::MAX,
+        delta_media_time: 1,
+        ..template
+    };
+    assert_eq!(overflowing.resolve_entry(1), None);
 }

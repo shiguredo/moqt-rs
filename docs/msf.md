@@ -69,7 +69,7 @@
 
 ## Timeline
 
-- Media Timeline (`[[pts_ms, [group_id, object_id], wallclock_ms], ...]` 形式)。pts_ms は非降順で、`validate_media_timeline_format` が template 属性との併用を拒否する
+- Media Timeline (`[[pts_ms, [group_id, object_id], wallclock_ms], ...]` 形式)。pts_ms は i64 の整数ミリ秒 (負値を許す) で非降順、`validate_media_timeline_format` が template 属性との併用を拒否する。`2002.0` / `2.002e3` のような整数値表現は受理し、`2002.5` は拒否する。encode は整数リテラルに正規化する
 - Event Timeline (`{T / L / M + data}` 形式、`data` は任意の JSON 値の生バイト列)。header data は MSF_EVENT_TIMELINE_HEADER (0x7B) Track property で運び、track の寿命を通じて不変である。`TrackProperties::event_timeline_header` で取得し、`MsfEventTimeline::decode_with_header` は header を解釈せず entry 列だけを decode する
 - Gzip 圧縮と signal に基づく展開 (`msf::MsfCompression` / `encode_media_timeline` 等)
   - Timeline の encode / decode 関数は `MsfCompression` を引数に取る。これは MSF_COMPRESSION property (0x78) の値であり、`Gzip` のときだけ gzip 圧縮・展開する

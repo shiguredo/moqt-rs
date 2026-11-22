@@ -250,6 +250,12 @@ fn parse_timestamp_u64(v: nojson::RawJsonValue<'_, '_>) -> Result<u64, nojson::J
     u64::try_from(value).map_err(|_| v.invalid("timestamp must be in u64 range"))
 }
 
+/// メディア PTS 用に、符号付きの整数 (i64 範囲) として JSON 数値をパースする
+fn parse_media_pts_i64(v: nojson::RawJsonValue<'_, '_>) -> Result<i64, nojson::JsonParseError> {
+    let value = parse_integer_value(v)?;
+    i64::try_from(value).map_err(|_| v.invalid("media PTS must be in i64 range"))
+}
+
 /// JSON 数値を有限の f64 としてパースする
 ///
 /// 非有限値 (infinity / NaN) は JSON の数値として不正なため拒否する (RFC 8259 §6 (Numbers))。
@@ -551,10 +557,10 @@ impl DisplayJson for MsfBuffers {
 /// 6 要素は必須であり指定順に現れる。計算式は §7.4.1 に従う。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MsfTemplate {
-    /// 先頭エントリのメディア PTS ms
-    pub start_media_time: u64,
-    /// メディア PTS の間隔 ms
-    pub delta_media_time: u64,
+    /// 先頭エントリのメディア PTS ms (i64 の整数。負値を許す)
+    pub start_media_time: i64,
+    /// メディア PTS の間隔 ms (i64。負値を許す)
+    pub delta_media_time: i64,
     /// 先頭エントリの Group ID
     pub start_group_id: u64,
     /// 先頭エントリの Object ID
@@ -594,22 +600,24 @@ impl MsfTemplate {
     /// draft-ietf-moq-msf-02 §7.4.1 の計算式に従う。4 系列のいずれかが overflow した場合は
     /// 全体を `None` とする (仕様式に overflow 定義がないための防御的扱い)。
     pub fn resolve_entry(&self, n: u64) -> Option<MsfMediaTimelineEntry> {
-        let media_time = self
-            .delta_media_time
+        let n = i128::from(n);
+        let media_time = i128::from(self.delta_media_time)
             .checked_mul(n)?
-            .checked_add(self.start_media_time)?;
-        let group_id = self
-            .delta_group_id
+            .checked_add(i128::from(self.start_media_time))?;
+        let media_time = i64::try_from(media_time).ok()?;
+        let n = n as u128;
+        let group_id = u128::from(self.delta_group_id)
             .checked_mul(n)?
-            .checked_add(self.start_group_id)?;
-        let object_id = self
-            .delta_object_id
+            .checked_add(u128::from(self.start_group_id))?;
+        let group_id = u64::try_from(group_id).ok()?;
+        let object_id = u128::from(self.delta_object_id)
             .checked_mul(n)?
-            .checked_add(self.start_object_id)?;
-        let wallclock_ms = self
-            .delta_wallclock
+            .checked_add(u128::from(self.start_object_id))?;
+        let object_id = u64::try_from(object_id).ok()?;
+        let wallclock_ms = u128::from(self.delta_wallclock)
             .checked_mul(n)?
-            .checked_add(self.start_wallclock)?;
+            .checked_add(u128::from(self.start_wallclock))?;
+        let wallclock_ms = u64::try_from(wallclock_ms).ok()?;
         Some(MsfMediaTimelineEntry {
             pts_ms: media_time,
             group_id,
@@ -2952,8 +2960,11 @@ impl MsfCatalogDocument {
 /// メディアタイムラインエントリ (draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload))
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MsfMediaTimelineEntry {
-    /// メディア PTS ms
-    pub pts_ms: u64,
+    /// メディア PTS ms (i64 の整数。負値を許す)
+    ///
+    /// `2002.0` / `2.002e3` のような整数値を持つ小数・指数表記も decode で受理し、
+    /// encode では整数リテラルに正規化する。`2002.5` のような非整数は拒否する。
+    pub pts_ms: i64,
     /// MOQT Group ID
     pub group_id: u64,
     /// MOQT Object ID
@@ -3069,8 +3080,8 @@ pub enum MsfEventIndex {
     Location(u64, u64),
     /// 'T': ウォールクロック ms
     WallclockMs(u64),
-    /// 'M': メディア PTS ms
-    MediaPtsMs(u64),
+    /// 'M': メディア PTS ms (i64 の整数。負値を許す)
+    MediaPtsMs(i64),
 }
 
 /// イベントタイムラインエントリ (draft-ietf-moq-msf-02 §8.2 (Event Timeline data format))
@@ -4787,8 +4798,10 @@ fn decode_template(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTemplate, Mes
     let mut iter = val
         .to_array()
         .map_err(|_| MessageError::InvalidCatalog("template must be an array".to_string()))?;
-    let start_media_time = parse_u64(iter.next().ok_or_else(|| missing("startMediaTime"))?)?;
-    let delta_media_time = parse_u64(iter.next().ok_or_else(|| missing("deltaMediaTime"))?)?;
+    let start_media_time =
+        parse_media_pts_i64(iter.next().ok_or_else(|| missing("startMediaTime"))?)?;
+    let delta_media_time =
+        parse_media_pts_i64(iter.next().ok_or_else(|| missing("deltaMediaTime"))?)?;
     let start_location = iter.next().ok_or_else(|| missing("startLocation"))?;
     let delta_location = iter.next().ok_or_else(|| missing("deltaLocation"))?;
     let start_wallclock =
@@ -5069,7 +5082,7 @@ fn decode_media_entry(
         ));
     }
 
-    let pts_ms = parse_u64(pts_v)?;
+    let pts_ms = parse_media_pts_i64(pts_v)?;
 
     let mut loc_iter = loc_v.to_array()?;
     let g_v = loc_iter.next().ok_or_else(|| {
@@ -5136,7 +5149,7 @@ fn decode_event_entry(
     } else {
         // has_m は true (上で index_count == 1 を保証済み)
         let m_v = val.to_member("M")?.required()?;
-        MsfEventIndex::MediaPtsMs(parse_u64(m_v)?)
+        MsfEventIndex::MediaPtsMs(parse_media_pts_i64(m_v)?)
     };
 
     let data_v = val.to_member("data")?.required()?;

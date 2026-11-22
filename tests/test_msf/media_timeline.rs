@@ -154,3 +154,72 @@ fn wallclock_accepts_integer_valued_json_numbers() {
         Err(MessageError::InvalidCatalog(_))
     ));
 }
+
+#[test]
+fn pts_accepts_integer_valued_json_numbers_and_negatives() {
+    // 2002.0 は数学的に整数なので受理し、encode では 2002 に正規化される
+    let tl = MsfMediaTimeline::decode(b"[[2002.0,[0,0],0]]").expect("2002.0 は受理される");
+    assert_eq!(tl.0[0].pts_ms, 2002);
+    assert_eq!(tl.encode(), b"[[2002,[0,0],0]]");
+    // 負のメディア PTS も受理する
+    let tl = MsfMediaTimeline::decode(b"[[-1.0,[0,0],0]]").expect("-1.0 は受理される");
+    assert_eq!(tl.0[0].pts_ms, -1);
+    // 2.002e3 / 100e-2 も整数として受理する
+    assert_eq!(
+        MsfMediaTimeline::decode(b"[[2.002e3,[0,0],0]]")
+            .expect("2.002e3 は受理される")
+            .0[0]
+            .pts_ms,
+        2002
+    );
+    assert_eq!(
+        MsfMediaTimeline::decode(b"[[100e-2,[0,0],0]]")
+            .expect("100e-2 は受理される")
+            .0[0]
+            .pts_ms,
+        1
+    );
+    // 非整数は拒否する
+    for json in [
+        &b"[[2002.5,[0,0],0]]"[..],
+        &b"[[2.0025e3,[0,0],0]]"[..],
+        &b"[[1e-1,[0,0],0]]"[..],
+    ] {
+        assert!(matches!(
+            MsfMediaTimeline::decode(json),
+            Err(MessageError::InvalidCatalog(_))
+        ));
+    }
+    // i64 の境界とその外側
+    let min = format!("[[{},[0,0],0]]", i64::MIN);
+    let max = format!("[[{}.0,[0,0],0]]", i64::MAX);
+    assert_eq!(
+        MsfMediaTimeline::decode(min.as_bytes())
+            .expect("i64::MIN は受理される")
+            .0[0]
+            .pts_ms,
+        i64::MIN
+    );
+    assert_eq!(
+        MsfMediaTimeline::decode(max.as_bytes())
+            .expect("i64::MAX の小数表記は受理される")
+            .0[0]
+            .pts_ms,
+        i64::MAX
+    );
+    let below = format!("[[{},[0,0],0]]", i128::from(i64::MIN) - 1);
+    let above = format!("[[{},[0,0],0]]", i128::from(i64::MAX) + 1);
+    for json in [below, above] {
+        assert!(matches!(
+            MsfMediaTimeline::decode(json.as_bytes()),
+            Err(MessageError::InvalidCatalog(_))
+        ));
+    }
+}
+
+#[test]
+fn location_ids_do_not_accept_integer_valued_json_numbers() {
+    // Location の ID は従来どおり整数リテラルだけを受理する
+    assert!(MsfMediaTimeline::decode(b"[[0,[0.0,0],0]]").is_err());
+    assert!(MsfMediaTimeline::decode(b"[[0,[0,0],0]]").is_ok());
+}

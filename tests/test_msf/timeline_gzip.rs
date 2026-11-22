@@ -44,7 +44,7 @@ fn sample_media_timeline() -> MsfMediaTimeline {
             group_id: i,
             object_id: 0,
             wallclock_ms: 1_700_000_000_000 + i * 1000,
-            pts_ms: i * 1000,
+            pts_ms: (i * 1000) as i64,
         });
     }
     tl

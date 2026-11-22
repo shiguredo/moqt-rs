@@ -407,3 +407,16 @@ fn decode_with_header_does_not_interpret_header() {
         MsfEventTimeline::decode_with_header(json, b"").expect("header なしでも decode できること");
     assert_eq!(with_header, without_header);
 }
+
+#[test]
+fn media_pts_index_accepts_integer_valued_json_numbers() {
+    let tl = MsfEventTimeline::decode(br#"[{"M":2002.0,"data":{}}]"#)
+        .expect("2002.0 は整数として受理される");
+    assert_eq!(tl.0[0].index, MsfEventIndex::MediaPtsMs(2002));
+    let tl = MsfEventTimeline::decode(br#"[{"M":-1.0,"data":{}}]"#).expect("-1.0 は受理される");
+    assert_eq!(tl.0[0].index, MsfEventIndex::MediaPtsMs(-1));
+    assert!(matches!(
+        MsfEventTimeline::decode(br#"[{"M":2002.5,"data":{}}]"#),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}

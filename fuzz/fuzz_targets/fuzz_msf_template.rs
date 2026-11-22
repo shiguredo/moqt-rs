@@ -8,8 +8,8 @@ use shiguredo_moqt::msf::MsfTemplate;
 /// MsfTemplate の全フィールドと解決する index
 #[derive(Arbitrary, Debug)]
 struct Input {
-    start_media_time: u64,
-    delta_media_time: u64,
+    start_media_time: i64,
+    delta_media_time: i64,
     start_group_id: u64,
     start_object_id: u64,
     delta_group_id: u64,

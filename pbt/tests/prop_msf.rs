@@ -432,8 +432,8 @@ fn sample_template(ctx: &mut noprop::TestCaseContext) -> Option<MsfTemplate> {
         return None;
     }
     Some(MsfTemplate {
-        start_media_time: noprop::sample_u32(ctx) as u64,
-        delta_media_time: noprop::sample_u32(ctx) as u64,
+        start_media_time: i64::from(noprop::sample_u32(ctx)),
+        delta_media_time: i64::from(noprop::sample_u32(ctx)),
         start_group_id: noprop::sample_u32(ctx) as u64,
         start_object_id: noprop::sample_u32(ctx) as u64,
         delta_group_id: noprop::sample_u32(ctx) as u64,
@@ -493,7 +493,7 @@ fn sample_remove_track(ctx: &mut noprop::TestCaseContext) -> MsfRemoveTrack {
 /// MsfMediaTimelineEntry を生成する
 fn sample_media_timeline_entry(ctx: &mut noprop::TestCaseContext) -> MsfMediaTimelineEntry {
     MsfMediaTimelineEntry {
-        pts_ms: noprop::sample_u32(ctx) as u64,
+        pts_ms: i64::from(noprop::sample_u32(ctx)),
         group_id: noprop::sample_u32(ctx) as u64,
         object_id: noprop::sample_u32(ctx) as u64,
         wallclock_ms: noprop::sample_u32(ctx) as u64,
@@ -508,7 +508,7 @@ fn sample_event_index(ctx: &mut noprop::TestCaseContext) -> MsfEventIndex {
             noprop::sample_u32(ctx) as u64,
         ),
         1 => MsfEventIndex::WallclockMs(noprop::sample_u32(ctx) as u64),
-        _ => MsfEventIndex::MediaPtsMs(noprop::sample_u32(ctx) as u64),
+        _ => MsfEventIndex::MediaPtsMs(i64::from(noprop::sample_u32(ctx))),
     }
 }
 
