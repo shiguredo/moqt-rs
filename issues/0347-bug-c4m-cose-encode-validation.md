@@ -1,7 +1,7 @@
 # CoseMessage::encode で alg とメッセージ種別の整合を検証する
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/fix-c4m-cose-encode-validation
 - Polished: 2026-11-21
 
@@ -74,3 +74,22 @@ COSE タグはメッセージ種別から `AlgorithmClass::tag()` で決まる�
 
 - `CoseSign1` / `CoseMac0` の公開フィールドを private にし、検証付きコンストラクタだけに構築を限定する変更。本 issue は encode の境界で検証する。
 - `CoseMessage::decode` のタグ付きメッセージで `alg` が無い場合の受理 (既存挙動)。本 issue は encode の受理範囲を decode に合わせるだけで、decode は変更しない。
+
+## 解決方法
+
+- `CoseMessage::encode` の先頭で `self.header()?` を呼び、protected / unprotected ヘッダを `decode` と同じ規則で検証するようにした。未知の `alg`、unprotected の `alg`、重複ラベル、不正な `crit` などは encode でもエラーになる。
+- `header()` が C4M ドラフトの別名 `-4` を HMAC-SHA256 に解決した後の `Algorithm` を使い、`CoseMessage::Sign1` は `AlgorithmClass::Signature`、`CoseMessage::Mac0` は `AlgorithmClass::Mac` を要求する。不一致は `CoseError::AlgorithmClassMismatch` を返す。
+- `alg` が無い場合、COSE タグを付けるなら decode がタグから種別を決めて受理するため encode も受理し、タグ無しなら `CoseError::MissingAlgorithm` を返す。検証順序は header、CWT タグの構造 (RFC 8392 §6)、`alg` の class / 欠落の順である。
+- `CoseSign1` / `CoseMac0` の公開フィールドは変更せず、encode の境界で検証する。`CoseMessage::encode` の doc に検証内容と返すエラーを追記した。
+- `tests/test_c4m/cose.rs` に class 不一致の拒否 (タグ付き / タグ無し / CWT タグの組み合わせ)、class 一致の受理、タグ無しで `alg` が無い場合の拒否、unprotected の `alg` の拒否、タグ付きで `alg` が無い場合の受理、protected ヘッダの decode と同じ検証を追加した。
+- `tests/test_c4m/dpop/cwt.rs` の `sign_proof_with_key` と `rejects_symmetric_algorithm` を、encode を経由せず COSE の CBOR を直接組み立てる形へ変更した。encode の検証追加後も decode 側のエラーを確認できる。
+- Lean 検証を `shiguredo/lean` の `moqt-rs/C4mCose/` に追加した。encode の成功と、出力ワイヤが decode に受理され種別が変わらないことの同値 (`encode_ok_iff`)、各エラー経路、成功経路を 25 個の定理で確認した。
+
+確認コマンド: `cargo test --workspace`、
+`cargo test -p shiguredo_moqt --features aws-lc-rs`、
+`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo clippy -p shiguredo_moqt --all-targets --features aws-lc-rs -- -D warnings`、
+`cargo build -p shiguredo_moqt --target thumbv7em-none-eabihf`、
+`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt`、
+`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt --features aws-lc-rs`、
+`cargo fmt --all -- --check` が通ることを確認した。
