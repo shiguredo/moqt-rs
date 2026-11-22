@@ -55,7 +55,7 @@ fn subscribe_namespace_lifecycle() {
         "SubscribeNamespaceReceived が発行されること: {received:?}"
     );
 
-    // REQUEST_OK (SUBSCRIBE_NAMESPACE_OK)
+    // REQUEST_OK (SUBSCRIBE_NAMESPACE_OK の別名)
     server
         .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
         .expect("SUBSCRIBE_NAMESPACE_OK を送信できること");
@@ -89,7 +89,7 @@ fn subscribe_namespace_lifecycle() {
         "prefix と suffix を結合した NamespaceReceived が発行されること: {received:?}"
     );
 
-    // NAMESPACE_DONE
+    // NAMESPACE_DONE メッセージ
     server
         .send_namespace_done(rid, ns(&[b"cam"]))
         .expect("NAMESPACE_DONE を送信できること");
@@ -564,7 +564,7 @@ fn response_only_message_as_request_closes_session() {
 fn namespace_request_forget_lifecycle() {
     let (mut client, mut server) = establish_pair();
 
-    // PUBLISH_NAMESPACE
+    // PUBLISH_NAMESPACE メッセージ
     let rid = client
         .send_publish_namespace(ns(&[b"live"]), MessageParameters::new())
         .expect("PUBLISH_NAMESPACE を送信できること");
@@ -583,7 +583,7 @@ fn namespace_request_forget_lifecycle() {
     assert!(client.publish_namespace_request(rid).is_none());
     assert!(server.publish_namespace_request(rid).is_none());
 
-    // SUBSCRIBE_TRACKS
+    // SUBSCRIBE_TRACKS メッセージ
     let rid = client
         .send_subscribe_tracks(ns(&[b"live"]), MessageParameters::new())
         .expect("SUBSCRIBE_TRACKS を送信できること");

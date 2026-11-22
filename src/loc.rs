@@ -218,7 +218,7 @@ pub const PROP_TIMESCALE: u64 = 0x08;
 /// 値の検証と Property Type は Track 側と共有するため `crate::property` に置いている
 /// (Scope が Track と Object の両方であり、transport 側でも同じ値を扱うため)。
 ///
-/// この定義は draft 由来であり、将来の draft 改版で ID・名前・値の扱いが変わる可能性がある。
+/// この定義は draft 由来であり、将来の draft 改版で ID、名前、値の扱いが変わる可能性がある。
 pub const PROP_CODEC_STRING: u64 = crate::property::CODEC_STRING_TYPE;
 
 /// Video Frame Marking プロパティ ID (奇数 → バイト列)
@@ -476,7 +476,7 @@ impl LocProperties {
     /// (Track and Object Properties) の "MUST allow multiple instances of the Property")。
     ///
     /// 最上位リストと IMMUTABLE_PROPERTIES (0x0B) の内側を、共通の KVP パーサーで検証する。
-    /// 内側の構造破損・入れ子の 0x0B・単一 ID の重複・Audio Level の値域違反・Video Frame
+    /// 内側の構造破損、入れ子の 0x0B、単一 ID の重複、Audio Level の値域違反、Video Frame
     /// Marking の長さ違反は、この関数のエラーとして返す。CODEC_STRING (0x11) の UTF-8 も
     /// 最上位と内側の両方で検証する (draft-ietf-moq-loc-05 §2.3.1.3 (Codec String) /
     /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure))。
@@ -491,7 +491,7 @@ impl LocProperties {
     ///   DELTA_ENCODING_OVERFLOW)
     /// - 単一に限られる既知 ID の重複: `MalformedTrack`
     ///   (draft-ietf-moq-transport-23 §8.4 / §12.1 (Malformed Tracks) 条件 9。呼び出し側は
-    ///   セッション終了ではなく、同じ Track の購読・fetch の取消へ渡す)。本関数は最上位
+    ///   セッション終了ではなく、同じ Track の購読 / fetch の取消へ渡す)。本関数は最上位
     ///   (mutable) リスト内と IMMUTABLE_PROPERTIES の内側リスト内をそれぞれ検出するが、
     ///   両リストをまたぐ同じ既知 ID の重複は検出しない (§10.7 は複数の値を許すプロパティに
     ///   限り両方への出現を許す。単一値プロパティが両方に現れると §8.4 / §12.1 条件 9 の

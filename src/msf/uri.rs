@@ -552,7 +552,7 @@ fn validate_pchar_no_amp(
         if is_pchar_no_amp_byte(b) || (allow_slash && b == b'/') {
             i += 1;
         } else if b == b'%' {
-            // pct-encoded = "%" HEXDIG HEXDIG
+            // RFC 3986 の pct-encoded の ABNF: pct-encoded = "%" HEXDIG HEXDIG
             if i + 2 >= bytes.len()
                 || !bytes[i + 1].is_ascii_hexdigit()
                 || !bytes[i + 2].is_ascii_hexdigit()

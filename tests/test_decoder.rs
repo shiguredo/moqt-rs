@@ -277,7 +277,7 @@ fn test_declared_length_at_limit_waits_for_body() {
     assert_eq!(
         encoded.len(),
         2 + 3 + limit as usize,
-        "type(2) + length(3) + body"
+        "type (2 バイト) + length (3 バイト) + body の構成"
     );
 
     let mut decoder = decoder();

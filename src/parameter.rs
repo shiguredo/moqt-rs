@@ -35,17 +35,17 @@ pub const MIN_MAX_CONTROL_MESSAGE_SIZE: u64 = 65_535;
 /// 節番号・値は draft 由来であり将来 draft 改定で変わる可能性がある。
 /// PATH (0x01)
 pub const SETUP_OPTION_PATH: u64 = 0x01;
-/// AUTHORIZATION_TOKEN (0x03)
+/// SETUP オプション: AUTHORIZATION_TOKEN (0x03)
 pub const SETUP_OPTION_AUTHORIZATION_TOKEN: u64 = 0x03;
-/// MAX_AUTH_TOKEN_CACHE_SIZE (0x04)
+/// SETUP オプション: MAX_AUTH_TOKEN_CACHE_SIZE (0x04)
 pub const SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE: u64 = 0x04;
-/// AUTHORITY (0x05)
+/// SETUP オプション: AUTHORITY (0x05)
 pub const SETUP_OPTION_AUTHORITY: u64 = 0x05;
-/// MAX_FILTER_RANGES (0x06)
+/// SETUP オプション: MAX_FILTER_RANGES (0x06)
 pub const SETUP_OPTION_MAX_FILTER_RANGES: u64 = 0x06;
-/// MOQT_IMPLEMENTATION (0x07)
+/// SETUP オプション: MOQT_IMPLEMENTATION (0x07)
 pub const SETUP_OPTION_MOQT_IMPLEMENTATION: u64 = 0x07;
-/// MAX_REQUEST_UPDATES (0x08)
+/// SETUP オプション: MAX_REQUEST_UPDATES (0x08)
 pub const SETUP_OPTION_MAX_REQUEST_UPDATES: u64 = 0x08;
 /// MAX_CONTROL_MESSAGE_SIZE (0x09)
 ///
@@ -400,7 +400,7 @@ impl SetupOptions {
         Ok((Self(options), pos))
     }
 
-    /// SETUP Option: PATH (type 0x01, draft-ietf-moq-transport-23 §9.1 (SETUP))
+    /// SETUP オプション: PATH を返す (type 0x01, draft-ietf-moq-transport-23 §9.1 (SETUP))
     pub fn path(&self) -> Option<&[u8]> {
         self.find_bytes(SETUP_OPTION_PATH)
     }
@@ -423,12 +423,12 @@ impl SetupOptions {
             .collect()
     }
 
-    /// SETUP Option: MAX_AUTH_TOKEN_CACHE_SIZE (type 0x04, draft-ietf-moq-transport-23 §9.1 (SETUP))
+    /// SETUP オプション: MAX_AUTH_TOKEN_CACHE_SIZE を返す (type 0x04, draft-ietf-moq-transport-23 §9.1 (SETUP))
     pub fn max_auth_token_cache_size(&self) -> Option<u64> {
         self.find_varint(SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE)
     }
 
-    /// SETUP Option: AUTHORITY (type 0x05, draft-ietf-moq-transport-23 §9.1 (SETUP))
+    /// SETUP オプション: AUTHORITY を返す (type 0x05, draft-ietf-moq-transport-23 §9.1 (SETUP))
     pub fn authority(&self) -> Option<&[u8]> {
         self.find_bytes(SETUP_OPTION_AUTHORITY)
     }

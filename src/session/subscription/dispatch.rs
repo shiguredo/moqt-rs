@@ -145,7 +145,7 @@ impl Session {
             // draft §9.3 (REQUEST_OK): PUBLISH_OK context → REQUEST_OK に統一。
             // Pending(Publisher) → Established 遷移
             SubscriptionState::Pending if pending_publisher => {
-                // draft-ietf-moq-transport-23 Appendix A.4 #1790 (Subscription parameters
+                // draft-ietf-moq-transport-23 Appendix A.4 (Since draft-ietf-moq-transport-19) (Subscription parameters
                 // appear in REQUEST_UPDATE, not PUBLISH_OK): PUBLISH_OK は EXPIRES のみを
                 // 運び、subscription 更新用パラメータは REQUEST_UPDATE (要求) に出現する。
                 // スコープ検証で EXPIRES 以外は既に弾かれているため、ここでは EXPIRES の
@@ -529,7 +529,7 @@ impl Session {
         if let Some((allowed, message)) = context_allowed
             && parameters.validate_scope(allowed).is_err()
         {
-            // draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): INVALID_PARAMETER (0x305)。
+            // 仕様: draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): INVALID_PARAMETER (0x305)。
             let err = SessionError::new(SESSION_INVALID_PARAMETER, message);
             self.fail(err.clone());
             return Err(err);
@@ -562,7 +562,7 @@ impl Session {
             // draft §9.3 (REQUEST_OK): PUBLISH_OK context → REQUEST_OK に統一。
             // Pending(Publisher) → Established 遷移
             SubscriptionState::Pending if subscription.is_pending_publisher() => {
-                // draft-ietf-moq-transport-23 Appendix A.4 #1790 (Subscription parameters
+                // draft-ietf-moq-transport-23 Appendix A.4 (Since draft-ietf-moq-transport-19) (Subscription parameters
                 // appear in REQUEST_UPDATE, not PUBLISH_OK): PUBLISH_OK は EXPIRES のみを
                 // 運ぶ。スコープ検証で EXPIRES 以外は既に弾かれているため、ここでは
                 // EXPIRES の適用と Established 遷移のみ行う。filter / PAUSED 等の
@@ -585,7 +585,7 @@ impl Session {
             SubscriptionState::Established => {
                 // LARGEST_OBJECT の保存は自側が subscriber の場合に限る。
                 // publisher 側の保存は draft-20 で廃止された
-                // (draft-ietf-moq-transport-23 Appendix A.4 #1872)。
+                // (draft-ietf-moq-transport-23 Appendix A.4 (Since draft-ietf-moq-transport-19))。
                 // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
                 if subscription.my_role != TrackRole::Publisher
                     && let Some((group_id, object_id)) = parameters.largest_object()

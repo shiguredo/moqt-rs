@@ -847,7 +847,7 @@ fn bearer_replay_cache_matches_model() -> noprop::TestResult {
             assert_eq!(
                 cache.check_and_bind(cti, connection, retain_until, reference),
                 expected,
-                "cti={cti:?} connection={connection:?} reference={reference} retain_until={retain_until}"
+                "クレーム: cti={cti:?} connection={connection:?} reference={reference} retain_until={retain_until}"
             );
             assert_eq!(cache.len(), model.len(), "記録数がモデルと一致しない");
         }

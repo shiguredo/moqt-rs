@@ -119,7 +119,7 @@ const REQUEST_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LARGEST_OBJECT]
 
 /// PUBLISH_OK context で許可されるパラメータ型 (draft-ietf-moq-transport-23 §9.19.16 (EXPIRES Parameter) の MAY appear 列挙)
 ///
-/// draft-ietf-moq-transport-23 Appendix A.4 #1790 (Subscription parameters appear in
+/// draft-ietf-moq-transport-23 Appendix A.4 (Since draft-ietf-moq-transport-19) (Subscription parameters appear in
 /// REQUEST_UPDATE, not PUBLISH_OK) により、subscription 更新用パラメータは
 /// REQUEST_UPDATE (要求) に出現し、PUBLISH_OK は EXPIRES のみとなる。
 pub(crate) const PUBLISH_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES];
@@ -204,7 +204,7 @@ const REQUEST_UPDATE_ALLOWED_PARAMS: &[u64] = &[
 /// SUBSCRIBE_TRACKS_ID を「SUBSCRIBE_TRACKS の結果として送る PUBLISH にだけ出現する」と
 /// 定める。値は元の SUBSCRIBE_TRACKS の Request ID である (§3.6 (Subscribing to Tracks by
 /// Prefix))。受信側は値を関連付け情報として保持し、対応する SUBSCRIBE_TRACKS を自側が
-/// 送っていれば prefix の一致・同じ track の重複 PUBLISH・PUBLISH_SKIPPED 後の PUBLISH を
+/// 送っていれば prefix の一致、同じ track の重複 PUBLISH、PUBLISH_SKIPPED 後の PUBLISH を
 /// 検証する (§3.6 / §9.5.2 / §9.18)。対応する要求が見つからないことを理由に PUBLISH を
 /// 拒否したりセッションを閉じたりはせず、通常の PUBLISH の検証と受理判断へ進む。送信側は
 /// SUBSCRIBE_TRACKS 起因の PUBLISH にだけ指定する (`Session::send_publish` の doc 参照)。
@@ -502,7 +502,7 @@ impl Setup {
 
 /// GOAWAY メッセージ (draft-ietf-moq-transport-23 §9.2 (GOAWAY))
 ///
-/// draft-ietf-moq-transport-23 Appendix A.5 (Since draft-ietf-moq-transport-18) #1623:
+/// draft-ietf-moq-transport-23 Appendix A.5 (Since draft-ietf-moq-transport-18):
 /// Request ID フィールドは削除された。Message Body は New Session URI + Timeout のみ。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Goaway {
@@ -900,7 +900,7 @@ impl ErrorDetails {
             }
         }
         if error_code == REQUEST_REDIRECT && !seen_redirect {
-            // §9.4.2.1: "It accompanies Error Code REDIRECT and MUST be present when the
+            // draft-ietf-moq-transport-23 §9.4.2.1: "It accompanies Error Code REDIRECT and MUST be present when the
             // Error Code is REDIRECT."
             return Err(MessageError::ProtocolViolation(
                 "REQUEST_ERROR with REDIRECT error code requires a REDIRECT error detail",

@@ -135,7 +135,7 @@ fn forget_subscription_emits_stop_sending_for_fill_fetch_stream() {
 #[test]
 fn forget_subscription_does_not_emit_stop_sending_for_migrated_stream() {
     let (mut client, mut server) = establish_pair();
-    // 同じ Track・同じ alias の購読を 2 本確立する
+    // 同じ Track / 同じ alias の購読を 2 本確立する
     let first = establish_subscription(&mut client, &mut server, 500);
     let second = establish_subscription(&mut client, &mut server, 500);
     assert_ne!(first, second);

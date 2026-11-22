@@ -11,7 +11,7 @@ struct Input {
 }
 
 fuzz_target!(|input: Input| {
-    // 0x01 = Ascending, 0x02 = Descending
+    // 0x01 は昇順、0x02 は降順
     let group_order = if input.group_order_ascending {
         0x01
     } else {

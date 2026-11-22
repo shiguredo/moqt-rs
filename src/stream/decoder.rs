@@ -241,7 +241,7 @@ impl SubgroupStreamDecoder {
     ///
     /// バッファに `payload_length` バイト分のデータが揃っていれば、
     /// ペイロードを返して状態を AwaitingObject に遷移する。
-    /// データが不足している場合は `None` を返す（追加データを push して再試行する）。
+    /// データが不足している場合は `None` を返す (追加データを push して再試行する)。
     ///
     /// - `Some(payload)` — ペイロード読み出し成功、次のオブジェクトに進める
     /// - `None` — データ不足、追加データが必要
@@ -317,19 +317,19 @@ impl SubgroupStreamDecoder {
     /// EOF 時点で header 未受信、partial object header、または未消費ペイロードが
     /// 残っている場合は `UnexpectedEof` を返す。
     ///
-    /// ヘッダーのみ + FIN（オブジェクト 0 個）は正規の空 Subgroup として成功を返す。
+    /// ヘッダーのみ + FIN (オブジェクト 0 個) は正規の空 Subgroup として成功を返す。
     /// draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams) 冒頭の
     /// "If a sender has delivered all objects in a Subgroup to the QUIC stream, except any
     /// Objects with Locations smaller than the subscription's Start Location, it MUST close
     /// the stream with a FIN." により、Subgroup の全オブジェクトが配達対象外の場合に
     /// ヘッダーのみ送って FIN で閉じるのが MUST に沿うフローになる。
     /// 受信側は FIN をこの Subgroup で受信すべき全オブジェクトを受信したことの保証として
-    /// 扱う（同節の "An MOQT implementation that processes a stream FIN is assured it has
-    /// received all objects in a subgroup from the start of the subscription."）。
+    /// 扱う (同節の "An MOQT implementation that processes a stream FIN is assured it has
+    /// received all objects in a subgroup from the start of the subscription.")。
     /// 空 Subgroup の通知として同節後半は RESET_STREAM_AT を MAY で規定するが、排他ではなく、
     /// また RESET_STREAM_AT 経路は FIN で終わらないため本関数には到達しない。送信側が
-    /// フィルタ等によりオブジェクトを 1 つも送らない場合（MUST reset 節の "Omitting a
-    /// Subgroup Object because the subscription is paused" に該当）でも、受信側はワイヤから
+    /// フィルタ等によりオブジェクトを 1 つも送らない場合 (MUST reset 節の "Omitting a
+    /// Subgroup Object because the subscription is paused" に該当) でも、受信側はワイヤから
     /// 送信側の意図を判定できないため、FIN 終了を正規の完了として受理する。
     /// draft §9.9 (PUBLISH_DONE) の Stream Count も "including streams that contained no
     /// Objects (e.g., an empty Subgroup)" と空 Subgroup の発生を想定する。
@@ -340,7 +340,7 @@ impl SubgroupStreamDecoder {
             SubgroupDecoderState::AwaitingObject => {
                 // 状態が AwaitingObject である時点でヘッダーはデコード済み。
                 // バッファが空ならヘッダーのみの空 Subgroup も含めて完結とみなす
-                // （partial object header はバッファ非空として検出される）。
+                // (partial object header はバッファ非空として検出される)。
                 if self.buffer.is_empty() {
                     Ok(())
                 } else {
@@ -369,23 +369,23 @@ impl Default for SubgroupStreamDecoder {
 /// ペイロードは含まない。呼び出し側が `payload_length` バイト分を消費する。
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecodedFetchEntry {
-    /// 通常のオブジェクト（デルタ解決済み）
+    /// 通常のオブジェクト (デルタ解決済み)
     Object(DecodedFetchObject),
-    /// End of Non-Existent Range (0x8C)
+    /// End of Non-Existent Range (0x8C、存在しない範囲の終端)
     EndOfNonExistentRange {
         /// 終端 Group ID (絶対値)
         group_id: u64,
         /// 終端 Object ID (絶対値)
         object_id: u64,
     },
-    /// End of Unknown Range (0x10C)
+    /// End of Unknown Range (0x10C、不明な範囲の終端)
     EndOfUnknownRange {
         /// 終端 Group ID (絶対値)
         group_id: u64,
         /// 終端 Object ID (絶対値)
         object_id: u64,
     },
-    /// End of Timed-Out Range (0x20C, draft-ietf-moq-transport-23 §11.4.1 Table 8)
+    /// End of Timed-Out Range (0x20C、タイムアウトした範囲の終端, draft-ietf-moq-transport-23 §11.4.1 Table 8)
     EndOfTimedOutRange {
         /// 終端 Group ID (絶対値)
         group_id: u64,
@@ -433,7 +433,7 @@ pub enum DecodedFetchEntry {
     },
 }
 
-/// デコード済み Fetch オブジェクトの情報（デルタ解決済み）
+/// デコード済み Fetch オブジェクトの情報 (デルタ解決済み)
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedFetchObject {
     /// 絶対 Group ID
@@ -442,7 +442,7 @@ pub struct DecodedFetchObject {
     pub subgroup_id: u64,
     /// 絶対 Object ID
     pub object_id: u64,
-    /// Publisher Priority
+    /// Publisher Priority (配信者の優先度)
     pub publisher_priority: u8,
     /// Datagram 起源のオブジェクトか
     pub is_datagram_origin: bool,
@@ -1186,16 +1186,16 @@ impl FetchStreamDecoder {
     /// EOF 時点で header 未受信、partial entry header、または未消費ペイロードが
     /// 残っている場合は `UnexpectedEof` を返す。
     ///
-    /// ヘッダーのみ + FIN（エントリ 0 個）は正規の空 FETCH 応答として成功を返す。
+    /// ヘッダーのみ + FIN (エントリ 0 個) は正規の空 FETCH 応答として成功を返す。
     /// draft-ietf-moq-transport-23 §3.2.1 (Fetch Object Delivery): "If no Objects exist in the
     /// requested range, the publisher opens the unidirectional stream, sends the
     /// FETCH_HEADER (see Section 11.4.1) and closes the stream with a FIN."
-    /// （要求範囲にオブジェクトが 1 つも存在しない場合、publisher は unidirectional ストリームを
+    /// (要求範囲にオブジェクトが 1 つも存在しない場合、publisher は unidirectional ストリームを
     /// 開き FETCH_HEADER を送って FIN で閉じる。空応答が正規なのは §3.2 (Fetch) の
     /// 「track にオブジェクトが 1 つも公開されていない、または Start Location が
     /// Largest Object を上回る場合は MUST REQUEST_ERROR INVALID_RANGE」に該当しない範囲のみ。
     /// この区別は bidi request stream 上の FETCH_OK / REQUEST_ERROR で行われるため、
-    /// データストリームの decoder 単体では判別不能）
+    /// データストリームの decoder 単体では判別不能)
     /// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     pub fn finish(&self) -> Result<(), MessageError> {
         match self.state {
@@ -1203,7 +1203,7 @@ impl FetchStreamDecoder {
             FetchDecoderState::AwaitingEntry => {
                 // 状態が AwaitingEntry である時点でヘッダーはデコード済み。
                 // バッファが空ならヘッダーのみの空 FETCH 応答も含めて完結とみなす
-                // （partial entry header はバッファ非空として検出される）。
+                // (partial entry header はバッファ非空として検出される)。
                 if self.buffer.is_empty() {
                     Ok(())
                 } else {

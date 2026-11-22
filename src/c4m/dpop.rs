@@ -15,7 +15,7 @@
 //! proof ([`DpopProof`]) は互換 API として残している。proof の署名は埋め込まれた JWK で
 //! 検証し、`cnf` の JWK サムプリントとの一致 (鍵バインディング)、`catdpop` のウィンドウに
 //! よる鮮度、jti によるリプレイ保護、Authorization Context (actx) の検証を行う。
-//! ただし、この API は CAT トークンの署名・クレーム・scope を検証しない。
+//! ただし、この API は CAT トークンの署名、クレーム、scope を検証しない。
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -354,11 +354,11 @@ pub struct DpopProofClaims {
     pub jti: String,
     /// `iat` (UNIX 秒)
     pub issued_at: f64,
-    /// `actx`
+    /// `actx` (認可コンテキスト)
     pub authorization_context: AuthorizationContext,
     /// `ath`。アクセストークンを伴う場合の base64url(SHA-256(token))
     pub access_token_hash: Option<String>,
-    /// `nonce`
+    /// `nonce` (サーバが発行する使い捨て値)
     pub nonce: Option<String>,
 }
 
@@ -404,7 +404,7 @@ pub struct DpopProof {
 /// 旧 JWT 形式の DPoP proof を CAT トークンに束縛して検証するための入力
 ///
 /// この入力を使う [`DpopProof::verify_against_token`] は proof 側だけを検証し、
-/// CAT の署名・クレーム・scope は検証しない。
+/// CAT の署名、クレーム、scope は検証しない。
 #[derive(Debug, Clone, Copy)]
 pub struct DpopVerification<'a> {
     /// 検証対象の CAT のクレーム
@@ -653,7 +653,7 @@ impl DpopProof {
     /// ように key 3 を `jkt` として扱う場合は
     /// [`DpopProof::verify_against_cat_token_with`] を使う。
     ///
-    /// この API は proof 側だけを検証する。CAT トークンの署名・クレーム・scope は
+    /// この API は proof 側だけを検証する。CAT トークンの署名、クレーム、scope は
     /// 検証しないため、呼び出し側が別途検証すること。CWT 形式と CAT の検証を
     /// まとめて行う場合は [`CwtDpopProof::verify_against_cat_token`] を使う。
     ///
@@ -731,7 +731,7 @@ impl DpopProof {
     /// `catdpop` が jti の処理を要求している場合 (`honor_jti` が真) は
     /// `replay_cache` が必須である。
     ///
-    /// この API は proof 側だけを検証し、CAT の署名・クレーム・scope は検証しない。
+    /// この API は proof 側だけを検証し、CAT の署名、クレーム、scope は検証しない。
     pub fn verify_against_token<C: CoseCrypto>(
         &self,
         crypto: &C,
@@ -939,11 +939,11 @@ impl DpopReplayCache {
 pub struct DpopProofBuilder {
     /// `kid` (任意)
     pub key_id: Option<String>,
-    /// `jti`
+    /// `jti` (proof の一意な識別子)
     pub jti: String,
     /// `iat` (UNIX 秒)
     pub issued_at: f64,
-    /// `actx`
+    /// `actx` (認可コンテキスト)
     pub authorization_context: AuthorizationContext,
     /// `ath` (任意)
     pub access_token_hash: Option<String>,
@@ -1066,7 +1066,7 @@ impl DpopProofBuilder {
 /// `namespace` と `track_name` は MOQT のメッセージが運ぶバイト列をそのまま保持し、
 /// シリアライズも正規化もしない。`action` は draft-ietf-moq-c4m-02 §2.1 Table 1 の
 /// 整数コードをそのまま保持するため、未知の整数も表現できる。既知のアクションへの
-/// 解決と要求されたアクション・target との一致判定は [`CwtAuthorizationContext::verify_request`]
+/// 解決と要求されたアクション / target との一致判定は [`CwtAuthorizationContext::verify_request`]
 /// が行う。
 ///
 /// `context_type` が "moqt" であることの検証は、発行時は [`CwtDpopProofCodec::build`]
@@ -1079,7 +1079,7 @@ pub struct CwtAuthorizationContext {
     pub action: i64,
     /// `namespace`。Track Namespace のフィールド列
     pub namespace: Option<Vec<Vec<u8>>>,
-    /// `track`。Track Name
+    /// `track` (Track Name を表す)
     pub track_name: Option<Vec<u8>>,
     /// 解釈しなかった actx のメンバー
     pub raw: Vec<(Value, Value)>,
@@ -1200,7 +1200,7 @@ pub struct CwtDpopProofClaims {
 pub struct CwtDpopProofHeader {
     /// `alg`。非対称署名アルゴリズム
     pub algorithm: Algorithm,
-    /// `typ`。"dpop-proof+cwt"
+    /// `typ` (値は "dpop-proof+cwt")
     pub typ: String,
     /// `kccs` の `cnf` から取り出した公開鍵
     pub confirmation_key: CoseKey,
@@ -1209,7 +1209,7 @@ pub struct CwtDpopProofHeader {
 /// CWT 形式の DPoP proof を CAT トークンに束縛して受理するかの検証入力
 ///
 /// [`CwtDpopProof::verify_against_cat_token`] だけが使う入力である。呼び出し側が CAT の
-/// 署名・クレーム・scope の検証を別々に済ませる必要はなく、この入力と proof を渡す
+/// 署名、クレーム、scope の検証を別々に済ませる必要はなく、この入力と proof を渡す
 /// 1 つの入口がすべての条件を判定する。
 #[derive(Debug, Clone, Copy)]
 pub struct CwtDpopVerification<'a> {
@@ -1545,7 +1545,7 @@ impl CwtDpopProof {
     /// CWT 形式の DPoP proof を CAT トークンに束縛して受理できるか一括検証する
     ///
     /// draft-ietf-moq-c4m-02 §4.3 の条件を、CAT の検証を含めて 1 つの入口で判定する。
-    /// 呼び出し側が署名・クレーム・scope の検証を別々に済ませたと仮定する API ではない。
+    /// 呼び出し側が署名、クレーム、scope の検証を別々に済ませたと仮定する API ではない。
     ///
     /// 検証は draft-ietf-moq-c4m-02 §4.3 の条件を次の順に行う。すべて成功したときだけ
     /// `cache` に replay 状態を記録し、途中で失敗した場合は記録しない。
@@ -1609,7 +1609,7 @@ impl CwtDpopProof {
         request
             .token
             .verify_with(crypto, request.token_key, &request.token_verify_options)?;
-        // 3. CAT の時刻・issuer・audience と moqt-reval の受理可否を検証する
+        // 3. CAT の時刻、issuer、audience と moqt-reval の受理可否を検証する
         request
             .token
             .claims()

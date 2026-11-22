@@ -447,7 +447,7 @@ fn is_understood_critical_label(label: &Value) -> bool {
     )
 }
 
-/// COSE_Sign1 (RFC 9052 §4.2)
+/// COSE_Sign1 形式 (RFC 9052 §4.2)
 #[derive(Debug, Clone, PartialEq)]
 pub struct CoseSign1 {
     /// protected ヘッダの CBOR バイト列 (bstr の中身)
@@ -464,7 +464,7 @@ pub struct CoseSign1 {
     pub cwt_tagged: bool,
 }
 
-/// COSE_Mac0 (RFC 9052 §6.2)
+/// COSE_Mac0 形式 (RFC 9052 §6.2)
 #[derive(Debug, Clone, PartialEq)]
 pub struct CoseMac0 {
     /// protected ヘッダの CBOR バイト列 (bstr の中身)
@@ -473,7 +473,7 @@ pub struct CoseMac0 {
     pub unprotected: Vec<(Value, Value)>,
     /// ペイロード。`None` は detached payload を表す
     pub payload: Option<Vec<u8>>,
-    /// MAC
+    /// MAC (メッセージ認証コード)
     pub tag: Vec<u8>,
     /// COSE タグ (17) が付いていたか
     pub cose_tagged: bool,
@@ -484,9 +484,9 @@ pub struct CoseMac0 {
 /// COSE のメッセージ (COSE_Sign1 / COSE_Mac0)
 #[derive(Debug, Clone, PartialEq)]
 pub enum CoseMessage {
-    /// COSE_Sign1
+    /// COSE_Sign1 形式
     Sign1(CoseSign1),
-    /// COSE_Mac0
+    /// COSE_Mac0 形式
     Mac0(CoseMac0),
 }
 

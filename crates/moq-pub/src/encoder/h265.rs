@@ -337,21 +337,21 @@ fn build_hvc_decoder_config_record(
     buf.extend_from_slice(&general_profile_compatibility_flags);
     buf.extend_from_slice(&general_constraint_indicator_flags);
     buf.push(general_level_idc);
-    // reserved(4='1111') | min_spatial_segmentation_idc(12=0)
+    // 4 ビットの reserved ('1111') | 12 ビットの min_spatial_segmentation_idc (0)
     buf.extend_from_slice(&[0xF0, 0x00]);
-    // reserved(6='111111') | parallelismType(2=0 unknown)
+    // 6 ビットの reserved ('111111') | 2 ビットの parallelismType (0 = 不明)
     buf.push(0xFC);
-    // reserved(6='111111') | chroma_format_idc(2=1 for 4:2:0)
+    // 6 ビットの reserved ('111111') | 2 ビットの chroma_format_idc (1 = 4:2:0)
     buf.push(0xFC | 0x01);
-    // reserved(5='11111') | bit_depth_luma_minus8(3=0 for 8-bit)
+    // 5 ビットの reserved ('11111') | 3 ビットの bit_depth_luma_minus8 (0 = 8 ビット)
     buf.push(0xF8);
-    // reserved(5='11111') | bit_depth_chroma_minus8(3=0 for 8-bit)
+    // 5 ビットの reserved ('11111') | 3 ビットの bit_depth_chroma_minus8 (0 = 8 ビット)
     buf.push(0xF8);
-    // avgFrameRate(16=0 unspecified)
+    // 16 ビットの avgFrameRate (0 = 未指定)
     buf.extend_from_slice(&[0x00, 0x00]);
-    // constantFrameRate(2=0) | numTemporalLayers(3=1) | temporalIdNested(1=0) | lengthSizeMinusOne(2)
+    // 2 ビットの constantFrameRate (0)、3 ビットの numTemporalLayers (1)、1 ビットの temporalIdNested (0)、2 ビットの lengthSizeMinusOne
     buf.push((1 << 3) | (HVCC_LENGTH_SIZE - 1));
-    // numOfArrays
+    // numOfArrays (配列数は 3)
     buf.push(3);
 
     for (nal_type, list) in [
@@ -359,7 +359,7 @@ fn build_hvc_decoder_config_record(
         (HEVC_NAL_SPS, sps_list),
         (HEVC_NAL_PPS, pps_list),
     ] {
-        // array_completeness(1=1) | reserved(1=0) | NAL_unit_type(6)
+        // 1 ビットの array_completeness (1)、1 ビットの reserved (0)、6 ビットの NAL_unit_type
         buf.push(0x80 | nal_type);
         buf.extend_from_slice(&(list.len() as u16).to_be_bytes());
         for nal in list {

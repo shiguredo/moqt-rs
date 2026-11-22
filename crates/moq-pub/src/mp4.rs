@@ -78,11 +78,11 @@ pub struct VideoTrackInfo {
 /// パススルー配信と再エンコード配信で共有する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mp4VideoCodec {
-    /// AV1
+    /// AV1 形式
     Av1,
-    /// H.264
+    /// H.264 形式
     H264,
-    /// H.265
+    /// H.265 形式
     H265,
 }
 

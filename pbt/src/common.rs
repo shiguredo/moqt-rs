@@ -58,7 +58,7 @@ pub fn sample_namespace_prefix(ctx: &mut noprop::TestCaseContext) -> TrackNamesp
 /// leading-ones 形式) のバイト長境界に揃えた境界値と全域を混ぜて生成する。境界値は
 /// `src/varint.rs` の THRESHOLD_n (1 バイト=2^7-1=127, 2 バイト=2^14-1, 3 バイト=2^21-1,
 /// 4 バイト=2^28-1, 5 バイト=2^35-1, 6 バイト=2^42-1, 7 バイト=2^49-1 (7 バイト長は
-/// draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1595 由来),
+/// draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) 由来),
 /// 8 バイト=2^56-1) に対応する。0 も含むため `ObjectDatagram` の
 /// ZERO_OBJECT_ID (object_id == 0) 経路も踏める。9 バイト (64 bit 全域,
 /// draft-ietf-moq-transport-23 §8.1 (Variable-Length Integers)) は
@@ -166,7 +166,7 @@ pub fn sample_setup_path(ctx: &mut noprop::TestCaseContext) -> Vec<u8> {
 /// SETUP 系生成器の値域指定
 ///
 /// 呼び出し側の意図で値域が異なるため、共通ロジックに値域だけを渡す。
-/// - 全域版: parameter 単体の検証用。型番号・varint 値・バイト長を広く取る
+/// - 全域版: parameter 単体の検証用。型番号、varint 値、バイト長を広く取る
 /// - 縮小版: message 全体の検証用。エンコード済みメッセージの肥大を抑える
 pub struct SetupSampling {
     /// 偶数型の上限 (排他的。option_type = sample(0..bound) * 2)
@@ -284,7 +284,7 @@ pub fn sample_setup_options_with(
 /// IMMUTABLE の内側 KVP 列の生成にも使う (入れ子は禁止のため内側に 0x0B は入れない)。
 pub fn sample_non_immutable_property(ctx: &mut noprop::TestCaseContext) -> TrackProperty {
     match noprop::sample_weighted_index(ctx, &[1, 1, 1, 1, 1, 1]) {
-        // DEFAULT_PUBLISHER_PRIORITY (0x0E): 0-255
+        // DEFAULT_PUBLISHER_PRIORITY (0x0E): 0〜255 の範囲
         0 => TrackProperty {
             prop_type: PROP_DEFAULT_PUBLISHER_PRIORITY,
             value: TrackPropertyValue::VarInt(noprop::sample_u64_in(ctx, 0..=255)),

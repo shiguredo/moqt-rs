@@ -1,4 +1,4 @@
-//! object モードで受信した映像 Object を Group ごと・Object ID 順に並べ替えるバッファ
+//! object モードで受信した映像 Object を Group ごと / Object ID 順に並べ替えるバッファ
 //!
 //! draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) の `object` モードでは、
 //! publisher は 1 Object を 1 Subgroup に載せ、Object ごとに別の data stream で送る。
@@ -61,7 +61,7 @@ struct GroupBuffer<T> {
     flushing: bool,
 }
 
-/// Object モードの映像 Object を Group ごと・Object ID 順に並べ替えるバッファ
+/// Object モードの映像 Object を Group ごと / Object ID 順に並べ替えるバッファ
 ///
 /// 購読 (復号経路) ごとに 1 つ持つ。複数の stream task から受信した Object を
 /// [`VideoObjectReorderBuffer::insert`] へ渡し、戻り値の順に復号経路へ流す。

@@ -77,23 +77,23 @@ pub const MATCH_TYPE_SUFFIX: i64 = 2;
 /// 同じ値を使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MoqtAction {
-    /// SETUP (1)
+    /// SETUP アクション (1)
     Setup,
-    /// PUBLISH_NAMESPACE (2)
+    /// PUBLISH_NAMESPACE アクション (2)
     PublishNamespace,
-    /// SUBSCRIBE_NAMESPACE (3)
+    /// SUBSCRIBE_NAMESPACE アクション (3)
     SubscribeNamespace,
-    /// SUBSCRIBE (4)
+    /// SUBSCRIBE アクション (4)
     Subscribe,
-    /// REQUEST_UPDATE (5)
+    /// REQUEST_UPDATE アクション (5)
     RequestUpdate,
-    /// PUBLISH (6)
+    /// PUBLISH アクション (6)
     Publish,
-    /// FETCH (7)
+    /// FETCH アクション (7)
     Fetch,
-    /// TRACK_STATUS (8)
+    /// TRACK_STATUS アクション (8)
     TrackStatus,
-    /// SUBSCRIBE_TRACKS (9)
+    /// SUBSCRIBE_TRACKS アクション (9)
     SubscribeTracks,
 }
 
@@ -259,7 +259,7 @@ impl Match {
     }
 }
 
-/// `moqt-ns-match` (draft-ietf-moq-c4m-02 §2.1)
+/// `moqt-ns-match` の名前空間マッチ (draft-ietf-moq-c4m-02 §2.1)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NamespaceMatch {
     /// `bin-match` による名前空間フィールドのマッチ

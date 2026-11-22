@@ -299,7 +299,7 @@ fn gone_range_preserves_prior_actual_object_fields() {
 #[test]
 fn gone_range_split_reception_matches_whole_push() {
     let mut bytes = FETCH_HEADER_BYTES.to_vec();
-    // Object (Group 2 / Object 0)
+    // Object (Group 2 の Object 0)
     bytes.extend_from_slice(&[0x1F, 0x02, 0x00, 0x00, 0x80, 0x00]);
     // End of Gone Range (Group 4 / 絶対 Object 7)
     bytes.extend_from_slice(&END_OF_GONE_RANGE_FLAGS);
@@ -457,12 +457,12 @@ fn gone_range_then_object_resolves_locations() {
 #[test]
 fn descending_gone_range_resolves_with_subtraction() {
     let mut bytes = FETCH_HEADER_BYTES.to_vec();
-    // Object (Group 10 / Object 5)
+    // Object (Group 10 の Object 5)
     bytes.extend_from_slice(&[0x1F, 0x0A, 0x00, 0x05, 0x80, 0x00]);
     // End of Gone Range: Group 10 - 3 = 7 / Object は新しい Group の絶対値 2
     bytes.extend_from_slice(&END_OF_GONE_RANGE_FLAGS);
     bytes.extend_from_slice(&[0x03, 0x02]);
-    // Object (Group 7 / Object 2 + 1 = 3)
+    // Object (Group 7 の Object 2 + 1 = 3)
     bytes.extend_from_slice(&[0x01, 0x00]);
 
     let mut decoder =

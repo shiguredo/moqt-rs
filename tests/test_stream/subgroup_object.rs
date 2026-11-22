@@ -128,7 +128,7 @@ fn valid_object_status_values() {
         shiguredo_moqt::varint::encode(status_val, &mut buf);
         assert!(
             SubgroupObject::decode(&buf, false).is_ok(),
-            "status {status_val:#x} should be valid"
+            "status {status_val:#x} は有効であること"
         );
     }
 }

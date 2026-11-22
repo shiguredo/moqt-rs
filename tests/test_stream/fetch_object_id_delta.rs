@@ -84,7 +84,7 @@ fn object_input(group_id: u64, subgroup_id: u64, object_id: u64) -> FetchObjectI
 #[test]
 fn prior_plus_one_omits_object_id_delta() {
     let mut golden = FETCH_HEADER_BYTES.to_vec();
-    // Object: Group 0 / Subgroup 0 / Object 0 / Priority 200 / payload 0
+    // Object: Group 0、Subgroup 0、Object 0、Priority 200、payload 0 バイト
     golden.extend_from_slice(&[0x1F, 0x00, 0x00, 0x00, 0xC8, 0x00]);
     // Object: 同一 Group / Subgroup は prior と同じ / Object 1 は delta 省略 / payload 0
     golden.extend_from_slice(&[0x01, 0x00]);
@@ -117,7 +117,7 @@ fn prior_plus_one_omits_object_id_delta() {
 #[test]
 fn prior_plus_two_encodes_object_id_delta_zero() {
     let mut golden = FETCH_HEADER_BYTES.to_vec();
-    // Object: Group 0 / Subgroup 0 / Object 0 / Priority 200 / payload 0
+    // Object: Group 0、Subgroup 0、Object 0、Priority 200、payload 0 バイト
     golden.extend_from_slice(&[0x1F, 0x00, 0x00, 0x00, 0xC8, 0x00]);
     // Object: 同一 Group / Object 2 は Object ID Delta 0 (+ 2) / payload 0
     golden.extend_from_slice(&[0x05, 0x00, 0x00]);
@@ -256,7 +256,7 @@ fn ascending_object_id_delta_golden_bytes_encode() {
 fn descending_golden() -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&FETCH_HEADER_BYTES);
-    // Object: Group 10 / Subgroup 0 / Object 5 / Priority 200 / payload 0
+    // Object: Group 10、Subgroup 0、Object 5、Priority 200、payload 0 バイト
     bytes.extend_from_slice(&[0x1F, 0x0A, 0x00, 0x05, 0xC8, 0x00]);
     // Object: 同一 Group / Object 6 は prior + 1 の省略
     bytes.extend_from_slice(&[0x01, 0x00]);
@@ -325,9 +325,9 @@ fn descending_object_id_delta_golden_bytes_encode() {
 #[test]
 fn object_after_end_of_range_uses_plus_two_rule() {
     let mut golden = FETCH_HEADER_BYTES.to_vec();
-    // Object: Group 5 / Subgroup 0 / Object 10 / Priority 200 / payload 0
+    // Object: Group 5、Subgroup 0、Object 10、Priority 200、payload 0 バイト
     golden.extend_from_slice(&[0x1F, 0x05, 0x00, 0x0A, 0xC8, 0x00]);
-    // End of Unknown Range: Group 5 (delta 0) / Object 20 (10 + 9 + 1)
+    // End of Unknown Range: Group 5 (delta 0) と Object 20 (10 + 9 + 1)
     golden.extend_from_slice(&[0x81, 0x0C, 0x00, 0x09]);
     // Object: Object 31 (20 + 9 + 2) / Subgroup 0 は直前の actual Object と同じ
     golden.extend_from_slice(&[0x05, 0x09, 0x00]);

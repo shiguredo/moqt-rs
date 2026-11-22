@@ -172,7 +172,7 @@ fn fetch_rejects_duplicate_range_filters() {
 
 /// PUBLISH_OK context の REQUEST_OK は重複 Range Filter を送信前に拒否する
 ///
-/// なお draft-ietf-moq-transport-23 Appendix A.4 #1790 以降、PUBLISH_OK は EXPIRES のみを
+/// なお draft-ietf-moq-transport-23 Appendix A.4 (Since draft-ietf-moq-transport-19) 以降、PUBLISH_OK は EXPIRES のみを
 /// 運ぶため、正当な Range Filter であっても後段のスコープ検証で拒否される。
 /// 本テストは前段の outgoing 検証 (重複検出) が先に発火することを確認する。
 #[test]
@@ -209,7 +209,7 @@ fn publish_ok_rejects_duplicate_range_filters() {
 /// (draft-20 で Joining FETCH は廃止された)
 ///
 /// なお PUBLISH_OK (send_request_ok) への到達確認は本テストの対象外である。
-/// draft-ietf-moq-transport-23 Appendix A.4 #1790 以降、PUBLISH_OK は EXPIRES のみを運ぶため、
+/// draft-ietf-moq-transport-23 Appendix A.4 (Since draft-ietf-moq-transport-19) 以降、PUBLISH_OK は EXPIRES のみを運ぶため、
 /// Range Filter を含む PUBLISH_OK は後段のスコープ検証でも拒否される。
 /// 本テストは前段の outgoing 検証 (MAX 未宣言検出) が先に発火することを確認する。
 #[test]
@@ -286,7 +286,7 @@ fn send_paths_accept_distinct_set_id_range_filters_and_publish_ok_rejects() {
     server
         .recv_request(pub_msg)
         .expect("PUBLISH の受信に成功すること");
-    // draft-ietf-moq-transport-23 Appendix A.4 #1790: PUBLISH_OK は EXPIRES のみを
+    // draft-ietf-moq-transport-23 Appendix A.4 (Since draft-ietf-moq-transport-19): PUBLISH_OK は EXPIRES のみを
     // 運ぶため、Range Filter を含む PUBLISH_OK は送信側で拒否される
     let err = server
         .send_request_ok(

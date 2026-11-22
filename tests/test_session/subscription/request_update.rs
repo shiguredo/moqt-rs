@@ -34,7 +34,7 @@ fn request_update_full_cycle() {
     server
         .recv_stream_message(rid, upd_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1540: REQUEST_UPDATE のパラメータは即座に適用されず、
+    // draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17): REQUEST_UPDATE のパラメータは即座に適用されず、
     // pending_update_params に蓄積される。REQUEST_OK 応答後に paused が反映される。
     assert!(
         server
@@ -281,7 +281,7 @@ fn request_ok_with_expires_zero_clears_existing_expires() {
             .is_some()
     );
 
-    // Client から REQUEST_UPDATE（EXPIRES なし）を送信
+    // Client から REQUEST_UPDATE (EXPIRES なし) を送信
     client
         .send_request_update(rid, MessageParameters::new())
         .expect("テストフィクスチャの前提条件を満たす");
@@ -855,7 +855,7 @@ fn subscription_terminated_by_peer_request_error_accepts_subsequent_publish_done
 #[test]
 fn subscription_terminated_by_peer_request_error_forgets_after_stream_fin_and_publish_done() {
     let (mut client, mut server) = establish_pair();
-    // client (subscriber) → server (publisher)
+    // client (subscriber) → server (publisher) の方向
     let rid = client
         .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
         .expect("テストフィクスチャの前提条件を満たす");
@@ -2367,7 +2367,7 @@ fn send_request_update_by_subscriber_on_publish_established_subscription() {
     client
         .recv_stream_message(rid, upd_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1540: REQUEST_UPDATE のパラメータは pending_update_params に蓄積される
+    // draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17): REQUEST_UPDATE のパラメータは pending_update_params に蓄積される
     let pending = client
         .subscription(rid)
         .expect("テストフィクスチャの前提条件を満たす")
@@ -2425,7 +2425,7 @@ fn send_request_ok_by_publisher_on_subscribe_established_subscription_succeeds()
     );
 }
 
-/// draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1540, draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions): 同一サブスクリプション上の複数 REQUEST_UPDATE が
+/// draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17), draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions): 同一サブスクリプション上の複数 REQUEST_UPDATE が
 /// 合体 (coalesce) される。後の値が前を上書きし、累積結果のみが適用される。
 #[test]
 fn multiple_request_updates_are_coalesced() {
@@ -2564,7 +2564,7 @@ fn multiple_request_updates_are_coalesced() {
     assert!(sub.pending_update_params.is_empty());
 }
 
-/// draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1540: REQUEST_UPDATE 合体後に REQUEST_ERROR で応答すると
+/// draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17): REQUEST_UPDATE 合体後に REQUEST_ERROR で応答すると
 /// pending_update_params が破棄される。
 #[test]
 fn request_error_discards_coalesced_pending_params() {
@@ -2633,7 +2633,7 @@ fn request_error_discards_coalesced_pending_params() {
     );
 }
 
-/// draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1583:
+/// draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17):
 /// REQUEST_UPDATE で購読が再開された (PAUSED 1→0) 後、STOP_SENDING で停止された
 /// サブグループを publisher が再オープンできる
 #[test]
@@ -2719,7 +2719,7 @@ fn resume_allows_reopen_of_stopped_by_peer_subgroup() {
             .paused
     );
 
-    // publisher (server) が同じサブグループを再オープンできる (draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1583)
+    // publisher (server) が同じサブグループを再オープンできる (draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17))
     // 再オープン成功自体が StoppedByPeer 記録の裏付けになる (他状態からは再オープン不可)
     let stream_id2 = DataStreamId(61);
     server
@@ -4356,7 +4356,7 @@ fn subscribe_originated_responder_request_ok_in_established_closes_session() {
     }
 }
 
-// ─── 受信順の処理・応答順・fill の非 coalescing ──────────────────
+// ─── 受信順の処理、応答順、fill の非 coalescing ──────────────────
 //
 // draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): "REQUEST_UPDATE messages MUST be
 // processed in order" / "REQUEST_UPDATE_OKs MUST be returned in the order the

@@ -203,7 +203,8 @@ mod tests {
         let source = track("source", Some(30), Some(1_000));
         let target = track("target", Some(60), Some(2_000));
         let variants = [variant(&source, 100), variant(&target, 100)];
-        let result = switch_target(&variants[0], &variants[1], 102, 0).expect("valid switch point");
+        let result = switch_target(&variants[0], &variants[1], 102, 0)
+            .expect("有効な switch point であること");
         assert_eq!(result.group_id, 101);
         assert_eq!(result.object_id, 0);
 

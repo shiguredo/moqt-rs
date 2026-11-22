@@ -37,7 +37,7 @@ fn include_properties_params(value: u8) -> MessageParameters {
 
 /// PUBLISH_OK + NEW_GROUP_REQUEST は送信側で拒否される
 ///
-/// draft-ietf-moq-transport-23 Appendix A.4 #1790 (Subscription parameters appear in
+/// draft-ietf-moq-transport-23 Appendix A.4 (Since draft-ietf-moq-transport-19) (Subscription parameters appear in
 /// REQUEST_UPDATE, not PUBLISH_OK): PUBLISH_OK は EXPIRES のみを運ぶ。
 /// NEW_GROUP_REQUEST は SUBSCRIBE / REQUEST_UPDATE にのみ出現する
 /// (draft-ietf-moq-transport-23 §9.19.19 (NEW GROUP REQUEST Parameter))。
@@ -867,7 +867,7 @@ fn peer_subscribe_auth_token_use_alias_known_accepted() {
     assert_eq!(server.state(), SessionState::Established);
 }
 
-// ─── Mandatory Track Properties (draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties)) ──────
+// ─── Mandatory Track Properties (必須の Track Property) (draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties)) ──────
 
 /// 未知の必須トラックプロパティを含む PUBLISH は REQUEST_ERROR (UNSUPPORTED_EXTENSION) で拒否される
 #[test]
@@ -1854,7 +1854,7 @@ fn publish_without_group_order_no_auto_inject() {
     }
 }
 
-// ─── SUBSCRIBE_TRACKS_ID (draft-ietf-moq-transport-23 §9.19.21) ────
+// ─── SUBSCRIBE_TRACKS_ID の検証 (draft-ietf-moq-transport-23 §9.19.21) ────
 
 /// 対応する SUBSCRIBE_TRACKS が無くても SUBSCRIBE_TRACKS_ID 付き PUBLISH を受理すること
 ///
@@ -1952,7 +1952,7 @@ fn subscribe_tracks_id_rejected_outside_publish() {
         });
         parameters
     };
-    // SUBSCRIBE
+    // SUBSCRIBE の場合
     let (_client, mut server) = establish_pair();
     assert_scope_violation(
         &mut server,
@@ -1964,7 +1964,7 @@ fn subscribe_tracks_id_rejected_outside_publish() {
         }),
         "SUBSCRIBE + SUBSCRIBE_TRACKS_ID",
     );
-    // FETCH
+    // FETCH の場合
     let (_client, mut server) = establish_pair();
     assert_scope_violation(
         &mut server,
@@ -1976,7 +1976,7 @@ fn subscribe_tracks_id_rejected_outside_publish() {
         }),
         "FETCH + SUBSCRIBE_TRACKS_ID",
     );
-    // TRACK_STATUS
+    // TRACK_STATUS の場合
     let (_client, mut server) = establish_pair();
     assert_scope_violation(
         &mut server,
@@ -2154,7 +2154,7 @@ fn publish_ok_with_out_of_scope_parameter_keeps_subscription_pending() {
 /// PAUSED を含む REQUEST_OK (Pending(Publisher) 分岐) で、subscription の状態が
 /// 遷移せず・パラメータも適用されないこと
 ///
-/// draft-ietf-moq-transport-23 Appendix A.4 #1790: subscription パラメータは
+/// draft-ietf-moq-transport-23 Appendix A.4 (Since draft-ietf-moq-transport-19): subscription パラメータは
 /// PUBLISH_OK に出現しない (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter) の
 /// MAY appear 列挙にも PUBLISH_OK は無い) ため、スコープ検証で拒否される
 /// (値検証には到達しない)。スコープ検証は状態遷移・パラメータ適用より前に実行されるため、
@@ -2222,7 +2222,7 @@ fn request_ok_publish_with_paused_keeps_subscription_pending() {
 /// LOCATION_FILTER を含む REQUEST_OK (Pending(Publisher) 分岐) で、
 /// subscription の状態が遷移せず・パラメータも適用されないこと
 ///
-/// draft-ietf-moq-transport-23 Appendix A.4 #1790: LOCATION_FILTER は PUBLISH_OK に
+/// draft-ietf-moq-transport-23 Appendix A.4 (Since draft-ietf-moq-transport-19): LOCATION_FILTER は PUBLISH_OK に
 /// 出現しないため、スコープ検証で拒否される (値検証には到達しない)。
 #[test]
 fn request_ok_publish_with_location_filter_keeps_subscription_pending() {
@@ -3245,7 +3245,7 @@ fn publish_advertised_largest_preserved_after_publish_ok() {
 /// PAUSED を含む REQUEST_OK (Pending(Publisher) 分岐) の受信で、subscription が
 /// Established に遷移せず・パラメータも適用されないこと
 ///
-/// draft-ietf-moq-transport-23 Appendix A.4 #1790: subscription パラメータは
+/// draft-ietf-moq-transport-23 Appendix A.4 (Since draft-ietf-moq-transport-19): subscription パラメータは
 /// PUBLISH_OK に出現しない (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter) の
 /// MAY appear 列挙にも PUBLISH_OK は無い) ため、スコープ検証で PROTOCOL_VIOLATION により
 /// 閉じる。スコープ検証は状態遷移・パラメータ適用より前に実行されるため、部分適用は
@@ -3327,7 +3327,7 @@ fn request_ok_publish_with_paused_keeps_subscription_pending_on_recv() {
 /// LOCATION_FILTER を含む REQUEST_OK (Pending(Publisher) 分岐) の受信で、
 /// subscription が Established に遷移せず・パラメータも適用されないこと
 ///
-/// draft-ietf-moq-transport-23 Appendix A.4 #1790: LOCATION_FILTER は PUBLISH_OK に
+/// draft-ietf-moq-transport-23 Appendix A.4 (Since draft-ietf-moq-transport-19): LOCATION_FILTER は PUBLISH_OK に
 /// 出現しないため、スコープ検証で PROTOCOL_VIOLATION により閉じる (値検証には
 /// 到達しないことを意図どおりとする)。
 #[test]
@@ -3492,11 +3492,11 @@ fn fill_parameters(inner: MessageParameters) -> MessageParameters {
 fn assert_scope_violation(server: &mut Session, message: ControlMessage, label: &str) {
     match server.recv_request(message) {
         Err(shiguredo_moqt::session::types::RecvRequestError::Session(err)) => {
-            assert_eq!(err.code, SESSION_INVALID_PARAMETER, "{label}");
+            assert_eq!(err.code, SESSION_INVALID_PARAMETER, "ラベル {label}");
         }
         other => panic!("{label}: PROTOCOL_VIOLATION が期待された: {other:?}"),
     }
-    assert_eq!(server.state(), SessionState::Closing, "{label}");
+    assert_eq!(server.state(), SessionState::Closing, "ラベル {label}");
     // MUST close がメッセージ単位の reject に隠れず、CloseSession(INVALID_PARAMETER) だけが
     // 発行され、REQUEST_ERROR を送らないこと
     let mut close_sessions = 0;
@@ -3504,7 +3504,7 @@ fn assert_scope_violation(server: &mut Session, message: ControlMessage, label: 
     while let Some(e) = server.poll_event() {
         match e {
             SessionEvent::CloseSession(err) => {
-                assert_eq!(err.code, SESSION_INVALID_PARAMETER, "{label}");
+                assert_eq!(err.code, SESSION_INVALID_PARAMETER, "ラベル {label}");
                 close_sessions += 1;
             }
             SessionEvent::SendOnStream {
@@ -3525,7 +3525,7 @@ fn recv_request_with_disallowed_parameter_closes_session() {
     use shiguredo_moqt::message::{
         Fetch as WireFetch, Publish as WirePublish, Subscribe, TrackStatus,
     };
-    // SUBSCRIBE + EXPIRES
+    // SUBSCRIBE と EXPIRES の組
     let (_client, mut server) = establish_pair();
     assert_scope_violation(
         &mut server,
@@ -3537,7 +3537,7 @@ fn recv_request_with_disallowed_parameter_closes_session() {
         }),
         "SUBSCRIBE + EXPIRES",
     );
-    // PUBLISH + NEW_GROUP_REQUEST
+    // PUBLISH と NEW_GROUP_REQUEST の組
     let (_client, mut server) = establish_pair();
     assert_scope_violation(
         &mut server,
@@ -3551,7 +3551,7 @@ fn recv_request_with_disallowed_parameter_closes_session() {
         }),
         "PUBLISH + NEW_GROUP_REQUEST",
     );
-    // FETCH + LARGEST_OBJECT
+    // FETCH と LARGEST_OBJECT の組
     let (_client, mut server) = establish_pair();
     assert_scope_violation(
         &mut server,
@@ -3563,7 +3563,7 @@ fn recv_request_with_disallowed_parameter_closes_session() {
         }),
         "FETCH + LARGEST_OBJECT",
     );
-    // TRACK_STATUS + EXPIRES
+    // TRACK_STATUS と EXPIRES の組
     let (_client, mut server) = establish_pair();
     assert_scope_violation(
         &mut server,
@@ -3630,7 +3630,7 @@ fn recv_request_with_allowed_parameters_is_accepted() {
         server.recv_request(message).unwrap_or_else(|e| {
             panic!("許可パラメータのみの request は受理されること: {label}: {e:?}")
         });
-        assert_eq!(server.state(), SessionState::Established, "{label}");
+        assert_eq!(server.state(), SessionState::Established, "ラベル {label}");
     }
 }
 
@@ -3638,7 +3638,7 @@ fn recv_request_with_allowed_parameters_is_accepted() {
 #[test]
 fn recv_request_scope_violation_precedes_reserved_namespace_rejection() {
     use shiguredo_moqt::message::{Subscribe, TrackStatus};
-    // SUBSCRIBE
+    // SUBSCRIBE の場合
     let (_client, mut server) = establish_pair();
     assert_scope_violation(
         &mut server,
@@ -3813,7 +3813,7 @@ fn recv_request_fill_parameters_with_invalid_value_encoding_closes_session() {
 #[test]
 fn recv_request_fill_parameters_outside_allowed_messages_closes_session() {
     use shiguredo_moqt::message::{Fetch as WireFetch, TrackStatus};
-    // FETCH
+    // FETCH の場合
     let (_client, mut server) = establish_pair();
     assert_scope_violation(
         &mut server,
@@ -3825,7 +3825,7 @@ fn recv_request_fill_parameters_outside_allowed_messages_closes_session() {
         }),
         "FETCH + FILL_PARAMETERS",
     );
-    // TRACK_STATUS
+    // TRACK_STATUS の場合
     let (_client, mut server) = establish_pair();
     assert_scope_violation(
         &mut server,
@@ -3957,11 +3957,11 @@ mod response_parameter_scope {
                 }),
             )
             .expect_err(&format!("{label}: 許可外パラメータは拒否されること"));
-        assert_eq!(err.code, SESSION_INVALID_PARAMETER, "{label}");
-        assert_eq!(client.state(), SessionState::Closing, "{label}");
+        assert_eq!(err.code, SESSION_INVALID_PARAMETER, "ラベル {label}");
+        assert_eq!(client.state(), SessionState::Closing, "ラベル {label}");
         match drain_until_close(client) {
             SessionEvent::CloseSession(err) => {
-                assert_eq!(err.code, SESSION_INVALID_PARAMETER, "{label}")
+                assert_eq!(err.code, SESSION_INVALID_PARAMETER, "ラベル {label}")
             }
             _ => unreachable!(),
         }

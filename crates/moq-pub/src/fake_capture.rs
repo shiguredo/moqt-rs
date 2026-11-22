@@ -295,7 +295,7 @@ fn bgra_to_nv12(
             let b = bgra[src] as i32;
             let g = bgra[src + 1] as i32;
             let r = bgra[src + 2] as i32;
-            // BT.601 limited range: Y = 16 + (66R + 129G + 25B + 128) >> 8
+            // BT.601 の limited range: Y = 16 + (66R + 129G + 25B + 128) >> 8
             let y_val = 16 + ((66 * r + 129 * g + 25 * b + 128) >> 8);
             y_plane[dst_row_start + x] = y_val.clamp(0, 255) as u8;
         }
@@ -328,7 +328,7 @@ fn bgra_to_nv12(
             let r = r_sum / 4;
             let g = g_sum / 4;
             let b = b_sum / 4;
-            // BT.601 limited range
+            // BT.601 の limited range
             // U = 128 + (-38R - 74G + 112B + 128) >> 8
             // V = 128 + (112R - 94G - 18B + 128) >> 8
             let u_val = 128 + ((-38 * r - 74 * g + 112 * b + 128) >> 8);

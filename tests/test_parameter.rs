@@ -342,9 +342,9 @@ mod delta_encoding {
         assert_eq!(buf[0], 0x02);
         // varint 50 は 1 バイト (50 < 64)
         assert_eq!(buf[1], 50);
-        // delta = 3 (type=5 - prev=2)
+        // delta = 3 (型 5 - 前回 2)
         assert_eq!(buf[2], 0x03);
-        // length = 5
+        // length = 5 (5 バイト)
         assert_eq!(buf[3], 0x05);
 
         let (decoded, consumed) =
@@ -396,7 +396,7 @@ mod accessors {
 
     #[test]
     fn authorization_token() {
-        // USE_VALUE (Alias Type 0x03): Token Type + Token Value
+        // USE_VALUE (Alias Type 0x03): Token Type と Token Value
         let token = AuthorizationToken::UseValue {
             token_type: 0,
             token_value: b"token123".to_vec(),
@@ -771,7 +771,7 @@ mod setup_authorization_token_scope {
 
     #[test]
     fn delete_is_protocol_violation() {
-        // DELETE (0x0) + Token Alias
+        // DELETE (0x0) と Token Alias
         let wire = setup_option_wire(&[0x00, 0x01]);
         assert_eq!(
             SetupOptions::decode(&wire),
@@ -784,7 +784,7 @@ mod setup_authorization_token_scope {
 
     #[test]
     fn use_alias_is_protocol_violation() {
-        // USE_ALIAS (0x2) + Token Alias
+        // USE_ALIAS (0x2) と Token Alias
         let wire = setup_option_wire(&[0x02, 0x01]);
         assert_eq!(
             SetupOptions::decode(&wire),
@@ -880,7 +880,7 @@ mod setup_authorization_token_scope {
     /// `SetupOptions::encode` は重複を拒否するため、wire は手で組む。
     #[test]
     fn duplicate_token_type_and_value_is_malformed_auth_token() {
-        // USE_VALUE (0x3) + Token Type 1 + Token Value "tok"
+        // USE_VALUE (0x3) として Token Type 1 と Token Value "tok"
         let token = [0x03, 0x01, b't', b'o', b'k'];
         // 1 件目は Type Delta = AUTHORIZATION_TOKEN、2 件目は同じ Type のため Type Delta = 0
         let mut wire = setup_option_wire(&token);

@@ -27,9 +27,9 @@ mod delta_encoding {
         // カウントプレフィックスなし
         // delta = 2 (type=2 - prev=0)
         assert_eq!(buf[0], 0x02);
-        // varint 50
+        // varint 50 (50 の varint)
         assert_eq!(buf[1], 50);
-        // delta = 3 (type=5 - prev=2)
+        // delta = 3 (型 5 - 前回 2)
         assert_eq!(buf[2], 0x03);
 
         let decoded = TrackProperties::decode(&buf).expect("テストフィクスチャの前提条件を満たす");
@@ -144,8 +144,8 @@ mod error_cases {
 
     #[test]
     fn value_too_long() {
-        // delta=1 (odd type), length=65536 (> 65535)
-        // vi64 for 65536: 0xC1_00_00 (3 bytes)
+        // delta=1 (奇数型)、length=65536 (> 65535)
+        // vi64 for 65536: 0xC1_00_00 (3 バイト)
         let mut buf = vec![0x01];
         // 65536 を vi64 エンコードする
         // 65536 = 0x10000, 3 バイト vi64: 110xxxxx xxxxxxxx xxxxxxxx
@@ -1013,7 +1013,7 @@ mod immutable_properties {
 
     /// IMMUTABLE_PROPERTIES 内側の GREASE 値は unknown mandatory にしない
     ///
-    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties) の「MUST search both」で
+    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties) の"MUST search both"で
     /// 内側も探索するが、§16.8 (Properties) の Table 15 が GREASE の Property Type
     /// (`0x7f * N + 0x9D`) を Scope Any として予約しているため、内側でも unknown mandatory
     /// として扱わない。
@@ -1413,7 +1413,7 @@ mod property_scope {
         );
     }
 
-    /// 未知型・GREASE・両スコープの型 (IMMUTABLE 内側を含む) は受理される
+    /// 未知型、GREASE、両スコープの型 (IMMUTABLE 内側を含む) は受理される
     ///
     /// draft-ietf-moq-transport-23 §8.4 は未知 Property の転送を MUST とし、§16.8 は
     /// "Endpoints MUST ignore unknown Property types" と定める。スコープを推測して
@@ -1478,7 +1478,7 @@ mod property_scope {
         assert_eq!(
             decoded.validate_scope(),
             Ok(()),
-            "未知型・GREASE・両スコープの型はスコープ違反にしないこと"
+            "未知型、GREASE、両スコープの型はスコープ違反にしないこと"
         );
     }
 

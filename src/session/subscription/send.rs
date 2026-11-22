@@ -461,7 +461,7 @@ impl Session {
         // 保持する。peer からの REQUEST_UPDATE に NEW_GROUP_REQUEST が含まれる場合の判断材料
         // になる。publisher 側は wire 上に提示する値そのものが判定材料であり、未判明にはならない。
         let dynamic_groups = DynamicGroupsSupport::from_local_properties(&track_properties);
-        // draft §10.4 (DEFAULT PUBLISHER PRIORITY) / §10.5 (DEFAULT PUBLISHER GROUP ORDER)
+        // 仕様: draft §10.4 (DEFAULT PUBLISHER PRIORITY) / §10.5 (DEFAULT PUBLISHER GROUP ORDER)
         let default_publisher_priority = track_properties.default_publisher_priority();
         let default_publisher_group_order = track_properties.default_publisher_group_order();
         // draft-ietf-moq-transport-23 §9.8 (PUBLISH): PUBLISH の Parameters に現れる
@@ -731,7 +731,7 @@ impl Session {
         // ローカルの対応情報は失われない。
         subscription.dynamic_groups =
             DynamicGroupsSupport::from_local_properties(&track_properties);
-        // draft §10.4 (DEFAULT PUBLISHER PRIORITY) / §10.5 (DEFAULT PUBLISHER GROUP ORDER)
+        // 仕様: draft §10.4 (DEFAULT PUBLISHER PRIORITY) / §10.5 (DEFAULT PUBLISHER GROUP ORDER)
         subscription.default_publisher_priority = track_properties.default_publisher_priority();
         subscription.default_publisher_group_order =
             track_properties.default_publisher_group_order();

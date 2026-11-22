@@ -152,7 +152,7 @@ fn property_of_type(ctx: &mut noprop::TestCaseContext, prop_type: u64) -> TrackP
 
 /// 候補となる Track Property 型を 1 つ生成する
 ///
-/// 未知の必須型・GREASE 予約値・既知型・必須範囲外の型を混ぜ、
+/// 未知の必須型、GREASE 予約値、既知型、必須範囲外の型を混ぜ、
 /// 列挙の対象と対象外が同じ入力に現れるようにする。
 fn sample_candidate_type(ctx: &mut noprop::TestCaseContext) -> u64 {
     match noprop::sample_weighted_index(ctx, &[3, 1, 1, 1]) {

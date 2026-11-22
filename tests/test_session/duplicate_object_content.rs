@@ -523,7 +523,7 @@ fn condition6_duplicate_object_with_same_content_is_not_malformed() {
         .recv_subgroup_header(stream_id, &header)
         .expect("テストフィクスチャの前提条件を満たす");
 
-    // 同一内容 (payload 長・properties とも同じ) を 2 回受信する
+    // 同一内容 (payload 長 / properties とも同じ) を 2 回受信する
     for _ in 0..2 {
         let outcome = client
             .recv_subgroup_object(

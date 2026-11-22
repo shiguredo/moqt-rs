@@ -440,16 +440,16 @@ fn sample_unsupported_property_type(ctx: &mut noprop::TestCaseContext) -> u64 {
 /// 任意の ControlMessage を生成する (21 ブランチを等確率で選ぶ)
 fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
     match noprop::sample_weighted_index(ctx, &[1u32; 21]) {
-        // Setup
+        // Setup メッセージ
         0 => ControlMessage::Setup(Setup {
             options: sample_setup_options_with(ctx, &SETUP_SAMPLING_SMALL),
         }),
-        // Goaway
+        // Goaway メッセージ
         1 => ControlMessage::Goaway(Goaway {
             new_session_uri: sample_bytes(ctx, 100),
             timeout: sample_small_varint(ctx),
         }),
-        // RequestOk
+        // RequestOk メッセージ
         2 => ControlMessage::RequestOk(RequestOk {
             parameters: sample_scoped_parameters(ctx, REQUEST_OK_PARAMS),
             track_properties: TrackProperties::default(),
@@ -487,18 +487,18 @@ fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
             track_name: sample_nonempty_bytes(ctx, 50),
             parameters: sample_scoped_parameters(ctx, SUBSCRIBE_PARAMS),
         }),
-        // SubscribeOk
+        // SubscribeOk メッセージ
         6 => ControlMessage::SubscribeOk(SubscribeOk {
             track_alias: sample_small_varint(ctx),
             parameters: sample_scoped_parameters(ctx, SUBSCRIBE_OK_PARAMS),
             track_properties: sample_track_properties(ctx),
         }),
-        // RequestUpdate
+        // RequestUpdate メッセージ
         7 => ControlMessage::RequestUpdate(RequestUpdate {
             request_id: sample_request_id(ctx),
             parameters: sample_scoped_parameters(ctx, REQUEST_UPDATE_PARAMS),
         }),
-        // Publish
+        // Publish メッセージ
         8 => ControlMessage::Publish(Publish {
             request_id: sample_request_id(ctx),
             track_namespace: sample_namespace_prefix(ctx),
@@ -507,7 +507,7 @@ fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
             parameters: sample_scoped_parameters(ctx, PUBLISH_PARAMS),
             track_properties: sample_track_properties(ctx),
         }),
-        // PublishDone
+        // PublishDone メッセージ
         9 => ControlMessage::PublishDone(PublishDone {
             status_code: sample_small_varint(ctx),
             stream_count: sample_small_varint(ctx),
@@ -529,30 +529,30 @@ fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
             parameters: sample_scoped_parameters(ctx, FETCH_OK_PARAMS),
             track_properties: sample_track_properties(ctx),
         }),
-        // TrackStatus
+        // TrackStatus メッセージ
         12 => ControlMessage::TrackStatus(TrackStatus {
             request_id: sample_request_id(ctx),
             track_namespace: sample_namespace_prefix(ctx),
             track_name: sample_nonempty_bytes(ctx, 50),
             parameters: sample_scoped_parameters(ctx, TRACK_STATUS_PARAMS),
         }),
-        // PublishStateNotify (draft-ietf-moq-transport-23 §9.10)
+        // PublishStateNotify メッセージ (draft-ietf-moq-transport-23 §9.10)
         13 => ControlMessage::PublishStateNotify(PublishStateNotify {
             parameters: sample_scoped_parameters(ctx, PUBLISH_STATE_NOTIFY_PARAMS),
         }),
-        // PUBLISH_NAMESPACE (draft-ietf-moq-transport-23 §9.13)
+        // PUBLISH_NAMESPACE メッセージ (draft-ietf-moq-transport-23 §9.13)
         15 => ControlMessage::PublishNamespace(PublishNamespace {
             request_id: sample_request_id(ctx),
             track_namespace: sample_namespace_prefix(ctx),
             parameters: sample_scoped_parameters(ctx, PUBLISH_NAMESPACE_PARAMS),
         }),
-        // SUBSCRIBE_NAMESPACE (draft-ietf-moq-transport-23 §9.14)
+        // SUBSCRIBE_NAMESPACE メッセージ (draft-ietf-moq-transport-23 §9.14)
         16 => ControlMessage::SubscribeNamespace(SubscribeNamespace {
             request_id: sample_request_id(ctx),
             track_namespace: sample_namespace_prefix(ctx),
             parameters: sample_scoped_parameters(ctx, SUBSCRIBE_NAMESPACE_PARAMS),
         }),
-        // SUBSCRIBE_TRACKS (draft-ietf-moq-transport-23 §9.17)
+        // SUBSCRIBE_TRACKS メッセージ (draft-ietf-moq-transport-23 §9.17)
         17 => ControlMessage::SubscribeTracks(SubscribeTracks {
             request_id: sample_request_id(ctx),
             track_namespace: sample_namespace_prefix(ctx),
@@ -563,11 +563,11 @@ fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
             track_namespace_suffix: sample_namespace_prefix(ctx),
             parameters: MessageParameters::new(),
         }),
-        // NAMESPACE_DONE (draft-ietf-moq-transport-23 §9.16)
+        // NAMESPACE_DONE メッセージ (draft-ietf-moq-transport-23 §9.16)
         19 => ControlMessage::NamespaceDone(NamespaceDone {
             track_namespace_suffix: sample_namespace_prefix(ctx),
         }),
-        // PUBLISH_SKIPPED (draft-ietf-moq-transport-23 §9.18)
+        // PUBLISH_SKIPPED メッセージ (draft-ietf-moq-transport-23 §9.18)
         20 => ControlMessage::PublishSkipped(PublishSkipped {
             track_namespace_suffix: sample_namespace_prefix(ctx),
             track_name: sample_nonempty_bytes(ctx, 50),
@@ -590,7 +590,7 @@ fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
                 error_details: details,
             })
         }
-        _ => unreachable!("sample_weighted_index returns a valid branch"),
+        _ => unreachable!("sample_weighted_index は有効な分岐を返す"),
     }
 }
 

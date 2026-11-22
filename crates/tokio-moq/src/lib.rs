@@ -374,7 +374,7 @@ impl core::fmt::Debug for MoqtFragment {
 /// `userinfo_bytes` にそのバイト長を表示する。
 #[derive(Clone)]
 pub struct ServerUrl {
-    /// authority (userinfo・ホスト名または IP アドレス・ポートを含み得る)
+    /// authority (userinfo、ホスト名または IP アドレス、ポートを含み得る)
     ///
     /// URL でポートを省略した場合はポートを含まない。接続先の決定では
     /// 既定ポート 443 を補って解釈する。
@@ -510,7 +510,7 @@ impl core::fmt::Debug for ServerUrl {
 /// draft-ietf-moq-msf-02 §11.5.2、fragment の `cat` は §11.1.1)、解析エラーはログや CLI の
 /// 標準エラーに出るため、エラーメッセージには入力 URL 全体とパラメータ値を含めない。
 /// scheme、`authority` / `path` などの成分名、空白のバイト位置、MSF fragment の
-/// track-identifier・パラメータ名・パラメータ位置 (いずれも機密値でない) だけを示し、
+/// track-identifier、パラメータ名、パラメータ位置 (いずれも機密値でない) だけを示し、
 /// fragment type の値は示さない。
 pub fn parse_url(url: &str) -> Result<ServerUrl, String> {
     // RFC 3986 §3 (`URI = scheme ":" hier-part`) が scheme を `:` の前に置くことを定め、
@@ -1035,7 +1035,7 @@ impl AuthorityParts<'_> {
 /// (draft-ietf-moq-transport-23 §6.1.2)。
 ///
 /// 受理する host は RFC 3986 §3.2.2 (Host) の `IP-literal / IPv4address / reg-name` のうち
-/// IPv6 リテラル・IPv4 リテラル・reg-name である。IPvFuture は受け付けない。
+/// IPv6 リテラル、IPv4 リテラル、reg-name である。IPvFuture は受け付けない。
 /// RFC 3986 §3.2.2 は未知の version flag を持つ IP-literal を dereference する
 /// アプリケーションに 'address mechanism not supported' のエラーを返すことを推奨する。
 /// RFC 6874 の zone id 付き IPv6 リテラル (`[fe80::1%25en0]`) も受け付けない。
@@ -2132,7 +2132,7 @@ pub(crate) fn local_bind_addr(remote: SocketAddr) -> SocketAddr {
     };
     wildcard
         .parse()
-        .expect("the wildcard address literal must parse")
+        .expect("ワイルドカードアドレスのリテラルを解析できること")
 }
 
 #[cfg(test)]
@@ -3096,7 +3096,10 @@ mod tests {
         ] {
             let url = parse_url(text).expect("URL のパースに成功すること");
             let err = resolve_namespace(None, &url).expect_err("エラーになること");
-            assert!(err.contains("--namespace is required"), "{text}: {err}");
+            assert!(
+                err.contains("--namespace is required"),
+                "ケース {text}: {err}"
+            );
         }
     }
 
@@ -3108,7 +3111,7 @@ mod tests {
         let url =
             parse_url("moqt://example.com/app#msf:--video").expect("URL のパースに成功すること");
         let err = resolve_namespace(None, &url).expect_err("エラーになること");
-        assert!(err.contains("at least one field"), "{err}");
+        assert!(err.contains("at least one field"), "エラー: {err}");
     }
 
     /// `--namespace` の空文字と §8.8 として不正な値はエラーになる
@@ -3116,10 +3119,10 @@ mod tests {
     fn resolve_namespace_rejects_invalid_explicit_option() {
         let url = parse_url("moqt://example.com/app").expect("URL のパースに成功すること");
         let err = resolve_namespace(Some(""), &url).expect_err("空文字はエラーになること");
-        assert!(err.contains("must not be empty"), "{err}");
+        assert!(err.contains("must not be empty"), "エラー: {err}");
         let err = resolve_namespace(Some("moq/example"), &url)
             .expect_err("§8.8 として不正な値はエラーになること");
-        assert!(err.contains("§8.8"), "{err}");
+        assert!(err.contains("§8.8"), "エラー: {err}");
     }
 
     /// パディング無しの標準 Base64 と base64url も cat として受理する
@@ -3134,7 +3137,7 @@ mod tests {
                 "moqt://example.com/app#msf:moq-example--video&cat={text}"
             ))
             .unwrap_or_else(|e| panic!("{text} のパースに失敗した: {e}"));
-            assert_eq!(url.cat_tokens, vec![bytes.to_vec()], "{text}");
+            assert_eq!(url.cat_tokens, vec![bytes.to_vec()], "ケース {text}");
         }
     }
 
@@ -3207,7 +3210,10 @@ mod tests {
         ] {
             let url = format!("moqt://example.com/app#msf:{value}");
             let err = parse_url(&url).expect_err("エラーになること");
-            assert!(err.contains("invalid MSF fragment"), "{url}: {err}");
+            assert!(
+                err.contains("invalid MSF fragment"),
+                "URL {url} の検証に失敗した: {err}"
+            );
         }
     }
 
@@ -3217,7 +3223,10 @@ mod tests {
         for text in ["!!!", ""] {
             let url = format!("moqt://example.com/app#msf:moq-example--video&cat={text}");
             let err = parse_url(&url).expect_err("エラーになること");
-            assert!(err.contains("invalid cat parameter"), "{url}: {err}");
+            assert!(
+                err.contains("invalid cat parameter"),
+                "URL {url} の検証に失敗した: {err}"
+            );
         }
     }
 
@@ -3881,8 +3890,8 @@ mod tests {
             ("relay.example.com:443", "relay.example.com", 443),
         ] {
             let parts = authority_parts(authority).expect("authority の解釈に成功すること");
-            assert_eq!(parts.host, host, "host: {authority}");
-            assert_eq!(parts.port, port, "port: {authority}");
+            assert_eq!(parts.host, host, "ホスト: {authority}");
+            assert_eq!(parts.port, port, "ポート: {authority}");
         }
     }
 
@@ -4121,7 +4130,7 @@ mod tests {
             tls,
             "127.0.0.1:0"
                 .parse()
-                .expect("the wildcard address literal must parse"),
+                .expect("ワイルドカードアドレスのリテラルを解析できること"),
         )
         .await
         .expect("サーバーを起動できること");

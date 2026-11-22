@@ -102,7 +102,7 @@ mod tests {
         for (index, sample) in output.iter().enumerate() {
             assert!(
                 (f64::from(*sample) - expected).abs() < 1e-9,
-                "index={index} sample={sample} expected={expected}"
+                "添字 index={index} 標本 sample={sample} 期待値 expected={expected}"
             );
             expected *= 0.5;
         }

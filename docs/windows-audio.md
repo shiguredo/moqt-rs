@@ -2,14 +2,14 @@
 
 - 調査日: 2026-10-19
 - 対象: moqt-rs develop (f297e07)、moqt-js (8c7d3d21)、shiguredo_audio_device 2026.4.0-canary.1
-- 症状: Windows の moq-pub から送信した実マイク音声を moqt-devtools で受信・再生すると、定期的に途切れ、音のピッチが下がる。macOS の moq-pub では問題ない。
+- 症状: Windows の moq-pub から送信した実マイク音声を moqt-devtools で受信 / 再生すると、定期的に途切れ、音のピッチが下がる。macOS の moq-pub では問題ない。
 
 ## 1. 結論
 
 原因は 2 つある。主原因はタイムスタンプではなく、Windows の音声キャプチャのフォーマット不一致である。
 
-1. 主原因: Windows の WASAPI キャプチャは `AudioCaptureConfig` の `sample_rate` / `channels` を無視し、共有モードの mix format (デバイスの Default Format のチャンネル数とサンプルレート) をそのまま返す。moq-pub は実測値を検証せず 48 kHz 1ch 前提で Opus 符号化・カタログ・OpusHead を作るため、実フォーマットが 48 kHz 1ch 以外だとピッチと実時間がずれる。2ch 48 kHz または 96 kHz 1ch なら 1 オクターブ下がる。
-2. 副原因: Windows の `timestamp_us` は `GetBuffer` 直後の `QueryPerformanceCounter` (読み出し時刻) であり、デバイスが記録した先頭フレームの時刻 (`pu64QPCPosition`) ではない。読み出しの burst で Timestamp が圧縮され、moq-pub の `AudioCaptureTimeline` がフレームごとに基準を取り直すため、Timestamp の揺れ・同一時刻化・逆行が起きる。これは A/V 同期と再生タイミングの揺らぎを作るが、ピッチは変えない。
+1. 主原因: Windows の WASAPI キャプチャは `AudioCaptureConfig` の `sample_rate` / `channels` を無視し、共有モードの mix format (デバイスの Default Format のチャンネル数とサンプルレート) をそのまま返す。moq-pub は実測値を検証せず 48 kHz 1ch 前提で Opus 符号化、カタログ、OpusHead を作るため、実フォーマットが 48 kHz 1ch 以外だとピッチと実時間がずれる。2ch 48 kHz または 96 kHz 1ch なら 1 オクターブ下がる。
+2. 副原因: Windows の `timestamp_us` は `GetBuffer` 直後の `QueryPerformanceCounter` (読み出し時刻) であり、デバイスが記録した先頭フレームの時刻 (`pu64QPCPosition`) ではない。読み出しの burst で Timestamp が圧縮され、moq-pub の `AudioCaptureTimeline` がフレームごとに基準を取り直すため、Timestamp の揺れ、同一時刻化、逆行が起きる。これは A/V 同期と再生タイミングの揺らぎを作るが、ピッチは変えない。
 3. 受信側 (moqt-devtools) にはピッチを変える処理が無い。`AudioBufferSourceNode.start(when)` だけで再生し、時間圧縮は NetEq accelerate の移植でピッチを保つ。したがってピッチ低下は配信側の PCM の解釈に由来する。
 4. 「定期的に途切れる」は、1 つの Opus フレームの実音声長 (D) が LOC Timestamp の刻み (T) より長くなること (D > T) で起きる。moqt-devtools が到着基準で再生する経路 (音声だけ購読、または jitter buffer 無効) では backlog drop がほぼ 1 フレームおきに発生する。映像と音声を同時に購読する時間軸経路では drop せず、再生の遅れ (lateness) が増え続ける。
 
@@ -30,8 +30,8 @@
 
 ### 2.3 Windows の mix format としてあり得る値
 
-- `GetMixFormat` は共有モードのエンジン内部処理形式を返し、アプリのストリームは通常デバイスと同じチャンネル数・同じサンプルレートでなければならない ([Device Formats](https://learn.microsoft.com/en-us/windows/win32/coreaudio/device-formats))。
-- ユーザーが mmsys.cpl の Default Format で選んだ形式が共有モードのデバイス形式になり、エンジンは同じチャンネル数・レートのままサンプルを float 化する。マイクの Default Format は 1ch / 2ch、44100 / 48000 / 96000 / 192000 のいずれもあり得る。2ch 48000 Hz は Windows で一般的である。
+- `GetMixFormat` は共有モードのエンジン内部処理形式を返し、アプリのストリームは通常デバイスと同じチャンネル数 / 同じサンプルレートでなければならない ([Device Formats](https://learn.microsoft.com/en-us/windows/win32/coreaudio/device-formats))。
+- ユーザーが mmsys.cpl の Default Format で選んだ形式が共有モードのデバイス形式になり、エンジンは同じチャンネル数 / レートのままサンプルを float 化する。マイクの Default Format は 1ch / 2ch、44100 / 48000 / 96000 / 192000 のいずれもあり得る。2ch 48000 Hz は Windows で一般的である。
 - 24 bit などを Default Format で選んでも mix format は float32 になるのが通常だが、float を明示的に保証する一次資料は無い。
 
 ## 3. 根拠: moq-pub は 48 kHz 1ch 固定
@@ -45,7 +45,7 @@
 ## 4. 根拠: 受信側 (moqt-devtools) はピッチを変えない
 
 - `playbackRate` / `detune` / `preservesPitch` は moqt-js のリポジトリ全体で 0 件である。音声の予約は `AudioBufferSourceNode.start(whenSeconds)` だけ (`src/playout/audioPlayoutSession.ts:597-613`)。
-- AudioBuffer は復号結果の `numberOfChannels` / `numberOfFrames` / `sampleRate` をそのまま使う (`src/playout/audioPlayoutSession.ts:257-260`, `:605`)。Web Audio がバッファのサンプルレートを AudioContext のレートへ変換するのは等価な波形変換であり、速度・ピッチを変える指定ではない。
+- AudioBuffer は復号結果の `numberOfChannels` / `numberOfFrames` / `sampleRate` をそのまま使う (`src/playout/audioPlayoutSession.ts:257-260`, `:605`)。Web Audio がバッファのサンプルレートを AudioContext のレートへ変換するのは等価な波形変換であり、速度 / ピッチを変える指定ではない。
 - 時間方向の加工は 2 つだけである。時間圧縮 (`src/playout/audioTimeStretch.ts:281-328`) はピッチ周期 1 つ分を削る NetEq accelerate の移植で、ピッチを保つ。補間 (`audioTimeStretch.ts:411` 以降) は末尾の周期を繰り返す。どちらもピッチを変えない。
 - moqt-devtools はライブラリと同じ `AudioPlayoutSession` を使う (`devtools/src/hooks/useSubscriber.ts:77`, `:1241`)。
 
@@ -116,7 +116,7 @@ Copy for LLM の JSON で次の値を見ると、どの経路かを切り分け�
 - `determine_audio_format` は `WAVE_FORMAT_EXTENSIBLE` の `cbSize` と `SubFormat` を検証し、24 bit / 32 bit PCM を S16 と誤判定しないようにする。現状は PCM の 24/32 bit container を S16 と扱い、`data_size = frames * channels * 2` でバッファの先頭だけを読むため波形が壊れる (`src/capture_wasapi.rs:288-301`, `src/device_wasapi.rs:220-239`)。
 - 変更後は canary.2 としてリリースし、moq-pub の依存を更新する。
 
-### 7.2 暫定・防御: moq-pub
+### 7.2 暫定 / 防御: moq-pub
 
 - `audio_capture.rs` で `AudioCapture::new` の直後に `capture.sample_rate()` / `channels()` を読み、実測値をログする。48 kHz / 1ch 以外なら起動時に明確なエラー (または警告) にする。純粋な検証関数に切り出せば macOS の unit test で検証できる。
 - `extract_pcm_i16` を `frame.channels` 対応にする。2ch は (L + R) / 2 でモノラルへ downmix する。これだけで 2ch 48 kHz のピッチと実時間の過剰は直る (3ch 以上はエラー)。ただし 96 kHz などのレート差は直らないため、7.1 の根本修正と併用する。

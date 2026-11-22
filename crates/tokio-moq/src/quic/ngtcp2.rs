@@ -254,7 +254,7 @@ impl SendStream {
 enum RecvEvent {
     /// 受信データ
     Data(Vec<u8>),
-    /// FIN
+    /// FIN による終端
     Fin,
     /// peer が RESET_STREAM で終端した
     Reset {

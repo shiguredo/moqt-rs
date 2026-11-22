@@ -279,7 +279,7 @@ pub struct Draft02AuthorizationTest {
     pub action: i64,
     /// Track Namespace のフィールド (UTF-8)
     pub namespace: &'static [&'static str],
-    /// Track Name (UTF-8)
+    /// Track Name (UTF-8 文字列)
     pub track: &'static str,
     /// 期待する判定
     pub expected: bool,

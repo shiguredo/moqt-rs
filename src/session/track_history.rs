@@ -276,7 +276,7 @@ impl PeerTrackHistory {
 /// 従って移動する (§3.2.1 (Fetch Object Delivery))。`from` が `None` のときは `anchor` を
 /// 応答の先頭とみなし、`anchor` 自身を含める。`include_to` が true なら `to` を含める。
 ///
-/// 戻り値は Group 内の部分区間・Group 全域・その両方に分解される。要求範囲への
+/// 戻り値は Group 内の部分区間、Group 全域、その両方に分解される。要求範囲への
 /// 切り詰めは呼び出し側 (`clamp_to_request`) が行う。
 fn ordered_region(
     from: Option<Location>,
@@ -540,7 +540,7 @@ mod tests {
         assert!(gap_between_entries(loc(0, 2), loc(0, 3)).is_empty());
     }
 
-    /// 昇順で Group をまたぐ gap は先行 Group の残り・経由 Group・後続 Group の先頭に分かれる
+    /// 昇順で Group をまたぐ gap は先行 Group の残り、経由 Group、後続 Group の先頭に分かれる
     #[test]
     fn gap_across_groups_in_ascending_order() {
         let ranges = gap_between_entries(loc(2, 5), loc(5, 3));

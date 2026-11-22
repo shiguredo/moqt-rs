@@ -59,7 +59,7 @@ const DROP_WARN_LIMIT: u64 = 5;
 /// OpusHead (RFC 7845 §5.1) から取り出した `dOps` に載せる値
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct OpusHeadConfig {
-    /// Channel Count
+    /// Channel Count (チャンネル数)
     pub channel_count: u8,
     /// Pre-skip (48 kHz 基準のサンプル数)
     pub pre_skip: u16,
@@ -1222,7 +1222,7 @@ fn parse_hevc_decoder_config_record(buf: &[u8]) -> Result<HevcDecoderConfigRecor
         for _ in 0..count {
             let nal = read_ps_nal(buf, &mut pos, "HEVCDecoderConfigurationRecord")?;
             match nal_type {
-                // ITU-T H.265 §7.4.2.2 Table 7-1
+                // ITU-T H.265 §7.4.2.2 の Table 7-1
                 32 => vps_list.push(nal),
                 33 => sps_list.push(nal),
                 34 => pps_list.push(nal),
@@ -1647,11 +1647,14 @@ mod tests {
         let SampleEntry::Opus(opus) = entry else {
             panic!("Opus sample entry になること");
         };
-        assert_eq!(opus.audio.channelcount, 1, "Channel Count");
+        assert_eq!(opus.audio.channelcount, 1, "チャンネル数 (Channel Count)");
         assert_eq!(opus.dops_box.output_channel_count, 1, "dOps のチャンネル数");
-        assert_eq!(opus.dops_box.pre_skip, 312, "Pre-skip");
-        assert_eq!(opus.dops_box.input_sample_rate, 48_000, "Input Sample Rate");
-        assert_eq!(opus.dops_box.output_gain, -512, "Output Gain");
+        assert_eq!(opus.dops_box.pre_skip, 312, "Pre-skip (事前スキップ)");
+        assert_eq!(
+            opus.dops_box.input_sample_rate, 48_000,
+            "入力サンプルレート"
+        );
+        assert_eq!(opus.dops_box.output_gain, -512, "出力ゲイン");
     }
 
     /// OpusHead が無ければ catalog の値を使う
@@ -2312,7 +2315,7 @@ mod tests {
         let path = std::env::temp_dir()
             .join(format!("moq-sub-mp4-{}-missing-dir", std::process::id()))
             .join("out.mp4");
-        std::fs::remove_dir_all(path.parent().expect("parent exists")).ok();
+        std::fs::remove_dir_all(path.parent().expect("親ディレクトリが存在すること")).ok();
         let mut writer = Writer::new(path.clone(), test_audio_setup());
         writer.handle_audio(AudioSample {
             timestamp: Some(0),

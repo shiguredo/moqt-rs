@@ -1088,7 +1088,7 @@ impl Session {
     ) -> Result<(), SessionError> {
         // ローカル終端済みの request (`rejected_request_ids` に記録) は送信方向を reset 済みだが、
         // peer が reset を観測する前に送った REQUEST_UPDATE は正当に届く。その場合は
-        // 状態遷移とイベント発行をしない (Request ID / MAX_REQUEST_UPDATES / state・role /
+        // 状態遷移とイベント発行をしない (Request ID / MAX_REQUEST_UPDATES / state / role /
         // auth token / パラメータスコープの検証は呼び出し元 `handle_peer_request_update` で
         // 済んでいる)。
         // 破棄済み (`forget_*` 後) の request への REQUEST_UPDATE は送信者を特定できないため
@@ -1397,7 +1397,7 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        // ローカル終端済みの request はここまでの検証 (送信者・state) だけを行い、
+        // ローカル終端済みの request はここまでの検証 (送信者 / state) だけを行い、
         // イベント発行はしない (peer が reset を観測する前に送った正当な応答が遅延して届く)
         if self.is_locally_terminated_request(request_id) {
             return Ok(());
@@ -1413,7 +1413,7 @@ impl Session {
         Ok(())
     }
 
-    // ─── REQUEST_ERROR per-kind dispatch ───────────────────────
+    // ─── REQUEST_ERROR の種類別処理 ───────────────────────
 
     /// FETCH への REQUEST_ERROR 送信時の fetch 状態遷移
     ///

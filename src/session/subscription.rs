@@ -38,7 +38,7 @@ impl Session {
     /// 削除は [`Session::remove_subscription_track_index`] が `subscriptions_by_track` を担い、
     /// subscription 本体は `forget_subscription` が除去する。alias 索引は別フェーズで登録する
     /// (`my_publisher_aliases` は `insert_alias_holder`、`peer_publisher_aliases` は
-    /// `register_peer_alias`（受信 PUBLISH / SUBSCRIBE_OK 確定時）)。
+    /// `register_peer_alias` (受信 PUBLISH / SUBSCRIBE_OK 確定時))。
     pub(crate) fn register_subscription(&mut self, request_id: u64, subscription: Subscription) {
         let key = (
             subscription.track_namespace.clone(),
@@ -106,8 +106,8 @@ impl Session {
     /// 実際に除去する open な受信 data stream には `SessionEvent::StopSendingDataStream`
     /// (`error_code` は CANCELLED (0x1)) を stream_id の昇順で発行する
     /// (draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE) の SHOULD)。対象は移管先の無い
-    /// subgroup stream と fill fetch stream であり、移管する subgroup stream・通常の FETCH
-    /// 応答 stream・`Discarded` と終端済みの stream は対象外である。除去した fill fetch
+    /// subgroup stream と fill fetch stream であり、移管する subgroup stream / 通常の FETCH
+    /// 応答 stream / `Discarded` と終端済みの stream は対象外である。除去した fill fetch
     /// stream の id は破棄対象の保持集合へ移すため、STOP_SENDING の後に届く FIN /
     /// RESET_STREAM は no-op で吸収される。
     /// 最後の帰属先が既に回収・キャンセル済みの場合は、同じ Track Alias の生きた他候補の

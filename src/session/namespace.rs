@@ -1129,7 +1129,7 @@ impl Session {
             return Ok(());
         }
         self.apply_peer_message_auth_tokens(&msg.parameters)?;
-        // draft-ietf-moq-transport-23 §3.3.2 (Range Filters) / §9.1.6 (MAX FILTER RANGES)
+        // 仕様: draft-ietf-moq-transport-23 §3.3.2 (Range Filters) / §9.1.6 (MAX FILTER RANGES)
         if let Err(reason) = self.check_incoming_range_filters(&msg.parameters) {
             self.emit_request_error(request_id, crate::error::REQUEST_INVALID_FILTER, reason);
             return Ok(());

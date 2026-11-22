@@ -44,9 +44,9 @@ pub fn allocate_alt_group_group_ids(start_group_id: u64, variant_count: usize) -
 /// variant の 1 Object 分のメタデータ
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VariantObject {
-    /// MOQT Group ID
+    /// MOQT の Group ID
     pub group_id: u64,
-    /// MOQT Object ID
+    /// MOQT の Object ID
     pub object_id: u64,
     /// この Object がキーフレームか
     pub is_keyframe: bool,

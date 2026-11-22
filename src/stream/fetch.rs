@@ -28,7 +28,7 @@ use super::{FETCH_HEADER_TYPE, validate_properties_blob};
 use crate::{error::MessageError, varint};
 use alloc::vec::Vec;
 
-/// FETCH_HEADER (draft-ietf-moq-transport-23 §11.4.1 (Fetch Header))
+/// FETCH_HEADER の形式 (draft-ietf-moq-transport-23 §11.4.1 (Fetch Header))
 #[derive(Debug, Clone, PartialEq)]
 pub struct FetchHeader {
     /// 対応する FETCH 要求の Request ID

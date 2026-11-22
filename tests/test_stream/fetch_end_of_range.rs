@@ -158,15 +158,15 @@ fn consecutive_end_of_range_indicators_chain_previous_locations() {
 /// End of Range は prior + delta + 1 になることを固定する。
 fn ascending_golden() -> Vec<u8> {
     let mut bytes = Vec::new();
-    // FETCH_HEADER (type 0x05 / Request ID 1)
+    // FETCH_HEADER (type 0x05 の Request ID 1)
     bytes.extend_from_slice(&[0x05, 0x01]);
-    // Object: Group 1 / Subgroup 0 / Object 0 / Priority 128 / payload 1
+    // Object: Group 1、Subgroup 0、Object 0、Priority 128、payload 1 バイト
     bytes.extend_from_slice(&[0x1F, 0x01, 0x00, 0x00, 0x80, 0x01, b'a']);
     // End of Non-Existent Range: Group 1 + 2 = 3 / Object は絶対値 2
     bytes.extend_from_slice(&[0x80, 0x8C, 0x02, 0x02]);
     // Object: Group 3 / Object 2 + 1 = 3 / Subgroup と Priority は直前の actual Object から継承
     bytes.extend_from_slice(&[0x01, 0x01, b'b']);
-    // End of Unknown Range: Group 3 / Object 3 + 0 + 1 = 4
+    // End of Unknown Range: Group 3 の Object 3 + 0 + 1 = 4
     bytes.extend_from_slice(&[0x81, 0x0C, 0x00, 0x00]);
     // End of Timed-Out Range: Group 3 + 2 = 5 / Object は絶対値 0
     bytes.extend_from_slice(&[0x82, 0x0C, 0x02, 0x00]);
@@ -258,15 +258,15 @@ fn ascending_end_of_range_golden_bytes_encode() {
 /// 減算する。同一 Group の End of Range は prior + delta + 1 になる。
 fn descending_golden() -> Vec<u8> {
     let mut bytes = Vec::new();
-    // FETCH_HEADER (type 0x05 / Request ID 1)
+    // FETCH_HEADER (type 0x05 の Request ID 1)
     bytes.extend_from_slice(&[0x05, 0x01]);
-    // Object: Group 10 / Subgroup 0 / Object 5 / Priority 128 / payload 0
+    // Object: Group 10、Subgroup 0、Object 5、Priority 128、payload 0 バイト
     bytes.extend_from_slice(&[0x1F, 0x0A, 0x00, 0x05, 0x80, 0x00]);
     // End of Unknown Range: Group 10 - 3 = 7 / Object は絶対値 2
     bytes.extend_from_slice(&[0x81, 0x0C, 0x03, 0x02]);
     // Object: Group 7 / Object 2 + 1 = 3 / Subgroup と Priority は直前の actual Object から継承
     bytes.extend_from_slice(&[0x01, 0x00]);
-    // End of Timed-Out Range: Group 7 / Object 3 + 2 + 1 = 6
+    // End of Timed-Out Range: Group 7 の Object 3 + 2 + 1 = 6
     bytes.extend_from_slice(&[0x82, 0x0C, 0x00, 0x02]);
     // Object: Group 7 - (2 + 1) = 4 / Object は絶対値 0 / Priority は直前の actual Object と同値なので省略
     bytes.extend_from_slice(&[0x0F, 0x02, 0x00, 0x00, 0x00]);

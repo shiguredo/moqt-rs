@@ -369,7 +369,10 @@ mod tests {
                 matches!(err, Error::WebTransport(_)),
                 "WebTransport に振り分けられること: {err}"
             );
-            assert!(err.to_string().starts_with("WebTransport: "), "{err}");
+            assert!(
+                err.to_string().starts_with("WebTransport: "),
+                "エラー: {err}"
+            );
         }
     }
 }

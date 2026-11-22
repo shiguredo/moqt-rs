@@ -8,7 +8,7 @@ use shiguredo_moqt::{
     session::types::SessionError, session::types::SessionEvent, session::types::SessionState,
 };
 
-// deadline 満了時の終端と、遅延メッセージ・data stream の吸収はサブモジュールへ分割する
+// deadline 満了時の終端と、遅延メッセージ / data stream の吸収はサブモジュールへ分割する
 // (fetch の `#[path = "fetch/fill.rs"]` と同じ方式)
 #[path = "goaway/absorb.rs"]
 mod absorb;
@@ -1300,7 +1300,7 @@ fn goaway_sent_side_registers_auth_token_from_going_away_rejected_subscribe() {
         .expect("server は GOAWAY を送信できる");
     let _ = take_goaway(&mut server);
 
-    // client → server: SUBSCRIBE (REGISTER alias=7)
+    // client → server: SUBSCRIBE (REGISTER で alias=7)
     let rid1 = client
         .send_subscribe(
             ns(&[b"live"]),

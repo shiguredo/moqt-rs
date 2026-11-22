@@ -184,7 +184,7 @@ impl<C: Copy> Scheduler<C> {
         self.phase = Phase::Running;
         Ok(self
             .start_next(now)
-            .expect("a non-empty candidate list must start a candidate"))
+            .expect("空でない候補リストは候補を開始すること"))
     }
 
     /// イベントを処理し、次に取る行動を返す
@@ -288,7 +288,7 @@ impl<C: Copy> Scheduler<C> {
             self.next_start_at = None;
             let best = self
                 .best_failure
-                .expect("at least one failed candidate must be recorded");
+                .expect("失敗した候補が 1 つ以上記録されること");
             return Ok(Action::Failed {
                 index: best,
                 candidate: self.candidates[best],
@@ -299,7 +299,7 @@ impl<C: Copy> Scheduler<C> {
             self.accelerate_next_start(now);
             let deadline = self
                 .next_start_at
-                .expect("a pending candidate must have a start deadline");
+                .expect("待機中の候補には開始期限があること");
             return Ok(Action::WaitUntil { deadline });
         }
 
@@ -379,7 +379,9 @@ mod tests {
     #[test]
     fn starts_first_candidate_and_then_timer_candidate() {
         let mut scheduler = Scheduler::new(&groups(2), config());
-        let action = scheduler.start(Timestamp::from_millis(0)).expect("start");
+        let action = scheduler
+            .start(Timestamp::from_millis(0))
+            .expect("start の呼び出しに成功すること");
         assert_eq!(
             action,
             Action::Start {
@@ -396,7 +398,7 @@ mod tests {
             .handle(Event::Timer {
                 now: Timestamp::from_millis(250),
             })
-            .expect("timer");
+            .expect("timer イベントの処理に成功すること");
         assert_eq!(
             action,
             Action::Start {
@@ -414,13 +416,15 @@ mod tests {
     #[test]
     fn failure_accelerates_next_start() {
         let mut scheduler = Scheduler::new(&groups(2), config());
-        scheduler.start(Timestamp::from_millis(0)).expect("start");
+        scheduler
+            .start(Timestamp::from_millis(0))
+            .expect("start の呼び出しに成功すること");
         let action = scheduler
             .handle(Event::Failed {
                 index: 0,
                 now: Timestamp::from_millis(20),
             })
-            .expect("failed");
+            .expect("failed イベントの処理に成功すること");
         assert_eq!(
             action,
             Action::WaitUntil {
@@ -433,7 +437,7 @@ mod tests {
             .handle(Event::Timer {
                 now: Timestamp::from_millis(100),
             })
-            .expect("timer");
+            .expect("timer イベントの処理に成功すること");
         assert_eq!(
             action,
             Action::Start {
@@ -450,10 +454,12 @@ mod tests {
     #[test]
     fn first_success_wins() {
         let mut scheduler = Scheduler::new(&groups(2), config());
-        scheduler.start(Timestamp::from_millis(0)).expect("start");
+        scheduler
+            .start(Timestamp::from_millis(0))
+            .expect("start の呼び出しに成功すること");
         let action = scheduler
             .handle(Event::Succeeded { index: 0 })
-            .expect("succeeded");
+            .expect("succeeded イベントの処理に成功すること");
         assert_eq!(
             action,
             Action::Winner {
@@ -476,24 +482,26 @@ mod tests {
     #[test]
     fn all_failed_returns_preferred_failure() {
         let mut scheduler = Scheduler::new(&groups(2), config());
-        scheduler.start(Timestamp::from_millis(0)).expect("start");
+        scheduler
+            .start(Timestamp::from_millis(0))
+            .expect("start の呼び出しに成功すること");
         scheduler
             .handle(Event::Failed {
                 index: 0,
                 now: Timestamp::from_millis(20),
             })
-            .expect("failed");
+            .expect("failed イベントの処理に成功すること");
         scheduler
             .handle(Event::Timer {
                 now: Timestamp::from_millis(100),
             })
-            .expect("timer");
+            .expect("timer イベントの処理に成功すること");
         let action = scheduler
             .handle(Event::Failed {
                 index: 1,
                 now: Timestamp::from_millis(110),
             })
-            .expect("failed");
+            .expect("failed イベントの処理に成功すること");
         assert_eq!(
             action,
             Action::Failed {
@@ -510,12 +518,14 @@ mod tests {
     #[test]
     fn early_timer_returns_same_deadline() {
         let mut scheduler = Scheduler::new(&groups(2), config());
-        scheduler.start(Timestamp::from_millis(0)).expect("start");
+        scheduler
+            .start(Timestamp::from_millis(0))
+            .expect("start の呼び出しに成功すること");
         let action = scheduler
             .handle(Event::Timer {
                 now: Timestamp::from_millis(10),
             })
-            .expect("timer");
+            .expect("timer イベントの処理に成功すること");
         assert_eq!(
             action,
             Action::WaitUntil {
@@ -528,7 +538,9 @@ mod tests {
     #[test]
     fn invalid_index_is_rejected() {
         let mut scheduler = Scheduler::new(&groups(1), config());
-        scheduler.start(Timestamp::from_millis(0)).expect("start");
+        scheduler
+            .start(Timestamp::from_millis(0))
+            .expect("start の呼び出しに成功すること");
         assert_eq!(
             scheduler.handle(Event::Succeeded { index: 1 }),
             Err(Error::InvalidIndex)
@@ -549,7 +561,9 @@ mod tests {
     #[test]
     fn double_start_is_rejected() {
         let mut scheduler = Scheduler::new(&groups(1), config());
-        scheduler.start(Timestamp::from_millis(0)).expect("start");
+        scheduler
+            .start(Timestamp::from_millis(0))
+            .expect("start の呼び出しに成功すること");
         assert_eq!(
             scheduler.start(Timestamp::from_millis(1)),
             Err(Error::AlreadyStarted)

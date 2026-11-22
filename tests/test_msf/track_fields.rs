@@ -240,7 +240,7 @@ fn buffers_ignored_when_is_live_false() {
 
 #[test]
 fn avg_bitrate_decoded() {
-    // draft-ietf-moq-msf-02 §5.2.24 (Average Bitrate): avgBitrate
+    // 仕様: draft-ietf-moq-msf-02 §5.2.24 (Average Bitrate): avgBitrate
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"bitrate":5000000,"avgBitrate":3000000}]}"#;
     let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
         .expect("テストフィクスチャの前提条件を満たす");
@@ -253,7 +253,7 @@ fn avg_bitrate_decoded() {
 
 #[test]
 fn max_durations_decoded() {
-    // draft-ietf-moq-msf-02 §5.2.25 (Maximum GOP Duration) / §5.2.26 (Maximum Group Duration)
+    // 仕様: draft-ietf-moq-msf-02 §5.2.25 (Maximum GOP Duration) / §5.2.26 (Maximum Group Duration)
     let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"maxGopDuration":2000,"maxGroupDuration":4000}]}"#;
     let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
         .expect("テストフィクスチャの前提条件を満たす");

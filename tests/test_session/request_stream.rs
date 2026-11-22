@@ -1467,7 +1467,7 @@ fn requester_receives_responder_fin_and_finishes_request_stream() {
     );
 }
 
-// ─── Pending(Subscriber) supersede by PUBLISH ────
+// ─── PUBLISH による Pending(Subscriber) の置き換え ────
 
 /// draft-ietf-moq-transport-23 §3.1 (Subscriptions): 既存 Pending(Subscriber) subscription に対して
 /// 同一 track の PUBLISH を受信すると、既存を Terminated に遷移させた上で
@@ -1541,7 +1541,7 @@ fn publish_supersedes_pending_subscriber_for_same_track() {
     }
     assert!(
         got_superseded,
-        "expected RequestTerminated(SupersededByPublish)"
+        "RequestTerminated(SupersededByPublish) を期待した"
     );
 
     // 旧 subscribe を forget しても新 PUBLISH の subscriptions_by_track entry は

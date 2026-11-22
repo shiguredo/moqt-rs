@@ -216,7 +216,7 @@ fn compress_mixes_splice_with_cross_fade() {
             (1.0 - weight) * original[splice - removed + index] + weight * original[splice + index];
         assert!(
             (channel[splice - removed + index] - expected).abs() < 1e-5,
-            "index={index}"
+            "添字 index={index}"
         );
     }
     // 切れ目より後ろは削った分だけ前へ詰まる
@@ -377,7 +377,7 @@ fn supported_sample_rates_are_stretched() {
         assert_eq!(
             compress(&mut channels, sample_rate, usize::MAX),
             -expected,
-            "sample_rate={sample_rate}"
+            "サンプルレート sample_rate={sample_rate}"
         );
     }
 }
@@ -648,7 +648,7 @@ fn conceal_repeats_the_tail_period_with_the_fractional_phase() {
     for (index, sample) in output[..1_920].iter().enumerate() {
         let gain = 1.0 - (1.0 - end_gain) * ((index as f32 + 1.0) / 1_920.0);
         let expected = sine_sample(FRAME_SAMPLES + index, 200.0, SAMPLE_RATE, 0.5) * gain;
-        assert!((sample - expected).abs() < 1e-4, "index={index}");
+        assert!((sample - expected).abs() < 1e-4, "添字 index={index}");
     }
     // 埋める長さを超える範囲には書かない
     assert!(output[1_920..].iter().all(|sample| *sample == 0.0));
@@ -855,7 +855,7 @@ fn conceal_lowers_the_amplitude_towards_the_end() {
     };
     let first = peak(&output[..100]);
     let last = peak(&output[4_700..]);
-    assert!(last < first * 0.6, "first={first} last={last}");
+    assert!(last < first * 0.6, "先頭 first={first} 末尾 last={last}");
 }
 
 #[test]
@@ -1039,14 +1039,14 @@ fn supported_sample_rates_are_concealed() {
         assert_eq!(
             conceal(&channels, &mut outputs, sample_rate, 20_000),
             expected as isize,
-            "sample_rate={sample_rate}"
+            "サンプルレート sample_rate={sample_rate}"
         );
         // 生成の先頭は、末尾の周期 1 つ分の先頭
         let end_gain = concealment_end_gain(20_000);
         let gain = 1.0 - (1.0 - end_gain) * (1.0 / expected as f32);
         assert!(
             (output[0] - original[length - period] * gain).abs() < 1e-4,
-            "sample_rate={sample_rate}"
+            "サンプルレート sample_rate={sample_rate}"
         );
     }
 }

@@ -433,7 +433,7 @@ fn publish_with_unknown_and_both_scope_properties_is_accepted() {
     );
 }
 
-// ─── SUBSCRIBE_OK ────────────────────────────────────────
+// ─── SUBSCRIBE_OK のスコープ ────────────────────────────────────────
 
 /// Object 専用の既知 Property を持つ SUBSCRIBE_OK は購読を cancel する
 #[test]
@@ -499,7 +499,7 @@ fn subscribe_ok_with_object_only_property_on_wire_cancels_subscription() {
     assert_malformed_terminations(&mut client, &[(rid, RequestKind::Subscribe)]);
 }
 
-// ─── FETCH_OK ────────────────────────────────────────────
+// ─── FETCH_OK のスコープ ────────────────────────────────────────────
 
 /// Object 専用の既知 Property を持つ FETCH_OK は fetch を cancel する
 #[test]
@@ -588,7 +588,7 @@ fn fetch_ok_with_object_only_property_on_wire_cancels_fetch() {
     assert_malformed_terminations(&mut client, &[(rid, RequestKind::Fetch)]);
 }
 
-// ─── TRACK_STATUS_OK ─────────────────────────────────────
+// ─── TRACK_STATUS_OK のスコープ ─────────────────────────────────────
 
 /// Object 専用の既知 Property を持つ TRACK_STATUS_OK は TRACK_STATUS と関連要求を cancel する
 ///
@@ -701,7 +701,7 @@ fn track_status_ok_with_object_only_property_on_wire_cancels_track_status() {
     assert_malformed_terminations(&mut client, &[(status, RequestKind::TrackStatus)]);
 }
 
-// ─── Object scope (data plane) ───────────────────────────
+// ─── Object scope (data plane: データプレーン) ───────────────────────────
 
 /// Object Properties の Track 専用既知 Property は subgroup 経路で Malformed Track になる
 ///

@@ -597,7 +597,7 @@ fn next_local_request_id_requires_established() {
     assert_eq!(client.state(), SessionState::LocalSetupSent);
 }
 
-// ─── peer_max_auth_token_cache_size (draft-ietf-moq-transport-23 §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE)) ─────
+// ─── peer_max_auth_token_cache_size の検証 (draft-ietf-moq-transport-23 §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE)) ─────
 
 /// peer SETUP 未受信時の `peer_max_auth_token_cache_size` はデフォルト 0 を返す
 ///
@@ -711,7 +711,7 @@ fn peer_max_auth_token_cache_size_is_peer_value_not_self_limit() {
     );
 }
 
-// ─── MAX_CONTROL_MESSAGE_SIZE (draft-ietf-moq-transport-23 §9.1.8) ─────
+// ─── MAX_CONTROL_MESSAGE_SIZE の検証 (draft-ietf-moq-transport-23 §9.1.8) ─────
 
 /// MAX_CONTROL_MESSAGE_SIZE を持つ SetupOptions を作る
 fn options_with_max_control_message_size(value: u64) -> SetupOptions {

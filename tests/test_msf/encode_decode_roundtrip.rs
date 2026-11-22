@@ -1480,7 +1480,7 @@ fn catalog_namespace_v02_roundtrip() {
     assert_eq!(decoded, doc, "decode / encode が往復すること");
 }
 
-/// encode が decode できない名前・namespace を出力しないこと
+/// encode が decode できない名前 / namespace を出力しないこと
 ///
 /// `MsfCatalogDocument::encode` は `decode_full_catalog` と同じ MUST 検証を通すため、
 /// 手組みの不正値もここで拒否される。

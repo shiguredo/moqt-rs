@@ -94,7 +94,7 @@ fn subgroup_header_unknown_alias_can_be_retried_after_alias_established() {
         .expect("テストフィクスチャの前提条件を満たす");
 }
 
-/// FirstObjectId モードの空 Subgroup（ヘッダーのみ + FIN、オブジェクト 0 個）が
+/// FirstObjectId モードの空 Subgroup (ヘッダーのみ + FIN、オブジェクト 0 個) が
 /// セッションを fail させずに受理される
 ///
 /// 受信側は FIN を「この Subgroup で受信すべき全オブジェクトを受信した」ことの
@@ -140,7 +140,7 @@ fn empty_first_object_id_subgroup_fin_does_not_fail_session() {
         .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
         .expect("テストフィクスチャの前提条件を満たす");
 
-    // セッションは fail しない（CloseSession イベントが発行されない）
+    // セッションは fail しない (CloseSession イベントが発行されない)
     assert_eq!(client.state(), SessionState::Established);
     while let Some(e) = client.poll_event() {
         assert!(
@@ -169,7 +169,7 @@ fn empty_first_object_id_subgroup_fin_does_not_fail_session() {
     );
 }
 
-/// END_OF_GROUP 空 Subgroup（オブジェクト 0 個）+ FIN で Group 終端が記録され、
+/// END_OF_GROUP 空 Subgroup (オブジェクト 0 個)+ FIN で Group 終端が記録され、
 /// 後から届くオブジェクトが Malformed Track として拒否される
 ///
 /// draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header) の END_OF_GROUP bit
@@ -230,7 +230,7 @@ fn end_of_group_empty_subgroup_fin_records_group_end() {
     assert_eq!(err.reason, "object received after End of Group");
 }
 
-/// Zero モードの END_OF_GROUP 空 Subgroup（オブジェクト 0 個）+ FIN で Group 終端が記録される
+/// Zero モードの END_OF_GROUP 空 Subgroup (オブジェクト 0 個)+ FIN で Group 終端が記録される
 ///
 /// FirstObjectId モードと違い subgroup_id が解決済み (Some(0)) のため、
 /// `peer_subgroups.mark_fin(…, None)` で final Object が無いことを記録しつつ、
@@ -1122,7 +1122,7 @@ fn send_object_datagram_max_location_uses_lexicographic_order() {
 #[test]
 fn send_object_datagram_updates_location_with_non_normal_status() {
     let (_, mut server, rid) = establish_subscribe_track(506);
-    // EndOfGroup = 0x3
+    // EndOfGroup = 0x3 (Group の終端)
     server
         .send_object_datagram(rid, 3, 1, None, Some(3), false)
         .expect("テストフィクスチャの前提条件を満たす");
@@ -1179,7 +1179,7 @@ fn send_object_datagram_rejects_invalid_properties_length() {
             None,
             "{label}: 拒否時に最大位置を更新しないこと"
         );
-        assert_eq!(server.state(), SessionState::Established, "{label}");
+        assert_eq!(server.state(), SessionState::Established, "ラベル {label}");
     }
 }
 
@@ -1369,12 +1369,12 @@ fn send_object_datagram_rejected_for_status_with_end_of_group() {
         assert_eq!(
             err.as_session_error().map(|e| e.code),
             Some(SESSION_PROTOCOL_VIOLATION),
-            "status={status}"
+            "状態 status={status}"
         );
         assert_eq!(
             err.as_session_error().map(|e| e.reason.as_ref()),
             Some("STATUS and END_OF_GROUP cannot both be set"),
-            "status={status}"
+            "状態 status={status}"
         );
         assert_eq!(
             server
@@ -1384,7 +1384,11 @@ fn send_object_datagram_rejected_for_status_with_end_of_group() {
             None,
             "status={status}: 拒否時に最大位置を更新しないこと"
         );
-        assert_eq!(server.state(), SessionState::Established, "status={status}");
+        assert_eq!(
+            server.state(),
+            SessionState::Established,
+            "状態 status={status}"
+        );
     }
 }
 
@@ -1698,7 +1702,7 @@ mod per_subgroup_delivery_timeout_override {
         let alias = 604;
         let (mut client, _, rid) = establish_with_track_delivery_timeout(alias);
 
-        // subgroup (1, 0): SUBGROUP_DELIVERY_TIMEOUT=100
+        // subgroup (1, 0): SUBGROUP_DELIVERY_TIMEOUT は 100
         open_subgroup_and_recv_first_object(
             &mut client,
             DataStreamId(24),
@@ -1708,7 +1712,7 @@ mod per_subgroup_delivery_timeout_override {
             Some(encode_subgroup_timeout_property(100)),
         );
 
-        // subgroup (2, 1): SUBGROUP_DELIVERY_TIMEOUT=300
+        // subgroup (2, 1): SUBGROUP_DELIVERY_TIMEOUT は 300
         open_subgroup_and_recv_first_object(
             &mut client,
             DataStreamId(25),
@@ -1815,7 +1819,10 @@ fn recv_datagram_status_with_end_of_group_closes_session() {
         let err = client
             .recv_datagram(&[type_id, 0x00, 0x00, 0x00])
             .expect_err("STATUS + END_OF_GROUP の type は拒否される");
-        assert_eq!(err.code, SESSION_INVALID_STREAM_HEADER, "type={type_id:#x}");
+        assert_eq!(
+            err.code, SESSION_INVALID_STREAM_HEADER,
+            "型 type={type_id:#x}"
+        );
         assert_eq!(
             err.reason, "unknown datagram type",
             "type={type_id:#x}: 無効 type として扱われること"
@@ -1974,7 +1981,7 @@ fn recv_datagram_empty_closes_session() {
     assert_eq!(err.reason, "datagram type varint could not be decoded");
 }
 
-// ─── mid-object FIN (draft-ietf-moq-transport-23 §11.3 (Subgroup Streams)) ────────────
+// ─── mid-object の FIN (draft-ietf-moq-transport-23 §11.3 (Subgroup Streams)) ────────────
 
 /// subgroup stream の raw バイト列を組み立てる
 ///
@@ -3675,7 +3682,7 @@ fn datagram_end_of_group_bit_sets_group_end() {
         .expect_err("宣言位置より大きい Object ID は拒否される");
 }
 
-// ─── Stream Reset Error Codes (draft §12.5 / §11.3.2) ────────────
+// ─── Stream Reset のエラーコード (draft §12.5 / §11.3.2) ────────────
 
 /// 理由からエラーコードへの対応表が draft-ietf-moq-transport-23 §12.5 と一致する
 #[test]
@@ -6142,7 +6149,7 @@ fn recv_object_datagram_rejects_status_with_end_of_group() {
             publisher_priority: Some(7),
             properties_data: None,
             end_of_group: true,
-            // End of Group (0x3)
+            // End of Group (0x3、Group の終端)
             status: Some(0x3),
         })
         .expect_err("STATUS と END_OF_GROUP の同時指定は拒否される");
@@ -6161,7 +6168,7 @@ fn recv_object_datagram_rejects_properties_on_non_normal_status() {
             publisher_priority: Some(7),
             properties_data: Some(valid_datagram_properties_blob()),
             end_of_group: false,
-            // End of Track (0x4)
+            // End of Track (0x4、Track の終端)
             status: Some(0x4),
         })
         .expect_err("非 Normal status の Properties は拒否される");

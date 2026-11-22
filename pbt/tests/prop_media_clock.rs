@@ -23,11 +23,11 @@ fn converted_times_are_monotonic_and_non_negative() -> noprop::TestResult {
             let converted = mapper
                 .to_wall_clock_us(media_us, None)
                 .expect("記録したので換算できること");
-            assert!(converted >= 0, "converted={converted}");
+            assert!(converted >= 0, "変換後 converted={converted}");
             if let Some(previous) = previous {
                 assert!(
                     converted > previous,
-                    "previous={previous} converted={converted}"
+                    "前回 previous={previous} 変換後 converted={converted}"
                 );
             }
             previous = Some(converted);

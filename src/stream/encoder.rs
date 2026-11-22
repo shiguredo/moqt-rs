@@ -33,7 +33,7 @@ pub struct FetchObjectInput {
     pub subgroup_id: u64,
     /// 絶対 Object ID
     pub object_id: u64,
-    /// Publisher Priority
+    /// Publisher Priority (配信者の優先度)
     pub publisher_priority: u8,
     /// Properties フィールドが存在するか
     pub has_properties: bool,
@@ -614,7 +614,7 @@ impl FetchStreamEncoder {
     ///
     /// `build_entry` は生の Group ID Delta / Object ID Delta を受け取って variant を組み立てる。
     /// 4 種の End of Range はフィールドの構造が同じで variant だけが異なるため、
-    /// デルタ計算・状態更新・prior 文脈の遷移を共通化する。
+    /// デルタ計算、状態更新、prior 文脈の遷移を共通化する。
     ///
     /// 範囲は直前に直列化した Object より後、`group_id` / `object_id` まで (指定した Location を
     /// 含む) であり、draft-ietf-moq-transport-23 §11.4.2 (End of Range) の "All Objects with

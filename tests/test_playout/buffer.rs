@@ -580,7 +580,7 @@ fn select_nearest_draws_each_frame_at_the_nearest_tick() {
                 }
                 assert!(
                     (*tick_us - nearest_tick_us).saturating_abs() <= 1_000,
-                    "{fps} fps / {refresh_hz} Hz: tick={tick_us} nearest={nearest_tick_us} presentation={frame_presentation_us}"
+                    "{fps} fps / {refresh_hz} Hz の比較: tick={tick_us} nearest={nearest_tick_us} presentation={frame_presentation_us}"
                 );
             }
         }

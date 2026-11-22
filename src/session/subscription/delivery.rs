@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn expires_non_zero_sets_subscription_expires() {
-        // EXPIRES=n（n > 0）では subscription.expires に DeadlineTimer が設定される。
+        // EXPIRES=n (n > 0) では subscription.expires に DeadlineTimer が設定される。
         // draft-ietf-moq-transport-23 §9.19.16
         let mut subscription = empty_subscription();
         let mut params = MessageParameters::new();

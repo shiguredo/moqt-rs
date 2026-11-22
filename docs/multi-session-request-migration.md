@@ -57,7 +57,7 @@ using the appropriate mechanism (e.g. FIN, stream reset, or PUBLISH_DONE)" を S
 - CODEBASE.md のとおり、`Session` は 1 本の MOQT Transport Session に閉じた endpoint-local の protocol state
   machine であり、Sans I/O / no_std を守る。本設計ではライブラリの `Session` API を複数 session 対応に拡張しない。
   session の所有とルーティングは crates と `crates/tokio-moq` の範囲に閉じる。
-- relay 機能は追加しない。モック・スタブは使わず、失敗系も実 peer の REQUEST_ERROR / 無応答 / 切断で作る。
+- relay 機能は追加しない。モック / スタブは使わず、失敗系も実 peer の REQUEST_ERROR / 無応答 / 切断で作る。
 - 設計の反映先の issue は、reopened の理由を追記してから実装対象へ戻す。
 
 ## 3. 設計
@@ -147,7 +147,7 @@ Idle
   -> Failed { reason }                        // 期限切れ / 拒否 / 新 session 断
 ```
 
-- `Establishing` は control GOAWAY 移行の接続確立・認可トークン引き継ぎ・指数バックオフ・期限の既存実装
+- `Establishing` は control GOAWAY 移行の接続確立、認可トークン引き継ぎ、指数バックオフ、期限の既存実装
   (`establish_publisher_session_with_retry` / `migration_target` / `MigrationDeadline`) を共通化して使う。
   control GOAWAY と異なり旧 session を閉じず、`SessionHandle` を追加するだけにする。
 - `Reissuing` では request 種別ごとの再発行 API を新しい handle に対して送る。
@@ -176,7 +176,7 @@ Idle
   以下ならアプリへ渡さず破棄する。watermark はアプリへ渡した時点で更新する。
 - catalog の適用は `CatalogState` へ到着順に適用する既存経路を維持し、重複 Object は watermark で落とす。
   catalog の delta は Location 順に届くため watermark による重複排除で十分である。
-- 映像・音声の decode order は論理 track 単位で維持する。移行直後は watermark より後の Object だけを復号へ
+- 映像 / 音声の decode order は論理 track 単位で維持する。移行直後は watermark より後の Object だけを復号へ
   渡すため、`VideoDecodeOrder` / `AudioDeliveryOrder` は session をまたいで共有する。
 
 ### 3.7 request 種別ごとの移行手順
@@ -202,17 +202,17 @@ Idle
 
 ### 3.8 失敗時
 
-- 新 session の確立失敗・再発行の拒否 (REQUEST_ERROR)・新 session の切断は `Failed` とし、理由をログに出す。
+- 新 session の確立失敗、再発行の拒否 (REQUEST_ERROR)、新 session の切断は `Failed` とし、理由をログに出す。
 - GOAWAY の Timeout は `GoawayReceived.timeout` を絶対時刻へ変換して保持し、`Establishing` / `AwaitingOk`
   の各段階で残り時間を確認する。期限を過ぎたら背景タスクを abort し、main ループを終了する。
 - 旧 request stream の終端に失敗した場合はセッションを閉じずにログを出し、slot の掃除で回収する。
-- 失敗系のテストは実 peer の REQUEST_ERROR・無応答・切断で作り、モックやスタブは使わない。
+- 失敗系のテストは実 peer の REQUEST_ERROR、無応答、切断で作り、モックやスタブは使わない。
 
 ### 3.9 観測
 
 - `SessionEvent::GoawayReceived { on_request_stream: Some(request_id), new_session_uri, timeout }` で
   移行対象を特定できる。example は `(SessionId, request_id)` を `RequestOwner` に解決してから移行を開始する。
-- 移行の開始・確立・再発行・完了・失敗を `tracing` で記録する。control GOAWAY 移行と同じイベント名・
+- 移行の開始、確立、再発行、完了、失敗を `tracing` で記録する。control GOAWAY 移行と同じイベント名 /
   レベルに揃える。
 - 移行回数と失敗数を example のログで観測できるようにする。メトリクスライブラリの追加はしない。
 
@@ -255,7 +255,7 @@ URL ごとの side session の専用タスクで扱う方式である。実装�
    実装する。対象: 両 example。実装済み。
 6. docs を実装に合わせて更新する。この文書と `docs/missing-features.md` は side session 方式に更新済み
    である。`docs/moqt.md` は session 層の request stream GOAWAY の記述を持つ。
-7. テスト (移行成功・同一 URL・失敗・重複排除) を peer_harness の実 peer 統合テストとして追加する。
+7. テスト (移行成功、同一 URL、失敗、重複排除) を peer_harness の実 peer 統合テストとして追加する。
    対象: `crates/moq-sub/src/pipeline.rs` / `crates/moq-pub/src/pipeline.rs`。実装済み。
 
 未対応 (今後の課題):

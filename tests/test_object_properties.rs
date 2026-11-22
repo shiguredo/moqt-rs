@@ -1248,7 +1248,7 @@ mod codec_string {
 
     #[test]
     fn codec_string_inside_immutable_properties_roundtrip() {
-        // IMMUTABLE_PROPERTIES の内側だけに CODEC_STRING を置いても構築・decode でき、
+        // IMMUTABLE_PROPERTIES の内側だけに CODEC_STRING を置いても構築 / decode でき、
         // 内側の KVP 列と、Track スコープの codec_string で文字列として取得できること。
         let codec = "vp09.00.10.08";
         let mut inner = ObjectProperties::new();

@@ -31,7 +31,7 @@ pub enum Role {
 pub enum Transport {
     /// QUIC connection 直接 (moqt:// URI)
     Quic,
-    /// WebTransport over HTTP/3
+    /// WebTransport over HTTP/3 のトランスポート
     WebTransport,
     /// QMux (draft-ietf-quic-qmux-02) 経由
     ///
@@ -702,7 +702,7 @@ pub enum SessionEvent {
     StopSendingDataStream {
         /// 対象 data stream の ID
         stream_id: DataStreamId,
-        /// Stream Reset Error Code (§12.5)
+        /// Stream Reset のエラーコード (§12.5)
         error_code: u64,
     },
     /// fill fetch stream を開く (draft-ietf-moq-transport-23 §3.4 (Fill Semantics))
@@ -783,7 +783,7 @@ pub enum SessionEvent {
     ResetRequestStream {
         /// 対象 request の Request ID
         request_id: u64,
-        /// Stream Reset Error Code (§12.5)
+        /// Stream Reset のエラーコード (§12.5)
         error_code: u64,
     },
     /// bidi request stream の受信方向を STOP_SENDING で打ち切る
@@ -814,7 +814,7 @@ pub enum SessionEvent {
     StopSendingRequestStream {
         /// 対象 request の Request ID
         request_id: u64,
-        /// Stream Reset Error Code (§12.5)
+        /// Stream Reset のエラーコード (§12.5)
         error_code: u64,
     },
     /// bidi request stream の送信方向を FIN で閉じる
@@ -1394,7 +1394,7 @@ impl DeadlineTimer {
     /// 新しい `DeadlineTimer` を作成する。
     ///
     /// `duration_ms == 0` は即期限切れとして扱う。例えば draft-ietf-moq-transport-23
-    /// §9.19.16（将来の draft で変更される可能性がある）の EXPIRES=0 を「期限なし」
+    /// §9.19.16 (将来の draft で変更される可能性がある) の EXPIRES=0 を「期限なし」
     /// と扱いたい場合は、呼び出し側で `None` に正規化してから渡すこと。
     pub(crate) fn new(duration_ms: u64, now_ms: Option<u64>) -> Self {
         match now_ms {
@@ -1500,7 +1500,7 @@ mod tests {
         };
         sub.publish_done
             .as_mut()
-            .expect("terminated_subscription_with_publish_done must set publish_done")
+            .expect("terminated_subscription_with_publish_done は publish_done を設定すること")
             .drain
             .expired = drain_expired;
         sub
@@ -1629,11 +1629,11 @@ mod tests {
 /// (将来の draft で変更される可能性がある)
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubscriptionPublishDone {
-    /// PUBLISH_DONE.status_code
+    /// PUBLISH_DONE の status_code
     pub status_code: u64,
-    /// PUBLISH_DONE.stream_count
+    /// PUBLISH_DONE の stream_count
     pub stream_count: u64,
-    /// PUBLISH_DONE.reason
+    /// PUBLISH_DONE の reason
     pub reason: ReasonPhrase,
     /// late-arriving stream を待つ drain timer
     pub drain: DeadlineTimer,
@@ -1948,7 +1948,7 @@ pub struct Subscription {
     /// draft-ietf-moq-transport-23 §3.6 (Subscribing to Tracks by Prefix) は
     /// SUBSCRIBE_TRACKS の結果として送る PUBLISH にこの値を載せると定める。
     /// 対応する SUBSCRIBE_TRACKS を自側が送っていれば、prefix の一致・同じ track の重複
-    /// PUBLISH・PUBLISH_SKIPPED 後の PUBLISH を Session が検証する (§3.6 / §9.5.2 / §9.18)。
+    /// PUBLISH / PUBLISH_SKIPPED 後の PUBLISH を Session が検証する (§3.6 / §9.5.2 / §9.18)。
     /// 対応する要求が無い PUBLISH でも値は保持し、受理・拒否は通常の PUBLISH の判断として行う。
     /// 自側が publisher の場合は `send_publish` に渡した値が入る。省略時は `None`。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
@@ -2601,7 +2601,7 @@ impl TrackStatusEntry {
     }
 }
 
-// ─── GOAWAY / Migration ────────────────────────────────────
+// ─── GOAWAY / Migration (セッション移行) ────────────────────────────────────
 //
 // draft-ietf-moq-transport-23 §6.6 (Termination), §6.6.1 (Graceful Session Migration), §9.2 (GOAWAY)
 

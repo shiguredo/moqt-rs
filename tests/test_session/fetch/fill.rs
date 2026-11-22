@@ -1485,7 +1485,7 @@ fn fill_evaluated_with_updated_filter_in_same_update() {
 #[test]
 fn fill_with_empty_range_opens_nothing() {
     let (mut client, mut server, sub_rid) = establish_sub_with_group_object(5, 10);
-    // AbsoluteRangeWithEnd {start {5, 10}, delta 0, end_object 3} → End {5, 3} < Start
+    // AbsoluteRangeWithEnd {start {5, 10}, delta 0, end_object 3} → End {5, 3} < Start (終端が開始より前)
     let inner = inner_with_location_filter(&LocationFilter::AbsoluteRangeWithEnd {
         start: Location {
             group_id: 5,

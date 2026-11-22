@@ -577,7 +577,7 @@ fn track_status_requester_terminates_on_responder_end() -> TestResult {
 ///   送った後に peer FIN が届くと両方向が閉じるため、遅延しても FIN 交換の確定
 ///   (`Session::finish_request_on_fin_exchange`) で同じ結果になり、この条件も単独では観測できない
 ///
-/// サンプルする状態は `Pending(Publisher)` / `Established` (publisher 役・subscriber 役) /
+/// サンプルする状態は `Pending(Publisher)` / `Established` (publisher 役 / subscriber 役) /
 /// `Terminated` (最終メッセージ送信後) である。REQUEST_UPDATE 失敗応答で PUBLISH_DONE を保留した
 /// `Terminated` はこの性質では作らず、例示テスト (`tests/test_session/subscription/request_update.rs`)
 /// が固定する。

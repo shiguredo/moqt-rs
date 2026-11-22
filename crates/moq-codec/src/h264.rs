@@ -159,9 +159,9 @@ fn convert_decoded_frame(result: std::result::Result<DecodedFrame<()>, Error>) -
 
 /// avcC から取り出した SPS / PPS と NAL 長フィールド幅
 struct AvcConfig {
-    /// Sequence Parameter Set
+    /// SPS (Sequence Parameter Set: シーケンスパラメータセット)
     sps: Vec<u8>,
-    /// Picture Parameter Set
+    /// PPS (Picture Parameter Set: ピクチャパラメータセット)
     pps: Vec<u8>,
     /// NAL 長フィールドのバイト数
     nalu_len_bytes: u32,

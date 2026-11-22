@@ -25,7 +25,7 @@ use alloc::vec::Vec;
 /// FetchStreamObject と同じく Length を含む規約である。Datagram では Properties Length = 0 は
 /// プロトコル違反 (受信側は MALFORMED_OBJECT。draft-ietf-moq-transport-23 §11.2.1
 /// (Object Datagram))。
-/// 空スライス (Length varint すら含まない)・途中で切れた Length varint・
+/// 空スライス (Length varint すら含まない)、途中で切れた Length varint、
 /// 宣言 Length と実データ長の不一致も拒否する。
 ///
 /// `ObjectDatagram::encode` と `send_object_datagram` の双方から使い、公開 API から
@@ -74,7 +74,7 @@ pub fn validate_object_datagram_type(type_id: u64) -> Result<(), MessageError> {
     Ok(())
 }
 
-/// OBJECT_DATAGRAM (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram))
+/// OBJECT_DATAGRAM の形式 (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram))
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectDatagram {
     /// 対象トラックの Alias

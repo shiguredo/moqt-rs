@@ -105,19 +105,19 @@ pub struct TokenVector {
     pub token: &'static str,
     /// `alg` の識別子
     pub algorithm_id: i64,
-    /// `iss`
+    /// `iss` (発行者)
     pub issuer: Option<&'static str>,
-    /// `aud`
+    /// `aud` (対象者)
     pub audience: &'static [&'static str],
-    /// `exp`
+    /// `exp` (有効期限)
     pub expiration: Option<f64>,
-    /// `nbf`
+    /// `nbf` (有効開始)
     pub not_before: Option<f64>,
-    /// `iat`
+    /// `iat` (発行時刻)
     pub issued_at: Option<f64>,
-    /// `sub`
+    /// `sub` (主体)
     pub subject: Option<&'static str>,
-    /// `cti`
+    /// `cti` (トークン ID)
     pub cwt_id: Option<&'static str>,
 }
 
@@ -230,7 +230,7 @@ pub struct AuthorizationTest {
     pub action: i64,
     /// Track Namespace のフィールド (UTF-8)
     pub namespace: &'static [&'static str],
-    /// Track Name (UTF-8)
+    /// Track Name (UTF-8 文字列)
     pub track: &'static str,
     /// 期待する判定
     pub expected: bool,

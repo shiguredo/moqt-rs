@@ -32,7 +32,7 @@ enum SubgroupTermination {
 impl SubgroupTermination {
     /// RESET で閉じる場合の Stream Reset Error Code (FIN の場合は `None`)
     ///
-    /// 購読者側のフィルタ不通過・Start Location や End Group の更新による配送中止のいずれも
+    /// 購読者側のフィルタ不通過 / Start Location や End Group の更新による配送中止のいずれも
     /// 「送信側の都合で配送を中止した」ため CANCELLED を使う
     /// (draft-ietf-moq-transport-23 §12.5 (Stream Reset Error Codes))。
     fn reset_error_code(self) -> Option<u64> {
@@ -78,7 +78,7 @@ struct SubgroupObjectState {
 }
 
 impl SubgroupObjectState {
-    /// 初期状態 (Object ID 0・直前の Pass なし・Skip なし) を返す
+    /// 初期状態 (Object ID 0、直前の Pass なし、Skip なし) を返す
     ///
     /// `start_location` には Subgroup 開始時点の購読の Start Location を渡す (判定規則は
     /// [`SubgroupObjectState::termination`] を参照)。
@@ -209,7 +209,7 @@ pub struct SubgroupWriter {
     publisher_priority: u8,
     /// SUBGROUP_HEADER の PROPERTIES ビット
     has_properties: bool,
-    /// Object ID 追跡・FIRST_OBJECT bit・終端方法の決定状態
+    /// Object ID 追跡、FIRST_OBJECT bit、終端方法の決定状態
     object_state: SubgroupObjectState,
 }
 

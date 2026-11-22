@@ -1,6 +1,6 @@
 ---
 name: shiguredo-moqt
-description: "時雨堂の Sans I/O MOQT ライブラリ shiguredo_moqt の機能・API リファレンス。draft-ietf-moq-transport-23 の制御メッセージ・セッション状態機械・data stream / datagram、LOC / MSF の codec、C4M (CAT / CWT) の認可トークン、音声の再生補助 (playout: 到着の揺らぎと実出力の先行量からの再生予算・鳴らす時刻・A/V 同期・共通の時間軸・時間圧縮/伸長・欠落の補間)、encode / decode やセッション駆動の実装に関する質問時に使用。"
+description: "時雨堂の Sans I/O MOQT ライブラリ shiguredo_moqt の機能 / API リファレンス。draft-ietf-moq-transport-23 の制御メッセージ / セッション状態機械、data stream / datagram、LOC / MSF の codec、C4M (CAT / CWT) の認可トークン、音声の再生補助 (playout: 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻、A/V 同期、共通の時間軸、時間圧縮/伸長、欠落の補間)、encode / decode やセッション駆動の実装に関する質問時に使用。"
 ---
 
 # shiguredo_moqt
@@ -14,7 +14,7 @@ draft-ietf-moq-transport-23 に基づく Sans I/O / no_std な Media over QUIC T
 - **依存は 4 つのみ**: `hashbrown` / `noflate` / `nojson` / `base64ct` (暗号処理は optional feature `aws-lc-rs`)
 - **Session 状態機械**: 1 本の Transport Session に閉じた endpoint-local な状態管理
 - **インクリメンタルデコード**: フレーム境界に依存せず受信バッファに蓄積しながらデコード
-- **音声の再生補助**: 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期の遅延制御、時間圧縮・伸長と欠落の補間 (no_std / Sans I/O)
+- **音声の再生補助**: 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期の遅延制御、時間圧縮 / 伸長と欠落の補間 (no_std / Sans I/O)
 - **対応仕様**: MOQT `draft-23` / LOC `draft-05` / MSF `draft-02` / C4M `draft-02`
 
 ## バージョン情報
@@ -66,7 +66,7 @@ use shiguredo_moqt::stream::SubgroupHeader;
 | `pending_subgroup_buffer` | 未到着の Subgroup より前の Object を保留するバッファ |
 | `video_decode_order` | 映像 Object の復号順と表示順の管理 |
 | `video_object_reorder` | 映像 Object の到着順の並べ替え |
-| `playout` | 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期、共通の時間軸、時間圧縮・伸長と欠落の補間 |
+| `playout` | 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期、共通の時間軸、時間圧縮 / 伸長と欠落の補間 |
 | `error` | エラー型とエラーコード定数 |
 
 ## クイックスタート
@@ -190,7 +190,7 @@ fn try_decode_message(&mut self) -> Result<Option<ControlMessage>, MessageError>
 fn try_decode_varint(&mut self) -> Result<Option<u64>, MessageError>
 ```
 
-- `Ok(Some)` = デコード成功・バッファから消費済み
+- `Ok(Some)` = デコード成功 / バッファから消費済み
 - `Ok(None)` = データ不足 (追加の `push` が必要)
 - `Err` = デコードエラー
 
@@ -301,7 +301,7 @@ End of Unknown Range (`0x10C`、§11.4.2 (End of Range)) を示したうえで�
 
 ### `SessionEvent`
 
-`poll_event()` が返すイベント。I/O 層はこれを受けて実際の送信・切断を行う。
+`poll_event()` が返すイベント。I/O 層はこれを受けて実際の送信 / 切断を行う。
 
 | variant | 意味 |
 | --- | --- |
@@ -352,8 +352,8 @@ FETCH 応答の遅延 data stream は破棄対象 stream として吸収し、
 fill fetch stream は subscription への帰属を保ったまま受理する (破棄後の終端通知は no-op)。peer が GOAWAY / reset を観測する前に
 送った応答 (SUBSCRIBE_OK / REQUEST_OK / REQUEST_ERROR / FETCH_OK / PUBLISH_DONE) と
 REQUEST_UPDATE / PUBLISH_STATE_NOTIFY は、各ハンドラがそのメッセージに該当する仕様の検証
-(送信者・種別・自側の役割・パラメータスコープ・PAUSED・Track Alias・Request ID・
-MAX_REQUEST_UPDATES・auth token・応答範囲 (LARGEST_OBJECT と要求 End)) を行ったうえで、状態遷移せず受理する
+(送信者、種別、自側の役割、パラメータスコープ、PAUSED、Track Alias、Request ID、
+MAX_REQUEST_UPDATES、auth token、応答範囲 (LARGEST_OBJECT と要求 End)) を行ったうえで、状態遷移せず受理する
 (subscription の遅延 REQUEST_ERROR は呼び出し元の §9.4.2.1 REDIRECT 検証のみで受理する)。遅延した REQUEST_ERROR では `RequestErrorReceived`
 のみを通知する (他の応答は状態遷移もイベント発行もしない)。ローカル終端済みの REQUEST_UPDATE では
 Range Filter の内容検証を省略する (draft §3.3.2 の MUST は REQUEST_ERROR による拒否であり、
@@ -433,14 +433,14 @@ stream を受理したこと、`RequestNotRegistered` は対応する要求が�
 publisher は初回 fill の fill fetch stream を開くが (draft-ietf-moq-transport-23 §3.4.1
 (Opening and Closing Fill Fetch Streams))、PUBLISH の bidi stream と初回 fill の uni stream の
 到着順序は保証されないため、PUBLISH の処理前に fill が届きうる。§11.4.1 (Fetch Header) は
-未知の Request ID の扱いを定めないため、caller は stream と decode 済みヘッダを有限の上限・
+未知の Request ID の扱いを定めないため、caller は stream と decode 済みヘッダを有限の上限 /
 期限で保留し、PUBLISH の受理後に同じヘッダを再通知すること。tokio-moq の
 `DataPlaneHandle::recv_fetch_header()` はこの契約を実装しており、戻り値は
 `FetchHeaderRegistration` (`Accepted` / `Pending` / `Rejected`) である。`Pending` は保留を
 作ったことを表し、`wait_fetch_header_registration()` で受理を待ってから entry の処理へ進む。
 PUBLISH の受理を観測した側は `notify_publish_accepted(request_id)` を呼んで保留を解決する
 (`MoqtClient` の受信ループが呼ぶ。制御メッセージを独自に処理する場合はアプリが呼ぶ)。
-保留は接続あたり上限 64 件・期限 5 秒であり、期限切れ・上限超過
+保留は接続あたり上限 64 件 / 期限 5 秒であり、期限切れ / 上限超過
 (`FetchHeaderResolution::Discarded` / `FetchHeaderRegistration::Rejected`) では stream の
 読み取りを打ち切る (Session の会計は解放済み)。
 
@@ -972,7 +972,7 @@ fn subscribe_tracks_id(&self) -> Option<u64>                // 0x36
 
 `SUBSCRIBE_TRACKS_ID` (0x36) は PUBLISH でのみ出現できる varint で、SUBSCRIBE_TRACKS の
 Request ID を運ぶ。受信側は値を `Subscription::subscribe_tracks_id` に相関情報として保持する。
-自側が対応する SUBSCRIBE_TRACKS を送っていれば、prefix との一致・同じ track の重複 PUBLISH・
+自側が対応する SUBSCRIBE_TRACKS を送っていれば、prefix との一致、同じ track の重複 PUBLISH、
 PUBLISH_SKIPPED 後の PUBLISH を検証する (§3.6 / §9.5.2 / §9.18)。対応する要求が無い PUBLISH は
 通常の検証と受理判断へ進む。`MessageParameters::resulting_publish_parameters` はこの型を
 引き継がない。`MessageParameters::track_property_filter_passes` で TRACK_PROPERTY_FILTER を
@@ -1031,9 +1031,9 @@ fn find_bytes(&self, prop_id: u64) -> Option<&[u8]>
 (Immutable Properties) の "MUST search both")。既知プロパティの accessor も同じ探索を行う。
 `iter` / `len` / `is_empty` は最上位リストだけを対象にし、`IMMUTABLE_PROPERTIES` の内側は含まない。
 `codec_string` は CODEC_STRING (`0x11`) を UTF-8 文字列として返し、欠落は `Ok(None)`、
-不正な UTF-8 は `MalformedKeyValue` にする。`IMMUTABLE_PROPERTIES` の内側 KVP が解析・
+不正な UTF-8 は `MalformedKeyValue` にする。`IMMUTABLE_PROPERTIES` の内側 KVP が解析 /
 検証できない場合も `Ok(None)` になる (既知の制約)。encode / decode は最上位と
-`IMMUTABLE_PROPERTIES` 内側の UTF-8 を検証する。encode は内側の構造・値域も検証して
+`IMMUTABLE_PROPERTIES` 内側の UTF-8 を検証する。encode は内側の構造 / 値域も検証して
 解析できない内側を拒否し、decode は解析できる内側だけ UTF-8 を検証する。
 
 | 定数 | 値 |
@@ -1210,7 +1210,7 @@ fn decode_event_timeline(
 ) -> Result<MsfEventTimeline, MessageError>
 ```
 
-`compression` は MSF_COMPRESSION property (0x78) の値である。`MsfCompression::Gzip` のときだけ gzip 圧縮・展開し、`None` のときは magic byte があっても自動展開しない (draft-ietf-moq-msf-02 §12.1.1)。
+`compression` は MSF_COMPRESSION property (0x78) の値である。`MsfCompression::Gzip` のときだけ gzip 圧縮 / 展開し、`None` のときは magic byte があっても自動展開しない (draft-ietf-moq-msf-02 §12.1.1)。
 
 ### URI
 
@@ -1546,7 +1546,7 @@ fn Jwk::thumbprint_sha256(&self, crypto: &C) -> Result<Vec<u8>, JwkError>
 
 - 直列化は COSE 形式 (COSE_Sign1 / COSE_Mac0、CWT タグは任意) と旧 compact 形式の両方をデコードできる。発行は `build_cose` を標準とする
 - 暗号実装は `aws-lc-rs` feature でのみ提供する。既定ビルドは no_std のままで、`CoseCrypto` trait と鍵表現だけを持つ
-- 対応アルゴリズムは HMAC 256/384/512・ES256/384/512・EdDSA (Ed25519)。RSA は未対応
+- 対応アルゴリズムは HMAC 256/384/512、ES256/384/512、EdDSA (Ed25519)。RSA は未対応
 
 ## その他
 
@@ -1875,7 +1875,7 @@ fn reset(&mut self)
 
 `playout::scheduler` は目標の時刻に従って音を並べ、間に合わない音は時間圧縮で目標へ戻す。
 `schedule` は計画 (`AudioPlayoutPlan`) を返すだけで、予約位置も統計も進めない。
-呼び出し側が時間圧縮・時間伸長・サンプルへの丸めを適用して出力へ積んだ後に、実際の
+呼び出し側が時間圧縮、時間伸長、サンプルへの丸めを適用して出力へ積んだ後に、実際の
 開始位置と長さ (`AudioPlayoutCommit`) で `commit` する。`commit` は `AudioPlayoutPlay`
 (`arrival_us` / `target_start_us` / `start_at_us` / `played_us` / `basis`) を返すので、
 それをそのまま `AudioPlayoutTimingStats::record_play` へ渡す。加工や投入に失敗した計画は
@@ -1914,12 +1914,12 @@ moqt-js 0885 の `presentationLatencyTicks` (推定表示時刻) は移植して
 `delay_breakdown` で内訳 (`AudioPlayoutDelayStats` を含む) を読める。
 `targetLatency` は `TimelineConfig` か `set_target_latency_ms` で渡し、上限に収まらない分は
 `target_latency_limited_us` で読める。`TimelineConfig` は `video_queue_limit`
-(映像の表示待ちのキューの上限、枚)・`max_presentation_delay_ms` (表示の遅れの上限、
-既定 500)・`target_latency_ms`・`audio_min_delay_us` (音声の待ち時間の下限、既定 50 ms) を
+(映像の表示待ちのキューの上限、枚)、`max_presentation_delay_ms` (表示の遅れの上限、
+既定 500)、`target_latency_ms`、`audio_min_delay_us` (音声の待ち時間の下限、既定 50 ms) を
 受ける。
 (復号の出力の時刻 − TIMESTAMP) が基準から 2 秒以上離れると基準を取り直して `generation` が進む。
 
-`playout::timing` は再生の観測値を記録して分布と累積を返す。`record_play` でスケジューラが決めた音を、`record_miss` で鳴らさなかった音を、`record_stopped` で停止時に切った予約を記録し、`snapshot` で余裕・鳴り始め・遅れの p50 / p95 / max と累積を読む。
+`playout::timing` は再生の観測値を記録して分布と累積を返す。`record_play` でスケジューラが決めた音を、`record_miss` で鳴らさなかった音を、`record_stopped` で停止時に切った予約を記録し、`snapshot` で余裕、鳴り始め、遅れの p50 / p95 / max と累積を読む。
 `record_gap` は補間で埋まらなかった区間、`record_rendered_gap` と `record_rendered_boundary` は出力側が実際に描画した未補間区間とバッファ境界の段差を記録する。`pending_us` / `pending_end_us` で停止時に鳴らし切るまでの残りを読める。`stretch_unavailable_frames` は時間圧縮も補間も使えないサンプルレート (8 kHz / 16 kHz / 32 kHz / 48 kHz / 44.1 kHz 以外) の音の数である。
 
 `MessageError` は `Clone` 不可。後段へ持ち回る場合は再構築を検討する。
@@ -1952,7 +1952,7 @@ moqt-js 0885 の `presentationLatencyTicks` (推定表示時刻) は移植して
 ## 注意事項
 
 - 型は定義元モジュールから import する。re-export は存在しない
-- `Session` は sans-I/O の状態機械であり、I/O・非同期処理・MoQ リレーが担う namespace 発見・告知と forwarding は含まない。`poll_event()` の結果を I/O 層へ渡すのは利用側の責務
+- `Session` は sans-I/O の状態機械であり、I/O、非同期処理、MoQ リレーが担う namespace 発見 / 告知と forwarding は含まない。`poll_event()` の結果を I/O 層へ渡すのは利用側の責務
 - `SendRequestError` のローカルエラー (`PeerGoawayReceived` / `LocalFilterMismatch` / `LocalDatagramTimeout`) は wire コードを持たない。wire コードとして公開 API に渡す必要はない (渡しても各レジストリの `*_INTERNAL_ERROR` に置換される)
 - `ControlMessage` と各メッセージ構造体は `Clone` だが `Copy` ではない
 - `MessageError` は `Clone` / `Copy` 不可

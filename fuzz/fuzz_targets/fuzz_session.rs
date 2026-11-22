@@ -59,7 +59,7 @@ struct FuzzInput {
 /// 受信 subgroup 経路は従来どおり受信 Op の request_id / stream と送信発行 id を
 /// 相関させない。REQUEST_UPDATE も同様に相関させず、`require_established` ガードと
 /// `locate_request` 失敗経路の検証を対象にする (成功経路は pbt 側で検証する)。
-/// 共有 Track Alias の帰属判定・stream 会計・delivery timeout override のライフサイクル
+/// 共有 Track Alias の帰属判定、stream 会計、delivery timeout override のライフサイクル
 /// (pbt の `prop_session/subgroup.rs` が検証する不変条件) を、任意の操作列で panic と
 /// 状態破壊が起きないかの観点で fuzz する。
 #[derive(Arbitrary, Debug)]

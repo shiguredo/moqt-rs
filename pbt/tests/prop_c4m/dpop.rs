@@ -52,15 +52,15 @@ fn sample_namespace(ctx: &mut noprop::TestCaseContext) -> TrackNamespace {
 struct GeneratedContext {
     /// actx の JSON
     text: String,
-    /// `type`
+    /// `type` (コンテキスト種別)
     context_type: String,
-    /// `action`
+    /// `action` (アクションコード)
     action_value: String,
-    /// `tns`
+    /// `tns` (Track Namespace を表す)
     tns_value: String,
-    /// `tn`
+    /// `tn` (Track Name を表す)
     tn_value: Option<String>,
-    /// `resource`
+    /// `resource` (対象リソース)
     resource: Option<String>,
     /// 重複メンバーを含むかどうか
     duplicate: bool,

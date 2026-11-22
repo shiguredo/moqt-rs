@@ -522,7 +522,10 @@ fn request_error_update_failure_transitions_to_terminated_and_auto_resets_data_s
         } = e
         {
             assert_eq!(sid, stream_id);
-            assert_eq!(error_code, STREAM_CANCELLED, "draft §12.5: CANCELLED (0x1)");
+            assert_eq!(
+                error_code, STREAM_CANCELLED,
+                "仕様 (draft §12.5): CANCELLED (0x1)"
+            );
             assert_eq!(
                 reliable_size, None,
                 "自動発火では RESET_STREAM (reliable_size なし) になること"

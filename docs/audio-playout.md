@@ -57,7 +57,7 @@
 
 ### 並べ方 (timestamp 経路と到着基準)
 
-- **予約は計画と確定に分ける。** `AudioPlayoutScheduler::schedule` は鳴らす時刻・詰める長さ・伸ばす長さ・隙間だけを返し、予約位置も統計も進めない。呼び出し側が時間圧縮・時間伸長・サンプルへの丸めを適用して出力へ積んだ後に、実際の開始位置と長さで `commit` する。加工や投入に失敗した計画は次の計画で失効し、予約位置を巻き戻す必要が無い。計画は識別子を持ち、古い計画や二重の確定は拒否する
+- **予約は計画と確定に分ける。** `AudioPlayoutScheduler::schedule` は鳴らす時刻、詰める長さ、伸ばす長さ、隙間だけを返し、予約位置も統計も進めない。呼び出し側が時間圧縮、時間伸長、サンプルへの丸めを適用して出力へ積んだ後に、実際の開始位置と長さで `commit` する。加工や投入に失敗した計画は次の計画で失効し、予約位置を巻き戻す必要が無い。計画は識別子を持ち、古い計画や二重の確定は拒否する
 - 時間軸が TIMESTAMP から目標の時刻を決められるときは、その時刻に従って並べる (`AudioPlayoutBasis::Timestamp`)
 - 鳴らす時刻は、目標の時刻と「今から 10 ms (`AUDIO_PLAYOUT_MIN_LEAD_US`) 以降かつ直前の音の終わり以降」の大きい方である。500 µs 以下の差は直前の音の終わりへ揃えて、1〜2 サンプルの無音を作らない
 - 目標に間に合わない音も捨てない。ずらした分は、遅れと音の長さの半分とキューの余裕の最小値まで時間圧縮で戻す。不感帯未満の遅れでは詰めない。到着基準では、隙間を挟む音 (遅れて届いた音) は詰めない
@@ -84,12 +84,12 @@
 ### 計器
 
 - 予算の内訳: `PlayoutTimeline::audio_delay_stats` が `jitter_us` / `output_lead_us` / `target_us` を返す。`compression_deadband_us` は圧縮の不感帯を返す
-- 遅延の内訳: `PlayoutTimeline::delay_breakdown` が音声と映像の基準の遅れ・jitter buffer の遅延・同期の補償・表示の遅れ・上限、基準を共有しているかとその理由、基準の差の動き、音声の予算、音声の残差を返す
+- 遅延の内訳: `PlayoutTimeline::delay_breakdown` が音声と映像の基準の遅れ、jitter buffer の遅延、同期の補償、表示の遅れ、上限、基準を共有しているかとその理由、基準の差の動き、音声の予算、音声の残差を返す
 - 並べ方: `AudioPlayoutScheduler` が実際に詰めた量 (`compressed_us`)、補間した量と回数 (`concealed_us` / `concealments`)、実際に伸ばした量 (`expanded_us`)、捨てた数 (`drops`)、基準を取り直した回数 (`rebases`)、現在の遅れ (`lateness_us`) を持つ。これらは計画ではなく `commit` した実際の開始位置と長さから求める
-- 確定の返り値: `commit` は `AudioPlayoutPlay` (`arrival_us` / `target_start_us` / `start_at_us` / `played_us` / `basis`) を返す。呼び出し側はこれをそのまま `AudioPlayoutTimingStats::record_play` へ渡す。`played_us` は時間圧縮・時間伸長・サンプルへの丸めを適用した後の、実際に積んだ長さである
+- 確定の返り値: `commit` は `AudioPlayoutPlay` (`arrival_us` / `target_start_us` / `start_at_us` / `played_us` / `basis`) を返す。呼び出し側はこれをそのまま `AudioPlayoutTimingStats::record_play` へ渡す。`played_us` は時間圧縮、時間伸長、サンプルへの丸めを適用した後の、実際に積んだ長さである
 - 映像の選択: `PlayoutNearestSelection` が `draw` / `dropped` / `draw_presentation_us` / `draw_late` を返す。呼び出し側は提示しなかったフレームの数と、逃げ道で遅れて提示した回数を計器とログへ記録する
-- 再生の観測: `AudioPlayoutTimingStats` が、予定に対する余裕・到着から鳴り始めるまで・予定からの遅れの分布 (直近 10 秒)、鳴らした音と鳴らさなかった音の累積、理由ごとの内訳、補間で埋まらなかった区間 (回数・合計・最大)、出力が枯れた回数と長さ、時間圧縮も補間も使えないサンプルレートの音の数を返す
-- `stretch_unavailable_frames` は時間圧縮・補間・伸長が使えないサンプルレートの音の数である。moqt-js の `sampleRateMismatchFrames` / `contextSampleRate` / `decodedSampleRate` は出力側の PCM キューのレート変換用の計器であり、moqt-rs は `playout::resample` を呼び出し側が使うかどうかを知らないため移植していない
+- 再生の観測: `AudioPlayoutTimingStats` が、予定に対する余裕、到着から鳴り始めるまで、予定からの遅れの分布 (直近 10 秒)、鳴らした音と鳴らさなかった音の累積、理由ごとの内訳、補間で埋まらなかった区間 (回数、合計、最大)、出力が枯れた回数と長さ、時間圧縮も補間も使えないサンプルレートの音の数を返す
+- `stretch_unavailable_frames` は時間圧縮、補間、伸長が使えないサンプルレートの音の数である。moqt-js の `sampleRateMismatchFrames` / `contextSampleRate` / `decodedSampleRate` は出力側の PCM キューのレート変換用の計器であり、moqt-rs は `playout::resample` を呼び出し側が使うかどうかを知らないため移植していない
 - 同期ずれの鮮度は、実績の新しい方ではなく、呼び出し側が渡す現在時刻 (`skew_us(now_us)`) で測る。両方の出力が止まった後も過去の値を返し続けないためである
 - 実際に描画した未補間区間とバッファ境界の段差は、`record_rendered_gap` と `record_rendered_boundary` で記録できる。停止時に鳴らし切るまでの残りは `pending_us` と `pending_end_us` で読める
 - 穴の計器は、材料化した隙間の全長から実際に補間した長さを引いた「補間で埋まらなかった長さ」を数える。moqt-js の `gapCount` / `gapMs` と同じ意味である。予約できる最も早い時刻より前だった前置きは `unrecoverable_gaps` として別に数える
@@ -100,7 +100,7 @@
 
 #### 結論
 
-- moqt-js の playout の純粋な計算 (時間圧縮、補間、遅延推定、閉ループ、追いつき、時間軸) は行単位で移植されており、数式・定数・境界に聴感差を生む差異は無かった
+- moqt-js の playout の純粋な計算 (時間圧縮、補間、遅延推定、閉ループ、追いつき、時間軸) は行単位で移植されており、数式、定数、境界に聴感差を生む差異は無かった
 - プチプチの主因は移植ミスではなく、再生方針と出力経路にあった。moqt-js 側でも同じ問題 (補間しなかった隙間が境界の段差になる、予約できない隙間がアンダーランになる) が実測で確認されており、moqt-rs は出力が FIFO のため、隙間が無音としても残らず再生が早期化する分だけ悪化し得る
 - qmux は原因を増幅する。QMux の DATAGRAM は TCP 1 本の順序付きストリームに載るため、TCP の再送待ちで音声がまとめて遅れて届く。受信バッファの上限を超えると破棄される
 
@@ -108,10 +108,10 @@
 
 この比較は 2026-10-20 時点のものであり、当時は遅延推定 (`delay.rs`) と閉ループ (`feedback.rs`) も移植していた。両者は 2026-11-01 に削除した。
 
-- 時間圧縮・補間: `src/playout/stretch.rs` と moqt-js の `audioTimeStretch.ts` は、4 kHz への間引き、相関窓、ピッチ探索、クロスフェード、放物線補間、継ぎ目の段差判定、末尾のフェードまで一致する
+- 時間圧縮 / 補間: `src/playout/stretch.rs` と moqt-js の `audioTimeStretch.ts` は、4 kHz への間引き、相関窓、ピッチ探索、クロスフェード、放物線補間、継ぎ目の段差判定、末尾のフェードまで一致する
 - 再生スケジューラ: `src/playout/scheduler.rs` と `audioPlayout.ts` は、目標時刻の決定、並べすぎの判定、到着基準へのフォールバック、詰める量の式、隙間の条件が一致する
 - 時間軸: `timeline.rs` と `timeline.ts` は、基準の 10 秒窓最小値、A/V 同期の不感帯、補償上限、ドリフト判定まで一致する
-- 遅延推定・閉ループ・追いつき: `delay.rs` / `feedback.rs` / `catch_up.rs` は、窓・分位点・忘却・上限・増減の速さ・床・cooldown まで一致していた (閉ループは 2026-11-01 に撤去)
+- 遅延推定、閉ループ、追いつき: `delay.rs` / `feedback.rs` / `catch_up.rs` は、窓、分位点、忘却、上限、増減の速さ、床、cooldown まで一致していた (閉ループは 2026-11-01 に撤去)
 
 #### 対策 (2026-10-20)
 
@@ -139,7 +139,7 @@
 #### 0882 穴 1 個での上限拡大と、音声だけの上限
 
 - `AudioDelayFeedback` に穴 1 個で一時的に広げる適用上限 (`gap_ceiling_us`) を追加した。穴は事後には埋められないため、1 個でも「経路の揺らぎが目標を超えた」証拠として扱う
-- 穴の長さ + 余白 (20 ms) を吸収できる値まで適用上限を広げ、最後の穴から `AUDIO_DELAY_FEEDBACK_GAP_QUIET_US` (5 秒) の間だけ保持する。保持中も目標を上げる向き (遅れ・並べすぎ・穴) は許すが、下げる向きへは進まない
+- 穴の長さ + 余白 (20 ms) を吸収できる値まで適用上限を広げ、最後の穴から `AUDIO_DELAY_FEEDBACK_GAP_QUIET_US` (5 秒) の間だけ保持する。保持中も目標を上げる向き (遅れ、並べすぎ、穴) は許すが、下げる向きへは進まない
 - 広げる値は `AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US` (160 ms) と明示設定 (`targetLatency`) の小さい方で切る。既存の artifact ceiling (圧縮か穴が 2 秒続いたときに 160 ms へ広げる規則) は残し、穴 1 個の一時的な広げと段階を分ける
 - `TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_MAX_US` (160 ms) と `audio_only_arrival_delay_us(learned_delay_us, floor_us)` を追加した。音声だけの購読では下限 140 ms を確保したうえで、閉ループが穴で広げた目標を 160 ms まで使う。共有の基準があるトラックの上限 (`TIMELINE_ARRIVAL_DELAY_US` の 100 ms) は変えない
 - `AudioDelayFeedbackObservation` に、累積の穴の数と長さ (`gap_count` / `gap_us`) と、音声だけの到着基準の下限 (`arrival_delay_floor_us`) を追加した
@@ -258,7 +258,7 @@ moqt-js が映像の表示をディスプレイのリフレッシュ (vsync) に
 - `estimateRefreshMs` と rAF の予約、`IDLE_STOP_MS` に相当する処理。moqt-rs のループは常時回っており、予約の停止で周期の推定が壊れる問題が無い。推定の手法 (下位 25 %) だけを example に移した
 - `VideoPlayoutPacing` の削除。moqt-rs に pacing は無く、削除するものがない
 - 実ブラウザ試験 (`requestVideoFrameCallback` による vsync 観測)。raw_player は SDL で、相当する観測が無い
-- devtools の遅延・停止レポート。ブラウザの計器であり、対応する層が無い。ただし「投入から描画までの遅れ」「表示時刻の残差」「表示間隔の分布」を example のログに出す考え方は取り込んだ
+- devtools の遅延 / 停止レポート。ブラウザの計器であり、対応する層が無い。ただし「投入から描画までの遅れ」「表示時刻の残差」「表示間隔の分布」を example のログに出す考え方は取り込んだ
 
 #### 注意: issue と実装の食い違い
 
@@ -278,13 +278,13 @@ moqt-rs へ移したのは、予約の計画と確定、予約の上限、短い
 
 #### 予約の計画と確定
 
-- `AudioPlayoutScheduler::schedule` は計画 (`AudioPlayoutPlan`) を返すだけにした。予約位置・
-  時間伸縮・再同期の実績は、呼び出し側が PCM を加工して出力へ積んだ後に `commit` した
+- `AudioPlayoutScheduler::schedule` は計画 (`AudioPlayoutPlan`) を返すだけにした。予約位置、
+  時間伸縮、再同期の実績は、呼び出し側が PCM を加工して出力へ積んだ後に `commit` した
   実際の開始位置と長さで初めて進む。加工や投入に失敗した計画は次の計画で失効する
 - 計画は識別子を持つ。古い計画、別の音の計画、二重の確定では予約位置を変えない
 - 旧 `confirm_stretch` / `confirm_expansion` / `confirm_concealment` / `confirm_playout_end`
-  を削除した。詰め・伸長・実終端は `commit` の前後差から求める
-- 時刻基準と到着基準で、予約の上限・前の音との接続・圧縮と伸長の選択を同じ規則にした。
+  を削除した。詰め、伸長、実終端は `commit` の前後差から求める
+- 時刻基準と到着基準で、予約の上限、前の音との接続、圧縮と伸長の選択を同じ規則にした。
   上限は時間圧縮の成否に関係なく、未加工の音の終端で検査する
 - 到着基準では、予定が到着 + 再生の遅れより不感帯以上に前なら時間伸長する。再同期の
   直後だけという限定を外し、浅い状態が続く間は戻す
@@ -345,7 +345,7 @@ moqt-rs へ移したのは、予約の計画と確定、予約の上限、短い
 - Web Audio (`AudioContext`、`AudioBufferSourceNode`、`AudioClockBridge`) と、`getOutputTimestamp()` と `performance.now()` の対応
 - `AudioWorklet` (`AudioWorkletProcessor`、`registerProcessor`、`currentFrame`、128 フレームの量子) と、出力コールバックの適用層 (`AudioRenderConcealer`)。DSP だけを移植した
 - WebCodecs (`AudioData` / `AudioDecoder`)、`HTMLAudioElement`、`MediaStream`、devtools
-- 映像の vsync と rAF の予約、`presentationLatencyTicks` (提示遅延の tick 数)、`estimateRefreshMs`、`requestVideoFrameCallback` による実ブラウザ試験、devtools の遅延・停止レポート
+- 映像の vsync と rAF の予約、`presentationLatencyTicks` (提示遅延の tick 数)、`estimateRefreshMs`、`requestVideoFrameCallback` による実ブラウザ試験、devtools の遅延 / 停止レポート
 - Wasm カーネル。Rust で同じ演算を書けば同じ結果になり、同梱と CSP の制約も無い
 - CSP、自動再生ポリシー、タブのバックグラウンド抑制、`AudioWorklet` の隣接する `process` に同じ `currentFrame` が渡る問題
 
@@ -368,19 +368,19 @@ moqt-rs へ移したのは、予約の計画と確定、予約の上限、短い
 - **直前の実音の履歴は、欠落の直後だけ 30 ms 未満になり得る。** 媒体時刻が 1 µs を超えて飛んだら履歴を作り直すため、欠落や配信元の切り替えの直後は履歴が短くなる。moqt-js のリングバッファも実音だけを保つが、moqt-rs は媒体時刻の連続性で作り直す判定を明示的に行う
 - **TIMESCALE がある TIMESTAMP はメディア時刻として扱う。** LOC の TIMESTAMP は Timescale が無ければ Unix epoch からのマイクロ秒 (壁時計)、あれば (0 を含む) publisher のメディア時刻である。メディア時刻の音は壁時計と対応しないため、時間軸の基準の学習と到着基準の深さの観測には使わない
 - **基準の共有解除の保持の満了は、基準の差を記録した時刻から測る。** 片方のトラックが届かなくなると記録が止まり、満了の判断もその時点で止まる (moqt-js と同じ)。記録が再開すると、その間に経過した時間で判定する
-- **44.1 kHz は DSP が解析対応したが、実機の確認はしていない。** 操作できるのは 8 kHz / 16 kHz / 32 kHz / 48 kHz / 44.1 kHz であり、それ以外のレート (例: 96 kHz) の音は時間圧縮・補間・伸長が働かず、`stretch_unavailable_frames` に数える。44.1 kHz の AAC で時間圧縮・補間・伸長が動くことと、聴感・圧縮量は未確認である
+- **44.1 kHz は DSP が解析対応したが、実機の確認はしていない。** 操作できるのは 8 kHz / 16 kHz / 32 kHz / 48 kHz / 44.1 kHz であり、それ以外のレート (例: 96 kHz) の音は時間圧縮、補間、伸長が働かず、`stretch_unavailable_frames` に数える。44.1 kHz の AAC で時間圧縮、補間、伸長が動くことと、聴感 / 圧縮量は未確認である
 - **vsync が無いため、提示遅延が tick に量子化されない。** moqt-rs は `set_vsync(0)` で vsync を無効にしており、プログラムから見た表示周期は呼び出し側のループ周期 (example は 1 ms) である。moqt-js の `presentationLatencyTicks` に相当する値は持たない
 - **投入から描画を観測するまでの遅れは、まだ実測していない。** 1 ループ周期 (1〜3 ms と推定) の見込みである。example のログに分布を出す
 - **`present` が戻ってから画面に出るまでの遅れは測れない。** SDL とコンポジタの実装依存であり、コードからは決まらない
 - **映像が遅れて描かれる量は A/V のずれに現れる。** 表示の実績は「描画を観測した時刻」であり、`MAX_PRESENTATION_LAG_US` の逃げ道まで遅れて描くと `skew_us` にもその分が現れる
 - **短いフレームの周期解析は、履歴の連続性に依存する。** 5 / 10 ms のフレームで履歴が無い、または媒体時刻が飛んで履歴を作り直した直後は、時間圧縮も時間伸長も働かない。moqt-js と同じ制約である
 - **レート変換は 1 ブロック単位で、フレームをまたぐ位相の連続を保証しない。** 呼び出し側が前後のブロックを含めた連続した PCM を渡すこと。moqt-js の `AudioRenderQueue` に相当するキューは持たない
-- **実リレー・実機での映像の計測はまだ行っていない。** 表示間隔と `skew_us` の実分布は未確認である
+- **実リレー / 実機での映像の計測はまだ行っていない。** 表示間隔と `skew_us` の実分布は未確認である
 - **実リレーでの計測はまだ行っていない。** このドキュメントの数値は moqt-js 側の計測に基づく
 
 ## 検証方法
 
-- 単体・統合・PBT:
+- 単体、統合、PBT:
   - `cargo test -p shiguredo_moqt --lib`
   - `cargo test -p shiguredo_moqt --test test_playout`
   - `cargo test -p pbt`
@@ -421,11 +421,11 @@ moqt-rs へ移したのは、予約の計画と確定、予約の上限、短い
   - `draw_late`: 目標に合うフレームが無く、遅れて提示した回数 (逃げ道が働いた回数)
   - `enqueue_to_render=(p50=... p95=... max=...)`: 再生機器へ投入してから描画を観測するまでの遅れ
   - `presentation_residual=(p50=... p95=... max=...)`: 記録した表示時刻 − `present_us` が決めた表示時刻
-  - `rendered` / `dropped` / `queue_full` / `late` / `resync` / `drain_recoveries` / `player_resyncs`: 再生機器が観測した描画・破棄・復帰の回数
+  - `rendered` / `dropped` / `queue_full` / `late` / `resync` / `drain_recoveries` / `player_resyncs`: 再生機器が観測した描画、破棄、復帰の回数
 - `timeline.delay_breakdown` の `sharing_bases` / `unshared_reason` を、映像ありの購読で読む。共有が解除されたまま戻らないなら、基準の差かドリフトの判定を見る
 - A/V 同期の制御 (30 秒保持の満了と解除、skew の合成)、出力残差の平滑化 (四捨五入) は `tests/test_playout/timeline.rs` と `pbt/tests/prop_playout/timeline.rs` で固定している。直前の実音の 30 ms 履歴、時間伸長の適用、停止時の drain は `cargo test -p moq-sub` で固定している
 - 映像の選択規則 (許容幅の境界、逃げ道で遅れて提示する上限、同じ目標に重なったとき、1 回 1 枚、未来のフレームだけなら描かない、世代の取り直し) は `tests/test_playout/buffer.rs` と `pbt/tests/prop_playout/buffer.rs` で固定している。選択の目標 (表示周期の実測への追随) と、描画を観測した分だけを実績に記録することは `cargo test -p moq-sub` で固定している
-- 同じ素材・同じリレーで qmux と QUIC 直接、映像あり / 映像なし、subgroup / datagram を比較する。qmux だけで `underruns` が増え、QMux の破棄警告が出ていなければ TCP の再送待ちによるバーストが原因である
+- 同じ素材 / 同じリレーで qmux と QUIC 直接、映像あり / 映像なし、subgroup / datagram を比較する。qmux だけで `underruns` が増え、QMux の破棄警告が出ていなければ TCP の再送待ちによるバーストが原因である
 - moq-pub の `--target-latency` を 300〜500 ms にして症状が消えるかを見る。消えるなら遅延スパイクに対して目標遅延が不足している
 - `e2e-tests` は実リレーを必要とし、`#[ignore]` を付けて `MOQT_E2E_URL` を設定したときだけ実行する。確認できるのは、publish と subscribe の往復、音声 datagram の受信と MP4 保存、プロセスの異常終了が無いこと、新しい計器がログに出て削除した項目が出ないことである。聴感、実出力遅延、A/V のリップシンク、Bluetooth と OS のミキサー、qmux 経由の TCP 再送バースト、Wi-Fi の周期的な停滞、長時間の傾向は確認できない
 
@@ -438,8 +438,8 @@ moqt-rs へ移したのは、予約の計画と確定、予約の上限、短い
 - 出力側の欠落判定と補間の適用層 (AudioWorklet 相当) が moqt-rs に無いこと。DSP (`stretch` / `expansion` / `predictor` / `splice_fade` / `gap`) は example の到着側の材料化から使っているが、出力コールバックで実欠落を検出して補間する層は無い。呼び出し側が出力を持つ場合の API として使う想定である
 - 映像の表示の遅れが 2 秒窓の百分位へ直接追従することの副作用。フレーム間隔の推定が不安定な開始直後に目標が跳ねないか
 - 時間伸長を入れたときの聴感と、圧縮との往復が増えないこと
-- 5 / 10 ms の短いフレームで、履歴と連結した周期解析が実リレーの音声でも圧縮・伸長を成立させること。単体テストは 400 Hz / 200 Hz の連続波でだけ確認している
-- `playout::resample` の通過帯域・阻止帯域・群遅延を、実リレーの音声と複数のレートの組み合わせで確認すること。単体テストは 96 → 48 kHz の正弦波と DC でだけ確認している
+- 5 / 10 ms の短いフレームで、履歴と連結した周期解析が実リレーの音声でも圧縮 / 伸長を成立させること。単体テストは 400 Hz / 200 Hz の連続波でだけ確認している
+- `playout::resample` の通過帯域、阻止帯域、群遅延を、実リレーの音声と複数のレートの組み合わせで確認すること。単体テストは 96 → 48 kHz の正弦波と DC でだけ確認している
 - 欠落の直後で直前の実音の履歴が 30 ms 未満になるときの補間の品質。moqt-js のリングバッファとの差は未確認である
 - 1 ループの実測周期 (sleep 1 ms と処理時間の合計)。1〜3 ms は推定である
 - 投入から描画を観測するまでの遅れの実測値

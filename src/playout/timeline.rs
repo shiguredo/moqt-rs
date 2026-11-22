@@ -33,8 +33,8 @@
 //! - いったん共有をやめたら [`TIMELINE_BASE_UNSHARED_HOLD_US`] の間は戻さない。ただし
 //!   解除の原因が去って差が戻った状態が [`TIMELINE_BASE_UNSHARED_RELEASE_US`] 続いたら、
 //!   往復の恐れが無いため保持を待たずに戻す
-//! - 遅延の内訳 (基準の遅れ・jitter buffer の遅延・足した分・共有できているかとその理由・
-//!   差の動き・音声の自動予算) は [`PlayoutTimeline::delay_breakdown`] が返す
+//! - 遅延の内訳 (基準の遅れ、jitter buffer の遅延、足した分、共有できているかとその理由、
+//!   差の動き、音声の自動予算) は [`PlayoutTimeline::delay_breakdown`] が返す
 //!
 //! 時刻の単位はすべてマイクロ秒 (i64) である。moqt-js はミリ秒の浮動小数で計算するが、
 //! 本実装はマイクロ秒の整数で計算する。比較はすべてマイクロ秒で厳密に行い、整数化の差は

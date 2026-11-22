@@ -38,7 +38,7 @@ fn subscribe_handshake_client_to_server() {
 
 /// PUBLISH_OK に PAUSED を含めると送信側で拒否される
 ///
-/// draft-ietf-moq-transport-23 Appendix A.4 #1790 (Subscription parameters appear in
+/// draft-ietf-moq-transport-23 Appendix A.4 (Since draft-ietf-moq-transport-19) (Subscription parameters appear in
 /// REQUEST_UPDATE, not PUBLISH_OK): subscription 更新用パラメータは REQUEST_UPDATE
 /// (要求) に出現し、PUBLISH_OK は EXPIRES のみとなる。PAUSED の更新は
 /// REQUEST_UPDATE 経路で行う。
@@ -81,7 +81,7 @@ fn publish_ok_with_paused_is_rejected() {
 
 /// PUBLISH_OK で PAUSED を省略しても paused は PUBLISH 時の値のまま維持される
 ///
-/// draft-ietf-moq-transport-23 Appendix A.4 #1790: PUBLISH_OK は EXPIRES のみを運び、
+/// draft-ietf-moq-transport-23 Appendix A.4 (Since draft-ietf-moq-transport-19): PUBLISH_OK は EXPIRES のみを運び、
 /// paused の更新は REQUEST_UPDATE (要求) 経路に委譲する。
 #[test]
 fn publish_ok_without_paused_keeps_publish_paused_state() {
@@ -183,7 +183,7 @@ fn publish_ok_emits_publish_ok_received_event_with_parameters() {
 
 /// PUBLISH_OK に LOCATION_FILTER を含めると送受信ともに拒否される
 ///
-/// draft-ietf-moq-transport-23 Appendix A.4 #1790 (Subscription parameters appear in
+/// draft-ietf-moq-transport-23 Appendix A.4 (Since draft-ietf-moq-transport-19) (Subscription parameters appear in
 /// REQUEST_UPDATE, not PUBLISH_OK): LOCATION_FILTER は REQUEST_UPDATE (要求) に出現し、
 /// PUBLISH_OK には出現しない。送信側は状態を変更せずエラーを返し、受信側は
 /// INVALID_PARAMETER でセッションを閉じる。
@@ -277,7 +277,7 @@ fn publish_ok_empty_parameters_still_emits_event() {
     }
     assert!(
         seen,
-        "invariant violated: empty REQUEST_OK must still emit RequestOkReceived event"
+        "不変条件違反: 空の REQUEST_OK でも RequestOkReceived イベントを発行すること"
     );
 }
 
@@ -463,7 +463,7 @@ fn subscribe_ok_with_unknown_mandatory_property_cancels_subscription() {
     }
     assert!(
         found,
-        "expected RequestTerminated event for cancelled subscription"
+        "キャンセル済み購読では RequestTerminated イベントを期待する"
     );
     // draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties) / §6.4.2.3
     // (Request Cancellation and Rejection): cancel は開いている方向を打ち切る

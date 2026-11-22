@@ -32,7 +32,7 @@
 
 use super::*;
 
-// ─── Multi-SUBSCRIBE ──────────────────────────────────────────────────────
+// ─── Multi-SUBSCRIBE (複数 SUBSCRIBE) ──────────────────────────────────────
 
 /// 異なる Track Namespace への 3 つの SUBSCRIBE を 1 Session で多重保持する。
 ///
@@ -183,7 +183,7 @@ fn multi_subscribe_holds_distinct_tracks_server_role() {
     run_multi_subscribe(&mut server, &mut client);
 }
 
-// ─── Multi-PUBLISH ────────────────────────────────────────────────────────
+// ─── Multi-PUBLISH (複数 PUBLISH) ────────────────────────────────────────
 
 /// 異なる Track Alias の 3 つの PUBLISH を 1 Session で多重保持する。
 ///
@@ -318,7 +318,7 @@ fn multi_publish_holds_distinct_tracks_server_role() {
     run_multi_publish(&mut server, &mut client);
 }
 
-// ─── Multi-FETCH ──────────────────────────────────────────────────────────
+// ─── Multi-FETCH (複数 FETCH) ──────────────────────────────────────────
 
 /// 3 つの FETCH を 1 Session で多重保持する。
 /// (draft-20 で FETCH は単一形式になった)
@@ -613,7 +613,7 @@ fn run_mixed(local: &mut Session, peer: &mut Session, _local_is_client: bool) {
         "subscriber 役の subscription は outgoing subgroup を持たない"
     );
 
-    // --- GOAWAY: Request ID 無しで送信できる (draft-ietf-moq-transport-23 §9.2 (GOAWAY) / Appendix A.4 #1623) ---
+    // --- GOAWAY: Request ID 無しで送信できる (draft-ietf-moq-transport-23 §9.2 (GOAWAY) / Appendix A.5 (Since draft-ietf-moq-transport-18)) ---
     // peer から 2 つの SUBSCRIBE を local が受信し、その後 GOAWAY を control stream で発行する。
     // Client は new_session_uri を空にする必要がある。
     // timeout=0 は specific timeout なし (draft-ietf-moq-transport-23 §9.2 (GOAWAY)) で deadline を設定しない。

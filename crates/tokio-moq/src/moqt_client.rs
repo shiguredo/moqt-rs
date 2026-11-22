@@ -174,9 +174,9 @@ pub struct IncomingRequest {
 /// peer (MOQT relay) から届いた REQUEST_UPDATE
 ///
 /// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE):
-/// 「The receiver of a REQUEST_UPDATE MUST respond with exactly one REQUEST_OK or
+/// "The receiver of a REQUEST_UPDATE MUST respond with exactly one REQUEST_OK or
 ///  REQUEST_ERROR message indicating if the update was successful, unless it is
-///  coalescing failed updates」
+///  coalescing failed updates."
 /// 応答は [`MoqtClient::send_request_ok`] / [`MoqtClient::send_request_error`] で行う。
 /// パラメータの検証 (scope / Range Filter / PAUSED 値域) は session 層が受信時に
 /// 済ませており、ここに来た更新は購読状態へ反映済みである。
@@ -206,7 +206,7 @@ pub enum ClientEvent {
 
 /// bidi 受信タスクへの STOP_SENDING 指示
 pub(crate) struct StopSendingCommand {
-    /// Stream Reset Error Code (draft-ietf-moq-transport-23 §12.5 (Stream Reset Error Codes))
+    /// stream reset のエラーコード (draft-ietf-moq-transport-23 §12.5 (Stream Reset Error Codes))
     error_code: u64,
     /// 受信半への STOP_SENDING 送出結果の完了通知
     ack: oneshot::Sender<Result<()>>,
@@ -3528,7 +3528,7 @@ impl SessionDriver {
                         match accepted {
                             Ok(()) => {}
                             Err(RecvRequestError::Session(_)) => {
-                                // parity 違反・Request ID 重複で Session は closing に遷移して
+                                // parity 違反 / Request ID 重複で Session は closing に遷移して
                                 // CloseSession を積んでいる。終了コード付きで閉じるため
                                 // drain_events に処理させる (TransportError::Internal に写して
                                 // ? で伝播させると drain_events を飛ばし、終了コードが peer に

@@ -457,7 +457,7 @@ fn zero_width_no_break_space_in_name_accepted() {
     assert_eq!(catalog.tracks[0].name, "a\u{feff}b");
 }
 
-/// clone / remove / publishTracks の名前・namespace を decode で拒否すること
+/// clone / remove / publishTracks の名前 / namespace を decode で拒否すること
 ///
 /// draft-ietf-moq-msf-02 §5.2.2 / §5.2.3 / §5.2.34 / §5.2.35 / §11.2: track object の
 /// 種類によらず、名前と namespace は同じ写像規則で検証する。

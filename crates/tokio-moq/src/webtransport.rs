@@ -241,8 +241,8 @@ mod tests {
             WtSessionState::ConnectionFailed,
         ] {
             let policy = session_policy(state);
-            assert!(policy.reject_new_streams, "{state:?}");
-            assert!(policy.reject_datagrams, "{state:?}");
+            assert!(policy.reject_new_streams, "状態: {state:?}");
+            assert!(policy.reject_datagrams, "状態: {state:?}");
         }
     }
 

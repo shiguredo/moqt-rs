@@ -793,8 +793,8 @@ fn setup_and_subscribe_tracks_known_bytes_round_trip() {
         let bytes = decode_hex(hex);
         let claim = MoqtClaim::decode(&cbor::decode(&bytes).expect("CBOR をデコードできる"))
             .expect("claim をデコードできる");
-        assert_eq!(claim.scopes.len(), 1, "{hex}");
-        assert_eq!(claim.scopes[0].actions, [action.key()], "{hex}");
+        assert_eq!(claim.scopes.len(), 1, "16 進表記 {hex}");
+        assert_eq!(claim.scopes[0].actions, [action.key()], "16 進表記 {hex}");
 
         // encode は入力と同じ決定論的バイト列に戻る
         assert_eq!(
@@ -839,7 +839,7 @@ fn scope_without_requested_action_is_rejected() {
 fn unknown_action_keys_are_not_mapped() {
     // §2.1 Table 1 に無い整数と、旧 CLIENT_SETUP の 0 は既知のアクションに変換しない
     for key in [0, 10, -1, i64::MIN, i64::MAX] {
-        assert_eq!(MoqtAction::from_key(key), None, "key={key}");
+        assert_eq!(MoqtAction::from_key(key), None, "キー key={key}");
     }
 }
 
@@ -871,7 +871,7 @@ fn action_integer_out_of_i64_range_is_rejected() {
             cbor::encode(&claim.encode().expect("エンコードできる")).expect("CBOR へ変換できる");
         let decoded = MoqtClaim::decode(&cbor::decode(&wire).expect("CBOR をデコードできる"))
             .expect("デコードできる");
-        assert_eq!(decoded, claim, "key={key}");
+        assert_eq!(decoded, claim, "キー key={key}");
     }
 }
 
@@ -918,7 +918,11 @@ fn legacy_authorization_context_table() {
             .iter()
             .find(|(candidate, _)| *candidate == action)
             .expect("表に全アクションがある");
-        assert_eq!(action.authorization_context(), *expected, "{action:?}");
+        assert_eq!(
+            action.authorization_context(),
+            *expected,
+            "アクション {action:?}"
+        );
         // 表の全文字列について、一致するのはそのアクションだけである
         for (other, value) in table {
             let expected_match = other == action && value == *expected;
@@ -926,7 +930,7 @@ fn legacy_authorization_context_table() {
                 Some(value) => assert_eq!(
                     action.matches_authorization_context(value),
                     expected_match,
-                    "{action:?} / {value}"
+                    "アクション {action:?} / 値 {value}"
                 ),
                 None => assert!(
                     !action.matches_authorization_context("SUBSCRIBE_TRACKS"),

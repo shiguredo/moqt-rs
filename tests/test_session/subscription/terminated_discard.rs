@@ -5,11 +5,11 @@
 //! sufficient state to quickly discard these unwanted Objects, rather than treating them as
 //! belonging to an unknown Track Alias."
 //!
-//! キャンセル由来 `Terminated`（`publish_done` が `None`）の subscription に届いた
+//! キャンセル由来 `Terminated` (`publish_done` が `None`) の subscription に届いた
 //! SUBGROUP_HEADER / OBJECT_DATAGRAM / 既存 stream への object / stream 終端は受理せず、
-//! 内部状態（`open_incoming_subgroup_count` / `largest_received_location` /
-//! `peer_subgroups` tracker 等）を汚染しないことを検証する。PUBLISH_DONE 受信済み
-//! （`publish_done` が `Some`）の drain 期間は従来どおり受理する (draft §9.9)。
+//! 内部状態 (`open_incoming_subgroup_count` / `largest_received_location` /
+//! `peer_subgroups` tracker 等) を汚染しないことを検証する。PUBLISH_DONE 受信済み
+//! (`publish_done` が `Some`) の drain 期間は従来どおり受理する (draft §9.9)。
 
 use super::*;
 use shiguredo_moqt::message_parameter::{
@@ -640,7 +640,7 @@ fn malformed_after_publish_done_sends_reset_without_request_terminated() {
 /// アプリが decoder を回して mid-object FIN を検出した場合でも、破棄対象 stream で
 /// セッションを fail させない。`recv_data_stream_closed` との呼び出し順序で挙動が
 /// 変わらないこと (doc コメントの契約) も検証する。キャンセル済み所有者の
-/// `Subgroup` variant は FIN / STOP_SENDING と同じ後始末 (open 数・delivery timeout
+/// `Subgroup` variant は FIN / STOP_SENDING と同じ後始末 (open 数 / delivery timeout
 /// override) を行う。
 #[test]
 fn discarded_stream_report_mid_object_fin_is_absorbed_in_any_order() {

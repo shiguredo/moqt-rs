@@ -484,10 +484,10 @@ mod non_minimal {
         // 37 を 2〜9 バイトの各長でエンコードしたものを decode する
         for len in 2..=9usize {
             let buf = encode_with_len(37, len);
-            assert_eq!(buf.len(), len, "len={len}");
+            assert_eq!(buf.len(), len, "長さ len={len}");
             let (val, consumed) = varint::decode(&buf).expect("非最小形も受理される");
-            assert_eq!(val, 37, "len={len}");
-            assert_eq!(consumed, len, "len={len}");
+            assert_eq!(val, 37, "長さ len={len}");
+            assert_eq!(consumed, len, "長さ len={len}");
         }
     }
 
@@ -509,8 +509,8 @@ mod non_minimal {
             let buf = encode_with_len(value, len);
             assert_eq!(buf.len(), len);
             let (val, consumed) = varint::decode(&buf).expect("非最小形も受理される");
-            assert_eq!(val, value, "minimal_len={minimal_len}");
-            assert_eq!(consumed, len, "minimal_len={minimal_len}");
+            assert_eq!(val, value, "最小長 minimal_len={minimal_len}");
+            assert_eq!(consumed, len, "最小長 minimal_len={minimal_len}");
         }
     }
 
@@ -521,8 +521,8 @@ mod non_minimal {
             let mut buf = encode_with_len(37, len);
             buf.push(0xAA);
             let (val, consumed) = varint::decode(&buf).expect("非最小形も受理される");
-            assert_eq!(val, 37, "len={len}");
-            assert_eq!(consumed, len, "len={len}");
+            assert_eq!(val, 37, "長さ len={len}");
+            assert_eq!(consumed, len, "長さ len={len}");
         }
     }
 }

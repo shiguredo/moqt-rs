@@ -1,7 +1,7 @@
-//! GOAWAY の deadline 満了で終端した request へ遅延して届くメッセージ・data stream の吸収
+//! GOAWAY の deadline 満了で終端した request へ遅延して届くメッセージ / data stream の吸収
 //!
 //! 終端と drain の状態遷移は `goaway::deadline` を参照。ここでは reset 後に届く
-//! peer の応答・REQUEST_UPDATE・PUBLISH_STATE_NOTIFY・FIN / RESET_STREAM と、
+//! peer の応答、REQUEST_UPDATE、PUBLISH_STATE_NOTIFY、FIN / RESET_STREAM と、
 //! 遅延 data stream の扱いを検証する。
 
 use super::*;

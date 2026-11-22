@@ -47,7 +47,7 @@ fn sample_subgroup_payload_status_with_properties(
         // ペイロードあり: payload_length > 0、status は None
         (sample_varint(ctx).max(1), None)
     } else {
-        // zero-length Normal status (draft-ietf-moq-transport-23 §11.1.1 (Object Status))
+        // 長さ 0 の Normal status (draft-ietf-moq-transport-23 §11.1.1 (Object Status))
         (0u64, Some(0u64))
     }
 }

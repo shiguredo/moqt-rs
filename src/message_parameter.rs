@@ -46,15 +46,15 @@ use range_filter::{
 
 // ─── 既知パラメータ型定数 ──────────────────────────────────────
 
-/// OBJECT_DELIVERY_TIMEOUT (varint, draft-ietf-moq-transport-23 §9.19.4 (OBJECT_DELIVERY_TIMEOUT Parameter))
+/// OBJECT_DELIVERY_TIMEOUT パラメータ (varint, draft-ietf-moq-transport-23 §9.19.4 (OBJECT_DELIVERY_TIMEOUT Parameter))
 pub const PARAM_OBJECT_DELIVERY_TIMEOUT: u64 = 0x02;
-/// AUTHORIZATION_TOKEN (length-prefixed)
+/// AUTHORIZATION_TOKEN パラメータ (length-prefixed)
 pub const PARAM_AUTHORIZATION_TOKEN: u64 = 0x03;
-/// SUBGROUP_DELIVERY_TIMEOUT (varint, draft-ietf-moq-transport-23 §9.19.3 (SUBGROUP_DELIVERY_TIMEOUT Parameter))
+/// SUBGROUP_DELIVERY_TIMEOUT パラメータ (varint, draft-ietf-moq-transport-23 §9.19.3 (SUBGROUP_DELIVERY_TIMEOUT Parameter))
 pub const PARAM_SUBGROUP_DELIVERY_TIMEOUT: u64 = 0x06;
-/// EXPIRES (varint)
+/// EXPIRES パラメータ (varint)
 pub const PARAM_EXPIRES: u64 = 0x08;
-/// LARGEST_OBJECT (Location)
+/// LARGEST_OBJECT パラメータ (Location)
 pub const PARAM_LARGEST_OBJECT: u64 = 0x09;
 /// PAUSED (uint8, draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter))
 ///
@@ -71,21 +71,21 @@ pub const PARAM_PAUSED: u64 = 0x11;
 /// アプリが `MessageParameters` から読む。
 /// 節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 pub const PARAM_RENDEZVOUS_TIMEOUT: u64 = 0x04;
-/// SUBSCRIBER_PRIORITY (uint8)
+/// SUBSCRIBER_PRIORITY パラメータ (uint8)
 pub const PARAM_SUBSCRIBER_PRIORITY: u64 = 0x20;
 /// LOCATION_FILTER (Location Filter 形式, draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter))
 pub const PARAM_LOCATION_FILTER: u64 = 0x21;
-/// GROUP_ORDER (uint8)
+/// GROUP_ORDER パラメータ (uint8)
 pub const PARAM_GROUP_ORDER: u64 = 0x22;
-/// FILL_TIMEOUT (varint, draft-ietf-moq-transport-23 §9.19.5 (FILL TIMEOUT Parameter))
+/// FILL_TIMEOUT パラメータ (varint, draft-ietf-moq-transport-23 §9.19.5 (FILL TIMEOUT Parameter))
 pub const PARAM_FILL_TIMEOUT: u64 = 0x0A;
 /// FILL_PARAMETERS (Number of Parameters + その個数の Parameters, draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter))
 pub const PARAM_FILL_PARAMETERS: u64 = 0x23;
-/// NEW_GROUP_REQUEST (varint)
+/// NEW_GROUP_REQUEST パラメータ (varint)
 pub const PARAM_NEW_GROUP_REQUEST: u64 = 0x32;
 /// TRACK_NAMESPACE_PREFIX (Track Namespace 形式, draft-ietf-moq-transport-23 §9.19.20 (TRACK_NAMESPACE_PREFIX Parameter))
 pub const PARAM_TRACK_NAMESPACE_PREFIX: u64 = 0x34;
-/// INCLUDE_PROPERTIES (uint8, draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter))
+/// INCLUDE_PROPERTIES パラメータ (uint8, draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter))
 pub const PARAM_INCLUDE_PROPERTIES: u64 = 0x35;
 /// SUBSCRIBE_TRACKS_ID (varint, draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter))
 ///
@@ -98,15 +98,15 @@ pub const PARAM_SUBSCRIBE_TRACKS_ID: u64 = 0x36;
 
 // ─── Range Filter パラメータ (draft-ietf-moq-transport-23 §3.3.2 (Range Filters)) ───
 
-/// SUBGROUP_FILTER (length-prefixed, draft-ietf-moq-transport-23 §3.3.2)
+/// SUBGROUP_FILTER パラメータ (length-prefixed, draft-ietf-moq-transport-23 §3.3.2)
 pub const PARAM_SUBGROUP_FILTER: u64 = 0x25;
-/// OBJECTID_FILTER (length-prefixed, draft-ietf-moq-transport-23 §3.3.2)
+/// OBJECTID_FILTER パラメータ (length-prefixed, draft-ietf-moq-transport-23 §3.3.2)
 pub const PARAM_OBJECTID_FILTER: u64 = 0x26;
-/// PRIORITY_FILTER (length-prefixed, draft-ietf-moq-transport-23 §3.3.2)
+/// PRIORITY_FILTER パラメータ (length-prefixed, draft-ietf-moq-transport-23 §3.3.2)
 pub const PARAM_PRIORITY_FILTER: u64 = 0x27;
-/// OBJECT_PROPERTY_FILTER (length-prefixed, draft-ietf-moq-transport-23 §3.3.2)
+/// OBJECT_PROPERTY_FILTER パラメータ (length-prefixed, draft-ietf-moq-transport-23 §3.3.2)
 pub const PARAM_OBJECT_PROPERTY_FILTER: u64 = 0x28;
-/// TRACK_PROPERTY_FILTER (length-prefixed, draft-ietf-moq-transport-23 §3.3.2)
+/// TRACK_PROPERTY_FILTER パラメータ (length-prefixed, draft-ietf-moq-transport-23 §3.3.2)
 pub const PARAM_TRACK_PROPERTY_FILTER: u64 = 0x29;
 
 // ─── FILL_PARAMETERS 内側スコープ ──────────────────────────────
@@ -135,11 +135,11 @@ pub(crate) const FILL_PARAMETERS_ALLOWED_PARAMS: &[u64] = &[
 enum ValueEncoding {
     /// 1 バイト固定
     Uint8,
-    /// vi64
+    /// vi64 で表現する。
     VarInt,
-    /// vi64 (Group) + vi64 (Object)
+    /// Group (vi64) と Object (vi64) の並び。
     Location,
-    /// vi64 (length) + bytes
+    /// vi64 (長さ) と bytes の並び。
     LengthPrefixed,
     /// Location Filter: Location Filter Type (vi64) + Type が定める vi64 フィールド列
     /// (draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter))
@@ -188,7 +188,7 @@ fn value_encoding(param_type: u64) -> Result<ValueEncoding, MessageError> {
     }
 }
 
-// ─── AuthorizationToken ───────────────────────────────────────
+// ─── AuthorizationToken (認可トークン) ───────────────────────────────────────
 
 /// AUTHORIZATION_TOKEN の Token 構造 (draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression))
 ///
@@ -237,7 +237,7 @@ pub enum AuthorizationToken {
     },
 }
 
-// ─── LocationFilter ─────────────────────────────────────────
+// ─── LocationFilter (Location フィルタ) ─────────────────────────────────────────
 
 /// LOCATION_FILTER の解決コンテキスト (draft-ietf-moq-transport-23 §3.3.1 (Location Filters))
 ///
@@ -321,23 +321,23 @@ pub enum LocationFilter {
     NextObject,
 }
 
-// ─── MessageParameterValue ─────────────────────────────────────
+// ─── MessageParameterValue (パラメータ値) ─────────────────────────────────────
 
 /// Message Parameter の値 (型固有エンコーディング)
 #[derive(Debug, Clone, PartialEq)]
 pub enum MessageParameterValue {
     /// uint8: 1 バイト固定
     Uint8(u8),
-    /// varint: vi64
+    /// varint: vi64 形式。
     VarInt(u64),
-    /// Location: Group (vi64) + Object (vi64)
+    /// Location: Group (vi64) と Object (vi64)。
     Location {
-        /// Group ID
+        /// Group ID (Group を識別する ID)
         group: u64,
-        /// Object ID
+        /// Object ID (Object を識別する ID)
         object: u64,
     },
-    /// Length-prefixed: vi64 (length) + bytes
+    /// Length-prefixed: vi64 (長さ) と bytes。
     LengthPrefixed(Vec<u8>),
     /// Location Filter: Location Filter Type (vi64) + Type が定める vi64 フィールド列
     /// (draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter))
@@ -361,7 +361,7 @@ pub enum MessageParameterValue {
     TrackNamespacePrefix(TrackNamespace),
 }
 
-// ─── MessageParameter ──────────────────────────────────────────
+// ─── MessageParameter (単一パラメータ) ──────────────────────────────────────────
 
 /// 単一の Message Parameter
 #[derive(Debug, Clone, PartialEq)]
@@ -372,7 +372,7 @@ pub struct MessageParameter {
     pub value: MessageParameterValue,
 }
 
-// ─── MessageParameters ─────────────────────────────────────────
+// ─── MessageParameters (パラメータ列) ─────────────────────────────────────────
 
 /// Message Parameters リスト (draft-ietf-moq-transport-23 §9.19 (Control Message Parameters))
 ///
@@ -692,8 +692,8 @@ impl MessageParameters {
     ///
     /// EXPIRES=0 もパラメータとしては存在する。
     /// `has_expires() == true` の場合でも `expires()` は `None` を返しうる
-    /// （EXPIRES=0 のとき）。
-    /// draft-ietf-moq-transport-23 §9.19.16（将来の draft で変更される可能性がある）
+    /// (EXPIRES=0 のとき)。
+    /// draft-ietf-moq-transport-23 §9.19.16 (将来の draft で変更される可能性がある)
     pub fn has_expires(&self) -> bool {
         self.0.iter().any(|p| p.param_type == PARAM_EXPIRES)
     }
@@ -701,10 +701,10 @@ impl MessageParameters {
     /// EXPIRES (type 0x08) の値を返す
     ///
     /// EXPIRES=0 または不在の場合は `None` を返す。
-    /// draft-ietf-moq-transport-23 §9.19.16（将来の draft で変更される可能性がある）
+    /// draft-ietf-moq-transport-23 §9.19.16 (将来の draft で変更される可能性がある)
     /// では「EXPIRES が 0 または不在なら subscription は expire しないか、
     /// 不明な時刻に expire する」と規定される。本実装では両者を「期限なし」
-    /// （`None`）として正規化する。
+    /// (`None`) として正規化する。
     pub fn expires(&self) -> Option<u64> {
         self.find_varint(PARAM_EXPIRES).filter(|&v| v != 0)
     }
@@ -939,7 +939,7 @@ impl MessageParameters {
         result
     }
 
-    /// 後続の REQUEST_UPDATE のパラメータをマージする (draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1540, draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions))
+    /// 後続の REQUEST_UPDATE のパラメータをマージする (draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17), draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions))
     ///
     /// 各パラメータ型について後の値で上書きする (field-by-field merge)。
     /// AUTHORIZATION_TOKEN (0x03) は複数回出現が許可されているため上書きせず追記する。
@@ -1469,7 +1469,7 @@ pub(crate) fn validate_auth_token_uniqueness<'a>(
     Ok(())
 }
 
-// ─── RangeFilterSet ────────────────────────────────────────
+// ─── RangeFilterSet (Range Filter の集合) ────────────────────────────────────────
 
 /// デコード済みの Range Filter インスタンス 1 つ (draft-ietf-moq-transport-23 §3.3.2 (Range Filters))
 ///
@@ -1480,7 +1480,7 @@ pub(crate) fn validate_auth_token_uniqueness<'a>(
 /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RangeFilterSet {
-    /// SetID (8 bits)
+    /// SetID (8 ビット)
     pub set_id: u8,
     /// Property Type。OBJECT_PROPERTY_FILTER (0x28) / TRACK_PROPERTY_FILTER (0x29) のみ `Some`
     pub property_type: Option<u64>,

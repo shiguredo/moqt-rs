@@ -82,7 +82,7 @@ fn wire_malformed_kvp_maps_to_malformed_key_value() {
 /// Field を受信したら INVALID_TRACK_NAMESPACE で閉じる (MUST)。
 #[test]
 fn wire_invalid_track_namespace_maps_to_invalid_track_namespace() {
-    // Track Namespace: count=1 / field length=0
+    // Track Namespace: count=1、field length=0 バイト
     let namespace_bytes = [0x01, 0x00];
     let wire = frame(0x03, &subscribe_payload(&namespace_bytes, b"cam", &[0x00]));
     let err =
@@ -227,7 +227,7 @@ fn wire_delta_overflow_takes_precedence_over_field_length_exceeded() {
 /// DEFAULT_PRIORITY を立て、Status だけを不正値にする。
 #[test]
 fn wire_object_datagram_invalid_status_maps_to_invalid_object_status() {
-    // Type Flags: STATUS (0x20) + ZERO_OBJECT_ID (0x04) + DEFAULT_PRIORITY (0x08)
+    // Type Flags: STATUS (0x20) と ZERO_OBJECT_ID (0x04) と DEFAULT_PRIORITY (0x08)
     let wire = [0x2C, 0x01, 0x02, 0x07];
     let err = shiguredo_moqt::stream::datagram::ObjectDatagram::decode(&wire)
         .expect_err("未知の Object Status は decode に失敗すること");

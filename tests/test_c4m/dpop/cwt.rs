@@ -112,12 +112,12 @@ fn codec_rejects_conflicting_claim_labels() {
         assert_eq!(
             CwtDpopProofCodec::new(reserved, 100),
             Err(DpopError::ReservedClaimLabel("actx")),
-            "actx_label={reserved}"
+            "actx_label (予約値)={reserved}"
         );
         assert_eq!(
             CwtDpopProofCodec::new(100, reserved),
             Err(DpopError::ReservedClaimLabel("ath")),
-            "ath_label={reserved}"
+            "ath_label (予約値)={reserved}"
         );
     }
     // 衝突しない設定は受理し、設定した label をそのまま返す
@@ -1204,7 +1204,7 @@ fn accepts_tagged_untagged_and_cwt_tagged_sign1() {
             .expect("COSE_Sign1 をエンコードできる");
         let proof = codec
             .decode(&bytes)
-            .unwrap_or_else(|error| panic!("cose_tag={cose_tag}, cwt_tag={cwt_tag}: {error}"));
+            .unwrap_or_else(|error| panic!("COSE タグ={cose_tag}、CWT タグ={cwt_tag}: {error}"));
         assert_eq!(proof.header().algorithm, Algorithm::Es256);
     }
 }

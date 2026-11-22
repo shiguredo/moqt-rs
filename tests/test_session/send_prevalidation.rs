@@ -156,7 +156,7 @@ fn oversized_full_track_name_rejected_by_all_request_apis() {
     let (namespace, track_name) = oversized_track_name();
     let (mut client, _server) = establish_pair();
 
-    // send_subscribe
+    // send_subscribe の事前検証
     let err = client
         .send_subscribe(
             namespace.clone(),
@@ -166,7 +166,7 @@ fn oversized_full_track_name_rejected_by_all_request_apis() {
         .expect_err("4097 バイトの SUBSCRIBE は拒否されること");
     assert_field_length_exceeded(err, "send_subscribe");
 
-    // send_publish
+    // send_publish の事前検証
     let err = client
         .send_publish(
             namespace.clone(),
@@ -178,7 +178,7 @@ fn oversized_full_track_name_rejected_by_all_request_apis() {
         .expect_err("4097 バイトの PUBLISH は拒否されること");
     assert_field_length_exceeded(err, "send_publish");
 
-    // send_fetch
+    // send_fetch の事前検証
     let err = client
         .send_fetch(
             namespace.clone(),
@@ -197,7 +197,7 @@ fn oversized_full_track_name_rejected_by_all_request_apis() {
         .expect_err("4097 バイトの FETCH は拒否されること");
     assert_field_length_exceeded(err, "send_fetch");
 
-    // send_track_status
+    // send_track_status の事前検証
     let err = client
         .send_track_status(namespace, track_name, MessageParameters::new())
         .expect_err("4097 バイトの TRACK_STATUS は拒否されること");

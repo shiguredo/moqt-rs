@@ -367,7 +367,7 @@ fn test_priority_change_in_same_subgroup_is_rejected() {
 const PRIORITY_CHANGE_MESSAGE: &str =
     "publisher priority must not change within the same subgroup in a FETCH response";
 
-/// 非 Datagram 起源・Properties なしの Object 入力を作る
+/// 非 Datagram 起源 / Properties なしの Object 入力を作る
 fn object_input(group_id: u64, object_id: u64, publisher_priority: u8) -> FetchObjectInput {
     FetchObjectInput {
         group_id,
@@ -502,7 +502,7 @@ fn test_end_of_range_then_object() {
     let mut encoder = FetchStreamEncoder::new(1);
     let mut stream = encoder.encode_header();
 
-    // End of Non-Existent Range
+    // End of Non-Existent Range (存在しない範囲の終端) を送る
     encoder
         .encode_end_of_non_existent_range(5, 10, &mut stream)
         .expect("テストフィクスチャの前提条件を満たす");
@@ -630,7 +630,7 @@ fn end_of_unknown_range_then_object() {
     let mut encoder = FetchStreamEncoder::new(1);
     let mut stream = encoder.encode_header();
 
-    // End of Unknown Range
+    // End of Unknown Range (不明な範囲の終端) を送る
     encoder
         .encode_end_of_unknown_range(5, 10, &mut stream)
         .expect("テストフィクスチャの前提条件を満たす");
@@ -739,7 +739,7 @@ fn end_of_timed_out_range_notifies_app() {
     let mut encoder = FetchStreamEncoder::new(1);
     let mut stream = encoder.encode_header();
 
-    // End of Timed-Out Range
+    // End of Timed-Out Range (タイムアウトした範囲の終端) を送る
     encoder
         .encode_end_of_timed_out_range(5, 10, &mut stream)
         .expect("テストフィクスチャの前提条件を満たす");
@@ -974,7 +974,7 @@ fn test_descending_end_of_range_mixed_with_objects() {
 
     // 10/2 Object → 9/5 End of Non-Existent Range → 5/0 Object → 5/3 Object
     // → 4/9 End of Unknown Range → 2/0 Object → 1/11 End of Timed-Out Range → 1/12 Object
-    // → 0/3 End of Gone Range
+    // → 0/3 End of Gone Range (Group/Object の送信順)
     encoder
         .encode_object(&descending_input(10, 2, 1), None, &mut stream)
         .expect("テストフィクスチャの前提条件を満たす");
@@ -1076,7 +1076,7 @@ fn end_of_gone_range_then_object() {
     let mut encoder = FetchStreamEncoder::new(1);
     let mut stream = encoder.encode_header();
 
-    // End of Gone Range (Group 5 / Object 10)
+    // End of Gone Range (Group 5 の Object 10)
     encoder
         .encode_end_of_gone_range(5, 10, &mut stream)
         .expect("テストフィクスチャの前提条件を満たす");
@@ -1144,7 +1144,7 @@ fn end_of_timed_out_range_then_object() {
     let mut encoder = FetchStreamEncoder::new(1);
     let mut stream = encoder.encode_header();
 
-    // End of Timed-Out Range
+    // End of Timed-Out Range (タイムアウトした範囲の終端)
     encoder
         .encode_end_of_timed_out_range(5, 10, &mut stream)
         .expect("テストフィクスチャの前提条件を満たす");

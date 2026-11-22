@@ -263,7 +263,7 @@ fn discarded_entry_accepts_no_more_chunks() {
 /// 破棄した entry の後続チャンクが、他のストリームを巻き添えで上限超過させない
 #[test]
 fn discarded_entry_does_not_overflow_other_stream() {
-    // per-stream 64 / per-session 100
+    // stream あたり 64 件 / session あたり 100 件
     let mut buffer = PendingSubgroupBuffer::new(options(64, 100));
     let abandoned = buffer.add(1, 0);
     let healthy = buffer.add(2, 0);

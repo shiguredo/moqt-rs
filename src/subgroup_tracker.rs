@@ -1,7 +1,7 @@
 //! Subgroup 再オープン禁止の追跡 (draft-ietf-moq-transport-23 §2.2 (Subgroups) / draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams))
 //!
 //! Subgroup ストリームは一度終端したら同一 `(track_alias, group_id, subgroup_id)` を
-//! 別ストリームで再オープンしてはならない。ただし draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1583 により、
+//! 別ストリームで再オープンしてはならない。ただし draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) により、
 //! STOP_SENDING で停止されたサブグループは、REQUEST_UPDATE で購読が再開された
 //! (PAUSED が 1→0 に変わった) 場合に再オープン可能。本モジュールは session 内でのストリーム
 //! ライフサイクルを追跡し、違反時に `PROTOCOL_VIOLATION` として通知するユーティリティ
@@ -17,7 +17,7 @@
 //!   Objects in that Subgroup.`
 //! - draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams): STOP_SENDING 単独では publisher は新 stream を開くべきではない。
 //!   REQUEST_UPDATE で購読が再開された (PAUSED が 1→0) 場合のみ再オープン MAY
-//!   (draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1583)
+//!   (draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17))
 //!
 //! # 注意
 //!
@@ -56,7 +56,7 @@ pub enum SubgroupStreamState {
     /// Subscriber 側から STOP_SENDING を受けて終端した
     ///
     /// draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams) /
-    /// Appendix A.6 (Since draft-ietf-moq-transport-17) #1583:
+    /// Appendix A.6 (Since draft-ietf-moq-transport-17):
     /// REQUEST_UPDATE で購読が再開された (PAUSED が 1→0) 場合に再オープン可能
     StoppedByPeer,
 }
@@ -238,7 +238,7 @@ impl SubgroupTracker {
     /// 新しい Subgroup ストリームのオープンを記録する
     ///
     /// すでに同一キーのエントリが Open 中の場合は `PROTOCOL_VIOLATION` を返す。
-    /// 終端済みの場合は draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1583
+    /// 終端済みの場合は draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17)
     /// (REQUEST_UPDATE で購読再開 (PAUSED 1→0)) に基づき、`can_reopen()` が true なら
     /// 再オープンを許可する。それ以外の終端状態は `PROTOCOL_VIOLATION` を返す。
     ///
@@ -801,7 +801,7 @@ mod tests {
         t.open(1, 10, 0)
             .expect("テストフィクスチャの前提条件を満たす");
         t.mark_stop_sending(1, 10, 0);
-        // draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1583
+        // draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17)
         // (REQUEST_UPDATE forward 0→1): StoppedByPeer は can_reopen() → 再オープン可能
         t.open(1, 10, 0)
             .expect("テストフィクスチャの前提条件を満たす");
@@ -976,7 +976,7 @@ mod tests {
     ///
     /// 上限ちょうどまで FIN 済みキーを保持し、上限を超える 1 件を追加した時点で、当該 alias の
     /// 終端済みキーが 3 つの表から削除される。破棄されたキーは未知キーとして扱われ、
-    /// 再オープン・優先度の初回記録・FIN の再記録ができ、条件 2/3 の比較は行われない。
+    /// 再オープン、優先度の初回記録、FIN の再記録ができ、条件 2/3 の比較は行われない。
     #[test]
     fn terminal_keys_are_pruned_when_limit_is_exceeded() {
         let limit = MAX_TRACKED_SUBGROUP_KEYS_PER_TRACK_ALIAS;

@@ -141,7 +141,7 @@ impl Session {
             ));
         }
         validate_outgoing_goaway_uri(self.role, &new_session_uri)?;
-        // draft-ietf-moq-transport-23 Appendix A.5 (Since draft-ietf-moq-transport-18) #1623:
+        // draft-ietf-moq-transport-23 Appendix A.5 (Since draft-ietf-moq-transport-18):
         // GOAWAY から Request ID は削除された。Message Body は URI + Timeout のみ。
         let msg = ControlMessage::Goaway(Goaway {
             new_session_uri,

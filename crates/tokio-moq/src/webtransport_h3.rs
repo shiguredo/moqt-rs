@@ -381,7 +381,7 @@ fn process_h3_result(
 /// h3 層へ入力を流した結果をセッション状態へ反映し、流した結果を返す
 ///
 /// h3 層へ入力を流す経路 (セッション確立時の CONNECT レスポンス待ち / CONNECT stream の
-/// 受信タスク / 制御・QPACK ストリームのルーティングタスク / datagram 受信タスク) が
+/// 受信タスク / 制御 / QPACK ストリームのルーティングタスク / datagram 受信タスク) が
 /// 共通で使う。feed がエラーでも drain したイベントは必ず `process_h3_events` へ渡す
 /// (取りこぼすとセッション終了を検知できず、MOQT 層の受信ループが待ち続ける)。
 /// datagram payload は `ClientConnectionState::drain_events` が購読処理用に保持する。
@@ -406,7 +406,7 @@ fn process_h3_outcome(
 /// h3 層のイベントを扱う唯一の経路である。`WebTransportEvent::Datagram` 以外のイベントを
 /// 捨てると `SessionClosed` / `SessionDraining` を取りこぼし、セッションが終了しても MOQT 層の
 /// 受信ループが待ち続ける。h3 層へ入力を流すすべての経路 (セッション確立時の CONNECT
-/// レスポンス待ち / CONNECT stream の受信タスク / 制御・QPACK ストリームの
+/// レスポンス待ち / CONNECT stream の受信タスク / 制御 / QPACK ストリームの
 /// ルーティングタスク / datagram 受信タスク / `take_buffered_datagrams`) がこの関数を通す。
 ///
 /// 本実装は 1 接続 1 セッションであり、イベントの `session_id` は照合しない
@@ -452,7 +452,7 @@ fn process_h3_events(
                 if *session_state.borrow() != WtSessionState::ClosedLocally {
                     *peer_close
                         .lock()
-                        .expect("peer close info mutex must not be poisoned") =
+                        .expect("peer close 情報の mutex が poison されていないこと") =
                         Some(PeerSessionClose {
                             code: u64::from(close_error_code),
                             reason: close_message,
@@ -479,7 +479,7 @@ fn process_h3_events(
 /// h3 層へストリームデータを流し、生じたイベントをセッション状態へ反映する
 ///
 /// セッション確立後に h3 層へストリームデータを流す経路 (CONNECT stream の受信タスク /
-/// 制御・QPACK ストリームのルーティングタスク) はこの関数を通る。確立前の CONNECT
+/// 制御 / QPACK ストリームのルーティングタスク) はこの関数を通る。確立前の CONNECT
 /// レスポンス待ちループだけは例外で、`feed_stream_and_drain` をロック保持の中で直接呼ぶ
 /// (ルーティングタスクはそのロックを取得できないため、確立ループが自分で feed と drain を
 /// 行えば CONNECT レスポンスのイベントを取りこぼさない)。
@@ -507,7 +507,7 @@ fn feed_stream_to_h3(
     let outcome = {
         let mut s = state
             .lock()
-            .expect("connection state mutex must not be poisoned");
+            .expect("接続状態の mutex が poison されていないこと");
         s.feed_stream_and_drain(stream_id, data, fin)
     };
     process_h3_outcome(outcome, session_state, peer_close, handle, "HTTP/3 stream")
@@ -1022,7 +1022,7 @@ impl WtClient {
         {
             let mut s = state
                 .lock()
-                .expect("connection state mutex must not be poisoned");
+                .expect("接続状態の mutex が poison されていないこと");
             s.h3_conn
                 .set_webtransport_transport_verified(datagram_supported, reset_stream_at_supported)
                 .map_err(|e| {
@@ -1058,7 +1058,7 @@ impl WtClient {
         let (session_state_tx, _) = watch::channel(WtSessionState::Active);
         // peer の WT_CLOSE_SESSION が運んだ終了コードと理由を、接続確立前から共有する。
         // SessionClosed を処理するタスクは複数あり、WtSession の生成前にも動くため
-        // (CONNECT stream の受信タスク・datagram 受信タスク)、`WtSession` とは独立に持つ。
+        // (CONNECT stream の受信タスク / datagram 受信タスク)、`WtSession` とは独立に持つ。
         let peer_close: Arc<StdMutex<Option<PeerSessionClose>>> = Arc::new(StdMutex::new(None));
         // ルーティングタスクが共有するハンドル (ストリームごとのタスクへ clone して渡す)
         let route_context = RouteContext {
@@ -1113,7 +1113,7 @@ impl WtClient {
         let init_data = {
             let mut s = state
                 .lock()
-                .expect("connection state mutex must not be poisoned");
+                .expect("接続状態の mutex が poison されていないこと");
             s.h3_conn
                 .init_h3_streams(control_send.id(), encoder_send.id(), decoder_send.id())?
         };
@@ -1156,7 +1156,7 @@ impl WtClient {
         let request_data = {
             let mut s = state
                 .lock()
-                .expect("connection state mutex must not be poisoned");
+                .expect("接続状態の mutex が poison されていないこと");
             let headers = ConnectRequest::new("https", &config.authority, path)
                 // draft-ietf-moq-transport-23 §6.2 / draft-ietf-webtrans-http3-16 §3.3:
                 // MOQT のプロトコル識別子を WT-Available-Protocols で通知する
@@ -1239,7 +1239,7 @@ impl WtClient {
                             let outcome = {
                                 let mut s = state_for_datagram
                                     .lock()
-                                    .expect("connection state mutex must not be poisoned");
+                                    .expect("接続状態の mutex が poison されていないこと");
                                 s.feed_datagram(&bytes)
                             };
                             // payload は共有状態に保持し、MOQT 層が取り出すまで残す。セッション
@@ -1321,7 +1321,7 @@ impl WtClient {
                         // feed と drain を同じロック保持で行う。ルーティングタスクも
                         // イベントを drain するため、ロックを跨ぐと CONNECT レスポンスの
                         // イベントを横取りされ得る
-                        let mut s = state.lock().expect("connection state mutex must not be poisoned");
+                        let mut s = state.lock().expect("接続状態の mutex が poison されていないこと");
                         s.feed_stream_and_drain(connect_stream_id, &data, fin)
                     };
                     observation.observe_events(&outcome.events);
@@ -1348,7 +1348,7 @@ impl WtClient {
                     let outcome = {
                         let mut s = state
                             .lock()
-                            .expect("connection state mutex must not be poisoned");
+                            .expect("接続状態の mutex が poison されていないこと");
                         s.drain_events_outcome()
                     };
                     observation.observe_events(&outcome.events);
@@ -1614,7 +1614,7 @@ fn reset_connect_stream(
     let outcome = {
         let mut s = state
             .lock()
-            .expect("connection state mutex must not be poisoned");
+            .expect("接続状態の mutex が poison されていないこと");
         s.process_stream_reset(stream_id, error_code)
     };
     let _ = process_h3_outcome(
@@ -1686,7 +1686,7 @@ async fn wait_for_peer_settings(
         {
             let s = state
                 .lock()
-                .expect("connection state mutex must not be poisoned");
+                .expect("接続状態の mutex が poison されていないこと");
             if s.h3_conn.peer_settings().is_some() {
                 // draft-ietf-webtrans-http3-17 §7.1: 共通版が無い peer とは CONNECT を
                 // 開始しない。旧 codepoint だけの peer は `None` になる
@@ -1784,11 +1784,11 @@ impl WtSession {
     /// 観測前は `None` を返す。`close_error_code` は WT_CLOSE_SESSION の Application Error
     /// Code であり、`error_code` (WT_SESSION_GONE などの HTTP/3 のコード) ではない。
     /// WT_CLOSE_SESSION を伴わない終了 (CONNECT stream の FIN / RESET_STREAM) では
-    /// コード 0・空文字列として記録される。
+    /// コード 0 / 空文字列として記録される。
     pub(crate) fn peer_session_close(&self) -> Option<PeerSessionClose> {
         self.peer_close
             .lock()
-            .expect("peer close info mutex must not be poisoned")
+            .expect("peer close 情報の mutex が poison されていないこと")
             .clone()
     }
 
@@ -1910,7 +1910,7 @@ impl WtSession {
             let mut state = self
                 .state
                 .lock()
-                .expect("connection state mutex must not be poisoned");
+                .expect("接続状態の mutex が poison されていないこと");
             state.process_stop_sending(stream_id, error_code)
         };
         process_h3_outcome(
@@ -2032,7 +2032,7 @@ impl WtSession {
             let mut s = self
                 .state
                 .lock()
-                .expect("connection state mutex must not be poisoned");
+                .expect("接続状態の mutex が poison されていないこと");
             // 接続エラーは接続を閉じた終了であり、読み出し側には「このセッションではもう受信
             // できない」ことだけを伝える (接続エラーの内容は `process_h3_result` が warn に
             // 残している)。それ以外のエラーは原因を保持したまま返し、購読を静かに止めない
@@ -2056,14 +2056,14 @@ impl WtSession {
     ///
     /// HTTP Datagram フォーマットでエンコードし、QUIC の DATAGRAM で送信する。
     /// `state` のロックは HTTP Datagram 生成後に解放してから送信し、デッドロックを回避する。
-    /// セッション終了・drain の検知後は新しい datagram を送らない (§6 の MUST NOT / §4.7)。
+    /// セッション終了 / drain の検知後は新しい datagram を送らない (§6 の MUST NOT / §4.7)。
     pub async fn send_datagram(&self, payload: &[u8]) -> Result<()> {
         self.ensure_datagram_allowed()?;
         let datagram_bytes = {
             let s = self
                 .state
                 .lock()
-                .expect("connection state mutex must not be poisoned");
+                .expect("接続状態の mutex が poison されていないこと");
             s.h3_conn.send_datagram(self.session_id, payload)?
         };
         // 送信キューの空きができるまで待つ。待たずに捨てるとメディアが飛ぶ
@@ -2837,7 +2837,7 @@ async fn route_uni_stream(
             loop {
                 let data = match recv_stream.receive().await {
                     Ok(Some(data)) => data,
-                    // FIN・RESET_STREAM・接続断のいずれでも読み出しは終わる
+                    // FIN、RESET_STREAM、接続断のいずれでも読み出しは終わる
                     Ok(None) | Err(_) => break,
                 };
                 let fed = feed_stream_to_h3(
@@ -3244,7 +3244,7 @@ mod tests {
                     .send_all(&settings)
                     .await
                     .expect("サーバーの SETTINGS を送れること");
-                // RFC 9114 §6.2.1 / RFC 9204 §4.2 の制御・QPACK encoder / decoder の
+                // RFC 9114 §6.2.1 / RFC 9204 §4.2 の制御ストリーム、QPACK encoder、QPACK decoder の
                 // 3 本を、暗黙の開設だけでなくピアが実際に種別を読めることで確認する。
                 let mut h3_recvs = Vec::new();
                 let mut h3_stream_types = Vec::new();
@@ -4792,7 +4792,7 @@ mod tests {
         {
             let mut s = state
                 .lock()
-                .expect("connection state mutex must not be poisoned");
+                .expect("接続状態の mutex が poison されていないこと");
             s.h3_conn
                 .feed_stream(
                     SERVER_CONTROL_STREAM_ID,
@@ -5140,7 +5140,7 @@ mod tests {
         assert_eq!(
             peer_close
                 .lock()
-                .expect("peer close info mutex must not be poisoned")
+                .expect("peer close 情報の mutex が poison されていないこと")
                 .clone(),
             Some(PeerSessionClose {
                 code: 0x11,
@@ -5173,7 +5173,7 @@ mod tests {
         assert!(
             peer_close
                 .lock()
-                .expect("peer close info mutex must not be poisoned")
+                .expect("peer close 情報の mutex が poison されていないこと")
                 .is_none(),
             "自側の close では peer 起点の終了情報を記録しないこと"
         );

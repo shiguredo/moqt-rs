@@ -69,7 +69,7 @@ fn near_max_keys_roundtrip() {
 /// 絶対キー復元 (prev + delta) の overflow は DELTA_ENCODING_OVERFLOW で弾かれる
 #[test]
 fn decode_overflow_rejected() {
-    // 内側: キー MAX - 1・値 0 の 1 件目に続き、delta 2 で MAX + 1 溢出する 2 件目
+    // 内側: キー MAX - 1 / 値 0 の 1 件目に続き、delta 2 で MAX + 1 溢出する 2 件目
     let mut inner = Vec::new();
     varint::encode(u64::MAX - 1, &mut inner);
     varint::encode(0, &mut inner);

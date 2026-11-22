@@ -50,7 +50,7 @@ use super::types::{
 ///
 /// キャンセル経路は `publish_done` を設定しないため、`Terminated` かつ `publish_done` が
 /// `None` であればキャンセル由来と判定できる。PUBLISH_DONE 受信による `Terminated`
-/// （`publish_done` が `Some`）は drain 期間中の遅延データを受理するため対象外
+/// (`publish_done` が `Some`) は drain 期間中の遅延データを受理するため対象外
 /// (draft-ietf-moq-transport-23 §9.9)。
 fn is_cancelled_terminated(subscription: &Subscription) -> bool {
     subscription.state == SubscriptionState::Terminated && subscription.publish_done.is_none()
@@ -114,16 +114,16 @@ pub(super) enum IncomingDataStream {
     Fetch(IncomingFetchStream),
     /// 破棄対象の受信 data stream
     ///
-    /// キャンセル由来 `Terminated`（`publish_done` が `None`）の subscription に属する
+    /// キャンセル由来 `Terminated` (`publish_done` が `None`) の subscription に属する
     /// stream、または `recv_subgroup_header` が `Discarded` を返した新規 stream を表す。
-    /// 以後の受信・終端（SUBGROUP_HEADER / object / FIN / RESET_STREAM / STOP_SENDING）は
+    /// 以後の受信・終端 (SUBGROUP_HEADER / object / FIN / RESET_STREAM / STOP_SENDING) は
     /// すべて no-op で吸収し、`peer_subgroups` tracker 等の内部状態を汚染しない
     /// (draft-ietf-moq-transport-23 §3.1.3: "Objects can arrive after a subscription has been
     /// cancelled. Subscribers SHOULD retain sufficient state to quickly discard these unwanted
     /// Objects, rather than treating them as belonging to an unknown Track Alias.")。
     ///
     /// `request_id` はキャンセル由来候補の subscription が存在する場合に `Some`、
-    /// `forget_subscription` 後（候補が存在しない場合）は `None` になる。
+    /// `forget_subscription` 後 (候補が存在しない場合) は `None` になる。
     Discarded {
         request_id: Option<u64>,
     },
@@ -399,7 +399,7 @@ impl Session {
             .delivery_timeouts
             .subgroup_overrides
             .get(&(group_id, subgroup_id));
-        // publisher's value: Object Property override or Track Property fallback
+        // publisher 側の値: Object Property による上書き、または Track Property のフォールバック
         let publisher_subgroup = match override_entry.and_then(|(s, _)| *s) {
             Some(v) => Some(v),
             None => subscription.delivery_timeouts.publisher_subgroup_ms,
@@ -408,7 +408,7 @@ impl Session {
             Some(v) => Some(v),
             None => subscription.delivery_timeouts.publisher_object_ms,
         };
-        // effective = min(publisher, subscriber) (draft-ietf-moq-transport-23 §5.2)
+        // effective = min(publisher, subscriber) (両者の小さい方) (draft-ietf-moq-transport-23 §5.2)
         let effective_subgroup =
             super::subscription::delivery::compute_effective_delivery_timeout_ms(
                 subscription.delivery_timeouts.subscriber_subgroup_ms,
@@ -1418,7 +1418,7 @@ impl Session {
         header: &SubgroupHeader,
     ) -> Result<TrackDataAcceptance, SessionError> {
         self.require_established()?;
-        // 保持集合に含まれる stream id（終端済みの破棄対象 stream）への再受信は
+        // 保持集合に含まれる stream id (終端済みの破棄対象 stream) への再受信は
         // no-op で吸収する
         if self.data_streams.discarded.contains_key(&stream_id) {
             return Ok(TrackDataAcceptance::Discarded);
@@ -1611,7 +1611,7 @@ impl Session {
     /// Track Alias, the subscriber re-applies each subscription's filter to determine which
     /// subscription a received Object belongs to." に従い、header 時に紐づけた subscription
     /// だけでなく `resolve_peer_track_alias` の候補すべてへ `object_passes_filters` を
-    /// 再適用し、最初に通過した（キャンセル由来 `Terminated` でない）subscription へ
+    /// 再適用し、最初に通過した (キャンセル由来 `Terminated` でない) subscription へ
     /// Object を帰属させる。
     /// `SubgroupIdMode::FirstObjectId` は `subgroup_id` を解決してからフィルタを評価する。
     ///
@@ -1693,7 +1693,7 @@ impl Session {
     /// である (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
     ///
     /// 返す写しは本段階の更新前の値を持つ。先頭 Object フラグが `false` なら、これから処理する
-    /// Object が Subgroup の先頭である。wire 構造に属する更新 (先頭 Object フラグ・最終 Object ID・
+    /// Object が Subgroup の先頭である。wire 構造に属する更新 (先頭 Object フラグ、最終 Object ID、
     /// DATA_STREAM_TIMEOUT 用の activity) はフィルタ判定の結果に依存させない。
     fn take_incoming_subgroup_object(
         &mut self,
@@ -2676,7 +2676,7 @@ impl Session {
                 {
                     Ok(properties) => properties,
                     Err(err) => {
-                        // 購読・fetch の cancel は terminate_malformed_track が扱う。
+                        // 購読 / fetch の cancel は terminate_malformed_track が扱う。
                         // セッション終了コードは Object Properties の decode エラー分類に従う
                         // (MALFORMED_KEY_VALUE などは専用コード、MalformedTrack は
                         // draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) の cancel で
@@ -3281,8 +3281,8 @@ impl Session {
     ///
     /// `properties_data` は Properties Length varint + Properties の生バイト列
     /// ([`ObjectDatagram::properties_data`](crate::stream::datagram::ObjectDatagram::properties_data) と同じ規約)。
-    /// 空スライス (Length varint すら含まない)・Properties Length varint が途中で切れている・
-    /// Properties Length = 0・宣言長と実データ長の不一致は送信前に拒否する
+    /// 空スライス (Length varint すら含まない)、Properties Length varint が途中で切れている、
+    /// Properties Length = 0、宣言長と実データ長の不一致は送信前に拒否する
     /// (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram): Datagram では Properties Length = 0 は
     /// プロトコル違反)。
     ///
@@ -4506,14 +4506,14 @@ impl Session {
                             last_object_id,
                         );
                     } else {
-                        // END_OF_GROUP 空 Subgroup（オブジェクト 0 個）の FIN:
+                        // END_OF_GROUP 空 Subgroup (オブジェクト 0 個) の FIN:
                         // draft §11.3.1 (Subgroup Header) の END_OF_GROUP bit
                         // ("indicates that this subgroup contains the largest Object in
                         // the Group") をオブジェクト 0 個に適用すると、この Group には
                         // 配達すべきオブジェクトが存在しないことを宣言したことになる。
                         // 「存在しない最小の Object ID = 0」として終端を記録し、後から
                         // この Group に届くオブジェクトは Malformed Track として検出する
-                        // （draft §12.1 (Malformed Tracks)）。
+                        // (draft §12.1 (Malformed Tracks))。
                         // `record_group_end_after` は last_object_id + 1 を記録するため
                         // 0 を渡すと 1 になり「Object ID 0 すら存在しない」という空 Group
                         // の意味論を壊す。ここでは 0 を直接記録する。
@@ -4633,7 +4633,7 @@ impl Session {
     /// 破棄対象として no-op で吸収し、生きた帰属先がある stream は通常どおり tracker と
     /// 会計を処理する (所有者のキャンセルだけでは帰属先への受信を止めない)。
     /// draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams) /
-    /// draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17) #1583:
+    /// draft-ietf-moq-transport-23 Appendix A.6 (Since draft-ietf-moq-transport-17):
     /// REQUEST_UPDATE で購読が再開された (PAUSED が 1→0 に変わった) 場合のみ再オープン MAY。
     pub fn send_data_stream_stop_sending(
         &mut self,
@@ -5033,11 +5033,11 @@ impl Session {
 
     /// 指定 request の subscription がキャンセル由来 `Terminated` かどうかを判定する
     ///
-    /// キャンセル経路（`stop_sending` / `handle_err_for_subscription` /
+    /// キャンセル経路 (`stop_sending` / `handle_err_for_subscription` /
     /// `close_subscription_on_stream_end` / `terminate_malformed_track` /
-    /// `handle_peer_subscribe_ok` の未知 Mandatory Track Property 検出）は `publish_done` を
+    /// `handle_peer_subscribe_ok` の未知 Mandatory Track Property 検出) は `publish_done` を
     /// 設定しないため、`Terminated` かつ `publish_done` が `None` であればキャンセル由来と
-    /// 判定できる。PUBLISH_DONE 受信による `Terminated`（`publish_done` が `Some`）は
+    /// 判定できる。PUBLISH_DONE 受信による `Terminated` (`publish_done` が `Some`) は
     /// drain 期間中の遅延データを受理するため対象外
     /// (draft-ietf-moq-transport-23 §9.9)。
     pub(super) fn is_cancelled_terminated_subscription(&self, request_id: u64) -> bool {
@@ -5046,7 +5046,7 @@ impl Session {
             .is_some_and(is_cancelled_terminated)
     }
 
-    /// 帰属実績・override 所有者の request_id が現在も有効な購読先かを判定する
+    /// 帰属実績 / override 所有者の request_id が現在も有効な購読先かを判定する
     ///
     /// subscription が存在し、キャンセル由来 `Terminated` でない場合のみ `Some` を返す
     /// (PUBLISH_DONE 受信後の drain 中 `Terminated` は有効な購読先として扱う)。
@@ -5100,7 +5100,7 @@ impl Session {
     /// 破棄対象 stream を `IncomingDataStream::Discarded` として登録する
     ///
     /// `request_id` はキャンセル由来候補の subscription が存在する場合に `Some`、
-    /// `forget_subscription` 後（候補が存在しない場合）は `None` になる。
+    /// `forget_subscription` 後 (候補が存在しない場合) は `None` になる。
     ///
     /// この variant は終端 (FIN / RESET_STREAM / STOP_SENDING / `report_mid_object_fin` /
     /// forget による除去) が来るまで `incoming` に残る。データが流れ続ける間は
@@ -5354,7 +5354,7 @@ impl Session {
 
     /// stream id を破棄対象の保持集合へ登録する
     ///
-    /// 保持期間は登録時点から `peer_alias_retention_ms`（alias tombstone と同じ長さ）。
+    /// 保持期間は登録時点から `peer_alias_retention_ms` (alias tombstone と同じ長さ)。
     /// 既に登録済みの id は期限を更新しない。
     fn retain_discarded_stream_id(&mut self, stream_id: DataStreamId) {
         self.data_streams
@@ -5373,7 +5373,7 @@ impl Session {
 
     /// FIN で閉じた stream id を保持集合へ登録する
     ///
-    /// 保持期間は登録時点から `peer_alias_retention_ms`（破棄対象 stream と同じ長さ）。
+    /// 保持期間は登録時点から `peer_alias_retention_ms` (破棄対象 stream と同じ長さ)。
     /// 既に登録済みの id は期限を更新しない。
     /// `discarded` と異なり受信そのものは吸収しない (終端通知の重複のみを吸収する)。
     fn retain_fin_closed_stream_id(&mut self, stream_id: DataStreamId) {
@@ -5393,7 +5393,7 @@ impl Session {
     /// 対象は保持集合 (`data_streams.discarded`) に移された終端済み id のみで、
     /// `incoming` に残る `Discarded` variant (未終端) は対象外
     /// ([`register_discarded_stream`](Self::register_discarded_stream) の doc 参照)。
-    /// alias tombstone（`tick_peer_alias_tombstones`）には連動させない
+    /// alias tombstone (`tick_peer_alias_tombstones`) には連動させない
     /// (共有 alias で `Established` subscription が残っている間は tombstone が
     /// 登録されず、連動すると掃除が発火しない)。
     pub(super) fn tick_discarded_data_stream_ids(&mut self, now_ms: u64) {
@@ -5460,7 +5460,7 @@ impl Session {
     /// draft-ietf-moq-transport-23 §3.1 (Subscriptions): "the subscriber re-applies each
     /// subscription's filter to determine which subscription a received Object belongs to."
     ///
-    /// 候補順にフィルタを評価し、最初に通過した（キャンセル由来 `Terminated` でない）
+    /// 候補順にフィルタを評価し、最初に通過した (キャンセル由来 `Terminated` でない)
     /// subscription を採用する。キャンセル由来 `Terminated` の候補は受理対象から除外しつつ
     /// フィルタ評価だけは実行し、合格した候補がキャンセル由来のみの場合は
     /// [`CandidateEvaluation::cancelled_request_id`] で判別できるようにする

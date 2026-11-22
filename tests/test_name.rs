@@ -152,7 +152,7 @@ mod parse_errors {
 
     #[test]
     fn full_name_too_long_rejected() {
-        // namespace 4090 + track 10 = 4100 > 4096
+        // namespace 4090 + track 10 = 4100 > 4096 (上限超過)
         let serialized = format!("{}--{}", "a".repeat(4090), "b".repeat(10));
         assert_eq!(
             parse_name(&serialized),
@@ -174,7 +174,7 @@ mod parse_errors {
     // `Display` が variant ごとの失敗内容を表す
     #[test]
     fn display_describes_each_variant() {
-        // namespace 4090 + track 10 = 4100 > 4096
+        // namespace 4090 + track 10 = 4100 > 4096 (上限超過)
         let too_long = format!("{}--{}", "a".repeat(4090), "b".repeat(10));
         // 33 フィールド (> 32)
         let too_many_fields = format!("{}--x", vec!["a"; 33].join("-"));

@@ -54,7 +54,7 @@ moq-sub は、プレイヤーへ `enqueue_video_i420` した時点で描画数 (
 
 ### moq-sub
 
-- `poll_events()` の直後に `stats()` を読み、描画数・破棄数の差分から実際に描画された
+- `poll_events()` の直後に `stats()` を読み、描画数 / 破棄数の差分から実際に描画された
   フレームを求める。投入したフレームの TIMESTAMP は FIFO で対応付け、描画されたものだけを
   その観測時刻で `PlayoutTimeline::record_presentation` に記録する。TIMESTAMP の無い
   フレームは位置合わせのため `None` として FIFO に積み、記録からは除く。
@@ -71,11 +71,11 @@ moq-sub は、プレイヤーへ `enqueue_video_i420` した時点で描画数 (
 
 ## 検証
 
-- raw-player-rs: 実 SDL の単体試験で、時計が PTS より遅れる場合・進む場合の両方から
+- raw-player-rs: 実 SDL の単体試験で、時計が PTS より遅れる場合 / 進む場合の両方から
   復帰して描画が継続すること、正常な 30 fps 再生では復帰が発動しないこと、理由別ドロップ
   数が合計と一致することを確認した。修正前のコードでは復帰の 2 ケースが描画 1 枚で
   失敗することも確認している。
-- moq-sub: `VideoPlayoutAccounting` の単体試験で、描画・破棄・キュー上限超過の対応付け、
+- moq-sub: `VideoPlayoutAccounting` の単体試験で、描画、破棄、キュー上限超過の対応付け、
   停止判定の境界、復帰後のリセットを確認した。`cargo clippy -p moq-sub --all-targets --
   -D warnings` と `cargo test -p moq-sub` が通る。
 

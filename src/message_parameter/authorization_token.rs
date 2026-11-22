@@ -65,7 +65,7 @@ impl AuthorizationToken {
                 }
                 Ok(Self::Delete { alias })
             }
-            // REGISTER (0x1): Token Alias + Token Type + Token Value
+            // REGISTER (0x1): Token Alias、Token Type、Token Value の順
             1 => {
                 let (alias, n) = varint::decode(&bytes[pos..]).map_err(|_| {
                     MessageError::MalformedAuthToken("failed to decode Token Alias in REGISTER")

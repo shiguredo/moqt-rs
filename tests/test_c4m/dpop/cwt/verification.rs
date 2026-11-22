@@ -1215,7 +1215,7 @@ fn cwt_dpop_freshness_accepts_window_boundaries() {
             Some(CWT_TRACK_NAME),
             &mut cache,
         );
-        assert_eq!(result, expected.map_or(Ok(()), Err), "offset={offset}");
+        assert_eq!(result, expected.map_or(Ok(()), Err), "位置 offset={offset}");
     }
 }
 
@@ -1585,7 +1585,7 @@ fn cwt_dpop_checks_moqt_reval_against_revalidation_capability() {
     assert_eq!(cache.len(), 1);
 }
 
-/// CAT の通常クレーム (期限・issuer・audience) が不正な場合は拒否し、記録しないこと
+/// CAT の通常クレーム (期限、issuer、audience) が不正な場合は拒否し、記録しないこと
 #[cfg(feature = "aws-lc-rs")]
 #[test]
 fn cwt_dpop_rejects_invalid_cat_claims_without_recording() {

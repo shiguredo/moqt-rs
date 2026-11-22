@@ -295,7 +295,7 @@ fn sample_track(ctx: &mut noprop::TestCaseContext) -> MsfTrack {
 ///
 /// 1 〜 3 個の非空 field を `/` で連結する。field が空にならず 32 fields を超えないため、
 /// `parse_catalog_namespace` が受理する。JSON エスケープの往復も検証できるよう、ときどき
-/// 引用符・backslash・制御文字・非 ASCII を含む field を混ぜる (NUL と `/` は §5.2.2 /
+/// 引用符、backslash、制御文字、非 ASCII を含む field を混ぜる (NUL と `/` は §5.2.2 /
 /// §11.2.1 が禁止するため含めない)。
 fn sample_catalog_namespace(ctx: &mut noprop::TestCaseContext) -> String {
     let count = noprop::sample_usize_in(ctx, 1..=3);
@@ -591,7 +591,7 @@ fn sample_event_timeline_entry(ctx: &mut noprop::TestCaseContext) -> MsfEventTim
     MsfEventTimelineEntry { index, data_raw }
 }
 
-// ─── PBT ─────────────────────────────────────────────────────────────────────
+// ─── PBT (プロパティベーステスト) ─────────────────────────────────────────────────────────────────────
 
 /// depends を、生成済みカタログ内で解決できる track name / renderGroup に置き換える
 ///
@@ -843,7 +843,7 @@ fn group_omissions_are_accepted() {
         for buffers_form in [false, true] {
             for publish in [false, true] {
                 let json = omitted_group_catalog_json(group_field, buffers_form, publish);
-                eprintln!("JSON={:?}", String::from_utf8_lossy(&json));
+                eprintln!("JSON の内容={:?}", String::from_utf8_lossy(&json));
                 let decoded = MsfCatalogDocument::decode(&json, MsfCompression::None)
                     .unwrap_or_else(|e| {
                         panic!(

@@ -41,7 +41,7 @@ mod setup_messages {
         let encoded = msg
             .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
             .expect("正当なテスト入力の encode は成功する");
-        // type = 0x2F00 (2 byte vi64: 0x80|0x2F=0xAF, 0x00)
+        // type = 0x2F00 (2 バイトの vi64: 0x80|0x2F=0xAF, 0x00)
         assert_eq!(encoded[0], 0xAF);
         assert_eq!(encoded[1], 0x00);
         // length = 0 (空の SetupOptions はカウントプレフィックスなしなので 0 バイト)
@@ -215,7 +215,7 @@ mod goaway {
         let err = ControlMessage::decode(&buf).expect_err("余剰バイトは MALFORMED_MESSAGE");
         assert!(
             matches!(err, MessageError::MalformedMessage(_)),
-            "got {err:?}"
+            "得たエラー: {err:?}"
         );
     }
 
@@ -235,7 +235,7 @@ mod goaway {
         let err = ControlMessage::decode(&buf).expect_err("URI > 8192 は FIELD_LENGTH_EXCEEDED");
         assert!(
             matches!(err, MessageError::FieldLengthExceeded(_)),
-            "got {err:?}"
+            "得たエラー: {err:?}"
         );
     }
 
@@ -282,7 +282,7 @@ mod goaway {
             .expect_err("URI > 8192 のエンコードは FIELD_LENGTH_EXCEEDED");
         assert!(
             matches!(err, MessageError::FieldLengthExceeded(_)),
-            "got {err:?}"
+            "得たエラー: {err:?}"
         );
     }
 }
@@ -1382,7 +1382,7 @@ mod track_name_length {
                 .expect("1 バイトの Track Name は encode できること");
             let (decoded, consumed) = ControlMessage::decode(&encoded).expect("decode できること");
             assert_eq!(consumed, encoded.len());
-            assert_eq!(decoded, msg, "{label}");
+            assert_eq!(decoded, msg, "ラベル {label}");
         }
     }
 
@@ -1450,7 +1450,7 @@ mod error_cases {
 
     #[test]
     fn payload_shorter_than_length() {
-        // type=0xAF, 0x00 (=0x2F00 SETUP), length=10, payload=5 bytes
+        // type=0xAF, 0x00 (=0x2F00 の SETUP)、length=10、payload=5 バイト
         let buf = vec![0xAF, 0x00, 0x0A, 0x01, 0x02, 0x03, 0x04, 0x05];
         assert_eq!(
             ControlMessage::decode(&buf),

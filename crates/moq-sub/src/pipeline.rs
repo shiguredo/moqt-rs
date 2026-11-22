@@ -449,7 +449,7 @@ fn subgroup_object_location(header: &SubgroupHeader, object: &DecodedSubgroupObj
 /// 経路に依存しない値をここへまとめ、重複の判定 → 購読境界の判定 → 録画 → Audio Config の
 /// 検証 → 送出順の判定 → デコード → catch-up の観測 → デコード済みフレームの送出という順序が
 /// 経路ごとに食い違わないようにする。重複と境界以下は Audio Config の検証だけを行い、復号・
-/// 送出・録画・catch-up の観測をしない。
+/// 送出、録画、catch-up の観測をしない。
 struct AudioDelivery<'a> {
     /// デコード済み音声フレームの送り先
     audio_tx: &'a std::sync::mpsc::Sender<DecodedAudioFrame>,
@@ -548,13 +548,13 @@ impl AudioDelivery<'_> {
         // Audio Config の検証だけは Properties から行うため、この時点では return しない。
         //
         // 同じ識別子の Object を publisher が複数回送ることがある (datagram は再送されない
-        // ため、RFC 9221 §3)。2 回目はここで捨て、録画・Audio Config の検証・復号・送出へ
+        // ため、RFC 9221 §3)。2 回目はここで捨て、録画、Audio Config の検証、復号、送出へ
         // 渡さない。覚えるのは最初の 1 回だけで、重複した到着では窓を変えない
         let (duplicate, before_boundary, boundary) = {
             let mut delivery_order = self
                 .delivery_order
                 .lock()
-                .expect("audio delivery order lock is not poisoned");
+                .expect("audio delivery order の lock が poison されていないこと");
             let duplicate = delivery_order.is_duplicate(location);
             // 重複は境界と比べる前に落とすため、重複した Object で境界以下の累計を二重に
             // 数えない (累計は「落とした理由」の内訳として読む)
@@ -641,7 +641,7 @@ impl AudioDelivery<'_> {
             let mut delivery_order = self
                 .delivery_order
                 .lock()
-                .expect("audio delivery order lock is not poisoned");
+                .expect("audio delivery order の lock が poison されていないこと");
             let previous_pts_us = delivery_order.last_pts_us();
             (delivery_order.admit(pts_us), previous_pts_us)
         };
@@ -696,7 +696,7 @@ impl AudioDelivery<'_> {
                 let mut catch_up = self
                     .catch_up
                     .lock()
-                    .expect("audio catch up lock is not poisoned");
+                    .expect("audio catch up の lock が poison されていないこと");
                 let decision = catch_up.observe(AudioReceiveCatchUpObservation {
                     now_us,
                     lag_us,
@@ -912,7 +912,7 @@ fn should_stop_sending(peer_ended: bool, session_terminated: bool) -> bool {
 /// 対象は「まだ active な購読」のみである。PUBLISH_DONE を受けた購読
 /// (`active_requests` から外れた request id) と、`video_request_id` などを参照できても
 /// 終端済みで active でない購読は、`Session::stop_sending` が Terminated を拒否するため
-/// 対象外にする (0100 型の警告を再発させない)。全部 media track が恒久終了して
+/// 対象外にする (STOP_SENDING 失敗の警告を再発させない)。全部 media track が恒久終了して
 /// `peer_ended` を立てる終了経路では `should_stop_sending` が偽になるため、外側の
 /// 全体ゲートで送らない。残った catalog は session close で終わる。
 fn stop_sending_targets(
@@ -1019,7 +1019,7 @@ fn request_session_termination(
 ///
 /// - `MalformedTrack`: draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) /
 ///   §12.1 (Malformed Tracks) 条件 9 の malformed Track は、セッション終了ではなく同じ
-///   Track の購読・fetch の cancel を求める。Session の data plane が同じ Object Properties
+///   Track の購読 / fetch の cancel を求める。Session の data plane が同じ Object Properties
 ///   を decode して既に cancel しているため、ここでセッションを閉じると無関係な Track まで
 ///   巻き込む。セッション終了は依頼せず、`true` を返してこの Object を捨てる
 /// - それ以外: draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の書式違反で
@@ -1497,7 +1497,7 @@ fn reissue_request_target(
 ///
 /// `Session::stop_sending` は Terminated を拒否するため、PUBLISH_DONE 済みの購読 (終了待ち
 /// entry が残っている場合) と、tick で解消済みの移行待ち (`migration_pending_tracks` に
-/// 載っている kind) には送らない (0100 型の警告を再発させない)。Established の通常
+/// 載っている kind) には送らない (STOP_SENDING 失敗の警告を再発させない)。Established の通常
 /// 再発行では送る。`permanently_ended_tracks` に含まれる track は再発行しないため
 /// 判定対象外である (安全側として送らない)。
 fn reissue_send_stop_sending(
@@ -1643,7 +1643,7 @@ fn record_last_location(
 ) {
     last_locations
         .lock()
-        .expect("last locations lock is not poisoned")
+        .expect("last locations の lock が poison されていないこと")
         .record(kind, location);
 }
 
@@ -2369,7 +2369,7 @@ async fn wait_before_migration_retry(
 
 /// バックグラウンドの移行タスクを起動する
 ///
-/// main ループは旧 session の受信・catalog の適用・stream の accept を続け、結果は
+/// main ループは旧 session の受信、catalog の適用、stream の accept を続け、結果は
 /// oneshot で受け取る (draft-ietf-moq-transport-23 §6.6.1 は移行をアプリケーションへ
 /// 透過的に行うことを求める。draft 由来の仕様であり将来変更されうる)。送信側を
 /// 呼び出し元へ返さないのは、移行タスクが結果を必ず 1 件送るためである。
@@ -2444,7 +2444,7 @@ struct ReissuedRequest {
 /// 旧 request stream は STOP_SENDING で閉じる (§6.4.2.3 (Request Cancellation and
 /// Rejection))。ただし発行済みの購読が既に Terminated の場合 (PUBLISH_DONE の
 /// `GOING_AWAY` 受信済みの再発行) は送らない (`Session::stop_sending` は Terminated を
-/// 拒否し、0100 型の警告が出るため)。購読の張り直しは移行時と同じ手順 (映像は
+/// 拒否し、STOP_SENDING 失敗の警告が出るため)。購読の張り直しは移行時と同じ手順 (映像は
 /// SUBSCRIBER_PRIORITY の REQUEST_UPDATE と直近 Group の FETCH、音声は SUBSCRIBE だけ)
 /// で行う。draft 由来の仕様であり、将来変更される可能性がある。
 async fn reissue_request(
@@ -4455,7 +4455,7 @@ pub async fn run(
                         continue;
                     }
                 };
-                // Padding Datagram と、フィルタを通過しなかった Object・キャンセル済み
+                // Padding Datagram と、フィルタを通過しなかった Object / キャンセル済み
                 // subscription の Object はメディアとして扱わない
                 // (draft-ietf-moq-transport-23 §3.1 (Subscriptions) / §11.5.2 (Padding Datagrams))
                 let DatagramAcceptance::Object(TrackDataAcceptance::Accepted) = acceptance else {
@@ -4756,7 +4756,7 @@ pub async fn run(
                                         {
                                             // control stream の GOAWAY: 移行先の確立と購読の
                                             // 張り直しはバックグラウンドのタスクへ移す。main
-                                            // ループは旧 session の受信・catalog の適用・stream
+                                            // ループは旧 session の受信、catalog の適用、stream
                                             // の accept を続ける (§6.6.1)
                                             let deadline = MigrationDeadline::after_goaway(
                                                 Instant::now(),
@@ -4765,7 +4765,7 @@ pub async fn run(
                                             let last_locations = *last_received_locations
                                                 .lock()
                                                 .expect(
-                                                    "last locations lock is not poisoned",
+                                                    "last locations の lock が poison されていないこと",
                                                 );
                                             let request = MigrationRequest {
                                                 url: target.url,
@@ -4930,7 +4930,7 @@ pub async fn run(
                                                 let last_locations = *last_received_locations
                                                     .lock()
                                                     .expect(
-                                                        "last locations lock is not poisoned",
+                                                        "last locations の lock が poison されていないこと",
                                                     );
                                                 if new_session_url {
                                                     tracing::info!(
@@ -5040,7 +5040,7 @@ pub async fn run(
                                                                     reread: last_received_locations
                                                                         .lock()
                                                                         .expect(
-                                                                            "last locations lock is not poisoned",
+                                                                            "last locations の lock が poison されていないこと",
                                                                         )
                                                                         .get(TrackKind::Video),
                                                                 };
@@ -5078,7 +5078,7 @@ pub async fn run(
                                                             audio_delivery_order
                                                                 .lock()
                                                                 .expect(
-                                                                    "audio delivery order lock is not poisoned",
+                                                                    "audio delivery order の lock が poison されていないこと",
                                                                 )
                                                                 .set_boundary(
                                                                     last_locations
@@ -5741,7 +5741,7 @@ pub async fn run(
                         group_switch.reset();
                         audio_catch_up
                             .lock()
-                            .expect("audio catch up lock is not poisoned")
+                            .expect("audio catch up の lock が poison されていないこと")
                             .reset();
                         // 音声の購読境界を「旧 session で最後に受信した Location」へ更新する。
                         // 移行先の購読はその位置を Location Filter の Absolute Start (0x02) に
@@ -5752,11 +5752,11 @@ pub async fn run(
                         // 変更されうる)
                         let audio_boundary = last_received_locations
                             .lock()
-                            .expect("last locations lock is not poisoned")
+                            .expect("last locations の lock が poison されていないこと")
                             .audio;
                         audio_delivery_order
                             .lock()
-                            .expect("audio delivery order lock is not poisoned")
+                            .expect("audio delivery order の lock が poison されていないこと")
                             .reset_for_migration(audio_boundary);
                         tracing::info!(
                             "Updated the audio subscription boundary for the migrated session: audio_boundary={audio_boundary:?}"
@@ -5770,7 +5770,7 @@ pub async fn run(
                                 .and_then(|locations| locations.video),
                             reread: last_received_locations
                                 .lock()
-                                .expect("last locations lock is not poisoned")
+                                .expect("last locations の lock が poison されていないこと")
                                 .video,
                         };
                         let video_boundary_candidate = select_video_subscription_boundary(
@@ -6292,7 +6292,7 @@ pub async fn run(
                                         MigrationDeadline::after_goaway(Instant::now(), 0);
                                     let last_locations = *last_received_locations
                                         .lock()
-                                        .expect("last locations lock is not poisoned");
+                                        .expect("last locations の lock が poison されていないこと");
                                     let request = MigrationRequest {
                                         url: config.url.clone(),
                                         transport: config.transport,
@@ -6370,7 +6370,7 @@ pub async fn run(
                 // 増えたときだけ info で出す
                 let counters = audio_delivery_order
                     .lock()
-                    .expect("audio delivery order lock is not poisoned")
+                    .expect("audio delivery order の lock が poison されていないこと")
                     .counters();
                 log_audio_delivery_counters(&mut logged_audio_delivery_counters, counters);
                 // 映像の購読境界以下として落とした Object の累計も、増えていれば出す
@@ -6598,7 +6598,7 @@ pub async fn run(
     if should_stop_sending(peer_ended, session_terminated) {
         // 対象は「まだ active な購読」だけである ([`stop_sending_targets`] を参照)。PUBLISH
         // DONE で Terminated になった購読と Session が回収済みの購読は拒否されるため、
-        // 0100 型の警告を出さない
+        // STOP_SENDING 失敗の警告を出さない
         for (kind, rid) in stop_sending_targets(
             video_request_id,
             audio_request_id,
@@ -7383,7 +7383,7 @@ async fn receive_catalog(
         data_plane.recv_data_stream_type(stream_id, stream_type_id)?;
         match stream_type {
             StreamType::Padding => {
-                // draft-ietf-moq-transport-23 §11.5.1 (Padding Streams)
+                // 仕様: draft-ietf-moq-transport-23 §11.5.1 (Padding Streams)
                 let _ = drain_registered_stream_to_end(&mut stream, data_plane, stream_id).await;
             }
             StreamType::Fetch => {
@@ -8802,7 +8802,7 @@ async fn handle_stream_body(
 /// 自分の `recv_subgroup_header` 再試行で確立を待つ (購読の確立は別 task の `note_subscriber`
 /// でも起こる)。確立後に保持チャンクを decoder へ戻すと、decode ループが `End(Fin)` を
 /// 観測して初めて session の `recv_data_stream_closed` を 1 度だけ通るため、FIN の会計
-/// 通知は二重にならない。期限切れ・RESET_STREAM / STOP_SENDING 指示による abort では
+/// 通知は二重にならない。期限切れ / RESET_STREAM / STOP_SENDING 指示による abort では
 /// 会計を `send_data_stream_stop_sending` で閉じるため、FIN の通知は成功経路・破棄経路の
 /// どちらでも 1 回以内である。移植元の moqt-js (外部リポジトリ) は FIN の時点で subscriber
 /// が居なければ entry を破棄する。本 example は保持を継続して購読の確立を待つ点が異なる
@@ -9631,7 +9631,7 @@ enum VideoDelivery {
     /// LOC Properties が malformed Track を示した (セッション終了は依頼せず、読み取りを打ち切る)
     ///
     /// draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1 (Malformed
-    /// Tracks) 条件 9 はセッションを閉じず購読・fetch の cancel を求める。このためセッション
+    /// Tracks) 条件 9 はセッションを閉じず購読 / fetch の cancel を求める。このためセッション
     /// 終了は依頼しない。Session の data plane も同じ Object Properties を decode するが、
     /// FETCH 応答 stream でこの結果になるのは Session が受理した後に LOC の再 decode だけが
     /// malformed Track と判定した場合である。したがって「Session が既に cancel している」
@@ -10180,7 +10180,7 @@ enum DatagramAction<'a> {
         /// 対象トラックの alias (警告を 1 回に絞るために使う)
         track_alias: u64,
     },
-    /// メディアとして扱わない Object (Object Status のみ・未知の alias・wire の書式違反)
+    /// メディアとして扱わない Object (Object Status のみ、未知の alias、wire の書式違反)
     Ignore,
 }
 
@@ -10223,7 +10223,7 @@ fn plan_datagram<'a>(raw: &'a [u8], track_map: &HashMap<u64, TrackKind>) -> Data
 /// LOC draft-ietf-moq-loc-05 §4.1 (Application with one audio track) では「1 audio chunk = 1 Object = 1 Group」と例示されているが、
 /// 防御的に subgroup 内の object をすべて処理する。
 ///
-/// 配送 (録画・Audio Config の検証・デコード・フレーム送出) は [`AudioDelivery::deliver`] が
+/// 配送 (録画、Audio Config の検証、デコード、フレーム送出) は [`AudioDelivery::deliver`] が
 /// 行う。datagram で届く音声も同じ関数を通る。
 #[expect(clippy::too_many_arguments)]
 async fn decode_audio_stream(
@@ -10585,7 +10585,7 @@ async fn read_video_fetch_stream(
         )
         .await;
         if video_fetch_stream_needs_cleanup(delivery) {
-            // malformed Track はセッション終了ではなく購読・fetch の cancel で済ませるが
+            // malformed Track はセッション終了ではなく購読 / fetch の cancel で済ませるが
             // (draft-ietf-moq-transport-23 §12.1 (Malformed Tracks))、FETCH 応答 stream を
             // Session の会計に残したままだと DATA_STREAM_TIMEOUT でセッションが閉じる
             // (同 §12.2 (Session Termination Codes))。読み切れなかった stream を会計から
@@ -10604,7 +10604,7 @@ async fn read_video_fetch_stream(
 
 /// FETCH 応答の映像配送を打ち切った後、stream を Session の会計から外すかを返す
 ///
-/// malformed Track はセッションを閉じず、同じ Track の購読・fetch の cancel で扱う
+/// malformed Track はセッションを閉じず、同じ Track の購読 / fetch の cancel で扱う
 /// (draft-ietf-moq-transport-23 §12.1 (Malformed Tracks))。ただし FETCH 応答 stream を
 /// Session の `data_streams.incoming` に残したままだと、同 §12.2 (Session Termination
 /// Codes) の DATA_STREAM_TIMEOUT でセッションが閉じる。STOP_SENDING で stream を会計から
@@ -12851,7 +12851,7 @@ mod tests {
         );
     }
 
-    /// 全 media track の終了判定が購読の有無・移行待ち・catalog を正しく扱うこと
+    /// 全 media track の終了判定が購読の有無、移行待ち、catalog を正しく扱うこと
     ///
     /// 移行済み track の PUBLISH_DONE と main ループの tick の両方から使う判定である。
     /// media の移行待ちがある間は終えない。catalog の恒久終了と移行待ちは media の判定に
@@ -14035,7 +14035,7 @@ mod tests {
     /// 音声配送は既知 LOC Property の重複をセッション終了へ変換しないこと
     ///
     /// draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1 (Malformed
-    /// Tracks) 条件 9 はセッション終了ではなく購読・fetch の cancel を求める。Session の
+    /// Tracks) 条件 9 はセッション終了ではなく購読 / fetch の cancel を求める。Session の
     /// data plane が同じ Object Properties を decode して cancel 済みのため、ここでは
     /// セッション終了を依頼せず、この Object だけを捨てて配送を続ける。
     #[tokio::test]
@@ -14175,7 +14175,7 @@ mod tests {
     ///
     /// FETCH 応答 stream を Session の会計に残したままだと、DATA_STREAM_TIMEOUT
     /// (30 秒) でセッションが閉じる。malformed Track はセッション終了ではなく
-    /// 購読・fetch の cancel で扱うため、STOP_SENDING と drain で会計から外す必要がある。
+    /// 購読 / fetch の cancel で扱うため、STOP_SENDING と drain で会計から外す必要がある。
     /// 配送の継続とセッション終了の依頼では後始末しないことも固定する。
     #[test]
     fn video_fetch_stream_cleanup_follows_the_delivery_outcome() {
@@ -14380,7 +14380,7 @@ mod tests {
         // 重複として落とした 1 件を累計に残す。原因の切り分け用の内訳である
         let counters = delivery_order
             .lock()
-            .expect("audio delivery order lock is not poisoned")
+            .expect("audio delivery order の lock が poison されていないこと")
             .counters();
         assert_eq!(
             counters.duplicate_objects, 1,
@@ -14679,7 +14679,7 @@ mod tests {
         assert_eq!(
             delivery_order
                 .lock()
-                .expect("audio delivery order lock is not poisoned")
+                .expect("audio delivery order の lock が poison されていないこと")
                 .last_pts_us(),
             Some(pts_us(5)),
             "送出順の判定は datagram と subgroup stream の経路で共有すること"
@@ -14687,7 +14687,7 @@ mod tests {
         // 送出済みの TIMESTAMP より古い 4 件を累計に残す
         let counters = delivery_order
             .lock()
-            .expect("audio delivery order lock is not poisoned")
+            .expect("audio delivery order の lock が poison されていないこと")
             .counters();
         assert_eq!(
             counters.stale_objects, 4,
@@ -14811,7 +14811,7 @@ mod tests {
         // 購読の境界 (SUBSCRIBE_OK の Largest Object) は Group 100 / Object 0 とする
         delivery_order
             .lock()
-            .expect("audio delivery order lock is not poisoned")
+            .expect("audio delivery order の lock が poison されていないこと")
             .set_boundary(Some(Location {
                 group_id: 100,
                 object_id: 0,
@@ -14862,7 +14862,7 @@ mod tests {
         assert_eq!(
             catch_up
                 .lock()
-                .expect("audio catch up lock is not poisoned")
+                .expect("audio catch up の lock が poison されていないこと")
                 .snapshot()
                 .lag_ms,
             None,
@@ -14909,7 +14909,7 @@ mod tests {
         // 復号も観測もしないため、追いつきの遅れは live の値から動かない
         let lag_after_live = catch_up
             .lock()
-            .expect("audio catch up lock is not poisoned")
+            .expect("audio catch up の lock が poison されていないこと")
             .snapshot()
             .lag_ms;
         assert!(
@@ -14926,7 +14926,7 @@ mod tests {
         assert_eq!(
             catch_up
                 .lock()
-                .expect("audio catch up lock is not poisoned")
+                .expect("audio catch up の lock が poison されていないこと")
                 .snapshot()
                 .lag_ms,
             lag_after_live,
@@ -14948,7 +14948,7 @@ mod tests {
         assert_eq!(
             delivery_order
                 .lock()
-                .expect("audio delivery order lock is not poisoned")
+                .expect("audio delivery order の lock が poison されていないこと")
                 .last_pts_us(),
             Some(pts_us(3)),
             "境界より後の live だけで送出順の基準を進めること"
@@ -14957,7 +14957,7 @@ mod tests {
         // 先に落ちるため、境界以下の累計は重複と二重に数えない
         let counters = delivery_order
             .lock()
-            .expect("audio delivery order lock is not poisoned")
+            .expect("audio delivery order の lock が poison されていないこと")
             .counters();
         assert_eq!(
             counters.duplicate_objects, 2,
@@ -15015,7 +15015,7 @@ mod tests {
         );
         let stats = catch_up
             .lock()
-            .expect("audio catch up lock is not poisoned")
+            .expect("audio catch up の lock が poison されていないこと")
             .snapshot();
         let lag_ms = stats.lag_ms.expect("復号の出力の遅れを観測すること");
         let input_lag_ms = stats
@@ -15050,7 +15050,7 @@ mod tests {
         );
         let stats = catch_up
             .lock()
-            .expect("audio catch up lock is not poisoned")
+            .expect("audio catch up の lock が poison されていないこと")
             .snapshot();
         assert_eq!(
             stats.input_lag_ms, None,
@@ -15150,7 +15150,7 @@ mod tests {
         let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
         delivery_order
             .lock()
-            .expect("audio delivery order lock is not poisoned")
+            .expect("audio delivery order の lock が poison されていないこと")
             .set_boundary(Some(Location {
                 group_id: 10,
                 object_id: 0,
@@ -15235,7 +15235,7 @@ mod tests {
         let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
         delivery_order
             .lock()
-            .expect("audio delivery order lock is not poisoned")
+            .expect("audio delivery order の lock が poison されていないこと")
             .set_boundary(Some(Location {
                 group_id: 10,
                 object_id: 0,
@@ -15451,7 +15451,7 @@ mod tests {
         assert_eq!(
             delivery_order
                 .lock()
-                .expect("audio delivery order lock is not poisoned")
+                .expect("audio delivery order の lock が poison されていないこと")
                 .last_pts_us(),
             Some(pts_us(6)),
             "送出しなかった音声で基準を戻さないこと"
@@ -15459,7 +15459,7 @@ mod tests {
         // 並び替わって届いた古い 1 件を stale の累計に残す
         let counters = delivery_order
             .lock()
-            .expect("audio delivery order lock is not poisoned")
+            .expect("audio delivery order の lock が poison されていないこと")
             .counters();
         assert_eq!(
             counters.stale_objects, 1,
@@ -15647,7 +15647,7 @@ mod tests {
             assert_eq!(
                 last_received_locations
                     .lock()
-                    .expect("last locations lock is not poisoned")
+                    .expect("last locations の lock が poison されていないこと")
                     .video,
                 Some(Location {
                     group_id,
@@ -16512,7 +16512,7 @@ mod tests {
             assert_eq!(
                 last_received_locations
                     .lock()
-                    .expect("last locations lock is not poisoned")
+                    .expect("last locations の lock が poison されていないこと")
                     .video,
                 None,
                 "保留中の Object を「最後に受信した位置」に記録しないこと"
@@ -16526,7 +16526,7 @@ mod tests {
             assert_eq!(
                 last_received_locations
                     .lock()
-                    .expect("last locations lock is not poisoned")
+                    .expect("last locations の lock が poison されていないこと")
                     .video,
                 Some(Location {
                     group_id: 11,
@@ -17949,7 +17949,7 @@ mod tests {
             .await;
         }
 
-        /// `read_catalog_fetch_stream` が request ID 不一致・デコード失敗・RESET を Err にすること
+        /// `read_catalog_fetch_stream` が request ID 不一致、デコード失敗、RESET を Err にすること
         ///
         /// `receive_catalog` はこれらの Err を警告に変えて購読で届く catalog を待つため、
         /// 関数自身は失敗を Err で返す契約であることを固定する。
@@ -18073,7 +18073,7 @@ mod tests {
 
         /// fill fetch stream が失敗しても `receive_catalog` が購読の catalog を待つこと
         ///
-        /// request ID 不一致・デコード失敗・RESET をすべて先に送り、catalog を送らずに
+        /// request ID 不一致、デコード失敗、RESET をすべて先に送り、catalog を送らずに
         /// `receive_catalog` を呼ぶ。どれも購読の失敗ではないため、`receive_catalog` は警告に
         /// 留めて購読で届く catalog を待ち続け、CATALOG_TIMEOUT で期限切れの Err を返す。
         /// 失敗を Err に伝播させる退行は期限より前に別のエラーで返るため、待ち時間と

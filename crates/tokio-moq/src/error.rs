@@ -412,7 +412,11 @@ mod tests {
             ),
         ];
         for (error, expected, message) in cases {
-            assert_eq!(session_error_code(error), *expected, "{message}: {error:?}");
+            assert_eq!(
+                session_error_code(error),
+                *expected,
+                "メッセージ {message}: {error:?}"
+            );
         }
     }
 

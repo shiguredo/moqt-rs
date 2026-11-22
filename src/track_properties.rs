@@ -45,20 +45,20 @@ use crate::property::{CODEC_STRING_TYPE as PROP_CODEC_STRING, validate_codec_str
 use crate::{error::MessageError, varint};
 use alloc::vec::Vec;
 
-/// OBJECT_DELIVERY_TIMEOUT (Property Type 0x02, draft-ietf-moq-transport-23 §10.2 (OBJECT_DELIVERY_TIMEOUT))
+/// OBJECT_DELIVERY_TIMEOUT プロパティ (Property Type 0x02, draft-ietf-moq-transport-23 §10.2 (OBJECT_DELIVERY_TIMEOUT))
 pub const PROP_OBJECT_DELIVERY_TIMEOUT: u64 = 0x02;
 /// MAX_CACHE_DURATION (Property Type 0x04, draft-ietf-moq-transport-23 §10.3 (MAX CACHE DURATION))
 ///
 /// この節番号・定義は draft-ietf-moq-transport-23 由来であり、将来の draft 改版で
 /// 変わる可能性がある。
 pub const PROP_MAX_CACHE_DURATION: u64 = 0x04;
-/// SUBGROUP_DELIVERY_TIMEOUT (Property Type 0x06, draft-ietf-moq-transport-23 §10.1 (SUBGROUP_DELIVERY_TIMEOUT))
+/// SUBGROUP_DELIVERY_TIMEOUT プロパティ (Property Type 0x06, draft-ietf-moq-transport-23 §10.1 (SUBGROUP_DELIVERY_TIMEOUT))
 pub const PROP_SUBGROUP_DELIVERY_TIMEOUT: u64 = 0x06;
-/// DEFAULT_PUBLISHER_PRIORITY (Property Type 0x0E)
+/// DEFAULT_PUBLISHER_PRIORITY プロパティ (Property Type 0x0E)
 pub const PROP_DEFAULT_PUBLISHER_PRIORITY: u64 = 0x0E;
-/// DEFAULT_PUBLISHER_GROUP_ORDER (Property Type 0x22)
+/// DEFAULT_PUBLISHER_GROUP_ORDER プロパティ (Property Type 0x22)
 pub const PROP_DEFAULT_PUBLISHER_GROUP_ORDER: u64 = 0x22;
-/// DYNAMIC_GROUPS (Property Type 0x30)
+/// DYNAMIC_GROUPS プロパティ (Property Type 0x30)
 pub const PROP_DYNAMIC_GROUPS: u64 = 0x30;
 /// MSF_EVENT_TIMELINE_HEADER (Property Type 0x7B, draft-ietf-moq-msf-02 §12.3.1)
 ///
@@ -255,7 +255,7 @@ impl TrackProperties {
                         // 内側の構造・値域を CODEC_STRING の UTF-8 検証なしで借用走査する。
                         // ローカル入力の検証である encode では、この走査で返る
                         // MalformedKeyValue (宣言長超過・既知 Type の値域違反など) を、既存の
-                        // encode 検証 (重複・2^16-1 超) と同じ ProtocolViolation に揃える。
+                        // encode 検証 (重複 / 2^16-1 超) と同じ ProtocolViolation に揃える。
                         // 入れ子の 0x0B など ProtocolViolation 系はそのまま透過させる。
                         let inner = match walk_track_kv_pairs(bytes, false, false) {
                             Ok(inner) => inner,
@@ -427,7 +427,7 @@ impl TrackProperties {
 
     /// 偶数型 Track Property から varint 値を取得する
     ///
-    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties)「MUST search both」に従い、
+    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties)"MUST search both"に従い、
     /// mutable リストを先に、無ければ IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。
     ///
     /// prop_type と値形式の両方が一致する最初のインスタンスを返す。wire 経由の値は
@@ -449,7 +449,7 @@ impl TrackProperties {
 
     /// 奇数型 Track Property から生バイト列を取得する
     ///
-    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties)「MUST search both」に従い、
+    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties)"MUST search both"に従い、
     /// mutable リストを先に、無ければ IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。内側から
     /// 取得する場合も外側の `Bytes` を借用したまま返すため、値のバイト列を `Vec` にコピーしない。
     ///
@@ -494,7 +494,7 @@ impl TrackProperties {
     ///
     /// draft-ietf-moq-loc-05 §2.3.1.3 (Codec String) / §6.1 (MOQ Properties Registry)
     /// Table 1 (Scope=Track, Object)。WebCodecs Codec Registry が定義する codec 値であり、
-    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties) の「MUST search both」に
+    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties) の"MUST search both"に
     /// 従って mutable リストと IMMUTABLE_PROPERTIES (0x0B) の内側を探索する。
     ///
     /// 欠落は `Ok(None)`、値が不正な UTF-8 の場合は `MalformedKeyValue` を返す
@@ -519,7 +519,7 @@ impl TrackProperties {
     /// mutable リストと IMMUTABLE_PROPERTIES の内側から、prop_type と値形式が一致する最初の
     /// インスタンスを探す
     ///
-    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties)「MUST search both」の
+    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties)"MUST search both"の
     /// 共通探索であり、[`TrackProperties::find_varint`] / [`TrackProperties::find_bytes`] は
     /// `wanted` を変えて呼ぶだけである。mutable リストを優先し、型が一致しても値形式が
     /// 一致しないインスタンスは読み飛ばす。IMMUTABLE_PROPERTIES の内側が破損している場合と

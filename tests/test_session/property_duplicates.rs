@@ -355,7 +355,7 @@ fn publish_with_unknown_duplicate_property_is_accepted() {
     );
 }
 
-// ─── SUBSCRIBE_OK ────────────────────────────────────────
+// ─── SUBSCRIBE_OK のスコープ ────────────────────────────────────────
 
 /// 既知 Property を重複して持つ SUBSCRIBE_OK は購読を cancel する
 #[test]
@@ -422,7 +422,7 @@ fn subscribe_ok_with_duplicate_track_property_on_wire_cancels_subscription() {
     assert_malformed_terminations(&mut client, &[(rid, RequestKind::Subscribe)]);
 }
 
-// ─── FETCH_OK ────────────────────────────────────────────
+// ─── FETCH_OK のスコープ ────────────────────────────────────────────
 
 /// 既知 Property を重複して持つ FETCH_OK は fetch を cancel する
 #[test]
@@ -511,7 +511,7 @@ fn fetch_ok_with_duplicate_track_property_on_wire_cancels_fetch() {
     assert_malformed_terminations(&mut client, &[(rid, RequestKind::Fetch)]);
 }
 
-// ─── TRACK_STATUS_OK ─────────────────────────────────────
+// ─── TRACK_STATUS_OK のスコープ ─────────────────────────────────────
 
 /// 既知 Property を重複して持つ TRACK_STATUS_OK は TRACK_STATUS と関連要求を cancel する
 #[test]
@@ -619,7 +619,7 @@ fn track_status_ok_with_duplicate_track_property_cancels_track_status() {
     assert_malformed_terminations(&mut client, &[(status, RequestKind::TrackStatus)]);
 }
 
-// ─── Object scope (data plane) ───────────────────────────
+// ─── Object scope (data plane: データプレーン) ───────────────────────────
 
 /// Object Properties の既知 Property の重複は subgroup 経路で Malformed Track になる
 ///

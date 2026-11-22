@@ -679,7 +679,7 @@ fn record_observed_video_frames(
 struct SamplePercentiles {
     /// p50 (中央値)
     p50_us: i64,
-    /// p95
+    /// p95 (95 パーセンタイル)
     p95_us: i64,
     /// 最大値
     max_us: i64,

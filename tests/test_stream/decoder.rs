@@ -7,8 +7,8 @@ use shiguredo_moqt::object_properties::{
 };
 
 /// テスト用: SubgroupHeader + SubgroupObject 列をエンコードする
-/// ペイロードも含めてバッファに書き込む（デコーダはペイロードに触れない。
-/// バッファ内のペイロードは try_read_payload で読み出す）
+/// ペイロードも含めてバッファに書き込む (デコーダはペイロードに触れない。
+/// バッファ内のペイロードは try_read_payload で読み出す)
 /// (object_id_delta, payload_length, status, payload)
 type SubgroupObjectTuple<'a> = (u64, u64, Option<u64>, Option<&'a [u8]>);
 
@@ -50,7 +50,7 @@ fn test_basic_decode() {
         end_of_group: false,
         first_object: false,
     };
-    // object_id: 0 (delta=0), 1 (delta=0), 2 (delta=0)
+    // object_id と delta の組: 0 (delta=0)、1 (delta=0)、2 (delta=0)
     let data = encode_subgroup_stream(
         &header,
         &[
@@ -150,7 +150,7 @@ fn test_object_id_delta_resolution() {
         end_of_group: false,
         first_object: false,
     };
-    // object_id: 5 (delta=5), 6 (delta=0), 10 (delta=3)
+    // object_id と delta の組: 5 (delta=5)、6 (delta=0)、10 (delta=3)
     let data = encode_subgroup_stream(
         &header,
         &[
@@ -327,7 +327,7 @@ fn test_subgroup_finish_without_header_errors() {
     assert_eq!(decoder.finish(), Err(MessageError::UnexpectedEof));
 }
 
-/// ヘッダーのみ + FIN（オブジェクト 0 個）の空 Subgroup で finish が Ok を返す
+/// ヘッダーのみ + FIN (オブジェクト 0 個) の空 Subgroup で finish が Ok を返す
 ///
 /// draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams) 冒頭の
 /// "If a sender has delivered all objects in a Subgroup to the QUIC stream, except any
@@ -355,7 +355,7 @@ fn test_subgroup_finish_after_header_without_object_ok() {
     assert_eq!(decoder.finish(), Ok(()));
 }
 
-/// ヘッダー + 不完全なオブジェクトヘッダー（バッファ非空）で finish が Err を返す
+/// ヘッダー + 不完全なオブジェクトヘッダー (バッファ非空) で finish が Err を返す
 ///
 /// 空 Subgroup の受理は「バッファが空であること」で判定するため、partial object
 /// header は従来どおり UnexpectedEof として検出される。
@@ -371,7 +371,7 @@ fn test_subgroup_finish_with_partial_object_header_errors() {
         first_object: false,
     };
     let data = encode_subgroup_stream(&header, &[(0, 2, None, Some(b"ab"))]);
-    // ヘッダー全体 + オブジェクトヘッダーの先頭 1 バイトのみ（オブジェクトヘッダーとして不完全）を送る
+    // ヘッダー全体 + オブジェクトヘッダーの先頭 1 バイトのみ (オブジェクトヘッダーとして不完全) を送る
     let header_len = header.encode().len();
     let mut decoder = SubgroupStreamDecoder::new();
     decoder.push(&data[..header_len + 1]);
@@ -390,7 +390,7 @@ fn test_subgroup_finish_with_partial_object_header_errors() {
     assert_eq!(decoder.finish(), Err(MessageError::UnexpectedEof));
 }
 
-/// partial SUBGROUP_HEADER（ヘッダーの途中で切れたデータ）で finish が Err を返す
+/// partial SUBGROUP_HEADER (ヘッダーの途中で切れたデータ) で finish が Err を返す
 ///
 /// 状態は `AwaitingHeader` のまま残るため、`finish` は Err を返す。
 /// 先頭 1 バイトは Type varint であり、track_alias 以降が欠落しているため
@@ -502,7 +502,7 @@ fn test_subgroup_finish_at_object_boundary_ok() {
     assert_eq!(decoder.finish(), Ok(()));
 }
 
-/// payload 長 0 の status オブジェクトで終端した後（`ConsumingPayload` を経由しない）
+/// payload 長 0 の status オブジェクトで終端した後 (`ConsumingPayload` を経由しない)
 /// finish が Ok を返す
 ///
 /// `try_decode_object` は payload 0 のオブジェクトでは状態を `AwaitingObject` のまま
@@ -594,7 +594,7 @@ fn decode_first_fetch_entry(data: &[u8]) -> DecodedFetchEntry {
         .expect("テストフィクスチャに期待される内部値が入っている")
 }
 
-/// (entry, properties_data, payload)
+/// (entry, properties_data, payload) の 3 つ組
 type FetchEntryTuple<'a> = (FetchStreamEntry, Option<&'a [u8]>, Option<&'a [u8]>);
 
 /// テスト用: FetchHeader + FetchStreamEntry 列をエンコードする
@@ -733,7 +733,7 @@ fn test_fetch_end_of_range_transitions() {
         .expect("テストフィクスチャの前提条件を満たす")
         .expect("テストフィクスチャに期待される内部値が入っている");
 
-    // EndOfNonExistentRange
+    // EndOfNonExistentRange (存在しない範囲の終端)
     let entry = decoder
         .try_decode_entry()
         .expect("テストフィクスチャの前提条件を満たす")
@@ -1476,7 +1476,7 @@ fn test_fetch_finish_without_header_errors() {
     assert_eq!(decoder.finish(), Err(MessageError::UnexpectedEof));
 }
 
-/// ヘッダーのみ + FIN（エントリ 0 個）は正規の空 FETCH 応答として成功を返す
+/// ヘッダーのみ + FIN (エントリ 0 個) は正規の空 FETCH 応答として成功を返す
 ///
 /// draft-ietf-moq-transport-23 §3.2.1 (Fetch Object Delivery): "If no Objects exist in the
 /// requested range, the publisher opens the unidirectional stream, sends the FETCH_HEADER
@@ -1493,7 +1493,7 @@ fn test_fetch_finish_after_header_without_entry_ok() {
     assert_eq!(decoder.finish(), Ok(()));
 }
 
-/// ヘッダー + 不完全なエントリヘッダー（バッファ非空）で finish が Err を返す
+/// ヘッダー + 不完全なエントリヘッダー (バッファ非空) で finish が Err を返す
 #[test]
 fn test_fetch_finish_with_partial_entry_header_errors() {
     let header = FetchHeader { request_id: 1 };
@@ -1506,7 +1506,7 @@ fn test_fetch_finish_with_partial_entry_header_errors() {
         is_datagram_origin: false,
         payload_length: 1,
     });
-    // エントリヘッダーの途中で切れたデータを作る（末尾の payload_length varint を欠落させる）
+    // エントリヘッダーの途中で切れたデータを作る (末尾の payload_length varint を欠落させる)
     let mut entry_bytes = Vec::new();
     obj.encode(None, FetchPriorContext::First, &mut entry_bytes)
         .expect("正当なテスト入力の encode は成功する");
@@ -1529,7 +1529,7 @@ fn test_fetch_finish_with_partial_entry_header_errors() {
     assert_eq!(decoder.finish(), Err(MessageError::UnexpectedEof));
 }
 
-/// partial FETCH_HEADER（ヘッダーの途中で切れたデータ）で finish が Err を返す
+/// partial FETCH_HEADER (ヘッダーの途中で切れたデータ) で finish が Err を返す
 ///
 /// `request_id` の varint が 1 バイトで表現されることを前提に、末尾 1 バイトを除いて
 /// ヘッダーを不完全にする。`try_decode_header` はデータ不足として `None` を返し、

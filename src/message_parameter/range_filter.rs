@@ -112,7 +112,7 @@ pub(super) fn count_ranges_in_filter(param_type: u64, bytes: &[u8]) -> Option<u6
     let (_, _, mut pos) = parse_range_filter_header(param_type, bytes)?;
     let mut count: u64 = 0;
     while pos < bytes.len() {
-        // Start (vi64)
+        // Start 値 (vi64)
         let (_, n) = varint::decode(&bytes[pos..]).ok()?;
         pos += n;
         count += 1;

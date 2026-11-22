@@ -849,7 +849,7 @@ fn cose_tag_option_is_honored() {
 fn round_trip_for_all_algorithms() {
     let crypto = AwsLcRsCrypto::new();
 
-    // HMAC 384 / 512
+    // HMAC 384 / 512 の両アルゴリズム
     for (algorithm, key) in [
         (Algorithm::HmacSha384, CoseKey::symmetric(vec![0xcd; 48])),
         (Algorithm::HmacSha512, CoseKey::symmetric(vec![0xef; 64])),
@@ -1338,7 +1338,7 @@ fn validate_moqt_reval_against_revalidation_capability() {
         assert_eq!(
             claims.validate(&options),
             expected,
-            "{description}: moqt_reval={moqt_reval:?} revalidation_interval_seconds={revalidation_interval_seconds:?}"
+            "ケース {description}: moqt_reval={moqt_reval:?} revalidation_interval_seconds={revalidation_interval_seconds:?}"
         );
     }
 
@@ -1636,7 +1636,7 @@ fn cat_replay_key_mapping() {
     }
     // 0 / 1 / 2 以外の整数は解釈しない
     for key in [3, 4, -1, i64::MAX, i64::MIN] {
-        assert_eq!(CatReplay::from_key(key), None, "key={key}");
+        assert_eq!(CatReplay::from_key(key), None, "キー key={key}");
     }
 }
 

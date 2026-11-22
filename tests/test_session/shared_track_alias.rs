@@ -77,7 +77,11 @@ fn same_track_two_subscriptions_share_alias_via_publish() {
             let sub = session
                 .subscription(rid)
                 .unwrap_or_else(|| panic!("{label}: subscription {rid} が存在すること"));
-            assert_eq!(sub.track_alias, Some(ALIAS), "{label}: {rid}");
+            assert_eq!(
+                sub.track_alias,
+                Some(ALIAS),
+                "{label} (リクエスト ID {rid})"
+            );
         }
     }
     assert_eq!(
@@ -372,7 +376,7 @@ fn establish_shared_alias_with_objectid_filters() -> (Session, Session, u64, u64
         opts
     });
 
-    // rid1: OBJECTID_FILTER [0, 9]
+    // rid1: OBJECTID_FILTER の範囲 [0, 9]
     let mut params1 = MessageParameters::new();
     params1.push(range_filter(PARAM_OBJECTID_FILTER, 0, 0, 9));
     let rid1 = client
@@ -383,7 +387,7 @@ fn establish_shared_alias_with_objectid_filters() -> (Session, Session, u64, u64
         .recv_request(sub_msg1)
         .expect("SUBSCRIBE の受信に成功すること");
 
-    // rid2: OBJECTID_FILTER [10, 19]
+    // rid2: OBJECTID_FILTER の範囲 [10, 19]
     let mut params2 = MessageParameters::new();
     params2.push(range_filter(PARAM_OBJECTID_FILTER, 0, 10, 19));
     let rid2 = client
@@ -558,7 +562,7 @@ fn subgroup_stream_routed_by_subgroup_filter() {
         opts
     });
 
-    // rid1: SUBGROUP_FILTER [0, 4]
+    // rid1: SUBGROUP_FILTER の範囲 [0, 4]
     let mut params1 = MessageParameters::new();
     params1.push(range_filter(PARAM_SUBGROUP_FILTER, 0, 0, 4));
     let rid1 = client
@@ -569,7 +573,7 @@ fn subgroup_stream_routed_by_subgroup_filter() {
         .recv_request(sub_msg1)
         .expect("SUBSCRIBE の受信に成功すること");
 
-    // rid2: SUBGROUP_FILTER [5, 9]
+    // rid2: SUBGROUP_FILTER の範囲 [5, 9]
     let mut params2 = MessageParameters::new();
     params2.push(range_filter(PARAM_SUBGROUP_FILTER, 0, 5, 9));
     let rid2 = client

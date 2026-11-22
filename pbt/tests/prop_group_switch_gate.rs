@@ -50,7 +50,7 @@ enum Event {
     Begin {
         /// 世代
         generation: u64,
-        /// Group ID
+        /// Group ID (グループ識別子)
         group_id: u64,
         /// stream の識別子
         stream_id: u64,
@@ -59,7 +59,7 @@ enum Event {
     End {
         /// 世代
         generation: u64,
-        /// Group ID
+        /// Group ID (グループ識別子)
         group_id: u64,
         /// stream の識別子
         stream_id: u64,

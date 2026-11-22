@@ -20,9 +20,9 @@ use super::jwk::{Jwk, JwkError};
 pub struct JwsHeader {
     /// `alg` を COSE のアルゴリズムへ変換したもの
     pub algorithm: Algorithm,
-    /// `typ`
+    /// `typ` (トークン種別)
     pub typ: Option<String>,
-    /// `kid`
+    /// `kid` (鍵 ID)
     pub key_id: Option<String>,
     /// `jwk` (DPoP proof が埋め込む公開鍵)
     pub jwk: Option<Jwk>,

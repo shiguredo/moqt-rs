@@ -2025,7 +2025,7 @@ impl Session {
     /// 送信方向は開いたままで、peer が GOAWAY / reset を観測する前に送ったメッセージは正当に届く。
     ///
     /// state テーブルに記録が残っている request へのメッセージは、各ハンドラがそのメッセージに
-    /// 該当する MUST 検証 (送信者・パラメータ・Track Alias・Track Properties 等) を済ませた
+    /// 該当する MUST 検証 (送信者、パラメータ、Track Alias、Track Properties 等) を済ませた
     /// うえで状態遷移せず受理する (`Session::is_locally_terminated_request`)。
     ///
     /// state テーブルから既に破棄された request (`forget_*` 後) へのメッセージは、検証に必要な
@@ -2323,7 +2323,7 @@ impl Session {
         // Track Name を送ると peer は §2.4.1 (Track Naming) の PROTOCOL_VIOLATION で
         // セッションを閉じる (§9.4.2.1 (REDIRECT) が空を MUST とする namespace-scoped
         // request は本ライブラリが送らない)。
-        // 状態遷移 (購読の終端・fetch の reset) より前に拒否し、自身の状態だけが進むのを防ぐ。
+        // 状態遷移 (購読の終端 / fetch の reset) より前に拒否し、自身の状態だけが進むのを防ぐ。
         if error_code == REQUEST_REDIRECT
             && let Some(redirect) = error_details.redirect()
         {
@@ -2613,7 +2613,7 @@ impl Session {
         if let Some((allowed, message)) = context_allowed
             && ok.parameters.validate_scope(allowed).is_err()
         {
-            // draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): INVALID_PARAMETER (0x305)。
+            // 仕様: draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): INVALID_PARAMETER (0x305)。
             let err = SessionError::new(SESSION_INVALID_PARAMETER, message);
             self.fail(err.clone());
             return Err(err);
@@ -2721,12 +2721,12 @@ impl Session {
     /// draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES) のクレジット管理に使う
     /// `outgoing_request_updates` / `incoming_request_updates` はクレジットが残っていても
     /// request 終端後は使われないため、count の値に関係なく除去してよい。request_id は
-    /// 再利用されない（自側採番は `RequestIdGenerator` の単調増加、peer 採番は
-    /// `RequestIdTracker` の重複拒否で担保）ため、残ったエントリが新 request のクレジット
+    /// 再利用されない (自側採番は `RequestIdGenerator` の単調増加、peer 採番は
+    /// `RequestIdTracker` の重複拒否で担保) ため、残ったエントリが新 request のクレジット
     /// として誤用されることはない。
-    /// forget 系 API が `None` を返す場合（cleanup 可能でない・ Pending 等）は掃除しない
-    /// （生きている request のクレジットを失わせると MAX_REQUEST_UPDATES の上限検出が
-    /// 緩むため。forget 系 API は成功時のみ本関数を呼ぶこと）。
+    /// forget 系 API が `None` を返す場合 (cleanup 可能でない・ Pending 等) は掃除しない
+    /// (生きている request のクレジットを失わせると MAX_REQUEST_UPDATES の上限検出が
+    /// 緩むため。forget 系 API は成功時のみ本関数を呼ぶこと)。
     pub(super) fn remove_request_update_credit_entries(&mut self, request_id: u64) {
         self.outgoing_request_updates.remove(&request_id);
         self.incoming_request_updates.remove(&request_id);
@@ -3296,7 +3296,7 @@ impl Session {
                             return Err(err);
                         }
                         Err(err) => {
-                            // duplicate alias
+                            // alias の重複
                             self.fail(err.clone());
                             return Err(err);
                         }
@@ -3367,7 +3367,7 @@ impl Session {
                     return Err(err);
                 }
                 Err(err) => {
-                    // duplicate alias
+                    // alias の重複
                     self.fail(err.clone());
                     return Err(err);
                 }

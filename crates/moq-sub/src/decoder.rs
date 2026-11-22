@@ -61,7 +61,7 @@ pub struct DecodedVideoFrame {
 
 /// デコード済み音声フレーム (S16 interleaved PCM)
 pub struct DecodedAudioFrame {
-    /// S16 interleaved PCM
+    /// S16 のインターリーブ PCM
     pub pcm: Vec<i16>,
     /// サンプルレート (Hz)
     pub sample_rate: u32,

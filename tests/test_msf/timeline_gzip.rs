@@ -160,7 +160,7 @@ fn gzip_is_smaller_for_many_entries() {
         .expect("テストフィクスチャの前提条件を満たす");
     assert!(
         gz.len() < raw.len() / 2,
-        "gzip should compress repetitive payload: raw={} gz={}",
+        "gzip は反復的な payload を圧縮すること: raw={} gz={}",
         raw.len(),
         gz.len()
     );

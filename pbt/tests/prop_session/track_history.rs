@@ -392,7 +392,7 @@ fn gap_between_entries_excludes_both_endpoints() -> noprop::TestResult {
 /// 昇順と降順は同じ要求範囲を同じ Location 集合で被覆する
 ///
 /// draft-ietf-moq-transport-23 §3.2.2 (Gaps in a Fetch Stream) は、降順 multi-group でも
-/// 「先行 Group の残り・飛ばした Group・後続 Group の先頭」を gap と定める。したがって
+/// 「先行 Group の残り、飛ばした Group、後続 Group の先頭」を gap と定める。したがって
 /// 同じ要求範囲と同じ配信 Object 集合に対して、順序によらず不存在の集合は一致しなければ
 /// ならない。
 #[test]

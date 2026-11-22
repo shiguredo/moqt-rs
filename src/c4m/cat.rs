@@ -399,9 +399,9 @@ impl CatReplay {
 ///
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CatClaims {
-    /// `iss`
+    /// `iss` (発行者)
     pub issuer: Option<String>,
-    /// `sub`
+    /// `sub` (主体)
     pub subject: Option<String>,
     /// `aud`。単一のテキストと配列の両方を受ける
     pub audience: Vec<String>,
@@ -413,7 +413,7 @@ pub struct CatClaims {
     pub issued_at: Option<f64>,
     /// `cti`。バイト文字列とテキスト文字列の両方を受ける
     pub cwt_id: Option<Vec<u8>>,
-    /// `cnf`
+    /// `cnf` (確認用の公開鍵)
     pub confirmation: Option<Confirmation>,
     /// `moqt` (draft-ietf-moq-c4m-02 §2.1)
     ///
@@ -429,7 +429,7 @@ pub struct CatClaims {
     /// (定期的に検証し直すこと) は実行しない。非ゼロの値を持つトークンを受理した利用側が
     /// この間隔以内で再検証すること。0 は再検証してはならない指示である。
     pub moqt_reval: Option<f64>,
-    /// `catdpop` (CTA-5007-B §4.8 / draft-ietf-moq-c4m-02 §4.1)
+    /// `catdpop` (CAT の DPoP proof クレーム, CTA-5007-B §4.8 / draft-ietf-moq-c4m-02 §4.1)
     pub catdpop: Option<CatDpop>,
     /// `catreplay` (draft-ietf-moq-c4m-02 §3)
     ///

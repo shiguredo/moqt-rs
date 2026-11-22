@@ -17,10 +17,10 @@ Public / Private の配置はアプリケーション層の責務です。
 
 `Codec String` は WebCodecs Codec Registry の codec 値の UTF-8 文字列です
 (draft-ietf-moq-loc-05 §2.3.1.3)。`codec_string` は欠落を `Ok(None)`、不正な UTF-8 を
-`MalformedKeyValue` で返します。内側の `IMMUTABLE_PROPERTIES` の KVP が解析・検証できない
+`MalformedKeyValue` で返します。内側の `IMMUTABLE_PROPERTIES` の KVP が解析 / 検証できない
 場合、accessor の探索結果は `Ok(None)` になります。encode / decode は最上位の `0x11` の
 UTF-8 を検証し、`IMMUTABLE_PROPERTIES` の内側の `0x11` も検証します。encode と decode は
-さらに内側の構造・値域・重複・入れ子の `0x0B` も検証するため、解析できない内側を持つ入力は
+さらに内側の構造、値域、重複、入れ子の `0x0B` も検証するため、解析できない内側を持つ入力は
 拒否します
 (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の `MALFORMED_KEY_VALUE`)。
 

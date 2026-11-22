@@ -359,11 +359,11 @@ fn forget_stream_owner_migrates_stream_to_attributed_subscription() {
     assert_eq!(client.state(), SessionState::Established);
 }
 
-/// Object の帰属実績が無い（全候補でフィルタ不通過）キャンセル済み所有者の stream では
+/// Object の帰属実績が無い (全候補でフィルタ不通過) キャンセル済み所有者の stream では
 /// `report_mid_object_fin` が破棄対象として吸収されること
 ///
 /// Object を 1 つも受理していない stream は帰属先 subscription にとって生きた stream では
-/// ないため、FIN / STOP_SENDING と同じ後始末 (open 数・delivery timeout override・保持集合)
+/// ないため、FIN / STOP_SENDING と同じ後始末 (open 数、delivery timeout override、保持集合)
 /// を行って no-op で受理する。後始末漏れは open_incoming_subgroup_count の張り付き
 /// (subscription リーク) として現れる。
 #[test]

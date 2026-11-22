@@ -584,7 +584,7 @@ impl Session {
         // 受け取った Track Properties は常に判明値として扱う。
         let dynamic_groups =
             DynamicGroupsSupport::from_peer_properties(&publish.track_properties, None);
-        // draft §10.4 (DEFAULT PUBLISHER PRIORITY) / §10.5 (DEFAULT PUBLISHER GROUP ORDER)
+        // 仕様: draft §10.4 (DEFAULT PUBLISHER PRIORITY) / §10.5 (DEFAULT PUBLISHER GROUP ORDER)
         let default_publisher_priority = publish.track_properties.default_publisher_priority();
         let default_publisher_group_order =
             publish.track_properties.default_publisher_group_order();
@@ -842,7 +842,7 @@ impl Session {
             &ok.track_properties,
             requested_include_properties,
         );
-        // draft §10.4 (DEFAULT PUBLISHER PRIORITY) / §10.5 (DEFAULT PUBLISHER GROUP ORDER)
+        // 仕様: draft §10.4 (DEFAULT PUBLISHER PRIORITY) / §10.5 (DEFAULT PUBLISHER GROUP ORDER)
         subscription.default_publisher_priority = ok.track_properties.default_publisher_priority();
         subscription.default_publisher_group_order =
             ok.track_properties.default_publisher_group_order();
@@ -984,7 +984,7 @@ impl Session {
                 return Err(err);
             }
         };
-        // draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): INVALID_PARAMETER (0x305)。
+        // 仕様: draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): INVALID_PARAMETER (0x305)。
         if update.parameters.validate_scope(allowed).is_err() {
             let err = SessionError::new(SESSION_INVALID_PARAMETER, scope_error);
             self.fail(err.clone());
@@ -1024,8 +1024,8 @@ impl Session {
         // `apply_peer_message_auth_token_registers_only` の doc 参照)。この検証は一時
         // キャッシュで alias を解決するだけで実キャッシュを変更せず、解決できない alias も
         // 判定対象から外すため、未登録 alias の扱いは適用経路のまま変わらない。
-        // セッション終了の検証 (§9.19.1 の context スコープ / §9.5 と §3.1・§3.2 の
-        // state・role / §9.19.18 の PAUSED 値域) は上で済ませてある。§9.19.19
+        // セッション終了の検証 (§9.19.1 の context スコープ / §9.5 と §3.1 / §3.2 の
+        // state / role / §9.19.18 の PAUSED 値域) は上で済ませてある。§9.19.19
         // (NEW_GROUP_REQUEST) は subscriber の MUST NOT を送信側で担保するものであり、
         // 受信側では同節の無視する規則に従って拒否しない (`handle_update_for_subscription`)。
         if self
@@ -1157,7 +1157,7 @@ impl Session {
     /// UPDATE_FAILED." を満たす。
     ///
     /// 呼び出し元 (`handle_peer_request_update` の拒否経路と、`handle_update_for_subscription`
-    /// の累積 Range Filter 超過) は、事前に §9.5 / §3.1 / §3.2 の state・role 検証
+    /// の累積 Range Filter 超過) は、事前に §9.5 / §3.1 / §3.2 の state / role 検証
     /// (`validate_subscription_request_update` /
     /// `validate_fetch_request_update`) を通している。更新できない request は
     /// REQUEST_ERROR ではなくセッション終了になっているため、本関数は
@@ -1356,7 +1356,7 @@ impl Session {
         // ローカル終端済みの request (`rejected_request_ids` に記録。GOAWAY の deadline 満了や
         // malformed 終端) は送信方向を reset 済みだが、peer が reset を観測する前に送った
         // REQUEST_UPDATE は正当に届く。その場合は状態遷移とイベント発行をせずに return する
-        // (Request ID / MAX_REQUEST_UPDATES / state・role / auth token / パラメータスコープ /
+        // (Request ID / MAX_REQUEST_UPDATES / state / role / auth token / パラメータスコープ /
         // PAUSED 値域の検証は呼び出し元 `handle_peer_request_update` で済んでいる)。
         // なお state テーブルから破棄済み (`forget_*` 後) の request への REQUEST_UPDATE は、
         // 送信者を特定できないため従来どおり UNEXPECTED_MESSAGE になる。
@@ -1727,5 +1727,5 @@ impl Session {
         Ok(())
     }
 
-    // ─── REQUEST_OK / REQUEST_ERROR per-kind dispatch ──────────
+    // ─── REQUEST_OK / REQUEST_ERROR の種類別処理 ──────────
 }

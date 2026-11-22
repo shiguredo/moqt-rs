@@ -37,7 +37,7 @@ fn sample_length(ctx: &mut noprop::TestCaseContext, sample_rate: u32) -> usize {
         8_000 => &[0, 1, 123, 124, 126, 160],
         // 44.1 kHz: 解析用の 48 kHz 変換を含む境界
         44_100 => &[0, 1, 800, 882, 441, 1_323],
-        // 16 / 32 / 48 kHz
+        // 16 / 32 / 48 kHz の各レート
         _ => &[0, 1, 729, 730, 742, 960],
     };
     match noprop::sample_usize_in(ctx, 0..4) {
@@ -273,11 +273,11 @@ fn concealment_end_gain_is_monotone_and_bounded() -> noprop::TestResult {
         let end_gain_of_longer = concealment_end_gain(longer);
         assert!(
             end_gain_of_shorter >= end_gain_of_longer,
-            "shorter={shorter} longer={longer}"
+            "短い方 shorter={shorter} 長い方 longer={longer}"
         );
         assert!(
             (TIME_STRETCH_CONCEAL_END_GAIN..=1.0).contains(&end_gain_of_longer),
-            "end_gain={end_gain_of_longer}"
+            "終端のゲイン end_gain={end_gain_of_longer}"
         );
         Ok(())
     })?;

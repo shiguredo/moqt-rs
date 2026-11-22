@@ -80,7 +80,7 @@ fn assert_filter_mismatch(err: SendRequestError, label: &str) {
     );
 }
 
-// ─── Paused ─────────────────────────────────────────────────────
+// ─── Paused (一時停止) ─────────────────────────────────────────────────
 
 /// paused (PAUSED=1) では subgroup object を送れない
 ///
@@ -162,7 +162,7 @@ fn paused_still_allows_publish_done() {
         .expect("PUBLISH_DONE は paused に関係なく送れる");
 }
 
-// ─── Location Filter ────────────────────────────────────────────
+// ─── Location Filter (Location フィルタ) ────────────────────────────────────────────
 
 /// AbsoluteStart の Start Location 未満は拒否される
 #[test]
@@ -202,7 +202,7 @@ fn location_filter_after_end_group_is_rejected() {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        // End Group = start.group_id + end_group_delta = 2 + 1 = 3
+        // End Group = start.group_id + end_group_delta = 2 + 1 = 3 (終端 Group の計算)
         value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
             start: Location {
                 group_id: 2,
@@ -239,7 +239,7 @@ fn location_filter_end_exceeded_keeps_subscription_established() {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        // End Group = start.group_id + end_group_delta = 2 + 1 = 3
+        // End Group = start.group_id + end_group_delta = 2 + 1 = 3 (終端 Group の計算)
         value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
             start: Location {
                 group_id: 2,
@@ -279,7 +279,7 @@ fn location_filter_after_end_object_is_rejected() {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        // Start = {2, 0}、End = {2 + 0, 5} = {2, 5}
+        // Start = {2, 0}、End = {2 + 0, 5} = {2, 5} (開始と終端)
         value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRangeWithEnd {
             start: Location {
                 group_id: 2,
@@ -305,7 +305,7 @@ fn location_filter_after_end_object_is_rejected() {
     assert_filter_mismatch(err, "Location Filter の EndObject 超過");
 }
 
-// ─── Range Filter ───────────────────────────────────────────────
+// ─── Range Filter (Range フィルタ) ───────────────────────────────────────────────
 
 /// SUBGROUP_FILTER の範囲外は拒否される
 #[test]
@@ -434,10 +434,10 @@ fn object_property_filter_uses_properties() {
 #[test]
 fn range_filters_and_within_set_or_across_sets() {
     let mut params = MessageParameters::new();
-    // SetID=0: subgroup 0..=0 AND object id 0..=1
+    // SetID=0: subgroup 0..=0 かつ object id 0..=1
     params.push(range_filter(PARAM_SUBGROUP_FILTER, 0, 0, 0));
     params.push(range_filter(PARAM_OBJECTID_FILTER, 0, 0, 1));
-    // SetID=1: subgroup 5..=5 AND object id 100..=101
+    // SetID=1: subgroup 5..=5 かつ object id 100..=101
     params.push(range_filter(PARAM_SUBGROUP_FILTER, 1, 5, 5));
     params.push(range_filter(PARAM_OBJECTID_FILTER, 1, 100, 101));
     let (_client, mut server, rid) = establish_with_filters(params);

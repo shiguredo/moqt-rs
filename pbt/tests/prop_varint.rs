@@ -41,7 +41,7 @@ fn leading_ones_indicate_length() -> noprop::TestResult {
             7 => 6u32, // 1111110x: draft-ietf-moq-transport-23 Appendix A.6
             8 => 7u32, // 11111110
             9 => 8u32,
-            _ => unreachable!("vi64 encoded length is always 1..=9"),
+            _ => unreachable!("vi64 のエンコード長は常に 1..=9 である"),
         };
         // 8 バイトの場合は先頭バイトが 0xFE (11111110)
         if expected_len == 8 {
@@ -112,8 +112,14 @@ fn non_minimal_encoding_decodes_to_the_same_value() -> noprop::TestResult {
             // 後続フィールドを模したバイトを足し、消費長が len で止まることも見る
             buf.push(0xAA);
             let (decoded, consumed) = varint::decode(&buf).expect("非最小形も decode できる");
-            assert_eq!(decoded, val, "minimal_len={minimal_len} len={len}");
-            assert_eq!(consumed, len, "minimal_len={minimal_len} len={len}");
+            assert_eq!(
+                decoded, val,
+                "最小長 minimal_len={minimal_len} 長さ len={len}"
+            );
+            assert_eq!(
+                consumed, len,
+                "最小長 minimal_len={minimal_len} 長さ len={len}"
+            );
         }
         Ok(())
     })?;

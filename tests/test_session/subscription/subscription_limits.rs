@@ -253,7 +253,7 @@ fn establish_publish_with(
     (client, server, rid)
 }
 
-// ─── MAX_REQUEST_UPDATES ──────────────────────────────────────────
+// ─── MAX_REQUEST_UPDATES の上限 ──────────────────────────────────────────
 
 /// peer が宣言した MAX_REQUEST_UPDATES=1 を超える送信は拒否され、メッセージは積まれない
 ///
@@ -478,7 +478,7 @@ fn too_many_request_updates_does_not_mutate_paused_state() {
     assert!(matches!(upd2, ControlMessage::RequestUpdate(_)));
 }
 
-// ─── MAX_FILTER_RANGES ────────────────────────────────────────────
+// ─── MAX_FILTER_RANGES の上限 ────────────────────────────────────────────
 
 /// peer の MAX_FILTER_RANGES=1 を超える 2 Range の送信は拒否され、メッセージは積まれない
 ///
@@ -1475,7 +1475,7 @@ fn incoming_distinct_set_id_range_filters_are_accepted() {
 
 /// PUBLISH_OK に Range Filter が来たらスコープ検証でセッションを閉じる
 ///
-/// draft-ietf-moq-transport-23 Appendix A.4 #1790 (Subscription parameters appear in
+/// draft-ietf-moq-transport-23 Appendix A.4 (Since draft-ietf-moq-transport-19) (Subscription parameters appear in
 /// REQUEST_UPDATE, not PUBLISH_OK): PUBLISH_OK は EXPIRES のみを運ぶ。
 /// Range Filter を含む PUBLISH_OK はスコープ外として INVALID_PARAMETER で
 /// セッションを閉じる。
@@ -1742,7 +1742,7 @@ fn outgoing_zero_range_filters_rejected_when_peer_max_is_zero() {
         let err = client
             .send_request_update(rid, params)
             .expect_err("peer MAX 未宣言では Range Filter を送出できない");
-        assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION, "{label}");
+        assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION, "ラベル {label}");
         // 上限超過 (Range 総数 0 なので発火しない) や重複検証と区別する
         assert_eq!(
             err.reason, "peer did not declare MAX_FILTER_RANGES",
@@ -1773,7 +1773,7 @@ fn outgoing_zero_range_filters_allowed_when_peer_max_declared() {
             .send_request_update(rid, params)
             .unwrap_or_else(|e| panic!("{label}: peer MAX=1 なら送出できること: {e:?}"));
         let (stream_rid, msg) = take_send_on_stream(&mut client);
-        assert_eq!(stream_rid, rid, "{label}");
+        assert_eq!(stream_rid, rid, "ラベル {label}");
         assert!(
             matches!(msg, ControlMessage::RequestUpdate(_)),
             "{label}: RequestUpdate として積まれること: {msg:?}"
@@ -1797,7 +1797,7 @@ fn outgoing_zero_range_filters_inside_fill_allowed_when_peer_max_declared() {
             .send_request_update(rid, outer)
             .unwrap_or_else(|e| panic!("{label}: peer MAX=1 なら送出できること: {e:?}"));
         let (stream_rid, msg) = take_send_on_stream(&mut client);
-        assert_eq!(stream_rid, rid, "{label}");
+        assert_eq!(stream_rid, rid, "ラベル {label}");
         assert!(
             matches!(msg, ControlMessage::RequestUpdate(_)),
             "{label}: RequestUpdate として積まれること: {msg:?}"

@@ -38,7 +38,7 @@ fn status_and_end_of_group_encode_error() {
 
 #[test]
 fn status_and_end_of_group_decode_error() {
-    // type_byte = 0x20 | 0x02 = 0x22 (STATUS + END_OF_GROUP)
+    // type_byte = 0x20 | 0x02 = 0x22 (STATUS と END_OF_GROUP)
     let buf = vec![0x22, 0x01, 0x01];
     assert!(matches!(
         ObjectDatagram::decode(&buf),
@@ -48,7 +48,7 @@ fn status_and_end_of_group_decode_error() {
 
 #[test]
 fn subgroup_type_decode_error() {
-    // type_byte = 0x10 (SUBGROUP_HEADER)
+    // type_byte = 0x10 (SUBGROUP_HEADER 形式)
     let buf = vec![0x10, 0x01, 0x01, 0x80];
     assert!(matches!(
         ObjectDatagram::decode(&buf),

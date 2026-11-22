@@ -13,9 +13,9 @@ use crate::error::{Error, Result};
 /// 扱う VP8 / VP9 の種別
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VpxCodec {
-    /// VP8
+    /// VP8 形式
     Vp8,
-    /// VP9
+    /// VP9 形式
     Vp9,
 }
 

@@ -85,7 +85,7 @@
   - FETCH 応答に対する Range Filters (§3.3.2 の Subgroup / Object ID / Priority / Object Property) は
     `send_fetch_object_with_context` が Subgroup ID / Publisher Priority / Object Properties の
     文脈付きで評価し、通らない Object を `LocalFilterMismatch` で拒否する (§3.3.3 の MUST)。
-    文脈を渡さない `send_fetch_object` は Subgroup ID なし・既定 Priority・Properties なしとして
+    文脈を渡さない `send_fetch_object` は Subgroup ID なし、既定 Priority、Properties なしとして
     同じ判定を行う
 - New Group Request
 - Range Filters (Subgroup / ObjectID / Priority / Object Property / Track Property)
@@ -95,8 +95,8 @@
     (`MessageParameters::track_property_filter_passes`)。draft-23 §3.6.1 (Filtering
     SUBSCRIBE_TRACKS) / §3.6.2 (Parameters on SUBSCRIBE_TRACKS) に従う
 - Subscribe Tracks ID (PUBLISH のみ。SUBSCRIBE_TRACKS の Request ID を相関情報として `Subscription`
-  に保持する。対応する SUBSCRIBE_TRACKS を自側が送っていれば、prefix との一致・同じ track の
-  重複 PUBLISH・PUBLISH_SKIPPED 後の PUBLISH を検証する。対応する要求が無い PUBLISH は、従来
+  に保持する。対応する SUBSCRIBE_TRACKS を自側が送っていれば、prefix との一致、同じ track の
+  重複 PUBLISH、PUBLISH_SKIPPED 後の PUBLISH を検証する。対応する要求が無い PUBLISH は、従来
   どおり値を保持するだけで通常の検証と受理判断へ進む。`resulting_publish_parameters` は
   this ID を引き継がない)
 - Subscriber Priority
@@ -127,12 +127,12 @@
 - 空 (0 バイト長) の Track Name を拒否する (§2.4.1。`.session` の旧例外は draft から削除済み)
 - `NEW_GROUP_REQUEST` は `DYNAMIC_GROUPS` を受信していなくても受理する (§3.5.1 / §9.19.19)
 - Subgroup 再オープン禁止の検証 (`subgroup_tracker::SubgroupTracker`)
-- 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期の遅延制御、音声と映像の共通の時間軸、表示時刻に合わせたフレームの選択、時間圧縮・伸長と欠落の補間 (`playout::{timeline, scheduler, buffer, stretch, expansion, predictor, gap, splice_fade, resample, timing, catch_up, publish_catch_up}`)
+- 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期の遅延制御、音声と映像の共通の時間軸、表示時刻に合わせたフレームの選択、時間圧縮 / 伸長と欠落の補間 (`playout::{timeline, scheduler, buffer, stretch, expansion, predictor, gap, splice_fade, resample, timing, catch_up, publish_catch_up}`)
 - メディア時刻の Unix epoch の壁時計への換算 (`media_clock::WallClockMapper`)
 - セッション終了 / REQUEST_ERROR / PUBLISH_DONE / Stream Reset のエラーコード (`error` モジュール)。
   セッション終了コードの分類は後述の「セッション終了コードの分類」を参照
 
-## namespace 発見・告知
+## namespace 発見 / 告知
 
 draft-ietf-moq-transport-23 §4 (Namespace Discovery) の 6 種を実装する。relay の forwarding
 (§7) は実装しないが、これらは client / server の endpoint 同士でも使う request である。
@@ -253,7 +253,7 @@ SUBSCRIBE_TRACKS へは載せられない (§3.6.2) ため、受信すると `IN
 `session` は SETUP と Request ID 管理に加えて、SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS の bidi request stream を扱います。
 uni data stream と datagram の送受信 state も扱います。
 REQUEST_UPDATE / PUBLISH_DONE / STOP_SENDING、FETCH、GOAWAY ハンドシェイクと drain、delivery timeout などの deadline 管理 (`tick` 駆動) も行います。
-一方で I/O、非同期処理、MoQ リレーが担う namespace 発見・告知と forwarding は含みません。
+一方で I/O、非同期処理、MoQ リレーが担う namespace 発見 / 告知と forwarding は含みません。
 
 ## セッション終了コードの分類
 
@@ -287,7 +287,7 @@ codes.")。各 codec は長さと溢出を他の検証より先に判定する�
 未知の終了コードは `normalize_session_termination_code` が `INTERNAL_ERROR` (`0x1`) に正規化する
 (§13 (Grease))。定義済みコードは正規化で変化しない。
 
-## 要求・配送終了・stream reset のエラーコード
+## 要求、配送終了、stream reset のエラーコード
 
 draft-ietf-moq-transport-23 §12.3 (Request Error Codes) / §16.12.2 (REQUEST_ERROR Codes)、
 §12.4 (Publish Done Codes) / §16.12.3 (PUBLISH_DONE Codes)、§12.5 (Stream Reset Error Codes) /

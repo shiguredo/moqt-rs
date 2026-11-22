@@ -89,7 +89,7 @@ fn loc_track_properties_in_immutable() -> TrackProperties {
     tp
 }
 
-/// 既知の MOQT 値 5 つ・LOC プロパティ 4 つ・未知の奇数型 1 つを併せ持つ Track Properties
+/// 既知の MOQT 値 5 つ、LOC プロパティ 4 つ、未知の奇数型 1 つを併せ持つ Track Properties
 ///
 /// 既知 MOQT 値の取り込みが LOC 値や未知の Property の追加で変わらないことを確かめる
 /// ための入力である。

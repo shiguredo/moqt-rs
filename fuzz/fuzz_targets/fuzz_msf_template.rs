@@ -19,7 +19,7 @@ struct Input {
     n: u64,
 }
 
-// 任意の系列・delta・index で resolve_entry が overflow して panic しない
+// 任意の系列、delta、index で resolve_entry が overflow して panic しない
 fuzz_target!(|input: Input| {
     let template = MsfTemplate {
         start_media_time: input.start_media_time,

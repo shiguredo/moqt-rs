@@ -38,9 +38,9 @@ mod delta_encoding {
             .encode(&mut buf)
             .expect("正当なテスト入力の encode は成功する");
 
-        // count = 2
+        // count = 2 (パラメータ 2 個)
         assert_eq!(buf[0], 0x02);
-        // delta = 2 (type=0x02 - prev=0)
+        // delta = 2 (型 0x02 - 前回 0)
         assert_eq!(buf[1], 0x02);
 
         let (decoded, consumed) =
@@ -175,11 +175,11 @@ mod error_cases {
         // draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の MUST により
         // MALFORMED_KEY_VALUE になる。
         let mut buf = Vec::new();
-        // count = 1
+        // count = 1 (パラメータ 1 個)
         buf.push(0x01);
-        // delta = 0x03 (PARAM_AUTHORIZATION_TOKEN)
+        // delta = 0x03 (PARAM_AUTHORIZATION_TOKEN の型)
         buf.push(0x03);
-        // length = 10
+        // length = 10 (10 バイト)
         buf.push(0x0A);
         // データが 3 バイトしかない
         buf.extend_from_slice(&[0x01, 0x02, 0x03]);
@@ -685,7 +685,7 @@ mod accessors {
 
     #[test]
     fn expires_non_zero_returns_some() {
-        // EXPIRES=n（n > 0）は有効な期限値として Some(n) を返す。
+        // EXPIRES=n (n > 0) は有効な期限値として Some(n) を返す。
         // draft-ietf-moq-transport-23 §9.19.16
         let mut params = MessageParameters::new();
         params.push(MessageParameter {
@@ -1359,7 +1359,7 @@ mod kvp_value_length_limit {
         let err = MessageParameters::decode(&buf).unwrap_err();
         assert!(
             matches!(err, MessageError::FieldLengthExceeded(_)),
-            "Expected ProtocolViolation, got {err:?}"
+            "ProtocolViolation を期待したが {err:?} が返った"
         );
     }
 
@@ -1655,7 +1655,7 @@ mod validate_range_filters {
     /// End デルタが u64 を溢出する場合は拒否される
     #[test]
     fn end_delta_overflow_is_rejected() {
-        // SetID=0, Start=1, End_delta = u64::MAX → 1 + MAX overflow
+        // SetID=0, Start=1, End_delta = u64::MAX → 1 + MAX でオーバーフロー
         let mut bytes = Vec::new();
         bytes.push(0x00);
         varint::encode(1, &mut bytes); // Start
@@ -1677,7 +1677,7 @@ mod validate_range_filters {
     /// draft-ietf-moq-transport-23 §9.19.12
     #[test]
     fn priority_filter_value_over_255_is_rejected() {
-        // SetID=0, Start=256 (> 255)
+        // SetID=0, Start=256 (> 255 で範囲外)
         let mut bytes = Vec::new();
         bytes.push(0x00);
         varint::encode(256, &mut bytes);
@@ -1698,7 +1698,7 @@ mod validate_range_filters {
     /// draft-ietf-moq-transport-23 §9.19.12
     #[test]
     fn priority_filter_end_over_255_is_rejected() {
-        // SetID=0, Start=200, End_delta=100 → absolute End=300 (> 255)
+        // SetID=0, Start=200, End_delta=100 → 絶対 End=300 (> 255 で範囲外)
         let mut bytes = Vec::new();
         bytes.push(0x00);
         varint::encode(200, &mut bytes);

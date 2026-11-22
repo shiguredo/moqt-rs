@@ -169,7 +169,7 @@ impl DatagramWriter {
         // 原因と対処が分かるエラーにする。
         check_datagram_size(buf.len(), self.max_size)?;
 
-        // 同じ Object の datagram を決めた回数だけ出す。フィルタ評価・サイズ判定・Object ID の
+        // 同じ Object の datagram を決めた回数だけ出す。フィルタ評価、サイズ判定、Object ID の
         // 前進はここまでの 1 回だけで済んでおり、copy はすべて同じ Object になる
         let copies = datagram_copies(self.redundancy);
         if copies > 1 {

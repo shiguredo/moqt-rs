@@ -17,9 +17,9 @@ pub enum VideoCodec {
     H264,
     /// H.265 / HEVC (Apple Video Toolbox, macOS 限定)
     H265,
-    /// VP8 (libvpx)
+    /// VP8 形式 (libvpx)
     Vp8,
-    /// VP9 (libvpx)
+    /// VP9 形式 (libvpx)
     Vp9,
 }
 
@@ -99,7 +99,7 @@ pub struct Config {
     pub gop_duration_ms: u32,
     /// Track Namespace (draft-ietf-moq-transport-23 §8.8 表現をパースしたもの)
     pub namespace: TrackNamespace,
-    /// Track Name
+    /// トラック名
     pub track_name: String,
     /// 実カメラを掴まず raden で疑似映像を生成するかどうか
     pub fake_capture_device: bool,

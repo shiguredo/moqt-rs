@@ -400,7 +400,7 @@ struct CatalogVideoTrack {
     height: u32,
     /// フレームレート
     fps: u32,
-    /// kbps
+    /// 単位は kbps。
     bitrate: u32,
     /// 映像トラックの最大 Group 長 (ms)
     ///
@@ -417,9 +417,9 @@ struct CatalogAudioTrack {
     codec: String,
     /// サンプリングレート (Hz)
     samplerate: u32,
-    /// MSF channelConfig (mono = "1")
+    /// MSF の channelConfig (mono = "1")
     channel_config: String,
-    /// kbps
+    /// 単位は kbps。
     bitrate: u32,
 }
 
@@ -1879,7 +1879,7 @@ pub async fn run(
                             &handle,
                             &data_plane,
                         );
-                        // LOC draft-ietf-moq-loc-05 §4.1 (Application with one audio track): 1 audio frame = 1 Object = 1 Group
+                        // LOC draft-ietf-moq-loc-05 §4.1 (Application with one audio track): 1 音声フレーム = 1 Object = 1 Group
                         if config.audio_datagram {
                             // datagram の送信は完了が返らない (fire-and-forget)。書き込みの
                             // 戻りを完了とみなすため、投入の直前の時刻を控える
@@ -3265,7 +3265,7 @@ pub async fn run(
     if let Some(writer) = current_video_writer.take() {
         // 終了時点で購読が消えていれば `None` (Location Filter 無し) と同じ扱いになり、
         // 省略があれば RESET 側に倒れる (安全側)。
-        // 失敗は `?` で `run` まで通さない。セッション終了・接続クローズ・peer の cancel に
+        // 失敗は `?` で `run` まで通さない。セッション終了、接続クローズ、peer の cancel に
         // 伴う失敗を致命エラーにすると、正常な終了経路でも `Fatal:` と exit(1) になって後始末が
         // 途中で切れる (期待する失敗の範囲をループ内の分類と同じにする。ループ内は想定外の
         // エラーを致命にするが、後始末は warn に落として続ける点が異なる)。
@@ -3535,7 +3535,7 @@ fn track_migrated(
 /// 同じ side session を共有する移行先 URL のキーを作る
 ///
 /// 1 本の side session を共有できるのは、接続先が同じ URL の PUBLISH だけである。
-/// [`tokio_moq::same_session_url`] と同じく authority・path・fragment で識別する。
+/// [`tokio_moq::same_session_url`] と同じく authority、path、fragment で識別する。
 /// fragment まで含めるのは、MSF fragment が track の namespace と認可トークン (cat) を
 /// 変えうるためである。path は空か `/` で始まるため、authority との境界は曖昧にならない。
 ///
@@ -6233,7 +6233,7 @@ mod tests {
     /// 同じ side session を共有する移行先 URL のキーを固定する
     ///
     /// 同じ URL を指す PUBLISH は 1 本の side session を共有し、URL が違えば別の session を
-    /// 使う。キーは接続先を決める authority・path と、認可トークン (cat) を含みうる
+    /// 使う。キーは接続先を決める authority / path と、認可トークン (cat) を含みうる
     /// fragment から作る。
     mod side_session_key_tests {
         use super::*;
@@ -6243,7 +6243,7 @@ mod tests {
             tokio_moq::parse_url(text).expect("テスト用の URL をパースできること")
         }
 
-        /// authority・path・fragment が同じ URL は同じキーになること
+        /// authority、path、fragment が同じ URL は同じキーになること
         #[test]
         fn same_target_url_shares_the_key() {
             assert_eq!(
@@ -6479,7 +6479,7 @@ mod tests {
         }
     }
 
-    /// 映像 Group の結線 (キーフレーム要求・Group 開始の観測・カタログ宣言) を固定する
+    /// 映像 Group の結線 (キーフレーム要求、Group 開始の観測、カタログ宣言) を固定する
     ///
     /// `pipeline::run` の映像入力分岐は実 relay や capture が無いと駆動できないため、
     /// `run` から抽出した関数を直接呼ぶ。出力フレームは `build_video_loc_properties` の
@@ -7206,7 +7206,7 @@ mod tests {
             video_config: Some(vec![0x01, 0x02]),
         };
         let props = build_video_loc_properties(&frame, Some(90_000));
-        // RFC 9626 §3.2: keyframe → S=1, E=1, I=1 → 0xE0
+        // RFC 9626 §3.2: キーフレーム → S=1, E=1, I=1 → 0xE0
         assert_eq!(
             props.video_frame_marking(),
             Some([0xE0u8].as_slice()),
@@ -8418,7 +8418,7 @@ mod tests {
             (accepted, response)
         }
 
-        /// FETCH を送り、application 側の request id・`serve_peer_request` の結果・応答を返す
+        /// FETCH を送り、application 側の request id、`serve_peer_request` の結果、応答を返す
         async fn serve_fetch(
             peer: &mut TestPeer,
             client: &mut MoqtClient,

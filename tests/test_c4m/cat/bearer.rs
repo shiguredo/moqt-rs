@@ -590,7 +590,7 @@ fn verify_bearer_rejects_confirmation() {
     assert!(cache.is_empty());
 }
 
-/// 署名・scope・期限の検証に失敗したトークンが束縛状態を汚染しないこと
+/// 署名、scope、期限の検証に失敗したトークンが束縛状態を汚染しないこと
 #[cfg(feature = "aws-lc-rs")]
 #[test]
 fn verify_bearer_failures_do_not_pollute_cache() {

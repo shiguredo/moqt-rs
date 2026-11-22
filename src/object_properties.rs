@@ -393,7 +393,7 @@ impl ObjectProperties {
 
     /// IMMUTABLE_PROPERTIES (0x0B) の内側 KVP をデコードして返す
     ///
-    /// 破損していれば空 Vec を返す (draft-ietf-moq-transport-23 §10.7 (Immutable Properties)「MUST search both」対応)。
+    /// 破損していれば空 Vec を返す (draft-ietf-moq-transport-23 §10.7 (Immutable Properties)"MUST search both"対応)。
     /// 最初の IMMUTABLE_PROPERTIES のみを対象とする。0x0B は単一に限られるため、`decode` が
     /// 保持した重複や `push` で積んだ重複は [`ObjectProperties::validate`] が malformed Track
     /// として拒否する。2 つ目以降の内側を探索しないのは、その前提が破れた入力に対する防御で
@@ -407,7 +407,7 @@ impl ObjectProperties {
 
     /// 偶数型 Object Property から varint 値を取得する
     ///
-    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties)「MUST search both」に従い、mutable リストに無ければ
+    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties)"MUST search both"に従い、mutable リストに無ければ
     /// IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。mutable リストを優先する。
     ///
     /// draft-ietf-moq-transport-23 §3.3.2 (Range Filters) の OBJECT_PROPERTY_FILTER は任意の
@@ -900,7 +900,7 @@ struct ObjectFieldRecord {
     delivery_mode: DeliveryMode,
     /// Subgroup ID (datagram 経由の場合は `None`)
     subgroup_id: Option<u64>,
-    /// Publisher Priority
+    /// Publisher Priority (配信者の優先度)
     publisher_priority: u8,
     /// IMMUTABLE_PROPERTIES (0x0B) の内側の生バイト列 (draft §10.7 (Immutable Properties))
     ///

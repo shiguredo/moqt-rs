@@ -11,7 +11,7 @@
 //! Property.")、許される数より多く受信したエンドポイントに Track を malformed とすることを
 //! MUST とする。§12.1 の条件 9 も同じ条件を列挙する。本モジュールは「この実装が意味を
 //! 理解する Property」の許可スコープと多重可否を 1 箇所にまとめる。Track Properties
-//! (`crate::track_properties`)・Object Properties (`crate::object_properties`)・LOC
+//! (`crate::track_properties`)、Object Properties (`crate::object_properties`)、LOC
 //! Properties (`crate::loc`) が同じ表を参照することで、判定が複数箇所に分かれて片方だけ
 //! 更新される事故を防ぐ。
 //!

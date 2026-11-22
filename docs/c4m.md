@@ -696,12 +696,12 @@ replay 検出を要求しない proof も、ウィンドウが cache の最大�
 
 `resource` の検証は action ごとに異なります。
 
-- SETUP (`MoqtAction::Setup`): `moqt://<authority>` だけを受理します。`moqt://` は小文字でなければならず、authority は空でなく、`?` `#` `/` `@` と空白・制御文字を含みません。`tns` / `tn` は比較しません。
+- SETUP (`MoqtAction::Setup`): `moqt://<authority>` だけを受理します。`moqt://` は小文字でなければならず、authority は空でなく、`?` `#` `/` `@` と空白 / 制御文字を含みません。`tns` / `tn` は比較しません。
   SETUP では `verify_target` を呼ばず、actx に `tn` があることだけを要求します。この `tn` 必須は旧 draft-ietf-moq-c4m-01 §3.1.2 の互換規則です。draft-02 §4.2 の CWT 形式 actx は SETUP に `tn` を持たないため、draft-02 に従う場合は CWT 形式の API を使ってください
 - namespace 操作 (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS): クエリの `tns` と actx の `tns` の一致を要求します。actx に `tn` があり、クエリにも `tn` がある場合だけ `tn` の一致を要求します (旧 draft-01 §3.1.3 の namespace 形式は `tn` を持たない)。
   旧 JWT 形式の actx は SUBSCRIBE_TRACKS を表現できないため、`verify_authorization_context` では action の検証で `ActionMismatch` になります
 - track 操作 (SUBSCRIBE / REQUEST_UPDATE / PUBLISH / FETCH / TRACK_STATUS): クエリの `tns` と actx の `tns` の一致を要求します。actx に `tn` がある場合はクエリの `tn` の一致も要求し、actx に `tn` が無い場合は `verify_target` が `MissingTrackName` で拒否します
-- SETUP 以外の action でも、`resource` は小文字 `moqt://` で始まり、authority が空でなく、`#` `/` `@` と空白・制御文字を含まないことを検証します
+- SETUP 以外の action でも、`resource` は小文字 `moqt://` で始まり、authority が空でなく、`#` `/` `@` と空白 / 制御文字を含まないことを検証します
 - `resource` が無い場合は任意です。クエリパラメータの重複は最後の値を使います。パーセントエンコーディングは解釈しません。endpoint (host / port) が接続先と一致することは検証しません
 
 SETUP 以外では `verify_target` が `tns` / `tn` を target と比較します。§3.1.2 は resource が `tns` / `tn` と一致することを MUST としますが、§3.1.3 の SETUP と namespace 操作の resource 形式には比較対象のパラメータが無いため、本実装は §3.1.3 の action 別形式を優先します。

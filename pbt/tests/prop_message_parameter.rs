@@ -400,13 +400,13 @@ fn relative_group_zero_ge_next_object() -> noprop::TestResult {
 /// 候補を狭く取ることで (Token Type, Token Value) の重複が十分な確率で生成されるようにする。
 #[derive(Debug, Clone, Copy)]
 enum AuthTokenSpec {
-    /// REGISTER (alias, token_type, token_value)
+    /// REGISTER のフィールド (alias, token_type, token_value)
     Register(u64, u64, u8),
-    /// USE_VALUE (token_type, token_value)
+    /// USE_VALUE のフィールド (token_type, token_value)
     UseValue(u64, u8),
-    /// USE_ALIAS (alias)
+    /// USE_ALIAS のフィールド (alias)
     UseAlias(u64),
-    /// DELETE (alias)
+    /// DELETE のフィールド (alias)
     Delete(u64),
 }
 
@@ -485,7 +485,7 @@ fn has_duplicate_type_value(specs: &[AuthTokenSpec]) -> bool {
 /// (Token Type, Token Value) が重複するとき、かつそのときに限り `MalformedAuthToken` を返す。
 ///
 /// USE_ALIAS / DELETE は codec 層の検証対象外であり、いくつ並んでも結果に影響しないことも
-/// あわせて確認する。重複あり / 重複なし / USE_ALIAS・DELETE を含む入力の 3 つを
+/// あわせて確認する。重複あり / 重複なし / USE_ALIAS / DELETE を含む入力の 3 つを
 /// カバレッジゲートで検証する。
 #[test]
 fn validate_auth_token_uniqueness_errs_exactly_on_duplicate_type_value() -> noprop::TestResult {
@@ -743,7 +743,7 @@ fn sample_fill_location_filter(ctx: &mut noprop::TestCaseContext) -> LocationFil
 fn sample_range_filter_value(ctx: &mut noprop::TestCaseContext, param_type: u64) -> Vec<u8> {
     let mut bytes = vec![noprop::sample_u8(ctx)];
     if has_property_type_field(param_type) {
-        // draft-ietf-moq-transport-23 §9.19.13 / §9.19.14: Property Type MUST be even
+        // 仕様: draft-ietf-moq-transport-23 §9.19.13 / §9.19.14: Property Type MUST be even (Property Type は偶数でなければならない)
         varint::encode(noprop::sample_choice(ctx, &[0u64, 2u64]), &mut bytes);
     }
     varint::encode(1, &mut bytes);
@@ -894,7 +894,7 @@ fn fill_parameters_count_framing_roundtrip() -> noprop::TestResult {
     Ok(())
 }
 
-/// PAUSED (0x11) の省略・0・1 が encode → decode で区別されたまま保たれること
+/// PAUSED (0x11) の省略、0、1 が encode → decode で区別されたまま保たれること
 ///
 /// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): PAUSED は uint8 で
 /// 0 は unpaused、1 は paused、省略時の既定値は 0 である。省略と 0 の明示は
@@ -955,7 +955,7 @@ fn paused_parameter_roundtrip_preserves_absence_and_values() -> noprop::TestResu
         assert_eq!(
             decoded.paused(),
             expected,
-            "省略・0・1 がそのまま保たれること"
+            "省略、0、1 がそのまま保たれること"
         );
         Ok(())
     })?;

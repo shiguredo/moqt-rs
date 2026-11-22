@@ -14,11 +14,11 @@ MSF `draft-ietf-moq-msf-02`、C4M `draft-ietf-moq-c4m-02` である。
 
 `CODEBASE.md` の「クライアントとサーバーのみで MoQ リレーには対応しないこと」により、
 relay の転送 (`§7` 全体、§3.2.3 Relay Fetch Handling、§7.5.1 / §7.7.1 Relay Switchover、
-relay による namespace の集約・forwarding) は本稿の対象外とする。namespace 発見・告知の
+relay による namespace の集約 / forwarding) は本稿の対象外とする。namespace 発見 / 告知の
 6 メッセージ (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUBSCRIBE_TRACKS` /
 `NAMESPACE` / `NAMESPACE_DONE` / `PUBLISH_SKIPPED`) は client / server の endpoint 同士でも
 使うため実装済みであり、本稿の「足りていない機能」には含めない (`docs/moqt.md` の
-「namespace 発見・告知」を参照)。
+「namespace 発見 / 告知」を参照)。
 `docs/moqt.md` / `docs/msf.md` / `docs/loc.md` / `docs/c4m.md` の「未対応」や「残る制約」に
 書かれている内容も既知として扱い、重複して数え上げない。
 
@@ -37,7 +37,7 @@ relay による namespace の集約・forwarding) は本稿の対象外とする
    Range Filters を有効にする `MAX_FILTER_RANGES` など。
 3. **アプリ機能として欠けているもの**: REQUEST_ERROR の REDIRECT 追随、トラック選択と切替、
    シーク / 巻き戻し、ライブ中の track 追加への追随、配信終了のシグナリング、統計表示。
-4. **MUST 未達・仕様違反になりうる箇所**:
+4. **MUST 未達 / 仕様違反になりうる箇所**:
    `isLive=false` の `targetLatency` (MSF §5.2.8)、
    `connectionURI` の新規接続 (MSF §5.2.37)、
    範囲指定の購読反映 (MSF §11.1.1)。
@@ -51,7 +51,7 @@ relay による namespace の集約・forwarding) は本稿の対象外とする
 | Secure Objects による E2E 暗号化と復号 | LOC §3、MSF §4.3 | 未実装。MSF の signaling フィールドは扱うが、`ENCRYPTED_LIST` (`0x0A`) / `PADDING` (`0x32`) Object Property と暗号処理が無い | 未着手 |
 | MSF_COMPRESSION property による catalog 圧縮 | MSF §5.5 / §12.1 | 実装済み。0x78 の Track Property / Object Property を `MsfCompression` で解釈し、catalog / timeline の encode / decode が signal を受け取る | - |
 | Log / Metrics track の payload | MSF §9 / §10 | 未実装。`packaging` の値は扱うが payload は未対応 | 未着手 |
-| LOC の Video Payload Format | LOC §2.1 | 部分実装。`loc::video_payload` で 1〜4 バイト length prefix / 3・4 バイト start code / length 1 = start code を扱う。example の annexB 統合と payload 内 parameter set は未対応 | 未着手 |
+| LOC の Video Payload Format | LOC §2.1 | 部分実装。`loc::video_payload` で 1〜4 バイト length prefix / 3 / 4 バイト start code / length 1 = start code を扱う。example の annexB 統合と payload 内 parameter set は未対応 | 未着手 |
 | LOC の Track スコープ Property | LOC §6.1 Table 1 | PUBLISH / SUBSCRIBE_OK で受信した場合、受信側は `Subscription::peer_track_properties` から `TrackProperties::find_varint` / `find_bytes` と `codec_string` (0x11 CODEC_STRING、UTF-8 検証) で取得できる。publisher example からの送信は未対応 | 未起票 |
 | DPoP proof の送信 | C4M §4.2 / §4.3 | CWT 形式 proof の codec と一括検証 API は実装済み。CWT proof を MOQT の AUTHORIZATION_TOKEN に載せる方法は仕様で未定義であり、example の URL 経路も proof を送らない | 未起票 |
 | C4M の複合クレーム評価 | C4M §2.1.1 / 付録 A.6 | 未実装。`CatClaims::raw` に保持するだけで、nested claim set の or / and / nor を評価しない。複合クレームだけを持つトークンは `moqt` が読めず認可されない。top-level の `moqt` と複合クレームが併存するトークンは top-level だけで認可されるため、複合クレームによる制限を評価する利用側は fail-closed に扱うこと | 未起票 |
@@ -99,7 +99,7 @@ C4M draft-02 の `moqt` クレームの map 化と未知キーの fail-closed、
 | FETCH_OK 前の Object 送信 | `send_fetch_header` が `FetchState::Established` を要求する | §3.2 (MAY) | 応答範囲の終端 (LARGEST_OBJECT が要求範囲内か) が確定するまで FETCH 応答 Object を送れない。fill fetch は `Pending` を許容するため非対称 |
 | moqt URI のパース | `msf::uri` は `moqt://authority/path?query#msf:...` を分解し、authority / path / query を RFC 3986 で検証する。`validate_moqt_endpoint_uri` は fragment なしの endpoint URI も検証し、catalog の `connectionURI` は decode / encode で検証される | §6.1 / §6.1.1 / §6.1.2 | 新規接続の確立は transport / example 層の責務である |
 
-## 4. MUST 未達・仕様違反になりうる箇所
+## 4. MUST 未達 / 仕様違反になりうる箇所
 
 ### 4.1 Object 側 `IMMUTABLE_PROPERTIES` の LOC 値域検証 (§10.7 / §8.3、ライブラリ)
 
@@ -153,7 +153,7 @@ transport / example 層に無い。publishTracks (Log / Metrics) を使う配信
 MSF §11.1.1 は「If multiple ranges are specified within the same URL for the same parameter,
 the client MUST process the union of those ranges.」と定める。
 `MsfFragment::wallclock_range_union` / `mediatime_range_union` / `location_range_union` を
-追加し、重なる・隣接する時間範囲・Group ID / Object ID 範囲と終端なしの範囲を union する
+追加し、重なる、隣接する時間範囲、Group ID / Object ID 範囲と終端なしの範囲を union する
 ようにした。union した範囲を実際の購読 / FETCH に反映する経路は未実装である
 (example からの呼び出しは 0 件)。
 
@@ -187,14 +187,14 @@ open な送信 stream を Session が reset する (`Session::reset_open_outgoin
 
 - MSF: Track Name が空の `msf:` fragment を拒否する (§2.4.1)。`parse_msf_uri` が
   authority / path / query を RFC 3986 で検証し、userinfo を拒否する (§11.1)。
-  変数置換は JSON の文字列リテラル内だけを対象にし、文字列外・キー・`\u0025` を拒否する
+  変数置換は JSON の文字列リテラル内だけを対象にし、文字列外、キー、`\u0025` を拒否する
   (§5.4.1)。`loc` の `streamMapping` は `group` / `object` だけを受理する (§4.1.1)。
   `accessibleWindowTime` は tracks / publishTracks を横断して検証する (§5.2.45)。
 - C4M: COSE の `alg` でレジストリ名 (tstr) を受理し整数へ正規化する (RFC 9052 §3.1)。
   COSE ヘッダと CAT クレームの重複ラベルを拒否する (RFC 8949 §5.6.1)。
   `catdpop` の負のウィンドウを decode / encode / 検証で拒否する。
   `CwtDpopProofCodec::build` が action に対する target の有無を検証する。
-- playout: `u64::MAX` の Object ID を終端として扱い、音声予算・リサンプラ・不感帯の
+- playout: `u64::MAX` の Object ID を終端として扱い、音声予算、リサンプラ、不感帯の
   飽和演算を修正した。これは仕様 MUST ではなく、公開 API の境界での panic / 誤動作の修正である。
 - MSF: `connectionURI` を `validate_moqt_endpoint_uri` で検証し、catalog decode / encode で
   不正な MOQT endpoint URI を拒否するようにした (§5.2.37 / MOQT §6.1)。
@@ -228,8 +228,8 @@ MSF v02 §11.4 は `PUBLISH_DONE` を使う (v01 §11.3 の `SUBSCRIBE_DONE` か
 `MessageParameters` を引数に取らず、内部で空のパラメータを渡す。
 ライブラリ側は `Session::send_publish(..., parameters, ...)` で任意のパラメータを受け付ける
 (`src/session/subscription/send.rs`) ため、transport 層のラッパーの制約である。
-結果として `EXPIRES` (§9.19.16)・`SUBSCRIBER_PRIORITY` (§9.19.7)・
-Delivery Timeout (§9.19.3 / §9.19.4)・`PAUSED` (§9.19.18)・`GROUP_ORDER` (§9.19.8) を
+結果として `EXPIRES` (§9.19.16)、`SUBSCRIBER_PRIORITY` (§9.19.7)、
+Delivery Timeout (§9.19.3 / §9.19.4)、`PAUSED` (§9.19.18)、`GROUP_ORDER` (§9.19.8) を
 PUBLISH に載せられない。
 
 ### 5.3 配送タイムアウトを載せていない
@@ -283,7 +283,7 @@ transport 層の `send_request_ok` も Track Properties を渡せない
 
 moq-sub は `--subscribe-tracks` を指定したときだけ、自側が送った SUBSCRIBE_TRACKS の
 Request ID に一致する `SUBSCRIBE_TRACKS_ID` (0x36) を持つ PUBLISH を PUBLISH_OK で受理する
-(`crates/moq-sub/src/pipeline.rs`)。受理した購読の Object は再生・録画に使わず、subgroup stream と
+(`crates/moq-sub/src/pipeline.rs`)。受理した購読の Object は再生 / 録画に使わず、subgroup stream と
 datagram の両方で読み捨てる。既存の購読と同じ Track Alias を持つ PUBLISH は、alias だけでは
 購読を区別できないため `UNINTERESTED` (0x20) で拒否する。
 
@@ -350,7 +350,7 @@ publish する経路が無い (§5.6.16、§10)。
 
 ## 6. subscriber (moq-sub) に足りない機能
 
-### 6.1 FETCH を使わない (シーク・巻き戻し・欠落回収ができない)
+### 6.1 FETCH を使わない (シーク、巻き戻し、欠落回収ができない)
 
 `MoqtClient::fetch` は存在し、`crates/moq-sub/src/pipeline.rs` の
 `fetch_recent_video_groups` が映像の購読直後に直近 Group を FETCH する。音声の明示 FETCH は
@@ -372,7 +372,7 @@ publish する経路が無い (§5.6.16、§10)。
 `crates/moq-sub/src/pipeline.rs` は catalog の並び順で最初に一致した
 映像コーデック / 音声コーデックのトラックを選ぶ。`--track-name` のような選択肢が無く、
 MSF §5.2.6 (role) / §5.2.10 (label) / §5.2.12 (altGroup) / §5.2.32 (lang) による
-選択も切替もできない。多言語・複数品質のカタログでは意図しない 1 本を選びうる。
+選択も切替もできない。多言語 / 複数品質のカタログでは意図しない 1 本を選びうる。
 
 ### 6.3 catalog の delta update で追加された track を購読しない
 
@@ -452,8 +452,8 @@ moq-sub はこのイベントをログに残し、映像 FETCH の拒否なら F
 
 REQUEST_UPDATE の送信は `crates/moq-sub/src/pipeline.rs` の 1 箇所だけで、
 固定値 192 の `SUBSCRIBER_PRIORITY` を送る (コメント上もサンプル)。§9.5 が購読で
-許す更新のうち、PAUSED (pause / 再開、§3.1.1)・Group Order・Location Filter・
-Range Filter・Delivery Timeout はいずれも送らない。REQUEST_UPDATE_OK も
+許す更新のうち、PAUSED (pause / 再開、§3.1.1)、Group Order、Location Filter、
+Range Filter、Delivery Timeout はいずれも送らない。REQUEST_UPDATE_OK も
 catch-all で読み捨てる (`pipeline.rs`)。`PAUSED=1` による一時停止ができない。
 
 購読中の `NEW_GROUP_REQUEST` (§9.19.19、§3.5.1) も送れない。session は
@@ -492,7 +492,7 @@ moq-sub が実際に載せるのは catalog の `LOCATION_FILTER` + `FILL_PARAME
 - Largest Object (§3.1.4、§9.19.17) はログのみ (`pipeline.rs`)。
   fill range の判断に使わない
 
-### 6.12 MSF の Timeline・範囲指定・buffers を使わない
+### 6.12 MSF の Timeline、範囲指定、buffers を使わない
 
 Media / Event Timeline (§7 / §8)、`msf::uri` の範囲パラメータ (§11.1.1)、
 `buffers` / `maxGopDuration` / `maxGroupDuration` (§5.2.9 / §5.2.24 / §5.2.25) は
@@ -622,7 +622,7 @@ example 側の `crates/moq-sub` が `playout::buffer` と `playout::timeline` �
 1. request stream GOAWAY の同一移行先 URL を指す複数 request の session 共有と、FETCH の
    request 単位移行 (6.6) — side session を URL 単位で共有し、FETCH の要求を追跡する必要がある
 2. メディアの FETCH 不在 (5.8 / 6.1) — シーク、巻き戻し、欠落回収ができない
-3. 配信終了のシグナリング (5.1) — 正常終了・VOD 化・恒久終了を伝えられない (MSF §11.3)
+3. 配信終了のシグナリング (5.1) — 正常終了、VOD 化、恒久終了を伝えられない (MSF §11.3)
 4. authInfo と変数置換 (6.4) — 認可付き配信が example 同士でも成立しない
 5. catalog delta で増えた track への追随 (6.3) — 動的な配信構成に追随できない
 6. Object Status と PUBLISH_DONE の未解釈 (6.11) — トラック終端を正しく検知できない

@@ -33,7 +33,7 @@ pub enum SubgroupIdMode {
     Explicit(u64),
 }
 
-/// SUBGROUP_HEADER (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
+/// SUBGROUP_HEADER の形式 (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubgroupHeader {
     /// 対象トラックの Alias

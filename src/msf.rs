@@ -350,7 +350,7 @@ fn validate_lang_tag(lang: &str) -> Result<(), MessageError> {
     }
     let primary = parts[0];
 
-    // privateuse = "x" 1*("-" (1*8alphanum))
+    // RFC 5646 の privateuse の ABNF: privateuse = "x" 1*("-" (1*8alphanum))
     if primary.eq_ignore_ascii_case("x") {
         if parts.len() < 2
             || parts[1..]
@@ -362,13 +362,13 @@ fn validate_lang_tag(lang: &str) -> Result<(), MessageError> {
         return Ok(());
     }
 
-    // language = 2*3ALPHA ["-" extlang] / 4ALPHA / 5*8ALPHA
+    // RFC 5646 の language の ABNF: language = 2*3ALPHA ["-" extlang] / 4ALPHA / 5*8ALPHA
     if !is_alpha(primary) || !(2..=8).contains(&primary.len()) {
         return Err(invalid(lang));
     }
     let mut index = 1;
     if primary.len() <= 3 {
-        // extlang = 3ALPHA *2("-" 3ALPHA)
+        // RFC 5646 の extlang の ABNF: extlang = 3ALPHA *2("-" 3ALPHA)
         for _ in 0..3 {
             if index < parts.len() && parts[index].len() == 3 && is_alpha(parts[index]) {
                 index += 1;
@@ -377,18 +377,18 @@ fn validate_lang_tag(lang: &str) -> Result<(), MessageError> {
             }
         }
     }
-    // script = 4ALPHA
+    // RFC 5646 の script の ABNF: script = 4ALPHA
     if index < parts.len() && parts[index].len() == 4 && is_alpha(parts[index]) {
         index += 1;
     }
-    // region = 2ALPHA / 3DIGIT
+    // RFC 5646 の region の ABNF: region = 2ALPHA / 3DIGIT
     if index < parts.len()
         && ((parts[index].len() == 2 && is_alpha(parts[index]))
             || (parts[index].len() == 3 && parts[index].bytes().all(|byte| byte.is_ascii_digit())))
     {
         index += 1;
     }
-    // variant = 5*8alphanum / (DIGIT 3alphanum)
+    // RFC 5646 の variant の ABNF: variant = 5*8alphanum / (DIGIT 3alphanum)
     while index < parts.len()
         && ((5..=8).contains(&parts[index].len()) && is_alphanum(parts[index])
             || (parts[index].len() == 4
@@ -399,7 +399,7 @@ fn validate_lang_tag(lang: &str) -> Result<(), MessageError> {
     {
         index += 1;
     }
-    // extension = singleton 1*("-" (2*8alphanum))
+    // RFC 5646 の extension の ABNF: extension = singleton 1*("-" (2*8alphanum))
     while index < parts.len()
         && parts[index].len() == 1
         && is_alphanum(parts[index])
@@ -417,7 +417,7 @@ fn validate_lang_tag(lang: &str) -> Result<(), MessageError> {
             return Err(invalid(lang));
         }
     }
-    // privateuse = "x" 1*("-" (1*8alphanum))
+    // RFC 5646 の privateuse の ABNF: privateuse = "x" 1*("-" (1*8alphanum))
     if index < parts.len() && parts[index].eq_ignore_ascii_case("x") {
         index += 1;
         let start = index;
@@ -455,9 +455,9 @@ pub enum MsfPackaging {
     MediaTimeline,
     /// イベントタイムライン ("eventtimeline")
     EventTimeline,
-    /// moqlog ("moqlog")
+    /// moqlog のカタログトラック ("moqlog")
     MoqLog,
-    /// moqmetrics ("moqmetrics")
+    /// moqmetrics のカタログトラック ("moqmetrics")
     MoqMetrics,
     /// 別のカタログトラックを参照するカタログ ("catalog")
     ///
@@ -801,7 +801,7 @@ pub struct MsfTrack {
     pub packaging: MsfPackaging,
     /// パッケージング固有メタデータ (draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata))
     ///
-    /// `;` 区切りの `key=value`。key / value に whitespace・`=`・`;` は含められない。
+    /// `;` 区切りの `key=value`。key / value に whitespace、`=`、`;` は含められない。
     /// `streamMapping` の値の解釈と既定値は [`MsfTrack::stream_mapping`] が扱う。
     pub packaging_metadata: Option<String>,
     /// イベントタイムラインタイプ (draft-ietf-moq-msf-02 §5.2.6 (Event timeline type)) - packaging=eventtimeline の場合必須
@@ -2277,7 +2277,7 @@ impl MsfCatalogTracker {
     ///
     /// # Errors
     ///
-    /// - 一度 TRUE になった `isComplete` が次のカタログで欠落・FALSE: `InvalidCatalog`
+    /// - 一度 TRUE になった `isComplete` が次のカタログで欠落 / FALSE: `InvalidCatalog`
     /// - `isComplete=true` の後に新しい track が現れた: `InvalidCatalog`
     /// - `isLive=false` だった Full Track Name が `isLive=true` で再登場した: `InvalidCatalog`
     /// - track の namespace / name が §5.2.2 / §5.2.3 の制約に違反する: `InvalidCatalog`
@@ -2425,7 +2425,7 @@ impl MsfCatalog {
         let mut undo = Vec::new();
         let result = self.apply_delta_operations(delta, catalog_namespace, &mut index, &mut undo);
         if let Err(error) = result {
-            // 追加・削除・置換・履歴・generatedAt を変更の逆順に戻す
+            // 追加、削除、置換、履歴、generatedAt を変更の逆順に戻す
             self.rollback_delta(undo);
             return Err(error);
         }
@@ -3041,9 +3041,9 @@ pub struct MsfMediaTimelineEntry {
     /// `2002.0` / `2.002e3` のような整数値を持つ小数・指数表記も decode で受理し、
     /// encode では整数リテラルに正規化する。`2002.5` のような非整数は拒否する。
     pub pts_ms: i64,
-    /// MOQT Group ID
+    /// MOQT の Group ID
     pub group_id: u64,
-    /// MOQT Object ID
+    /// MOQT の Object ID
     pub object_id: u64,
     /// ウォールクロック ms (不明な場合は 0)
     pub wallclock_ms: u64,
@@ -3152,7 +3152,7 @@ pub fn validate_media_timeline_format(
 /// イベントタイムラインのインデックス参照 (draft-ietf-moq-msf-02 §8.2 (Event Timeline data format))
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MsfEventIndex {
-    /// 'L': MOQT Location [group_id, object_id]
+    /// 'L': MOQT の Location [group_id, object_id]
     Location(u64, u64),
     /// 'T': ウォールクロック ms
     WallclockMs(u64),
@@ -3874,7 +3874,7 @@ pub fn validate_event_timeline_depends(
 /// packagingMetadata の構文を検証する
 ///
 /// draft-ietf-moq-msf-02 §5.2.5 (Packaging metadata): `;` 区切りの `key=value` で、key と
-/// value は case-sensitive、whitespace・`=`・`;` を含んではならない (MUST NOT)。空要素、
+/// value は case-sensitive、whitespace、`=`、`;` を含んではならない (MUST NOT)。空要素、
 /// `=` を含まない要素、空の key / value も不正とする。未知の key は呼び出し側で無視する。
 fn validate_packaging_metadata(value: &str) -> Result<(), MessageError> {
     if value.is_empty() {
@@ -4419,7 +4419,7 @@ fn decode_delta_operation(
 /// track / cloneTracks 共通フィールドの抽出結果 (decode 専用の内部型)
 ///
 /// `MsfTrack` と `MsfCloneTrack` は公開型としては別 (必須/省略の意味が異なる) だが、
-/// ワイヤ上のフィールド一覧・JSON キー・値の読み方は同一のため、抽出は 1 関数
+/// ワイヤ上のフィールド一覧、JSON キー、値の読み方は同一のため、抽出は 1 関数
 /// (`decode_common_track_fields`) に集約する。片方への修正漏れを防ぐための集約であり、
 /// 必須可否・継承可否などの妥当性規則は呼び出し側 (decode_track / decode_clone_track)
 /// が担う。encode 側は機械的な member 書き出しであり、roundtrip テストで drift を検出する。
@@ -4815,7 +4815,7 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
 /// draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List): `track-property` /
 /// `object-property` の data は property type の hex notation を持つ。仕様は文法を定めないため、
 /// 本実装は `0x` に続く 1〜16 桁の hex digit (大文字小文字を問わない) で、MOQT の property type が
-/// 表現できる 2^62 - 1 以下と定める。`inline` の Base64 検証は 0342 が担当する。
+/// 表現できる 2^62 - 1 以下と定める。`inline` の Base64 検証は `base64_decode` が行う。
 /// Base64 (RFC 4648 §4) としてデコードできるかを検証する
 fn base64_decode(value: &str) -> Result<Vec<u8>, base64ct::Error> {
     Base64::decode_vec(value)
@@ -5600,8 +5600,8 @@ fn is_variable_value_char(b: u8) -> bool {
 ///
 /// # Errors
 ///
-/// - 空の変数名・fragment の param-name として表現できない変数名 (`pct-encoded` を除く)・
-///   値文字種外・`#` 含有: `InvalidCatalog`
+/// - 空の変数名、fragment の param-name として表現できない変数名 (`pct-encoded` を除く)、
+///   値文字種外、`#` 含有: `InvalidCatalog`
 ///
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 pub fn parse_fragment_pairs(fragment: &str) -> Result<Vec<(String, String)>, MessageError> {

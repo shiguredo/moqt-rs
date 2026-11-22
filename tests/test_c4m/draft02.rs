@@ -358,7 +358,7 @@ fn claim_vectors_keep_draft_02_cat_encodings() {
     );
 }
 
-/// A.3 の公式 COSE 構造をデコードし、ヘッダ・payload・MAC / 署名を固定する
+/// A.3 の公式 COSE 構造をデコードし、ヘッダ、payload、MAC / 署名を固定する
 #[test]
 fn token_vectors_decode_cose() {
     for vector in DRAFT_02_TOKEN_VECTORS {
@@ -1311,7 +1311,7 @@ fn tampered_mac_and_wrong_key_are_rejected() {
         .expect("正しい鍵で検証できる");
 }
 
-/// 公式の COSE_Mac0 を COSE タグ付き・CWT タグ無しで再エンコードすると公式バイト列に戻ること
+/// 公式の COSE_Mac0 を COSE タグ付き / CWT タグ無しで再エンコードすると公式バイト列に戻ること
 ///
 /// COSE_Sign1 への差し替えは `cose_mac0_tag_with_mac_algorithm_is_rejected_as_sign1` で
 /// 別に確認する。

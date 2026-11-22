@@ -1407,7 +1407,7 @@ mod tests {
             let root = sqrt(value);
             assert!(
                 (root * root - value).abs() <= 1e-9 * value.max(1.0),
-                "value={value} root={root}"
+                "値 value={value} 根 root={root}"
             );
         }
         // 0 と負の値は 0 になる

@@ -111,7 +111,7 @@ fn end_of_group_ends_the_group_and_restores_the_next_group() {
     // 2 個目の Object は Group ID Delta 0 (5 + 0 + 1 = 6)、Object ID Delta 7 (絶対値)
     let mut bytes = FETCH_HEADER_BYTES.to_vec();
     bytes.extend_from_slice(&[
-        // Object: flags 0x1F (Subgroup ID present + Object ID + Group ID + Priority)
+        // Object: flags 0x1F (Subgroup ID と Object ID と Group ID と Priority が存在する)
         0x1F, 0x05, // Group ID Delta 5 (最初の Object なので絶対値)
         0x00, // Subgroup ID 0
         0x03, // Object ID Delta 3 (最初の Object なので絶対値)
@@ -120,7 +120,7 @@ fn end_of_group_ends_the_group_and_restores_the_next_group() {
     ]);
     bytes.extend_from_slice(&END_OF_GROUP_BYTES);
     bytes.extend_from_slice(&[
-        // Object: flags 0x1D (Subgroup ID previous same + Object ID + Group ID + Priority)
+        // Object: flags 0x1D (Subgroup ID は前回と同じで、Object ID と Group ID と Priority が存在する)
         0x1D, 0x00, // Group ID Delta 0 → 直前の Group 5 + 0 + 1 = 6
         0x07, // Object ID Delta 7 (Group ID Delta が present なので絶対値)
         0x80, // Publisher Priority 128

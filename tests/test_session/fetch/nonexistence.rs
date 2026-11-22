@@ -930,7 +930,7 @@ fn trailing_gap_is_deferred_until_fetch_ok_arrives() {
 ///
 /// draft-ietf-moq-transport-23 §3.2.2 (Gaps in a Fetch Stream): 降順で Start と End の Group が
 /// 異なる場合、連続する Object が異なる Group にあるときの gap は先行 Group の残り・経由
-/// Group・後続 Group の先頭になる。要求範囲外の Location を不存在として記録してはならない。
+/// Group / 後続 Group の先頭になる。要求範囲外の Location を不存在として記録してはならない。
 #[test]
 fn descending_multi_group_gap_is_clamped_to_request() {
     let mut params = fetch_range_params(

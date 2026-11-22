@@ -556,11 +556,11 @@ impl fmt::Debug for CoseKey {
 /// JWK サムプリント (RFC 7638) など、署名以外でハッシュが必要な処理に使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DigestAlgorithm {
-    /// SHA-256
+    /// SHA-256 ハッシュ
     Sha256,
-    /// SHA-384
+    /// SHA-384 ハッシュ
     Sha384,
-    /// SHA-512
+    /// SHA-512 ハッシュ
     Sha512,
 }
 

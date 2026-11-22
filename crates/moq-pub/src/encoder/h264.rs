@@ -269,9 +269,9 @@ fn build_avc_decoder_config_record(sps_list: &[Vec<u8>], pps_list: &[Vec<u8>]) -
     buf.push(profile_idc); // AVCProfileIndication
     buf.push(profile_compatibility); // profile_compatibility
     buf.push(level_idc); // AVCLevelIndication
-    // 6 bits reserved ('111111') | 2 bits lengthSizeMinusOne
+    // 6 ビットの reserved ('111111') | 2 ビットの lengthSizeMinusOne
     buf.push(0xFC | (AVCC_LENGTH_SIZE - 1));
-    // 3 bits reserved ('111') | 5 bits numOfSequenceParameterSets
+    // 3 ビットの reserved ('111') | 5 ビットの numOfSequenceParameterSets
     buf.push(0xE0 | (sps_list.len() as u8));
     for sps in sps_list {
         buf.extend_from_slice(&(sps.len() as u16).to_be_bytes());
@@ -284,13 +284,13 @@ fn build_avc_decoder_config_record(sps_list: &[Vec<u8>], pps_list: &[Vec<u8>]) -
     }
 
     // High / High10 / High 4:2:2 / High 4:4:4 profile はチャンネル拡張フィールドを追加する
-    // (§5.2.4.1.1 「if( profile_idc == 100 || 110 || 122 || 144 )」)
+    // (§5.2.4.1.1 "if( profile_idc == 100 || 110 || 122 || 144 )")
     if matches!(profile_idc, 100 | 110 | 122 | 144) {
-        // 6 bits reserved ('111111') | 2 bits chroma_format (1 = 4:2:0)
+        // 6 ビットの reserved ('111111') | 2 ビットの chroma_format (1 = 4:2:0)
         buf.push(0xFC | 0x01);
-        // 5 bits reserved ('11111') | 3 bits bit_depth_luma_minus8 (0 = 8-bit)
+        // 5 ビットの reserved ('11111') | 3 ビットの bit_depth_luma_minus8 (0 = 8 ビット)
         buf.push(0xF8);
-        // 5 bits reserved ('11111') | 3 bits bit_depth_chroma_minus8 (0 = 8-bit)
+        // 5 ビットの reserved ('11111') | 3 ビットの bit_depth_chroma_minus8 (0 = 8 ビット)
         buf.push(0xF8);
         // numOfSequenceParameterSetExt = 0 (VT は SPS Extension を出さない)
         buf.push(0x00);

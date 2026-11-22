@@ -5,7 +5,7 @@ use super::*;
 /// tracks 内の (namespace, name) 重複は encode でも拒否されること
 #[test]
 fn encode_full_duplicate_name_within_tracks_rejected() {
-    // draft-ietf-moq-msf-02 §5.2.3 (Track name)
+    // 仕様: draft-ietf-moq-msf-02 §5.2.3 (Track name)
     let a = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     let b = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     assert!(matches!(
@@ -29,7 +29,7 @@ fn encode_full_duplicate_name_across_tracks_and_publish_tracks_rejected() {
 /// initDataList の id 重複は encode でも拒否されること
 #[test]
 fn encode_full_duplicate_init_data_list_id_rejected() {
-    // draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List)
+    // 仕様: draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List)
     let entry = || MsfInitData {
         id: "init1".to_string(),
         kind: MsfInitDataKind::Inline,
@@ -45,7 +45,7 @@ fn encode_full_duplicate_init_data_list_id_rejected() {
 /// 一致しない initRef は encode でも拒否されること
 #[test]
 fn encode_full_missing_init_ref_rejected() {
-    // draft-ietf-moq-msf-02 §5.2.14 (Initialization reference)
+    // 仕様: draft-ietf-moq-msf-02 §5.2.14 (Initialization reference)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.init_ref = Some("missing".to_string());
     assert!(matches!(
@@ -57,7 +57,7 @@ fn encode_full_missing_init_ref_rejected() {
 /// targetLatency と buffers の共存は encode でも拒否されること
 #[test]
 fn encode_full_target_latency_and_buffers_together_rejected() {
-    // draft-ietf-moq-msf-02 §5.2.9 (Target latency) / §5.2.10 (Buffers)
+    // 仕様: draft-ietf-moq-msf-02 §5.2.9 (Target latency) / §5.2.10 (Buffers)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.target_latency = Some(500);
     track.buffers = Some(MsfBuffers {
@@ -75,7 +75,7 @@ fn encode_full_target_latency_and_buffers_together_rejected() {
 /// 同一 renderGroup の targetLatency 不一致は encode でも拒否されること
 #[test]
 fn encode_full_group_target_latency_mismatch_rejected() {
-    // draft-ietf-moq-msf-02 §5.2.9 (Target latency)
+    // 仕様: draft-ietf-moq-msf-02 §5.2.9 (Target latency)
     let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
     a.render_group = Some(1);
     a.target_latency = Some(500);
@@ -91,7 +91,7 @@ fn encode_full_group_target_latency_mismatch_rejected() {
 /// publishTracks 内の同一 altGroup の buffers 不一致は encode でも拒否されること
 #[test]
 fn encode_full_publish_tracks_group_buffers_mismatch_rejected() {
-    // draft-ietf-moq-msf-02 §5.2.10 (Buffers)
+    // 仕様: draft-ietf-moq-msf-02 §5.2.10 (Buffers)
     let mut a = MsfTrack::new("a".to_string(), MsfPackaging::MoqLog, true);
     a.alt_group = Some(1);
     a.buffers = Some(MsfBuffers {
@@ -289,7 +289,7 @@ fn encode_full_publish_tracks_group_target_latency_omitted_accepted() {
 /// 省略トラックを挟んでも宣言された targetLatency の不一致は encode でも拒否されること
 #[test]
 fn encode_full_group_omitted_between_different_target_latency_rejected() {
-    // draft-ietf-moq-msf-02 §5.2.9 (Target latency)
+    // 仕様: draft-ietf-moq-msf-02 §5.2.9 (Target latency)
     let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
     a.render_group = Some(1);
     a.target_latency = Some(500);
@@ -307,7 +307,7 @@ fn encode_full_group_omitted_between_different_target_latency_rejected() {
 /// 省略トラックを挟んでも宣言された buffers の不一致は encode でも拒否されること
 #[test]
 fn encode_full_group_omitted_between_different_buffers_rejected() {
-    // draft-ietf-moq-msf-02 §5.2.10 (Buffers)
+    // 仕様: draft-ietf-moq-msf-02 §5.2.10 (Buffers)
     let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
     a.render_group = Some(1);
     a.buffers = Some(MsfBuffers {
@@ -373,7 +373,7 @@ fn encode_full_group_buffers_is_live_false_ignored() {
 /// 非 eventtimeline での eventType は encode でも拒否されること
 #[test]
 fn encode_full_event_type_with_non_eventtimeline_rejected() {
-    // draft-ietf-moq-msf-02 §5.2.6 (Event timeline type)
+    // 仕様: draft-ietf-moq-msf-02 §5.2.6 (Event timeline type)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.event_type = Some("x".to_string());
     assert!(matches!(
@@ -385,7 +385,7 @@ fn encode_full_event_type_with_non_eventtimeline_rejected() {
 /// eventtimeline で eventType が無い場合は encode でも拒否されること
 #[test]
 fn encode_full_event_timeline_missing_event_type_rejected() {
-    // draft-ietf-moq-msf-02 §5.2.6 (Event timeline type)
+    // 仕様: draft-ietf-moq-msf-02 §5.2.6 (Event timeline type)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::EventTimeline, true);
     track.depends = vec![MsfDependency::TrackName("v".to_string())];
     track.mime_type = Some("application/json".to_string());
@@ -398,7 +398,7 @@ fn encode_full_event_timeline_missing_event_type_rejected() {
 /// mediatimeline で depends が無い場合は encode でも拒否されること
 #[test]
 fn encode_full_media_timeline_missing_depends_rejected() {
-    // draft-ietf-moq-msf-02 §7.2 (Media Timeline Catalog requirements)
+    // 仕様: draft-ietf-moq-msf-02 §7.2 (Media Timeline Catalog requirements)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::MediaTimeline, true);
     track.mime_type = Some("application/json".to_string());
     assert!(matches!(
@@ -424,7 +424,7 @@ fn encode_full_custom_scheme_without_cipher_suite_accepted() {
 /// moq-secure-objects の必須組欠如は encode でも拒否されること
 #[test]
 fn encode_full_secure_objects_incomplete_rejected() {
-    // draft-ietf-moq-msf-02 §4.4.3 (Recommended encryption scheme)
+    // 仕様: draft-ietf-moq-msf-02 §4.4.3 (Recommended encryption scheme)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.encryption_scheme = Some("moq-secure-objects".to_string());
     track.cipher_suite = Some("aes-128-gcm-sha256".to_string());
@@ -438,7 +438,7 @@ fn encode_full_secure_objects_incomplete_rejected() {
 /// 不正な lang は encode でも拒否されること
 #[test]
 fn encode_full_invalid_lang_rejected() {
-    // draft-ietf-moq-msf-02 §5.2.33 (Language)
+    // 仕様: draft-ietf-moq-msf-02 §5.2.33 (Language)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.lang = Some("1".to_string());
     assert!(matches!(
@@ -450,7 +450,7 @@ fn encode_full_invalid_lang_rejected() {
 /// irregular タグは encode でも受理され、decode で同じ値に戻ること
 #[test]
 fn encode_full_irregular_lang_roundtrip() {
-    // draft-ietf-moq-msf-02 §5.2.33 (Language)
+    // 仕様: draft-ietf-moq-msf-02 §5.2.33 (Language)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.lang = Some("i-klingon".to_string());
     let bytes = full_doc(vec![track], vec![], vec![])
@@ -471,7 +471,7 @@ fn encode_full_irregular_lang_roundtrip() {
 /// 通常トラックの parentName は encode でも拒否されること
 #[test]
 fn encode_full_parent_name_rejected() {
-    // draft-ietf-moq-msf-02 §5.2.34 (Parent name)
+    // 仕様: draft-ietf-moq-msf-02 §5.2.34 (Parent name)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.parent_name = Some("p".to_string());
     assert!(matches!(
@@ -483,7 +483,7 @@ fn encode_full_parent_name_rejected() {
 /// isLive=true の trackDuration は encode でも拒否されること
 #[test]
 fn encode_full_track_duration_when_is_live_true_rejected() {
-    // draft-ietf-moq-msf-02 §5.2.36 (Track duration)
+    // 仕様: draft-ietf-moq-msf-02 §5.2.36 (Track duration)
     let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
     track.track_duration = Some(1000);
     assert!(matches!(

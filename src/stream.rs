@@ -106,14 +106,14 @@ pub fn encode_control_stream_setup(
     Ok(buf)
 }
 
-/// Object Status: Normal (draft-ietf-moq-transport-23 §11.1.1 (Object Status))
+/// Object Status: Normal (通常の Object) (draft-ietf-moq-transport-23 §11.1.1 (Object Status))
 pub(crate) const OBJECT_STATUS_NORMAL: u64 = 0x0;
-/// Object Status: End of Group (draft-ietf-moq-transport-23 §11.1.1 (Object Status))
+/// Object Status: End of Group (Group の終端) (draft-ietf-moq-transport-23 §11.1.1 (Object Status))
 ///
 /// §11.1.1: "Indicates that no objects with the specified Group ID and the Object ID that is
 /// greater than or equal to the one specified exist in the group identified by the Group ID."
 pub const OBJECT_STATUS_END_OF_GROUP: u64 = 0x3;
-/// Object Status: End of Track (draft-ietf-moq-transport-23 §11.1.1 (Object Status))
+/// Object Status: End of Track (Track の終端) (draft-ietf-moq-transport-23 §11.1.1 (Object Status))
 ///
 /// §11.1.1: "Indicates that no objects with the Location that is equal to or greater than the
 /// one specified exist."

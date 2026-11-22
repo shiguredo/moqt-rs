@@ -282,7 +282,7 @@ where
     /// イベントが発生するまで読み進め、1 件返す
     async fn next_event(&mut self) -> Result<Event> {
         loop {
-            // イベントを返す前に必ず書き出しを済ませる (応答・WINDOW_UPDATE を滞留させない)
+            // イベントを返す前に必ず書き出しを済ませる (応答 / WINDOW_UPDATE を滞留させない)
             self.flush().await?;
             if let Some(event) = self.conn.poll_event() {
                 return Ok(event);
@@ -330,7 +330,7 @@ impl WtH2Client {
     /// - CONNECT が 2xx 以外で拒否された場合 (§3.2)
     /// - 2xx 応答の `WT-Protocol` が無い、または送った候補に一致しない場合 (§3.3)
     pub async fn connect(config: ClientConfig, path: &str) -> Result<WtH2Session> {
-        // 1. TCP + TLS
+        // 1. TCP + TLS で接続する
         let tls_config = build_tls_client_config(&config)?;
         let tcp = TcpStream::connect(config.remote_addr)
             .await
@@ -2056,13 +2056,13 @@ mod tests {
             let error = verify_wt_protocol(&headers).expect_err("拒否されること");
             assert!(
                 matches!(error, TransportError::InvalidState(_)),
-                "{error:?}"
+                "エラー: {error:?}"
             );
         }
         let error = verify_wt_protocol(&[]).expect_err("WT-Protocol 無しは拒否されること");
         assert!(
             matches!(error, TransportError::InvalidState(_)),
-            "{error:?}"
+            "エラー: {error:?}"
         );
     }
 
@@ -2152,8 +2152,8 @@ mod tests {
         assert!(config.receive_datagrams);
         // Debug は PEM の中身を出さない
         let debug = format!("{config:?}");
-        assert!(debug.contains("<PEM>"), "{debug}");
-        assert!(!debug.contains("PEM,"), "{debug}");
+        assert!(debug.contains("<PEM>"), "デバッグ情報 {debug}");
+        assert!(!debug.contains("PEM,"), "デバッグ情報 {debug}");
     }
 
     /// 既定では authority を server_name と同じ値にする
@@ -2461,7 +2461,7 @@ mod tests {
                 .await
                 .expect("WebTransport セッションの確立に成功すること");
 
-            // client → server (uni stream)
+            // client → server (単方向 stream)
             let mut send = session
                 .open_uni_stream()
                 .await
@@ -2499,12 +2499,12 @@ mod tests {
                 {
                     RecvChunk::Data(data) => response.extend_from_slice(&data),
                     RecvChunk::End(RequestStreamEnd::Fin) => break,
-                    RecvChunk::End(end) => panic!("unexpected end: {end:?}"),
+                    RecvChunk::End(end) => panic!("想定外の終端: {end:?}"),
                 }
             }
             assert_eq!(response, b"res", "双方向ストリームの応答を受信すること");
 
-            // server → client (uni stream)
+            // server → client (単方向 stream)
             let mut recv = session
                 .accept_uni_stream()
                 .await
@@ -2514,7 +2514,7 @@ mod tests {
                 match recv.recv_chunk().await.expect("recv_chunk に成功すること") {
                     RecvChunk::Data(data) => received.extend_from_slice(&data),
                     RecvChunk::End(RequestStreamEnd::Fin) => break,
-                    RecvChunk::End(end) => panic!("unexpected end: {end:?}"),
+                    RecvChunk::End(end) => panic!("想定外の終端: {end:?}"),
                 }
             }
             assert_eq!(received, b"world", "server のデータを受信すること");
@@ -2536,7 +2536,7 @@ mod tests {
                 {
                     RecvChunk::Data(data) => received.extend_from_slice(&data),
                     RecvChunk::End(RequestStreamEnd::Fin) => break,
-                    RecvChunk::End(end) => panic!("unexpected end: {end:?}"),
+                    RecvChunk::End(end) => panic!("想定外の終端: {end:?}"),
                 }
             }
             assert_eq!(
@@ -2544,7 +2544,7 @@ mod tests {
                 "server 起動の双方向ストリームのデータを受信すること"
             );
 
-            // client → server (stream reset)
+            // client → server (stream の reset)
             let mut reset_send = session
                 .open_uni_stream()
                 .await
@@ -2573,13 +2573,13 @@ mod tests {
                 .expect("accept_uni_stream に成功すること");
             match extra.recv_chunk().await.expect("recv_chunk に成功すること") {
                 RecvChunk::Data(data) => assert_eq!(data, b"extra", "extra のデータを受信すること"),
-                RecvChunk::End(end) => panic!("unexpected end: {end:?}"),
+                RecvChunk::End(end) => panic!("想定外の終端: {end:?}"),
             }
             extra
                 .stop_sending(0x2)
                 .expect("stop_sending に成功すること");
 
-            // server → client (datagram)
+            // server → client (datagram 送信)
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
                 let datagrams = session
@@ -2878,7 +2878,7 @@ mod tests {
                 match recv.recv_chunk().await.expect("recv_chunk に成功すること") {
                     RecvChunk::Data(data) => received.extend_from_slice(&data),
                     RecvChunk::End(RequestStreamEnd::Fin) => break,
-                    RecvChunk::End(end) => panic!("unexpected end: {end:?}"),
+                    RecvChunk::End(end) => panic!("想定外の終端: {end:?}"),
                 }
             }
             assert_eq!(
@@ -3018,7 +3018,7 @@ mod tests {
         );
         assert!(
             matches!(error, TransportError::ConnectFailed { status: Some(403) }),
-            "{error:?}"
+            "エラー: {error:?}"
         );
         server
             .await
@@ -3042,7 +3042,7 @@ mod tests {
         );
         assert!(
             matches!(error, TransportError::InvalidState(_)),
-            "{error:?}"
+            "エラー: {error:?}"
         );
         server
             .await
@@ -3065,7 +3065,7 @@ mod tests {
         );
         assert!(
             matches!(error, TransportError::InvalidState(_)),
-            "{error:?}"
+            "エラー: {error:?}"
         );
         server
             .await
@@ -3215,9 +3215,9 @@ mod tests {
                 break RawSettingsObservation::Closed;
             };
             match frame_type {
-                // HEADERS
+                // HEADERS フレーム
                 0x01 => break RawSettingsObservation::Headers,
-                // GOAWAY: last-stream-id (4) + error code (4)
+                // GOAWAY: last-stream-id (4 バイト) + error code (4 バイト)
                 0x07 => {
                     let code = payload
                         .get(4..8)
@@ -3309,7 +3309,7 @@ mod tests {
             .expect("観測結果が届くこと")
     }
 
-    /// SETTINGS_ENABLE_CONNECT_PROTOCOL (RFC 8441)
+    /// SETTINGS_ENABLE_CONNECT_PROTOCOL の設定 (RFC 8441)
     const SETTINGS_ENABLE_CONNECT_PROTOCOL: u16 = 0x08;
     /// draft-16 の SETTINGS_WT_ENABLED
     const SETTINGS_WT_ENABLED_DRAFT16: u16 = 0x2b67;
@@ -3379,7 +3379,7 @@ mod tests {
         );
         assert!(
             matches!(error, TransportError::InvalidState(_)),
-            "{error:?}"
+            "エラー: {error:?}"
         );
         assert_eq!(
             recv_observation(observed).await,
@@ -3415,7 +3415,7 @@ mod tests {
         );
         assert!(
             matches!(error, TransportError::InvalidState(_)),
-            "{error:?}"
+            "エラー: {error:?}"
         );
         assert_eq!(
             recv_observation(observed).await,
@@ -3453,7 +3453,7 @@ mod tests {
             TransportError::Http2(error) => assert_eq!(
                 error.kind(),
                 shiguredo_http2::ErrorKind::ConnectionError(ErrorCode::ProtocolError),
-                "{error:?}"
+                "エラー: {error:?}"
             ),
             other => panic!("TransportError::Http2 を期待したが {other:?} だった"),
         }

@@ -365,7 +365,7 @@ fn fetch_ok_params_with(
 fn establish_subscribe_track(alias: u64) -> (Session, Session, u64) {
     establish_subscribe_track_with_params(alias, MessageParameters::new())
 }
-/// SUBSCRIBE / SUBSCRIBE_OK までを確立し、subscriber・publisher・request_id を返す
+/// SUBSCRIBE / SUBSCRIBE_OK までを確立し、subscriber、publisher、request_id を返す
 ///
 /// SUBSCRIBE に載せるパラメータを指定したいテスト (delivery timeout 等) は本関数を使う。
 fn establish_subscribe_track_with_params(

@@ -656,7 +656,7 @@ fn fetch_start_exceeds_received_largest_rejected() {
     server
         .send_subgroup_object(stream_id, 9, None)
         .expect("テストフィクスチャの前提条件を満たす");
-    // FETCH (start={6,0} > effective {5,9}) → INVALID_RANGE
+    // FETCH (start={6,0} が effective {5,9} より大きい) → INVALID_RANGE
     assert_fetch_rejected_with_invalid_range(
         &mut client,
         &mut server,
@@ -1279,7 +1279,7 @@ fn send_fetch_with_empty_filter_range_rejected() {
     };
     use shiguredo_moqt::session::types::SendRequestError;
     let (mut client, _server) = establish_pair();
-    // AbsoluteRangeWithEnd {start {5, 10}, delta 0, end 3} → End {5, 3} < Start
+    // AbsoluteRangeWithEnd {start {5, 10}, delta 0, end 3} → End {5, 3} < Start (終端が開始より前)
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,

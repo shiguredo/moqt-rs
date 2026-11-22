@@ -53,7 +53,7 @@ pub enum SendStream {
     WtH3(WtSendStream),
     /// WebTransport over HTTP/2 の送信ストリーム
     WtH2(WtH2SendStream),
-    /// QMux (draft-ietf-quic-qmux-02)
+    /// QMux 経路 (draft-ietf-quic-qmux-02)
     Qmux(shiguredo_tokio_qmux::SendStream),
 }
 

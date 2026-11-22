@@ -43,7 +43,7 @@ pub struct VideoTrackParams<'a> {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    /// kbps
+    /// 単位は kbps。
     pub bitrate: u32,
     /// 映像トラックの最大 Group 長 (ms)
     ///
@@ -68,10 +68,10 @@ pub struct AudioTrackParams<'a> {
     pub codec: &'a str,
     /// サンプリングレート Hz
     pub samplerate: u32,
-    /// MSF channelConfig (mono = "1", stereo = "2")
+    /// MSF の channelConfig (mono = "1" / stereo = "2")
     /// draft-ietf-moq-msf-02 §5.2.30 (Channel configuration)
     pub channel_config: &'a str,
-    /// kbps
+    /// 単位は kbps。
     pub bitrate: u32,
 }
 

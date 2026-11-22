@@ -166,11 +166,11 @@ fn convert_decoded_frame(result: std::result::Result<DecodedFrame<()>, Error>) -
 
 /// hvcC から取り出した VPS / SPS / PPS と NAL 長フィールド幅
 struct HvcConfig {
-    /// Video Parameter Set
+    /// VPS (Video Parameter Set: 映像パラメータセット)
     vps: Vec<u8>,
-    /// Sequence Parameter Set
+    /// SPS (Sequence Parameter Set: シーケンスパラメータセット)
     sps: Vec<u8>,
-    /// Picture Parameter Set
+    /// PPS (Picture Parameter Set: ピクチャパラメータセット)
     pps: Vec<u8>,
     /// NAL 長フィールドのバイト数
     nalu_len_bytes: u32,
