@@ -1,7 +1,7 @@
 # MSF Log / Metrics track の payload に対応する
 
 - Created: 2026-09-09
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/add-msf-log-metrics-payload
 - Polished: 2026-11-22
 - Refreshed: 2026-11-22
@@ -61,3 +61,33 @@ MSF-02 と下位ドラフトには次の不整合がある。実装では上記�
 - [MOQLOG] §5.3 / [MOQMETRICS] §5.3 / §5.4 の MUST に反する値が decode で拒否されること
 - MSF-02 §9.4 / §10.4 の packaging / role の値と矛盾しないこと
 - `tests/` / `pbt/` に対応テストが追加されていること
+
+## 解決方法
+
+- `src/msf/log.rs` を追加し、MOQLOG-04 の Log track を実装した。
+  - §4 の ResourceID を 16 桁小文字 hex として扱う。
+  - §5.1 の namespace prefix / severity Track Name を定数と `LogSeverity` で表現する。
+  - §5.2 / §5.3 の Timestamp Offset / Facility / Hostname / App Name / Proc ID /
+    Msg ID / Message / Attribute を `LogRecord::encode` / `decode` で扱う。
+  - Timestamp Offset、Facility、ASCII / UTF-8 の MUST 違反を decode で拒否する。
+- `src/msf/metrics.rs` を追加し、MOQMETRICS-03 を実装した。
+  - §4 の Gauge / Counter、unsigned / signed / float、metric 名、Attribute を型で表現する。
+  - §5.1 / §5.2 の namespace prefix、data track 名、catalog track 名、granularity を扱う。
+  - §5.3 の Catalog Header / Metric Description と §5.4 の Capture Info / Metric Value を
+    encode / decode する。Metric Index は Object ID として引数で受け取り、payload には含めない。
+  - Metric Type / Value Representation / Metric Index / metric 名 / UTF-8 / 長さの MUST 違反を
+    decode で拒否する。
+- `MessageError::InvalidMsfPayload` を追加し、payload の復号失敗をセッション終了ではなく
+  アプリケーション層のエラーとして扱えるようにした。
+- MSF-02 §9.4 / §10.4 の packaging / role (`moqlog` / `log`、`moqmetrics` / `metrics`) を
+  定数化し、catalog JSON と矛盾しないことをテストで固定した。
+- `tests/test_msf/log.rs` に 9 件、`tests/test_msf/metrics.rs` に 19 件の単体テスト、
+  `pbt/tests/prop_msf_log.rs` / `pbt/tests/prop_msf_metrics.rs` に 16 件の PBT を追加した。
+- `docs/msf.md` と `docs/missing-features.md` を実装状況に合わせて更新した。
+- publishTracks への配置、example への統合、Group ID / Object ID の割り当て、Track Properties は
+  issue の範囲外として行っていない。
+
+`cargo test --workspace`、`cargo test -p pbt`、
+`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check`、
+`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt`、
+`prek run --files` が成功した。
