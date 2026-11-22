@@ -1,7 +1,7 @@
 # トランスポートエラーの表示振り分けを網羅 match にする
 
 - Created: 2026-09-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/refactor-transport-error-mapping
 - Polished: 2026-11-14
 - Updated: 2026-11-14
@@ -112,3 +112,16 @@ catch-all を残したままでも通る。そのため QUIC 経路で `Transpor
 - 全 17 variant の写像先と表示文字列を列挙して固定するテストが両バイナリにあり、variant の追加時に
   `From` の網羅 match がコンパイルエラーになってテストの更新が必要になること
 - `Error::WebTransport` に畳まれると書いた既存コメントが、変更後の写像と一致していること
+
+## 解決方法
+
+- `crates/moq-pub/src/error.rs` と `crates/moq-sub/src/error.rs` の
+  `From<tokio_moq::error::TransportError>` から catch-all を削除し、全 17 variant を
+  明示 match にした。`TransportError` に variant が増えるとコンパイルエラーになる。
+- `Transport` / `Unsupported` は接頭辞なしの `Error::Other` にした。
+- `Http3` / `Http2` / `WtH2` / `ConnectFailed` / `ProtocolNegotiationFailed` /
+  `StreamClosed` / `InvalidState` は `WebTransport:` を付けたまま従来の表示を保つ。
+- 両バイナリに `Other` と `WebTransport` の写像を固定するテストを追加した。
+
+`cargo test -p moq-pub -p moq-sub`、`cargo clippy -p moq-pub -p moq-sub --all-targets -- -D warnings`、
+`cargo fmt --all -- --check` が成功した。
