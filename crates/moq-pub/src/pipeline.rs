@@ -2304,20 +2304,20 @@ pub async fn run(
                                                 // 失敗する。Ended の到着を待たずに終了経路へ進む
                                                 if commands.send(command).await.is_err() {
                                                     tracing::warn!(
-                                                        "Failed to send a PUBLISH migration command to the existing side session: authority={}, kind={kind:?}",
-                                                        target.url.authority
+                                                        "Failed to send a PUBLISH migration command to the existing side session: url={}, kind={kind:?}",
+                                                        side_session_url_display(&target.url)
                                                     );
                                                     request_migration_sessions.remove(&key);
                                                     return Ok(true);
                                                 }
                                                 tracing::info!(
-                                                    "Requested the {kind:?} PUBLISH migration on the existing side session: authority={}, request_id={request_id}",
-                                                    target.url.authority
+                                                    "Requested the {kind:?} PUBLISH migration on the existing side session: url={}, request_id={request_id}",
+                                                    side_session_url_display(&target.url)
                                                 );
                                             } else {
                                                 tracing::info!(
                                                     "Starting a background request migration to {}: kind={kind:?}, request_id={request_id}, timeout={timeout}ms, local_default={}",
-                                                    target.url.authority,
+                                                    side_session_url_display(&target.url),
                                                     deadline.uses_local_default(),
                                                 );
                                                 let (task, commands) = spawn_request_migration(
@@ -2935,8 +2935,8 @@ pub async fn run(
                         }
                         migrating_tracks.retain(|track| *track != kind);
                         tracing::info!(
-                            "Migrated the {kind:?} PUBLISH to another session: authority={}, old_request_id={old_request_id}, new_request_id={new_request_id}, track_alias={new_track_alias}",
-                            url.authority
+                            "Migrated the {kind:?} PUBLISH to another session: url={}, old_request_id={old_request_id}, new_request_id={new_request_id}, track_alias={new_track_alias}",
+                            side_session_url_display(&url)
                         );
                     }
                     RequestMigrationEvent::Ended { url } => {
@@ -2947,8 +2947,8 @@ pub async fn run(
                         // パイプラインを終了する扱いにする
                         request_migration_sessions.remove(&side_session_key(&url));
                         tracing::warn!(
-                            "The request migration side session ended: authority={}; ending the pipeline",
-                            url.authority
+                            "The request migration side session ended: url={}; ending the pipeline",
+                            side_session_url_display(&url)
                         );
                         session_ended = true;
                         break 'main;
@@ -2966,8 +2966,8 @@ pub async fn run(
                         // "Failed to migrate the" を待って期限切れを観測する。文言を
                         // 変えるときはテストの needle も更新する
                         tracing::warn!(
-                            "Failed to migrate the {kind:?} PUBLISH to another session: authority={}, request_id={old_request_id}: {reason}",
-                            url.authority
+                            "Failed to migrate the {kind:?} PUBLISH to another session: url={}, request_id={old_request_id}: {reason}",
+                            side_session_url_display(&url)
                         );
                         session_ended = true;
                         break 'main;
@@ -3470,11 +3470,66 @@ fn track_migrated(
 ///
 /// この文字列はログに出さない。fragment には認可トークンが含まれうるためである。
 fn side_session_key(url: &ServerUrl) -> String {
-    let fragment = match &url.fragment {
-        Some(fragment) => format!("{}:{}", fragment.fragment_type, fragment.value),
-        None => String::new(),
+    use std::hash::{Hash, Hasher};
+
+    fn hash(value: &str) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    // userinfo は同一性に使わない (認可情報であり、接続先の識別には authority の host / port で足りる)
+    let authority = url.authority.rsplit('@').next().unwrap_or(&url.authority);
+    let (path, query) = match url.path.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (url.path.as_str(), None),
     };
-    format!("{}{}#{}", url.authority, url.path, fragment)
+    let (fragment_type, fragment_value) = match &url.fragment {
+        Some(fragment) => (fragment.fragment_type.as_str(), fragment.value.as_str()),
+        None => ("", ""),
+    };
+    let query_state = if query.is_some() { "q1" } else { "q0" };
+    format!(
+        "{}{}#{query_state}{:016x}#{}:{}",
+        authority,
+        path,
+        hash(query.unwrap_or("")),
+        hash(fragment_type),
+        hash(fragment_value),
+    )
+}
+
+/// side session の URL をログ表示用に整形する
+///
+/// query と fragment は実値ではなくハッシュを出し、authority の userinfo を除く。
+/// 認可トークンを含み得る実値をログへ出さないための表示用関数であり、
+/// 同一性のキーには [`side_session_key`] を使う。
+fn side_session_url_display(url: &ServerUrl) -> String {
+    use std::hash::{Hash, Hasher};
+
+    fn hash(value: &str) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    let authority = url.authority.rsplit('@').next().unwrap_or(&url.authority);
+    let (path, query) = match url.path.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (url.path.as_str(), None),
+    };
+    let (fragment_type, fragment_value) = match &url.fragment {
+        Some(fragment) => (fragment.fragment_type.as_str(), fragment.value.as_str()),
+        None => ("", ""),
+    };
+    let fragment = format!("{}:{}", hash(fragment_type), hash(fragment_value));
+    match query {
+        Some(query) => format!(
+            "moqt://{authority}{path}?query={:016x}#{fragment}",
+            hash(query)
+        ),
+        None => format!("moqt://{authority}{path}#{fragment}"),
+    }
 }
 
 /// PUBLISH した track の Object を送る session のハンドル一式
@@ -6106,6 +6161,48 @@ mod tests {
                 side_session_key(&url("moqt://relay.example:443/live")),
                 side_session_key(&url("moqt://relay.example:443/other")),
                 "path が違う URL は別の side session にすること"
+            );
+        }
+
+        /// query だけが違う URL は別のキーになり、実値はキーと表示に残らないこと
+        #[test]
+        fn query_differences_use_another_key_without_leaking_tokens() {
+            let first = url("moqt://relay.example:443/live?token=FIRSTSECRET");
+            let second = url("moqt://relay.example:443/live?token=SECONDSECRET");
+            assert_ne!(side_session_key(&first), side_session_key(&second));
+            let key = side_session_key(&first);
+            let display = side_session_url_display(&first);
+            for secret in ["FIRSTSECRET", "token"] {
+                assert!(!key.contains(secret), "キーに実値を含めないこと: {secret}");
+                assert!(
+                    !display.contains(secret),
+                    "表示に実値を含めないこと: {secret}"
+                );
+            }
+            // query の有無と空 query は区別する
+            assert_ne!(
+                side_session_key(&url("moqt://relay.example:443/live")),
+                side_session_key(&url("moqt://relay.example:443/live?"))
+            );
+        }
+
+        /// fragment と userinfo の実値がキーと表示に残らないこと
+        #[test]
+        fn fragment_and_userinfo_are_redacted() {
+            let target =
+                url("moqt://alice:s3cr3t@relay.example:443/live#msf:moq-example--video&cat=QUJD");
+            let key = side_session_key(&target);
+            let display = side_session_url_display(&target);
+            for secret in ["alice", "s3cr3t", "QUJD", "cat"] {
+                assert!(!key.contains(secret), "キーに実値を含めないこと: {secret}");
+                assert!(
+                    !display.contains(secret),
+                    "表示に実値を含めないこと: {secret}"
+                );
+            }
+            assert!(
+                display.contains("relay.example:443"),
+                "host と port は表示すること: {display}"
             );
         }
     }
@@ -9543,10 +9640,9 @@ mod tests {
                 // テスト終了まで保持し、ポートが他のテストに再利用されないようにする
                 let reserved_port = ReservedUdpPort::new();
                 let unreachable = format!("moqt://127.0.0.1:{}", reserved_port.port());
-                // 警告ログの authority は移行先 (unreachable) のものである
+                // 警告ログの URL は移行先 (unreachable) のものを秘匿表示したものである
                 let migration_log = format!(
-                    "Failed to migrate the Catalog PUBLISH to another session: authority={}",
-                    unreachable.trim_start_matches("moqt://")
+                    "Failed to migrate the Catalog PUBLISH to another session: url={unreachable}"
                 );
                 wait_for(peer.send_goaway_on_request_stream(
                     catalog_request_id,
