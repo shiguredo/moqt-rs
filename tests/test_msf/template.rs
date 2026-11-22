@@ -274,3 +274,12 @@ fn resolve_entry_handles_u64_max_index() {
     };
     assert_eq!(overflowing.resolve_entry(1), None);
 }
+
+#[test]
+fn template_delta_wallclock_negative_is_rejected() {
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"template":[0,0,[0,0],[1,0],0.0,-1]}]}"#;
+    assert!(matches!(
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}

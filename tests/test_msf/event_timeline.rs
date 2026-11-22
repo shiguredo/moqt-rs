@@ -420,3 +420,20 @@ fn media_pts_index_accepts_integer_valued_json_numbers() {
         Err(MessageError::InvalidCatalog(_))
     ));
 }
+
+#[test]
+fn wallclock_index_accepts_integer_valued_json_numbers() {
+    let tl = MsfEventTimeline::decode(br#"[{"T":0.0,"data":{}}]"#).expect("0.0 は受理される");
+    assert_eq!(tl.0[0].index, MsfEventIndex::WallclockMs(0));
+    let tl = MsfEventTimeline::decode(br#"[{"T":18446744073709551615.0,"data":{}}]"#)
+        .expect("u64::MAX の小数表記は受理される");
+    assert_eq!(tl.0[0].index, MsfEventIndex::WallclockMs(u64::MAX));
+    assert!(matches!(
+        MsfEventTimeline::decode(br#"[{"T":-1,"data":{}}]"#),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+    assert!(matches!(
+        MsfEventTimeline::decode(br#"[{"T":18446744073709551616,"data":{}}]"#),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
