@@ -28,7 +28,10 @@ pub(crate) struct CatalogObject {
 }
 
 impl CatalogObject {
-    /// Object の payload をカタログの 1 Object としてデコードする
+    /// Object の payload を非圧縮のカタログとしてデコードする
+    ///
+    /// MSF_COMPRESSION Track Property がある場合は
+    /// [`Self::decode_with_compression`] を使う。
     pub(crate) fn decode(location: Location, payload: &[u8]) -> Result<Self> {
         Self::decode_with_compression(location, payload, MsfCompression::None)
     }
