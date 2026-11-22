@@ -564,6 +564,7 @@ impl Session {
                 self.events.push_back(SessionEvent::RequestOkReceived {
                     request_id,
                     request_kind: RequestKind::Publish,
+                    track_properties: crate::track_properties::TrackProperties::new(),
                     parameters: parameters.clone(),
                 });
             }
@@ -591,6 +592,8 @@ impl Session {
                         SubscriptionInitiator::Subscriber => RequestKind::Subscribe,
                         SubscriptionInitiator::Publisher => RequestKind::Publish,
                     },
+                    // REQUEST_UPDATE_OK は Track Properties を運べない (§9.3)
+                    track_properties: crate::track_properties::TrackProperties::new(),
                     parameters: parameters.clone(),
                 });
             }

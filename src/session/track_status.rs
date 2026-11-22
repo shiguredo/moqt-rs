@@ -507,6 +507,7 @@ impl Session {
         self.events.push_back(SessionEvent::RequestOkReceived {
             request_id,
             request_kind: RequestKind::TrackStatus,
+            track_properties: track_properties.clone(),
             parameters: parameters.clone(),
         });
         self.clear_control_message_deadline(request_id);

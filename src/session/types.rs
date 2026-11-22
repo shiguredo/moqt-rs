@@ -388,6 +388,12 @@ pub enum SessionEvent {
         request_id: u64,
         /// 応答対象の request 種別 (subscription では購読を開始したメッセージ種別)
         request_kind: RequestKind,
+        /// 受信した Track Properties
+        ///
+        /// SUBSCRIBE_OK / TRACK_STATUS_OK が運んだ値をそのまま保持する。REQUEST_UPDATE_OK
+        /// は Track Properties を運べないため空になる (§9.3)。MSF_COMPRESSION の
+        /// ように購読の Track Property をアプリが解釈する用途で使う。
+        track_properties: TrackProperties,
         /// 受信したパラメータ
         parameters: MessageParameters,
     },

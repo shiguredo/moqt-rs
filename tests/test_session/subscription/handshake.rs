@@ -170,6 +170,7 @@ fn publish_ok_emits_publish_ok_received_event_with_parameters() {
             request_id,
             request_kind: _,
             parameters,
+            ..
         } = ev
             && request_id == rid
         {

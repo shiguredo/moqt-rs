@@ -1407,6 +1407,7 @@ impl Session {
         self.events.push_back(SessionEvent::RequestOkReceived {
             request_id,
             request_kind: RequestKind::Fetch,
+            track_properties: TrackProperties::new(),
             parameters: parameters.clone(),
         });
         Ok(())

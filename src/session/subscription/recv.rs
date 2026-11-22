@@ -858,7 +858,7 @@ impl Session {
         // peer publisher が SUBSCRIBE_OK で送った Track Properties を加工せずに保持する。
         // INCLUDE_PROPERTIES=0 により wire 上で空化された場合は、空の TrackProperties が
         // そのまま入る (draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter))。
-        subscription.peer_track_properties = ok.track_properties;
+        subscription.peer_track_properties = ok.track_properties.clone();
         // draft-ietf-moq-transport-23 §9.19.8 (GROUP ORDER Parameter): GROUP_ORDER は
         // SUBSCRIBE / PUBLISH / SUBSCRIBE_TRACKS / FETCH に含まれる。
         // SUBSCRIBE_OK には含まれないため、group_order は SUBSCRIBE 送信時の値のまま保持される。
@@ -867,6 +867,7 @@ impl Session {
         self.events.push_back(SessionEvent::RequestOkReceived {
             request_id,
             request_kind: RequestKind::Subscribe,
+            track_properties: ok.track_properties,
             parameters: ok.parameters,
         });
         Ok(())
