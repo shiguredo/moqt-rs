@@ -1034,13 +1034,15 @@ async fn finish_publisher(context: PublishFinishContext<'_>) -> Result<()> {
     mp4_reader_result.and(reencode_result)
 }
 
-pub async fn run(
-    mut config: Config,
-    task_monitor: tokio_metrics::TaskMonitor,
-    mut shutdown_monitor: tokio_utils::ShutdownMonitor,
-) -> Result<()> {
-    // MP4 パススルーは接続前にファイルを読み込んで検証する
-    // (不正な入力を relay の接続可否に依存せず報告するため)
+/// 入力ソース (MP4 / 再エンコード) を開いて検証する
+///
+/// 読み込みと検証はここで完了させ、後段はリーダーからサンプルを取り出すだけにする。
+fn prepare_input_sources(
+    config: &mut Config,
+) -> Result<(
+    Option<mp4::Mp4VideoReader>,
+    Option<mp4::reencode::Mp4ReencodeReader>,
+)> {
     let mp4_reader: Option<mp4::Mp4VideoReader> = match config.input_mp4.as_deref() {
         Some(path) => Some(mp4::Mp4VideoReader::open(path)?),
         None => None,
@@ -1070,6 +1072,17 @@ pub async fn run(
         config.audio_enabled = false;
     }
 
+    Ok((mp4_reader, reencode_reader))
+}
+
+pub async fn run(
+    mut config: Config,
+    task_monitor: tokio_metrics::TaskMonitor,
+    mut shutdown_monitor: tokio_utils::ShutdownMonitor,
+) -> Result<()> {
+    // MP4 パススルーは接続前にファイルを読み込んで検証する
+    // (不正な入力を relay の接続可否に依存せず報告するため)
+    let (mp4_reader, reencode_reader) = prepare_input_sources(&mut config)?;
     // QMux 経路も experimental である。DATAGRAM は経路での損失を下位の TCP が再送するため
     // 起きないが、TCP の再送で遅延が伸びる。QMux は速やかに配送できない DATAGRAM の破棄を
     // 許すため (draft-ietf-quic-qmux-02 Section 6)、受信側のバッファが溢れると欠落しうる
