@@ -1,7 +1,7 @@
 # codec 層のモジュール責務を整理する
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/refactor-codec-module-structure
 - Polished: 2026-11-20
 
@@ -38,3 +38,28 @@
 - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` が通ること。
 - `cargo build -p shiguredo_moqt --target thumbv7em-none-eabihf` が通ること。
 - 公開 API のパス・型・シグネチャが変わっていないこと。`pub use` による re-export を追加していないこと。
+
+## 解決方法
+
+- `src/parameter.rs` の RFC 3986 URI 検証を `src/setup_uri.rs` へ移した。
+  - `lib.rs` は `pub(crate) mod setup_uri;` とし、公開モジュールにしていない。
+  - `SetupUriValidationError` は `pub(crate)` のまま移し、`validate_path` / `validate_authority` を
+    `pub(crate)` にした。`session/core.rs` と `src/msf/uri.rs` の import を追随させた。
+  - `validate_ipv6addr` / `validate_ip_literal` の直接テストは `setup_uri.rs` へ移し、
+    `SetupOptions::validate_uri_format` 経由のテストは `parameter.rs` に残した。
+- `src/message_parameter.rs` を `message_parameter.rs` + `message_parameter/{authorization_token,
+  location_filter,range_filter}.rs` に分割した。
+  - 公開型の定義と `MessageParameters` の `impl`、共有定数・ヘルパは親に残した。
+  - サブモジュールには各型の `impl` と private ヘルパだけを置き、`pub use` は追加していない。
+  - `LocationFilter::decode_partial` / `validate` は `pub(super)` にした。
+  - `pbt/src/common.rs` の同期先コメントを `src/message_parameter/range_filter.rs` に更新した。
+- `src/message.rs` に `decode_control_message_header` と `ControlMessageHeader` を追加し、
+  `MessageDecoder::try_decode_message` と `ControlMessage::decode` で共用した。
+  - ヘッダ未完成は `Ok(None)`、varint 不正は `Err`、payload 未完成は呼び出し側が判定する。
+  - `ControlMessage::decode` はヘッダ / payload 未完成を `UnexpectedEof` に写す。
+  - `MessageDecoder` の宣言長超過と、外側フレーム完備後の body 不正の挙動を維持した。
+- 公開型・定数のパスは変えていない。`pub use` の追加は 0 件である。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt`、
+`cargo build -p shiguredo_moqt --target thumbv7em-none-eabihf`、`prek run --files` が成功した。
