@@ -1,7 +1,7 @@
 # PlayoutTimeline::with_config と set_target_latency_ms で targetLatency の適用を一致させる
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/fix-playout-target-latency-consistency
 - Polished: 2026-11-21
 
@@ -56,3 +56,22 @@ setter 経路と異なる。また `set_target_latency_ms` は `config.target_la
 - `TimelineConfig::target_latency_ms` の doc に、0 以下の扱いが書かれていること。
 - `set_target_latency_ms` の doc に、0 以下の扱いと `config()` への反映が書かれていること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` が通ること。
+
+## 解決方法
+
+- `src/playout/timeline.rs` に private の `apply_target_latency_ms` を追加した。0 以下を 0 に丸めたうえで `self.target_latency_ms` と `self.config.target_latency_ms` を同じ値にし、`refresh_unshared_state`、`sync_natural_presentation_us` がある場合の `align_sync_extras`、`update_limited_us` を順に呼ぶ。
+- `with_config` は `Self` を構築した後に `apply_target_latency_ms` を呼ぶ。`set_target_latency_ms` も同じヘルパを呼ぶ。これにより構築直後の `target_latency_limited_us` と `config().target_latency_ms` が setter 経路と一致する。
+- `TimelineConfig::target_latency_ms` の doc を「0 以下は下限にしない」に、`with_config` の doc を「targetLatency が表示の遅れの下限になることと 0 以下は下限を外すこと」に、`set_target_latency_ms` の doc を「0 以下の扱いと `config()` への反映」に更新した。
+- `tests/test_playout/timeline.rs` に
+  `with_config_and_setter_apply_target_latency_identically` を追加した。
+  90 ms / 600 ms (表示の遅れの上限 500 ms を超える) / 0 / -100 ms について、
+  両経路の構築直後の `target_latency_ms()` / `config().target_latency_ms` /
+  `target_latency_limited_us()` と、同じ観測列を与えた後の `presentation_delay_us` /
+  `presentation_extra_delay_us` / `video_delay_us` / `target_latency_limited_us` /
+  `audio_delay_stats().target_us` が一致することを確認する。
+- Lean 検証を `shiguredo/lean` の `moqt-rs/PlayoutTargetLatency/` に追加した。`apply_target_latency_ms` を共有する両経路が同じ状態になること、`config` と target が一致すること、0 以下で下限を外すこと、上限超過分が `limited_us` に残ること、targetLatency が表示の遅れの下限になることを 10 個の定理と 6 個の有限例で確認した。
+
+確認コマンド: `cargo test --workspace`、
+`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、
+`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` が通ることを確認した。
