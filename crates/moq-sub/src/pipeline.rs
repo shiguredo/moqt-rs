@@ -4499,6 +4499,58 @@ struct PreparedResources {
 /// デコーダは録画のセットアップより先に作る。AAC は AudioToolbox の出力がステレオ固定で
 /// catalog の channelConfig と食い違うことがあり、再生と録画に渡すチャンネル数を
 /// デコーダの出力に合わせるためである。
+/// 録画対象のトラック情報を確定してライタースレッドを起動する
+fn start_media_recorder(
+    config: &Config,
+    subscribe_video: bool,
+    video_info: &Option<VideoTrackInfo>,
+    audio_params: Option<(u32, u8)>,
+    audio_codec: Option<&str>,
+) -> Result<(Option<Recorder>, Option<RecorderSender>)> {
+    // 録画対象のトラック情報を確定してライタースレッドを起動する。stream task が動き出す前に
+    // 起動するため、最初のサンプルより先にセットアップが反映される。
+    let video_setup = if subscribe_video {
+        let v = video_info.as_ref().expect("video_info is Some");
+        Some(VideoSetup {
+            codec: v.codec.clone(),
+            fps: v.fps,
+        })
+    } else {
+        None
+    };
+    // MP4 録画の音声トラックは Opus のみに対応する。mp4.rs の `build_audio_entry` は
+    // Opus のサンプルエントリーを構築し、録画するデータは圧縮 payload そのものであるため、
+    // AAC を録画するとコンテナの表記と実際のペイロードが食い違う。AAC のトラックでは
+    // 音声を録画せず警告する (映像のみの MP4 になる)
+    let audio_setup = match (audio_params, audio_codec) {
+        (Some((sample_rate, channels)), Some(codec)) if decoder::is_opus_codec(codec) => {
+            Some(AudioSetup {
+                sample_rate,
+                channels,
+            })
+        }
+        (Some(_), Some(codec)) if config.mp4.is_some() => {
+            tracing::warn!(
+                "MP4 recording supports Opus audio only; audio is not recorded (catalog codec: {codec})"
+            );
+            None
+        }
+        _ => None,
+    };
+    let recorder = match config.mp4.as_deref() {
+        Some(path) => Some(Recorder::start(
+            path,
+            Setup {
+                video: video_setup,
+                audio: audio_setup,
+            },
+        )?),
+        None => None,
+    };
+    let recorder_sender = recorder.as_ref().map(|recorder| recorder.sender());
+    Ok((recorder, recorder_sender))
+}
+
 fn prepare_recorders_and_decoders(inputs: RecorderSetup<'_>) -> Result<PreparedResources> {
     let RecorderSetup {
         config,
@@ -4559,47 +4611,13 @@ fn prepare_recorders_and_decoders(inputs: RecorderSetup<'_>) -> Result<PreparedR
         _ => None,
     };
 
-    // 録画対象のトラック情報を確定してライタースレッドを起動する。stream task が動き出す前に
-    // 起動するため、最初のサンプルより先にセットアップが反映される。
-    let video_setup = if subscribe_video {
-        let v = video_info.as_ref().expect("video_info is Some");
-        Some(VideoSetup {
-            codec: v.codec.clone(),
-            fps: v.fps,
-        })
-    } else {
-        None
-    };
-    // MP4 録画の音声トラックは Opus のみに対応する。mp4.rs の `build_audio_entry` は
-    // Opus のサンプルエントリーを構築し、録画するデータは圧縮 payload そのものであるため、
-    // AAC を録画するとコンテナの表記と実際のペイロードが食い違う。AAC のトラックでは
-    // 音声を録画せず警告する (映像のみの MP4 になる)
-    let audio_setup = match (audio_params, audio_codec) {
-        (Some((sample_rate, channels)), Some(codec)) if decoder::is_opus_codec(codec) => {
-            Some(AudioSetup {
-                sample_rate,
-                channels,
-            })
-        }
-        (Some(_), Some(codec)) if config.mp4.is_some() => {
-            tracing::warn!(
-                "MP4 recording supports Opus audio only; audio is not recorded (catalog codec: {codec})"
-            );
-            None
-        }
-        _ => None,
-    };
-    let recorder = match config.mp4.as_deref() {
-        Some(path) => Some(Recorder::start(
-            path,
-            Setup {
-                video: video_setup,
-                audio: audio_setup,
-            },
-        )?),
-        None => None,
-    };
-    let recorder_sender = recorder.as_ref().map(|recorder| recorder.sender());
+    let (recorder, recorder_sender) = start_media_recorder(
+        config,
+        subscribe_video,
+        video_info,
+        audio_params,
+        audio_codec,
+    )?;
 
     // stream task は `Arc<Mutex<...>>` でデコーダを共有する
     let audio_decoder =
@@ -7095,316 +7113,376 @@ async fn handle_client_event(
 ///
 /// 移行に成功した場合は、旧 session の購読と stream task を止めて、移行先の session と
 /// 再発行済みの要求へ状態を差し替える。
-async fn handle_migration_result(
+/// 移行先の session へ切り替える前に、request 単位移行の side session を止める
+///
+/// abort 済みの side session が送信済みのイベントは移行後の状態を壊しうるため、
+/// 集約チャネルを作り直して捨てる。
+async fn stop_migrated_side_sessions(state: &mut PipelineState) {
+    let PipelineState {
+        request_migration_tasks,
+        request_migration_sessions,
+        request_migration_tx,
+        request_migration_rx,
+        ..
+    } = state;
+    // request 単位移行の side session をすべて止める。移行先の session は
+    // 全 track を張り直すため、同じ track を 2 つの session から受信
+    // しないようにする
+    let side_session_count = request_migration_tasks.len();
+    for handle in request_migration_tasks.drain(..) {
+        handle.abort();
+        let _ = handle.await;
+    }
+    request_migration_sessions.clear();
+    // abort 済みの side session が送信済みのイベントは、移行後の状態を
+    // 壊しうる (古い request id で購読の状態を消すなど)。集約チャネルを
+    // 作り直して、これらのイベントを捨てる
+    let (new_tx, new_rx) =
+        tokio::sync::mpsc::channel::<RequestMigrationEvent>(REQUEST_MIGRATION_EVENT_CHANNEL_SIZE);
+    *request_migration_tx = new_tx;
+    *request_migration_rx = new_rx;
+    if side_session_count > 0 {
+        tracing::info!(
+            "Stopped the request migration side sessions after a full session migration: count={side_session_count}"
+        );
+    }
+}
+
+/// 旧 session の stream task と、旧 session に紐づく受信状態を捨てる
+async fn reset_migrated_stream_state(state: &mut PipelineState) {
+    let PipelineState {
+        join_set,
+        pending_streams,
+        pending_subgroups,
+        video_decode_order,
+        object_mode_video,
+        group_switch,
+        audio_catch_up,
+        ..
+    } = state;
+    // 旧 session の stream task を止める。abort したあとに回収することで、
+    // 切替のあと旧 data_plane しか持たない task が sink へ書かないことを
+    // 保証する (§6.6.1 の移行をアプリへ透過にするため)
+    join_set.abort_all();
+    let drained = tokio::time::timeout(MIGRATION_STREAM_DRAIN_TIMEOUT, async {
+        while join_set.join_next().await.is_some() {}
+    })
+    .await;
+    if drained.is_err() {
+        tracing::warn!(
+            "Timed out waiting for the old stream tasks to stop; switching the session anyway"
+        );
+    }
+    // 旧 session で受理済みの stream は新しい data_plane では処理できない
+    pending_streams.clear();
+    // 旧 session の Track Alias で保留中の Subgroup も捨てる。alias は
+    // session ごとに払い直されるため、残すと新 session の stream が
+    // 保留枠を奪われたうえ、別の track の chunk として解釈されうる
+    pending_subgroups.lock().await.reset();
+    // 旧 session の復号順と追いつきの状態を捨てる。新 session の live を
+    // 古い Group として誤って拒否しないためである
+    video_decode_order.lock().await.reset();
+    // object モードの並べ替えも捨てる。復号器は同じコーデックを
+    // 続けて復号できるため残す
+    object_mode_video.reset().await;
+    // Group の切り替え gate も初期化する。旧 session の stream task は
+    // abort しても await 点でしか止まらず、drain の打ち切り後も動き得る
+    // ため、世代を進めて旧い task の begin_stream / end_stream /
+    // admit を無視する
+    group_switch.reset();
+    audio_catch_up
+        .lock()
+        .expect("audio catch up の lock が poison されていないこと")
+        .reset();
+}
+
+/// 移行先の購読境界を、旧 session で最後に受信した位置へ更新する
+fn advance_migration_boundaries(state: &mut PipelineState) {
+    let PipelineState {
+        audio_delivery_order,
+        video_delivery_order,
+        last_received_locations,
+        migration_boundary_snapshot,
+        ..
+    } = state;
+    // 音声の購読境界を「旧 session で最後に受信した Location」へ更新する。
+    // 移行先の購読はその位置を Location Filter の Absolute Start (0x02) に
+    // して張り直すため、境界と同じ位置だけが再送される。移行先の Largest
+    // Object を境界にすると、移行中に抜けた音声 (最後の受信位置より後) を
+    // 境界以下として捨ててしまう (draft-ietf-moq-transport-23 §9.19.9
+    // (LOCATION FILTER Parameter) Table 6。draft 由来の仕様であり将来
+    // 変更されうる)
+    let audio_boundary = last_received_locations
+        .lock()
+        .expect("last locations の lock が poison されていないこと")
+        .audio;
+    audio_delivery_order
+        .lock()
+        .expect("audio delivery order の lock が poison されていないこと")
+        .reset_for_migration(audio_boundary);
+    tracing::info!(
+        "Updated the audio subscription boundary for the migrated session: audio_boundary={audio_boundary:?}"
+    );
+    // 映像の購読境界も更新する。候補は旧 session の stream task を止めた
+    // あとに読み直した最後の受信位置である (選び方は
+    // select_video_subscription_boundary)
+    let video_boundary_candidates = VideoBoundaryCandidates {
+        snapshot: migration_boundary_snapshot
+            .take()
+            .and_then(|locations| locations.video),
+        reread: last_received_locations
+            .lock()
+            .expect("last locations の lock が poison されていないこと")
+            .video,
+    };
+    let video_boundary_candidate = select_video_subscription_boundary(
+        ResubscribeRoute::SessionMigration,
+        video_boundary_candidates,
+    );
+    let video_boundary = {
+        let mut order = video_delivery_order
+            .lock()
+            .expect("video delivery order lock is not poisoned");
+        order.advance_boundary(video_boundary_candidate);
+        order.boundary()
+    };
+    tracing::info!(
+        "Updated the video subscription boundary for the migrated session: candidates={video_boundary_candidates:?}, candidate={video_boundary_candidate:?}, boundary={video_boundary:?}"
+    );
+}
+
+/// 移行先の alias 表から datagram 受信タスク用の表を作る
+fn build_migrated_datagram_map(
     state: &mut PipelineState,
-    result: std::result::Result<MigrationResult, ()>,
-) -> LoopFlow {
+    resubscribed: &Resubscribed,
+) -> std::sync::Arc<HashMap<u64, TrackKind>> {
+    // alias 表を移行先のものへ差し替える (alias は peer が決めるため変わる)
+    let PipelineState { track_map, .. } = state;
+    let mut map = track_map
+        .write()
+        .expect("track_map lock must not be poisoned");
+    map.clear();
+    if let Some(ref sub) = resubscribed.catalog {
+        map.insert(sub.track_alias, TrackKind::Catalog);
+    }
+    if let Some(ref sub) = resubscribed.video {
+        map.insert(sub.track_alias, TrackKind::Video);
+    }
+    if let Some(ref sub) = resubscribed.audio {
+        map.insert(sub.track_alias, TrackKind::Audio);
+    }
+    std::sync::Arc::new(map.clone())
+}
+
+/// 移行先の session へ状態を差し替える
+///
+/// 旧 session は STOP_SENDING を送ってから別タスクで NO_ERROR で閉じる。
+fn switch_to_migrated_session(
+    state: &mut PipelineState,
+    outcome: MigrationOutcome,
+    datagram_map: std::sync::Arc<HashMap<u64, TrackKind>>,
+    new_wt_session_state: Option<tokio::sync::watch::Receiver<WtSessionState>>,
+) {
     let PipelineState {
         url,
-        subscribe_tracks,
         task_monitor,
         client,
         recv_acceptor,
-        subscribe_tracks_namespace,
         data_plane,
         active_requests,
         publish_done_pending,
         migration_pending_tracks,
-        track_map,
+        track_map: _,
         fetch_targets,
         fetch_requests,
         video_request_id,
         audio_request_id,
         video_alias,
         audio_alias,
-        video_decode_order,
-        group_switch,
-        object_mode_video,
-        tracks_request_id,
-        ignored_publish_requests,
         catalog_request_id,
         catalog_alias,
         session_generation,
-        audio_catch_up,
-        audio_delivery_order,
-        video_delivery_order,
-        join_set,
-        pending_subgroups,
-        pending_streams,
-        last_received_locations,
         datagram_session_tx,
-        migration_rx,
-        migration_in_progress,
-        migration_task,
-        migration_boundary_snapshot,
         old_session_closers,
-        request_migration_sessions,
-        request_migration_tasks,
-        request_migration_tx,
-        request_migration_rx,
         wt_session_state_rx,
         ..
     } = state;
-    // バックグラウンドの移行タスクの結果を受ける。成功した場合はここで 1 か所に
-    // まとめて移行先へ切り替える
-    *migration_in_progress = false;
-    *migration_rx = None;
-    *migration_task = None;
-    match result {
-        Ok(Ok(outcome)) => {
-            // request 単位移行の side session をすべて止める。移行先の session は
-            // 全 track を張り直すため、同じ track を 2 つの session から受信
-            // しないようにする
-            let side_session_count = request_migration_tasks.len();
-            for handle in request_migration_tasks.drain(..) {
-                handle.abort();
-                let _ = handle.await;
-            }
-            request_migration_sessions.clear();
-            // abort 済みの side session が送信済みのイベントは、移行後の状態を
-            // 壊しうる (古い request id で購読の状態を消すなど)。集約チャネルを
-            // 作り直して、これらのイベントを捨てる
-            let (new_tx, new_rx) = tokio::sync::mpsc::channel::<RequestMigrationEvent>(
-                REQUEST_MIGRATION_EVENT_CHANNEL_SIZE,
-            );
-            *request_migration_tx = new_tx;
-            *request_migration_rx = new_rx;
-            if side_session_count > 0 {
+    // 移行先の WebTransport の drain を観測できるよう、receiver を差し替える
+    // datagram 受信タスクには、旧 session を閉じる前に新しい handle /
+    // data_plane / alias 表を渡す。閉じた後だと旧接続の受信エラーでタスクが
+    // 終了してしまう
+    // 新しい session の世代 を進める。Audio Config の検証済み世代 と
+    // 比べることで、移行前の session の遅延 Object が新しい session の
+    // 検証状態を進めないようにする
+    let new_generation = {
+        *session_generation = session_generation.saturating_add(1);
+        session_generation
+    };
+    let _ = datagram_session_tx.send(DatagramSession {
+        handle: outcome.client.handle(),
+        data_plane: outcome.data_plane.clone(),
+        track_map: datagram_map.clone(),
+        generation: *new_generation,
+    });
+    // 旧 session は STOP_SENDING を送ってから NO_ERROR で閉じる (§6.6.1 /
+    // §9.2)。GOAWAY の Timeout は待たず、main ループを塞がないよう別タスクで
+    // 行う。PUBLISH_DONE で Terminated になった購読と Session が回収済み
+    // の購読は STOP_SENDING を送らない (active_requests から外れている)
+    let old_request_ids: Vec<u64> = active_requests.iter().copied().collect();
+    // 終了待ち entry は Session 入れ替えで request_id がすべて新しくなるため
+    // 解消する (張り直した track と旧 request_id のどちらも、移行後の poll で
+    // 誤って終了しない)
+    publish_done_pending.clear();
+    let old_client = std::mem::replace(client, outcome.client);
+    old_session_closers.push(spawn_old_session_close(
+        task_monitor,
+        old_client,
+        old_request_ids,
+    ));
+    // ここから先が移行先への切替である。関連する状態を 1 か所でまとめて
+    // 差し替え、旧 session の値と混ざらないようにする
+    *url = outcome.url;
+    *recv_acceptor = outcome.recv_acceptor;
+    *data_plane = outcome.data_plane;
+    *catalog_request_id = outcome
+        .resubscribed
+        .catalog
+        .as_ref()
+        .map(|sub| sub.request_id);
+    *catalog_alias = outcome
+        .resubscribed
+        .catalog
+        .as_ref()
+        .map(|sub| sub.track_alias);
+    *video_request_id = outcome
+        .resubscribed
+        .video
+        .as_ref()
+        .map(|sub| sub.request_id);
+    *video_alias = outcome
+        .resubscribed
+        .video
+        .as_ref()
+        .map(|sub| sub.track_alias);
+    *audio_request_id = outcome
+        .resubscribed
+        .audio
+        .as_ref()
+        .map(|sub| sub.request_id);
+    *audio_alias = outcome
+        .resubscribed
+        .audio
+        .as_ref()
+        .map(|sub| sub.track_alias);
+    // メディア FETCH の対応表を移行先のものへ差し替える。Request ID は
+    // session ごとに払い出されるため、旧 session の表で移行先の FETCH 応答
+    // stream を振り分けることはできない
+    *fetch_targets = std::sync::Arc::new(std::sync::Mutex::new(outcome.resubscribed.fetch_targets));
+    *fetch_requests = outcome.resubscribed.fetch_requests;
+    // 移行先の subscription を active 側に載せ替える
+    active_requests.clear();
+    if let Some(ref sub) = outcome.resubscribed.catalog {
+        active_requests.insert(sub.request_id);
+    }
+    if let Some(ref sub) = outcome.resubscribed.video {
+        active_requests.insert(sub.request_id);
+    }
+    if let Some(ref sub) = outcome.resubscribed.audio {
+        active_requests.insert(sub.request_id);
+    }
+    // 移行先で張り直した media track は再開したため、移行待ちをクリアする
+    // (恒久終了の track は維持する)
+    migration_pending_tracks.clear();
+    *wt_session_state_rx = new_wt_session_state;
+    tracing::info!("Migrated the session to {}", url.authority);
+}
+
+/// 移行先の session で SUBSCRIBE_TRACKS を張り直す
+async fn resend_subscribe_tracks_on_migrated_session(state: &mut PipelineState) {
+    let PipelineState {
+        subscribe_tracks,
+        client,
+        subscribe_tracks_namespace,
+        tracks_request_id,
+        ignored_publish_requests,
+        ..
+    } = state;
+    // SUBSCRIBE_TRACKS は session 単位の namespace 要求であり、移行先で
+    // 張り直す必要がある。PUBLISH 起点の購読と Request ID は旧 session の
+    // ものなので破棄する (track_map は上の差し替えで catalog / 映像 / 音声
+    // だけになっている)
+    ignored_publish_requests.clear();
+    *tracks_request_id = None;
+    if *subscribe_tracks {
+        match client
+            .subscribe_tracks(subscribe_tracks_namespace.clone(), MessageParameters::new())
+            .await
+        {
+            Ok(request_id) => {
+                *tracks_request_id = Some(request_id);
                 tracing::info!(
-                    "Stopped the request migration side sessions after a full session migration: count={side_session_count}"
-                );
-            }
-            // 旧 session の stream task を止める。abort したあとに回収することで、
-            // 切替のあと旧 data_plane しか持たない task が sink へ書かないことを
-            // 保証する (§6.6.1 の移行をアプリへ透過にするため)
-            join_set.abort_all();
-            let drained = tokio::time::timeout(MIGRATION_STREAM_DRAIN_TIMEOUT, async {
-                while join_set.join_next().await.is_some() {}
-            })
-            .await;
-            if drained.is_err() {
-                tracing::warn!(
-                    "Timed out waiting for the old stream tasks to stop; switching the session anyway"
-                );
-            }
-            // 旧 session で受理済みの stream は新しい data_plane では処理できない
-            pending_streams.clear();
-            // 旧 session の Track Alias で保留中の Subgroup も捨てる。alias は
-            // session ごとに払い直されるため、残すと新 session の stream が
-            // 保留枠を奪われたうえ、別の track の chunk として解釈されうる
-            pending_subgroups.lock().await.reset();
-            // 旧 session の復号順と追いつきの状態を捨てる。新 session の live を
-            // 古い Group として誤って拒否しないためである
-            video_decode_order.lock().await.reset();
-            // object モードの並べ替えも捨てる。復号器は同じコーデックを
-            // 続けて復号できるため残す
-            object_mode_video.reset().await;
-            // Group の切り替え gate も初期化する。旧 session の stream task は
-            // abort しても await 点でしか止まらず、drain の打ち切り後も動き得る
-            // ため、世代を進めて旧い task の begin_stream / end_stream /
-            // admit を無視する
-            group_switch.reset();
-            audio_catch_up
-                .lock()
-                .expect("audio catch up の lock が poison されていないこと")
-                .reset();
-            // 音声の購読境界を「旧 session で最後に受信した Location」へ更新する。
-            // 移行先の購読はその位置を Location Filter の Absolute Start (0x02) に
-            // して張り直すため、境界と同じ位置だけが再送される。移行先の Largest
-            // Object を境界にすると、移行中に抜けた音声 (最後の受信位置より後) を
-            // 境界以下として捨ててしまう (draft-ietf-moq-transport-23 §9.19.9
-            // (LOCATION FILTER Parameter) Table 6。draft 由来の仕様であり将来
-            // 変更されうる)
-            let audio_boundary = last_received_locations
-                .lock()
-                .expect("last locations の lock が poison されていないこと")
-                .audio;
-            audio_delivery_order
-                .lock()
-                .expect("audio delivery order の lock が poison されていないこと")
-                .reset_for_migration(audio_boundary);
-            tracing::info!(
-                "Updated the audio subscription boundary for the migrated session: audio_boundary={audio_boundary:?}"
-            );
-            // 映像の購読境界も更新する。候補は旧 session の stream task を止めた
-            // あとに読み直した最後の受信位置である (選び方は
-            // select_video_subscription_boundary)
-            let video_boundary_candidates = VideoBoundaryCandidates {
-                snapshot: migration_boundary_snapshot
-                    .take()
-                    .and_then(|locations| locations.video),
-                reread: last_received_locations
-                    .lock()
-                    .expect("last locations の lock が poison されていないこと")
-                    .video,
-            };
-            let video_boundary_candidate = select_video_subscription_boundary(
-                ResubscribeRoute::SessionMigration,
-                video_boundary_candidates,
-            );
-            let video_boundary = {
-                let mut order = video_delivery_order
-                    .lock()
-                    .expect("video delivery order lock is not poisoned");
-                order.advance_boundary(video_boundary_candidate);
-                order.boundary()
-            };
-            tracing::info!(
-                "Updated the video subscription boundary for the migrated session: candidates={video_boundary_candidates:?}, candidate={video_boundary_candidate:?}, boundary={video_boundary:?}"
-            );
-            // alias 表を移行先のものへ差し替える (alias は peer が決めるため変わる)
-            let datagram_map = {
-                let mut map = track_map
-                    .write()
-                    .expect("track_map lock must not be poisoned");
-                map.clear();
-                if let Some(ref sub) = outcome.resubscribed.catalog {
-                    map.insert(sub.track_alias, TrackKind::Catalog);
-                }
-                if let Some(ref sub) = outcome.resubscribed.video {
-                    map.insert(sub.track_alias, TrackKind::Video);
-                }
-                if let Some(ref sub) = outcome.resubscribed.audio {
-                    map.insert(sub.track_alias, TrackKind::Audio);
-                }
-                Arc::new(map.clone())
-            };
-            // 移行先の WebTransport の drain を観測できるよう、receiver を差し替える
-            let new_wt_session_state = outcome.client.wt_session_state();
-            // datagram 受信タスクには、旧 session を閉じる前に新しい handle /
-            // data_plane / alias 表を渡す。閉じた後だと旧接続の受信エラーでタスクが
-            // 終了してしまう
-            // 新しい session の世代 を進める。Audio Config の検証済み世代 と
-            // 比べることで、移行前の session の遅延 Object が新しい session の
-            // 検証状態を進めないようにする
-            let new_generation = {
-                *session_generation = session_generation.saturating_add(1);
-                session_generation
-            };
-            let _ = datagram_session_tx.send(DatagramSession {
-                handle: outcome.client.handle(),
-                data_plane: outcome.data_plane.clone(),
-                track_map: datagram_map,
-                generation: *new_generation,
-            });
-            // 旧 session は STOP_SENDING を送ってから NO_ERROR で閉じる (§6.6.1 /
-            // §9.2)。GOAWAY の Timeout は待たず、main ループを塞がないよう別タスクで
-            // 行う。PUBLISH_DONE で Terminated になった購読と Session が回収済み
-            // の購読は STOP_SENDING を送らない (active_requests から外れている)
-            let old_request_ids: Vec<u64> = active_requests.iter().copied().collect();
-            // 終了待ち entry は Session 入れ替えで request_id がすべて新しくなるため
-            // 解消する (張り直した track と旧 request_id のどちらも、移行後の poll で
-            // 誤って終了しない)
-            publish_done_pending.clear();
-            let old_client = std::mem::replace(client, outcome.client);
-            old_session_closers.push(spawn_old_session_close(
-                task_monitor,
-                old_client,
-                old_request_ids,
-            ));
-            // ここから先が移行先への切替である。関連する状態を 1 か所でまとめて
-            // 差し替え、旧 session の値と混ざらないようにする
-            *url = outcome.url;
-            *recv_acceptor = outcome.recv_acceptor;
-            *data_plane = outcome.data_plane;
-            *catalog_request_id = outcome
-                .resubscribed
-                .catalog
-                .as_ref()
-                .map(|sub| sub.request_id);
-            *catalog_alias = outcome
-                .resubscribed
-                .catalog
-                .as_ref()
-                .map(|sub| sub.track_alias);
-            *video_request_id = outcome
-                .resubscribed
-                .video
-                .as_ref()
-                .map(|sub| sub.request_id);
-            *video_alias = outcome
-                .resubscribed
-                .video
-                .as_ref()
-                .map(|sub| sub.track_alias);
-            *audio_request_id = outcome
-                .resubscribed
-                .audio
-                .as_ref()
-                .map(|sub| sub.request_id);
-            *audio_alias = outcome
-                .resubscribed
-                .audio
-                .as_ref()
-                .map(|sub| sub.track_alias);
-            // メディア FETCH の対応表を移行先のものへ差し替える。Request ID は
-            // session ごとに払い出されるため、旧 session の表で移行先の FETCH 応答
-            // stream を振り分けることはできない
-            *fetch_targets =
-                std::sync::Arc::new(std::sync::Mutex::new(outcome.resubscribed.fetch_targets));
-            *fetch_requests = outcome.resubscribed.fetch_requests;
-            // 移行先の subscription を active 側に載せ替える
-            active_requests.clear();
-            if let Some(ref sub) = outcome.resubscribed.catalog {
-                active_requests.insert(sub.request_id);
-            }
-            if let Some(ref sub) = outcome.resubscribed.video {
-                active_requests.insert(sub.request_id);
-            }
-            if let Some(ref sub) = outcome.resubscribed.audio {
-                active_requests.insert(sub.request_id);
-            }
-            // 移行先で張り直した media track は再開したため、移行待ちをクリアする
-            // (恒久終了の track は維持する)
-            migration_pending_tracks.clear();
-            *wt_session_state_rx = new_wt_session_state;
-            tracing::info!("Migrated the session to {}", url.authority);
-            // SUBSCRIBE_TRACKS は session 単位の namespace 要求であり、移行先で
-            // 張り直す必要がある。PUBLISH 起点の購読と Request ID は旧 session の
-            // ものなので破棄する (track_map は上の差し替えで catalog / 映像 / 音声
-            // だけになっている)
-            ignored_publish_requests.clear();
-            *tracks_request_id = None;
-            if *subscribe_tracks {
-                match client
-                    .subscribe_tracks(subscribe_tracks_namespace.clone(), MessageParameters::new())
-                    .await
-                {
-                    Ok(request_id) => {
-                        *tracks_request_id = Some(request_id);
-                        tracing::info!(
-                            "Re-sent SUBSCRIBE_TRACKS on the migrated session: \
+                    "Re-sent SUBSCRIBE_TRACKS on the migrated session: \
                                          request_id={request_id}"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to re-send SUBSCRIBE_TRACKS on the migrated \
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to re-send SUBSCRIBE_TRACKS on the migrated \
                                          session: {e}"
-                        );
-                    }
-                }
+                );
             }
         }
+    }
+}
+
+/// 移行に成功した結果を購読状態へ適用する
+async fn apply_migrated_session(state: &mut PipelineState, outcome: MigrationOutcome) -> LoopFlow {
+    stop_migrated_side_sessions(state).await;
+    reset_migrated_stream_state(state).await;
+    advance_migration_boundaries(state);
+    let datagram_map = build_migrated_datagram_map(state, &outcome.resubscribed);
+    let new_wt_session_state = outcome.client.wt_session_state();
+    switch_to_migrated_session(state, outcome, datagram_map, new_wt_session_state);
+    resend_subscribe_tracks_on_migrated_session(state).await;
+    LoopFlow::Continue
+}
+
+/// バックグラウンドの session 移行の結果を受けて、移行先へ切り替える
+///
+/// 移行に成功した場合は受信ループを続け、失敗した場合は終了経路へ進む。
+async fn handle_migration_result(
+    state: &mut PipelineState,
+    result: std::result::Result<MigrationResult, ()>,
+) -> LoopFlow {
+    {
+        let PipelineState {
+            migration_in_progress,
+            migration_rx,
+            migration_task,
+            ..
+        } = state;
+        // バックグラウンドの移行タスクの結果を受ける。成功した場合は
+        // ここで 1 か所にまとめて移行先へ切り替える
+        *migration_in_progress = false;
+        *migration_rx = None;
+        *migration_task = None;
+    }
+    match result {
+        Ok(Ok(outcome)) => apply_migrated_session(state, outcome).await,
         Ok(Err(failure)) => {
             // 期限超過・再試行不能なエラーである。旧 session はまだ生きており、
-            // GOAWAY は subscription state に影響しない
-            // (draft-ietf-moq-transport-23 §9.2。draft 由来の仕様であり将来変更
-            // されうる) ため、購読を STOP_SENDING で終了してから GOAWAY /
-            // 正常 close を送る既存の後始末へ進む (peer_ended は立てない。この分岐は
-            // 直接受信ループを抜けるため、後始末の判定に使う `goaway_received` は
-            // 立てる必要がない)
+            // GOAWAY は subscription state に影響しないため、購読を STOP_SENDING で
+            // 終了してから既存の後始末へ進む
             tracing::warn!("Failed to migrate the session: {failure}");
-            return LoopFlow::Break;
+            LoopFlow::Break
         }
         Err(()) => {
             // 移行タスクが結果を送らずに終了した。移行を続けられないため、
             // 旧 session の終了経路へ進む
             tracing::warn!("The migration task ended without a result");
-            return LoopFlow::Break;
+            LoopFlow::Break
         }
     }
-    LoopFlow::Continue
 }
 
 /// request 単位移行の side session から届いたイベントを処理する
