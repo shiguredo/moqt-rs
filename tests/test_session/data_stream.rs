@@ -3025,6 +3025,113 @@ fn malformed_track_via_datagram_terminates_subscription() {
     );
 }
 
+/// Track Property と Object Property の両方に MSF_COMPRESSION があると Malformed Track
+///
+/// draft-ietf-moq-msf-02 §12.1 (Compression Signaling): publisher は同じ track で
+/// Track Property と Object Property の両方を使ってはならない (MUST NOT)。subscriber は
+/// Track Property を優先せず、購読を cancel する。
+#[test]
+fn subgroup_object_with_both_compression_signaling_is_malformed_track() {
+    use shiguredo_moqt::track_properties::{
+        PROP_MSF_COMPRESSION, TrackProperty, TrackPropertyValue,
+    };
+
+    let alias = 711;
+    let mut track_properties = TrackProperties::new();
+    track_properties.push(TrackProperty {
+        prop_type: PROP_MSF_COMPRESSION,
+        value: TrackPropertyValue::VarInt(1),
+    });
+    let (mut client, _server, rid) =
+        establish_subscribe_track_with_properties(alias, track_properties);
+    open_incoming_subgroup(&mut client, DataStreamId(90), alias, 3, 0, false);
+
+    let mut object_properties = ObjectProperties::new();
+    object_properties.push(ObjectProperty {
+        prop_type: PROP_MSF_COMPRESSION,
+        value: ObjectPropertyValue::VarInt(1),
+    });
+    let mut encoded = Vec::new();
+    object_properties
+        .encode(&mut encoded)
+        .expect("encode に成功すること");
+    let err = client
+        .recv_subgroup_object(DataStreamId(90), &object_with_properties(1, encoded))
+        .expect_err("MSF_COMPRESSION の併用は Malformed Track として拒否される");
+    assert_eq!(
+        err.reason, "track and object MSF_COMPRESSION are both set",
+        "§12.1 の併用禁止を理由にすること"
+    );
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated,
+        "Malformed Track で購読が終端されること"
+    );
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "セッションは閉じない"
+    );
+}
+
+/// datagram でも MSF_COMPRESSION の併用を Malformed Track として拒否する
+#[test]
+fn datagram_object_with_both_compression_signaling_is_malformed_track() {
+    use shiguredo_moqt::track_properties::{
+        PROP_MSF_COMPRESSION, TrackProperty, TrackPropertyValue,
+    };
+
+    let alias = 712;
+    let mut track_properties = TrackProperties::new();
+    track_properties.push(TrackProperty {
+        prop_type: PROP_MSF_COMPRESSION,
+        value: TrackPropertyValue::VarInt(1),
+    });
+    let (mut client, _server, rid) =
+        establish_subscribe_track_with_properties(alias, track_properties);
+
+    let mut object_properties = ObjectProperties::new();
+    object_properties.push(ObjectProperty {
+        prop_type: PROP_MSF_COMPRESSION,
+        value: ObjectPropertyValue::VarInt(1),
+    });
+    let mut encoded = Vec::new();
+    object_properties
+        .encode(&mut encoded)
+        .expect("encode に成功すること");
+    let err = client
+        .recv_object_datagram(&ObjectDatagram {
+            track_alias: alias,
+            group_id: 3,
+            object_id: 8,
+            publisher_priority: Some(7),
+            properties_data: Some(encoded),
+            end_of_group: false,
+            status: None,
+        })
+        .expect_err("MSF_COMPRESSION の併用は Malformed Track として拒否される");
+    assert_eq!(
+        err.reason, "track and object MSF_COMPRESSION are both set",
+        "§12.1 の併用禁止を理由にすること"
+    );
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated,
+        "Malformed Track で購読が終端されること"
+    );
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "セッションは閉じない"
+    );
+}
+
 // ─── EndOfGroup / EndOfTrack の意味論 (draft §11.1.1 / §11.3.1 / §11.2.1) ─────
 
 /// subgroup stream を開いて object を 1 件流すヘルパー

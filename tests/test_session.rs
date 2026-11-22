@@ -372,6 +372,29 @@ fn establish_subscribe_track_with_params(
     alias: u64,
     params: MessageParameters,
 ) -> (Session, Session, u64) {
+    establish_subscribe_track_with_params_and_properties(alias, params, TrackProperties::new())
+}
+
+/// SUBSCRIBE / SUBSCRIBE_OK までを確立し、SUBSCRIBE_OK に Track Properties を載せる
+///
+/// MSF_COMPRESSION など、応答の Track Property を検証するテストで使う。
+fn establish_subscribe_track_with_properties(
+    alias: u64,
+    track_properties: TrackProperties,
+) -> (Session, Session, u64) {
+    establish_subscribe_track_with_params_and_properties(
+        alias,
+        MessageParameters::new(),
+        track_properties,
+    )
+}
+
+/// SUBSCRIBE / SUBSCRIBE_OK までを確立し、パラメータと Track Properties を指定する
+fn establish_subscribe_track_with_params_and_properties(
+    alias: u64,
+    params: MessageParameters,
+    track_properties: TrackProperties,
+) -> (Session, Session, u64) {
     let (mut client, mut server) = establish_pair();
     let rid = client
         .send_subscribe(ns(&[b"live"]), b"cam1".to_vec(), params)
@@ -381,7 +404,7 @@ fn establish_subscribe_track_with_params(
         .recv_request(sub_msg)
         .expect("テストフィクスチャの前提条件を満たす");
     server
-        .send_subscribe_ok(rid, alias, MessageParameters::new(), TrackProperties::new())
+        .send_subscribe_ok(rid, alias, MessageParameters::new(), track_properties)
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, ok_msg) = take_send_on_stream(&mut server);
     client

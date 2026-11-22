@@ -1847,6 +1847,25 @@ impl Session {
                 return Err(err);
             }
         };
+        // draft-ietf-moq-msf-02 §12.1 (Compression Signaling): Track Property と Object
+        // Property の両方に MSF_COMPRESSION があると MUST NOT に反する。Track Property を
+        // 優先して Object Property を無視せず、Malformed Track として購読を cancel する。
+        let compression_conflict = {
+            let track = self
+                .subscriptions
+                .get(&object_request_id)
+                .map(|subscription| subscription.peer_msf_compression());
+            let object = decoded_properties
+                .as_ref()
+                .map(crate::session::compression::object_compression)
+                .transpose();
+            matches!((track, object), (Some(Ok(Some(_))), Ok(Some(_))))
+        };
+        if compression_conflict {
+            let reason = "track and object MSF_COMPRESSION are both set";
+            self.terminate_malformed_track(object_request_id, Some(stream_id), reason);
+            return Err(SessionError::new(SESSION_PROTOCOL_VIOLATION, reason));
+        }
         // draft-ietf-moq-transport-23 §10.1 / §10.2: subgroup の先頭 object に付与された
         // SUBGROUP_DELIVERY_TIMEOUT / OBJECT_DELIVERY_TIMEOUT は Track-level 値を
         // per-subgroup で上書きする。先頭以外の object では無視される。
@@ -3529,6 +3548,24 @@ impl Session {
             }
             return Ok(TrackDataAcceptance::FilteredOut);
         };
+        // draft-ietf-moq-msf-02 §12.1 (Compression Signaling): Track Property と Object
+        // Property の両方に MSF_COMPRESSION があると MUST NOT に反する。
+        let compression_conflict = {
+            let track = self
+                .subscriptions
+                .get(&request_id)
+                .map(|subscription| subscription.peer_msf_compression());
+            let object = decode_object_properties(properties_bytes)
+                .ok()
+                .flatten()
+                .map(|properties| crate::session::compression::object_compression(&properties));
+            matches!((track, object), (Some(Ok(Some(_))), Some(Ok(Some(_)))))
+        };
+        if compression_conflict {
+            let reason = "track and object MSF_COMPRESSION are both set";
+            self.terminate_malformed_track(request_id, None, reason);
+            return Err(SessionError::new(SESSION_PROTOCOL_VIOLATION, reason));
+        }
         let received_location = Location {
             group_id: datagram.group_id,
             object_id: datagram.object_id,
