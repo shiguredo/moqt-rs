@@ -489,3 +489,102 @@ fn stream_mapping_is_ignored_for_other_packaging() {
         "loc 以外の packaging の streamMapping は encode でも無視すること"
     );
 }
+
+#[test]
+fn mime_type_audio_requires_audio_fields_for_unregistered_codec() {
+    // 登録外の audio codec でも mimeType が audio/ を示せば MUST を課す
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"codec":"ac-3","mimeType":"audio/mp4"}]}"#;
+    let error = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect_err("audio の必須フィールド不足を拒否すること");
+    assert!(
+        error.to_string().contains("mimeType 'audio/mp4'"),
+        "mimeType を根拠として示すこと: {error}"
+    );
+}
+
+#[test]
+fn mime_type_video_requires_bitrate_for_unregistered_codec() {
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"codec":"mp4v","mimeType":"video/mp4"}]}"#;
+    let error = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect_err("video の bitrate 不足を拒否すること");
+    assert!(
+        error.to_string().contains("MUST specify bitrate"),
+        "bitrate の不足として報告すること: {error}"
+    );
+}
+
+#[test]
+fn mime_type_without_codec_requires_codec() {
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"bitrate":64000,"samplerate":48000,"channelConfig":"2","mimeType":"audio/mp4"}]}"#;
+    let error = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect_err("codec 不足を拒否すること");
+    assert!(
+        error.to_string().contains("MUST specify codec"),
+        "codec の不足として報告すること: {error}"
+    );
+}
+
+#[test]
+fn mime_type_prefix_is_case_insensitive() {
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"codec":"ac-3","mimeType":"Audio/MP4"}]}"#;
+    assert!(
+        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None).is_err(),
+        "大文字の Audio/ も audio として扱うこと"
+    );
+}
+
+#[test]
+fn conflicting_codec_and_mime_type_require_both_sets() {
+    // codec は音声、mimeType は映像を示すため、bitrate と音声の必須フィールドの両方を要求する
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"codec":"opus","bitrate":64000,"mimeType":"video/mp4"}]}"#;
+    let error = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect_err("音声の samplerate 不足を拒否すること");
+    assert!(
+        error.to_string().contains("MUST specify samplerate"),
+        "音声の要求も重ねて適用すること: {error}"
+    );
+}
+
+#[test]
+fn mime_type_with_required_fields_is_accepted() {
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"codec":"ac-3","bitrate":64000,"samplerate":48000,"channelConfig":"2","mimeType":"audio/mp4"}]}"#;
+    MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("audio の必須フィールドを揃えた track を受理すること");
+}
+
+#[test]
+fn unknown_codec_without_mime_type_does_not_require_media_fields() {
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"codec":"custom-data"}]}"#;
+    MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("mimeType の無い登録外 codec は media と判定しないこと");
+}
+
+#[test]
+fn role_and_mime_type_conflict_requires_both_sets() {
+    let missing_audio = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"role":"video","codec":"av01.0.08M.08","bitrate":500000,"mimeType":"audio/mp4"}]}"#;
+    assert!(
+        MsfCatalogDocument::decode(missing_audio, shiguredo_moqt::msf::MsfCompression::None)
+            .is_err(),
+        "role 側の video と mimeType 側の audio の両方を要求すること"
+    );
+    let both = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"role":"video","codec":"av01.0.08M.08","framerate":30,"bitrate":500000,"samplerate":48000,"channelConfig":"2","mimeType":"audio/mp4"}]}"#;
+    MsfCatalogDocument::decode(both, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("両方の必須フィールドを揃えた track を受理すること");
+}
+
+#[test]
+fn encode_rejects_mime_type_audio_without_samplerate() {
+    let json = br#"{"version":"draft-02","tracks":[{"name":"t","packaging":"loc","isLive":true,"codec":"ac-3","bitrate":64000,"samplerate":48000,"channelConfig":"2","mimeType":"audio/mp4"}]}"#;
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let MsfCatalogDocument::Full(mut cat) = doc else {
+        panic!("Full catalog がデコードされること");
+    };
+    cat.tracks[0].samplerate = None;
+    assert!(
+        MsfCatalogDocument::Full(cat)
+            .encode(shiguredo_moqt::msf::MsfCompression::None)
+            .is_err(),
+        "encode でも mimeType 由来の samplerate 要求を適用すること"
+    );
+}

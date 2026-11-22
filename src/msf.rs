@@ -3344,6 +3344,16 @@ fn validate_media_track_fields(track: &MsfTrack) -> Result<(), MessageError> {
 
     let codec_audio = track.codec.as_deref().is_some_and(is_audio_codec);
     let codec_video = track.codec.as_deref().is_some_and(is_video_codec);
+    // mimeType は RFC 6838 §4.2 により大文字小文字を区別しない。登録外 codec でも
+    // audio/ / video/ を示す場合は media track として MUST を課す
+    let mime_audio = track
+        .mime_type
+        .as_deref()
+        .is_some_and(|mime| mime.to_ascii_lowercase().starts_with("audio/"));
+    let mime_video = track
+        .mime_type
+        .as_deref()
+        .is_some_and(|mime| mime.to_ascii_lowercase().starts_with("video/"));
 
     // draft-ietf-moq-msf-02 §5.2.4.1 (Required fields per packaging and track type) の
     // Table 6: (packaging, role) ごとの追加必須フィールド。個別フィールドの Conditional MUST
@@ -3364,37 +3374,45 @@ fn validate_media_track_fields(track: &MsfTrack) -> Result<(), MessageError> {
         }
     }
 
-    // role による判定と codec による判定が食い違う場合は、両方の要求を重ねて適用する
-    let require_audio = role_audio || codec_audio;
-    let require_video = role_video || codec_video;
+    // role / codec / mimeType の判定が食い違う場合は、両方の要求を重ねて適用する
+    let require_audio = role_audio || codec_audio || mime_audio;
+    let require_video = role_video || codec_video || mime_video;
     if !require_audio && !require_video {
         return Ok(());
     }
 
-    // codec から種別を判定した場合は codec が存在するため、ここに来るのは role 指定時だけ
+    // 要求の根拠 (role / codec / mimeType) をすべてエラーメッセージに含める。
+    // 成功経路で String を確保しないよう、エラー分岐の中でだけ組み立てる。
+    let requirement_source = || {
+        let mut sources = Vec::new();
+        if role_audio || role_video {
+            sources.push(format!("role '{}'", role.unwrap_or("")));
+        }
+        if codec_audio || codec_video {
+            sources.push(format!("codec '{}'", track.codec.as_deref().unwrap_or("")));
+        }
+        if mime_audio || mime_video {
+            sources.push(format!(
+                "mimeType '{}'",
+                track.mime_type.as_deref().unwrap_or("")
+            ));
+        }
+        sources.join(" / ")
+    };
+
     if track.codec.is_none() {
         return Err(MessageError::InvalidCatalog(format!(
-            "track '{}' with role '{}' MUST specify codec",
+            "track '{}' with {} MUST specify codec",
             track.name,
-            role.unwrap_or("")
+            requirement_source()
         )));
     }
-
-    // 要求の根拠 (role か codec か) をエラーメッセージに含め、食い違い時も原因を追えるようにする
-    // 成功経路で String を確保しないよう、エラー分岐の中でだけ組み立てる
-    let requirement_source = |by_role: bool| {
-        if by_role {
-            format!("role '{}'", role.unwrap_or(""))
-        } else {
-            format!("codec '{}'", track.codec.as_deref().unwrap_or(""))
-        }
-    };
 
     if track.bitrate.is_none() {
         return Err(MessageError::InvalidCatalog(format!(
             "track '{}' with {} MUST specify bitrate",
             track.name,
-            requirement_source(role_audio || role_video)
+            requirement_source()
         )));
     }
 
@@ -3403,14 +3421,14 @@ fn validate_media_track_fields(track: &MsfTrack) -> Result<(), MessageError> {
             return Err(MessageError::InvalidCatalog(format!(
                 "track '{}' with {} MUST specify samplerate",
                 track.name,
-                requirement_source(role_audio)
+                requirement_source()
             )));
         }
         if track.channel_config.is_none() {
             return Err(MessageError::InvalidCatalog(format!(
                 "track '{}' with {} MUST specify channelConfig",
                 track.name,
-                requirement_source(role_audio)
+                requirement_source()
             )));
         }
     }

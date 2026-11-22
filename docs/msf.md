@@ -59,12 +59,13 @@
   - timeline の depends / mimeType 必須
   - initRef の initDataList 参照整合性
   - initDataList の type は `inline` / `track-property` / `object-property`。property 型の data は `0x` + 1〜16 桁の hex (2^62 - 1 以下) で、inline の Base64 検証は 0342 が担当する。initRef の type と property scope の整合は catalog から判定できないため検証しない
-  - codec が audio / video と判定できるトラックは bitrate 必須 (audio は samplerate / channelConfig も)
-  - 判定は WEBCODECS-CODEC-REGISTRY (Registry Draft, 2026-02-12) §3 / §4 の登録表記に基づく
+  - codec が audio / video と判定できるトラック、または mimeType が `audio/` / `video/` を示すトラックは bitrate 必須 (audio は samplerate / channelConfig も)
+  - codec の判定は WEBCODECS-CODEC-REGISTRY (Registry Draft, 2026-02-12) §3 / §4 の登録表記に基づく
+  - mimeType の判定は RFC 6838 §4.2 に従い大文字小文字を区別せず、`audio/` / `video/` の接頭辞で行う。登録外 codec でも mimeType が種別を示せば MUST を課し、codec も必須とする
   - role (`video` / `audio` / `audiodescription`) は codec が無い場合も従来どおり codec / bitrate (audio は samplerate / channelConfig) を要求する
   - role `signlanguage` は §5.2.7 Table 7 の visual track のため video として扱い、codec / bitrate を要求する
-  - codec と role の判定が食い違う場合は両方の要求を満たす
-  - codec なし・登録外 codec は codec に基づく要求を行わない
+  - codec / role / mimeType の判定が食い違う場合は両方の要求を満たす
+  - codec なし・登録外 codec は mimeType が種別を示さない限り codec に基づく要求を行わない
   - lang の BCP 47 簡易検証 (RFC 5646 §2.1 の grandfathered タグを含む。`irregular` は固定リスト、`regular` は langtag 規則で受理する)
 
 ## Timeline
