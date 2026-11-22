@@ -454,6 +454,8 @@ QUIC のコード space を共有し、WebTransport over HTTP/2 は capsule が�
 `fetch_stop_sending_received(request_id, error_code)` の `error_code` も同じ意味である。
 受信したコードは `Session::stopped_outgoing_subgroup_error_code(request_id, track_alias,
 group_id, subgroup_id) -> Option<Option<u64>>` (外側が再オープン禁止の有無、内側がコードの有無) と
+`Session::outgoing_subgroup_reopen_blocked(track_alias, group_id, subgroup_id) -> bool`
+(alias を共有する別 request の停止エントリも含めた送信前の再オープン禁止判定) と
 `Fetch::peer_stop_sending_error_code` (外側がデータストリーム側の STOP_SENDING 受理の有無、
 内側がコードの有無) から参照できる。
 

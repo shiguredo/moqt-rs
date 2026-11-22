@@ -5293,6 +5293,10 @@ fn stop_sending_error_code_is_reported_for_stopped_subgroup() {
         Some(Some(0x1)),
         "FirstObjectId モードの未解決 subgroup_id でも受信したコードが保持されること"
     );
+    assert!(
+        server.outgoing_subgroup_reopen_blocked(alias, 6, None),
+        "送信前に再オープン禁止を判定できること"
+    );
 
     // コード無しで受信した場合は内側が None になる (解決済み subgroup_id の経路)
     let no_code_header = SubgroupHeader {
@@ -5321,6 +5325,10 @@ fn stop_sending_error_code_is_reported_for_stopped_subgroup() {
         server.stopped_outgoing_subgroup_error_code(rid, alias, 6, None),
         None,
         "購読の再開 (PAUSED 1→0) の受理で停止エントリが破棄されること"
+    );
+    assert!(
+        !server.outgoing_subgroup_reopen_blocked(alias, 6, None),
+        "購読の再開後は再オープン禁止が解除されること"
     );
 }
 
@@ -6268,4 +6276,69 @@ fn subgroup_unsupported_compression_value_is_ignored() {
         "track は継続すること"
     );
     assert_eq!(client.state(), SessionState::Established);
+}
+
+/// alias を共有する別 subscription の停止エントリも送信前判定に含めること
+///
+/// draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams): Subgroup の同一性は
+/// `(track_alias, group_id, subgroup_id)` であるため、同じ alias を使う別 request からも
+/// 同じ Subgroup は再オープンできない。
+#[test]
+fn reopen_blocked_includes_entries_from_other_requests_sharing_the_alias() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_PAUSED,
+    };
+
+    let alias = 843u64;
+    let (mut client, mut server, rid1) = establish_paused_subscription(alias);
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
+    });
+    let rid2 = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), params)
+        .expect("2 本目の SUBSCRIBE の送信に成功すること");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("2 本目の SUBSCRIBE の受信に成功すること");
+    server
+        .send_subscribe_ok(
+            rid2,
+            alias,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("同じ alias の SUBSCRIBE_OK の送信に成功すること");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid2, ok_msg)
+        .expect("SUBSCRIBE_OK の受信に成功すること");
+
+    let header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 8,
+        subgroup_id: SubgroupIdMode::FirstObjectId,
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    server
+        .send_subgroup_header(DataStreamId(72), rid2, &header)
+        .expect("header の送信に成功すること");
+    server
+        .recv_data_stream_stop_sending(DataStreamId(72), Some(0x2))
+        .expect("STOP_SENDING の通知に成功すること");
+
+    assert_eq!(
+        server.stopped_outgoing_subgroup_error_code(rid1, alias, 8, None),
+        None,
+        "コード参照 API は記録した request_id のエントリだけを返すこと"
+    );
+    assert!(
+        server.outgoing_subgroup_reopen_blocked(alias, 8, None),
+        "別 request の停止エントリでも再オープン禁止と判定すること"
+    );
 }

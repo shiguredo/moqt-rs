@@ -1267,7 +1267,11 @@ impl Session {
     /// 別 subscription の request_id からも再オープンできないよう全エントリを照合する
     /// (解除は停止ストリームを所有する request の PAUSED 1→0 のみ)。
     /// `subgroup_id` の `None` は FirstObjectId モードの未解決 subgroup を表す。
-    fn outgoing_subgroup_reopen_blocked(
+    ///
+    /// [`Session::stopped_outgoing_subgroup_error_code`] が記録時の request_id と完全一致する
+    /// エントリだけを返すのに対し、このメソッドは alias を共有する別 request のエントリも
+    /// 含めて判定する。送信前に新しい Subgroup を開いてよいかを確かめる用途である。
+    pub fn outgoing_subgroup_reopen_blocked(
         &self,
         track_alias: u64,
         group_id: u64,
