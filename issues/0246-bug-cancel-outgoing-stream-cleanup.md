@@ -1,7 +1,7 @@
 # cancel された outgoing stream の順序契約と追跡終端
 
 - Created: 2026-10-13
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/fix-cancel-outgoing-stream-cleanup
 - Polished: 2026-10-25
 
@@ -95,3 +95,35 @@ peer が STOP_SENDING で cancel した outgoing data stream について、0243
   トランスポート非依存であり、I/O 層の観測は `MoqtClient::pump_once` に集約されている。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `src/session/data.rs` の `close_outgoing_subgroup_stream` で、`data_streams.outgoing` から
+  除去する stream の `(request_id, track_alias, group_id, subgroup_id)` を
+  `data_streams.terminated_outgoing_subgroups` に保持するようにした。
+- `recv_data_stream_stop_sending` は open stream を優先し、無ければ保持情報から同じ 4 値を
+  復元して `stopped_outgoing_subgroups` へ再オープン禁止を記録する。`subgroup_id` が `Some`
+  なら `my_subgroups.mark_stop_sending` も呼ぶ。
+  - 保持情報がある終端済み stream への STOP_SENDING は `Ok(())` で吸収する。
+  - 保持情報も無い stream id は従来どおり `SESSION_PROTOCOL_VIOLATION` を返し、セッションは
+    閉じない。
+- 保持情報は `stopped_outgoing_subgroups` と同じ契機 (PAUSED 1→0 の REQUEST_UPDATE 受理と
+  `forget_subscription`) で `discard_outgoing_subgroup_cancel_tracking` により同時に破棄する。
+- `recv_data_stream_stop_sending` の doc と、未知 stream のテスト doc を
+  「STOP_SENDING と終端通知の順序は保証されない」という実装に合わせた。
+- `crates/moq-pub/src/stream_writer.rs` の `write_object` / `finish` / `reset_by_session` が
+  `TransportError::StreamReset` / `StreamClosed` で失敗する経路で、失敗を返す前に
+  `send_data_stream_closed(RequestStreamEnd::Reset { error_code: None, reliable_size: None })`
+  を呼ぶ。通知の失敗は無視し、元の transport エラーを返す。
+- `crates/moq-pub/src/pipeline.rs` の `is_peer_stream_reset` 分岐に、追跡終端が
+  stream_writer 側の通知で担保されることをコメントで明記した。
+- `tests/test_session/data_stream.rs` に次のテストを追加した。
+  - 終端通知が先の順序でも再オープン禁止が記録され、Forward 0→1 後に再オープンできること。
+  - `forget_subscription` で保持情報が破棄されること。
+  - `send_data_stream_closed(Reset)` 後に PUBLISH_DONE が flush され、後着 STOP_SENDING が
+    吸収されること。
+- `tests/test_session/subscription/request_update.rs` に、REQUEST_UPDATE 受理後の再オープンと
+  保持情報の破棄を固定するテストを追加した。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`prek run --files` が成功した。
