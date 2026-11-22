@@ -326,7 +326,9 @@ moqt-rs へ移したのは、予約の計画と確定、予約の上限、短い
 
 ### moqt-rs に移植したもの
 
-- `src/playout/timeline.rs`: 基準の学習、音声の自動予算 (揺らぎの百分位 + 出力の先行量の clamp)、映像の表示の遅れ、A/V 同期 (毎回の引き直し、補償上限、出力残差、共有の解除と復帰)、基準を共有しない判定と理由、遅延の内訳
+- `src/playout/timeline.rs`: 公開 API、基準の学習、音声の自動予算 (揺らぎの百分位 + 出力の先行量の clamp)、映像の表示の遅れ、遅延の内訳
+- `src/playout/timeline/sync.rs`: A/V 同期 (毎回の引き直し、補償上限、出力残差、共有の解除と復帰) と基準を共有しない判定
+- `src/playout/timeline/config.rs`: 表示の遅れの上限を求める設定計算
 - `src/playout/scheduler.rs`: 鳴らす時刻の決定 (timestamp 経路と到着基準)、時間圧縮の要求、再同期後の時間伸長の要求、隙間の 3 分割、終端の確定、統計
 - `src/playout/stretch.rs`: 時間圧縮 (端数周期、削る位置の選択、短いフレームの履歴解析)、時間伸長 (`preemptively_expand`)、周期補間 (`conceal`)、44.1 kHz の解析対応
 - `src/playout/expansion.rs`: 出力側で生成する最大 100 ms の続き音 (周期補間と非周期合成の使い分け、音量の制約)
