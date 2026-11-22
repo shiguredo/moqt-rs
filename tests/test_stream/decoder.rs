@@ -7,8 +7,8 @@ use shiguredo_moqt::object_properties::{
 };
 
 /// テスト用: SubgroupHeader + SubgroupObject 列をエンコードする
-/// ペイロードも含めてバッファに書き込む（デコーダはペイロードに触れないが、
-/// consume_payload 後にバッファから drain する必要があるためテスト側で処理する）
+/// ペイロードも含めてバッファに書き込む（デコーダはペイロードに触れない。
+/// バッファ内のペイロードは try_read_payload で読み出す）
 /// (object_id_delta, payload_length, status, payload)
 type SubgroupObjectTuple<'a> = (u64, u64, Option<u64>, Option<&'a [u8]>);
 
@@ -1937,4 +1937,166 @@ fn test_fetch_end_of_range_entries_carry_no_properties() {
         "End of Range の 4 エントリは Properties を持たない variant として返ること"
     );
     assert_eq!(decoder.finish(), Ok(()));
+}
+
+// ─── consume_payload の契約 ──────────────────────────────
+
+/// consume_payload 用の Subgroup ヘッダー
+fn consume_payload_subgroup_header() -> SubgroupHeader {
+    SubgroupHeader {
+        track_alias: 1,
+        group_id: 10,
+        subgroup_id: SubgroupIdMode::Zero,
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    }
+}
+
+/// consume_payload 用の Subgroup Object (payload_length 4)
+fn consume_payload_object() -> SubgroupObjectTuple<'static> {
+    (0, 4, None, None)
+}
+
+#[test]
+fn subgroup_consume_payload_requires_empty_buffer() {
+    // バッファに payload が残っている状態では拒否し、状態とバッファを変えない
+    let data = encode_subgroup_stream(
+        &consume_payload_subgroup_header(),
+        &[(0, 4, None, Some(b"abcd"))],
+    );
+    let mut decoder = SubgroupStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("ヘッダーをデコードできること")
+        .expect("ヘッダーがあること");
+    decoder
+        .try_decode_object()
+        .expect("Object をデコードできること")
+        .expect("Object があること");
+    assert!(matches!(
+        decoder.consume_payload(4),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+    assert_eq!(
+        decoder
+            .try_read_payload()
+            .expect("payload が残っていること"),
+        b"abcd"
+    );
+}
+
+#[test]
+fn subgroup_consume_payload_succeeds_when_buffer_is_empty() {
+    // バッファに payload を残さず外部で読み出した場合は成功する
+    let data = encode_subgroup_stream(
+        &consume_payload_subgroup_header(),
+        &[consume_payload_object()],
+    );
+    let mut decoder = SubgroupStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("ヘッダーをデコードできること")
+        .expect("ヘッダーがあること");
+    decoder
+        .try_decode_object()
+        .expect("Object をデコードできること")
+        .expect("Object があること");
+    // 長さ不一致は状態を変えない
+    assert!(matches!(
+        decoder.consume_payload(3),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+    assert!(decoder.consume_payload(4).is_ok());
+    assert!(
+        decoder
+            .try_decode_object()
+            .expect("次の Object へ進めること")
+            .is_none()
+    );
+}
+
+#[test]
+fn subgroup_consume_payload_rejects_unexpected_state() {
+    let mut decoder = SubgroupStreamDecoder::new();
+    assert!(matches!(
+        decoder.consume_payload(1),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+}
+
+// ─── FetchStreamDecoder の consume_payload の契約 ──────────────────────────────
+
+/// consume_payload 用の Fetch Object エントリ (payload_length 2)
+fn consume_payload_fetch_object() -> FetchStreamEntry {
+    FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(0),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(0),
+        publisher_priority: Some(128),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 2,
+    })
+}
+
+#[test]
+fn fetch_consume_payload_requires_empty_buffer() {
+    let header = FetchHeader { request_id: 1 };
+    let data = encode_fetch_stream(&header, &[(consume_payload_fetch_object(), None, None)]);
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("ヘッダーをデコードできること")
+        .expect("ヘッダーがあること");
+    decoder
+        .try_decode_entry()
+        .expect("エントリをデコードできること")
+        .expect("エントリがあること");
+    // ConsumingPayload の間に外部からバッファへ追加された payload も残っている扱いになる
+    decoder.push(b"xy");
+    assert!(matches!(
+        decoder.consume_payload(2),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+    assert_eq!(
+        decoder
+            .try_read_payload()
+            .expect("payload が残っていること"),
+        b"xy"
+    );
+}
+
+#[test]
+fn fetch_consume_payload_succeeds_when_buffer_is_empty() {
+    let header = FetchHeader { request_id: 1 };
+    let data = encode_fetch_stream(&header, &[(consume_payload_fetch_object(), None, None)]);
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("ヘッダーをデコードできること")
+        .expect("ヘッダーがあること");
+    decoder
+        .try_decode_entry()
+        .expect("エントリをデコードできること")
+        .expect("エントリがあること");
+    assert!(matches!(
+        decoder.consume_payload(1),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+    assert!(decoder.consume_payload(2).is_ok());
+}
+
+#[test]
+fn fetch_consume_payload_rejects_unexpected_state() {
+    let mut decoder = FetchStreamDecoder::new();
+    assert!(matches!(
+        decoder.consume_payload(1),
+        Err(MessageError::ProtocolViolation(_))
+    ));
 }

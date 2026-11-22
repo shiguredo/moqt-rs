@@ -808,7 +808,7 @@ fn encode_end_of_timed_out_range(&mut self, group_id: u64, object_id: u64, buf: 
 ```
 
 - `SubgroupStreamDecoder` は `try_decode_object` / `consume_payload`、`FetchStreamDecoder` は `try_decode_entry` / `consume_payload` とメソッド名が異なる
-- ペイロード本体はデコーダの責務外。`payload_length` バイト分を読み出したら `consume_payload` を呼ぶ
+- ペイロード本体はデコーダの責務外。`payload_length` バイト分を外部で読み出したら、デコーダのバッファが空であることを確認して `consume_payload` を呼ぶ。バッファ内のペイロードは `try_read_payload` で読み出す
 - Object Properties は `DecodedSubgroupObject::properties_bytes` と `DecodedFetchObject::properties_bytes` の
   どちらも Properties Length varint 込みの生バイト列であり、`LocProperties::decode` にそのまま渡せる。
   wire に現れた varint をそのまま保持するため、Properties Length = 0 は最小形なら `0x00` の 1 バイトになる

@@ -61,7 +61,9 @@ enum SubgroupDecoderState {
 /// `SubgroupIdMode::FirstObjectId` の解決) を内部で管理する。
 ///
 /// ペイロードはデコーダの責務外。`try_decode_object` が返す `payload_length` バイト分を
-/// 呼び出し側がバッファから消費した後、`consume_payload` を呼んで次のオブジェクトに進む。
+/// 呼び出し側が外部で読み出した後、デコーダのバッファが空の状態で `consume_payload` を
+/// 呼んで次のオブジェクトに進む。バッファ内のペイロードは `try_read_payload` で読み出す
+/// (この場合は `consume_payload` を呼ばない)。
 ///
 /// # 使い方 (検証対象外の疑似コード)
 ///
@@ -81,9 +83,10 @@ enum SubgroupDecoderState {
 /// loop {
 ///     match decoder.try_decode_object()? {
 ///         Some(obj) => {
-///             // payload_length バイト分のペイロードを読み出す
+///             // payload_length バイト分をデコーダのバッファとは別に読み出し、
+///             // バッファが空であることを確認する
 ///             // ...
-///             decoder.consume_payload(obj.payload_length);
+///             decoder.consume_payload(obj.payload_length)?;
 ///         }
 ///         None => {
 ///             // データ不足、追加データを push する
@@ -167,8 +170,9 @@ impl SubgroupStreamDecoder {
     /// バッファから SubgroupObject のデコードを試みる
     ///
     /// - `Ok(Some(obj))` — デコード成功。`object_id` は絶対値に解決済み。
-    ///   呼び出し側は `payload_length` バイト分のペイロードをバッファから読み出した後、
-    ///   `consume_payload` を呼ぶこと。
+    ///   呼び出し側は `payload_length` バイト分のペイロードを外部で読み出した後、
+    ///   バッファが空の状態で `consume_payload` を呼ぶこと。バッファ内のペイロードは
+    ///   `try_read_payload` で読み出す。
     ///   Object Properties は `properties_bytes` に保持される。
     /// - `Ok(None)` — データ不足、追加データが必要
     /// - `Err(e)` — デコードエラー
@@ -259,21 +263,34 @@ impl SubgroupStreamDecoder {
         }
     }
 
-    /// ペイロードの消費を通知する
+    /// 外部で読み出したペイロードの消費を通知する
     ///
-    /// `try_decode_object` が返した `payload_length` バイト分のペイロードを
-    /// 呼び出し側が外部で読み出した場合に呼ぶ。
-    /// バッファ内のペイロードを読み出す場合は `try_read_payload` を使う。
+    /// `try_decode_object` が返した `payload_length` バイト分のペイロードを、呼び出し側が
+    /// デコーダのバッファとは別の場所から読み出した場合に呼ぶ。デコーダのバッファに
+    /// ペイロードが残っている状態で呼んではならない。バッファ内のペイロードを読み出す場合は
+    /// [`Self::try_read_payload`] を使う。
     ///
-    /// `length` は消費したバイト数。
-    /// `payload_length` と一致しない、または `ConsumingPayload` 状態以外で
-    /// 呼ばれた場合は `Err(ProtocolViolation)` を返し、状態は変わらない。
+    /// 呼び出し時に次をすべて満たす必要がある。
+    ///
+    /// - 状態が `ConsumingPayload` である
+    /// - `length` が残りのペイロード長と一致する
+    /// - デコーダのバッファが空である
+    ///
+    /// `payload_length` が 0 の Object と status 付き Object では呼ばない
+    /// (`try_decode_object` がそのまま次の Object へ進める)。
+    ///
+    /// いずれかを満たさない場合は `Err(ProtocolViolation)` を返し、状態とバッファは変えない。
     pub fn consume_payload(&mut self, length: u64) -> Result<(), MessageError> {
         match self.state {
             SubgroupDecoderState::ConsumingPayload { remaining } => {
                 if length != remaining {
                     return Err(MessageError::ProtocolViolation(
                         "consumed payload length does not match remaining",
+                    ));
+                }
+                if !self.buffer.is_empty() {
+                    return Err(MessageError::ProtocolViolation(
+                        "consume_payload called with a non-empty buffer",
                     ));
                 }
                 self.state = SubgroupDecoderState::AwaitingObject;
@@ -503,8 +520,10 @@ const FETCH_GROUP_ORDER_DESCENDING: u8 = 0x02;
 /// End of Group / End of Track は ID フィールドを持たないため、直前の解決済み Group ID を
 /// 引き継ぎ、prior Object ID を `2^64 - 1` にする (§11.4.2.2 (Prior Object Fields))。
 ///
-/// ペイロードはデコーダの責務外。`try_decode_entry` が返す `payload_length` バイト分を
-/// 呼び出し側がバッファから消費した後、`consume_payload` を呼んで次のエントリに進む。
+/// ペイロードはデコーダの責務外。`try_decode_entry` が返す Object の `payload_length`
+/// バイト分を呼び出し側が外部で読み出した後、デコーダのバッファが空の状態で
+/// `consume_payload` を呼んで次のエントリに進む。バッファ内のペイロードは
+/// `try_read_payload` で読み出す (この場合は `consume_payload` を呼ばない)。
 ///
 /// # 使い方 (検証対象外の疑似コード)
 ///
@@ -524,9 +543,10 @@ const FETCH_GROUP_ORDER_DESCENDING: u8 = 0x02;
 /// loop {
 ///     match decoder.try_decode_entry()? {
 ///         Some(DecodedFetchEntry::Object(obj)) => {
-///             // payload_length バイト分のペイロードを読み出す
+///             // payload_length バイト分をデコーダのバッファとは別に読み出し、
+///             // バッファが空であることを確認する
 ///             // ...
-///             decoder.consume_payload(obj.payload_length);
+///             decoder.consume_payload(obj.payload_length)?;
 ///         }
 ///         Some(_) => { /* EndOfRange / EndOfGroup / EndOfTrack エントリ */ }
 ///         None => {
@@ -676,7 +696,8 @@ impl FetchStreamDecoder {
     ///
     /// - `Ok(Some(entry))` — デコード成功。group_id / subgroup_id / object_id は絶対値に解決済み。
     ///   Object エントリの場合、呼び出し側は `payload_length` バイト分のペイロードを
-    ///   バッファから読み出した後 `consume_payload` を呼ぶこと。
+    ///   外部で読み出した後、バッファが空の状態で `consume_payload` を呼ぶこと。
+    ///   バッファ内のペイロードは `try_read_payload` で読み出す。
     ///   Object エントリの Object Properties は `properties_bytes` に保持される。
     ///   EndOfRange / EndOfGroup / EndOfTrack エントリの場合、`consume_payload` は不要。
     ///   EndOfGroup / EndOfTrack は marker 自身が ID フィールドを持たないため、
@@ -1168,21 +1189,35 @@ impl FetchStreamDecoder {
         }
     }
 
-    /// ペイロードの消費を通知する
+    /// 外部で読み出したペイロードの消費を通知する
     ///
-    /// `try_decode_entry` が返した Object エントリの `payload_length` バイト分を
-    /// 呼び出し側が外部で読み出した場合に呼ぶ。
-    /// バッファ内のペイロードを読み出す場合は `try_read_payload` を使う。
+    /// `try_decode_entry` が返した Object エントリの `payload_length` バイト分を、呼び出し側が
+    /// デコーダのバッファとは別の場所から読み出した場合に呼ぶ。デコーダのバッファに
+    /// ペイロードが残っている状態で呼んではならない。バッファ内のペイロードを読み出す場合は
+    /// [`Self::try_read_payload`] を使う。
     ///
-    /// `length` は消費したバイト数。
-    /// `payload_length` と一致しない、または `ConsumingPayload` 状態以外で
-    /// 呼ばれた場合は `Err(ProtocolViolation)` を返し、状態は変わらない。
+    /// 呼び出し時に次をすべて満たす必要がある。
+    ///
+    /// - 状態が `ConsumingPayload` である
+    /// - `length` が残りのペイロード長と一致する
+    /// - デコーダのバッファが空である
+    ///
+    /// End of Range / End of Group / End of Track の marker エントリと
+    /// `payload_length` が 0 の Object では呼ばない (`try_decode_entry` がそのまま
+    /// 次のエントリへ進める)。
+    ///
+    /// いずれかを満たさない場合は `Err(ProtocolViolation)` を返し、状態とバッファは変えない。
     pub fn consume_payload(&mut self, length: u64) -> Result<(), MessageError> {
         match self.state {
             FetchDecoderState::ConsumingPayload { remaining } => {
                 if length != remaining {
                     return Err(MessageError::ProtocolViolation(
                         "consumed payload length does not match remaining",
+                    ));
+                }
+                if !self.buffer.is_empty() {
+                    return Err(MessageError::ProtocolViolation(
+                        "consume_payload called with a non-empty buffer",
                     ));
                 }
                 self.state = FetchDecoderState::AwaitingEntry;
