@@ -5334,9 +5334,13 @@ fn stop_sending_error_code_is_reported_for_stopped_subgroup() {
 
 /// 未知の outgoing stream への STOP_SENDING はセッションを閉じずに拒否される
 ///
-/// I/O 層は STOP_SENDING の受信を終端通知より先に渡す契約だが、終端済みの stream へ
-/// 遅延して届く場合がある。Session はこの経路で `fail()` を呼ばず、example が該当
-/// ストリームの終端として吸収できることを固定する。
+/// I/O 層が STOP_SENDING の観測を終端通知より先に渡す順序は保証されない。終端通知が
+/// 先に届いた stream への STOP_SENDING は、Session が終端時に保持した識別情報から
+/// 再オープン禁止を記録して `Ok(())` で吸収する
+/// (`stop_sending_after_data_stream_closed_records_reopen_prohibition` を参照)。
+/// 一度も開いていない stream id は保持情報も無いため、従来どおり拒否される。
+/// Session はこの経路で `fail()` を呼ばず、example が該当ストリームの終端として吸収できる
+/// ことを固定する。
 #[test]
 fn recv_data_stream_stop_sending_for_unknown_stream_does_not_close_session() {
     let (_client, mut server, _rid) = establish_subscribe_track(843);
@@ -5348,6 +5352,77 @@ fn recv_data_stream_stop_sending_for_unknown_stream_does_not_close_session() {
         server.state(),
         SessionState::Established,
         "セッションは閉じないこと"
+    );
+}
+
+/// `forget_subscription` は再オープン禁止と終端済み stream の保持情報を同時に破棄する
+///
+/// 保持情報の寿命を既存の再オープン禁止エントリと揃える契約を、破棄前後で後着の
+/// STOP_SENDING の扱いが変わることで固定する。破棄前は自動 reset 済みの stream id を
+/// 保持情報から吸収し、破棄後は一度も開いていない stream と同じく拒否する
+/// (セッションは閉じない)。
+#[test]
+fn forget_subscription_discards_terminated_outgoing_subgroup_retention() {
+    let alias = 848u64;
+    let (_client, mut server, rid) = establish_paused_subscription(alias);
+    let header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 5,
+        subgroup_id: SubgroupIdMode::Explicit(3),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    let stream_id = DataStreamId(102);
+    server
+        .send_subgroup_header(stream_id, rid, &header)
+        .expect("header の送信に成功すること");
+
+    // subscriber が bidi request stream を RESET_STREAM で cancel する。open な outgoing
+    // subgroup stream は Session が自動 reset し
+    // (`reset_open_outgoing_subgroup_streams`)、終端済み stream の保持情報が残る。
+    server
+        .recv_request_stream_closed(
+            rid,
+            RequestStreamEnd::Reset {
+                error_code: Some(0x1),
+                reliable_size: None,
+            },
+        )
+        .expect("request stream の終端通知に成功すること");
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated,
+        "cancel で subscription が Terminated になること"
+    );
+
+    // 自動 reset 後の後着 STOP_SENDING は保持情報から再オープン禁止を記録し Ok で吸収される
+    server
+        .recv_data_stream_stop_sending(stream_id, Some(0x1))
+        .expect("自動 reset 済み stream への STOP_SENDING は Ok で吸収されること");
+    assert_eq!(
+        server.stopped_outgoing_subgroup_error_code(rid, alias, 5, Some(3)),
+        Some(Some(0x1)),
+        "自動 reset 経路でも保持情報から停止エントリを記録すること"
+    );
+
+    // subscription の破棄で停止エントリと保持情報をまとめて破棄する
+    assert!(
+        server.forget_subscription(rid).is_some(),
+        "Terminated 後の subscription を破棄できること"
+    );
+    let err = server
+        .recv_data_stream_stop_sending(stream_id, Some(0x1))
+        .expect_err("破棄後は保持情報も残らないこと");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "未知 stream の拒否でセッションを閉じないこと"
     );
 }
 
@@ -5476,6 +5551,101 @@ fn stop_sending_then_reset_still_blocks_reopen_until_resume() {
     server
         .send_subgroup_header(DataStreamId(65), rid, &header)
         .expect("購読の再開後は再オープンできること");
+}
+
+/// 終端通知が STOP_SENDING の観測より先に届いても再オープン禁止が記録される
+///
+/// I/O 層が STOP_SENDING の観測を終端通知より先に渡す順序は保証されない。アプリが
+/// cancel を検知して `send_data_stream_closed(Reset)` を先に呼んだ場合、後着の
+/// STOP_SENDING は `data_streams.outgoing` に stream が無い。Session は終端時に保持した
+/// `(request_id, track_alias, group_id, subgroup_id)` から再オープン禁止
+/// (`stopped_outgoing_subgroups`) を記録し、`Ok(())` で吸収する。
+///
+/// 購読を再開する REQUEST_UPDATE (PAUSED 1→0) の受理で停止エントリと保持情報が破棄され、
+/// 再オープンできること、破棄後に旧 stream id への STOP_SENDING が未知 stream として
+/// 拒否されること (保持情報の寿命) も固定する。
+/// draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams)。
+#[test]
+fn stop_sending_after_data_stream_closed_records_reopen_prohibition() {
+    let alias = 847u64;
+    let (mut client, mut server, rid) = establish_paused_subscription(alias);
+    let header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 5,
+        subgroup_id: SubgroupIdMode::Explicit(3),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    let stream_id = DataStreamId(100);
+    server
+        .send_subgroup_header(stream_id, rid, &header)
+        .expect("header の送信に成功すること");
+
+    // 終端通知 (RESET) が先。アプリが cancel を検知して自分の writer を終端した経路である
+    server
+        .send_data_stream_closed(
+            stream_id,
+            RequestStreamEnd::Reset {
+                error_code: Some(DataStreamResetReason::Cancelled.error_code()),
+                reliable_size: None,
+            },
+        )
+        .expect("終端通知に成功すること");
+
+    // 後着の STOP_SENDING は保持情報から再オープン禁止を記録し、Ok(()) で吸収される
+    server
+        .recv_data_stream_stop_sending(stream_id, Some(0x1))
+        .expect("終端済み stream への STOP_SENDING は Ok で吸収されること");
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "終端済み stream への STOP_SENDING でセッションを閉じないこと"
+    );
+    assert_eq!(
+        server.stopped_outgoing_subgroup_error_code(rid, alias, 5, Some(3)),
+        Some(Some(0x1)),
+        "保持情報から (track_alias, group_id, subgroup_id) を復元して停止エントリを記録すること"
+    );
+    assert!(
+        server.outgoing_subgroup_reopen_blocked(alias, 5, Some(3)),
+        "後着の STOP_SENDING でも再オープン禁止が記録されること"
+    );
+
+    // 購読の再開前の再オープンは拒否され、セッションは閉じない
+    let err = server
+        .send_subgroup_header(DataStreamId(101), rid, &header)
+        .unwrap_err();
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(server.state(), SessionState::Established);
+
+    // PAUSED 1→0 の REQUEST_UPDATE 受理で停止エントリと保持情報が破棄され、再オープンできる
+    resume_subscription(&mut client, &mut server, rid);
+    assert_eq!(
+        server.stopped_outgoing_subgroup_error_code(rid, alias, 5, Some(3)),
+        None,
+        "購読の再開で停止エントリが破棄されること"
+    );
+    assert!(
+        !server.outgoing_subgroup_reopen_blocked(alias, 5, Some(3)),
+        "購読の再開で再オープン禁止が解除されること"
+    );
+    server
+        .send_subgroup_header(DataStreamId(101), rid, &header)
+        .expect("購読の再開後は再オープンできること");
+
+    // 保持情報も停止エントリと同じ契機で破棄されているため、旧 stream id への後着の
+    // STOP_SENDING は未知 stream として拒否される (セッションは閉じない)
+    let err = server
+        .recv_data_stream_stop_sending(stream_id, Some(0x1))
+        .expect_err("購読の再開後は旧 stream id の保持情報も残らないこと");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "未知 stream の拒否でセッションを閉じないこと"
+    );
 }
 
 /// FirstObjectId の subgroup_id 解決経路でも購読の再開まで再オープンできない

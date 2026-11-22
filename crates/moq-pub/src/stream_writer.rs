@@ -14,6 +14,7 @@ use shiguredo_moqt::{
 };
 
 use crate::error::{Error, Result};
+use tokio_moq::error::TransportError;
 use tokio_moq::moqt_client::{DataPlaneHandle, ObjectFilterOutcome};
 use tokio_moq::transport;
 
@@ -283,6 +284,63 @@ impl SubgroupWriter {
         }
     }
 
+    /// peer の STOP_SENDING に起因する transport エラーかどうか
+    ///
+    /// `TransportError::StreamReset` は peer の STOP_SENDING により送信 API が
+    /// 失敗したことを表す。`TransportError::StreamClosed` は driver が台帳に peer の
+    /// コードを持たないままストリームを閉じていた場合の拒否であり、同じく peer が
+    /// 当該ストリームを終端した結果として現れる
+    /// (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))。
+    /// どちらも当該ストリームだけの終端であり、セッションは継続する。
+    fn is_peer_stream_termination(error: &TransportError) -> bool {
+        matches!(
+            error,
+            TransportError::StreamReset { .. } | TransportError::StreamClosed
+        )
+    }
+
+    /// peer が終端したストリームを Session へ通知する (ベストエフォート)
+    ///
+    /// `write_object` / `finish` / `reset_by_session` が STOP_SENDING に起因する
+    /// transport エラーで失敗した場合、アプリが `send_data_stream_closed` を呼ばないまま
+    /// writer を捨てると Session の追跡が終端されず、保留中の PUBLISH_DONE の flush 条件
+    /// (全 outgoing stream の終端) が満たされない。失敗を返す前にこの通知を行い、追跡を
+    /// 終端する。
+    ///
+    /// 通知する終端は `RequestStreamEnd::Reset` で、`error_code` / `reliable_size` は `None`
+    /// にする。peer が載せた STOP_SENDING のコードは別経路
+    /// (`MoqtClient::pump_once` 経由の `Session::recv_data_stream_stop_sending`) で観測され、
+    /// 後着の観測が `stopped_outgoing_subgroups` に remap 後のコードを記録するため、
+    /// ここでは確定したコードを主張しない。
+    ///
+    /// 通知自体の失敗 (セッション終了・既に終端済みの stream id など) は無視する。
+    /// 呼び出し元は元の transport エラーを返す。
+    fn notify_peer_stream_termination(&self) {
+        if let Err(e) = self.data_plane.send_data_stream_closed(
+            self.stream_id,
+            RequestStreamEnd::Reset {
+                error_code: None,
+                reliable_size: None,
+            },
+        ) {
+            tracing::debug!(
+                "failed to notify the session of the peer-terminated subgroup stream: stream_id={}, error={e}",
+                self.stream_id.0,
+            );
+        }
+    }
+
+    /// ストリーム操作の transport エラーを分類し、peer の終端なら Session へ通知する
+    ///
+    /// peer の終端を表すエラーの場合だけ [`SubgroupWriter::notify_peer_stream_termination`]
+    /// を呼び、元の transport エラーを [`Error`] に変換して返す。
+    fn stream_operation_error(&self, error: TransportError) -> Error {
+        if Self::is_peer_stream_termination(&error) {
+            self.notify_peer_stream_termination();
+        }
+        error.into()
+    }
+
     /// オブジェクトを書き込む
     ///
     /// LOC プロパティとペイロードを含むオブジェクトをストリームに書き込む。
@@ -307,6 +365,12 @@ impl SubgroupWriter {
     /// 返り値の `ObjectFilterOutcome::Pass` はワイヤへ送信したこと、`Skip` はフィルタ
     /// 不通過で送信しなかったことを示す。呼び出し側は `Skip` をスキップとして扱い、
     /// 送信を継続する (その他のエラーは伝播する)。
+    ///
+    /// ワイヤ送信が peer の STOP_SENDING に起因する `TransportError::StreamReset` /
+    /// `TransportError::StreamClosed` で失敗した場合は、エラーを返す前に
+    /// [`SubgroupWriter::notify_peer_stream_termination`] で Session へ終端
+    /// (`RequestStreamEnd::Reset`) を通知する。通知自体の失敗は無視し、元の transport
+    /// エラーを返す。
     ///
     /// 検証 (手動): OBJECT_PROPERTY_FILTER 付きの subscription に対して、
     /// フィルタ外のオブジェクトが subscriber に届かず publisher が生存すること、
@@ -349,7 +413,9 @@ impl SubgroupWriter {
         if let Some(first_object) = self.object_state.on_pass()? {
             let header = self.build_header(first_object);
             let encoded = header.encode();
-            self.stream.send(Bytes::from(encoded)).await?;
+            if let Err(e) = self.stream.send(Bytes::from(encoded)).await {
+                return Err(self.stream_operation_error(e));
+            }
         }
 
         let obj = SubgroupObject {
@@ -362,7 +428,9 @@ impl SubgroupWriter {
         obj.encode(self.has_properties, properties_data.as_deref(), &mut buf)?;
         buf.extend_from_slice(payload);
 
-        self.stream.send(Bytes::from(buf)).await?;
+        if let Err(e) = self.stream.send(Bytes::from(buf)).await {
+            return Err(self.stream_operation_error(e));
+        }
 
         Ok(ObjectFilterOutcome::Pass)
     }
@@ -399,6 +467,12 @@ impl SubgroupWriter {
     /// draft は配送可能な Object が無い Subgroup を SUBGROUP_HEADER + RESET_STREAM_AT で通知する
     /// ことを MAY で示すが、example の transport API に RESET_STREAM_AT が無いためヘッダを送らず
     /// RESET_STREAM で代替する。
+    ///
+    /// ワイヤの終端 (`reset` / `finish`) が peer の STOP_SENDING に起因する
+    /// `TransportError::StreamReset` / `TransportError::StreamClosed` で失敗した場合は、
+    /// エラーを返す前に [`SubgroupWriter::notify_peer_stream_termination`] で Session へ終端
+    /// (`RequestStreamEnd::Reset`) を通知する。通知自体の失敗は無視し、元の transport
+    /// エラーを返す。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub async fn finish(mut self, current_start_location: Option<Location>) -> Result<()> {
         let termination = self.object_state.termination(current_start_location);
@@ -416,7 +490,9 @@ impl SubgroupWriter {
         // (`transport::SendStream` を要求する分岐そのものは example の単体テストから観測できない)
         match termination.reset_error_code() {
             Some(error_code) => {
-                self.stream.reset(error_code, None).await?;
+                if let Err(e) = self.stream.reset(error_code, None).await {
+                    return Err(self.stream_operation_error(e));
+                }
                 self.data_plane.send_data_stream_closed(
                     self.stream_id,
                     RequestStreamEnd::Reset {
@@ -426,7 +502,9 @@ impl SubgroupWriter {
                 )?;
             }
             None => {
-                self.stream.finish().await?;
+                if let Err(e) = self.stream.finish().await {
+                    return Err(self.stream_operation_error(e));
+                }
                 self.data_plane
                     .send_data_stream_closed(self.stream_id, RequestStreamEnd::Fin)?;
             }
@@ -449,6 +527,13 @@ impl SubgroupWriter {
     /// draft は RESET_STREAM_AT も認めるが、example の transport API に RESET_STREAM_AT が無いため
     /// `reliable_size` は使わず RESET_STREAM で代替する (`Session` 自身も自動発火の reset では
     /// `reliable_size: None` を渡す)。
+    ///
+    /// ワイヤの reset が peer の STOP_SENDING に起因する `TransportError::StreamReset` /
+    /// `TransportError::StreamClosed` で失敗した場合は、エラーを返す前に
+    /// [`SubgroupWriter::notify_peer_stream_termination`] で Session へ終端
+    /// (`RequestStreamEnd::Reset`) を通知する。通知自体の失敗は無視し、元の transport
+    /// エラーを返す (`ResetTracking::Removed` で既に追跡が除去されている場合もあり、
+    /// その場合の通知は未知 stream id として失敗するが無視される)。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub async fn reset_by_session(
         mut self,
@@ -464,7 +549,9 @@ impl SubgroupWriter {
             reliable_size,
             tracking,
         );
-        self.stream.reset(error_code, reliable_size).await?;
+        if let Err(e) = self.stream.reset(error_code, reliable_size).await {
+            return Err(self.stream_operation_error(e));
+        }
         // 配送 timeout の reset は Session が stream 追跡を残しているため、終端を通知して
         // 保留 PUBLISH_DONE の flush を進める。アプリ起点の reset は Session 側で既に
         // 追跡を除去済みであり、通知すると未知 stream id になる

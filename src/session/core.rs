@@ -50,7 +50,7 @@ use crate::track_properties::TrackProperties;
 use crate::stream::SETUP_STREAM_TYPE;
 
 use super::auth_token_cache::AuthTokenCache;
-use super::data::{IncomingDataStream, OutgoingDataStream};
+use super::data::{IncomingDataStream, OutgoingDataStream, TerminatedOutgoingSubgroup};
 use super::request_id::{RequestIdGenerator, RequestIdTracker};
 use super::subscription::dispatch::SubscriptionOkResponse;
 use super::types::{
@@ -259,6 +259,24 @@ pub(super) fn range_filter_usage(parameters: &MessageParameters) -> (bool, u64) 
 pub(super) struct DataStreamState {
     pub(super) incoming: HashMap<DataStreamId, IncomingDataStream>,
     pub(super) outgoing: HashMap<DataStreamId, OutgoingDataStream>,
+    /// 終端済み subgroup stream の識別情報 (stream_id → 識別情報)
+    ///
+    /// STOP_SENDING の観測 (`Session::recv_data_stream_stop_sending`) は、I/O 層の契約上
+    /// 終端通知 (`Session::send_data_stream_closed`) より後に届きうる
+    /// (draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams) の再オープン禁止を
+    /// 記録する契機を失わないための保持である)。
+    ///
+    /// `outgoing` から除去した stream の `(request_id, track_alias, group_id, subgroup_id)` を
+    /// 残し、後着の STOP_SENDING を `stopped_outgoing_subgroups` へ記録できるようにする。
+    /// 保持期間は `stopped_outgoing_subgroups` と揃え、購読を再開する REQUEST_UPDATE
+    /// (PAUSED 1→0) の受理と [`Session::forget_subscription`] で
+    /// [`Session::discard_outgoing_subgroup_cancel_tracking`] が同時に破棄する。
+    /// 自動 reset (`DataStreamState::auto_reset`) で終端した stream も同じ経路で保持する
+    /// (後着の STOP_SENDING を `Ok(())` で吸収し、再オープン禁止を記録するため)。
+    /// 購読がキャンセルも再開もされないまま長期間続くと、閉じた stream の数だけエントリが
+    /// 増える。これは後着の STOP_SENDING を再オープン禁止へ写像するために必要な情報であり、
+    /// 再オープン禁止エントリと同じ契機 (再開 / 破棄) まで保持する設計である。
+    pub(super) terminated_outgoing_subgroups: HashMap<DataStreamId, TerminatedOutgoingSubgroup>,
     /// 自端点が送信中の FETCH data stream (draft §11.4.1 (Fetch Header))
     ///
     /// FETCH_HEADER は Request ID のみを持ち subgroup stream とフィールド構成が異なるため、
@@ -795,6 +813,7 @@ impl Session {
             data_streams: DataStreamState {
                 incoming: HashMap::new(),
                 outgoing: HashMap::new(),
+                terminated_outgoing_subgroups: HashMap::new(),
                 outgoing_fetch: HashMap::new(),
                 outgoing_fill: HashMap::new(),
                 discarded: HashMap::new(),

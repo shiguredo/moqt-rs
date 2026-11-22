@@ -1443,6 +1443,56 @@ fn pending_publish_done_flushed_on_data_stream_closed_reset() {
     );
 }
 
+/// `send_data_stream_closed(Reset)` で PUBLISH_DONE を flush した後でも、後着の
+/// STOP_SENDING を保持情報から吸収して再オープン禁止を記録する
+///
+/// I/O 層が STOP_SENDING の観測を終端通知より先に渡す順序は保証されない。アプリが
+/// cancel を検知して `send_data_stream_closed(Reset)` を先に呼ぶと、保留 PUBLISH_DONE の
+/// flush (§9.5.1 の MUST) はその時点で完了するが、STOP_SENDING の観測は後から届きうる。
+/// Session は終端時に保持した識別情報
+/// (`DataStreamState::terminated_outgoing_subgroups`) から停止エントリを記録し、
+/// 未知 stream の `SESSION_PROTOCOL_VIOLATION` にしない。
+/// draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams)。
+#[test]
+fn late_stop_sending_after_publish_done_flush_is_absorbed() {
+    let (mut server, rid, stream_ids) = establish_publisher_with_pending_publish_done(&[0]);
+    let stream_id = stream_ids[0];
+    let error_code = DataStreamResetReason::Cancelled.error_code();
+    server
+        .send_data_stream_closed(
+            stream_id,
+            RequestStreamEnd::Reset {
+                error_code: Some(error_code),
+                reliable_size: None,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        count_publish_done(&drain_events(&mut server)),
+        1,
+        "終端通知で保留 PUBLISH_DONE が flush されること"
+    );
+
+    // 後着の STOP_SENDING。終端通知が先でも保持情報から停止エントリを記録する
+    server
+        .recv_data_stream_stop_sending(stream_id, Some(error_code))
+        .expect("終端済み stream への後着 STOP_SENDING は Ok で吸収されること");
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "後着の STOP_SENDING でセッションを閉じないこと"
+    );
+    assert_eq!(
+        server.stopped_outgoing_subgroup_error_code(rid, 1, 0, None),
+        Some(Some(error_code)),
+        "保持情報から FirstObjectId の停止エントリを記録すること"
+    );
+    assert!(
+        server.outgoing_subgroup_reopen_blocked(1, 0, None),
+        "後着の STOP_SENDING でも再オープン禁止が記録されること"
+    );
+}
+
 /// open 中の outgoing stream が残っている間は `send_data_stream_closed(Reset)` でも
 /// PUBLISH_DONE を送らず、最後の 1 本を閉じたときに 1 回だけ送る
 ///

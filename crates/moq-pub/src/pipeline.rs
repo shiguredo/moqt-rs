@@ -1523,6 +1523,11 @@ pub async fn run(
                                     .await;
                                 if let Err(e) = write_result.and(finish_result) {
                                     if is_peer_stream_reset(&e) {
+                                        // writer の `write_object` / `finish` は、peer の
+                                        // STOP_SENDING に起因する失敗を返す前に Session へ
+                                        // 終端 (`send_data_stream_closed(Reset)`) を通知済み
+                                        // である。ここで writer を捨てても Session の追跡は
+                                        // 終端され、保留 PUBLISH_DONE の flush 条件を満たす
                                         tracing::info!(
                                             "Peer video stream was reset by peer; dropping the subscription: request_id={}",
                                             peer.request_id
@@ -1539,6 +1544,10 @@ pub async fn run(
                             };
                             if let Err(e) = writer.write_object(&ef.data, &properties).await {
                                 if is_peer_stream_reset(&e) {
+                                    // `write_object` は STOP_SENDING に起因する失敗を返す前に
+                                    // Session へ終端を通知済みである。writer を捨てても Session
+                                    // の追跡は終端され、後着の STOP_SENDING 観測が再オープン
+                                    // 禁止を記録する
                                     tracing::info!(
                                         "Peer video stream was reset by peer; dropping the subscription: request_id={}",
                                         peer.request_id
@@ -1568,7 +1577,10 @@ pub async fn run(
                         // writer を捨て、次の group id へ進める。STOP_SENDING を受けた
                         // Subgroup の再オープンは購読を再開する REQUEST_UPDATE (PAUSED 1→0) の受理まで
                         // 禁止されるため、同じ group id (この example は subgroup id 0 固定) を
-                        // 使うと `send_subgroup_header` が拒否される
+                        // 使うと `send_subgroup_header` が拒否される。
+                        // writer の `write_object` / `finish` は、失敗を返す前に Session へ終端
+                        // (`send_data_stream_closed(Reset)`) を通知済みである。writer を捨てても
+                        // Session の追跡は終端され、保留 PUBLISH_DONE の flush 条件を満たす
                         current_video_writer = None;
                         if config.stream_mapping == StreamMapping::Group {
                             video_group_id = group_id::next_group_id(video_group_id)?;
@@ -1978,6 +1990,9 @@ pub async fn run(
                                     }
                                     Err(e) => {
                                         if is_peer_stream_reset(&e) {
+                                            // datagram は Session の outgoing stream 追跡
+                                            // (`data_streams.outgoing`) を持たないため、
+                                            // 終端通知 (`send_data_stream_closed`) の対象外である
                                             tracing::info!(
                                                 "Peer audio datagram was reset by peer; dropping the subscription: request_id={}",
                                                 peer.request_id
@@ -2024,6 +2039,9 @@ pub async fn run(
                                         if let Some(e) = write_error.or(finish_error)
                                         {
                                             if is_peer_stream_reset(&e) {
+                                                // writer の `write_object` / `finish` は、失敗を
+                                                // 返す前に Session へ終端を通知済みである。writer を
+                                                // 捨てても Session の追跡は終端される
                                                 tracing::info!(
                                                     "Peer audio stream was reset by peer; dropping the subscription: request_id={}",
                                                     peer.request_id
@@ -2064,7 +2082,9 @@ pub async fn run(
                     Err(e) if is_peer_stream_reset(&e) => {
                         // peer が音声の subgroup stream を cancel した (§11.3.2)。該当ストリーム
                         // だけを終端し、次のフレームから新しい group で再開する。同じ group id を
-                        // 使うと再オープン禁止で拒否されるため、通常経路と同じくここで進める
+                        // 使うと再オープン禁止で拒否されるため、通常経路と同じくここで進める。
+                        // この分岐に届く writer の `write_object` / `finish` は、失敗を返す前に
+                        // Session へ終端を通知済みであり、writer を捨てても追跡は終端される
                         audio_group_id = group_id::next_group_id(audio_group_id)?;
                         tracing::info!(
                             "Audio subgroup stream was reset by peer; continuing with the next frame"
@@ -3166,7 +3186,10 @@ pub async fn run(
                     }
                     Err(e) if is_peer_stream_reset(&e) => {
                         // peer がカタログの Subgroup stream を cancel した。送信前に採番は
-                        // 進めてあるため、同じ Location を再送せず次の間隔で送り直す
+                        // 進めてあるため、同じ Location を再送せず次の間隔で送り直す。
+                        // `catalog::publish_catalog_object` 内の writer の `write_object` /
+                        // `finish` は、失敗を返す前に Session へ終端を通知済みであり、
+                        // writer を捨てても Session の追跡は終端される
                         tracing::info!("Catalog subgroup stream was reset by peer; continuing");
                     }
                     Err(e) => {

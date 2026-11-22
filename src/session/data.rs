@@ -256,6 +256,21 @@ pub(super) struct OutgoingFetchStream {
     pub(super) range: Option<(Location, Location)>,
 }
 
+/// 終端済み subgroup stream の識別情報
+///
+/// STOP_SENDING の観測が終端通知より後に届いても再オープン禁止
+/// (`DataStreamState::stopped_outgoing_subgroups`) を記録できるよう、`data_streams.outgoing`
+/// から除去した stream の識別子を保持する。保持期間と破棄箇所は
+/// [`Session::discard_outgoing_subgroup_cancel_tracking`] を参照する。
+#[derive(Debug, Clone, Copy)]
+pub(super) struct TerminatedOutgoingSubgroup {
+    pub(super) request_id: u64,
+    pub(super) track_alias: u64,
+    pub(super) group_id: u64,
+    /// FirstObjectId モードの未解決 subgroup_id は `None` で保持する
+    pub(super) subgroup_id: Option<u64>,
+}
+
 /// 自端点が送信中の uni subgroup data stream の内部状態
 ///
 /// draft-ietf-moq-transport-23 §6.4.1 Table 2 は data stream を SUBGROUP_HEADER /
@@ -1040,6 +1055,18 @@ impl Session {
             request_id,
             ..
         } = stream;
+        // 後着の STOP_SENDING を再オープン禁止へ写像できるよう、終端した stream の識別情報を
+        // 保持する。破棄は `stopped_outgoing_subgroups` と同じ契機
+        // (購読を再開する REQUEST_UPDATE の受理 / `forget_subscription`) で行う
+        self.data_streams.terminated_outgoing_subgroups.insert(
+            stream_id,
+            TerminatedOutgoingSubgroup {
+                request_id,
+                track_alias,
+                group_id,
+                subgroup_id,
+            },
+        );
         // SUBGROUP_DELIVERY_TIMEOUT: subgroup stream の FIN 検出時にタイマーを開始する
         // draft-ietf-moq-transport-23 §5.2 (Delivery Timeouts and Data Reliability): subgroup stream が
         // FIN で終了した場合、SUBGROUP_DELIVERY_TIMEOUT のタイマーを開始し、
@@ -1169,9 +1196,14 @@ impl Session {
     /// 反映し、あわせて Session の再オープン禁止エントリ (`stopped_outgoing_subgroups`) に
     /// 記録する (draft-ietf-moq-transport-23 §11.3.2)。購読を再開する REQUEST_UPDATE
     /// (PAUSED が 1 から 0 へ変わる) が受理されるまで送信 API が再オープンを拒否する。
-    /// 既に `send_data_stream_closed` で終端済みの stream への `STOP_SENDING` は
-    /// unknown outgoing stream として拒否され、禁止エントリも記録されない
-    /// (I/O 層は STOP_SENDING の受信を終端通知より先に渡す契約)。
+    ///
+    /// I/O 層が STOP_SENDING の受信を終端通知より先に渡す順序は保証されない。終端通知
+    /// (`Session::send_data_stream_closed`) が先に届いた場合は `data_streams.outgoing` から
+    /// 既に除去されているため、`Session::close_outgoing_subgroup_stream` が保持した
+    /// `data_streams.terminated_outgoing_subgroups` の識別情報から再オープン禁止を記録する
+    /// (この経路も `Ok(())` で吸収する)。保持情報も無い stream id は一度も開いていない
+    /// stream であり、従来どおり `SESSION_PROTOCOL_VIOLATION` を返す (セッションは閉じない)。
+    ///
     /// local endpoint がまだ FIN / RESET を流していない可能性があるため、
     /// open stream 集合からは即時には除去しない。
     /// fill fetch stream に対する `STOP_SENDING` は subscriber による独立 cancel であり
@@ -1201,8 +1233,13 @@ impl Session {
             self.maybe_flush_pending_publish_done(request_id);
             return Ok(());
         }
-        let Some((request_id, track_alias, group_id, subgroup_id)) =
-            self.data_streams.outgoing.get(&stream_id).map(|stream| {
+        // open 中の stream を優先する。終端通知が先に届いた場合は、終端時に保持した識別情報
+        // (`terminated_outgoing_subgroups`) から同じ判定に使う 4 値を得る。
+        let stream_info = self
+            .data_streams
+            .outgoing
+            .get(&stream_id)
+            .map(|stream| {
                 (
                     stream.request_id,
                     stream.track_alias,
@@ -1210,7 +1247,20 @@ impl Session {
                     stream.subgroup_id,
                 )
             })
-        else {
+            .or_else(|| {
+                self.data_streams
+                    .terminated_outgoing_subgroups
+                    .get(&stream_id)
+                    .map(|stream| {
+                        (
+                            stream.request_id,
+                            stream.track_alias,
+                            stream.group_id,
+                            stream.subgroup_id,
+                        )
+                    })
+            });
+        let Some((request_id, track_alias, group_id, subgroup_id)) = stream_info else {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "STOP_SENDING received for unknown outgoing data stream id",
@@ -1222,6 +1272,8 @@ impl Session {
         // (PAUSED が 1 から 0 へ変わる) の受理まで解除しない。
         // FirstObjectId の未解決 subgroup は `None` で記録する。
         // peer が載せたエラーコードも同時に保持し、cancel の理由を参照できるようにする。
+        // 終端済み stream の経路でも、終端時に `mark_reset` / `mark_fin` 済みの tracker へ
+        // 後勝ちで `StoppedByPeer` を反映する (`mark_stop_sending` は ClosedFin を上書きしない)。
         self.stopped_outgoing_subgroups
             .entry(request_id)
             .or_default()
@@ -1231,6 +1283,23 @@ impl Session {
                 .mark_stop_sending(track_alias, group_id, subgroup_id);
         }
         Ok(())
+    }
+
+    /// STOP_SENDING による再オープン禁止と、その判定に使う終端済み stream の保持情報を
+    /// まとめて破棄する
+    ///
+    /// `stopped_outgoing_subgroups` と `data_streams.terminated_outgoing_subgroups` は
+    /// 「STOP_SENDING を受けた Subgroup の再オープン禁止」という同一の状態を表すため、
+    /// 保持期間を揃えて必ず同時に破棄する。呼び出し元は購読を再開する REQUEST_UPDATE
+    /// (PAUSED 1→0) の受理 (`Session::send_ok_for_subscription` の適用) と
+    /// [`Session::forget_subscription`] である。
+    /// 保持情報だけが残ると、破棄済み subscription の終端 stream への STOP_SENDING を
+    /// 誤って吸収しうるため、片方だけの破棄は行わない。
+    pub(super) fn discard_outgoing_subgroup_cancel_tracking(&mut self, request_id: u64) {
+        self.stopped_outgoing_subgroups.remove(&request_id);
+        self.data_streams
+            .terminated_outgoing_subgroups
+            .retain(|_, stream| stream.request_id != request_id);
     }
 
     /// STOP_SENDING で再オープン禁止になった outgoing Subgroup のエラーコードを返す
@@ -1244,7 +1313,10 @@ impl Session {
     /// alias を共有する別 request のエントリも照合するため、本 API が `None` を返しても
     /// 再オープンが禁止されている場合がある。
     /// エントリは購読を再開する REQUEST_UPDATE の受理または
-    /// `Session::forget_subscription` で破棄される。
+    /// `Session::forget_subscription` で破棄される。後着の STOP_SENDING を本エントリへ
+    /// 写像するための終端済み stream の保持情報
+    /// (`data_streams.terminated_outgoing_subgroups`) も同じ契機で破棄される
+    /// (`Session::discard_outgoing_subgroup_cancel_tracking`)。
     pub fn stopped_outgoing_subgroup_error_code(
         &self,
         request_id: u64,

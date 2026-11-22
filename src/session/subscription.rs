@@ -227,8 +227,10 @@ impl Session {
         // REQUEST_UPDATE 起因の fill fetch stream の Request ID 対応も破棄する
         // (draft-ietf-moq-transport-23 §3.4 (Fill Semantics))
         self.remove_fill_request_subscriptions(request_id);
-        // STOP_SENDING による再オープン禁止エントリも破棄する
-        self.stopped_outgoing_subgroups.remove(&request_id);
+        // STOP_SENDING による再オープン禁止エントリも破棄する。
+        // 後着 STOP_SENDING の写像に使う終端済み stream の保持情報も同じ契機で破棄し、
+        // 保持期間を揃える (`Session::discard_outgoing_subgroup_cancel_tracking`)
+        self.discard_outgoing_subgroup_cancel_tracking(request_id);
         // 自動 reset した stream id の記録も破棄する (request id の再利用時に
         // 無関係な stream の終端通知を吸収しないため)
         self.data_streams

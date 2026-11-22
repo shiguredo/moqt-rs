@@ -137,6 +137,10 @@ impl Session {
             )?;
             return Ok(SubscriptionOkResponse::Rejected);
         }
+        // PAUSED 1→0 (購読の再開) の受理を検出したかどうか。`subscription` の可変借用が
+        // 続いている間は `discard_outgoing_subgroup_cancel_tracking` を呼べないため、
+        // 適用結果だけを退避し、借用が終わってから破棄する。
+        let mut resumed_subscription = false;
         match state {
             // draft §9.3 (REQUEST_OK): PUBLISH_OK context → REQUEST_OK に統一。
             // Pending(Publisher) → Established 遷移
@@ -186,7 +190,10 @@ impl Session {
                         // 現在値が unpaused であることでは解除しない
                         // (PUBLISH_STATE_NOTIFY などの他経路でも解除しない)
                         if subscription.paused && !new_paused {
-                            self.stopped_outgoing_subgroups.remove(&request_id);
+                            // 再オープン禁止と、後着 STOP_SENDING の写像に使う終端済み
+                            // stream の保持情報を同時に破棄する (保持期間を揃える)。
+                            // 実際の破棄は `subscription` の借用が終わった後に行う
+                            resumed_subscription = true;
                         }
                         subscription.paused = new_paused;
                     }
@@ -250,6 +257,12 @@ impl Session {
                     "request_ok (subscription) requires Pending(Publisher) or Established state",
                 ));
             }
+        }
+        if resumed_subscription {
+            // 購読を再開する REQUEST_UPDATE (PAUSED 1→0) の受理。送信待ちの stream が
+            // 再び開けるよう、再オープン禁止と後着 STOP_SENDING の写像に使う保持情報を
+            // 同じ契機で破棄する
+            self.discard_outgoing_subgroup_cancel_tracking(request_id);
         }
         // draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter): LARGEST_OBJECT は actual received 以上でなければならない
         // draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter) /
