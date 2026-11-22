@@ -118,6 +118,7 @@ mod tests {
     use crate::object_properties::{ObjectProperty, ObjectPropertyValue};
     use crate::track_properties::{TrackProperty, TrackPropertyValue};
     use alloc::vec;
+    use alloc::vec::Vec;
 
     /// テスト用の Track Property を 1 つ作る
     fn track_property(prop_type: u64, value: u64) -> TrackProperty {
@@ -234,6 +235,23 @@ mod tests {
             resolve(None, None).expect("property 無しは非圧縮"),
             MsfCompression::None
         );
+    }
+
+    /// Object Properties の生バイト列から 0x78 の有無を判定できること
+    #[test]
+    fn object_properties_have_compression_detects_property() {
+        assert!(!object_properties_have_compression(None));
+        let empty = ObjectProperties::new();
+        let mut encoded = Vec::new();
+        empty.encode(&mut encoded).expect("encode に成功すること");
+        assert!(!object_properties_have_compression(Some(&encoded)));
+        let mut properties = ObjectProperties::new();
+        properties.push(object_property(PROP_MSF_COMPRESSION, 1));
+        let mut encoded = Vec::new();
+        properties
+            .encode(&mut encoded)
+            .expect("encode に成功すること");
+        assert!(object_properties_have_compression(Some(&encoded)));
     }
 
     /// INCLUDE_PROPERTIES=0 でも MSF_COMPRESSION と IMMUTABLE_PROPERTIES を残すこと
