@@ -1,7 +1,7 @@
 # parse_namespace のエラーを長さ超過とフィールド数超過で区別する
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/fix-name-parse-namespace-error
 - Polished: 2026-11-20
 - Refreshed: 2026-11-04
@@ -41,3 +41,16 @@ FIELD_LENGTH_EXCEEDED、32 フィールド超の Track Namespace または 0 バ
 - 既存テストの 33 フィールド (`vec!["a"; 33].join("-")`、合計 33 バイト) は長さ超過を伴わないため、引き続き `Err(NameParseError::InvalidNamespace)` になること。
 - 空フィールド・パーセントエンコーディング・`parse_name` の `FullNameTooLong` の既存テストが変わらず通ること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `NameParseError` に `NamespaceTooLong` を追加し、Display を
+  `namespace is too long (max 4096 bytes)` にした。
+- `parse_namespace` でデコード済みフィールドの合計バイト長を先に検査し、4096 バイト超なら
+  `NamespaceTooLong` を返す。長さ超過とフィールド数超過が同時なら長さ超過を優先する。
+- `tests/test_name.rs` の `namespace_only_parse_errors` に、4096 バイトの成功、
+  4097 バイトの `NamespaceTooLong`、Display 文字列、33 フィールドの `InvalidNamespace`
+  維持を追加した。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`RUSTDOCFLAGS="-D warnings" cargo doc` が成功した。
