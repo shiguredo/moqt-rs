@@ -1,7 +1,7 @@
 # 長寿命購読で増え続ける SubgroupTracker の追跡状態を有界にする
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/refactor-unbounded-state-growth
 - Polished: 2026-11-21
 - Refreshed: 2026-11-04
@@ -74,3 +74,20 @@
   上限・破棄・known limitation が書かれていること。`skills/shiguredo-moqt/SKILL.md` の `SubgroupTracker` の説明も同じ内容に更新されていること。
 - `remove_track_alias` が 3 つの `HashMap` から alias のキーをすべて削除し、alias ごとの件数カウンタも削除すること (同じ alias を再利用しても以前の件数が残らないこと)。
 - 0352 実装済みの現行コードで `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `src/subgroup_tracker.rs` に `MAX_TRACKED_SUBGROUP_KEYS_PER_TRACK_ALIAS` (100,000) を追加した。既存の datagram 追跡エントリ上限と同じ値である。上限は Track Alias ごとに判定する。
+- `SubgroupTracker` に `counts: HashMap<u64, usize>` を追加し、`entries` / `priorities` / `fin_last_object_ids` のキーの和集合の件数を保持する。`known_key` と `note_inserted_key` で、キーが和集合に新規に加わったときだけ件数を増やす。
+- `open` / `mark_fin` / `record_priority` はキーを追加した後に、`mark_reset` / `mark_stop_sending` は `Open` から終端状態へ変わった後に `enforce_limit` を呼ぶ。件数が上限を超えたら `prune_terminal` が当該 alias の終端済みキーを 3 つの表からまとめて破棄する。`Open` のキーは破棄しない。
+- 終端済みキーは、`entries` の値が `Open` 以外のキーと、`entries` に存在しない `priorities` / `fin_last_object_ids` のキーである。`prune_terminal` は重複を除いて削除し、カウンタを削除したキー数だけ減らす。0 になったカウンタは削除する。
+- `remove_track_alias` は 3 つの表のキーに加えて alias ごとのカウンタも削除する。
+- 破棄は検証を確定させた後に行う。破棄されたキーは未知キーとして扱われ、`open` は成功し、`check_object_after_fin` は条件 2 を、`record_priority` は条件 1 を、`mark_fin` は条件 3 の比較を行わない。`mark_reset` / `mark_stop_sending` は no-op になる。この known limitation を `SubgroupTracker` / `fin_last_object_ids` / 各公開メソッドの doc に書いた。
+- `src/subgroup_tracker.rs` に単体テストを追加し、カウンタと和集合の一致、alias ごとの独立性、終端済みキーの破棄、`Open` の保持、破棄後の未知キー扱い、`remove_track_alias` のカウンタ削除を確認した。`tests/test_subgroup_tracker.rs` には、上限ちょうどから 1 件超過したときの破棄と、破棄後の再オープン・優先度初回記録・FIN 再記録を確認する公開テストを追加した。
+- `skills/shiguredo-moqt/SKILL.md` の `SubgroupTracker` の説明に、上限、破棄、`Open` の保持、known limitation を追記した。
+- Lean 検証を `shiguredo/lean` の `moqt-rs/SubgroupTracker/` に追加した。1 つの Track Alias について、件数カウンタとレコード数の一致、操作が不変条件を保つこと、`pruneMap` が `Open` だけを残すこと、上限超過時に `enforce` が `Open` だけを残すこと、破棄されたキーの再オープンを 32 個の定理と 7 個の有限例で確認した。
+
+確認コマンド: `cargo test --workspace`、
+`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、
+`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` が通ることを確認した。
