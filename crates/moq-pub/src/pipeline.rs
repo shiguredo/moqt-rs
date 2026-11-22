@@ -2096,6 +2096,138 @@ async fn send_audio_to_peer_subscriptions(
     Ok(())
 }
 
+struct AudioSendContext<'a> {
+    config: &'a mut Config,
+    namespace: &'a mut TrackNamespace,
+    audio_config_sent: &'a mut bool,
+    media_cache: &'a mut cache::MediaCache,
+    audio_publish_catch_up: &'a mut AudioPublishCatchUp,
+    audio_publish_target: &'a mut Option<PublishTarget>,
+    audio_request_id: &'a mut Option<u64>,
+    audio_group_id: &'a mut u64,
+    handle: &'a mut StreamHandle,
+    data_plane: &'a mut DataPlaneHandle,
+    client: &'a mut MoqtClient,
+}
+
+/// 音声 Object を datagram または stream で送信する
+async fn send_audio_object(
+    context: AudioSendContext<'_>,
+    encoded: &[u8],
+    properties: &LocProperties,
+    send_timestamp_us: i64,
+    send_duration_us: i64,
+    is_reencode: bool,
+) -> Result<()> {
+    let AudioSendContext {
+        config,
+        namespace,
+        audio_config_sent,
+        media_cache,
+        audio_publish_catch_up,
+        audio_publish_target,
+        audio_request_id,
+        audio_group_id,
+        handle,
+        data_plane,
+        client,
+    } = context;
+    let (audio_handle, audio_data_plane) =
+        publish_sink(audio_publish_target.as_ref(), handle, data_plane);
+    if config.audio_datagram {
+        // datagram の送信は完了が返らない (fire-and-forget)。書き込みの
+        // 戻りを完了とみなすため、投入の直前の時刻を控える
+        let queued_wall_clock_ms = wall_clock_now_us()? / 1_000;
+        let mut writer = DatagramWriter::new(
+            audio_handle,
+            audio_data_plane,
+            audio_request_id.expect("audio request_id enabled"),
+            AUDIO_TRACK_ALIAS,
+            *audio_group_id,
+            DEFAULT_PUBLISHER_PRIORITY,
+            config.datagram_max_size,
+            config.audio_redundancy,
+        );
+        let object_location = writer.next_object_location();
+        let outcome = writer.write_object(encoded, properties).await?;
+        if outcome == ObjectFilterOutcome::Pass {
+            *audio_config_sent = true;
+            media_cache.insert(
+                namespace,
+                AUDIO_TRACK_NAME.as_bytes(),
+                object_location,
+                properties,
+                encoded,
+            )?;
+            // 送れなかった Object (フィルタで Skip) は送信のキューへ
+            // 入っていないため記録しない。TIMESTAMP が壁時計でない
+            // (再エンコード) 音も、読んだ時刻との差が遅れにならない
+            // ため記録しない
+            if !is_reencode {
+                record_audio_send(
+                    audio_publish_catch_up,
+                    send_timestamp_us,
+                    send_duration_us,
+                    queued_wall_clock_ms,
+                    wall_clock_now_us()? / 1_000,
+                );
+            }
+        }
+    } else {
+        // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
+        // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
+        // 音声ストリームには毎フレーム LOC プロパティを付与するため true を渡す
+        let audio_request_id = audio_request_id.expect("audio request_id enabled");
+        // ストリームの生成と書き込みの待ち (backpressure) を含めて測る
+        let queued_wall_clock_ms = wall_clock_now_us()? / 1_000;
+        let mut writer = SubgroupWriter::new(
+            audio_handle,
+            audio_data_plane,
+            audio_request_id,
+            AUDIO_TRACK_ALIAS,
+            *audio_group_id,
+            SubgroupIdMode::Zero,
+            0,
+            DEFAULT_PUBLISHER_PRIORITY,
+            true,
+            publish_start_location(client, audio_publish_target.as_ref(), audio_request_id),
+        )
+        .await?;
+        let object_location = writer.next_object_location();
+        let outcome = writer.write_object(encoded, properties).await?;
+        if outcome == ObjectFilterOutcome::Pass {
+            *audio_config_sent = true;
+            media_cache.insert(
+                namespace,
+                AUDIO_TRACK_NAME.as_bytes(),
+                object_location,
+                properties,
+                encoded,
+            )?;
+        }
+        writer
+            .finish(publish_start_location(
+                client,
+                audio_publish_target.as_ref(),
+                audio_request_id,
+            ))
+            .await?;
+        // 送れなかった Object (フィルタで Skip) は記録しない。TIMESTAMP が
+        // 壁時計でない (再エンコード) 音も、読んだ時刻との差が遅れに
+        // ならないため記録しない
+        if outcome == ObjectFilterOutcome::Pass && !is_reencode {
+            record_audio_send(
+                audio_publish_catch_up,
+                send_timestamp_us,
+                send_duration_us,
+                queued_wall_clock_ms,
+                wall_clock_now_us()? / 1_000,
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn process_audio_chunks(
     context: AudioProcessContext<'_>,
     samples_per_frame: usize,
@@ -2227,102 +2359,28 @@ async fn process_audio_chunks(
             audio_config.as_deref()
         };
         let properties = build_audio_loc_properties(timestamp, *audio_timescale, audio_config);
-        // request 単位移行で side session へ移した track は、その session の
-        // handle / data plane で Object を送る ([`publish_sink`])
-        let (audio_handle, audio_data_plane) =
-            publish_sink(audio_publish_target.as_ref(), handle, data_plane);
         // LOC draft-ietf-moq-loc-05 §4.1 (Application with one audio track): 1 音声フレーム = 1 Object = 1 Group
-        if config.audio_datagram {
-            // datagram の送信は完了が返らない (fire-and-forget)。書き込みの
-            // 戻りを完了とみなすため、投入の直前の時刻を控える
-            let queued_wall_clock_ms = wall_clock_now_us()? / 1_000;
-            let mut writer = DatagramWriter::new(
-                audio_handle,
-                audio_data_plane,
-                audio_request_id.expect("audio request_id enabled"),
-                AUDIO_TRACK_ALIAS,
-                *audio_group_id,
-                DEFAULT_PUBLISHER_PRIORITY,
-                config.datagram_max_size,
-                config.audio_redundancy,
-            );
-            let object_location = writer.next_object_location();
-            let outcome = writer.write_object(&encoded, &properties).await?;
-            if outcome == ObjectFilterOutcome::Pass {
-                *audio_config_sent = true;
-                media_cache.insert(
-                    namespace,
-                    AUDIO_TRACK_NAME.as_bytes(),
-                    object_location,
-                    &properties,
-                    &encoded,
-                )?;
-                // 送れなかった Object (フィルタで Skip) は送信のキューへ
-                // 入っていないため記録しない。TIMESTAMP が壁時計でない
-                // (再エンコード) 音も、読んだ時刻との差が遅れにならない
-                // ため記録しない
-                if !is_reencode {
-                    record_audio_send(
-                        audio_publish_catch_up,
-                        send_timestamp_us,
-                        send_duration_us,
-                        queued_wall_clock_ms,
-                        wall_clock_now_us()? / 1_000,
-                    );
-                }
-            }
-        } else {
-            // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
-            // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
-            // 音声ストリームには毎フレーム LOC プロパティを付与するため true を渡す
-            let audio_request_id = audio_request_id.expect("audio request_id enabled");
-            // ストリームの生成と書き込みの待ち (backpressure) を含めて測る
-            let queued_wall_clock_ms = wall_clock_now_us()? / 1_000;
-            let mut writer = SubgroupWriter::new(
-                audio_handle,
-                audio_data_plane,
-                audio_request_id,
-                AUDIO_TRACK_ALIAS,
-                *audio_group_id,
-                SubgroupIdMode::Zero,
-                0,
-                DEFAULT_PUBLISHER_PRIORITY,
-                true,
-                publish_start_location(client, audio_publish_target.as_ref(), audio_request_id),
-            )
-            .await?;
-            let object_location = writer.next_object_location();
-            let outcome = writer.write_object(&encoded, &properties).await?;
-            if outcome == ObjectFilterOutcome::Pass {
-                *audio_config_sent = true;
-                media_cache.insert(
-                    namespace,
-                    AUDIO_TRACK_NAME.as_bytes(),
-                    object_location,
-                    &properties,
-                    &encoded,
-                )?;
-            }
-            writer
-                .finish(publish_start_location(
-                    client,
-                    audio_publish_target.as_ref(),
-                    audio_request_id,
-                ))
-                .await?;
-            // 送れなかった Object (フィルタで Skip) は記録しない。TIMESTAMP が
-            // 壁時計でない (再エンコード) 音も、読んだ時刻との差が遅れに
-            // ならないため記録しない
-            if outcome == ObjectFilterOutcome::Pass && !is_reencode {
-                record_audio_send(
-                    audio_publish_catch_up,
-                    send_timestamp_us,
-                    send_duration_us,
-                    queued_wall_clock_ms,
-                    wall_clock_now_us()? / 1_000,
-                );
-            }
-        }
+        send_audio_object(
+            AudioSendContext {
+                config: &mut *config,
+                namespace: &mut *namespace,
+                audio_config_sent: &mut *audio_config_sent,
+                media_cache: &mut *media_cache,
+                audio_publish_catch_up: &mut *audio_publish_catch_up,
+                audio_publish_target: &mut *audio_publish_target,
+                audio_request_id: &mut *audio_request_id,
+                audio_group_id: &mut *audio_group_id,
+                handle: &mut *handle,
+                data_plane: &mut *data_plane,
+                client: &mut *client,
+            },
+            &encoded,
+            &properties,
+            send_timestamp_us,
+            send_duration_us,
+            is_reencode,
+        )
+        .await?;
         // 受信 SUBSCRIBE の購読 (音声) にも同じ Object を送る
         // (draft-ietf-moq-transport-23 §3.1 の MUST)。フィルタと PAUSED は
         // Session が subscription ごとに評価する。Audio Config は購読ごとの
