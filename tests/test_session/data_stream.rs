@@ -6214,3 +6214,58 @@ fn datagram_unsupported_compression_value_is_filtered_out() {
         .expect("未サポートの Track Property は payload を処理しない");
     assert_eq!(acceptance, TrackDataAcceptance::FilteredOut);
 }
+
+/// 未サポートの MSF_COMPRESSION 値の subgroup Object は受理しない
+///
+/// draft-ietf-moq-msf-02 §12.1.1 / §12.1.2: 2 以上の値は MUST NOT attempt to process。
+/// Object を捨て、track とセッションは継続する。
+#[test]
+fn subgroup_unsupported_compression_value_is_ignored() {
+    use shiguredo_moqt::track_properties::{
+        PROP_MSF_COMPRESSION, TrackProperty, TrackPropertyValue,
+    };
+
+    let mut track_properties = TrackProperties::new();
+    track_properties.push(TrackProperty {
+        prop_type: PROP_MSF_COMPRESSION,
+        value: TrackPropertyValue::VarInt(2),
+    });
+    let (mut client, _server, rid) =
+        establish_subscribe_track_with_properties(717, track_properties);
+    open_incoming_subgroup(&mut client, DataStreamId(94), 717, 1, 0, false);
+    client
+        .recv_subgroup_object(DataStreamId(94), &normal_object(0))
+        .expect("未サポートの Track Property は Object を受理しない");
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Established,
+        "track は継続すること"
+    );
+
+    let (mut client, _server, rid) = establish_subscribe_track(718);
+    open_incoming_subgroup(&mut client, DataStreamId(95), 718, 1, 0, false);
+    let mut object_properties = ObjectProperties::new();
+    object_properties.push(ObjectProperty {
+        prop_type: PROP_MSF_COMPRESSION,
+        value: ObjectPropertyValue::VarInt(2),
+    });
+    let mut encoded = Vec::new();
+    object_properties
+        .encode(&mut encoded)
+        .expect("encode に成功すること");
+    client
+        .recv_subgroup_object(DataStreamId(95), &object_with_properties(0, encoded))
+        .expect("未サポートの Object Property は Object を受理しない");
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Established,
+        "track は継続すること"
+    );
+    assert_eq!(client.state(), SessionState::Established);
+}

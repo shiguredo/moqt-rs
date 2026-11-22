@@ -1877,6 +1877,24 @@ impl Session {
             self.terminate_malformed_track(object_request_id, Some(stream_id), reason);
             return Err(SessionError::new(SESSION_PROTOCOL_VIOLATION, reason));
         }
+        // draft-ietf-moq-msf-02 §12.1.1 / §12.1.2: 未サポートの値 (2 以上) は payload を
+        // 処理してはならない。Track Property 版は track の unsubscribe を促すが、ここでは
+        // 当該 Object を受理せず track は継続する。
+        let unsupported_compression = {
+            let track = self
+                .subscriptions
+                .get(&object_request_id)
+                .map(|subscription| subscription.peer_msf_compression());
+            let object = decoded_properties
+                .as_ref()
+                .map(crate::session::compression::object_compression)
+                .transpose();
+            matches!(track, Some(Err(MessageError::UnsupportedCompression(_))))
+                || matches!(object, Err(MessageError::UnsupportedCompression(_)))
+        };
+        if unsupported_compression {
+            return Ok(());
+        }
         // draft-ietf-moq-transport-23 §10.1 / §10.2: subgroup の先頭 object に付与された
         // SUBGROUP_DELIVERY_TIMEOUT / OBJECT_DELIVERY_TIMEOUT は Track-level 値を
         // per-subgroup で上書きする。先頭以外の object では無視される。
