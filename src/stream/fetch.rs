@@ -712,14 +712,6 @@ impl FetchStreamObject {
         flags: u64,
         buf: &[u8],
     ) -> Result<(Self, Option<Vec<u8>>, usize), MessageError> {
-        // flags が 128 以上は通常のフラグではない (特殊値はこのメソッドに来ない)
-        if flags >= 128 {
-            // draft-ietf-moq-transport-23 §11.4.1 (Fetch Header): MALFORMED_OBJECT (0x201)。
-            return Err(MessageError::MalformedObject(
-                "invalid fetch serialization flags",
-            ));
-        }
-
         let mut pos = 0;
 
         // draft-ietf-moq-transport-23 §11.4.1.1 (Flags): bit 0x40 は Datagram 起源を示す

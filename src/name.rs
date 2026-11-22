@@ -253,12 +253,6 @@ fn is_uri_data_byte(b: u8) -> bool {
 
 /// pct-encoded の hex 1 桁を値へ変換する (大文字小文字は問わない)
 ///
-/// RFC 3986 §2.1 (Percent-Encoding) は `pct-encoded` の hex について大文字小文字を
-/// 等価とするため、`UppercaseHex` は適用しない。
-fn decode_hex_any_case(b: u8) -> Option<u8> {
-    hex_nibble(b)
-}
-
 /// draft-ietf-moq-transport-23 §8.8 (Representing Namespace and Track Names) 表現の単一フィールドを binary バイト列へデコードする (同節の MUST を厳格に適用)
 ///
 /// `percent` が [`PercentEncoding::Allowed`] のときは、URI 層の `%XX` を 1 パスで
@@ -289,10 +283,10 @@ fn decode_field(bytes: &[u8], percent: PercentEncoding) -> Result<Vec<u8>, NameP
             if i + 2 >= bytes.len() {
                 return Err(NameParseError::InvalidEscape);
             }
-            let (Some(high), Some(low)) = (
-                decode_hex_any_case(bytes[i + 1]),
-                decode_hex_any_case(bytes[i + 2]),
-            ) else {
+            // RFC 3986 §2.1 (Percent-Encoding) は `pct-encoded` の hex について
+            // 大文字小文字を等価とするため、`UppercaseHex` は適用しない。
+            let (Some(high), Some(low)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2]))
+            else {
                 return Err(NameParseError::InvalidEscape);
             };
             out.push((high << 4) | low);

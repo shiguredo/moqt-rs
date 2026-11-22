@@ -416,7 +416,8 @@ fn encode_request_id_and_namespace(
     buf: &mut Vec<u8>,
 ) -> Result<(), MessageError> {
     varint::encode(request_id, buf);
-    ns.encode_to(buf)
+    ns.encode_to(buf);
+    Ok(())
 }
 
 /// request_id と TrackNamespace をバッファの `pos` 位置からデコードする (namespace 系メッセージの骨格前半)
@@ -649,7 +650,7 @@ impl Redirect {
         validate_full_track_name(&self.track_namespace, &self.track_name)?;
         varint::encode(self.connect_uri.len() as u64, buf);
         buf.extend_from_slice(&self.connect_uri);
-        self.track_namespace.encode_to(buf)?;
+        self.track_namespace.encode_to(buf);
         encode_track_name(&self.track_name, buf);
         Ok(())
     }
@@ -1422,7 +1423,7 @@ impl Fetch {
         validate_full_track_name(&self.track_namespace, &self.track_name)?;
         // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は送出しない
         validate_track_name(&self.track_name)?;
-        self.track_namespace.encode_to(buf)?;
+        self.track_namespace.encode_to(buf);
         encode_track_name(&self.track_name, buf);
         self.parameters.encode(buf)?;
         Ok(())
@@ -1672,7 +1673,7 @@ impl Namespace {
         // 挙げていないため、§9.19.1 (Parameter Scope) の MUST に従い空集合として検証する。
         // 将来 draft が NAMESPACE 用のパラメータを追加した場合は、この集合を更新する。
         self.parameters.validate_scope(NAMESPACE_ALLOWED_PARAMS)?;
-        self.track_namespace_suffix.encode_to(buf)?;
+        self.track_namespace_suffix.encode_to(buf);
         self.parameters.encode(buf)?;
         Ok(())
     }
@@ -1708,7 +1709,8 @@ pub struct NamespaceDone {
 impl NamespaceDone {
     /// 自身のペイロードを `buf` に追記する (type_id は ControlMessage 側が持つ)
     pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
-        self.track_namespace_suffix.encode_to(buf)
+        self.track_namespace_suffix.encode_to(buf);
+        Ok(())
     }
 
     /// `payload` 先頭から自身を構築し `(Self, 消費バイト数)` を返す
@@ -1743,7 +1745,7 @@ impl PublishSkipped {
     pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
         // draft-ietf-moq-transport-23 §2.4.1 (Track Naming): 空の Track Name は送出しない
         validate_track_name(&self.track_name)?;
-        self.track_namespace_suffix.encode_to(buf)?;
+        self.track_namespace_suffix.encode_to(buf);
         encode_track_name(&self.track_name, buf);
         Ok(())
     }

@@ -86,16 +86,6 @@ pub fn classify_data_stream_type(type_id: u64) -> Option<DataStreamType> {
     None
 }
 
-/// 制御ストリーム用の stream type prefix を varint エンコードして返す
-///
-/// 新規制御ストリームを開設して SETUP を送信する際は
-/// [`encode_control_stream_setup`] を使うこと。
-fn encode_control_stream_prefix() -> Vec<u8> {
-    let mut buf = Vec::new();
-    crate::varint::encode(SETUP_STREAM_TYPE, &mut buf);
-    buf
-}
-
 /// 新規制御ストリームの先頭メッセージを stream type prefix 込みでエンコードする
 ///
 /// [`crate::stream::subgroup::SubgroupHeader::encode`] や [`crate::stream::fetch::FetchHeader::encode`] が stream type を
@@ -110,7 +100,8 @@ pub fn encode_control_stream_setup(
     msg: &ControlMessage,
     max_control_message_size: u64,
 ) -> Result<Vec<u8>, MessageError> {
-    let mut buf = encode_control_stream_prefix();
+    let mut buf = Vec::new();
+    crate::varint::encode(SETUP_STREAM_TYPE, &mut buf);
     buf.extend_from_slice(&msg.encode(max_control_message_size)?);
     Ok(buf)
 }

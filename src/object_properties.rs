@@ -214,7 +214,7 @@ impl ObjectProperties {
                     // 内側の KVP が書式として壊れていないかを検証する。内側の意味検証
                     // (スコープと多重可否) は上の `validate` が両リストを合わせて行う。
                     if prop.prop_type == PROP_IMMUTABLE_PROPERTIES {
-                        validate_immutable_inner(b, KvpContext::Encode)?;
+                        decode_kv_pairs(b, false, KvpContext::Encode)?;
                     }
                     varint::encode(b.len() as u64, &mut inner);
                     inner.extend_from_slice(b);
@@ -731,22 +731,6 @@ enum KvpContext {
     Encode,
 }
 
-/// IMMUTABLE_PROPERTIES の中身バイト列を書式として検証する
-///
-/// 内側に IMMUTABLE_PROPERTIES を含む場合、KVP の宣言長が残りバイトを超える場合、
-/// CODEC_STRING (0x11) の値が不正な UTF-8 の場合に失敗する (入れ子 IMMUTABLE_PROPERTIES は
-/// draft-ietf-moq-transport-23 §10.7 (Immutable Properties) により禁止、CODEC_STRING の
-/// UTF-8 は同 §8.3 (Key-Value-Pair Structure) / draft-ietf-moq-loc-05 §2.3.1.3
-/// (Codec String))。内側の意味検証 (スコープと多重可否) は
-/// [`ObjectProperties::validate`] が mutable リストと合わせて行う。
-///
-/// `context` は入れ子 IMMUTABLE_PROPERTIES の分類を決める
-/// ([`KvpContext`] の doc 参照)。
-fn validate_immutable_inner(bytes: &[u8], context: KvpContext) -> Result<(), MessageError> {
-    decode_kv_pairs(bytes, false, context)?;
-    Ok(())
-}
-
 /// 長さ付きバッファから K-V ペア列をパースする
 ///
 /// 構造と値の書式 (CODEC_STRING (0x11) の UTF-8) を読み、意味検証 (スコープ
@@ -807,7 +791,7 @@ fn decode_kv_pairs(
 
             // IMMUTABLE_PROPERTIES 自体は許可するが内側を検証する
             if prop_type == PROP_IMMUTABLE_PROPERTIES {
-                validate_immutable_inner(&bytes, context)?;
+                decode_kv_pairs(&bytes, false, context)?;
             }
 
             ObjectPropertyValue::Bytes(bytes)

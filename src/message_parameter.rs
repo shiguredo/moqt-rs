@@ -1891,7 +1891,7 @@ fn encode_value(value: &MessageParameterValue, buf: &mut Vec<u8>) -> Result<(), 
         }
         MessageParameterValue::TrackNamespacePrefix(ns) => {
             // draft-ietf-moq-transport-23 §9.19.20 (TRACK_NAMESPACE_PREFIX Parameter): Track Namespace 形式でエンコード
-            ns.encode_to(buf)?;
+            ns.encode_to(buf);
         }
     }
     Ok(())

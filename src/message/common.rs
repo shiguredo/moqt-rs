@@ -85,20 +85,14 @@ impl TrackNamespace {
 
     /// バッファにエンコードする
     ///
-    /// draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Track Namespace が
-    /// 4096 バイトを超えたら FIELD_LENGTH_EXCEEDED (0x401) でセッションを閉じる (MUST)。
-    pub(crate) fn encode_to(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
-        if self.byte_length() > MAX_TRACK_NAME_LENGTH {
-            return Err(MessageError::FieldLengthExceeded(
-                "track namespace exceeds 4096 bytes",
-            ));
-        }
+    /// 長さの不変条件は [`TrackNamespace::new`] と [`TrackNamespace::decode_from`] が
+    /// 検査するため、この関数は常に成功する。
+    pub(crate) fn encode_to(&self, buf: &mut Vec<u8>) {
         varint::encode(self.0.len() as u64, buf);
         for field in &self.0 {
             varint::encode(field.len() as u64, buf);
             buf.extend_from_slice(field);
         }
-        Ok(())
     }
 
     /// バッファの `pos` 位置からデコードする (0–32 フィールド)
