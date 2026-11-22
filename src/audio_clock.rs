@@ -31,7 +31,7 @@
 //!
 //! 時計もデバイスも触らず、フレームのメディア時刻とそのとき読んだ壁時計を引数で受ける。
 
-use alloc::collections::VecDeque;
+use crate::playout::window::TimedWindow;
 
 /// 補正に使う観測の窓 (マイクロ秒)
 ///
@@ -80,15 +80,6 @@ pub const AUDIO_TIMESTAMP_SLOPE_WINDOW_US: i64 = 10_000_000;
 /// 傾きを求める長い窓 (マイクロ秒)
 pub const AUDIO_TIMESTAMP_SLOPE_LONG_WINDOW_US: i64 = 60_000_000;
 
-/// 観測した 1 つの音声フレームの対応
-#[derive(Debug, Clone, Copy)]
-struct AudioTimestampObservation {
-    /// 読み出したときの壁時計 (Unix epoch マイクロ秒)
-    read_wall_clock_us: i64,
-    /// 読み出した壁時計 - 音声の TIMESTAMP (マイクロ秒)
-    offset_us: i64,
-}
-
 /// 窓の中の観測のまとめ
 #[derive(Debug, Clone, Copy)]
 struct OffsetWindow {
@@ -104,7 +95,7 @@ struct OffsetWindow {
 /// メディア時刻を [`AudioTimestampClock::apply`] で壁時計のマイクロ秒へ換算する。
 pub struct AudioTimestampClock {
     /// 直近の観測。時刻の昇順に入る
-    observations: VecDeque<AudioTimestampObservation>,
+    observations: TimedWindow,
     /// TIMESTAMP に足している補正 (マイクロ秒)。まだ観測が無ければ `None`
     applied_offset_us: Option<i64>,
     /// 観測した最小値 (マイクロ秒)。補正の取り直しでは消さない
@@ -121,7 +112,7 @@ impl AudioTimestampClock {
     /// まだ 1 つも観測していない状態で作る
     pub fn new() -> Self {
         Self {
-            observations: VecDeque::new(),
+            observations: TimedWindow::default(),
             applied_offset_us: None,
             min_offset_us: None,
             max_offset_us: None,
@@ -142,10 +133,7 @@ impl AudioTimestampClock {
     pub fn record(&mut self, read_wall_clock_us: i64, audio_timestamp_us: i64) {
         let offset_us = read_wall_clock_us.saturating_sub(audio_timestamp_us);
 
-        self.observations.push_back(AudioTimestampObservation {
-            read_wall_clock_us,
-            offset_us,
-        });
+        self.observations.push(read_wall_clock_us, offset_us);
         self.sample_count = self.sample_count.saturating_add(1);
         self.min_offset_us = Some(
             self.min_offset_us
@@ -187,11 +175,11 @@ impl AudioTimestampClock {
     /// 前の値)。まだ観測が無ければ `None`。傾きは観測が窓を埋めていなくても、観測がある
     /// 範囲で求める (傾きを出せるだけの幅が無いときは `None`)。
     pub fn snapshot(&self) -> Option<AudioTimestampOffsetStats> {
-        let latest = self.observations.back()?;
+        let (_, current_us) = self.observations.latest()?;
         Some(AudioTimestampOffsetStats {
-            current_us: latest.offset_us,
-            min_us: self.min_offset_us.unwrap_or(latest.offset_us),
-            max_us: self.max_offset_us.unwrap_or(latest.offset_us),
+            current_us,
+            min_us: self.min_offset_us.unwrap_or(current_us),
+            max_us: self.max_offset_us.unwrap_or(current_us),
             slope_10s_us_per_second: self.slope_us_per_second(AUDIO_TIMESTAMP_SLOPE_WINDOW_US),
             slope_60s_us_per_second: self.slope_us_per_second(AUDIO_TIMESTAMP_SLOPE_LONG_WINDOW_US),
             applied_us: self.applied_offset_us,
@@ -296,37 +284,31 @@ impl AudioTimestampClock {
     fn offset_window_between(&self, since_us: i64, until_us: i64) -> Option<OffsetWindow> {
         let mut min_us: Option<i64> = None;
         let mut count = 0usize;
-        for observation in self.observations.iter().rev() {
-            if observation.read_wall_clock_us < since_us {
+        for (read_wall_clock_us, offset_us) in self.observations.iter().rev() {
+            if read_wall_clock_us < since_us {
                 break;
             }
-            if observation.read_wall_clock_us > until_us {
+            if read_wall_clock_us > until_us {
                 continue;
             }
-            min_us = Some(min_us.map_or(observation.offset_us, |min_us| {
-                min_us.min(observation.offset_us)
-            }));
+            min_us = Some(min_us.map_or(offset_us, |min_us| min_us.min(offset_us)));
             count += 1;
         }
         min_us.map(|min_us| OffsetWindow { min_us, count })
     }
 
     /// 窓の中の最小の観測。無ければ `None`
-    fn min_observation_between(
-        &self,
-        since_us: i64,
-        until_us: i64,
-    ) -> Option<&AudioTimestampObservation> {
-        let mut best: Option<&AudioTimestampObservation> = None;
-        for observation in self.observations.iter().rev() {
-            if observation.read_wall_clock_us < since_us {
+    fn min_observation_between(&self, since_us: i64, until_us: i64) -> Option<(i64, i64)> {
+        let mut best: Option<(i64, i64)> = None;
+        for (read_wall_clock_us, offset_us) in self.observations.iter().rev() {
+            if read_wall_clock_us < since_us {
                 break;
             }
-            if observation.read_wall_clock_us > until_us {
+            if read_wall_clock_us > until_us {
                 continue;
             }
-            if best.is_none_or(|best| observation.offset_us < best.offset_us) {
-                best = Some(observation);
+            if best.is_none_or(|(_, best_offset_us)| offset_us < best_offset_us) {
+                best = Some((read_wall_clock_us, offset_us));
             }
         }
         best
@@ -338,24 +320,19 @@ impl AudioTimestampClock {
     /// 使うため、読み出しの遅れの揺らぎを受けにくい。観測がまだ窓を埋めていないときは、
     /// 観測がある範囲で求める (傾きを出せるだけの幅が無いときは `None`)。
     fn slope_us_per_second(&self, window_us: i64) -> Option<i64> {
-        let latest = self.observations.back()?;
-        let oldest = self.observations.front()?;
-        let since_us = latest
-            .read_wall_clock_us
-            .saturating_sub(window_us)
-            .max(oldest.read_wall_clock_us);
-        let middle_us = since_us + (latest.read_wall_clock_us - since_us) / 2;
-        let older = self.min_observation_between(since_us, middle_us)?;
-        let newer = self.min_observation_between(middle_us, latest.read_wall_clock_us)?;
-        let span_us = newer
-            .read_wall_clock_us
-            .saturating_sub(older.read_wall_clock_us);
+        let (latest_us, _) = self.observations.latest()?;
+        let (oldest_us, _) = self.observations.oldest()?;
+        let since_us = latest_us.saturating_sub(window_us).max(oldest_us);
+        let middle_us = since_us + (latest_us - since_us) / 2;
+        let (older_us, older_offset_us) = self.min_observation_between(since_us, middle_us)?;
+        let (newer_us, newer_offset_us) = self.min_observation_between(middle_us, latest_us)?;
+        let span_us = newer_us.saturating_sub(older_us);
         if span_us <= 0 {
             return None;
         }
         // 傾きは「離れた 2 つの床の差 ÷ 経過時間」である。i64 の積で桁あふれしないよう
         // i128 で計算し、i64 に収まらない値は飽和させる
-        let difference_us = i128::from(newer.offset_us) - i128::from(older.offset_us);
+        let difference_us = i128::from(newer_offset_us) - i128::from(older_offset_us);
         let slope_us_per_second = difference_us * 1_000_000 / i128::from(span_us);
         match i64::try_from(slope_us_per_second) {
             Ok(slope_us_per_second) => Some(slope_us_per_second),
@@ -372,12 +349,7 @@ impl AudioTimestampClock {
     /// 古い観測は `VecDeque::pop_front` で捨てる (moqt-js の head インデックスは配列を
     /// 詰め直さないための工夫であり、`VecDeque` が同じ役割を果たす)。
     fn prune(&mut self, oldest_us: i64) {
-        while let Some(observation) = self.observations.front() {
-            if observation.read_wall_clock_us >= oldest_us {
-                break;
-            }
-            self.observations.pop_front();
-        }
+        self.observations.prune(oldest_us);
     }
 }
 

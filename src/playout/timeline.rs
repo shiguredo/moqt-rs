@@ -45,6 +45,8 @@
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
+use crate::playout::window::TimedWindow;
+
 /// 基準の遅れを求める直近の窓 (マイクロ秒)
 pub const TIMELINE_WINDOW_US: i64 = 10_000_000;
 
@@ -531,70 +533,6 @@ fn presentation_cap_us(config: &TimelineConfig, frame_interval_us: Option<i64>) 
         config.video_queue_limit,
         frame_interval_us,
     ))
-}
-
-/// 観測の時刻付きの値の窓 (古い順)
-///
-/// 記録の時刻は単調に増えるため、窓より古い値は先頭にある。moqt-js の `TimedValues` と
-/// 同じく、件数の上限は置かない (呼び出し側の観測の頻度と窓の長さで決まる)。
-#[derive(Debug, Default)]
-struct TimedWindow {
-    entries: VecDeque<(i64, i64)>,
-}
-
-impl TimedWindow {
-    /// 観測を 1 つ足す
-    fn push(&mut self, at_us: i64, value_us: i64) {
-        self.entries.push_back((at_us, value_us));
-    }
-
-    /// `oldest_us` より前の観測を捨てる
-    fn prune(&mut self, oldest_us: i64) {
-        while self
-            .entries
-            .front()
-            .is_some_and(|(at_us, _)| *at_us < oldest_us)
-        {
-            self.entries.pop_front();
-        }
-    }
-
-    /// 窓の中の最小値
-    fn min_value(&self) -> Option<i64> {
-        self.entries.iter().map(|(_, value_us)| *value_us).min()
-    }
-
-    /// 窓の中の最も古い記録 (時刻, 値)。無ければ None
-    fn oldest(&self) -> Option<(i64, i64)> {
-        self.entries.front().copied()
-    }
-
-    /// `since_us` 以降の記録の最小値。無ければ None
-    ///
-    /// 窓より短い区間の最小値を取り直すために使う。窓全体の最小値は、値が単調に動いて
-    /// いるときに最も古い観測を指したままになる。
-    fn min_after(&self, since_us: i64) -> Option<i64> {
-        let mut min: Option<i64> = None;
-        for (at_us, value_us) in self.entries.iter().rev() {
-            if *at_us < since_us {
-                break;
-            }
-            min = Some(min.map_or(*value_us, |min| min.min(*value_us)));
-        }
-        min
-    }
-
-    /// 昇順に並べた、窓の中の値
-    fn sorted_values(&self) -> Vec<i64> {
-        let mut values: Vec<i64> = self.entries.iter().map(|(_, value_us)| *value_us).collect();
-        values.sort_unstable();
-        values
-    }
-
-    /// 記録をすべて捨てる
-    fn clear(&mut self) {
-        self.entries.clear();
-    }
 }
 
 /// 追いつき中の確認点

@@ -6,6 +6,7 @@
 
 pub mod buffer;
 pub mod catch_up;
+pub(crate) mod catch_up_limit;
 pub mod expansion;
 pub mod gap;
 pub mod predictor;
@@ -16,3 +17,4 @@ pub mod splice_fade;
 pub mod stretch;
 pub mod timeline;
 pub mod timing;
+pub(crate) mod window;

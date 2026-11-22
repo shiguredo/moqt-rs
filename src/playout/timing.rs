@@ -28,6 +28,7 @@ use alloc::vec::Vec;
 
 use crate::playout::scheduler::{AudioPlayoutBasis, AudioPlayoutPlay};
 use crate::playout::timeline::percentile_index;
+use crate::playout::window::TimedWindow;
 
 /// 分布を求める直近の窓 (マイクロ秒)
 pub const AUDIO_PLAYOUT_TIMING_WINDOW_US: i64 = 10_000_000;
@@ -288,47 +289,32 @@ pub struct AudioPlayoutTimingSnapshot {
 
 /// 記録した時刻の順に並んだ値の列 (マイクロ秒)
 ///
-/// 記録の時刻は単調に増えるため、窓より古い値は先頭にある。先頭から捨てるときに配列を
-/// 詰め直さないよう、読み始めの位置を進め、半分を超えたらまとめて詰める。
+/// 共通の [`TimedWindow`] に保持と切り捨てを委ねる。窓の境界は従来どおり含む
+/// (prune は `min_at_us` より前だけを捨てる)。
 #[derive(Debug, Default)]
 struct TimedValues {
-    /// 記録した時刻 (古い順)
-    times_us: Vec<i64>,
-    /// 記録した値 (古い順)
-    values_us: Vec<i64>,
-    /// 読み始めの位置
-    head: usize,
+    window: TimedWindow,
 }
 
 impl TimedValues {
     /// 値を記録する
     fn push(&mut self, at_us: i64, value_us: i64) {
-        self.times_us.push(at_us);
-        self.values_us.push(value_us);
+        self.window.push(at_us, value_us);
     }
 
-    /// `at_us` が `min_at_us` より前の値を捨てる
+    /// `at_us` が `min_at_us` より前の値を捨てる (境界を含む)
     fn prune(&mut self, min_at_us: i64) {
-        while self.head < self.times_us.len() && self.times_us[self.head] < min_at_us {
-            self.head += 1;
-        }
-        if self.head > 0 && self.head * 2 >= self.times_us.len() {
-            self.times_us.drain(..self.head);
-            self.values_us.drain(..self.head);
-            self.head = 0;
-        }
+        self.window.prune(min_at_us);
     }
 
     /// 窓の中の値 (古い順)
-    fn current(&self) -> &[i64] {
-        &self.values_us[self.head..]
+    fn current(&self) -> Vec<i64> {
+        self.window.values_vec()
     }
 
     /// 記録をすべて捨てる
     fn clear(&mut self) {
-        self.times_us.clear();
-        self.values_us.clear();
-        self.head = 0;
+        self.window.clear();
     }
 }
 
@@ -563,9 +549,9 @@ impl AudioPlayoutTimingStats {
             snapshot.last_start_delay_us = Some(play.start_delay_us);
             snapshot.last_lateness_us = play.lateness_us;
         }
-        snapshot.slack_us = summarize_timings(self.slacks_us.current());
-        snapshot.start_delay_us = summarize_timings(self.start_delays_us.current());
-        snapshot.lateness_us = summarize_timings(self.latenesses_us.current());
+        snapshot.slack_us = summarize_timings(&self.slacks_us.current());
+        snapshot.start_delay_us = summarize_timings(&self.start_delays_us.current());
+        snapshot.lateness_us = summarize_timings(&self.latenesses_us.current());
         snapshot.played_frames = self.played_frames;
         snapshot.played_us = self.played_us;
         snapshot.arrival_planned_frames = self.arrival_planned_frames;

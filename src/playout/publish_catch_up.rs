@@ -23,13 +23,14 @@ use alloc::collections::{BTreeMap, VecDeque};
 /// 健全な遅れが小さいときに許す、遅れの上限 (ミリ秒)
 ///
 /// 音声の 1 パケットは 20 ms であり、これは 3 パケット分にあたる。
-pub const AUDIO_PUBLISH_CATCH_UP_MIN_MS: i64 = 60;
+pub const AUDIO_PUBLISH_CATCH_UP_MIN_MS: i64 = crate::playout::catch_up_limit::CATCH_UP_MIN_MS;
 
 /// 健全な遅れが大きい環境で、そこからさらに許す遅れ (ミリ秒)
 ///
 /// 2 パケット分である。遅れは経路と符号化の揺らぎで数十 ms 動くため、1 フレームの揺らぎで
 /// 始めない幅としてこれを許す。
-pub const AUDIO_PUBLISH_CATCH_UP_GROWTH_MS: i64 = 40;
+pub const AUDIO_PUBLISH_CATCH_UP_GROWTH_MS: i64 =
+    crate::playout::catch_up_limit::CATCH_UP_GROWTH_MS;
 
 /// 追いつきをやめて投入を再開する、キューに残ってよい音声の長さ (ミリ秒)
 ///
@@ -40,7 +41,8 @@ pub const AUDIO_PUBLISH_CATCH_UP_RESUME_MS: i64 = 20;
 ///
 /// 1 フレームの観測だけで始めると、読み出しがまとめて行われただけでも始まる。100 ms (20 ms
 /// のフレームで 5 個) の持続を要求する。
-pub const AUDIO_PUBLISH_CATCH_UP_CONFIRM_MS: i64 = 100;
+pub const AUDIO_PUBLISH_CATCH_UP_CONFIRM_MS: i64 =
+    crate::playout::catch_up_limit::CATCH_UP_CONFIRM_MS;
 
 /// 符号化のキューが単独で上限を超えた状態が続くことを要求するフレーム数
 ///
@@ -52,7 +54,8 @@ pub const AUDIO_PUBLISH_CATCH_UP_QUEUE_CONFIRM_FRAMES: u64 = 2;
 ///
 /// 遅れだけを根拠にした開始を止める。キューが単独で上限を超え続けている場合は、待つと
 /// 遅れが伸びるため直ちに始める。
-pub const AUDIO_PUBLISH_CATCH_UP_COOLDOWN_MS: i64 = 1_000;
+pub const AUDIO_PUBLISH_CATCH_UP_COOLDOWN_MS: i64 =
+    crate::playout::catch_up_limit::CATCH_UP_COOLDOWN_MS;
 
 /// 出力が返らない記録を捨てるまでの時間 (ミリ秒)
 ///
@@ -454,10 +457,10 @@ impl AudioPublishCatchUp {
     ///
     /// 健全な遅れ (床) からの増加と、絶対値の下限の大きい方である。
     pub fn limit_ms(&self) -> i64 {
-        AUDIO_PUBLISH_CATCH_UP_MIN_MS.max(
-            self.floor_ms
-                .unwrap_or(0)
-                .saturating_add(AUDIO_PUBLISH_CATCH_UP_GROWTH_MS),
+        crate::playout::catch_up_limit::limit_ms(
+            self.floor_ms.unwrap_or(0),
+            AUDIO_PUBLISH_CATCH_UP_MIN_MS,
+            AUDIO_PUBLISH_CATCH_UP_GROWTH_MS,
         )
     }
 

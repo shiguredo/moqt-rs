@@ -39,7 +39,7 @@
 //!
 //! 判定だけを行い、復号器には触れない。時刻と値は呼び出し側が引数で渡す。
 
-use alloc::collections::VecDeque;
+use crate::playout::window::TimedWindow;
 
 /// 健全な遅れ (床) を求める窓 (ミリ秒)
 ///
@@ -54,13 +54,14 @@ pub const AUDIO_RECEIVE_CATCH_UP_FLOOR_WINDOW_MS: i64 = 5_000;
 /// 音声の 1 パケットは 20 ms であり、これは 3 パケット分にあたる。復号の出力は投入から
 /// 1 パケット以上遅れて返るため、健全な状態でも 10〜20 ms の遅れがある。床を実際より
 /// 小さく観測しても、上限がこれより下がらないようにする。
-pub const AUDIO_RECEIVE_CATCH_UP_MIN_MS: i64 = 60;
+pub const AUDIO_RECEIVE_CATCH_UP_MIN_MS: i64 = crate::playout::catch_up_limit::CATCH_UP_MIN_MS;
 
 /// 健全な遅れからさらに許す遅れ (ミリ秒)
 ///
 /// 2 パケット分である。遅れは経路と復号の揺らぎで数十 ms 動くため、1 音の揺らぎで始めない
 /// 幅としてこれを許す。
-pub const AUDIO_RECEIVE_CATCH_UP_GROWTH_MS: i64 = 40;
+pub const AUDIO_RECEIVE_CATCH_UP_GROWTH_MS: i64 =
+    crate::playout::catch_up_limit::CATCH_UP_GROWTH_MS;
 
 /// 健全な遅れを超えた分がこれを超えたら、持続を待たずに始める (ミリ秒)
 ///
@@ -77,14 +78,16 @@ pub const AUDIO_RECEIVE_CATCH_UP_JUMP_MS: i64 = 100;
 /// 1 音の観測だけで始めると、経路と復号が一瞬つまずいただけでも始まる。100 ms (20 ms の
 /// 音で 5 個) の持続を要求する。[`AUDIO_RECEIVE_CATCH_UP_JUMP_MS`] を超える遅れは、この
 /// 持続を待たずに始める。待つと、その間に映像だけが先へ進んでずれが開くためである。
-pub const AUDIO_RECEIVE_CATCH_UP_CONFIRM_MS: i64 = 100;
+pub const AUDIO_RECEIVE_CATCH_UP_CONFIRM_MS: i64 =
+    crate::playout::catch_up_limit::CATCH_UP_CONFIRM_MS;
 
 /// 追いつきを始めた後、次を始めない時間 (ミリ秒)
 ///
 /// 1 回の作り直しで戻らない状態がある。負荷の間は作り直した後も溜まり直すためであり、
 /// 遅れが上限へ戻るまではこの間隔で始め直す。上限をまたぐたびに始め直す状態にはならない
 /// (床と上限は窓と共に動く)。
-pub const AUDIO_RECEIVE_CATCH_UP_COOLDOWN_MS: i64 = 1_000;
+pub const AUDIO_RECEIVE_CATCH_UP_COOLDOWN_MS: i64 =
+    crate::playout::catch_up_limit::CATCH_UP_COOLDOWN_MS;
 
 /// 追いつきで音が飛んだとみなす、1 音の長さを超える最小の跳び (ミリ秒)
 ///
@@ -114,15 +117,6 @@ fn round_us_to_ms(value_us: i64) -> i64 {
     } else {
         quotient
     }
-}
-
-/// 床を求める 1 つの観測 (マイクロ秒)
-#[derive(Debug, Clone, Copy)]
-struct FloorSample {
-    /// 観測した時刻 (マイクロ秒)
-    at_us: i64,
-    /// そのときの「復号が足している遅れ」 (マイクロ秒)
-    lag_us: i64,
 }
 
 /// 復号の出力 1 つの観測
@@ -215,7 +209,7 @@ pub struct AudioReceiveCatchUpStats {
 /// ものではないため、設定は受け取らない。
 pub struct AudioReceiveCatchUp {
     /// 床を求める観測 (古い順)
-    floor_samples: VecDeque<FloorSample>,
+    floor_samples: TimedWindow,
     /// 直近の窓の最小の遅れ (マイクロ秒)。まだ観測していなければ `None`
     ///
     /// 「復号が足している遅れ」の最小値である (出力の遅れではない)
@@ -254,7 +248,7 @@ impl AudioReceiveCatchUp {
     /// 何も観測していない状態で作る
     pub fn new() -> Self {
         Self {
-            floor_samples: VecDeque::new(),
+            floor_samples: TimedWindow::default(),
             floor_us: None,
             last_lag_us: None,
             last_input_lag_us: None,
@@ -378,10 +372,10 @@ impl AudioReceiveCatchUp {
 
     /// いまの遅れの上限 (マイクロ秒)。床からの増加と絶対値の下限の大きい方
     fn limit_us(&self) -> i64 {
-        ms_to_us(AUDIO_RECEIVE_CATCH_UP_MIN_MS).max(
-            self.floor_us
-                .unwrap_or(0)
-                .saturating_add(ms_to_us(AUDIO_RECEIVE_CATCH_UP_GROWTH_MS)),
+        crate::playout::catch_up_limit::limit_us(
+            self.floor_us.unwrap_or(0),
+            AUDIO_RECEIVE_CATCH_UP_MIN_MS,
+            AUDIO_RECEIVE_CATCH_UP_GROWTH_MS,
         )
     }
 
@@ -433,20 +427,14 @@ impl AudioReceiveCatchUp {
             self.held_floor_until_us =
                 Some(now_us.saturating_add(ms_to_us(AUDIO_RECEIVE_CATCH_UP_FLOOR_WINDOW_MS)));
         }
-        self.floor_samples.push_back(FloorSample {
-            at_us: now_us,
-            lag_us: decode_lag_us,
-        });
+        self.floor_samples.push(now_us, decode_lag_us);
+        // 境界 (oldest_us ちょうど) の観測は窓の外として捨てる。従来の
+        // `at_us <= oldest_us` を捨てる挙動を保つ。
         let oldest_us = now_us.saturating_sub(ms_to_us(AUDIO_RECEIVE_CATCH_UP_FLOOR_WINDOW_MS));
-        while let Some(sample) = self.floor_samples.front() {
-            if sample.at_us > oldest_us {
-                break;
-            }
-            self.floor_samples.pop_front();
-        }
+        self.floor_samples.prune_excluding(oldest_us);
         let mut floor_us = decode_lag_us;
-        for sample in &self.floor_samples {
-            floor_us = floor_us.min(sample.lag_us);
+        if let Some(min_us) = self.floor_samples.min_value() {
+            floor_us = floor_us.min(min_us);
         }
         if let (Some(held_floor_us), Some(held_floor_until_us)) =
             (self.held_floor_us, self.held_floor_until_us)
