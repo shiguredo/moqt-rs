@@ -1943,29 +1943,51 @@ async fn finish_audio_input(context: AudioInputContext<'_>) -> Result<()> {
 }
 
 /// 音声入力の変換・エンコード・送信の本体
-async fn run_audio_input_body(
-    context: AudioInputContext<'_>,
-    audio_input: AudioInput,
+struct AudioProcessContext<'a> {
+    config: &'a mut Config,
+    namespace: &'a mut TrackNamespace,
+    audio_publish_catch_up: &'a mut AudioPublishCatchUp,
+    audio_catch_up_logged_dropped_frames: &'a mut u64,
+    audio_timescale: &'a mut Option<u64>,
+    audio_config: &'a mut Option<Vec<u8>>,
+    handle: &'a mut StreamHandle,
+    audio_group_id: &'a mut u64,
+    audio_frame_count: &'a mut u64,
+    peer_subscriptions: &'a mut Vec<PeerSubscription>,
+    audio_pcm_buf: &'a mut Vec<i16>,
+    audio_fade_pending: &'a mut Option<(Vec<i16>, u64)>,
+    audio_fade_next_head: &'a mut bool,
+    audio_timeline: &'a mut AudioCaptureTimeline,
+    audio_config_sent: &'a mut bool,
+    media_cache: &'a mut cache::MediaCache,
+    audio_publish_target: &'a mut Option<PublishTarget>,
+    audio_request_id: &'a mut Option<u64>,
+    data_plane: &'a mut DataPlaneHandle,
+    client: &'a mut MoqtClient,
+    audio_encoder: &'a mut Option<AudioEncoder>,
+}
+
+/// 音声 PCM をチャンクごとにエンコードして送信する
+async fn process_audio_chunks(
+    context: AudioProcessContext<'_>,
+    samples_per_frame: usize,
+    input_timestamp: Option<u64>,
+    is_reencode: bool,
 ) -> Result<()> {
-    let AudioInputContext {
+    let AudioProcessContext {
         config,
         namespace,
-        audio_encoder,
         audio_publish_catch_up,
         audio_catch_up_logged_dropped_frames,
-        audio_samples_per_frame,
         audio_timescale,
         audio_config,
         handle,
         audio_group_id,
         audio_frame_count,
         peer_subscriptions,
-        session_ended: _,
         audio_pcm_buf,
         audio_fade_pending,
         audio_fade_next_head,
-        audio_clock,
-        capture_residuals,
         audio_timeline,
         audio_config_sent,
         media_cache,
@@ -1973,41 +1995,10 @@ async fn run_audio_input_body(
         audio_request_id,
         data_plane,
         client,
+        audio_encoder,
     } = context;
     let encoder = audio_encoder.as_mut().expect("audio encoder enabled");
-    let samples_per_frame = audio_samples_per_frame.expect("audio samples_per_frame enabled");
-    // 再エンコードでは入力サンプルのタイムスタンプをそのまま使う
-    let (pcm, input_timestamp) = match audio_input {
-        AudioInput::Raw(frame) => {
-            // live capture の Timestamp は capture のメディア時刻を epoch
-            // マイクロ秒へ換算する。起源はカメラとマイクで異なるため、
-            // 換算は映像と音声で別々の時計が持つ
-            let frame_epoch_us = map_audio_capture_timestamp_us(
-                audio_clock,
-                capture_residuals,
-                frame.timestamp_us,
-                wall_clock_now_us()?,
-            )?;
-            // バッファに残っているサンプルはこのフレームの直前のサンプルで
-            // あるため、バッファ先頭の時刻はこのフレームの時刻から
-            // サンプル数ぶん戻った位置になる。取りこぼしたフレームがあっても
-            // その差をここで吸収でき、壁時計からずれない
-            audio_timeline.observe_frame(
-                frame_epoch_us,
-                audio_pcm_buf.len() as u64,
-                AUDIO_SAMPLE_RATE,
-            );
-            (extract_pcm_i16(&frame)?, None)
-        }
-        AudioInput::Reencode { frame, timestamp } => (extract_pcm_i16(&frame)?, Some(timestamp)),
-    };
-    audio_pcm_buf.extend_from_slice(&pcm);
-    // 再エンコードでは 1 つの入力から複数チャンクを取り出しても入力の
-    // タイムスケールで 20 ms ずつ進める
     let mut next_chunk_timestamp = input_timestamp;
-    // 再エンコードでは TIMESTAMP が入力のタイムスケールであり壁時計ではない。
-    // 読み出しの遅れを測れないため、追いつきの判定をしない
-    let is_reencode = input_timestamp.is_some();
     while audio_pcm_buf.len() >= samples_per_frame {
         // TIMESTAMP を先に決める。読み出しの遅れは「読んだ壁時計 − TIMESTAMP」
         // であり、判定に要る
@@ -2314,6 +2305,100 @@ async fn run_audio_input_body(
         *audio_frame_count += 1;
     }
     Ok(())
+}
+
+async fn run_audio_input_body(
+    context: AudioInputContext<'_>,
+    audio_input: AudioInput,
+) -> Result<()> {
+    let AudioInputContext {
+        config,
+        namespace,
+        audio_encoder,
+        audio_publish_catch_up,
+        audio_catch_up_logged_dropped_frames,
+        audio_samples_per_frame,
+        audio_timescale,
+        audio_config,
+        handle,
+        audio_group_id,
+        audio_frame_count,
+        peer_subscriptions,
+        session_ended: _,
+        audio_pcm_buf,
+        audio_fade_pending,
+        audio_fade_next_head,
+        audio_clock,
+        capture_residuals,
+        audio_timeline,
+        audio_config_sent,
+        media_cache,
+        audio_publish_target,
+        audio_request_id,
+        data_plane,
+        client,
+    } = context;
+    let (pcm, input_timestamp) = match audio_input {
+        AudioInput::Raw(frame) => {
+            // live capture の Timestamp は capture のメディア時刻を epoch
+            // マイクロ秒へ換算する。起源はカメラとマイクで異なるため、
+            // 換算は映像と音声で別々の時計が持つ
+            let frame_epoch_us = map_audio_capture_timestamp_us(
+                audio_clock,
+                capture_residuals,
+                frame.timestamp_us,
+                wall_clock_now_us()?,
+            )?;
+            // バッファに残っているサンプルはこのフレームの直前のサンプルで
+            // あるため、バッファ先頭の時刻はこのフレームの時刻から
+            // サンプル数ぶん戻った位置になる。取りこぼしたフレームがあっても
+            // その差をここで吸収でき、壁時計からずれない
+            audio_timeline.observe_frame(
+                frame_epoch_us,
+                audio_pcm_buf.len() as u64,
+                AUDIO_SAMPLE_RATE,
+            );
+            (extract_pcm_i16(&frame)?, None)
+        }
+        AudioInput::Reencode { frame, timestamp } => (extract_pcm_i16(&frame)?, Some(timestamp)),
+    };
+    audio_pcm_buf.extend_from_slice(&pcm);
+    // 再エンコードでは 1 つの入力から複数チャンクを取り出しても入力の
+    // タイムスケールで 20 ms ずつ進める
+    // 再エンコードでは TIMESTAMP が入力のタイムスケールであり壁時計ではない。
+    // 読み出しの遅れを測れないため、追いつきの判定をしない
+    let is_reencode = input_timestamp.is_some();
+    let samples_per_frame = audio_samples_per_frame.expect("audio samples_per_frame enabled");
+    let process_context = AudioProcessContext {
+        config: &mut *config,
+        namespace: &mut *namespace,
+        audio_publish_catch_up: &mut *audio_publish_catch_up,
+        audio_catch_up_logged_dropped_frames: &mut *audio_catch_up_logged_dropped_frames,
+        audio_timescale: &mut *audio_timescale,
+        audio_config: &mut *audio_config,
+        handle: &mut *handle,
+        audio_group_id: &mut *audio_group_id,
+        audio_frame_count: &mut *audio_frame_count,
+        peer_subscriptions: &mut *peer_subscriptions,
+        audio_pcm_buf: &mut *audio_pcm_buf,
+        audio_fade_pending: &mut *audio_fade_pending,
+        audio_fade_next_head: &mut *audio_fade_next_head,
+        audio_timeline: &mut *audio_timeline,
+        audio_config_sent: &mut *audio_config_sent,
+        media_cache: &mut *media_cache,
+        audio_publish_target: &mut *audio_publish_target,
+        audio_request_id: &mut *audio_request_id,
+        data_plane: &mut *data_plane,
+        client: &mut *client,
+        audio_encoder: &mut *audio_encoder,
+    };
+    process_audio_chunks(
+        process_context,
+        samples_per_frame,
+        input_timestamp,
+        is_reencode,
+    )
+    .await
 }
 
 async fn handle_audio_input(
