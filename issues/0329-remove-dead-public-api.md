@@ -1,7 +1,7 @@
 # 不要な公開 API、到達不能な検証、重複したテスト、薄いラッパーと固定値判定を削除する
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/remove-dead-public-api
 - Polished: 2026-11-20
 - Refreshed: 2026-11-04
@@ -147,3 +147,35 @@
 - 変更したファイルを指定した `prek run --files` が通ること (tombi / markdownlint を含む)。
 - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` が通ること。
 - ソースコードに issue 番号を書かないこと。コメントは日本語、ログは英語、テストのログは日本語であること。
+
+## 解決方法
+
+- 利用実績の無い公開 API を削除した。
+  - `MessageError::malformed_track_reason`
+  - `ObjectProperties::len` / `iter` (利用側は `as_slice()` を使う)
+  - `playout::buffer::JITTER_BUFFER_MAX_QUEUED_FRAMES`
+    (テスト / PBT / README / SKILL は `TimelineConfig::video_queue_limit` を使う)
+  - `FetchStreamDecoder::set_subgroup_final_object` と最終 Object 検証、
+    `subgroup_final_objects` / `subgroup_max_objects`
+- テスト専用 API を公開面から外した。
+  - `SubgroupStreamDecoder::resolved_subgroup_id` を `#[cfg(test)]` に限定し、
+    moq-pub のテストヘルパーは `header.subgroup_id` と最初の Object から値を導く。
+  - `SubgroupTracker::get` を `#[cfg(test)]` に限定し、統合テストと PBT のモデル検査を
+    `src/subgroup_tracker.rs` の単体テスト (固定の操作列) へ移した。
+  - `PendingSubgroupBuffer::take_ready` を削除し、`take_ready_for` に一本化した。
+    テストと PBT を entry 指定の引き取りへ書き換え、PBT の `Command::Take` と
+    モデルの `take_ready` を削除した。
+- 到達不能な検査と薄いラッパーを削除した。
+  - `TrackNamespace::encode_to` の 4096 バイト検査を外し、戻り値を `()` にした。
+  - `FetchStreamObject::decode_after_flags` の `flags >= 128` 再検査を削除した。
+  - `validate_immutable_inner` / `decode_hex_any_case` / `encode_control_stream_prefix` を
+    呼び出し側へ畳んだ。
+  - `TrackProperties::is_known_mandatory` を削除し、`is_unknown_mandatory` を簡潔化した。
+- 重複テストを削除した (`tests/test_parameter.rs` のトップレベル `missing_returns_none`、
+  `src/loc.rs` の重複 6 本)。`pbt/tests/prop_loc.rs` と重複でないインラインテストは残した。
+- `skills/shiguredo-moqt/SKILL.md` と `README.md` を削除・改名に追随させた。
+  `CHANGES.md` は更新していない。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt`、
+`prek run --files` が成功した。
