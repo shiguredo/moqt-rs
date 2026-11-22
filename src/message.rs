@@ -1809,6 +1809,53 @@ pub enum ControlMessage {
     PublishSkipped(PublishSkipped),
 }
 
+/// 制御メッセージの外側フレームのヘッダ (Type + Length)
+///
+/// MOQT の制御メッセージは `Type (vi64) | Length (vi64) | Message Body` で構成される
+/// (draft-ietf-moq-transport-23 §9 (Control Messages))。`payload_len` は Message Body の
+/// バイト数であり、ヘッダのバイト数 (`header_len`) には含まない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ControlMessageHeader {
+    /// メッセージ型
+    pub(crate) type_id: u64,
+    /// 宣言された Message Body のバイト数
+    pub(crate) payload_len: u64,
+    /// Type と Length を合わせたバイト数
+    pub(crate) header_len: usize,
+}
+
+/// 制御メッセージの外側フレームのヘッダを解析する
+///
+/// `buf` の先頭から Type (vi64) と Length (vi64) を読み、[`ControlMessageHeader`] を返す。
+/// ヘッダが未完成 (varint がバッファ終端で切れている) の場合は `Ok(None)` を返し、
+/// 呼び出し側が追加データを待てるようにする。ヘッダの varint 自体が不正な場合は `Err` を
+/// 返す。
+///
+/// payload の完成判定は本関数では行わない。宣言された `payload_len` とバッファ長から
+/// 呼び出し側が判定する ([`ControlMessage::decode`] と
+/// [`crate::decoder::MessageDecoder::try_decode_message`] で共用する)。
+pub(crate) fn decode_control_message_header(
+    buf: &[u8],
+) -> Result<Option<ControlMessageHeader>, MessageError> {
+    let (type_id, type_len) = match varint::decode(buf) {
+        Ok(value) => value,
+        // ヘッダがバッファ終端で切れているだけなので、追加データ待ちとして扱う
+        Err(MessageError::UnexpectedEof) => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    let (payload_len, length_len) = match varint::decode(&buf[type_len..]) {
+        Ok(value) => value,
+        // Length の varint がバッファ終端で切れている場合も追加データ待ちとして扱う
+        Err(MessageError::UnexpectedEof) => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    Ok(Some(ControlMessageHeader {
+        type_id,
+        payload_len,
+        header_len: type_len + length_len,
+    }))
+}
+
 impl ControlMessage {
     /// メッセージ全体 (Type + Length + Message Body) をエンコードして返す
     ///
@@ -1876,28 +1923,29 @@ impl ControlMessage {
     /// (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) も、`Session` が本体を
     /// 解析したうえで同じ検証を行う ([`crate::session::core::Session::recv_request`])。
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), MessageError> {
-        let mut pos = 0;
+        // ヘッダの解析は `MessageDecoder` と共通のヘルパに委ねる。ヘッダ未完成は
+        // 追加データ待ちを表す UnexpectedEof に写す。
+        let Some(header) = decode_control_message_header(buf)? else {
+            return Err(MessageError::UnexpectedEof);
+        };
 
-        let (type_id, n) = varint::decode(&buf[pos..])?;
-        pos += n;
-
-        let (declared_len, n) = varint::decode(&buf[pos..])?;
-        pos += n;
+        // payload の完成判定は本関数が行う。宣言長が残りバッファを超える場合も
+        // 追加データ待ちを表す UnexpectedEof になる。
         // 32bit 環境でも宣言長を usize へ切り捨てずに残りバッファと比較する
-        let payload_len = varint::checked_len(declared_len, buf[pos..].len())?;
-
-        let payload = &buf[pos..pos + payload_len];
-        pos += payload_len;
+        let payload_len = varint::checked_len(header.payload_len, buf.len() - header.header_len)?;
+        let payload_start = header.header_len;
+        let payload_end = payload_start + payload_len;
+        let payload = &buf[payload_start..payload_end];
 
         // 宣言された Length 分の本文は揃っているため、本文の解析中に生じた UnexpectedEof は
         // 「本文が Length より短い」ことを意味する (§9 の MALFORMED_MESSAGE)。
-        let msg = Self::decode_message_body(type_id, payload).map_err(|err| match err {
+        let msg = Self::decode_message_body(header.type_id, payload).map_err(|err| match err {
             MessageError::UnexpectedEof => MessageError::MalformedMessage(
                 "control message body is shorter than the declared length",
             ),
             other => other,
         })?;
-        Ok((msg, pos))
+        Ok((msg, payload_end))
     }
 
     /// ペイロードをエンコードして `(type_id, payload_bytes)` を返す
@@ -2137,6 +2185,37 @@ mod tests {
                 "単一 Track 専用のパラメータ {param_type:#x} を SUBSCRIBE_TRACKS の集合に含めてはならない"
             );
         }
+    }
+
+    /// フレームヘッダの解析が未完成ヘッダと完成ヘッダを区別すること
+    ///
+    /// `MessageDecoder` は `Ok(None)` を追加データ待ちに写し、`ControlMessage::decode` は
+    /// `UnexpectedEof` に写す。payload の有無ではなくヘッダ (Type + Length) の完成だけで
+    /// 判定する境界をここで固定する。
+    #[test]
+    fn control_message_header_distinguishes_incomplete_header() {
+        // 空バッファ、Type のみ、Length の varint 途中終端はすべてヘッダ未完成
+        assert_eq!(decode_control_message_header(&[]), Ok(None));
+        assert_eq!(decode_control_message_header(&[0x03]), Ok(None));
+        assert_eq!(decode_control_message_header(&[0x03, 0x80]), Ok(None));
+        // Type と Length が揃えば payload が 0 バイトでもヘッダは完成する
+        assert_eq!(
+            decode_control_message_header(&[0x03, 0x05]),
+            Ok(Some(ControlMessageHeader {
+                type_id: 0x03,
+                payload_len: 5,
+                header_len: 2,
+            }))
+        );
+        // 非最小符号化された Type も受理し、ヘッダ長は実際のバイト数になる
+        assert_eq!(
+            decode_control_message_header(&[0xAF, 0x00, 0x00]),
+            Ok(Some(ControlMessageHeader {
+                type_id: MSG_SETUP,
+                payload_len: 0,
+                header_len: 3,
+            }))
+        );
     }
 
     /// PUBLISH の許可集合が draft-ietf-moq-transport-23 §9.8 の明示リストと一致すること

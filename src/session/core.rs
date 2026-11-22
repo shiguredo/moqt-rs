@@ -42,8 +42,9 @@ use crate::message_parameter::{
 use crate::object_properties::ObjectFieldTracker;
 use crate::parameter::{
     DEFAULT_MAX_CONTROL_MESSAGE_SIZE, MIN_MAX_CONTROL_MESSAGE_SIZE,
-    SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE, SetupOptionValue, SetupOptions, SetupUriValidationError,
+    SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE, SetupOptionValue, SetupOptions,
 };
+use crate::setup_uri::SetupUriValidationError;
 use crate::subgroup_tracker::SubgroupTracker;
 use crate::track_properties::TrackProperties;
 

@@ -65,6 +65,8 @@ pub(crate) mod property;
 /// Property の許可スコープ (Track / Object) の表を集約する内部モジュール (外部公開しない)
 pub(crate) mod property_scope;
 pub mod session;
+/// RFC 3986 の URI 検証を SETUP と MOQT URI で共有する内部モジュール (外部公開しない)
+pub(crate) mod setup_uri;
 pub mod stream;
 pub mod subgroup_tracker;
 /// トラック プロパティ群 (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties))

@@ -9,7 +9,7 @@
 //! ストリームからのデータ受信は呼び出し側が行う。
 use crate::decode_buffer::DecodeBuffer;
 use crate::error::MessageError;
-use crate::message::ControlMessage;
+use crate::message::{ControlMessage, decode_control_message_header};
 use crate::varint;
 
 /// バッファ付きメッセージデコーダー
@@ -82,37 +82,28 @@ impl MessageDecoder {
     /// - 本文が Length と一致しない: [`MessageError::MalformedMessage`]
     /// - 未知のメッセージ型など、メッセージ固有のデコード検証に失敗した: そのエラー
     pub fn try_decode_message(&mut self) -> Result<Option<ControlMessage>, MessageError> {
-        if self.buffer.is_empty() {
+        // Type (vi64) と Length (vi64) の解析は `ControlMessage::decode` と共通のヘルパに
+        // 委ねる。ヘッダ未完成 (`Ok(None)`) は追加データ待ちとして扱う。
+        let Some(header) = decode_control_message_header(self.buffer.available())? else {
             return Ok(None);
-        }
-        // Type (vi64) を読む
-        let (_, type_len) = match varint::decode(self.buffer.available()) {
-            Ok(v) => v,
-            Err(MessageError::UnexpectedEof) => return Ok(None),
-            Err(e) => return Err(e),
-        };
-        // Length (vi64) を読む
-        let (payload_len, length_len) = match varint::decode(&self.buffer.available()[type_len..]) {
-            Ok(v) => v,
-            Err(MessageError::UnexpectedEof) => return Ok(None),
-            Err(e) => return Err(e),
         };
         // 長さ宣言の段階で受信上限を検証する。巨大な本文を待たず、宣言長に応じた領域も
         // 確保しない (draft-ietf-moq-transport-23 §9 (Control Messages) / §15.5
         // (Resource Exhaustion))。
-        if payload_len > self.max_control_message_size {
+        if header.payload_len > self.max_control_message_size {
             return Err(MessageError::FieldLengthExceeded(
                 "control message exceeds local MAX_CONTROL_MESSAGE_SIZE",
             ));
         }
         // 32bit 環境では usize に収まらない長さを待ち続けない
-        if payload_len > usize::MAX as u64 {
+        if header.payload_len > usize::MAX as u64 {
             return Err(MessageError::FieldLengthExceeded(
                 "control message length does not fit in usize",
             ));
         }
-        let header_len = type_len + length_len;
-        if payload_len > (self.buffer.len() - header_len) as u64 {
+        // payload の完成判定は本関数が行う。宣言長が揃うまでは Ok(None) を返す。
+        let buffered = self.buffer.len();
+        if header.payload_len > (buffered - header.header_len) as u64 {
             return Ok(None);
         }
         // 外側フレーム (Type + Length + payload) が揃ったので decode する。

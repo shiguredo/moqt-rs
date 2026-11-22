@@ -313,16 +313,16 @@ fn split_moqt_uri(uri: &str) -> Result<MoqtUriComponents<'_>, MessageError> {
             "MOQT URI authority MUST NOT contain userinfo".to_string(),
         ));
     }
-    crate::parameter::validate_authority(authority.as_bytes()).map_err(|_| {
+    crate::setup_uri::validate_authority(authority.as_bytes()).map_err(|_| {
         MessageError::InvalidCatalog(
             "MOQT URI authority is not a valid RFC 3986 authority".to_string(),
         )
     })?;
-    crate::parameter::validate_path_abempty(path.as_bytes()).map_err(|_| {
+    crate::setup_uri::validate_path_abempty(path.as_bytes()).map_err(|_| {
         MessageError::InvalidCatalog("MOQT URI path is not a valid RFC 3986 path".to_string())
     })?;
     if let Some(query) = query {
-        crate::parameter::validate_query(query.as_bytes()).map_err(|_| {
+        crate::setup_uri::validate_query(query.as_bytes()).map_err(|_| {
             MessageError::InvalidCatalog("MOQT URI query is not a valid RFC 3986 query".to_string())
         })?;
     }

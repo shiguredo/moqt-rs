@@ -397,7 +397,7 @@ pub fn sample_track_properties(ctx: &mut noprop::TestCaseContext) -> TrackProper
 /// Range Filter パラメータ型 (0x25-0x29) の一覧
 ///
 /// draft-ietf-moq-transport-23 §3.3.2 (Range Filters)。
-/// `src/message_parameter.rs` の `is_range_filter_type` と同期して更新すること。
+/// `src/message_parameter/range_filter.rs` の `is_range_filter_type` と同期して更新すること。
 pub const RANGE_FILTER_TYPES: &[u64] = &[
     PARAM_SUBGROUP_FILTER,
     PARAM_OBJECTID_FILTER,
