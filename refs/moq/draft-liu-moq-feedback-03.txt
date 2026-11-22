@@ -1,0 +1,2464 @@
+
+
+
+
+Media Over QUIC                                                   Y. Liu
+Internet-Draft                                              Alibaba Inc.
+Intended status: Standards Track                                M. Jiang
+Expires: 23 May 2027                                                    
+                                                                   R. Wu
+                                                              Ant Group.
+                                                             C. Jennings
+                                                           Cisco Systems
+                                                           S. Nandakumar
+                                                                   Cisco
+                                                        19 November 2026
+
+
+                              MoQ Feedback
+                       draft-liu-moq-feedback-03
+
+Abstract
+
+   This document defines Media over QUIC Feedback (MQF), an extension to
+   Media over QUIC Transport (MOQT) that enables delivery quality
+   information about media Objects to be reported using Feedback Tracks.
+   It defines how Feedback Tracks are associated with media Tracks,
+   established, forwarded through Relays, and consumed, together with
+   the MQF report format and capability negotiation.  MQF complements
+   transport-layer signals with per-Object delivery information.
+
+Discussion Venues
+
+   This note is to be removed before publishing as an RFC.
+
+   Discussion of this document takes place on the Media Over QUIC
+   Working Group mailing list (moq@ietf.org), which is archived at
+   https://mailarchive.ietf.org/arch/browse/moq/.
+
+   Source for this draft and an issue tracker can be found at
+   https://github.com/Yanmei-Liu/draft-moq-multimodal-feedback.
+
+Status of This Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at https://datatracker.ietf.org/drafts/current/.
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                  [Page 1]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on 23 May 2027.
+
+Copyright Notice
+
+   Copyright (c) 2026 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents (https://trustee.ietf.org/
+   license-info) in effect on the date of publication of this document.
+   Please review these documents carefully, as they describe your rights
+   and restrictions with respect to this document.  Code Components
+   extracted from this document must include Revised BSD License text as
+   described in Section 4.e of the Trust Legal Provisions and are
+   provided without warranty as described in the Revised BSD License.
+
+Table of Contents
+
+   1.  Introduction  . . . . . . . . . . . . . . . . . . . . . . . .   4
+     1.1.  Conventions and Definitions . . . . . . . . . . . . . . .   4
+     1.2.  Scope and Non-Goals . . . . . . . . . . . . . . . . . . .   5
+   2.  Motivation  . . . . . . . . . . . . . . . . . . . . . . . . .   6
+   3.  Architecture  . . . . . . . . . . . . . . . . . . . . . . . .   7
+     3.1.  Feedback Model  . . . . . . . . . . . . . . . . . . . . .   7
+     3.2.  Feedback for Bidirectional Media  . . . . . . . . . . . .   8
+     3.3.  Feedback Routing through Relays . . . . . . . . . . . . .   9
+   4.  Feedback Track  . . . . . . . . . . . . . . . . . . . . . . .  10
+     4.1.  Track Definition  . . . . . . . . . . . . . . . . . . . .  10
+     4.2.  Track Naming  . . . . . . . . . . . . . . . . . . . . . .  12
+     4.3.  Track Establishment and Lifecycle . . . . . . . . . . . .  13
+     4.4.  Transport and Priority  . . . . . . . . . . . . . . . . .  16
+   5.  Feedback Report Format  . . . . . . . . . . . . . . . . . . .  16
+     5.1.  Report Structure  . . . . . . . . . . . . . . . . . . . .  17
+     5.2.  Object Entry  . . . . . . . . . . . . . . . . . . . . . .  18
+       5.2.1.  Group ID  . . . . . . . . . . . . . . . . . . . . . .  18
+       5.2.2.  Object ID . . . . . . . . . . . . . . . . . . . . . .  18
+       5.2.3.  Status  . . . . . . . . . . . . . . . . . . . . . . .  18
+       5.2.4.  Receive Timestamp Delta . . . . . . . . . . . . . . .  18
+     5.3.  Delivery Status Codes . . . . . . . . . . . . . . . . . .  19
+       5.3.1.  RECEIVED_LATE Determination . . . . . . . . . . . . .  20
+       5.3.2.  NOT_RECEIVED Reporting Timing . . . . . . . . . . . .  20
+       5.3.3.  PARTIALLY_RECEIVED  . . . . . . . . . . . . . . . . .  21
+       5.3.4.  NOT_DELIVERED . . . . . . . . . . . . . . . . . . . .  21
+
+
+
+Liu, et al.                Expires 23 May 2027                  [Page 2]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+     5.4.  Summary Stats Block . . . . . . . . . . . . . . . . . . .  22
+       5.4.1.  Report Interval . . . . . . . . . . . . . . . . . . .  23
+       5.4.2.  Total Objects Evaluated . . . . . . . . . . . . . . .  23
+       5.4.3.  Objects Received  . . . . . . . . . . . . . . . . . .  23
+       5.4.4.  Objects Received Late . . . . . . . . . . . . . . . .  23
+       5.4.5.  Objects Lost  . . . . . . . . . . . . . . . . . . . .  23
+       5.4.6.  Avg Inter-Arrival Delta . . . . . . . . . . . . . . .  23
+       5.4.7.  Objects Not Delivered . . . . . . . . . . . . . . . .  24
+     5.5.  Optional Media Metrics  . . . . . . . . . . . . . . . . .  24
+     5.6.  Report Size Control . . . . . . . . . . . . . . . . . . .  27
+       5.6.1.  Encoding Example  . . . . . . . . . . . . . . . . . .  28
+   6.  Negotiation . . . . . . . . . . . . . . . . . . . . . . . . .  29
+     6.1.  Setup Option  . . . . . . . . . . . . . . . . . . . . . .  29
+     6.2.  Capability Negotiation Rules  . . . . . . . . . . . . . .  31
+     6.3.  Behavior When Option Not Declared . . . . . . . . . . . .  32
+     6.4.  Runtime Capability Change . . . . . . . . . . . . . . . .  32
+   7.  Media Subscriber Behavior . . . . . . . . . . . . . . . . . .  32
+     7.1.  Arrival Time Recording  . . . . . . . . . . . . . . . . .  32
+     7.2.  Delivery Status Determination . . . . . . . . . . . . . .  32
+     7.3.  MQF Generation Timing . . . . . . . . . . . . . . . . . .  33
+     7.4.  Object Entry Selection  . . . . . . . . . . . . . . . . .  33
+     7.5.  Exception Handling  . . . . . . . . . . . . . . . . . . .  34
+   8.  Media Publisher Behavior  . . . . . . . . . . . . . . . . . .  34
+     8.1.  Report Consumption  . . . . . . . . . . . . . . . . . . .  34
+   9.  Application Usage Considerations  . . . . . . . . . . . . . .  34
+     9.1.  Relay-Local Feedback Consumption  . . . . . . . . . . . .  34
+     9.2.  Source Adaptation with End-to-End Feedback  . . . . . . .  35
+     9.3.  Selecting Feedback Tracks with TopN . . . . . . . . . . .  36
+     9.4.  Cache Feedback as an Optional Extension . . . . . . . . .  37
+     9.5.  Relay-Derived Feedback from Multiple Subscribers  . . . .  38
+     9.6.  Uplink-Constrained Simulcast Publisher  . . . . . . . . .  39
+     9.7.  Feedback for Many Media Tracks  . . . . . . . . . . . . .  40
+   10. Security Considerations . . . . . . . . . . . . . . . . . . .  40
+   11. Privacy Considerations  . . . . . . . . . . . . . . . . . . .  41
+   12. IANA Considerations . . . . . . . . . . . . . . . . . . . . .  41
+   13. Acknowledgments . . . . . . . . . . . . . . . . . . . . . . .  42
+   14. References  . . . . . . . . . . . . . . . . . . . . . . . . .  42
+     14.1.  Normative References . . . . . . . . . . . . . . . . . .  42
+     14.2.  Informative References . . . . . . . . . . . . . . . . .  43
+   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .  43
+
+
+
+
+
+
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                  [Page 3]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+1.  Introduction
+
+   Media over QUIC Transport (MOQT, [MoQTransport]) is a QUIC-based
+   publish/subscribe media transport framework.  In low-latency
+   applications, a Media Publisher can benefit from knowing whether
+   media Objects were received completely and within an application-
+   relevant deadline.  QUIC acknowledgments and receive timestamps
+   provide transport-layer information, but they do not directly express
+   these Object-level delivery outcomes or application state.
+   Transport-layer feedback is also scoped to an individual QUIC
+   connection.  When media traverses one or more Relays, feedback on the
+   Media Original Publisher's connection describes delivery only to its
+   adjacent peer, not the cumulative delivery outcome observed by the
+   downstream Media Subscriber.
+
+   This document defines Media over QUIC Feedback (MQF), a MoQ-layer
+   mechanism for carrying such information in Feedback Tracks.  MQF
+   reports are associated with a media Track and can be consumed by an
+   adjacent Media Publisher or delivered across Relays to the Media
+   Original Publisher.
+
+1.1.  Conventions and Definitions
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+   "OPTIONAL" in this document are to be interpreted as described in BCP
+   14 [RFC2119] [RFC8174] when, and only when, they appear in all
+   capitals, as shown here.
+
+   The following terms are used throughout this document:
+
+   *  *MOQT:* Media over QUIC Transport, following [MoQTransport].
+
+   *  *Object:* An addressable unit whose Payload is a sequence of
+      bytes, following [MoQTransport].
+
+   *  *Media Publisher:* The Publisher of a media Track on a given MOQT
+      session.
+
+   *  *Media Subscriber:* A Subscriber of a media Track on a given MOQT
+      session.
+
+   *  *Relay:* A MoQ node that forwards media Tracks or Feedback Tracks
+      between Publishers and Subscribers, following [MoQTransport].
+
+   *  *Media Original Publisher:* The Original Publisher, as defined by
+      [MoQTransport], of the media Track associated with a Feedback
+      Track.
+
+
+
+Liu, et al.                Expires 23 May 2027                  [Page 4]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   *  *Adjacent Media Publisher:* The Publisher from which a Media
+      Subscriber receives the associated media Track on a particular
+      MOQT session.  It can be a Relay or the Media Original Publisher.
+
+   *  *Feedback Publisher:* The Publisher of a Feedback Track, typically
+      a Media Subscriber of the associated media Track or a Relay
+      generating a new Feedback Track.
+
+   *  *Feedback Subscriber:* A Subscriber of a Feedback Track.  An
+      intermediate Relay can subscribe to a Feedback Track for
+      forwarding without consuming its Payload.
+
+   *  *Feedback Consumer:* The terminal Feedback Subscriber that
+      interprets MQF reports.  The Feedback Consumer is the Adjacent
+      Media Publisher for HOP_FEEDBACK and the Media Original Publisher
+      for ORIGIN_FEEDBACK.
+
+   *  *Feedback Track:* A MoQ Track that carries MQF reports.
+
+   *  *Feedback Type:* A Relay-visible Track Property that identifies
+      whether a Feedback Track terminates at the Adjacent Media
+      Publisher or is delivered to the Media Original Publisher.
+
+   *  *MQF (Media over QUIC Feedback):* A feedback report at the MoQ
+      layer containing per-Object delivery status for an associated
+      media Track.
+
+1.2.  Scope and Non-Goals
+
+   This document specifies:
+
+   *  how a Feedback Track is associated with a media Track;
+
+   *  how Feedback Tracks are established, forwarded, and terminated;
+
+   *  the Relay behavior associated with each Feedback Type;
+
+   *  the MQF report format and capability negotiation; and
+
+   *  endpoint behavior required to generate and interpret interoperable
+      MQF reports.
+
+   This document does not specify:
+
+   *  how an application adjusts encoding, generation, subscription, or
+      scheduling in response to MQF;
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                  [Page 5]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   *  the algorithm a Relay uses to derive or aggregate a new MQF report
+      from downstream observations and local state;
+
+   *  how Relays are deployed or configured, including path selection,
+      Relay-to-Relay monitoring, and path remediation.
+
+   An implementation can use MQF reports as one input when adapting
+   media or local forwarding behavior.  Such use does not replace
+   transport congestion control, and an implementation MUST NOT use MQF
+   to bypass the sending limits imposed by its congestion controller.
+
+2.  Motivation
+
+   QUIC-layer feedback mechanisms such as acknowledgments and Receive
+   Timestamps operate at the packet level and do not directly carry the
+   following MoQ- or application-level information:
+
+   +=================+=================================================+
+   | Blind Spot      | Description                                     |
+   +=================+=================================================+
+   | Object          | Transport acknowledgment does not state whether |
+   | Delivery        | a complete Object was available before an       |
+   | Outcome         | application deadline                            |
+   +-----------------+-------------------------------------------------+
+   | Object-Level    | Packet timing does not directly express the     |
+   | Timing          | arrival relationship between media Objects      |
+   +-----------------+-------------------------------------------------+
+   | Application     | The transport does not know playback headroom   |
+   | State           | or application consumption state                |
+   +-----------------+-------------------------------------------------+
+   | End-to-End      | Transport feedback is scoped to one QUIC        |
+   | Delivery        | connection and does not describe the cumulative |
+   | across Relays   | delivery outcome across a Relay chain           |
+   +-----------------+-------------------------------------------------+
+
+                                  Table 1
+
+   Addressing these blind spots requires a feedback mechanism that
+   reports delivery outcomes at MOQT Object granularity and associates
+   those observations with the corresponding media Track.
+
+
+
+
+
+
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                  [Page 6]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   In a direct deployment, the Adjacent Media Publisher is also the
+   Media Original Publisher.  When media traverses one or more Relays,
+   these roles are separated.  A feedback mechanism therefore needs to
+   support both local consumption by the Adjacent Media Publisher and
+   delivery of downstream observations across the Relay chain to the
+   Media Original Publisher.  The latter cannot be inferred from
+   transport feedback on the Media Original Publisher's immediate
+   connection.
+
+3.  Architecture
+
+3.1.  Feedback Model
+
+   A Feedback Track is a normal MOQT Track whose Objects carry MQF
+   reports.  MQF introduces no new QUIC frame or MOQT control message
+   type.  The associated media Track identifies the Object sequence
+   being reported, and the Feedback Type identifies the intended
+   Feedback Consumer and Relay behavior.
+
+   MQF operates at Object granularity.  The interpretation of an Object
+   as a frame, chunk, or other media unit is defined by the media format
+   or application.
+
+   MQF complements, rather than replaces, transport-layer signals.  QUIC
+   acknowledgments describe packet delivery on one QUIC connection, and
+   receive timestamps such as [quic-receive-ts] can provide additional
+   packet timing information.  MQF describes delivery outcomes using
+   media Object coordinates and can carry application-level observations
+   such as playout headroom.
+
+   An ORIGIN_FEEDBACK report can reflect the cumulative delivery outcome
+   observed downstream of the Media Original Publisher, but it does not
+   identify which Relay hop or path segment caused that outcome.  Hop-
+   by-hop path diagnosis is not defined by MQF.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                  [Page 7]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   +========================+===============+==========================+
+   | Signal                 | Granularity   | Information Provided     |
+   |                        | and Scope     |                          |
+   +========================+===============+==========================+
+   | QUIC                   | Packet level  | Transport delivery and   |
+   | acknowledgment and     | on one QUIC   | timing information       |
+   | receive timestamps     | connection    |                          |
+   +------------------------+---------------+--------------------------+
+   | MQF                    | Object level, | Object delivery status   |
+   |                        | hop-local or  | and optional application |
+   |                        | across Relays | observations             |
+   +------------------------+---------------+--------------------------+
+
+                                  Table 2
+
+3.2.  Feedback for Bidirectional Media
+
+   Feedback direction is defined relative to the associated media Track,
+   not by an endpoint role or an application-specific direction label.
+   A Media Subscriber that generates feedback acts as the Feedback
+   Publisher.  The intended Feedback Consumer is determined by the
+   Feedback Type: the Adjacent Media Publisher for HOP_FEEDBACK, or the
+   Media Original Publisher for ORIGIN_FEEDBACK.
+
+   An endpoint can be a Media Publisher for one Track and a Media
+   Subscriber for another Track.  Each media Track can independently
+   have one or more associated Feedback Tracks:
+
+   Endpoint A                         Endpoint B
+     |--- media Track A ------------>|  B: Media Subscriber
+     |<-- Feedback Track A -----------|  B: Feedback Publisher
+     |                                |
+     |<-- media Track B --------------|  A: Media Subscriber
+     |--- Feedback Track B ---------->|  A: Feedback Publisher
+
+   The two Feedback Tracks use the same report format and establishment
+   rules.  The associated media Track identifies the media flow being
+   reported, and each Feedback Track independently declares HOP_FEEDBACK
+   or ORIGIN_FEEDBACK.  The PUBLISH_FEEDBACK and SUBSCRIBE_FEEDBACK
+   Setup Option bits indicate whether the endpoint that declares them
+   can publish or subscribe to Feedback Tracks on the current MOQT
+   session.
+
+
+
+
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                  [Page 8]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+3.3.  Feedback Routing through Relays
+
+   MQF supports deployments in which feedback is consumed by the
+   Adjacent Media Publisher as well as deployments in which feedback is
+   delivered to the Media Original Publisher.  The Feedback Type Track
+   Property defined in Section 4.1 identifies the intended consumer and
+   required Relay behavior.
+
+   In a cascaded Relay architecture, media from a Media Original
+   Publisher traverses multiple Relays before reaching a Media
+   Subscriber.  The Media Subscriber is the feedback source, the Relay
+   adjacent to the Media Subscriber can consume its reported delivery
+   outcomes, and the Relay chain can carry a separate Feedback Track to
+   the Media Original Publisher.
+
+   Media
+     Media Original Publisher -> ... -> L2 -> L1 -> Media Subscriber
+   HOP_FEEDBACK
+                                              L1 <- Media Subscriber
+   Relay-generated ORIGIN_FEEDBACK
+     Media Original Publisher <- ... <- L2 <- L1
+   Subscriber-generated ORIGIN_FEEDBACK
+     Media Original Publisher <- ... <- L2 <- L1 <- Media Subscriber
+
+   The following Feedback Tracks serve different consumers:
+
+   *  A HOP_FEEDBACK Track carries delivery outcomes observed by the
+      Media Subscriber and terminates at the L1 Relay for local
+      interpretation.
+
+   *  The L1 Relay can derive a new ORIGIN_FEEDBACK Track from received
+      HOP_FEEDBACK and other information available to the Relay when
+      configured to do so.  When doing so, the Relay acts as a new
+      Feedback Publisher and publishes a distinct Feedback Track in the
+      context of its upstream media Track.
+
+   *  An ORIGIN_FEEDBACK Track can be published by a Media Subscriber or
+      a Relay and can traverse zero or more Relays.  Its MQF Payload
+      remains opaque to intermediate Relays.  Subscriber-generated
+      ORIGIN_FEEDBACK requires the Media Original Publisher to have
+      sufficient application context to interpret the report and its
+      associated media Track coordinates.
+
+
+
+
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                  [Page 9]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   A Media Subscriber behind an L1 Relay SHOULD use HOP_FEEDBACK when
+   the report requires Relay-local interpretation or translation into
+   the context of an upstream media Track.  It MAY instead publish
+   ORIGIN_FEEDBACK when the Media Original Publisher has sufficient
+   application context to interpret the report and its associated media
+   Track coordinates.
+
+   The relative importance of the two Feedback Types depends on the
+   application.  For example, a deployment can use HOP_FEEDBACK as input
+   to local Track selection or forwarding behavior and ORIGIN_FEEDBACK
+   as input to source adaptation.  A Relay that derives a report from
+   one or more downstream reports acts as a new Feedback Publisher and
+   publishes a distinct Feedback Track.  The base MQF format does not
+   define the semantics of deriving ORIGIN_FEEDBACK from downstream
+   reports, whether from one report or by aggregating multiple reports.
+   Such derivation requires an extension or application agreement that
+   defines observation provenance, timestamp handling, metric
+   interpretation, and, when applicable, the represented Media
+   Subscribers and aggregation method.
+
+4.  Feedback Track
+
+4.1.  Track Definition
+
+   The Feedback Track is a normal MoQ Track where the Payload of each
+   Object is an MQF report.  Each MQF report is published as an
+   independent Object with monotonically increasing Object ID within a
+   Group.
+
+   Each Feedback Track has exactly one Feedback Type and MUST NOT mix
+   HOP_FEEDBACK and ORIGIN_FEEDBACK.  The type controls Track
+   distribution and is carried in the Relay-visible MQF_FEEDBACK_TYPE
+   Track Property.  A Feedback Publisher that generates both types MUST
+   publish two distinct Feedback Tracks.
+
+   The MQF_FEEDBACK_TYPE Track Property has an MOQT variable-length
+   integer (vi64) value, encoded as specified in [MoQTransport],
+   Section 8.1:
+
+
+
+
+
+
+
+
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 10]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+    +=======+=================+=======================================+
+    | Value | Name            | Description                           |
+    +=======+=================+=======================================+
+    | 0x00  | HOP_FEEDBACK    | Intended for the Adjacent Media       |
+    |       |                 | Publisher on the current MOQT session |
+    +-------+-----------------+---------------------------------------+
+    | 0x01  | ORIGIN_FEEDBACK | Intended for the Media Original       |
+    |       |                 | Publisher across zero or more Relays  |
+    +-------+-----------------+---------------------------------------+
+
+                                  Table 3
+
+   Every Feedback Track MUST include the MQF_FEEDBACK_TYPE Track
+   Property (TBD2 - experimental number 0x37FE) in its PUBLISH Track
+   Properties.  This Property is immutable for the lifetime of the
+   Track.  A Relay that recognizes it MUST NOT modify or remove it.  A
+   Relay that does not recognize it forwards and caches it according to
+   the unknown Property rules in [MoQTransport].  An MQF-aware Relay
+   uses this Property without inspecting MQF Object Payloads.  A
+   terminal Feedback Consumer that receives an unsupported value MUST
+   reject the Feedback Track.
+
+   The Group division strategy for Feedback Track is implementation-
+   defined.  Each MQF report is self-contained, and a newer report
+   supersedes the value of an older one.  It is therefore RECOMMENDED
+   that a Feedback Publisher start a new Group for each MQF report, with
+   the report as Object 0 of that Group, so that a delayed or lost
+   report does not block delivery of newer reports on the same stream.
+   A Feedback Publisher that places multiple reports in one Group
+   accepts that a retransmitted earlier report can delay later reports.
+
+   Each Feedback Track MUST be associated 1:1 with a media Track.  The
+   association is encoded in the Feedback Full Track Name (Section 4.2)
+   and is not repeated in MQF reports.  This Full Track Name binding is
+   the media Track binding mechanism defined by this document; no per-
+   Object binding parameter is required.
+
+   When feedback is needed for multiple media Tracks, independent
+   Feedback Tracks MUST be established separately.
+
+   Each Feedback Publisher or publication session MUST use a distinct
+   Feedback Full Track Name.  This prevents independent publishers from
+   producing different Payloads for the same Group ID and Object ID on
+   what MOQT would otherwise treat as a single Track.
+
+
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 11]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+4.2.  Track Naming
+
+   The Feedback Full Track Name carries the information that Relays need
+   to distribute a Feedback Track without inspecting Object Payloads.
+   Let ++ denote appending fields to a Track Namespace tuple.  A
+   Feedback Track MUST use:
+
+   *  *Track Namespace:* The media Track Namespace with three fields
+      appended in this order: the literal mqf, the feedback type label,
+      and the feedback source ID.
+
+   *  *Track Name:* The Track Name of the associated media Track.
+
+   The feedback-type-label is the ASCII string hop-feedback for
+   HOP_FEEDBACK or origin-feedback for ORIGIN_FEEDBACK.  It enables
+   Namespace prefix matching.  The label MUST agree with the
+   MQF_FEEDBACK_TYPE Track Property.  A node that detects a mismatch
+   MUST reject the Feedback Track.
+
+   The feedback-source-id is an opaque, non-empty byte string selected
+   by the Feedback Publisher.  It MUST distinguish that publisher and
+   publication session from every other Feedback Publisher and session
+   for the associated media Track.  It is not required to identify a
+   user and MUST NOT be interpreted as a user identity.  A publisher
+   MUST select a new value before reusing a Group ID and Object ID pair
+   or restarting its Report Sequence space.  To limit linkability across
+   sessions, a Feedback Publisher SHOULD select a feedback-source-id
+   that is randomly generated for each publication session and is not
+   derived from a stable user, device, or network identifier (see
+   Section 11).
+
+   For example, feedback for media Full Track Name (example.com,
+   meeting, audio_response) can use:
+
+(example.com, meeting, mqf, hop-feedback, subscriber-17, audio_response)
+(example.com, meeting, mqf, origin-feedback, relay-l1-4, audio_response)
+
+   The same naming construction applies independently to every media
+   Track.  The associated media Track determines the media direction
+   being reported; a separate direction prefix is not used.
+
+   A node receiving a PUBLISH for a Feedback Track reconstructs the
+   associated media Full Track Name by removing the final three
+   Namespace fields and retaining the Feedback Track Name.  If it cannot
+   identify the associated media Track or does not support the indicated
+   type, it SHOULD respond with REQUEST_ERROR.
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 12]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+4.3.  Track Establishment and Lifecycle
+
+   The Feedback Track is established by the Feedback Publisher (a Media
+   Subscriber or a Relay generating new feedback) through MOQT's PUBLISH
+   / REQUEST_OK exchange on a bidirectional request stream.  In
+   [MoQTransport], PUBLISH_OK is a descriptive alias for REQUEST_OK, not
+   a separate wire message type.  The MQF capabilities required by
+   Section 6 MUST be negotiated before establishment.
+
+   For a HOP_FEEDBACK Track, the terminal Feedback Consumer is the
+   Adjacent Media Publisher on that MOQT session.  The Feedback Consumer
+   accepts the PUBLISH and MUST NOT advertise or forward that Feedback
+   Track on another MOQT session.
+
+   An L1 Relay that generates ORIGIN_FEEDBACK is a new Feedback
+   Publisher.  It uses a new Feedback Full Track Name, Report Sequence
+   space, and MQF Payload.  It can derive that Payload from
+   HOP_FEEDBACK, local media transmission state, and the mapping between
+   its upstream and downstream media Tracks.
+
+   An ORIGIN_FEEDBACK type does not create a route by itself.  Before
+   feedback Objects can be delivered, an interest and authorization
+   chain MUST be established between the Media Original Publisher and
+   the Feedback Publisher:
+
+   1.  The Media Original Publisher, acting as a Feedback Subscriber,
+       expresses interest in the origin-feedback Namespace for the media
+       Track.  It can use SUBSCRIBE_TRACKS for the corresponding
+       Namespace prefix, or use deployment-specific prior interest and
+       authorization as permitted by [MoQTransport].
+
+   2.  Each intermediate Relay binds the Feedback Track to the media
+       forwarding state identified by Section 4.2.  It propagates
+       feedback interest only to downstream peers to which it forwards
+       the associated media Track.  Feedback Objects travel in the
+       opposite direction, toward the peer from which the Relay received
+       that media Track.
+
+   3.  The Feedback Publisher sends PUBLISH for its unique Feedback Full
+       Track Name.  Each hop uses the PUBLISH / REQUEST_OK and SUBSCRIBE
+       / SUBSCRIBE_OK procedures in [MoQTransport] to establish
+       forwarding with Forward State 1.
+
+   SUBSCRIBE_NAMESPACE discovers published Namespaces; it does not
+   request PUBLISH messages for their Tracks.  SUBSCRIBE_TRACKS
+   expresses that Track interest in [MoQTransport].
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 13]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   PUBLISH_NAMESPACE is not a route discovery mechanism.  A Relay MUST
+   NOT use it to search a richly connected Relay topology for a path to
+   the Media Original Publisher.  A Relay forwards ORIGIN_FEEDBACK only
+   toward the peer from which it received the associated media Track,
+   and MUST NOT forward it back toward the Feedback Publisher or another
+   downstream media peer.  If there is no unique reverse media-path
+   binding, the Relay MUST reject the Feedback Track.  These rules
+   prevent a feedback loop in the single-upstream media topology defined
+   by this document.
+
+   If any hop has no matching interest, lacks authorization, has no
+   media-path binding, or rejects the request, that hop MUST reject
+   establishment using the applicable MOQT request error.  The Feedback
+   Publisher MUST NOT send MQF Objects until its PUBLISH is accepted.
+   It MAY continue or fall back to a separately established HOP_FEEDBACK
+   Track, but it MUST NOT relabel a rejected Track to bypass the
+   failure.
+
+   Relays route both Feedback Track types solely from the Full Track
+   Name and MQF_FEEDBACK_TYPE Track Property.  In accordance with
+   [MoQTransport], the Object Payload is opaque to a Relay and is not
+   processed to make a forwarding decision.  An ORIGIN_FEEDBACK MQF
+   Payload can therefore be protected between the Feedback Publisher and
+   the Media Original Publisher.  A HOP_FEEDBACK MQF Payload can be
+   protected for its adjacent terminal Feedback Consumer.
+
+   *Direct Establishment Flow Example:*
+
+   Both endpoints have completed the MQF Setup exchange in Section 6.
+   The Media Original Publisher has prior interest in and authorization
+   to receive the Feedback Track.  The diagram omits request identifiers
+   and other MOQT fields.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 14]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+Media Subscriber                  Media Original Publisher
+(Media Subscriber /               (Media Publisher /
+ Feedback Publisher)               Feedback Subscriber)
+  |                                    |
+  | SUBSCRIBE(track=audio_response)    |  (1) Subscribe media Track
+  |----------------------------------->|
+  | SUBSCRIBE_OK                       |
+  |<-----------------------------------|
+  |                                    |
+  | PUBLISH(                           |  (2) Publish origin-feedback Track
+  |   namespace=media_namespace ++     |
+  |     ("mqf", "origin-feedback",     |
+  |      "subscriber-17"),             |
+  |   track=audio_response,            |
+  |   property=MQF_FEEDBACK_TYPE(1))   |
+  |----------------------------------->|
+  | REQUEST_OK                         |
+  |<-----------------------------------|
+  |                                    |
+  | [Object: MQF seq=0]                |  (3) Send MQF report
+  |----------------------------------->|
+  | [Object: MQF seq=1]                |
+  |----------------------------------->|
+  | ...                                |
+
+   *Lifecycle Rules:*
+
+   The Feedback Track lifecycle SHOULD align with the subscribed media
+   Track it covers.  After the media Track publisher sends PUBLISH_DONE
+   for the media Track, the Feedback Publisher SHOULD send PUBLISH_DONE
+   for the Feedback Track after transmitting the final MQF report and
+   stop publishing Objects.  When the Media Subscriber ends its
+   subscription to the media Track, for example when switching to a
+   different representation, it SHOULD send PUBLISH_DONE for the
+   associated Feedback Track after transmitting any final MQF report.
+
+   When a MOQT session carrying a Feedback Track is disconnected, a
+   Relay MUST discard the associated forwarding state and MUST NOT re-
+   advertise the old Feedback Track after reconnecting.  The Feedback
+   Publisher establishes a new Feedback Track with a new feedback-
+   source-id; its Report Sequence SHOULD restart from 0.
+
+   Feedback is time-sensitive.  A Feedback Publisher SHOULD use the
+   MAX_CACHE_DURATION Track Property defined by [MoQTransport] to bound
+   the period for which MQF Objects can be served from cache.  A
+   terminal feedback consumer MUST NOT apply an MQF report from a
+   previous publication session.
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 15]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+4.4.  Transport and Priority
+
+   The Feedback Track SHOULD be carried over QUIC Stream (consistent
+   with ordinary MoQ Objects).
+
+   Feedback is most useful when the path is congested, which is also
+   when it is most likely to be delayed.  If a Feedback Track is
+   scheduled behind the media it describes, reports can be delayed until
+   they no longer reflect current conditions.  The priority of a
+   Feedback Track ([MoQTransport], Section 5.1) SHOULD therefore be no
+   lower than the priority of the media Track it describes.  Example
+   priority assignment:
+
+          +================+=====================+=============+
+          | Track Type     | Subscriber Priority | Description |
+          +================+=====================+=============+
+          | audio_response | 0 (highest)         | Audio media |
+          +----------------+---------------------+-------------+
+          | Feedback Track | 1                   | MQF report  |
+          +----------------+---------------------+-------------+
+          | video_response | 2                   | Video media |
+          +----------------+---------------------+-------------+
+
+                                 Table 4
+
+   A high priority does not entitle feedback to a large share of
+   capacity.  A Feedback Publisher MUST bound the rate of each Feedback
+   Track, for example by limiting report frequency (Section 7.3) and
+   report size (Section 5.6), so that feedback remains a small fraction
+   of the media rate it describes.
+
+   A stale report has little value once a newer report is available.  A
+   Feedback Publisher SHOULD use a delivery timeout ([MoQTransport]) no
+   larger than a small multiple of its report interval, so that
+   undelivered reports are abandoned rather than retransmitted after
+   newer reports exist.
+
+5.  Feedback Report Format
+
+   This section defines the binary encoding format of an MQF report.
+   All integer fields use QUIC Variable-Length Integer encoding (RFC
+   9000, Section 16) unless otherwise specified.
+
+   This MQF Payload encoding is distinct from the MOQT vi64 encoding
+   used for Setup Options and Track Properties.  Relays forwarding MQF
+   Objects preserve the Payload bytes without translating between these
+   encodings.
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 16]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   Fields marked as "signed encoding" use ZigZag mapping and are
+   transmitted as unsigned QUIC varint:
+
+   *  *Encoding:* unsigned = (signed << 1) ^ (signed >> 63)
+
+   *  *Decoding:* signed = (unsigned >>> 1) ^ -(unsigned & 1)
+
+   Mapping examples: 0 -> 0, -1 -> 1, 1 -> 2, -2 -> 3, 2 -> 4.
+
+5.1.  Report Structure
+
+   MQF Report {
+     Report Timestamp (i),
+     Report Sequence (i),
+     Object Entry Count (i),
+     Object Entry (..) ...,
+     Summary Stats (..),
+     Optional Metric Count (i),
+     Optional Metric (..) ...,
+   }
+
+   This document defines MQF report format version 0.  The MOQT_FEEDBACK
+   Setup Option (Section 6.1) declares support for this format; it does
+   not negotiate a separate version number.  The format version is not
+   repeated in each report.
+
+   Each MQF report describes Object delivery status for a single media
+   Track associated with its Feedback Track (1:1 association, see
+   Section 4.1).
+
+   *Report Timestamp (varint):* The moment when the report is generated,
+   using the Feedback Publisher's local monotonic clock value in
+   microseconds.  This value is only used for Receive Timestamp Delta
+   chain anchoring and report ordering, not for cross-end time
+   alignment.  Monotonic clock MUST be used.  The epoch of this clock is
+   chosen by the Feedback Publisher and has no meaning to the Feedback
+   Consumer; it MUST remain constant for the lifetime of a Feedback
+   Track.
+
+   *Report Sequence (varint):* Monotonically increasing from 0
+   independently for each Feedback Track.  A gap can indicate an omitted
+   report only when the publication policy for that Track requires a
+   contiguous Report Sequence.  An Object ID gap alone, without a Prior
+   Object ID Gap property as defined by [MoQTransport], MUST NOT be
+   interpreted as feedback loss.  Because HOP_FEEDBACK and
+   ORIGIN_FEEDBACK use separate Tracks, terminating one type cannot
+   create sequence gaps in the other type's sequence space.
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 17]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   *Object Entry Count (varint):* Number of Object Entries that follow.
+   When the value is 0, the report contains only Summary Stats (for
+   heartbeat purposes).
+
+5.2.  Object Entry
+
+   Object Entry {
+     Group ID (i),
+     Object ID (i),
+     Status (i),
+     [Receive Timestamp Delta (i)],
+   }
+
+   Object Entries within the same MQF MUST be sorted in ascending order
+   by (Group ID, Object ID).
+
+5.2.1.  Group ID
+
+   The Group ID (varint) of the Object in the associated media Track.
+
+5.2.2.  Object ID
+
+   The Object ID (varint) within the identified Group of the associated
+   media Track.
+
+   The media Full Track Name from Section 4.2, Group ID, and Object ID
+   together identify the media Object being reported.  A Relay
+   forwarding the same media Track preserves these coordinates.  A Relay
+   that changes the Full Track Name or media Object coordinates is
+   publishing a different media Track and MUST NOT associate its
+   Feedback Track with the pre-transformation media Track.
+
+5.2.3.  Status
+
+   Delivery status code (varint), see Section 5.3 for values.
+
+5.2.4.  Receive Timestamp Delta
+
+   Conditional presence field (varint, signed encoding): Present only
+   when Status is RECEIVED (0x00) or RECEIVED_LATE (0x01).  Encoding
+   rules:
+
+   *  *First received Object within the same MQF* (i.e., the first entry
+      with Status RECEIVED or RECEIVED_LATE when iterating through the
+      list): Let R be the Report Timestamp and T_i be the Object's
+      arrival time, both in microseconds on the Feedback Publisher's
+      local monotonic clock.  The signed Delta is T_i - R.
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 18]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   *  *Subsequent received Objects:* Let T_j be the arrival time of the
+      most recent preceding entry with Status RECEIVED or RECEIVED_LATE.
+      The signed Delta is T_i - T_j.
+
+   A decoder reconstructs T_i as R + Delta for the first received Object
+   Entry and as T_j + Delta for each subsequent received Object Entry.
+   Each signed Delta is encoded using the ZigZag mapping defined in
+   Section 5.
+
+   NOT_RECEIVED, PARTIALLY_RECEIVED, and NOT_DELIVERED entries are
+   skipped in the delta chain.
+
+   Since Object Entries are sorted by (Group ID, Object ID) while
+   Objects may arrive out of order, delta values can be negative
+   (indicating the Object arrived earlier than the previous received
+   Object in the list).  Negative delta from reordering is a valid
+   network state signal.
+
+5.3.  Delivery Status Codes
+
+      +=======+====================+===============================+
+      | Value | Name               | Description                   |
+      +=======+====================+===============================+
+      | 0x00  | RECEIVED           | Completely received and       |
+      |       |                    | within delivery deadline      |
+      +-------+--------------------+-------------------------------+
+      | 0x01  | RECEIVED_LATE      | Completely received but       |
+      |       |                    | exceeded delivery deadline    |
+      +-------+--------------------+-------------------------------+
+      | 0x02  | NOT_RECEIVED       | No bytes received at report   |
+      |       |                    | generation time               |
+      +-------+--------------------+-------------------------------+
+      | 0x03  | PARTIALLY_RECEIVED | Partial bytes received but    |
+      |       |                    | Object is incomplete          |
+      +-------+--------------------+-------------------------------+
+      | 0x04  | NOT_DELIVERED      | Not received, and the Object  |
+      |       |                    | was intentionally not         |
+      |       |                    | delivered (see Section 5.3.4) |
+      +-------+--------------------+-------------------------------+
+
+                                 Table 5
+
+   NOT_RECEIVED and PARTIALLY_RECEIVED describe Objects that a Publisher
+   attempted to deliver but that did not arrive intact.  NOT_DELIVERED
+   describes Objects that were withheld or abandoned by design.
+   Feedback Consumers SHOULD NOT treat NOT_DELIVERED as evidence of
+   network loss.
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 19]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+5.3.1.  RECEIVED_LATE Determination
+
+   The Feedback Publisher MUST determine Object expiration based on a
+   locally available playback deadline:
+
+   An Object is RECEIVED_LATE when its arrival time exceeds its expected
+   playback moment.
+
+   When a playback deadline is unavailable (e.g., non-real-time playback
+   scenarios), the Feedback Publisher SHOULD report RECEIVED rather than
+   RECEIVED_LATE.
+
+   For example, suppose the application determines that an Object is
+   expected to be available for playback at time 10.180 seconds on the
+   Feedback Publisher's monotonic clock.  If the last byte arrives at
+   10.195 seconds, the Object is reported as RECEIVED_LATE.  If the MQF
+   report is generated at 10.220 seconds and this is the first received
+   Object Entry in the report, its Receive Timestamp Delta represents an
+   arrival 25 milliseconds before the Report Timestamp.  The playback
+   deadline and the 15-millisecond lateness are not carried in the
+   Object Entry; MQF reports the result of evaluating the application-
+   provided deadline.
+
+   Playback deadlines are often derived from an adaptive jitter buffer
+   and differ between Media Subscribers and over time.  When Optional
+   Media Metrics are enabled, a Feedback Publisher that reports
+   RECEIVED_LATE SHOULD include the TARGET_PLAYOUT_DELAY_MS metric
+   (Section 5.5) so that a Feedback Consumer can interpret the deadline
+   that was applied and compare reports from different Media
+   Subscribers.
+
+5.3.2.  NOT_RECEIVED Reporting Timing
+
+   The Feedback Publisher SHOULD report an Object as NOT_RECEIVED when
+   one of the following conditions is met:
+
+   *  A subsequent Object with a larger Object ID in the same Subgroup
+      of the same Group has arrived, but this Object has not.
+
+   *  The Object's expected arrival time has exceeded 2 x
+      expected_interval (see Section 5.4.6) without arrival, and no
+      subsequent Object is available for reference.
+
+   Condition 2 covers the "last Object lost" scenario (no subsequent
+   Object to trigger Condition 1).
+
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 20]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   Condition 1 is evaluated per Subgroup.  Objects of one Group can be
+   carried in several Subgroups on separate streams, for example when
+   temporal enhancement layers are carried in a different Subgroup from
+   the base layer, and the streams can be delivered in any order and at
+   different priorities.  The arrival of an Object in one Subgroup MUST
+   NOT, by itself, cause an Object in a different Subgroup to be
+   reported as NOT_RECEIVED.  For Objects carried in Datagrams, which
+   have no Subgroup, Condition 1 applies across the Group.
+
+   The Feedback Publisher MUST NOT report NOT_RECEIVED for Objects that
+   are not yet reasonably expected to arrive, or for Objects that meet
+   the conditions for NOT_DELIVERED (Section 5.3.4).
+
+5.3.3.  PARTIALLY_RECEIVED
+
+   Applicable to Objects carried over QUIC Stream: When a Stream is
+   terminated by RESET_STREAM or closed due to timeout, Objects with
+   partially received data SHOULD be reported as PARTIALLY_RECEIVED.
+
+   The timeout threshold used to determine whether a partially received
+   Object should be reported as PARTIALLY_RECEIVED is application-
+   defined.  Different applications can use different thresholds
+   according to their latency requirements.
+
+   A partially received Object that other Objects depend on, such as a
+   video reference frame, can leave the Media Subscriber unable to
+   decode the rest of the Group.  MQF reports the observation; a Media
+   Subscriber that needs a new decodable starting point can request one
+   using the NEW_GROUP_REQUEST parameter defined in [MoQTransport].
+
+   For Objects carried over QUIC Datagram: Since QUIC Datagrams are not
+   retransmitted by the transport layer, any Object whose Datagram(s)
+   are lost results in incomplete data at the Feedback Publisher.  If
+   the Feedback Publisher detects that some but not all Datagrams
+   constituting an Object have arrived, and the remaining Datagrams are
+   not expected to arrive (e.g., a subsequent Object has arrived or the
+   application-defined timeout has expired), the Object SHOULD be
+   reported as PARTIALLY_RECEIVED.  If no Datagrams for the Object have
+   arrived, the Object SHOULD be reported as NOT_RECEIVED instead.
+
+5.3.4.  NOT_DELIVERED
+
+   MOQT Publishers and Relays do not always deliver every Object of a
+   Track.  They schedule by priority and can abandon Objects that would
+   arrive too late, and a Subscriber can stop receiving a Group to move
+   to a newer one.  Reporting such Objects as NOT_RECEIVED would make
+   deliberate scheduling decisions look like network loss, and a
+   Feedback Consumer that adapts on loss could then reduce quality
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 21]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   without cause.
+
+   The Feedback Publisher SHOULD report an Object as NOT_DELIVERED when
+   it has not been received and at least one of the following is true:
+
+   *  The upstream Publisher signalled that the Object will not be
+      delivered, for example through an Object Status, a Prior Object ID
+      Gap property, or an end of Group or Subgroup indication as defined
+      by [MoQTransport].
+
+   *  The stream carrying the Object was reset by the Publisher with an
+      error code that [MoQTransport] associates with a delivery timeout
+      or with the Publisher's decision to stop sending that stream.
+
+   *  The Media Subscriber itself stopped receiving the Group or
+      Subgroup containing the Object, for example by moving to a newer
+      Group, by canceling the stream, or by ending the subscription.
+
+   NOT_DELIVERED describes why an Object is missing from the Media
+   Subscriber's point of view; it does not identify which node withheld
+   it.  An Object reported as NOT_DELIVERED can still be missing because
+   of congestion upstream, for example when a Relay drops low-priority
+   Objects that it could not send in time.  Feedback Consumers that need
+   to detect such congestion can track the rate of NOT_DELIVERED Objects
+   separately from Objects Lost.
+
+5.4.  Summary Stats Block
+
+   Summary Stats {
+     Report Interval (i),
+     Total Objects Evaluated (i),
+     Objects Received (i),
+     Objects Received Late (i),
+     Objects Lost (i),
+     Avg Inter-Arrival Delta (i),
+     Objects Not Delivered (i),
+   }
+
+   Summary Stats MUST always be included in every MQF report and are not
+   controlled by the negotiation bitmap.  They provide a windowed
+   aggregate view for Feedback Consumers that do not process every
+   Object Entry.
+
+   The Report Interval window of Summary Stats is independent from the
+   coverage of Object Entries.  Object Entries MAY include Objects
+   outside the Report Interval window (e.g., continuously reported
+   NOT_RECEIVED entries, see Section 7.4).
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 22]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+5.4.1.  Report Interval
+
+   The time window length covered by this report (varint), in
+   microseconds.  This window spans from Report Timestamp - Report
+   Interval to Report Timestamp.  RECOMMENDED value is 50000-200000
+   (50-200ms).
+
+5.4.2.  Total Objects Evaluated
+
+   Total number of Objects (varint) evaluated within the Report Interval
+   window.  Includes Objects of all statuses.  MUST equal Objects
+   Received + Objects Received Late + Objects Lost + Objects Not
+   Delivered.
+
+   Because a later report can revise the status of an Object
+   (Section 7.2), these counts are a snapshot taken when the report is
+   generated.  A Feedback Consumer that accumulates counts across
+   reports needs to account for Objects that appear in more than one
+   Report Interval window.
+
+5.4.3.  Objects Received
+
+   Number of Objects (varint) with status RECEIVED within the window.
+
+5.4.4.  Objects Received Late
+
+   Number of Objects (varint) with status RECEIVED_LATE within the
+   window.
+
+5.4.5.  Objects Lost
+
+   Number of Objects (varint) with status NOT_RECEIVED or
+   PARTIALLY_RECEIVED within the window.
+
+5.4.6.  Avg Inter-Arrival Delta
+
+   Average arrival interval deviation (varint, signed encoding) of
+   consecutive received Object pairs within the window, in microseconds.
+   Calculation method:
+
+   For consecutive received Object pairs (i-1, i) sorted by arrival time
+   within the window:
+
+   delta(i) = (A(i) - A(i-1)) - expected_interval
+   Avg Inter-Arrival Delta = mean(delta(i)) for all i
+
+   Where A(i) is the arrival time of Object i, and expected_interval is
+   the expected arrival interval.
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 23]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   Methods to determine expected_interval (by priority):
+
+   1.  A nominal Object interval supplied by the media format or
+       application.
+
+   2.  Historical average arrival interval within current session
+       (sliding window).
+
+   If neither method is available, the Feedback Publisher SHOULD use
+   method 2 or set this field to 0.
+
+   Positive values indicate Object arrival interval greater than
+   expected (increased queuing), negative values indicate less than
+   expected.  When fewer than 2 received Objects exist in the window,
+   this field MUST be 0.
+
+   Arrival time is recorded when the last byte of an Object arrives
+   (Section 7.1).  For media in which Object sizes vary widely, such as
+   video with periodic key frames, part of the deviation reflects Object
+   size rather than queuing.  Feedback Consumers SHOULD interpret this
+   field over several reports rather than from a single value.
+
+5.4.7.  Objects Not Delivered
+
+   Number of Objects (varint) with status NOT_DELIVERED within the
+   window.  These Objects are not included in Objects Lost.
+
+5.5.  Optional Media Metrics
+
+   Optional Media Metrics immediately follow Summary Stats.  Optional
+   Metric Count (varint) specifies the number of subsequent Optional
+   Metrics; a value of 0 indicates no optional metrics are included.
+
+   Each metric uses the following MQF type/value pair.  Both fields use
+   the QUIC variable-length integer encoding defined for report Payloads
+   in Section 5:
+
+   Optional Metric {
+     Metric Type (i),
+     Metric Value (i),
+   }
+
+   Defined metric types are divided into two categories: Application-
+   Layer Metrics and QUIC Layer Summary Metrics.
+
+   *Application-Layer Metrics:*
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 24]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   +====+==========================+============+=====================+
+   |Type| Name                     |Unit        |Description          |
+   +====+==========================+============+=====================+
+   |0x02| PLAYOUT_AHEAD_MS         |milliseconds|Remaining time until |
+   |    |                          |            |playback stall at the|
+   |    |                          |            |Feedback Publisher,  |
+   |    |                          |            |i.e., buffered but   |
+   |    |                          |            |not yet played media |
+   |    |                          |            |duration.  Smaller   |
+   |    |                          |            |values indicate      |
+   |    |                          |            |closer to stall (0 = |
+   |    |                          |            |currently stalled).  |
+   +----+--------------------------+------------+---------------------+
+   |0x04| ESTIMATED_BANDWIDTH_KBPS |kbps        |Bandwidth estimate   |
+   |    |                          |            |reported by the      |
+   |    |                          |            |Feedback Publisher.  |
+   |    |                          |            |The estimation method|
+   |    |                          |            |is application-      |
+   |    |                          |            |defined.             |
+   +----+--------------------------+------------+---------------------+
+   |0x06| UNDERRUN_COUNT           |events      |Number of times      |
+   |    |                          |            |within the Report    |
+   |    |                          |            |Interval that        |
+   |    |                          |            |playback of the      |
+   |    |                          |            |associated media     |
+   |    |                          |            |Track had no media   |
+   |    |                          |            |available to play    |
+   |    |                          |            |when needed (buffer  |
+   |    |                          |            |underrun).           |
+   +----+--------------------------+------------+---------------------+
+   |0x08| STALL_DURATION_MS        |milliseconds|Total time within the|
+   |    |                          |            |Report Interval      |
+   |    |                          |            |during which playback|
+   |    |                          |            |of the associated    |
+   |    |                          |            |media Track was      |
+   |    |                          |            |stalled.             |
+   +----+--------------------------+------------+---------------------+
+   |0x0A| TARGET_PLAYOUT_DELAY_MS  |milliseconds|Playout delay        |
+   |    |                          |            |targeted by the      |
+   |    |                          |            |Feedback Publisher's |
+   |    |                          |            |jitter buffer at     |
+   |    |                          |            |report generation    |
+   |    |                          |            |time, used to        |
+   |    |                          |            |determine            |
+   |    |                          |            |RECEIVED_LATE        |
+   |    |                          |            |(Section 5.3.1).     |
+   +----+--------------------------+------------+---------------------+
+   |0x0C| RECEIVE_RATE_KBPS        |kbps        |Object Payload bytes |
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 25]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   |    |                          |            |of the associated    |
+   |    |                          |            |media Track received |
+   |    |                          |            |within the Report    |
+   |    |                          |            |Interval, divided by |
+   |    |                          |            |the Report Interval. |
+   +----+--------------------------+------------+---------------------+
+
+                                 Table 6
+
+   *QUIC Layer Summary Metrics:*
+
+   The following metrics expose summary information about the Feedback
+   Publisher's local QUIC connection to the Feedback Consumer.
+
+   +======+================+==============+============================+
+   | Type | Name           | Unit         | Description                |
+   +======+================+==============+============================+
+   | 0x10 | PEER_RTT_US    | microseconds | Feedback Publisher's       |
+   |      |                |              | local QUIC connection      |
+   |      |                |              | smoothed RTT,              |
+   |      |                |              | corresponding to           |
+   |      |                |              | smoothed_rtt in RFC 9002.  |
+   +------+----------------+--------------+----------------------------+
+   | 0x12 | PEER_LOSS_RATE | per mille    | Feedback Publisher's       |
+   |      |                |              | local QUIC connection      |
+   |      |                |              | packet loss rate within    |
+   |      |                |              | Report Interval,           |
+   |      |                |              | expressed in per mille     |
+   |      |                |              | (e.g., 50 = 5.0%).         |
+   +------+----------------+--------------+----------------------------+
+
+                                  Table 7
+
+   Object Entries and Summary Stats carry the core MQF report
+   information.  Optional Metrics provide supplementary application- or
+   transport-level observations.
+
+   UNDERRUN_COUNT and STALL_DURATION_MS describe events within the
+   Report Interval rather than a value at a single moment.  A Feedback
+   Consumer can compute the underrun frequency directly from consecutive
+   reports, which is a common input for selecting a lower-rate
+   representation.
+
+
+
+
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 26]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   Because the method behind ESTIMATED_BANDWIDTH_KBPS is application-
+   defined, values from different Feedback Publishers are not comparable
+   unless the application defines the method.  RECEIVE_RATE_KBPS is
+   defined by this document and is comparable across Feedback
+   Publishers.  It reports the rate that was received, which is not
+   necessarily the rate the path could carry.  Neither metric replaces
+   congestion control (Section 1.2).
+
+   PEER_LOSS_RATE counts QUIC packet loss.  QUIC retransmits lost data
+   carried on streams, so packet loss does not by itself imply Object
+   loss.
+
+   Metric Types are assigned from the Optional Metrics Type Registry
+   (Section 12).  Values 0x00-0x3f are assigned by Standards Action;
+   values 0x40-0x3fff are assigned by Specification Required; values
+   0x4000 and above are reserved for Private Use. A Feedback Publisher
+   MUST NOT send a Private Use Metric Type unless the Feedback Consumer
+   is known, through an application agreement, to interpret it the same
+   way.
+
+   The Feedback Consumer MUST ignore unrecognized Metric Types.
+
+   Optional Media Metrics MAY be included in an MQF report only when
+   both endpoints have declared OPTIONAL_METRICS in their Setup Options
+   (Section 6).  When that capability is not enabled, Optional Metric
+   Count MUST be 0.
+
+5.6.  Report Size Control
+
+   A single MQF report is RECOMMENDED not to exceed 1200 bytes, so that
+   a report fits in a single QUIC packet and the loss of one packet does
+   not delay the whole report.
+
+   When the number of Objects to report exceeds the capacity of a single
+   MQF report, the Feedback Publisher SHOULD:
+
+   *  Prioritize including recent Object Entries (largest media Object
+      locations).
+
+   *  Trim the oldest Object Entries.
+
+   *  Ensure Summary Stats covers the complete Report Interval window
+      (Summary Stats is not affected by Object Entry trimming).
+
+
+
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 27]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+5.6.1.  Encoding Example
+
+   The following is an encoding structure of a typical MQF report
+   containing delivery status of the 5 most recent Objects on the
+   audio_response Track.  Object Entries are sorted in ascending order
+   by (Group ID, Object ID).  Signed fields use ZigZag-encoded unsigned
+   values (encoding convention at the beginning of Section 5).  The
+   Feedback Track carries the MQF_FEEDBACK_TYPE Track Property with
+   value ORIGIN_FEEDBACK.
+
+MQF Report:
+  Report Timestamp: 2000000 (2000000us = 2s since setup)
+  Report Sequence: 10 (10th report)
+  Object Entry Count: 5 (5 Objects)
+
+  Object Entry [0]: (smallest media Object location, first in list)
+    Group ID: 7
+    Object ID: 96
+    Status: 0x00 (RECEIVED)
+    Recv Ts Delta: 189999 (ZigZag(-95000): 95ms before Report Timestamp)
+    (First received Object, baseline=Report Timestamp)
+
+  Object Entry [1]:
+    Group ID: 7
+    Object ID: 97
+    Status: 0x02 (NOT_RECEIVED)
+    (No Recv Ts Delta)
+
+  Object Entry [2]:
+    Group ID: 7
+    Object ID: 98
+    Status: 0x01 (RECEIVED_LATE)
+    Recv Ts Delta: 100000 (ZigZag(+50000): 50ms later than Object 96)
+    (Skip NOT_RECEIVED 97, baseline=Object 96)
+
+  Object Entry [3]:
+    Group ID: 7
+    Object ID: 99
+    Status: 0x00 (RECEIVED)
+    Recv Ts Delta: 40000 (ZigZag(+20000): 20ms later than Object 98)
+
+  Object Entry [4]:
+    Group ID: 7
+    Object ID: 100
+    Status: 0x00 (RECEIVED)
+    Recv Ts Delta: 40000 (ZigZag(+20000): 20ms later than Object 99)
+
+  Summary Stats:
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 28]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+    Report Interval: 100000 (100000us = 100ms)
+    Total Objects Evaluated: 5
+    Objects Received: 3
+    Objects Received Late: 1
+    Objects Lost: 1
+    Avg Inter-Arrival Delta: 6000
+      (ZigZag(+3000): avg arrival interval 3ms larger)
+    Objects Not Delivered: 0
+
+  Optional Metric Count: 2
+  Optional Metric [0]:
+    Metric Type: 0x02 (PLAYOUT_AHEAD_MS)
+    Metric Value: 150 (playout headroom 150ms)
+  Optional Metric [1]:
+    Metric Type: 0x04 (ESTIMATED_BANDWIDTH_KBPS)
+    Metric Value: 800 (estimated bandwidth 800kbps)
+
+   In this example, the Track Property identifies an ORIGIN_FEEDBACK
+   Track.  Intermediate Relays forward the Track toward the Media
+   Original Publisher without inspecting its MQF Payload.  Object 97 in
+   Group 7 is lost and Object 98 arrived late.  Object 98's delta
+   (+50ms) is significantly larger than normal interval (~20ms).  Avg
+   Inter-Arrival Delta is positive (+3ms) indicating larger-than-
+   expected arrival intervals.  PLAYOUT_AHEAD_MS is only 150ms.  These
+   signals combined indicate deteriorating network conditions.
+
+6.  Negotiation
+
+6.1.  Setup Option
+
+   This extension is defined for MOQT draft-22.  Endpoints declare MQF
+   support using the MOQT_FEEDBACK Setup Option in the symmetric SETUP
+   exchange described in [MoQTransport], Sections 6.3.2 and 9.1.  Each
+   endpoint sends SETUP as the first message on its own unidirectional
+   control stream.  Either endpoint can send first, without waiting for
+   the other endpoint's SETUP.
+
+   The MOQT version is selected during session establishment using ALPN
+   for native QUIC or WT-Available-Protocols for WebTransport, as
+   specified in [MoQTransport], Section 6.2.  The protocol identifier
+   for draft-22 is moqt-22.  SETUP carries neither a transport version
+   field nor a ROLE option.  The SETUP message has Type 0x2F00, a 16-bit
+   message Length, and a sequence of Setup Options bounded by that
+   Length; there is no option count.
+
+   MOQT_FEEDBACK has an even Option Type, TBD1 (experimental number
+   0xFE).  It uses the Key-Value-Pair encoding in [MoQTransport],
+   Section 8.3:
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 29]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   MOQT_FEEDBACK Setup Option {
+     Delta Type (vi64),
+     Capability Bitmap (vi64),
+   }
+
+   Delta Type is TBD1 minus the previous Option Type in this SETUP, or
+   TBD1 if this is the first option.  Options are ordered by their
+   decoded Type.  Because TBD1 is even, the value is a single MOQT
+   variable-length integer and no option Length field is present.  These
+   fields use MOQT vi64, not the QUIC integer encoding used in MQF
+   report Payloads.
+
+   An endpoint MUST NOT include more than one MOQT_FEEDBACK option in
+   SETUP.  An MQF endpoint receiving a duplicate MUST close the session
+   with PROTOCOL_VIOLATION.  A value that does not match this
+   serialization is handled as KEY_VALUE_FORMATTING_ERROR under
+   [MoQTransport], Section 8.3.  An endpoint that does not recognize the
+   option ignores it under the MOQT Setup Option rules.
+
+   The option declares support for MQF report format version 0.  Its
+   Capability Bitmap has the following bit definitions:
+
+    +======+====================+====================================+
+    | Bit  | Name               | Description                        |
+    +======+====================+====================================+
+    | 0    | PUBLISH_FEEDBACK   | Support publishing Feedback Tracks |
+    |      |                    | on this MOQT session               |
+    +------+--------------------+------------------------------------+
+    | 1    | OPTIONAL_METRICS   | Support Optional Media Metrics     |
+    |      |                    | (Section 5.5)                      |
+    +------+--------------------+------------------------------------+
+    | 2    | SUBSCRIBE_FEEDBACK | Support subscribing to Feedback    |
+    |      |                    | Tracks on this MOQT session        |
+    +------+--------------------+------------------------------------+
+    | 3-63 | Reserved           | Endpoints MUST set these bits to 0 |
+    |      |                    | and MUST ignore them when received |
+    +------+--------------------+------------------------------------+
+
+                                 Table 8
+
+   *Negotiation Example:*
+
+   The following diagram shows logical option types and values.  Other
+   Setup Options, including any required by the transport, are omitted.
+   On the wire, Option Types are delta-encoded as described above.  The
+   two SETUP messages are independent advertisements; their order here
+   does not imply a response or a requirement to wait.
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 30]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   Endpoint A                          Endpoint B
+     |                                    |
+     | SETUP(options=[                    |
+     |   {type=TBD1, value=0x06}          |  OPTIONAL_METRICS +
+     | ])                                 |  SUBSCRIBE_FEEDBACK
+     |----------------------------------->|
+     |                                    |
+     | SETUP(options=[                    |
+     |   {type=TBD1, value=0x03}          |  PUBLISH_FEEDBACK +
+     | ])                                 |  OPTIONAL_METRICS
+     |<-----------------------------------|
+     |                                    |
+     | After both SETUPs:                 |
+     |   B -> A feedback is enabled.      |
+     |   A -> B feedback is disabled.     |
+     |   Optional Metrics are enabled.    |
+
+6.2.  Capability Negotiation Rules
+
+   Each capability bit describes the endpoint that sends the Setup
+   Option.  PUBLISH_FEEDBACK and SUBSCRIBE_FEEDBACK are complementary
+   endpoint capabilities; they do not require both endpoints to declare
+   the same bit.  A Feedback Track from Endpoint A to Endpoint B can be
+   established only when Endpoint A has declared PUBLISH_FEEDBACK and
+   Endpoint B has declared SUBSCRIBE_FEEDBACK.
+
+   An endpoint MUST send its SETUP and receive the peer's SETUP before
+   establishing a Feedback Track or sending MQF Objects.  An endpoint
+   MUST NOT use capabilities remembered from an earlier session to send
+   Feedback Track requests or MQF Objects in 0-RTT before the current
+   exchange completes.  After applying the default of zero for an
+   omitted option, each endpoint computes the same directional result:
+
+   *  A-to-B feedback requires A's PUBLISH_FEEDBACK and B's
+      SUBSCRIBE_FEEDBACK.
+
+   *  B-to-A feedback requires B's PUBLISH_FEEDBACK and A's
+      SUBSCRIBE_FEEDBACK.
+
+   *  Optional Metrics require both endpoints' OPTIONAL_METRICS bits and
+      do not enable either feedback direction by themselves.
+
+   An endpoint that has not declared PUBLISH_FEEDBACK MUST NOT publish a
+   Feedback Track.  When an endpoint receives a PUBLISH for a Feedback
+   Track, it MUST reject the request with REQUEST_ERROR if the peer did
+   not declare PUBLISH_FEEDBACK or if the receiving endpoint did not
+   declare SUBSCRIBE_FEEDBACK.
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 31]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   Optional Media Metrics are enabled only when both endpoints have
+   declared OPTIONAL_METRICS.  An MQF report MUST NOT include Optional
+   Metrics when that capability is not enabled.
+
+   These capability rules apply to all MOQT endpoints, including Relays,
+   independently on each MOQT session.
+
+6.3.  Behavior When Option Not Declared
+
+   When a peer's SETUP does not include the MOQT_FEEDBACK option, that
+   peer is treated as having declared a zero Capability Bitmap and does
+   not support publishing or subscribing to Feedback Tracks.  An
+   endpoint MUST NOT publish a Feedback Track to that peer and MUST
+   reject a Feedback Track PUBLISH received from that peer.  The absence
+   of this option does not prevent ordinary media Track operation.
+
+6.4.  Runtime Capability Change
+
+   This version does not support runtime changes to Media over QUIC
+   Feedback capability.  If change is needed, MoQ session MUST be re-
+   established.
+
+7.  Media Subscriber Behavior
+
+   A Media Subscriber that publishes MQF reports acts as the Feedback
+   Publisher for the associated media Track.  This section describes
+   that Media Subscriber behavior.
+
+7.1.  Arrival Time Recording
+
+   The Media Subscriber MUST record the arrival time of each Object.
+   Arrival time is defined as the moment when the last byte of the
+   Object arrives at the Media Subscriber's MoQ layer.  Implementation
+   MUST use monotonic clock, unaffected by system time adjustments.
+   Time precision SHOULD be no less than 1 millisecond, RECOMMENDED to
+   be microsecond-level.
+
+7.2.  Delivery Status Determination
+
+   The Media Subscriber MUST maintain delivery status for each known
+   Object:
+
+   *  Last byte of Object arrives and within deadline: RECEIVED (0x00).
+
+   *  Last byte of Object arrives but exceeds deadline: RECEIVED_LATE
+      (0x01).
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 32]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   *  Object has not arrived but is reasonably considered lost (see
+      Section 5.3): NOT_RECEIVED (0x02).
+
+   *  Object partially arrived and carrying Stream is closed:
+      PARTIALLY_RECEIVED (0x03).
+
+   *  Object has not arrived and was intentionally not delivered (see
+      Section 5.3.4): NOT_DELIVERED (0x04).
+
+   Object status MAY be updated in subsequent MQF.  For example, from
+   NOT_RECEIVED to RECEIVED (when a delayed Object is eventually
+   received).  Therefore, counts such as Objects Lost in Summary Stats
+   reflect an observation snapshot at report generation time rather than
+   final delivery statistics.
+
+7.3.  MQF Generation Timing
+
+   The frequency of MQF reports is application- and deployment-defined.
+   A Feedback Publisher needs to balance the freshness required by its
+   Feedback Consumer against the bandwidth and processing cost of the
+   Feedback Track.  This document does not define media-specific
+   reporting intervals or require MQF reports to be used as a session
+   heartbeat.
+
+   A Feedback Publisher MAY generate an additional report when a recent
+   Object changes status rather than waiting for its next periodic
+   report.
+
+7.4.  Object Entry Selection
+
+   The number of Object Entries in an MQF report is not fixed.  A
+   Feedback Publisher selects Object Entries according to its reporting
+   policy and report-size budget.
+
+   When selecting Object Entries:
+
+   *  If not all candidate Object Entries are included, the Feedback
+      Publisher SHOULD prioritize recently observed Objects.
+
+   *  An Object reported in a previous MQF report MAY be omitted when
+      its status has not changed.
+
+   *  A later report can update the reported status of an Object.
+
+   The absence of an Object Entry from a report does not indicate any
+   delivery status for that Object.  Each report represents the
+   observations included at its generation time.
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 33]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+7.5.  Exception Handling
+
+   *  *Object Out-of-Order Arrival:* The Media Subscriber MUST record by
+      actual arrival time without reordering.  Arrival time reflects
+      actual network behavior; out-of-order itself is a valid network
+      signal.
+
+   *  *Duplicate Objects:* The Media Subscriber SHOULD identify
+      duplicates by Group ID and Object ID, ignore duplicate arrivals,
+      and retain the first arrival time.
+
+8.  Media Publisher Behavior
+
+   A Media Publisher that terminates and interprets an associated
+   Feedback Track acts as its Feedback Consumer.  This section describes
+   how the Media Publisher processes MQF reports for the associated
+   media Track.
+
+8.1.  Report Consumption
+
+   A Feedback Consumer uses the media Full Track Name, Group ID, and
+   Object ID in an MQF report to associate each reported status with an
+   Object from the corresponding media Track.
+
+   MQF reports describe observations made by a Feedback Publisher.  A
+   Feedback Consumer can make valid reports available to the
+   Application.
+
+9.  Application Usage Considerations
+
+   This non-normative section illustrates conditions that can cause an
+   application to generate feedback, the information conveyed in an MQF
+   report, and possible actions by a Feedback Consumer.  MQF conveys
+   observations rather than control commands; adaptation strategies and
+   coordination between decision points are application-defined.
+
+9.1.  Relay-Local Feedback Consumption
+
+   Consider a live-streaming deployment that supports Relay-executed
+   Track selection through a separate Track-switching mechanism.  The
+   application makes the same video available through a high-bitrate
+   Track and a low-bitrate Track.  A Media Subscriber configures these
+   Tracks as acceptable alternatives and authorizes the adjacent Relay
+   to select between them.  While the Relay is forwarding the high-
+   bitrate Track, several complete Objects arrive after their
+   application-defined playback deadlines and the Media Subscriber's
+   playout headroom decreases.  The Media Subscriber publishes a
+   HOP_FEEDBACK report containing RECEIVED_LATE Object Entries, a
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 34]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   nonzero Objects Received Late count, and, when Optional Media Metrics
+   have been enabled, a decreasing PLAYOUT_AHEAD_MS value.
+
+   The adjacent Relay terminates the Feedback Track and can use the
+   report as an application-level input in addition to transport
+   information available on the downstream MOQT session.  For example,
+   the Relay's Track-selection logic might change the selected
+   representation from the high-bitrate Track to the low-bitrate Track.
+   A later series of reports showing timely Object delivery and
+   recovered playout headroom might contribute to selecting the high-
+   bitrate Track again.  MQF identifies the affected media Track and
+   conveys the observations, but it does not identify alternative
+   representations, authorize Relay-executed selection, define when a
+   switch occurs, or provide a Track-switching procedure.
+
+9.2.  Source Adaptation with End-to-End Feedback
+
+   Consider an interactive conference in which a Media Original
+   Publisher produces only one representation of a real-time video
+   Track.  A Media Subscriber receives the Track either directly with no
+   Relay or through one or more Relays.  The rate of the published
+   representation persistently exceeds what can be delivered in time
+   over the complete path.  Suppose a report interval covers five
+   Objects: two are RECEIVED, two are RECEIVED_LATE, and one is
+   NOT_RECEIVED.  On a direct path, or when Relays forward the media
+   Track without republishing or transforming it, the Media Original
+   Publisher can interpret the reported Group ID and Object ID.  The
+   Media Subscriber therefore publishes these observations as
+   ORIGIN_FEEDBACK.
+
+   When the path contains Relays, they forward the ORIGIN_FEEDBACK Track
+   without interpreting its MQF Payload.  In either topology, MQF
+   reports whether Objects reached the Media Subscriber before their
+   application-defined deadlines.  In a cascaded topology, transport
+   feedback on the Media Original Publisher's immediate MOQT session
+   describes only that session and does not provide this end-to-end
+   outcome.  A Relay also has no lower-bitrate Track to select in this
+   example and, when acting solely as a forwarding Relay, cannot modify
+   the opaque media Payload to reduce the source bitrate.
+
+   The Media Original Publisher can use a continuing pattern of late or
+   missing Objects as one input when deciding whether to reduce the
+   source encoding or generation rate.  This is an action that neither
+   the Media Subscriber nor a Relay acting solely as a forwarding Relay
+   can perform on the original media source.
+
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 35]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+9.3.  Selecting Feedback Tracks with TopN
+
+   Consider a deployment that supports the proposed Top Tracks Filter
+   mechanism [TopTracks].  Ten Media Subscribers receive the same media
+   Track through one or more Relays and publish separate ORIGIN_FEEDBACK
+   Tracks.  The application defines a ranking Property for feedback
+   selection.  Tracks with larger values of this Property are selected
+   first.  Each Feedback Publisher exposes the ranking value as a Relay-
+   visible Object Property on its feedback Objects, outside the MQF
+   Payload.
+
+   The Media Original Publisher, acting as the Feedback Subscriber,
+   requests the five Feedback Tracks with the highest values of that
+   Property from its adjacent Relay.  The candidate set is scoped to
+   feedback for the associated media Track.  The Relay executes the
+   requested selection using the exposed Property, without interpreting
+   or modifying the MQF Payload.  As ranking values change, the selected
+   Tracks can change according to the Track-selection mechanism.
+
+   In a multi-relay deployment, the requested filter can be propagated
+   toward the Feedback Publishers so that intermediate Relays also
+   perform selection.  For example, Relay C can request up to five
+   Feedback Tracks from each of Relays A and B and select five from
+   their combined candidates:
+
+   Subscribers A --> Relay A --+
+                     (Top5)   |
+                              +--> Relay C --> Media Original Publisher
+                              |    (Top5)
+   Subscribers B --> Relay B --+
+                     (Top5)
+
+   Subscribers A and B are two subsets of the ten Media Subscribers.
+   Arrows show the feedback flow; filter requests travel in the opposite
+   direction.  Each Top5 selection forwards up to five Feedback Tracks.
+
+   Each branch uses the same ranking Property with comparable values and
+   restricts its candidates to feedback for the associated media Track.
+   This allows filtering before feedback reaches the Relay adjacent to
+   the Media Original Publisher.  Selection updates, tie handling, and
+   timeouts follow the separate Track-selection mechanism; MQF does not
+   define a distributed selection algorithm or require simultaneous
+   selection changes across Relays.
+
+   The Media Original Publisher receives MQF reports from up to five
+   selected Feedback Tracks, each carrying the observations of its
+   individual Feedback Publisher.
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 36]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+9.4.  Cache Feedback as an Optional Extension
+
+   Consider a deployment in which a Relay caches a media Track and
+   serves subsequent FETCH requests for its Objects.  The Media Original
+   Publisher supplies MAX_CACHE_DURATION as defined in [MoQTransport],
+   Section 10.3.  For example, an Object has a cache duration of ten
+   seconds, measured from when the Relay began receiving it.  The Relay
+   evicts the cached Object after three seconds due to local resource
+   constraints.  A FETCH requesting that Object after five seconds
+   encounters a local cache miss.  The cache duration limits how long an
+   Object can be served from a cache; it does not guarantee retention
+   until that limit.
+
+   A separate extension or application agreement could define feedback
+   describing such misses.  The Relay has direct knowledge of its cache
+   operations and, when it retains sufficient metadata, can distinguish
+   an Object that was cached and evicted early from one that was never
+   cached or whose cache duration has expired.  A downstream Media
+   Subscriber cannot infer this cause solely from a missing Object.  A
+   local cache miss also does not necessarily imply a delivery failure,
+   since the Relay might retrieve the Object from an upstream Publisher.
+
+   Under such an extension, the Relay acts as a Feedback Publisher and
+   publishes a new ORIGIN_FEEDBACK Track associated with the media
+   Track.  It uses a distinct Feedback Full Track Name and Report
+   Sequence space.  The Feedback Track follows the existing
+   establishment, authorization, and reverse media-path binding rules.
+   Intermediate Relays forward its MQF Payload without interpreting it.
+   The Media Original Publisher consumes the Relay's own cache
+   observations, rather than interpreting them as delivery outcomes
+   observed by a downstream Subscriber.
+
+   The extension could use Optional Media Metrics to convey scalar
+   counters, such as the number of FETCH requests evaluated and the
+   number affected by early eviction.  These metrics would supplement
+   the existing MQF report structure and would be carried only when
+   Optional Media Metrics are enabled.  The extension would define the
+   metric identifiers and meanings, the reporting interval and counting
+   rules, and the scope and completeness of the observations, including
+   how to represent unavailable eviction history.  The generic
+   OPTIONAL_METRICS capability does not establish agreement on these
+   extension-specific semantics.  Cache misses would not change the
+   meanings of Object delivery status or the Summary Stats fields,
+   including Objects Lost.
+
+   The Media Original Publisher could use these observations to assess
+   how cache retention affects retrieval and recovery in the deployment.
+   For example, frequent cache misses caused by early eviction could
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 37]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   lead the Media Original Publisher to extend its own Object retention
+   window.  This can reduce the risk that a Relay's upstream retrieval
+   fails because the Object is no longer available at the origin.  Any
+   resulting cache or application policy remains outside MQF.  This
+   example does not define cache feedback metrics or require Relays to
+   retain eviction history.  Interoperable cache feedback requires the
+   separate extension or application agreement.
+
+9.5.  Relay-Derived Feedback from Multiple Subscribers
+
+   Consider an interactive conference in which an adjacent Relay
+   forwards the same media Track to multiple Media Subscribers.  Each
+   Media Subscriber publishes HOP_FEEDBACK describing the delivery
+   outcome it observes.  The Relay can interpret each report together
+   with local forwarding observations, such as whether an Object was
+   available at the Relay in time for downstream delivery and whether
+   similar outcomes were reported by multiple Media Subscribers.
+
+   A future extension could define how a Relay aggregates these
+   observations before sending feedback upstream.  For example, it could
+   distinguish an outcome reported by one Media Subscriber from an
+   outcome reported by several Media Subscribers, or combine several
+   reports to limit the number of Feedback Tracks delivered to the Media
+   Original Publisher.  If the Relay makes the resulting observations
+   available to the Media Original Publisher, it acts as a new Feedback
+   Publisher and publishes a new ORIGIN_FEEDBACK report associated with
+   the upstream media Track.
+
+   Under such an extension, the Relay consumes the Subscriber-generated
+   HOP_FEEDBACK reports and combines them with its local observations.
+   It then generates a separate ORIGIN_FEEDBACK report with a new
+   Feedback Full Track Name, Report Sequence space, and MQF Payload.
+   The Relay does not relabel or mechanically forward the received
+   HOP_FEEDBACK Objects.  Intermediate Relays forward the new
+   ORIGIN_FEEDBACK Track without interpreting its Payload.  Such
+   aggregated reports are not interoperable based on this document
+   alone; an extension defining them needs to specify the represented
+   Media Subscribers, the aggregation method, and the interpretation of
+   each reported field.
+
+
+
+
+
+
+
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 38]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   In large-audience deployments, such as a webinar with thousands of
+   Media Subscribers, the Media Original Publisher typically needs the
+   distribution of outcomes rather than individual reports: for example,
+   the fraction of Media Subscribers that stalled during the last
+   interval.  Such an extension can represent per-Subscriber metrics as
+   histograms with fixed bucket boundaries.  Histograms from different
+   Relays merge by adding bucket counts, which allows hierarchical
+   aggregation so that the volume of feedback reaching the Media
+   Original Publisher grows with the number of Relays rather than the
+   number of Media Subscribers.
+
+   Applications such as interactive conferencing, live streaming, cloud
+   rendering, gaming, and live-agent media can interpret Object delivery
+   status according to their own media format and latency objectives.
+
+9.6.  Uplink-Constrained Simulcast Publisher
+
+   Consider a conference in which a participant publishes the same
+   camera source as several simulcast Tracks, for example at 180p, 540p,
+   and 1080p, to a Relay that forwards them to other participants.
+   Assume that the 180p, 540p, and 1080p Tracks have the same priority.
+   The participant's uplink capacity drops so that the 1080p Track can
+   no longer be delivered in time.
+
+   The Relay is a Media Subscriber of each simulcast Track and publishes
+   a HOP_FEEDBACK Track for each of them.  Its reports of all media
+   Tracks show RECEIVED_LATE and PARTIALLY_RECEIVED Objects.  The
+   participant, as Media Original Publisher and Feedback Consumer, can
+   use these reports to stop encoding the 1080p Track, freeing uplink
+   capacity for the remaining Tracks.
+
+   The Relay can, in parallel, change what it forwards downstream.  It
+   can stop forwarding the 1080p Track and let Media Subscribers select
+   another Track based on a catalog update, or it can forward a lower
+   simulcast Track to Media Subscribers that had selected the 1080p
+   representation, using a Relay-executed Track selection mechanism.  In
+   both cases the downstream decoder needs a decodable starting point.
+   When the selected Track supports dynamic Groups, the Relay or Media
+   Subscriber can request one using the NEW_GROUP_REQUEST parameter
+   defined in [MoQTransport], which Relays forward toward the Media
+   Original Publisher and coalesce when several requests are
+   outstanding.  MQF conveys the observations that lead to these
+   decisions; it does not itself request new Groups or select Tracks.
+
+
+
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 39]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+9.7.  Feedback for Many Media Tracks
+
+   A Media Subscriber in a conference can receive many media Tracks at
+   once, for example one video Track for each participant shown in a
+   gallery layout.  Because each Feedback Track is associated with
+   exactly one media Track (Section 4.1), such a Media Subscriber
+   publishes one Feedback Track per media Track for which it reports
+   feedback.  Each Feedback Track needs its own establishment exchange
+   and Relay state, and each switch to a different representation ends
+   one media Track and starts another, together with their Feedback
+   Tracks.
+
+   For example, with reports of about 80 bytes including framing every
+   100 milliseconds, a Media Subscriber reporting on 25 video Tracks
+   sends about 160 kbps of feedback.  Deployments with many media Tracks
+   per Media Subscriber can reduce this cost by reporting only for
+   Tracks whose observations are used, by using longer Report Intervals
+   for Tracks of lower importance, or by relying on a future extension
+   that carries reports for several media Tracks in one Feedback Track.
+   Such an extension would need to identify each media Track within the
+   report and define how Summary Stats are scoped, for example per media
+   Track and per priority class, so that a Feedback Consumer can
+   evaluate all Tracks that share a priority together.
+
+10.  Security Considerations
+
+   MQF reports are inputs to adaptation decisions made by Media
+   Publishers and Relays.  A Feedback Publisher that reports false
+   observations, whether by error or with malicious intent, can cause a
+   Feedback Consumer to reduce quality for all Media Subscribers of a
+   Track, or to keep a rate that is too high for some of them.
+
+   A Feedback Consumer SHOULD treat MQF reports as advisory
+   observations.  When reports from multiple Feedback Publishers are
+   available, a Feedback Consumer SHOULD NOT allow the reports of a
+   single Feedback Publisher to determine a decision that affects other
+   Media Subscribers, and SHOULD limit how quickly any single source of
+   reports can change its behavior.
+
+   A node MUST only accept a Feedback Track from a peer that is
+   authorized to subscribe to the associated media Track.  For
+   ORIGIN_FEEDBACK, each Relay applies this check on its own session,
+   and the Media Original Publisher applies its own authorization to the
+   Feedback Publisher as described in Section 4.3.
+
+   Feedback Tracks consume Relay state and capacity.  Relays SHOULD
+   limit the number of Feedback Tracks accepted per MOQT session and per
+   media Track, and the rate at which MQF Objects are accepted on each
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 40]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   Feedback Track, and MAY reject or terminate Feedback Tracks that
+   exceed those limits.  Relays that forward ORIGIN_FEEDBACK SHOULD
+   apply such limits to each downstream peer so that a large number of
+   Feedback Publishers cannot overwhelm the Media Original Publisher.
+
+   MQF Object Payloads are opaque to Relays that forward them.  They can
+   be protected end to end between the Feedback Publisher and the
+   Feedback Consumer, for example using the same mechanism that protects
+   media Object Payloads.  A HOP_FEEDBACK Payload that is protected end
+   to end cannot be interpreted by the Adjacent Media Publisher when
+   that publisher is a Relay; deployments that rely on Relay-local
+   consumption need the Relay to have access to the Payload.
+
+11.  Privacy Considerations
+
+   MQF reports describe the network conditions and media consumption of
+   the Feedback Publisher, including which Tracks it receives, when, and
+   how playback progresses.  This information can reveal user activity
+   and network characteristics.
+
+   Feedback Track Namespaces are formed by appending fields to the media
+   Track Namespace (Section 4.2), so a peer that can discover the media
+   Namespace can also discover the existence of Feedback Tracks for it.
+   Relays MUST NOT deliver a Feedback Track, or advertise its Namespace,
+   to any peer other than the Feedback Consumer and the Relays on the
+   path to it.
+
+   A stable feedback-source-id would let observers correlate feedback
+   across sessions.  A Feedback Publisher SHOULD use a random feedback-
+   source-id for each publication session (Section 4.2).
+
+   Optional Media Metrics and Relay-visible Object Properties used for
+   selection, such as the ranking Property in the TopN example, expose
+   information to every Relay on the path.  Feedback Publishers SHOULD
+   include only the metrics that the Feedback Consumer needs.
+
+12.  IANA Considerations
+
+   This document defines the following code points for registration:
+
+   *  *TBD1:* MOQT_FEEDBACK (experimental number 0xFE) in the MOQT Setup
+      Options registry ([MoQTransport], Section 16.4), with an even
+      Option Type and a vi64 capability bitmap value (Section 6.1).
+
+   *  *TBD2:* MQF_FEEDBACK_TYPE (experimental number 0x37FE) in the MOQ
+      Properties registry ([MoQTransport], Section 16.8), with an even
+      Property Type outside the Mandatory Track Property range and a
+      vi64 value, scoped to Tracks (Section 4.1).
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 41]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   *  *Feedback Type Registry* (Section 4.1):
+
+      -  0x00: HOP_FEEDBACK
+
+      -  0x01: ORIGIN_FEEDBACK
+
+   *  *Delivery Status Code Registry* (Section 5.3):
+
+      -  0x00: RECEIVED
+
+      -  0x01: RECEIVED_LATE
+
+      -  0x02: NOT_RECEIVED
+
+      -  0x03: PARTIALLY_RECEIVED
+
+      -  0x04: NOT_DELIVERED
+
+   *  *Optional Metrics Type Registry* (Section 5.5), with registration
+      policies of Standards Action for 0x00-0x3f, Specification Required
+      for 0x40-0x3fff, and Private Use for 0x4000 and above [RFC8126]:
+
+      -  0x02: PLAYOUT_AHEAD_MS
+
+      -  0x04: ESTIMATED_BANDWIDTH_KBPS
+
+      -  0x06: UNDERRUN_COUNT
+
+      -  0x08: STALL_DURATION_MS
+
+      -  0x0A: TARGET_PLAYOUT_DELAY_MS
+
+      -  0x0C: RECEIVE_RATE_KBPS
+
+      -  0x10: PEER_RTT_US
+
+      -  0x12: PEER_LOSS_RATE
+
+13.  Acknowledgments
+
+   The authors would like to thank Cullen Jennings for his valuable
+   review comments, proposed revisions, and insightful suggestions on
+   application scenarios for this document.
+
+14.  References
+
+14.1.  Normative References
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 42]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   [MoQTransport]
+              Nandakumar, S., Vasiliev, V., Swett, I., and A. Frindell,
+              "Media over QUIC Transport", Work in Progress, Internet-
+              Draft, draft-ietf-moq-transport-22, 1 October 2026,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-moq-
+              transport-22>.
+
+   [QUIC-TRANSPORT]
+              Iyengar, J., Ed. and M. Thomson, Ed., "QUIC: A UDP-Based
+              Multiplexed and Secure Transport", RFC 9000,
+              DOI 10.17487/RFC9000, May 2021,
+              <https://www.rfc-editor.org/rfc/rfc9000>.
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119,
+              DOI 10.17487/RFC2119, March 1997,
+              <https://www.rfc-editor.org/rfc/rfc2119>.
+
+   [RFC8126]  Cotton, M., Leiba, B., and T. Narten, "Guidelines for
+              Writing an IANA Considerations Section in RFCs", BCP 26,
+              RFC 8126, DOI 10.17487/RFC8126, June 2017,
+              <https://www.rfc-editor.org/rfc/rfc8126>.
+
+   [RFC8174]  Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC
+              2119 Key Words", BCP 14, RFC 8174, DOI 10.17487/RFC8174,
+              May 2017, <https://www.rfc-editor.org/rfc/rfc8174>.
+
+14.2.  Informative References
+
+   [quic-receive-ts]
+              Swett, I. and J. Beshay, "QUIC Extended Acknowledgement
+              for Reporting Packet Receive Timestamps", Work in
+              Progress, Internet-Draft, draft-ietf-quic-receive-ts-01, 2
+              March 2026, <https://datatracker.ietf.org/doc/html/draft-
+              ietf-quic-receive-ts-01>.
+
+   [TopTracks]
+              Zanaty, M., "Top Tracks Filter (MOQT Pull Request #1981)",
+              12 October 2026,
+              <https://github.com/moq-wg/moq-transport/pull/1981>.
+
+Authors' Addresses
+
+   Yanmei Liu
+   Alibaba Inc.
+   Email: miaoji.lym@alibaba-inc.com
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 43]
+
+Internet-Draft                MoQ Feedback                 November 2026
+
+
+   Minghui Jiang
+   Email: jiangminghui2003@gmail.com
+
+
+   Ronghua Wu
+   Ant Group.
+   Email: r.wu@antgroup.com
+
+
+   Cullen Jennings
+   Cisco Systems
+   Email: fluffy@cisco.com
+
+
+   Suhas Nandakumar
+   Cisco
+   Email: snandaku@cisco.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Liu, et al.                Expires 23 May 2027                 [Page 44]
