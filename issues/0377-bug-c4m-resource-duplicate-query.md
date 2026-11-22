@@ -1,7 +1,7 @@
 # resource の重複した tns / tn をすべて検証する
 
 - Created: 2026-10-25
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/fix-c4m-resource-duplicate-query
 - Polished: 2026-10-25
 
@@ -41,3 +41,21 @@
 - `tests/test_c4m/dpop.rs` に上記のテストが追加され、`cargo test --workspace` が通ること。
 - `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
 - `markdownlint-cli2` が変更した Markdown で通ること。
+
+## 解決方法
+
+- `src/c4m/dpop.rs` の `resource_query_parameters` を `resource_query_parameter_values` に置き換え、クエリの `tns` / `tn` を出現順にすべて返すようにした。パーセントエンコーディングを解釈しない点は変えていない。
+- `resource_values_match` を追加し、値が 1 つ以上あり、すべて期待値と一致する場合だけ整合とする。比較対象のパラメータがクエリに無い場合は一致しない。
+- namespace 操作は `tns` のすべての値を比較し、actx とクエリの両方に `tn` がある場合だけ `tn` のすべての値を比較する。クエリに `tn` が無い場合は比較を省略する。
+- track 操作は `tns` のすべての値を比較し、actx に `tn` があればクエリの `tn` のすべての値を比較する。クエリに `tn` が無い場合も `DpopError::ResourceInconsistent` を返す。actx に `tn` が無い場合は比較せず、後段の `verify_target` が `MissingTrackName` で拒否する。
+- SETUP は従来どおり `tns` / `tn` を比較しない。0346 の action 別検証の規則は維持している。
+- `tests/test_c4m/dpop.rs` に `resource_consistency_checks_every_duplicate_parameter` を追加した。同じ値の重複の受理、最後の値だけが一致する `tns` / `tn` の重複の拒否、`tns` が無い場合、track 操作で `tn` が無い場合、actx に `tn` が無い場合の比較省略を確認する。
+- `pbt/tests/prop_c4m/dpop.rs` のモデルは 0356 の範囲のため変更していない。
+- Lean 検証を `shiguredo/lean` の `moqt-rs/C4mResource/` に追加した。`allEq` が空でないすべての値の一致を要求すること、重複をすべて保持すること、action 別の比較対象と、最後の値だけが一致する重複の拒否を 12 個の定理と 9 個の有限例で確認した。
+
+確認コマンド: `cargo test --workspace`、
+`cargo test -p shiguredo_moqt --features aws-lc-rs`、
+`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo clippy -p shiguredo_moqt --all-targets --features aws-lc-rs -- -D warnings`、
+`cargo fmt --all -- --check`、
+`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` が通ることを確認した。
