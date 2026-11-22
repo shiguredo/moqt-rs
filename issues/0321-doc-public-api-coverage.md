@@ -1,7 +1,7 @@
 # 公開 API の doc を整備する
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/update-doc-public-api-coverage
 - Polished: 2026-11-20
 
@@ -46,3 +46,19 @@ shiguredo-rust は公開 API (型・関数・フィールド・variant) に `///
 - `src/session/core.rs` のモジュール doc の兄弟モジュール一覧に `track_status.rs` が含まれ、メッセージ種別の列挙に TRACK_STATUS が含まれていること。
 - `src/playout/buffer.rs` と `src/playout/timeline.rs` の `playout_delay_us` の doc が相互参照と意味の違いを明記していること。
 - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` と `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `RUSTDOCFLAGS="-W missing_docs" cargo doc --no-deps -p shiguredo_moqt -p tokio-moq` の
+  欠落を 0 件にした。
+  - `tokio-moq` の `TransportError` のフィールド、`Result` 型、`SubscribeResult` の
+    `request_id` / `track_alias`、`StreamRead` / `RecvChunk` / 各 transport enum の variant、
+    `webtransport_h2` / `webtransport_h3` の `ClientConfig` とメソッドに doc を追加した。
+- 公開 doc から非公開項目への intra-doc link をコード表記に直し、
+  `RUSTDOCFLAGS="-D warnings" cargo doc` を通した。
+- `PlayoutBuffer::playout_delay_us` と `PlayoutTimeline::playout_delay_us` の doc に
+  相互参照と意味の違いを明記した。
+- `src/session/core.rs` のモジュール doc に `track_status.rs` と TRACK_STATUS を追加した。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`RUSTDOCFLAGS="-D warnings" cargo doc` が成功した。
