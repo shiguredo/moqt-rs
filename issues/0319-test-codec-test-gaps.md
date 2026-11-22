@@ -1,7 +1,7 @@
 # codec / data stream のテストの穴と誤りを埋める
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/test-codec-test-gaps
 - Polished: 2026-11-20
 - Refreshed: 2026-11-04
@@ -63,3 +63,25 @@ draft-ietf-moq-transport-23 の MUST / MAY に対応するにもかかわらず�
 - 追加・修正した各テストが、対応する実装を変えると落ちることを確認していること (PBT は実装を変えると落ちる性質になっていること)。
 - `src/` の実装の挙動を変えていないこと (テストの追加・修正で実装の不足が見つかった場合は別 issue に切り出していること)。
 - `cargo test --workspace` / `cargo test -p pbt` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- FETCH の Descending Group Order で、Group ID Delta 0 の成功境界と、delta が prev_group と
+  等しくなる underflow 境界のテストを追加した。
+- `pbt/tests/prop_decoder.rs` の分割不変式を、push ごとの `try_decode_message` の結果列を
+  比較する fail し得る性質に書き換えた。`decoder_garbage_never_panics` は削除し、任意入力の
+  panic 耐性は fuzz に任せた。
+- `pbt/tests/prop_stream/decoder.rs` は Subgroup / Fetch とも非空の Properties blob を生成し、
+  `properties_bytes` が往復することを PBT で固定した。
+- `pbt/tests/prop_varint.rs` の 8 バイト長の分岐を確認し、draft の changelog PR 番号を
+  コメントから削除した。
+- `pbt/tests/prop_message.rs` の `SUBSCRIBE_PARAMS` と生成器に `PARAM_RENDEZVOUS_TIMEOUT` を
+  追加した。
+- `tests/test_pending_subgroup_buffer.rs` の `caller_dropped_objects_are_not_retained` は、
+  チャンクを push した後の `total_bytes` が remove で 0 に戻ることを検証するようにした。
+- `tests/test_subgroup_tracker.rs` のモジュール doc を `//!` にし、Range Filters の
+  陳腐化したコメントを draft-ietf-moq-transport-23 §3.3.2 に更新した。
+- `src/` の実装の挙動は変更していない。
+
+`cargo test --workspace`、`cargo test -p pbt`、
+`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が成功した。
