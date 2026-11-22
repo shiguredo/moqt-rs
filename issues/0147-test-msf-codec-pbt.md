@@ -1,7 +1,7 @@
 # MSF の PBT トラック生成器に codec と role を追加する
 
 - Created: 2026-09-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/test-msf-codec-pbt
 - Polished: 2026-11-14
 - Updated: 2026-11-14
@@ -41,3 +41,18 @@ MSF のカタログ検証は codec 文字列と role から audio / video を判
 - `full_catalog_roundtrip` が codec / role を持つトラックを含むカタログで往復を検証すること
 - 生成器が codec を持たないトラックも引き続き生成すること
 - `make pbt` (`cargo test -p pbt`) と `make test` / `make clippy` / `make fmt` が通ること
+
+## 解決方法
+
+- `pbt/tests/prop_msf.rs` の `sample_track` に codec と role の生成を追加した。
+  - codec は `None`、登録済み audio / video、登録外 (`ac-3` / `custom-codec`) を混ぜる
+  - role は `None`、`video`、`signlanguage`、`audio`、`audiodescription` を混ぜる
+  - role があり codec が無い場合は `custom-codec` を補う
+  - codec / role を持つトラックには bitrate / samplerate / channelConfig を生成し、
+    `video` / `signlanguage` には framerate、`audiodescription` には lang も生成する
+- `full_catalog_roundtrip` と `delta_roundtrip` が codec / role を持つトラックを含む
+  カタログでも encode → decode の往復を検証するようになった。
+- codec を持たないトラックの生成も維持した。
+
+`cargo test -p pbt`、`cargo test --workspace`、
+`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が成功した。
