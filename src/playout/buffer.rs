@@ -28,9 +28,6 @@ use crate::playout::timeline::{PlayoutTimeline, Track};
 /// 表示待ちのキューの上限 (枚)
 ///
 /// 保持しているフレームは復号器のメモリを占める。30 fps で再生遅延の上限 (500 ms) を
-/// 保持できる枚数に余裕を足した値にする。
-pub const JITTER_BUFFER_MAX_QUEUED_FRAMES: usize = 24;
-
 /// 表示の機会に表示できるフレームが無いときに限って、表示時刻を過ぎたフレームを遅れて
 /// 提示してよい上限 (マイクロ秒)
 ///

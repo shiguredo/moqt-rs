@@ -1698,8 +1698,7 @@ fn merge_faded_planes(
 ```rust
 // playout::buffer
 use shiguredo_moqt::playout::buffer::{
-    JITTER_BUFFER_MAX_QUEUED_FRAMES, MAX_PRESENTATION_LAG_US, PlayoutBuffer,
-    PlayoutNearestSelection,
+    MAX_PRESENTATION_LAG_US, PlayoutBuffer, PlayoutNearestSelection,
 };
 fn new(max_queued_frames: usize, track: Track) -> PlayoutBuffer<T>
 fn enqueue(&mut self, item: T, timestamp_us: Option<i64>, timeline: &PlayoutTimeline) -> Vec<T>
@@ -1878,7 +1877,7 @@ fn reset(&mut self)
 並べすぎの判定は、時刻基準では `delay_us` と `presentation_delay_us` の大きい方に、到着基準では `arrival_delay_us` に、`AUDIO_PLAYOUT_BACKLOG_US` (250 ms) を足した値を超えるかで行う (遅れが 50 ms のとき合計 300 ms = `AUDIO_PLAYOUT_MAX_DELAY_US`)。上限は時間圧縮の成否に関係なく、未加工の音の終端で検査する。
 
 `playout::buffer` は復号したフレームを目標表示時刻に合わせて選ぶキューである。`select_nearest` は、目標表示時刻から `max_late_us` より古いフレームを `dropped` として返し、`target - max_late` から `target + tolerance` の範囲で目標に最も近い 1 枚を `draw` として選ぶ (同距離なら先に積んだ方)。
-選んだフレームより前のフレームも `dropped` として返す。`draw_late` は選んだフレームの表示時刻が `target - tolerance` より古い場合に true になる (遅れて提示する逃げ道を使ったとき)。目標に合うフレームが無く未来のフレームだけなら `draw` は None になり、何も描かずに待つ。表示時刻を決められないフレームと、積んだときの世代が今と違うフレームは届いた順に 1 枚ずつ描く。上限 (`JITTER_BUFFER_MAX_QUEUED_FRAMES`) を超えたフレームは `enqueue` が古い方から返す。
+選んだフレームより前のフレームも `dropped` として返す。`draw_late` は選んだフレームの表示時刻が `target - tolerance` より古い場合に true になる (遅れて提示する逃げ道を使ったとき)。目標に合うフレームが無く未来のフレームだけなら `draw` は None になり、何も描かずに待つ。表示時刻を決められないフレームと、積んだときの世代が今と違うフレームは届いた順に 1 枚ずつ描く。上限 (`TimelineConfig::video_queue_limit`) を超えたフレームは `enqueue` が古い方から返す。
 moqt-rs には vsync が無く、呼び出し側のループ周期 (example は 1 ms) ごとに 1 枚選ぶ。`MAX_PRESENTATION_LAG_US` (20 ms) は「表示時刻を過ぎたフレームを 20 ms まで遅れて描く」上限ではなく、表示できるフレームが無いときだけ遅れて提示する逃げ道の上限である。提示遅延がある出し先 (moqt-js の generator 経路に相当) では、その分を足した値を `max_late_us` へ渡す。
 
 `media_clock` はデバイスが返すメディア時刻を Unix epoch の壁時計へ換算する。`observe` で「壁時計 − メディア時刻」の最小値を目標にし、`to_wall_clock_us` でその目標へ向けて 1 回の換算につきメディア時刻の差の半分未満だけ動かす (換算した TIMESTAMP が戻らない)。

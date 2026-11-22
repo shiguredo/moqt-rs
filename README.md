@@ -270,10 +270,8 @@ fn authorize_bearer<C: CoseCrypto>(
 - 音声と映像は、表示時刻のずれを補正し、ライブ配信から遅れたら追いつきます
 
 ```rust,no_run
-use shiguredo_moqt::playout::buffer::{
-    JITTER_BUFFER_MAX_QUEUED_FRAMES, MAX_PRESENTATION_LAG_US, PlayoutBuffer,
-};
-use shiguredo_moqt::playout::timeline::{PlayoutTimeline, Track};
+use shiguredo_moqt::playout::buffer::{MAX_PRESENTATION_LAG_US, PlayoutBuffer};
+use shiguredo_moqt::playout::timeline::{PlayoutTimeline, TimelineConfig, Track};
 
 fn main() {
     let mut timeline = PlayoutTimeline::new();
@@ -287,7 +285,7 @@ fn main() {
 
     // 映像: 復号したフレームを積み、表示したい時刻に最も近いものを 1 枚取り出す。
     // 第 2 引数は目標からの許容幅、第 3 引数は遅れて提示してよい上限 (マイクロ秒)
-    let mut buffer: PlayoutBuffer<u32> = PlayoutBuffer::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+    let mut buffer: PlayoutBuffer<u32> = PlayoutBuffer::new(TimelineConfig::default().video_queue_limit, Track::Video);
     let _ = buffer.enqueue(0, Some(timestamp_us), &timeline);
     let selection = buffer.select_nearest(
         wall_clock_us,

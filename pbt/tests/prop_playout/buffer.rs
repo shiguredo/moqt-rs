@@ -10,10 +10,13 @@
 //! - 揺らぎの p95 が最大の到着列でも、表示間隔が半分にならない
 
 use pbt::common::test_runner;
-use shiguredo_moqt::playout::buffer::{
-    JITTER_BUFFER_MAX_QUEUED_FRAMES, MAX_PRESENTATION_LAG_US, PlayoutBuffer,
-};
-use shiguredo_moqt::playout::timeline::{PlayoutTimeline, Track};
+use shiguredo_moqt::playout::buffer::{MAX_PRESENTATION_LAG_US, PlayoutBuffer};
+use shiguredo_moqt::playout::timeline::{PlayoutTimeline, TimelineConfig, Track};
+
+/// テストで使うキューの上限 (TimelineConfig の既定値)
+fn max_queued_frames() -> usize {
+    TimelineConfig::default().video_queue_limit
+}
 
 /// 送信側の壁時計 (Unix epoch マイクロ秒)。メディア時刻 0 のフレームの TIMESTAMP にする
 const EPOCH_US: i64 = 1_790_263_445_000_000;
@@ -37,7 +40,7 @@ fn selection_conserves_frames_and_keeps_order() -> noprop::TestResult {
         // 壁時計の TIMESTAMP を持つ場合と持たない場合を試す
         let with_timestamp = noprop::sample_bool(ctx);
         let mut timeline = PlayoutTimeline::new();
-        let max_queued_frames = noprop::sample_usize_in(ctx, 1..=JITTER_BUFFER_MAX_QUEUED_FRAMES);
+        let max_queued_frames = noprop::sample_usize_in(ctx, 1..=max_queued_frames());
         let mut buffer = PlayoutBuffer::new(max_queued_frames, Track::Video);
         let mut removed: Vec<u64> = Vec::new();
         let mut enqueued = 0u64;
@@ -99,7 +102,7 @@ fn drawn_frames_stay_within_the_tolerance_or_the_lag_limit() -> noprop::TestResu
     let mut runner = test_runner()?;
     runner.run(128, |ctx| {
         let mut timeline = PlayoutTimeline::new();
-        let mut buffer = PlayoutBuffer::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+        let mut buffer = PlayoutBuffer::new(max_queued_frames(), Track::Video);
         let mut enqueued = 0u64;
         let mut local_us = LOCAL_ORIGIN_US;
         for _ in 0..noprop::sample_usize_in(ctx, 1..=60) {

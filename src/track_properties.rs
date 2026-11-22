@@ -606,15 +606,6 @@ impl TrackProperties {
         self.find_varint(PROP_SUBGROUP_DELIVERY_TIMEOUT)
     }
 
-    /// prop_type が既知の必須プロパティかどうかを返す (draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties))
-    ///
-    /// 0x4000-0x7FFF 範囲のうち、この実装が認識しているプロパティ型を返す。
-    /// draft-ietf-moq-transport-23 時点ではこの範囲に定義済みのプロパティは存在しない。
-    fn is_known_mandatory(_prop_type: u64) -> bool {
-        // draft-ietf-moq-transport-23 時点では 0x4000-0x7FFF 範囲の既知プロパティは定義されていない
-        false
-    }
-
     /// 未知の Mandatory Track Property の型を昇順・重複なしで列挙する
     ///
     /// draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties) の
@@ -670,7 +661,6 @@ impl TrackProperties {
     /// (§13 (Grease)) 型を未知の Mandatory Track Property とする。
     fn is_unknown_mandatory(prop_type: u64) -> bool {
         (MANDATORY_TRACK_PROPERTY_MIN..=MANDATORY_TRACK_PROPERTY_MAX).contains(&prop_type)
-            && !Self::is_known_mandatory(prop_type)
             && !crate::grease::is_grease(prop_type)
     }
 

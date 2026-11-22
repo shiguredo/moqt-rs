@@ -131,19 +131,9 @@ impl ObjectProperties {
         self.0.is_empty()
     }
 
-    /// プロパティ数を返す
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
     /// 内部のプロパティスライスを返す
     pub fn as_slice(&self) -> &[ObjectProperty] {
         &self.0
-    }
-
-    /// 全プロパティのイテレータを返す
-    pub fn iter(&self) -> impl Iterator<Item = &ObjectProperty> {
-        self.0.iter()
     }
 
     /// Object Properties ブロック全体を `buf` に追記する

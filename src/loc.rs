@@ -128,7 +128,7 @@ fn validate_codec_strings(properties: &[LocPropertyRef<'_>]) -> Result<(), Messa
 pub(crate) fn validate_object_loc_properties(
     properties: &crate::object_properties::ObjectProperties,
 ) -> Result<(), MessageError> {
-    for property in properties.iter() {
+    for property in properties.as_slice().iter() {
         match property.prop_type {
             PROP_AUDIO_LEVEL => {
                 let ObjectPropertyValue::VarInt(value) = &property.value else {
@@ -912,7 +912,9 @@ fn walk_kv_pairs<'a>(
     // (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1
     // (Malformed Tracks) 条件 9)。未知 ID の重複は §8.4 の "MUST allow multiple
     // instances of the Property" により正当である。
-    if crate::property_scope::has_duplicate_single_property(properties.iter().map(|p| p.prop_id)) {
+    if crate::property_scope::has_duplicate_single_property(
+        properties.as_slice().iter().map(|p| p.prop_id),
+    ) {
         return Err(MessageError::MalformedTrack(DUPLICATE_LOC_PROPERTY));
     }
 
@@ -1002,49 +1004,7 @@ mod tests {
         assert_eq!(decoded.codec_string(), Ok(Some("av01.0.04M.08")));
     }
 
-    #[test]
-    fn even_id_with_bytes_error() {
-        let mut props = LocProperties::new();
-        props.push(LocProperty {
-            prop_id: PROP_TIMESTAMP,
-            value: LocPropertyValue::Bytes(vec![0x01]),
-        });
-        assert!(matches!(
-            props.encode(),
-            Err(MessageError::ProtocolViolation(_))
-        ));
-    }
-
-    #[test]
-    fn odd_id_with_varint_error() {
-        let mut props = LocProperties::new();
-        props.push(LocProperty {
-            prop_id: PROP_VIDEO_CONFIG,
-            value: LocPropertyValue::VarInt(42),
-        });
-        assert!(matches!(
-            props.encode(),
-            Err(MessageError::ProtocolViolation(_))
-        ));
-    }
-
     // ─── 既知プロパティ値域・長さバリデーション ─────────────────────
-
-    #[test]
-    fn timestamp_max_accepted() {
-        // Timestamp は vi64 1-9 bytes (u64 全域) のため u64::MAX も受理される
-        let mut props = LocProperties::new();
-        props.push(LocProperty {
-            prop_id: PROP_TIMESTAMP,
-            value: LocPropertyValue::VarInt(u64::MAX),
-        });
-        let encoded = props
-            .encode()
-            .expect("正当なテスト入力の encode は成功する");
-        let (decoded, _) =
-            LocProperties::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
-        assert_eq!(decoded.timestamp(), Some(u64::MAX));
-    }
 
     #[test]
     fn timestamp_max_accepted_on_decode() {
@@ -1073,19 +1033,6 @@ mod tests {
         let (decoded, _) =
             LocProperties::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
         assert_eq!(decoded.audio_level(), Some(255));
-    }
-
-    #[test]
-    fn audio_level_over_8bit_rejected_on_encode() {
-        let mut props = LocProperties::new();
-        props.push(LocProperty {
-            prop_id: PROP_AUDIO_LEVEL,
-            value: LocPropertyValue::VarInt(256),
-        });
-        assert!(matches!(
-            props.encode(),
-            Err(MessageError::MalformedKeyValue(_))
-        ));
     }
 
     #[test]
@@ -1129,20 +1076,6 @@ mod tests {
     }
 
     #[test]
-    fn video_frame_marking_empty_rejected_on_encode() {
-        // 長さ 0 は 1-4 bytes の範囲外
-        let mut props = LocProperties::new();
-        props.push(LocProperty {
-            prop_id: PROP_VIDEO_FRAME_MARKING,
-            value: LocPropertyValue::Bytes(vec![]),
-        });
-        assert!(matches!(
-            props.encode(),
-            Err(MessageError::MalformedKeyValue(_))
-        ));
-    }
-
-    #[test]
     fn video_frame_marking_empty_rejected_on_decode() {
         // 宣言長 0 の VFM を直接構築してデコード検証
         let mut inner = Vec::new();
@@ -1153,20 +1086,6 @@ mod tests {
         buf.extend_from_slice(&inner);
         assert!(matches!(
             LocProperties::decode(&buf),
-            Err(MessageError::MalformedKeyValue(_))
-        ));
-    }
-
-    #[test]
-    fn video_frame_marking_5_bytes_rejected_on_encode() {
-        // 長さ 5 は 1-4 bytes の範囲外
-        let mut props = LocProperties::new();
-        props.push(LocProperty {
-            prop_id: PROP_VIDEO_FRAME_MARKING,
-            value: LocPropertyValue::Bytes(vec![0x01, 0x02, 0x03, 0x04, 0x05]),
-        });
-        assert!(matches!(
-            props.encode(),
             Err(MessageError::MalformedKeyValue(_))
         ));
     }

@@ -10,10 +10,13 @@
 //! `performance.now()` の軸で行うが、本実装は `present_us` が返す epoch の軸で行うため、
 //! 原点の変換は要らない。
 
-use shiguredo_moqt::playout::buffer::{
-    JITTER_BUFFER_MAX_QUEUED_FRAMES, MAX_PRESENTATION_LAG_US, PlayoutBuffer,
-};
-use shiguredo_moqt::playout::timeline::{PlayoutTimeline, Track};
+use shiguredo_moqt::playout::buffer::{MAX_PRESENTATION_LAG_US, PlayoutBuffer};
+use shiguredo_moqt::playout::timeline::{PlayoutTimeline, TimelineConfig, Track};
+
+/// テストで使うキューの上限 (TimelineConfig の既定値)
+fn max_queued_frames() -> usize {
+    TimelineConfig::default().video_queue_limit
+}
 
 /// 送信側の壁時計 (Unix epoch マイクロ秒)。メディア時刻 0 のフレームの TIMESTAMP にする
 const EPOCH_US: i64 = 1_790_263_445_000_000;
@@ -66,7 +69,7 @@ fn presentation_us(buffer: &PlayoutBuffer<i64>, timeline: &PlayoutTimeline, medi
 fn select_nearest_draws_the_frame_nearest_to_the_target() {
     let mut timeline = create_shared_timeline();
     observe_frame(&mut timeline, Track::Video, FRAME_US, 0);
-    let mut buffer = PlayoutBuffer::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+    let mut buffer = PlayoutBuffer::new(max_queued_frames(), Track::Video);
     buffer.enqueue(0, Some(timestamp_of(0)), &timeline);
     buffer.enqueue(1, Some(timestamp_of(FRAME_US)), &timeline);
     let first_us = presentation_us(&buffer, &timeline, 0);
@@ -88,7 +91,7 @@ fn select_nearest_draws_the_frame_nearest_to_the_target() {
 #[test]
 fn select_nearest_drops_frames_older_than_the_tolerance_and_draws_the_latest() {
     let mut timeline = create_shared_timeline();
-    let mut buffer = PlayoutBuffer::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+    let mut buffer = PlayoutBuffer::new(max_queued_frames(), Track::Video);
     for index in 0..3i64 {
         observe_frame(&mut timeline, Track::Video, index * FRAME_US, 0);
         buffer.enqueue(index, Some(timestamp_of(index * FRAME_US)), &timeline);
@@ -105,7 +108,7 @@ fn select_nearest_drops_frames_older_than_the_tolerance_and_draws_the_latest() {
 #[test]
 fn select_nearest_waits_for_future_frames_and_drops_old_frames() {
     let mut timeline = create_shared_timeline();
-    let mut buffer = PlayoutBuffer::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+    let mut buffer = PlayoutBuffer::new(max_queued_frames(), Track::Video);
     observe_frame(&mut timeline, Track::Video, FRAME_US, 0);
     buffer.enqueue(0, Some(timestamp_of(0)), &timeline);
     buffer.enqueue(1, Some(timestamp_of(FRAME_US)), &timeline);
@@ -137,7 +140,7 @@ fn select_nearest_waits_for_future_frames_and_drops_old_frames() {
 fn select_nearest_chooses_the_nearest_frame_inside_the_tolerance() {
     let mut timeline = create_shared_timeline();
     observe_frame(&mut timeline, Track::Video, FRAME_US, 0);
-    let mut buffer = PlayoutBuffer::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+    let mut buffer = PlayoutBuffer::new(max_queued_frames(), Track::Video);
     buffer.enqueue(0, Some(timestamp_of(0)), &timeline);
     buffer.enqueue(1, Some(timestamp_of(FRAME_US)), &timeline);
     let first_us = presentation_us(&buffer, &timeline, 0);
@@ -163,7 +166,7 @@ fn select_nearest_chooses_the_nearest_frame_inside_the_tolerance() {
 fn select_nearest_draws_one_frame_per_tick_when_two_frames_share_a_target() {
     let mut timeline = create_shared_timeline();
     observe_frame(&mut timeline, Track::Video, FRAME_US / 2, 0);
-    let mut buffer = PlayoutBuffer::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+    let mut buffer = PlayoutBuffer::new(max_queued_frames(), Track::Video);
     buffer.enqueue(0, Some(timestamp_of(0)), &timeline);
     buffer.enqueue(1, Some(timestamp_of(FRAME_US / 2)), &timeline);
     let first_us = presentation_us(&buffer, &timeline, 0);
@@ -187,7 +190,7 @@ fn select_nearest_drops_window_frames_before_the_chosen_one() {
     let frame_us = 1_000_000 / 60;
     let mut timeline = create_shared_timeline();
     observe_frame(&mut timeline, Track::Video, frame_us, 0);
-    let mut buffer = PlayoutBuffer::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+    let mut buffer = PlayoutBuffer::new(max_queued_frames(), Track::Video);
     buffer.enqueue(0, Some(timestamp_of(0)), &timeline);
     buffer.enqueue(1, Some(timestamp_of(frame_us)), &timeline);
     let first_us = presentation_us(&buffer, &timeline, 0);
@@ -209,7 +212,7 @@ fn select_nearest_drops_window_frames_before_the_chosen_one() {
 #[should_panic(expected = "tolerance_us must be non-negative")]
 fn select_nearest_rejects_a_negative_tolerance_in_debug_builds() {
     let timeline = create_timeline();
-    let mut buffer = PlayoutBuffer::<i64>::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+    let mut buffer = PlayoutBuffer::<i64>::new(max_queued_frames(), Track::Video);
     buffer.enqueue(0, None, &timeline);
     let _ = buffer.select_nearest(0, -1, MAX_PRESENTATION_LAG_US, &timeline);
 }
@@ -220,7 +223,7 @@ fn select_nearest_rejects_a_negative_tolerance_in_debug_builds() {
 #[should_panic(expected = "max_late_us must be non-negative")]
 fn select_nearest_rejects_a_negative_lag_limit_in_debug_builds() {
     let timeline = create_timeline();
-    let mut buffer = PlayoutBuffer::<i64>::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+    let mut buffer = PlayoutBuffer::<i64>::new(max_queued_frames(), Track::Video);
     buffer.enqueue(0, None, &timeline);
     let _ = buffer.select_nearest(0, 0, -1, &timeline);
 }
@@ -235,7 +238,7 @@ fn select_nearest_clamps_negative_arguments_in_release_builds() {
     // 負の許容幅は 0 として扱う。目標に最も近いフレームを選ぶ対象は変わらない
     let mut timeline = create_shared_timeline();
     observe_frame(&mut timeline, Track::Video, FRAME_US, 0);
-    let mut buffer = PlayoutBuffer::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+    let mut buffer = PlayoutBuffer::new(max_queued_frames(), Track::Video);
     buffer.enqueue(0, Some(timestamp_of(0)), &timeline);
     let first_us = presentation_us(&buffer, &timeline, 0);
     let selection = buffer.select_nearest(first_us, -1, MAX_PRESENTATION_LAG_US, &timeline);
@@ -249,7 +252,7 @@ fn select_nearest_clamps_negative_arguments_in_release_builds() {
     // 負の遅れの上限は 0 として扱う。目標より古いフレームは逃げ道を使えず捨てる
     let mut timeline = create_shared_timeline();
     observe_frame(&mut timeline, Track::Video, FRAME_US, 0);
-    let mut buffer = PlayoutBuffer::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+    let mut buffer = PlayoutBuffer::new(max_queued_frames(), Track::Video);
     buffer.enqueue(0, Some(timestamp_of(0)), &timeline);
     let first_us = presentation_us(&buffer, &timeline, 0);
     let dropped = buffer.select_nearest(first_us + 10_000, 0, -1, &timeline);
@@ -269,7 +272,7 @@ fn select_nearest_never_draws_older_than_the_lag_limit() {
     for late_us in [0i64, 10_000, 19_999, 20_000, 20_001] {
         let mut timeline = create_shared_timeline();
         observe_frame(&mut timeline, Track::Video, FRAME_US, 0);
-        let mut buffer = PlayoutBuffer::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+        let mut buffer = PlayoutBuffer::new(max_queued_frames(), Track::Video);
         buffer.enqueue(0, Some(timestamp_of(0)), &timeline);
         let frame_presentation_us = presentation_us(&buffer, &timeline, 0);
         let target_us = frame_presentation_us + late_us;
@@ -299,7 +302,7 @@ fn select_nearest_never_draws_older_than_the_lag_limit() {
 fn select_nearest_draws_a_frame_late_only_within_the_lag_limit() {
     let mut timeline = create_shared_timeline();
     observe_frame(&mut timeline, Track::Video, FRAME_US, 0);
-    let mut buffer = PlayoutBuffer::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+    let mut buffer = PlayoutBuffer::new(max_queued_frames(), Track::Video);
     buffer.enqueue(0, Some(timestamp_of(0)), &timeline);
     let frame_presentation_us = presentation_us(&buffer, &timeline, 0);
     let within = buffer.select_nearest(
@@ -313,7 +316,7 @@ fn select_nearest_draws_a_frame_late_only_within_the_lag_limit() {
 
     let mut timeline = create_shared_timeline();
     observe_frame(&mut timeline, Track::Video, FRAME_US, 0);
-    let mut buffer = PlayoutBuffer::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+    let mut buffer = PlayoutBuffer::new(max_queued_frames(), Track::Video);
     buffer.enqueue(0, Some(timestamp_of(0)), &timeline);
     let frame_presentation_us = presentation_us(&buffer, &timeline, 0);
     let beyond = buffer.select_nearest(
@@ -331,7 +334,7 @@ fn select_nearest_draws_a_frame_late_only_within_the_lag_limit() {
 fn select_nearest_draws_late_when_no_frame_matches_the_target() {
     let mut timeline = create_shared_timeline();
     observe_frame(&mut timeline, Track::Video, FRAME_US, 0);
-    let mut buffer = PlayoutBuffer::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+    let mut buffer = PlayoutBuffer::new(max_queued_frames(), Track::Video);
     buffer.enqueue(0, Some(timestamp_of(0)), &timeline);
     buffer.enqueue(1, Some(timestamp_of(FRAME_US)), &timeline);
     let second_us = presentation_us(&buffer, &timeline, FRAME_US);
@@ -347,7 +350,7 @@ fn select_nearest_draws_late_when_no_frame_matches_the_target() {
 #[test]
 fn select_nearest_draws_frames_without_timestamp_in_arrival_order() {
     let timeline = create_timeline();
-    let mut buffer = PlayoutBuffer::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+    let mut buffer = PlayoutBuffer::new(max_queued_frames(), Track::Video);
     buffer.enqueue(0, None, &timeline);
     buffer.enqueue(1, None, &timeline);
     buffer.enqueue(2, None, &timeline);
@@ -368,7 +371,7 @@ fn select_nearest_draws_arrival_order_after_generation_change() {
     let mut timeline = create_timeline();
     observe_frame(&mut timeline, Track::Video, 0, 0);
     observe_frame(&mut timeline, Track::Video, FRAME_US, 0);
-    let mut buffer = PlayoutBuffer::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+    let mut buffer = PlayoutBuffer::new(max_queued_frames(), Track::Video);
     buffer.enqueue(0, Some(timestamp_of(0)), &timeline);
     buffer.enqueue(1, Some(timestamp_of(FRAME_US)), &timeline);
     // 1 時間前の TIMESTAMP のフレームが届き、基準を取り直す (世代が進む)
@@ -406,7 +409,7 @@ fn presentation_time_comes_from_the_timeline() {
     // なる。映像の表示の遅れは揺らぎ (0 ms) だけである
     let mut timeline = create_timeline();
     observe_frame(&mut timeline, Track::Video, 0, 0);
-    let mut buffer = PlayoutBuffer::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+    let mut buffer = PlayoutBuffer::new(max_queued_frames(), Track::Video);
     assert_eq!(
         buffer.playout_delay_us(&timeline),
         Some(0),
@@ -433,7 +436,7 @@ fn presentation_time_comes_from_the_timeline() {
 #[test]
 fn playout_delay_follows_the_timeline_learning() {
     let mut timeline = create_timeline();
-    let buffer = PlayoutBuffer::<i64>::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+    let buffer = PlayoutBuffer::<i64>::new(max_queued_frames(), Track::Video);
     // 揺らぎ 0 のフレームを 1 秒分観測する
     for index in 0..30i64 {
         observe_frame(&mut timeline, Track::Video, index * FRAME_US, 0);

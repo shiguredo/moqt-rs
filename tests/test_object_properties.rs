@@ -792,7 +792,7 @@ mod property_scope {
         let (decoded, consumed) =
             ObjectProperties::decode(&buf).expect("内側の未知型と両スコープ型は受理すること");
         assert_eq!(consumed, buf.len());
-        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded.as_slice().len(), 1);
     }
 
     /// Track 専用の既知 Property を Object scope で受信したら `MalformedTrack` になる
@@ -831,7 +831,7 @@ mod property_scope {
         let (decoded, consumed) =
             ObjectProperties::decode(&buf).expect("Object scope の正当な型は受理すること");
         assert_eq!(consumed, buf.len());
-        assert_eq!(decoded.len(), 6);
+        assert_eq!(decoded.as_slice().len(), 6);
     }
 
     /// 未知 Property と GREASE はスコープを推測して拒否しない
