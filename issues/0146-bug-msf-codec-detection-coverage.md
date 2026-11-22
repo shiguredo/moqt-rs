@@ -1,7 +1,7 @@
 # MSF の必須フィールド検証が登録外 codec と mimeType を覆えていない
 
 - Created: 2026-09-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/fix-msf-codec-detection-coverage
 - Polished: 2026-11-14
 - Updated: 2026-11-14
@@ -58,3 +58,19 @@ draft-ietf-moq-msf-01 の §5.2.18 (Codec) は inherent codec を持つトラッ
 - role と mimeType の判定が食い違う場合に両方の要求を満たす必要があるテストが追加されていること (例: role `video` + codec `av01` + mimeType `audio/mp4` で bitrate を与え、samplerate / channelConfig を欠けば mimeType 側の audio 要求で拒否され、両方を揃えれば受理される。role 側が mimeType 側の要求を包摂する向きでは mimeType の寄与を判別できないため使わない)
 - `docs/msf.md` の検証規則の記述が mimeType による判定と登録外 codec の扱いに追随していること
 - `make test` / `make clippy` / `make fmt` が通ること
+
+## 解決方法
+
+- `validate_media_track_fields` の種別判定に `mimeType` を加えた。
+  RFC 6838 §4.2 に従い大文字小文字を区別せず、`audio/` / `video/` の接頭辞で判定する。
+- 登録外 codec でも mimeType が種別を示せば bitrate / samplerate / channelConfig の MUST を
+  課し、codec を持たない場合は `MUST specify codec` で拒否する。
+- role / codec / mimeType の判定が食い違う場合は両方の要求を重ねる。
+- エラーメッセージの要求根拠に role / codec / mimeType を列挙するようにした。
+- `tests/test_msf/track_fields.rs` に、登録外 codec + mimeType の不足、codec 欠如、
+  大文字表記、role との食い違い、必須フィールドを揃えた受理、encode 経路の拒否、
+  mimeType の無い登録外 codec の受理を追加した。
+- `docs/msf.md` の検証規則を mimeType と登録外 codec の扱いに合わせて更新した。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check` が成功した。
