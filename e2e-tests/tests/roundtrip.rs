@@ -93,6 +93,14 @@ fn e2e_transport() -> String {
     }
 }
 
+/// 証明書検証をスキップするかどうかを環境変数から取り出す (既定 false)
+///
+/// relay が自己署名証明書を使う場合は `MOQT_E2E_INSECURE=1` を設定する。公開 CA の
+/// 証明書を使う場合は設定しない (システムルートストアで検証する)。
+fn e2e_insecure() -> bool {
+    std::env::var("MOQT_E2E_INSECURE").is_ok_and(|value| value == "1")
+}
+
 /// 実行ごとに一意な Track Namespace を作る
 ///
 /// 同じ relay を同時に使う実行や、前回の実行で残った配信と混ざらないようにする。
@@ -252,16 +260,21 @@ fn msf_url(url: &str, namespace: &str, track_name: &str) -> String {
 /// `--namespace` ではなく `--url` の MSF fragment から渡し、省略時の解決も E2E で確かめる。
 fn start_publisher(url: &str, transport: &str, namespace: &str) -> Publisher {
     let url = msf_url(url, namespace, MSF_TRACK_NAME);
-    let config = moq_pub::cli::parse_args(&[
+    let mut args = vec![
         "--url",
         url.as_str(),
         "--transport",
         transport,
         "--fake-capture-device",
         "--no-audio",
-    ])
-    .expect("publisher のオプションを解釈できること")
-    .expect("publisher の設定が返ること");
+    ];
+    // relay が自己署名証明書を使う場合だけ、明示的に検証をスキップする
+    if e2e_insecure() {
+        args.push("--insecure");
+    }
+    let config = moq_pub::cli::parse_args(&args)
+        .expect("publisher のオプションを解釈できること")
+        .expect("publisher の設定が返ること");
 
     spawn_publisher(config)
 }
@@ -297,6 +310,10 @@ fn start_audio_publisher_with_redundancy(
     ];
     if let Some(redundancy) = redundancy {
         args.extend_from_slice(&["--audio-redundancy", redundancy]);
+    }
+    // relay が自己署名証明書を使う場合だけ、明示的に検証をスキップする
+    if e2e_insecure() {
+        args.push("--insecure");
     }
     let config = moq_pub::cli::parse_args(&args)
         .expect("publisher のオプションを解釈できること")
@@ -353,7 +370,7 @@ async fn start_subscriber(
     loop {
         // --no-play は指定しない。no_play はデコード自体を無効にするため映像 / 音声
         // フレームが得られなくなる。SDL プレイヤーは lib に含まれないため、再生は行われない。
-        let config = moq_sub::cli::parse_args(&[
+        let mut args = vec![
             "--url",
             url.as_str(),
             "--transport",
@@ -361,9 +378,14 @@ async fn start_subscriber(
             disabled_track,
             "--mp4",
             &mp4_path,
-        ])
-        .expect("subscriber のオプションを解釈できること")
-        .expect("subscriber の設定が返ること");
+        ];
+        // relay が自己署名証明書を使う場合だけ、明示的に検証をスキップする
+        if e2e_insecure() {
+            args.push("--insecure");
+        }
+        let config = moq_sub::cli::parse_args(&args)
+            .expect("subscriber のオプションを解釈できること")
+            .expect("subscriber の設定が返ること");
 
         let (frame_tx, frames) = std::sync::mpsc::channel();
         let (audio_tx, audio_frames) = std::sync::mpsc::channel();

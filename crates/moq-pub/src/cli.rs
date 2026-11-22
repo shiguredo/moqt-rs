@@ -70,7 +70,14 @@ pub struct Config {
     /// (`tokio_moq::resolve_transport`)。
     pub transport: Transport,
     /// TLS CA 証明書パス
+    ///
+    /// 指定すると、その証明書だけをルートとしてサーバー証明書を検証する。省略時は OS の
+    /// システムルートストアで検証する。`insecure` と同時には指定できない。
     pub cert: Option<String>,
+    /// 証明書検証をスキップする (開発用)
+    ///
+    /// 接続時に警告ログを出す。`cert` と同時には指定できない。
+    pub insecure: bool,
     /// カメラデバイス ID
     pub device_id: Option<String>,
     /// 映像幅
@@ -310,9 +317,19 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
 
     let cert: Option<String> = noargs::opt("cert")
         .ty("PATH")
-        .doc("TLS CA certificate path (verification is skipped if omitted)")
+        .doc("TLS CA certificate path (default: the OS system root store)")
         .take(&mut args)
         .present_and_then(|o| Ok::<_, std::convert::Infallible>(o.value().to_string()))?;
+    let insecure: bool = noargs::flag("insecure")
+        .doc("Skip TLS certificate verification (development only; cannot be used with --cert)")
+        .take(&mut args)
+        .is_present();
+    if cert.is_some() && insecure {
+        return Err(noargs::Error::other(
+            &args,
+            "--cert and --insecure cannot be used together (specify either a CA certificate or insecure mode)",
+        ));
+    }
 
     let device_id: Option<String> = noargs::opt("device-id")
         .ty("ID")
@@ -697,6 +714,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         url,
         transport,
         cert,
+        insecure,
         device_id,
         width,
         height,

@@ -5,6 +5,9 @@
 #   検証する (e2e-tests/tests/roundtrip.rs)
 # - secrets.TEST_MOQT_URI は moqt:// を指定する。接続経路は vars.TEST_MOQT_TRANSPORT
 #   (quic / wt-h3 / wt-h2) で選び、未設定なら quic を使う
+# - relay が自己署名証明書を使う場合は vars.TEST_MOQT_INSECURE に 1 を設定し、
+#   MOQT_E2E_INSECURE として渡す。公開 CA の証明書を使う場合は設定しない (未設定なら
+#   システムルートストアで検証する)
 # - secrets.TEST_MOQT_URI が未設定の場合 (fork からの PR など) はテストを実行しない
 # - crates 配下の crate が macOS 専用依存 (Video Toolbox / CoreAudio 系の shiguredo_*_device 等) を
 #   持つため macos-15 を使う (ci.yml と同じ理由)
@@ -70,4 +73,5 @@ jobs:
         env:
           MOQT_E2E_URL: ${{ secrets.TEST_MOQT_URI }}
           MOQT_E2E_TRANSPORT: ${{ vars.TEST_MOQT_TRANSPORT }}
+          MOQT_E2E_INSECURE: ${{ vars.TEST_MOQT_INSECURE }}
         run: cargo test -p e2e-tests -- --ignored

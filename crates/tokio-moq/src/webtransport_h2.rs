@@ -75,9 +75,14 @@ pub struct ClientConfig {
     ///
     /// URL でポートを省略した場合はポートを含まない。
     pub authority: String,
-    /// TLS の CA 証明書 (PEM)
+    /// 検証に使う CA 証明書 (PEM)
+    ///
+    /// 指定した場合はこの CA 証明書だけをルートとして検証する。指定しない場合は
+    /// OS のシステムルートストアで検証する。
     pub ca_cert_pem: Option<String>,
     /// 証明書検証を無効化するかどうか (開発用)
+    ///
+    /// `insecure()` でだけ true になる。true の場合は CA 証明書もシステムルートも使わない。
     pub disable_cert_validation: bool,
     /// datagram をアプリへ引き渡すか
     ///
@@ -114,7 +119,10 @@ impl ClientConfig {
         self
     }
 
-    /// TLS の CA 証明書 (PEM) を設定する
+    /// 検証に使う CA 証明書 (PEM) を設定する
+    ///
+    /// 指定した場合はこの CA 証明書だけをルートとして検証する。指定しない場合は
+    /// OS のシステムルートストアで検証する。
     pub fn ca_cert(mut self, pem: impl Into<String>) -> Self {
         self.ca_cert_pem = Some(pem.into());
         self
@@ -122,7 +130,7 @@ impl ClientConfig {
 
     /// 証明書検証を無効化する (開発用)
     ///
-    /// 呼び出し側は無効化の旨をログ等で明示すること。
+    /// 検証をスキップした旨の警告ログは TLS の設定を組み立てるときに出る。
     pub fn insecure(mut self) -> Self {
         self.disable_cert_validation = true;
         self
@@ -156,6 +164,7 @@ impl std::fmt::Debug for ClientConfig {
 /// rustls のクライアント設定を構築する (ALPN `h2` 固定)
 ///
 /// TLS の組み立ては QMux 経路と共通である (`crate::tls::build_client_config`)。
+/// CA 証明書も `insecure()` も指定されていない場合は OS のシステムルートストアで検証する。
 fn build_tls_client_config(config: &ClientConfig) -> Result<Arc<rustls::ClientConfig>> {
     crate::tls::build_client_config(
         config.ca_cert_pem.as_deref(),

@@ -323,7 +323,8 @@ mod tests {
     ///
     /// ハングを「失敗」として観測するため、待ち合わせに上限を置く。
     async fn expect_connect_error(addr: std::net::SocketAddr, message: &str) -> TransportError {
-        let result = tokio::time::timeout(TEST_TIMEOUT, connect(addr, "localhost", None))
+        // テスト peer は自己署名証明書を使うため、証明書検証をスキップする
+        let result = tokio::time::timeout(TEST_TIMEOUT, connect(addr, "localhost", None, true))
             .await
             .expect("上限時間以内に完了すること");
         result.expect_err(message)

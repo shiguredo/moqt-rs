@@ -528,6 +528,7 @@ fn publisher_connect_params<'a>(config: &'a Config, url: &'a ServerUrl) -> Conne
         url,
         transport: config.transport,
         cert: config.cert.as_deref(),
+        insecure: config.insecure,
         impl_name: "moq-pub",
         // publisher は datagram を受信しない
         receive_datagrams: false,
@@ -7695,6 +7696,21 @@ mod tests {
             0x0A, 0x0B, 0x00, 0x00, 0x00, 0x24, 0xC4, 0xFF, 0xDF, 0x3F, 0xFE, 0x60, 0x10,
         ];
 
+        /// テスト用 peer へ接続する設定を、接続先 URL を指定して組み立てる
+        ///
+        /// テスト用 peer は自己署名証明書を使うため、システムルートストアでは検証できない。
+        /// `--insecure` を明示して証明書検証をスキップする。
+        fn peer_config_for_url(url: &str, extra: &[&str]) -> Config {
+            let mut args = vec!["--insecure"];
+            args.extend_from_slice(extra);
+            config_for_url(url, &args)
+        }
+
+        /// `--namespace moq-example` と `--insecure` を含むテスト用の設定を組み立てる
+        fn peer_config(extra: &[&str]) -> Config {
+            peer_config_for_url("moqt://127.0.0.1:4443", extra)
+        }
+
         /// テスト本体を上限時間で実行する
         async fn run_with_timeout(future: impl Future<Output = ()>) {
             tokio::time::timeout(TEST_TIMEOUT, future)
@@ -8483,7 +8499,7 @@ mod tests {
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn subscribe_serves_known_tracks_and_rejects_unknown_tracks() {
             run_with_timeout(async {
-                let config = config_with(&[]);
+                let config = peer_config(&[]);
                 let mut server = start_peer_server().await;
                 let (mut peer, mut client) = connect_client(&mut server, &config).await;
                 drop(server);
@@ -8554,7 +8570,7 @@ mod tests {
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn requests_for_another_namespace_are_rejected() {
             run_with_timeout(async {
-                let config = config_with(&[]);
+                let config = peer_config(&[]);
                 let mut server = start_peer_server().await;
                 let (mut peer, mut client) = connect_client(&mut server, &config).await;
                 drop(server);
@@ -8614,7 +8630,7 @@ mod tests {
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn new_group_request_is_accepted_for_live_video() {
             run_with_timeout(async {
-                let config = config_with(&[]);
+                let config = peer_config(&[]);
                 let mut server = start_peer_server().await;
                 let (mut peer, mut client) = connect_client(&mut server, &config).await;
                 drop(server);
@@ -8662,7 +8678,7 @@ mod tests {
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn new_group_request_is_not_accepted_for_mp4_passthrough() {
             run_with_timeout(async {
-                let config = config_with(&["--input-mp4", "input.mp4"]);
+                let config = peer_config(&["--input-mp4", "input.mp4"]);
                 let mut server = start_peer_server().await;
                 let (mut peer, mut client) = connect_client(&mut server, &config).await;
                 drop(server);
@@ -8709,7 +8725,7 @@ mod tests {
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn filtered_and_paused_subscriptions_are_accepted_and_objects_are_filtered() {
             run_with_timeout(async {
-                let config = config_with(&[]);
+                let config = peer_config(&[]);
                 let mut server = start_peer_server().await;
                 let (mut peer, mut client) = connect_client(&mut server, &config).await;
                 drop(server);
@@ -8823,7 +8839,7 @@ mod tests {
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn catalog_fetch_serves_object_empty_and_invalid_range() {
             run_with_timeout(async {
-                let config = config_with(&[]);
+                let config = peer_config(&[]);
                 let mut server = start_peer_server().await;
                 let (mut peer, mut client) = connect_client(&mut server, &config).await;
                 drop(server);
@@ -8933,7 +8949,7 @@ mod tests {
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn media_fetch_serves_empty_range_and_rejects_unknown_and_unsupported_requests() {
             run_with_timeout(async {
-                let config = config_with(&[]);
+                let config = peer_config(&[]);
                 let mut server = start_peer_server().await;
                 let (mut peer, mut client) = connect_client(&mut server, &config).await;
                 drop(server);
@@ -9090,7 +9106,7 @@ mod tests {
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn serve_fetch_entries_writes_end_of_range_in_order_and_closes_with_fin() {
             run_with_timeout(async {
-                let config = config_with(&[]);
+                let config = peer_config(&[]);
                 let mut server = start_peer_server().await;
                 let (mut peer, mut client) = connect_client(&mut server, &config).await;
                 drop(server);
@@ -9237,7 +9253,7 @@ mod tests {
                     .path()
                     .to_str()
                     .expect("一時 MP4 のパスが UTF-8 であること");
-                let config = config_for_url(&url, &["--input-mp4", fixture_path]);
+                let config = peer_config_for_url(&url, &["--input-mp4", fixture_path]);
                 let publisher = RunningPublisher::start(config);
                 let mut peer = accept_publisher(&mut server).await;
                 let request_ids = accept_initial_publishes(
@@ -9324,7 +9340,7 @@ mod tests {
                     .path()
                     .to_str()
                     .expect("一時 MP4 のパスが UTF-8 であること");
-                let config = config_for_url(
+                let config = peer_config_for_url(
                     &url,
                     &["--input-mp4", fixture_path, "--stream-mapping", "object"],
                 );
@@ -9396,7 +9412,7 @@ mod tests {
                 let url = format!("moqt://{}", server.local_addr());
                 let mut args = TEST_VIDEO_ARGS.to_vec();
                 args.push("--no-audio");
-                let publisher = RunningPublisher::start(config_for_url(&url, &args));
+                let publisher = RunningPublisher::start(peer_config_for_url(&url, &args));
                 let mut peer = accept_publisher(&mut server).await;
                 let mut request_ids = accept_initial_publishes(
                     &mut peer,
@@ -9466,7 +9482,7 @@ mod tests {
                 let url_b = format!("moqt://{}", server_b.local_addr());
                 let mut args = TEST_VIDEO_ARGS.to_vec();
                 args.push("--no-audio");
-                let publisher = RunningPublisher::start(config_for_url(&url_a, &args));
+                let publisher = RunningPublisher::start(peer_config_for_url(&url_a, &args));
                 let mut peer_a = accept_publisher(&mut server_a).await;
                 let mut request_ids = accept_initial_publishes(
                     &mut peer_a,
@@ -9564,7 +9580,7 @@ mod tests {
                 let url_b = format!("moqt://{}", server_b.local_addr());
                 let mut args = TEST_VIDEO_ARGS.to_vec();
                 args.push("--no-audio");
-                let publisher = RunningPublisher::start(config_for_url(&url_a, &args));
+                let publisher = RunningPublisher::start(peer_config_for_url(&url_a, &args));
                 let mut peer_a = accept_publisher(&mut server_a).await;
                 let request_ids = accept_initial_publishes(
                     &mut peer_a,
@@ -9627,7 +9643,7 @@ mod tests {
                 args.push("--no-audio");
                 // 警告ログは run の起動後に出るため、起動前に購読を始める
                 let mut run_logs = subscribe_run_logs();
-                let publisher = RunningPublisher::start(config_for_url(&url, &args));
+                let publisher = RunningPublisher::start(peer_config_for_url(&url, &args));
                 let mut peer = accept_publisher(&mut server).await;
                 let request_ids = accept_initial_publishes(
                     &mut peer,
@@ -9683,7 +9699,7 @@ mod tests {
                 let url_a = format!("moqt://{}", server_a.local_addr());
                 let mut server_b = start_peer_server().await;
                 let url_b = format!("moqt://{}", server_b.local_addr());
-                let publisher = RunningPublisher::start(config_for_url(&url_a, TEST_AUDIO_ARGS));
+                let publisher = RunningPublisher::start(peer_config_for_url(&url_a, TEST_AUDIO_ARGS));
                 let mut peer_a = accept_publisher(&mut server_a).await;
                 let request_ids = accept_initial_publishes(
                     &mut peer_a,
@@ -9781,7 +9797,7 @@ mod tests {
             run_with_timeout(async {
                 let mut server = start_peer_server().await;
                 let url = format!("moqt://{}", server.local_addr());
-                let publisher = RunningPublisher::start(config_for_url(&url, TEST_AUDIO_ARGS));
+                let publisher = RunningPublisher::start(peer_config_for_url(&url, TEST_AUDIO_ARGS));
                 let mut peer = accept_publisher(&mut server).await;
                 let request_ids = accept_initial_publishes(
                     &mut peer,

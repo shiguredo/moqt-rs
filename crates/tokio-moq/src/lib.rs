@@ -1672,8 +1672,18 @@ pub struct ConnectParams<'a> {
     /// [`Transport::Auto`] の場合は、`connect` が URL とビルドに応じて候補を展開し、
     /// Happy Eyeballs v3 で競争させる。
     pub transport: Transport,
-    /// TLS の CA 証明書パス。省略すると証明書検証をスキップする (開発用)
+    /// TLS の CA 証明書パス
+    ///
+    /// 指定すると、その証明書だけをルートとしてサーバー証明書を検証する。省略した場合は
+    /// OS のシステムルートストアで検証する (native QUIC の ngtcp2 バックエンドだけは
+    /// aws-lc-sys の SSL の既定のトラストストアを使う)。[`Self::insecure`] と同時には
+    /// 指定できない。
     pub cert: Option<&'a str>,
+    /// 証明書検証をスキップする (開発用)
+    ///
+    /// true の場合はサーバー証明書を検証しない。接続時に警告ログを出す。
+    /// [`Self::cert`] と同時には指定できない。
+    pub insecure: bool,
     /// SETUP の MOQT IMPLEMENTATION (option type 0x07) に載せる実装名
     pub impl_name: &'a str,
     /// WebTransport 経路で datagram の継続受信を有効にする (subscriber が使う)
@@ -1706,12 +1716,17 @@ pub struct ConnectParams<'a> {
 /// SETUP の失敗は別の候補へのフォールバックを起こさない (draft-ietf-happy-happyeyeballs-v3-05
 /// §6.1 は成功判定をアプリケーションに委ねる)。
 ///
-/// 証明書検証の無効化 (`--cert` の省略) は、この関数が試行ごとに警告する。
+/// 証明書の検証方法は [`ConnectParams`] で決める。`cert` も `insecure` も指定されない
+/// 場合は OS のシステムルートストアで検証する (ngtcp2 バックエンドは aws-lc-sys の SSL の
+/// 既定のトラストストア)。`insecure` を指定したときだけ検証をスキップし、その旨を
+/// 試行ごとに警告する。`cert` と `insecure` を同時に指定すると、名前解決より前に
+/// エラーを返す。
 ///
 /// # Errors
 ///
 /// 名前解決に失敗した場合、接続の確立に失敗した場合、SETUP の交換に失敗した場合、
-/// 証明書の読み込みに失敗した場合は [`TransportError`] になる。
+/// 証明書の読み込みに失敗した場合、システムルートストアからルートを読み込めない場合、
+/// `cert` と `insecure` を同時に指定した場合は [`TransportError`] になる。
 pub async fn connect(
     params: &ConnectParams<'_>,
     task_monitor: &tokio_metrics::TaskMonitor,
@@ -1722,6 +1737,14 @@ pub async fn connect(
     ),
     TransportError,
 > {
+    // CA 証明書での検証と検証のスキップは同時に指定できない。どちらを優先するかを
+    // 決められないため、接続を試みる前にエラーにする。
+    if params.cert.is_some() && params.insecure {
+        return Err(TransportError::InvalidState(
+            "cert and insecure cannot be used together; specify either a CA certificate or insecure mode"
+                .to_string(),
+        ));
+    }
     // wt-h3 を提供しないビルドでは確立しない。CLI は Transport::parse /
     // resolve_transport で拒否するが、ConnectParams を直接組み立てる呼び出し側にも対処する。
     if params.transport == Transport::WtH3
@@ -1769,6 +1792,8 @@ struct AttemptContext {
     url: ServerUrl,
     /// TLS の CA 証明書パス
     cert: Option<String>,
+    /// 証明書検証をスキップするか
+    insecure: bool,
     /// WebTransport 経路で datagram の継続受信を有効にするか
     receive_datagrams: bool,
 }
@@ -1860,6 +1885,7 @@ async fn connect_resolved(
     let context = std::sync::Arc::new(AttemptContext {
         url: url.clone(),
         cert: params.cert.map(str::to_string),
+        insecure: params.insecure,
         receive_datagrams: params.receive_datagrams,
     });
     let config = params.happy_eyeballs.clone().sanitized();
@@ -1959,8 +1985,13 @@ async fn connect_transport(
     let server_name = host_from_authority(&url.authority);
     match transport {
         Transport::Quic => {
-            let (connection, stop_sending_rx) =
-                crate::quic::connect(socket_addr, server_name, context.cert.as_deref()).await?;
+            let (connection, stop_sending_rx) = crate::quic::connect(
+                socket_addr,
+                server_name,
+                context.cert.as_deref(),
+                context.insecure,
+            )
+            .await?;
             Ok(ConnectedTransport::Quic(connection, stop_sending_rx))
         }
         Transport::WtH3 => {
@@ -1979,7 +2010,8 @@ async fn connect_transport(
                     // subscriber は datagram を継続受信するためバックグラウンドタスクを起動する。
                     client_config = client_config.receive_datagrams();
                 }
-                client_config = apply_tls_config_h3(client_config, context.cert.as_deref())?;
+                client_config =
+                    apply_tls_config_h3(client_config, context.cert.as_deref(), context.insecure)?;
                 let session =
                     crate::webtransport_h3::WtClient::connect(client_config, &url.path).await?;
                 Ok(ConnectedTransport::WtH3(session))
@@ -2002,7 +2034,8 @@ async fn connect_transport(
                 // subscriber は datagram を継続受信するためバックグラウンドタスクを起動する。
                 client_config = client_config.receive_datagrams();
             }
-            client_config = apply_tls_config_h2(client_config, context.cert.as_deref())?;
+            client_config =
+                apply_tls_config_h2(client_config, context.cert.as_deref(), context.insecure)?;
             let session =
                 crate::webtransport_h2::WtH2Client::connect(client_config, &url.path).await?;
             Ok(ConnectedTransport::WtH2(session))
@@ -2012,6 +2045,7 @@ async fn connect_transport(
                 socket_addr,
                 server_name,
                 context.cert.as_deref(),
+                context.insecure,
                 task_monitor,
             )
             .await?;
@@ -2024,41 +2058,59 @@ async fn connect_transport(
     }
 }
 
-/// WebTransport over HTTP/3 の TLS 設定に CA 証明書を適用する
+/// WebTransport over HTTP/3 の TLS 設定に CA 証明書または検証のスキップを適用する
 ///
-/// `--cert` が無い場合は証明書検証をスキップする (開発用)。QUIC 直接接続と対称の警告を出す。
+/// `cert` が指定された場合はその CA 証明書で検証する。`insecure` が true の場合は
+/// 証明書検証をスキップする (開発用)。どちらも指定されない場合は WebTransport over
+/// HTTP/3 の connect が OS のシステムルートストアで検証する。両方が指定された場合は
+/// [`connect`] が事前にエラーにするため、ここでは `insecure` を優先する。
 /// Windows では `webtransport_h3` をコンパイルしないため、この関数もコンパイルしない。
 #[cfg(not(windows))]
 fn apply_tls_config_h3(
     client_config: crate::webtransport_h3::ClientConfig,
     cert: Option<&str>,
+    insecure: bool,
 ) -> Result<crate::webtransport_h3::ClientConfig, TransportError> {
-    if let Some(cert) = cert {
-        let pem = std::fs::read_to_string(cert).map_err(|e| {
-            TransportError::Internal(format!("failed to read certificate '{cert}': {e}"))
-        })?;
-        Ok(client_config.ca_cert(pem))
-    } else {
-        tracing::warn!("TLS certificate verification is disabled (development mode)");
-        Ok(client_config.insecure())
+    if insecure {
+        // 検証をスキップした旨の警告は、TLS の設定を組み立てるときに一箇所で出す
+        return Ok(client_config.insecure());
+    }
+    match cert {
+        Some(cert) => {
+            let pem = std::fs::read_to_string(cert).map_err(|e| {
+                TransportError::Internal(format!("failed to read certificate '{cert}': {e}"))
+            })?;
+            Ok(client_config.ca_cert(pem))
+        }
+        // CA 証明書が無い場合はシステムルートストアで検証する (connect が行う)
+        None => Ok(client_config),
     }
 }
 
-/// WebTransport over HTTP/2 の TLS 設定に CA 証明書を適用する
+/// WebTransport over HTTP/2 の TLS 設定に CA 証明書または検証のスキップを適用する
 ///
-/// `--cert` が無い場合は証明書検証をスキップする (開発用)。QUIC 直接接続と対称の警告を出す。
+/// `cert` が指定された場合はその CA 証明書で検証する。`insecure` が true の場合は
+/// 証明書検証をスキップする (開発用)。どちらも指定されない場合は OS のシステムルート
+/// ストアで検証する。両方が指定された場合は [`connect`] が事前にエラーにするため、
+/// ここでは `insecure` を優先する。
 fn apply_tls_config_h2(
     client_config: crate::webtransport_h2::ClientConfig,
     cert: Option<&str>,
+    insecure: bool,
 ) -> Result<crate::webtransport_h2::ClientConfig, TransportError> {
-    if let Some(cert) = cert {
-        let pem = std::fs::read_to_string(cert).map_err(|e| {
-            TransportError::Internal(format!("failed to read certificate '{cert}': {e}"))
-        })?;
-        Ok(client_config.ca_cert(pem))
-    } else {
-        tracing::warn!("TLS certificate verification is disabled (development mode)");
-        Ok(client_config.insecure())
+    if insecure {
+        // 検証をスキップした旨の警告は、TLS の設定を組み立てるときに一箇所で出す
+        return Ok(client_config.insecure());
+    }
+    match cert {
+        Some(cert) => {
+            let pem = std::fs::read_to_string(cert).map_err(|e| {
+                TransportError::Internal(format!("failed to read certificate '{cert}': {e}"))
+            })?;
+            Ok(client_config.ca_cert(pem))
+        }
+        // CA 証明書が無い場合はシステムルートストアで検証する (WtH2Client::connect が行う)
+        None => Ok(client_config),
     }
 }
 
@@ -3548,6 +3600,8 @@ mod tests {
             url: &url,
             transport: Transport::Quic,
             cert: None,
+            // 接続しないため検証の有無は結果に影響しない
+            insecure: false,
             impl_name: "impl",
             receive_datagrams: false,
             datagram_max_size: None,
@@ -4093,7 +4147,8 @@ mod tests {
             let counted = std::sync::Arc::clone(&counted);
             async move {
                 counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                crate::quic::connect(addr, "localhost", None).await
+                // テスト peer は自己署名証明書を使うため、証明書検証をスキップする
+                crate::quic::connect(addr, "localhost", None, true).await
             }
         })
         .await
@@ -4112,6 +4167,40 @@ mod tests {
             accepted_ip,
             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             "IPv4 の待ち受けで接続を受け付けること"
+        );
+    }
+
+    /// `cert` と `insecure` の同時指定は接続の前にエラーになる
+    ///
+    /// どちらを優先するかを決められないため、名前解決や接続を試みずに拒否する。
+    /// `cert` のパスは読み取りまで進まないことを、存在しないパスでも同じエラーになる
+    /// ことで確かめる。
+    #[tokio::test]
+    async fn connect_rejects_cert_and_insecure_together() {
+        let url = parse_url("moqt://127.0.0.1:4443/").expect("URL を解釈できること");
+        let params = ConnectParams {
+            url: &url,
+            transport: Transport::Quic,
+            cert: Some("/nonexistent/ca.pem"),
+            insecure: true,
+            impl_name: "test-client",
+            receive_datagrams: false,
+            datagram_max_size: None,
+            happy_eyeballs: happy_eyeballs::Config::default(),
+        };
+        let monitor = tokio_metrics::TaskMonitor::new();
+        let error = match connect(&params, &monitor).await {
+            Ok(_) => panic!("cert と insecure の同時指定はエラーになること"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, TransportError::InvalidState(_)),
+            "設定の矛盾として返ること: {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("cert") && message.contains("insecure"),
+            "どちらも指定できないことを示すこと: {message}"
         );
     }
 
@@ -4135,6 +4224,8 @@ mod tests {
                 url: &url,
                 transport: Transport::Quic,
                 cert: None,
+                // テスト peer は自己署名証明書を使うため、証明書検証をスキップする
+                insecure: true,
                 impl_name: "test-client",
                 receive_datagrams: false,
                 datagram_max_size: None,
@@ -4209,6 +4300,8 @@ mod tests {
                 url: &url,
                 transport: Transport::Auto,
                 cert: None,
+                // テスト peer は自己署名証明書を使うため、証明書検証をスキップする
+                insecure: true,
                 impl_name: "test-client",
                 receive_datagrams: false,
                 datagram_max_size: None,

@@ -2171,6 +2171,8 @@ struct MigrationRequest {
     transport: Transport,
     /// TLS の CA 証明書パス (現在の接続と同じものを使う)
     cert: Option<String>,
+    /// 証明書検証をスキップするか (現在の接続と同じものを使う)
+    insecure: bool,
     /// 移行先で張り直す購読の指定
     plan: ResubscribePlan,
     /// 再購読の Location Filter に使う、track ごとの最後の Location
@@ -2246,6 +2248,7 @@ async fn migrate_to_target(
         url: &request.url,
         transport: request.transport,
         cert: request.cert.as_deref(),
+        insecure: request.insecure,
         impl_name: "moq-sub",
         // subscriber は WebTransport 経路で datagram を継続受信する
         receive_datagrams: true,
@@ -2768,6 +2771,8 @@ struct SideSessionRequest {
     transport: Transport,
     /// TLS の CA 証明書パス (現在の接続と同じものを使う)
     cert: Option<String>,
+    /// 証明書検証をスキップするか (現在の接続と同じものを使う)
+    insecure: bool,
     /// 接続の期限 (最初の再発行要求の GOAWAY の Timeout から作る)
     ///
     /// 追加の要求は確立済みの session に相乗りするため、接続の期限は最初の要求で決まる。
@@ -2885,6 +2890,7 @@ fn start_side_session(
     task_monitor: &tokio_metrics::TaskMonitor,
     transport: Transport,
     cert: Option<String>,
+    insecure: bool,
     events: &tokio::sync::mpsc::Sender<RequestMigrationEvent>,
     url: tokio_moq::ServerUrl,
     initial: SideSessionCommand,
@@ -2904,6 +2910,7 @@ fn start_side_session(
             url,
             transport,
             cert,
+            insecure,
             deadline,
             initial,
         },
@@ -2937,6 +2944,7 @@ async fn dispatch_side_session_command<F>(
     task_monitor: &tokio_metrics::TaskMonitor,
     transport: Transport,
     cert: Option<String>,
+    insecure: bool,
     events: &tokio::sync::mpsc::Sender<RequestMigrationEvent>,
     url: tokio_moq::ServerUrl,
     command: SideSessionCommand,
@@ -2969,6 +2977,7 @@ async fn dispatch_side_session_command<F>(
                 task_monitor,
                 transport,
                 cert,
+                insecure,
                 events,
                 url,
                 command,
@@ -2984,6 +2993,7 @@ async fn dispatch_side_session_command<F>(
         task_monitor,
         transport,
         cert,
+        insecure,
         events,
         url,
         command,
@@ -3208,6 +3218,7 @@ async fn run_side_session(
         url: &request.url,
         transport: request.transport,
         cert: request.cert.as_deref(),
+        insecure: request.insecure,
         impl_name: "moq-sub",
         // subscriber は WebTransport 経路で datagram を継続受信する
         receive_datagrams: true,
@@ -3721,6 +3732,7 @@ pub async fn run(
             url: &config.url,
             transport: config.transport,
             cert: config.cert.as_deref(),
+            insecure: config.insecure,
             impl_name: "moq-sub",
             // subscriber は WebTransport 経路で datagram を継続受信する
             receive_datagrams: true,
@@ -4756,6 +4768,7 @@ pub async fn run(
                                                 url: target.url,
                                                 transport: config.transport,
                                                 cert: config.cert.clone(),
+                                                insecure: config.insecure,
                                                 plan: {
                                                     let (plan, resolve_as_ended) =
                                                         plan_for_migration(
@@ -4934,6 +4947,7 @@ pub async fn run(
                                                         &task_monitor,
                                                         config.transport,
                                                         config.cert.clone(),
+                                                        config.insecure,
                                                         &request_migration_tx,
                                                         target.url.clone(),
                                                         SideSessionCommand::Reissue {
@@ -5166,6 +5180,7 @@ pub async fn run(
                                                         &task_monitor,
                                                         config.transport,
                                                         config.cert.clone(),
+                                                        config.insecure,
                                                         &request_migration_tx,
                                                         target.url.clone(),
                                                         SideSessionCommand::ReissueFetch {
@@ -6261,6 +6276,7 @@ pub async fn run(
                                         url: config.url.clone(),
                                         transport: config.transport,
                                         cert: config.cert.clone(),
+                                        insecure: config.insecure,
                                         plan: {
                                             let (plan, resolve_as_ended) = plan_for_migration(
                                                 &resubscribe_plan,
@@ -16854,6 +16870,8 @@ mod tests {
                 url: &url,
                 transport: Transport::Quic,
                 cert: None,
+                // テスト peer は自己署名証明書を使うため、証明書検証をスキップする
+                insecure: true,
                 impl_name: "moq-sub-test",
                 receive_datagrams: true,
                 datagram_max_size: None,
@@ -17590,11 +17608,15 @@ mod tests {
         ///
         /// 映像の購読を無効にすると catalog の映像 track を無視する挙動まで変わるため、
         /// テストの catalog が音声だけでも `video_enabled` は有効のままにする。
+        ///
+        /// テスト用 peer は自己署名証明書を使うため、システムルートストアでは検証できない。
+        /// `insecure` を true にして証明書検証をスキップする。
         fn test_audio_config(addr: SocketAddr) -> Config {
             Config {
                 url: moqt_url_for(addr),
                 transport: Transport::Quic,
                 cert: None,
+                insecure: true,
                 namespace: test_track_namespace(),
                 video_enabled: true,
                 audio_enabled: true,

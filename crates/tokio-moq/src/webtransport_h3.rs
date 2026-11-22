@@ -56,9 +56,14 @@ pub struct ClientConfig {
     ///
     /// URL でポートを省略した場合はポートを含まない。
     pub authority: String,
-    /// 追加で信頼する CA 証明書 (PEM)
+    /// 検証に使う CA 証明書 (PEM)
+    ///
+    /// 指定した場合はこの CA 証明書だけをルートとして検証する。指定しない場合は
+    /// OS のシステムルートストアで検証する。
     pub ca_cert_pem: Option<String>,
     /// 証明書検証を無効化する (開発用)
+    ///
+    /// `insecure()` でだけ true になる。true の場合は CA 証明書もシステムルートも使わない。
     pub disable_cert_validation: bool,
     /// HTTP/3 の SETTINGS
     pub h3_settings: H3Settings,
@@ -82,7 +87,8 @@ pub(crate) fn wt_h3_settings() -> shiguredo_http3::webtransport::Settings {
 impl ClientConfig {
     /// 既定値でクライアント設定を作る
     ///
-    /// 証明書検証は有効、datagram の受信は無効で初期化する。
+    /// 証明書検証は有効 (CA 証明書を指定しなければ OS のシステムルートストアを使う) で、
+    /// datagram の受信は無効で初期化する。
     pub fn new(remote_addr: SocketAddr, server_name: impl Into<String>) -> Self {
         let server_name = server_name.into();
         Self {
@@ -107,9 +113,10 @@ impl ClientConfig {
         self
     }
 
-    /// 追加で信頼する CA 証明書 (PEM) を設定する
+    /// 検証に使う CA 証明書 (PEM) を設定する
     ///
-    /// システムのルートストアに加えて、この証明書を信頼する。
+    /// 指定した場合はこの CA 証明書だけをルートとして検証する。指定しない場合は
+    /// OS のシステムルートストアで検証する。
     pub fn ca_cert(mut self, pem: impl Into<String>) -> Self {
         self.ca_cert_pem = Some(pem.into());
         self
@@ -117,7 +124,7 @@ impl ClientConfig {
 
     /// 証明書検証を無効化する (開発用)
     ///
-    /// 呼び出し側は無効化の旨をログ等で明示すること。
+    /// 検証をスキップした旨の警告ログは TLS の設定を組み立てるときに出る。
     pub fn insecure(mut self) -> Self {
         self.disable_cert_validation = true;
         self
@@ -919,18 +926,20 @@ impl WtClient {
     /// 現在の接続で受信した SETTINGS と、省略された項目の既定値だけを使う。版選択は
     /// 現在のローカル SETTINGS と peer SETTINGS だけで決まり、前回接続の値には依存しない
     /// (draft-ietf-webtrans-http3-17 §3.2 / §7.1)。
+    /// 証明書の検証方法は `ClientConfig` に従う。CA 証明書も `insecure()` も指定されていない
+    /// 場合は、OS のシステムルートストアで検証する (WebTransport over HTTP/3 の ALPN は
+    /// `h3` (RFC 9114 §3.1) を使う)。
+    ///
+    /// # Errors
+    ///
+    /// システムルートストアからルートを 1 つも読み込めない場合、CA 証明書を読み込めない
+    /// 場合、QUIC / TLS / HTTP/3 の確立に失敗した場合に [`TransportError`] になる。
     pub async fn connect(config: ClientConfig, path: &str) -> Result<WtSession> {
-        let tls = if config.disable_cert_validation {
-            // 開発用: 証明書検証をスキップする。WebTransport over HTTP/3 の ALPN は
-            // `h3` (RFC 9114 §3.1) を使う
-            crate::tls::build_client_config(None, true, H3_ALPN)?
-        } else if let Some(ref ca_pem) = config.ca_cert_pem {
-            crate::tls::build_client_config(Some(ca_pem), false, H3_ALPN)?
-        } else {
-            return Err(TransportError::InvalidState(
-                "ca_cert_pem or disable_cert_validation is required".to_string(),
-            ));
-        };
+        let tls = crate::tls::build_client_config(
+            config.ca_cert_pem.as_deref(),
+            config.disable_cert_validation,
+            H3_ALPN,
+        )?;
 
         // WebTransport over HTTP/3 は draft-ietf-webtrans-http3-17 §3.1 の ALPN
         let client = Client::builder()

@@ -41,6 +41,8 @@ bytes = "1.12"
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs"], optional = true }
 # TLS バックエンド (QUIC と WebTransport over HTTP/2 の rustls で使う)
 rustls = "0.23"
+# OS のシステムルートストアから TLS のルート証明書を読み込む (--cert 省略時の既定の検証)
+rustls-native-certs = "0.8"
 # QUIC 実装 (s2n-quic)。quic-s2n feature で有効にする
 s2n-quic = { version = "1.91", default-features = false, features = ["provider-address-token-default", "provider-tls-rustls", "unstable-provider-datagram"], optional = true }
 # 非同期ランタイム

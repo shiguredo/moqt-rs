@@ -1196,7 +1196,7 @@ mod tests {
         // 接続と受理は並行に進める。tobi-quic のサーバーは `accept()` の poll で
         // ハンドシェイクを進めるため、client の `connect()` を先に待つと停止する
         let (connection, peer) = tokio::join!(
-            crate::quic::connect(addr, "localhost", None),
+            crate::quic::connect(addr, "localhost", None, true),
             server.accept(),
         );
         let (connection, stop_sending_rx) = connection.expect("接続できること");
@@ -1955,7 +1955,7 @@ mod tests {
         // 接続と受理は並行に進める。tobi-quic のサーバーは `accept()` の poll で
         // ハンドシェイクを進めるため、client の `connect()` を先に待つと停止する
         let (connection, peer) = tokio::join!(
-            crate::quic::connect(addr, "localhost", None),
+            crate::quic::connect(addr, "localhost", None, true),
             server.accept(),
         );
         let (connection, stop_sending_rx) = connection.expect("接続できること");
@@ -2416,6 +2416,8 @@ mod tests {
                         url: &connect_url,
                         transport: crate::Transport::Quic,
                         cert: None,
+                        // テスト peer は自己署名証明書を使うため、証明書検証をスキップする
+                        insecure: true,
                         impl_name: "test-peer",
                         receive_datagrams: false,
                         // QMux 経路は使わない (QUIC 直接接続の試験基盤)
@@ -2523,6 +2525,8 @@ mod tests {
                         url: &target.url,
                         transport: crate::Transport::Quic,
                         cert: None,
+                        // テスト peer は自己署名証明書を使うため、証明書検証をスキップする
+                        insecure: true,
                         impl_name: "test-peer",
                         receive_datagrams: false,
                         // QMux 経路は使わない (QUIC 直接接続の試験基盤)
@@ -2595,6 +2599,8 @@ mod tests {
                         url: &connect_url,
                         transport: crate::Transport::Quic,
                         cert: None,
+                        // テスト peer は自己署名証明書を使うため、証明書検証をスキップする
+                        insecure: true,
                         impl_name: "test-peer",
                         receive_datagrams: false,
                         // QMux 経路は使わない (QUIC 直接接続の試験基盤)
@@ -2690,6 +2696,8 @@ mod tests {
                         url: &target,
                         transport: crate::Transport::Quic,
                         cert: None,
+                        // テスト peer は自己署名証明書を使うため、証明書検証をスキップする
+                        insecure: true,
                         impl_name: "test-peer",
                         receive_datagrams: false,
                         // QMux 経路は使わない (QUIC 直接接続の試験基盤)
@@ -3665,6 +3673,8 @@ mod tests {
                     url: &url,
                     transport: crate::Transport::Quic,
                     cert: None,
+                    // テスト peer は自己署名証明書を使うため、証明書検証をスキップする
+                    insecure: true,
                     impl_name: "test-peer",
                     receive_datagrams: false,
                     datagram_max_size: None,

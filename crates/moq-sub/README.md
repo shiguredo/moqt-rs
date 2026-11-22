@@ -42,6 +42,9 @@ cargo run -p moq-sub --no-default-features --features quic-tobi -- --url moqt://
 # QUIC で起動する
 cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
 
+# 自己署名証明書を使うローカル relay で試す (開発用。証明書検証をスキップする)
+cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --insecure
+
 # WebTransport over HTTP/3 で起動する (tobi-quic ビルドが必要)
 cargo run -p moq-sub --no-default-features --features quic-tobi -- --url moqt://127.0.0.1:4443 --namespace moq-example --transport wt-h3
 
@@ -69,7 +72,8 @@ cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --re
 | --- | --- | --- |
 | `--url` | (必須) | 接続先 URL (`moqt://`) |
 | `--transport` | (省略時は `--url` の `msf` fragment の `connection`、無ければ `quic`) | 接続経路 (`quic` / `wt-h3` / `wt-h2` / `qmux` / `auto`)。`wt-h3` は s2n-quic バックエンドのビルドと Windows ビルドでは選べない。`qmux` は experimental。`auto` は Happy Eyeballs v3 で候補を競争する (詳細は [tokio-moq](../tokio-moq/README.md) を参照する) |
-| `--cert` | | TLS CA 証明書パス |
+| `--cert` | | TLS CA 証明書パス。省略時は OS のシステムルートストアで検証する |
+| `--insecure` | | 証明書検証をスキップする (開発用。接続時に警告ログが出る。`--cert` と同時には指定できない) |
 | `--namespace` | (省略時は `--url` の `msf` fragment) | Track Namespace (§8.8 表現。`-` が namespace フィールドの区切り) |
 | `--no-video` | | 映像トラックの購読を無効化する |
 | `--no-audio` | | 音声トラックの購読を無効化する |

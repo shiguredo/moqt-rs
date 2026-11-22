@@ -26,6 +26,10 @@ cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --fa
 
 # subscriber
 cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
+
+# 自己署名証明書を使うローカル relay で試す (開発用。証明書検証をスキップする)
+cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --insecure --fake-capture-device
+cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --insecure
 ```
 
 ## 接続設定
@@ -39,7 +43,8 @@ cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
 - WebTransport (`wt-h3`) の QUIC 層は tobi-quic 固定である。s2n-quic は RESET_STREAM_AT を実装していないため、既定の s2n-quic ビルドでは `wt-h3` を選べない。使う場合は `--no-default-features --features quic-tobi` でビルドする (Windows ビルドでは tobi-quic 非対応のため `wt-h3` を選べない)
 - `--namespace` を省略すると MSF fragment の track-identifier の namespace を使う。どちらも無ければエラー
 - MSF fragment の `cat` は SETUP と PUBLISH / SUBSCRIBE / FETCH / REQUEST_UPDATE の AUTHORIZATION_TOKEN として送信する
-- `--cert` を省略すると TLS の証明書検証をスキップする。本番環境では必ず指定する
+- TLS は既定で OS のシステムルートストアによる証明書検証を行う。`--cert` で CA 証明書を指定すると、その証明書だけをルートとして検証する
+- 自己署名証明書を使うローカル開発では `--insecure` を明示すると証明書検証をスキップできる (接続時に警告ログが出る)。`--cert` との同時指定はエラーになる。本番環境では `--insecure` を使わない
 
 ```bash
 # C4M トークン付き (シェルでは & を引用符で囲む)

@@ -1092,26 +1092,40 @@ fn datagram_config() -> ngtcp2::DatagramConfig {
 }
 
 /// QUIC クライアント接続を確立する
+///
+/// ngtcp2 は rustls ではなく aws-lc-sys の SSL を使うため、rustls のシステムルート
+/// ストアではなく SSL の既定のトラストストアで検証する。
+///
+/// - `insecure` が true: 証明書検証をスキップする (開発用)
+/// - `cert_path` が指定されている: その CA 証明書を既定のトラストストアに追加して検証する
+/// - どちらも指定されていない: SSL の既定のトラストストア (既定の CA パスと
+///   `SSL_CERT_FILE` / `SSL_CERT_DIR`) で検証する
+///
+/// 既定のトラストストアからルートを読み込めない場合はハンドシェイクの失敗として
+/// 観測される。検証をスキップする経路へはフォールバックしない。
 pub(crate) async fn connect(
     socket_addr: SocketAddr,
     server_name: &str,
     cert_path: Option<&str>,
+    insecure: bool,
 ) -> Result<(Connected, StopSendingReceiver)> {
     let mut config = ClientConfig::new(&[ALPN])
         .with_transport_params(build_transport_params())
         .with_datagram(datagram_config());
-    match cert_path {
-        Some(path) => {
-            let pem = std::fs::read_to_string(path).map_err(|e| {
-                TransportError::Quic(format!("failed to read certificate '{path}': {e}"))
-            })?;
-            config = config.with_verify_peer(true).with_ca_cert_pem(pem);
-        }
-        None => {
-            // 開発用: 証明書検証をスキップする
-            tracing::warn!("TLS certificate verification is disabled (development mode)");
-            config = config.with_verify_peer(false);
-        }
+    if insecure {
+        // 開発用: `insecure` を明示したときだけ証明書検証をスキップする
+        tracing::warn!(
+            "TLS certificate verification is disabled (insecure mode); the server certificate is not verified"
+        );
+        config = config.with_verify_peer(false);
+    } else if let Some(path) = cert_path {
+        let pem = std::fs::read_to_string(path).map_err(|e| {
+            TransportError::Quic(format!("failed to read certificate '{path}': {e}"))
+        })?;
+        config = config.with_verify_peer(true).with_ca_cert_pem(pem);
+    } else {
+        // `ClientConfig::new` の既定も true だが、検証を有効にする意図を明示する
+        config = config.with_verify_peer(true);
     }
 
     let local_addr = crate::local_bind_addr(socket_addr);

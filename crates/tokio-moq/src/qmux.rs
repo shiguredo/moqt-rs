@@ -168,20 +168,26 @@ impl QmuxSession {
 /// QMux 接続を確立する
 ///
 /// 名前解決とアドレスのフォールバックは [`crate::connect`] の Happy Eyeballs v3 の競争が
-/// 済ませており、ここは解決済みの 1 つのアドレスへ TCP を張るところから始める。`--cert` を
-/// 省略した場合は証明書検証を無効化する (WebTransport over HTTP/2 経路と同じ扱い)。
+/// 済ませており、ここは解決済みの 1 つのアドレスへ TCP を張るところから始める。
+/// TLS の検証方法は [`crate::tls::build_client_config`] と共有する。
+///
+/// - `insecure` が true: 証明書検証をスキップする (開発用)
+/// - `cert` が指定されている: その CA 証明書で検証する
+/// - どちらも指定されていない: OS のシステムルートストアで検証する
 ///
 /// # Errors
 ///
 /// TCP 接続、TLS ハンドシェイク、QMux のトランスポートパラメータ検証のいずれかに
-/// 失敗した場合に [`TransportError`] になる。
+/// 失敗した場合に [`TransportError`] になる。システムルートストアからルートを
+/// 読み込めない場合もエラーになる。
 pub(crate) async fn connect(
     socket_addr: SocketAddr,
     server_name: &str,
     cert: Option<&str>,
+    insecure: bool,
     task_monitor: &tokio_metrics::TaskMonitor,
 ) -> Result<QmuxSession> {
-    let connection = connect_connection(socket_addr, server_name, cert).await?;
+    let connection = connect_connection(socket_addr, server_name, cert, insecure).await?;
     let session = split_connection(Arc::clone(&connection), task_monitor);
     wait_for_peer_transport_parameters(&connection).await?;
     Ok(session)
@@ -196,9 +202,10 @@ pub(crate) async fn connect_without_peer_parameters(
     socket_addr: SocketAddr,
     server_name: &str,
     cert: Option<&str>,
+    insecure: bool,
     task_monitor: &tokio_metrics::TaskMonitor,
 ) -> Result<QmuxSession> {
-    let connection = connect_connection(socket_addr, server_name, cert).await?;
+    let connection = connect_connection(socket_addr, server_name, cert, insecure).await?;
     Ok(split_connection(connection, task_monitor))
 }
 
@@ -209,6 +216,7 @@ async fn connect_connection(
     socket_addr: SocketAddr,
     server_name: &str,
     cert: Option<&str>,
+    insecure: bool,
 ) -> Result<Arc<shiguredo_tokio_qmux::Connection>> {
     // TCP。QMux は 1 本のバイトストリームを多重化するため、Nagle による遅延が全ストリームに
     // 乗る。音声の datagram を 20 ms ごとに送るため無効化する。
@@ -222,16 +230,18 @@ async fn connect_connection(
     tcp.set_nodelay(true).map_err(TransportError::transport)?;
 
     // TLS。CA 証明書の読み込みと検証の有無は WebTransport over HTTP/2 経路と同じ扱いにする。
-    let ca_cert_pem = match cert {
-        Some(path) => Some(std::fs::read_to_string(path).map_err(|e| {
-            TransportError::Internal(format!("failed to read certificate '{path}': {e}"))
-        })?),
-        None => {
-            tracing::warn!("TLS certificate verification is disabled (development mode)");
-            None
+    // 検証をスキップする場合は CA 証明書を使わないため、読み込みもしない。
+    let ca_cert_pem = if insecure {
+        None
+    } else {
+        match cert {
+            Some(path) => Some(std::fs::read_to_string(path).map_err(|e| {
+                TransportError::Internal(format!("failed to read certificate '{path}': {e}"))
+            })?),
+            None => None,
         }
     };
-    let tls_config = crate::tls::build_client_config(ca_cert_pem.as_deref(), false, ALPN)?;
+    let tls_config = crate::tls::build_client_config(ca_cert_pem.as_deref(), insecure, ALPN)?;
     let server_name = rustls::pki_types::ServerName::try_from(server_name.to_string())
         .map_err(|e| TransportError::Internal(format!("invalid server name: {e}")))?;
     let tls = TlsConnector::from(tls_config)
@@ -610,7 +620,7 @@ mod tests {
 
         let connect = tokio::spawn(async move {
             let task_monitor = tokio_metrics::TaskMonitor::new();
-            let session = connect(addr, "localhost", None, &task_monitor).await?;
+            let session = connect(addr, "localhost", None, true, &task_monitor).await?;
             let handle = Arc::clone(&session.handle);
             let (client, acceptor) = MoqtClient::establish_qmux(
                 session,
@@ -1009,7 +1019,7 @@ mod tests {
         let addr = server.local_addr();
         let connect = tokio::spawn(async move {
             let task_monitor = tokio_metrics::TaskMonitor::new();
-            connect(addr, "localhost", None, &task_monitor).await
+            connect(addr, "localhost", None, true, &task_monitor).await
         });
         let mut peer = server.accept().await.expect("接続を受理できること");
         let session = connect
@@ -1073,7 +1083,7 @@ mod tests {
         let addr = server.local_addr();
         let connect = tokio::spawn(async move {
             let task_monitor = tokio_metrics::TaskMonitor::new();
-            connect(addr, "localhost", None, &task_monitor).await
+            connect(addr, "localhost", None, true, &task_monitor).await
         });
         let peer = server.accept().await.expect("接続を受理できること");
         let session = connect
@@ -1187,7 +1197,7 @@ mod tests {
         });
 
         let task_monitor = tokio_metrics::TaskMonitor::new();
-        let session = connect_without_peer_parameters(addr, "localhost", None, &task_monitor)
+        let session = connect_without_peer_parameters(addr, "localhost", None, true, &task_monitor)
             .await
             .expect("接続できること");
         let QmuxSession {
@@ -1288,7 +1298,14 @@ mod tests {
     async fn qmux_connect_rejects_peer_without_transport_parameters() {
         let addr = spawn_tls_peer(vec![crate::MOQT_PROTOCOL.as_bytes().to_vec()]).await;
         let started = std::time::Instant::now();
-        let error = match connect(addr, "localhost", None, &tokio_metrics::TaskMonitor::new()).await
+        let error = match connect(
+            addr,
+            "localhost",
+            None,
+            true,
+            &tokio_metrics::TaskMonitor::new(),
+        )
+        .await
         {
             Ok(_) => panic!("QMux のパラメータを送らないピアとは接続できないこと"),
             Err(e) => e,
@@ -1313,7 +1330,14 @@ mod tests {
     async fn qmux_connect_rejects_a_peer_without_alpn_selection() {
         let addr = spawn_tls_peer(Vec::new()).await;
         // QmuxSession は Debug ではないため expect_err を使わずに取り出す
-        let error = match connect(addr, "localhost", None, &tokio_metrics::TaskMonitor::new()).await
+        let error = match connect(
+            addr,
+            "localhost",
+            None,
+            true,
+            &tokio_metrics::TaskMonitor::new(),
+        )
+        .await
         {
             Ok(_) => panic!("ALPN を選択しないピアとは接続できないこと"),
             Err(e) => e,
@@ -1337,7 +1361,14 @@ mod tests {
     async fn qmux_connect_rejects_a_draft_22_peer() {
         let addr = spawn_tls_peer(vec![b"moqt-22".to_vec()]).await;
         // QmuxSession は Debug ではないため expect_err を使わずに取り出す
-        let error = match connect(addr, "localhost", None, &tokio_metrics::TaskMonitor::new()).await
+        let error = match connect(
+            addr,
+            "localhost",
+            None,
+            true,
+            &tokio_metrics::TaskMonitor::new(),
+        )
+        .await
         {
             Ok(_) => panic!("draft 22 の識別子しか広告しないピアとは接続できないこと"),
             Err(e) => e,

@@ -167,7 +167,7 @@ QMux 経路 (`qmux`) は experimental として扱う。QMux は順序保証さ�
 QMux 自体は暗号化も ALPN のネゴシエーションも行わないため、ALPN は native QUIC と同じ `moqt-23` をこのクレートが張る (`wt-h2` の ALPN は `h2` のままである)。
 DATAGRAM は経路での損失を下位の TCP が再送するため起きないが、TCP の再送で遅延が伸びる。また QMux は速やかに配送できない DATAGRAM の破棄を許すため (draft-ietf-quic-qmux-02 Section 6)、受信側のバッファが溢れると欠落しうる (破棄は `dropped_datagrams` として警告ログに出る)。QMux は `RESET_STREAM_AT` を実装しないため `reliable_size` は常に `None` になる。
 送る DATAGRAM がピアの広告する `max_datagram_frame_size` か `max_record_size` (QMux はフレーム全体を両方と比較する) に収まらない場合、shiguredo_tokio_qmux の `send_datagram` はエラーを返す。音声は 20 ms ごとに送るためエラーログが大量にならないよう、接続確立時に 1 度だけ判定して警告ログ (英語) を出す (`--datagram-max-size` の既定 1160 の音声 Object は、QMux の DATAGRAM フレーム全体では 1163 バイトになる)。
-`--cert` の扱いは WebTransport over HTTP/2 経路と同じで、省略すると証明書検証をスキップする (TCP + TLS の組み立てを共有し、ALPN だけが異なる)。
+`--cert` / `--insecure` の扱いは WebTransport over HTTP/2 経路と同じである (TCP + TLS の組み立てを共有し、ALPN だけが異なる)。省略時は OS のシステムルートストアで検証する。
 この経路を選ぶと、接続の前に experimental である旨の警告ログ (英語) が出る。
 実装は `qmux.rs` に閉じており、[qmux-rs](https://github.com/shiguredo/qmux-rs) の `shiguredo_qmux` と `shiguredo_tokio_qmux` を git の rev 固定で取り込む (タグが無く crates.io にも未公開のため)。
 
@@ -190,9 +190,22 @@ cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video&cat=
 
 ## TLS 証明書
 
-接続時の TLS は `--cert` の CA 証明書で検証する。`--cert` を省略すると証明書検証をスキップする。
+接続時の TLS は次の規則で検証する。
 
-本番環境では `--cert` で CA 証明書を指定して証明書検証を有効にすること。
+- `--cert` も `--insecure` も指定しない場合は、OS のシステムルートストアでサーバー証明書を検証する。rustls を使う経路 (native QUIC の s2n-quic / tobi-quic、WebTransport over HTTP/3 / HTTP/2、QMux) は `rustls-native-certs` でシステムルートを読み込む。ngtcp2 バックエンドだけは rustls を使わず、aws-lc-sys の SSL の既定のトラストストア (既定の CA パスと `SSL_CERT_FILE` / `SSL_CERT_DIR`) で検証する
+- `--cert` を指定した場合は、その CA 証明書だけをルートとして検証する
+- `--insecure` を指定した場合だけ証明書検証をスキップする。接続時に警告ログが出る。`--cert` との同時指定はエラーになる
+- システムルートを 1 つも読み込めない場合は接続をエラーにする。検証をスキップする経路へはフォールバックしない
+
+自己署名証明書を使うローカル relay で試すときは、`--insecure` を明示する。
+
+```bash
+# 自己署名証明書を使うローカル relay へ接続する (開発用。証明書検証をスキップする)
+cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --insecure --fake-capture-device
+cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --insecure
+```
+
+本番環境では `--cert` で CA 証明書を指定するか、公開 CA の証明書を使ってシステムルートストアで検証すること。`--insecure` は使わないこと。
 
 ## テスト
 

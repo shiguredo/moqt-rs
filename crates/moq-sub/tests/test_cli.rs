@@ -35,6 +35,10 @@ fn help_prints_help_and_exits_successfully() {
             "--url の説明が表示されること ({flag}): {stdout}"
         );
         assert!(
+            stdout.contains("--insecure"),
+            "--insecure の説明が表示されること ({flag}): {stdout}"
+        );
+        assert!(
             stdout.contains("--namespace"),
             "--namespace の説明が表示されること ({flag}): {stdout}"
         );
@@ -77,6 +81,46 @@ fn help_prints_help_and_exits_successfully() {
             "必須オプションのエラーにならないこと ({flag}): {stdout}{stderr}"
         );
     }
+}
+
+/// `--insecure` は受理され、後続の検証まで進む
+///
+/// 証明書検証をスキップする指定そのものが option の解釈でエラーにならないことを、
+/// その後に評価される `--no-video` / `--no-audio` のエラーで確かめる (接続は行わない)。
+#[test]
+fn insecure_is_accepted() {
+    let (code, stdout, stderr) = run(&[
+        "--url",
+        "moqt://127.0.0.1:4443#msf:moq-example--video",
+        "--insecure",
+        "--no-video",
+        "--no-audio",
+    ]);
+    assert_eq!(code, Some(1), "異常終了すること: {stdout}{stderr}");
+    assert!(
+        stderr.contains("at least one of audio or video"),
+        "--insecure の解釈を通って次の検証まで進むこと: {stdout}{stderr}"
+    );
+}
+
+/// `--cert` と `--insecure` の同時指定はエラーになる
+///
+/// CA 証明書での検証と検証のスキップは同時に成り立たないため、接続を試みる前に
+/// CLI で拒否する。
+#[test]
+fn cert_and_insecure_cannot_be_used_together() {
+    let (code, stdout, stderr) = run(&[
+        "--url",
+        "moqt://127.0.0.1:4443#msf:moq-example--video",
+        "--cert",
+        "/nonexistent/ca.pem",
+        "--insecure",
+    ]);
+    assert_eq!(code, Some(1), "異常終了すること: {stdout}{stderr}");
+    assert!(
+        stderr.contains("--cert") && stderr.contains("--insecure"),
+        "同時指定できないことを示すこと: {stdout}{stderr}"
+    );
 }
 
 /// `--url` を省略した実行は必須オプション欠如のエラーになる

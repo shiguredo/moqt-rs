@@ -461,12 +461,17 @@ fn map_send_error(error: s2n_quic::stream::Error) -> QuicError {
 }
 
 /// QUIC クライアント接続を確立する
+///
+/// `cert_path` が指定された場合はその CA 証明書で検証し、`insecure` が true の場合は
+/// 検証をスキップする (開発用)。どちらも指定されない場合は OS のシステムルートストアで
+/// 検証する。
 pub(crate) async fn connect(
     socket_addr: SocketAddr,
     server_name: &str,
     cert_path: Option<&str>,
+    insecure: bool,
 ) -> Result<(Connected, StopSendingReceiver)> {
-    let tls = crate::tls::build_quic_client_config(cert_path, ALPN)?;
+    let tls = crate::tls::build_quic_client_config(cert_path, insecure, ALPN)?;
     let tls = s2n_rustls::Client::from(tls);
 
     let (stop_sending_tx, stop_sending_rx) = mpsc::unbounded_channel();

@@ -32,6 +32,19 @@ test publish_and_subscribe_audio_redundancy_roundtrip ... ok
 test publish_and_subscribe_roundtrip ... ok
 ```
 
+自己署名証明書を使う relay への接続は、システムルートストアで検証できないため失敗します。
+その場合は `MOQT_E2E_INSECURE=1` を設定し、publisher / subscriber に `--insecure` を渡します
+(証明書検証をスキップするための開発用の指定です)。公開 CA の証明書を使う relay では設定
+しないでください。
+
+```console
+$ MOQT_E2E_INSECURE=1 MOQT_E2E_URL=moqt://<HOST>/ cargo test -p e2e-tests -- --ignored
+running 3 tests
+test publish_and_subscribe_audio_datagram_roundtrip ... ok
+test publish_and_subscribe_audio_redundancy_roundtrip ... ok
+test publish_and_subscribe_roundtrip ... ok
+```
+
 既定のビルドは s2n-quic である。WebTransport over HTTP/3 (`wt-h3`) を試すときは
 `--no-default-features --features quic-tobi` を付ける。s2n-quic は RESET_STREAM_AT を
 実装していないため、既定のビルドでは `--transport wt-h3` がエラーになる。tobi-quic は
@@ -48,6 +61,7 @@ $ MOQT_E2E_TRANSPORT=wt-h3 MOQT_E2E_URL=moqt://<HOST>/ \
 | --- | --- | --- |
 | `MOQT_E2E_URL` | (必須) | 接続先 URL (`moqt://host[:port]/path`) |
 | `MOQT_E2E_TRANSPORT` | `quic` | トランスポート (`quic` / `wt-h3` / `wt-h2`)。`wt-h3` は s2n-quic 以外のバックエンドのビルドで選べる |
+| `MOQT_E2E_INSECURE` | (未設定) | `1` を指定すると publisher / subscriber に `--insecure` を渡す (relay が自己署名証明書を使う場合だけ設定する) |
 | `MOQT_E2E_KEEP` | (未設定) | `1` を指定すると受信した MP4 を残す (残した場所は `--nocapture` を付けたときに表示される) |
 
 `MOQT_E2E_URL` が未設定の場合は、何が必要かを示すメッセージでテストが失敗します。受信した MP4 は一時ディレクトリ (OS の一時ディレクトリ配下の `moqt-e2e-<PID>/subscriber.mp4`) に置き、終了時に削除します。
@@ -56,6 +70,6 @@ QMux 経路 (`qmux`) は対象外です。これらのテストは実リレー�
 
 ## CI
 
-`.github/workflows/e2e-test.yml` がこのテストを実行します。接続先は `secrets.TEST_MOQT_URI`、トランスポートは `vars.TEST_MOQT_TRANSPORT` から渡し、`secrets.TEST_MOQT_URI` が未設定の場合はテストを実行しません (fork からの PR など)。
+`.github/workflows/e2e-test.yml` がこのテストを実行します。接続先は `secrets.TEST_MOQT_URI`、トランスポートは `vars.TEST_MOQT_TRANSPORT` から渡し、`secrets.TEST_MOQT_URI` が未設定の場合はテストを実行しません (fork からの PR など)。relay が自己署名証明書を使う場合は `vars.TEST_MOQT_INSECURE` に `1` を設定します。公開 CA の証明書を使う場合は設定しません (未設定のままにします)。
 
 crates 配下の moq-pub / moq-sub は Video Toolbox / CoreAudio 系の macOS 専用依存を持つため、runner は `macos-15` を使います。

@@ -576,7 +576,7 @@ example 側の `crates/moq-sub` が `playout::buffer` と `playout::timeline` �
   MUST で要求するためである。DNS の非同期解決と SVCB/HTTPS レコードの解釈は対象外であり、
   SETUP は勝者だけで交換するため SETUP の失敗は別経路へのフォールバックを起こさない
   (`docs/happy-eyeballs.md`)
-- `--cert` を省略すると証明書検証をスキップする。mTLS (§15.3.1) には対応しない
+- 証明書検証は既定で OS のシステムルートストアを使う。`--cert` で CA 証明書を指定した場合はその証明書だけで検証し、`--insecure` を明示したときだけ検証をスキップする。ngtcp2 バックエンドだけは aws-lc-sys の SSL の既定のトラストストアを使う。mTLS (§15.3.1) には対応しない
 - 0-RTT (§6.3.1) と再接続 / セッション再開は未対応 (`rg 'early_data|0-rtt|resumption' crates/` が 0 件)
 - 無通信時の切断対策が無い。§15.6.1 が挙げる 3 つの選択肢 (transport の keep-alive、
   定期 control message、切断後の再接続) のいずれも実装していない
