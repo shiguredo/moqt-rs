@@ -1,7 +1,7 @@
 # moq-sub のカタログ解釈を MSF に合わせる
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/fix-subscriber-catalog-handling
 - Polished: 2026-11-20
 
@@ -100,3 +100,20 @@ moq-sub のカタログ解釈に、MSF (draft-ietf-moq-msf-02) の MUST と実�
 - Full / delta の拒否時にカタログ状態 (`catalog` / `latest_group` / `last_applied`) と履歴が更新されないこと。
 - 上記を `crates/moq-sub/src/pipeline.rs` と `crates/moq-sub/src/catalog.rs` の `#[cfg(test)] mod tests` に単体テストとして固定すること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `receive_catalog` の映像 / 音声選択に `is_loc_packaging` を追加し、
+  `packaging` が `loc` の track だけを media として選ぶようにした。
+- 予約 role の規則を `role_allows_video` / `role_allows_audio` に分けた。
+  `video` / `signlanguage` は映像、`audio` / `audiodescription` は音声、`data` はどちらでもない。
+  role 無しと予約外の custom role は codec と packaging が合えば選ぶ。
+- Full catalog をまたぐ `isLive` / `isComplete` の履歴は `MsfCatalogTracker` が既に
+  検証していたため、media 選択の修正と履歴テストの不足分を追加した。
+  - `isComplete=true` 後の track 追加の拒否
+  - track を追加しない `isComplete=true` の受理
+  - `isLive=true→false` と `isComplete=false→true` の受理
+  - namespace を省略した track と catalog namespace を明示した track の同一視
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check` が成功した。
