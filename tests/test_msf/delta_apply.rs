@@ -971,7 +971,7 @@ fn apply_delta_is_atomic_when_later_operation_fails() {
     );
 }
 
-/// 成功時は複製への適用結果がそのまま反映される (tracks / generatedAt)
+/// 成功時は操作列の適用結果がそのまま反映される (tracks / generatedAt)
 #[test]
 fn apply_delta_applies_all_operations_on_success() {
     let mut catalog = MsfCatalog::new();
@@ -2036,4 +2036,641 @@ fn apply_delta_clone_inherits_or_overrides_keyframe_spacing() {
         Some(60),
         "clone が明示した値は親を上書きすること"
     );
+}
+
+/// remove の後に適用後検証で失敗した場合、削除と履歴の変更が巻き戻ること
+#[test]
+fn apply_delta_remove_rolls_back_when_validation_fails() {
+    // v は a に依存する。a を削除すると依存解決が適用後検証で失敗するため、
+    // 削除した a と生成時刻が呼び出し前へ戻らなければならない。
+    let mut catalog = MsfCatalog::new();
+    let mut dependent = loc_track("v", Some("ns"));
+    dependent.depends = vec![MsfDependency::TrackName("a".to_string())];
+    catalog.tracks.push(dependent);
+    catalog.tracks.push(loc_track("a", Some("ns")));
+    let before = catalog.clone();
+
+    let delta = MsfDeltaUpdate {
+        generated_at: 500,
+        operations: vec![MsfDeltaOperation::Remove {
+            tracks: vec![remove_ref("a", "ns")],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, Some(&test_catalog_namespace("ns"))),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+    assert_eq!(
+        catalog, before,
+        "削除したトラック、履歴、generatedAt が呼び出し前と一致すること"
+    );
+    assert!(
+        catalog.removed_tracks.is_empty(),
+        "失敗時は削除履歴も残さないこと"
+    );
+}
+
+/// update の後に適用後検証で失敗した場合、置換が巻き戻ること
+#[test]
+fn apply_delta_update_rolls_back_when_validation_fails() {
+    // 同じ renderGroup 1 の v / w は targetLatency 100 で一致している。
+    // v の update で 200 に変えるとグループ内の一致検証で失敗するため、
+    // v は更新前の targetLatency 100 へ戻らなければならない。
+    let mut catalog = MsfCatalog::new();
+    let mut v = loc_track("v", Some("ns"));
+    v.render_group = Some(1);
+    v.target_latency = Some(100);
+    let mut w = loc_track("w", Some("ns"));
+    w.render_group = Some(1);
+    w.target_latency = Some(100);
+    catalog.tracks.push(v);
+    catalog.tracks.push(w);
+    let before = catalog.clone();
+
+    let mut update = MsfCloneTrack::new("v".to_string(), "v".to_string());
+    update.target_latency = Some(200);
+    let delta = MsfDeltaUpdate {
+        generated_at: 600,
+        operations: vec![MsfDeltaOperation::Update {
+            tracks: vec![MsfUpdateTrack { track: update }],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, Some(&test_catalog_namespace("ns"))),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+    assert_eq!(
+        catalog, before,
+        "置換したトラックと generatedAt が呼び出し前と一致すること"
+    );
+}
+
+/// clone の後に適用後検証で失敗した場合、追加が巻き戻ること
+#[test]
+fn apply_delta_clone_rolls_back_when_validation_fails() {
+    // v1 の targetLatency 100 を継承した clone を renderGroup 2 へ入れようとすると、
+    // renderGroup 2 の v2 (200) と一致しなくなる。追加した clone は残ってはならない。
+    let mut catalog = MsfCatalog::new();
+    let mut v1 = loc_track("v1", Some("ns"));
+    v1.render_group = Some(1);
+    v1.target_latency = Some(100);
+    let mut v2 = loc_track("v2", Some("ns"));
+    v2.render_group = Some(2);
+    v2.target_latency = Some(200);
+    catalog.tracks.push(v1);
+    catalog.tracks.push(v2);
+    let before = catalog.clone();
+
+    let mut clone = MsfCloneTrack::new("v3".to_string(), "v1".to_string());
+    clone.render_group = Some(2);
+    let delta = MsfDeltaUpdate {
+        generated_at: 700,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, Some(&test_catalog_namespace("ns"))),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+    assert_eq!(
+        catalog, before,
+        "clone したトラックと generatedAt が呼び出し前と一致すること"
+    );
+}
+
+/// 削除履歴を上書きした後に失敗した場合、上書き前の履歴が戻ること
+#[test]
+fn apply_delta_rolls_back_overwritten_removed_tracks_history() {
+    // 1 回目の delta で v を削除し、isLive=false で再追加する。この時点の履歴は
+    // 1 回目に削除した v (label=first) である。2 回目の delta は v をもう一度削除して
+    // 履歴を label=second で上書きした後、存在しないトラックの削除で失敗する。
+    // 履歴は label=first へ戻り、tracks の v (label=second) も復元されなければならない。
+    let mut catalog = MsfCatalog::new();
+    let mut first = loc_track("v", Some("ns"));
+    first.is_live = false;
+    first.label = Some("first".to_string());
+    catalog.tracks.push(first);
+
+    let first_remove = MsfDeltaUpdate {
+        generated_at: 1,
+        operations: vec![MsfDeltaOperation::Remove {
+            tracks: vec![remove_ref("v", "ns")],
+        }],
+    };
+    catalog
+        .apply_delta(&first_remove, Some(&test_catalog_namespace("ns")))
+        .expect("1 回目の remove は成功する");
+
+    let mut second = loc_track("v", Some("ns"));
+    second.is_live = false;
+    second.label = Some("second".to_string());
+    let readd = MsfDeltaUpdate {
+        generated_at: 2,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![second],
+        }],
+    };
+    catalog
+        .apply_delta(&readd, Some(&test_catalog_namespace("ns")))
+        .expect("isLive=false の再追加は成功する");
+    let before = catalog.clone();
+
+    let delta = MsfDeltaUpdate {
+        generated_at: 3,
+        operations: vec![
+            MsfDeltaOperation::Remove {
+                tracks: vec![remove_ref("v", "ns")],
+            },
+            MsfDeltaOperation::Remove {
+                tracks: vec![remove_ref("missing", "ns")],
+            },
+        ],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, Some(&test_catalog_namespace("ns"))),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+    assert_eq!(
+        catalog, before,
+        "削除したトラック、上書き前の履歴、generatedAt が呼び出し前と一致すること"
+    );
+    let restored = catalog
+        .removed_tracks
+        .keys()
+        .next()
+        .and_then(|key| catalog.removed_tracks.get(key))
+        .expect("v の削除履歴が存在すること");
+    assert_eq!(
+        restored.label.as_deref(),
+        Some("first"),
+        "履歴は上書き前の label=first へ戻ること"
+    );
+}
+
+/// 既存カタログに重複キーがある場合、最初の出現だけを索引対象にすること
+#[test]
+fn apply_delta_remove_uses_first_duplicate_key() {
+    // 公開フィールド経由で同じ Full Track Name を 2 つ持つカタログを作れる。
+    // 削除は線形探索と同じく最初の出現を対象とし、2 番目の出現は残る。
+    let mut catalog = MsfCatalog::new();
+    let mut first = loc_track("v", Some("ns"));
+    first.label = Some("first".to_string());
+    let mut second = loc_track("v", Some("ns"));
+    second.label = Some("second".to_string());
+    catalog.tracks.push(first);
+    catalog.tracks.push(second);
+
+    let delta = MsfDeltaUpdate {
+        generated_at: 400,
+        operations: vec![MsfDeltaOperation::Remove {
+            tracks: vec![remove_ref("v", "ns")],
+        }],
+    };
+    catalog
+        .apply_delta(&delta, Some(&test_catalog_namespace("ns")))
+        .expect("重複キーがあっても remove は成功する");
+    assert_eq!(catalog.tracks.len(), 1, "削除は 1 件だけであること");
+    assert_eq!(
+        catalog.tracks[0].label.as_deref(),
+        Some("second"),
+        "残るのは 2 番目の出現であること"
+    );
+    let removed = catalog
+        .removed_tracks
+        .values()
+        .next()
+        .expect("削除履歴が存在すること");
+    assert_eq!(
+        removed.label.as_deref(),
+        Some("first"),
+        "履歴には最初の出現を記録すること"
+    );
+}
+
+/// 同じ add 操作内でキーが重複した場合、1 件も追加せずに拒否すること
+#[test]
+fn apply_delta_add_rejects_duplicate_within_batch() {
+    let mut catalog = MsfCatalog::new();
+    let before = catalog.clone();
+    let delta = MsfDeltaUpdate {
+        generated_at: 800,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![loc_track("dup", Some("ns")), loc_track("dup", Some("ns"))],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, Some(&test_catalog_namespace("ns"))),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+    assert_eq!(
+        catalog, before,
+        "バッチ内の重複で失敗したときは 1 件も追加しないこと"
+    );
+}
+
+/// 同じ clone 操作内でキーが重複した場合、追加した clone を巻き戻すこと
+#[test]
+fn apply_delta_clone_rejects_duplicate_within_batch() {
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(loc_track("parent", Some("ns")));
+    let before = catalog.clone();
+    let delta = MsfDeltaUpdate {
+        generated_at: 900,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![
+                MsfCloneTrack::new("dup".to_string(), "parent".to_string()),
+                MsfCloneTrack::new("dup".to_string(), "parent".to_string()),
+            ],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, Some(&test_catalog_namespace("ns"))),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+    assert_eq!(
+        catalog, before,
+        "バッチ内の重複で失敗したときは先行して追加した clone も残さないこと"
+    );
+}
+
+/// 同じ delta 内で remove したキーを add で再追加できること
+#[test]
+fn apply_delta_readd_same_key_in_same_delta() {
+    // remove 直後に索引からキーが消えるため、同じ delta 内の add は既存重複として
+    // 誤判定されず、投入順に適用される。
+    let mut catalog = MsfCatalog::new();
+    let mut original = loc_track("v", Some("ns"));
+    original.label = Some("original".to_string());
+    catalog.tracks.push(original);
+
+    let mut readded = loc_track("v", Some("ns"));
+    readded.label = Some("readded".to_string());
+    let delta = MsfDeltaUpdate {
+        generated_at: 1000,
+        operations: vec![
+            MsfDeltaOperation::Remove {
+                tracks: vec![remove_ref("v", "ns")],
+            },
+            MsfDeltaOperation::Add {
+                tracks: vec![readded],
+            },
+        ],
+    };
+    catalog
+        .apply_delta(&delta, Some(&test_catalog_namespace("ns")))
+        .expect("remove 後の add は成功する");
+    assert_eq!(catalog.tracks.len(), 1, "再追加後は 1 件であること");
+    assert_eq!(
+        catalog.tracks[0].label.as_deref(),
+        Some("readded"),
+        "再追加したトラックが反映されること"
+    );
+    assert_eq!(
+        catalog
+            .removed_tracks
+            .values()
+            .next()
+            .map(|t| t.label.as_deref()),
+        Some(Some("original")),
+        "削除履歴には削除時点のトラックを残すこと"
+    );
+}
+
+/// 10,000 トラックのカタログに add / remove / clone / update を一括適用できること
+#[test]
+fn apply_delta_scales_to_ten_thousand_tracks() {
+    // インデックス構築、remove 後の添字更新、バッチ内重複判定、clone の継承が
+    // 実用的な規模で順序を保ったまま動くことを確認する。
+    let mut catalog = MsfCatalog::new();
+    for index in 0..10_000 {
+        catalog
+            .tracks
+            .push(loc_track(&format!("track-{index:05}"), Some("ns")));
+    }
+
+    let add_tracks: Vec<MsfTrack> = (0..100)
+        .map(|index| loc_track(&format!("added-{index:05}"), Some("ns")))
+        .collect();
+    let remove_tracks: Vec<MsfRemoveTrack> = (0..100)
+        .map(|index| remove_ref(&format!("track-{index:05}"), "ns"))
+        .collect();
+    let clone_tracks: Vec<MsfCloneTrack> = (0..100)
+        .map(|index| {
+            MsfCloneTrack::new(
+                format!("clone-{index:05}"),
+                format!("track-{:05}", 1_000 + index),
+            )
+        })
+        .collect();
+    let update_tracks: Vec<MsfUpdateTrack> = (0..100)
+        .map(|index| {
+            let name = format!("track-{:05}", 2_000 + index);
+            let mut track = MsfCloneTrack::new(name.clone(), name);
+            track.label = Some("updated".to_string());
+            MsfUpdateTrack { track }
+        })
+        .collect();
+
+    let delta = MsfDeltaUpdate {
+        generated_at: 7,
+        operations: vec![
+            MsfDeltaOperation::Add { tracks: add_tracks },
+            MsfDeltaOperation::Remove {
+                tracks: remove_tracks,
+            },
+            MsfDeltaOperation::Clone {
+                tracks: clone_tracks,
+            },
+            MsfDeltaOperation::Update {
+                tracks: update_tracks,
+            },
+        ],
+    };
+    catalog
+        .apply_delta(&delta, Some(&test_catalog_namespace("ns")))
+        .expect("10,000 トラックの delta は成功する");
+
+    assert_eq!(
+        catalog.tracks.len(),
+        10_100,
+        "add 100 / remove 100 / clone 100 を反映した件数であること"
+    );
+    assert_eq!(catalog.generated_at, Some(7));
+    // remove は順序を保つため、先頭は削除されなかった最初のトラックになる
+    assert_eq!(catalog.tracks[0].name, "track-00100");
+    assert_eq!(catalog.tracks[9_899].name, "track-09999");
+    // add は末尾へ投入順に追加され、clone はその後ろに追加される
+    assert_eq!(catalog.tracks[9_900].name, "added-00000");
+    assert_eq!(catalog.tracks[10_000].name, "clone-00000");
+    assert_eq!(catalog.tracks[10_099].name, "clone-00099");
+    let updated = catalog
+        .tracks
+        .iter()
+        .find(|track| track.name == "track-02000")
+        .expect("update 対象のトラックが存在すること");
+    assert_eq!(
+        updated.label.as_deref(),
+        Some("updated"),
+        "update した属性が反映されること"
+    );
+}
+
+/// 重複キーを同じ delta 内で 2 回削除するとき、1 回目の後に索引を引き直すこと
+#[test]
+fn apply_delta_remove_duplicate_key_twice() {
+    // 最初の削除後も同じキーの 2 番目の出現が残るため、2 回目の削除はその出現を
+    // 対象にしなければならない。履歴は最後に削除したトラックで上書きされる。
+    let mut catalog = MsfCatalog::new();
+    let mut first = loc_track("v", Some("ns"));
+    first.label = Some("first".to_string());
+    let mut second = loc_track("v", Some("ns"));
+    second.label = Some("second".to_string());
+    catalog.tracks.push(first);
+    catalog.tracks.push(second);
+
+    let delta = MsfDeltaUpdate {
+        generated_at: 450,
+        operations: vec![MsfDeltaOperation::Remove {
+            tracks: vec![remove_ref("v", "ns"), remove_ref("v", "ns")],
+        }],
+    };
+    catalog
+        .apply_delta(&delta, Some(&test_catalog_namespace("ns")))
+        .expect("重複キーの 2 回削除は成功する");
+    assert!(
+        catalog.tracks.is_empty(),
+        "同じキーの出現を順に削除すること"
+    );
+    let removed = catalog
+        .removed_tracks
+        .values()
+        .next()
+        .expect("削除履歴が存在すること");
+    assert_eq!(
+        removed.label.as_deref(),
+        Some("second"),
+        "履歴は最後に削除した出現で上書きされること"
+    );
+}
+
+/// 同じ delta 内で追加した 2 件目を remove できること
+#[test]
+fn apply_delta_remove_track_added_in_same_delta() {
+    // 索引の rank 計算は、初期トラック数より後ろのスロットも含めて正しくなければ
+    // ならない。初期トラック 1 件の状態で 2 件追加し、2 件目を同じ delta で削除する。
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(loc_track("a", Some("ns")));
+    let mut second = loc_track("c", Some("ns"));
+    second.label = Some("c-label".to_string());
+
+    let delta = MsfDeltaUpdate {
+        generated_at: 1100,
+        operations: vec![
+            MsfDeltaOperation::Add {
+                tracks: vec![loc_track("b", Some("ns")), second],
+            },
+            MsfDeltaOperation::Remove {
+                tracks: vec![remove_ref("c", "ns")],
+            },
+        ],
+    };
+    catalog
+        .apply_delta(&delta, Some(&test_catalog_namespace("ns")))
+        .expect("同一 delta 内で追加したトラックの remove は成功する");
+    let names: Vec<&str> = catalog
+        .tracks
+        .iter()
+        .map(|track| track.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["a", "b"],
+        "削除するのは 2 件目の追加トラックであること"
+    );
+    let removed = catalog
+        .removed_tracks
+        .values()
+        .next()
+        .expect("削除履歴が存在すること");
+    assert_eq!(removed.name, "c", "履歴のキーと値が一致すること");
+    assert_eq!(
+        removed.label.as_deref(),
+        Some("c-label"),
+        "履歴には削除したトラックの属性を残すこと"
+    );
+}
+
+/// 同じ delta 内で追加したトラックを clone の親と update の対象にできること
+#[test]
+fn apply_delta_clone_and_update_tracks_added_in_same_delta() {
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(loc_track("a", Some("ns")));
+    let mut parent = loc_track("c", Some("ns"));
+    parent.label = Some("from-c".to_string());
+
+    let clone = MsfCloneTrack::new("d".to_string(), "c".to_string());
+    let mut update = MsfCloneTrack::new("c".to_string(), "c".to_string());
+    update.label = Some("updated".to_string());
+    let delta = MsfDeltaUpdate {
+        generated_at: 1200,
+        operations: vec![
+            MsfDeltaOperation::Add {
+                tracks: vec![loc_track("b", Some("ns")), parent],
+            },
+            MsfDeltaOperation::Clone {
+                tracks: vec![clone],
+            },
+            MsfDeltaOperation::Update {
+                tracks: vec![MsfUpdateTrack { track: update }],
+            },
+        ],
+    };
+    catalog
+        .apply_delta(&delta, Some(&test_catalog_namespace("ns")))
+        .expect("同一 delta 内で追加したトラックの clone / update は成功する");
+    let names: Vec<&str> = catalog
+        .tracks
+        .iter()
+        .map(|track| track.name.as_str())
+        .collect();
+    assert_eq!(names, ["a", "b", "c", "d"], "tracks の順序が保たれること");
+    let cloned = catalog
+        .tracks
+        .iter()
+        .find(|track| track.name == "d")
+        .expect("clone したトラックが存在すること");
+    assert_eq!(
+        cloned.label.as_deref(),
+        Some("from-c"),
+        "clone は追加した 2 件目の親から属性を継承すること"
+    );
+    let updated = catalog
+        .tracks
+        .iter()
+        .find(|track| track.name == "c")
+        .expect("update 対象のトラックが存在すること");
+    assert_eq!(
+        updated.label.as_deref(),
+        Some("updated"),
+        "update は追加した 2 件目を置換すること"
+    );
+}
+
+/// 初期トラックが多い状態でも、同じ delta 内で追加したトラックを参照できること
+#[test]
+fn apply_delta_references_tracks_added_in_same_delta() {
+    // Fenwick 木の初期化は初期トラック数より後ろの節点にも初期生存数を設定する必要がある。
+    // 2 の冪でない 1,023 件を初期カタログにして、初期化漏れが rank 計算に現れる形で
+    // 3 件追加し、2 件目の remove、3 件目の clone、
+    // 1 件目の update を同じ delta で行う。
+    let mut catalog = MsfCatalog::new();
+    for index in 0..1_023 {
+        catalog
+            .tracks
+            .push(loc_track(&format!("base-{index:04}"), Some("ns")));
+    }
+    let mut a = loc_track("add-a", Some("ns"));
+    a.label = Some("a".to_string());
+    let mut b = loc_track("add-b", Some("ns"));
+    b.label = Some("b".to_string());
+    let mut c = loc_track("add-c", Some("ns"));
+    c.label = Some("c".to_string());
+    let clone = MsfCloneTrack::new("add-d".to_string(), "add-c".to_string());
+    let mut update = MsfCloneTrack::new("add-a".to_string(), "add-a".to_string());
+    update.label = Some("updated".to_string());
+
+    let delta = MsfDeltaUpdate {
+        generated_at: 1300,
+        operations: vec![
+            MsfDeltaOperation::Add {
+                tracks: vec![a, b, c],
+            },
+            MsfDeltaOperation::Remove {
+                tracks: vec![remove_ref("add-b", "ns")],
+            },
+            MsfDeltaOperation::Clone {
+                tracks: vec![clone],
+            },
+            MsfDeltaOperation::Update {
+                tracks: vec![MsfUpdateTrack { track: update }],
+            },
+        ],
+    };
+    catalog
+        .apply_delta(&delta, Some(&test_catalog_namespace("ns")))
+        .expect("初期 1,023 件でも同一 delta 内の参照は成功する");
+    assert_eq!(
+        catalog.tracks.len(),
+        1_026,
+        "追加 3 件と削除 1 件が反映されること"
+    );
+    let tail: Vec<&str> = catalog.tracks[1_023..]
+        .iter()
+        .map(|track| track.name.as_str())
+        .collect();
+    assert_eq!(
+        tail,
+        ["add-a", "add-c", "add-d"],
+        "追加順と削除が保たれること"
+    );
+    let updated = &catalog.tracks[1_023];
+    assert_eq!(
+        updated.label.as_deref(),
+        Some("updated"),
+        "追加した 1 件目の update が反映されること"
+    );
+    let cloned = &catalog.tracks[1_025];
+    assert_eq!(
+        cloned.label.as_deref(),
+        Some("c"),
+        "追加した 3 件目から clone した属性が継承されること"
+    );
+    let removed = catalog
+        .removed_tracks
+        .values()
+        .next()
+        .expect("削除履歴が存在すること");
+    assert_eq!(
+        removed.name, "add-b",
+        "削除した追加トラックが履歴に残ること"
+    );
+}
+
+/// 多数の renderGroup と media timeline があるカタログの適用後検証が成功すること
+#[test]
+fn apply_delta_validates_media_timeline_dependencies_at_scale() {
+    // renderGroup ごとの所属索引と depends の集合化が、正当なカタログを誤って拒否しない
+    // ことを確認する。media timeline は所属 renderGroup を参照するため、所属トラックの
+    // 個別名を併記する規則には違反しない。
+    let mut catalog = MsfCatalog::new();
+    for group in 0..500u64 {
+        for member in 0..20 {
+            let mut track = loc_track(&format!("v-{group:03}-{member:02}"), Some("ns"));
+            track.render_group = Some(group);
+            catalog.tracks.push(track);
+        }
+    }
+    for group in 0..200u64 {
+        let mut timeline = MsfTrack::new(
+            format!("timeline-{group:03}"),
+            MsfPackaging::MediaTimeline,
+            true,
+        );
+        timeline.namespace = Some("ns".to_string());
+        timeline.render_group = Some(group);
+        timeline.depends = vec![MsfDependency::RenderGroup(group)];
+        catalog.tracks.push(timeline);
+    }
+    let before_len = catalog.tracks.len();
+
+    let delta = MsfDeltaUpdate {
+        generated_at: 1400,
+        operations: Vec::new(),
+    };
+    catalog
+        .apply_delta(&delta, Some(&test_catalog_namespace("ns")))
+        .expect("多数の renderGroup がある正当なカタログは成功する");
+    assert_eq!(catalog.tracks.len(), before_len);
+    assert_eq!(catalog.generated_at, Some(1400));
 }

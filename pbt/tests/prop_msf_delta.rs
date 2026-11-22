@@ -75,3 +75,62 @@ fn add_then_remove_restores_tracks() -> noprop::TestResult {
     })?;
     Ok(())
 }
+
+/// 同じ delta 内で追加した 2 件目のトラックを remove できること
+///
+/// 1 回の `apply_delta` の中で索引を更新しながら 2 件を追加し、その後ろのトラックを
+/// 削除する。索引の rank 計算が追加分も含めて正しくなければ、削除対象がずれる。
+#[test]
+fn add_two_then_remove_second_in_same_delta() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let initial = sample_catalog(ctx);
+        let mut catalog = initial.clone();
+        let suffix = noprop::sample_u64(ctx);
+        let first_name = format!("added-first-{suffix}");
+        let second_name = format!("added-second-{suffix}");
+        let mut second = MsfTrack::new(second_name.clone(), MsfPackaging::Loc, true);
+        second.label = Some("second".to_string());
+        let delta = MsfDeltaUpdate {
+            generated_at: 1,
+            operations: vec![
+                MsfDeltaOperation::Add {
+                    tracks: vec![
+                        MsfTrack::new(first_name.clone(), MsfPackaging::Loc, true),
+                        second,
+                    ],
+                },
+                MsfDeltaOperation::Remove {
+                    tracks: vec![MsfRemoveTrack::new(second_name.clone())],
+                },
+            ],
+        };
+        catalog
+            .apply_delta(&delta, None)
+            .expect("同一 delta 内の add と remove は成功する");
+        assert!(
+            !catalog.tracks.iter().any(|t| t.name == second_name),
+            "2 件目の追加トラックが削除されること"
+        );
+        assert!(
+            catalog.tracks.iter().any(|t| t.name == first_name),
+            "1 件目の追加トラックは残ること"
+        );
+        assert_eq!(
+            catalog.tracks.len(),
+            initial.tracks.len() + 1,
+            "初期トラックと 1 件目の追加トラックが残ること"
+        );
+        let removed = catalog
+            .removed_tracks
+            .values()
+            .next()
+            .expect("削除履歴が存在すること");
+        assert_eq!(
+            removed.name, second_name,
+            "履歴のキーと値が削除したトラックで一致すること"
+        );
+        Ok(())
+    })?;
+    Ok(())
+}

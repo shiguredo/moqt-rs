@@ -95,7 +95,7 @@ impl CatalogState {
     ///
     /// 適用しなかった場合は理由付きの [`CatalogApplyOutcome::Ignored`] を返す。delta の適用に
     /// 失敗した場合 (属性の不変条件違反など) は `Err` を返し、カタログは変更しない
-    /// (`MsfCatalog::apply_delta` が複製へ適用してから差し替えるため)。
+    /// (`MsfCatalog::apply_delta` が失敗時に変更を巻き戻すため)。
     pub(crate) fn apply(&mut self, object: &CatalogObject) -> Result<CatalogApplyOutcome> {
         let location = object.location;
         // 最新 Group の最初の Object より前の catalog update は無視する

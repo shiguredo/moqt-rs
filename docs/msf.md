@@ -12,6 +12,7 @@
   - Full / Delta の判別は `MsfCatalogDocument` が行う
 - Delta 適用 (`MsfCatalog::apply_delta`)
   - clone の継承解決 (`MsfCloneTrack::into_track`) と add / remove / clone / update の順次適用
+  - 途中で失敗した場合は適用済みの変更を逆順に巻き戻し、呼び出し前のカタログ (tracks / removedTracks / generatedAt) を保つ
   - update は `name` = `parentName` を必須とし、`parentNamespace` 省略時は catalog namespace を使う。名前 / namespace の変更と isLive の false→true を拒否し、マージ後の track を通常の MUST で検証する (§5.1.6)。§5.6.4 の name 省略例は非規範として扱う
   - clone 以外の track は、namespace を省略すると catalog track の MOQT Track Namespace を継承する。clone は clone 固有の規則 (§5.1.6) により、namespace を明示すればそれを使い、省略すれば親トラックの namespace を継承する。clone の parentNamespace を省略した場合は catalog namespace を親の namespace と仮定する (§5.2.35)。名前の比較はカタログの `/` 区切り文字列ではなく、§11.2 の写像後のバイト値で行う
   - add するトラックは適用時点で §5.2 各フィールドの MUST を検証し、add 操作内の全トラックを検証してから追加する

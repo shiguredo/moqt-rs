@@ -1811,6 +1811,234 @@ pub struct MsfCatalog {
     pub removed_tracks: hashbrown::HashMap<(Option<TrackNamespace>, Vec<u8>), MsfTrack>,
 }
 
+/// delta 適用で比較する解決済みの Full Track Name
+///
+/// Track Namespace を省略したトラックはカタログの namespace を継承した値に解決する
+/// (draft-ietf-moq-msf-02 §5.2.2 (Track namespace))。比較は §11.2 の写像後のバイト値で
+/// 行うため、JSON 文字列ではなくこの型で保持する。
+type TrackKey = (Option<TrackNamespace>, Vec<u8>);
+
+/// delta 適用中の Full Track Name 索引
+///
+/// `positions` は解決済みキーからスロット番号を引く。スロット番号はトラックの追加順に
+/// 単調増加し、削除しても再利用しない。生存スロットを昇順に並べたものが `tracks` の
+/// 並びと一致するため、スロット番号より小さい生存スロットの数が現在の添字になる。
+/// これにより、削除のたびに全トラックの添字を計算し直さなくて済む。
+struct TrackIndex {
+    /// 解決済みキー → スロット番号 (重複キーは最初の出現だけ)
+    positions: hashbrown::HashMap<TrackKey, usize>,
+    /// `tracks` と並行なスロット番号
+    ///
+    /// カタログに重複キーがあった場合だけ保持する。重複キーの削除時に、残った同じキーの
+    /// スロット番号を引き直すために使う。重複の無い通常のカタログでは確保しない。
+    slots: Option<Vec<usize>>,
+    /// 生存スロットの順序統計
+    ranks: SlotRanks,
+    /// 次に割り当てるスロット番号
+    next_slot: usize,
+}
+
+/// 生存スロットの順序統計 (Fenwick 木)
+///
+/// スロット `slot` より小さい生存スロットの数を O(log N) で求める。値は 1 (生存) と
+/// 0 (削除済み) だけであり、削除のたびに添字を振り直さない。
+struct SlotRanks {
+    /// 1-indexed の Fenwick 木
+    tree: Vec<isize>,
+}
+
+impl SlotRanks {
+    /// 先頭 `initial_slots` 個が生存している状態で、最大 `capacity` スロット分を作る
+    ///
+    /// Fenwick 木の各節点は、担当する区間と初期生存区間 `[0, initial_slots)` の共通部分の
+    /// 長さで初期化する。追加で割り当てるスロットは [`Self::add`] で 1 を加える。
+    /// 初期構築は O(capacity) である。
+    fn new(initial_slots: usize, capacity: usize) -> Self {
+        let mut tree = alloc::vec![0; capacity + 1];
+        for (index, node) in tree.iter_mut().enumerate().skip(1) {
+            // 節点 `index` は区間 `[index - lowbit(index), index)` の生存数を保持する。
+            // 初期状態では `[0, initial_slots)` だけが生存しているため、その区間との
+            // 共通部分の長さを設定する。初期スロット数を超える節点にも、初期スロットを
+            // 含む区間があるため、`capacity` まで全て設定する必要がある。
+            let lowbit = index & index.wrapping_neg();
+            let start = index - lowbit;
+            *node = (core::cmp::min(index, initial_slots) - core::cmp::min(start, initial_slots))
+                as isize;
+        }
+        Self { tree }
+    }
+
+    /// スロット `slot` の生存状態を `delta` だけ変える
+    fn add(&mut self, slot: usize, delta: isize) {
+        let mut i = slot + 1;
+        while i < self.tree.len() {
+            self.tree[i] += delta;
+            i += i & i.wrapping_neg();
+        }
+    }
+
+    /// スロット `slot` より小さい生存スロットの数を返す
+    fn count_before(&self, slot: usize) -> usize {
+        let mut i = slot;
+        let mut count = 0;
+        while i > 0 {
+            count += self.tree[i];
+            i -= i & i.wrapping_neg();
+        }
+        debug_assert!(count >= 0);
+        count as usize
+    }
+}
+
+impl TrackIndex {
+    /// カタログ全体のキーを解決して索引を作る
+    ///
+    /// `added_tracks` は今回の delta で追加され得るトラック数であり、スロット番号の
+    /// 上限として使う。重複キーは最初の出現だけを索引に残す。カタログに含まれるキーを
+    /// 解決できない場合はその時点でエラーを返し、カタログは変更しない。
+    fn build(
+        tracks: &[MsfTrack],
+        catalog_namespace: Option<&TrackNamespace>,
+        added_tracks: usize,
+    ) -> Result<Self, MessageError> {
+        let mut positions = hashbrown::HashMap::new();
+        let mut has_duplicates = false;
+        for (slot, track) in tracks.iter().enumerate() {
+            let key = MsfCatalog::track_key(track, catalog_namespace)?;
+            match positions.entry(key) {
+                hashbrown::hash_map::Entry::Occupied(_) => has_duplicates = true,
+                hashbrown::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(slot);
+                }
+            }
+        }
+        Ok(Self {
+            positions,
+            // 重複キーが無ければ、削除後の重複引き直しは不要なので確保しない
+            slots: has_duplicates.then(|| (0..tracks.len()).collect()),
+            ranks: SlotRanks::new(tracks.len(), tracks.len() + added_tracks),
+            next_slot: tracks.len(),
+        })
+    }
+
+    /// キーに対応する最初のトラックの現在の添字を返す
+    fn index_of(&self, key: &TrackKey) -> Option<usize> {
+        let slot = self.positions.get(key)?;
+        debug_assert_ne!(*slot, usize::MAX);
+        Some(self.ranks.count_before(*slot))
+    }
+
+    /// 追加予定のキーを重複検査のために仮登録する
+    ///
+    /// 既に登録済み (既存トラックまたは同一操作内の先行トラック) の場合は `false` を
+    /// 返して何もしない。仮登録のスロット番号は `usize::MAX` とし、実際に追加するときに
+    /// [`Self::append`] で上書きする。仮登録したままエラーになった場合は索引ごと破棄する
+    /// ため、不整合は残らない。
+    fn reserve_if_absent(&mut self, key: &TrackKey) -> bool {
+        match self.positions.entry(key.clone()) {
+            hashbrown::hash_map::Entry::Occupied(_) => false,
+            hashbrown::hash_map::Entry::Vacant(entry) => {
+                entry.insert(usize::MAX);
+                true
+            }
+        }
+    }
+
+    /// 末尾へ追加するトラックのキーを索引へ登録する
+    ///
+    /// 呼び出し側はこの直後に `tracks` の末尾へトラックを追加する。
+    fn append(&mut self, key: TrackKey, track_index: usize) {
+        debug_assert!(self.next_slot + 1 < self.ranks.tree.len());
+        let slot = self.next_slot;
+        self.next_slot += 1;
+        // `reserve_if_absent` で仮登録したキー、または未登録のキーを実スロット番号で上書きする
+        self.positions.insert(key, slot);
+        if let Some(slots) = &mut self.slots {
+            slots.push(slot);
+            debug_assert_eq!(slots.len(), track_index + 1);
+        }
+        self.ranks.add(slot, 1);
+    }
+
+    /// キーの最初の出現を索引から削除し、削除したトラックの現在の添字を返す
+    ///
+    /// `tracks` 側の削除は呼び出し側が返り値の添字で行う。
+    fn remove(&mut self, key: &TrackKey) -> Option<usize> {
+        let slot = self.positions.remove(key)?;
+        let index = self.ranks.count_before(slot);
+        self.ranks.add(slot, -1);
+        if let Some(slots) = &mut self.slots {
+            debug_assert_eq!(slots[index], slot);
+            slots.remove(index);
+        }
+        Some(index)
+    }
+
+    /// 重複キーを持つカタログで、削除したキーの次の出現を索引へ入れ直す
+    ///
+    /// `tracks` は削除後の列であり、`start` は削除した位置である。重複キーを持つ
+    /// カタログは仕様違反だが、削除を続けたときに線形探索と同じ対象を選ぶために、
+    /// 残った同じキーの最初の出現を first-wins の索引へ戻す。重複が無いカタログでは
+    /// `slots` を保持していないため、走査しない。
+    fn repair_duplicate(
+        &mut self,
+        key: &TrackKey,
+        tracks: &[MsfTrack],
+        start: usize,
+        catalog_namespace: Option<&TrackNamespace>,
+    ) -> Result<(), MessageError> {
+        let Some(slots) = self.slots.as_ref() else {
+            return Ok(());
+        };
+        for (offset, track) in tracks[start..].iter().enumerate() {
+            if MsfCatalog::track_key(track, catalog_namespace)? == *key {
+                let index = start + offset;
+                self.positions.insert(key.clone(), slots[index]);
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// delta 適用の巻き戻しログ
+///
+/// カタログへの変更のたびに記録し、エラー時は [`MsfCatalog::rollback_delta`] が逆順に
+/// 再生して呼び出し前の状態へ戻す。
+enum DeltaUndo {
+    /// Add / Clone で末尾に追加したトラック (追加前の長さまで切り詰める)
+    Appended {
+        /// 追加前の `tracks` の長さ
+        previous_len: usize,
+    },
+    /// Remove で削除したトラック (元の添字へ戻す)
+    Removed {
+        /// 削除した添字
+        index: usize,
+        /// 削除したトラック
+        track: MsfTrack,
+    },
+    /// Remove で `removed_tracks` に上書きしたキーの旧値
+    RemovedHistory {
+        /// 上書きしたキー
+        key: TrackKey,
+        /// 上書き前の値
+        previous: Option<MsfTrack>,
+    },
+    /// Update で置き換えたトラックの旧値
+    Updated {
+        /// 置き換えた添字
+        index: usize,
+        /// 置き換え前のトラック
+        previous: MsfTrack,
+    },
+    /// `generated_at` の旧値
+    GeneratedAt {
+        /// 変更前の値
+        previous: Option<u64>,
+    },
+}
+
 impl MsfCatalog {
     /// 空のカタログを作成する
     ///
@@ -2006,26 +2234,65 @@ impl MsfCatalog {
     /// - 削除済みの同じ Full Track Name を `isLive=false` から `true` で再追加する: `InvalidCatalog`
     ///   (§5.2.7 (Is Live))
     ///
-    /// 失敗時はカタログを変更しない。操作は複製に対して配列順に適用し、全操作と
-    /// 適用後検証が成功したときだけ `self` を差し替える (copy-on-write)。
+    /// 失敗時はカタログを変更しない。変更のたびに巻き戻しログを記録し、途中で失敗した
+    /// 場合は変更を逆順に戻してからエラーを返す。全操作と適用後検証が成功したときだけ
+    /// 変更を確定する。
     pub fn apply_delta(
         &mut self,
         delta: &MsfDeltaUpdate,
         catalog_namespace: Option<&TrackNamespace>,
     ) -> Result<(), MessageError> {
-        // 失敗時にカタログを不変に保つため、複製へ適用してから差し替える
-        let mut working = self.clone();
-        working.apply_delta_in_place(delta, catalog_namespace)?;
-        *self = working;
-        Ok(())
+        // 失敗時の巻き戻しは apply_delta_in_place が担うため、ここでは複製を作らない
+        self.apply_delta_in_place(delta, catalog_namespace)
     }
 
-    /// `apply_delta` の本体。`self` を直接書き換えるため、失敗時のロールバックは
-    /// 呼び出し側 (複製への適用) が担う。
+    /// `apply_delta` の本体。`self` を直接書き換え、失敗時は巻き戻しログで戻す。
     fn apply_delta_in_place(
         &mut self,
         delta: &MsfDeltaUpdate,
         catalog_namespace: Option<&TrackNamespace>,
+    ) -> Result<(), MessageError> {
+        // 操作が無い場合は索引を作らず、generatedAt の更新と適用後検証だけを行う
+        if delta.operations.is_empty() {
+            let previous_generated_at = self.generated_at;
+            self.generated_at = Some(delta.generated_at);
+            if let Err(error) = self.validate_after_delta(catalog_namespace) {
+                self.generated_at = previous_generated_at;
+                return Err(error);
+            }
+            return Ok(());
+        }
+        // 追加され得るトラック数をスロット番号の上限として渡す
+        let added_tracks: usize = delta
+            .operations
+            .iter()
+            .map(|op| match op {
+                MsfDeltaOperation::Add { tracks } => tracks.len(),
+                MsfDeltaOperation::Clone { tracks } => tracks.len(),
+                MsfDeltaOperation::Remove { .. } | MsfDeltaOperation::Update { .. } => 0,
+            })
+            .sum();
+        // 索引の構築は全操作より前に行う。ここで失敗した場合はまだカタログを変更していない
+        let mut index = TrackIndex::build(&self.tracks, catalog_namespace, added_tracks)?;
+        let mut undo = Vec::new();
+        let result = self.apply_delta_operations(delta, catalog_namespace, &mut index, &mut undo);
+        if let Err(error) = result {
+            // 追加・削除・置換・履歴・generatedAt を変更の逆順に戻す
+            self.rollback_delta(undo);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// 操作列を配列順に適用し、最後に適用後検証を行う
+    ///
+    /// 途中で失敗した場合は `undo` に記録済みの変更を呼び出し側が逆順に巻き戻す。
+    fn apply_delta_operations(
+        &mut self,
+        delta: &MsfDeltaUpdate,
+        catalog_namespace: Option<&TrackNamespace>,
+        index: &mut TrackIndex,
+        undo: &mut Vec<DeltaUndo>,
     ) -> Result<(), MessageError> {
         for op in &delta.operations {
             match op {
@@ -2044,16 +2311,12 @@ impl MsfCatalog {
                     for track in tracks {
                         validate_full_track(track)?;
                     }
-                    // 2) 既存トラックおよびバッチ内の重複を全件検出してから追加する
-                    let mut batch_keys: Vec<(Option<TrackNamespace>, Vec<u8>)> =
-                        Vec::with_capacity(tracks.len());
+                    // 2) 既存トラックおよびバッチ内の重複を全件検出してから追加する。
+                    // バッチ内のキーは索引へ仮登録するため、バッチ内の重複も O(1) で検出できる
+                    let mut batch_keys: Vec<TrackKey> = Vec::new();
                     for track in tracks {
                         let key = Self::track_key(track, catalog_namespace)?;
-                        if self
-                            .find_track_index(key.0.as_ref(), &key.1, catalog_namespace)?
-                            .is_some()
-                            || batch_keys.contains(&key)
-                        {
+                        if !index.reserve_if_absent(&key) {
                             return Err(MessageError::InvalidCatalog(format!(
                                 "delta add: track '{}' already exists",
                                 track.name
@@ -2062,11 +2325,15 @@ impl MsfCatalog {
                         batch_keys.push(key);
                     }
                     // 3) 削除済みの同じ Full Track Name があれば isLive の逆行を検査する
-                    for track in tracks {
-                        self.validate_readded_track(track, catalog_namespace, ReaddOperation::Add)?;
+                    for (track, key) in tracks.iter().zip(&batch_keys) {
+                        self.validate_readded_key(key, track, ReaddOperation::Add)?;
                     }
-                    // 4) 全件を投入順に追加する
-                    for track in tracks {
+                    // 4) 全件を投入順に追加する。検証は完了しているため、ここでは失敗しない
+                    undo.push(DeltaUndo::Appended {
+                        previous_len: self.tracks.len(),
+                    });
+                    for (track, key) in tracks.iter().zip(batch_keys) {
+                        index.append(key, self.tracks.len());
                         self.tracks.push(track.clone());
                     }
                 }
@@ -2078,24 +2345,29 @@ impl MsfCatalog {
                             None => catalog_namespace.cloned(),
                         };
                         let name = catalog_track_name_bytes(&r.name)?;
-                        let idx = self
-                            .find_track_index(ns.as_ref(), &name, catalog_namespace)?
-                            .ok_or_else(|| {
-                                MessageError::InvalidCatalog(format!(
-                                    "delta remove: track '{}' not found",
-                                    r.name
-                                ))
-                            })?;
+                        // 解決済みのキーは削除対象の探索と履歴のキーにそのまま使える
+                        let key = (ns, name);
+                        let idx = index.remove(&key).ok_or_else(|| {
+                            MessageError::InvalidCatalog(format!(
+                                "delta remove: track '{}' not found",
+                                r.name
+                            ))
+                        })?;
                         let removed = self.tracks.remove(idx);
+                        // この後の処理で失敗しても削除を戻せるよう、直後に記録する
+                        undo.push(DeltaUndo::Removed {
+                            index: idx,
+                            track: removed.clone(),
+                        });
+                        // 重複キーを持つカタログでは、残った同じキーの出現を索引へ戻す
+                        index.repair_duplicate(&key, &self.tracks, idx, catalog_namespace)?;
                         // draft-ietf-moq-msf-02 §5.3 (Delta updates): 削除した Track の属性を
-                        // 履歴として残し、同じ Full Track Name の再追加で属性変更と
-                        // isLive の逆行を検出できるようにする。`or_insert` により、同じ
-                        // tuple が既に履歴にある場合は最初に削除されたときの属性を保持し続ける
-                        // (§5.3 が求める「宣言時の属性」を保持する側に倒す。apply_delta 経由で
-                        // 再追加される限り直近の削除で上書きしても検証結果は変わらないが、
-                        // 履歴の値は公開フィールドとして観測できるため差が生じる)。
-                        let key = Self::track_key(&removed, catalog_namespace)?;
-                        self.removed_tracks.insert(key, removed);
+                        // 履歴として残し、同じ Full Track Name の再追加で isLive の逆行を
+                        // 検出できるようにする。同じキーが既に履歴にある場合は、後から削除した
+                        // Track の属性で上書きする (履歴は公開フィールドとして観測できるため、
+                        // `or_insert` ではなく `insert` の挙動を保つ)。
+                        let previous = self.removed_tracks.insert(key.clone(), removed);
+                        undo.push(DeltaUndo::RemovedHistory { key, previous });
                     }
                 }
                 MsfDeltaOperation::Clone { tracks } => {
@@ -2113,31 +2385,27 @@ impl MsfCatalog {
                             None => catalog_namespace.cloned(),
                         };
                         let parent_name = catalog_track_name_bytes(&clone.parent_name)?;
-                        let idx = self
-                            .find_track_index(parent_ns.as_ref(), &parent_name, catalog_namespace)?
-                            .ok_or_else(|| {
-                                MessageError::InvalidCatalog(format!(
-                                    "delta clone: parent track '{}' not found",
-                                    clone.parent_name
-                                ))
-                            })?;
+                        let idx = index.index_of(&(parent_ns, parent_name)).ok_or_else(|| {
+                            MessageError::InvalidCatalog(format!(
+                                "delta clone: parent track '{}' not found",
+                                clone.parent_name
+                            ))
+                        })?;
                         let parent = self.tracks[idx].clone();
                         let new_track = clone.clone().into_track(&parent)?;
                         let key = Self::track_key(&new_track, catalog_namespace)?;
-                        if self
-                            .find_track_index(key.0.as_ref(), &key.1, catalog_namespace)?
-                            .is_some()
-                        {
+                        if !index.reserve_if_absent(&key) {
                             return Err(MessageError::InvalidCatalog(format!(
                                 "delta clone: track '{}' already exists",
                                 new_track.name
                             )));
                         }
-                        self.validate_readded_track(
-                            &new_track,
-                            catalog_namespace,
-                            ReaddOperation::Clone,
-                        )?;
+                        self.validate_readded_key(&key, &new_track, ReaddOperation::Clone)?;
+                        // 検証が完了したので追加する。この後で失敗する処理は無い
+                        undo.push(DeltaUndo::Appended {
+                            previous_len: self.tracks.len(),
+                        });
+                        index.append(key, self.tracks.len());
                         self.tracks.push(new_track);
                     }
                 }
@@ -2149,8 +2417,8 @@ impl MsfCatalog {
                             None => catalog_namespace.cloned(),
                         };
                         let parent_name = catalog_track_name_bytes(&update.track.parent_name)?;
-                        let idx = self
-                            .find_track_index(parent_ns.as_ref(), &parent_name, catalog_namespace)?
+                        let idx = index
+                            .index_of(&(parent_ns.clone(), parent_name))
                             .ok_or_else(|| {
                                 MessageError::InvalidCatalog(format!(
                                     "delta update: parent track '{}' not found",
@@ -2179,14 +2447,48 @@ impl MsfCatalog {
                         let merged = update.track.clone().into_track(&parent)?;
                         // マージ後の track が通常の track と同じ MUST を満たすこと
                         validate_full_track(&merged)?;
-                        self.tracks[idx] = merged;
+                        // 名前と namespace は変更できないため、索引のキーと添字はそのまま使える
+                        let previous = core::mem::replace(&mut self.tracks[idx], merged);
+                        undo.push(DeltaUndo::Updated {
+                            index: idx,
+                            previous,
+                        });
                     }
                 }
             }
         }
         // デルタ更新の generatedAt は適用後のカタログの生成時刻として引き継ぐ
+        undo.push(DeltaUndo::GeneratedAt {
+            previous: self.generated_at,
+        });
         self.generated_at = Some(delta.generated_at);
         self.validate_after_delta(catalog_namespace)
+    }
+
+    /// 巻き戻しログを逆順に再生して、`apply_delta` 前の状態へ戻す
+    ///
+    /// ログは変更の発生順に積まれているため、逆順に再生するとトラックの添字と
+    /// `removed_tracks` の上書き関係が元の状態に戻る。
+    fn rollback_delta(&mut self, undo: Vec<DeltaUndo>) {
+        for entry in undo.into_iter().rev() {
+            match entry {
+                DeltaUndo::Appended { previous_len } => self.tracks.truncate(previous_len),
+                DeltaUndo::Removed { index, track } => {
+                    // 逆順再生により、この位置は削除前の状態に戻っている
+                    self.tracks.insert(index, track);
+                }
+                DeltaUndo::RemovedHistory { key, previous } => match previous {
+                    Some(track) => {
+                        self.removed_tracks.insert(key, track);
+                    }
+                    None => {
+                        self.removed_tracks.remove(&key);
+                    }
+                },
+                DeltaUndo::Updated { index, previous } => self.tracks[index] = previous,
+                DeltaUndo::GeneratedAt { previous } => self.generated_at = previous,
+            }
+        }
     }
 
     /// トラックの (解決済み Track Namespace, Track Name バイト列) キーを作る
@@ -2209,14 +2511,15 @@ impl MsfCatalog {
     ///
     /// draft-ietf-moq-msf-02 §5.2.8 (Is Live): "A True value MUST never follow a False value."
     /// のみを検査する。v02 は v01 の属性不変 MUST を削除したため、属性の変更は許可する。
-    fn validate_readded_track(
+    /// `key` は `track` の解決済みキーでなければならない。呼び出し側が索引の構築や重複検査で
+    /// キーを解決済みの場合は、再解決を避けてこれを渡す。
+    fn validate_readded_key(
         &self,
+        key: &TrackKey,
         track: &MsfTrack,
-        catalog_namespace: Option<&TrackNamespace>,
         operation: ReaddOperation,
     ) -> Result<(), MessageError> {
-        let key = Self::track_key(track, catalog_namespace)?;
-        let Some(previous) = self.removed_tracks.get(&key) else {
+        let Some(previous) = self.removed_tracks.get(key) else {
             return Ok(());
         };
         if !previous.is_live && track.is_live {
@@ -2228,32 +2531,6 @@ impl MsfCatalog {
             )));
         }
         Ok(())
-    }
-
-    /// Full Track Name が一致するトラックの index を返す
-    ///
-    /// `namespace` / `name` は解決済みの MOQT のバイト値であり、カタログの JSON 文字列では
-    /// 比較しない (draft-ietf-moq-msf-02 §11.2.2 (Comparing names))。`namespace` が `None` の
-    /// 場合はカタログの namespace も不明な状態を表し、namespace を省略したトラックだけが
-    /// 一致する。
-    fn find_track_index(
-        &self,
-        namespace: Option<&TrackNamespace>,
-        name: &[u8],
-        catalog_namespace: Option<&TrackNamespace>,
-    ) -> Result<Option<usize>, MessageError> {
-        for (index, track) in self.tracks.iter().enumerate() {
-            let track_namespace = match track.namespace.as_deref() {
-                Some(value) => Some(parse_catalog_namespace(value)?),
-                None => catalog_namespace.cloned(),
-            };
-            if track_namespace.as_ref() == namespace
-                && catalog_track_name_bytes(&track.name)? == name
-            {
-                return Ok(Some(index));
-            }
-        }
-        Ok(None)
     }
 
     /// カタログ内の Full Track Name の一意性を検証する
@@ -3072,9 +3349,14 @@ fn validate_init_refs(
     publish_tracks: &[MsfTrack],
     init_data_list: &[MsfInitData],
 ) -> Result<(), MessageError> {
+    // initRef の解決は、initDataList の id を 1 回だけ索引化して O(1) で行う。
+    // catalog のトラック数 M と initDataList の件数 D に対して O(M * D) だった
+    // 線形探索を O(M + D) にする。
+    let ids: hashbrown::HashSet<&str> =
+        init_data_list.iter().map(|data| data.id.as_str()).collect();
     for t in tracks.iter().chain(publish_tracks.iter()) {
         if let Some(ref init_ref) = t.init_ref
-            && !init_data_list.iter().any(|d| &d.id == init_ref)
+            && !ids.contains(init_ref.as_str())
         {
             return Err(MessageError::InvalidCatalog(format!(
                 "initRef '{init_ref}' does not match any initDataList id"
@@ -3257,62 +3539,75 @@ fn validate_media_timeline_dependencies(
         .iter()
         .chain(publish_tracks.iter())
         .collect::<Vec<_>>();
-    let mut render_groups = Vec::new();
-    for track in &all_tracks {
-        if let Some(group) = track.render_group
-            && !render_groups.contains(&group)
-        {
-            render_groups.push(group);
+    // renderGroup ごとの所属トラックの添字を 1 回だけ作り、source ごとに catalog 全体を
+    // 走査する O(source 数 * group 数 * track 数) の処理を O(source 数 * (group 数 + track 数))
+    // にする。グループの順序は初出順で、エラーを返す順序を現行実装と一致させる。
+    let mut group_index: hashbrown::HashMap<u64, usize> = hashbrown::HashMap::new();
+    let mut groups: Vec<(u64, Vec<usize>)> = Vec::new();
+    for (index, track) in all_tracks.iter().enumerate() {
+        let Some(group) = track.render_group else {
+            continue;
+        };
+        if let Some(position) = group_index.get(&group) {
+            groups[*position].1.push(index);
+        } else {
+            group_index.insert(group, groups.len());
+            groups.push((group, alloc::vec![index]));
         }
     }
+    // 添字の対応だけを作り終えたら、group_index は不要になる
+    drop(group_index);
 
-    for source in &all_tracks {
+    for (source_index, source) in all_tracks.iter().enumerate() {
         if source.packaging != MsfPackaging::MediaTimeline {
             continue;
         }
-        let referenced_names = source
+        // depends の名前 / renderGroup は集合として 1 回だけ作り、所属トラックごとの
+        // 線形探索 (Vec::contains) を O(1) の照合にする。
+        let referenced_names: hashbrown::HashSet<&str> = source
             .depends
             .iter()
             .filter_map(|dependency| match dependency {
                 MsfDependency::TrackName(name) => Some(name.as_str()),
                 MsfDependency::RenderGroup(_) => None,
             })
-            .collect::<Vec<_>>();
-        let referenced_groups = source
+            .collect();
+        let referenced_groups: hashbrown::HashSet<u64> = source
             .depends
             .iter()
             .filter_map(|dependency| match dependency {
                 MsfDependency::RenderGroup(group) => Some(*group),
                 MsfDependency::TrackName(_) => None,
             })
-            .collect::<Vec<_>>();
+            .collect();
 
-        for group in &render_groups {
-            let members = all_tracks
-                .iter()
-                .copied()
-                .filter(|track| {
-                    track.render_group == Some(*group) && !core::ptr::eq(*track, *source)
-                })
-                .collect::<Vec<_>>();
-            if members.is_empty() {
+        for (group, group_members) in &groups {
+            // 現行実装と同じく、source 自身は所属トラックから除外する
+            let member_count =
+                group_members.len() - usize::from(source.render_group == Some(*group));
+            if member_count == 0 {
                 continue;
             }
             let group_referenced = referenced_groups.contains(group);
-            let all_members_referenced = members
-                .iter()
-                .all(|track| referenced_names.contains(&track.name.as_str()));
+            let mut all_members_referenced = true;
+            let mut any_member_referenced = false;
+            for &member_index in group_members {
+                if member_index == source_index {
+                    continue;
+                }
+                if referenced_names.contains(all_tracks[member_index].name.as_str()) {
+                    any_member_referenced = true;
+                } else {
+                    all_members_referenced = false;
+                }
+            }
             if all_members_referenced && !group_referenced {
                 return Err(MessageError::InvalidCatalog(format!(
                     "media timeline '{}' MUST reference renderGroup {group} instead of all of its tracks",
                     source.name
                 )));
             }
-            if group_referenced
-                && members
-                    .iter()
-                    .any(|track| referenced_names.contains(&track.name.as_str()))
-            {
+            if group_referenced && any_member_referenced {
                 return Err(MessageError::InvalidCatalog(format!(
                     "media timeline '{}' MUST NOT reference individual tracks in the referenced renderGroup {group}",
                     source.name
