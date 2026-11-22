@@ -1,7 +1,7 @@
 # example の TLS 証明書検証を既定で有効にする
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/change-example-tls-default
 - Polished: 2026-11-21
 
@@ -94,3 +94,38 @@
 - `cargo clippy -p tokio-moq --no-default-features --features quic-ngtcp2 --all-targets -- -D warnings` と `cargo clippy -p tokio-moq --no-default-features --features quic-tobi --all-targets -- -D warnings` が通ること。
 - `prek run --all-files` が通ること。
 - e2e テストは、CI の relay の証明書に合わせた設定 (自己署名なら `MOQT_E2E_INSECURE=1`、公開 CA なら未設定) で通ること。
+
+## 解決方法
+
+- `--cert` を省略した既定を、証明書検証スキップから OS のシステムルートストアによる検証へ
+  変えた。`--cert` も `--insecure` も指定しない場合、rustls 経路 (QMux / wt-h2 / wt-h3 /
+  s2n-quic / tobi-quic) は `rustls-native-certs` の `load_native_certs()` で得たルートを使う。
+  ルートが 1 つも読み込めない場合は接続エラーにし、検証スキップへフォールバックしない。
+  `--cert` の PEM に証明書が 1 つも含まれない場合もエラーにした。
+- `--insecure` を追加し、指定したときだけ証明書検証をスキップする。スキップ時は
+  rustls 経路と ngtcp2 のそれぞれで警告ログを出す。
+- `--cert` と `--insecure` の同時指定は CLI でエラーにし、`ConnectParams` でも `connect` が
+  `InvalidState` を返すようにした。
+- ngtcp2 は aws-lc-sys の SSL の既定トラストストアを使い、`--cert` は
+  `with_ca_cert_pem` で追加、`--insecure` のときだけ `with_verify_peer(false)` にした。
+- `ConnectParams` に `insecure` を追加し、moq-pub / moq-sub の初回接続、GOAWAY 後の移行、
+  side session、`quic::connect` / `qmux::connect` / `apply_tls_config_h3` /
+  `apply_tls_config_h2` へ伝搬した。
+- moq-pub / moq-sub の CLI に `--insecure` を追加し、help と README、`docs/missing-features.md`
+  を新しい既定に合わせた。
+- 既存のテスト peer は自己署名証明書を使うため、`ConnectParams` / `quic::connect` の
+  テスト呼び出しと moq-sub のテスト用 `Config` は `insecure: true` にした。moq-pub の
+  peer 統合テストにも `--insecure` を渡すヘルパーを追加した。
+- e2e テストは `MOQT_E2E_INSECURE=1` のときだけ `--insecure` を渡す。workflow は
+  `vars.TEST_MOQT_INSECURE` を `MOQT_E2E_INSECURE` として渡し、CI relay が自己署名なら
+  変数に `1` を設定し、公開 CA なら未設定にする運用にした。
+- `CHANGES.md` は更新していない。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`cargo clippy -p tokio-moq --no-default-features
+--features quic-ngtcp2 --all-targets -- -D warnings`、`cargo clippy -p tokio-moq
+--no-default-features --features quic-tobi --all-targets -- -D warnings`、
+`cargo test -p tokio-moq --no-default-features --features quic-ngtcp2`、
+`cargo test -p tokio-moq --no-default-features --features quic-tobi`、
+`cargo doc --no-deps -p tokio-moq -p moq-pub -p moq-sub`、`prek run --files` が成功した。
+E2E テスト本体は実リレーが必要なため未実行である。
