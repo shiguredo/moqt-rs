@@ -1229,9 +1229,19 @@ struct WtSessionContext<'a> {
 }
 /// WebTransport のセッション状態の変化を処理する
 async fn handle_wt_session_state(
-    context: WtSessionContext<'_>,
+    state: &mut PublisherPipelineState<'_>,
     wt_state: Option<WtSessionState>,
 ) -> LoopFlow {
+    let context = WtSessionContext {
+        config: &mut *state.config,
+        namespace: &mut *state.namespace,
+        task_monitor: &mut *state.task_monitor,
+        migration_task: &mut *state.migration_task,
+        migration_rx: &mut *state.migration_rx,
+        migration_limiter: &mut *state.migration_limiter,
+        session_ended: &mut *state.session_ended,
+        wt_session_state_rx: &mut *state.wt_session_state_rx,
+    };
     let WtSessionContext {
         config,
         namespace,
@@ -1308,7 +1318,16 @@ struct TickContext<'a> {
     audio_frame_count: &'a mut u64,
 }
 /// 100 ms tick の定期処理
-fn handle_tick(context: TickContext<'_>) {
+fn handle_tick(state: &mut PublisherPipelineState<'_>) {
+    let context = TickContext {
+        client: &mut *state.client,
+        config: &mut *state.config,
+        start: &mut *state.start,
+        audio_stats_logged_ms: &mut *state.audio_stats_logged_ms,
+        audio_publish_catch_up: &mut *state.audio_publish_catch_up,
+        video_group_id: &mut *state.video_group_id,
+        audio_frame_count: &mut *state.audio_frame_count,
+    };
     let TickContext {
         client,
         config,
@@ -1356,7 +1375,19 @@ struct CatalogRepublishContext<'a> {
     session_ended: &'a mut bool,
 }
 /// カタログを次の Group の先頭へ送り直す
-async fn handle_catalog_republish(context: CatalogRepublishContext<'_>) -> Result<LoopFlow> {
+async fn handle_catalog_republish(state: &mut PublisherPipelineState<'_>) -> Result<LoopFlow> {
+    let context = CatalogRepublishContext {
+        client: &mut *state.client,
+        catalog_publish_target: &mut *state.catalog_publish_target,
+        handle: &mut *state.handle,
+        data_plane: &mut *state.data_plane,
+        catalog_request_id: &mut *state.catalog_request_id,
+        catalog_json: &mut *state.catalog_json,
+        catalog_group_id: &mut *state.catalog_group_id,
+        catalog_location: &mut *state.catalog_location,
+        peer_subscriptions: &mut *state.peer_subscriptions,
+        session_ended: &mut *state.session_ended,
+    };
     let CatalogRepublishContext {
         client,
         catalog_publish_target,
@@ -1875,9 +1906,32 @@ async fn handle_video_input_outcome(
 }
 
 async fn handle_video_input(
-    mut context: VideoInputContext<'_>,
+    state: &mut PublisherPipelineState<'_>,
     video_input: Option<VideoInput>,
 ) -> Result<LoopFlow> {
+    let mut context = VideoInputContext {
+        config: &mut *state.config,
+        namespace: &mut *state.namespace,
+        video_encoder: &mut *state.video_encoder,
+        video_timescale: &mut *state.video_timescale,
+        reencode_video_timescale: &mut *state.reencode_video_timescale,
+        handle: &mut *state.handle,
+        video_group_id: &mut *state.video_group_id,
+        started_video_group_id: &mut *state.started_video_group_id,
+        current_video_writer: &mut *state.current_video_writer,
+        video_object_id: &mut *state.video_object_id,
+        peer_subscriptions: &mut *state.peer_subscriptions,
+        gop_tracker: &mut *state.gop_tracker,
+        session_ended: &mut *state.session_ended,
+        video_clock: &mut *state.video_clock,
+        capture_residuals: &mut *state.capture_residuals,
+        pending_video_timestamps: &mut *state.pending_video_timestamps,
+        media_cache: &mut *state.media_cache,
+        video_publish_target: &mut *state.video_publish_target,
+        video_request_id: &mut *state.video_request_id,
+        data_plane: &mut *state.data_plane,
+        client: &mut *state.client,
+    };
     let Some(video_input) = video_input else {
         tracing::info!("Video input channel closed");
         return Ok(LoopFlow::Break);
@@ -2966,9 +3020,36 @@ async fn run_audio_input_body(
 }
 
 async fn handle_audio_input(
-    mut context: AudioInputContext<'_>,
+    state: &mut PublisherPipelineState<'_>,
     audio_input: Option<AudioInput>,
 ) -> Result<LoopFlow> {
+    let mut context = AudioInputContext {
+        config: &mut *state.config,
+        namespace: &mut *state.namespace,
+        audio_encoder: &mut *state.audio_encoder,
+        audio_publish_catch_up: &mut *state.audio_publish_catch_up,
+        audio_catch_up_logged_dropped_frames: &mut *state.audio_catch_up_logged_dropped_frames,
+        audio_samples_per_frame: &mut *state.audio_samples_per_frame,
+        audio_timescale: &mut *state.audio_timescale,
+        audio_config: &mut *state.audio_config,
+        handle: &mut *state.handle,
+        audio_group_id: &mut *state.audio_group_id,
+        audio_frame_count: &mut *state.audio_frame_count,
+        peer_subscriptions: &mut *state.peer_subscriptions,
+        session_ended: &mut *state.session_ended,
+        audio_pcm_buf: &mut *state.audio_pcm_buf,
+        audio_fade_pending: &mut *state.audio_fade_pending,
+        audio_fade_next_head: &mut *state.audio_fade_next_head,
+        audio_clock: &mut *state.audio_clock,
+        capture_residuals: &mut *state.capture_residuals,
+        audio_timeline: &mut *state.audio_timeline,
+        audio_config_sent: &mut *state.audio_config_sent,
+        media_cache: &mut *state.media_cache,
+        audio_publish_target: &mut *state.audio_publish_target,
+        audio_request_id: &mut *state.audio_request_id,
+        data_plane: &mut *state.data_plane,
+        client: &mut *state.client,
+    };
     let Some(audio_input) = audio_input else {
         tracing::info!("Audio input channel closed");
         finish_audio_input(&mut context).await?;
@@ -3629,9 +3710,42 @@ async fn handle_publisher_session_event(
 }
 
 async fn handle_notable_event(
-    context: &mut NextEventContext<'_>,
+    state: &mut PublisherPipelineState<'_>,
     notable: std::result::Result<Option<ClientEvent>, TransportError>,
 ) -> Result<LoopFlow> {
+    let mut context = NextEventContext {
+        task_monitor: &mut *state.task_monitor,
+        config: &mut *state.config,
+        namespace: &mut *state.namespace,
+        handle: &mut *state.handle,
+        catalog_group_id: &mut *state.catalog_group_id,
+        catalog_location: &mut *state.catalog_location,
+        catalog_json: &mut *state.catalog_json,
+        started_video_group_id: &mut *state.started_video_group_id,
+        current_video_writer: &mut *state.current_video_writer,
+        peer_subscriptions: &mut *state.peer_subscriptions,
+        next_peer_alias: &mut *state.next_peer_alias,
+        gop_tracker: &mut *state.gop_tracker,
+        session_ended: &mut *state.session_ended,
+        media_cache: &mut *state.media_cache,
+        migration_task: &mut *state.migration_task,
+        request_migration_tx: &mut *state.request_migration_tx,
+        request_migration_tasks: &mut *state.request_migration_tasks,
+        request_migration_sessions: &mut *state.request_migration_sessions,
+        migrating_tracks: &mut *state.migrating_tracks,
+        video_publish_target: &mut *state.video_publish_target,
+        audio_publish_target: &mut *state.audio_publish_target,
+        catalog_publish_target: &mut *state.catalog_publish_target,
+        migration_limiter: &mut *state.migration_limiter,
+        catalog_request_id: &mut *state.catalog_request_id,
+        audio_request_id: &mut *state.audio_request_id,
+        video_request_id: &mut *state.video_request_id,
+        data_plane: &mut *state.data_plane,
+        client: &mut *state.client,
+        migration_rx: &mut *state.migration_rx,
+        audio_config_sent: &mut *state.audio_config_sent,
+    };
+    let context = &mut context;
     // 分岐本体を async ブロックに閉じ込め、`?` が `run` を抜けないようにする。
     // `context.client.next_event()` の結果とピア要求への応答 (`serve_peer_request`) は
     // どちらも transport I/O を行い、セッション終了後は
@@ -3730,9 +3844,39 @@ struct MigrationResultContext<'a> {
 
 /// バックグラウンドの session 移行の結果を処理する
 async fn handle_migration_outcome(
-    context: MigrationResultContext<'_>,
+    state: &mut PublisherPipelineState<'_>,
     migration_outcome: Option<MigrationTaskResult>,
 ) -> Result<LoopFlow> {
+    let context = MigrationResultContext {
+        task_monitor: &mut *state.task_monitor,
+        config: &mut *state.config,
+        handle: &mut *state.handle,
+        catalog_group_id: &mut *state.catalog_group_id,
+        catalog_location: &mut *state.catalog_location,
+        catalog_context: &mut *state.catalog_context,
+        catalog_json: &mut *state.catalog_json,
+        current_video_writer: &mut *state.current_video_writer,
+        peer_subscriptions: &mut *state.peer_subscriptions,
+        gop_tracker: &mut *state.gop_tracker,
+        session_ended: &mut *state.session_ended,
+        migration_task: &mut *state.migration_task,
+        request_migration_rx: &mut *state.request_migration_rx,
+        request_migration_tasks: &mut *state.request_migration_tasks,
+        request_migration_sessions: &mut *state.request_migration_sessions,
+        migrating_tracks: &mut *state.migrating_tracks,
+        video_publish_target: &mut *state.video_publish_target,
+        audio_publish_target: &mut *state.audio_publish_target,
+        catalog_publish_target: &mut *state.catalog_publish_target,
+        old_session_closers: &mut *state.old_session_closers,
+        wt_session_state_rx: &mut *state.wt_session_state_rx,
+        catalog_request_id: &mut *state.catalog_request_id,
+        audio_request_id: &mut *state.audio_request_id,
+        video_request_id: &mut *state.video_request_id,
+        data_plane: &mut *state.data_plane,
+        client: &mut *state.client,
+        migration_rx: &mut *state.migration_rx,
+        audio_config_sent: &mut *state.audio_config_sent,
+    };
     let MigrationResultContext {
         task_monitor,
         config,
@@ -3986,9 +4130,30 @@ struct RequestMigrationContext<'a> {
 
 /// request 単位移行の side session から届いたイベントを処理する
 async fn handle_request_migration_event(
-    context: RequestMigrationContext<'_>,
+    state: &mut PublisherPipelineState<'_>,
     event: RequestMigrationEvent,
 ) -> Result<LoopFlow> {
+    let context = RequestMigrationContext {
+        handle: &mut *state.handle,
+        catalog_group_id: &mut *state.catalog_group_id,
+        catalog_location: &mut *state.catalog_location,
+        catalog_json: &mut *state.catalog_json,
+        current_video_writer: &mut *state.current_video_writer,
+        peer_subscriptions: &mut *state.peer_subscriptions,
+        gop_tracker: &mut *state.gop_tracker,
+        session_ended: &mut *state.session_ended,
+        request_migration_sessions: &mut *state.request_migration_sessions,
+        migrating_tracks: &mut *state.migrating_tracks,
+        video_publish_target: &mut *state.video_publish_target,
+        audio_publish_target: &mut *state.audio_publish_target,
+        catalog_publish_target: &mut *state.catalog_publish_target,
+        catalog_request_id: &mut *state.catalog_request_id,
+        audio_request_id: &mut *state.audio_request_id,
+        video_request_id: &mut *state.video_request_id,
+        data_plane: &mut *state.data_plane,
+        client: &mut *state.client,
+        audio_config_sent: &mut *state.audio_config_sent,
+    };
     let RequestMigrationContext {
         handle,
         catalog_group_id,
@@ -4211,312 +4376,60 @@ async fn handle_request_migration_event(
     Ok(LoopFlow::Continue)
 }
 
-async fn run_publisher_loop(state: PublisherPipelineState<'_>) -> Result<()> {
-    let PublisherPipelineState {
-        task_monitor,
-        shutdown_monitor,
-        config,
-        namespace,
-        video_encoder,
-        video_timescale,
-        reencode_video_timescale,
-        audio_encoder,
-        audio_publish_catch_up,
-        audio_catch_up_logged_dropped_frames,
-        audio_samples_per_frame,
-        audio_timescale,
-        audio_config,
-        handle,
-        catalog_group_id,
-        catalog_location,
-        catalog_context,
-        catalog_json,
-        video_input_rx,
-        audio_input_rx,
-        start,
-        video_group_id,
-        started_video_group_id,
-        audio_group_id,
-        audio_frame_count,
-        current_video_writer,
-        video_object_id,
-        peer_subscriptions,
-        next_peer_alias,
-        gop_tracker,
-        session_ended,
-        audio_pcm_buf,
-        audio_fade_pending,
-        audio_fade_next_head,
-        video_clock,
-        audio_clock,
-        capture_residuals,
-        audio_timeline,
-        pending_video_timestamps,
-        audio_config_sent,
-        audio_stats_logged_ms,
-        media_cache,
-        tick_interval,
-        catalog_republish_interval,
-        migration_rx,
-        migration_task,
-        request_migration_tx,
-        request_migration_rx,
-        request_migration_tasks,
-        request_migration_sessions,
-        migrating_tracks,
-        video_publish_target,
-        audio_publish_target,
-        catalog_publish_target,
-        old_session_closers,
-        migration_limiter,
-        wt_session_state_rx,
-        client,
-        data_plane,
-        video_request_id,
-        audio_request_id,
-        catalog_request_id,
-    } = state;
+async fn run_publisher_loop(mut state: PublisherPipelineState<'_>) -> Result<()> {
     'main: loop {
         tokio::select! {
-            video_input = video_input_rx.recv(), if config.video_enabled => {
-                match handle_video_input(
-                    VideoInputContext {
-                        config,
-                        namespace,
-                        video_encoder,
-                        video_timescale,
-                        reencode_video_timescale,
-                        handle,
-                        video_group_id,
-                        started_video_group_id,
-                        current_video_writer,
-                        video_object_id,
-                        peer_subscriptions,
-                        gop_tracker,
-                        session_ended,
-                        video_clock,
-                        capture_residuals,
-                        pending_video_timestamps,
-                        media_cache,
-                        video_publish_target,
-                        video_request_id,
-                        data_plane,
-                        client,
-                    },
-                    video_input,
-                )
-                .await
-                {
+            video_input = state.video_input_rx.recv(), if state.config.video_enabled => {
+                match handle_video_input(&mut state, video_input).await {
                     Ok(LoopFlow::Continue) => {}
                     Ok(LoopFlow::Break) => break 'main,
                     Err(e) => return Err(e),
                 }
             }
-            audio_input = audio_input_rx.recv(), if config.audio_enabled => {
-                match handle_audio_input(
-                    AudioInputContext {
-                        config,
-                        namespace,
-                        audio_encoder,
-                        audio_publish_catch_up,
-                        audio_catch_up_logged_dropped_frames,
-                        audio_samples_per_frame,
-                        audio_timescale,
-                        audio_config,
-                        handle,
-                        audio_group_id,
-                        audio_frame_count,
-                        peer_subscriptions,
-                        session_ended,
-                        audio_pcm_buf,
-                        audio_fade_pending,
-                        audio_fade_next_head,
-                        audio_clock,
-                        capture_residuals,
-                        audio_timeline,
-                        audio_config_sent,
-                        media_cache,
-                        audio_publish_target,
-                        audio_request_id,
-                        data_plane,
-                        client,
-                    },
-                    audio_input,
-                )
-                .await
-                {
+            audio_input = state.audio_input_rx.recv(), if state.config.audio_enabled => {
+                match handle_audio_input(&mut state, audio_input).await {
                     Ok(LoopFlow::Continue) => {}
                     Ok(LoopFlow::Break) => break 'main,
                     Err(e) => return Err(e),
                 }
             }
-            notable = client.next_event() => {
-                match handle_notable_event(
-                    &mut NextEventContext {
-                        task_monitor,
-                        config,
-                        namespace,
-                        handle,
-                        catalog_group_id,
-                        catalog_location,
-                        catalog_json,
-                        started_video_group_id,
-                        current_video_writer,
-                        peer_subscriptions,
-                        next_peer_alias,
-                        gop_tracker,
-                        session_ended,
-                        audio_config_sent,
-                        media_cache,
-                        migration_task,
-                        request_migration_tx,
-                        request_migration_tasks,
-                        request_migration_sessions,
-                        migrating_tracks,
-                        video_publish_target,
-                        audio_publish_target,
-                        catalog_publish_target,
-                        migration_limiter,
-                        catalog_request_id,
-                        audio_request_id,
-                        video_request_id,
-                        data_plane,
-                        client,
-                        migration_rx,
-                    },
-                    notable,
-                )
-                .await
-                {
+            notable = state.client.next_event() => {
+                match handle_notable_event(&mut state, notable).await {
                     Ok(LoopFlow::Continue) => {}
                     Ok(LoopFlow::Break) => break 'main,
                     Err(e) => return Err(e),
                 }
             }
-            migration_outcome = wait_migration_result(migration_rx) => {
-                match handle_migration_outcome(
-                    MigrationResultContext {
-                        task_monitor,
-                        config,
-                        handle,
-                        catalog_group_id,
-                        catalog_location,
-                        catalog_context,
-                        catalog_json,
-                        current_video_writer,
-                        peer_subscriptions,
-                        gop_tracker,
-                        session_ended,
-                        audio_config_sent,
-                        migration_task,
-                        request_migration_rx,
-                        request_migration_tasks,
-                        request_migration_sessions,
-                        migrating_tracks,
-                        video_publish_target,
-                        audio_publish_target,
-                        catalog_publish_target,
-                        old_session_closers,
-                        wt_session_state_rx,
-                        catalog_request_id,
-                        audio_request_id,
-                        video_request_id,
-                        data_plane,
-                        client,
-                        migration_rx,
-                    },
-                    migration_outcome,
-                )
-                .await
-                {
+            migration_outcome = wait_migration_result(&mut *state.migration_rx) => {
+                match handle_migration_outcome(&mut state, migration_outcome).await {
                     Ok(LoopFlow::Continue) => {}
                     Ok(LoopFlow::Break) => break 'main,
                     Err(e) => return Err(e),
                 }
             }
-            Some(event) = request_migration_rx.recv() => {
-                match handle_request_migration_event(
-                    RequestMigrationContext {
-                        handle,
-                        catalog_group_id,
-                        catalog_location,
-                        catalog_json,
-                        current_video_writer,
-                        peer_subscriptions,
-                        gop_tracker,
-                        session_ended,
-                        audio_config_sent,
-                        request_migration_sessions,
-                        migrating_tracks,
-                        video_publish_target,
-                        audio_publish_target,
-                        catalog_publish_target,
-                        catalog_request_id,
-                        audio_request_id,
-                        video_request_id,
-                        data_plane,
-                        client,
-                    },
-                    event,
-                )
-                .await
-                {
+            Some(event) = state.request_migration_rx.recv() => {
+                match handle_request_migration_event(&mut state, event).await {
                     Ok(LoopFlow::Continue) => {}
                     Ok(LoopFlow::Break) => break 'main,
                     Err(e) => return Err(e),
                 }
             }
-            wt_state = wait_wt_session_change(wt_session_state_rx) => {
-                if let LoopFlow::Break = handle_wt_session_state(
-                    WtSessionContext {
-                        config,
-                        namespace,
-                        task_monitor,
-                        migration_task,
-                        migration_rx,
-                        migration_limiter,
-                        session_ended,
-                        wt_session_state_rx,
-                    },
-                    wt_state,
-                )
-                .await
-                {
+            wt_state = wait_wt_session_change(&mut *state.wt_session_state_rx) => {
+                if let LoopFlow::Break = handle_wt_session_state(&mut state, wt_state).await {
                     break 'main;
                 }
             }
-            _ = tick_interval.tick() => {
-                handle_tick(TickContext {
-                    client,
-                    config,
-                    start,
-                    audio_stats_logged_ms,
-                    audio_publish_catch_up,
-                    video_group_id,
-                    audio_frame_count,
-                });
+            _ = state.tick_interval.tick() => {
+                handle_tick(&mut state);
             }
-            _ = catalog_republish_interval.tick() => {
-                match handle_catalog_republish(CatalogRepublishContext {
-                    client,
-                    catalog_publish_target,
-                    handle,
-                    data_plane,
-                    catalog_request_id,
-                    catalog_json,
-                    catalog_group_id,
-                    catalog_location,
-                    peer_subscriptions,
-                    session_ended,
-                })
-                .await
-                {
+            _ = state.catalog_republish_interval.tick() => {
+                match handle_catalog_republish(&mut state).await {
                     Ok(LoopFlow::Continue) => {}
                     Ok(LoopFlow::Break) => break 'main,
                     Err(e) => return Err(e),
                 }
             }
-            _ = shutdown_monitor.recv() => {
+            _ = state.shutdown_monitor.recv() => {
                 tracing::info!("Shutdown signal received");
                 break;
             }
