@@ -1,7 +1,7 @@
 # pbt の ControlMessage 生成に Unsupported を追加する
 
 - Created: 2026-10-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/test-pbt-unsupported-control-message
 - Polished: 2026-10-25
 - Refreshed: 2026-11-04
@@ -38,3 +38,14 @@
 - `pbt/tests/prop_message.rs` の ControlMessage ラウンドトリップ PBT が `Unsupported` を生成し、`type_id` / `request_id` / `body` の一致を検証していること。`unsupported_seen` ゲートにより、少なくとも 1 件の `Unsupported` が往復を通って観測されること。
 - request 型の `request_id` と body 先頭 varint が一致し、`type_id` と `request_id` の有無が 0317 の encode 検証と整合していること。
 - `cargo test --workspace` (pbt を含む) / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+`0431` で `ControlMessage::Unsupported` variant 自体が削除され、未対応の control message は
+`ControlMessage` の enum に保持せず、`Session::recv_request` が型 ID と本文長を読んで
+`REQUEST_NOT_SUPPORTED` を返す設計になった。`UNSUPPORTED_MESSAGE_TYPES` も同じ変更で
+不要になっている。
+
+そのため本 issue が対象としていた `ControlMessage::Unsupported` の encode / decode
+ラウンドトリップは存在せず、PBT の生成分岐を追加する前提が無くなった。未対応型の受信経路は
+`fuzz/fuzz_targets/fuzz_session.rs` の `Op::RecvRequest` と session の単体テストで扱う。
