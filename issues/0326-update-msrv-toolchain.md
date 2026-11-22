@@ -1,7 +1,7 @@
 # ライブラリの MSRV と rust-toolchain を shiguredo-rust の規約に合わせる
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/update-msrv-toolchain
 - Polished: 2026-11-20
 - Refreshed: 2026-11-04
@@ -45,3 +45,15 @@ shiguredo-rust はライブラリの MSRV を 1.95 とし、`Cargo.toml` の `ru
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が macOS 上で通ること (crates 配下の crate が macOS 専用依存を持つため、Linux では workspace 全体をビルドできない)。
 - 変更したファイルを指定した `prek run --files` が通ること (markdownlint / tombi を含む)。`prek run --all-files` は本 issue と無関係な既存の markdownlint 違反 (`issues/0324-doc-docs-implementation-consistency.md` と `issues/0002-msf-draft-02-compression-signaling.md` の MD013) が残っている間は失敗するため、本 issue では新たな違反を増やさないこと。
 - `CHANGES.md` にエントリが追加されていないこと。
+
+## 解決方法
+
+- ルート `Cargo.toml` / `pbt/Cargo.toml` / `fuzz/Cargo.toml` の `rust-version` を
+  `"1.95"` にした。
+- `rust-toolchain.toml` の channel は既に 1.95 のため変更せず、コメントを
+  MSRV 1.95 と channel 1.95 を揃えていること、crates 配下と e2e-tests が
+  1.95 を要求する理由 (QUIC バックエンドと raden) を示す内容に更新した。
+- `crates/README.md` と `skills/shiguredo-moqt/SKILL.md` の案内を 1.95 に揃えた。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`prek run --files` が成功した。
