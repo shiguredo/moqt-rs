@@ -1555,7 +1555,9 @@ fn generate(n: u64) -> Option<u64>
 fn is_grease(value: u64) -> bool
 
 // subgroup_tracker
-use shiguredo_moqt::subgroup_tracker::{SubgroupStreamState, SubgroupTracker};
+use shiguredo_moqt::subgroup_tracker::{
+    MAX_TRACKED_SUBGROUP_KEYS_PER_TRACK_ALIAS, SubgroupStreamState, SubgroupTracker,
+};
 fn new() -> SubgroupTracker
 fn open(&mut self, track_alias: u64, group_id: u64, subgroup_id: u64) -> Result<(), MessageError>
 fn mark_fin(&mut self, track_alias: u64, group_id: u64, subgroup_id: u64, last_object_id: Option<u64>) -> Result<(), MessageError>
@@ -1582,6 +1584,7 @@ fn SubgroupStreamState::can_reopen(&self) -> bool
 
 `SubgroupTracker` は FIN を最優先の終端理由として扱う。`ClosedFin` のキーへの `mark_reset` / `mark_stop_sending` は状態を変えず、FIN 後の再オープンは拒否される (draft-ietf-moq-transport-23 §11.3.2 / §2.2)。
 `SubgroupStreamState::ClosedFin` は値を持たず、FIN 前の最終 Object ID は tracker が状態とは別に保持する (状態エントリの無いキーの FIN も記録し、§12.1 条件 2/3 の検出に使う)。
+`track_alias` ごとの追跡キー数が `MAX_TRACKED_SUBGROUP_KEYS_PER_TRACK_ALIAS` (100,000) を超えると、終端済みキーは 3 つの表からまとめて破棄される。`Open` のキーは破棄しない。破棄されたキーは未知キーとして再オープンでき、条件 1〜3 の検出はそのキーについては行われない (known limitation)。
 
 ```rust
 // playout::stretch

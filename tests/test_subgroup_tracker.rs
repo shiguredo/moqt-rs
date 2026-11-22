@@ -3,7 +3,9 @@
 /// draft-ietf-moq-transport-23 §2.2 (Subgroups) / draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams) に基づく再オープン禁止検証の
 /// 境界条件・エラーパスを PBT とは別に厳密化する。
 use shiguredo_moqt::error::MessageError;
-use shiguredo_moqt::subgroup_tracker::{SubgroupStreamState, SubgroupTracker};
+use shiguredo_moqt::subgroup_tracker::{
+    MAX_TRACKED_SUBGROUP_KEYS_PER_TRACK_ALIAS, SubgroupStreamState, SubgroupTracker,
+};
 
 #[test]
 fn open_then_fin_then_different_subgroup_ok() {
@@ -226,4 +228,80 @@ fn mark_stop_sending_sets_stopped_by_peer_flag() {
         .expect("テストフィクスチャの前提条件を満たす");
     t.mark_stop_sending(1, 5, 3);
     assert_eq!(t.get(1, 5, 3), Some(&SubgroupStreamState::StoppedByPeer));
+}
+
+/// 追跡キー数が上限を超えたとき、終端済みキーがまとめて破棄されること
+///
+/// 上限ちょうどまで FIN 済みキーを保持し、上限を超える 1 件を追加した時点で、当該 alias の
+/// 終端済みキーが 3 つの表から削除される。破棄されたキーは未知キーとして扱われ、
+/// 再オープン・優先度の初回記録・FIN の再記録ができ、条件 2/3 の比較は行われない。
+#[test]
+fn terminal_keys_are_pruned_when_limit_is_exceeded() {
+    let limit = MAX_TRACKED_SUBGROUP_KEYS_PER_TRACK_ALIAS;
+    let mut tracker = SubgroupTracker::new();
+
+    // 上限ちょうどまで FIN 済みキーを作る。この時点では上限を超えないため破棄されない
+    for subgroup_id in 0..limit as u64 {
+        tracker
+            .open(1, 0, subgroup_id)
+            .expect("テストフィクスチャの前提条件を満たす");
+        tracker
+            .record_priority(1, 0, subgroup_id, 3)
+            .expect("テストフィクスチャの前提条件を満たす");
+        tracker
+            .mark_fin(1, 0, subgroup_id, Some(subgroup_id))
+            .expect("テストフィクスチャの前提条件を満たす");
+    }
+    assert_eq!(
+        tracker.get(1, 0, 0),
+        Some(&SubgroupStreamState::ClosedFin),
+        "上限ちょうどの時点では終端済みキーを保持すること"
+    );
+
+    // 新しい Open のキーで上限を超える。終端済みキーはまとめて破棄される
+    tracker
+        .open(1, 0, limit as u64)
+        .expect("上限を超えるキーの open は成功すること");
+    assert_eq!(
+        tracker.get(1, 0, 0),
+        None,
+        "破棄された終端済みキーは観測できないこと"
+    );
+    assert_eq!(
+        tracker.get(1, 0, limit as u64),
+        Some(&SubgroupStreamState::Open),
+        "Open のキーは破棄しないこと"
+    );
+    assert_eq!(
+        tracker.check_object_after_fin(1, 0, 0, u64::MAX),
+        None,
+        "破棄された FIN 記録との条件 2 の比較は行わないこと"
+    );
+    // 破棄されたキーへの終端マークは状態エントリが無いため no-op
+    tracker.mark_reset(1, 0, 0, Some(10));
+    tracker.mark_stop_sending(1, 0, 0);
+    assert_eq!(tracker.get(1, 0, 0), None);
+
+    // 破棄されたキーは未知キーとして再オープンできる
+    tracker
+        .open(1, 0, 0)
+        .expect("破棄されたキーは再オープンできること");
+    assert_eq!(tracker.get(1, 0, 0), Some(&SubgroupStreamState::Open));
+
+    // 破棄前の優先度 (3) は失われ、新しい優先度を初回記録として受理する
+    tracker
+        .record_priority(1, 0, 0, 9)
+        .expect("破棄後の最初の優先度記録は成功すること");
+    assert!(
+        matches!(
+            tracker.record_priority(1, 0, 0, 10),
+            Err(MessageError::MalformedTrack(_))
+        ),
+        "破棄後の 2 回目の記録は条件 1 で拒否すること"
+    );
+
+    // 破棄前の最終 Object ID (0) は失われ、異なる最終 Object ID の FIN を受理する
+    tracker
+        .mark_fin(1, 0, 0, Some(999))
+        .expect("破棄後の FIN は条件 3 の比較を行わないこと");
 }
