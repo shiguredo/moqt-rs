@@ -857,52 +857,71 @@ struct PublishFinishContext<'a> {
 ///
 /// 移行タスクと旧 session を止め、MP4 入力・映像 stream・購読の writer を閉じ、
 /// PUBLISH_DONE と GOAWAY / close を送ってから結果を返す。
-async fn finish_publisher(context: PublishFinishContext<'_>) -> Result<()> {
-    let PublishFinishContext {
-        migration_task,
-        old_session_closers,
-        mp4_source,
-        reencode_source,
-        current_video_writer,
-        video_request_id,
+/// 受信 SUBSCRIBE で確立した購読の writer を閉じ、PUBLISH_DONE を送る
+async fn finish_peer_subscriptions(
+    peer_subscriptions: &mut [PeerSubscription],
+    client: &mut MoqtClient,
+    session_ended: bool,
+) {
+    for peer in peer_subscriptions.iter_mut() {
+        if peer.ended {
+            continue;
+        }
+        peer.ended = true;
+        if let Some(writer) = peer.writer.take()
+            && let Err(e) = writer
+                .finish(client.subscription_filter_start(peer.request_id))
+                .await
+        {
+            // 終端に伴う失敗と接続クローズだけを info に落とす (`cleanup_finish_is_expected`
+            // と `Error::ConnectionClosed` の判定)
+            log_failure(
+                format_args!(
+                    "Failed to finish peer subscription stream (request_id={}): {e}",
+                    peer.request_id
+                ),
+                session_ended || cleanup_finish_is_expected(session_ended, &e),
+            );
+        }
+        if let Err(e) = client
+            .send_publish_done(peer.request_id, PUBLISH_DONE_GOING_AWAY, "")
+            .await
+        {
+            log_failure(
+                format_args!(
+                    "Failed to send PUBLISH_DONE for peer subscribe (request_id={}): {e}",
+                    peer.request_id
+                ),
+                session_ended || is_connection_closed(&e),
+            );
+        }
+    }
+}
+
+struct FinishStreamsContext<'a> {
+    client: &'a mut MoqtClient,
+    video_request_id: Option<u64>,
+    video_publish_target: &'a Option<PublishTarget>,
+    audio_request_id: Option<u64>,
+    audio_publish_target: &'a Option<PublishTarget>,
+    catalog_publish_target: &'a Option<PublishTarget>,
+    catalog_request_id: u64,
+    session_ended: bool,
+    current_video_writer: &'a mut Option<SubgroupWriter>,
+}
+/// 映像 writer を閉じ、各 track の PUBLISH_DONE を送る
+async fn finish_publish_streams(context: FinishStreamsContext<'_>) {
+    let FinishStreamsContext {
         client,
+        video_request_id,
         video_publish_target,
-        session_ended,
         audio_request_id,
         audio_publish_target,
         catalog_publish_target,
         catalog_request_id,
-        peer_subscriptions,
-        request_migration_tasks,
-        request_migration_sessions,
+        session_ended,
+        current_video_writer,
     } = context;
-    // 進行中の移行タスクを打ち切って回収する。確立済みの移行先 session は `MoqtClient` の
-    // drop で transport が閉じる。run 自体の終了が先に決まった場合であり異常ではない
-    if let Some(handle) = migration_task.take() {
-        handle.abort();
-        let _ = handle.await;
-        tracing::debug!("Aborted the in-flight migration task");
-    }
-    // 旧 session の終了タスクは best-effort である。run の終了を待たせないよう打ち切って
-    // 回収する (旧 session の transport は `MoqtClient` の drop で閉じる)
-    for handle in old_session_closers.drain(..) {
-        handle.abort();
-        let _ = handle.await;
-        tracing::debug!("Aborted the old session close task");
-    }
-
-    // MP4 リーダーのスレッドを停止して実行時エラーを拾う
-    // (open 時に全サンプルを検証しているため通常は到達しないが、異常終了を正常終了と
-    // 混同しないようにする)
-    let mp4_reader_result = match mp4_source.take() {
-        Some(source) => source.stop(),
-        None => Ok(()),
-    };
-    let reencode_result = match reencode_source.take() {
-        Some(source) => source.stop(),
-        None => Ok(()),
-    };
-
     if let Some(writer) = current_video_writer.take() {
         // 終了時点で購読が消えていれば `None` (Location Filter 無し) と同じ扱いになり、
         // 省略があれば RESET 側に倒れる (安全側)。
@@ -966,43 +985,68 @@ async fn finish_publisher(context: PublishFinishContext<'_>) -> Result<()> {
             session_ended || is_connection_closed(&e),
         );
     }
+}
 
-    // 受信 SUBSCRIBE で確立した購読の writer を閉じ、PUBLISH_DONE を送る
-    // (draft-ietf-moq-transport-23 §6.4.2.2 の MUST / §9.9 の MUST NOT。終端済みの購読
-    // (`ended`) には送らない)
-    for peer in peer_subscriptions.iter_mut() {
-        if peer.ended {
-            continue;
-        }
-        peer.ended = true;
-        if let Some(writer) = peer.writer.take()
-            && let Err(e) = writer
-                .finish(client.subscription_filter_start(peer.request_id))
-                .await
-        {
-            // 終端に伴う失敗と接続クローズだけを info に落とす (`cleanup_finish_is_expected`
-            // と `Error::ConnectionClosed` の判定)
-            log_failure(
-                format_args!(
-                    "Failed to finish peer subscription stream (request_id={}): {e}",
-                    peer.request_id
-                ),
-                session_ended || cleanup_finish_is_expected(session_ended, &e),
-            );
-        }
-        if let Err(e) = client
-            .send_publish_done(peer.request_id, PUBLISH_DONE_GOING_AWAY, "")
-            .await
-        {
-            log_failure(
-                format_args!(
-                    "Failed to send PUBLISH_DONE for peer subscribe (request_id={}): {e}",
-                    peer.request_id
-                ),
-                session_ended || is_connection_closed(&e),
-            );
-        }
+async fn finish_publisher(context: PublishFinishContext<'_>) -> Result<()> {
+    let PublishFinishContext {
+        migration_task,
+        old_session_closers,
+        mp4_source,
+        reencode_source,
+        current_video_writer,
+        video_request_id,
+        client,
+        video_publish_target,
+        session_ended,
+        audio_request_id,
+        audio_publish_target,
+        catalog_publish_target,
+        catalog_request_id,
+        peer_subscriptions,
+        request_migration_tasks,
+        request_migration_sessions,
+    } = context;
+    // 進行中の移行タスクを打ち切って回収する。確立済みの移行先 session は `MoqtClient` の
+    // drop で transport が閉じる。run 自体の終了が先に決まった場合であり異常ではない
+    if let Some(handle) = migration_task.take() {
+        handle.abort();
+        let _ = handle.await;
+        tracing::debug!("Aborted the in-flight migration task");
     }
+    // 旧 session の終了タスクは best-effort である。run の終了を待たせないよう打ち切って
+    // 回収する (旧 session の transport は `MoqtClient` の drop で閉じる)
+    for handle in old_session_closers.drain(..) {
+        handle.abort();
+        let _ = handle.await;
+        tracing::debug!("Aborted the old session close task");
+    }
+
+    // MP4 リーダーのスレッドを停止して実行時エラーを拾う
+    // (open 時に全サンプルを検証しているため通常は到達しないが、異常終了を正常終了と
+    // 混同しないようにする)
+    let mp4_reader_result = match mp4_source.take() {
+        Some(source) => source.stop(),
+        None => Ok(()),
+    };
+    let reencode_result = match reencode_source.take() {
+        Some(source) => source.stop(),
+        None => Ok(()),
+    };
+
+    finish_publish_streams(FinishStreamsContext {
+        client: &mut *client,
+        video_request_id,
+        video_publish_target,
+        audio_request_id,
+        audio_publish_target,
+        catalog_publish_target,
+        catalog_request_id,
+        session_ended,
+        current_video_writer: &mut *current_video_writer,
+    })
+    .await;
+
+    finish_peer_subscriptions(peer_subscriptions, client, session_ended).await;
 
     if let Err(e) = client.send_goaway(Vec::new(), 5000).await {
         log_failure(
