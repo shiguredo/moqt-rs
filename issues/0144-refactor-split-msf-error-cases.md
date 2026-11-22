@@ -1,7 +1,7 @@
 # MSF の decode / encode エラーケーステストを分割する
 
 - Created: 2026-09-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/refactor-split-msf-error-cases
 - Polished: 2026-11-14
 - Updated: 2026-11-14
@@ -60,3 +60,28 @@ codec / role に応じた必須フィールド節の末尾にある `parent_name
 - `tests/test_msf.rs` の mod 宣言が分割後のファイル構成と一致していること
 - テストの総数と内容が分割前後で変わらないこと
 - `make test` / `make clippy` / `make fmt` が通ること
+
+## 解決方法
+
+`tests/test_msf/error_cases.rs` を次の 10 ファイルへテーマ単位で分割し、
+`tests/test_msf.rs` の mod 宣言を差し替えて `error_cases.rs` を削除した。
+
+- `catalog_structure.rs`: カタログ基本構造と timeline の decode 検証
+- `lang_validation.rs`: lang BCP 47 軽量バリデーション
+- `target_latency_buffers.rs`: targetLatency / buffers の相互制約
+- `init_data_list.rs`: initDataList
+- `delta_update_structure.rs`: delta update 新構造
+- `codec_role_requirements.rs`: codec / role に応じた必須フィールド
+- `framerate_validation.rs`: framerate の非有限値拒否
+- `auth_info_encode.rs`: authInfo value_raw の encode 時検証
+- `encode_full_catalog.rs`: encode 時の完全カタログ検証
+- `encode_delta_update.rs`: encode 時のデルタ更新検証
+
+- 各ファイルは `use super::*;` で共通 import を共有する。
+- 複数ファイルから使う `full_doc` は `tests/test_msf.rs` の親モジュールへ移した。
+- issue が指定した group / initDataList / timeline / parentName の移動を反映した。
+- 分割前後でテスト総数は 559 のまま、`cargo test -p shiguredo_moqt --test test_msf` は
+  559 passed / 0 failed である。テスト名・内容は変更していない。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`prek run --files` が成功した。
