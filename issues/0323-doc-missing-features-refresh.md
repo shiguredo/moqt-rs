@@ -1,7 +1,7 @@
 # docs/missing-features.md を現コードに同期させる
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/update-doc-missing-features-refresh
 - Polished: 2026-11-20
 
@@ -76,3 +76,20 @@ docs/missing-features.md は 2026-10-14 の f91baf3 時点の調査メモとし�
 - `docs/missing-features.md` 内に issue 番号 / issue ファイルパス / issue への言及が無いこと。
 - playout の対応サンプルレート (8 kHz / 16 kHz / 32 kHz / 48 kHz / 44.1 kHz)、44.1 kHz は解析用の信号だけを 48 kHz の格子へ換算すること、時間伸長が `preemptively_expand` であること、映像表示は example 側であることが moq-sub の節 (6.15) に記載されていること。
 - markdownlint-cli2 が通ること。
+
+## 解決方法
+
+- 冒頭を「基準: develop の `08f38d2` (2026-11-22) 時点のスナップショット」とし、
+  最新の実装状況はコードを参照する旨を明記した。
+- `MoqtClient::fetch` と `fetch_recent_video_groups` の実装に合わせて FETCH の節を更新し、
+  直近 Group の取得はできるがシーク / 巻き戻し / 任意区間の後追い / VOD はできないと整理した。
+- `cache_duration_properties` による `MAX_CACHE_DURATION` の告知を反映し、未告知の
+  Track Property を `DEFAULT_PUBLISHER_PRIORITY` / `DEFAULT_PUBLISHER_GROUP_ORDER` /
+  `IMMUTABLE_PROPERTIES` / `EXPIRES` に限定した。
+- ソースの行番号参照をファイルパスとシンボル名の参照に置き換え、issue 番号・issue への
+  言及を削除した。
+- playout の節に、対応サンプルレート (8 kHz / 16 kHz / 32 kHz / 48 kHz / 44.1 kHz)、
+  44.1 kHz は解析信号だけを 48 kHz の格子へ換算すること、時間伸長が
+  `preemptively_expand` であること、映像の表示が example 側であることを追記した。
+
+`prek run --files docs/missing-features.md` (markdownlint を含む) が成功した。
