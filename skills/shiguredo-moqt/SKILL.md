@@ -1848,7 +1848,7 @@ fn reset(&mut self)
 `playout::gap` は再生の隙間を材料化する。出力が FIFO (積んだ順に鳴らす) の場合は隙間を積まないと後続が早く鳴って出力が枯れるため、`materialize` は要求した隙間の全長ぶんの音を必ず返す。隙間は先頭から `playout::expansion` の続き音で埋め、残りは無音にする。
 隙間の先頭は直前の音の最終サンプル (続き音があるときはその先頭の値) から 0 へ向かう重みで繋ぎ、続き音が隙間の後ろ 2 ms まで続くときは隙間の末尾を 0 へ落とさず `splice_fade::cross_fade_head` で今回の音の先頭へクロスフェードする。`current` の先頭は書き換わるため `&mut` で渡す。
 
-`playout::splice_fade` は音声の境目をフェードで繋ぐ。`fade_splice_edge` / `fade_splice_edge_i16` は配信側で捨てたフレームの端を `AUDIO_SPLICE_FADE_US` (2 ms) で 0 へ落とす。
+`playout::splice_fade` は音声の境目をフェードで繋ぐ。`fade_splice_edge` / `fade_splice_edge_i16` は配信側で捨てたフレームの端を 2 ms で 0 へ落とす。
 出力側では `interpolate_splice_gap` (直前の末尾から次の先頭への直線)、`cross_fade_head` (補間の続きから実音の先頭へ 2 ms で移る)、`smooth_splice_head` (周期補間の先頭に段差があるときだけ接続を滑らかにする)、`merge_faded_planes` (チャンネルごとの音声をフェードして `f32-planar` へ戻す) を使う。
 
 `playout::scheduler` は目標の時刻に従って音を並べ、間に合わない音は時間圧縮で目標へ戻す。

@@ -15,7 +15,7 @@
 //!     [`TIMELINE_AUDIO_DELAY_FLOOR_US`]) 〜 [`TIMELINE_ARRIVAL_DELAY_US`] の自動予算に
 //!     する
 //!   - 映像は到着の揺らぎの百分位を使う。百分位は配信 fps から決め、表示時刻の後に
-//!     届くフレームが 1 秒に [`TIMELINE_LATE_FRAMES_PER_SECOND`] 枚までになる値
+//!     届くフレームが 1 秒に 1 枚までになる値
 //!     ([`playout_delay_percentile`]) と下限の大きい方である
 //!   - 追いつき中と停滞後のまとめた復号を分布へ混ぜない。古い観測が窓から消えたら
 //!     必要値へ戻す
@@ -59,10 +59,10 @@ pub const TIMELINE_WINDOW_US: i64 = 10_000_000;
 pub const TIMELINE_JITTER_WINDOW_US: i64 = 2_000_000;
 
 /// 実出力の先行量の百分位を求める窓 (マイクロ秒)
-pub const TIMELINE_AUDIO_OUTPUT_LEAD_WINDOW_US: i64 = 1_000_000;
+pub(crate) const TIMELINE_AUDIO_OUTPUT_LEAD_WINDOW_US: i64 = 1_000_000;
 
 /// 到着基準で並べた実出力の深さを使う窓 (マイクロ秒)
-pub const TIMELINE_AUDIO_ARRIVAL_DELAY_WINDOW_US: i64 = 1_000_000;
+pub(crate) const TIMELINE_AUDIO_ARRIVAL_DELAY_WINDOW_US: i64 = 1_000_000;
 
 /// TIMESTAMP と壁時計の関係が基準からこれ以上離れたら基準を取り直す (マイクロ秒)
 ///
@@ -75,7 +75,7 @@ pub const TIMELINE_DISCONTINUITY_US: i64 = 2_000_000;
 /// 1 秒あたりの止まりの数であり、同じ割合で遅れを許すと配信 fps が高いほど止まりが
 /// 増える。許す数を 1 秒あたりで決め、再生遅延の目標にする揺らぎの百分位を配信 fps から
 /// 求める ([`playout_delay_percentile`])。
-pub const TIMELINE_LATE_FRAMES_PER_SECOND: i64 = 1;
+pub(crate) const TIMELINE_LATE_FRAMES_PER_SECOND: i64 = 1;
 
 /// 再生遅延の目標にする揺らぎの百分位の下限 (100 万分率)
 ///
@@ -88,10 +88,7 @@ pub const TIMELINE_MIN_PLAYOUT_DELAY_PERCENTILE_PPM: i64 = 950_000;
 /// 100 万分率で表した 95% の百分位
 ///
 /// 実出力の先行量の p95 に使う。
-pub const TIMELINE_P95_PERCENTILE_PPM: i64 = 950_000;
-
-/// 100 万分率で表した 50% の百分位
-pub const TIMELINE_P50_PERCENTILE_PPM: i64 = 500_000;
+pub(crate) const TIMELINE_P95_PERCENTILE_PPM: i64 = 950_000;
 
 /// 表示の遅れの上限の既定値 (ミリ秒)
 pub const TIMELINE_MAX_PRESENTATION_DELAY_MS: i64 = 500;
@@ -109,7 +106,7 @@ pub const TIMELINE_QUEUE_HEADROOM_FRAMES: usize = 4;
 pub const TIMELINE_MIN_BASE_DIFFERENCE_MS: i64 = 100;
 
 /// フレーム間隔の中央値を求めるために保持する TIMESTAMP の差の数
-pub const TIMELINE_FRAME_INTERVAL_SAMPLES: usize = 32;
+pub(crate) const TIMELINE_FRAME_INTERVAL_SAMPLES: usize = 32;
 
 /// 実績を A/V のずれの推定に使う期間 (マイクロ秒)
 pub const TIMELINE_SKEW_WINDOW_US: i64 = 1_000_000;
@@ -122,13 +119,13 @@ pub const TIMELINE_SKEW_WINDOW_US: i64 = 1_000_000;
 const TIMELINE_AUDIO_PLAYOUT_CORRECTION_SMOOTHING_US: i64 = 250_000;
 
 /// 追いつき中かを確かめる間隔 (マイクロ秒)
-pub const TIMELINE_CATCH_UP_CHECK_INTERVAL_US: i64 = 250_000;
+pub(crate) const TIMELINE_CATCH_UP_CHECK_INTERVAL_US: i64 = 250_000;
 
 /// 追いつき中とみなす、間隔の間の基準の遅れの下がり幅 (マイクロ秒)
 ///
 /// 実時間の 1.1 倍の速さで追いつく場合も 25 ms 下がる。live に追いついた後の経路の
 /// 最小の遅延の変化 (数ミリ秒) より十分大きくする。
-pub const TIMELINE_CATCH_UP_MIN_BASE_DROP_US: i64 = 20_000;
+pub(crate) const TIMELINE_CATCH_UP_MIN_BASE_DROP_US: i64 = 20_000;
 
 /// 基準を共有できない間に、同期の補償を戻す速さ (マイクロ秒 / 秒)
 pub const TIMELINE_DELAY_DECAY_US_PER_SECOND: i64 = 20_000;
@@ -499,7 +496,7 @@ fn percentile_ppm(sorted: &[i64], numerator_ppm: i64) -> i64 {
 
 /// 再生遅延の目標にする揺らぎの百分位 (100 万分率)
 ///
-/// 表示時刻の後に届くフレームが 1 秒に [`TIMELINE_LATE_FRAMES_PER_SECOND`] 枚までに
+/// 表示時刻の後に届くフレームが 1 秒に 1 枚までに
 /// なる百分位 `1 - フレーム間隔 × 枚数 / 1 秒` と下限の大きい方。30 fps で約 96.7%、
 /// 60 fps で約 98.3%、120 fps で約 99.2% になる。フレーム間隔が不明、または 0 以下なら
 /// 下限 ([`TIMELINE_MIN_PLAYOUT_DELAY_PERCENTILE_PPM`]) を返す。

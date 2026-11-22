@@ -8,7 +8,7 @@
 //!
 //! - 読み出しの遅れが上限を超えたフレームは、その場で捨てる。受信側の基準の遅れにそのまま
 //!   出るためであり、キューに溜まっていないため状態は持ち越さない
-//! - 符号化のキューが上限を超えたら、[`AUDIO_PUBLISH_CATCH_UP_RESUME_MS`] (1 パケット) 以下に
+//! - 符号化のキューが上限を超えたら、20 ms (1 パケット) 以下に
 //!   減るまで投入をやめる。減る前に再開すると、キューに残った分がはけないまま次のフレームが
 //!   入り、捨てるかどうかが往復して音声が送られなくなる
 //! - 始めるのは、上限を超えた状態が続いたときだけにする。読み出しがまとめて行われると
@@ -29,26 +29,26 @@ pub const AUDIO_PUBLISH_CATCH_UP_MIN_MS: i64 = crate::playout::catch_up_limit::C
 ///
 /// 2 パケット分である。遅れは経路と符号化の揺らぎで数十 ms 動くため、1 フレームの揺らぎで
 /// 始めない幅としてこれを許す。
-pub const AUDIO_PUBLISH_CATCH_UP_GROWTH_MS: i64 =
+pub(crate) const AUDIO_PUBLISH_CATCH_UP_GROWTH_MS: i64 =
     crate::playout::catch_up_limit::CATCH_UP_GROWTH_MS;
 
 /// 追いつきをやめて投入を再開する、キューに残ってよい音声の長さ (ミリ秒)
 ///
 /// 1 パケット分である。これ以下なら、投入を再開しても次のフレームが待たずに符号化される。
-pub const AUDIO_PUBLISH_CATCH_UP_RESUME_MS: i64 = 20;
+pub(crate) const AUDIO_PUBLISH_CATCH_UP_RESUME_MS: i64 = 20;
 
 /// 追いつきを始める前に、上限を超えた状態が続くことを要求する時間 (ミリ秒)
 ///
 /// 1 フレームの観測だけで始めると、読み出しがまとめて行われただけでも始まる。100 ms (20 ms
 /// のフレームで 5 個) の持続を要求する。
-pub const AUDIO_PUBLISH_CATCH_UP_CONFIRM_MS: i64 =
+pub(crate) const AUDIO_PUBLISH_CATCH_UP_CONFIRM_MS: i64 =
     crate::playout::catch_up_limit::CATCH_UP_CONFIRM_MS;
 
 /// 符号化のキューが単独で上限を超えた状態が続くことを要求するフレーム数
 ///
 /// キューが単独で上限を超えている状態は、実時間に追いつかない状態そのものであり、キューが
 /// はけるまで続く。読み出しの揺らぎでは起きないため、短い確認で始めてよい。
-pub const AUDIO_PUBLISH_CATCH_UP_QUEUE_CONFIRM_FRAMES: u64 = 2;
+pub(crate) const AUDIO_PUBLISH_CATCH_UP_QUEUE_CONFIRM_FRAMES: u64 = 2;
 
 /// 追いつきをやめた後、次を始めない時間 (ミリ秒)
 ///
@@ -61,7 +61,7 @@ pub const AUDIO_PUBLISH_CATCH_UP_COOLDOWN_MS: i64 =
 ///
 /// 符号化の失敗や配信の停止で完了が返らない記録が残り続けると、キューの長さが実際より
 /// 大きく見えたままになる。
-pub const AUDIO_PUBLISH_CATCH_UP_PENDING_TIMEOUT_MS: i64 = 5_000;
+pub(crate) const AUDIO_PUBLISH_CATCH_UP_PENDING_TIMEOUT_MS: i64 = 5_000;
 
 /// 追いつきの方針
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

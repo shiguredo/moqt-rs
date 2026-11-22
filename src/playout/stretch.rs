@@ -29,17 +29,17 @@ pub const TIME_STRETCH_MIN_LAG: usize = 10;
 pub const TIME_STRETCH_MAX_LAG: usize = 60;
 
 /// 操作を行う正規化相関の下限
-pub const TIME_STRETCH_CORRELATION_THRESHOLD: f64 = 0.9;
+pub(crate) const TIME_STRETCH_CORRELATION_THRESHOLD: f64 = 0.9;
 
 /// 無音とみなす振幅のピーク (-60 dBFS 相当)
-pub const TIME_STRETCH_SILENCE_PEAK: f32 = 0.001;
+pub(crate) const TIME_STRETCH_SILENCE_PEAK: f32 = 0.001;
 
 /// 継ぎ目の段差を許す、末尾の周期の自然な段差に対する倍率
 ///
 /// 周期どおりに繰り返せていれば、繰り返しの先頭は末尾の続きになるため段差は自然な段差と
 /// 同程度になる。周期がずれている音では段差が大きくなる (クリックとして聞こえる) ため、
 /// この倍率を超える音では埋めない。
-pub const TIME_STRETCH_MAX_SEAM_STEP_RATIO: f64 = 2.0;
+pub(crate) const TIME_STRETCH_MAX_SEAM_STEP_RATIO: f64 = 2.0;
 
 /// 欠落した区間の補間で使う相関の窓の長さ (4 kHz のサンプル数、9.75 ms)
 ///
@@ -51,7 +51,7 @@ pub const TIME_STRETCH_MAX_SEAM_STEP_RATIO: f64 = 2.0;
 /// では 4 kHz へ間引くと 79 サンプルであり、100 Hz (40 サンプル) まで探すには窓長 39 が
 /// 上限である (39 + 40 = 79)。これより低いピッチは 20 ms のフレームでは探せない (窓を
 /// 短くすれば探せるが、相関の推定が不安定になるため伸ばさない)。
-pub const TIME_STRETCH_TAIL_CORRELATION_LEN: usize = 39;
+pub(crate) const TIME_STRETCH_TAIL_CORRELATION_LEN: usize = 39;
 
 /// 補間した音の末尾を無音へ落とす長さ (ミリ秒)
 ///
@@ -66,8 +66,8 @@ pub const TIME_STRETCH_CONCEAL_FADE_MS: f64 = 2.0;
 ///
 /// 末尾の周期の相関がこれ未満のときは、繰り返す周期が本当の周期とずれている可能性があり、
 /// 穴の終わりで次の音と位相が合わない (段差が出る)。補間をやめる下限
-/// ([`TIME_STRETCH_CORRELATION_THRESHOLD`] の 0.9) は超えていても、位相のずれは残る。
-pub const TIME_STRETCH_CONCEAL_FADE_CORRELATION: f64 = 0.95;
+/// (0.9 の 0.9) は超えていても、位相のずれは残る。
+pub(crate) const TIME_STRETCH_CONCEAL_FADE_CORRELATION: f64 = 0.95;
 
 /// 補間した音の末尾の振幅 (補間の長さが [`TIME_STRETCH_MAX_CONCEAL_US`] 以上のとき)
 pub const TIME_STRETCH_CONCEAL_END_GAIN: f32 = 0.5;
@@ -1257,7 +1257,7 @@ fn is_channel_seam_smooth(channel: &[f32], period: f64) -> bool {
 /// 0.5 で一致する。100 ms 以外の長さでは、moqt-js の `expandAudio` が渡す 0.5 とは末尾ゲインが
 /// 異なる点に注意する。
 ///
-/// 周期の推定が確かでない ([`TIME_STRETCH_CONCEAL_FADE_CORRELATION`] 未満) ときは、穴の
+/// 周期の推定が確かでない (0.95 未満) ときは、穴の
 /// 終わりで次に鳴る音の位相が分からず段差がクリックになるため、生成した音の末尾を
 /// [`TIME_STRETCH_CONCEAL_FADE_MS`] で 0 へ落とす。
 ///
@@ -1266,8 +1266,8 @@ fn is_channel_seam_smooth(channel: &[f32], period: f64) -> bool {
 /// 埋めた長さ (サンプル数)。0 のとき `output` には何も書かない。0 になるのは、対応外の
 /// サンプルレート、空または長さの揃わないチャンネル、`output` の長さが合わないか足りない
 /// とき、埋める長さが 0 以下のとき、末尾に周期が無いとき、末尾の相関が
-/// [`TIME_STRETCH_CORRELATION_THRESHOLD`] 未満のとき (無音を除く)、第 2 チャンネル以降で
-/// 同じ周期が使えないとき、継ぎ目の段差が [`TIME_STRETCH_MAX_SEAM_STEP_RATIO`] を超える
+/// 0.9 未満のとき (無音を除く)、第 2 チャンネル以降で
+/// 同じ周期が使えないとき、継ぎ目の段差が 2.0 を超える
 /// とき (どのチャンネルでも)。無音の入力では相関が常に 0 になるが、周期の代わりに 0 を
 /// 書いて要求どおりの長さを埋める。
 pub fn conceal(

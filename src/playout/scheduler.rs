@@ -74,7 +74,7 @@ pub const AUDIO_PLAYOUT_STRETCH_MIN_US: i64 = 20_000;
 /// ただし鳴り遅れを理由に音は捨てない (捨てると語尾が切れる)。音がまだ鳴っている間は
 /// 到着基準へ並べ直さず、遅れたまま鳴らし続ける ([`AudioPlayoutScheduler::schedule`] を
 /// 参照)。
-pub const AUDIO_PLAYOUT_MAX_LATENESS_US: i64 = 500_000;
+pub(crate) const AUDIO_PLAYOUT_MAX_LATENESS_US: i64 = 500_000;
 
 /// 到着基準へ並べ直したとみなす、ずらす幅の下限 (マイクロ秒)
 ///
@@ -82,7 +82,7 @@ pub const AUDIO_PLAYOUT_MAX_LATENESS_US: i64 = 500_000;
 /// 先に進んでいて、音が連続したまま鳴るとき) は、ずらす幅が数ミリ秒以下になる。遅れて
 /// 届いた音を到着 + 再生の遅れへ置き直すときは数百ミリ秒になる。音 1 つ (Opus で 20 ms)
 /// の半分未満のずれは、媒体時刻が跳んだとはみなさない (基準を取り直した回数に数えない)。
-pub const AUDIO_PLAYOUT_RESYNC_MIN_JUMP_US: i64 = 10_000;
+pub(crate) const AUDIO_PLAYOUT_RESYNC_MIN_JUMP_US: i64 = 10_000;
 
 /// 補間する隙間の下限 (マイクロ秒)
 ///

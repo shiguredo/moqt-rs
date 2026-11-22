@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 ///
 /// 8 ms のフレームの半分より短くし、音を削りすぎない長さである。20 ms のフレームでは
 /// 10 分の 1 であり、聞こえる欠落にならない。
-pub const AUDIO_SPLICE_FADE_US: i64 = 2_000;
+pub(crate) const AUDIO_SPLICE_FADE_US: i64 = 2_000;
 
 /// 落とす端
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,7 +149,7 @@ pub fn interpolate_splice_gap(
 /// 両方を 0 へ落とす方式と違い、同じ波形なら音量を保つ。補間の続きは実音の開始位置に
 /// 対応するサンプル列であり、遅延や再生する長さは増やさない。入力の配列は変更しない。
 ///
-/// 混ぜる長さは [`AUDIO_SPLICE_FADE_US`] をサンプル数へ四捨五入した長さと、`channels` の
+/// 混ぜる長さは 2 ms をサンプル数へ四捨五入した長さと、`channels` の
 /// 先頭チャンネルの長さ、`continuation` の先頭チャンネルの長さの最小値である。続きの
 /// チャンネルが無いときは、その実音をそのまま複製して返す。チャンネルごとに `continuation`
 /// が短いときは、足りない分を 0 として混ぜる (moqt-js の `previous[index] ?? 0` と同じ)。
@@ -186,7 +186,7 @@ pub fn cross_fade_head(
 
 /// 周期補間の先頭に、直前の音の変化幅を超える段差がある場合だけ接続を滑らかにする
 ///
-/// 通常の波形へ毎回フェードを掛けず、既存の [`AUDIO_SPLICE_FADE_US`] 以内で補間波形へ戻す。
+/// 通常の波形へ毎回フェードを掛けず、既存の 2 ms 以内で補間波形へ戻す。
 /// `previous` から求めた変化幅 (`natural_step`) を超える段差があるときだけ
 /// [`cross_fade_head`] を掛ける。
 pub fn smooth_splice_head(

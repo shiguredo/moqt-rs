@@ -93,7 +93,7 @@ pub const AUDIO_RECEIVE_CATCH_UP_COOLDOWN_MS: i64 =
 ///
 /// 復号の出力の TIMESTAMP は投入の順に進むため、飛びが無ければ 1 音の長さずつ進む。
 /// これより小さい差は TIMESTAMP の丸めとみなし、捨てた音として数えない。
-pub const AUDIO_RECEIVE_CATCH_UP_SKIP_MIN_MS: i64 = 1;
+pub(crate) const AUDIO_RECEIVE_CATCH_UP_SKIP_MIN_MS: i64 = 1;
 
 /// ミリ秒の定数をマイクロ秒へ換算する (内部の計算用)
 ///
