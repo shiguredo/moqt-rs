@@ -1,7 +1,7 @@
 # playout のローリング窓と catch_up の重複実装を共通化する
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/refactor-playout-window-duplication
 - Polished: 2026-11-21
 
@@ -57,3 +57,32 @@ playout と audio_clock には「時刻付き値のローリング窓」が 4 �
 - 受信側の床の計算 (5 秒窓と途切れ時の保持) と配信側の床の計算 (全期間の最小)、および開始・終了・クールダウンの判定が変更されていないこと。
 - 既存の playout テストと PBT (境界のテストを含む) が通ること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / `cargo build -p shiguredo_moqt --target thumbv7em-none-eabihf` が通ること。
+
+## 解決方法
+
+`src/playout/window.rs` に `TimedWindow` (`VecDeque<(i64, i64)>`) を新設し、境界の扱いを
+メソッド名で分けた。
+
+- `prune`: `oldest_us` より前だけを捨てる (境界を含む)
+- `prune_excluding`: `oldest_us` 以下を捨てる (境界を含まない)
+- `min_after`: `since_us` を含む
+- `latest` / `iter` / `min_value` / `sorted_values` / `clear`
+
+`TimedValues` の `times_us` / `values_us` / `head` を削除して共通型へ移行し、`current` は
+`Vec<i64>` を返すようにした。`summarize_timings` の `&[i64]` シグネチャは変えていない。
+`timeline.rs` のローカル `TimedWindow`、`AudioTimestampClock::observations`、
+`AudioReceiveCatchUp::floor_samples` も共通型へ移行した。`floor_samples` は従来どおり
+境界を含まない切り捨てを `prune_excluding` で明示している。
+
+`src/playout/catch_up_limit.rs` に `CATCH_UP_MIN_MS` (60) / `CATCH_UP_GROWTH_MS` (40) /
+`CATCH_UP_CONFIRM_MS` (100) / `CATCH_UP_COOLDOWN_MS` (1_000) と `limit_ms` / `limit_us` を
+置いた。公開定数 `AUDIO_RECEIVE_CATCH_UP_*` / `AUDIO_PUBLISH_CATCH_UP_*` は値の参照に
+変え、公開 API は維持している。床の計算と開始・終了・クールダウンの判定は変更していない。
+
+Lean では `moqt-js` の `PlayoutAudit/Window.lean` の `prefix_prune_equivalent` を参考に、
+`PlayoutWindow/Window.lean` で先頭 prune と age filter の同値を境界あり・なしの両方で
+証明した。catch_up の上限については下限・単調性・勝つ条件を証明した (7 定理 + 4 例)。
+
+検証は `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`cargo build -p shiguredo_moqt --target thumbv7em-none-eabihf`、
+playout / audio_clock のテストと PBT、`lake build PlayoutWindow` が成功した。
