@@ -1,7 +1,7 @@
 # CODEBASE.md の GitHub Actions 非対応方針と workflows の実態を一致させる
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/update-codebase-github-actions-consistency
 - Polished: 2026-11-20
 
@@ -50,3 +50,14 @@ CODEBASE.md は「この指示がなくなるまでは GitHub Actions 対応は�
 - CHANGES.md にエントリが追加されていないこと。
 - コミットメッセージが `整備` で、本文がないこと。
 - `prek run --files CODEBASE.md` が通ること (markdownlint を含む)。`prek run --all-files` は本 issue の変更対象外の既存の markdownlint 違反 (2026-11-20 時点で `issues/0324-doc-docs-implementation-consistency.md` と `issues/0002-msf-draft-02-compression-signaling.md`) で失敗するため、本 issue では新たな違反を増やさないことを確認する。
+
+## 解決方法
+
+- CODEBASE.md の「## ルール」から
+  `- この指示がなくなるまでは GitHub Actions 対応はしないこと` の 1 行を削除した。
+- WebAssembly / CHANGES.md / Pull-Request とブランチのルール、MOQT 節の CI 前提の記述は
+  変更していない。
+- `.github/workflows/` の 4 workflow、`e2e-tests/README.md`、`docs/windows-audio.md`、
+  ルート README、SKILL.md、CHANGES.md は変更していない。
+
+`prek run --files CODEBASE.md` が成功した。
