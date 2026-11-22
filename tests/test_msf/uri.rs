@@ -713,13 +713,28 @@ fn parse_uri_rejects_invalid_rfc3986_components() {
 /// パスワードをログや Debug に残さないため、エラーメッセージには authority を埋め込まない。
 #[test]
 fn parse_uri_rejects_userinfo_without_leaking() {
-    let uri = "moqt://user:secret@host/p#msf:ns--catalog";
-    let error = parse_msf_uri(uri).expect_err("userinfo を含む URI を拒否すること");
-    let message = error.to_string();
-    assert!(
-        !message.contains("secret") && !message.contains("user@"),
-        "エラーメッセージに userinfo の実値を含めないこと: {message}"
-    );
+    // パスワード付き (`user:password@`) と、パスワード無し (`user@`) の両方を拒否する
+    for uri in [
+        "moqt://user@host/p#msf:ns--catalog",
+        "moqt://user:secret@host/p#msf:ns--catalog",
+    ] {
+        let error = parse_msf_uri(uri).expect_err("userinfo を含む URI を拒否すること");
+        assert!(
+            matches!(error, MessageError::InvalidCatalog(_)),
+            "userinfo の拒否は InvalidCatalog であること: {uri}"
+        );
+        // authority は `//` の後ろから最初の `/` までである
+        let authority = uri
+            .split_once("//")
+            .and_then(|(_, rest)| rest.split_once('/'))
+            .map(|(authority, _)| authority)
+            .expect("テストフィクスチャは authority を持つ");
+        let message = error.to_string();
+        assert!(
+            !message.contains(authority),
+            "エラーメッセージに authority の実値を含めないこと: {message}"
+        );
+    }
 }
 
 /// MSF の connectionURI が要求する MOQT endpoint URI の受理例

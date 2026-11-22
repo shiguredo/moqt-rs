@@ -103,6 +103,9 @@ pub struct MsfLocationRange {
 #[derive(Clone, PartialEq)]
 pub struct MsfUri {
     /// authority (host + optional port)
+    ///
+    /// [`parse_msf_uri`] が返す値は userinfo (`@`) を含まない。authority に `@` を
+    /// 含む URI は RFC 3986 §3.2.1 (User Information) に基づき拒否する。
     pub authority: String,
     /// path (先頭の `/` を含む。無い場合は空文字列)
     pub path: String,
@@ -386,6 +389,9 @@ fn validate_moqt_fragment_syntax(fragment: &str) -> Result<(), MessageError> {
 /// # Errors
 ///
 /// - `moqt://` scheme でない / `#` が無い / authority が空: `InvalidCatalog`
+/// - authority に userinfo (`@`) を含む: `InvalidCatalog`
+///   (RFC 3986 §3.2.1 (User Information) は `user:password` 形式を deprecated とし、
+///   受け取った reference 中の userinfo を拒否する選択を許す)
 /// - fragment が `msf:` で始まらない / 形式不正: `InvalidCatalog`
 pub fn parse_msf_uri(uri: &str) -> Result<MsfUri, MessageError> {
     let components = split_moqt_uri(uri)?;
