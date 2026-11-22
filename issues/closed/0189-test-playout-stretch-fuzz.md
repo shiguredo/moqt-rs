@@ -1,7 +1,7 @@
 # playout::stretch の fuzz ターゲットを追加する
 
 - Created: 2026-10-01
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/add-playout-stretch-fuzz
 - Polished: 2026-11-14
 - Updated: 2026-11-14
@@ -41,4 +41,14 @@
 
 ## 解決方法
 
-{未着手}
+- `fuzz/fuzz_targets/fuzz_playout_stretch.rs` を追加し、`fuzz/Cargo.toml` に `[[bin]]` を
+  追加した。`cargo fuzz list` に表示され、`make fuzzing` の対象に含まれる。
+- 入力は 8 kHz / 16 kHz / 32 kHz / 44.1 kHz / 48 kHz と対応外 (0 / 96 kHz)、0〜2 チャンネル、
+  0〜2000 サンプルの任意 f32 ビット列、履歴、`max_length_change_samples`、`conceal_us` を
+  組み立てる。チャンネル長と履歴長が揃わない入力も生成する。
+- `compress` / `compress_with_history` / `preemptively_expand` / `conceal` を呼び、panic しない
+  ことに加えて、有限値では削る長さ・追加長・conceal の要求長の契約を assert する。
+- `cargo +nightly fuzz run fuzz_playout_stretch -- -max_total_time=30` が 217,424 runs で
+  panic せずに完了した。
+
+`cargo +nightly check --manifest-path fuzz/Cargo.toml` と `prek run --files` が成功した。
