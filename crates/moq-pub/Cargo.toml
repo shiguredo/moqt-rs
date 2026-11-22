@@ -10,6 +10,8 @@ publish = false
 [dependencies]
 # 時雨堂クレート
 
+# Happy Eyeballs v3 の設定値
+happy-eyeballs = { path = "../happy-eyeballs" }
 # 疑似キャプチャ用 2D ベクターグラフィックス
 raden = "2026.2"
 # AV1 エンコーダ (libaom)

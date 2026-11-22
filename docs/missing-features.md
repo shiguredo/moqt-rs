@@ -556,6 +556,13 @@ moqt-js (HEAD `f6a171e8`) の playout のうち、次の 2 つは移植してい
   (`refs/moq/draft-nandakumar-moq-qmux-moqt-00.txt`) は MOQT draft-16 を前提としており、
   同 draft の control stream (双方向 stream 0) は draft-ietf-moq-transport-23 §6.4.1
   (control stream は単方向) と矛盾する。本実装は QUIC version 1 との 1 対 1 の対応を採る
+- `--transport auto` は Happy Eyeballs v3 (draft-ietf-happy-happyeyeballs-v3-05) の
+  Connection Attempts に従い、`connection` が無ければ `quic` → `wt-h3` → `qmux` → `wt-h2`、
+  `connection=q` は `quic` だけ、`connection=wt` は `wt-h3` → `wt-h2` を競争する。
+  `connection=q` で QMux を含めないのは draft-ietf-moq-msf-02 §11.1.1 が Native QUIC を
+  MUST で要求するためである。DNS の非同期解決と SVCB/HTTPS レコードの解釈は対象外であり、
+  SETUP は勝者だけで交換するため SETUP の失敗は別経路へのフォールバックを起こさない
+  (`docs/happy-eyeballs.md`)
 - `--cert` を省略すると証明書検証をスキップする。mTLS (§15.3.1) には対応しない
 - 0-RTT (§6.3.1) と再接続 / セッション再開は未対応 (`rg 'early_data|0-rtt|resumption' crates/` が 0 件)
 - 無通信時の切断対策が無い。§15.6.1 が挙げる 3 つの選択肢 (transport の keep-alive、

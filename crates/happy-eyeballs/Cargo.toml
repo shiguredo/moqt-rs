@@ -1,0 +1,9 @@
+[package]
+name = "happy-eyeballs"
+version = "2026.0.0"
+edition = "2024"
+# 接続スケジューラは no_std で完結する。MSRV はワークスペースの Rust に合わせる
+rust-version = "1.95"
+publish = false
+
+[dependencies]

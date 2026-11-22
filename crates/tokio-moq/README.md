@@ -2,19 +2,20 @@
 
 `moq-pub` / `moq-sub` が共有するトランスポート層のライブラリ。crates.io へは公開しない (`publish = false`)。
 
-QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux の接続確立と、Sans I/O な `shiguredo_moqt::session::core::Session` を Tokio の I/O と結線する `MoqtClient` を提供する。`--url` と `--transport` の解釈もこのクレートが担う。
+QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux の接続確立と、Sans I/O な `shiguredo_moqt::session::core::Session` を Tokio の I/O と結線する `MoqtClient` を提供する。`--url` と `--transport` の解釈もこのクレートが担う。`--transport auto` では、候補の経路を Happy Eyeballs v3 (draft-ietf-happy-happyeyeballs-v3-05) の考え方で競争させ、最初に確立した経路を使う。
 
-tobi-quic は Windows 非対応のため、Windows ビルドでは tobi-quic を依存に含めず、WebTransport over HTTP/3 (`wt-h3`) と `quic-tobi` バックエンドを提供しない。Windows ビルドで選べるネイティブ QUIC のバックエンドは `quic-s2n` / `quic-ngtcp2` であり、接続経路は `quic` / `wt-h2` / `qmux` になる。
+tobi-quic は Windows 非対応のため、Windows ビルドでは tobi-quic を依存に含めず、WebTransport over HTTP/3 (`wt-h3`) と `quic-tobi` バックエンドを提供しない。Windows ビルドで選べるネイティブ QUIC のバックエンドは `quic-s2n` / `quic-ngtcp2` であり、接続経路は `quic` / `wt-h2` / `qmux` / `auto` になる。
 
 ## 提供する範囲
 
 - URL の解釈と接続パラメータの解決
   - `parse_url`：`moqt://` URI を `ServerUrl` にパースする。fragment は draft-ietf-moq-transport-23 §6.1.1 の構文で検証し、`msf` fragment は MSF fragment (`track-identifier [ "&" parameter-list ]`) として検証する
-  - `resolve_transport`：`--transport` の指定と `msf` fragment の `connection` から `Transport` を解決する
+  - `resolve_transport`：`--transport` の指定と `msf` fragment の `connection` から `Transport` を解決する。`auto` は候補の展開を `connect` に委ねる
   - `resolve_namespace`：`--namespace` の指定と `msf` fragment の track-identifier から Track Namespace を解決する
   - `ServerUrl`：authority / path / fragment / MSF fragment の解釈結果 / C4M 認可トークン (`cat_tokens`) を保持する
-- 接続確立：`quic` / `webtransport_h3` / `webtransport_h2` / `qmux` の各モジュールが TLS とハンドシェイクを行う (`webtransport_h3` は Windows ビルドでは提供しない)
+- 接続確立：`quic` / `webtransport_h3` / `webtransport_h2` / `qmux` の各モジュールが TLS とハンドシェイクを行う (`webtransport_h3` は Windows ビルドでは提供しない)。`happy-eyeballs` クレートの Sans I/O スケジューラが `--transport auto` の候補の並びと開始時刻を決め、`tokio-moq` のアダプタが接続 future とタイマーを駆動する
 - `transport`：4 経路を統一的に扱う `SendStream` / `RecvStream` / `StreamHandle` / `StreamAcceptor` / `BidiStreamAcceptor`
+- `happy_eyeballs::Config`：`--transport auto` と複数アドレスの競争に使う Connection Attempt Delay、最小値、最大値、倍率、Preferred Address Family Count を設定する
 - `moqt_client::MoqtClient`：control stream と bidi request stream を駆動する。`establish_quic` /
   `establish_wt` (wt-h3) / `establish_wt_h2` / `establish_qmux` (qmux) で確立し、`publish_track` /
   `subscribe_track` / `send_subscribe_ok` / `send_request_error` / `next_event` / `tick` などで
@@ -48,9 +49,10 @@ userinfo を含む authority はパスワードなどの機密値を含み得る
 URL と MSF fragment の構文検証エラーのメッセージには、入力 URL 全体とパラメータ値を含めない。query と fragment は認可トークンを含み得るため (draft-ietf-moq-msf-02 §11.5.2 / §11.1.1)、原因を特定できる非機密の成分 (scheme、authority / path などの成分名、track-identifier、パラメータ名、パラメータ位置) だけを示す。
 `connection` や range の値変換エラーは機密値でないため、従来どおり値を示す。
 
-DNS 名が複数のアドレスに解決される場合は、解決順に `--transport` で選んだトランスポートの確立を試す。IPv4 と IPv6 の両方に解決される `localhost` などで、先頭の接続先が待ち受けていない場合にも次のアドレスへ進む。接続先のアドレスファミリに合わせてローカルソケットを選ぶため、IPv6 の接続先にも送信できる。
+DNS 名が複数のアドレスに解決される場合は、Happy Eyeballs v3 の考え方でアドレスを並べて接続を試す。IPv4 と IPv6 の両方に解決される `localhost` などでは、先頭の接続先が待ち受けていない場合にも次のアドレスへ進む。アドレスは先頭のファミリを優先しつつファミリを交互に並べ、同じファミリ内では解決器が返した順序を保つ。接続先のアドレスファミリに合わせてローカルソケットを選ぶため、IPv6 の接続先にも送信できる。
+`--transport` が具体的な経路の場合は、その経路だけでアドレスを競争させる。`--transport auto` の場合は後述の候補を、経路とアドレスの組で並べて競争させる。
 
-トランスポートが確立した時点でアドレスの試行を終え、その接続で MOQT の SETUP を交換する。SETUP が失敗した場合は、次のアドレスを試さずエラーを返す。WebTransport 経路では、Extended CONNECT と WebTransport のプロトコル交渉までがトランスポートの確立に含まれる。
+最初に確立した接続で MOQT の SETUP を交換し、残りの試行は採用時にキャンセルする。SETUP が失敗した場合は、次のアドレスや経路を試さずエラーを返す (SETUP の失敗を候補の失敗として扱わない)。WebTransport 経路では、Extended CONNECT と WebTransport のプロトコル交渉までがトランスポートの確立に含まれる。
 
 query (`?key=value`) は SETUP の PATH option と WebTransport の `:path` にそのまま引き継がれる。
 
@@ -81,12 +83,52 @@ scheme は RFC 3986 §3.1 に従い大文字小文字を区別しない (`MOQT:/
 エラーになる。`connection` と矛盾する `--transport`、`connection=q` と `connection=wt` の
 併記、`connection=q` / `connection=wt` と `--transport qmux` の組み合わせはエラーになる。
 
+`--transport auto` は候補の経路を Happy Eyeballs v3 で競争させ、最初に確立した経路を採用する。
+`connection` が無ければ `quic` → `wt-h3` → `qmux` → `wt-h2` の順に候補を並べる (`wt-h3` を
+提供しないビルドでは `quic` → `qmux` → `wt-h2`)。`connection=q` は `quic` だけ、`connection=wt`
+は `wt-h3` → `wt-h2` を競争する。
+
 | `--transport` | `Transport` | 接続経路 | 備考 |
 | --- | --- | --- | --- |
 | `quic` | `Transport::Quic` | QUIC 直接接続 | ALPN は `moqt-23` |
 | `wt-h3` | `Transport::WtH3` | WebTransport over HTTP/3 | QUIC 上の ALPN は `h3`。s2n-quic バックエンドのビルドと Windows ビルドでは選べない |
 | `wt-h2` | `Transport::WtH2` | WebTransport over HTTP/2 | TCP+TLS 上の ALPN は `h2` |
 | `qmux` | `Transport::Qmux` | QMux | TCP+TLS 上の ALPN は `moqt-23`。UDP が使えない環境向け。experimental |
+| `auto` | `Transport::Auto` | Happy Eyeballs v3 による自動選択 | `connection` が無ければ `quic` → `wt-h3` → `qmux` → `wt-h2` を競争する。`connection=q` は `quic` だけ、`connection=wt` は `wt-h3` → `wt-h2` |
+
+### Happy Eyeballs v3 による自動選択
+
+`--transport auto` は draft-ietf-happy-happyeyeballs-v3-05 の Connection Attempts (§6) に従う。
+
+- 候補は経路の優先順に並べ、各経路のアドレスはアドレスファミリを交互にした順序にする
+  (§5.3)。先頭のファミリのアドレスを 1 個並べたあと、もう一方のファミリのアドレスを
+  1 個挟む (Preferred Address Family Count は既定 1、設定可能)
+- 最初の候補は即座に開始する。以降は Connection Attempt Delay (既定 250 ms、最小 100 ms、
+  最大 2 s、倍率 1) ごとに次の候補を開始する (§6 / §10)
+- 試行が失敗したときは、次の候補の開始を前倒しする。ただし直前の試行の開始から
+  `minimum_connection_attempt_delay` (既定 100 ms) 未満では開始しない。仕様の MUST である
+  10 ms も下限として守る
+- いずれかの候補でトランスポートが確立した時点で、残りの試行をキャンセルする。成功判定は
+  QUIC / TLS のハンドシェイクと、WebTransport の CONNECT およびプロトコル交渉までとする。
+  MOQT の SETUP は勝者だけで交換する (§6.1 は成功判定をアプリケーションに委ねる)
+- すべての候補が失敗した場合は、候補順で最も先頭の失敗を呼び出し元へ返す
+
+候補の優先順は、QUIC を TCP より優先する §3 の前提に従う。同じ QUIC 系では層の少ない
+native QUIC を WebTransport over HTTP/3 より先にし、TCP 系では QMux を WebTransport over
+HTTP/2 より先にする。`connection=q` (draft-ietf-moq-msf-02 §11.1.1 が Native QUIC を MUST で
+要求する) では QMux を候補に含めない。
+
+Connection Attempt Delay などの値は `ConnectParams::happy_eyeballs`
+(`happy_eyeballs::Config`) で変更できる。既定値は Connection Attempt Delay
+250 ms、推奨最小値 100 ms、推奨最大値 2 s、倍率 1、Preferred Address Family Count 1
+(いずれも設定可能) である。
+
+本実装が対象とするのは接続試行の部分である。DNS の非同期解決 (§4) と SVCB/HTTPS レコードの
+解釈 (§5.1 / §5.2 / §6.2 / §6.3) は `tokio::net::lookup_host` の解決結果を使うため対象外であり、
+アドレスファミリの優先順は OS の解決器に委ねる。0-RTT とセッション再開は使わない。
+
+一次資料は [`refs/happy/draft-ietf-happy-happyeyeballs-v3-05.txt`](../../refs/happy/draft-ietf-happy-happyeyeballs-v3-05.txt)
+に置く。設計の詳細は [`docs/happy-eyeballs.md`](../../docs/happy-eyeballs.md) を参照する。
 
 ### QUIC バックエンド
 

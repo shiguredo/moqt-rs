@@ -202,6 +202,14 @@ impl Connected {
             .remote_addr()
             .map_err(|e| QuicError::Other(format!("failed to read the remote address: {e}")))
     }
+
+    /// 競争に負けた接続を破棄する
+    ///
+    /// s2n-quic は最後の接続ハンドルが drop されると接続を閉じるため、明示的な close は
+    /// 行わず、接続を所有する値をここで drop する。
+    pub(crate) fn close(self) {
+        drop(self);
+    }
 }
 
 /// ストリームを開く側の接続ハンドル

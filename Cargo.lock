@@ -710,6 +710,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
+name = "happy-eyeballs"
+version = "2026.0.0"
+
+[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -886,6 +890,7 @@ name = "moq-pub"
 version = "2026.0.0"
 dependencies = [
  "bytes",
+ "happy-eyeballs",
  "noargs",
  "raden",
  "shiguredo_aom",
@@ -912,6 +917,7 @@ name = "moq-sub"
 version = "2026.0.0"
 dependencies = [
  "bytes",
+ "happy-eyeballs",
  "noargs",
  "raw_player",
  "shiguredo_audio_toolbox",
@@ -1060,6 +1066,7 @@ dependencies = [
 name = "pbt"
 version = "0.0.0"
 dependencies = [
+ "happy-eyeballs",
  "noprop",
  "shiguredo_moqt",
 ]
@@ -1989,6 +1996,7 @@ version = "2026.0.0"
 dependencies = [
  "base64ct",
  "bytes",
+ "happy-eyeballs",
  "rcgen",
  "rustls",
  "s2n-quic",

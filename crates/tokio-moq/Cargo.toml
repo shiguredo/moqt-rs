@@ -9,6 +9,8 @@ publish = false
 [dependencies]
 # 時雨堂クレート
 
+# Happy Eyeballs v3 の Sans I/O スケジューラ
+happy-eyeballs = { path = "../happy-eyeballs" }
 # HTTP/2 / WebTransport over HTTP/2 クライアント
 shiguredo_http2 = "2026.1.0-canary.17"
 # HTTP/3 / WebTransport over HTTP/3 クライアント

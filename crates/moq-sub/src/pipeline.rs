@@ -2249,6 +2249,7 @@ async fn migrate_to_target(
         receive_datagrams: true,
         // subscriber は datagram を送らない
         datagram_max_size: None,
+        happy_eyeballs: happy_eyeballs::Config::default(),
     };
     let mut attempt: u32 = 0;
     loop {
@@ -3210,6 +3211,7 @@ async fn run_side_session(
         receive_datagrams: true,
         // subscriber は datagram を送らない
         datagram_max_size: None,
+        happy_eyeballs: happy_eyeballs::Config::default(),
     };
     let (mut client, mut recv_acceptor) = match tokio_moq::connect_with_retry(
         &params,
@@ -3699,6 +3701,12 @@ pub async fn run(
         tracing::warn!(
             "QMux transport is experimental: DATAGRAM and stream resets are carried over TCP, so latency can grow when the connection is congested"
         );
+    } else if config.transport == Transport::Auto {
+        // auto は connection の指定が無いとき QMux を候補に含め得る。どの経路が選ばれるかは
+        // 接続時まで分からないため、選ばれた場合の注意を先に出す
+        tracing::warn!(
+            "QMux may be selected by --transport auto when the URL has no 'connection' parameter: QMux is experimental and carries DATAGRAM and stream resets over TCP, so latency can grow when the connection is congested"
+        );
     }
 
     // 1. 接続確立と SETUP ハンドシェイク
@@ -3715,6 +3723,7 @@ pub async fn run(
             receive_datagrams: true,
             // subscriber は datagram を送らない
             datagram_max_size: None,
+            happy_eyeballs: happy_eyeballs::Config::default(),
         },
         &task_monitor,
     )
@@ -16671,6 +16680,7 @@ mod tests {
                 impl_name: "moq-sub-test",
                 receive_datagrams: true,
                 datagram_max_size: None,
+                happy_eyeballs: happy_eyeballs::Config::default(),
             };
             let (connected, peer) =
                 tokio::join!(tokio_moq::connect(&params, &task_monitor), async {

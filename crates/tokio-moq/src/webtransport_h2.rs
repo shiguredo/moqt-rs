@@ -644,6 +644,14 @@ pub struct WtH2Session {
 }
 
 impl WtH2Session {
+    /// 競争に負けたセッションを破棄する
+    ///
+    /// driver は `AbortOnDrop` で drop 時に中断され、TCP + TLS の I/O も driver が
+    /// 所有しているため、明示的な close は不要である。
+    pub(crate) fn discard(self) {
+        drop(self);
+    }
+
     /// セッション状態の変更を観測する receiver を作る
     pub(crate) fn session_state_receiver(&self) -> watch::Receiver<WtSessionState> {
         self.session_state.subscribe()

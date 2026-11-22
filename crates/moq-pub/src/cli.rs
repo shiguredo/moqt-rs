@@ -268,28 +268,37 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     // (s2n-quic は RESET_STREAM_AT 未実装、Windows は tobi-quic 非対応) ため、Windows を先に
     // 判定する。noargs の doc は &'static str しか取れないため、定数を選ぶ。
     let transport_doc: &'static str = if cfg!(windows) {
-        "Transport (quic | wt-h2 | qmux; wt-h3 is not available on Windows because its \
-         QUIC layer uses tobi-quic, which does not support Windows. qmux (QMux over \
+        "Transport (quic | wt-h2 | qmux | auto; wt-h3 is not available on Windows because \
+         its QUIC layer uses tobi-quic, which does not support Windows. qmux (QMux over \
          TCP+TLS) is experimental; wt-h2 depends on relay support for WT_RESET_STREAM \
-         capsules). If --transport is omitted, uses the 'connection' parameter of the \
-         --url MSF fragment (q: native QUIC; wt requires --transport wt-h2 because wt-h3 \
-         is unavailable); otherwise defaults to quic. A conflicting --transport, or \
-         'connection=q' with 'connection=wt', is an error"
+         capsules). auto races the available routes with Happy Eyeballs v3 \
+         (draft-ietf-happy-happyeyeballs-v3); with 'connection=q' only native QUIC is \
+         raced, and with 'connection=wt' the available WebTransport routes are raced. If --transport is \
+         omitted, uses the 'connection' parameter of the --url MSF fragment (q: native \
+         QUIC; wt requires --transport wt-h2 because wt-h3 is unavailable); otherwise \
+         defaults to quic. A conflicting --transport, or 'connection=q' with \
+         'connection=wt', is an error"
     } else if tokio_moq::is_wt_h3_available() {
-        "Transport (quic | wt-h3 | wt-h2 | qmux; qmux (QMux over TCP+TLS) is \
+        "Transport (quic | wt-h3 | wt-h2 | qmux | auto; qmux (QMux over TCP+TLS) is \
          experimental; wt-h2 depends on relay support for WT_RESET_STREAM capsules). \
-         If --transport is omitted, uses the 'connection' parameter of the --url MSF \
-         fragment (q: native QUIC, wt: WebTransport over HTTP/3, or wt-h2 with \
-         --transport wt-h2 for HTTP/2); otherwise defaults to quic. A conflicting \
-         --transport, or 'connection=q' with 'connection=wt', is an error"
+         auto races the available routes with Happy Eyeballs v3 \
+         (draft-ietf-happy-happyeyeballs-v3); with 'connection=q' only native QUIC is \
+         raced, and with 'connection=wt' the available WebTransport routes are raced. If --transport is \
+         omitted, uses the 'connection' parameter of the --url MSF fragment (q: native \
+         QUIC, wt: WebTransport over HTTP/3, or wt-h2 with --transport wt-h2 for \
+         HTTP/2); otherwise defaults to quic. A conflicting --transport, or \
+         'connection=q' with 'connection=wt', is an error"
     } else {
-        "Transport (quic | wt-h2 | qmux; wt-h3 is not available with the s2n-quic \
+        "Transport (quic | wt-h2 | qmux | auto; wt-h3 is not available with the s2n-quic \
          backend because it requires RESET_STREAM_AT. qmux (QMux over TCP+TLS) is \
          experimental; wt-h2 depends on relay support for WT_RESET_STREAM capsules). \
-         If --transport is omitted, uses the 'connection' parameter of the --url MSF \
-         fragment (q: native QUIC; wt requires --transport wt-h2 because wt-h3 is \
-         unavailable); otherwise defaults to quic. A conflicting --transport, or \
-         'connection=q' with 'connection=wt', is an error"
+         auto races the available routes with Happy Eyeballs v3 \
+         (draft-ietf-happy-happyeyeballs-v3); with 'connection=q' only native QUIC is \
+         raced, and with 'connection=wt' the available WebTransport routes are raced. If --transport is \
+         omitted, uses the 'connection' parameter of the --url MSF fragment (q: native \
+         QUIC; wt requires --transport wt-h2 because wt-h3 is unavailable); otherwise \
+         defaults to quic. A conflicting --transport, or 'connection=q' with \
+         'connection=wt', is an error"
     };
     let transport_opt: Option<Transport> = noargs::opt("transport")
         .ty("TYPE")
@@ -883,6 +892,45 @@ mod tests {
             Transport::Qmux,
             "--transport qmux がそのまま使われること"
         );
+    }
+
+    /// `--transport auto` は Happy Eyeballs v3 の自動選択になる
+    #[test]
+    fn transport_accepts_explicit_auto() {
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--transport", "auto"]);
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            config.transport,
+            Transport::Auto,
+            "--transport auto がそのまま使われること"
+        );
+    }
+
+    /// `--transport auto` は `connection` の要求とも両立する
+    #[test]
+    fn transport_accepts_auto_with_connection_requirement() {
+        for connection in ["q", "wt"] {
+            let url = format!("moqt://127.0.0.1:4443#msf:spam-egg--video&connection={connection}");
+            let args = [
+                "--url",
+                url.as_str(),
+                "--namespace",
+                "moq-example",
+                "--transport",
+                "auto",
+            ];
+            let config = parse_args(&args)
+                .expect("オプションの解析に成功すること")
+                .expect("設定が返ること");
+            assert_eq!(
+                config.transport,
+                Transport::Auto,
+                "connection={connection} と --transport auto は両立すること"
+            );
+        }
     }
 
     /// `connection=wt` と整合する `--transport` の明示はそのまま使う

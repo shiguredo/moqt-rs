@@ -535,6 +535,7 @@ fn publisher_connect_params<'a>(config: &'a Config, url: &'a ServerUrl) -> Conne
         // datagram を送らない設定では確認しない (`--datagram-max-size` が使われないため)
         datagram_max_size: (config.audio_enabled && config.audio_datagram)
             .then_some(config.datagram_max_size),
+        happy_eyeballs: happy_eyeballs::Config::default(),
     }
 }
 
@@ -829,6 +830,12 @@ pub async fn run(
     if config.transport == Transport::Qmux {
         tracing::warn!(
             "QMux transport is experimental: DATAGRAM and stream resets are carried over TCP, so latency can grow when the connection is congested"
+        );
+    } else if config.transport == Transport::Auto {
+        // auto は connection の指定が無いとき QMux を候補に含め得る。どの経路が選ばれるかは
+        // 接続時まで分からないため、選ばれた場合の注意を先に出す
+        tracing::warn!(
+            "QMux may be selected by --transport auto when the URL has no 'connection' parameter: QMux is experimental and carries DATAGRAM and stream resets over TCP, so latency can grow when the connection is congested"
         );
     }
 

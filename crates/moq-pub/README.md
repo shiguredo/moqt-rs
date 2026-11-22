@@ -22,7 +22,7 @@ WebTransport over HTTP/3 の QUIC 層は tobi-quic 固定であり、s2n-quic �
 `--no-default-features --features quic-tobi` でビルドする。
 tobi-quic は Windows 非対応のため、Windows ビルドでは tobi-quic を依存に含めず、`quic-tobi` と
 `--transport wt-h3` を提供しない。Windows ビルドでは `quic-s2n` / `quic-ngtcp2` のバックエンドと
-`quic` / `wt-h2` / `qmux` の経路を使う。詳細は [tokio-moq](../tokio-moq/README.md) を参照すること。
+`quic` / `wt-h2` / `qmux` / `auto` の経路を使う。詳細は [tokio-moq](../tokio-moq/README.md) を参照すること。
 
 ```bash
 # 既定の s2n-quic
@@ -63,7 +63,7 @@ cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video' --f
 | オプション | デフォルト | 説明 |
 | --- | --- | --- |
 | `--url` | (必須) | 接続先 URL (`moqt://`) |
-| `--transport` | (省略時は `--url` の `msf` fragment の `connection`、無ければ `quic`) | 接続経路 (`quic` / `wt-h3` / `wt-h2` / `qmux`)。`wt-h3` は s2n-quic バックエンドのビルドと Windows ビルドでは選べない。`qmux` は experimental |
+| `--transport` | (省略時は `--url` の `msf` fragment の `connection`、無ければ `quic`) | 接続経路 (`quic` / `wt-h3` / `wt-h2` / `qmux` / `auto`)。`wt-h3` は s2n-quic バックエンドのビルドと Windows ビルドでは選べない。`qmux` は experimental。`auto` は Happy Eyeballs v3 で候補を競争する (詳細は [tokio-moq](../tokio-moq/README.md) を参照する) |
 | `--cert` | | TLS CA 証明書パス |
 | `--device-id` | | カメラデバイス ID |
 | `--width` | `1280` | 映像幅 (px) |

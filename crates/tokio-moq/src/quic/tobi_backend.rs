@@ -22,16 +22,57 @@ use crate::error::{Result, TransportError};
 pub struct Connected {
     /// tobi-quic の接続
     inner: TobiConnection,
+    /// 接続の所有者がすべて drop されたときに接続を閉じるガード
+    close_guard: Arc<CloseGuard>,
+}
+
+/// tobi-quic の接続を所有者の drop 時に閉じるガード
+///
+/// STOP_SENDING の観測タスクは接続ハンドルを保持するため、アプリ側のハンドルを drop
+/// するだけでは driver が idle timeout まで残る。最後のガードが drop された時点で
+/// close を送り、driver と観測タスクを終了させる。
+#[derive(Debug)]
+struct CloseGuard {
+    connection: TobiConnection,
+}
+
+impl CloseGuard {
+    fn new(connection: TobiConnection) -> Self {
+        Self { connection }
+    }
+}
+
+impl Drop for CloseGuard {
+    fn drop(&mut self) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        // Drop の中で close を待てないため、clone したハンドルを別タスクへ渡して
+        // close の完了を待つ
+        let connection = self.connection.clone();
+        runtime.spawn(async move {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                connection.close(0, b"closed"),
+            )
+            .await;
+        });
+    }
 }
 
 impl Connected {
     /// 接続を操作ハンドルとストリーム受理ハンドルに分割する
     pub(crate) fn split(self) -> (Connection, StreamAcceptor) {
-        let (handle, acceptor) = self.inner.split();
+        let Self { inner, close_guard } = self;
+        let (handle, acceptor) = inner.split();
         (
-            Connection { inner: handle },
+            Connection {
+                inner: handle,
+                _close_guard: Arc::clone(&close_guard),
+            },
             StreamAcceptor {
                 inner: Arc::new(acceptor),
+                _close_guard: close_guard,
             },
         )
     }
@@ -40,6 +81,13 @@ impl Connected {
     pub async fn remote_addr(&self) -> std::result::Result<SocketAddr, QuicError> {
         self.inner.remote_addr().await.map_err(tobi::map_error)
     }
+
+    /// 競争に負けた接続を閉じる
+    ///
+    /// 接続を保持する `CloseGuard` を drop して、close と driver の終了を促す。
+    pub(crate) fn close(self) {
+        drop(self);
+    }
 }
 
 /// ストリームを開く側の接続ハンドル
@@ -47,6 +95,8 @@ impl Connected {
 pub struct Connection {
     /// tobi-quic の接続ハンドル
     inner: TobiConnection,
+    /// 接続の所有者がすべて drop されたときに接続を閉じるガード
+    _close_guard: Arc<CloseGuard>,
 }
 
 impl Connection {
@@ -153,6 +203,8 @@ impl SendStream {
 pub struct StreamAcceptor {
     /// tobi-quic のストリーム受理
     inner: Arc<tobi_quic::StreamAcceptor>,
+    /// 接続の所有者がすべて drop されたときに接続を閉じるガード
+    _close_guard: Arc<CloseGuard>,
 }
 
 impl StreamAcceptor {
@@ -230,7 +282,14 @@ pub(crate) async fn connect(
     let stop_sending_rx = tobi::spawn_connection_observer(&connection);
 
     tracing::info!("Connected to {socket_addr}");
-    Ok((Connected { inner: connection }, stop_sending_rx))
+    let close_guard = Arc::new(CloseGuard::new(connection.clone()));
+    Ok((
+        Connected {
+            inner: connection,
+            close_guard,
+        },
+        stop_sending_rx,
+    ))
 }
 
 /// テスト用の QUIC サーバー
@@ -252,7 +311,11 @@ impl Server {
         let connection = self.inner.accept().await.map_err(|e| {
             TransportError::Quic(format!("server failed to accept a connection: {e}"))
         })?;
-        Ok(Connected { inner: connection })
+        let close_guard = Arc::new(CloseGuard::new(connection.clone()));
+        Ok(Connected {
+            inner: connection,
+            close_guard,
+        })
     }
 }
 

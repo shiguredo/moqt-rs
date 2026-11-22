@@ -77,6 +77,13 @@ impl Connected {
     pub async fn remote_addr(&self) -> std::result::Result<SocketAddr, QuicError> {
         Ok(self.remote_addr)
     }
+
+    /// 競争に負けた接続を破棄する
+    ///
+    /// 操作チャネルを drop するとドライバがコマンド待ちから抜けて終了する。
+    pub(crate) fn close(self) {
+        drop(self);
+    }
 }
 
 /// ストリームを開く側の接続ハンドル

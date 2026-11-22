@@ -6,6 +6,7 @@ draft-ietf-moq-transport-23、draft-ietf-moq-loc-05、draft-ietf-moq-msf-02、dr
 - [moq-pub](moq-pub/README.md)：catalog / audio / video track を PUBLISH する publisher
 - [moq-sub](moq-sub/README.md)：catalog と audio / video を SUBSCRIBE して再生する subscriber
 - [tokio-moq](tokio-moq/README.md)：publisher / subscriber が共有するトランスポート層 (ライブラリ)
+- [happy-eyeballs](happy-eyeballs/README.md)：Sans I/O の Happy Eyeballs v3 接続候補スケジューラ
 
 [Tokio](https://github.com/tokio-rs/tokio)、[s2n-quic](https://github.com/aws/s2n-quic)、[tobi-quic](https://github.com/shiguredo/tobi-quic)、[http3-rs](https://github.com/shiguredo/http3-rs)、[http2-rs](https://github.com/shiguredo/http2-rs)、[qmux-rs](https://github.com/shiguredo/qmux-rs) を利用しています。
 QUIC の実装は既定で s2n-quic を使います。cargo feature で tobi-quic / ngtcp2-rs も選べます。
@@ -31,7 +32,8 @@ cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
 
 `--url`、`--transport`、`--namespace`、C4M 認可トークン、TLS 証明書の扱いは publisher と subscriber で共通です。詳細は [tokio-moq](tokio-moq/README.md) を参照してください。
 
-- 接続経路は `--url` の scheme ではなく `--transport` (`quic` / `wt-h3` / `wt-h2` / `qmux`) で選ぶ。省略時は MSF fragment の `connection` (`q` / `wt`)、それも無ければ `quic`
+- 接続経路は `--url` の scheme ではなく `--transport` (`quic` / `wt-h3` / `wt-h2` / `qmux` / `auto`) で選ぶ。省略時は MSF fragment の `connection` (`q` / `wt`)、それも無ければ `quic`
+- `auto` は Happy Eyeballs v3 で複数の経路を競争する experimental な指定である。候補の並びは [tokio-moq](tokio-moq/README.md) を参照する
 - `wt-h3` / `wt-h2` は `--transport wt-h3` / `--transport wt-h2` で選ぶ。`wt-h3` は s2n-quic バックエンドのビルドと Windows ビルドでは選べない。`wt-h2` は `WT_RESET_STREAM` capsule を使うため MoQ リレーの capsule 対応に依存する
 - `qmux` は TCP + TLS 上で QUIC のストリームと DATAGRAM を多重化する経路で、TCP の再送による遅延や DATAGRAM の破棄があり得る
 - WebTransport (`wt-h3`) の QUIC 層は tobi-quic 固定である。s2n-quic は RESET_STREAM_AT を実装していないため、既定の s2n-quic ビルドでは `wt-h3` を選べない。使う場合は `--no-default-features --features quic-tobi` でビルドする (Windows ビルドでは tobi-quic 非対応のため `wt-h3` を選べない)

@@ -859,6 +859,44 @@ fn run_connect_actions(
 // WebTransport クライアント
 // ---------------------------------------------------------------------------
 
+/// WebTransport over HTTP/3 の接続を所有者の drop 時に閉じるガード
+///
+/// tobi-quic の driver は接続ハンドルを保持するタスクが残る間は終了しないため、
+/// CONNECT の途中で future を drop した場合や、確立済みのセッションを drop した場合に、
+/// 接続と受信タスクが idle timeout まで残ることがある。`Drop` から非同期の `close` を
+/// 待つことはできないので、close を別タスクへ送って driver を終了させる。
+struct ConnectionCloseGuard {
+    /// 中断時に閉じる接続
+    connection: Option<tobi_quic::Connection>,
+}
+
+impl ConnectionCloseGuard {
+    /// 接続を監視するガードを作る
+    fn new(connection: tobi_quic::Connection) -> Self {
+        Self {
+            connection: Some(connection),
+        }
+    }
+}
+
+impl Drop for ConnectionCloseGuard {
+    fn drop(&mut self) {
+        let Some(connection) = self.connection.take() else {
+            return;
+        };
+        // runtime の外で drop された場合は close を送れないが、その場合も接続の
+        // ハンドルはここで drop されるため、新たなタスクは増えない
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(async move {
+            // 0 は RFC 9000 §20.1 の NO_ERROR。理由は診断用の固定文字列であり、
+            // 認可トークンなどの機密値を含めない
+            let _ = connection.close(0, b"cancelled by Happy Eyeballs").await;
+        });
+    }
+}
+
 /// WebTransport セッションを確立するクライアント
 pub struct WtClient;
 
@@ -912,6 +950,10 @@ impl WtClient {
             ))
             .await
             .map_err(TransportError::transport)?;
+        // 競争に負けてこの future が drop されたときや、確立後にセッションが drop された
+        // ときに、tobi-quic の driver と受信タスクが接続を握ったまま残らないようにする。
+        // ガードは確立後は `WtSession` が所有する
+        let close_guard = ConnectionCloseGuard::new(connection.clone());
         // 0-RTT を使わないため `connect_early` は呼ばない。前回接続の SETTINGS を
         // 注入せず、現接続で受信した SETTINGS だけを使う
         // (draft-ietf-webtrans-http3-17 §3.2)。
@@ -1418,6 +1460,7 @@ impl WtClient {
             stop_sending_rx: Some(stop_sending_rx),
             state,
             session_state: session_state_tx,
+            _close_guard: close_guard,
         })
     }
 }
@@ -1641,9 +1684,20 @@ pub struct WtSession {
     state: Arc<StdMutex<ClientConnectionState>>,
     /// セッション状態 (§6 の終了 / §4.7 の drain / h3 層が返した接続エラー) を配る sender
     session_state: watch::Sender<WtSessionState>,
+    /// 接続の所有者が drop されたときに接続を閉じるガード
+    _close_guard: ConnectionCloseGuard,
 }
 
 impl WtSession {
+    /// 競争に負けたセッションを閉じる
+    ///
+    /// 受信タスクと `hold_h3_critical_streams` が接続ハンドルを保持するため、drop だけでは
+    /// 接続が idle timeout まで残ることがある。明示的に close を送って接続を終了させる。
+    pub(crate) fn discard(self) {
+        // `_close_guard` の Drop が接続を閉じる
+        drop(self);
+    }
+
     /// 現在のセッションの状態を返す
     ///
     /// 状態を配る sender から直接読む。読み取りロックはこの式の中だけで解放されるため、

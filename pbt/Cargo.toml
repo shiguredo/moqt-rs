@@ -6,6 +6,8 @@ rust-version = "1.93"
 publish = false
 
 [dependencies]
+# Happy Eyeballs v3 の Sans I/O スケジューラ
+happy-eyeballs = { path = "../crates/happy-eyeballs" }
 # Property-Based Testing
 noprop = "0.2"
 # MOQT 本体 (ローカル参照)

@@ -10,6 +10,8 @@ publish = false
 [dependencies]
 # 時雨堂クレート
 
+# Happy Eyeballs v3 の設定値
+happy-eyeballs = { path = "../happy-eyeballs" }
 # 映像プレイヤー (メインスレッド実行)
 raw_player = "2026.3"
 # AV1 デコーダ (dav1d)

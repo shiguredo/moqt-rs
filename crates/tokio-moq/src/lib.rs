@@ -1,7 +1,8 @@
 //! crates 配下で共有するトランスポート crate
 //!
 //! `moq-pub` / `moq-sub` の両バイナリが共通で利用する QUIC / WebTransport over HTTP/3 /
-//! WebTransport over HTTP/2 / QMux のトランスポート層を提供する。
+//! WebTransport over HTTP/2 / QMux のトランスポート層を提供する。`--transport auto` では
+//! 複数の経路を Happy Eyeballs v3 (draft-ietf-happy-happyeyeballs-v3-05) の手順で競争させる。
 //! URL の scheme は `moqt://` に統一し、トランスポートは [`Transport`] (`--transport`) で選ぶ。
 //! `--transport` を省略した場合は `--url` の MSF fragment の `connection` で決める
 //! ([`resolve_transport`])。
@@ -140,6 +141,8 @@ pub(crate) fn c4m_authorization_token(token_value: &[u8]) -> AuthorizationToken 
 /// draft-23 として受け入れない。
 pub const MOQT_PROTOCOL: &str = "moqt-23";
 
+mod connection_race;
+
 pub mod error;
 pub mod metrics;
 pub mod moqt_client;
@@ -250,6 +253,26 @@ pub enum Transport {
     /// 配送できない DATAGRAM の破棄を許すため (draft-ietf-quic-qmux-02 Section 6)、受信側の
     /// バッファが溢れると欠落しうる。破棄は `dropped_datagrams` として警告ログに出る。
     Qmux,
+    /// 複数の経路を Happy Eyeballs v3 で競争させ、最初に確立した経路を使う
+    ///
+    /// draft-ietf-happy-happyeyeballs-v3-05 の Connection Attempts (§6) に従い、候補を
+    /// Connection Attempt Delay でずらして開始し、最初にトランスポートが確立した候補を
+    /// 採用する。候補は URL の `msf` fragment の `connection` とビルドで利用できる経路から
+    /// 決める。
+    ///
+    /// - `connection` が無い場合: `quic`、`wt-h3`、`qmux`、`wt-h2` の順に競争する
+    ///   (`wt-h3` を提供しないビルドでは `quic`、`qmux`、`wt-h2`)。QUIC を TCP より優先し
+    ///   (draft-ietf-happy-happyeyeballs-v3-05 §3)、同一の QUIC 系では層の少ない
+    ///   native QUIC を先にする
+    /// - `connection=q` の場合: `quic` だけを使う。draft-ietf-moq-msf-02 §11.1.1 は `q` に
+    ///   Native QUIC を MUST で対応づけるため、QMux (TCP+TLS 上の QUIC 多重化) は候補に
+    ///   含めない
+    /// - `connection=wt` の場合: `wt-h3`、`wt-h2` の順に競争する (`wt-h3` を提供しない
+    ///   ビルドでは `wt-h2` だけ)
+    ///
+    /// MOQT の SETUP は最初に確立した候補だけで交換する。SETUP の失敗は別の候補への
+    /// フォールバックを起こさない (`connect` の doc を参照する)。
+    Auto,
 }
 
 impl Transport {
@@ -260,8 +283,8 @@ impl Transport {
     ///
     /// # Errors
     ///
-    /// `quic` / `wt-h3` / `wt-h2` / `qmux` 以外の値と、`wt-h3` を提供しないビルドでの
-    /// `wt-h3` はエラーになる。
+    /// `quic` / `wt-h3` / `wt-h2` / `qmux` / `auto` 以外の値と、`wt-h3` を提供しない
+    /// ビルドでの `wt-h3` はエラーになる。
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
             "quic" => Ok(Self::Quic),
@@ -271,8 +294,9 @@ impl Transport {
             },
             "wt-h2" => Ok(Self::WtH2),
             "qmux" => Ok(Self::Qmux),
+            "auto" => Ok(Self::Auto),
             other => Err(format!(
-                "unknown transport '{other}' (expected quic, wt-h3, wt-h2, or qmux)"
+                "unknown transport '{other}' (expected quic, wt-h3, wt-h2, qmux, or auto)"
             )),
         }
     }
@@ -284,6 +308,7 @@ impl Transport {
             Self::WtH3 => "wt-h3",
             Self::WtH2 => "wt-h2",
             Self::Qmux => "qmux",
+            Self::Auto => "auto",
         }
     }
 }
@@ -636,6 +661,10 @@ pub fn resolve_namespace(
 ///   ranges.`) は値域 (range) を対象とした規則であり `connection` には適用しないため、
 ///   [`MsfFragment::connection_types`] は `connection` の値を出現順にすべて返すだけである。
 ///   moq-pub / moq-sub はその結果を見て両立しない組み合わせを拒否する
+/// - `--transport auto` は [`Transport::Auto`] を返す。候補の展開と競争は [`connect`] が行う。
+///   `connection=q` と組み合わせた場合は native QUIC だけを、`connection=wt` と組み合わせた
+///   場合は `wt-h3` / `wt-h2` を競争する。`connection` が無い場合は `quic` / `wt-h3` /
+///   `qmux` / `wt-h2` を競争する ([`Transport::Auto`] の doc を参照する)
 ///
 /// 値域の検証 (`q` / `wt` 以外の拒否) は [`MsfFragment::connection_types`] が行う。
 ///
@@ -688,7 +717,9 @@ pub fn resolve_transport(
     match (required, explicit) {
         (None, explicit) => Ok(explicit.unwrap_or(Transport::Quic)),
         (Some(MsfConnectionType::Quic), None) => Ok(Transport::Quic),
-        (Some(MsfConnectionType::Quic), Some(Transport::Quic)) => Ok(Transport::Quic),
+        (Some(MsfConnectionType::Quic), Some(explicit @ (Transport::Quic | Transport::Auto))) => {
+            Ok(explicit)
+        }
         (Some(MsfConnectionType::Quic), Some(explicit)) => Err(format!(
             "--transport {} conflicts with 'connection=q' in --url: draft-ietf-moq-msf-02 \
              §11.1.1 mandates a native QUIC connection (remove --transport or the 'connection' \
@@ -703,7 +734,7 @@ pub fn resolve_transport(
         },
         (
             Some(MsfConnectionType::WebTransport),
-            Some(explicit @ (Transport::WtH3 | Transport::WtH2)),
+            Some(explicit @ (Transport::WtH3 | Transport::WtH2 | Transport::Auto)),
         ) => Ok(explicit),
         (Some(MsfConnectionType::WebTransport), Some(explicit)) => Err(format!(
             "--transport {} conflicts with 'connection=wt' in --url: draft-ietf-moq-msf-02 \
@@ -1202,6 +1233,9 @@ where
 /// `connect` は各試行で 1 回呼ばれ、試行したアドレスは常に info ログに残す。
 /// すべての試行が失敗した場合は最後の失敗を返す。
 ///
+/// [`connect`] はこの関数ではなく、アドレスとトランスポートを Happy Eyeballs v3 で
+/// 競争させる。この関数は並行競争を行わない汎用ヘルパーとして残している。
+///
 /// # Errors
 ///
 /// 名前解決に失敗した場合と、`connect` がすべてのアドレスで失敗した場合はエラーになる。
@@ -1634,6 +1668,9 @@ pub struct ConnectParams<'a> {
     /// 接続先 (authority / path / MSF fragment / C4M 認可トークン)
     pub url: &'a ServerUrl,
     /// 接続経路 (`--transport` と `--url` の `msf` fragment の `connection` から解決済みの値)
+    ///
+    /// [`Transport::Auto`] の場合は、`connect` が URL とビルドに応じて候補を展開し、
+    /// Happy Eyeballs v3 で競争させる。
     pub transport: Transport,
     /// TLS の CA 証明書パス。省略すると証明書検証をスキップする (開発用)
     pub cert: Option<&'a str>,
@@ -1647,15 +1684,27 @@ pub struct ConnectParams<'a> {
     /// `max_datagram_frame_size` に収まるかを接続確立時に確認して警告する。`None` は
     /// datagram を送らない経路 (subscriber) を表す。
     pub datagram_max_size: Option<usize>,
+    /// Happy Eyeballs v3 の設定
+    ///
+    /// [`Transport::Auto`] と、アドレスが複数ある場合の競争に使う。既定値は
+    /// draft-ietf-happy-happyeyeballs-v3-05 §10 の推奨値である。
+    pub happy_eyeballs: happy_eyeballs::Config,
 }
 
 /// URL と接続設定から MOQT セッションを確立する
 ///
-/// 名前解決したアドレスを順に試し、`params.transport` で指定したトランスポートが
-/// 確立した最初のアドレスを採用する。そこで MOQT の SETUP を交換する。SETUP が
-/// 失敗した場合は、別のアドレスを試さずエラーを返す。
+/// 名前解決したアドレスと、`params.transport` で指定した経路の候補を Happy Eyeballs v3 の
+/// 手順で試し、最初にトランスポートが確立した候補を採用する。そこで MOQT の SETUP を交換する。
+/// SETUP が失敗した場合は、別の候補を試さずエラーを返す。
 /// 成功時は [`MoqtClient`](crate::moqt_client::MoqtClient) と data stream を受信する
 /// [`StreamAcceptor`](crate::transport::StreamAcceptor) を返す。
+///
+/// `params.transport` が [`Transport::Auto`] の場合は、URL の `msf` fragment の
+/// `connection` とビルドで利用できる経路から候補を展開し、Happy Eyeballs v3
+/// (draft-ietf-happy-happyeyeballs-v3-05) の手順で競争させる。候補の並びと成功判定は
+/// [`Transport::Auto`] の doc を参照する。競争の勝者だけで SETUP を交換するため、
+/// SETUP の失敗は別の候補へのフォールバックを起こさない (draft-ietf-happy-happyeyeballs-v3-05
+/// §6.1 は成功判定をアプリケーションに委ねる)。
 ///
 /// 証明書検証の無効化 (`--cert` の省略) は、この関数が試行ごとに警告する。
 ///
@@ -1693,7 +1742,104 @@ enum ConnectedTransport {
     Qmux(crate::qmux::QmuxSession),
 }
 
-/// トランスポートが確立するまで解決順に試し、採用した接続でだけ MOQT SETUP を交換する
+impl ConnectedTransport {
+    /// 競争に負けた確立済みの接続を閉じる
+    ///
+    /// 競争の勝者が決まったとき、`JoinSet` にはすでに確立まで完了した負け候補が残って
+    /// いることがある。それを drop するだけでは、バックエンドによっては接続を保持する
+    /// タスクが残り、idle timeout までソケットとドライバが残る。ここで明示的に閉じる。
+    fn close(self) {
+        match self {
+            Self::Quic(connection, _) => connection.close(),
+            #[cfg(not(windows))]
+            Self::WtH3(session) => session.discard(),
+            Self::WtH2(session) => session.discard(),
+            Self::Qmux(session) => session.discard(),
+        }
+    }
+}
+
+/// 接続競争の各試行が所有する接続設定
+///
+/// [`ConnectParams`] は参照を持つため、競争の各タスクへそのまま渡せない。試行に必要な値
+/// だけを所有権付きで複製する。認可トークン (`ServerUrl::cat_tokens`) は URL の一部として
+/// 複製するが、ログには出さない。
+struct AttemptContext {
+    /// 接続先 (authority / path / MSF fragment / C4M 認可トークン)
+    url: ServerUrl,
+    /// TLS の CA 証明書パス
+    cert: Option<String>,
+    /// WebTransport 経路で datagram の継続受信を有効にするか
+    receive_datagrams: bool,
+}
+
+/// URL の `msf` fragment の `connection` から q / wt の要求を取り出す
+///
+/// 戻り値は (`connection=q` があるか, `connection=wt` があるか)。`connection` が無い場合は
+/// `(false, false)`。両方が指定されている場合と値が不正な場合はエラーになる
+/// (draft-ietf-moq-msf-02 §11.1.1)。
+fn connection_requirements(url: &ServerUrl) -> Result<(bool, bool), TransportError> {
+    let Some(msf) = url.msf.as_ref() else {
+        return Ok((false, false));
+    };
+    let mut requires_quic = false;
+    let mut requires_webtransport = false;
+    for connection in msf
+        .connection_types()
+        .map_err(|e| TransportError::InvalidState(format!("invalid 'connection' parameter: {e}")))?
+    {
+        match connection {
+            MsfConnectionType::Quic => requires_quic = true,
+            MsfConnectionType::WebTransport => requires_webtransport = true,
+        }
+    }
+    if requires_quic && requires_webtransport {
+        return Err(TransportError::InvalidState(
+            "'connection=q' and 'connection=wt' cannot be used together: \
+             draft-ietf-moq-msf-02 §11.1.1 mandates a native QUIC connection for 'q' and a \
+             WebTransport connection for 'wt'"
+                .to_string(),
+        ));
+    }
+    Ok((requires_quic, requires_webtransport))
+}
+
+/// [`Transport::Auto`] を具体的なトランスポートの優先順へ展開する
+///
+/// `connection` が無い場合は QUIC を TCP より優先し (draft-ietf-happy-happyeyeballs-v3-05 §3)、
+/// 同一の QUIC 系では層の少ない native QUIC を先にする。`connection=q` は
+/// draft-ietf-moq-msf-02 §11.1.1 が Native QUIC を MUST で要求するため `quic` だけにする
+/// (QMux は TCP+TLS 上で QUIC のストリーム操作を多重化する経路であり、Native QUIC ではない)。
+/// `connection=wt` は `wt-h3` / `wt-h2` を HTTP/3 優先で競争する。
+fn candidate_transports(
+    requested: Transport,
+    url: &ServerUrl,
+) -> Result<Vec<Transport>, TransportError> {
+    if requested != Transport::Auto {
+        return Ok(vec![requested]);
+    }
+
+    let (requires_quic, requires_webtransport) = connection_requirements(url)?;
+    let mut transports = Vec::new();
+    if requires_quic {
+        transports.push(Transport::Quic);
+    } else if requires_webtransport {
+        if is_wt_h3_available() {
+            transports.push(Transport::WtH3);
+        }
+        transports.push(Transport::WtH2);
+    } else {
+        transports.push(Transport::Quic);
+        if is_wt_h3_available() {
+            transports.push(Transport::WtH3);
+        }
+        transports.push(Transport::Qmux);
+        transports.push(Transport::WtH2);
+    }
+    Ok(transports)
+}
+
+/// トランスポートが確立するまで候補を競争させ、採用した接続でだけ MOQT SETUP を交換する
 async fn connect_resolved(
     params: &ConnectParams<'_>,
     task_monitor: &tokio_metrics::TaskMonitor,
@@ -1709,10 +1855,54 @@ async fn connect_resolved(
 
     let url = params.url;
     let authority = &url.authority;
-    let connection = try_resolved_addrs(authority, addrs, |addr| {
-        connect_transport(params, task_monitor, addr)
-    })
-    .await?;
+    // 自動選択では候補ごとに別の接続を作る (§6)。試行に必要な値は所有権付きで複製し、
+    // 各タスクが参照を跨がないようにする
+    let context = std::sync::Arc::new(AttemptContext {
+        url: url.clone(),
+        cert: params.cert.map(str::to_string),
+        receive_datagrams: params.receive_datagrams,
+    });
+    let config = params.happy_eyeballs.clone().sanitized();
+    let transports = candidate_transports(params.transport, url)?;
+    let groups: Vec<happy_eyeballs::CandidateGroup<Transport>> = transports
+        .iter()
+        .map(|&transport| happy_eyeballs::CandidateGroup {
+            transport,
+            addrs: addrs.to_vec(),
+        })
+        .collect();
+    tracing::debug!(
+        config = ?config,
+        transports = ?transports,
+        "Happy Eyeballs: connection candidates"
+    );
+    let connection = crate::connection_race::race(
+        groups,
+        config,
+        task_monitor,
+        move |candidate| {
+            let context = std::sync::Arc::clone(&context);
+            let task_monitor = task_monitor.clone();
+            async move {
+                connect_transport(&context, candidate.transport, candidate.addr, &task_monitor)
+                    .await
+            }
+        },
+        |connected| connected.close(),
+    )
+    .await
+    .map_err(|failure| match failure {
+        crate::connection_race::RaceFailure::NoCandidates => TransportError::Unsupported(
+            "no connection candidate is available for this URL".to_string(),
+        ),
+        crate::connection_race::RaceFailure::Attempt(error) => error,
+        crate::connection_race::RaceFailure::Task(error) => TransportError::Internal(format!(
+            "Happy Eyeballs connection attempt task failed: {error}"
+        )),
+        crate::connection_race::RaceFailure::Internal(reason) => {
+            TransportError::Internal(reason.to_string())
+        }
+    })?;
 
     // SETUP 失敗をアドレス試行に戻すと、同じ SETUP を別の接続へ送り直してしまう。
     match connection {
@@ -1755,18 +1945,22 @@ async fn connect_resolved(
     }
 }
 
-/// 指定アドレスのトランスポートだけを確立する。MOQT のストリームは開かない
+/// 指定アドレスの指定トランスポートだけを確立する。MOQT のストリームは開かない
+///
+/// 競争の各タスクから呼ばれるため、`context` は所有権付きの設定だけを持つ。MOQT 層の
+/// 確立 (`establish_*`) は競争の勝者だけで行う。
 async fn connect_transport(
-    params: &ConnectParams<'_>,
-    task_monitor: &tokio_metrics::TaskMonitor,
+    context: &AttemptContext,
+    transport: Transport,
     socket_addr: SocketAddr,
+    task_monitor: &tokio_metrics::TaskMonitor,
 ) -> Result<ConnectedTransport, TransportError> {
-    let url = params.url;
+    let url = &context.url;
     let server_name = host_from_authority(&url.authority);
-    match params.transport {
+    match transport {
         Transport::Quic => {
             let (connection, stop_sending_rx) =
-                crate::quic::connect(socket_addr, server_name, params.cert).await?;
+                crate::quic::connect(socket_addr, server_name, context.cert.as_deref()).await?;
             Ok(ConnectedTransport::Quic(connection, stop_sending_rx))
         }
         Transport::WtH3 => {
@@ -1781,11 +1975,11 @@ async fn connect_transport(
                         // (draft-ietf-webtrans-http3-16 §3.2)。
                         .authority(&url.authority)
                         .enable_webtransport(crate::webtransport_h3::wt_h3_settings());
-                if params.receive_datagrams {
+                if context.receive_datagrams {
                     // subscriber は datagram を継続受信するためバックグラウンドタスクを起動する。
                     client_config = client_config.receive_datagrams();
                 }
-                client_config = apply_tls_config_h3(client_config, params.cert)?;
+                client_config = apply_tls_config_h3(client_config, context.cert.as_deref())?;
                 let session =
                     crate::webtransport_h3::WtClient::connect(client_config, &url.path).await?;
                 Ok(ConnectedTransport::WtH3(session))
@@ -1804,20 +1998,29 @@ async fn connect_transport(
                     // :authority は target URI の表記どおり渡す
                     // (draft-ietf-webtrans-http2-16 §3.2)。
                     .authority(&url.authority);
-            if params.receive_datagrams {
+            if context.receive_datagrams {
                 // subscriber は datagram を継続受信するためバックグラウンドタスクを起動する。
                 client_config = client_config.receive_datagrams();
             }
-            client_config = apply_tls_config_h2(client_config, params.cert)?;
+            client_config = apply_tls_config_h2(client_config, context.cert.as_deref())?;
             let session =
                 crate::webtransport_h2::WtH2Client::connect(client_config, &url.path).await?;
             Ok(ConnectedTransport::WtH2(session))
         }
         Transport::Qmux => {
-            let session =
-                crate::qmux::connect(socket_addr, server_name, params.cert, task_monitor).await?;
+            let session = crate::qmux::connect(
+                socket_addr,
+                server_name,
+                context.cert.as_deref(),
+                task_monitor,
+            )
+            .await?;
             Ok(ConnectedTransport::Qmux(session))
         }
+        Transport::Auto => Err(TransportError::Internal(
+            "Transport::Auto must be expanded into concrete candidates before connecting"
+                .to_string(),
+        )),
     }
 }
 
@@ -2125,6 +2328,10 @@ mod tests {
         assert_eq!(
             Transport::parse("qmux").expect("qmux は受理されること"),
             Transport::Qmux
+        );
+        assert_eq!(
+            Transport::parse("auto").expect("auto は受理されること"),
+            Transport::Auto
         );
     }
 
@@ -2449,7 +2656,12 @@ mod tests {
     /// 往復を検証する。
     #[test]
     fn transport_as_str_is_the_inverse_of_parse() {
-        for transport in [Transport::Quic, Transport::WtH2, Transport::Qmux] {
+        for transport in [
+            Transport::Quic,
+            Transport::WtH2,
+            Transport::Qmux,
+            Transport::Auto,
+        ] {
             assert_eq!(
                 Transport::parse(transport.as_str()).expect("解釈できること"),
                 transport,
@@ -2627,6 +2839,102 @@ mod tests {
                 "wt-h3 を提供しないビルドでは wt-h3 を明示しても拒否すること"
             );
         }
+    }
+
+    /// `--transport auto` は `connection` の要求と両立する
+    ///
+    /// `connection=q` は native QUIC を MUST で要求し、`connection=wt` は WebTransport を
+    /// MUST で要求する (draft-ietf-moq-msf-02 §11.1.1)。どちらも `auto` の候補集合を
+    /// その要求の範囲に狭めるだけで、`auto` 自体は拒否しない。
+    #[test]
+    fn resolve_transport_accepts_auto_with_connection_requirements() {
+        let url = parse_url("moqt://example.com/app#msf:moq-example--video&connection=q")
+            .expect("URL を解釈できること");
+        assert_eq!(
+            resolve_transport(Some(Transport::Auto), &url).expect("auto を解決できること"),
+            Transport::Auto,
+            "connection=q でも auto を受け付けること"
+        );
+
+        let url = parse_url("moqt://example.com/app#msf:moq-example--video&connection=wt")
+            .expect("URL を解釈できること");
+        assert_eq!(
+            resolve_transport(Some(Transport::Auto), &url).expect("auto を解決できること"),
+            Transport::Auto,
+            "connection=wt でも auto を受け付けること"
+        );
+
+        let url = parse_url("moqt://example.com/app").expect("URL を解釈できること");
+        assert_eq!(
+            resolve_transport(Some(Transport::Auto), &url).expect("auto を解決できること"),
+            Transport::Auto,
+            "connection が無い場合も auto をそのまま返すこと"
+        );
+    }
+
+    /// `auto` の候補集合は `connection` とビルドの提供状況で決まる
+    ///
+    /// `connection` が無い場合は QUIC を TCP より優先し、`connection=q` は native QUIC だけ、
+    /// `connection=wt` は `wt-h3` / `wt-h2` にする。`wt-h3` を提供しないビルドでは候補から
+    /// 外す。
+    #[test]
+    fn candidate_transports_expands_auto() {
+        let url = parse_url("moqt://example.com/app").expect("URL を解釈できること");
+        let mut expected = vec![Transport::Quic];
+        if is_wt_h3_available() {
+            expected.push(Transport::WtH3);
+        }
+        expected.push(Transport::Qmux);
+        expected.push(Transport::WtH2);
+        assert_eq!(
+            candidate_transports(Transport::Auto, &url).expect("候補を展開できること"),
+            expected,
+            "connection が無い場合は QUIC、WebTransport over HTTP/3、QMux、\
+             WebTransport over HTTP/2 の順に競争すること"
+        );
+
+        let url = parse_url("moqt://example.com/app#msf:moq-example--video&connection=q")
+            .expect("URL を解釈できること");
+        assert_eq!(
+            candidate_transports(Transport::Auto, &url).expect("候補を展開できること"),
+            vec![Transport::Quic],
+            "connection=q は Native QUIC だけを候補にすること"
+        );
+
+        let url = parse_url("moqt://example.com/app#msf:moq-example--video&connection=wt")
+            .expect("URL を解釈できること");
+        let mut expected = Vec::new();
+        if is_wt_h3_available() {
+            expected.push(Transport::WtH3);
+        }
+        expected.push(Transport::WtH2);
+        assert_eq!(
+            candidate_transports(Transport::Auto, &url).expect("候補を展開できること"),
+            expected,
+            "connection=wt は wt-h3 / wt-h2 を候補にすること"
+        );
+
+        // 具体的なトランスポートは展開しない
+        let url = parse_url("moqt://example.com/app").expect("URL を解釈できること");
+        assert_eq!(
+            candidate_transports(Transport::Qmux, &url).expect("候補を展開できること"),
+            vec![Transport::Qmux],
+            "具体的なトランスポートはそのまま 1 候補になること"
+        );
+    }
+
+    /// `auto` でも `connection=q` と `connection=wt` の同時指定はエラーにする
+    #[test]
+    fn candidate_transports_rejects_conflicting_connections() {
+        let url =
+            parse_url("moqt://example.com/app#msf:moq-example--video&connection=q&connection=wt")
+                .expect("URL を解釈できること");
+        let error = candidate_transports(Transport::Auto, &url)
+            .expect_err("q と wt の同時指定はエラーになること");
+        assert!(
+            error.to_string().contains("cannot be used together"),
+            "両立しないことが理由として分かること: {error}"
+        );
     }
 
     /// `connection=q` と `connection=wt` の同時指定はエラーにする
@@ -3243,6 +3551,7 @@ mod tests {
             impl_name: "impl",
             receive_datagrams: false,
             datagram_max_size: None,
+            happy_eyeballs: happy_eyeballs::Config::default(),
         };
         let debug = format!("{params:?}");
         assert_hidden(&debug, "userinfo", b"alice:s3cr3t");
@@ -3829,6 +4138,7 @@ mod tests {
                 impl_name: "test-client",
                 receive_datagrams: false,
                 datagram_max_size: None,
+                happy_eyeballs: happy_eyeballs::Config::default(),
             };
             let monitor = tokio_metrics::TaskMonitor::new();
 
@@ -3877,6 +4187,45 @@ mod tests {
         })
         .await
         .expect("SETUP の失敗と切断の観測が制限時間内に完了すること");
+    }
+
+    /// `Transport::Auto` は QUIC が確立できないとき QMux にフォールバックする
+    ///
+    /// QUIC の待ち受けを置かず、TCP + TLS + QMux のサーバーだけを立てる。Auto の候補は
+    /// native QUIC を先に試すため、QUIC の試行が確立しない間に QMux の試行が始まり、
+    /// QMux が勝者になる。SETUP まで交換できたことを実接続で確認する。
+    #[tokio::test]
+    async fn connect_auto_falls_back_to_qmux() {
+        use crate::peer_harness::QmuxTestPeerServer;
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut server = QmuxTestPeerServer::start()
+                .await
+                .expect("QMux のテストサーバーを起動できること");
+            let addr = server.local_addr();
+            let url = parse_url(&format!("moqt://127.0.0.1:{}", addr.port()))
+                .expect("接続先 URL を解釈できること");
+            let params = ConnectParams {
+                url: &url,
+                transport: Transport::Auto,
+                cert: None,
+                impl_name: "test-client",
+                receive_datagrams: false,
+                datagram_max_size: None,
+                happy_eyeballs: happy_eyeballs::Config::default(),
+            };
+            let monitor = tokio_metrics::TaskMonitor::new();
+
+            // QUIC の待ち受けは無い。QMux のサーバーは TCP で待ち受け、Auto の QMux 試行を
+            // 受理して SETUP を交換する
+            let (connected, ()) = tokio::join!(connect(&params, &monitor), async {
+                let mut peer = server.accept().await.expect("QMux 接続を受理できること");
+                peer.establish().await.expect("SETUP を交換できること");
+            },);
+            connected.expect("QMux 経由で接続できること");
+        })
+        .await
+        .expect("Auto のフォールバックが制限時間内に完了すること");
     }
 
     /// すべての接続先が失敗した場合は最後の失敗を返す

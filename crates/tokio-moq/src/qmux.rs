@@ -20,6 +20,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration as StdDuration;
 
 use shiguredo_qmux::codec::role::Role;
 use shiguredo_qmux::codec::time::Duration;
@@ -64,6 +65,16 @@ pub(crate) const READ_BUFFER_SIZE: usize = 64 * 1024;
 /// 1163 バイトになるため、これも満たす。
 const MAX_DATAGRAM_FRAME_SIZE: u64 = shiguredo_qmux::record::DEFAULT_MAX_RECORD_SIZE;
 
+/// ピアの QX_TRANSPORT_PARAMETERS を待つ上限
+///
+/// QMux の TLS + ALPN が成功しても、ピアが QMux のトランスポートパラメータを送らない
+/// 場合は QMux の接続として扱わない。TCP / TLS のハンドシェイクは完了しているため、
+/// パラメータは通常ただちに届く。1 秒待っても届かない場合は別の候補へ進める。
+const PEER_TRANSPORT_PARAMETERS_TIMEOUT: StdDuration = StdDuration::from_secs(1);
+
+/// ピアの QX_TRANSPORT_PARAMETERS を確認する間隔
+const PEER_TRANSPORT_PARAMETERS_POLL_INTERVAL: StdDuration = StdDuration::from_millis(10);
+
 /// QMux 接続のハンドル
 ///
 /// `transport.rs` の `StreamHandle::Qmux` が持つ。破棄された受信 DATAGRAM の通知を
@@ -75,6 +86,24 @@ pub struct QmuxHandle {
     connection: Arc<shiguredo_tokio_qmux::Connection>,
     /// 最後にログへ出した破棄数
     logged_dropped_datagrams: AtomicU64,
+    /// ハンドルがすべて drop されたときに接続を閉じるガード
+    _close_guard: QmuxCloseGuard,
+}
+
+/// QMux 接続を所有者の drop 時に閉じるガード
+///
+/// QMux の受理タスクは接続の `Arc` を保持するため、ハンドルを drop するだけでは
+/// ドライバが idle timeout まで残ることがある。最後のハンドルが drop された時点で
+/// close フレームを送り、ドライバと受理タスクを終了させる。
+#[derive(Debug)]
+struct QmuxCloseGuard {
+    connection: Arc<shiguredo_tokio_qmux::Connection>,
+}
+
+impl Drop for QmuxCloseGuard {
+    fn drop(&mut self) {
+        let _ = self.connection.close(0, "closed");
+    }
 }
 
 impl QmuxHandle {
@@ -125,11 +154,22 @@ pub struct QmuxSession {
     pub(crate) stop_sending_rx: StopSendingReceiver,
 }
 
+impl QmuxSession {
+    /// 競争に負けたセッションを破棄する
+    ///
+    /// `QmuxHandle` の `QmuxCloseGuard` が接続を閉じるため、セッションを drop するだけで
+    /// close フレームが送られ、ドライバと受理タスクが終了する。
+    pub(crate) fn discard(self) {
+        // `QmuxHandle` の `_close_guard` が接続を閉じる
+        drop(self);
+    }
+}
+
 /// QMux 接続を確立する
 ///
-/// 名前解決とアドレスのフォールバックは [`crate::connect_with_fallback`] が済ませており、
-/// ここは解決済みの 1 つのアドレスへ TCP を張るところから始める。`--cert` を省略した場合は
-/// 証明書検証を無効化する (WebTransport over HTTP/2 経路と同じ扱い)。
+/// 名前解決とアドレスのフォールバックは [`crate::connect`] の Happy Eyeballs v3 の競争が
+/// 済ませており、ここは解決済みの 1 つのアドレスへ TCP を張るところから始める。`--cert` を
+/// 省略した場合は証明書検証を無効化する (WebTransport over HTTP/2 経路と同じ扱い)。
 ///
 /// # Errors
 ///
@@ -141,6 +181,35 @@ pub(crate) async fn connect(
     cert: Option<&str>,
     task_monitor: &tokio_metrics::TaskMonitor,
 ) -> Result<QmuxSession> {
+    let connection = connect_connection(socket_addr, server_name, cert).await?;
+    let session = split_connection(Arc::clone(&connection), task_monitor);
+    wait_for_peer_transport_parameters(&connection).await?;
+    Ok(session)
+}
+
+/// テスト用に、ピアのトランスポートパラメータを待たずに QMux 接続を作る
+///
+/// ピアが QMux を話さない場合のドライバ終了を確認するテストで使う。通常の接続経路では
+/// [`connect`] を使い、この関数は使わない。
+#[cfg(test)]
+pub(crate) async fn connect_without_peer_parameters(
+    socket_addr: SocketAddr,
+    server_name: &str,
+    cert: Option<&str>,
+    task_monitor: &tokio_metrics::TaskMonitor,
+) -> Result<QmuxSession> {
+    let connection = connect_connection(socket_addr, server_name, cert).await?;
+    Ok(split_connection(connection, task_monitor))
+}
+
+/// TCP + TLS + QMux の接続を作る
+///
+/// ドライバの起動とピアのトランスポートパラメータの待機は呼び出し側で行う。
+async fn connect_connection(
+    socket_addr: SocketAddr,
+    server_name: &str,
+    cert: Option<&str>,
+) -> Result<Arc<shiguredo_tokio_qmux::Connection>> {
     // TCP。QMux は 1 本のバイトストリームを多重化するため、Nagle による遅延が全ストリームに
     // 乗る。音声の datagram を 20 ms ごとに送るため無効化する。
     //
@@ -182,13 +251,33 @@ pub(crate) async fn connect(
     }
 
     // QMux。`Connection::new` は送信できない設定の場合にエラーを返す。
-    let connection = Arc::new(shiguredo_tokio_qmux::Connection::new(
+    Ok(Arc::new(shiguredo_tokio_qmux::Connection::new(
         Role::Client,
         tls,
         build_config(),
-    )?);
+    )?))
+}
 
-    Ok(split_connection(connection, task_monitor))
+/// ピアの QX_TRANSPORT_PARAMETERS が届くまで待つ
+///
+/// qmux-rs の公開 API には待機用の関数が無いため、`peer_transport_parameters` を短い間隔で
+/// 確認する。届かない場合は再試行可能なトランスポートエラーを返す。
+async fn wait_for_peer_transport_parameters(
+    connection: &shiguredo_tokio_qmux::Connection,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + PEER_TRANSPORT_PARAMETERS_TIMEOUT;
+    loop {
+        if connection.peer_transport_parameters().is_some() {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(TransportError::transport(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the QMux peer did not send QX_TRANSPORT_PARAMETERS",
+            )));
+        }
+        tokio::time::sleep(PEER_TRANSPORT_PARAMETERS_POLL_INTERVAL).await;
+    }
 }
 
 /// 確立済みの QMux 接続から、MOQT 層が使う資源を組み立てる
@@ -212,8 +301,9 @@ pub(crate) fn split_connection(
     spawn_stop_sending(Arc::clone(&connection), stop_sending_tx, task_monitor);
 
     let handle = Arc::new(QmuxHandle {
-        connection,
+        connection: Arc::clone(&connection),
         logged_dropped_datagrams: AtomicU64::new(0),
+        _close_guard: QmuxCloseGuard { connection },
     });
     QmuxSession {
         handle,
@@ -1097,7 +1187,7 @@ mod tests {
         });
 
         let task_monitor = tokio_metrics::TaskMonitor::new();
-        let session = connect(addr, "localhost", None, &task_monitor)
+        let session = connect_without_peer_parameters(addr, "localhost", None, &task_monitor)
             .await
             .expect("接続できること");
         let QmuxSession {
@@ -1187,6 +1277,31 @@ mod tests {
             }
         });
         addr
+    }
+
+    /// QMux のトランスポートパラメータを送らないピアは成功扱いにしない
+    ///
+    /// TLS + ALPN だけを話すピアは `moqt-23` を選択できてしまう。QMux の成功判定を
+    /// TLS + ALPN で止めると、Auto でこのピアが勝って SETUP で失敗する。QMux の
+    /// パラメータを受信するまで待ち、受信できなければ再試行可能な失敗にすること。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qmux_connect_rejects_peer_without_transport_parameters() {
+        let addr = spawn_tls_peer(vec![crate::MOQT_PROTOCOL.as_bytes().to_vec()]).await;
+        let started = std::time::Instant::now();
+        let error = match connect(addr, "localhost", None, &tokio_metrics::TaskMonitor::new()).await
+        {
+            Ok(_) => panic!("QMux のパラメータを送らないピアとは接続できないこと"),
+            Err(e) => e,
+        };
+        assert!(
+            crate::is_retryable_connect_error(&error),
+            "再試行可能な接続失敗として返ること: {error:?}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "1 秒の待機で打ち切ること (elapsed: {:?})",
+            started.elapsed()
+        );
     }
 
     /// ALPN を選択しないピアとは接続できない

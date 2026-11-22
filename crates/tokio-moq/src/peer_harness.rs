@@ -2420,6 +2420,7 @@ mod tests {
                         receive_datagrams: false,
                         // QMux 経路は使わない (QUIC 直接接続の試験基盤)
                         datagram_max_size: None,
+                        happy_eyeballs: happy_eyeballs::Config::default(),
                     },
                     &connect_monitor,
                 )
@@ -2526,6 +2527,7 @@ mod tests {
                         receive_datagrams: false,
                         // QMux 経路は使わない (QUIC 直接接続の試験基盤)
                         datagram_max_size: None,
+                        happy_eyeballs: happy_eyeballs::Config::default(),
                     },
                     &connect_monitor,
                 )
@@ -2597,6 +2599,7 @@ mod tests {
                         receive_datagrams: false,
                         // QMux 経路は使わない (QUIC 直接接続の試験基盤)
                         datagram_max_size: None,
+                        happy_eyeballs: happy_eyeballs::Config::default(),
                     },
                     &connect_monitor,
                 )
@@ -2691,6 +2694,7 @@ mod tests {
                         receive_datagrams: false,
                         // QMux 経路は使わない (QUIC 直接接続の試験基盤)
                         datagram_max_size: None,
+                        happy_eyeballs: happy_eyeballs::Config::default(),
                     },
                     deadline,
                     crate::RetryPolicy::default(),
@@ -3664,6 +3668,7 @@ mod tests {
                     impl_name: "test-peer",
                     receive_datagrams: false,
                     datagram_max_size: None,
+                    happy_eyeballs: happy_eyeballs::Config::default(),
                 },
                 deadline,
                 policy,
