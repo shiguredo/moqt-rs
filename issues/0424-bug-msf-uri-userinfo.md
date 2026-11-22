@@ -1,7 +1,7 @@
 # parse_msf_uri で authority の userinfo を拒否する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/fix-msf-uri-userinfo
 - Polished: 2026-11-14
 
@@ -39,3 +39,27 @@ library の `parse_msf_uri` でも拒否し、パスワードを保持・表示�
 - authority に `@` を含まない既存の MSF URI の解析結果が変わらないこと。path / query に `@` を含む MSF URI (`moqt://host/a@b#msf:ns--catalog`、`moqt://host/path?x=a@b#msf:ns--catalog`) も従来どおり受理されること。
 - `parse_msf_uri` の `# Errors` に authority に `@` を含む場合が追加され、`MsfUri::authority` の doc に userinfo (`@`) を含まないことが書かれていること。
 - 上記を `tests/test_msf/uri.rs` で固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `src/msf/uri.rs` の `split_moqt_uri` は、`moqt://` の後ろを `#`、`?`、`/` の順に分割した後、
+  authority に `@` を含む場合に `MessageError::InvalidCatalog` を返す。エラーメッセージは
+  "MOQT URI authority MUST NOT contain userinfo" とし、authority の実値を含めない。
+  `parse_msf_uri` と `validate_moqt_endpoint_uri` は `split_moqt_uri` を共有するため、
+  どちらも userinfo を拒否する。`@` の判定は authority に対してだけ行い、path / query の
+  `@` は従来どおり受理する。
+- `parse_msf_uri` の `# Errors` に authority の userinfo (`@`) を拒否することを、
+  RFC 3986 §3.2.1 を根拠として追記した。`MsfUri::authority` の doc に、`parse_msf_uri` が
+  返す値は userinfo を含まないことを追記した。
+- `tests/test_msf/uri.rs` の `parse_uri_rejects_userinfo_without_leaking` を、パスワード付き
+  (`user:secret@host`) とパスワード無し (`user@host`) の両方を拒否し、エラーメッセージに
+  authority の実値を含めないことを確認する形に拡張した。IPv6 リテラル + port で path / query に
+  `@` を含む URI の受理は `parse_uri_rejects_invalid_rfc3986_components` で確認している。
+- Lean 検証を `shiguredo/lean` の `moqt-rs/MsfUri/` に追加した。`#`、`?`、`/` の分割順により
+  path / query / fragment の `@` が authority に混入しないこと、authority の `@` を拒否する
+  ことを 13 個の定理と 5 個の有限例で確認した。
+
+確認コマンド: `cargo test --workspace`、`cargo test -p shiguredo_moqt --test test_msf uri`、
+`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、
+`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` が通ることを確認した。
