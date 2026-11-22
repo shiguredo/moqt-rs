@@ -1,7 +1,7 @@
 # moq-pub が Object を publish していない track の FETCH に INVALID_RANGE を返す
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/fix-publisher-fetch-unpublished-invalid-range
 - Polished: 2026-11-14
 
@@ -36,3 +36,17 @@ moq-pub は配信中の track でも、まだ 1 件も Object を cache に入�
   `crates/moq-pub/src/pipeline.rs` の `FetchPlan::UnknownTrack` への doc 参照も更新されていること。
 - `crates/moq-pub/README.md` の FETCH と `--cache-duration` の説明が、cache に Object が 1 件も無い track の `REQUEST_INVALID_RANGE` に合っていること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `crates/moq-pub/src/cache.rs` の `MediaCache::plan` を、Object の有無の判定を `GROUP_ORDER` の判定より先に行う順序に変更した。期限切れの評価後、cache に track が無い場合と `TrackCache::first_published` が無い場合は `FetchPlan::NoPublishedObjects` を返す。Object を入れた後に期限切れで全て evict した track は `first_published` が残るため、従来どおり保持内容の判定へ進む。
+- 到達しなかった `FetchPlan::NoPublishedObjects` と、未 cache の配信中 track を表していた `FetchPlan::UnknownTrack` を `NoPublishedObjects` に統合し、`FetchPlan` と `entries` の doc を更新した。`UnknownTrack` variant は削除した。
+- `crates/moq-pub/src/pipeline.rs` の `serve_media_fetch` は `NoPublishedObjects` を `REQUEST_INVALID_RANGE` で拒否する。削除した `UnknownTrack` の分岐（`REQUEST_DOES_NOT_EXIST`）を取り除き、`fetch_request_range` の doc を `NoPublishedObjects` に合わせた。配信していない track は従来どおり `serve_peer_request` が `REQUEST_DOES_NOT_EXIST` で拒否する。
+- `crates/moq-pub/src/cache.rs` の単体テストを新しい分類に合わせ、未 cache の track が `NoPublishedObjects` になることと、Object が無い track では Descending の `GROUP_ORDER` でも `NoPublishedObjects` を優先することを追加した。
+- `crates/moq-pub/src/pipeline.rs` の FETCH 統合テストに、配信中で cache に Object が無い track と、その Descending の `GROUP_ORDER` 付き要求が `REQUEST_INVALID_RANGE` になるケースを追加した。配信していない track の `REQUEST_DOES_NOT_EXIST` は既存のケースで確認する。
+- `crates/moq-pub/README.md` の FETCH と `--cache-duration` の説明に、Object を 1 件も publish していない track の `REQUEST_INVALID_RANGE` と、`GROUP_ORDER` より優先することを追記した。
+- Lean 検証を `shiguredo/lean` の `moqt-rs/MoqPubFetch/` に追加した。Object が無ければ `GROUP_ORDER` と range にかかわらず `noPublishedObjects` になり、配信中の track では `REQUEST_INVALID_RANGE`、配信していない track では `REQUEST_DOES_NOT_EXIST` になることを 11 個の定理と 5 個の有限例で確認した。
+
+確認コマンド: `cargo test --workspace`、
+`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check` が通ることを確認した。
