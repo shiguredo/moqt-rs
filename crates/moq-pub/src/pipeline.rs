@@ -1492,6 +1492,42 @@ async fn encode_video_input_frames(
 /// エンコード済みフレームを Group / Object として送信する
 /// キーフレームで新しい Group を開始し、旧 writer を閉じる
 /// Group 境界で peer 向けの映像 writer を閉じる
+/// 旧映像 writer を終端する
+async fn close_video_writer(
+    client: &MoqtClient,
+    video_publish_target: &Option<PublishTarget>,
+    video_request_id: u64,
+    writer: SubgroupWriter,
+) -> Result<()> {
+    writer
+        .finish(publish_start_location(
+            client,
+            video_publish_target.as_ref(),
+            video_request_id,
+        ))
+        .await
+}
+
+/// Group 開始位置と次の Group ID を記録する
+fn mark_video_group_started(
+    context: &mut VideoInputContext<'_>,
+    observed_group_durations_us: &mut std::vec::IntoIter<Option<u64>>,
+) -> Result<()> {
+    *context.started_video_group_id = Some(*context.video_group_id);
+    // 直前の Group の長さを出し、カタログへ宣言した
+    // maxGopDuration / maxGroupDuration と実機で突き合わせられるようにする
+    // (観測したキーフレームごとに 1 件ずつ取り出す)
+    if let Some(previous_duration_us) = observed_group_durations_us.next().flatten() {
+        tracing::debug!(
+            "Previous video group lasted {} ms",
+            previous_duration_us / 1_000
+        );
+    }
+    tracing::debug!("Started new video group {}", context.video_group_id);
+    *context.video_group_id = group_id::next_group_id(*context.video_group_id)?;
+    Ok(())
+}
+
 async fn begin_video_group(
     context: &mut VideoInputContext<'_>,
     observed_group_durations_us: &mut std::vec::IntoIter<Option<u64>>,
@@ -1511,13 +1547,13 @@ async fn begin_video_group(
     // 指定でき、キーフレーム (IDR) が 1 QUIC datagram に収まらない
     // 映像では使わない。
     if let Some(writer) = context.current_video_writer.take() {
-        writer
-            .finish(publish_start_location(
-                context.client,
-                context.video_publish_target.as_ref(),
-                video_request_id,
-            ))
-            .await?;
+        close_video_writer(
+            context.client,
+            context.video_publish_target,
+            video_request_id,
+            writer,
+        )
+        .await?;
     }
     // 受信 SUBSCRIBE の購読 (video) の writer も同じ Group 境界で
     // 閉じて開き直す (受信 SUBSCRIBE は次の Group のキーフレームの
@@ -1589,18 +1625,7 @@ async fn begin_video_group(
     // STOP_SENDING など) や writer の作成が失敗した場合に、送られて
     // いない Group を現在の Group として NEW_GROUP_REQUEST を
     // 誤って無視し得る
-    *context.started_video_group_id = Some(*context.video_group_id);
-    // 直前の Group の長さを出し、カタログへ宣言した
-    // maxGopDuration / maxGroupDuration と実機で突き合わせられるようにする
-    // (観測したキーフレームごとに 1 件ずつ取り出す)
-    if let Some(previous_duration_us) = observed_group_durations_us.next().flatten() {
-        tracing::debug!(
-            "Previous video group lasted {} ms",
-            previous_duration_us / 1_000
-        );
-    }
-    tracing::debug!("Started new video group {}", context.video_group_id);
-    *context.video_group_id = group_id::next_group_id(*context.video_group_id)?;
+    mark_video_group_started(context, observed_group_durations_us)?;
     Ok(())
 }
 
@@ -1872,6 +1897,117 @@ struct AudioInputContext<'a> {
 
 /// 音声入力 1 件をエンコードして送信する
 /// 音声入力が閉じたときの残余フレームの処理
+struct AudioFadeContext<'a> {
+    config: &'a mut Config,
+    audio_fade_pending: &'a mut Option<(Vec<i16>, u64)>,
+    audio_encoder: &'a mut Option<AudioEncoder>,
+    audio_config_sent: &'a mut bool,
+    audio_timescale: &'a mut Option<u64>,
+    audio_publish_target: &'a mut Option<PublishTarget>,
+    handle: &'a mut StreamHandle,
+    data_plane: &'a mut DataPlaneHandle,
+    audio_request_id: &'a mut Option<u64>,
+    audio_group_id: &'a mut u64,
+    namespace: &'a mut TrackNamespace,
+    media_cache: &'a mut cache::MediaCache,
+    audio_config: &'a mut Option<Vec<u8>>,
+    client: &'a mut MoqtClient,
+}
+
+/// フェード用に保持している最後の音声チャンクを送る
+async fn flush_audio_fade(context: AudioFadeContext<'_>) -> Result<()> {
+    let AudioFadeContext {
+        config,
+        audio_fade_pending,
+        audio_encoder,
+        audio_config_sent,
+        audio_timescale,
+        audio_publish_target,
+        handle,
+        data_plane,
+        audio_request_id,
+        audio_group_id,
+        namespace,
+        media_cache,
+        audio_config,
+        client,
+    } = context;
+    let Some((chunk, timestamp)) = audio_fade_pending.take() else {
+        return Ok(());
+    };
+    let encoder = audio_encoder.as_mut().expect("audio encoder enabled");
+    let encoded = encoder.encode(&chunk).await?;
+    let audio_config = if *audio_config_sent {
+        None
+    } else {
+        audio_config.as_deref()
+    };
+    let properties = build_audio_loc_properties(timestamp, *audio_timescale, audio_config);
+    // request 単位移行で side session へ移した track は、その session の
+    // handle / data plane で Object を送る ([`publish_sink`])
+    let (audio_handle, audio_data_plane) =
+        publish_sink(audio_publish_target.as_ref(), handle, data_plane);
+    if config.audio_datagram {
+        let mut writer = DatagramWriter::new(
+            audio_handle,
+            audio_data_plane,
+            audio_request_id.expect("audio request_id enabled"),
+            AUDIO_TRACK_ALIAS,
+            *audio_group_id,
+            DEFAULT_PUBLISHER_PRIORITY,
+            config.datagram_max_size,
+            config.audio_redundancy,
+        );
+        let object_location = writer.next_object_location();
+        let outcome = writer.write_object(&encoded, &properties).await?;
+        if outcome == ObjectFilterOutcome::Pass {
+            *audio_config_sent = true;
+            media_cache.insert(
+                namespace,
+                AUDIO_TRACK_NAME.as_bytes(),
+                object_location,
+                &properties,
+                &encoded,
+            )?;
+        }
+    } else {
+        let audio_request_id = audio_request_id.expect("audio request_id enabled");
+        let mut writer = SubgroupWriter::new(
+            audio_handle,
+            audio_data_plane,
+            audio_request_id,
+            AUDIO_TRACK_ALIAS,
+            *audio_group_id,
+            SubgroupIdMode::Zero,
+            0,
+            DEFAULT_PUBLISHER_PRIORITY,
+            true,
+            publish_start_location(client, audio_publish_target.as_ref(), audio_request_id),
+        )
+        .await?;
+        let object_location = writer.next_object_location();
+        let outcome = writer.write_object(&encoded, &properties).await?;
+        if outcome == ObjectFilterOutcome::Pass {
+            *audio_config_sent = true;
+            media_cache.insert(
+                namespace,
+                AUDIO_TRACK_NAME.as_bytes(),
+                object_location,
+                &properties,
+                &encoded,
+            )?;
+        }
+        writer
+            .finish(publish_start_location(
+                client,
+                audio_publish_target.as_ref(),
+                audio_request_id,
+            ))
+            .await?;
+    }
+    Ok(())
+}
+
 async fn finish_audio_input(context: AudioInputContext<'_>) -> Result<()> {
     let AudioInputContext {
         config,
@@ -1903,82 +2039,22 @@ async fn finish_audio_input(context: AudioInputContext<'_>) -> Result<()> {
     tracing::info!("Audio input channel closed");
     // フェードのために符号化へ渡すチャンクを 1 つ保持している。送らないと
     // 最後の 1 フレームが失われるため、符号化してから閉じる
-    let outcome: Result<()> = async {
-        let Some((chunk, timestamp)) = audio_fade_pending.take() else {
-            return Ok(());
-        };
-        let encoder = audio_encoder.as_mut().expect("audio encoder enabled");
-        let encoded = encoder.encode(&chunk).await?;
-        let audio_config = if *audio_config_sent {
-            None
-        } else {
-            audio_config.as_deref()
-        };
-        let properties = build_audio_loc_properties(timestamp, *audio_timescale, audio_config);
-        // request 単位移行で side session へ移した track は、その session の
-        // handle / data plane で Object を送る ([`publish_sink`])
-        let (audio_handle, audio_data_plane) =
-            publish_sink(audio_publish_target.as_ref(), handle, data_plane);
-        if config.audio_datagram {
-            let mut writer = DatagramWriter::new(
-                audio_handle,
-                audio_data_plane,
-                audio_request_id.expect("audio request_id enabled"),
-                AUDIO_TRACK_ALIAS,
-                *audio_group_id,
-                DEFAULT_PUBLISHER_PRIORITY,
-                config.datagram_max_size,
-                config.audio_redundancy,
-            );
-            let object_location = writer.next_object_location();
-            let outcome = writer.write_object(&encoded, &properties).await?;
-            if outcome == ObjectFilterOutcome::Pass {
-                *audio_config_sent = true;
-                media_cache.insert(
-                    namespace,
-                    AUDIO_TRACK_NAME.as_bytes(),
-                    object_location,
-                    &properties,
-                    &encoded,
-                )?;
-            }
-        } else {
-            let audio_request_id = audio_request_id.expect("audio request_id enabled");
-            let mut writer = SubgroupWriter::new(
-                audio_handle,
-                audio_data_plane,
-                audio_request_id,
-                AUDIO_TRACK_ALIAS,
-                *audio_group_id,
-                SubgroupIdMode::Zero,
-                0,
-                DEFAULT_PUBLISHER_PRIORITY,
-                true,
-                publish_start_location(client, audio_publish_target.as_ref(), audio_request_id),
-            )
-            .await?;
-            let object_location = writer.next_object_location();
-            let outcome = writer.write_object(&encoded, &properties).await?;
-            if outcome == ObjectFilterOutcome::Pass {
-                *audio_config_sent = true;
-                media_cache.insert(
-                    namespace,
-                    AUDIO_TRACK_NAME.as_bytes(),
-                    object_location,
-                    &properties,
-                    &encoded,
-                )?;
-            }
-            writer
-                .finish(publish_start_location(
-                    client,
-                    audio_publish_target.as_ref(),
-                    audio_request_id,
-                ))
-                .await?;
-        }
-        Ok(())
-    }
+    let outcome = flush_audio_fade(AudioFadeContext {
+        config: &mut *config,
+        audio_fade_pending: &mut *audio_fade_pending,
+        audio_encoder: &mut *audio_encoder,
+        audio_config_sent: &mut *audio_config_sent,
+        audio_timescale: &mut *audio_timescale,
+        audio_publish_target: &mut *audio_publish_target,
+        handle: &mut *handle,
+        data_plane: &mut *data_plane,
+        audio_request_id: &mut *audio_request_id,
+        audio_group_id: &mut *audio_group_id,
+        namespace: &mut *namespace,
+        media_cache: &mut *media_cache,
+        audio_config: &mut *audio_config,
+        client: &mut *client,
+    })
     .await;
     if let Err(e) = outcome {
         tracing::warn!("Failed to flush the held audio chunk: {e}");
