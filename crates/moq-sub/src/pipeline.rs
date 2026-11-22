@@ -47,12 +47,12 @@ use shiguredo_moqt::{
     message_parameter::MessageParameters, message_parameter::PARAM_FILL_PARAMETERS,
     message_parameter::PARAM_LOCATION_FILTER, message_parameter::PARAM_NEW_GROUP_REQUEST,
     message_parameter::PARAM_RENDEZVOUS_TIMEOUT, message_parameter::PARAM_SUBSCRIBER_PRIORITY,
-    msf::MSF_CATALOG_TRACK_NAME, msf::MsfCompression, msf::MsfTrack, msf::StreamMapping,
-    msf::parse_catalog_namespace, name::serialize_namespace, name::serialize_track_name,
-    session::types::DataStreamId, session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
-    stream::decoder::DecodedSubgroupObject, stream::decoder::FetchStreamDecoder,
-    stream::decoder::SubgroupStreamDecoder, stream::fetch::FetchHeader,
-    track_properties::TrackProperties,
+    msf::MSF_CATALOG_TRACK_NAME, msf::MsfCompression, msf::MsfPackaging, msf::MsfTrack,
+    msf::StreamMapping, msf::parse_catalog_namespace, name::serialize_namespace,
+    name::serialize_track_name, session::types::DataStreamId, session::types::SessionEvent,
+    stream::decoder::DecodedFetchEntry, stream::decoder::DecodedSubgroupObject,
+    stream::decoder::FetchStreamDecoder, stream::decoder::SubgroupStreamDecoder,
+    stream::fetch::FetchHeader, track_properties::TrackProperties,
 };
 
 use crate::catalog;
@@ -7440,24 +7440,28 @@ async fn receive_catalog(
     // targetLatency は再生側の時間軸が表示の遅れの下限に使う。どの track を購読するかは
     // 呼び出し側が決めるため、ここでは選択した track の情報だけを返し、値の決定は呼び出し側で行う
     let video_track = catalog.tracks.iter().find(|t| {
-        t.codec.as_ref().is_some_and(|c| {
-            c.starts_with("av01")
-                || c.starts_with("avc1")
-                || c.starts_with("hvc1")
-                || c.starts_with("hev1")
-                // VP8 は登録名のみ、VP9 は `vp09.<profile>.<level>.<bit depth>` である
-                || c == "vp8"
-                || c == "vp09"
-                || c.starts_with("vp09.")
-        })
+        is_loc_packaging(t)
+            && role_allows_video(t)
+            && t.codec.as_ref().is_some_and(|c| {
+                c.starts_with("av01")
+                    || c.starts_with("avc1")
+                    || c.starts_with("hvc1")
+                    || c.starts_with("hev1")
+                    // VP8 は登録名のみ、VP9 は `vp09.<profile>.<level>.<bit depth>` である
+                    || c == "vp8"
+                    || c == "vp09"
+                    || c.starts_with("vp09.")
+            })
     });
     // 音声トラックは本 example がデコードできる codec (opus / mp4a.* (AAC)) から選ぶ。
     // codec の文字列は draft-ietf-moq-msf-02 §5.2.19 (Codec) が定める RFC 6381 の表記である。
     // デコードできない codec を購読すると、録画中でも再生時にデコーダを生成できずに失敗する。
     let audio_track = catalog.tracks.iter().find(|t| {
-        t.codec
-            .as_deref()
-            .is_some_and(decoder::is_supported_audio_codec)
+        is_loc_packaging(t)
+            && role_allows_audio(t)
+            && t.codec
+                .as_deref()
+                .is_some_and(decoder::is_supported_audio_codec)
     });
     let selected_latency = |track: Option<&MsfTrack>| {
         track.map(|track| SelectedTrackLatency {
@@ -7971,6 +7975,37 @@ fn resolve_track_namespace(track: &MsfTrack, inherited: &TrackNamespace) -> Resu
         )));
     }
     Ok(namespace)
+}
+
+/// media として購読してよい LOC packaging の track か
+///
+/// draft-ietf-moq-msf-02 §4.1 (LOC packaging) / §5.2.4 (Packaging): media track は
+/// `packaging: "loc"` で配送する。timeline / moqlog / moqmetrics / catalog の track を
+/// LOC として購読すると payload をデコードできない。
+fn is_loc_packaging(track: &MsfTrack) -> bool {
+    matches!(track.packaging, MsfPackaging::Loc)
+}
+
+/// 映像として購読してよい予約 role か
+///
+/// draft-ietf-moq-msf-02 §5.2.7 (Track role): `video` と `signlanguage` は映像、
+/// `audio` / `audiodescription` は音声、`data` はどちらでもない。予約外の role は
+/// アプリケーション定義のため、codec と packaging が合えば購読する。
+fn role_allows_video(track: &MsfTrack) -> bool {
+    match track.role.as_deref() {
+        None | Some("video" | "signlanguage") => true,
+        Some("audio" | "audiodescription" | "data") => false,
+        Some(_) => true,
+    }
+}
+
+/// 音声として購読してよい予約 role か
+fn role_allows_audio(track: &MsfTrack) -> bool {
+    match track.role.as_deref() {
+        None | Some("audio" | "audiodescription") => true,
+        Some("video" | "signlanguage" | "data") => false,
+        Some(_) => true,
+    }
 }
 
 fn extract_video_info(
@@ -11416,6 +11451,50 @@ mod tests {
             test_namespace("moq-example/video"),
             "宣言された namespace を使うこと"
         );
+    }
+
+    /// LOC 以外の packaging は media として選ばないこと
+    #[test]
+    fn catalog_track_selection_requires_loc_packaging() {
+        let mut track = track_with_namespace("av01.0.04M.08", None);
+        track.width = Some(1920);
+        track.height = Some(1080);
+        assert!(is_loc_packaging(&track), "既定の loc は選べること");
+        track.packaging = MsfPackaging::MediaTimeline;
+        assert!(
+            !is_loc_packaging(&track),
+            "timeline は LOC として選ばないこと"
+        );
+        track.packaging = MsfPackaging::Catalog;
+        assert!(
+            !is_loc_packaging(&track),
+            "catalog は LOC として選ばないこと"
+        );
+    }
+
+    /// 予約 role がメディア種別と合わない track を選ばないこと
+    #[test]
+    fn catalog_track_selection_respects_reserved_roles() {
+        let mut track = track_with_namespace("av01.0.04M.08", None);
+        // role 無しと予約外の custom role は codec と packaging で選ぶ
+        assert!(role_allows_video(&track) && role_allows_audio(&track));
+        track.role = Some("custom-role".to_string());
+        assert!(role_allows_video(&track) && role_allows_audio(&track));
+        // 映像の予約 role
+        for role in ["video", "signlanguage"] {
+            track.role = Some(role.to_string());
+            assert!(role_allows_video(&track), "映像として選ぶこと: {role}");
+            assert!(!role_allows_audio(&track), "音声として選ばないこと: {role}");
+        }
+        // 音声の予約 role
+        for role in ["audio", "audiodescription"] {
+            track.role = Some(role.to_string());
+            assert!(role_allows_audio(&track), "音声として選ぶこと: {role}");
+            assert!(!role_allows_video(&track), "映像として選ばないこと: {role}");
+        }
+        // data はどちらでもない
+        track.role = Some("data".to_string());
+        assert!(!role_allows_video(&track) && !role_allows_audio(&track));
     }
 
     /// 映像の width / height が u32 の範囲外ならエラーにすること

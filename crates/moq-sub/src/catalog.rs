@@ -280,6 +280,21 @@ mod tests {
         .into_bytes()
     }
 
+    /// テストで使う複数 track の Full カタログの JSON
+    fn full_json_named_tracks(names: &[&str], is_complete: bool) -> Vec<u8> {
+        let complete = if is_complete {
+            r#""isComplete":true,"#
+        } else {
+            ""
+        };
+        let tracks = names
+            .iter()
+            .map(|name| format!(r#"{{"name":"{name}","packaging":"loc","isLive":true}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(r#"{{"version":"draft-02",{complete}"tracks":[{tracks}]}}"#).into_bytes()
+    }
+
     /// テストで使う delta カタログの JSON (track を 1 つ追加する)
     ///
     /// delta update は version を持ってはならない (draft-ietf-moq-msf-02 §5.3 (Delta updates))。
@@ -951,6 +966,128 @@ mod tests {
         assert!(
             state.apply(&incomplete).is_err(),
             "isComplete を削除するカタログは拒否すること"
+        );
+    }
+    /// isComplete=true の後に新しい track を追加する Full カタログを拒否すること
+    #[test]
+    fn is_complete_rejects_new_tracks() {
+        let mut state = CatalogState::new(test_namespace());
+        let first = CatalogObject::decode(
+            Location {
+                group_id: 100,
+                object_id: 0,
+            },
+            &full_json_named_tracks(&["a"], true),
+        )
+        .expect("最初の Full カタログをデコードできること");
+        assert_eq!(
+            state.apply(&first).expect("最初のカタログを適用できること"),
+            CatalogApplyOutcome::Replaced
+        );
+
+        let second = CatalogObject::decode(
+            Location {
+                group_id: 101,
+                object_id: 0,
+            },
+            &full_json_named_tracks(&["a", "b"], true),
+        )
+        .expect("2 番目の Full カタログをデコードできること");
+        let error = state
+            .apply(&second)
+            .expect_err("isComplete 後の track 追加は拒否すること");
+        assert!(
+            error.to_string().contains("new track"),
+            "新しい track の追加として拒否すること: {error}"
+        );
+        assert_eq!(
+            state
+                .catalog()
+                .expect("旧カタログを維持すること")
+                .tracks
+                .len(),
+            1
+        );
+    }
+
+    /// isComplete=true を維持し、track を追加しない Full カタログを受理すること
+    #[test]
+    fn is_complete_allows_unchanged_tracks() {
+        let mut state = CatalogState::new(test_namespace());
+        for group_id in [100, 101] {
+            let full = CatalogObject::decode(
+                Location {
+                    group_id,
+                    object_id: 0,
+                },
+                &full_json_named_tracks(&["a"], true),
+            )
+            .expect("Full カタログをデコードできること");
+            assert_eq!(
+                state.apply(&full).expect("同じ track なら適用できること"),
+                CatalogApplyOutcome::Replaced
+            );
+        }
+    }
+
+    /// isLive=true→false と isComplete=false→true の遷移を受理すること
+    #[test]
+    fn is_live_true_to_false_and_complete_false_to_true_are_accepted() {
+        let mut state = CatalogState::new(test_namespace());
+        let first = CatalogObject::decode(
+            Location {
+                group_id: 100,
+                object_id: 0,
+            },
+            &full_json_live("a", true, false),
+        )
+        .expect("Full カタログをデコードできること");
+        state.apply(&first).expect("最初のカタログを適用できること");
+
+        let second = CatalogObject::decode(
+            Location {
+                group_id: 101,
+                object_id: 0,
+            },
+            &full_json_live("a", false, true),
+        )
+        .expect("Full カタログをデコードできること");
+        assert_eq!(
+            state
+                .apply(&second)
+                .expect("true→false と false→true は受理すること"),
+            CatalogApplyOutcome::Replaced
+        );
+    }
+
+    /// namespace を省略した track と catalog namespace を明示した track を同じキーにすること
+    #[test]
+    fn tracker_uses_the_catalog_namespace_for_omitted_tracks() {
+        let mut state = CatalogState::new(test_namespace());
+        let omitted = CatalogObject::decode(
+            Location {
+                group_id: 100,
+                object_id: 0,
+            },
+            &full_json_live("a", false, false),
+        )
+        .expect("Full カタログをデコードできること");
+        state
+            .apply(&omitted)
+            .expect("最初のカタログを適用できること");
+
+        let explicit = br#"{"version":"draft-02","tracks":[{"name":"a","namespace":"moq-example","packaging":"loc","isLive":true}]}"#;
+        let explicit = CatalogObject::decode(
+            Location {
+                group_id: 101,
+                object_id: 0,
+            },
+            explicit,
+        )
+        .expect("Full カタログをデコードできること");
+        assert!(
+            state.apply(&explicit).is_err(),
+            "同じキーとして isLive=false→true を拒否すること"
         );
     }
 }
