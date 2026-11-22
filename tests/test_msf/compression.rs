@@ -45,3 +45,53 @@ fn unsupported_compression_does_not_terminate_the_session() {
     assert_eq!(error.data_plane_session_termination_code(), None);
     assert_eq!(error.reason(), "unsupported MSF compression value");
 }
+
+/// catalog を Gzip signal で往復できること
+#[test]
+fn catalog_roundtrip_with_gzip_signal() {
+    let doc = MsfCatalogDocument::Full(MsfCatalog::new());
+    let encoded = doc
+        .encode_with_compression(MsfCompression::Gzip)
+        .expect("catalog を gzip 圧縮できること");
+    assert_eq!(
+        &encoded[..2],
+        &[0x1F, 0x8B],
+        "Gzip signal は gzip を出力する"
+    );
+    let decoded = MsfCatalogDocument::decode_with_compression(&encoded, MsfCompression::Gzip)
+        .expect("gzip 圧縮した catalog を decode できること");
+    assert_eq!(decoded, doc);
+}
+
+/// signal なしでは catalog の gzip を展開しないこと
+///
+/// draft-ietf-moq-msf-02 §12.1.1 は、MSF_COMPRESSION property が無ければ payload を
+/// 非圧縮として扱うことを求める。gzip magic があっても自動展開しない。
+#[test]
+fn catalog_decode_without_signal_does_not_decompress_gzip() {
+    let doc = MsfCatalogDocument::Full(MsfCatalog::new());
+    let encoded = doc
+        .encode_with_compression(MsfCompression::Gzip)
+        .expect("catalog を gzip 圧縮できること");
+    let err = MsfCatalogDocument::decode_with_compression(&encoded, MsfCompression::None)
+        .expect_err("signal なしの gzip は catalog として受理しないこと");
+    assert!(
+        matches!(err, MessageError::InvalidCatalog(_)),
+        "signal なしでは JSON / UTF-8 の検証で失敗する: got {err:?}"
+    );
+}
+
+/// Gzip signal で非圧縮の catalog を渡すと GzipDecode になること
+#[test]
+fn catalog_decode_with_gzip_signal_rejects_plain_json() {
+    let doc = MsfCatalogDocument::Full(MsfCatalog::new());
+    let encoded = doc
+        .encode_with_compression(MsfCompression::None)
+        .expect("catalog を非圧縮でエンコードできること");
+    let err = MsfCatalogDocument::decode_with_compression(&encoded, MsfCompression::Gzip)
+        .expect_err("Gzip signal の非 gzip 入力は拒否すること");
+    assert!(
+        matches!(err, MessageError::GzipDecode(_)),
+        "Gzip signal で非 gzip を渡すと GzipDecode になる: got {err:?}"
+    );
+}

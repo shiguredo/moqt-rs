@@ -1123,6 +1123,8 @@ use shiguredo_moqt::msf::MsfCatalogDocument;
 fn example(bytes: &[u8]) -> Result<(), MessageError> {
     // Full / Delta を自動判別
     let doc = MsfCatalogDocument::decode(bytes)?;
+    // MSF_COMPRESSION property が Gzip の場合は decode_with_compression(bytes, MsfCompression::Gzip)
+    let gz = doc.encode_with_compression(MsfCompression::Gzip)?;
     let encoded = doc.encode()?;
     let _ = encoded;
     Ok(())
