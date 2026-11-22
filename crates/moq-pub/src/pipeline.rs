@@ -3847,7 +3847,7 @@ async fn handle_migration_outcome(
     state: &mut PublisherPipelineState<'_>,
     migration_outcome: Option<MigrationTaskResult>,
 ) -> Result<LoopFlow> {
-    let context = MigrationResultContext {
+    let mut context = MigrationResultContext {
         task_monitor: &mut *state.task_monitor,
         config: &mut *state.config,
         handle: &mut *state.handle,
@@ -3877,233 +3877,262 @@ async fn handle_migration_outcome(
         migration_rx: &mut *state.migration_rx,
         audio_config_sent: &mut *state.audio_config_sent,
     };
-    let MigrationResultContext {
-        task_monitor,
-        config,
-        handle,
-        catalog_group_id,
-        catalog_location,
-        catalog_context,
-        catalog_json,
-        current_video_writer,
-        peer_subscriptions,
-        gop_tracker,
-        session_ended,
-        audio_config_sent,
-        migration_task,
-        request_migration_rx,
-        request_migration_tasks,
-        request_migration_sessions,
-        migrating_tracks,
-        video_publish_target,
-        audio_publish_target,
-        catalog_publish_target,
-        old_session_closers,
-        wt_session_state_rx,
-        catalog_request_id,
-        audio_request_id,
-        video_request_id,
-        data_plane,
-        client,
-        migration_rx,
-    } = context;
     match migration_outcome {
         Some(Ok(migrated)) => {
             // 移行完了: 旧 session から新 session へ参照先をここでまとめて差し替える。
             // draft-ietf-moq-transport-23 §7.7.1 (Graceful Publisher Relay Switchover):
             // 新 session で PUBLISH が成立するまで旧 session の配信を止めない。
             // ここに来た時点で PUBLISH は成立している
-            async {
-                            // 旧 session の映像 writer を終端する (§11.3.2)。終端しないと
-                            // open 中の outgoing stream が残り、旧 session の PUBLISH_DONE が
-                            // 拒否される (§9.9)。filter start は差し替え前の client から取る
-                            // (request 単位移行で side session へ移した track は、main ループ
-                            // から購読状態を観測できないため `None` になる)
-                            if let Some(writer) = current_video_writer.take() {
-                                let start_location = video_request_id.and_then(|request_id| {
-                                    publish_start_location(
-                                        client,
-                                        video_publish_target.as_ref(),
-                                        request_id,
-                                    )
-                                });
-                                if let Err(e) = writer.finish(start_location).await {
-                                    tracing::debug!(
-                                        "Failed to finish the outgoing video subgroup stream during migration: {e}"
-                                    );
-                                }
-                            }
-                            // request 単位移行の side session が残っていれば止める。session
-                            // 全体の移行はすべての track を新しい session で張り直すため、
-                            // 同じ track が 2 つの session から送られないようにする
-                            for task in request_migration_tasks.drain(..) {
-                                task.abort();
-                                let _ = task.await;
-                                tracing::debug!(
-                                    "Aborted the request migration task after a full session migration"
-                                );
-                            }
-                            // 打ち切ったタスクが送信済みのイベントを捨てる。移行先の session の
-                            // request id を古い side session のものへ差し替えないためである
-                            while request_migration_rx.try_recv().is_ok() {}
-                            // URL ごとの side session の slot も破棄する。全 track を新しい
-                            // session で張り直すため、side session はもう使わない
-                            request_migration_sessions.clear();
-                            // request 単位移行で旧 session の PUBLISH を既に終端した track は、
-                            // 旧 session の終了処理でも PUBLISH_DONE を送らない。main ループが
-                            // 持つ request id は side session のものになっており、旧 session の
-                            // 別の request を終端しうるためである
-                            let video_was_migrated = video_publish_target.is_some();
-                            let audio_was_migrated = audio_publish_target.is_some();
-                            let catalog_was_migrated = catalog_publish_target.is_some();
-                            // request 単位移行の送出先を戻す。以降は新しい session の
-                            // handle / data plane を使う
-                            *video_publish_target = None;
-                            *audio_publish_target = None;
-                            *catalog_publish_target = None;
-                            migrating_tracks.clear();
-                            let MigratedSession { url, session } = migrated;
-                            let PublisherSession {
-                                client: new_client,
-                                data_plane: new_data_plane,
-                                video_request_id: new_video_request_id,
-                                audio_request_id: new_audio_request_id,
-                                catalog_request_id: new_catalog_request_id,
-                            } = session;
-                            // 旧 session の終了 (PUBLISH_DONE と NO_ERROR の close) は main ループを
-                            // 止めないよう別タスクに任せる。GOAWAY の Timeout 分は待たない
-                            let old_client = std::mem::replace(client, new_client);
-                            let old_video_request_id =
-                                std::mem::replace(video_request_id, new_video_request_id);
-                            let old_audio_request_id =
-                                std::mem::replace(audio_request_id, new_audio_request_id);
-                            let old_catalog_request_id =
-                                std::mem::replace(catalog_request_id, new_catalog_request_id);
-                            // 移行先の cat が変わると catalog の track の authInfo を載せ替える
-                            // 必要がある (draft-ietf-moq-msf-02 §5.2.42 (Authorization Info))。
-                            // `config.url` を新しい URL に更新する前に比較する
-                            if cat_tokens_changed(&config.url.cat_tokens, &url.cat_tokens) {
-                                match catalog_context.json(&url.cat_tokens) {
-                                    Ok(rebuilt) => {
-                                        *catalog_json = rebuilt;
-                                        tracing::info!(
-                                            "Rebuilt the MSF catalog for the migrated session's C4M authorization tokens"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "Failed to rebuild the MSF catalog for the migrated session's C4M authorization tokens: {e}"
-                                        );
-                                    }
-                                }
-                            }
-                            // 以降の送信は新しい session の handle / data plane を使う
-                            *data_plane = new_data_plane;
-                            *handle = client.handle();
-                            config.url = url;
-                            *wt_session_state_rx = client.wt_session_state();
-                            // 新しい session の最初の音声 Object に Audio Config を載せ直す
-                            // (Audio Config は最初にフィルタを通過した Object にだけ載せるため)
-                            *audio_config_sent = false;
-                            // 新しい session では旧 Group を継続できないため、次のキーフレームで
-                            // 新しい Group を開始する。エンコーダ経路は次のフレームでキーフレームを
-                            // 要求し、切替の空白を短くする
-                            gop_tracker.request_new_group();
-                            // 旧 session の受信 SUBSCRIBE 購読の writer を閉じる
-                            // (open 中の outgoing stream が残っていると旧 session の
-                            // PUBLISH_DONE が拒否される。§9.9)。Session は入れ替わるため
-                            // 受信 SUBSCRIBE の購読も旧 session で終端される
-                            for peer in peer_subscriptions.iter_mut() {
-                                peer.ended = true;
-                                if let Some(writer) = peer.writer.take()
-                                    && let Err(e) = writer
-                                        .finish(
-                                            old_client
-                                                .subscription_filter_start(peer.request_id),
-                                        )
-                                        .await
-                                {
-                                    tracing::debug!(
-                                        "Failed to finish a peer subscription stream during migration: request_id={}, {e}",
-                                        peer.request_id
-                                    );
-                                }
-                            }
-                            let peer_request_ids: Vec<u64> = peer_subscriptions
-                                .iter()
-                                .map(|peer| peer.request_id)
-                                .collect();
-                            // 旧 session の終了は main ループを止めないよう別タスクに任せる。
-                            // JoinHandle は run の終了時に打ち切るため保持する
-                            old_session_closers.push(spawn_old_session_close(
-                                task_monitor,
-                                old_client,
-                                if video_was_migrated {
-                                    None
-                                } else {
-                                    old_video_request_id
-                                },
-                                if audio_was_migrated {
-                                    None
-                                } else {
-                                    old_audio_request_id
-                                },
-                                if catalog_was_migrated {
-                                    None
-                                } else {
-                                    Some(old_catalog_request_id)
-                                },
-                                peer_request_ids,
-                            ));
-                            // 受信 SUBSCRIBE の購読は旧 session の PUBLISH_DONE で終端したため、
-                            // 新 session では送出しない (移行後に再確立しない。購読者が必要なら
-                            // 再度 SUBSCRIBE する)
-                            peer_subscriptions.clear();
-                            tracing::info!(
-                                "Migrated the publisher session to {}",
-                                config.url.authority
-                            );
-                            // 新しい session でカタログを次の Group で送り直す
-                            // (draft-ietf-moq-msf-02 §5 (Catalog) / §6.1 (Group numbering))
-                            if let Err(e) = republish_catalog_at_next_group(
-                                client,
-                                catalog_sink(
-                                    client,
-                                    catalog_publish_target.as_ref(),
-                                    handle,
-                                    data_plane,
-                                    *catalog_request_id,
-                                ),
-                                handle,
-                                data_plane,
-                                *catalog_request_id,
-                                catalog_json,
-                                catalog_group_id,
-                                catalog_location,
-                                peer_subscriptions,
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    "Failed to republish the catalog on the new session: {e}"
-                                );
-                            }
-                        }
-                        .await;
+            let migrated_tracks = finish_old_session_before_migration(&mut context).await;
+            let old_session =
+                replace_with_migrated_session(&mut context, migrated, migrated_tracks);
+            finish_old_session_after_replacement(&mut context, old_session).await;
+            republish_catalog_on_migrated_session(&mut context).await;
             // 結果を受け取ったタスクは完了している。JoinHandle を手放してよい
-            *migration_task = None;
-            *migration_rx = None;
+            *context.migration_task = None;
+            *context.migration_rx = None;
         }
         Some(Err(reason)) => {
             tracing::warn!("Session migration failed: {reason}");
-            *migration_task = None;
+            *context.migration_task = None;
             // 移行を諦め、既存の終了経路 (後始末) へ進む
-            *session_ended = true;
+            *context.session_ended = true;
             return Ok(LoopFlow::Break);
         }
         None => {}
     }
     Ok(LoopFlow::Continue)
+}
+
+/// 移行時に既に request 単位移行で旧 session の PUBLISH を終端した track
+struct MigratedTracks {
+    /// 映像 track の PUBLISH を先に終端したか
+    video: bool,
+    /// 音声 track の PUBLISH を先に終端したか
+    audio: bool,
+    /// catalog track の PUBLISH を先に終端したか
+    catalog: bool,
+}
+
+/// 移行前の旧 session の送信を終端し、request 単位移行の残骸を片付ける
+///
+/// 移行先の session では PUBLISH が成立しているため、旧 session の映像 writer と request
+/// 単位移行の side session を止める。旧 session の PUBLISH を既に終端した track の判定結果を
+/// 返す (旧 session の終了処理で PUBLISH_DONE を二重に送らないために使う)。
+async fn finish_old_session_before_migration(
+    context: &mut MigrationResultContext<'_>,
+) -> MigratedTracks {
+    // 旧 session の映像 writer を終端する (§11.3.2)。終端しないと open 中の outgoing stream
+    // が残り、旧 session の PUBLISH_DONE が拒否される (§9.9)。filter start は差し替え前の
+    // client から取る (request 単位移行で side session へ移した track は、main ループから
+    // 購読状態を観測できないため `None` になる)
+    if let Some(writer) = context.current_video_writer.take() {
+        let start_location = context.video_request_id.and_then(|request_id| {
+            publish_start_location(
+                context.client,
+                context.video_publish_target.as_ref(),
+                request_id,
+            )
+        });
+        if let Err(e) = writer.finish(start_location).await {
+            tracing::debug!(
+                "Failed to finish the outgoing video subgroup stream during migration: {e}"
+            );
+        }
+    }
+    // request 単位移行の side session が残っていれば止める。session 全体の移行はすべての
+    // track を新しい session で張り直すため、同じ track が 2 つの session から送られない
+    // ようにする
+    for task in context.request_migration_tasks.drain(..) {
+        task.abort();
+        let _ = task.await;
+        tracing::debug!("Aborted the request migration task after a full session migration");
+    }
+    // 打ち切ったタスクが送信済みのイベントを捨てる。移行先の session の request id を古い
+    // side session のものへ差し替えないためである
+    while context.request_migration_rx.try_recv().is_ok() {}
+    // URL ごとの side session の slot も破棄する。全 track を新しい session で張り直すため、
+    // side session はもう使わない
+    context.request_migration_sessions.clear();
+    // request 単位移行で旧 session の PUBLISH を既に終端した track は、旧 session の終了処理
+    // でも PUBLISH_DONE を送らない。main ループが持つ request id は side session のものに
+    // なっており、旧 session の別の request を終端しうるためである
+    let migrated_tracks = MigratedTracks {
+        video: context.video_publish_target.is_some(),
+        audio: context.audio_publish_target.is_some(),
+        catalog: context.catalog_publish_target.is_some(),
+    };
+    // request 単位移行の送出先を戻す。以降は新しい session の handle / data plane を使う
+    *context.video_publish_target = None;
+    *context.audio_publish_target = None;
+    *context.catalog_publish_target = None;
+    context.migrating_tracks.clear();
+    migrated_tracks
+}
+
+/// 移行前の旧 session の後始末に使う値
+struct OldSession {
+    /// 旧 session の client
+    client: MoqtClient,
+    /// 旧 session の映像 PUBLISH の request id
+    video_request_id: Option<u64>,
+    /// 旧 session の音声 PUBLISH の request id
+    audio_request_id: Option<u64>,
+    /// 旧 session の catalog PUBLISH の request id
+    catalog_request_id: u64,
+    /// request 単位移行で旧 session の PUBLISH を既に終端した track
+    migrated_tracks: MigratedTracks,
+}
+
+/// 移行先の session を現在の session として差し替える
+///
+/// 旧 session の client と request id は後始末のために返す。`config.url` を新しい URL へ
+/// 更新する前に cat の変更を比較し、認可トークンが変わった場合はカタログを組み直す。
+fn replace_with_migrated_session(
+    context: &mut MigrationResultContext<'_>,
+    migrated: MigratedSession,
+    migrated_tracks: MigratedTracks,
+) -> OldSession {
+    let MigratedSession { url, session } = migrated;
+    let PublisherSession {
+        client: new_client,
+        data_plane: new_data_plane,
+        video_request_id: new_video_request_id,
+        audio_request_id: new_audio_request_id,
+        catalog_request_id: new_catalog_request_id,
+    } = session;
+    // 旧 session の終了 (PUBLISH_DONE と NO_ERROR の close) は main ループを止めないよう
+    // 別タスクに任せる。GOAWAY の Timeout 分は待たない
+    let old_client = std::mem::replace(context.client, new_client);
+    let old_video_request_id = std::mem::replace(context.video_request_id, new_video_request_id);
+    let old_audio_request_id = std::mem::replace(context.audio_request_id, new_audio_request_id);
+    let old_catalog_request_id =
+        std::mem::replace(context.catalog_request_id, new_catalog_request_id);
+    // 移行先の cat が変わると catalog の track の authInfo を載せ替える必要がある
+    // (draft-ietf-moq-msf-02 §5.2.42 (Authorization Info))。`config.url` を新しい URL に
+    // 更新する前に比較する
+    if cat_tokens_changed(&context.config.url.cat_tokens, &url.cat_tokens) {
+        match context.catalog_context.json(&url.cat_tokens) {
+            Ok(rebuilt) => {
+                *context.catalog_json = rebuilt;
+                tracing::info!(
+                    "Rebuilt the MSF catalog for the migrated session's C4M authorization tokens"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to rebuild the MSF catalog for the migrated session's C4M authorization tokens: {e}"
+                );
+            }
+        }
+    }
+    // 以降の送信は新しい session の handle / data plane を使う
+    *context.data_plane = new_data_plane;
+    *context.handle = context.client.handle();
+    context.config.url = url;
+    *context.wt_session_state_rx = context.client.wt_session_state();
+    // 新しい session の最初の音声 Object に Audio Config を載せ直す
+    // (Audio Config は最初にフィルタを通過した Object にだけ載せるため)
+    *context.audio_config_sent = false;
+    // 新しい session では旧 Group を継続できないため、次のキーフレームで新しい Group を
+    // 開始する。エンコーダ経路は次のフレームでキーフレームを要求し、切替の空白を短くする
+    context.gop_tracker.request_new_group();
+    OldSession {
+        client: old_client,
+        video_request_id: old_video_request_id,
+        audio_request_id: old_audio_request_id,
+        catalog_request_id: old_catalog_request_id,
+        migrated_tracks,
+    }
+}
+
+/// 旧 session の受信 SUBSCRIBE の writer を閉じ、旧 session の終了を別タスクへ任せる
+async fn finish_old_session_after_replacement(
+    context: &mut MigrationResultContext<'_>,
+    old_session: OldSession,
+) {
+    // 旧 session の受信 SUBSCRIBE 購読の writer を閉じる (open 中の outgoing stream が
+    // 残っていると旧 session の PUBLISH_DONE が拒否される。§9.9)。Session は入れ替わるため
+    // 受信 SUBSCRIBE の購読も旧 session で終端される
+    for peer in context.peer_subscriptions.iter_mut() {
+        peer.ended = true;
+        if let Some(writer) = peer.writer.take()
+            && let Err(e) = writer
+                .finish(
+                    old_session
+                        .client
+                        .subscription_filter_start(peer.request_id),
+                )
+                .await
+        {
+            tracing::debug!(
+                "Failed to finish a peer subscription stream during migration: request_id={}, {e}",
+                peer.request_id
+            );
+        }
+    }
+    let peer_request_ids: Vec<u64> = context
+        .peer_subscriptions
+        .iter()
+        .map(|peer| peer.request_id)
+        .collect();
+    // 旧 session の終了は main ループを止めないよう別タスクに任せる。
+    // JoinHandle は run の終了時に打ち切るため保持する
+    let closer = spawn_old_session_close(
+        context.task_monitor,
+        old_session.client,
+        if old_session.migrated_tracks.video {
+            None
+        } else {
+            old_session.video_request_id
+        },
+        if old_session.migrated_tracks.audio {
+            None
+        } else {
+            old_session.audio_request_id
+        },
+        if old_session.migrated_tracks.catalog {
+            None
+        } else {
+            Some(old_session.catalog_request_id)
+        },
+        peer_request_ids,
+    );
+    context.old_session_closers.push(closer);
+    // 受信 SUBSCRIBE の購読は旧 session の PUBLISH_DONE で終端したため、新 session では送出
+    // しない (移行後に再確立しない。購読者が必要なら再度 SUBSCRIBE する)
+    context.peer_subscriptions.clear();
+    tracing::info!(
+        "Migrated the publisher session to {}",
+        context.config.url.authority
+    );
+}
+
+/// 新しい session でカタログを次の Group で送り直す
+///
+/// draft-ietf-moq-msf-02 §5 (Catalog) / §6.1 (Group numbering)
+async fn republish_catalog_on_migrated_session(context: &mut MigrationResultContext<'_>) {
+    if let Err(e) = republish_catalog_at_next_group(
+        context.client,
+        catalog_sink(
+            context.client,
+            context.catalog_publish_target.as_ref(),
+            context.handle,
+            context.data_plane,
+            *context.catalog_request_id,
+        ),
+        context.handle,
+        context.data_plane,
+        *context.catalog_request_id,
+        context.catalog_json,
+        context.catalog_group_id,
+        context.catalog_location,
+        context.peer_subscriptions,
+    )
+    .await
+    {
+        tracing::warn!("Failed to republish the catalog on the new session: {e}");
+    }
 }
 
 struct RequestMigrationContext<'a> {
@@ -4133,7 +4162,7 @@ async fn handle_request_migration_event(
     state: &mut PublisherPipelineState<'_>,
     event: RequestMigrationEvent,
 ) -> Result<LoopFlow> {
-    let context = RequestMigrationContext {
+    let mut context = RequestMigrationContext {
         handle: &mut *state.handle,
         catalog_group_id: &mut *state.catalog_group_id,
         catalog_location: &mut *state.catalog_location,
@@ -4154,27 +4183,6 @@ async fn handle_request_migration_event(
         client: &mut *state.client,
         audio_config_sent: &mut *state.audio_config_sent,
     };
-    let RequestMigrationContext {
-        handle,
-        catalog_group_id,
-        catalog_location,
-        catalog_json,
-        current_video_writer,
-        peer_subscriptions,
-        gop_tracker,
-        session_ended,
-        audio_config_sent,
-        request_migration_sessions,
-        migrating_tracks,
-        video_publish_target,
-        audio_publish_target,
-        catalog_publish_target,
-        catalog_request_id,
-        audio_request_id,
-        video_request_id,
-        data_plane,
-        client,
-    } = context;
     match event {
         RequestMigrationEvent::Migrated {
             url,
@@ -4182,109 +4190,25 @@ async fn handle_request_migration_event(
             old_request_id,
             new_request_id,
             new_track_alias,
-            data_plane: migrated_data_plane,
-            handle: migrated_handle,
+            data_plane,
+            handle,
         } => {
-            // side session の確立と PUBLISH の再発行に成功した。旧 session の
-            // 当該 PUBLISH を終端し、以降の Object は side session へ送る
-            // draft-ietf-moq-transport-23 §9.2 (GOAWAY) の "close the old
-            // request stream using the appropriate mechanism"
-            match kind {
-                PublishTrack::Video => {
-                    // open 中の subgroup stream が残っていると PUBLISH_DONE が
-                    // 拒否されるため (§9.9)、先に writer を終端する
-                    if let Some(writer) = current_video_writer.take() {
-                        let start_location = video_request_id
-                            .and_then(|request_id| client.subscription_filter_start(request_id));
-                        if let Err(e) = writer.finish(start_location).await {
-                            tracing::debug!(
-                                "Failed to finish the outgoing video subgroup stream after a request migration: {e}"
-                            );
-                        }
-                    }
-                    send_publish_done_best_effort(client, old_request_id, "video").await;
-                    *video_request_id = Some(new_request_id);
-                    // 新しい session では旧 Group を継続できないため、次の
-                    // キーフレームで新しい Group を開始する。映像の writer は
-                    // Group の先頭 (キーフレーム) でだけ作るため、ここでは
-                    // 作らず、次のキーフレームで side session の handle /
-                    // data plane から作り直す
-                    gop_tracker.request_new_group();
-                    *video_publish_target = Some(PublishTarget {
-                        old_request_id,
-                        handle: migrated_handle,
-                        data_plane: migrated_data_plane,
-                    });
-                }
-                PublishTrack::Audio => {
-                    send_publish_done_best_effort(client, old_request_id, "audio").await;
-                    *audio_request_id = Some(new_request_id);
-                    // 新しい session の最初の音声 Object に Audio Config を
-                    // 載せ直す
-                    *audio_config_sent = false;
-                    *audio_publish_target = Some(PublishTarget {
-                        old_request_id,
-                        handle: migrated_handle,
-                        data_plane: migrated_data_plane,
-                    });
-                }
-                PublishTrack::Catalog => {
-                    send_publish_done_best_effort(client, old_request_id, "catalog").await;
-                    *catalog_request_id = new_request_id;
-                    *catalog_publish_target = Some(PublishTarget {
-                        old_request_id,
-                        handle: migrated_handle,
-                        data_plane: migrated_data_plane,
-                    });
-                    // 新しい session でカタログを次の Group で送り直す
-                    // (draft-ietf-moq-msf-02 §5 (Catalog) /
-                    // §6.1 (Group numbering))
-                    let sink = catalog_sink(
-                        client,
-                        catalog_publish_target.as_ref(),
-                        handle,
-                        data_plane,
-                        *catalog_request_id,
-                    );
-                    if let Err(e) = republish_catalog_at_next_group(
-                        client,
-                        sink,
-                        handle,
-                        data_plane,
-                        *catalog_request_id,
-                        catalog_json,
-                        catalog_group_id,
-                        catalog_location,
-                        peer_subscriptions,
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            "Failed to republish the catalog on the request migration side session: {e}"
-                        );
-                    }
-                }
-                PublishTrack::Unknown => {}
-            }
-            migrating_tracks.retain(|track| *track != kind);
-            tracing::info!(
-                "Migrated the {kind:?} PUBLISH to another session: url={}, old_request_id={old_request_id}, new_request_id={new_request_id}, track_alias={new_track_alias}",
-                side_session_url_display(&url)
-            );
+            handle_migrated_request(
+                &mut context,
+                MigratedRequest {
+                    url,
+                    kind,
+                    old_request_id,
+                    new_request_id,
+                    new_track_alias,
+                    data_plane,
+                    handle,
+                },
+            )
+            .await;
         }
         RequestMigrationEvent::Ended { url } => {
-            // side session を共有するすべての track が送れなくなる。対象 URL の
-            // slot を削除し、パイプラインを終了する。`*_publish_target` を
-            // `None` にすると「未移行」の意味になり、main session の別 request
-            // の id で送信してしまうため、control GOAWAY の移行失敗と同じく
-            // パイプラインを終了する扱いにする
-            request_migration_sessions.remove(&side_session_key(&url));
-            tracing::warn!(
-                "The request migration side session ended: url={}; ending the pipeline",
-                side_session_url_display(&url)
-            );
-            *session_ended = true;
-            return Ok(LoopFlow::Break);
+            return Ok(handle_side_session_ended(&mut context, &url));
         }
         RequestMigrationEvent::Failed {
             url,
@@ -4292,88 +4216,284 @@ async fn handle_request_migration_event(
             old_request_id,
             reason,
         } => {
-            // 1 本の PUBLISH の再発行失敗である。control GOAWAY の移行失敗と
-            // 同じく警告を出し、旧 session の終了経路へ進む
-            //
-            // テスト (peer_integration_tests の移行期限切れ) はこの文言の
-            // "Failed to migrate the" を待って期限切れを観測する。文言を
-            // 変えるときはテストの needle も更新する
-            tracing::warn!(
-                "Failed to migrate the {kind:?} PUBLISH to another session: url={}, request_id={old_request_id}: {reason}",
-                side_session_url_display(&url)
-            );
-            *session_ended = true;
-            return Ok(LoopFlow::Break);
+            return Ok(handle_migrated_request_failed(
+                &mut context,
+                &url,
+                kind,
+                old_request_id,
+                &reason,
+            ));
         }
         RequestMigrationEvent::SessionEvent { url, event } => {
-            // 移行済みの PUBLISH について side session で観測したイベントを
-            // ログに残す。side session の後始末は main ループが所有する
-            // `MoqtClient` では行えないため、記録だけに留める
-            match event {
-                SessionEvent::PublishDoneReceived {
-                    request_id,
-                    status_code,
-                    stream_count,
-                    reason,
-                } => {
-                    tracing::info!(
-                        "Received PUBLISH_DONE on the request migration side session: authority={}, request_id={request_id}, status_code={status_code}, stream_count={stream_count}, reason={}",
-                        url.authority,
-                        reason.as_str(),
-                    );
-                }
-                SessionEvent::RequestErrorReceived {
-                    request_id,
-                    error_code,
-                    retry_interval,
-                    reason,
-                    ..
-                } => {
-                    tracing::warn!(
-                        "Received REQUEST_ERROR on the request migration side session: authority={}, request_id={request_id}, error_code={error_code:#x}, retry_interval={retry_interval}, reason={}",
-                        url.authority,
-                        reason.as_str(),
-                    );
-                }
-                SessionEvent::GoawayReceived {
-                    new_session_uri,
-                    timeout,
-                    on_request_stream,
-                } => {
-                    // side session の GOAWAY はさらに移行しない。移行対象の
-                    // 購読は relay が管理するため、ログだけ残す
-                    tracing::warn!(
-                        "Received GOAWAY on the request migration side session: authority={}, timeout={timeout}, on_request_stream={on_request_stream:?}, new_session_uri_len={}",
-                        url.authority,
-                        new_session_uri.len(),
-                    );
-                }
-                SessionEvent::CloseSession(err) => {
-                    tracing::warn!(
-                        "The request migration side session closed: authority={}, {:#x} {}",
-                        url.authority,
-                        err.code,
-                        err.reason,
-                    );
-                }
-                SessionEvent::PeerClosed(err) => {
-                    tracing::warn!(
-                        "The request migration side session was closed by peer: authority={}, {:#x} {}",
-                        url.authority,
-                        err.code,
-                        err.reason,
-                    );
-                }
-                other => {
-                    tracing::debug!(
-                        "Ignoring a session event on the request migration side session: authority={}, event={other:?}",
-                        url.authority,
-                    );
-                }
-            }
+            log_side_session_event(&url, event);
         }
     }
     Ok(LoopFlow::Continue)
+}
+
+/// side session への移行に成功した request
+struct MigratedRequest {
+    /// 移行先の URL (side session を共有する単位)
+    url: ServerUrl,
+    /// 移行した track 種別
+    kind: PublishTrack,
+    /// 旧 session の request id
+    old_request_id: u64,
+    /// side session で再発行した PUBLISH の request id
+    new_request_id: u64,
+    /// 再発行に使った Track Alias
+    new_track_alias: u64,
+    /// side session の Object 送信用ハンドル
+    data_plane: DataPlaneHandle,
+    /// side session のストリーム開設用ハンドル
+    handle: StreamHandle,
+}
+
+/// side session で PUBLISH を再発行できた request を処理する
+///
+/// side session の確立と PUBLISH の再発行に成功したため、旧 session の当該 PUBLISH を終端し、
+/// 以降の Object は side session へ送る。draft-ietf-moq-transport-23 §9.2 (GOAWAY) の
+/// "close the old request stream using the appropriate mechanism"
+async fn handle_migrated_request(
+    context: &mut RequestMigrationContext<'_>,
+    request: MigratedRequest,
+) {
+    let MigratedRequest {
+        url,
+        kind,
+        old_request_id,
+        new_request_id,
+        new_track_alias,
+        data_plane,
+        handle,
+    } = request;
+    match kind {
+        PublishTrack::Video => {
+            handle_migrated_video(context, old_request_id, new_request_id, handle, data_plane)
+                .await;
+        }
+        PublishTrack::Audio => {
+            handle_migrated_audio(context, old_request_id, new_request_id, handle, data_plane)
+                .await;
+        }
+        PublishTrack::Catalog => {
+            handle_migrated_catalog(context, old_request_id, new_request_id, handle, data_plane)
+                .await;
+        }
+        PublishTrack::Unknown => {}
+    }
+    context.migrating_tracks.retain(|track| *track != kind);
+    tracing::info!(
+        "Migrated the {kind:?} PUBLISH to another session: url={}, old_request_id={old_request_id}, new_request_id={new_request_id}, track_alias={new_track_alias}",
+        side_session_url_display(&url)
+    );
+}
+
+/// 映像 track の PUBLISH を side session へ移す
+async fn handle_migrated_video(
+    context: &mut RequestMigrationContext<'_>,
+    old_request_id: u64,
+    new_request_id: u64,
+    migrated_handle: StreamHandle,
+    migrated_data_plane: DataPlaneHandle,
+) {
+    // open 中の subgroup stream が残っていると PUBLISH_DONE が拒否されるため (§9.9)、
+    // 先に writer を終端する
+    if let Some(writer) = context.current_video_writer.take() {
+        let start_location = context
+            .video_request_id
+            .and_then(|request_id| context.client.subscription_filter_start(request_id));
+        if let Err(e) = writer.finish(start_location).await {
+            tracing::debug!(
+                "Failed to finish the outgoing video subgroup stream after a request migration: {e}"
+            );
+        }
+    }
+    send_publish_done_best_effort(context.client, old_request_id, "video").await;
+    *context.video_request_id = Some(new_request_id);
+    // 新しい session では旧 Group を継続できないため、次のキーフレームで新しい Group を
+    // 開始する。映像の writer は Group の先頭 (キーフレーム) でだけ作るため、ここでは作らず、
+    // 次のキーフレームで side session の handle / data plane から作り直す
+    context.gop_tracker.request_new_group();
+    *context.video_publish_target = Some(PublishTarget {
+        old_request_id,
+        handle: migrated_handle,
+        data_plane: migrated_data_plane,
+    });
+}
+
+/// 音声 track の PUBLISH を side session へ移す
+async fn handle_migrated_audio(
+    context: &mut RequestMigrationContext<'_>,
+    old_request_id: u64,
+    new_request_id: u64,
+    migrated_handle: StreamHandle,
+    migrated_data_plane: DataPlaneHandle,
+) {
+    send_publish_done_best_effort(context.client, old_request_id, "audio").await;
+    *context.audio_request_id = Some(new_request_id);
+    // 新しい session の最初の音声 Object に Audio Config を載せ直す
+    *context.audio_config_sent = false;
+    *context.audio_publish_target = Some(PublishTarget {
+        old_request_id,
+        handle: migrated_handle,
+        data_plane: migrated_data_plane,
+    });
+}
+
+/// catalog track の PUBLISH を side session へ移し、カタログを送り直す
+async fn handle_migrated_catalog(
+    context: &mut RequestMigrationContext<'_>,
+    old_request_id: u64,
+    new_request_id: u64,
+    migrated_handle: StreamHandle,
+    migrated_data_plane: DataPlaneHandle,
+) {
+    send_publish_done_best_effort(context.client, old_request_id, "catalog").await;
+    *context.catalog_request_id = new_request_id;
+    *context.catalog_publish_target = Some(PublishTarget {
+        old_request_id,
+        handle: migrated_handle,
+        data_plane: migrated_data_plane,
+    });
+    // 新しい session でカタログを次の Group で送り直す
+    // (draft-ietf-moq-msf-02 §5 (Catalog) / §6.1 (Group numbering))
+    let sink = catalog_sink(
+        context.client,
+        context.catalog_publish_target.as_ref(),
+        context.handle,
+        context.data_plane,
+        *context.catalog_request_id,
+    );
+    if let Err(e) = republish_catalog_at_next_group(
+        context.client,
+        sink,
+        context.handle,
+        context.data_plane,
+        *context.catalog_request_id,
+        context.catalog_json,
+        context.catalog_group_id,
+        context.catalog_location,
+        context.peer_subscriptions,
+    )
+    .await
+    {
+        tracing::warn!(
+            "Failed to republish the catalog on the request migration side session: {e}"
+        );
+    }
+}
+
+/// side session が終了したときの処理
+///
+/// side session を共有するすべての track が送れなくなる。対象 URL の slot を削除し、
+/// パイプラインを終了する。`*_publish_target` を `None` にすると「未移行」の意味になり、
+/// main session の別 request の id で送信してしまうため、control GOAWAY の移行失敗と同じく
+/// パイプラインを終了する扱いにする
+fn handle_side_session_ended(
+    context: &mut RequestMigrationContext<'_>,
+    url: &ServerUrl,
+) -> LoopFlow {
+    context
+        .request_migration_sessions
+        .remove(&side_session_key(url));
+    tracing::warn!(
+        "The request migration side session ended: url={}; ending the pipeline",
+        side_session_url_display(url)
+    );
+    *context.session_ended = true;
+    LoopFlow::Break
+}
+
+/// request 単位移行の PUBLISH 再発行に失敗したときの処理
+///
+/// 1 本の PUBLISH の再発行失敗である。control GOAWAY の移行失敗と同じく警告を出し、
+/// 旧 session の終了経路へ進む。
+///
+/// テスト (peer_integration_tests の移行期限切れ) はこの文言の "Failed to migrate the" を
+/// 待って期限切れを観測する。文言を変えるときはテストの needle も更新する
+fn handle_migrated_request_failed(
+    context: &mut RequestMigrationContext<'_>,
+    url: &ServerUrl,
+    kind: PublishTrack,
+    old_request_id: u64,
+    reason: &str,
+) -> LoopFlow {
+    tracing::warn!(
+        "Failed to migrate the {kind:?} PUBLISH to another session: url={}, request_id={old_request_id}: {reason}",
+        side_session_url_display(url)
+    );
+    *context.session_ended = true;
+    LoopFlow::Break
+}
+
+/// side session で観測した session イベントをログに残す
+///
+/// 移行済みの PUBLISH について side session で観測したイベントをログに残す。side session の
+/// 後始末は main ループが所有する `MoqtClient` では行えないため、記録だけに留める
+fn log_side_session_event(url: &ServerUrl, event: SessionEvent) {
+    match event {
+        SessionEvent::PublishDoneReceived {
+            request_id,
+            status_code,
+            stream_count,
+            reason,
+        } => {
+            tracing::info!(
+                "Received PUBLISH_DONE on the request migration side session: authority={}, request_id={request_id}, status_code={status_code}, stream_count={stream_count}, reason={}",
+                url.authority,
+                reason.as_str(),
+            );
+        }
+        SessionEvent::RequestErrorReceived {
+            request_id,
+            error_code,
+            retry_interval,
+            reason,
+            ..
+        } => {
+            tracing::warn!(
+                "Received REQUEST_ERROR on the request migration side session: authority={}, request_id={request_id}, error_code={error_code:#x}, retry_interval={retry_interval}, reason={}",
+                url.authority,
+                reason.as_str(),
+            );
+        }
+        SessionEvent::GoawayReceived {
+            new_session_uri,
+            timeout,
+            on_request_stream,
+        } => {
+            // side session の GOAWAY はさらに移行しない。移行対象の購読は relay が管理する
+            // ため、ログだけ残す
+            tracing::warn!(
+                "Received GOAWAY on the request migration side session: authority={}, timeout={timeout}, on_request_stream={on_request_stream:?}, new_session_uri_len={}",
+                url.authority,
+                new_session_uri.len(),
+            );
+        }
+        SessionEvent::CloseSession(err) => {
+            tracing::warn!(
+                "The request migration side session closed: authority={}, {:#x} {}",
+                url.authority,
+                err.code,
+                err.reason,
+            );
+        }
+        SessionEvent::PeerClosed(err) => {
+            tracing::warn!(
+                "The request migration side session was closed by peer: authority={}, {:#x} {}",
+                url.authority,
+                err.code,
+                err.reason,
+            );
+        }
+        other => {
+            tracing::debug!(
+                "Ignoring a session event on the request migration side session: authority={}, event={other:?}",
+                url.authority,
+            );
+        }
+    }
 }
 
 async fn run_publisher_loop(mut state: PublisherPipelineState<'_>) -> Result<()> {
