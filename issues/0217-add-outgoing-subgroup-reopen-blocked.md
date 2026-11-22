@@ -1,7 +1,7 @@
 # STOP_SENDING による再オープン禁止を送信前に判定できるようにする
 
 - Created: 2026-10-09
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/add-outgoing-subgroup-reopen-blocked
 - Polished: 2026-10-25
 - Refreshed: 2026-11-04
@@ -56,3 +56,17 @@ REQUEST_UPDATE の受理まで禁止する状態として保持し (draft は SH
   `stopped_outgoing_subgroup_error_code` との使い分けが追記されていること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること
+
+## 解決方法
+
+- `Session::outgoing_subgroup_reopen_blocked(track_alias, group_id, subgroup_id) -> bool` を
+  公開した。alias を共有する別 request の停止エントリも含めて判定する。
+- `tests/test_session/data_stream.rs` に、STOP_SENDING 後・購読再開後の判定と、
+  alias を共有する 2 本目の subscription の停止エントリを判定に含めるテストを追加した。
+  `stopped_outgoing_subgroup_error_code` は従来どおり記録した request_id のエントリだけを返す。
+- `skills/shiguredo-moqt/SKILL.md` の API 一覧に新しい判定 API と
+  `stopped_outgoing_subgroup_error_code` の使い分けを追記した。
+- example の自前管理は置き換えていない。example は writer の失敗
+  (`TransportError::StreamReset` / `StreamClosed`) を検知して writer を捨て、Group ID を進める
+  経路で cancel を扱っており、判定 API だけに置き換えると実際の送信失敗の検知が失われる。
+  送信前判定が必要な将来の経路では新 API を使える。
