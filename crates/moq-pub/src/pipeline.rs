@@ -466,6 +466,37 @@ impl CatalogContext {
     }
 }
 
+/// エンコーダ経路の映像トラックをカタログ用に組み立てる
+///
+/// キーフレームを時間ベースで要求する経路では、Group が 1 キーフレーム間隔で進む。
+/// Group 長の宣言は、時間ベースの判定が境界のフレームで行われることを踏まえた
+/// [`gop::catalog_max_duration_ms`] の値にし、`maxGopDuration` と `maxGroupDuration` の
+/// 両方へ同じ値を載せる (draft-ietf-moq-msf-02 §5.2.25 / §5.2.26)。
+///
+/// `stream_mapping` は配信設定 `--stream-mapping` の値であり、Group 長の宣言とは独立して
+/// catalog の `packagingMetadata` に載るため、呼び出し側から受け取る。
+fn catalog_video_track(
+    codec: String,
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate: u32,
+    gop_duration_ms: u32,
+    stream_mapping: StreamMapping,
+) -> CatalogVideoTrack {
+    CatalogVideoTrack {
+        codec,
+        width,
+        height,
+        fps,
+        bitrate,
+        // 時間ベースの判定は入力フレームの Timestamp の差分で行うため、宣言は公称 fps で
+        // 境界の 1 フレーム分を見込んだ値にする
+        max_group_duration_ms: Some(gop::catalog_max_duration_ms(fps, gop_duration_ms)),
+        stream_mapping,
+    }
+}
+
 /// カタログの送信用パラメータを組み立てる
 ///
 /// 起動時の初回送信で使う。JSON の組み立てと送信は [`catalog::send_catalog`] が担う。
@@ -1024,20 +1055,15 @@ pub async fn run(
                     stream_mapping: config.stream_mapping,
                 })
             }
-            (None, Some(enc)) => Some(CatalogVideoTrack {
-                codec: enc.catalog_codec_string().to_string(),
-                width: encode_width,
-                height: encode_height,
-                fps: encode_fps,
-                bitrate: config.bitrate,
-                // 時間ベースの判定は入力フレームの Timestamp の差分で行うため、宣言は
-                // 公称 fps で境界の 1 フレーム分を見込んだ値にする
-                max_group_duration_ms: Some(gop::catalog_max_duration_ms(
-                    encode_fps,
-                    config.gop_duration_ms,
-                )),
-                stream_mapping: config.stream_mapping,
-            }),
+            (None, Some(enc)) => Some(catalog_video_track(
+                enc.catalog_codec_string().to_string(),
+                encode_width,
+                encode_height,
+                encode_fps,
+                config.bitrate,
+                config.gop_duration_ms,
+                config.stream_mapping,
+            )),
             (None, None) => None,
         },
         audio: audio_encoder.as_ref().map(|enc| CatalogAudioTrack {
@@ -1262,12 +1288,13 @@ pub async fn run(
                                 frame.timestamp_us,
                                 wall_clock_now_us()?,
                             )?;
-                            // 目標の Group 長を時間で決めるため、直前のキーフレームから
-                            // `--gop-duration` が経過した入力フレームでキーフレームを強制する
-                            let force_keyframe =
-                                gop_tracker.request_keyframe_if_due(timestamp_us);
                             (
-                                encoder.encode(&frame, timestamp_us, force_keyframe)?,
+                                encode_video_input(
+                                    encoder,
+                                    &mut gop_tracker,
+                                    &frame,
+                                    timestamp_us,
+                                )?,
                                 None,
                                 None,
                             )
@@ -1282,9 +1309,8 @@ pub async fn run(
                             let timescale = reencode_video_timescale
                                 .expect("re-encode video input has a timescale");
                             let media_us = media_time_to_micros(timestamp, timescale);
-                            let force_keyframe = gop_tracker.request_keyframe_if_due(media_us);
                             (
-                                encoder.encode(&frame, media_us, force_keyframe)?,
+                                encode_video_input(encoder, &mut gop_tracker, &frame, media_us)?,
                                 Some(timestamp),
                                 Some(timescale),
                             )
@@ -1298,14 +1324,14 @@ pub async fn run(
                         output_timescale,
                         &mut encoded_frames,
                     );
+                    // 出力フレーム列から Group の開始を観測し、次のキーフレーム要求の基準を
+                    // 進める。戻り値はキーフレームごとの直前 Group 長であり、下のループで
+                    // debug ログに使う
+                    let mut observed_group_durations_us =
+                        observe_encoded_frames(&mut gop_tracker, &encoded_frames, video_timescale)
+                            .into_iter();
                     for ef in encoded_frames {
                         if ef.is_keyframe {
-                            // Group を開始したフレームを観測し、次のキーフレーム要求の基準に
-                            // する。エンコーダが時間ベースの要求ではなくフレーム数の上限で
-                            // キーフレームを出した場合もここで基準が進み、その直後に時間
-                            // ベースの要求が重なって 1 フレームの Group になることを防ぐ
-                            let previous_duration_us = gop_tracker
-                                .observe_keyframe(frame_timestamp_us(ef.timestamp, video_timescale));
                             // writer の作成と終端で同じ値を使うため、ここで request_id を
                             // 確定させる (`.expect()` の重複も避ける)
                             let video_request_id =
@@ -1405,7 +1431,10 @@ pub async fn run(
                             started_video_group_id = Some(video_group_id);
                             // 直前の Group の長さを出し、カタログへ宣言した
                             // maxGopDuration / maxGroupDuration と実機で突き合わせられるようにする
-                            if let Some(previous_duration_us) = previous_duration_us {
+                            // (観測したキーフレームごとに 1 件ずつ取り出す)
+                            if let Some(previous_duration_us) =
+                                observed_group_durations_us.next().flatten()
+                            {
                                 tracing::debug!(
                                     "Previous video group lasted {} ms",
                                     previous_duration_us / 1_000
@@ -5282,6 +5311,57 @@ fn frame_timestamp_us(timestamp: u64, timescale: Option<u64>) -> u64 {
     }
 }
 
+/// 出力フレーム列から Group の開始を観測する
+///
+/// キーフレームを出力したフレームで [`gop::GopTracker::observe_keyframe`] を呼び、次の
+/// キーフレーム要求の基準を進める。戻り値は観測したキーフレームごとの直前 Group 長
+/// (マイクロ秒) であり、最初のキーフレームは `None` になる。`run` はこの戻り値を
+/// キーフレームごとの debug ログに使う。
+///
+/// エンコーダが時間ベースの要求ではなくフレーム数の上限でキーフレームを出した場合も、
+/// ここで基準が進む。進めないと、その直後に時間ベースの要求が重なって 1 フレームの
+/// Group ができる (実カデンスが公称 fps より速いと上限の方が先に発火する)。
+///
+/// `frame.timestamp` は live capture では Unix epoch マイクロ秒、MP4 の経路では入力
+/// トラックの timescale 単位である。時間ベースの判定は入力フレームのマイクロ秒と比較する
+/// ため、[`frame_timestamp_us`] で単位を揃えてから観測する。
+fn observe_encoded_frames(
+    tracker: &mut gop::GopTracker,
+    frames: &[EncodedFrame],
+    timescale: Option<u64>,
+) -> Vec<Option<u64>> {
+    let mut group_durations_us = Vec::new();
+    for frame in frames {
+        if !frame.is_keyframe {
+            continue;
+        }
+        group_durations_us
+            .push(tracker.observe_keyframe(frame_timestamp_us(frame.timestamp, timescale)));
+    }
+    group_durations_us
+}
+
+/// 1 つの入力フレームをエンコードする
+///
+/// 映像 Group の長さを時間ベースで決めるため、[`gop::GopTracker::request_keyframe_if_due`]
+/// の判定とエンコーダへのキーフレーム強制の受け渡しをここにまとめる。live capture と
+/// MP4 再エンコードの両経路が本関数を通るため、どちらか一方だけ配線が外れた場合も
+/// テストで検出できる。
+///
+/// `timestamp_us` は入力フレームのメディア時刻 (マイクロ秒)。エンコーダは先頭の出力
+/// フレームへこの値を載せる。
+fn encode_video_input(
+    encoder: &mut encoder::VideoEncoder,
+    tracker: &mut gop::GopTracker,
+    frame: &VideoFrameOwned,
+    timestamp_us: u64,
+) -> Result<Vec<EncodedFrame>> {
+    // 目標の Group 長を時間で決めるため、直前のキーフレームから `--gop-duration` が
+    // 経過した入力フレームでキーフレームを強制する
+    let force_keyframe = tracker.request_keyframe_if_due(timestamp_us);
+    encoder.encode(frame, timestamp_us, force_keyframe)
+}
+
 /// 音声の配信の遅れの内訳を 1 行にまとめる
 ///
 /// 読み出し・符号化のキュー・送信のキューのどこで遅れが溜まっているかを、1 行で読める
@@ -6395,6 +6475,184 @@ mod tests {
             assert!(
                 cat_tokens_changed(&[b"abc".to_vec()], &[b"abd".to_vec()]),
                 "トークンの値が変わったら再構築すること"
+            );
+        }
+    }
+
+    /// 映像 Group の結線 (キーフレーム要求・Group 開始の観測・カタログ宣言) を固定する
+    ///
+    /// `pipeline::run` の映像入力分岐は実 relay や capture が無いと駆動できないため、
+    /// `run` から抽出した関数を直接呼ぶ。出力フレームは `build_video_loc_properties` の
+    /// テストと同じく [`EncodedFrame`] を直接組み立て、エンコーダは実物 (AV1) を使う。
+    ///
+    /// `run` から抽出した関数を呼ぶだけの配線は、呼び出し自体を削除してもこのテストでは
+    /// 検出できない。変異試験の対象は関数内の判定・換算・観測・宣言に置き、`run` からの
+    /// 呼び出しはレビューで確認する。
+    mod gop_wiring_tests {
+        use super::*;
+
+        /// テスト用の映像出力フレームを構築する
+        ///
+        /// Timestamp とキーフレームかどうかだけを変えたフレーム列を作る。実際の
+        /// [`EncodedFrame`] を直接組み立て、モックやスタブは使わない。
+        fn encoded_frame(timestamp: u64, is_keyframe: bool) -> EncodedFrame {
+            EncodedFrame {
+                data: vec![0x00],
+                is_keyframe,
+                timestamp,
+                video_config: None,
+            }
+        }
+
+        /// キーフレーム要求が出た入力が、実エンコーダでキーフレームとして出力されること
+        ///
+        /// `encode_video_input` が encoder へ渡す強制引数を常に `false` にすると、
+        /// 時間ベースの要求がエンコーダへ届かず、このテストが落ちる。先頭フレームの
+        /// キーフレームで Group を開始させ、`--gop-duration` が経過した 2 フレーム目で
+        /// 要求を出す。安全弁のキーフレーム間隔 (600 フレーム) は 2 フレーム目では発火
+        /// しないため、2 フレーム目がキーフレームになるのは強制が届いた場合だけである。
+        #[test]
+        fn encode_video_input_sends_the_forced_keyframe_to_the_encoder() {
+            let mut encoder = encoder::VideoEncoder::Av1(Box::new(
+                encoder::av1::Av1Encoder::new(64, 48, 30, 500, 600)
+                    .expect("AV1 エンコーダを作成できること"),
+            ));
+            let mut tracker = gop::GopTracker::new(2_000);
+
+            // 先頭フレームで Group を開始する (エンコーダは先頭フレームを必ずキーフレームにする)
+            let first =
+                encode_video_input(&mut encoder, &mut tracker, &encoder::test_frame(64, 48), 0)
+                    .expect("先頭フレームの AV1 エンコードに成功すること");
+            assert!(
+                first.iter().any(|frame| frame.is_keyframe),
+                "先頭フレームはキーフレームとして出力されること"
+            );
+            // run と同じ順序で、出力されたキーフレームを観測して次の要求の基準にする
+            observe_encoded_frames(&mut tracker, &first, None);
+
+            // 直前のキーフレームから 2 秒 (gop_duration) 経過した入力で要求が出る
+            let forced = encode_video_input(
+                &mut encoder,
+                &mut tracker,
+                &encoder::test_frame(64, 48),
+                2_000_000,
+            )
+            .expect("2 フレーム目の AV1 エンコードに成功すること");
+            assert!(
+                forced.iter().any(|frame| frame.is_keyframe),
+                "要求したフレームがキーフレームとして出力されること: {:?}",
+                forced
+                    .iter()
+                    .map(|frame| frame.is_keyframe)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                forced.first().map(|frame| frame.timestamp),
+                Some(2_000_000),
+                "出力フレームには入力の Timestamp が載ること"
+            );
+        }
+
+        /// 出力フレームの Timestamp を timescale からマイクロ秒へ換算して観測すること
+        ///
+        /// `observe_encoded_frames` が `frame_timestamp_us` を通さず
+        /// [`EncodedFrame::timestamp`] をそのまま使うと、90000 タイムスケールの
+        /// PTS 180000 が 180000 マイクロ秒の Group 長として返り、このテストが落ちる。
+        /// 戻り値だけでなく、換算した時刻が次のキーフレーム要求の基準になっていることも
+        /// 確かめる。
+        #[test]
+        fn observe_encoded_frames_converts_timestamps_to_microseconds() {
+            // 90000 タイムスケールの PTS。180000 は 2 秒であり、gop_duration と等しい
+            let frames = [
+                encoded_frame(0, true),
+                encoded_frame(90_000, false),
+                encoded_frame(180_000, true),
+            ];
+            let mut tracker = gop::GopTracker::new(2_000);
+            let durations = observe_encoded_frames(&mut tracker, &frames, Some(90_000));
+            assert_eq!(
+                durations,
+                vec![None, Some(2_000_000)],
+                "キーフレームごとの直前 Group 長がマイクロ秒で返ること"
+            );
+            // 換算した 2 秒を基準にすると、3 秒ではまだ gop_duration に達しない
+            assert!(
+                !tracker.request_keyframe_if_due(3_000_000),
+                "換算した 2 秒を基準に、gop_duration が経過するまでは要求しないこと"
+            );
+            assert!(
+                tracker.request_keyframe_if_due(4_000_000),
+                "換算した 2 秒から gop_duration が経過したら要求すること"
+            );
+        }
+
+        /// 観測したキーフレームが次のキーフレーム要求の基準になること
+        ///
+        /// `observe_encoded_frames` から `observe_keyframe` の呼び出しを削除すると、
+        /// トラッカーは Group を開始した時刻を知らないままになり、時間ベースの
+        /// キーフレーム要求が一度も出なくなる。そのため、観測後の要求の有無で
+        /// 呼び出しの欠落を検出する。
+        #[test]
+        fn observe_encoded_frames_moves_the_keyframe_request_reference() {
+            // live capture と同じく timescale を載せないフレーム列
+            let frames = [
+                encoded_frame(1_000_000, true),
+                encoded_frame(2_000_000, false),
+                encoded_frame(3_000_000, true),
+            ];
+            let mut tracker = gop::GopTracker::new(2_000);
+            let durations = observe_encoded_frames(&mut tracker, &frames, None);
+            assert_eq!(
+                durations,
+                vec![None, Some(2_000_000)],
+                "最後に観測したキーフレームの直前 Group 長が返ること"
+            );
+            assert!(
+                !tracker.request_keyframe_if_due(4_999_999),
+                "観測したキーフレームから gop_duration の 1 マイクロ秒手前では要求しないこと"
+            );
+            assert!(
+                tracker.request_keyframe_if_due(5_000_000),
+                "観測したキーフレームから gop_duration が経過したら要求すること"
+            );
+        }
+
+        /// エンコーダ経路のカタログが最大 Group 長を宣言すること
+        ///
+        /// `catalog_video_track` の `max_group_duration_ms` を `None` に固定すると、
+        /// カタログに `maxGopDuration` / `maxGroupDuration` が載らず、このテストが落ちる。
+        /// 宣言値が `gop_duration` に境界の 1 フレーム分を足した値であることと、
+        /// 組み立ての引数がそのまま載ることを確かめる。
+        #[test]
+        fn catalog_video_track_declares_the_max_group_duration() {
+            let track = catalog_video_track(
+                "av01.0.08M.08".to_string(),
+                640,
+                360,
+                30,
+                1_500,
+                2_000,
+                StreamMapping::Group,
+            );
+            assert_eq!(
+                track.max_group_duration_ms,
+                Some(gop::catalog_max_duration_ms(30, 2_000)),
+                "最大 Group 長を宣言すること"
+            );
+            assert_eq!(
+                track.max_group_duration_ms,
+                Some(2_034),
+                "30 fps の 2 秒は 1 フレーム (34 ms の切り上げ) を足した 2034 ms になること"
+            );
+            assert_eq!(track.codec, "av01.0.08M.08", "codec 文字列が載ること");
+            assert_eq!(track.width, 640, "幅が載ること");
+            assert_eq!(track.height, 360, "高さが載ること");
+            assert_eq!(track.fps, 30, "fps が載ること");
+            assert_eq!(track.bitrate, 1_500, "bitrate が載ること");
+            assert_eq!(
+                track.stream_mapping,
+                StreamMapping::Group,
+                "streamMapping が載ること"
             );
         }
     }
