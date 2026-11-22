@@ -14,7 +14,7 @@
 //! 弾くことで、delta の二重適用を防ぐ。
 
 use shiguredo_moqt::message::common::{Location, TrackNamespace};
-use shiguredo_moqt::msf::{MsfCatalog, MsfCatalogDocument, MsfCatalogTracker};
+use shiguredo_moqt::msf::{MsfCatalog, MsfCatalogDocument, MsfCatalogTracker, MsfCompression};
 
 use crate::error::{Error, Result};
 
@@ -30,14 +30,24 @@ pub(crate) struct CatalogObject {
 impl CatalogObject {
     /// Object の payload をカタログの 1 Object としてデコードする
     pub(crate) fn decode(location: Location, payload: &[u8]) -> Result<Self> {
-        let document =
-            MsfCatalogDocument::decode(payload, shiguredo_moqt::msf::MsfCompression::None)
-                .map_err(|e| {
-                    Error::Other(format!(
-                        "failed to parse MSF catalog: {e}, raw={}",
-                        String::from_utf8_lossy(payload),
-                    ))
-                })?;
+        Self::decode_with_compression(location, payload, MsfCompression::None)
+    }
+
+    /// MSF_COMPRESSION property の値に従って catalog Object をデコードする
+    ///
+    /// draft-ietf-moq-msf-02 §5.5 / §12.1: Track Property が Gzip なら全 Object が
+    /// 圧縮されている。呼び出し側が購読の Track Property から解決した値を渡す。
+    pub(crate) fn decode_with_compression(
+        location: Location,
+        payload: &[u8],
+        compression: MsfCompression,
+    ) -> Result<Self> {
+        let document = MsfCatalogDocument::decode(payload, compression).map_err(|e| {
+            Error::Other(format!(
+                "failed to parse MSF catalog: {e}, raw={}",
+                String::from_utf8_lossy(payload),
+            ))
+        })?;
         Ok(Self { location, document })
     }
 }
@@ -909,5 +919,29 @@ mod tests {
             state.apply(&incomplete).is_err(),
             "isComplete を削除するカタログは拒否すること"
         );
+    }
+}
+
+#[cfg(test)]
+mod compression_tests {
+    use super::*;
+
+    /// Gzip signal の catalog Object をデコードできること
+    #[test]
+    fn decode_with_compression_reads_gzip_catalog() {
+        let document = MsfCatalogDocument::Full(MsfCatalog::new());
+        let encoded = document
+            .encode(MsfCompression::Gzip)
+            .expect("catalog を gzip 圧縮できること");
+        let object = CatalogObject::decode_with_compression(
+            Location {
+                group_id: 1,
+                object_id: 0,
+            },
+            &encoded,
+            MsfCompression::Gzip,
+        )
+        .expect("Gzip signal の catalog をデコードできること");
+        assert_eq!(object.document, document);
     }
 }
