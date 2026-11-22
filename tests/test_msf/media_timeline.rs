@@ -134,3 +134,23 @@ fn media_timeline_format_rejects_template_with_explicit_payload() {
         "template が無ければ explicit payload を受理すること"
     );
 }
+
+#[test]
+fn wallclock_accepts_integer_valued_json_numbers() {
+    // 0.0 は数学的に整数 0 なので受理する
+    let tl = MsfMediaTimeline::decode(b"[[0,[0,0],0.0]]").expect("0.0 は受理される");
+    assert_eq!(tl.0[0].wallclock_ms, 0);
+    // u64::MAX の小数表記も f64 を経由せず受理する
+    let tl = MsfMediaTimeline::decode(b"[[0,[0,0],18446744073709551615.0]]")
+        .expect("u64::MAX の小数表記は受理される");
+    assert_eq!(tl.0[0].wallclock_ms, u64::MAX);
+    // 負値と範囲外は拒否する
+    assert!(matches!(
+        MsfMediaTimeline::decode(b"[[0,[0,0],-1]]"),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+    assert!(matches!(
+        MsfMediaTimeline::decode(b"[[0,[0,0],18446744073709551616]]"),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}

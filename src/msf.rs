@@ -186,6 +186,70 @@ fn parse_u64(v: nojson::RawJsonValue<'_, '_>) -> Result<u64, nojson::JsonParseEr
     v.as_integer_str()?.parse::<u64>().map_err(|e| v.invalid(e))
 }
 
+/// JSON の数値表現を数学的な整数としてパースする
+///
+/// `2002`, `2002.0`, `2.002e3`, `2002e0`, `100e-2` のように値が整数なら字句形式に
+/// 関わらず受理し、`2002.5`, `1e-1` のような非整数は拒否する。f64 を経由しないため、
+/// 2^53 を超える整数でも精度落ちしない。i128 の範囲を超える値は `None` を返す。
+fn parse_integer_string(s: &str) -> Option<i128> {
+    let (negative, rest) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s),
+    };
+    let (mantissa, exponent) = match rest.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i64>().ok()?),
+        None => (rest, 0),
+    };
+    let (int_part, frac_part) = match mantissa.split_once('.') {
+        Some((int_part, frac_part)) => (int_part, frac_part),
+        None => (mantissa, ""),
+    };
+    let mut digits = String::new();
+    digits.push_str(int_part);
+    digits.push_str(frac_part);
+    let trimmed = digits.trim_start_matches('0');
+    if trimmed.is_empty() {
+        return Some(0);
+    }
+    let exponent = exponent.checked_sub(frac_part.len() as i64)?;
+    let (digits, zeros) = if exponent >= 0 {
+        (trimmed.to_string(), exponent)
+    } else {
+        let drop = usize::try_from(-exponent).ok()?;
+        if drop > trimmed.len() {
+            return None;
+        }
+        let (keep, removed) = trimmed.split_at(trimmed.len() - drop);
+        if !removed.bytes().all(|b| b == b'0') {
+            return None;
+        }
+        if keep.is_empty() {
+            return Some(0);
+        }
+        (keep.to_string(), 0)
+    };
+    let mut value: i128 = 0;
+    for b in digits.bytes() {
+        value = value.checked_mul(10)?.checked_add(i128::from(b - b'0'))?;
+    }
+    for _ in 0..zeros {
+        value = value.checked_mul(10)?;
+    }
+    Some(if negative { -value } else { value })
+}
+
+/// 時刻フィールド用に、数学的な整数として JSON 数値をパースする
+fn parse_integer_value(v: nojson::RawJsonValue<'_, '_>) -> Result<i128, nojson::JsonParseError> {
+    let s = v.as_number_str()?;
+    parse_integer_string(s).ok_or_else(|| v.invalid("number must be an integer"))
+}
+
+/// 時刻フィールド用に、非負の整数 (u64 範囲) として JSON 数値をパースする
+fn parse_timestamp_u64(v: nojson::RawJsonValue<'_, '_>) -> Result<u64, nojson::JsonParseError> {
+    let value = parse_integer_value(v)?;
+    u64::try_from(value).map_err(|_| v.invalid("timestamp must be in u64 range"))
+}
+
 /// JSON 数値を有限の f64 としてパースする
 ///
 /// 非有限値 (infinity / NaN) は JSON の数値として不正なため拒否する (RFC 8259 §6 (Numbers))。
@@ -4727,8 +4791,10 @@ fn decode_template(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTemplate, Mes
     let delta_media_time = parse_u64(iter.next().ok_or_else(|| missing("deltaMediaTime"))?)?;
     let start_location = iter.next().ok_or_else(|| missing("startLocation"))?;
     let delta_location = iter.next().ok_or_else(|| missing("deltaLocation"))?;
-    let start_wallclock = parse_u64(iter.next().ok_or_else(|| missing("startWallclock"))?)?;
-    let delta_wallclock = parse_u64(iter.next().ok_or_else(|| missing("deltaWallclock"))?)?;
+    let start_wallclock =
+        parse_timestamp_u64(iter.next().ok_or_else(|| missing("startWallclock"))?)?;
+    let delta_wallclock =
+        parse_timestamp_u64(iter.next().ok_or_else(|| missing("deltaWallclock"))?)?;
     if iter.next().is_some() {
         return Err(extra());
     }
@@ -5022,7 +5088,7 @@ fn decode_media_entry(
 
     let group_id = parse_u64(g_v)?;
     let object_id = parse_u64(o_v)?;
-    let wallclock_ms = parse_u64(wall_v)?;
+    let wallclock_ms = parse_timestamp_u64(wall_v)?;
 
     Ok(MsfMediaTimelineEntry {
         pts_ms,
@@ -5066,7 +5132,7 @@ fn decode_event_entry(
         }
         MsfEventIndex::Location(parse_u64(g_v)?, parse_u64(o_v)?)
     } else if let Some(t_v) = val.to_member("T")?.optional() {
-        MsfEventIndex::WallclockMs(parse_u64(t_v)?)
+        MsfEventIndex::WallclockMs(parse_timestamp_u64(t_v)?)
     } else {
         // has_m は true (上で index_count == 1 を保証済み)
         let m_v = val.to_member("M")?.required()?;
