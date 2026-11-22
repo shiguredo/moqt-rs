@@ -1119,6 +1119,25 @@ fn prepare_input_sources(
     Ok((mp4_reader, reencode_reader))
 }
 
+/// セットアップ済みの入力ソース
+struct PreparedInputs {
+    /// MP4 パススルー配信のリーダー (`--input-mp4` の指定が無い場合は `None`)
+    mp4_reader: Option<mp4::Mp4VideoReader>,
+    /// MP4 再エンコード配信のリーダー (`--input-mp4-reencode` の指定が無い場合は `None`)
+    reencode_reader: Option<mp4::reencode::Mp4ReencodeReader>,
+}
+
+/// 入力ソース (MP4 / 再エンコード) を開いて検証する
+///
+/// 読み込みと検証はここで完了させ、後段はリーダーからサンプルを取り出すだけにする。
+fn prepare_inputs(config: &mut Config) -> Result<PreparedInputs> {
+    let (mp4_reader, reencode_reader) = prepare_input_sources(config)?;
+    Ok(PreparedInputs {
+        mp4_reader,
+        reencode_reader,
+    })
+}
+
 /// moq-pub のデータループが使う状態
 struct PublisherPipelineState<'a> {
     task_monitor: &'a mut tokio_metrics::TaskMonitor,
@@ -4506,71 +4525,33 @@ async fn run_publisher_loop(state: PublisherPipelineState<'_>) -> Result<()> {
     Ok(())
 }
 
-pub async fn run(
-    mut config: Config,
-    mut task_monitor: tokio_metrics::TaskMonitor,
-    mut shutdown_monitor: tokio_utils::ShutdownMonitor,
-) -> Result<()> {
-    // MP4 パススルーは接続前にファイルを読み込んで検証する
-    // (不正な入力を relay の接続可否に依存せず報告するため)
-    let (mp4_reader, reencode_reader) = prepare_input_sources(&mut config)?;
-    // QMux 経路も experimental である。DATAGRAM は経路での損失を下位の TCP が再送するため
-    // 起きないが、TCP の再送で遅延が伸びる。QMux は速やかに配送できない DATAGRAM の破棄を
-    // 許すため (draft-ietf-quic-qmux-02 Section 6)、受信側のバッファが溢れると欠落しうる
-    // (`dropped_datagrams` を警告ログに出して追えるようにしている)。
-    // `RESET_STREAM_AT` を実装しないため `reliable_size` は常に `None` になる。
-    if config.transport == Transport::Qmux {
-        tracing::warn!(
-            "QMux transport is experimental: DATAGRAM and stream resets are carried over TCP, so latency can grow when the connection is congested"
-        );
-    } else if config.transport == Transport::Auto {
-        // auto は connection の指定が無いとき QMux を候補に含め得る。どの経路が選ばれるかは
-        // 接続時まで分からないため、選ばれた場合の注意を先に出す
-        tracing::warn!(
-            "QMux may be selected by --transport auto when the URL has no 'connection' parameter: QMux is experimental and carries DATAGRAM and stream resets over TCP, so latency can grow when the connection is congested"
-        );
-    }
+/// セットアップ済みの映像エンコーダと、カタログ・送信に使う映像情報
+struct PreparedVideoEncoder {
+    /// 映像エンコーダ (MP4 パススルー配信または映像無効時は `None`)
+    encoder: Option<encoder::VideoEncoder>,
+    /// PROP_TIMESCALE に載せるタイムスケール (live capture は `None`)
+    timescale: Option<u64>,
+    /// 再エンコード入力の映像トラックのタイムスケール (再エンコード以外は `None`)
+    reencode_timescale: Option<u64>,
+    /// エンコーダとカタログに使う映像幅
+    encode_width: u32,
+    /// エンコーダとカタログに使う映像高さ
+    encode_height: u32,
+    /// エンコーダとカタログに使うフレームレート
+    encode_fps: u32,
+}
 
-    // CLI で §8.8 表現としてパース済みの namespace をそのまま使う
-    let mut namespace = config.namespace.clone();
-    // カタログの namespace は draft-ietf-moq-msf-02 §5.2.2 の `/` 区切りで書く。
-    // Track Namespace Field が UTF-8 でない、NUL を含む、`/` を含む場合はカタログで
-    // 表現できないため、ここで publisher の設定エラーとして拒否する。
-    let namespace_text = serialize_catalog_namespace(&namespace).map_err(|e| {
-        Error::Other(format!(
-            "catalog namespace cannot be represented in MSF: {e}"
-        ))
-    })?;
-
-    // 1. 接続確立と SETUP ハンドシェイク、2. タイムアウト設定、
-    // 3. PUBLISH (video / audio / catalog)
-    //
-    // 名前解決、解決したアドレスのフォールバック、transport ごとの分岐は
-    // tokio_moq の共通の接続経路が担う (GOAWAY 後の移行でも同じ経路を使う)。
-    let PublisherSession {
-        mut client,
-        mut data_plane,
-        mut video_request_id,
-        mut audio_request_id,
-        mut catalog_request_id,
-    } = establish_publisher_session(&config, &config.url, &namespace, &task_monitor).await?;
-    tracing::info!(
-        "Session timeouts: control={:?}ms, data={:?}ms",
-        client.control_message_timeout_ms(),
-        client.data_stream_timeout_ms(),
-    );
-
-    // 4. エンコーダを先に生成し、catalog の codec 文字列を encoder から取得する
-    // --input-mp4 の場合はエンコーダを使わず、MP4 の映像トラック情報を catalog に使う
-    // --input-mp4-reencode の場合は解像度とフレームレートを MP4 から自動検出する
-    let reencode_video_info = reencode_reader.as_ref().and_then(|r| r.video_info());
+/// 映像エンコーダとカタログ用の映像情報を準備する
+///
+/// `--input-mp4` の場合はエンコーダを使わず、MP4 の映像トラック情報を catalog に使う。
+/// `--input-mp4-reencode` の場合は解像度とフレームレートを MP4 から自動検出する。
+fn prepare_video_encoder(config: &Config, inputs: &PreparedInputs) -> Result<PreparedVideoEncoder> {
+    let reencode_video_info = inputs.reencode_reader.as_ref().and_then(|r| r.video_info());
     let (encode_width, encode_height, encode_fps) = match &reencode_video_info {
         Some(info) => (info.width, info.height, info.fps),
         None => (config.width, config.height, config.fps),
     };
-    let mut video_encoder: Option<encoder::VideoEncoder> = if config.video_enabled
-        && mp4_reader.is_none()
-    {
+    let encoder = if config.video_enabled && inputs.mp4_reader.is_none() {
         // エンコーダへ渡すキーフレーム間隔は、時間ベースの要求が効かない場合の安全弁として
         // `--gop-duration` から逆算する
         let keyframe_interval_frames =
@@ -4631,17 +4612,40 @@ pub async fn run(
     // PROP_TIMESCALE を載せる場合の値。MP4 パススルーでは MP4 のタイムスケールを、
     // 再エンコードでは入力映像トラックのタイムスケールを使う。live capture は
     // Unix epoch マイクロ秒 (LOC の既定) を送るため載せない (`None`)。
-    let mut video_timescale: Option<u64> = match (&mp4_reader, &reencode_video_info) {
+    let timescale = match (&inputs.mp4_reader, &reencode_video_info) {
         (Some(reader), _) => Some(reader.info().timescale),
         (None, Some(info)) => Some(info.timescale),
         (None, None) => None,
     };
     // 再エンコードの入力映像トラックのタイムスケール。デコード済みフレームの PTS を
     // マイクロ秒へ換算するために使う。
-    let mut reencode_video_timescale: Option<u64> =
-        reencode_video_info.as_ref().map(|info| info.timescale);
+    let reencode_timescale = reencode_video_info.as_ref().map(|info| info.timescale);
 
-    let mut audio_encoder: Option<AudioEncoder> = if config.audio_enabled {
+    Ok(PreparedVideoEncoder {
+        encoder,
+        timescale,
+        reencode_timescale,
+        encode_width,
+        encode_height,
+        encode_fps,
+    })
+}
+
+/// セットアップ済みの音声エンコーダと、カタログ・送信に使う音声情報
+struct PreparedAudioEncoder {
+    /// 音声エンコーダ (音声無効時は `None`)
+    encoder: Option<AudioEncoder>,
+    /// 1 フレームあたりのサンプル数
+    samples_per_frame: Option<usize>,
+    /// PROP_TIMESCALE に載せるタイムスケール (live capture は `None`)
+    timescale: Option<u64>,
+    /// codec 固有の configuration bytes
+    config_bytes: Option<Vec<u8>>,
+}
+
+/// 音声エンコーダとカタログ・送信に使う音声情報を準備する
+fn prepare_audio_encoder(config: &Config, inputs: &PreparedInputs) -> Result<PreparedAudioEncoder> {
+    let encoder: Option<AudioEncoder> = if config.audio_enabled {
         Some(AudioEncoder::new(
             config.audio_codec,
             AUDIO_SAMPLE_RATE,
@@ -4651,16 +4655,12 @@ pub async fn run(
     } else {
         None
     };
-    // 音声の追いつきの判定 (配信ごとに 1 つ)。符号化が実時間に追いつかなくなるとキューが
-    // 溜まり、遅れが受信側の基準を押し上げるため、遅れたチャンクは符号化へ渡さずに捨てる
-    let mut audio_publish_catch_up = AudioPublishCatchUp::new();
-    // 直近にログへ出した、捨てたチャンクの数。状態が変わったときだけログに出す
-    let mut audio_catch_up_logged_dropped_frames: u64 = 0;
-    let mut audio_samples_per_frame = audio_encoder.as_ref().map(|e| e.samples_per_frame());
+    let samples_per_frame = encoder.as_ref().map(|e| e.samples_per_frame());
     // PROP_TIMESCALE は再エンコードでは入力音声トラックのタイムスケールを使う。
     // live capture は Unix epoch マイクロ秒 (LOC の既定) を送るため載せない (`None`)。
-    let mut audio_timescale: Option<u64> = if config.audio_enabled {
-        reencode_reader
+    let timescale = if config.audio_enabled {
+        inputs
+            .reencode_reader
             .as_ref()
             .and_then(|r| r.audio_info())
             .map(|info| info.timescale)
@@ -4669,37 +4669,116 @@ pub async fn run(
     };
     // codec 固有の configuration bytes (Opus は OpusHead、AAC-LC は AudioSpecificConfig) を
     // 事前に構築する。Audio Config プロパティとして最初の audio object にだけ付与する
-    let mut audio_config = audio_encoder
+    let config_bytes = encoder
         .as_ref()
         .map(|e| e.audio_config(AUDIO_SAMPLE_RATE, AUDIO_CHANNELS))
         .transpose()?;
 
-    // 5. MSF カタログを送信する
+    Ok(PreparedAudioEncoder {
+        encoder,
+        samples_per_frame,
+        timescale,
+        config_bytes,
+    })
+}
+
+/// 接続済みの publisher session と、接続に使った namespace
+struct ConnectedPublisher {
+    /// CLI で §8.8 表現としてパース済みの namespace
+    namespace: TrackNamespace,
+    /// カタログ用の namespace の MSF (`/` 区切り) 表現
+    namespace_text: String,
+    /// SETUP まで終えた session と各 track の PUBLISH
+    session: PublisherSession,
+}
+
+/// 接続を確立し、namespace を準備して映像 / 音声 / catalog の PUBLISH を張る
+async fn connect_and_publish(
+    config: &Config,
+    task_monitor: &tokio_metrics::TaskMonitor,
+) -> Result<ConnectedPublisher> {
+    // QMux 経路も experimental である。DATAGRAM は経路での損失を下位の TCP が再送するため
+    // 起きないが、TCP の再送で遅延が伸びる。QMux は速やかに配送できない DATAGRAM の破棄を
+    // 許すため (draft-ietf-quic-qmux-02 Section 6)、受信側のバッファが溢れると欠落しうる
+    // (`dropped_datagrams` を警告ログに出して追えるようにしている)。
+    // `RESET_STREAM_AT` を実装しないため `reliable_size` は常に `None` になる。
+    if config.transport == Transport::Qmux {
+        tracing::warn!(
+            "QMux transport is experimental: DATAGRAM and stream resets are carried over TCP, so latency can grow when the connection is congested"
+        );
+    } else if config.transport == Transport::Auto {
+        // auto は connection の指定が無いとき QMux を候補に含め得る。どの経路が選ばれるかは
+        // 接続時まで分からないため、選ばれた場合の注意を先に出す
+        tracing::warn!(
+            "QMux may be selected by --transport auto when the URL has no 'connection' parameter: QMux is experimental and carries DATAGRAM and stream resets over TCP, so latency can grow when the connection is congested"
+        );
+    }
+
+    // CLI で §8.8 表現としてパース済みの namespace をそのまま使う
+    let namespace = config.namespace.clone();
+    // カタログの namespace は draft-ietf-moq-msf-02 §5.2.2 の `/` 区切りで書く。
+    // Track Namespace Field が UTF-8 でない、NUL を含む、`/` を含む場合はカタログで
+    // 表現できないため、ここで publisher の設定エラーとして拒否する。
+    let namespace_text = serialize_catalog_namespace(&namespace).map_err(|e| {
+        Error::Other(format!(
+            "catalog namespace cannot be represented in MSF: {e}"
+        ))
+    })?;
+
+    // 1. 接続確立と SETUP ハンドシェイク、2. タイムアウト設定、
+    // 3. PUBLISH (video / audio / catalog)
     //
-    // カタログの Group ID は 0 に固定しない。draft-ietf-moq-msf-02 §6.1 (Group numbering) は
-    // Track の Group ID を一意で単調増加とする MUST を課し、publisher の再起動時には
-    // 以前 publish したどの Group ID よりも大きい値から始める MUST を課す。同じ Track 名で
-    // 配信し直しても Group ID が衝突しないよう、Unix epoch ミリ秒から払い出す。
-    // 移行 (GOAWAY) で差し替えるため、writer の生成に使う handle も可変にする
-    let mut handle = client.handle();
-    let mut catalog_group_id = group_id::allocate_initial_group_id()?;
-    // カタログの Location。FETCH 応答と fill fetch stream の範囲判定、SUBSCRIBE_OK の
-    // LARGEST_OBJECT に使う
-    let mut catalog_location = Location {
-        group_id: catalog_group_id,
-        object_id: 0,
-    };
-    // カタログの組み立てに使う入力を保持する。GOAWAY 移行で移行先の cat が変わったときに
-    // 同じ入力から authInfo を載せ替えるため、エンコーダ / MP4 リーダーではなく値を所有する
-    let mut catalog_context = CatalogContext {
+    // 名前解決、解決したアドレスのフォールバック、transport ごとの分岐は
+    // tokio_moq の共通の接続経路が担う (GOAWAY 後の移行でも同じ経路を使う)。
+    let session =
+        establish_publisher_session(config, &config.url, &namespace, task_monitor).await?;
+    tracing::info!(
+        "Session timeouts: control={:?}ms, data={:?}ms",
+        session.client.control_message_timeout_ms(),
+        session.client.data_stream_timeout_ms(),
+    );
+
+    Ok(ConnectedPublisher {
+        namespace,
         namespace_text,
-        track_name: config.track_name.clone(),
-        // 音声と映像を同じ時間軸で再生するため、両トラックへ同じ値を載せる
-        sync: catalog::CatalogSyncParams {
-            render_group: CATALOG_RENDER_GROUP,
-            target_latency_ms: u64::from(config.target_latency_ms),
-        },
-        video: match (&mp4_reader, video_encoder.as_ref()) {
+        session,
+    })
+}
+
+/// 送信済みのカタログ
+struct PreparedCatalog {
+    /// カタログ track の Subgroup / Object 送信に使う session の handle
+    handle: StreamHandle,
+    /// カタログの最初の Group ID
+    group_id: u64,
+    /// カタログの Location
+    location: Location,
+    /// カタログの組み立てに使う入力
+    context: CatalogContext,
+    /// 送信したカタログ JSON
+    json: Vec<u8>,
+}
+
+/// カタログに載せる映像 / 音声トラック
+struct CatalogTracks {
+    /// カタログに載せる映像トラック (映像を配信しない場合は `None`)
+    video: Option<CatalogVideoTrack>,
+    /// カタログに載せる音声トラック (音声を配信しない場合は `None`)
+    audio: Option<CatalogAudioTrack>,
+}
+
+/// カタログに載せる映像 / 音声トラックを組み立てる
+///
+/// エンコーダは `Sync` ではないため、非同期のカタログ送信へはエンコーダの参照ではなく
+/// 組み立て済みの値を渡す (async fn の引数に残すと `run` の future が `Send` にならない)。
+fn prepare_catalog_tracks(
+    config: &Config,
+    inputs: &PreparedInputs,
+    video: &PreparedVideoEncoder,
+    audio: &PreparedAudioEncoder,
+) -> CatalogTracks {
+    CatalogTracks {
+        video: match (&inputs.mp4_reader, video.encoder.as_ref()) {
             (Some(reader), _) => {
                 let info = reader.info();
                 Some(CatalogVideoTrack {
@@ -4717,290 +4796,607 @@ pub async fn run(
             }
             (None, Some(enc)) => Some(catalog_video_track(
                 enc.catalog_codec_string().to_string(),
-                encode_width,
-                encode_height,
-                encode_fps,
+                video.encode_width,
+                video.encode_height,
+                video.encode_fps,
                 config.bitrate,
                 config.gop_duration_ms,
                 config.stream_mapping,
             )),
             (None, None) => None,
         },
-        audio: audio_encoder.as_ref().map(|enc| CatalogAudioTrack {
+        audio: audio.encoder.as_ref().map(|enc| CatalogAudioTrack {
             codec: enc.catalog_codec_string().to_string(),
             samplerate: AUDIO_SAMPLE_RATE,
             channel_config: AUDIO_CHANNEL_CONFIG.to_string(),
             bitrate: config.audio_bitrate,
         }),
+    }
+}
+
+/// MSF カタログを組み立てて送信する
+async fn prepare_catalog(
+    config: &Config,
+    connected: &mut ConnectedPublisher,
+    tracks: CatalogTracks,
+) -> Result<PreparedCatalog> {
+    // カタログの Group ID は 0 に固定しない。draft-ietf-moq-msf-02 §6.1 (Group numbering) は
+    // Track の Group ID を一意で単調増加とする MUST を課し、publisher の再起動時には
+    // 以前 publish したどの Group ID よりも大きい値から始める MUST を課す。同じ Track 名で
+    // 配信し直しても Group ID が衝突しないよう、Unix epoch ミリ秒から払い出す。
+    // 移行 (GOAWAY) では差し替えるため、handle は [`PublisherSetup`] が可変として保持する
+    let handle = connected.session.client.handle();
+    let catalog_group_id = group_id::allocate_initial_group_id()?;
+    // カタログの Location。FETCH 応答と fill fetch stream の範囲判定、SUBSCRIBE_OK の
+    // LARGEST_OBJECT に使う
+    let catalog_location = Location {
+        group_id: catalog_group_id,
+        object_id: 0,
+    };
+    // カタログの組み立てに使う入力を保持する。GOAWAY 移行で移行先の cat が変わったときに
+    // 同じ入力から authInfo を載せ替えるため、エンコーダ / MP4 リーダーではなく値を所有する
+    let catalog_context = CatalogContext {
+        namespace_text: std::mem::take(&mut connected.namespace_text),
+        track_name: config.track_name.clone(),
+        // 音声と映像を同じ時間軸で再生するため、両トラックへ同じ値を載せる
+        sync: catalog::CatalogSyncParams {
+            render_group: CATALOG_RENDER_GROUP,
+            target_latency_ms: u64::from(config.target_latency_ms),
+        },
+        video: tracks.video,
+        audio: tracks.audio,
     };
     // `cat` が指定された配信は、映像 / 音声の track に authInfo を載せる (§5.2.42)
-    let mut catalog_json = catalog::send_catalog(catalog_params(
+    let catalog_json = catalog::send_catalog(catalog_params(
         &catalog_context,
         &handle,
-        &data_plane,
-        catalog_request_id,
+        &connected.session.data_plane,
+        connected.session.catalog_request_id,
         catalog_group_id,
-        client.subscription_filter_start(catalog_request_id),
+        connected
+            .session
+            .client
+            .subscription_filter_start(connected.session.catalog_request_id),
         &config.url.cat_tokens,
     ))
     .await?;
 
-    // 6. 映像 / 音声入力を起動する
-    //
-    // MP4 リーダーの停止は Drop で行う。Drop は宣言と逆順に実行されるため、
-    // 受信側 (video_input_rx / audio_input_rx) を先に閉じてから join できるよう
-    // リーダーの生存管理を先に宣言する。
+    Ok(PreparedCatalog {
+        handle,
+        group_id: catalog_group_id,
+        location: catalog_location,
+        context: catalog_context,
+        json: catalog_json,
+    })
+}
+
+/// 起動済みの入力タスク
+struct StartedInputTasks {
+    /// 映像キャプチャの寿命管理 (読み出さないが drop されるまで保持する)
+    _video_capture: Option<VideoCaptureGuard>,
+    /// 疑似音声キャプチャの寿命管理 (読み出さないが drop されるまで保持する)
+    _fake_audio_capture: Option<fake_audio_capture::FakeAudioCapture>,
+    /// 映像入力の受信側
+    video_input_rx: mpsc::Receiver<VideoInput>,
+    /// 音声入力の受信側
+    audio_input_rx: mpsc::Receiver<AudioInput>,
+    /// MP4 パススルー入力のリーダー
+    mp4_source: Option<mp4::ReaderGuard>,
+    /// MP4 再エンコード入力のリーダー
+    reencode_source: Option<mp4::ReaderGuard>,
+}
+
+/// 映像 / 音声の入力タスクを起動する
+///
+/// MP4 リーダーの停止は Drop で行う。Drop は宣言と逆順に実行されるため、受信側
+/// (`video_input_rx` / `audio_input_rx`) を先に閉じてから join できるよう、リーダーの
+/// 生存管理を先に宣言する。
+///
+/// 実マイクのキャプチャは、実行中のセッションを表すガードが
+/// [`shiguredo_audio_device::AudioCapture`] を借用する。`AudioCapture` は `audio_capture`
+/// に、そのガードは戻り値に分けて返し、`run` が宣言順に保持することで guard の drop が
+/// `AudioCapture` の drop より先に起きるようにする。
+fn start_input_tasks<'a>(
+    config: &Config,
+    inputs: PreparedInputs,
+    audio_capture: &'a mut Option<shiguredo_audio_device::AudioCapture>,
+) -> Result<(
+    StartedInputTasks,
+    Option<shiguredo_audio_device::AudioCaptureSession<'a>>,
+)> {
+    let PreparedInputs {
+        mp4_reader,
+        reencode_reader,
+    } = inputs;
     let mut mp4_source: Option<mp4::ReaderGuard> = None;
     let mut reencode_source: Option<mp4::ReaderGuard> = None;
-    let (video_input_tx, mut video_input_rx) = mpsc::channel::<VideoInput>(4);
-    let (audio_input_tx, mut audio_input_rx) = mpsc::channel::<AudioInput>(8);
-    // 実マイクのキャプチャは、実行中のセッションを表すガードが AudioCapture を借用するため、
-    // AudioCapture とガードを別々のローカル変数として保持する。宣言と逆順に drop されるので、
-    // キャプチャを止めるガードの drop が AudioCapture の drop より先に起きる。
-    #[expect(
-        unused_assignments,
-        reason = "実キャプチャを使わない経路では初期値の None を読まないため"
-    )]
-    let mut audio_capture: Option<shiguredo_audio_device::AudioCapture> = None;
-    let mut _audio_capture_session: Option<shiguredo_audio_device::AudioCaptureSession<'_>> = None;
-    // 疑似音声キャプチャの寿命管理 (読み出さないが drop されるまで保持する)
-    let _fake_audio_capture: Option<fake_audio_capture::FakeAudioCapture>;
-    let _video_capture: Option<VideoCaptureGuard>;
+    let (video_input_tx, video_input_rx) = mpsc::channel::<VideoInput>(4);
+    let (audio_input_tx, audio_input_rx) = mpsc::channel::<AudioInput>(8);
+    let mut audio_capture_session = None;
     if let Some(reader) = reencode_reader {
         // MP4 再エンコード: リーダーが映像と音声の両方を供給する
         let video_input_tx = config.video_enabled.then_some(video_input_tx);
         let audio_input_tx = config.audio_enabled.then_some(audio_input_tx);
         reencode_source = Some(reader.start(video_input_tx, audio_input_tx)?);
-        _video_capture = None;
-        _fake_audio_capture = None;
-    } else {
-        _video_capture = if config.video_enabled {
-            match mp4_reader {
-                Some(reader) => {
-                    mp4_source = Some(reader.start(video_input_tx)?);
-                    None
-                }
-                None => Some(if config.fake_capture_device {
-                    VideoCaptureGuard::Fake(fake_capture::start_capture(&config, video_input_tx)?)
-                } else {
-                    VideoCaptureGuard::Real(capture::start_capture(&config, video_input_tx)?)
-                }),
-            }
-        } else {
-            // 送信側を drop して受信側を閉じておく (select の分岐は cfg gate でスキップ)
-            drop(video_input_tx);
-            None
-        };
+        return Ok((
+            StartedInputTasks {
+                _video_capture: None,
+                _fake_audio_capture: None,
+                video_input_rx,
+                audio_input_rx,
+                mp4_source,
+                reencode_source,
+            },
+            audio_capture_session,
+        ));
+    }
 
-        if config.audio_enabled {
-            if config.fake_capture_device {
-                _fake_audio_capture = Some(fake_audio_capture::start_capture(audio_input_tx)?);
-            } else {
-                _fake_audio_capture = None;
-                audio_capture = Some(audio_capture::new_capture(&config, audio_input_tx)?);
-                let capture = audio_capture
-                    .as_mut()
-                    .expect("audio capture is set just above");
-                _audio_capture_session = Some(capture.start()?);
-                tracing::info!("Audio capture started (48000 Hz, 1ch)");
+    let video_capture = if config.video_enabled {
+        match mp4_reader {
+            Some(reader) => {
+                mp4_source = Some(reader.start(video_input_tx)?);
+                None
             }
-        } else {
-            drop(audio_input_tx);
-            _fake_audio_capture = None;
+            None => Some(if config.fake_capture_device {
+                VideoCaptureGuard::Fake(fake_capture::start_capture(config, video_input_tx)?)
+            } else {
+                VideoCaptureGuard::Real(capture::start_capture(config, video_input_tx)?)
+            }),
         }
+    } else {
+        // 送信側を drop して受信側を閉じておく (select の分岐は cfg gate でスキップ)
+        drop(video_input_tx);
+        None
     };
 
-    // 7. データループ
-    let mut start = Instant::now();
-    // 映像 / 音声の Group ID も 0 に固定しない (draft-ietf-moq-msf-02 §6.1 (Group numbering))。
-    // 再起動時に以前の Group ID を下回らないよう、カタログと同じ規則で払い出す。
-    let mut video_group_id: u64 = group_id::allocate_initial_group_id()?;
-    // 直前に開始した映像 Group の ID。NEW_GROUP_REQUEST (§9.19.19) の値が未来の Group を
-    // 指しているかを判定するために使う
-    let mut started_video_group_id: Option<u64> = None;
-    let mut audio_group_id: u64 = group_id::allocate_initial_group_id()?;
-    let mut audio_frame_count: u64 = 0;
-    let mut current_video_writer: Option<SubgroupWriter> = None;
-    // object モードで次に送る Object の Group 内の Object ID
-    // (draft-ietf-moq-msf-02 §6.2 (Object Numbering): Group 内で 0 から 1 ずつ増やす)
-    let mut video_object_id: u64 = 0;
-    // 受信 SUBSCRIBE で確立した購読の送出状態 (draft-ietf-moq-transport-23 §3.1)。
-    // Track Alias は PUBLISH の固定値 (0 / 1 / 2) の次から採番する
-    let mut peer_subscriptions: Vec<PeerSubscription> = Vec::new();
-    let mut next_peer_alias: u64 = AUDIO_TRACK_ALIAS + 1;
-    // 映像 Group の開始時刻を追跡する。キーフレームの要求はエンコーダを使う経路
-    // (live capture / MP4 再エンコード) でだけ行い、MP4 パススルーでは Group 長の観測
-    // (debug ログ) にだけ使う
-    let mut gop_tracker = gop::GopTracker::new(config.gop_duration_ms);
-    // セッション終了を観測してループを抜けたかどうか。後始末の失敗をセッション終了に伴う
-    // 失敗として扱うために使う (セッション終了後の `close` は CONNECT stream の送信失敗として
-    // `Error::WebTransport` に畳まれる経路があり、エラーの variant だけでは判別できない)
-    let mut session_ended = false;
-    let mut audio_pcm_buf: Vec<i16> = Vec::new();
-    // 棄却で飛んだ境目をフェードで繋ぐために保持しているチャンク (PCM と TIMESTAMP)。
-    // 捨てるかどうかは次のチャンクの判定を見るまで分からないため、符号化へ渡すチャンクを
-    // 1 つ保持する (先読みの分だけ符号化が 1 フレーム遅れる)
-    let mut audio_fade_pending: Option<(Vec<i16>, u64)> = None;
-    // 直前にチャンクを捨てたかどうか。捨てた直後のチャンクの先頭を落とす
-    let mut audio_fade_next_head = false;
-    // live capture のメディア時刻を epoch マイクロ秒へ換算する。capture の時刻の起源は
-    // 音声と映像 (さらにデバイスと OS) で異なるため、それぞれ別に持つ。映像は対応を小さく
-    // する向きにだけ動かす `WallClockMapper`、音声はドリフトへ窓を滑らせて追従し段差では
-    // 取り直す `AudioTimestampClock` を使う
-    let mut video_clock = WallClockMapper::new();
-    let mut audio_clock = AudioTimestampClock::new();
-    // 換算の残差 (受信時刻 − 換算した TIMESTAMP) をトラックごとに溜め、定期的に要約を出す
-    let mut capture_residuals = CaptureClockResiduals::new();
-    // live capture の音声バッファ先頭の時刻。1 つの capture フレームから複数の Opus
-    // フレームを切り出すため、切り出し位置の時刻をサンプル数から進める。
-    let mut audio_timeline = AudioCaptureTimeline::new();
-    // 再エンコードで入力サンプルの PTS を出力フレームへ対応付ける待ち行列
-    let mut pending_video_timestamps: VecDeque<u64> = VecDeque::new();
-    // Audio Config を送信済みかどうかのフラグ
-    // Opus は全フレームが独立してデコード可能なため、最初の audio object だけでよい
-    let mut audio_config_sent = false;
-    // 直近に音声の配信の遅れの内訳を出した時刻 (開始からのミリ秒)
-    let mut audio_stats_logged_ms: u64 = 0;
-    // publish したメディアの保持。subscriber の FETCH に配る Object と End of Unknown Range を
-    // 決めるために使う (draft-ietf-moq-transport-23 §3.2 (Fetch))。GOAWAY で session を移行しても
-    // 保持は続ける (移行先の購読者も直近の Object を FETCH で取得できる)
-    let mut media_cache = cache::MediaCache::new(config.cache_duration_ms);
-    let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(100));
-    tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // カタログの送り直し。開始直後の 1 回は送信済みなので、1 間隔ぶん待ってから始める
-    let mut catalog_republish_interval = tokio::time::interval_at(
+    let fake_audio_capture = if config.audio_enabled {
+        if config.fake_capture_device {
+            Some(fake_audio_capture::start_capture(audio_input_tx)?)
+        } else {
+            *audio_capture = Some(audio_capture::new_capture(config, audio_input_tx)?);
+            let capture = audio_capture
+                .as_mut()
+                .expect("audio capture is set just above");
+            audio_capture_session = Some(capture.start()?);
+            tracing::info!("Audio capture started (48000 Hz, 1ch)");
+            None
+        }
+    } else {
+        drop(audio_input_tx);
+        None
+    };
+
+    Ok((
+        StartedInputTasks {
+            _video_capture: video_capture,
+            _fake_audio_capture: fake_audio_capture,
+            video_input_rx,
+            audio_input_rx,
+            mp4_source,
+            reencode_source,
+        },
+        audio_capture_session,
+    ))
+}
+
+/// セットアップ済みのエンコーダ一式
+struct PreparedEncoders {
+    /// 映像エンコーダと映像情報
+    video: PreparedVideoEncoder,
+    /// 音声エンコーダと音声情報
+    audio: PreparedAudioEncoder,
+}
+
+/// データループが書き換える状態
+///
+/// `run` はこの値を [`PublisherSetup`] に保持し、ループと終了処理へ引き回す。
+struct PublisherLoopState {
+    /// データループを開始した時刻
+    start: Instant,
+    /// 映像トラックの Group ID
+    ///
+    /// draft-ietf-moq-msf-02 §6.1 (Group numbering): Group ID を 0 に固定してはならない。
+    /// 再起動時に以前の Group ID を下回らないよう、カタログと同じ規則で払い出す。
+    video_group_id: u64,
+    /// 直前に開始した映像 Group の ID
+    ///
+    /// NEW_GROUP_REQUEST (§9.19.19) の値が未来の Group を指しているかの判定に使う。
+    started_video_group_id: Option<u64>,
+    /// 音声トラックの Group ID ([`PublisherLoopState::video_group_id`] と同じ規則で払い出す)
+    audio_group_id: u64,
+    /// 送信した音声フレームの数
+    audio_frame_count: u64,
+    /// 開いている映像の Subgroup writer
+    current_video_writer: Option<SubgroupWriter>,
+    /// object モードで次に送る Object の Group 内の Object ID
+    ///
+    /// draft-ietf-moq-msf-02 §6.2 (Object Numbering): Group 内で 0 から 1 ずつ増やす。
+    video_object_id: u64,
+    /// 受信 SUBSCRIBE で確立した購読の送出状態 (draft-ietf-moq-transport-23 §3.1)
+    ///
+    /// Track Alias は PUBLISH の固定値 (0 / 1 / 2) の次から採番する。
+    peer_subscriptions: Vec<PeerSubscription>,
+    /// 受信 SUBSCRIBE の Track Alias の次の値
+    next_peer_alias: u64,
+    /// 映像 Group の開始時刻を追跡するトラッカー
+    ///
+    /// キーフレームの要求はエンコーダを使う経路 (live capture / MP4 再エンコード) でだけ
+    /// 行い、MP4 パススルーでは Group 長の観測 (debug ログ) にだけ使う。
+    gop_tracker: gop::GopTracker,
+    /// セッション終了を観測してループを抜けたかどうか
+    ///
+    /// 後始末の失敗をセッション終了に伴う失敗として扱うために使う。セッション終了後の
+    /// `close` は CONNECT stream の送信失敗として `Error::WebTransport` に畳まれる経路が
+    /// あり、エラーの variant だけでは判別できない。
+    session_ended: bool,
+    /// 符号化前の音声 PCM のバッファ
+    audio_pcm_buf: Vec<i16>,
+    /// フェードで繋ぐために保持しているチャンク (PCM と TIMESTAMP)
+    ///
+    /// 棄却で飛んだ境目をフェードで繋ぐために保持している。捨てるかどうかは次のチャンクの
+    /// 判定を見るまで分からないため、符号化へ渡すチャンクを 1 つ保持する (先読みの分だけ
+    /// 符号化が 1 フレーム遅れる)。
+    audio_fade_pending: Option<(Vec<i16>, u64)>,
+    /// 直前にチャンクを捨てたかどうか (捨てた直後のチャンクの先頭を落とす)
+    audio_fade_next_head: bool,
+    /// live capture の映像時刻を epoch マイクロ秒へ換算する
+    ///
+    /// capture の時刻の起源は音声と映像 (さらにデバイスと OS) で異なるため、音声とは別に
+    /// 持つ。映像は対応を小さくする向きにだけ動かす [`WallClockMapper`] を使う。
+    video_clock: WallClockMapper,
+    /// live capture の音声時刻を epoch マイクロ秒へ換算する
+    ///
+    /// 音声はドリフトへ窓を滑らせて追従し、段差では取り直す [`AudioTimestampClock`] を使う。
+    audio_clock: AudioTimestampClock,
+    /// 換算の残差 (受信時刻 − 換算した TIMESTAMP) をトラックごとに溜めたもの
+    capture_residuals: CaptureClockResiduals,
+    /// live capture の音声バッファ先頭の時刻
+    ///
+    /// 1 つの capture フレームから複数の Opus フレームを切り出すため、切り出し位置の時刻を
+    /// サンプル数から進める。
+    audio_timeline: AudioCaptureTimeline,
+    /// 再エンコードで入力サンプルの PTS を出力フレームへ対応付ける待ち行列
+    pending_video_timestamps: VecDeque<u64>,
+    /// Audio Config を送信済みかどうか
+    ///
+    /// Opus は全フレームが独立してデコード可能なため、最初の audio object だけでよい。
+    audio_config_sent: bool,
+    /// 直近に音声の配信の遅れの内訳を出した時刻 (開始からのミリ秒)
+    audio_stats_logged_ms: u64,
+    /// 音声の追いつきの判定 (配信ごとに 1 つ)
+    ///
+    /// 符号化が実時間に追いつかなくなるとキューが溜まり、遅れが受信側の基準を押し上げる
+    /// ため、遅れたチャンクは符号化へ渡さずに捨てる。
+    audio_publish_catch_up: AudioPublishCatchUp,
+    /// 直近にログへ出した、捨てたチャンクの数 (状態が変わったときだけログに出す)
+    audio_catch_up_logged_dropped_frames: u64,
+    /// publish したメディアの保持
+    ///
+    /// subscriber の FETCH に配る Object と End of Unknown Range を決めるために使う
+    /// (draft-ietf-moq-transport-23 §3.2 (Fetch))。GOAWAY で session を移行しても保持は
+    /// 続ける (移行先の購読者も直近の Object を FETCH で取得できる)。
+    media_cache: cache::MediaCache,
+    /// ループの tick
+    tick_interval: tokio::time::Interval,
+    /// カタログの送り直しの tick
+    catalog_republish_interval: tokio::time::Interval,
+    /// バックグラウンド移行の受信口
+    ///
+    /// 移行していないときは `None` であり、select の分岐は [`wait_migration_result`] が
+    /// 永久 pending にして実質無効にする。
+    migration_rx: Option<oneshot::Receiver<MigrationTaskResult>>,
+    /// 進行中の移行タスク (run の終了時に打ち切る)
+    migration_task: Option<tokio::task::JoinHandle<()>>,
+    /// request 単位移行のイベント送信側
+    request_migration_tx: mpsc::Sender<RequestMigrationEvent>,
+    /// request 単位移行のイベント受信側
+    request_migration_rx: mpsc::Receiver<RequestMigrationEvent>,
+    /// 進行中の request 単位移行の side session のタスク (run の終了時に打ち切る)
+    request_migration_tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// 移行先 URL ごとの side session
+    ///
+    /// 同じ移行先 URL を指す複数の PUBLISH は 1 本の side session を共有し、2 本目以降は
+    /// slot が持つチャネルへ PUBLISH の再発行を依頼する。
+    request_migration_sessions: HashMap<String, SideSessionSlot>,
+    /// 確立処理中の track (同じ track の移行を二重に開始しないために持つ)
+    migrating_tracks: Vec<PublishTrack>,
+    /// request 単位移行で side session へ PUBLISH を移した映像 track の送出先
+    ///
+    /// 移行していない track は `None` であり、main ループが持つ現在の session の handle /
+    /// data plane を使う。
+    video_publish_target: Option<PublishTarget>,
+    /// request 単位移行で side session へ PUBLISH を移した音声 track の送出先
+    audio_publish_target: Option<PublishTarget>,
+    /// request 単位移行で side session へ PUBLISH を移した catalog track の送出先
+    catalog_publish_target: Option<PublishTarget>,
+    /// 移行後に旧 session を終了するタスク (run の終了時に打ち切る)
+    old_session_closers: Vec<tokio::task::JoinHandle<()>>,
+    /// 短期間に連続する GOAWAY 移行を制限する
+    ///
+    /// 移行先がまた GOAWAY を返す構成での再接続ストームを防ぐ。
+    migration_limiter: MigrationLimiter,
+    /// WebTransport セッションの drain 状態の購読 (QUIC 直接接続と QMux では `None`)
+    wt_session_state_rx: Option<watch::Receiver<WtSessionState>>,
+}
+
+/// 100 ms 周期のループ tick を作る
+fn new_tick_interval() -> tokio::time::Interval {
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval
+}
+
+/// カタログの送り直しの interval を作る
+///
+/// 開始直後の 1 回は送信済みなので、1 間隔ぶん待ってから始める。
+fn new_catalog_republish_interval() -> tokio::time::Interval {
+    let mut interval = tokio::time::interval_at(
         tokio::time::Instant::now() + CATALOG_REPUBLISH_INTERVAL,
         CATALOG_REPUBLISH_INTERVAL,
     );
-    catalog_republish_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // バックグラウンド移行の受信口。移行していないときは `None` であり、select の分岐は
-    // [`wait_migration_result`] が永久 pending にして実質無効にする
-    let mut migration_rx: Option<oneshot::Receiver<MigrationTaskResult>> = None;
-    // 進行中の移行タスク。run の終了時に打ち切る
-    let mut migration_task: Option<tokio::task::JoinHandle<()>> = None;
-    // request stream の GOAWAY で別 URL の session へ PUBLISH を移す side session から
-    // イベントを受け取るチャネル。送信側 (`request_migration_tx`) は main ループが保持し
-    // 続けるため、受信は常に待てる
-    let (mut request_migration_tx, mut request_migration_rx) =
-        mpsc::channel::<RequestMigrationEvent>(REQUEST_MIGRATION_EVENT_CHANNEL_SIZE);
-    // 進行中の request 単位移行 side session のタスク。run の終了時に打ち切る
-    let mut request_migration_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-    // 移行先 URL ごとの side session。同じ移行先 URL を指す複数の PUBLISH は 1 本の
-    // side session を共有し、2 本目以降は slot が持つチャネルへ PUBLISH の再発行を依頼する
-    let mut request_migration_sessions: HashMap<String, SideSessionSlot> = HashMap::new();
-    // 確立処理中の track。同じ track の移行を二重に開始しないために持つ
-    let mut migrating_tracks: Vec<PublishTrack> = Vec::new();
-    // request 単位移行で side session へ PUBLISH を移した track の送出先。移行していない
-    // track は `None` であり、main ループが持つ現在の session の handle / data plane を使う
-    let mut video_publish_target: Option<PublishTarget> = None;
-    let mut audio_publish_target: Option<PublishTarget> = None;
-    let mut catalog_publish_target: Option<PublishTarget> = None;
-    // 移行後に旧 session を終了するタスク。run の終了時に打ち切る
-    let mut old_session_closers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-    // 短期間に連続する GOAWAY 移行を制限する (移行先がまた GOAWAY を返す構成での
-    // 再接続ストームを防ぐ)
-    let mut migration_limiter =
-        MigrationLimiter::new(MIGRATION_LIMIT_WINDOW, MAX_MIGRATIONS_PER_WINDOW);
-    // WebTransport セッションの drain 状態を購読する。QUIC 直接接続と QMux では `None`
-    let mut wt_session_state_rx = client.wt_session_state();
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval
+}
 
-    tracing::info!(
-        "Starting publish loop (video={}, audio={}, video_delivery=subgroup, audio_delivery={}, cache_duration={}ms)",
-        config.video_enabled,
-        config.audio_enabled,
-        if config.audio_datagram {
-            "datagram"
-        } else {
-            "subgroup"
-        },
-        media_cache.duration_ms(),
-    );
+impl PublisherLoopState {
+    /// データループが書き換える状態を初期化する
+    fn new(client: &MoqtClient, gop_duration_ms: u32, cache_duration_ms: u64) -> Result<Self> {
+        // request stream の GOAWAY で別 URL の session へ PUBLISH を移す side session から
+        // イベントを受け取るチャネル。送信側 (`request_migration_tx`) は main ループが保持し
+        // 続けるため、受信は常に待てる
+        let (request_migration_tx, request_migration_rx) =
+            mpsc::channel::<RequestMigrationEvent>(REQUEST_MIGRATION_EVENT_CHANNEL_SIZE);
 
-    let publisher_state = PublisherPipelineState {
-        task_monitor: &mut task_monitor,
-        shutdown_monitor: &mut shutdown_monitor,
-        config: &mut config,
-        namespace: &mut namespace,
-        video_encoder: &mut video_encoder,
-        video_timescale: &mut video_timescale,
-        reencode_video_timescale: &mut reencode_video_timescale,
-        audio_encoder: &mut audio_encoder,
-        audio_publish_catch_up: &mut audio_publish_catch_up,
-        audio_catch_up_logged_dropped_frames: &mut audio_catch_up_logged_dropped_frames,
-        audio_samples_per_frame: &mut audio_samples_per_frame,
-        audio_timescale: &mut audio_timescale,
-        audio_config: &mut audio_config,
-        handle: &mut handle,
-        catalog_group_id: &mut catalog_group_id,
-        catalog_location: &mut catalog_location,
-        catalog_context: &mut catalog_context,
-        catalog_json: &mut catalog_json,
-        video_input_rx: &mut video_input_rx,
-        audio_input_rx: &mut audio_input_rx,
-        start: &mut start,
-        video_group_id: &mut video_group_id,
-        started_video_group_id: &mut started_video_group_id,
-        audio_group_id: &mut audio_group_id,
-        audio_frame_count: &mut audio_frame_count,
-        current_video_writer: &mut current_video_writer,
-        video_object_id: &mut video_object_id,
-        peer_subscriptions: &mut peer_subscriptions,
-        next_peer_alias: &mut next_peer_alias,
-        gop_tracker: &mut gop_tracker,
-        session_ended: &mut session_ended,
-        audio_pcm_buf: &mut audio_pcm_buf,
-        audio_fade_pending: &mut audio_fade_pending,
-        audio_fade_next_head: &mut audio_fade_next_head,
-        video_clock: &mut video_clock,
-        audio_clock: &mut audio_clock,
-        capture_residuals: &mut capture_residuals,
-        audio_timeline: &mut audio_timeline,
-        pending_video_timestamps: &mut pending_video_timestamps,
-        audio_config_sent: &mut audio_config_sent,
-        audio_stats_logged_ms: &mut audio_stats_logged_ms,
-        media_cache: &mut media_cache,
-        tick_interval: &mut tick_interval,
-        catalog_republish_interval: &mut catalog_republish_interval,
-        migration_rx: &mut migration_rx,
-        migration_task: &mut migration_task,
-        request_migration_tx: &mut request_migration_tx,
-        request_migration_rx: &mut request_migration_rx,
-        request_migration_tasks: &mut request_migration_tasks,
-        request_migration_sessions: &mut request_migration_sessions,
-        migrating_tracks: &mut migrating_tracks,
-        video_publish_target: &mut video_publish_target,
-        audio_publish_target: &mut audio_publish_target,
-        catalog_publish_target: &mut catalog_publish_target,
-        old_session_closers: &mut old_session_closers,
-        migration_limiter: &mut migration_limiter,
-        wt_session_state_rx: &mut wt_session_state_rx,
-        client: &mut client,
-        data_plane: &mut data_plane,
-        video_request_id: &mut video_request_id,
-        audio_request_id: &mut audio_request_id,
-        catalog_request_id: &mut catalog_request_id,
-    };
-    run_publisher_loop(publisher_state).await?;
+        Ok(Self {
+            start: Instant::now(),
+            video_group_id: group_id::allocate_initial_group_id()?,
+            started_video_group_id: None,
+            audio_group_id: group_id::allocate_initial_group_id()?,
+            audio_frame_count: 0,
+            current_video_writer: None,
+            video_object_id: 0,
+            peer_subscriptions: Vec::new(),
+            next_peer_alias: AUDIO_TRACK_ALIAS + 1,
+            gop_tracker: gop::GopTracker::new(gop_duration_ms),
+            session_ended: false,
+            audio_pcm_buf: Vec::new(),
+            audio_fade_pending: None,
+            audio_fade_next_head: false,
+            video_clock: WallClockMapper::new(),
+            audio_clock: AudioTimestampClock::new(),
+            capture_residuals: CaptureClockResiduals::new(),
+            audio_timeline: AudioCaptureTimeline::new(),
+            pending_video_timestamps: VecDeque::new(),
+            audio_config_sent: false,
+            audio_stats_logged_ms: 0,
+            audio_publish_catch_up: AudioPublishCatchUp::new(),
+            audio_catch_up_logged_dropped_frames: 0,
+            media_cache: cache::MediaCache::new(cache_duration_ms),
+            tick_interval: new_tick_interval(),
+            catalog_republish_interval: new_catalog_republish_interval(),
+            migration_rx: None,
+            migration_task: None,
+            request_migration_tx,
+            request_migration_rx,
+            request_migration_tasks: Vec::new(),
+            request_migration_sessions: HashMap::new(),
+            migrating_tracks: Vec::new(),
+            video_publish_target: None,
+            audio_publish_target: None,
+            catalog_publish_target: None,
+            old_session_closers: Vec::new(),
+            migration_limiter: MigrationLimiter::new(
+                MIGRATION_LIMIT_WINDOW,
+                MAX_MIGRATIONS_PER_WINDOW,
+            ),
+            wt_session_state_rx: client.wt_session_state(),
+        })
+    }
+}
 
-    finish_publisher(PublishFinishContext {
-        migration_task: &mut migration_task,
-        old_session_closers: &mut old_session_closers,
-        mp4_source: &mut mp4_source,
-        reencode_source: &mut reencode_source,
-        current_video_writer: &mut current_video_writer,
-        video_request_id,
-        client: &mut client,
-        video_publish_target: &video_publish_target,
-        session_ended,
-        audio_request_id,
-        audio_publish_target: &audio_publish_target,
-        catalog_publish_target: &catalog_publish_target,
-        catalog_request_id,
-        peer_subscriptions: &mut peer_subscriptions,
-        request_migration_tasks: &mut request_migration_tasks,
-        request_migration_sessions: &mut request_migration_sessions,
-    })
-    .await
+/// `run` がセットアップ結果を保持し、データループと終了処理へ引き回す状態
+///
+/// 各セットアップ関数が返した値をまとめて所有する。参照だけを要求する
+/// [`PublisherPipelineState`] は [`PublisherSetup::pipeline_state`] が組み立てる。
+struct PublisherSetup {
+    /// データループが書き換える状態
+    loop_state: PublisherLoopState,
+    /// 起動済みの入力タスク
+    input_tasks: StartedInputTasks,
+    /// 送信済みのカタログ
+    catalog: PreparedCatalog,
+    /// 準備済みのエンコーダ
+    encoders: PreparedEncoders,
+    /// 接続済みの session と namespace
+    connected: ConnectedPublisher,
+    /// 実行設定
+    config: Config,
+    /// タスクメトリクスの監視
+    task_monitor: tokio_metrics::TaskMonitor,
+    /// シャットダウンの監視
+    shutdown_monitor: tokio_utils::ShutdownMonitor,
+}
+
+impl PublisherSetup {
+    /// セットアップ結果をまとめ、データループの初期状態を用意する
+    fn new(
+        config: Config,
+        task_monitor: tokio_metrics::TaskMonitor,
+        shutdown_monitor: tokio_utils::ShutdownMonitor,
+        connected: ConnectedPublisher,
+        encoders: PreparedEncoders,
+        catalog: PreparedCatalog,
+        input_tasks: StartedInputTasks,
+    ) -> Result<Self> {
+        let loop_state = PublisherLoopState::new(
+            &connected.session.client,
+            config.gop_duration_ms,
+            config.cache_duration_ms,
+        )?;
+        // フィールドの宣言順は drop 順でもある。元のローカル変数と同じく、データループの
+        // 状態、入力タスク、session の順に後始末される並びにしている
+        let setup = Self {
+            loop_state,
+            input_tasks,
+            catalog,
+            encoders,
+            connected,
+            config,
+            task_monitor,
+            shutdown_monitor,
+        };
+        tracing::info!(
+            "Starting publish loop (video={}, audio={}, video_delivery=subgroup, audio_delivery={}, cache_duration={}ms)",
+            setup.config.video_enabled,
+            setup.config.audio_enabled,
+            if setup.config.audio_datagram {
+                "datagram"
+            } else {
+                "subgroup"
+            },
+            setup.loop_state.media_cache.duration_ms(),
+        );
+        Ok(setup)
+    }
+
+    /// データループへ渡す参照だけの状態を組み立てる
+    fn pipeline_state(&mut self) -> PublisherPipelineState<'_> {
+        PublisherPipelineState {
+            task_monitor: &mut self.task_monitor,
+            shutdown_monitor: &mut self.shutdown_monitor,
+            config: &mut self.config,
+            namespace: &mut self.connected.namespace,
+            video_encoder: &mut self.encoders.video.encoder,
+            video_timescale: &mut self.encoders.video.timescale,
+            reencode_video_timescale: &mut self.encoders.video.reencode_timescale,
+            audio_encoder: &mut self.encoders.audio.encoder,
+            audio_publish_catch_up: &mut self.loop_state.audio_publish_catch_up,
+            audio_catch_up_logged_dropped_frames: &mut self
+                .loop_state
+                .audio_catch_up_logged_dropped_frames,
+            audio_samples_per_frame: &mut self.encoders.audio.samples_per_frame,
+            audio_timescale: &mut self.encoders.audio.timescale,
+            audio_config: &mut self.encoders.audio.config_bytes,
+            handle: &mut self.catalog.handle,
+            catalog_group_id: &mut self.catalog.group_id,
+            catalog_location: &mut self.catalog.location,
+            catalog_context: &mut self.catalog.context,
+            catalog_json: &mut self.catalog.json,
+            video_input_rx: &mut self.input_tasks.video_input_rx,
+            audio_input_rx: &mut self.input_tasks.audio_input_rx,
+            start: &mut self.loop_state.start,
+            video_group_id: &mut self.loop_state.video_group_id,
+            started_video_group_id: &mut self.loop_state.started_video_group_id,
+            audio_group_id: &mut self.loop_state.audio_group_id,
+            audio_frame_count: &mut self.loop_state.audio_frame_count,
+            current_video_writer: &mut self.loop_state.current_video_writer,
+            video_object_id: &mut self.loop_state.video_object_id,
+            peer_subscriptions: &mut self.loop_state.peer_subscriptions,
+            next_peer_alias: &mut self.loop_state.next_peer_alias,
+            gop_tracker: &mut self.loop_state.gop_tracker,
+            session_ended: &mut self.loop_state.session_ended,
+            audio_pcm_buf: &mut self.loop_state.audio_pcm_buf,
+            audio_fade_pending: &mut self.loop_state.audio_fade_pending,
+            audio_fade_next_head: &mut self.loop_state.audio_fade_next_head,
+            video_clock: &mut self.loop_state.video_clock,
+            audio_clock: &mut self.loop_state.audio_clock,
+            capture_residuals: &mut self.loop_state.capture_residuals,
+            audio_timeline: &mut self.loop_state.audio_timeline,
+            pending_video_timestamps: &mut self.loop_state.pending_video_timestamps,
+            audio_config_sent: &mut self.loop_state.audio_config_sent,
+            audio_stats_logged_ms: &mut self.loop_state.audio_stats_logged_ms,
+            media_cache: &mut self.loop_state.media_cache,
+            tick_interval: &mut self.loop_state.tick_interval,
+            catalog_republish_interval: &mut self.loop_state.catalog_republish_interval,
+            migration_rx: &mut self.loop_state.migration_rx,
+            migration_task: &mut self.loop_state.migration_task,
+            request_migration_tx: &mut self.loop_state.request_migration_tx,
+            request_migration_rx: &mut self.loop_state.request_migration_rx,
+            request_migration_tasks: &mut self.loop_state.request_migration_tasks,
+            request_migration_sessions: &mut self.loop_state.request_migration_sessions,
+            migrating_tracks: &mut self.loop_state.migrating_tracks,
+            video_publish_target: &mut self.loop_state.video_publish_target,
+            audio_publish_target: &mut self.loop_state.audio_publish_target,
+            catalog_publish_target: &mut self.loop_state.catalog_publish_target,
+            old_session_closers: &mut self.loop_state.old_session_closers,
+            migration_limiter: &mut self.loop_state.migration_limiter,
+            wt_session_state_rx: &mut self.loop_state.wt_session_state_rx,
+            client: &mut self.connected.session.client,
+            data_plane: &mut self.connected.session.data_plane,
+            video_request_id: &mut self.connected.session.video_request_id,
+            audio_request_id: &mut self.connected.session.audio_request_id,
+            catalog_request_id: &mut self.connected.session.catalog_request_id,
+        }
+    }
+
+    /// 終了処理へ渡す参照だけの状態を組み立てる
+    fn finish_context(&mut self) -> PublishFinishContext<'_> {
+        PublishFinishContext {
+            migration_task: &mut self.loop_state.migration_task,
+            old_session_closers: &mut self.loop_state.old_session_closers,
+            mp4_source: &mut self.input_tasks.mp4_source,
+            reencode_source: &mut self.input_tasks.reencode_source,
+            current_video_writer: &mut self.loop_state.current_video_writer,
+            video_request_id: self.connected.session.video_request_id,
+            client: &mut self.connected.session.client,
+            video_publish_target: &self.loop_state.video_publish_target,
+            session_ended: self.loop_state.session_ended,
+            audio_request_id: self.connected.session.audio_request_id,
+            audio_publish_target: &self.loop_state.audio_publish_target,
+            catalog_publish_target: &self.loop_state.catalog_publish_target,
+            catalog_request_id: self.connected.session.catalog_request_id,
+            peer_subscriptions: &mut self.loop_state.peer_subscriptions,
+            request_migration_tasks: &mut self.loop_state.request_migration_tasks,
+            request_migration_sessions: &mut self.loop_state.request_migration_sessions,
+        }
+    }
+}
+
+pub async fn run(
+    mut config: Config,
+    task_monitor: tokio_metrics::TaskMonitor,
+    shutdown_monitor: tokio_utils::ShutdownMonitor,
+) -> Result<()> {
+    // MP4 パススルーは接続前にファイルを読み込んで検証する
+    // (不正な入力を relay の接続可否に依存せず報告するため)
+    let inputs = prepare_inputs(&mut config)?;
+    // 1. 接続を確立し、namespace を準備して PUBLISH を張る
+    let mut connected = connect_and_publish(&config, &task_monitor).await?;
+
+    // 4. エンコーダを準備する。catalog の codec 文字列を encoder から取得する
+    let video = prepare_video_encoder(&config, &inputs)?;
+
+    let audio = prepare_audio_encoder(&config, &inputs)?;
+
+    // 5. MSF カタログを送信する
+    let catalog = prepare_catalog(
+        &config,
+        &mut connected,
+        prepare_catalog_tracks(&config, &inputs, &video, &audio),
+    )
+    .await?;
+
+    // 6. 映像 / 音声入力を起動する
+    //
+    // 実マイクのキャプチャは、実行中のセッションを表すガードが AudioCapture を借用するため、
+    // AudioCapture とガードを別々のローカル変数として保持する。宣言と逆順に drop されるので、
+    // キャプチャを止めるガードの drop が AudioCapture の drop より先に起きる。
+    let mut audio_capture = None;
+    let (input_tasks, _audio_capture_session) =
+        start_input_tasks(&config, inputs, &mut audio_capture)?;
+
+    // 7. データループと終了処理へ引き回す状態をまとめる
+    let mut setup = PublisherSetup::new(
+        config,
+        task_monitor,
+        shutdown_monitor,
+        connected,
+        PreparedEncoders { video, audio },
+        catalog,
+        input_tasks,
+    )?;
+    run_publisher_loop(setup.pipeline_state()).await?;
+    finish_publisher(setup.finish_context()).await
 }
 
 /// GOAWAY ごとに publisher が取る動作
