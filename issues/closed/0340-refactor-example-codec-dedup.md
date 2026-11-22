@@ -1,7 +1,7 @@
 # moq-pub / moq-sub の decoder 実装の重複を解消する
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/refactor-example-codec-dedup
 - Polished: 2026-11-20
 
@@ -55,3 +55,38 @@
 - 既存の pub の H.264 / H.265 の encode→decode テストと sub の VP8 / VP9 / AAC のテストが残り、通ること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
 - `.github/workflows/e2e-test.yml` と同じ条件 (macOS、`MOQT_E2E_URL` 設定済み) で `cargo test -p e2e-tests -- --ignored` が通ること。
+
+## 解決方法
+
+- `crates/moq-codec` (package `moq-codec`、`publish = false`、`rust-version = "1.95"`) を
+  新設し、workspace の `members` に追加した。
+  - AV1 / H.264 / H.265 / Opus のデコーダ
+  - `DecodedVideoFrame` (I420 のみ)、`copy_plane` / `read_ps_nal` / `skip_ps_nal`
+  - avcC / hvcC のパースと設定型
+  - codec 層のエラー型
+  - H.264 / H.265 と `shiguredo_video_toolbox` は macOS 限定の依存と `cfg`
+- pub / sub には codec 選択 Enum、`interleave_uv`、`drain_delayed` / `reset` 呼び出し、
+  sub の VP8 / VP9 / AAC、sub のタイムスタンプ付き `DecodedVideoFrame` を残した。
+  - 共有フレームからの変換では `timestamp_us: None` / `timestamp_kind: TimestampKind::None`
+    とし、pipeline が Object Properties から設定する現行挙動を保つ。
+- 各 example の `Error` に `moq_codec::error::Error` からの `From` を実装し、
+  既存の variant と表示 (`decode: ...` / `video toolbox: ...` / `opus: ...`) を維持した。
+- H.264 / H.265 の設定未到達時は共有 crate が `NotInitialized` を返し、pub はエラー、
+  sub は警告ログを出して空フレーム列を返す現行挙動を維持した。
+- sub の `OpusDecoder::reset` / `sample_rate` / `channels` を共有 Opus デコーダでも提供した。
+- 差の吸収は trait ではなく Enum / ラッパーで行った。`mod.rs` は使っていない。
+- 既存の pub の H.264 / H.265 encode→decode テストは共有 crate のデコーダを対象に残し、
+  sub の VP8 / VP9 / AAC テストも残した。
+
+macOS 実機の検証は GitHub Actions で行った。`79cb386` の CI (macos-15) で
+`cargo test --workspace` が成功し、H.264 / H.265 のデコードテスト
+(`decoder::tests::h264::encoded_frames_are_decoded` /
+`decoder::tests::h265::encoded_frames_are_decoded`) が成功している。
+同じ commit の E2E Test も `MOQT_E2E_URL` 付きで 3 テスト成功している。
+
+- [CI](https://github.com/shiguredo/moqt-rs/actions/runs/44995722301)
+- [E2E](https://github.com/shiguredo/moqt-rs/actions/runs/44995722322)
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p moq-codec
+-p moq-pub -p moq-sub`、`prek run --files` も成功した。
