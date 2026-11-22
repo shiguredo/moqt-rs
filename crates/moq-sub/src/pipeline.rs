@@ -47,8 +47,8 @@ use shiguredo_moqt::{
     message_parameter::MessageParameters, message_parameter::PARAM_FILL_PARAMETERS,
     message_parameter::PARAM_LOCATION_FILTER, message_parameter::PARAM_NEW_GROUP_REQUEST,
     message_parameter::PARAM_RENDEZVOUS_TIMEOUT, message_parameter::PARAM_SUBSCRIBER_PRIORITY,
-    msf::MSF_CATALOG_TRACK_NAME, msf::MsfCompression, msf::MsfPackaging, msf::MsfTrack,
-    msf::StreamMapping, msf::parse_catalog_namespace, name::serialize_namespace,
+    msf::MSF_CATALOG_TRACK_NAME, msf::MsfCatalog, msf::MsfCompression, msf::MsfPackaging,
+    msf::MsfTrack, msf::StreamMapping, msf::parse_catalog_namespace, name::serialize_namespace,
     name::serialize_track_name, session::types::DataStreamId, session::types::SessionEvent,
     stream::decoder::DecodedFetchEntry, stream::decoder::DecodedSubgroupObject,
     stream::decoder::FetchStreamDecoder, stream::decoder::SubgroupStreamDecoder,
@@ -7439,30 +7439,11 @@ async fn receive_catalog(
     };
     // targetLatency は再生側の時間軸が表示の遅れの下限に使う。どの track を購読するかは
     // 呼び出し側が決めるため、ここでは選択した track の情報だけを返し、値の決定は呼び出し側で行う
-    let video_track = catalog.tracks.iter().find(|t| {
-        is_loc_packaging(t)
-            && role_allows_video(t)
-            && t.codec.as_ref().is_some_and(|c| {
-                c.starts_with("av01")
-                    || c.starts_with("avc1")
-                    || c.starts_with("hvc1")
-                    || c.starts_with("hev1")
-                    // VP8 は登録名のみ、VP9 は `vp09.<profile>.<level>.<bit depth>` である
-                    || c == "vp8"
-                    || c == "vp09"
-                    || c.starts_with("vp09.")
-            })
-    });
+    let video_track = select_video_track(catalog);
     // 音声トラックは本 example がデコードできる codec (opus / mp4a.* (AAC)) から選ぶ。
     // codec の文字列は draft-ietf-moq-msf-02 §5.2.19 (Codec) が定める RFC 6381 の表記である。
     // デコードできない codec を購読すると、録画中でも再生時にデコーダを生成できずに失敗する。
-    let audio_track = catalog.tracks.iter().find(|t| {
-        is_loc_packaging(t)
-            && role_allows_audio(t)
-            && t.codec
-                .as_deref()
-                .is_some_and(decoder::is_supported_audio_codec)
-    });
+    let audio_track = select_audio_track(catalog);
     let selected_latency = |track: Option<&MsfTrack>| {
         track.map(|track| SelectedTrackLatency {
             render_group: track.render_group,
@@ -7997,6 +7978,32 @@ fn role_allows_video(track: &MsfTrack) -> bool {
         Some("audio" | "audiodescription" | "data") => false,
         Some(_) => true,
     }
+}
+
+/// 映像として購読する track を選ぶ
+///
+/// library の codec 種別判定と example のデコード可否の両方を満たす最初の track を返す。
+fn select_video_track(catalog: &MsfCatalog) -> Option<&MsfTrack> {
+    catalog.tracks.iter().find(|track| {
+        is_loc_packaging(track)
+            && role_allows_video(track)
+            && track.codec.as_deref().is_some_and(|codec| {
+                shiguredo_moqt::msf::is_video_codec(codec)
+                    && decoder::is_supported_video_codec(codec)
+            })
+    })
+}
+
+/// 音声として購読する track を選ぶ
+fn select_audio_track(catalog: &MsfCatalog) -> Option<&MsfTrack> {
+    catalog.tracks.iter().find(|track| {
+        is_loc_packaging(track)
+            && role_allows_audio(track)
+            && track.codec.as_deref().is_some_and(|codec| {
+                shiguredo_moqt::msf::is_audio_codec(codec)
+                    && decoder::is_supported_audio_codec(codec)
+            })
+    })
 }
 
 /// 音声として購読してよい予約 role か
@@ -11451,6 +11458,41 @@ mod tests {
             test_namespace("moq-example/video"),
             "宣言された namespace を使うこと"
         );
+    }
+
+    /// library の種別判定と example のデコード可否を組み合わせて選択すること
+    #[test]
+    fn catalog_track_selection_uses_library_classification_and_decoder_support() {
+        let mut catalog = MsfCatalog::new();
+        catalog
+            .tracks
+            .push(track_with_namespace("av01.0.08M.08", None));
+        catalog.tracks.push(track_with_namespace("opus", None));
+        assert!(
+            select_video_track(&catalog).is_some(),
+            "AV1 は映像として選ぶこと"
+        );
+        assert!(
+            select_audio_track(&catalog).is_some(),
+            "Opus は音声として選ぶこと"
+        );
+
+        // library が video / audio と判定しても example がデコードできない codec は選ばない
+        let mut catalog = MsfCatalog::new();
+        catalog
+            .tracks
+            .push(track_with_namespace("avc3.640028", None));
+        catalog.tracks.push(track_with_namespace("flac", None));
+        assert!(select_video_track(&catalog).is_none());
+        assert!(select_audio_track(&catalog).is_none());
+
+        // library が登録外と判定する codec は選ばない
+        let mut catalog = MsfCatalog::new();
+        catalog.tracks.push(track_with_namespace("av01x", None));
+        catalog.tracks.push(track_with_namespace("opusx", None));
+        catalog.tracks.push(track_with_namespace("opus.2", None));
+        assert!(select_video_track(&catalog).is_none());
+        assert!(select_audio_track(&catalog).is_none());
     }
 
     /// LOC 以外の packaging は media として選ばないこと

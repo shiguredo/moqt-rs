@@ -588,3 +588,37 @@ fn encode_rejects_mime_type_audio_without_samplerate() {
         "encode でも mimeType 由来の samplerate 要求を適用すること"
     );
 }
+
+#[test]
+fn codec_classification_public_api_matches_registry() {
+    use shiguredo_moqt::msf::{is_audio_codec, is_video_codec};
+
+    for codec in [
+        "flac",
+        "mp3",
+        "opus",
+        "vorbis",
+        "ulaw",
+        "alaw",
+        "mp4a",
+        "mp4a.40.2",
+    ] {
+        assert!(is_audio_codec(codec), "audio と判定すること: {codec}");
+    }
+    for codec in ["opusx", "opus.2", "mp4a-40", "ac-3"] {
+        assert!(!is_audio_codec(codec), "audio と判定しないこと: {codec}");
+    }
+    for codec in [
+        "vp8",
+        "av01",
+        "av01.0.08M.08",
+        "avc3.640028",
+        "vp09",
+        "vp09.00.40.08",
+    ] {
+        assert!(is_video_codec(codec), "video と判定すること: {codec}");
+    }
+    for codec in ["av01x", "avc1x", "hvc1x", "hev1x", "vp8.0", "mp4v"] {
+        assert!(!is_video_codec(codec), "video と判定しないこと: {codec}");
+    }
+}

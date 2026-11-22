@@ -275,6 +275,21 @@ pub(crate) fn is_aac_codec(codec: &str) -> bool {
 ///
 /// 購読する audio track の選択に使う。デコードできない codec を選ぶと、録画中でも
 /// 再生時にデコーダを生成できずに失敗するため、対応する codec だけを対象にする。
+/// この example がデコードできる video codec か
+///
+/// library の [`shiguredo_moqt::msf::is_video_codec`] は登録名全体を判定するが、
+/// この example のデコーダは AV1 / H.264 / H.265 / VP8 / VP9 だけを扱う。
+pub(crate) fn is_supported_video_codec(codec: &str) -> bool {
+    codec.starts_with("av01")
+        || codec.starts_with("avc1")
+        || codec.starts_with("hvc1")
+        || codec.starts_with("hev1")
+        // VP8 は登録名のみ、VP9 は `vp09.<profile>.<level>.<bit depth>` である
+        || codec == "vp8"
+        || codec == "vp09"
+        || codec.starts_with("vp09.")
+}
+
 pub(crate) fn is_supported_audio_codec(codec: &str) -> bool {
     is_opus_codec(codec) || is_aac_codec(codec)
 }
