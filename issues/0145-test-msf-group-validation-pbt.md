@@ -1,7 +1,7 @@
 # PBT で MSF の group 検証を固定する
 
 - Created: 2026-09-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/test-msf-group-validation-pbt
 - Polished: 2026-11-14
 - Updated: 2026-11-14
@@ -50,3 +50,22 @@ PBT のトラック生成にグループの一貫性を持たせ、グループ�
   renderGroup / altGroup の両方、tracks / publishTracks の両方向、`targetLatency` と `buffers` の両方で
   確認する)
 - `make pbt` / `make test` / `make clippy` / `make fmt` が通ること
+
+## 解決方法
+
+- `full_catalog_roundtrip` のトラック生成数を tracks 4〜8 件、publishTracks 2〜4 件に増やし、
+  `normalize_group_members` でカタログ全体のグループ割当を一貫させた。
+  - renderGroup 0 は targetLatency 形、renderGroup 1 は buffers 形にし、altGroup 2 / 3 も
+    同じ形で割り当てる。
+  - グループの先頭は必ず値を宣言し、以降は宣言と省略を交互にして省略との混在を通す。
+  - 依存の書き換えより前に正規化し、依存先の renderGroup が実在するようにした。
+- 宣言値が異なるグループを `MsfCatalogDocument::encode` と `decode` の両方が拒否する性質を
+  `group_declaration_conflicts_are_rejected` で追加した。renderGroup / altGroup、
+  tracks / publishTracks、targetLatency / buffers の全組み合わせを固定している。
+- グループ内で片方だけが値を宣言するカタログを受理する性質を
+  `group_omissions_are_accepted` で追加し、encode → decode の往復も確認した。
+- delta 更新は対象外とし、`MsfCatalog::validate_after_delta` の単体テストに委ねた。
+
+`cargo test --workspace`、`cargo test -p pbt`、
+`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check`、
+`prek run --files` が成功した。
