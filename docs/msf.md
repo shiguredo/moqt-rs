@@ -72,6 +72,37 @@
   - `initDataList` の `inline` data と `trackBaseKey` は Base64 (RFC 4648 §4) であること
   - lang は RFC 5646 §2.1 の Language-Tag ABNF 全体で検証し、IANA Language Subtag Registry との照合は行わない (RFC 5646 §2.1 の grandfathered タグを含む。`irregular` は固定リスト、`regular` は langtag 規則で受理する)
 
+## Log / Metrics payload
+
+- MOQLOG (`msf::log`)
+  - Log Record (`LogRecord`) の encode / decode (draft-jennings-moq-log-04 §5.3)
+  - Timestamp Offset は Group ID (秒) からのナノ秒オフセットで、1,000,000,000 未満。
+    Facility は 0〜23。Timestamp Offset / Facility / ASCII でない Hostname・App Name・
+    Proc ID・Msg ID / UTF-8 でない Message・Attribute は encode / decode で拒否する
+  - Track Namespace は `("logs.moq.arpa", "v1", <resourceID>)`、Track Name は severity の
+    1 桁 ASCII 数字。MSF catalog の namespace 文字列には `/` 区切りで写像する
+    (`log_track_namespace` / `log_track_namespace_string` / `LogSeverity`)
+  - MSF catalog の packaging / role 値 (`LOG_TRACK_PACKAGING` = moqlog /
+    `LOG_TRACK_ROLE` = log、draft-ietf-moq-msf-02 §9.4)
+- MOQMETRICS (`msf::metrics`)
+  - Catalog Header (`CatalogHeader`) と Metric Description (`MetricDescription`) の
+    encode / decode (draft-jennings-moq-metrics-03 §5.3)。Metric Index は catalog group の
+    Object ID であり payload には含めない
+  - Capture Info (`CaptureInfo`) と Metric Value (`MetricValue`) の encode / decode (§5.4)。
+    Value Representation は unsigned (vi64) / signed (64-bit two's complement) /
+    float (IEEE 754 binary64)。Capture Timestamp Offset は Group ID (ミリ秒) からの
+    ナノ秒オフセットで、1,000,000 未満
+  - Metric Type (Gauge / Counter) と Value Representation の未知値、Metric Index 0、
+    metric 名の文字種違反は decode で拒否し、encode でも手組みの不正値を拒否する
+  - Track Namespace は `("metrics.moq.arpa", "v1", <resourceID>)`。data track は
+    granularity の 1 桁 ASCII 数字、catalog track は "catalog"
+    (`metrics_track_namespace` / `metrics_track_namespace_string` / `MetricGranularity`)
+  - MSF catalog の packaging / role 値 (`METRICS_TRACK_PACKAGING` = moqmetrics /
+    `METRICS_TRACK_ROLE` = metrics、draft-ietf-moq-msf-02 §10.4)
+- publishTracks への配置、role の MUST ペア検証、example への統合は未対応
+- Track Namespace / Track Name / payload / Group / Object 規則は MOQLOG-04 / MOQMETRICS-03 を
+  一次資料とし、MSF-02 §9.1 / §9.3 / §10.1 / §10.3 / §5.6.17 の食い違う記述は使わない。
+
 ## Timeline
 
 - Media Timeline (`[[pts_ms, [group_id, object_id], wallclock_ms], ...]` 形式)。pts_ms は i64 の整数ミリ秒 (負値を許す) で非降順、`validate_media_timeline_format` が template 属性との併用を拒否する。`2002.0` / `2.002e3` のような整数値表現は受理し、`2002.5` は拒否する。encode は整数リテラルに正規化する
@@ -97,5 +128,5 @@
 ## 未対応
 
 - §5.5 / §12.1 (MSF_COMPRESSION property signaling)：-01 では Track Property ID が TBD、Object Property のレジストリ登録も未定義のため wire 実装を行わない (Timeline の圧縮は gzip magic byte 検出による従来動作のまま)
-- §9 / §10 (Log / Metrics track)：packaging 値のみで、payload は MOQLOG / MOQMETRICS 側の定義で未実装
+- §9 / §10 (Log / Metrics track)：payload codec (`msf::log` / `msf::metrics`) は実装済み。publishTracks への配置、role の MUST ペア検証、example への統合は未実装
 - §4.3 (Content protection)：catalog の signaling は扱うが、Secure Objects による暗号化と復号は未実装

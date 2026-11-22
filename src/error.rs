@@ -124,6 +124,13 @@ pub enum MessageError {
     InvalidCatalog(String),
     /// MSF カタログのバージョンが未対応
     InvalidCatalogVersion(String),
+    /// MSF の Log / Metrics payload が不正 (説明付き)
+    ///
+    /// draft-jennings-moq-log-04 §5.3 (Log Record) と
+    /// draft-jennings-moq-metrics-03 §5.3 (Catalog Track) / §5.4 (Groups and Objects) の
+    /// MUST に反する値、または定義済みフィールドの途中で終わるバイナリ payload を表す。
+    /// MSF の payload はアプリケーション層で解釈するため、このエラーでセッションは閉じない。
+    InvalidMsfPayload(String),
     /// MSF Timeline の gzip 復号に失敗した (draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload) / §8.2 (Event Timeline data format))
     GzipDecode(String),
     /// MSF Timeline の gzip 圧縮に失敗した (draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload) / §8.2 (Event Timeline data format))
@@ -163,6 +170,7 @@ impl core::fmt::Display for MessageError {
             Self::MalformedAuthToken(msg) => write!(f, "malformed auth token: {msg}"),
             Self::InvalidCatalog(msg) => write!(f, "invalid MSF catalog: {msg}"),
             Self::InvalidCatalogVersion(v) => write!(f, "unsupported MSF catalog version: {v}"),
+            Self::InvalidMsfPayload(msg) => write!(f, "invalid MSF payload: {msg}"),
             Self::GzipDecode(msg) => write!(f, "MSF timeline gzip decode failed: {msg}"),
             Self::GzipEncode(msg) => write!(f, "MSF timeline gzip encode failed: {msg}"),
             Self::UnsupportedCompression(value) => {
@@ -202,6 +210,7 @@ impl MessageError {
             Self::InvalidParameter => "invalid parameter encoding",
             Self::InvalidCatalog(_) => "invalid MSF catalog",
             Self::InvalidCatalogVersion(_) => "unsupported MSF catalog version",
+            Self::InvalidMsfPayload(_) => "invalid MSF payload",
             Self::GzipDecode(_) => "MSF timeline gzip decode failed",
             Self::GzipEncode(_) => "MSF timeline gzip encode failed",
             Self::UnsupportedCompression(_) => "unsupported MSF compression value",
@@ -260,6 +269,7 @@ impl MessageError {
             Self::MalformedTrack(_)
             | Self::InvalidCatalog(_)
             | Self::InvalidCatalogVersion(_)
+            | Self::InvalidMsfPayload(_)
             | Self::GzipDecode(_)
             | Self::GzipEncode(_)
             | Self::UnsupportedCompression(_) => None,

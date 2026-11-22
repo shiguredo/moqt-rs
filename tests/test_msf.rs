@@ -104,3 +104,9 @@ mod delta_apply;
 
 #[path = "test_msf/uri.rs"]
 mod uri;
+
+#[path = "test_msf/log.rs"]
+mod log;
+
+#[path = "test_msf/metrics.rs"]
+mod metrics;

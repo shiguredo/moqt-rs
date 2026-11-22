@@ -29,8 +29,9 @@ relay による namespace の集約 / forwarding) は本稿の対象外とする
 足りていないのは次の 4 層に分かれる。
 
 1. **仕様側で明示的に未実装のまま残っている機能**: Secure Objects (LOC §3 / MSF §4.3)、
-   Log / Metrics track の payload (§9 / §10)、LOC の Video Payload Format (§2.1)。
-   いずれも未起票の既知の差分として扱う。
+   LOC の Video Payload Format (§2.1)。Log / Metrics の payload codec は `msf::log` /
+   `msf::metrics` で実装済みであり、publishTracks への配置と role の MUST ペア検証だけが
+   残っている。
 2. **ライブラリには API があるのに、moq-pub / moq-sub から使われていない機能**:
    FETCH (要求側 API は transport 層で削除済み)、TRACK_STATUS、Media / Event Timeline、
    MSF の変数置換、パディング、`publishTracks`、Audio Level、`END_OF_GROUP`、
@@ -50,7 +51,7 @@ relay による namespace の集約 / forwarding) は本稿の対象外とする
 | --- | --- | --- | --- |
 | Secure Objects による E2E 暗号化と復号 | LOC §3、MSF §4.3 | 未実装。MSF の signaling フィールドは扱うが、`ENCRYPTED_LIST` (`0x0A`) / `PADDING` (`0x32`) Object Property と暗号処理が無い | 未着手 |
 | MSF_COMPRESSION property による catalog 圧縮 | MSF §5.5 / §12.1 | 実装済み。0x78 の Track Property / Object Property を `MsfCompression` で解釈し、catalog / timeline の encode / decode が signal を受け取る | - |
-| Log / Metrics track の payload | MSF §9 / §10 | 未実装。`packaging` の値は扱うが payload は未対応 | 未着手 |
+| Log / Metrics track の payload | MSF §9 / §10 | payload codec は実装済み。`msf::log` の Log Record (MOQLOG §5.3) と `msf::metrics` の Catalog Header / Metric Description / Capture Info / Metric Value (MOQMETRICS §5.3 / §5.4) を扱う。publishTracks への配置と role の MUST ペア検証は未対応 | 未着手 |
 | LOC の Video Payload Format | LOC §2.1 | 部分実装。`loc::video_payload` で 1〜4 バイト length prefix / 3 / 4 バイト start code / length 1 = start code を扱う。example の annexB 統合と payload 内 parameter set は未対応 | 未着手 |
 | LOC の Track スコープ Property | LOC §6.1 Table 1 | PUBLISH / SUBSCRIBE_OK で受信した場合、受信側は `Subscription::peer_track_properties` から `TrackProperties::find_varint` / `find_bytes` と `codec_string` (0x11 CODEC_STRING、UTF-8 検証) で取得できる。publisher example からの送信は未対応 | 未起票 |
 | DPoP proof の送信 | C4M §4.2 / §4.3 | CWT 形式 proof の codec と一括検証 API は実装済み。CWT proof を MOQT の AUTHORIZATION_TOKEN に載せる方法は仕様で未定義であり、example の URL 経路も proof を送らない | 未起票 |

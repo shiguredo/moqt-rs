@@ -24,6 +24,12 @@ use nojson::{DisplayJson, JsonFormatter};
 /// MSF URI / fragment のパース (draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation))
 pub mod uri;
 
+/// MOQLOG の Log track payload (draft-jennings-moq-log-04)
+pub mod log;
+
+/// MOQMETRICS の Metrics track payload (draft-jennings-moq-metrics-03)
+pub mod metrics;
+
 /// 対応 MSF バージョン (draft-ietf-moq-msf-02 §5.1.1 (MSF version))
 ///
 /// draft-ietf-moq-msf-02 §5.1.1 (MSF version): version は JSON Type: String である。
@@ -5819,4 +5825,56 @@ pub fn resolve_catalog_variables(json: &[u8], fragment: &str) -> Result<Vec<u8>,
         ));
     }
     Ok(out)
+}
+
+// ─── MOQLOG / MOQMETRICS payload の共通バイナリヘルパ ─────────────────────────
+//
+// draft-jennings-moq-log-04 §5.3 (Log Record) / draft-jennings-moq-metrics-03 §5.3
+// (Catalog Track) / §5.4 (Groups and Objects) は vi64 と length-prefixed バイト列で
+// payload を構成する。両モジュールで同じ読み書きを行うため、ここに集約する。
+
+/// バイナリ payload の `pos` から vi64 フィールドを 1 つ読み進める
+///
+/// 途中で終わる入力は [`MessageError::InvalidMsfPayload`] にする。MSF payload の
+/// 復号失敗はアプリケーション層のエラーであり、MOQT のデータプレーンエラー
+/// ([`MessageError::UnexpectedEof`]) と混同しないよう写像する。
+pub(crate) fn decode_payload_varint(buf: &[u8], pos: &mut usize) -> Result<u64, MessageError> {
+    let Some(rest) = buf.get(*pos..) else {
+        return Err(MessageError::InvalidMsfPayload(
+            "payload is truncated at a varint field".to_string(),
+        ));
+    };
+    let (value, consumed) = crate::varint::decode(rest).map_err(|_| {
+        MessageError::InvalidMsfPayload("payload is truncated at a varint field".to_string())
+    })?;
+    *pos += consumed;
+    Ok(value)
+}
+
+/// `pos` から vi64 の長さフィールドと、その長さ分のバイト列を読み進める
+///
+/// 長さが残りバイトを超える入力と、読み出し位置がバッファ外になる入力は
+/// [`MessageError::InvalidMsfPayload`] にする。
+pub(crate) fn decode_length_prefixed_bytes<'a>(
+    buf: &'a [u8],
+    pos: &mut usize,
+) -> Result<&'a [u8], MessageError> {
+    let len = decode_payload_varint(buf, pos)?;
+    let Some(rest) = buf.get(*pos..) else {
+        return Err(MessageError::InvalidMsfPayload(
+            "payload is truncated at a length-prefixed field".to_string(),
+        ));
+    };
+    let len = crate::varint::checked_len(len, rest.len()).map_err(|_| {
+        MessageError::InvalidMsfPayload("length exceeds the remaining payload".to_string())
+    })?;
+    let bytes = &rest[..len];
+    *pos += len;
+    Ok(bytes)
+}
+
+/// バイト列を vi64 の長さフィールド付きで `buf` に追記する
+pub(crate) fn encode_length_prefixed_bytes(bytes: &[u8], buf: &mut Vec<u8>) {
+    crate::varint::encode(bytes.len() as u64, buf);
+    buf.extend_from_slice(bytes);
 }
