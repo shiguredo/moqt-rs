@@ -785,6 +785,114 @@ fn outgoing_subgroup_reset_tracks_delivery_timeout_reason() {
         .expect("reset 済み Subgroup は再オープンできること");
 }
 
+/// publisher は Track Property 設定時に Object Property の MSF_COMPRESSION を送れない
+///
+/// draft-ietf-moq-msf-02 §12.1 (Compression Signaling): 同じ track で 2 つの機構を
+/// 併用してはならない (MUST NOT)。subgroup と datagram の両送信経路で拒否する。
+#[test]
+fn publisher_rejects_both_compression_signaling() {
+    use shiguredo_moqt::track_properties::{
+        PROP_MSF_COMPRESSION, TrackProperty, TrackPropertyValue,
+    };
+
+    let alias = 713;
+    let mut track_properties = TrackProperties::new();
+    track_properties.push(TrackProperty {
+        prop_type: PROP_MSF_COMPRESSION,
+        value: TrackPropertyValue::VarInt(1),
+    });
+    let (_, mut server, rid) = establish_subscribe_track_with_properties(alias, track_properties);
+    let header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 4,
+        subgroup_id: SubgroupIdMode::Explicit(1),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    server
+        .send_subgroup_header(DataStreamId(92), rid, &header)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let mut object_properties = ObjectProperties::new();
+    object_properties.push(ObjectProperty {
+        prop_type: PROP_MSF_COMPRESSION,
+        value: ObjectPropertyValue::VarInt(1),
+    });
+    let mut encoded = Vec::new();
+    object_properties
+        .encode(&mut encoded)
+        .expect("encode に成功すること");
+
+    let err = server
+        .send_subgroup_object(DataStreamId(92), 0, Some(&encoded))
+        .expect_err("Track Property 設定時の Object Property は拒否される");
+    assert_eq!(
+        err.as_session_error().map(|error| error.code),
+        Some(SESSION_PROTOCOL_VIOLATION),
+        "subgroup object の併用は ProtocolViolation になること"
+    );
+    let err = server
+        .send_object_datagram(rid, 4, 0, Some(encoded), None, false)
+        .expect_err("Track Property 設定時の Object Property は拒否される");
+    assert_eq!(
+        err.as_session_error().map(|error| error.code),
+        Some(SESSION_PROTOCOL_VIOLATION),
+        "datagram の併用は ProtocolViolation になること"
+    );
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "送信拒否でセッションを閉じない"
+    );
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Established,
+        "送信拒否で購読を終端しない"
+    );
+}
+
+/// Track Property が無ければ Object Property の MSF_COMPRESSION を送れる
+///
+/// draft-ietf-moq-msf-02 §12.1.2 (Compression Signaling): 圧縮が Object ごとに異なる
+/// 場合は Track Property を設定せず、圧縮する Object にだけ Object Property を載せる。
+#[test]
+fn publisher_allows_object_compression_without_track_compression() {
+    use shiguredo_moqt::track_properties::PROP_MSF_COMPRESSION;
+
+    let alias = 714;
+    let (_, mut server, rid) = establish_subscribe_track(alias);
+    let header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 4,
+        subgroup_id: SubgroupIdMode::Explicit(1),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    server
+        .send_subgroup_header(DataStreamId(93), rid, &header)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let mut object_properties = ObjectProperties::new();
+    object_properties.push(ObjectProperty {
+        prop_type: PROP_MSF_COMPRESSION,
+        value: ObjectPropertyValue::VarInt(1),
+    });
+    let mut encoded = Vec::new();
+    object_properties
+        .encode(&mut encoded)
+        .expect("encode に成功すること");
+    server
+        .send_subgroup_object(DataStreamId(93), 0, Some(&encoded))
+        .expect("Track Property が無ければ Object Property を送れること");
+}
+
 #[test]
 fn incoming_subgroup_reset_tracks_delivery_timeout_reason() {
     let (mut client, _, _rid) = establish_subscribe_track(703);

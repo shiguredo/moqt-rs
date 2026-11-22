@@ -562,6 +562,17 @@ impl Session {
             )
             .into());
         };
+        // draft-ietf-moq-msf-02 §12.1 (Compression Signaling): Track Property を設定した
+        // track では Object Property の MSF_COMPRESSION を使ってはならない (MUST NOT)。
+        if self.has_local_msf_compression(request_id)
+            && crate::session::compression::object_properties_have_compression(properties_bytes)
+        {
+            return Err(SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "track and object MSF_COMPRESSION are both set",
+            )
+            .into());
+        }
         // draft §3.1.2 (Subscription State Management): "Objects MUST NOT be sent for requests
         // that end with an error." REQUEST_UPDATE 失敗応答 (`send_request_error`) で `Terminated` に
         // 遷移した subscription の outgoing stream は `forget_subscription` まで残るため、
@@ -2182,6 +2193,15 @@ impl Session {
             {
                 return Err(SendRequestError::LocalFilterMismatch);
             }
+            if self.has_local_msf_compression(stream.request_id)
+                && crate::session::compression::object_properties_have_compression(properties_bytes)
+            {
+                return Err(SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "track and object MSF_COMPRESSION are both set",
+                )
+                .into());
+            }
             return Ok(());
         }
         let Some(stream) = self.data_streams.outgoing_fetch.get(&stream_id) else {
@@ -2192,6 +2212,17 @@ impl Session {
             .into());
         };
         let request_id = stream.request_id;
+        // draft-ietf-moq-msf-02 §12.1 (Compression Signaling): Track Property を設定した
+        // track では Object Property の MSF_COMPRESSION を使ってはならない (MUST NOT)。
+        if self.has_local_msf_compression(request_id)
+            && crate::session::compression::object_properties_have_compression(properties_bytes)
+        {
+            return Err(SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "track and object MSF_COMPRESSION are both set",
+            )
+            .into());
+        }
         let Some(fetch) = self.fetches.get(&request_id) else {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
@@ -3198,6 +3229,19 @@ impl Session {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "outgoing object datagram requires Established subscription",
+            )
+            .into());
+        }
+        // draft-ietf-moq-msf-02 §12.1 (Compression Signaling): Track Property を設定した
+        // track では Object Property の MSF_COMPRESSION を使ってはならない (MUST NOT)。
+        if self.has_local_msf_compression(request_id)
+            && crate::session::compression::object_properties_have_compression(
+                properties_data.as_deref(),
+            )
+        {
+            return Err(SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "track and object MSF_COMPRESSION are both set",
             )
             .into());
         }

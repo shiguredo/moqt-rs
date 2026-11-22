@@ -449,6 +449,12 @@ pub struct Session {
     /// 受信した Object は含めない (relay の上流受信の集約は relay の責務)。セッション終了まで
     /// 保持し、エントリ数はセッション中に publish した Track 数に比例する。
     pub(super) published_track_largest: HashMap<(TrackNamespace, Vec<u8>), Location>,
+    /// 自側が publisher として送った MSF_COMPRESSION Track Property (request_id -> value)
+    ///
+    /// draft-ietf-moq-msf-02 §12.1.1 (Compression Signaling): Track Property を設定した
+    /// track では、Object ごとの Object Property を使ってはならない (§12.1 の MUST NOT)。
+    /// 送信 Object の検証に使う。property の presence が必要なため、値 0 も記録する。
+    pub(super) local_msf_compression: HashMap<u64, u64>,
     /// Fetch の管理 (Request ID 索引)
     pub(super) fetches: HashMap<u64, Fetch>,
     /// TRACK_STATUS の管理
@@ -772,6 +778,7 @@ impl Session {
             },
             subscriptions: HashMap::new(),
             published_track_largest: HashMap::new(),
+            local_msf_compression: HashMap::new(),
             aliases: AliasState {
                 my_publisher_aliases: HashMap::new(),
                 peer_publisher_aliases: HashMap::new(),

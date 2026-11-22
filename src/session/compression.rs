@@ -76,6 +76,42 @@ pub(crate) fn retain_msf_compression(properties: &TrackProperties) -> TrackPrope
     retained
 }
 
+impl crate::session::core::Session {
+    /// 自側が送った Track Properties から MSF_COMPRESSION を記録する
+    ///
+    /// property が無ければ既存の記録を削除する。値 0 (非圧縮) も「Track Property を
+    /// 設定した」として記録する。
+    pub(super) fn record_local_msf_compression(
+        &mut self,
+        request_id: u64,
+        properties: &TrackProperties,
+    ) {
+        match properties.msf_compression() {
+            Some(value) => {
+                self.local_msf_compression.insert(request_id, value);
+            }
+            None => {
+                self.local_msf_compression.remove(&request_id);
+            }
+        }
+    }
+
+    /// 自側が送った MSF_COMPRESSION Track Property があるかを返す
+    pub(super) fn has_local_msf_compression(&self, request_id: u64) -> bool {
+        self.local_msf_compression.contains_key(&request_id)
+    }
+}
+
+/// Object Properties の生バイト列に MSF_COMPRESSION が含まれるかを返す
+///
+/// decode に失敗した場合は `false` を返す (不正な properties の拒否は wire encode 層の
+/// 責務であり、ここでは併用検出だけを行う)。
+pub(crate) fn object_properties_have_compression(properties_bytes: Option<&[u8]>) -> bool {
+    properties_bytes
+        .and_then(|bytes| ObjectProperties::decode(bytes).ok())
+        .is_some_and(|(properties, _)| properties.msf_compression().is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

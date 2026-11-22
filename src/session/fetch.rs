@@ -184,6 +184,7 @@ impl Session {
             self.rejected_request_ids.insert(request_id);
         }
         self.request_streams.remove(&request_id);
+        self.local_msf_compression.remove(&request_id);
         self.peer_fin_received.remove(&request_id);
         self.local_fin_sent.remove(&request_id);
         self.clear_request_stream_goaway_deadline(request_id);
@@ -550,6 +551,7 @@ impl Session {
             track_properties
         };
         fetch.track_properties = track_properties.clone();
+        self.record_local_msf_compression(request_id, &track_properties);
         let msg = ControlMessage::RequestOk(RequestOk {
             parameters,
             track_properties,

@@ -763,6 +763,7 @@ impl Session {
         } else {
             track_properties
         };
+        self.record_local_msf_compression(request_id, &track_properties);
         let msg = ControlMessage::SubscribeOk(SubscribeOk {
             track_alias,
             parameters,
