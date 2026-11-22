@@ -74,7 +74,7 @@ pub(crate) struct VideoSetup {
     /// RFC 6381 の codec 文字列 (av01 / avc1 / hvc1 / hev1)
     pub codec: String,
     /// catalog のフレームレート (duration の期待値に使う)
-    pub fps: u32,
+    pub fps: f64,
 }
 
 /// 録画する audio トラックの情報 (catalog 由来)
@@ -817,7 +817,7 @@ impl Writer {
     fn expected_duration_us(&self, kind: TrackId) -> u64 {
         match kind {
             TrackId::Video => match self.setup.video.as_ref() {
-                Some(video) if video.fps > 0 => (1_000_000 / u64::from(video.fps)).max(1),
+                Some(video) if video.fps > 0.0 => (1_000_000.0 / video.fps).round().max(1.0) as u64,
                 _ => VIDEO_FALLBACK_DURATION_US,
             },
             TrackId::Audio => AUDIO_FALLBACK_DURATION_US,
@@ -1755,6 +1755,27 @@ mod tests {
         );
     }
 
+    /// 小数の framerate を保持し、期待尺を丸めて計算すること
+    #[test]
+    fn expected_duration_keeps_fractional_fps() {
+        let path = temp_path("fractional-fps");
+        let writer = Writer::new(
+            path,
+            Setup {
+                video: Some(VideoSetup {
+                    codec: "av01.0.08M.08".to_string(),
+                    fps: 29.97,
+                }),
+                audio: None,
+            },
+        );
+        assert_eq!(
+            writer.expected_duration_us(TrackId::Video),
+            33_367,
+            "29.97 fps の期待尺を f64 のまま計算すること"
+        );
+    }
+
     /// 未対応の video codec はエラーになる
     #[test]
     fn build_video_entry_rejects_unsupported_codec() {
@@ -1774,7 +1795,7 @@ mod tests {
                 Setup {
                     video: Some(VideoSetup {
                         codec: "av01.0.08M.08".to_string(),
-                        fps: 30,
+                        fps: 30.0,
                     }),
                     audio: None,
                 },
@@ -1937,7 +1958,7 @@ mod tests {
                 Setup {
                     video: Some(VideoSetup {
                         codec: "av01.0.08M.08".to_string(),
-                        fps: 30,
+                        fps: 30.0,
                     }),
                     audio: Some(AudioSetup {
                         sample_rate: 48_000,
@@ -2012,7 +2033,7 @@ mod tests {
                 Setup {
                     video: Some(VideoSetup {
                         codec: "avc1.64001E".to_string(),
-                        fps: 30,
+                        fps: 30.0,
                     }),
                     audio: Some(AudioSetup {
                         sample_rate: 48_000,
@@ -2062,7 +2083,7 @@ mod tests {
                 Setup {
                     video: Some(VideoSetup {
                         codec: "av01.0.08M.08".to_string(),
-                        fps: 30,
+                        fps: 30.0,
                     }),
                     audio: Some(AudioSetup {
                         sample_rate: 48_000,
@@ -2154,7 +2175,7 @@ mod tests {
                 Setup {
                     video: Some(VideoSetup {
                         codec: "av01.0.08M.08".to_string(),
-                        fps: 30,
+                        fps: 30.0,
                     }),
                     audio: Some(AudioSetup {
                         sample_rate: 48_000,
@@ -2226,7 +2247,7 @@ mod tests {
                 Setup {
                     video: Some(VideoSetup {
                         codec: "av01.0.08M.08".to_string(),
-                        fps: 30,
+                        fps: 30.0,
                     }),
                     audio: Some(AudioSetup {
                         sample_rate: 48_000,

@@ -850,7 +850,7 @@ struct VideoTrackInfo {
     codec: String,
     width: u32,
     height: u32,
-    fps: u32,
+    fps: f64,
     /// LOC packaging の Object を MOQT Stream へ割り当てるモード
     ///
     /// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) / §5.2.5 (Packaging
@@ -7993,7 +7993,7 @@ fn extract_video_info(
             .ok_or_else(|| Error::Other("catalog track missing height".to_string()))?,
     )
     .map_err(|_| Error::Other("catalog track height is out of u32 range".to_string()))?;
-    let fps = track.framerate.map(|f| f as u32).unwrap_or(30);
+    let fps = track.framerate.unwrap_or(30.0);
     // draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) / §5.2.5 (Packaging
     // metadata): streamMapping がない場合は group。不正値はカタログ不正として扱う
     let stream_mapping = track.stream_mapping().map_err(|e| {
@@ -16167,7 +16167,7 @@ mod tests {
                 Setup {
                     video: Some(VideoSetup {
                         codec: "av01.0.08M.08".to_string(),
-                        fps: 30,
+                        fps: 30.0,
                     }),
                     audio: None,
                 },
