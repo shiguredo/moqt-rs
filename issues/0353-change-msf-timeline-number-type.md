@@ -1,7 +1,7 @@
 # MSF Timeline の時刻フィールドの数値型と検証を見直す
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/change-msf-timeline-number-type
 - Polished: 2026-11-21
 
@@ -84,3 +84,21 @@ draft-ietf-moq-msf-02 §7.1.1 (Explicit entry format) と §8.2 (Event Timeline 
 - `cargo build -p shiguredo_moqt --target thumbv7em-none-eabihf` と `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` が通ること (no_std と公開 doc の維持)。
 - `docs/msf.md` が markdownlint を通ること (CI の prek ジョブと同じ)。
 - `fuzz/fuzz_targets/fuzz_msf_template.rs` が `cargo +nightly fuzz build fuzz_msf_template` でビルドできること (CI の `cargo test --workspace` は `fuzz/` を対象外とするため、ローカルで確認する)。
+
+## 解決方法
+
+- メディア PTS を `i64` にした: `MsfMediaTimelineEntry::pts_ms`、`MsfEventIndex::MediaPtsMs`、
+  `MsfTemplate::start_media_time` / `delta_media_time`。
+- wallclock と Location の ID は `u64` のままにした。
+- f64 を経由しない 10 進整数パーサを追加し、`2002.0` / `2.002e3` / `2002e0` / `100e-2` を
+  整数として受理し、`2002.5` / `1e-1` を拒否する。i64 / u64 の範囲外は拒否する。
+- `MsfTemplate::resolve_entry` は i128 / u128 で計算し、各系列が範囲外なら `None` を返す。
+- decode した `2002.0` は encode で `2002` に正規化される。
+- `tests/test_msf` に整数値表現・負値・i64/u64 境界・Location ID の非受理・u64::MAX index・
+  wallclock 境界・template の負の deltaWallclock のテストを追加した。
+- `pbt/tests/prop_msf.rs` と `fuzz/fuzz_targets/fuzz_msf_template.rs` を新しい型に更新した。
+- `docs/msf.md` と公開 doc に受理範囲と正規化を明記した。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`cargo doc`、`cargo +nightly check --manifest-path fuzz/Cargo.toml`、
+`cargo build -p shiguredo_moqt --target thumbv7em-none-eabihf` が成功した。
