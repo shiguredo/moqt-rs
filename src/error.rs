@@ -124,9 +124,9 @@ pub enum MessageError {
     InvalidCatalog(String),
     /// MSF カタログのバージョンが未対応
     InvalidCatalogVersion(String),
-    /// MSF Timeline の gzip 復号に失敗した (draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload) / §8.1 (Event Timeline data format))
+    /// MSF Timeline の gzip 復号に失敗した (draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload) / §8.2 (Event Timeline data format))
     GzipDecode(String),
-    /// MSF Timeline の gzip 圧縮に失敗した (draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload) / §8.1 (Event Timeline data format))
+    /// MSF Timeline の gzip 圧縮に失敗した (draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload) / §8.2 (Event Timeline data format))
     GzipEncode(String),
     /// MSF_COMPRESSION property の値が未サポート
     ///

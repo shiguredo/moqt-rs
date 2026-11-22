@@ -27,8 +27,8 @@ relay による namespace の集約・forwarding) は本稿の対象外とする
 足りていないのは次の 4 層に分かれる。
 
 1. **仕様側で明示的に未実装のまま残っている機能**: Secure Objects (LOC §3 / MSF §4.3)、
-   MSF の catalog 圧縮 (§5.5)、Log / Metrics track の payload (§9 / §10)、
-   LOC の Video Payload Format (§2.1)。いずれも `issues/pending/` に起票済みである。
+   Log / Metrics track の payload (§9 / §10)、LOC の Video Payload Format (§2.1)。
+   いずれも `issues/pending/` に起票済みである。
 2. **ライブラリには API があるのに、moq-pub / moq-sub から使われていない機能**:
    FETCH (要求側 API は transport 層で削除済み)、TRACK_STATUS、Media / Event Timeline、
    MSF の変数置換、パディング、`publishTracks`、Audio Level、`END_OF_GROUP`、
@@ -47,7 +47,7 @@ relay による namespace の集約・forwarding) は本稿の対象外とする
 | 機能 | 仕様 | 現状 | issue |
 | --- | --- | --- | --- |
 | Secure Objects による E2E 暗号化と復号 | LOC §3、MSF §4.3 | 未実装。MSF の signaling フィールドは扱うが、`ENCRYPTED_LIST` (`0x0A`) / `PADDING` (`0x32`) Object Property と暗号処理が無い | `issues/pending/0004-add-secure-objects-encryption.md` |
-| MSF_COMPRESSION property による catalog 圧縮 | MSF §5.5 / §12.1 | 未実装。Track Property ID が TBD のため wire 実装しない | `issues/pending/0002-change-msf-compression-signaling.md` |
+| MSF_COMPRESSION property による catalog 圧縮 | MSF §5.5 / §12.1 | 実装済み。0x78 の Track Property / Object Property を `MsfCompression` で解釈し、catalog / timeline の encode / decode が signal を受け取る | - |
 | Log / Metrics track の payload | MSF §9 / §10 | 未実装。`packaging` の値は扱うが payload は未対応 | `issues/0003-add-msf-log-metrics-payload.md` |
 | LOC の Video Payload Format | LOC §2.1 | 部分実装。`loc::video_payload` で 1〜4 バイト length prefix / 3・4 バイト start code / length 1 = start code を扱う。example の annexB 統合と payload 内 parameter set は未対応 | `issues/pending/0005-add-loc-video-payload-format.md` |
 | LOC の Track スコープ Property | LOC §6.1 Table 1 | PUBLISH / SUBSCRIBE_OK で受信した場合、受信側は `Subscription::peer_track_properties` から `TrackProperties::find_varint` / `find_bytes` と `codec_string` (0x11 CODEC_STRING、UTF-8 検証) で取得できる。publisher example からの送信は未対応 | 未起票 |

@@ -2998,7 +2998,7 @@ pub fn validate_media_timeline_format(
     validate_media_time_order(&timeline.0)
 }
 
-/// イベントタイムラインのインデックス参照 (draft-ietf-moq-msf-02 §8.1 (Event Timeline data format))
+/// イベントタイムラインのインデックス参照 (draft-ietf-moq-msf-02 §8.2 (Event Timeline data format))
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MsfEventIndex {
     /// 'L': MOQT Location [group_id, object_id]
@@ -3009,7 +3009,7 @@ pub enum MsfEventIndex {
     MediaPtsMs(u64),
 }
 
-/// イベントタイムラインエントリ (draft-ietf-moq-msf-02 §8.1 (Event Timeline data format))
+/// イベントタイムラインエントリ (draft-ietf-moq-msf-02 §8.2 (Event Timeline data format))
 #[derive(Debug, Clone, PartialEq)]
 pub struct MsfEventTimelineEntry {
     /// インデックス参照
@@ -3045,7 +3045,7 @@ impl DisplayJson for MsfEventTimelineEntry {
     }
 }
 
-/// イベントタイムライントラックペイロード (draft-ietf-moq-msf-02 §8.1 (Event Timeline data format))
+/// イベントタイムライントラックペイロード (draft-ietf-moq-msf-02 §8.2 (Event Timeline data format))
 ///
 /// フォーマット: `[{"t"/"l"/"m": ..., "data": ...}, ...]`
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -3073,7 +3073,7 @@ impl MsfEventTimeline {
     /// - `data_raw` が UTF-8 でない: `InvalidCatalog`
     /// - `data_raw` 全体が単一の JSON object としてパース可能でない (trailing 文字を含む): `InvalidCatalog`
     pub fn encode(&self) -> Result<Vec<u8>, MessageError> {
-        // draft-ietf-moq-msf-02 §8.1 (Event Timeline data format): "An event timeline track is a JSON [JSON] document."
+        // draft-ietf-moq-msf-02 §8.2 (Event Timeline data format): "An event timeline track is a JSON [JSON] document."
         // この仕様は将来変更される可能性がある。
         // data_raw は利用者が任意に構築できる pub フィールドのため、encode 前に検証して
         // panic 経路と不正な JSON の生成を防ぐ (検証の詳細は validate_event_data_raw を参照)。
@@ -5100,7 +5100,7 @@ fn validate_auth_info_value_raw(value_raw: &[u8]) -> Result<(), MessageError> {
 
 /// イベントデータの生 JSON バイト列を検証する
 ///
-/// draft-ietf-moq-msf-02 §8.1 (Event Timeline data format): "An event timeline track is a JSON `[JSON]` document."
+/// draft-ietf-moq-msf-02 §8.2 (Event Timeline data format): "An event timeline track is a JSON `[JSON]` document."
 /// この仕様は将来変更される可能性がある。
 /// encode 側の検証欠落による panic (fmt エラー時の to_string の仕様) と
 /// 不正な JSON の静的な生成を防ぐため、`data_raw` が「UTF-8 かつ単独の JSON object
@@ -5115,7 +5115,7 @@ fn validate_event_data_raw(data_raw: &[u8]) -> Result<(), MessageError> {
 
 // ─── Timeline の gzip 圧縮・自動復号 ────────────────────────────────────────
 //
-// §7.1 (Media Timeline track payload) および §8.1 (Event Timeline data format) は
+// §7.1 (Media Timeline track payload) および §8.2 (Event Timeline data format) は
 // payload の compression を許容する。codec は [`MsfCompression`] を signal として受け取り、
 // `Gzip` のときだけ gzip (RFC 1952) 圧縮・復号する。property が無い場合は圧縮されて
 // いないものとして扱う (draft-ietf-moq-msf-02 §12.1.1)。magic byte による自動判定は
@@ -5166,7 +5166,7 @@ impl TryFrom<u64> for MsfCompression {
 /// gzip 展開後の累計出力サイズの上限 (16 MiB)
 ///
 /// この上限は実装が定める防御的上限であり、仕様で規定された値ではない。
-/// draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload) / §8.1 (Event Timeline data format) は MSF_COMPRESSION property (Section 12.1) による圧縮のみ規定し、
+/// draft-ietf-moq-msf-02 §7.1 (Media Timeline track payload) / §8.2 (Event Timeline data format) は MSF_COMPRESSION property (Section 12.1) による圧縮のみ規定し、
 /// 展開後サイズや圧縮比の上限を定めていない。draft-ietf-moq-msf-02 §13 (Security Considerations)
 /// も上限値を規定していないため、本実装は OOM 防止の防御として独自上限を置く。
 /// GZIP 自体 (RFC 1952) も展開後サイズを規定しない。
@@ -5278,7 +5278,7 @@ pub fn decode_media_timeline(
 
 /// Event Timeline を JSON にシリアライズし、signal に従って gzip 圧縮する
 ///
-/// draft-ietf-moq-msf-02 §8.1 (Event Timeline data format) に準拠。
+/// draft-ietf-moq-msf-02 §8.2 (Event Timeline data format) に準拠。
 pub fn encode_event_timeline(
     timeline: &MsfEventTimeline,
     compression: MsfCompression,
@@ -5290,7 +5290,7 @@ pub fn encode_event_timeline(
 ///
 /// `Gzip` のときだけ展開し、magic byte による自動判定は行わない。
 ///
-/// draft-ietf-moq-msf-02 §8.1 (Event Timeline data format) / §12.1.1
+/// draft-ietf-moq-msf-02 §8.2 (Event Timeline data format) / §12.1.1
 /// (Compression Signaling) に準拠。
 pub fn decode_event_timeline(
     data: &[u8],
