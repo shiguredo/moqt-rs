@@ -6150,3 +6150,67 @@ fn subgroup_object_with_invalid_inner_audio_level_requires_malformed_key_value()
         "data plane のエラーは戻り値で通知し、セッション終了は呼び出し側が行うこと"
     );
 }
+
+/// 未サポートの MSF_COMPRESSION 値は当該 Object を処理しない
+///
+/// draft-ietf-moq-msf-02 §12.1.1 / §12.1.2: 2 以上の値は MUST NOT attempt to process。
+/// datagram 経路では Object を FilteredOut として捨て、track は継続する。
+#[test]
+fn datagram_unsupported_compression_value_is_filtered_out() {
+    use shiguredo_moqt::track_properties::PROP_MSF_COMPRESSION;
+
+    // Object Property が未サポート値
+    let (mut client, _server, rid) = establish_subscribe_track(715);
+    let mut object_properties = ObjectProperties::new();
+    object_properties.push(ObjectProperty {
+        prop_type: PROP_MSF_COMPRESSION,
+        value: ObjectPropertyValue::VarInt(2),
+    });
+    let mut encoded = Vec::new();
+    object_properties
+        .encode(&mut encoded)
+        .expect("encode に成功すること");
+    let acceptance = client
+        .recv_object_datagram(&ObjectDatagram {
+            track_alias: 715,
+            group_id: 1,
+            object_id: 0,
+            publisher_priority: Some(7),
+            properties_data: Some(encoded),
+            end_of_group: false,
+            status: None,
+        })
+        .expect("未サポート値は Object 単位で捨てる");
+    assert_eq!(acceptance, TrackDataAcceptance::FilteredOut);
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Established,
+        "track は継続すること"
+    );
+    assert_eq!(client.state(), SessionState::Established);
+
+    // Track Property が未サポート値
+    use shiguredo_moqt::track_properties::{TrackProperty, TrackPropertyValue};
+    let mut track_properties = TrackProperties::new();
+    track_properties.push(TrackProperty {
+        prop_type: PROP_MSF_COMPRESSION,
+        value: TrackPropertyValue::VarInt(2),
+    });
+    let (mut client, _server, _rid) =
+        establish_subscribe_track_with_properties(716, track_properties);
+    let acceptance = client
+        .recv_object_datagram(&ObjectDatagram {
+            track_alias: 716,
+            group_id: 1,
+            object_id: 0,
+            publisher_priority: Some(7),
+            properties_data: None,
+            end_of_group: false,
+            status: None,
+        })
+        .expect("未サポートの Track Property は payload を処理しない");
+    assert_eq!(acceptance, TrackDataAcceptance::FilteredOut);
+}

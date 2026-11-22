@@ -3610,6 +3610,25 @@ impl Session {
             self.terminate_malformed_track(request_id, None, reason);
             return Err(SessionError::new(SESSION_PROTOCOL_VIOLATION, reason));
         }
+        // draft-ietf-moq-msf-02 §12.1.1 / §12.1.2: 未サポートの値 (2 以上) は payload を
+        // 処理してはならない。Track Property 版は track の unsubscribe を促すが、ここでは
+        // 当該 Object を処理せず購読は継続する。Track Property の未サポートを検出した場合は
+        // 以後の payload も処理しない。
+        let unsupported_compression = {
+            let track = self
+                .subscriptions
+                .get(&request_id)
+                .map(|subscription| subscription.peer_msf_compression());
+            let object = decode_object_properties(properties_bytes)
+                .ok()
+                .flatten()
+                .map(|properties| crate::session::compression::object_compression(&properties));
+            matches!(track, Some(Err(MessageError::UnsupportedCompression(_))))
+                || matches!(object, Some(Err(MessageError::UnsupportedCompression(_))))
+        };
+        if unsupported_compression {
+            return Ok(TrackDataAcceptance::FilteredOut);
+        }
         let received_location = Location {
             group_id: datagram.group_id,
             object_id: datagram.object_id,
