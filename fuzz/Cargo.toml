@@ -215,6 +215,11 @@ doc = false
 name = "fuzz_c4m_dpop_verify"
 path = "fuzz_targets/fuzz_c4m_dpop_verify.rs"
 
+[[bin]]
+doc = false
+name = "fuzz_playout_stretch"
+path = "fuzz_targets/fuzz_playout_stretch.rs"
+
 [dependencies]
 # 構造化入力生成に使用 (Arbitrary derive)
 arbitrary = { version = "1.5", features = ["derive"] }
