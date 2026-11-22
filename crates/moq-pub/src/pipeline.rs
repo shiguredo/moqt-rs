@@ -1116,7 +1116,6 @@ struct PublisherPipelineState<'a> {
     capture_residuals: &'a mut CaptureClockResiduals,
     audio_timeline: &'a mut AudioCaptureTimeline,
     pending_video_timestamps: &'a mut VecDeque<u64>,
-    audio_config_sent: &'a mut bool,
     audio_stats_logged_ms: &'a mut u64,
     media_cache: &'a mut cache::MediaCache,
     tick_interval: &'a mut tokio::time::Interval,
@@ -1141,6 +1140,7 @@ struct PublisherPipelineState<'a> {
     video_request_id: &'a mut Option<u64>,
     data_plane: &'a mut DataPlaneHandle,
     client: &'a mut MoqtClient,
+    audio_config_sent: &'a mut bool,
 }
 
 /// moq-pub のデータループを回す
@@ -1818,12 +1818,12 @@ struct AudioInputContext<'a> {
     audio_clock: &'a mut AudioTimestampClock,
     capture_residuals: &'a mut CaptureClockResiduals,
     audio_timeline: &'a mut AudioCaptureTimeline,
-    audio_config_sent: &'a mut bool,
     media_cache: &'a mut cache::MediaCache,
     audio_publish_target: &'a mut Option<PublishTarget>,
     audio_request_id: &'a mut Option<u64>,
     data_plane: &'a mut DataPlaneHandle,
     client: &'a mut MoqtClient,
+    audio_config_sent: &'a mut bool,
 }
 
 /// 音声入力 1 件をエンコードして送信する
@@ -1838,10 +1838,10 @@ async fn finish_audio_input(context: AudioInputContext<'_>) -> Result<()> {
         audio_samples_per_frame: _,
         audio_timescale,
         audio_config,
+        peer_subscriptions: _,
         handle,
         audio_group_id,
         audio_frame_count: _,
-        peer_subscriptions: _,
         session_ended: _,
         audio_pcm_buf: _,
         audio_fade_pending,
@@ -1958,16 +1958,144 @@ struct AudioProcessContext<'a> {
     audio_fade_pending: &'a mut Option<(Vec<i16>, u64)>,
     audio_fade_next_head: &'a mut bool,
     audio_timeline: &'a mut AudioCaptureTimeline,
-    audio_config_sent: &'a mut bool,
     media_cache: &'a mut cache::MediaCache,
     audio_publish_target: &'a mut Option<PublishTarget>,
     audio_request_id: &'a mut Option<u64>,
     data_plane: &'a mut DataPlaneHandle,
     client: &'a mut MoqtClient,
     audio_encoder: &'a mut Option<AudioEncoder>,
+    audio_config_sent: &'a mut bool,
 }
 
 /// 音声 PCM をチャンクごとにエンコードして送信する
+struct AudioPeerContext<'a> {
+    config: &'a mut Config,
+    audio_timescale: &'a mut Option<u64>,
+    peer_subscriptions: &'a mut Vec<PeerSubscription>,
+    handle: &'a mut StreamHandle,
+    audio_group_id: &'a mut u64,
+    data_plane: &'a mut DataPlaneHandle,
+    client: &'a mut MoqtClient,
+}
+
+/// 受信 SUBSCRIBE の peer へ音声 Object を送る
+async fn send_audio_to_peer_subscriptions(
+    context: AudioPeerContext<'_>,
+    timestamp: u64,
+    audio_config: Option<&[u8]>,
+    _properties: &LocProperties,
+    encoded: &[u8],
+) -> Result<()> {
+    let AudioPeerContext {
+        config,
+        audio_timescale,
+        peer_subscriptions,
+        handle,
+        audio_group_id,
+        data_plane,
+        client,
+    } = context;
+    for peer in peer_subscriptions.iter_mut() {
+        if peer.track != PublishedTrack::Audio || peer.ended {
+            continue;
+        }
+        let audio_config_for_peer = if peer.audio_config_sent {
+            None
+        } else {
+            audio_config
+        };
+        let peer_properties =
+            build_audio_loc_properties(timestamp, *audio_timescale, audio_config_for_peer);
+        if config.audio_datagram {
+            let mut writer = DatagramWriter::new(
+                handle,
+                data_plane,
+                peer.request_id,
+                peer.alias,
+                *audio_group_id,
+                DEFAULT_PUBLISHER_PRIORITY,
+                config.datagram_max_size,
+                config.audio_redundancy,
+            );
+            let outcome = writer.write_object(encoded, &peer_properties).await;
+            match outcome {
+                Ok(outcome) => {
+                    if outcome == ObjectFilterOutcome::Pass {
+                        peer.audio_config_sent = true;
+                    }
+                }
+                Err(e) => {
+                    if is_peer_stream_reset(&e) {
+                        // datagram は Session の outgoing stream 追跡
+                        // (`data_streams.outgoing`) を持たないため、
+                        // 終端通知 (`send_data_stream_closed`) の対象外である
+                        tracing::info!(
+                            "Peer audio datagram was reset by peer; dropping the subscription: request_id={}",
+                            peer.request_id
+                        );
+                        peer.ended = true;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        } else {
+            let writer_result = SubgroupWriter::new(
+                handle,
+                data_plane,
+                peer.request_id,
+                peer.alias,
+                *audio_group_id,
+                SubgroupIdMode::Zero,
+                0,
+                DEFAULT_PUBLISHER_PRIORITY,
+                true,
+                client.subscription_filter_start(peer.request_id),
+            )
+            .await;
+            match writer_result {
+                Ok(mut writer) => {
+                    let (write_error, write_passed) =
+                        match writer.write_object(encoded, &peer_properties).await {
+                            Ok(outcome) => (None, outcome == ObjectFilterOutcome::Pass),
+                            Err(e) => (Some(e), false),
+                        };
+                    let finish_error = writer
+                        .finish(client.subscription_filter_start(peer.request_id))
+                        .await
+                        .err();
+                    if let Some(e) = write_error.or(finish_error) {
+                        if is_peer_stream_reset(&e) {
+                            // writer の `write_object` / `finish` は、失敗を
+                            // 返す前に Session へ終端を通知済みである。writer を
+                            // 捨てても Session の追跡は終端される
+                            tracing::info!(
+                                "Peer audio stream was reset by peer; dropping the subscription: request_id={}",
+                                peer.request_id
+                            );
+                            peer.ended = true;
+                        } else {
+                            return Err(e);
+                        }
+                    } else if write_passed {
+                        peer.audio_config_sent = true;
+                    }
+                }
+                Err(e) => {
+                    if is_transport_session_end(&e) {
+                        return Err(e);
+                    }
+                    tracing::warn!(
+                        "Failed to open a peer audio stream: request_id={}, {e}",
+                        peer.request_id
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn process_audio_chunks(
     context: AudioProcessContext<'_>,
     samples_per_frame: usize,
@@ -2203,104 +2331,23 @@ async fn process_audio_chunks(
         // モードの購読は 1 object = 1 stream で PUBLISH 側と同じ形で送る。
         // 送信統計 (`record_audio_send`) は PUBLISH 購読の Pass を基準に
         // するためここでは行わない
-        for peer in peer_subscriptions.iter_mut() {
-            if peer.track != PublishedTrack::Audio || peer.ended {
-                continue;
-            }
-            let audio_config_for_peer = if peer.audio_config_sent {
-                None
-            } else {
-                audio_config
-            };
-            let peer_properties =
-                build_audio_loc_properties(timestamp, *audio_timescale, audio_config_for_peer);
-            if config.audio_datagram {
-                let mut writer = DatagramWriter::new(
-                    handle,
-                    data_plane,
-                    peer.request_id,
-                    peer.alias,
-                    *audio_group_id,
-                    DEFAULT_PUBLISHER_PRIORITY,
-                    config.datagram_max_size,
-                    config.audio_redundancy,
-                );
-                let outcome = writer.write_object(&encoded, &peer_properties).await;
-                match outcome {
-                    Ok(outcome) => {
-                        if outcome == ObjectFilterOutcome::Pass {
-                            peer.audio_config_sent = true;
-                        }
-                    }
-                    Err(e) => {
-                        if is_peer_stream_reset(&e) {
-                            // datagram は Session の outgoing stream 追跡
-                            // (`data_streams.outgoing`) を持たないため、
-                            // 終端通知 (`send_data_stream_closed`) の対象外である
-                            tracing::info!(
-                                "Peer audio datagram was reset by peer; dropping the subscription: request_id={}",
-                                peer.request_id
-                            );
-                            peer.ended = true;
-                        } else {
-                            return Err(e);
-                        }
-                    }
-                }
-            } else {
-                let writer_result = SubgroupWriter::new(
-                    handle,
-                    data_plane,
-                    peer.request_id,
-                    peer.alias,
-                    *audio_group_id,
-                    SubgroupIdMode::Zero,
-                    0,
-                    DEFAULT_PUBLISHER_PRIORITY,
-                    true,
-                    client.subscription_filter_start(peer.request_id),
-                )
-                .await;
-                match writer_result {
-                    Ok(mut writer) => {
-                        let (write_error, write_passed) =
-                            match writer.write_object(&encoded, &peer_properties).await {
-                                Ok(outcome) => (None, outcome == ObjectFilterOutcome::Pass),
-                                Err(e) => (Some(e), false),
-                            };
-                        let finish_error = writer
-                            .finish(client.subscription_filter_start(peer.request_id))
-                            .await
-                            .err();
-                        if let Some(e) = write_error.or(finish_error) {
-                            if is_peer_stream_reset(&e) {
-                                // writer の `write_object` / `finish` は、失敗を
-                                // 返す前に Session へ終端を通知済みである。writer を
-                                // 捨てても Session の追跡は終端される
-                                tracing::info!(
-                                    "Peer audio stream was reset by peer; dropping the subscription: request_id={}",
-                                    peer.request_id
-                                );
-                                peer.ended = true;
-                            } else {
-                                return Err(e);
-                            }
-                        } else if write_passed {
-                            peer.audio_config_sent = true;
-                        }
-                    }
-                    Err(e) => {
-                        if is_transport_session_end(&e) {
-                            return Err(e);
-                        }
-                        tracing::warn!(
-                            "Failed to open a peer audio stream: request_id={}, {e}",
-                            peer.request_id
-                        );
-                    }
-                }
-            }
-        }
+        let peer_context = AudioPeerContext {
+            config: &mut *config,
+            audio_timescale: &mut *audio_timescale,
+            peer_subscriptions: &mut *peer_subscriptions,
+            handle: &mut *handle,
+            audio_group_id: &mut *audio_group_id,
+            data_plane: &mut *data_plane,
+            client: &mut *client,
+        };
+        send_audio_to_peer_subscriptions(
+            peer_context,
+            timestamp,
+            audio_config,
+            &properties,
+            &encoded,
+        )
+        .await?;
         *audio_group_id = group_id::next_group_id(*audio_group_id)?;
         *audio_frame_count += 1;
     }
@@ -2539,7 +2586,6 @@ struct NextEventContext<'a> {
     next_peer_alias: &'a mut u64,
     gop_tracker: &'a mut gop::GopTracker,
     session_ended: &'a mut bool,
-    audio_config_sent: &'a mut bool,
     media_cache: &'a mut cache::MediaCache,
     migration_task: &'a mut Option<tokio::task::JoinHandle<()>>,
     request_migration_tx: &'a mut tokio::sync::mpsc::Sender<RequestMigrationEvent>,
@@ -2558,6 +2604,7 @@ struct NextEventContext<'a> {
     migration_rx: &'a mut Option<
         tokio::sync::oneshot::Receiver<std::result::Result<MigratedSession, String>>,
     >,
+    audio_config_sent: &'a mut bool,
 }
 
 /// session のイベント 1 件を処理する
@@ -3185,7 +3232,6 @@ struct MigrationResultContext<'a> {
     peer_subscriptions: &'a mut Vec<PeerSubscription>,
     gop_tracker: &'a mut gop::GopTracker,
     session_ended: &'a mut bool,
-    audio_config_sent: &'a mut bool,
     migration_task: &'a mut Option<tokio::task::JoinHandle<()>>,
     request_migration_rx: &'a mut tokio::sync::mpsc::Receiver<RequestMigrationEvent>,
     request_migration_tasks: &'a mut Vec<tokio::task::JoinHandle<()>>,
@@ -3204,6 +3250,7 @@ struct MigrationResultContext<'a> {
     migration_rx: &'a mut Option<
         tokio::sync::oneshot::Receiver<std::result::Result<MigratedSession, String>>,
     >,
+    audio_config_sent: &'a mut bool,
 }
 
 /// バックグラウンドの session 移行の結果を処理する
@@ -3449,7 +3496,6 @@ struct RequestMigrationContext<'a> {
     peer_subscriptions: &'a mut Vec<PeerSubscription>,
     gop_tracker: &'a mut gop::GopTracker,
     session_ended: &'a mut bool,
-    audio_config_sent: &'a mut bool,
     request_migration_sessions: &'a mut HashMap<String, SideSessionSlot>,
     migrating_tracks: &'a mut Vec<PublishTrack>,
     video_publish_target: &'a mut Option<PublishTarget>,
@@ -3460,6 +3506,7 @@ struct RequestMigrationContext<'a> {
     video_request_id: &'a mut Option<u64>,
     data_plane: &'a mut DataPlaneHandle,
     client: &'a mut MoqtClient,
+    audio_config_sent: &'a mut bool,
 }
 
 /// request 単位移行の side session から届いたイベントを処理する
