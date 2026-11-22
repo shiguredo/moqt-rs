@@ -361,10 +361,20 @@ mod namespace_only {
             Err(NameParseError::RedundantEncoding)
         );
         assert_eq!(parse_namespace("a."), Err(NameParseError::InvalidEscape));
-        // 33 フィールド (> 32)
+        // 33 フィールド (> 32)。合計 33 バイトなので長さ超過ではない
         assert_eq!(
             parse_namespace(&vec!["a"; 33].join("-")),
             Err(NameParseError::InvalidNamespace)
+        );
+        // 4096 バイトちょうどは成功し、4097 バイトは長さ超過
+        assert!(parse_namespace(&"a".repeat(4096)).is_ok());
+        assert_eq!(
+            parse_namespace(&"a".repeat(4097)),
+            Err(NameParseError::NamespaceTooLong)
+        );
+        assert_eq!(
+            NameParseError::NamespaceTooLong.to_string(),
+            "namespace is too long (max 4096 bytes)"
         );
         assert_eq!(parse_track_name("-"), Err(NameParseError::InvalidEscape));
         assert_eq!(parse_track_name("a.2E"), Err(NameParseError::UppercaseHex));

@@ -55,6 +55,11 @@ pub enum NameParseError {
     MultipleSeparators,
     /// namespace + track name の合計が 4096 バイトを超える (draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure))
     FullNameTooLong,
+    /// namespace の合計バイト長が 4096 バイトを超える
+    /// (draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure) の FIELD_LENGTH_EXCEEDED)
+    ///
+    /// `parse_namespace` だけが返す。
+    NamespaceTooLong,
     /// `TrackNamespace::new` のフィールド数 (32 超) 制約違反 (draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure))
     InvalidNamespace,
 }
@@ -74,6 +79,12 @@ impl core::fmt::Display for NameParseError {
                 write!(
                     f,
                     "full track name is too long (max {MAX_TRACK_NAME_LENGTH} bytes)"
+                )
+            }
+            Self::NamespaceTooLong => {
+                write!(
+                    f,
+                    "namespace is too long (max {MAX_TRACK_NAME_LENGTH} bytes)"
                 )
             }
             Self::InvalidNamespace => write!(f, "namespace is invalid (max 32 fields)"),
@@ -186,6 +197,12 @@ pub fn parse_namespace(s: &str) -> Result<TrackNamespace, NameParseError> {
             }
             fields.push(decode_field(field_bytes, PercentEncoding::Forbidden)?);
         }
+    }
+    // 合計長を先に検査する。長さ超過とフィールド数超過が同時に起きた場合は
+    // 長さ超過を優先し、利用者が原因を判別できるようにする。
+    let total_len: usize = fields.iter().map(Vec::len).sum();
+    if total_len > MAX_TRACK_NAME_LENGTH {
+        return Err(NameParseError::NamespaceTooLong);
     }
     TrackNamespace::new(fields).map_err(|_| NameParseError::InvalidNamespace)
 }
