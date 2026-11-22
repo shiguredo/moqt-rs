@@ -1,7 +1,7 @@
 # MSF の delta 適用の探索と複製を減らす
 
 - Created: 2026-10-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/refactor-msf-apply-delta-search
 - Polished: 2026-11-21
 
@@ -53,3 +53,19 @@
 - 巨大カタログ (例: 10,000 tracks) の add / remove / clone / update を適用する回帰テストが `tests/test_msf/delta_apply.rs` に追加され、通ること。
 - 既存の delta 適用テストが変わらず通ること。
 - `cargo test --workspace` / `cargo test -p pbt` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` が通ること。
+
+## 解決方法
+
+- `src/msf.rs` に `TrackIndex` を追加した。解決済みキーからスロット番号を引く `positions`、`tracks` と並行な `slots`、生存スロットの順序統計 (`SlotRanks` の Fenwick 木)、単調増加する `next_slot` を持ち、Add / Remove / Clone / Update の対象を線形探索せずに引く。
+- Add / Clone は追加予定のキーを `reserve_if_absent` で仮登録し、既存カタログと同一バッチ内の重複を O(1) で検出する。全件の検証が終わるまで `tracks` へ追加しないため、部分適用は起きない。
+- Remove は first-wins の最初の出現を削除し、重複キーを持つカタログだけ `repair_duplicate` で残った同じキーの出現を索引へ戻す。Update は Full Track Name を変えないため、索引のキーと添字をそのまま使う。
+- `apply_delta` はカタログ全体の clone をやめ、`DeltaUndo` の巻き戻しログを変更のたびに記録する。Err 時は `rollback_delta` が逆順に再生し、`tracks` / `removed_tracks` / `generated_at` を呼び出し前へ戻す。Add / Clone のバッチは 1 件の `Appended` で記録する。
+- `validate_init_refs` は `initDataList` の id を `HashSet` にして O(M + D) にした。`validate_media_timeline_dependencies` は renderGroup ごとの所属添字と depends の名前 / group を `HashMap` / `HashSet` にして、source ごとのカタログ全体の走査をなくした。エラーを返す順序は現行実装に合わせている。
+- `tests/test_msf/delta_apply.rs` に Remove / Update / Clone 後の適用後検証失敗、削除履歴の上書き後の失敗、重複キーの remove、同一バッチ内の重複、同一 delta 内の add / remove / clone / update、10,000 tracks の回帰テストを追加した。`pbt/tests/prop_msf_delta.rs` に同一 delta 内で追加した 2 件目のトラックを削除する PBT を追加した。
+- `crates/moq-sub/src/catalog.rs` と `docs/msf.md` の copy-on-write を前提にした記述を、巻き戻しログによる原子性の記述へ更新した。
+- Lean 検証を `shiguredo/lean` の `moqt-rs/MsfDelta/` に追加した。参照実装と高速実装の一致 (`execFast_eq_execRef`)、エラー時の復元 (`execFastCore_error_restores`)、索引の不変条件と undo の復元を 90 個の定理と 9 個の有限例で確認した。性能計測は `reports/2026-11-22-msf-delta.md` に記録した。
+
+確認コマンド: `cargo test --workspace`、`cargo test -p pbt`、
+`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、
+`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` が通ることを確認した。
