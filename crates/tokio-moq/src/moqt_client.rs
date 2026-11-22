@@ -309,6 +309,12 @@ pub struct SubscribeResult {
     /// 購読より前に配られた Object は FILL_PARAMETERS 付き購読の fill fetch stream
     /// (§3.4) で受け取る。LARGEST_OBJECT は fill range の上限を publisher が決めるために使う。
     pub largest_object: Option<Location>,
+    /// SUBSCRIBE_OK が運んだ Track Properties
+    ///
+    /// draft-ietf-moq-transport-23 §8.4 / draft-ietf-moq-msf-02 §12.1。INCLUDE_PROPERTIES=0
+    /// 指定時も MSF_COMPRESSION は保持される。application はここから
+    /// `TrackProperties::msf_compression` を読める。
+    pub track_properties: TrackProperties,
 }
 
 /// FETCH 応答ストリームの writer (publisher 側)
@@ -2566,7 +2572,7 @@ impl MoqtClient {
         };
         self.drain_events().await?;
         self.wait_subscription_resolved(request_id).await?;
-        let (request_id, track_alias, largest_object) = {
+        let (request_id, track_alias, largest_object, track_properties) = {
             let session = lock_session(&self.session);
             let sub = session
                 .subscription(request_id)
@@ -2574,13 +2580,19 @@ impl MoqtClient {
             let track_alias = sub.track_alias.ok_or_else(|| {
                 TransportError::Internal("SUBSCRIBE_OK without track_alias".into())
             })?;
-            (sub.request_id, track_alias, sub.largest_location)
+            (
+                sub.request_id,
+                track_alias,
+                sub.largest_location,
+                sub.peer_track_properties.clone(),
+            )
         };
         tracing::info!("SUBSCRIBE_OK: request_id={request_id}, alias={track_alias}");
         Ok(SubscribeResult {
             request_id,
             track_alias,
             largest_object,
+            track_properties,
         })
     }
 

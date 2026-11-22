@@ -52,6 +52,7 @@ use shiguredo_moqt::{
     session::types::DataStreamId, session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
     stream::decoder::DecodedSubgroupObject, stream::decoder::FetchStreamDecoder,
     stream::decoder::SubgroupStreamDecoder, stream::fetch::FetchHeader,
+    track_properties::TrackProperties,
 };
 
 use crate::catalog;
@@ -3812,12 +3813,14 @@ pub async fn run(
     let mut migration_pending_tracks: HashSet<TrackKind> = HashSet::new();
 
     // fill fetch stream と購読で届くカタログを読み、MSF の配置規則で適用する
+    let initial_catalog_compression = resolve_catalog_compression(&catalog_sub.track_properties);
     let catalog_resolution = receive_catalog(
         &mut recv_acceptor,
         &data_plane,
         catalog_sub.request_id,
         catalog_sub.track_alias,
         namespace,
+        initial_catalog_compression,
     )
     .await?;
     let CatalogResolution {
@@ -4144,7 +4147,7 @@ pub async fn run(
     let mut catalog_alias: Option<u64> = Some(catalog_sub.track_alias);
     // catalog track の MSF_COMPRESSION。SUBSCRIBE_OK の Track Property から解決する。
     // catalog の data stream はこの値で gzip かどうかを決める。
-    let mut catalog_compression = MsfCompression::None;
+    let mut catalog_compression = initial_catalog_compression;
 
     // 音声は 1 object = 1 subgroup stream で届く (LOC draft-ietf-moq-loc-05 §4.1)。
     // stream ごとにデコーダを作り直すと 20 ms ごとにデコーダ状態が失われ、
@@ -7277,12 +7280,30 @@ fn catalog_subscribe_parameters() -> MessageParameters {
 ///
 /// これにより draft-ietf-moq-msf-02 §5 (Catalog) が求める「最新の完全なカタログと、
 /// それに続く delta update」を 1 つの状態 [`catalog::CatalogState`] へまとめて適用できる。
+/// Track Properties から MSF_COMPRESSION を解決する
+///
+/// 未サポート値は警告して非圧縮として扱う。catalog のデコードは後段で失敗するため、
+/// payload を圧縮済みとして処理することはない。
+fn resolve_catalog_compression(properties: &TrackProperties) -> MsfCompression {
+    match properties.msf_compression() {
+        Some(value) => match MsfCompression::try_from(value) {
+            Ok(compression) => compression,
+            Err(e) => {
+                tracing::warn!("Unsupported catalog MSF_COMPRESSION: {e}");
+                MsfCompression::None
+            }
+        },
+        None => MsfCompression::None,
+    }
+}
+
 async fn receive_catalog(
     recv_acceptor: &mut transport::StreamAcceptor,
     data_plane: &DataPlaneHandle,
     fill_request_id: u64,
     catalog_alias: u64,
     catalog_namespace: TrackNamespace,
+    compression: MsfCompression,
 ) -> Result<CatalogResolution> {
     let deadline = tokio::time::Instant::now() + CATALOG_TIMEOUT;
     // 継承の解決と比較は MOQT の Track Namespace のバイト値で行うため、catalog track の
@@ -7343,7 +7364,7 @@ async fn receive_catalog(
                         stream_id,
                         &buf,
                         fill_request_id,
-                        MsfCompression::None,
+                        compression,
                     ),
                 )
                 .await
@@ -7380,7 +7401,7 @@ async fn receive_catalog(
                         stream_id,
                         &buf,
                         catalog_alias,
-                        MsfCompression::None,
+                        compression,
                     ),
                 )
                 .await
@@ -17657,6 +17678,7 @@ mod tests {
                         subscribed.request_id,
                         subscribed.track_alias,
                         test_track_namespace(),
+                        MsfCompression::None,
                     ),
                 )
                 .await
@@ -17715,6 +17737,7 @@ mod tests {
                         subscribed.request_id,
                         subscribed.track_alias,
                         test_track_namespace(),
+                        MsfCompression::None,
                     ),
                 )
                 .await
@@ -17753,6 +17776,7 @@ mod tests {
                         subscribed.request_id,
                         subscribed.track_alias,
                         test_track_namespace(),
+                        MsfCompression::None,
                     ),
                 )
                 .await
@@ -17960,6 +17984,7 @@ mod tests {
                         catalog.request_id,
                         catalog.track_alias,
                         test_track_namespace(),
+                        MsfCompression::None,
                     ),
                 )
                 .await
@@ -18002,6 +18027,7 @@ mod tests {
                         catalog.request_id,
                         catalog.track_alias,
                         test_track_namespace(),
+                        MsfCompression::None,
                     ),
                 )
                 .await
@@ -18139,6 +18165,7 @@ mod tests {
                         catalog.request_id,
                         catalog.track_alias,
                         test_track_namespace(),
+                        MsfCompression::None,
                     ),
                 )
                 .await
