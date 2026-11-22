@@ -1,7 +1,7 @@
 # WebTransport 経路で 32 ビット超の MOQT エラーコードを送れない制限の扱いを決める
 
 - Created: 2026-09-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/change-webtransport-grease-error-code-limits
 - Polished: 2026-11-14
 - Refreshed: 2026-11-04
@@ -99,3 +99,27 @@ WebTransport のストリーム操作 (RESET_STREAM / STOP_SENDING) のアプリ
   close フォールバックと矛盾しないこと。0176 のフォールバックは close code 用の `StreamHandle::close` 経路であり、
   `Session::close` は任意の `u64` を受け付けるため、reset API の 32 ビット制限では到達不能にならない
   (0176 の「到達不能になる」記述は close code も 32 ビットに制限する場合の話である)。
+
+## 解決方法
+
+- 方針 (c) を選んだ。経路ごとに扱いを分け、QUIC 経路は QUIC varint の上限 (`2^62 - 1`) まで
+  送信でき、WebTransport 経路 (wt-h3 / wt-h2) は 32 ビット (`0x00000000-0xffffffff`) を超える
+  コードを送信前に拒否する。理由は、MOQT のエラーコードは varint 全域を取り得る一方、
+  draft-ietf-webtrans-http3-17 §4.4 と draft-ietf-webtrans-http2-16 §6.2 / §6.3 が
+  WebTransport の Application Error Code を 32 ビットに限るためである。Session の API を
+  32 ビットに制限する (b) は QUIC 経路の正当な値を不必要に狭めるため採らない。
+- `WtH2SendStream::reset` と `WtH2RecvStream::stop_sending` に共通の
+  `validate_wt_application_error_code` を追加した。32 ビット超は driver へ送らずに
+  `TransportError::Internal` を返し、エラーメッセージに元のコードと §6.2 / §6.3 を明示する。
+  これにより H2 の stop_sending も呼び出し元へエラーを返す。H3 は既存の `moqt_to_wt_code`
+  が同じ制限を明示しており、変更していない。
+- `SendStream::reset` / `RecvStream::stop_sending` と H2 の各メソッドの doc に、QUIC の
+  varint 上限と WebTransport の 32 ビット制限、根拠の節を記録した。
+- greasing 値の生成側は変更しない。`grease::generate(n)` は 32 ビット超を返し得るが、
+  ライブラリがエラーコードの greasing 値を生成して reset に渡す箇所は無い。アプリが
+  32 ビット超の値を WebTransport 経路へ渡した場合は上記の `Internal` で明示的に失敗する。
+- close 経路は `Session::close` / `moqt_close_code` の別経路であり、本変更の対象外である。
+
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p tokio-moq`、
+`prek run --files` が成功した。
