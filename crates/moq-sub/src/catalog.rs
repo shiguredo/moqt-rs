@@ -948,6 +948,24 @@ mod compression_tests {
         assert_eq!(object.document, document);
     }
 
+    /// 非圧縮の catalog Object を decode できること
+    #[test]
+    fn decode_reads_uncompressed_catalog() {
+        let document = MsfCatalogDocument::Full(MsfCatalog::new());
+        let encoded = document
+            .encode(MsfCompression::None)
+            .expect("非圧縮でエンコードできること");
+        let object = CatalogObject::decode(
+            Location {
+                group_id: 1,
+                object_id: 0,
+            },
+            &encoded,
+        )
+        .expect("非圧縮の catalog をデコードできること");
+        assert_eq!(object.document, document);
+    }
+
     /// signal なしでは gzip 圧縮された catalog を受理しないこと
     #[test]
     fn decode_without_signal_rejects_gzip_catalog() {
