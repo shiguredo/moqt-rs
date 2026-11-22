@@ -1378,68 +1378,48 @@ struct VideoInputContext<'a> {
 
 /// 映像入力 1 件をエンコードして送信する
 /// 映像入力の変換・エンコード・送信の本体
-async fn run_video_input_body(
-    context: VideoInputContext<'_>,
+/// 入力フレームをエンコード済みフレーム列へ変換する
+async fn encode_video_input_frames(
+    context: &mut VideoInputContext<'_>,
     video_input: VideoInput,
-) -> Result<()> {
-    let VideoInputContext {
-        config,
-        namespace,
-        video_encoder,
-        video_timescale,
-        reencode_video_timescale,
-        handle,
-        video_group_id,
-        started_video_group_id,
-        current_video_writer,
-        video_object_id,
-        peer_subscriptions,
-        gop_tracker,
-        session_ended: _,
-        video_clock,
-        capture_residuals,
-        pending_video_timestamps,
-        media_cache,
-        video_publish_target,
-        video_request_id,
-        data_plane,
-        client,
-    } = context;
-    // カメラ / 疑似キャプチャは生フレームをエンコードし、MP4 パススルーは
-    // エンコード済みサンプルをそのまま送り、MP4 再エンコードはデコード済みの
-    // 生フレームをエンコードする
-    // `output_timescale` は、encoder が付けた Timestamp がマイクロ秒である
-    // ことを示す。入力より出力が多いときに、その値を入力の単位へ戻すために使う
+) -> Result<(Vec<EncodedFrame>, std::vec::IntoIter<Option<u64>>)> {
     let (mut encoded_frames, input_timestamp, output_timescale) = match video_input {
         VideoInput::Raw(frame) => {
-            let encoder = video_encoder.as_mut().expect("video encoder enabled");
+            let encoder = context
+                .video_encoder
+                .as_mut()
+                .expect("video encoder enabled");
             // live capture の Timestamp は capture のメディア時刻を epoch
             // マイクロ秒へ換算する。起源はカメラとマイクで異なるため、
             // 換算は映像と音声で別々の時計が持つ
             let timestamp_us = map_capture_timestamp_us(
-                video_clock,
-                capture_residuals,
+                context.video_clock,
+                context.capture_residuals,
                 frame.timestamp_us,
                 wall_clock_now_us()?,
             )?;
             (
-                encode_video_input(encoder, gop_tracker, &frame, timestamp_us)?,
+                encode_video_input(encoder, context.gop_tracker, &frame, timestamp_us)?,
                 None,
                 None,
             )
         }
         VideoInput::Encoded(frame) => (vec![frame], None, None),
         VideoInput::Reencode { frame, timestamp } => {
-            let encoder = video_encoder.as_mut().expect("video encoder enabled");
+            let encoder = context
+                .video_encoder
+                .as_mut()
+                .expect("video encoder enabled");
             // 入力サンプルの PTS (入力トラックの timescale 単位) をマイクロ秒へ
             // 換算して encoder へ渡す。encoder が載せた値は下の
             // `assign_input_timestamps` が入力の PTS で上書きするため、
             // 出力の Timestamp は入力トラックの timescale のままになる
-            let timescale =
-                reencode_video_timescale.expect("re-encode video input has a timescale");
+            let timescale = context
+                .reencode_video_timescale
+                .expect("re-encode video input has a timescale");
             let media_us = media_time_to_micros(timestamp, timescale);
             (
-                encode_video_input(encoder, gop_tracker, &frame, media_us)?,
+                encode_video_input(encoder, context.gop_tracker, &frame, media_us)?,
                 Some(timestamp),
                 Some(timescale),
             )
@@ -1448,7 +1428,7 @@ async fn run_video_input_body(
     // 再エンコードでは出力フレームのタイムスタンプに入力サンプルの PTS を
     // 使う。0 フレームを返した入力の PTS は次に出力されたフレームへ引き継ぐ
     assign_input_timestamps(
-        pending_video_timestamps,
+        context.pending_video_timestamps,
         input_timestamp,
         output_timescale,
         &mut encoded_frames,
@@ -1456,120 +1436,221 @@ async fn run_video_input_body(
     // 出力フレーム列から Group の開始を観測し、次のキーフレーム要求の基準を
     // 進める。戻り値はキーフレームごとの直前 Group 長であり、下のループで
     // debug ログに使う
-    let mut observed_group_durations_us =
-        observe_encoded_frames(gop_tracker, &encoded_frames, *video_timescale).into_iter();
-    for ef in encoded_frames {
-        if ef.is_keyframe {
-            // writer の作成と終端で同じ値を使うため、ここで request_id を
-            // 確定させる (`.expect()` の重複も避ける)
-            let video_request_id = video_request_id.expect("video request_id enabled");
-            // request 単位移行で side session へ移した track は、その session
-            // の handle / data plane で Object を送る ([`publish_sink`])
-            let (video_handle, video_data_plane) =
-                publish_sink(video_publish_target.as_ref(), handle, data_plane);
-            // 映像は 1 group = 1 unidirectional stream で送る
-            // (draft-ietf-moq-loc-05 §4.2)。datagram 配送は音声トラックだけに
-            // 指定でき、キーフレーム (IDR) が 1 QUIC datagram に収まらない
-            // 映像では使わない。
-            if let Some(writer) = current_video_writer.take() {
-                writer
-                    .finish(publish_start_location(
-                        client,
-                        video_publish_target.as_ref(),
-                        video_request_id,
-                    ))
-                    .await?;
-            }
-            // 受信 SUBSCRIBE の購読 (video) の writer も同じ Group 境界で
-            // 閉じて開き直す (受信 SUBSCRIBE は次の Group のキーフレームの
-            // 先頭から配信するため。Group の途中で受理した購読は次の Group
-            // から届く)。PUBLISH 済みの購読と同じ Object を送る
-            // (draft-ietf-moq-transport-23 §3.1 の MUST)
-            for peer in peer_subscriptions.iter_mut() {
-                if peer.track != PublishedTrack::Video {
-                    continue;
-                }
-                if let Some(writer) = peer.writer.take()
-                    && let Err(e) = writer
-                        .finish(client.subscription_filter_start(peer.request_id))
-                        .await
-                {
-                    tracing::debug!(
-                        "Failed to finish a peer video stream: request_id={}, {e}",
+    let observed_group_durations_us = observe_encoded_frames(
+        context.gop_tracker,
+        &encoded_frames,
+        *context.video_timescale,
+    )
+    .into_iter();
+    Ok((encoded_frames, observed_group_durations_us))
+}
+
+/// エンコード済みフレームを Group / Object として送信する
+/// キーフレームで新しい Group を開始し、旧 writer を閉じる
+/// Group 境界で peer 向けの映像 writer を閉じる
+async fn begin_video_group(
+    context: &mut VideoInputContext<'_>,
+    observed_group_durations_us: &mut std::vec::IntoIter<Option<u64>>,
+) -> Result<()> {
+    // writer の作成と終端で同じ値を使うため、ここで request_id を
+    // 確定させる (`.expect()` の重複も避ける)
+    let video_request_id = context.video_request_id.expect("video request_id enabled");
+    // request 単位移行で side session へ移した track は、その session
+    // の context.handle / data plane で Object を送る ([`publish_sink`])
+    let (video_handle, video_data_plane) = publish_sink(
+        context.video_publish_target.as_ref(),
+        context.handle,
+        context.data_plane,
+    );
+    // 映像は 1 group = 1 unidirectional stream で送る
+    // (draft-ietf-moq-loc-05 §4.2)。datagram 配送は音声トラックだけに
+    // 指定でき、キーフレーム (IDR) が 1 QUIC datagram に収まらない
+    // 映像では使わない。
+    if let Some(writer) = context.current_video_writer.take() {
+        writer
+            .finish(publish_start_location(
+                context.client,
+                context.video_publish_target.as_ref(),
+                video_request_id,
+            ))
+            .await?;
+    }
+    // 受信 SUBSCRIBE の購読 (video) の writer も同じ Group 境界で
+    // 閉じて開き直す (受信 SUBSCRIBE は次の Group のキーフレームの
+    // 先頭から配信するため。Group の途中で受理した購読は次の Group
+    // から届く)。PUBLISH 済みの購読と同じ Object を送る
+    // (draft-ietf-moq-transport-23 §3.1 の MUST)
+    for peer in context.peer_subscriptions.iter_mut() {
+        if peer.track != PublishedTrack::Video || peer.ended {
+            continue;
+        }
+        if let Some(writer) = peer.writer.take()
+            && let Err(e) = writer
+                .finish(context.client.subscription_filter_start(peer.request_id))
+                .await
+        {
+            tracing::debug!(
+                "Failed to finish a peer video stream: request_id={}, {e}",
+                peer.request_id
+            );
+        }
+        if !peer.ended && context.config.stream_mapping == StreamMapping::Group {
+            let writer = SubgroupWriter::new(
+                context.handle,
+                context.data_plane,
+                peer.request_id,
+                peer.alias,
+                *context.video_group_id,
+                SubgroupIdMode::Zero,
+                0,
+                DEFAULT_PUBLISHER_PRIORITY,
+                true,
+                context.client.subscription_filter_start(peer.request_id),
+            )
+            .await?;
+            peer.writer = Some(writer);
+        }
+    }
+    // object モードは Object ごとに Subgroup を開くため、Group の
+    // 開始時点では開かない。Object ID は Group の先頭から数え直す
+    if context.config.stream_mapping == StreamMapping::Object {
+        *context.video_object_id = 0;
+    }
+    // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
+    // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
+    // 映像ストリームには毎フレーム LOC プロパティを付与するため true を渡す
+    if context.config.stream_mapping == StreamMapping::Group {
+        *context.current_video_writer = Some(
+            SubgroupWriter::new(
+                video_handle,
+                video_data_plane,
+                video_request_id,
+                VIDEO_TRACK_ALIAS,
+                *context.video_group_id,
+                SubgroupIdMode::Zero,
+                0,
+                DEFAULT_PUBLISHER_PRIORITY,
+                true,
+                publish_start_location(
+                    context.client,
+                    context.video_publish_target.as_ref(),
+                    video_request_id,
+                ),
+            )
+            .await?,
+        );
+    }
+    // 「現在の Group ID」は Session へ登録できた Group を記録する。
+    // writer の作成前に記録すると、直前の Group の終端 (peer の
+    // STOP_SENDING など) や writer の作成が失敗した場合に、送られて
+    // いない Group を現在の Group として NEW_GROUP_REQUEST を
+    // 誤って無視し得る
+    *context.started_video_group_id = Some(*context.video_group_id);
+    // 直前の Group の長さを出し、カタログへ宣言した
+    // maxGopDuration / maxGroupDuration と実機で突き合わせられるようにする
+    // (観測したキーフレームごとに 1 件ずつ取り出す)
+    if let Some(previous_duration_us) = observed_group_durations_us.next().flatten() {
+        tracing::debug!(
+            "Previous video group lasted {} ms",
+            previous_duration_us / 1_000
+        );
+    }
+    tracing::debug!("Started new video group {}", context.video_group_id);
+    *context.video_group_id = group_id::next_group_id(*context.video_group_id)?;
+    Ok(())
+}
+
+/// 受信 SUBSCRIBE の peer へ同じ Object を送る
+async fn send_video_to_peer_subscriptions(
+    context: &mut VideoInputContext<'_>,
+    ef: &EncodedFrame,
+    object_id: u64,
+) -> Result<()> {
+    let properties = build_video_loc_properties(ef, *context.video_timescale);
+    for peer in context.peer_subscriptions.iter_mut() {
+        if peer.track != PublishedTrack::Video || peer.ended {
+            continue;
+        }
+        if context.config.stream_mapping == StreamMapping::Object
+            && let Some(group_id) = context.started_video_group_id
+        {
+            // object モードの購読にも、この Object だけを載せる Subgroup を
+            // 開く。PUBLISH 済みの購読と同じ Object ID と Subgroup ID に
+            // なる (draft-ietf-moq-transport-23 §3.1 の MUST)
+            let mut writer = SubgroupWriter::new(
+                context.handle,
+                context.data_plane,
+                peer.request_id,
+                peer.alias,
+                *group_id,
+                SubgroupIdMode::FirstObjectId,
+                object_id,
+                DEFAULT_PUBLISHER_PRIORITY,
+                true,
+                context.client.subscription_filter_start(peer.request_id),
+            )
+            .await?;
+            let write_result = writer.write_object(&ef.data, &properties).await;
+            let finish_result = writer
+                .finish(context.client.subscription_filter_start(peer.request_id))
+                .await;
+            if let Err(e) = write_result.and(finish_result) {
+                if is_peer_stream_reset(&e) {
+                    // writer の `write_object` / `finish` は、peer の
+                    // STOP_SENDING に起因する失敗を返す前に Session へ
+                    // 終端 (`send_data_stream_closed(Reset)`) を通知済み
+                    // である。ここで writer を捨てても Session の追跡は
+                    // 終端され、保留 PUBLISH_DONE の flush 条件を満たす
+                    tracing::info!(
+                        "Peer video stream was reset by peer; dropping the subscription: request_id={}",
                         peer.request_id
                     );
-                }
-                if !peer.ended && config.stream_mapping == StreamMapping::Group {
-                    let writer = SubgroupWriter::new(
-                        handle,
-                        data_plane,
-                        peer.request_id,
-                        peer.alias,
-                        *video_group_id,
-                        SubgroupIdMode::Zero,
-                        0,
-                        DEFAULT_PUBLISHER_PRIORITY,
-                        true,
-                        client.subscription_filter_start(peer.request_id),
-                    )
-                    .await?;
-                    peer.writer = Some(writer);
+                    peer.ended = true;
+                } else {
+                    return Err(e);
                 }
             }
-            // object モードは Object ごとに Subgroup を開くため、Group の
-            // 開始時点では開かない。Object ID は Group の先頭から数え直す
-            if config.stream_mapping == StreamMapping::Object {
-                *video_object_id = 0;
-            }
-            // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
-            // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
-            // 映像ストリームには毎フレーム LOC プロパティを付与するため true を渡す
-            if config.stream_mapping == StreamMapping::Group {
-                *current_video_writer = Some(
-                    SubgroupWriter::new(
-                        video_handle,
-                        video_data_plane,
-                        video_request_id,
-                        VIDEO_TRACK_ALIAS,
-                        *video_group_id,
-                        SubgroupIdMode::Zero,
-                        0,
-                        DEFAULT_PUBLISHER_PRIORITY,
-                        true,
-                        publish_start_location(
-                            client,
-                            video_publish_target.as_ref(),
-                            video_request_id,
-                        ),
-                    )
-                    .await?,
-                );
-            }
-            // 「現在の Group ID」は Session へ登録できた Group を記録する。
-            // writer の作成前に記録すると、直前の Group の終端 (peer の
-            // STOP_SENDING など) や writer の作成が失敗した場合に、送られて
-            // いない Group を現在の Group として NEW_GROUP_REQUEST を
-            // 誤って無視し得る
-            *started_video_group_id = Some(*video_group_id);
-            // 直前の Group の長さを出し、カタログへ宣言した
-            // maxGopDuration / maxGroupDuration と実機で突き合わせられるようにする
-            // (観測したキーフレームごとに 1 件ずつ取り出す)
-            if let Some(previous_duration_us) = observed_group_durations_us.next().flatten() {
-                tracing::debug!(
-                    "Previous video group lasted {} ms",
-                    previous_duration_us / 1_000
-                );
-            }
-            tracing::debug!("Started new video group {}", video_group_id);
-            *video_group_id = group_id::next_group_id(*video_group_id)?;
+            continue;
         }
-        let properties = build_video_loc_properties(&ef, *video_timescale);
+        let Some(writer) = peer.writer.as_mut() else {
+            continue;
+        };
+        if let Err(e) = writer.write_object(&ef.data, &properties).await {
+            if is_peer_stream_reset(&e) {
+                // `write_object` は STOP_SENDING に起因する失敗を返す前に
+                // Session へ終端を通知済みである。writer を捨てても Session
+                // の追跡は終端され、後着の STOP_SENDING 観測が再オープン
+                // 禁止を記録する
+                tracing::info!(
+                    "Peer video stream was reset by peer; dropping the subscription: request_id={}",
+                    peer.request_id
+                );
+                peer.writer = None;
+                peer.ended = true;
+            } else {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn send_encoded_video_frames(
+    context: &mut VideoInputContext<'_>,
+    encoded_frames: Vec<EncodedFrame>,
+    mut observed_group_durations_us: std::vec::IntoIter<Option<u64>>,
+) -> Result<()> {
+    for ef in encoded_frames {
+        if ef.is_keyframe {
+            begin_video_group(context, &mut observed_group_durations_us).await?;
+        }
+        let properties = build_video_loc_properties(&ef, *context.video_timescale);
         // object モードでこの Object に割り当てる Group 内の Object ID。
         // 書き込みの成否に関わらず 1 つ消費する (同じ Object ID を別の Object に
         // 使わないため)
-        let object_id = *video_object_id;
-        if config.stream_mapping == StreamMapping::Object
-            && let Some(group_id) = started_video_group_id
+        let object_id = *context.video_object_id;
+        if context.config.stream_mapping == StreamMapping::Object
+            && let Some(group_id) = context.started_video_group_id
         {
             // 1 Object を 1 Subgroup に載せる。Subgroup ID を最初の Object ID
             // から決めるモード (FirstObjectId) は Object ごとに一意になり、
@@ -1577,10 +1658,13 @@ async fn run_video_input_body(
             // Object が publisher によりその Subgroup に最初に公開された
             // Object であることを示すため true になる
             // (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
-            let video_request_id = video_request_id.expect("video request_id enabled");
-            let (video_handle, video_data_plane) =
-                publish_sink(video_publish_target.as_ref(), handle, data_plane);
-            *current_video_writer = Some(
+            let video_request_id = context.video_request_id.expect("video request_id enabled");
+            let (video_handle, video_data_plane) = publish_sink(
+                context.video_publish_target.as_ref(),
+                context.handle,
+                context.data_plane,
+            );
+            *context.current_video_writer = Some(
                 SubgroupWriter::new(
                     video_handle,
                     video_data_plane,
@@ -1591,13 +1675,17 @@ async fn run_video_input_body(
                     object_id,
                     DEFAULT_PUBLISHER_PRIORITY,
                     true,
-                    publish_start_location(client, video_publish_target.as_ref(), video_request_id),
+                    publish_start_location(
+                        context.client,
+                        context.video_publish_target.as_ref(),
+                        video_request_id,
+                    ),
                 )
                 .await?,
             );
-            *video_object_id += 1;
+            *context.video_object_id += 1;
         }
-        if let Some(writer) = current_video_writer.as_mut() {
+        if let Some(writer) = context.current_video_writer.as_mut() {
             // 保持する Location と SUBGROUP_OBJECT に載る Object ID を一致させる
             // ため、書き込む前に writer が使う Location を取る
             let object_location = writer.next_object_location();
@@ -1605,25 +1693,25 @@ async fn run_video_input_body(
             if outcome == ObjectFilterOutcome::Pass {
                 // フィルタを通過して実際に送った Object だけを保持する。送って
                 // いない Object を FETCH で配ると購読のフィルタを迂回する
-                media_cache.insert(
-                    namespace,
-                    config.track_name.as_bytes(),
+                context.media_cache.insert(
+                    context.namespace,
+                    context.config.track_name.as_bytes(),
                     object_location,
                     &properties,
                     &ef.data,
                 )?;
             }
         }
-        if config.stream_mapping == StreamMapping::Object
-            && let Some(writer) = current_video_writer.take()
+        if context.config.stream_mapping == StreamMapping::Object
+            && let Some(writer) = context.current_video_writer.take()
         {
             // object モードでは 1 Object を書いたら Subgroup を閉じる。
             // 次の Object は新しい Subgroup に載せる
-            let video_request_id = video_request_id.expect("video request_id enabled");
+            let video_request_id = context.video_request_id.expect("video request_id enabled");
             writer
                 .finish(publish_start_location(
-                    client,
-                    video_publish_target.as_ref(),
+                    context.client,
+                    context.video_publish_target.as_ref(),
                     video_request_id,
                 ))
                 .await?;
@@ -1632,149 +1720,37 @@ async fn run_video_input_body(
         // (draft-ietf-moq-transport-23 §3.1 の "the publisher MUST send the
         // Object once for each matching subscription")。フィルタと PAUSED は
         // Session が subscription ごとに評価するため、Pass の成否は送信側の
-        // 状態に使わない (media_cache / 送信統計は PUBLISH 購読の writer の
+        // 状態に使わない (context.media_cache / 送信統計は PUBLISH 購読の writer の
         // Pass を基準にする)。購読が reset された stream だけを捨てる
-        for peer in peer_subscriptions.iter_mut() {
-            if peer.track != PublishedTrack::Video || peer.ended {
-                continue;
-            }
-            if config.stream_mapping == StreamMapping::Object
-                && let Some(group_id) = started_video_group_id
-            {
-                // object モードの購読にも、この Object だけを載せる Subgroup を
-                // 開く。PUBLISH 済みの購読と同じ Object ID と Subgroup ID に
-                // なる (draft-ietf-moq-transport-23 §3.1 の MUST)
-                let mut writer = SubgroupWriter::new(
-                    handle,
-                    data_plane,
-                    peer.request_id,
-                    peer.alias,
-                    *group_id,
-                    SubgroupIdMode::FirstObjectId,
-                    object_id,
-                    DEFAULT_PUBLISHER_PRIORITY,
-                    true,
-                    client.subscription_filter_start(peer.request_id),
-                )
-                .await?;
-                let write_result = writer.write_object(&ef.data, &properties).await;
-                let finish_result = writer
-                    .finish(client.subscription_filter_start(peer.request_id))
-                    .await;
-                if let Err(e) = write_result.and(finish_result) {
-                    if is_peer_stream_reset(&e) {
-                        // writer の `write_object` / `finish` は、peer の
-                        // STOP_SENDING に起因する失敗を返す前に Session へ
-                        // 終端 (`send_data_stream_closed(Reset)`) を通知済み
-                        // である。ここで writer を捨てても Session の追跡は
-                        // 終端され、保留 PUBLISH_DONE の flush 条件を満たす
-                        tracing::info!(
-                            "Peer video stream was reset by peer; dropping the subscription: request_id={}",
-                            peer.request_id
-                        );
-                        peer.ended = true;
-                    } else {
-                        return Err(e);
-                    }
-                }
-                continue;
-            }
-            let Some(writer) = peer.writer.as_mut() else {
-                continue;
-            };
-            if let Err(e) = writer.write_object(&ef.data, &properties).await {
-                if is_peer_stream_reset(&e) {
-                    // `write_object` は STOP_SENDING に起因する失敗を返す前に
-                    // Session へ終端を通知済みである。writer を捨てても Session
-                    // の追跡は終端され、後着の STOP_SENDING 観測が再オープン
-                    // 禁止を記録する
-                    tracing::info!(
-                        "Peer video stream was reset by peer; dropping the subscription: request_id={}",
-                        peer.request_id
-                    );
-                    peer.writer = None;
-                    peer.ended = true;
-                } else {
-                    return Err(e);
-                }
-            }
-        }
+        send_video_to_peer_subscriptions(context, &ef, object_id).await?;
     }
     Ok(())
 }
 
-async fn handle_video_input(
-    context: VideoInputContext<'_>,
-    video_input: Option<VideoInput>,
+async fn run_video_input_body(
+    context: &mut VideoInputContext<'_>,
+    video_input: VideoInput,
+) -> Result<()> {
+    // カメラ / 疑似キャプチャは生フレームをエンコードし、MP4 パススルーは
+    // エンコード済みサンプルをそのまま送り、MP4 再エンコードはデコード済みの
+    // 生フレームをエンコードする
+    // `output_timescale` は、encoder が付けた Timestamp がマイクロ秒である
+    // ことを示す。入力より出力が多いときに、その値を入力の単位へ戻すために使う
+    let (encoded_frames, observed_group_durations_us) =
+        encode_video_input_frames(context, video_input).await?;
+    send_encoded_video_frames(context, encoded_frames, observed_group_durations_us).await
+}
+
+/// 映像入力の処理結果をループの流れへ写す
+async fn handle_video_input_outcome(
+    context: &mut VideoInputContext<'_>,
+    outcome: Result<()>,
 ) -> Result<LoopFlow> {
-    let VideoInputContext {
-        config,
-        namespace,
-        video_encoder,
-        video_timescale,
-        reencode_video_timescale,
-        handle,
-        video_group_id,
-        started_video_group_id,
-        current_video_writer,
-        video_object_id,
-        peer_subscriptions,
-        gop_tracker,
-        session_ended,
-        video_clock,
-        capture_residuals,
-        pending_video_timestamps,
-        media_cache,
-        video_publish_target,
-        video_request_id,
-        data_plane,
-        client,
-    } = context;
-    let Some(video_input) = video_input else {
-        tracing::info!("Video input channel closed");
-        return Ok(LoopFlow::Break);
-    };
-    // エンコードとフレーム送信を async ブロックに閉じ込め、`?` が `run` を
-    // 抜けないようにする。フレーム送信経路 (`SubgroupWriter::new` /
-    // `SubgroupWriter::write_object` / `DatagramWriter::write_object` など) は
-    // セッション終了後に `TransportError::ConnectionClosed` を返すため、`?` を
-    // `run` まで通すと終了時の後始末 (`PUBLISH_DONE` / `close(0, "")`) に到達しない。
-    // ループを抜ける制御 (`let Some(..) = .. else { break }`) はブロックの
-    // 外に出す (ブロックの中では外側のループを抜けられない)。
-    let outcome = run_video_input_body(
-        VideoInputContext {
-            config: &mut *config,
-            namespace: &mut *namespace,
-            video_encoder: &mut *video_encoder,
-            video_timescale: &mut *video_timescale,
-            reencode_video_timescale: &mut *reencode_video_timescale,
-            handle: &mut *handle,
-            video_group_id: &mut *video_group_id,
-            started_video_group_id: &mut *started_video_group_id,
-            current_video_writer: &mut *current_video_writer,
-            video_object_id: &mut *video_object_id,
-            peer_subscriptions: &mut *peer_subscriptions,
-            gop_tracker: &mut *gop_tracker,
-            session_ended: &mut *session_ended,
-            video_clock: &mut *video_clock,
-            capture_residuals: &mut *capture_residuals,
-            pending_video_timestamps: &mut *pending_video_timestamps,
-            media_cache: &mut *media_cache,
-            video_publish_target: &mut *video_publish_target,
-            video_request_id: &mut *video_request_id,
-            data_plane: &mut *data_plane,
-            client: &mut *client,
-        },
-        video_input,
-    )
-    .await;
-    // セッション終了は異常ではなく期待される終了である (`is_transport_session_end`)。
-    // `?` で `run` を抜けず、終了時の後始末へ進む
     match outcome {
         Ok(()) => {}
         Err(e) if is_transport_session_end(&e) => {
             tracing::info!("Session closed by transport");
-            *session_ended = true;
+            *context.session_ended = true;
             return Ok(LoopFlow::Break);
         }
         Err(e) if is_peer_stream_reset(&e) => {
@@ -1786,9 +1762,9 @@ async fn handle_video_input(
             // writer の `write_object` / `finish` は、失敗を返す前に Session へ終端
             // (`send_data_stream_closed(Reset)`) を通知済みである。writer を捨てても
             // Session の追跡は終端され、保留 PUBLISH_DONE の flush 条件を満たす
-            *current_video_writer = None;
-            if config.stream_mapping == StreamMapping::Group {
-                *video_group_id = group_id::next_group_id(*video_group_id)?;
+            *context.current_video_writer = None;
+            if context.config.stream_mapping == StreamMapping::Group {
+                *context.video_group_id = group_id::next_group_id(*context.video_group_id)?;
                 tracing::info!(
                     "Subgroup stream was reset by peer; dropping the current video group"
                 );
@@ -1803,11 +1779,23 @@ async fn handle_video_input(
         }
         Err(e) => {
             // MOQT メッセージの encode / decode 失敗は終了コード付きで閉じる
-            close_on_message_error(client, &e).await;
+            close_on_message_error(context.client, &e).await;
             return Err(e);
         }
     }
     Ok(LoopFlow::Continue)
+}
+
+async fn handle_video_input(
+    mut context: VideoInputContext<'_>,
+    video_input: Option<VideoInput>,
+) -> Result<LoopFlow> {
+    let Some(video_input) = video_input else {
+        tracing::info!("Video input channel closed");
+        return Ok(LoopFlow::Break);
+    };
+    let outcome = run_video_input_body(&mut context, video_input).await;
+    handle_video_input_outcome(&mut context, outcome).await
 }
 
 struct AudioInputContext<'a> {
