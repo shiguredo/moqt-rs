@@ -186,7 +186,7 @@ FILL_PARAMETERS 付き SUBSCRIBE (§3.5 の「現在 Group から参加」) も�
 
 ## datagram 配送の音声
 
-音声トラックは subgroup stream と datagram の両方で届きうる。LOC は音声について「1 audio chunk = 1 Object = 1 Group」の datagram 配送を例示しており (draft-ietf-moq-loc-05 §4.1)、moq-pub は `--audio-datagram` でこの配送を選べる。
+音声トラックは subgroup stream と datagram の両方で届きうる。LOC は音声について「1 audio chunk = 1 Object = 1 Group」の datagram 配送を例示しており (draft-ietf-moq-loc-05 §4.1)、moq-pub は既定でこの datagram 配送を使い、`--audio-subgroup` を指定すると subgroup stream 配送になる。moq-sub はその両方を受信できる。
 
 moq-sub は datagram で届いた OBJECT_DATAGRAM を自ら decode し、subgroup stream と同じ経路 (録画 → Audio Config の検証 → デコード → 音声の再生の組み立て) へ流す。
 

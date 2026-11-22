@@ -60,7 +60,12 @@ use shiguredo_moqt::stream::SubgroupHeader;
 | `name` | Namespace / Track Name の文字列表現 |
 | `grease` | GREASE 値の生成・判定 |
 | `subgroup_tracker` | Subgroup 再オープン禁止の検証 |
+| `audio_clock` | 受信音声の時計の傾斜とオフセットの推定 |
 | `group_switch_gate` | 前の Group の stream が開いている間、次の Group の映像 Object を保留する判定 |
+| `media_clock` | TIMESTAMP と受信側の時計を結ぶ基準時刻の推定 |
+| `pending_subgroup_buffer` | 未到着の Subgroup より前の Object を保留するバッファ |
+| `video_decode_order` | 映像 Object の復号順と表示順の管理 |
+| `video_object_reorder` | 映像 Object の到着順の並べ替え |
 | `playout` | 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期、共通の時間軸、時間圧縮・伸長と欠落の補間 |
 | `error` | エラー型とエラーコード定数 |
 
@@ -1595,13 +1600,19 @@ fn SubgroupStreamState::can_reopen(&self) -> bool
 ```rust
 // playout::stretch
 use shiguredo_moqt::playout::stretch::{
-    PreemptiveExpansion, compress, conceal, concealment_end_gain, is_time_stretch_available,
-    preemptively_expand,
+    PreemptiveExpansion, compress, compress_with_history, conceal, concealment_end_gain,
+    is_time_stretch_available, preemptively_expand,
 };
 fn compress(
     channels: &mut [&mut [f32]],
     sample_rate: u32,
     max_length_change_samples: usize,
+) -> isize
+fn compress_with_history(
+    channels: &mut [&mut [f32]],
+    sample_rate: u32,
+    max_length_change_samples: usize,
+    history: &[Vec<f32>],
 ) -> isize
 fn preemptively_expand(
     channels: &[Vec<f32>],
@@ -1793,10 +1804,11 @@ fn reset(&mut self)
 
 // playout::timeline (free functions)
 use shiguredo_moqt::playout::timeline::{
-    audio_arrival_delay_us, playout_delay_percentile, playout_queue_cap_us,
-    sync_compensation_limit_us,
+    audio_arrival_delay_us, audio_arrival_delay_us_with_min, playout_delay_percentile,
+    playout_queue_cap_us, sync_compensation_limit_us,
 };
 fn audio_arrival_delay_us(learned_delay_us: i64) -> i64
+fn audio_arrival_delay_us_with_min(learned_delay_us: i64, minimum_delay_us: i64) -> i64
 fn sync_compensation_limit_us(base_difference_us: i64, buffer_difference_us: i64) -> i64
 fn playout_delay_percentile(frame_interval_us: Option<i64>) -> i64
 fn playout_queue_cap_us(max_queued_frames: usize, frame_interval_us: Option<i64>) -> i64

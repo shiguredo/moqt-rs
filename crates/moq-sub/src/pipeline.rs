@@ -13670,7 +13670,7 @@ mod tests {
 
     /// datagram で届いた音声 Object が subgroup stream と同じ経路でデコードされること
     ///
-    /// moq-pub は `--audio-datagram` で 1 audio chunk = 1 Object = 1 Group の datagram を送る
+    /// moq-pub は `--audio-subgroup` を指定しない限り 1 audio chunk = 1 Object = 1 Group の datagram を送る
     /// (draft-ietf-moq-loc-05 §4.1)。購読側は payload を decode してデコード済みフレームを
     /// 送出する必要がある。
     #[tokio::test]

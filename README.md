@@ -258,7 +258,7 @@ fn authorize_bearer<C: CoseCrypto>(
 署名検証だけでも action は認可できません。認可には `moqt` クレームの scope の確認まで必要です。
 接続束縛 (`catreplay`) を含む bearer トークンは `CatToken::verify_bearer` を、`cnf` 付きトークンは DPoP proof と合わせて `CwtDpopProof::verify_against_cat_token` を使ってください。
 `catreplay` が 1 でない bearer トークンでも `verify_bearer` を使い、接続識別子と replay cache を渡してください。
-詳しい責務の分担は [docs/c4m.md](docs/c4m.md) に書いています。
+詳しい責務の分担は [docs/c4m.md](https://github.com/shiguredo/moqt-rs/docs/c4m.md) に書いています。
 
 ### 音声と映像を再生する
 
@@ -300,13 +300,13 @@ fn main() {
 }
 ```
 
-実際に組み込んだ例が [moq-sub](crates/moq-sub/README.md) です。詳しい仕組みと制約は [docs/audio-playout.md](docs/audio-playout.md) に書いています。
+実際に組み込んだ例が [moq-sub](https://github.com/shiguredo/moqt-rs/crates/moq-sub/README.md) です。詳しい仕組みと制約は [docs/audio-playout.md](https://github.com/shiguredo/moqt-rs/docs/audio-playout.md) に書いています。
 
 ## サンプル
 
-実際に動くサンプルとして、配信側の [moq-pub](crates/moq-pub/README.md)、受信側の [moq-sub](crates/moq-sub/README.md)、両者が共有するトランスポート層の [tokio-moq](crates/tokio-moq/README.md) があります。
+実際に動くサンプルとして、配信側の [moq-pub](https://github.com/shiguredo/moqt-rs/crates/moq-pub/README.md)、受信側の [moq-sub](https://github.com/shiguredo/moqt-rs/crates/moq-sub/README.md)、両者が共有するトランスポート層の [tokio-moq](https://github.com/shiguredo/moqt-rs/crates/tokio-moq/README.md) があります。
 
-実行方法、前提、接続設定は [crates/README.md](crates/README.md) を参照してください。
+実行方法、前提、接続設定は [crates/README.md](https://github.com/shiguredo/moqt-rs/crates/README.md) を参照してください。
 
 ## ライセンス
 

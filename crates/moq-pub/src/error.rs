@@ -66,7 +66,7 @@ impl fmt::Display for Error {
             Self::DatagramTooLarge { size, max_size } => write!(
                 f,
                 "object datagram is too large: {size} bytes (limit {max_size} bytes). \
-                 Disable --audio-datagram or increase --datagram-max-size"
+                 Use --audio-subgroup or increase --datagram-max-size"
             ),
             Self::Moqt(e) => write!(f, "MOQT: {e}"),
             Self::Capture(e) => write!(f, "capture: {e:?}"),
@@ -237,7 +237,7 @@ mod tests {
         assert_eq!(
             message,
             "object datagram is too large: 1161 bytes (limit 1160 bytes). \
-             Disable --audio-datagram or increase --datagram-max-size",
+             Use --audio-subgroup or increase --datagram-max-size",
             "実サイズと上限と対処が分かるメッセージであること"
         );
     }

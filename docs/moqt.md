@@ -127,7 +127,7 @@
 - 空 (0 バイト長) の Track Name を拒否する (§2.4.1。`.session` の旧例外は draft から削除済み)
 - `NEW_GROUP_REQUEST` は `DYNAMIC_GROUPS` を受信していなくても受理する (§3.5.1 / §9.19.19)
 - Subgroup 再オープン禁止の検証 (`subgroup_tracker::SubgroupTracker`)
-- 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期の遅延制御、音声と映像の共通の時間軸、表示時刻に合わせたフレームの選択、時間圧縮・伸長と欠落の補間 (`playout::{timeline, scheduler, buffer, stretch, expansion, predictor, gap, splice_fade, resample, timing, catch_up}`)
+- 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期の遅延制御、音声と映像の共通の時間軸、表示時刻に合わせたフレームの選択、時間圧縮・伸長と欠落の補間 (`playout::{timeline, scheduler, buffer, stretch, expansion, predictor, gap, splice_fade, resample, timing, catch_up, publish_catch_up}`)
 - メディア時刻の Unix epoch の壁時計への換算 (`media_clock::WallClockMapper`)
 - セッション終了 / REQUEST_ERROR / PUBLISH_DONE / Stream Reset のエラーコード (`error` モジュール)。
   セッション終了コードの分類は後述の「セッション終了コードの分類」を参照
@@ -217,7 +217,10 @@ SUBSCRIBE_TRACKS へは載せられない (§3.6.2) ため、受信すると `IN
 | `c4m::jwk` | JWK (RFC 7517) と JWK サムプリント (RFC 7638) |
 | `c4m::jwt` | JWS compact (RFC 7515) の JWT (旧 JWT 形式の DPoP proof 用) |
 | `c4m::dpop` | DPoP proof の検証と発行。旧 JWT 形式と draft-02 §4.2 の CWT 形式 |
+| `audio_clock` | 受信音声の時計の傾きとオフセットの推定 |
 | `decoder` | バッファ付きインクリメンタル制御メッセージデコーダー |
+| `group_switch_gate` | 前の Group の stream が開いている間、次の Group の映像 Object を保留する判定 |
+| `media_clock` | TIMESTAMP と受信側の時計を結ぶ基準時刻の推定 |
 | `error` | コーデックエラー型とセッション終了 / REQUEST_ERROR / PUBLISH_DONE / Stream Reset の各コード |
 | `grease` | GREASE 値の生成と判定ユーティリティ |
 | `loc` | LOC Properties の encode / decode |
@@ -226,12 +229,15 @@ SUBSCRIBE_TRACKS へは載せられない (§3.6.2) ため、受信すると `IN
 | `msf` | MSF Catalog / Timeline / URI の encode / decode |
 | `name` | Namespace / Track Name のシリアライズ表現とパース (`parse_name` / `parse_name_with_percent_encoding` / `serialize_name` / `parse_namespace` / `serialize_namespace` / `parse_track_name` / `serialize_track_name`) |
 | `object_properties` | Object-scoped Properties と `IMMUTABLE_PROPERTIES` 補助デコーダー |
+| `pending_subgroup_buffer` | 未到着の Subgroup より前の Object を保留するバッファ |
 | `parameter` | SETUP Options の encode / decode |
 | `playout` | 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の計画と確定、A/V 同期の遅延制御、音声と映像の共通の時間軸、表示時刻に合わせたフレームの選択、時間圧縮・伸長と欠落の補間、帯域制限のレート変換 |
 | `session` | 1 本の `MOQT Transport Session` に閉じた sans I/O な状態機械で、control plane に加えて request stream / data stream / datagram の state も扱う |
 | `stream` | data stream ヘッダ、`SubgroupStreamDecoder`、`FetchStreamDecoder`、`FetchStreamEncoder` |
 | `subgroup_tracker` | Subgroup 再オープン禁止の検証ユーティリティ |
 | `track_properties` | Track Properties の encode / decode |
+| `video_decode_order` | 映像 Object の復号順と表示順の管理 |
+| `video_object_reorder` | 映像 Object の到着順の並べ替え |
 | `varint` | 可変長整数 (vi64) の encode / decode |
 
 内部専用の `kvp` モジュール (delta-key 骨格) は公開 API ではありません。
