@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-cmsf-draft-01
 - Polished: 2026-11-23
+- Refreshed: 2026-11-23
 
 ## 目的
 
@@ -44,13 +45,12 @@ CMSF 対応 (0467〜0472) が揃ったら、利用者向けの入口になる文
     - `buffers` / `MsfBuffers` は、次の `buffers` / `maxGopDuration` / `maxGroupDuration` の行も扱っている。
     - 0471 / 0472 の完了で、ほかにも次の記述が事実と食い違う。
       - 5.12: 「`crates/moq-pub/src/catalog.rs` が設定するのは name / namespace / … / authInfo である。」0471 で、cmaf の track に initRef が、root に initDataList が加わる
-      - 6.5: 「トラックを選ぶ条件は codec の一致だけで、`packaging` (§5.2.4) と `isLive` (§5.2.7) を判定していない。」現状でも `is_loc_packaging` で loc 以外を除外しているので食い違っており、0472 で cmaf の track も選ぶようになる
+      - 6.5: 「トラックを選ぶ条件は codec の一致だけで、`packaging` (§5.2.4) と `isLive` (§5.2.8) を判定していない。」現状でも `is_loc_packaging` で loc 以外を除外しているので食い違っており、0472 で cmaf の track も選ぶようになる
       - 6.13: 「録画は MP4 のみで音声は Opus に限る (AAC は警告して音声を録画しない)。」0472 で、cmaf の track では AAC / VP8 / VP9 も録画する
     - 0467〜0470 で増える CMSF の公開 API のうち、次は完了後も `crates/` から呼ばれない。
       - `MsfTrack` / `MsfCloneTrack` の `max_grp_sap_starting_type` / `max_obj_sap_starting_type`。0471〜0473 は設定も参照もしない
       - SAP Type timeline の型と相互変換。0469 は moq-pub / moq-sub での発行と購読を範囲外にしている
       - `MsfCatalog::content_protections` と `Cmsf*` の Content Protection の型。0471 は Content Protection の発行を範囲外にしており、0472 は track の `contentProtectionRefIDs` で除外するだけで root を読まない
-    - 文書全体に MSF-01 の節番号が残っている (例: 隣の `buffers` / `maxGopDuration` / `maxGroupDuration` の行の「MSF §5.2.9 / §5.2.24 / §5.2.25」。MSF-02 では §5.2.10 / §5.2.25 / §5.2.26)。0441 の取り残しで、CMSF とは別の目的なので本 issue では扱わない
 - `refs/moq/draft-ietf-moq-cmsf-01.txt` の表題は「CMSF- a CMAF compliant implementation of MOQT Streaming Format」である。
 
 ## 設計方針
@@ -96,13 +96,13 @@ CMSF 対応 (0467〜0472) が揃ったら、利用者向けの入口になる文
   - `initDataList` / `initRef` / `buffers` の行は削除せず、完了後も使われない範囲に絞って書き直す。`MsfInitDataKind::TrackProperty` / `ObjectProperty` は、完了後も `crates/` から呼ばれない公開 API で、表の収録基準に当たり続けるためである (0467 は cmaf の initRef の参照先を inline に限り、0471 / 0472 も inline だけを使う)。
     - 機能: loc の track の `initRef` と、`track-property` / `object-property` 型の initDataList entry
     - API: `MsfInitDataKind::TrackProperty` / `ObjectProperty`
-    - 仕様: MSF §5.1.7 / §5.2.14。現在の `MSF §5.1.7 / §5.2.9 / §5.2.13` のうち、MSF-02 の §5.2.9 は Target latency、§5.2.13 は Alternate group で、initRef は §5.2.14 (Initialization reference) である。buffers を外すので、Buffers (§5.2.10) も載せない
+    - 仕様: MSF §5.1.7 / §5.2.14。現在の `MSF §5.1.7 / §5.2.10 / §5.2.14` から、buffers を外すので Buffers (§5.2.10) を除く
     - 影響: moq-pub は loc の track に initRef を載せず、moq-sub も読まない。cmaf の track では inline entry の init segment を使う
     - `buffers` / `MsfBuffers` は次の行が扱うので、この行からは外す。
   - 0471 / 0472 の完了で事実と食い違う記述 (現状に挙げた 5.12 / 6.5 / 6.13) を、完了後の挙動に合わせて直す。
   - 第 3 節の表に、完了後も `crates/` から呼ばれない CMSF の公開 API (現状に挙げた SAP starting type のフィールド、SAP Type timeline、Content Protection) の行を加える。第 3 節の収録基準 (`crates/` から呼ばれていない公開 API) に当たるためである。仕様の列は CMSF-01 の節番号 (§3.5.2 / §3.6 / §4) で書く。
   - 0473 (prft による壁時計の同期) の有無に関わる cmaf の時刻の制約は、第 6 節に書かない (実装判断)。記述が 0473 の完了の有無で変わり、0473 が後から完了したときに誰が消すかの引き継ぎが要るので、0474 の中で閉じないためである。
-  - 本 issue で書き直す箇所 (表の initDataList の行、新しく加える行、5.12 / 6.5 / 6.13 の節) の中にある節番号は、書き加える部分だけでなくすべて MSF-02 / CMSF-01 の番号にする。書き加えた部分と同じ段落の古い番号がぶつからないようにするためである (例: 5.12 に initRef を §5.2.14 で書くと、同じ段落の「`depends` (§5.2.14)」とぶつかる。MSF-02 では depends は §5.2.15)。それ以外の箇所に残る MSF-01 の節番号は直さない (現状に挙げたとおり別の目的である)。
+  - 本 issue で書き直す箇所 (表の initDataList の行、新しく加える行、5.12 / 6.5 / 6.13 の節) の中にある節番号は、すべて MSF-02 / CMSF-01 の番号にする。
 - `docs/msf.md` の冒頭の対応仕様の文に、`draft-ietf-moq-cmsf-01` (CMSF の節) を加える。
 
 ## 完了条件
