@@ -2771,30 +2771,30 @@ async fn deliver_audio_chunk(
 }
 
 struct AudioTimingContext<'a> {
-    audio_timescale: &'a mut Option<u64>,
     audio_publish_catch_up: &'a mut AudioPublishCatchUp,
     audio_timeline: &'a mut AudioCaptureTimeline,
 }
 
 /// チャンクのタイムスタンプと追いつき判定を行う
+///
+/// `reencode_timeline` は再エンコードのときだけ渡す。渡したときはその時刻を使い、
+/// 渡さないとき (live capture) は `audio_timeline` の時刻を使う。どちらも、
+/// 時刻を返すと同時に次のチャンクの時刻へ進める。
 fn prepare_audio_chunk_timing(
     context: AudioTimingContext<'_>,
-    mut next_chunk_timestamp: Option<u64>,
+    reencode_timeline: Option<&mut ReencodeChunkTimeline>,
     samples_per_frame: usize,
     is_reencode: bool,
-) -> Result<(u64, Option<u64>, u64, i64, i64, bool)> {
+) -> Result<(u64, u64, i64, i64, bool)> {
     let AudioTimingContext {
-        audio_timescale,
         audio_publish_catch_up,
         audio_timeline,
     } = context;
-    let timestamp = match next_chunk_timestamp {
-        Some(timestamp) => {
-            // 再エンコードの入力音声トラックのタイムスケール
-            let timescale = audio_timescale.expect("re-encode audio input has a timescale");
-            let step = samples_per_frame as u64 * timescale / (AUDIO_SAMPLE_RATE as u64);
-            next_chunk_timestamp = Some(timestamp.saturating_add(step));
-            timestamp
+    let timestamp = match reencode_timeline {
+        // 再エンコードは入力の時刻から 1 チャンク分ずつ進める。同じ入力から
+        // 切り出した複数 Object が同じ Timestamp にならない
+        Some(timeline) => {
+            timeline.next_chunk_timestamp(samples_per_frame as u64, AUDIO_SAMPLE_RATE)
         }
         // live capture はバッファ先頭の時刻から切り出し位置までを
         // サンプル数で進める。同じ capture フレーム由来の複数 Object が
@@ -2818,7 +2818,6 @@ fn prepare_audio_chunk_timing(
     });
     Ok((
         timestamp,
-        next_chunk_timestamp,
         duration_us,
         send_timestamp_us,
         send_duration_us,
@@ -2856,33 +2855,27 @@ async fn process_audio_chunks(
         audio_encoder,
     } = context;
     let encoder = audio_encoder.as_mut().expect("audio encoder enabled");
-    // 再エンコードでは、1 つの入力から複数のチャンクを取り出すときに、
-    // チャンクごとに入力のタイムスケールで 1 チャンク分ずつ進める。
+    // 再エンコードでは、入力の時刻を起点にチャンクごとに 1 チャンク分ずつ進める。
     // live capture では None のままで、時刻は audio_timeline が進める
-    let mut next_chunk_timestamp = input_timestamp;
+    let mut reencode_timeline = input_timestamp.map(|timestamp| {
+        // 再エンコードの入力音声トラックのタイムスケール
+        let timescale = audio_timescale.expect("re-encode audio input has a timescale");
+        ReencodeChunkTimeline::new(timestamp, timescale)
+    });
     while audio_pcm_buf.len() >= samples_per_frame {
         // TIMESTAMP を先に決める。読み出しの遅れは「読んだ壁時計 − TIMESTAMP」
-        // であり、判定に要る
-        let (
-            timestamp,
-            following_chunk_timestamp,
-            duration_us,
-            send_timestamp_us,
-            send_duration_us,
-            accepted,
-        ) = prepare_audio_chunk_timing(
-            AudioTimingContext {
-                audio_timescale: &mut *audio_timescale,
-                audio_publish_catch_up: &mut *audio_publish_catch_up,
-                audio_timeline: &mut *audio_timeline,
-            },
-            next_chunk_timestamp,
-            samples_per_frame,
-            is_reencode,
-        )?;
-        // 次のチャンクの時刻は、このチャンクを捨てる場合も進める。
+        // であり、判定に要る。時刻はこのチャンクを捨てる場合も進む。
         // 捨てたチャンクの分も入力の時間軸は進んでいるためである
-        next_chunk_timestamp = following_chunk_timestamp;
+        let (timestamp, duration_us, send_timestamp_us, send_duration_us, accepted) =
+            prepare_audio_chunk_timing(
+                AudioTimingContext {
+                    audio_publish_catch_up: &mut *audio_publish_catch_up,
+                    audio_timeline: &mut *audio_timeline,
+                },
+                reencode_timeline.as_mut(),
+                samples_per_frame,
+                is_reencode,
+            )?;
         // 捨てる場合もバッファからは取り出す (符号化へ渡さない)
         let Some((encoded, timestamp)) = encode_audio_chunk(
             encoder,
@@ -7822,6 +7815,40 @@ impl AudioCaptureTimeline {
     }
 }
 
+/// 再エンコードの音声へ載せる Timestamp を組み立てる状態
+///
+/// 再エンコードでは、復号した入力 1 つの PCM から複数のチャンクを切り出すことがある
+/// (入力の 1 sample とエンコーダのフレーム長が一致しないため)。入力の時刻
+/// (入力音声トラックの timescale の単位) を起点に、切り出したチャンクごとに
+/// 1 チャンク分ずつ進める。同じ入力から複数の Object を切り出しても同じ Timestamp
+/// にはならない。時刻を返すメソッドが同時に進めるので、呼び出し側が進め忘れることはない。
+struct ReencodeChunkTimeline {
+    /// 次に切り出すチャンクの時刻 (入力音声トラックの timescale の単位)
+    next_timestamp: u64,
+    /// 入力音声トラックの timescale
+    timescale: u64,
+}
+
+impl ReencodeChunkTimeline {
+    /// 入力の時刻を起点にして作る
+    fn new(input_timestamp: u64, timescale: u64) -> Self {
+        Self {
+            next_timestamp: input_timestamp,
+            timescale,
+        }
+    }
+
+    /// `samples` サンプル (`sample_rate` Hz) を切り出したチャンクの Timestamp を返す
+    ///
+    /// 切り出したぶんだけ、入力の timescale で次のチャンクの時刻が進む。
+    fn next_chunk_timestamp(&mut self, samples: u64, sample_rate: u32) -> u64 {
+        let timestamp = self.next_timestamp;
+        let step = samples.saturating_mul(self.timescale) / u64::from(sample_rate);
+        self.next_timestamp = timestamp.saturating_add(step);
+        timestamp
+    }
+}
+
 /// 映像 LOC プロパティを構築する
 ///
 /// `timescale` は入力ファイル由来のメディア時刻を送るときだけ渡す。live capture は
@@ -9700,6 +9727,44 @@ mod tests {
         assert!(
             timestamps.windows(2).all(|pair| pair[0] < pair[1]),
             "Timestamp が単調に増加すること"
+        );
+    }
+
+    /// 再エンコードで 1 つの入力から複数の Object を切り出すと Timestamp が進むこと
+    ///
+    /// 0339 の分割で、次のチャンクの時刻を呼び出し側が捨てていたため、同じ入力から
+    /// 切り出した Object がすべて入力の時刻になっていた。時刻は入力の timescale で
+    /// 1 チャンク分ずつ進む。
+    #[test]
+    fn reencode_timeline_advances_timestamps_within_an_input() {
+        // 入力音声トラックの timescale が 48 kHz の場合、20 ms は 960 進む
+        let mut timeline = ReencodeChunkTimeline::new(96_000, 48_000);
+        let timestamps: Vec<u64> = (0..3)
+            .map(|_| timeline.next_chunk_timestamp(960, 48_000))
+            .collect();
+        assert_eq!(
+            timestamps,
+            vec![96_000, 96_960, 97_920],
+            "入力の timescale で 20 ms (960) ずつ進むこと"
+        );
+    }
+
+    /// 入力の timescale がエンコーダのサンプルレートと異なっても、入力の単位で進むこと
+    ///
+    /// Timestamp は入力の timescale のまま送るため、進む量も入力の単位で求める。
+    #[test]
+    fn reencode_timeline_advances_in_the_input_timescale() {
+        // 入力の timescale が 44.1 kHz の場合、20 ms は 882 進む
+        let mut timeline = ReencodeChunkTimeline::new(0, 44_100);
+        assert_eq!(
+            timeline.next_chunk_timestamp(960, 48_000),
+            0,
+            "最初のチャンクは入力の時刻であること"
+        );
+        assert_eq!(
+            timeline.next_chunk_timestamp(960, 48_000),
+            882,
+            "2 つ目のチャンクは入力の timescale で 20 ms (882) 進むこと"
         );
     }
 
