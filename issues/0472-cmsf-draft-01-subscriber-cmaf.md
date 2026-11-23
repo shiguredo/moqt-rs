@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-cmsf-draft-01
 - Polished: 2026-11-23
+- Refreshed: 2026-11-23
 
 ## 目的
 
@@ -38,6 +39,7 @@ moq-sub は `loc` 以外の track を購読対象から外している。その�
   - 映像: VP8 / VP9 は LOC の設定から sample entry を作れないため、録画に対応していない (`build_video_entry`)。`Writer::accept_video` は keyframe で Video Config がある sample まで待ち、`Writer::build_entry` は Video Config がなければエラーにする。
   - 音声: `build_audio_entry` が Opus の sample entry しか作らないため、Opus のみに対応する。AAC の track は `start_media_recorder` が "MP4 recording supports Opus audio only; audio is not recorded" と警告し、録画しない。`crates/moq-sub/README.md` の `--mp4` の行にも同じ制約が書かれている。
   - 録画器は sample を PTS の順に並べ、`composition_time_offset` を書かない。
+- moq-sub は track の initRef と initDataList を読まない。一方、moq-pub は Video Config / Audio Config を Object に載せる loc の track (VP8 / VP9 の映像を除く) に、type `object-property` の initDataList entry (`video-config` / `audio-config`、data は `0x0D` / `0x0F`) を指す initRef を載せる (MSF-02 §12.2、`crates/moq-pub/src/catalog.rs`)。
 - moq-sub は Base64 の crate に依存していない。
 - `shiguredo_mp4` (2026.6.0-canary.2) について:
   - `Fmp4SegmentDemuxer::handle_init_segment` は init segment を解析する。
@@ -62,7 +64,8 @@ moq-sub は `loc` 以外の track を購読対象から外している。その�
   - `contentProtectionRefIDs` を持つ cmaf の track は除外する (CENC の復号は範囲外)。
   - `extract_video_info` が cmaf の track で `StreamMapping::Group` を使うことは、0468 で実装済みの前提とする。本 issue では変更しない。
 - init segment の読み込み (起動時):
-  - 起動時に解決した track の `initRef` が指す initDataList の Base64 を decode する。moq-sub に `base64ct` を依存として加える (shiguredo-rust の選定に従う)。
+  - 起動時に解決した track のうち、packaging が cmaf の track に限り、`initRef` が指す initDataList の Base64 を decode する。参照先が `inline` の entry であることは、0467 が catalog の decode で検証する。moq-sub に `base64ct` を依存として加える (shiguredo-rust の選定に従う)。
+  - loc の track の initRef (MSF-02 §12.2 の `object-property` の entry を指す) は読まず、LOC 経路は現状どおり in-band の Video Config / Audio Config を使う。loc の track にもこの手順を当てると、entry の data (`0x0D` など) が Base64 として decode できてしまい、`MoovBox` の decode で起動が失敗する。
   - init segment の moov を `MoovBox` で decode し、次を確かめて sample entry と timescale (mdhd) を保持する。
     - media の trak (handler が vide か soun) が 1 つだけで、role (映像 / 音声) と handler が一致する。CMSF §3.1 は CMAF header を「associated with a CMAF track」とする
     - stsd の entry が 1 つだけで、moq-sub が扱える種類 (avc1 / hev1 / hvc1 / av01 / vp08 / vp09 / Opus / mp4a。shiguredo_mp4 の `SampleEntry` の variant と、moq-sub のデコーダが扱う codec に合わせる) である
