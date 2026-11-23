@@ -2237,9 +2237,10 @@ impl DisplayJson for MsfCatalog {
                 )?;
             }
             // エンコーダの慣例として tracks → publishTracks → initDataList の順で出力する
-            // (initDataList が tracks より後という §5.1.7 の MUST を満たし、間は Table 1 の記載順に従う。
+            // (initDataList が tracks より後という §5.1.7 の SHOULD を満たし、間は Table 1 の記載順に従う。
             // JSON としての意味は変わらない)
-            // draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List): initDataList は tracks 配列より後に出現しなければならない
+            // draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List): initDataList は tracks 配列より
+            // 後に置くべきである (SHOULD)
             // 空配列のときは出力しない
             if !self.init_data_list.is_empty() {
                 f.member(
@@ -4267,21 +4268,10 @@ fn decode_full_catalog(
             .collect::<Result<Vec<_>, _>>()?,
     };
 
-    // draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List): initDataList は tracks 配列より後に出現しなければならない。
-    // nojson の to_object は JSON の出現順に列挙するため、ここで順序を検証できる。
-    // この仕様は将来変更される可能性がある。
-    let mut saw_tracks = false;
-    for (key, _) in val.to_object()? {
-        let key: &str = key.try_into()?;
-        if key == "tracks" {
-            saw_tracks = true;
-        }
-        if key == "initDataList" && !saw_tracks {
-            return Err(MessageError::InvalidCatalog(
-                "initDataList MUST be located after tracks".to_string(),
-            ));
-        }
-    }
+    // draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List): "The Initialization Data List,
+    // if present, SHOULD be located after the tracks array in the root of the JSON catalog."
+    // 配置は読みやすさのための SHOULD であり、満たさないカタログも正しい MSF のカタログである。
+    // そのため decode は JSON キーの出現順を問わずに受理する。encode は tracks より後に出力する
     let init_data_list = match val.to_member("initDataList")?.optional() {
         Some(v) => v
             .to_array()?

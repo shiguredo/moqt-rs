@@ -1307,7 +1307,7 @@ fn delta_without_version_is_not_version_gated() {
 /// initDataList が tracks より後にあるカタログは受理されること
 ///
 /// draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List): "The Initialization Data List, if
-/// present, MUST be located after the Tracks field."
+/// present, SHOULD be located after the tracks array in the root of the JSON catalog."
 #[test]
 fn init_data_list_after_tracks_accepted() {
     let json = br#"{"version":"draft-02","tracks":[],"initDataList":[{"id":"i","type":"inline","data":"AAEC"}]}"#;
@@ -1319,12 +1319,30 @@ fn init_data_list_after_tracks_accepted() {
     assert_eq!(cat.init_data_list.len(), 1);
 }
 
-/// initDataList が tracks より前にあるカタログは拒否されること
+/// initDataList が tracks より前にあるカタログも受理され、encode では tracks より後に出ること
+///
+/// draft-ietf-moq-msf-02 §5.1.7 の配置は読みやすさのための SHOULD であり、満たさない
+/// カタログも正しい MSF のカタログである。decode は受理し、encode は SHOULD に従って
+/// initDataList を tracks より後に出力する。
 #[test]
-fn init_data_list_before_tracks_rejected() {
+fn init_data_list_before_tracks_accepted() {
     let json = br#"{"version":"draft-02","initDataList":[{"id":"i","type":"inline","data":"AAEC"}],"tracks":[]}"#;
-    assert!(matches!(
-        MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None),
-        Err(MessageError::InvalidCatalog(_))
-    ));
+    let doc = MsfCatalogDocument::decode(json, shiguredo_moqt::msf::MsfCompression::None)
+        .expect("initDataList が tracks より前にあるカタログも受理されること");
+    let MsfCatalogDocument::Full(cat) = doc else {
+        panic!("Full が期待された");
+    };
+    assert_eq!(cat.init_data_list.len(), 1, "initDataList が読めること");
+    let encoded = MsfCatalogDocument::Full(cat)
+        .encode(shiguredo_moqt::msf::MsfCompression::None)
+        .expect("encode できること");
+    let encoded = String::from_utf8(encoded).expect("JSON は UTF-8 であること");
+    let tracks_at = encoded.find("\"tracks\"").expect("tracks を出力すること");
+    let init_data_list_at = encoded
+        .find("\"initDataList\"")
+        .expect("initDataList を出力すること");
+    assert!(
+        tracks_at < init_data_list_at,
+        "encode では initDataList を tracks より後に出力すること: {encoded}"
+    );
 }

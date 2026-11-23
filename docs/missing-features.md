@@ -160,10 +160,11 @@ the client MUST process the union of those ranges.」と定める。
 
 ### 4.6 `initDataList` の配置 (MSF §5.1.7)
 
-解消済み。MSF §5.1.7 は「The Initialization Data List, if present, MUST be located after the
-Tracks field.」と定める。`nojson` の `to_object` が JSON の出現順に列挙することを利用し、
-`MsfCatalogDocument::decode` が `initDataList` より前に `tracks` が現れることを検証する。
-encode も `tracks` → `publishTracks` → `initDataList` の順で出力する。
+解消済み。MSF §5.1.7 は「The Initialization Data List, if present, SHOULD be located after the
+tracks array in the root of the JSON catalog.」と定める。読みやすさのための SHOULD であり、
+満たさないカタログも正しい MSF のカタログであるため、`MsfCatalogDocument::decode` は
+JSON キーの出現順を問わずに受理する。encode は `tracks` → `publishTracks` → `initDataList`
+の順で出力し、SHOULD を満たす。
 
 ### 4.7 STOP_SENDING 受信時の open な stream の reset (§3.1.2 / §3.2.4、ライブラリ)
 
