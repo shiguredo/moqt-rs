@@ -212,17 +212,21 @@ open な送信 stream を Session が reset する (`Session::reset_open_outgoin
 
 MSF §11.4 はライブ配信の終了を次の 3 手順で伝えるとする。
 
-1. 全 track に status code `0x2` (Track Ended) で終了を通知する
+1. 全 active track に `PUBLISH_DONE` (MoQT §9.9) を送る
 2. VOD 化する場合は `isLive=false` と `trackDuration` を入れた独立カタログを公開する
 3. 恒久終了の場合は `isComplete=true` と空の `tracks` を持つ独立カタログを公開する
 
-moq-pub は終了時に `PUBLISH_DONE(GOING_AWAY = 0x4)` を送るだけである
-(`crates/moq-pub/src/pipeline.rs`)。`PUBLISH_DONE_TRACK_ENDED` は
-example から使われず、catalog は `is_complete: false` / `isLive: true` 固定で
-`trackDuration` も設定しない (`crates/moq-pub/src/catalog.rs`)。
-購読側は配信が正常終了したことを判別できない。
+手順 1 は `PUBLISH_DONE` の status code を定めない。status code は MoQT §12.4 が
+「The application SHOULD use a relevant status code in PUBLISH_DONE」とし、
+`TRACK_ENDED` (`0x2`) を「The track is no longer being published.」、
+`GOING_AWAY` (`0x4`) を「The subscriber or publisher issued a GOAWAY message.」と定める。
+
+moq-pub は終了時に、GOAWAY の送出に先立って各 track に `PUBLISH_DONE(GOING_AWAY = 0x4)` を
+送る (`crates/moq-pub/src/pipeline.rs`)。手順 1 はこれで満たす。一方、手順 2 / 3 の独立カタログは
+公開しない。catalog は `is_complete: false` / `isLive: true` 固定で `trackDuration` も設定しない
+(`crates/moq-pub/src/catalog.rs`)。そのため購読側は、配信の正常終了 (VOD 化と恒久終了) と
+publisher の離脱を区別できない。
 MSF v02 §11.4 は `PUBLISH_DONE` を使う (v01 §11.3 の `SUBSCRIBE_DONE` から改名されている)。
-コードは `src/error.rs` の `PUBLISH_DONE_TRACK_ENDED = 0x2` を使う。
 
 ### 5.2 PUBLISH に Message Parameters を載せられない
 
