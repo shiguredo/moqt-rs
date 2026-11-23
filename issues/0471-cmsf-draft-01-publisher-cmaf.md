@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-cmsf-draft-01
 - Polished: 2026-11-23
+- Refreshed: 2026-11-23
 
 ## 目的
 
@@ -15,7 +16,10 @@
 
 ### moq-pub
 
-- `crates/moq-pub/src/catalog.rs` の `build_catalog` は、映像 / 音声とも `MsfPackaging::Loc` の track を作り、`init_data_list` を空にする。`alt_group` は設定しない。
+- `crates/moq-pub/src/catalog.rs` の `build_catalog` は、映像 / 音声とも `MsfPackaging::Loc` の track を作る。`alt_group` は設定しない。
+  - `VideoTrackParams::video_config_in_objects` / `AudioTrackParams::audio_config_in_objects` が真の track には、type `object-property` の initDataList entry (`video-config` / `audio-config`、data は `0x0D` / `0x0F`) を指す initRef を載せる (MSF-02 §12.2)。
+  - 2 つのフラグは、`pipeline.rs` の `prepare_catalog_tracks` が packaging によらずに決める。音声は常に真、`--input-mp4` の映像は常に真、エンコーダの映像は `VideoEncoder::carries_video_config` の値 (AV1 / H.264 / H.265 は真、VP8 / VP9 は偽) である。値は `CatalogVideoTrack` / `CatalogAudioTrack` を通って `build_catalog` に渡る。
+  - `MsfTrack::init_ref` は track ごとに 1 つである。
 - `crates/moq-pub/src/pipeline.rs` の `run` は次の順で進む。
   1. 接続し、映像 / 音声 / catalog の PUBLISH を張る
   2. エンコーダを準備する
@@ -243,6 +247,8 @@ init segment を作るには sample entry が要る。H.264 / H.265 / AV1 / VP9 
   - これらの I/O は型の判断を通らないので、型の単体テストの対象にしない。
 - 確定時の送出では、その時点でループが持つ `handle` / `catalog_request_id` / `catalog_publish_target` を参照する。確定前にこれらを別の変数へ写して持ち越さない。こうすると、確定前に `replace_with_migrated_session` や request 単位の移行で差し替えられた値で送られる。
 - 確定後は、init segment を `initDataList` の `inline` entry に Base64 で入れ、track の `initRef` から参照する。
+  - cmaf の track は Video Config / Audio Config を Object property で送らない (cmaf の Object には LOC property を付けない)。そのため MSF-02 §12.2 の object-property の initRef は掛からず、object-property の initDataList entry とそれを指す initRef は載せない。
+  - 1 つの track が持てる initRef は 1 つ (MSF-02 §5.2.14) なので、cmaf の track の initRef は CMSF-01 §3.1 の inline entry だけを指す。0467 は、cmaf の track の initRef が inline 以外の entry を指すカタログを `InvalidCatalog` にする。
   - moq-pub は Base64 の crate に依存していないので、`base64ct` を加える (shiguredo-rust の選定に従う)。
   - catalog の track には `packaging: "cmaf"` と `initRef` を載せる。`CatalogContext` が init segment を持つので、`cat_tokens_changed` で作り直すカタログにも initDataList と initRef が載る。
 
@@ -258,7 +264,7 @@ init segment を作るには sample entry が要る。H.264 / H.265 / AV1 / VP9 
 
 ## 完了条件
 
-- `--packaging cmaf` で、init segment を `initDataList` に載せたカタログを送ること。`cat_tokens` が変わる session 移行で作り直したカタログにも、initDataList と initRef が載ること。
+- `--packaging cmaf` で、init segment を `initDataList` に載せたカタログを送ること。`cat_tokens` が変わる session 移行で作り直したカタログにも、init segment の inline entry とそれを指す initRef が載ること。cmaf のカタログの initDataList に object-property の entry がないこと。
 - 1 sample ごとの Object (moof + mdat) を Subgroup 0 で送ること。音声も subgroup で送り、Object に LOC property を付けないこと。
 - tfdt と timescale が、LOC 経路で送る Timestamp / Timescale と一致すること。live capture では、tfdt が capture の Unix epoch マイクロ秒になること。例外は、Timestamp が直前の chunk の tfdt 以下になる場合だけである。その場合 tfdt は「直前の tfdt + 1」になり、track ごとに逆行しないこと。直前の tfdt より大きい Timestamp (間隔が名目の duration より短い場合を含む) は、そのまま使われること。
 - trun の duration / size / flags が sample ごとに、data_offset が trun ごとに書かれていること。`Fmp4SegmentDemuxer` で demux した sample の時刻・サイズ・keyframe 判定が、送信側と一致すること。
