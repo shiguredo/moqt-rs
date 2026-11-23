@@ -28,7 +28,7 @@ relay による namespace の集約 / forwarding) は本稿の対象外とする
 メッセージパラメータ、Track / Object Property、エラーコードはほぼ実装済みである。
 足りていないのは次の 4 層に分かれる。
 
-1. **仕様側で明示的に未実装のまま残っている機能**: Secure Objects (LOC §3 / MSF §4.3)、
+1. **仕様側で明示的に未実装のまま残っている機能**: Secure Objects (LOC §3 / MSF §4.4)、
    LOC の Video Payload Format (§2.1)。Log / Metrics の payload codec は `msf::log` /
    `msf::metrics` で実装済みであり、publishTracks への配置と role の MUST ペア検証だけが
    残っている。
@@ -39,7 +39,7 @@ relay による namespace の集約 / forwarding) は本稿の対象外とする
 3. **アプリ機能として欠けているもの**: REQUEST_ERROR の REDIRECT 追随、トラック選択と切替、
    シーク / 巻き戻し、ライブ中の track 追加への追随、配信終了のシグナリング、統計表示。
 4. **MUST 未達 / 仕様違反になりうる箇所**:
-   `isLive=false` の `targetLatency` (MSF §5.2.8)、
+   `isLive=false` の `targetLatency` (MSF §5.2.9)、
    `connectionURI` の新規接続 (MSF §5.2.37)、
    範囲指定の購読反映 (MSF §11.1.1)。
 
@@ -49,7 +49,7 @@ relay による namespace の集約 / forwarding) は本稿の対象外とする
 
 | 機能 | 仕様 | 現状 | issue |
 | --- | --- | --- | --- |
-| Secure Objects による E2E 暗号化と復号 | LOC §3、MSF §4.3 | 未実装。MSF の signaling フィールドは扱うが、`ENCRYPTED_LIST` (`0x0A`) / `PADDING` (`0x32`) Object Property と暗号処理が無い | 未着手 |
+| Secure Objects による E2E 暗号化と復号 | LOC §3、MSF §4.4 | 未実装。MSF の signaling フィールドは扱うが、`ENCRYPTED_LIST` (`0x0A`) / `PADDING` (`0x32`) Object Property と暗号処理が無い | 未着手 |
 | MSF_COMPRESSION property による catalog 圧縮 | MSF §5.5 / §12.1 | 実装済み。0x78 の Track Property / Object Property を `MsfCompression` で解釈し、catalog / timeline の encode / decode が signal を受け取る | - |
 | Log / Metrics track の payload | MSF §9 / §10 | payload codec は実装済み。`msf::log` の Log Record (MOQLOG §5.3) と `msf::metrics` の Catalog Header / Metric Description / Capture Info / Metric Value (MOQMETRICS §5.3 / §5.4) を扱う。publishTracks への配置と role の MUST ペア検証は未対応 | 未着手 |
 | LOC の Video Payload Format | LOC §2.1 | 部分実装。`loc::video_payload` で 1〜4 バイト length prefix / 3 / 4 バイト start code / length 1 = start code を扱う。example の annexB 統合と payload 内 parameter set は未対応 | 未着手 |
@@ -89,10 +89,10 @@ C4M draft-02 の `moqt` クレームの map 化と未知キーの fail-closed、
 | `wt-h3` の選択 | `Transport::WtH3` | webtrans-http3 §4.4 | s2n-quic は RESET_STREAM_AT を実装しないため、既定の s2n-quic ビルドでは `wt-h3` を選べない (`Transport::parse` / `resolve_transport` が拒否する)。tobi-quic は Windows 非対応のため、Windows ビルドでも選べない。s2n-quic 以外のバックエンドを使う Windows 以外のビルドでは選べる |
 | `PRIOR_GROUP_ID_GAP` | `ObjectProperties::prior_group_id_gap` | §10.8 / MSF §6.1 | moq-pub は前回の Group ID を永続化しないため gap を宣言できない (SHOULD の前提を満たさない) |
 | `END_OF_GROUP` | Subgroup Header / Object Datagram のフラグ | §11.2.1 / §11.3.1 | moq-pub は常に false を送る。音声は 1 Group = 1 Object のため、終端を早期に通知できない |
-| `publishTracks` | `MsfCatalog::publish_tracks` | MSF §5.1.5 / §5.6.16 | 逆方向 track (Log / Metrics) を告知できず、QoE メトリクスの返送経路が無い |
-| `initDataList` / `initRef` / `buffers` | `MsfInitData` / `MsfBuffers` | MSF §5.1.7 / §5.2.9 / §5.2.13 | moq-sub は in-band の Video Config / Audio Config 前提で、initData 経由の構成情報を扱わない |
-| `buffers` / `maxGopDuration` / `maxGroupDuration` | `MsfBuffers` / `MsfTrack` | MSF §5.2.9 / §5.2.24 / §5.2.25 | moq-pub は宣言するが moq-sub は読まない。バッファ下限 / 上限の指示が再生に反映されない |
-| `altGroup` | `MsfTrack::alt_group` | MSF §5.2.12 / §4.2 | 品質切替 (ABR) の告知も選択もできない |
+| `publishTracks` | `MsfCatalog::publish_tracks` | MSF §5.1.5 / §5.6.17 | 逆方向 track (Log / Metrics) を告知できず、QoE メトリクスの返送経路が無い |
+| `initDataList` / `initRef` / `buffers` | `MsfInitData` / `MsfBuffers` | MSF §5.1.7 / §5.2.10 / §5.2.14 | moq-sub は in-band の Video Config / Audio Config 前提で、initData 経由の構成情報を扱わない |
+| `buffers` / `maxGopDuration` / `maxGroupDuration` | `MsfBuffers` / `MsfTrack` | MSF §5.2.10 / §5.2.25 / §5.2.26 | moq-pub は宣言するが moq-sub は読まない。バッファ下限 / 上限の指示が再生に反映されない |
+| `altGroup` | `MsfTrack::alt_group` | MSF §5.2.13 / §4.2 | 品質切替 (ABR) の告知も選択もできない |
 | Audio Level | `PROP_AUDIO_LEVEL` | LOC §2.3.3.2 | moq-pub が送らず moq-sub も読まない |
 | catalog の delta update 生成 | `MsfCatalogDocument::Delta` | MSF §5.1.6 / §5.3 | moq-pub は常に Full のみ。MAY なので違反ではない |
 | `PUBLISH_STATE_NOTIFY` の送信 | `Session::send_publish_state_notify` に `MoqtClient` のラッパーが無い | §9.10 | publisher から状態変化を通知できない |
@@ -124,16 +124,16 @@ Value が定義された serialization と一致しなければ MALFORMED_KEY_VA
   検出し、購読の cancel へ渡す。`OBJECT_PROPERTY_FILTER` の送信側フィルタは Object Properties
   の decode エラーをフィルタ不通過に畳む
 
-### 4.2 `isLive=false` の `targetLatency` を使う (MSF §5.2.8、moq-sub)
+### 4.2 `isLive=false` の `targetLatency` を使う (MSF §5.2.9、moq-sub)
 
-MSF §5.2.8 は「If isLive is FALSE, this field MUST be ignored.」と定める。
+MSF §5.2.9 は「If isLive is false, this field MUST be ignored.」と定める。
 moq-sub は `targetLatency` を無条件に再生遅延へ反映する
 (`crates/moq-sub/src/pipeline.rs`、`2150-2175`)。
 `is_live` は example から参照されていない (grep で 0 件)。VOD のトラックで不要な遅延を入れる。
 
 ### 4.3 catalog 更新をまたいだ `isLive` の False → True (MSF §5.2.8、moq-sub)
 
-解消済み。MSF §5.2.8 は「A True value MUST never follow a False value.」と定める。
+解消済み。MSF §5.2.8 は「A True value MUST NOT follow a False value in a catalog update.」と定める。
 ライブラリは同一 catalog 内の delta 再追加を `validate_readded_track` で検証するほか、
 独立した Full catalog を順に観測する `MsfCatalogTracker::observe` を提供する。
 moq-sub の `CatalogState` は Full catalog の置き換え時と delta 適用時に tracker を更新し、
@@ -207,9 +207,9 @@ open な送信 stream を Session が reset する (`Session::reset_open_outgoin
 
 ## 5. publisher (moq-pub) に足りない機能
 
-### 5.1 配信終了のシグナリングをしない (MSF §11.3)
+### 5.1 配信終了のシグナリングをしない (MSF §11.4)
 
-MSF §11.3 はライブ配信の終了を次の 3 手順で伝えるとする。
+MSF §11.4 はライブ配信の終了を次の 3 手順で伝えるとする。
 
 1. 全 track に status code `0x2` (Track Ended) で終了を通知する
 2. VOD 化する場合は `isLive=false` と `trackDuration` を入れた独立カタログを公開する
@@ -337,17 +337,17 @@ MSF §5.6.2 (simulcast) / §5.6.3 (SVC) や LOC §4.4〜§4.6 が想定する
 packaging / role / isLive / codec / width / height / framerate / bitrate /
 maxGopDuration / maxGroupDuration / targetLatency / renderGroup / samplerate /
 channelConfig / authInfo である。必須と条件付き必須は満たすが、
-`timescale` (§5.2.21) / `mimeType` (§5.2.19) / `avgBitrate` (§5.2.23) /
-`displayWidth` / `displayHeight` (§5.2.30 / .31) / `lang` (§5.2.32) /
-`label` (§5.2.10) / `altGroup` (§5.2.12) / `depends` (§5.2.14) /
-`template` (§5.2.15) / `temporalId` / `spatialId` (§5.2.16 / .17) /
-`trackDuration` (§5.2.35) / `accessibility` (§5.2.44) は未設定である。
+`timescale` (§5.2.22) / `mimeType` (§5.2.20) / `avgBitrate` (§5.2.24) /
+`displayWidth` / `displayHeight` (§5.2.31 / .32) / `lang` (§5.2.33) /
+`label` (§5.2.11) / `altGroup` (§5.2.13) / `depends` (§5.2.15) /
+`template` (§5.2.16) / `temporalId` / `spatialId` (§5.2.17 / .18) /
+`trackDuration` (§5.2.36) / `accessibility` (§5.2.44) は未設定である。
 購読側の言語選択や表示制御の材料が無い。
 
 ### 5.13 逆方向 track (Log / Metrics) を告知しない
 
 MSF §5.1.5 の `publishTracks` を出さないため、subscriber 側から Log / Metrics を
-publish する経路が無い (§5.6.16、§10)。
+publish する経路が無い (§5.6.17、§10)。
 
 ## 6. subscriber (moq-sub) に足りない機能
 
@@ -372,7 +372,7 @@ publish する経路が無い (§5.6.16、§10)。
 
 `crates/moq-sub/src/pipeline.rs` は catalog の並び順で最初に一致した
 映像コーデック / 音声コーデックのトラックを選ぶ。`--track-name` のような選択肢が無く、
-MSF §5.2.6 (role) / §5.2.10 (label) / §5.2.12 (altGroup) / §5.2.32 (lang) による
+MSF §5.2.7 (role) / §5.2.11 (label) / §5.2.13 (altGroup) / §5.2.33 (lang) による
 選択も切替もできない。多言語 / 複数品質のカタログでは意図しない 1 本を選びうる。
 
 ### 6.3 catalog の delta update で追加された track を購読しない
@@ -384,7 +384,7 @@ track の追加 (§5.3 の `add` / `clone`) に追随して SUBSCRIBE を送ら�
 
 ### 6.4 `authInfo` を参照せず、変数置換もしない
 
-MSF §11.4.1 は「購読者は track ごとに `authInfo` を見て認可要件を判断する」と定める。
+MSF §11.5.1 は「購読者は track ごとに `authInfo` を見て認可要件を判断する」と定める。
 moq-sub は `authInfo` を参照せず (grep で 0 件)、track ごとの認可要件を判定しない。
 さらに moq-pub は `authInfo` の値に `"%cat%"` という変数参照を書く
 (`crates/moq-pub/src/catalog.rs`、§5.2.43) が、moq-sub は
@@ -394,7 +394,7 @@ moq-sub は `authInfo` を参照せず (grep で 0 件)、track ごとの認可�
 
 ### 6.5 `packaging` と `isLive` を見ない
 
-トラックを選ぶ条件は codec の一致だけで、`packaging` (§5.2.4) と `isLive` (§5.2.7) を
+トラックを選ぶ条件は codec の一致だけで、`packaging` (§5.2.4) と `isLive` (§5.2.8) を
 判定していない。`loc` 以外の packaging (`mediatimeline` / `eventtimeline` / `moqlog` /
 `moqmetrics`) の track を購読しても LOC として解釈するため、受信後にデコードで失敗する。
 `isLive=false` の track も live と同じ経路で購読する (4.2 も参照)。
@@ -496,10 +496,10 @@ moq-sub が実際に載せるのは catalog の `LOCATION_FILTER` + `FILL_PARAME
 ### 6.12 MSF の Timeline、範囲指定、buffers を使わない
 
 Media / Event Timeline (§7 / §8)、`msf::uri` の範囲パラメータ (§11.1.1)、
-`buffers` / `maxGopDuration` / `maxGroupDuration` (§5.2.9 / §5.2.24 / §5.2.25) は
+`buffers` / `maxGopDuration` / `maxGroupDuration` (§5.2.10 / §5.2.25 / §5.2.26) は
 いずれも example から使われない。Timeline を使った A/V 同期と任意位置再生、
 バッファ量の指示に基づく再生制御に対応しない。
-ライブラリにも §7.3 / §8.3 の「各 Group の最初の Object は独立、以降は差分」を
+ライブラリにも §7.3 / §8.4 の「各 Group の最初の Object は独立、以降は差分」を
 蓄積する状態型が無い (payload の encode / decode のみ)。
 
 ### 6.13 再生面の機能が無い
@@ -623,7 +623,7 @@ example 側の `crates/moq-sub` が `playout::buffer` と `playout::timeline` �
 1. request stream GOAWAY の同一移行先 URL を指す複数 request の session 共有と、FETCH の
    request 単位移行 (6.6) — side session を URL 単位で共有し、FETCH の要求を追跡する必要がある
 2. メディアの FETCH 不在 (5.8 / 6.1) — シーク、巻き戻し、欠落回収ができない
-3. 配信終了のシグナリング (5.1) — 正常終了、VOD 化、恒久終了を伝えられない (MSF §11.3)
+3. 配信終了のシグナリング (5.1) — 正常終了、VOD 化、恒久終了を伝えられない (MSF §11.4)
 4. authInfo と変数置換 (6.4) — 認可付き配信が example 同士でも成立しない
 5. catalog delta で増えた track への追随 (6.3) — 動的な配信構成に追随できない
 6. Object Status と PUBLISH_DONE の未解釈 (6.11) — トラック終端を正しく検知できない
