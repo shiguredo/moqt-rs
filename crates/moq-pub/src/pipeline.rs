@@ -2856,13 +2856,16 @@ async fn process_audio_chunks(
         audio_encoder,
     } = context;
     let encoder = audio_encoder.as_mut().expect("audio encoder enabled");
-    let next_chunk_timestamp = input_timestamp;
+    // 再エンコードでは、1 つの入力から複数のチャンクを取り出すときに、
+    // チャンクごとに入力のタイムスケールで 1 チャンク分ずつ進める。
+    // live capture では None のままで、時刻は audio_timeline が進める
+    let mut next_chunk_timestamp = input_timestamp;
     while audio_pcm_buf.len() >= samples_per_frame {
         // TIMESTAMP を先に決める。読み出しの遅れは「読んだ壁時計 − TIMESTAMP」
         // であり、判定に要る
         let (
             timestamp,
-            _next_chunk_timestamp,
+            following_chunk_timestamp,
             duration_us,
             send_timestamp_us,
             send_duration_us,
@@ -2877,6 +2880,9 @@ async fn process_audio_chunks(
             samples_per_frame,
             is_reencode,
         )?;
+        // 次のチャンクの時刻は、このチャンクを捨てる場合も進める。
+        // 捨てたチャンクの分も入力の時間軸は進んでいるためである
+        next_chunk_timestamp = following_chunk_timestamp;
         // 捨てる場合もバッファからは取り出す (符号化へ渡さない)
         let Some((encoded, timestamp)) = encode_audio_chunk(
             encoder,
