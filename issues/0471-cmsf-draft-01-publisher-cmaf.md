@@ -3,7 +3,7 @@
 - Created: 2026-11-23
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-cmsf-draft-01
-- Polished: 2026-11-23
+- Polished: {YYYY-MM-DD}
 
 ## 目的
 
@@ -56,7 +56,14 @@
   - live capture では、LOC の Timestamp を Timescale なしで送る。値は Unix epoch からのマイクロ秒である。
   - `--input-mp4` (映像のみ) と `--input-mp4-reencode` (映像と音声) では、入力ファイル由来のメディア時刻を送る。Timescale には入力 track の timescale を使う (`video_timescale` / `audio_timescale` など)。
 - 映像は 1 GOP を 1 Group にする。音声は 1 フレームを 1 Object・1 Group にする (`deliver_audio_chunk` が Object ごとに `group_id::next_group_id` で進める)。
-- 既存の送り直し (`republish_catalog_at_next_group`) は、Skip を「どの購読にも届かなかった (PAUSED など)」として正常系で扱い、location を前回のままにする。購読が PAUSED のときは、session 層 (`src/session/subscription/validation.rs` の `object_passes_filters`) が Object を落とし、tokio-moq がそれを `ObjectFilterOutcome::Skip` にする。
+- `republish_catalog_at_group` は、PUBLISH 購読への送出結果 (`ObjectFilterOutcome`) だけを返す。受信 SUBSCRIBE の購読者への送出結果は、失敗をログにするだけで返さない。
+  - 既存の送り直し (`republish_catalog_at_next_group`) は、この戻り値が Skip のとき location を前回のままにする。
+  - 購読が PAUSED のときは、session 層 (`src/session/subscription/validation.rs` の `object_passes_filters`) が Object を落とし、tokio-moq がそれを `ObjectFilterOutcome::Skip` にする。
+  - session 層は、Object が購読の filter を通った時点で、Track の Largest Object を記録する。記録の関数は `src/session/subscription/delivery.rs` の `record_published_track_largest` で、`src/session/data.rs` の送出処理から呼ばれる。記録は PUBLISH 由来か SUBSCRIBE 由来かを問わない。そのため、PUBLISH 購読で Skip でも受信 SUBSCRIBE 側に届いていれば、session 層は Largest を観測済みになる。
+- media の Object は、経路ごとに組み立てて送る。
+  - 映像: `send_encoded_video_frames` が PUBLISH の writer に送り、Pass のとき `media_cache` (FETCH 用) に入れる。受信 SUBSCRIBE の購読者には、`send_video_to_peer_subscriptions` が LOC property を組み立て直して送る (`media_cache` には入れない)。
+  - 音声: `deliver_audio_chunk` が `send_audio_datagram` / `send_audio_stream` で PUBLISH に送り、`media_cache` に入れる。受信 SUBSCRIBE の購読者には、`send_audio_to_peer_subscriptions` が購読ごとに組み立て直して送る (`media_cache` には入れない)。終了時のフェードは、`flush_audio_fade` が PUBLISH と `media_cache` にだけ送る。
+- live capture の音声の Timestamp は単調に増えるとは限らない。`src/audio_clock.rs` の `AudioTimestampClock` は、補正を「下がる方向は待たずに合わせる」ので、補正が 1 フレーム分を超えて下がると、次の chunk の Timestamp が直前より小さくなる。映像は `src/media_clock.rs` の `WallClockMapper` が単調増加を保証する。
 - 定期再送の `handle_catalog_republish` は、送出エラーを次のように分類する。
   - `is_transport_session_end`: session の終了として扱う
   - `is_peer_stream_reset`: 送出を継続する
@@ -104,6 +111,10 @@
 - tfdt と timescale には、LOC 経路で Timestamp / Timescale として送っている値をそのまま使う。
   - live capture では、timescale を 1,000,000 とし、tfdt を capture の timestamp (Unix epoch からのマイクロ秒) とする。映像と音声が同じ時計に載るので、先頭 sample の capture 時刻の差がそのまま tfdt の差になる。
   - `--input-mp4` / `--input-mp4-reencode` では、timescale を LOC 経路の Timescale と同じ入力 track の timescale とし、tfdt を入力ファイル由来のメディア時刻とする。映像と音声は同じファイルの時間軸に載る。
+  - track ごとに tfdt を逆行させない。tfdt は sample の decode time であり、chunk の並びで減ってはならない。
+    - live capture の音声のように、Timestamp が直前の chunk の tfdt 以下になる場合だけ、tfdt を「直前の tfdt + 1」(timescale 単位) にし、英語の debug ログを出す。
+    - 下限を「直前の tfdt + 名目の duration」にはしない。映像の `WallClockMapper` が保証するのは、刻みが名目の間隔の半分より大きいことまでである。名目の duration を下限にすると、収束中や丸めの差で、逆行していない普段の chunk にも揃えが入るためである。
+    - それ以外は LOC の Timestamp と同じ値を使う。
 - `Fmp4SegmentMuxer` が作る media segment は、この決め方に使えない。tfdt が track ごとに 0 から始まり、duration の累積で進むため、次の 2 つが起きる。
   - 映像と音声の先頭 sample の時刻の差が失われ、開始時点で同期がずれる。
   - 名目の duration を累積すると、フレーム落ちのたびに capture 時刻とのずれが積み上がる。
@@ -125,32 +136,62 @@
   - trun の data_offset: trun に 1 つ書く値で、moof の先頭から mdat の payload までの距離とする
   - composition offset は書かない。LOC 経路と同じく、エンコーダ出力の timestamp を表示順 = 復号順として扱う前提である。H.264 / H.265 は `allow_frame_reordering: Some(false)` で、パススルーは B フレームを含む MP4 を拒否する。
 - 配信中に sample entry が最初のものから変わった場合は、英語のエラーログを出して終了する。init segment を差し替えると、独立カタログの再送と購読側の再初期化が必要になり、本 issue の範囲を超えるためである。
+- chunk のバイト列は、1 sample につき 1 回だけ組み立てる。mfhd の sequence_number も 1 回だけ消費する。
+  - 組み立てたバイト列を、すべての経路で同じものとして使う。経路は、PUBLISH の writer、受信 SUBSCRIBE の購読者 (`send_video_to_peer_subscriptions` / `send_audio_to_peer_subscriptions`)、`media_cache` (FETCH)、`flush_audio_fade` である。
+  - 経路ごとに組み立てると sequence_number が食い違い、同じ Location の Object の payload が変わる。MoQT-23 §7.1 は「An endpoint that receives a duplicate Object with a different Delivery Mode, Subgroup ID, Priority or Payload MUST treat the track as Malformed.」と定める。
 
 ### カタログの確定
 
-init segment は、配信する track の最初の sample がループに届くまで作れない。エンコーダ経路では、エンコードを終えた時点で届く。現状ではエンコードが `run_publisher_loop` の中にあるため、cmaf ではカタログ未確定のままループに入る。loc では現状の順序 (ループに入る前に `prepare_catalog`) を変えない。
+init segment を作るには sample entry が要る。H.264 / H.265 / AV1 / VP9 などは、エンコーダの出力を見るまで sample entry を作れない。そのため cmaf では、配信する track の最初の sample がループに届くのを一律に待つ。現状ではエンコードが `run_publisher_loop` の中にあるため、cmaf ではカタログ未確定のままループに入る。loc では現状の順序 (ループに入る前に `prepare_catalog`) を変えない。
 
 - 状態の持ち方:
   - `PreparedCatalog` から `handle` を外に出す。`handle` は media の送信にも使う session の handle なので、カタログの確定前からループが持つ。
   - カタログの中身は次の 2 段の `Option` で持つ。
     - `json` と `group_id` を 1 つの `Option` にまとめる。`None` がカタログ未確定を表す。
-    - `location` は別の `Option` とし、カタログの Object が一度でも Pass した時点で `Some` にする。既存の `republish_catalog_at_next_group` と同じく、Group ID は送信の成否によらず進め、location は Pass のときだけ更新する。
+    - `location` は別の `Option` とする。cmaf では、カタログの Object がいずれかの購読 (PUBLISH 購読または受信 SUBSCRIBE の購読者) に届いた時点で `Some` にする。session 層が Largest Object を記録する条件と揃えるためである。loc は従来どおり、PUBLISH 購読が Pass のときだけ更新する (下の「location の更新規則」)。Group ID は、既存の `republish_catalog_at_next_group` と同じく送信の成否によらず進める。
+    - 「届いた」は、購読の filter を通ったこと (`SubgroupWriter::write_object` の filter 判定が Pass) とする。session 層が Largest を記録するのも filter を通った時点 (`src/session/data.rs` の送出処理) なので、条件が一致する。filter を通った後のワイヤへの送信や `finish` が失敗しても、届いた扱いにする。
   - 送り直しの経路は、`json` の有無 (確定済みかどうか) で動かすかを決める。FETCH と fill fetch に応答できるかどうかは、`location` の有無で決める。
+  - loc でも同じ状態の型を使う。loc は、ループに入る前の `prepare_catalog` の結果から、確定済みで `location` がある状態で始める。
   - `CatalogContext` の組み立てを `prepare_catalog` から切り出す。現状の `prepare_catalog` と同じく、`start_input_tasks` より前に `prepare_catalog_tracks` の結果から作り、ループまで持ち越す。init segment の欄は空にしておく。
 - media の扱い:
   - media の Object は、カタログ確定前から通常どおり送る。最初の sample も保持せず、そのまま送る。chunk の組み立てに init segment は要らない。track_ID は、track ごとの muxer が `tracks.len() + 1` で採番するので 1 であり、timescale は前述のとおり事前に決まっている。
   - media track への要求は、確定前も通常どおり処理する。
 - 確定の契機: 配信する全 track の最初の sample がループに届いた時点とする。
-  - 配信する track は、映像と音声のうち有効なものである。`--no-video` / `--no-audio` で外した track と、`--input-mp4` の音声 (映像のみを配信する) は待たない。
+  - 配信する track は、映像と音声のうち有効なもの (`config` の映像・音声の有効フラグ) である。`--no-video` / `--no-audio` で外した track、`--input-mp4` の音声 (映像のみを配信する)、再エンコードで対応する音声がない場合の音声は待たない。
+  - `handle_video_input` / `handle_audio_input` は、各 track の最初の sample の sample entry (と timescale) を、ループの状態に記録するだけにする。確定の処理そのものは行わない。
+- 確定を実行する場所: `run_publisher_loop` の中で、`handle_video_input` / `handle_audio_input` から戻った直後に、確定の契機を満たしたかを確かめて、専用の関数で確定する。
+  - media の送信の結果処理 (`handle_video_input_outcome` など) の中では確定しない。
+  - 理由は、media の結果処理が `is_peer_stream_reset` に media 固有の後始末 (現在の Group の writer を捨てて Group ID を進める) を結び付けているからである。カタログの送出エラーがそこへ流れると、カタログの stream の reset が映像の reset として扱われる。
+  - 確定の関数は、カタログの送出に必要な状態をループの状態から受け取る。
+    - 送出に使うもの: `client`、`handle`、`data_plane`、`catalog_request_id`、`catalog_publish_target`、`peer_subscriptions`
+    - 組み立てに使うもの: `CatalogContext`、記録した sample entry、`config.url.cat_tokens`
+    - 結果を書き込むもの: カタログの状態 (下の型)、`session_ended`
+    - `client` / `handle` / `data_plane` は `replace_with_migrated_session` で差し替わる値なので、確定時点の値を参照する。
 - 確定の手順: 確定の契機で、次の順に処理する。
   1. init segment を作り、`CatalogContext` に入れる。
   2. その時点の `cat_tokens` で `CatalogContext::json` を組み立てる。
   3. 現状の `prepare_catalog` と同じく、`group_id::allocate_initial_group_id` で Group ID を払い出す。`json` と `group_id` を `Some` にする。ここでカタログは確定する。
   4. `catalog_sink` → `republish_catalog_at_group` の経路で、その Group にカタログを送る。この経路を使うのは、確定前に catalog の PUBLISH が request 単位で移行していても、現在の送り先に送るためである。
-  5. 結果は既存の送り直しと同じに扱う。
-     - Pass: `location` を `{group_id, 0}` にする。
-     - Skip: `location` を `None` のまま続ける。どの購読にも届かなかっただけ (PAUSED など) で、正常系である。確定済みなので、以後の送り直し (定期再送など) が次の Group で届ける。
-     - Err: `handle_catalog_republish` と同じに分類する。`is_transport_session_end` なら session の終了として扱い、`is_peer_stream_reset` なら続け、それ以外はエラーにする。
+     - 送出の結果は、`Result` ではなく次の 3 つを持つ結果型 (例: `CatalogPublishResult`) で返す。`Result` にすると、`Err` のときに filter の結果を呼び出し元へ渡せないためである。
+       - PUBLISH 購読の filter の結果 (filter の判定まで進まなかった場合は「なし」)
+       - PUBLISH 側の送出エラー (なければ「なし」)
+       - 受信 SUBSCRIBE の購読者のどれかに届いたか
+     - 「届いた」を filter の結果で判定するために、filter の結果を送出エラーと分けて取り出せるようにする。
+       - 現状の `SubgroupWriter::write_object` (`crates/moq-pub/src/stream_writer.rs`) は、filter を通った後の SUBGROUP_HEADER や payload の送信が失敗すると、`Err` だけを返して Pass を捨てる。
+       - そこで、filter の結果と送出の結果を両方返すメソッドを `SubgroupWriter` に追加する。既存の `write_object` はそのメソッドを使って現状と同じ戻り値を返し、media 経路などの他の呼び出し元の挙動は変えない。
+       - `catalog::publish_catalog_object` は追加したメソッドを使い、`finish` の失敗も含めて、filter の結果と送出エラーを分けて返す。
+     - `republish_catalog_at_group` と `republish_catalog_at_next_group` は、上の結果型を返すように変える。
+       - PUBLISH 側の送出エラーがあれば、現状どおり受信 SUBSCRIBE の購読者への送出を行わずに返す (`.await?` と同じ順序)。
+       - 受信 SUBSCRIBE 側の送出エラーは、現状どおりログにして続ける。
+       - 関数の中では location を更新しない (`republish_catalog_at_next_group` の引数 `catalog_location: &mut Location` をやめる)。
+       - 呼び出し元 (送り直しの 5 経路と確定の関数) は、まず結果型を下の型の「`location` の更新」に渡し、その後で PUBLISH 側の送出エラーを分類する。
+     - location の更新規則は packaging で分ける。
+       - cmaf: PUBLISH 購読の filter の結果が Pass か、受信 SUBSCRIBE の購読者のどれかに届いた場合に更新する。送出エラーの有無は問わない。session 層が Largest を記録する条件と揃えるためである。
+       - loc: PUBLISH 購読の filter の結果が Pass で、かつ PUBLISH 側の送出エラーがない場合だけ更新する。現状の `if published == ObjectFilterOutcome::Pass` (`.await?` の後) と同じであり、loc の挙動はこの issue では変えない。
+  5. 結果は次のように扱う。この判断は確定の関数の中で行い、media の結果処理には渡さない。
+     - いずれかの購読に届いた: `location` を `{group_id, 0}` にする。
+     - どの購読にも届かなかった (Ok で、PUBLISH 購読は PAUSED などで Skip、受信 SUBSCRIBE の購読者もいないか filter で落ちた): `location` を `None` のまま続け、英語のログを出す。正常系である。確定済みなので、以後の送り直し (定期再送や SUBSCRIBE の受理時の送り直し) が、いずれかの購読に届いた時点で `location` を `Some` にする。この状態では Object がどの購読の filter も通っていないので、session 層も Largest Object を観測しておらず、FETCH の扱いと食い違わない。
+     - Err: `handle_catalog_republish` と同じに分類する。`is_transport_session_end` なら `session_ended` を立てて `LoopFlow::Break` を返す。`is_peer_stream_reset` なら英語のログを出して続ける。それ以外は `close_on_message_error` の後にエラーを返す。
 - 現状の初回送出は Skip を終了扱いにする。cmaf の確定では、これに合わせない。cmaf の確定はループの中で起きるので、relay が catalog の購読を pause した後になり得る。そこで終了すると、LOC 経路にはない終了経路ができてしまう。
 - 確定前の要求は、保留しない。
   - catalog の SUBSCRIBE は即時に受理する。catalog の SUBSCRIBE_OK は、カタログの JSON と Location に依存しない (`subscribe_ok_properties` は catalog に `TrackProperties::new()` を返す)。Object がない状態の LARGEST_OBJECT の省略は、MoQT-23 §9.19.17 で定義されている。受理した購読には、確定時の送出 (`republish_catalog_at_group` は catalog の購読者にも送る) でカタログが届く。
@@ -164,12 +205,14 @@ init segment は、配信する track の最初の sample がループに届く�
   - 同じ関数の中で行う PUBLISH の張り直しは、確定前も行う。具体的には、`republish_request_on_current_session` の新しい PUBLISH / `catalog_request_id` の差し替え / 旧 request への PUBLISH_DONE と、`handle_migrated_catalog` の PUBLISH_DONE / `catalog_request_id` / `catalog_publish_target` の更新である。確定時の送出は、その時点の送り先に向かう。
   - `cat_tokens_changed` のときの作り直しも、確定前は飛ばす。確定時の手順 2 が、その時点の `cat_tokens` で組み立てる。`replace_with_migrated_session` は確定前も `config.url` を更新する。
   - session 単位の移行では、移行先の session も未確定の状態のまま続け、確定した時点でカタログを送る。
-- 確定前の判断は、I/O を持たない型に切り出す。既存の `gop::GopTracker` と同じく、その型の単体テストで状態遷移を固定する。疑似キャプチャの入力とイベントの到着順は `run_publisher_loop` の `select!` で決まらず、モックも使えない (AGENTS.md) ためである。切り出す判断は次のとおりである。
-  - 確定の契機 (どの track の最初の sample を待つか)
-  - 要求への応答 (SUBSCRIBE の受理、FETCH と fill fetch の拒否)
-  - 送り直しの経路ごとに、張り直しを行いカタログの送出だけを飛ばすこと
-  - 確定時の結果の扱い
-- PUBLISH の張り直し・PUBLISH_DONE・送り先の更新という I/O は、既存の経路を変えずに使う。
+- カタログの状態の判断は、I/O を持たない型に切り出す。既存の `gop::GopTracker` と同じく、その型の単体テストで状態遷移を固定する。疑似キャプチャの入力とイベントの到着順は `run_publisher_loop` の `select!` で決まらず、モックも使えない (AGENTS.md) ためである。型が持つ判断は次の 4 つに限る。
+  - 確定の契機: 有効な track ごとに最初の sample を記録し、全部揃ったかを返す
+  - カタログを送ってよいか・作り直してよいか: `json` があるか。送り直しの 5 経路と、`cat_tokens_changed` のときの作り直しが参照する
+  - `location` の更新: 送出の結果型を受けて、packaging ごとの規則で更新する (cmaf は「PUBLISH の filter が Pass か、受信 SUBSCRIBE のどれかに届いた」、loc は「PUBLISH の filter が Pass で送出エラーなし」)
+  - FETCH と fill fetch に応答できるか: `location` があるか
+- PUBLISH の張り直し・PUBLISH_DONE・送り先の更新・catalog の SUBSCRIBE の受理という I/O は、既存の経路を変えずに使う。
+  - 送り直しの 5 経路は、カタログを送る直前に型の「送ってよいか」を参照し、送った結果型を型の「`location` の更新」に渡してから、PUBLISH 側の送出エラーを分類する。
+  - これらの I/O は型の判断を通らないので、型の単体テストの対象にしない。
 - 確定時の送出では、その時点でループが持つ `handle` / `catalog_request_id` / `catalog_publish_target` を参照する。確定前にこれらを別の変数へ写して持ち越さない。こうすると、確定前に `replace_with_migrated_session` や request 単位の移行で差し替えられた値で送られる。
 - 確定後は、init segment を `initDataList` の `inline` entry に Base64 で入れ、track の `initRef` から参照する。catalog の track には `packaging: "cmaf"` と `initRef` を載せる。`CatalogContext` が init segment を持つので、`cat_tokens_changed` で作り直すカタログにも initDataList と initRef が載る。
 
@@ -187,17 +230,19 @@ init segment は、配信する track の最初の sample がループに届く�
 
 - `--packaging cmaf` で、init segment を `initDataList` に載せたカタログを送ること。`cat_tokens` が変わる session 移行で作り直したカタログにも、initDataList と initRef が載ること。
 - 1 sample ごとの Object (moof + mdat) を Subgroup 0 で送ること。音声も subgroup で送り、Object に LOC property を付けないこと。
-- tfdt と timescale が、LOC 経路で送る Timestamp / Timescale と一致すること。live capture では、tfdt が capture の Unix epoch マイクロ秒になること。
+- tfdt と timescale が、LOC 経路で送る Timestamp / Timescale と一致すること。live capture では、tfdt が capture の Unix epoch マイクロ秒になること。例外は、Timestamp が直前の chunk の tfdt 以下になる場合だけである。その場合 tfdt は「直前の tfdt + 1」になり、track ごとに逆行しないこと。直前の tfdt より大きい Timestamp (間隔が名目の duration より短い場合を含む) は、そのまま使われること。
 - trun の duration / size / flags が sample ごとに、data_offset が trun ごとに書かれていること。`Fmp4SegmentDemuxer` で demux した sample の時刻・サイズ・keyframe 判定が、送信側と一致すること。
+- 同じ Location の media の Object のバイト列が、すべての経路で一致すること。経路は、PUBLISH、受信 SUBSCRIBE の購読者、FETCH (`media_cache`)、音声の終了時のフェードである。
 - 確定前も media の Object を送り、media track への要求を処理すること。
 - 切り出した型の単体テストで、次の判断を固定すること。
-  - 確定の契機: 有効な track の最初の sample が揃った時点であること (`--no-audio` と `--input-mp4` では音声を待たないこと)
-  - 確定前の要求への応答: catalog の SUBSCRIBE を受理し、FETCH を INVALID_RANGE、fill fetch を `reject_fill_fetch` で拒否すること
-  - 確定前の送り直し: 5 経路と `cat_tokens` の作り直しで、カタログの送出だけを飛ばすこと。`republish_request_on_current_session` と `handle_migrated_catalog` では、PUBLISH の張り直しも確定前に行うこと
-  - 確定前の session 単位の移行: 未確定の状態を保つこと
-  - 確定時の結果: 送出の前に `json` / `group_id` が確定すること。Pass で `location` が `Some` になること。Skip で `location` が `None` のまま続け、以後の送り直しで届くこと。Err は `handle_catalog_republish` と同じ分類になること
-  - `location` が `None` の間は、FETCH を INVALID_RANGE、fill fetch を `reject_fill_fetch` で拒否すること
-- 確定時の送出は、その時点でループが持つ `handle` / `catalog_request_id` / `catalog_publish_target` を参照すること (確定前に写した値を使わないこと)。
+  - 確定の契機: 有効な track の最初の sample が揃った時点で揃ったと返すこと (`--no-audio` と `--input-mp4` では音声を待たないこと)
+  - カタログを送ってよいか・作り直してよいか: 確定前 (`json` がない) は否、確定後は可を返すこと
+  - `location` の更新: cmaf では、PUBLISH の filter が Pass か受信 SUBSCRIBE のどれかに届いたら、送出エラーがあっても `Some` になること。どの購読にも届かなければ `None` のままであること。loc では、PUBLISH の filter が Pass で送出エラーがないときだけ更新されること (従来どおり)
+  - FETCH と fill fetch: `location` が `None` の間は応答できない (INVALID_RANGE / `reject_fill_fetch`) と返すこと
+- 確定を実行する関数について、次のとおりになること。
+  - 送出エラーを `handle_catalog_republish` と同じ 3 分類で扱うこと
+  - media の結果処理に送出エラーを渡さないこと
+  - 送出時に、その時点でループが持つ `handle` / `catalog_request_id` / `catalog_publish_target` を参照すること (確定前に写した値を使わないこと)
 - 確定後の結果 (カタログの内容と FETCH への応答) を `peer_integration_tests` で確認すること。
 - `--stream-mapping` を明示して `--packaging cmaf` と併用すると、エラーになること。
 - sample entry について、次のとおりになること。
