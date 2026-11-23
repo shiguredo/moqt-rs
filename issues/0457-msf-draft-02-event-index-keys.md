@@ -1,7 +1,7 @@
 # MSF Event Timeline の index key を大文字化し data を任意 JSON 値にする
 
 - Created: 2026-11-16
-- Completed: 2026-11-17
+- Completed: 2026-11-23
 - Branch: feature/update-msf-draft-02
 - Polished: {YYYY-MM-DD}
 
@@ -51,3 +51,12 @@ draft-ietf-moq-msf-02 §8.2 (Event Timeline data format) は、index key を小�
 - `MsfEventTimeline::encode` と `validate_event_data_raw` の doc が、`data_raw` を「単一の JSON object」としてパース可能であることを要求している。実装は任意の JSON 値を受理する。
 - `tests/test_msf/event_timeline.rs` の `data_object_with_nested_values` のコメントが「§8.1 (Event Timeline data format): data は Object でなければならない」のままで、節番号も内容も古い。
 - `decode_rejects_deeply_nested_document` と `decode_rejects_deeply_nested_array_document` が、小文字の `t` で入力を作っている。index 欠如で先に `InvalidCatalog` になるため、深さ制限がなくなっても検出できない。後者の doc も、削除済みの「event data MUST be a JSON object」の検証を前提にしている。
+
+## 解決方法 (reopened 後)
+
+- `MsfEventTimeline` の doc のフォーマットを、大文字の `[{"T"/"L"/"M": ..., "data": ...}, ...]` に直した。`data` は任意の JSON 値を生バイト列のまま保持することも書いた。
+- `MsfEventTimeline::encode` と `validate_event_data_raw` の doc を、「単一の JSON object」から「単一の JSON 値」に直した。
+- `data_object_with_nested_values` のコメントを §8.2 に直し、data は任意の JSON 値であると書き直した。
+- `decode_rejects_deeply_nested_document` と `decode_rejects_deeply_nested_array_document` の入力を大文字の `T` にした。深さ制限が無ければ decode が成功する入力になり、制限の退行を検出できる。後者は data に深い配列をそのまま入れ、削除済みの検証を前提にした doc も書き直した。
+
+確認コマンド: `cargo test --test test_msf event_timeline` と、pre-commit (cargo fmt / cargo clippy) / pre-push (cargo test) の prek フックが通ることを確認した。
