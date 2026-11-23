@@ -3,7 +3,7 @@
 - Created: 2026-11-23
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-cmsf-draft-01
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-11-23
 
 ## 目的
 
@@ -193,7 +193,7 @@ init segment は、配信する track の最初の sample がループに届く�
 - 切り出した型の単体テストで、次の判断を固定すること。
   - 確定の契機: 有効な track の最初の sample が揃った時点であること (`--no-audio` と `--input-mp4` では音声を待たないこと)
   - 確定前の要求への応答: catalog の SUBSCRIBE を受理し、FETCH を INVALID_RANGE、fill fetch を `reject_fill_fetch` で拒否すること
-  - 確定前の送り直し: 5 経路と `cat_tokens` の作り直しで、PUBLISH の張り直しは行い、カタログの送出だけを飛ばすこと
+  - 確定前の送り直し: 5 経路と `cat_tokens` の作り直しで、カタログの送出だけを飛ばすこと。`republish_request_on_current_session` と `handle_migrated_catalog` では、PUBLISH の張り直しも確定前に行うこと
   - 確定前の session 単位の移行: 未確定の状態を保つこと
   - 確定時の結果: 送出の前に `json` / `group_id` が確定すること。Pass で `location` が `Some` になること。Skip で `location` が `None` のまま続け、以後の送り直しで届くこと。Err は `handle_catalog_republish` と同じ分類になること
   - `location` が `None` の間は、FETCH を INVALID_RANGE、fill fetch を `reject_fill_fetch` で拒否すること
