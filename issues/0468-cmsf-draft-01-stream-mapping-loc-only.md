@@ -3,7 +3,7 @@
 - Created: 2026-11-23
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-cmsf-draft-01
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-11-23
 
 ## 目的
 
