@@ -3204,7 +3204,8 @@ impl DisplayJson for MsfEventTimelineEntry {
 
 /// イベントタイムライントラックペイロード (draft-ietf-moq-msf-02 §8.2 (Event Timeline data format))
 ///
-/// フォーマット: `[{"t"/"l"/"m": ..., "data": ...}, ...]`
+/// フォーマット: `[{"T"/"L"/"M": ..., "data": ...}, ...]`。index key は大文字だけを受理し、
+/// `data` は任意の JSON 値を生バイト列のまま保持する。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MsfEventTimeline(
     /// タイムラインのエントリ列 (JSON 配列順)
@@ -3228,7 +3229,7 @@ impl MsfEventTimeline {
     /// # Errors
     ///
     /// - `data_raw` が UTF-8 でない: `InvalidCatalog`
-    /// - `data_raw` 全体が単一の JSON object としてパース可能でない (trailing 文字を含む): `InvalidCatalog`
+    /// - `data_raw` 全体が単一の JSON 値としてパース可能でない (trailing 文字を含む): `InvalidCatalog`
     pub fn encode(&self) -> Result<Vec<u8>, MessageError> {
         // draft-ietf-moq-msf-02 §8.2 (Event Timeline data format): "An event timeline track is a JSON [JSON] document."
         // この仕様は将来変更される可能性がある。
@@ -5368,8 +5369,9 @@ fn validate_auth_info_value_raw(value_raw: &[u8]) -> Result<(), MessageError> {
 /// draft-ietf-moq-msf-02 §8.2 (Event Timeline data format): "An event timeline track is a JSON `[JSON]` document."
 /// この仕様は将来変更される可能性がある。
 /// encode 側の検証欠落による panic (fmt エラー時の to_string の仕様) と
-/// 不正な JSON の静的な生成を防ぐため、`data_raw` が「UTF-8 かつ単独の JSON object
-/// としてパース可能」であることを検証する。エラー種別・文言は decode 側と対称にする。
+/// 不正な JSON の静的な生成を防ぐため、`data_raw` が「UTF-8 かつ単独の JSON 値
+/// としてパース可能」であることを検証する。`data` は任意の JSON 値であり、型は問わない。
+/// エラー種別・文言は decode 側と対称にする。
 fn validate_event_data_raw(data_raw: &[u8]) -> Result<(), MessageError> {
     let text = core::str::from_utf8(data_raw).map_err(|_| {
         MessageError::InvalidCatalog("event timeline is not valid UTF-8".to_string())

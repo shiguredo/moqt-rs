@@ -22,7 +22,8 @@ fn wallclock_index() {
 
 #[test]
 fn data_object_with_nested_values() {
-    // draft-ietf-moq-msf-02 §8.1 (Event Timeline data format): data は Object でなければならない
+    // draft-ietf-moq-msf-02 §8.2 (Event Timeline data format): data は任意の JSON 値である。
+    // 入れ子の Object を data に持つ場合も、生 JSON のまま保持されることを確認する
     let json = br#"[{"L":[0,0],"data":{"lat":47.1812,"lon":8.4592}}]"#;
     let tl = MsfEventTimeline::decode(json).expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(tl.0[0].index, MsfEventIndex::Location(0, 0));
@@ -222,10 +223,13 @@ fn nested_array_json(depth: usize) -> String {
 /// ことを検証する。同一の `RawJson::parse` を経由するため、このテストで decode 系 3 関数
 /// (`MsfEventTimeline::decode` / `MsfMediaTimeline::decode` / `MsfCatalogDocument::decode`)
 /// を代表できる。
+///
+/// index key は大文字の `T` にする。小文字だと index 欠如で先に `InvalidCatalog` になり、
+/// 深さ制限が無くなってもこのテストが通ってしまうためである。
 #[test]
 fn decode_rejects_deeply_nested_document() {
     let data = nested_object_json(nojson::MAX_NESTING_DEPTH + 1);
-    let json = format!("[{{\"t\":1000,\"data\":{data}}}]");
+    let json = format!("[{{\"T\":1000,\"data\":{data}}}]");
     assert!(matches!(
         MsfEventTimeline::decode(json.as_bytes()),
         Err(MessageError::InvalidCatalog(_))
@@ -238,15 +242,13 @@ fn decode_rejects_deeply_nested_document() {
 /// nojson の深さ制限は `parse_object` と `parse_array` の両方に適用される。
 /// ここでは「配列も累積深さ制限に参加する」ことを検証する (制限値そのものは
 /// `parse_object` と同じ実装定数 `MAX_NESTING_DEPTH` に依存する)。
-/// data を Object で包んでいるのは、data が素の配列だと「event data MUST be a JSON object」
-/// の構造検証で先に落ち、深さ制限の有無に関係なくエラーになるため
-/// (深さ制限を検証するには、制限なし実装ではパース成功 → decode 成功となる入力を
-/// 使わなければならない)。
+/// 深さ制限を検証するには、制限なし実装ではパース成功 → decode 成功となる入力を使わなければ
+/// ならない。そのため index key は大文字の `T` にし、data には任意の JSON 値を受理する仕様
+/// (draft-ietf-moq-msf-02 §8.2) に沿って深い配列をそのまま入れる。
 #[test]
 fn decode_rejects_deeply_nested_array_document() {
-    let inner = nested_array_json(nojson::MAX_NESTING_DEPTH + 1);
-    let data = format!("{{\"a\":{inner}}}");
-    let json = format!("[{{\"t\":1000,\"data\":{data}}}]");
+    let data = nested_array_json(nojson::MAX_NESTING_DEPTH + 1);
+    let json = format!("[{{\"T\":1000,\"data\":{data}}}]");
     assert!(matches!(
         MsfEventTimeline::decode(json.as_bytes()),
         Err(MessageError::InvalidCatalog(_))
