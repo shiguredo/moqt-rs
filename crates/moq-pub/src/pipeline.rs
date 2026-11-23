@@ -4866,8 +4866,8 @@ async fn prepare_catalog(
     // 移行 (GOAWAY) では差し替えるため、handle は [`PublisherSetup`] が可変として保持する
     let handle = connected.session.client.handle();
     let catalog_group_id = group_id::allocate_initial_group_id()?;
-    // カタログの Location。FETCH 応答と fill fetch stream の範囲判定、SUBSCRIBE_OK の
-    // LARGEST_OBJECT に使う
+    // カタログの Location。FETCH 応答と fill fetch stream の範囲判定、FETCH_OK の
+    // LARGEST_OBJECT に使う。受信 SUBSCRIBE への SUBSCRIBE_OK には、この値を渡さない
     let catalog_location = Location {
         group_id: catalog_group_id,
         object_id: 0,
