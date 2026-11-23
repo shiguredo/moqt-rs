@@ -39,14 +39,15 @@ CMSF 対応 (0467〜0472) が揃ったら、利用者向けの入口になる文
   - `docs/msf.md` の冒頭: 「[draft-ietf-moq-msf-02](…) の実装状況です。」
   - `docs/missing-features.md`: 対象仕様の段落に CMSF がない。
     - 第 3 節「ライブラリの API 露出と example での未使用」の表は、「`src/` の公開 API のうち `crates/` から呼ばれていないもの、および draft の MAY に対応していないもの」を収録している。
-    - その表の `initDataList` / `initRef` / `buffers` の行 (`MsfInitData` / `MsfBuffers`) は、「moq-sub は in-band の Video Config / Audio Config 前提で、initData 経由の構成情報を扱わない」と書いている。
+    - その表の「`initDataList` の `inline` / `track-property` 型、`initRef` の読み取り」の行 (`MsfInitDataKind::Inline` / `TrackProperty`、`MsfTrack::init_ref`、MSF §5.1.7 / §5.2.14 / §12.2) は、「moq-pub は `object-property` 型の entry と initRef だけを載せる (5.14)。moq-sub は initRef を読まず、in-band の Video Config / Audio Config を使う」と書いている。
     - 0471 は cmaf の track の init segment を initDataList の inline entry に入れて initRef から参照し、0472 はそれを読む。そのため、完了後は cmaf の track で `MsfInitData` (`MsfInitDataKind::Inline`) と initRef が両方の crate から使われる。
-    - 一方、loc の track の initRef と、`MsfInitDataKind::TrackProperty` / `ObjectProperty` の entry は、完了後も crates から使われない。0472 は LOC 経路を変えないので、loc の track では「in-band の Video Config / Audio Config 前提」のままである。
-    - `buffers` / `MsfBuffers` は、次の `buffers` / `maxGopDuration` / `maxGroupDuration` の行も扱っている。
+    - 一方、`MsfInitDataKind::TrackProperty` の entry は、完了後もどちらの crate からも使われない。
+    - loc の track の initRef と `ObjectProperty` の entry は moq-pub が載せる (`crates/moq-pub/src/catalog.rs`。Video Config を Object に載せない VP8 / VP9 の映像 track を除く) が、moq-sub は loc の track の initRef を読まない。0472 は LOC 経路を変えないので、loc の track では in-band の Video Config / Audio Config を使うままである。
     - 0471 / 0472 の完了で、ほかにも次の記述が事実と食い違う。
-      - 5.12: 「`crates/moq-pub/src/catalog.rs` が設定するのは name / namespace / … / authInfo である。」0471 で、cmaf の track に initRef が、root に initDataList が加わる
+      - 5.12: 「`crates/moq-pub/src/catalog.rs` が設定するのは name / namespace / … / authInfo である。」loc の track の initRef と root の `object-property` 型の initDataList がすでに加わっているので、現状でも食い違っている。0471 で、cmaf の track の initRef と root の `inline` 型の entry が加わる
       - 6.5: 「トラックを選ぶ条件は codec の一致だけで、`packaging` (§5.2.4) と `isLive` (§5.2.8) を判定していない。」現状でも `is_loc_packaging` で loc 以外を除外しているので食い違っており、0472 で cmaf の track も選ぶようになる
       - 6.13: 「録画は MP4 のみで音声は Opus に限る (AAC は警告して音声を録画しない)。」0472 で、cmaf の track では AAC / VP8 / VP9 も録画する
+      - 5.14: 「Video Config / Audio Config を Object に載せる track (VP8 / VP9 の映像を除く) に `object-property` 型の entry を指す initRef を載せる」。0471 の cmaf の track は Object に LOC property を付けず、object-property の initRef も載せないので、loc の track に限る記述になる
     - 0467〜0470 で増える CMSF の公開 API のうち、次は完了後も `crates/` から呼ばれない。
       - `MsfTrack` / `MsfCloneTrack` の `max_grp_sap_starting_type` / `max_obj_sap_starting_type`。0471〜0473 は設定も参照もしない
       - SAP Type timeline の型と相互変換。0469 は moq-pub / moq-sub での発行と購読を範囲外にしている
@@ -93,16 +94,16 @@ CMSF 対応 (0467〜0472) が揃ったら、利用者向けの入口になる文
 - `crates/README.md`、crate doc (`crates/moq-pub/src/lib.rs`、`crates/moq-pub/src/main.rs`、`crates/moq-sub/src/lib.rs`、`crates/moq-sub/src/main.rs`)、モジュール doc (`src/msf.rs`、`src/lib.rs` の `msf` モジュール) の準拠の文に、`draft-ietf-moq-cmsf-01` を加える。
 - `docs/missing-features.md`:
   - 対象仕様の段落に、CMSF `draft-ietf-moq-cmsf-01` を加える。
-  - `initDataList` / `initRef` / `buffers` の行は削除せず、完了後も使われない範囲に絞って書き直す。`MsfInitDataKind::TrackProperty` / `ObjectProperty` は、完了後も `crates/` から呼ばれない公開 API で、表の収録基準に当たり続けるためである (0467 は cmaf の initRef の参照先を inline に限り、0471 / 0472 も inline だけを使う)。
-    - 機能: loc の track の `initRef` と、`track-property` / `object-property` 型の initDataList entry
-    - API: `MsfInitDataKind::TrackProperty` / `ObjectProperty`
-    - 仕様: MSF §5.1.7 / §5.2.14。現在の `MSF §5.1.7 / §5.2.10 / §5.2.14` から、buffers を外すので Buffers (§5.2.10) を除く
-    - 影響: moq-pub は loc の track に initRef を載せず、moq-sub も読まない。cmaf の track では inline entry の init segment を使う
-    - `buffers` / `MsfBuffers` は次の行が扱うので、この行からは外す。
-  - 0471 / 0472 の完了で事実と食い違う記述 (現状に挙げた 5.12 / 6.5 / 6.13) を、完了後の挙動に合わせて直す。
+  - 「`initDataList` の `inline` / `track-property` 型、`initRef` の読み取り」の行は削除せず、完了後も使われない範囲に絞って書き直す。
+    - 完了後も、`MsfInitDataKind::TrackProperty` はどちらの crate からも使われず、loc の track の initRef は moq-pub が載せるが moq-sub は読まないので、表の収録基準に当たり続けるためである (0467 は cmaf の initRef の参照先を inline に限り、0471 / 0472 も cmaf の track では inline だけを使う)。
+    - 機能: `track-property` 型の initDataList entry と、loc の track の `initRef` の読み取り
+    - API: `MsfInitDataKind::TrackProperty`、`MsfTrack::init_ref` (loc の track の読み取り)
+    - 仕様: MSF §5.1.7 / §5.2.14 / §12.2 (現在の列のまま)
+    - 影響: moq-pub は loc の track に `object-property` 型の entry を指す initRef を載せる (5.14) が、moq-sub は読まず、in-band の Video Config / Audio Config を使う。cmaf の track では moq-pub / moq-sub とも inline entry の init segment を使う。`track-property` 型はどちらの crate も使わない
+  - 0471 / 0472 の完了で事実と食い違う記述 (現状に挙げた 5.12 / 5.14 / 6.5 / 6.13) を、完了後の挙動に合わせて直す。
   - 第 3 節の表に、完了後も `crates/` から呼ばれない CMSF の公開 API (現状に挙げた SAP starting type のフィールド、SAP Type timeline、Content Protection) の行を加える。第 3 節の収録基準 (`crates/` から呼ばれていない公開 API) に当たるためである。仕様の列は CMSF-01 の節番号 (§3.5.2 / §3.6 / §4) で書く。
   - 0473 (prft による壁時計の同期) の有無に関わる cmaf の時刻の制約は、第 6 節に書かない (実装判断)。記述が 0473 の完了の有無で変わり、0473 が後から完了したときに誰が消すかの引き継ぎが要るので、0474 の中で閉じないためである。
-  - 本 issue で書き直す箇所 (表の initDataList の行、新しく加える行、5.12 / 6.5 / 6.13 の節) の中にある節番号は、すべて MSF-02 / CMSF-01 の番号にする。
+  - 本 issue で書き直す箇所 (表の initDataList の行、新しく加える行、5.12 / 5.14 / 6.5 / 6.13 の節) の中にある節番号は、すべて MSF-02 / CMSF-01 の番号にする。
 - `docs/msf.md` の冒頭の対応仕様の文に、`draft-ietf-moq-cmsf-01` (CMSF の節) を加える。
 
 ## 完了条件
@@ -116,8 +117,8 @@ CMSF 対応 (0467〜0472) が揃ったら、利用者向けの入口になる文
 - `crates/README.md`、crate doc、モジュール doc の準拠の文に、`draft-ietf-moq-cmsf-01` があること。CMSF の型を `msf` モジュールの外に置いた場合は、SKILL.md のモジュール構成の表にそのモジュールの行があり、`src/lib.rs` のそのモジュールの doc に `draft-ietf-moq-cmsf-01` があること。
 - `docs/missing-features.md`:
   - 対象仕様に CMSF があること。
-  - `initDataList` / `initRef` / `buffers` の行が、loc の track の initRef と `track-property` / `object-property` 型の entry に絞られ、仕様の列が MSF §5.1.7 / §5.2.14 になり、cmaf の track で inline entry を使うことと食い違っていないこと。
-  - 5.12 / 6.5 / 6.13 が、0471 / 0472 の完了後の挙動と食い違っていないこと。
+  - 「`initDataList` の `inline` / `track-property` 型、`initRef` の読み取り」の行が、`track-property` 型の entry と loc の track の initRef の読み取りに絞られ、仕様の列が MSF §5.1.7 / §5.2.14 / §12.2 であり、moq-pub が loc の track に `object-property` の initRef を載せることと、cmaf の track で inline entry を使うことの両方と食い違っていないこと。
+  - 5.12 / 5.14 / 6.5 / 6.13 が、0471 / 0472 の完了後の挙動と食い違っていないこと。
   - 第 3 節に、完了後も `crates/` から呼ばれない CMSF の公開 API の行があること。
   - 本 issue で書き直した箇所の中の節番号が、すべて MSF-02 / CMSF-01 の番号であること。
 - `docs/msf.md` の冒頭の対応仕様の文に、`draft-ietf-moq-cmsf-01` があること。
