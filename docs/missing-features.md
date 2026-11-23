@@ -359,8 +359,8 @@ publish する経路が無い (§5.6.17、§10)。
 MSF §12.2 は、初期化データを Object property で送る track について「Publishers SHOULD add
 this Object property to the first Object in each Group.」とし、initRef が type `object-property`
 の initDataList entry を指すことを MUST とする。moq-pub は映像の Video Config をキーフレーム
-(Group の先頭) ごとに載せ、映像 / 音声の track に `object-property` 型の entry を指す initRef を
-載せる (`crates/moq-pub/src/catalog.rs`)。一方、音声の Audio Config は最初の Object (と移行後の
+(Group の先頭) ごとに載せ、Video Config / Audio Config を Object に載せる track (VP8 / VP9 の映像を
+除く) に `object-property` 型の entry を指す initRef を載せる (`crates/moq-pub/src/catalog.rs`)。一方、音声の Audio Config は最初の Object (と移行後の
 最初の Object) にだけ載せる (`crates/moq-pub/src/pipeline.rs`)。音声は 1 Object = 1 Group のため、
 relay 経由で途中から購読した subscriber は Audio Config を受け取れない (moq-pub へ直接 SUBSCRIBE
 した購読者には、その購読の最初の Object に載せる)。moq-sub は音声デコーダを catalog の
