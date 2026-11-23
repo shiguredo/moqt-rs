@@ -3,7 +3,7 @@
 - Created: 2026-11-23
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-cmsf-draft-01
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-11-23
 
 ## 目的
 
@@ -63,7 +63,8 @@
 - media の Object は、経路ごとに組み立てて送る。
   - 映像: `send_encoded_video_frames` が PUBLISH の writer に送り、Pass のとき `media_cache` (FETCH 用) に入れる。受信 SUBSCRIBE の購読者には、`send_video_to_peer_subscriptions` が LOC property を組み立て直して送る (`media_cache` には入れない)。
   - 音声: `deliver_audio_chunk` が `send_audio_datagram` / `send_audio_stream` で PUBLISH に送り、`media_cache` に入れる。受信 SUBSCRIBE の購読者には、`send_audio_to_peer_subscriptions` が購読ごとに組み立て直して送る (`media_cache` には入れない)。終了時のフェードは、`flush_audio_fade` が PUBLISH と `media_cache` にだけ送る。
-- live capture の音声の Timestamp は単調に増えるとは限らない。`src/audio_clock.rs` の `AudioTimestampClock` は、補正を「下がる方向は待たずに合わせる」ので、補正が 1 フレーム分を超えて下がると、次の chunk の Timestamp が直前より小さくなる。映像は `src/media_clock.rs` の `WallClockMapper` が単調増加を保証する。
+- live capture の音声の Timestamp は単調に増えるとは限らない。`src/audio_clock.rs` の `AudioTimestampClock` は、補正を「下がる方向は待たずに合わせる」ので、補正が 1 フレーム分を超えて下がると、次の chunk の Timestamp が直前より小さくなる。
+  - 映像も、送出する Timestamp は単調に増えるとは限らない。`src/media_clock.rs` の `WallClockMapper` が単調増加を保証するのは、入力の時刻の換算までである。エンコーダが 1 つの入力から複数の出力を返すと、`crates/moq-pub/src/encoder.rs` の `output_timestamp_us` が `入力の時刻 + 出力の番号 × フレーム間隔` を付ける。この時刻が、次の入力の時刻を超えることがある。再エンコードの `assign_input_timestamps` も同様である。
 - 定期再送の `handle_catalog_republish` は、送出エラーを次のように分類する。
   - `is_transport_session_end`: session の終了として扱う
   - `is_peer_stream_reset`: 送出を継続する
@@ -112,8 +113,8 @@
   - live capture では、timescale を 1,000,000 とし、tfdt を capture の timestamp (Unix epoch からのマイクロ秒) とする。映像と音声が同じ時計に載るので、先頭 sample の capture 時刻の差がそのまま tfdt の差になる。
   - `--input-mp4` / `--input-mp4-reencode` では、timescale を LOC 経路の Timescale と同じ入力 track の timescale とし、tfdt を入力ファイル由来のメディア時刻とする。映像と音声は同じファイルの時間軸に載る。
   - track ごとに tfdt を逆行させない。tfdt は sample の decode time であり、chunk の並びで減ってはならない。
-    - live capture の音声のように、Timestamp が直前の chunk の tfdt 以下になる場合だけ、tfdt を「直前の tfdt + 1」(timescale 単位) にし、英語の debug ログを出す。
-    - 下限を「直前の tfdt + 名目の duration」にはしない。映像の `WallClockMapper` が保証するのは、刻みが名目の間隔の半分より大きいことまでである。名目の duration を下限にすると、収束中や丸めの差で、逆行していない普段の chunk にも揃えが入るためである。
+    - 映像・音声の両方の track で、Timestamp が直前の chunk の tfdt 以下になる場合だけ、tfdt を「直前の tfdt + 1」(timescale 単位) にし、英語の debug ログを出す。この処理は、track ごとの chunk の組み立てに置く。
+    - 下限を「直前の tfdt + 名目の duration」にはしない。映像の `WallClockMapper` が保証するのは、入力の時刻の刻みがメディア時刻の差の半分より大きいことまでである。名目の duration を下限にすると、収束中や丸めの差で、逆行していない普段の chunk にも揃えが入るためである。
     - それ以外は LOC の Timestamp と同じ値を使う。
 - `Fmp4SegmentMuxer` が作る media segment は、この決め方に使えない。tfdt が track ごとに 0 から始まり、duration の累積で進むため、次の 2 つが起きる。
   - 映像と音声の先頭 sample の時刻の差が失われ、開始時点で同期がずれる。
@@ -135,9 +136,32 @@
     - flags: `SampleFlags::from_fields` で組む。keyframe は sync sample、それ以外は non-sync sample とする
   - trun の data_offset: trun に 1 つ書く値で、moof の先頭から mdat の payload までの距離とする
   - composition offset は書かない。LOC 経路と同じく、エンコーダ出力の timestamp を表示順 = 復号順として扱う前提である。H.264 / H.265 は `allow_frame_reordering: Some(false)` で、パススルーは B フレームを含む MP4 を拒否する。
+- sample entry の作り方 (live capture と `--input-mp4-reencode`)。値の出どころは codec ごとに次のとおりとする。
+  - H.264 / H.265:
+    - 使う値は keyframe の `EncodedFrame::video_config` (avcC / hvcC のレコード本体) である。
+    - このレコード本体には box header がない。そのため、先頭に 8 バイトの box header (size と `avcC` / `hvcC`) を付けてから `AvccBox` / `HvccBox` として decode する。`AvccBox::decode` は box header を要求するためである。
+    - H.264: decode した `AvccBox` の SPS / PPS のリストを `build_avc1_box` に渡す。`H264SampleEntryConfig` の length_size は、`length_size_minus_one` を `LengthSize::from_length_size_minus_one` で変換して入れる。
+    - H.265: `HvccBox` は VPS / SPS / PPS を `nalu_arrays` にまとめて持つので、nal_unit_type 32 / 33 / 34 の配列から取り出して `build_hvc1_box` に渡す。
+      - `H265SampleEntryConfig` は、length_size を同じく変換して入れ、`avg_frame_rate` を `AVG_FRAME_RATE_UNSPECIFIED`、`constant_frame_rate` を `H265ConstantFrameRate::Unknown` とする。moq-sub の録画 (`build_video_entry`) と同じ値である。
+  - AV1: keyframe の Video Config (Sequence Header OBU) を `build_av01_box_from_config_obus` に渡す。moq-sub の録画に前例がある。
+  - VP8:
+    - keyframe の frame header を `bitstream::vp8::parse_frame_header` で解析し、`Vp8SampleEntryConfig` の width / height に、得た幅と高さを入れる。
+    - 色特性はビットストリームから得られない。そのため `colour_primaries` / `transfer_characteristics` / `matrix_coefficients` は 2 (unspecified、ISO/IEC 23001-8) とし、`video_full_range_flag` は false とする (実装判断)。
+  - VP9:
+    - keyframe の frame header を `bitstream::vp9::parse_frame_header` で解析して `build_vp09_box` に渡す。
+    - `Vp9SampleEntryConfig` の width / height には、header の幅と高さを入れる。`level` は `LEVEL_UNDEFINED` (0) とし、色特性は VP8 と同じく 2 (unspecified) とする。
+  - Opus: OpusHead を組むときと同じ値を `OpusSampleEntryConfig` に入れる。moq-pub の `encoder/opus.rs` の `build_opus_head` に合わせ、チャンネル数と入力サンプルレートはエンコーダ設定の値、pre_skip と output_gain は 0 とする。OpusHead のバイト列を解析する必要はない。
+  - AAC:
+    - エンコーダの AudioSpecificConfig を `bitstream::aac::parse_audio_specific_config` で解析し、`build_mp4a_box` に渡す。
+    - `Mp4aSampleEntryConfig` は、`es_id` を `EsDescriptor::MIN_ES_ID`、`buffer_size_db` を 0、`max_bitrate` / `avg_bitrate` を `config.audio_bitrate` (CLI の値で単位は kbps) を 1000 倍した bps とする (実装判断)。既存の `encoder/aac.rs` や `catalog.rs` も同じく 1000 倍して bps に換算している。
 - 配信中に sample entry が最初のものから変わった場合は、英語のエラーログを出して終了する。init segment を差し替えると、独立カタログの再送と購読側の再初期化が必要になり、本 issue の範囲を超えるためである。
+  - 検出は、live capture と `--input-mp4-reencode` の映像の keyframe ごとに行う。その keyframe から上の方法で組み直した sample entry を、最初のものと比べる (`SampleEntry` は `PartialEq` を実装している)。
+  - `--input-mp4` のパススルーでは検出しない。元の MP4 の sample entry を使い、`Mp4VideoReader::open` が sample entry を 1 種類に限るためである。組み直した entry は元の entry と一致しない (unknown box や compressorname の違い、`hev1` が `hvc1` になる) ので、比べると誤って終了してしまう。
+  - 音声は、エンコーダの設定が配信中に変わらないので比べない。
+  - 比べる処理は I/O を持たない関数に切り出し、単体テストで固定する。
 - chunk のバイト列は、1 sample につき 1 回だけ組み立てる。mfhd の sequence_number も 1 回だけ消費する。
-  - 組み立てたバイト列を、すべての経路で同じものとして使う。経路は、PUBLISH の writer、受信 SUBSCRIBE の購読者 (`send_video_to_peer_subscriptions` / `send_audio_to_peer_subscriptions`)、`media_cache` (FETCH)、`flush_audio_fade` である。
+  - 組み立てたバイト列を、同じ Object を送るすべての経路で同じものとして使う。経路は、PUBLISH の writer、受信 SUBSCRIBE の購読者 (`send_video_to_peer_subscriptions` / `send_audio_to_peer_subscriptions`)、`media_cache` (FETCH) である。
+  - 終了時のフェード (`flush_audio_fade`) は、まだ送っていないチャンクを次の Group で送るもので、既に送った Object の送り直しではない。フェードの chunk も、同じ音声 track の組み立ての状態で組む。具体的には、mfhd の sequence_number を続きから使い、逆行防止に直前の tfdt を使う。組んだバイト列は PUBLISH と `media_cache` で同じものを使う。別の組み立て状態で組むと、終了時に sequence_number や tfdt が戻り得る。
   - 経路ごとに組み立てると sequence_number が食い違い、同じ Location の Object の payload が変わる。MoQT-23 §7.1 は「An endpoint that receives a duplicate Object with a different Delivery Mode, Subgroup ID, Priority or Payload MUST treat the track as Malformed.」と定める。
 
 ### カタログの確定
@@ -171,6 +195,7 @@ init segment を作るには sample entry が要る。H.264 / H.265 / AV1 / VP9 
   1. init segment を作り、`CatalogContext` に入れる。
   2. その時点の `cat_tokens` で `CatalogContext::json` を組み立てる。
   3. 現状の `prepare_catalog` と同じく、`group_id::allocate_initial_group_id` で Group ID を払い出す。`json` と `group_id` を `Some` にする。ここでカタログは確定する。
+     - 手順 1〜3 のいずれかが失敗した場合 (init segment の生成、`CatalogContext::json`、Group ID の払い出し) は、英語のエラーで終了する。カタログを組めないまま続けても、購読者は起動できないためである。Skip を終了扱いにしない次の判断とは別で、こちらは組み立ての失敗である。
   4. `catalog_sink` → `republish_catalog_at_group` の経路で、その Group にカタログを送る。この経路を使うのは、確定前に catalog の PUBLISH が request 単位で移行していても、現在の送り先に送るためである。
      - 送出の結果は、`Result` ではなく次の 3 つを持つ結果型 (例: `CatalogPublishResult`) で返す。`Result` にすると、`Err` のときに filter の結果を呼び出し元へ渡せないためである。
        - PUBLISH 購読の filter の結果 (filter の判定まで進まなかった場合は「なし」)
@@ -179,12 +204,15 @@ init segment を作るには sample entry が要る。H.264 / H.265 / AV1 / VP9 
      - 「届いた」を filter の結果で判定するために、filter の結果を送出エラーと分けて取り出せるようにする。
        - 現状の `SubgroupWriter::write_object` (`crates/moq-pub/src/stream_writer.rs`) は、filter を通った後の SUBGROUP_HEADER や payload の送信が失敗すると、`Err` だけを返して Pass を捨てる。
        - そこで、filter の結果と送出の結果を両方返すメソッドを `SubgroupWriter` に追加する。既存の `write_object` はそのメソッドを使って現状と同じ戻り値を返し、media 経路などの他の呼び出し元の挙動は変えない。
-       - `catalog::publish_catalog_object` は追加したメソッドを使い、`finish` の失敗も含めて、filter の結果と送出エラーを分けて返す。
+       - `catalog::publish_catalog_object` は追加したメソッドを使い、`finish` の失敗も含めて、filter の結果と送出エラーを分けて返す。loc の初回送出の `catalog::send_catalog` もこの関数を使うので、戻り値の変更に追従させる (Skip をエラーにする挙動は変えない)。
      - `republish_catalog_at_group` と `republish_catalog_at_next_group` は、上の結果型を返すように変える。
        - PUBLISH 側の送出エラーがあれば、現状どおり受信 SUBSCRIBE の購読者への送出を行わずに返す (`.await?` と同じ順序)。
        - 受信 SUBSCRIBE 側の送出エラーは、現状どおりログにして続ける。
        - 関数の中では location を更新しない (`republish_catalog_at_next_group` の引数 `catalog_location: &mut Location` をやめる)。
-       - 呼び出し元 (送り直しの 5 経路と確定の関数) は、まず結果型を下の型の「`location` の更新」に渡し、その後で PUBLISH 側の送出エラーを分類する。
+       - 呼び出し元 (送り直しの 5 経路と確定の関数) は、まず結果型を下の型の「`location` の更新」に渡し、その後で PUBLISH 側の送出エラーを扱う。
+       - エラーの扱いは経路ごとに現状のまま変えない。変えるのは、location の更新との順序だけである。
+         - 3 分類 (`is_transport_session_end` / `is_peer_stream_reset` / それ以外) で扱うのは、`handle_catalog_republish` と確定の関数だけである。
+         - 他の 4 経路 (`apply_republished_request` / `handle_publisher_request_event` / `republish_catalog_on_migrated_session` / `handle_migrated_catalog`) は、`location` を更新した後、現状どおり英語の warn ログを出して続ける。
      - location の更新規則は packaging で分ける。
        - cmaf: PUBLISH 購読の filter の結果が Pass か、受信 SUBSCRIBE の購読者のどれかに届いた場合に更新する。送出エラーの有無は問わない。session 層が Largest を記録する条件と揃えるためである。
        - loc: PUBLISH 購読の filter の結果が Pass で、かつ PUBLISH 側の送出エラーがない場合だけ更新する。現状の `if published == ObjectFilterOutcome::Pass` (`.await?` の後) と同じであり、loc の挙動はこの issue では変えない。
@@ -206,15 +234,17 @@ init segment を作るには sample entry が要る。H.264 / H.265 / AV1 / VP9 
   - `cat_tokens_changed` のときの作り直しも、確定前は飛ばす。確定時の手順 2 が、その時点の `cat_tokens` で組み立てる。`replace_with_migrated_session` は確定前も `config.url` を更新する。
   - session 単位の移行では、移行先の session も未確定の状態のまま続け、確定した時点でカタログを送る。
 - カタログの状態の判断は、I/O を持たない型に切り出す。既存の `gop::GopTracker` と同じく、その型の単体テストで状態遷移を固定する。疑似キャプチャの入力とイベントの到着順は `run_publisher_loop` の `select!` で決まらず、モックも使えない (AGENTS.md) ためである。型が持つ判断は次の 4 つに限る。
-  - 確定の契機: 有効な track ごとに最初の sample を記録し、全部揃ったかを返す
+  - 確定の契機: 有効な track ごとに最初の sample を記録し、未確定 (`json` がない) のときだけ、全部揃ったかを返す
   - カタログを送ってよいか・作り直してよいか: `json` があるか。送り直しの 5 経路と、`cat_tokens_changed` のときの作り直しが参照する
   - `location` の更新: 送出の結果型を受けて、packaging ごとの規則で更新する (cmaf は「PUBLISH の filter が Pass か、受信 SUBSCRIBE のどれかに届いた」、loc は「PUBLISH の filter が Pass で送出エラーなし」)
   - FETCH と fill fetch に応答できるか: `location` があるか
 - PUBLISH の張り直し・PUBLISH_DONE・送り先の更新・catalog の SUBSCRIBE の受理という I/O は、既存の経路を変えずに使う。
-  - 送り直しの 5 経路は、カタログを送る直前に型の「送ってよいか」を参照し、送った結果型を型の「`location` の更新」に渡してから、PUBLISH 側の送出エラーを分類する。
+  - 送り直しの 5 経路は、カタログを送る直前に型の「送ってよいか」を参照し、送った結果型を型の「`location` の更新」に渡してから、PUBLISH 側の送出エラーを経路ごとの現状の扱い (上記) で処理する。
   - これらの I/O は型の判断を通らないので、型の単体テストの対象にしない。
 - 確定時の送出では、その時点でループが持つ `handle` / `catalog_request_id` / `catalog_publish_target` を参照する。確定前にこれらを別の変数へ写して持ち越さない。こうすると、確定前に `replace_with_migrated_session` や request 単位の移行で差し替えられた値で送られる。
-- 確定後は、init segment を `initDataList` の `inline` entry に Base64 で入れ、track の `initRef` から参照する。catalog の track には `packaging: "cmaf"` と `initRef` を載せる。`CatalogContext` が init segment を持つので、`cat_tokens_changed` で作り直すカタログにも initDataList と initRef が載る。
+- 確定後は、init segment を `initDataList` の `inline` entry に Base64 で入れ、track の `initRef` から参照する。
+  - moq-pub は Base64 の crate に依存していないので、`base64ct` を加える (shiguredo-rust の選定に従う)。
+  - catalog の track には `packaging: "cmaf"` と `initRef` を載せる。`CatalogContext` が init segment を持つので、`cat_tokens_changed` で作り直すカタログにも initDataList と initRef が載る。
 
 ### 範囲外
 
@@ -232,7 +262,7 @@ init segment を作るには sample entry が要る。H.264 / H.265 / AV1 / VP9 
 - 1 sample ごとの Object (moof + mdat) を Subgroup 0 で送ること。音声も subgroup で送り、Object に LOC property を付けないこと。
 - tfdt と timescale が、LOC 経路で送る Timestamp / Timescale と一致すること。live capture では、tfdt が capture の Unix epoch マイクロ秒になること。例外は、Timestamp が直前の chunk の tfdt 以下になる場合だけである。その場合 tfdt は「直前の tfdt + 1」になり、track ごとに逆行しないこと。直前の tfdt より大きい Timestamp (間隔が名目の duration より短い場合を含む) は、そのまま使われること。
 - trun の duration / size / flags が sample ごとに、data_offset が trun ごとに書かれていること。`Fmp4SegmentDemuxer` で demux した sample の時刻・サイズ・keyframe 判定が、送信側と一致すること。
-- 同じ Location の media の Object のバイト列が、すべての経路で一致すること。経路は、PUBLISH、受信 SUBSCRIBE の購読者、FETCH (`media_cache`)、音声の終了時のフェードである。
+- 同じ Location の media の Object のバイト列が、すべての経路で一致すること。経路は、PUBLISH、受信 SUBSCRIBE の購読者、FETCH (`media_cache`) である。音声の終了時のフェードの chunk が、同じ track の sequence_number と tfdt の続きで組まれ、PUBLISH と `media_cache` で同じバイト列になること。
 - 確定前も media の Object を送り、media track への要求を処理すること。
 - 切り出した型の単体テストで、次の判断を固定すること。
   - 確定の契機: 有効な track の最初の sample が揃った時点で揃ったと返すこと (`--no-audio` と `--input-mp4` では音声を待たないこと)
@@ -240,9 +270,12 @@ init segment を作るには sample entry が要る。H.264 / H.265 / AV1 / VP9 
   - `location` の更新: cmaf では、PUBLISH の filter が Pass か受信 SUBSCRIBE のどれかに届いたら、送出エラーがあっても `Some` になること。どの購読にも届かなければ `None` のままであること。loc では、PUBLISH の filter が Pass で送出エラーがないときだけ更新されること (従来どおり)
   - FETCH と fill fetch: `location` が `None` の間は応答できない (INVALID_RANGE / `reject_fill_fetch`) と返すこと
 - 確定を実行する関数について、次のとおりになること。
-  - 送出エラーを `handle_catalog_republish` と同じ 3 分類で扱うこと
+  - 送出エラーを `handle_catalog_republish` と同じ 3 分類で扱うこと。3 分類は `handle_catalog_republish` と共有する I/O を持たない分類関数に切り出し、その単体テストで固定する
   - media の結果処理に送出エラーを渡さないこと
   - 送出時に、その時点でループが持つ `handle` / `catalog_request_id` / `catalog_publish_target` を参照すること (確定前に写した値を使わないこと)
+  - 上の 2 つは関数の構造で満たす要件である。モックを使えず、到着順も制御できないので、テストでは観測できない。コードレビューで確認する
+- 手順 1〜3 が失敗したら英語のエラーで終了すること
+- 配信中の sample entry の変化を検出する関数を、単体テストで固定すること (同じ設定の keyframe では変化なし、SPS や解像度が変わった keyframe では変化あり)
 - 確定後の結果 (カタログの内容と FETCH への応答) を `peer_integration_tests` で確認すること。
 - `--stream-mapping` を明示して `--packaging cmaf` と併用すると、エラーになること。
 - sample entry について、次のとおりになること。
