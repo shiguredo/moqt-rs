@@ -43,9 +43,15 @@ moq-sub は、壁時計の Timestamp を持つフレームだけを時間軸に�
 ### 着手前の確認
 
 - 規格本文が `refs/` にないため、実装に着手する前に次の 2 つを本文で確認する。
-  - ISO/IEC 14496-12 (`shiguredo_mp4` のコメントが参照する 2022 年版) §8.16.5: prft の構造。具体的には、version ごとの media_time の幅、reference_track_ID、ntp_timestamp、flags の値と意味である。
+  - ISO/IEC 14496-12 (`shiguredo_mp4` のコメントが参照する 2022 年版) §8.16.5: prft の構造。具体的には、version ごとの media_time の幅、media_time の単位 (reference track の mdhd の timescale であること)、reference_track_ID、ntp_timestamp の形式、flags の値と意味である。
   - ISO/IEC 23000-19 (CMAF): CMAF Chunk の moof の前に prft を置けること。CMSF §3.3 は Object を CMAF Chunk と同一視しているので (「This is equivalent to requiring that each Object hold at least one CMAF Chunk」)、CMSF の本文だけでは決まらない。
-- どちらかを確認できない場合は着手しない。shiguredo-issues の規約に従い、理由を追記して pending にする。その場合の 0474 の開始条件 (0467〜0473 が揃ったら) の見直しは、0474 の側で行う。
+- どちらかを確認できない場合は着手しない。shiguredo-issues の規約に従い、理由を追記して pending にする。0474 は開始条件に 0473 を含めていないので、0473 が pending になっても 0474 は進められる。
+- 本文で確認できても、この issue の設計の前提と合わない場合は、着手せずに、確認した内容を issue に追記して設計を見直す (見直した issue を `/polish-issue` にかけてから着手する)。前提は次のとおりである。
+  - CMAF Chunk ごとに、moof の前に prft を置けること
+  - ntp_timestamp が capture の時刻であることを表す flags の値があること
+  - media_time を 64 bit で書ける版があること
+  - media_time の単位が reference track の mdhd の timescale であること
+  - ntp_timestamp が 32 bit の秒と 32 bit の小数部の NTP 形式であること
 - 確認した構造は、moq-codec のテストの固定バイト列の根拠として、版と節番号とともにテストのコメントに書く。
 
 ### 時刻の変換
@@ -59,7 +65,7 @@ moq-sub は、壁時計の Timestamp を持つフレームだけを時間軸に�
   - 秒未満のマイクロ秒 = (小数部 × 1,000,000 + 2^31) >> 32 (四捨五入)。
     - 組み立てを切り捨て、解析を四捨五入にすると、秒未満のすべての値 (0〜999,999 µs) で往復が一致する。両方を切り捨てにすると一致しない (例: 1 µs → 4,294 → 0)。
     - 四捨五入の結果は 1,000,000 になり得るので、桁を連結せずに秒のマイクロ秒へ加算する。
-- prft の対応による sample の時刻の換算 (moq-sub):
+- prft の対応による sample の時刻の換算 (moq-sub が使う。置き場所は「コードの置き場所」のとおり moq-codec):
   - wall_us = ntp_us + (pts − media_time) × 1,000,000 / timescale
   - pts と media_time は track の mdhd の timescale (0472 が init segment から保持する値) の単位である。差は符号付きで求め、中間計算は 128 bit で行い、i64 で飽和させる。0472 の DTS の換算と同じ幅である。
   - 除算は床関数 (負の無限大方向への丸め、`div_euclid`) とする。0 方向への切り捨てにすると、差の正負で丸めの向きが変わる (例: 48 kHz の −1 tick は −20.83 µs で、床関数なら −21、0 方向なら −20)。
@@ -94,12 +100,17 @@ moq-sub は、壁時計の Timestamp を持つフレームだけを時間軸に�
     - reference_track_ID が、init segment の media trak の track_ID と一致しない。CMSF §3.3 は「MUST contain a single track」としているので、他の track を指す prft は意味を持たない
 - 対応の引き継ぎ:
   - track ごとに、読んだ prft のうち media_time が最も大きいものの対応 (media_time と壁時計) を保持する。prft のある組はその組の prft で、prft のない組は保持している対応で換算し、`TimestampKind::WallClock` にする。対応をまだ持たない track の組だけを、0472 のとおり `TimestampKind::MediaTime` にする。
-  - 状態を更新するのは、対応をまだ持っていないときと、読んだ prft の media_time が保持している対応の media_time より大きいときだけである。購読境界より前の Group の replay、FETCH の応答、重複した Object のように後から届く古い Object の prft で、保持している対応が古いものに戻らないようにするためである。対応が chunk ごとに変わる publisher (時計の drift の補正など) でも、保持している対応は新しい方向にしか動かない。
+  - 状態を更新するのは、対応をまだ持っていないときと、読んだ prft の media_time が保持している対応の media_time より大きいときだけである。FETCH の応答や重複した Object のように後から届く古い Object の prft で、保持している対応が古いものに戻らないようにするためである。対応が chunk ごとに変わる publisher (時計の drift の補正など) でも、保持している対応は新しい方向にしか動かない。
   - 状態の更新と換算は、cmaf の入口の前段 (0472 の対応外の状態を確かめる呼び出し側) で行う。
     - 分割と検証の関数が sample の列を返した Object だけを対象にする。「Object を破棄する」「track を対応外にする」の結果になった Object の prft は使わない。
     - 対象の Object では、組の順に処理する。prft のある組はその prft で換算し、上の規則に当たれば状態を更新する。prft のない組は、その時点の状態で換算する。1 つの Object の中で「prft のない組 → prft のある組」と並ぶ場合も、組の順に処理する。
     - 換算した時刻と `TimestampKind` は sample ごとに持たせ、後段 (重複・購読境界・復号順の判定、復号、送出、録画) にはそれを渡す。同じ Object の中でも、組ごとに WallClock と MediaTime が分かれ得るためである。
-    - 重複や購読境界で後段が落とす Object の prft も、この規則で状態の更新に使ってよい。重複した Object は payload が同じ (MoQT-23 §7.1) なので、同じ prft をすでに読んでいる。購読境界より前の Object は Location が前なので、track ごとに逆行しない tfdt と同じく media_time も小さく、状態を更新しない。
+    - 重複や購読境界で後段が落とす Object の prft も、この規則で状態の更新に使ってよい。重複した Object は payload が同じ (MoQT-23 §7.1) なので、同じ prft をすでに読んでいる。購読境界より前の Object は Location が前なので、track ごとに逆行しない tfdt と同じく media_time も小さい。そのため、より新しい対応を保持した後では状態を更新しない。
+    - 対応をまだ持たない track では、最初に読んだ prft で状態が作られ、その時点で MediaTime から WallClock に切り替わる。最初の prft になるのは、到着順によって次のどれかである。
+      - relay が購読の開始時に replay する Group の先頭。closed 0280 の実測に使った relay は、Location Filter のない購読に対して cache の最新 Group の先頭から replay した。ただし、この挙動は MoQT が保証するものではない
+      - 映像の `fetch_recent_video_groups` の FETCH の応答。`plan_fetch_range` は直近の Group を Object 0 から要求する。音声は明示の FETCH を発行しない
+      - live で届く次の Group の先頭
+    - どの到着順でも、状態は後から読む media_time の大きい prft でだけ置き換わり、media_time の小さい prft では更新しない。そのため切り替えは 1 回だけである。Group の先頭にだけ prft を置く publisher では、最初の prft より前に届いた prft のない Object だけが MediaTime になる。
   - 引き継ぐ理由: Object や組ごとに判定すると、Group の先頭にだけ prft を置く publisher で、同じ track の中に WallClock と MediaTime が混ざる。
     - 映像では、時間軸に載るフレームと届いた順に出るフレームが混ざる。closed 0332 が直したのと同じ状態である。
     - 音声では、`AudioDeliveryOrder::admit` が種類を見ずに PTS で並べる。そのため、epoch µs の音の後に来たメディア時刻の音がすべて Stale になる。
@@ -118,8 +129,9 @@ moq-sub は、壁時計の Timestamp を持つフレームだけを時間軸に�
 
 ### コードの置き場所
 
-- prft の組み立てと解析、NTP 形式との変換は `crates/moq-codec` に置く。
-  - moq-pub と moq-sub は互いに依存していないので、組み立てと解析を 1 つの単体テストで往復させるには、両方が依存する crate に置く必要がある。両方が依存するワークスペース内の crate のうち、メディアの形式を扱う補助を置くのは moq-codec である。ワークスペース内のほかの共通の依存は、tokio-moq がトランスポート層、happy-eyeballs が接続候補のスケジューラ、shiguredo_moqt が MOQT 本体で、box の補助を置く責務に合わない。
+- prft の組み立てと解析、NTP 形式との変換、prft の対応による sample の時刻の換算は `crates/moq-codec` に置く。換算は、解析した prft の対応の型のメソッドにする。
+  - moq-pub と moq-sub は互いに依存していないので、組み立てと解析を同じ固定のバイト列で確かめ、NTP 形式の変換の往復を全数で確かめるには、両方が依存する crate に置く必要がある。
+  - 換算は moq-sub だけが使うが、prft の media_time と ntp_timestamp の意味 (単位と起点) に依存する。prft の意味を扱うコードを 1 か所にまとめるため、解析と同じ crate に置く。両方が依存するワークスペース内の crate のうち、メディアの形式を扱う補助を置くのは moq-codec である。ワークスペース内のほかの共通の依存は、tokio-moq がトランスポート層、happy-eyeballs が接続候補のスケジューラ、shiguredo_moqt が MOQT 本体で、box の補助を置く責務に合わない。
   - moq-codec の crate doc (「moq-pub / moq-sub の example が共有する codec デコーダ」) に、共有する box の補助も置くことを追記する。
 - `shiguredo_mp4` への型の追加は範囲外とする。上流の mp4-rs の 0071 が待っている「要求」には当たるが、別リポジトリの作業である。
 
@@ -141,8 +153,7 @@ moq-sub は、壁時計の Timestamp を持つフレームだけを時間軸に�
 ## 完了条件
 
 - moq-codec の単体テスト:
-  - 着手前に確認した §8.16.5 の構造から手で書いた固定のバイト列と、組み立ての結果および解析の結果が一致すること。テストのコメントに版と節番号を書く。
-  - 組み立てと解析が往復すること。
+  - 着手前に確認した §8.16.5 の構造から手で書いた固定のバイト列と、組み立ての結果および解析の結果が一致すること。テストのコメントに版と節番号を書く。組み立てと解析の両方向をこの固定のバイト列で確かめるので、別の往復テストは置かない。
   - マイクロ秒と NTP 形式の変換が、秒未満のすべての値 (0〜999,999 µs) で往復一致すること。2036-02-07T06:28:16Z の前後の時刻を、正しい起点で読むこと。
   - prft の対応による換算が、差が負の場合 (床関数で丸めること) と飽和する場合を含めて、上の式のとおりになること。
 - moq-pub:
@@ -152,7 +163,9 @@ moq-sub は、壁時計の Timestamp を持つフレームだけを時間軸に�
 - moq-sub:
   - 分割と検証の関数が、組ごとに解析した prft の対応を返すこと。不正な prft (長さ、version、reference_track_ID の不一致) は「不正」として返すこと。
   - 対応の状態の型に組の順で適用すると、prft のある組はその prft で、prft のない組は保持している対応で換算され、WallClock になること。対応を持つ前の組は MediaTime になること。1 つの Object に「prft のない組 → prft のある組」が並ぶ場合も、組の順に換算されること。保持している対応より media_time が小さい prft では、その組の換算には使うが、状態を更新しないこと。
-  - prft のある cmaf の Object が `TimestampKind::WallClock` の時刻で配送されること。prft を一度も読んでいない track の Object は `TimestampKind::MediaTime` のままであること。
+  - prft のある cmaf の Object が `TimestampKind::WallClock` の時刻で配送されること。prft を一度も読んでいない track の Object は `TimestampKind::MediaTime` のままであること。分割と検証の関数、対応の状態の型、cmaf の入口を順に通すテストで確かめる。入力は、0472 の cmaf の入口のテストと同じく `shiguredo_mp4::boxes` で組み立てた実際のバイト列に、moq-codec で組み立てた prft を前に置いたものとする。
+  - 0472 の 5 つの呼び出し元 (`decode_video_stream` / `read_video_fetch_stream` / `decode_audio_stream` / `deliver_datagram` / `run_side_session`) がすべて、cmaf の入口の前段で状態の更新と換算を行うこと。対応の状態が、音声は 4 か所、映像は `DatagramTaskContext` を除く 3 か所に、同じインスタンスとして配られていること。
+    - 0472 と同じく配線の要件で、テストで経路ごとに観測しにくいので、コードレビューで確認する。0471 の対応は恒等で時刻の値が変わらないため、`read_video_fetch_stream` で前段を漏らしても E2E では気づけない。
   - prft のある cmaf の音で、入力遅れが catch-up に渡ること。既存の `audio_delivery_passes_the_input_lag_to_the_catch_up` と同じ形で、0472 の cmaf の入口を使って確かめる。
   - `receive_input_lag_us` の既存テストの各ケースが、`receive_input_lag_us(loc_wall_clock_us(timestamp, timescale, pts), arrival)` の合成で、期待値を変えずに通ること。
   - テストではモックを使わない。
