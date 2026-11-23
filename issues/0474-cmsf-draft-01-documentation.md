@@ -3,7 +3,7 @@
 - Created: 2026-11-23
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-cmsf-draft-01
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-11-23
 
 ## 目的
 
@@ -13,7 +13,7 @@ CMSF 対応 (0467〜0472) が揃ったら、利用者向けの入口になる文
 
 次の文書は、それぞれの機能の issue が自分の分を更新するので、本 issue の対象外である。
 
-- `docs/msf.md` の CMSF の節 (0467 が新設し、0469〜0473 が追記する。0468 は Catalog の節を直す)
+- `docs/msf.md` の CMSF の節 (0467 が新設し、0469〜0473 が追記する。0468 は Catalog の節を直す)。ただし、CMSF の節の外にある冒頭の対応仕様の文は本 issue で直す
 - `crates/moq-pub/README.md` (0471)
 - `crates/moq-sub/README.md` (0472)
 - `crates/moq-codec` の crate doc (0473)
@@ -35,12 +35,22 @@ CMSF 対応 (0467〜0472) が揃ったら、利用者向けの入口になる文
   - `crates/README.md`: 「draft-ietf-moq-transport-23、draft-ietf-moq-loc-05、draft-ietf-moq-msf-02、draft-ietf-moq-c4m-02 に準拠しています。」
   - crate doc: `crates/moq-pub/src/lib.rs`、`crates/moq-pub/src/main.rs`、`crates/moq-sub/src/lib.rs`、`crates/moq-sub/src/main.rs` の「draft-ietf-moq-transport-23、draft-ietf-moq-loc-05、draft-ietf-moq-msf-02 に準拠。」
   - モジュール doc: `src/msf.rs` の「draft-ietf-moq-msf-02 に基づく。」と、`src/lib.rs` の `msf` モジュールの「MOQT Streaming Format のカタログとタイムラインのコーデック (draft-ietf-moq-msf-02)」
+  - `docs/msf.md` の冒頭: 「[draft-ietf-moq-msf-02](…) の実装状況です。」
   - `docs/missing-features.md`: 対象仕様の段落に CMSF がない。
-    - 第 3 節「ライブラリの API 露出と example での未使用」の表は、`src/` の公開 API のうち `crates/` から呼ばれていないものを収録している。
+    - 第 3 節「ライブラリの API 露出と example での未使用」の表は、「`src/` の公開 API のうち `crates/` から呼ばれていないもの、および draft の MAY に対応していないもの」を収録している。
     - その表の `initDataList` / `initRef` / `buffers` の行 (`MsfInitData` / `MsfBuffers`) は、「moq-sub は in-band の Video Config / Audio Config 前提で、initData 経由の構成情報を扱わない」と書いている。
     - 0471 は cmaf の track の init segment を initDataList の inline entry に入れて initRef から参照し、0472 はそれを読む。そのため、完了後は cmaf の track で `MsfInitData` (`MsfInitDataKind::Inline`) と initRef が両方の crate から使われる。
     - 一方、loc の track の initRef と、`MsfInitDataKind::TrackProperty` / `ObjectProperty` の entry は、完了後も crates から使われない。0472 は LOC 経路を変えないので、loc の track では「in-band の Video Config / Audio Config 前提」のままである。
     - `buffers` / `MsfBuffers` は、次の `buffers` / `maxGopDuration` / `maxGroupDuration` の行も扱っている。
+    - 0471 / 0472 の完了で、ほかにも次の記述が事実と食い違う。
+      - 5.12: 「`crates/moq-pub/src/catalog.rs` が設定するのは name / namespace / … / authInfo である。」0471 で、cmaf の track に initRef が、root に initDataList が加わる
+      - 6.5: 「トラックを選ぶ条件は codec の一致だけで、`packaging` (§5.2.4) と `isLive` (§5.2.7) を判定していない。」現状でも `is_loc_packaging` で loc 以外を除外しているので食い違っており、0472 で cmaf の track も選ぶようになる
+      - 6.13: 「録画は MP4 のみで音声は Opus に限る (AAC は警告して音声を録画しない)。」0472 で、cmaf の track では AAC / VP8 / VP9 も録画する
+    - 0467〜0470 で増える CMSF の公開 API のうち、次は完了後も `crates/` から呼ばれない。
+      - `MsfTrack` / `MsfCloneTrack` の `max_grp_sap_starting_type` / `max_obj_sap_starting_type`。0471〜0473 は設定も参照もしない
+      - SAP Type timeline の型と相互変換。0469 は moq-pub / moq-sub での発行と購読を範囲外にしている
+      - `MsfCatalog::content_protections` と `Cmsf*` の Content Protection の型。0471 は Content Protection の発行を範囲外にしており、0472 は track の `contentProtectionRefIDs` で除外するだけで root を読まない
+    - 文書全体に MSF-01 の節番号が残っている (例: 隣の `buffers` / `maxGopDuration` / `maxGroupDuration` の行の「MSF §5.2.9 / §5.2.24 / §5.2.25」。MSF-02 では §5.2.10 / §5.2.25 / §5.2.26)。0441 の取り残しで、CMSF とは別の目的なので本 issue では扱わない
 - `refs/moq/draft-ietf-moq-cmsf-01.txt` の表題は「CMSF- a CMAF compliant implementation of MOQT Streaming Format」である。
 
 ## 設計方針
@@ -60,7 +70,8 @@ CMSF 対応 (0467〜0472) が揃ったら、利用者向けの入口になる文
   - 準拠仕様の節: 「draft-ietf-moq-cmsf-01 - CMAF compliant implementation of MOQT Streaming Format」と URL を加える。
 - 準拠仕様の節の MSF の行を、draft-ietf-moq-msf-02 と、その URL に直す。0437 の取り残しで、CMSF を追記する行のすぐ隣にあるためである。
 - API の記載は、機械的な基準で決める。
-  - 0467〜0470 で `msf` モジュール (`src/msf.rs` と `src/msf/` 配下) に追加・変更された pub 項目をすべて記載する。pub 項目には、型、enum の variant、定数、関数、メソッド、フィールドを含む。実装した差分 (`src/msf.rs` と `src/msf/` の pub 項目の増減) から拾い、issue の記述からは拾わない。関数名や `scheme` の型、新しい型の置き場所のように、issue の時点では決まっていないものがあるためである。
+  - 0467〜0470 で `src/` に追加・削除・変更された pub 項目をすべて記載する。pub 項目には、型、enum の variant、定数、関数、メソッド、フィールドを含み、変更にはシグネチャとフィールドの型の変更を含む。実装した `src/` の差分から拾い、issue の記述からは拾わない。関数名や `scheme` の型、新しい型の置き場所のように、issue の時点では決まっていないものがあるためである。
+  - CMSF の型が `msf` モジュールの外 (新しいモジュールなど) に置かれた場合は、モジュール構成の表に行を加え、`src/lib.rs` のそのモジュールの doc にも `draft-ietf-moq-cmsf-01` を書く。
   - 既存の記載の粒度に合わせて、次のように書く。
     - 型と定数は、型の一覧の行に加える。
     - `MsfTrack` に追加したフィールドは、フィールド一覧に加える。
@@ -82,11 +93,17 @@ CMSF 対応 (0467〜0472) が揃ったら、利用者向けの入口になる文
 - `crates/README.md`、crate doc (`crates/moq-pub/src/lib.rs`、`crates/moq-pub/src/main.rs`、`crates/moq-sub/src/lib.rs`、`crates/moq-sub/src/main.rs`)、モジュール doc (`src/msf.rs`、`src/lib.rs` の `msf` モジュール) の準拠の文に、`draft-ietf-moq-cmsf-01` を加える。
 - `docs/missing-features.md`:
   - 対象仕様の段落に、CMSF `draft-ietf-moq-cmsf-01` を加える。
-  - `initDataList` / `initRef` / `buffers` の行は削除せず、完了後も使われない範囲に絞って書き直す。表は `MsfCatalogDocument::Delta` のように variant 単位の未使用も収録しているためである。
+  - `initDataList` / `initRef` / `buffers` の行は削除せず、完了後も使われない範囲に絞って書き直す。`MsfInitDataKind::TrackProperty` / `ObjectProperty` は、完了後も `crates/` から呼ばれない公開 API で、表の収録基準に当たり続けるためである (0467 は cmaf の initRef の参照先を inline に限り、0471 / 0472 も inline だけを使う)。
     - 機能: loc の track の `initRef` と、`track-property` / `object-property` 型の initDataList entry
     - API: `MsfInitDataKind::TrackProperty` / `ObjectProperty`
+    - 仕様: MSF §5.1.7 / §5.2.14。現在の `MSF §5.1.7 / §5.2.9 / §5.2.13` のうち、MSF-02 の §5.2.9 は Target latency、§5.2.13 は Alternate group で、initRef は §5.2.14 (Initialization reference) である。buffers を外すので、Buffers (§5.2.10) も載せない
     - 影響: moq-pub は loc の track に initRef を載せず、moq-sub も読まない。cmaf の track では inline entry の init segment を使う
     - `buffers` / `MsfBuffers` は次の行が扱うので、この行からは外す。
+  - 0471 / 0472 の完了で事実と食い違う記述 (現状に挙げた 5.12 / 6.5 / 6.13) を、完了後の挙動に合わせて直す。
+  - 第 3 節の表に、完了後も `crates/` から呼ばれない CMSF の公開 API (現状に挙げた SAP starting type のフィールド、SAP Type timeline、Content Protection) の行を加える。第 3 節の収録基準 (`crates/` から呼ばれていない公開 API) に当たるためである。仕様の列は CMSF-01 の節番号 (§3.5.2 / §3.6 / §4) で書く。
+  - 0473 (prft による壁時計の同期) の有無に関わる cmaf の時刻の制約は、第 6 節に書かない (実装判断)。記述が 0473 の完了の有無で変わり、0473 が後から完了したときに誰が消すかの引き継ぎが要るので、0474 の中で閉じないためである。
+  - 本 issue で書き直す箇所 (表の initDataList の行、新しく加える行、5.12 / 6.5 / 6.13 の節) の中にある節番号は、書き加える部分だけでなくすべて MSF-02 / CMSF-01 の番号にする。書き加えた部分と同じ段落の古い番号がぶつからないようにするためである (例: 5.12 に initRef を §5.2.14 で書くと、同じ段落の「`depends` (§5.2.14)」とぶつかる。MSF-02 では depends は §5.2.15)。それ以外の箇所に残る MSF-01 の節番号は直さない (現状に挙げたとおり別の目的である)。
+- `docs/msf.md` の冒頭の対応仕様の文に、`draft-ietf-moq-cmsf-01` (CMSF の節) を加える。
 
 ## 完了条件
 
@@ -94,8 +111,14 @@ CMSF 対応 (0467〜0472) が揃ったら、利用者向けの入口になる文
 - `skills/shiguredo-moqt/SKILL.md`:
   - description、特徴の対応仕様、モジュール構成の表の `msf` 行、準拠仕様の節に、CMSF draft-01 があること。
   - 準拠仕様の節の MSF の行が、draft-ietf-moq-msf-02 とその URL になっていること。
-  - 0467〜0470 で `msf` モジュール (`src/msf.rs` と `src/msf/` 配下) に追加・変更された pub 項目が、すべて記載されていること。`MsfCloneTrack` のフィールド、0469 の相互変換、`MsfTrack::stream_mapping` を含む。確かめ方は、`src/msf.rs` と `src/msf/` の差分の pub 項目と、SKILL.md の記載を突き合わせることである。
+  - 0467〜0470 で `src/` に追加・削除・変更された pub 項目 (シグネチャとフィールドの型の変更を含む) が、すべて記載されていること。`MsfCloneTrack` のフィールド、0469 の相互変換、`MsfTrack::stream_mapping` を含む。確かめ方は、`src/` の差分の pub 項目と、SKILL.md の記載を突き合わせることである。
   - CLI の記載を加えていないこと。
-- `crates/README.md`、crate doc、モジュール doc の準拠の文に、`draft-ietf-moq-cmsf-01` があること。
-- `docs/missing-features.md` の対象仕様に CMSF があり、`initDataList` / `initRef` / `buffers` の行が、loc の track の initRef と `track-property` / `object-property` 型の entry に絞られ、cmaf の track で inline entry を使うことと食い違っていないこと。
+- `crates/README.md`、crate doc、モジュール doc の準拠の文に、`draft-ietf-moq-cmsf-01` があること。CMSF の型を `msf` モジュールの外に置いた場合は、SKILL.md のモジュール構成の表にそのモジュールの行があり、`src/lib.rs` のそのモジュールの doc に `draft-ietf-moq-cmsf-01` があること。
+- `docs/missing-features.md`:
+  - 対象仕様に CMSF があること。
+  - `initDataList` / `initRef` / `buffers` の行が、loc の track の initRef と `track-property` / `object-property` 型の entry に絞られ、仕様の列が MSF §5.1.7 / §5.2.14 になり、cmaf の track で inline entry を使うことと食い違っていないこと。
+  - 5.12 / 6.5 / 6.13 が、0471 / 0472 の完了後の挙動と食い違っていないこと。
+  - 第 3 節に、完了後も `crates/` から呼ばれない CMSF の公開 API の行があること。
+  - 本 issue で書き直した箇所の中の節番号が、すべて MSF-02 / CMSF-01 の番号であること。
+- `docs/msf.md` の冒頭の対応仕様の文に、`draft-ietf-moq-cmsf-01` があること。
 - `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
