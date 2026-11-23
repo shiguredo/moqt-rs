@@ -3,7 +3,7 @@
 - Created: 2026-11-23
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-cmsf-draft-01
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-11-23
 
 ## 目的
 
@@ -47,25 +47,31 @@ key 名の出典は次のとおりである。
   - `drm_system` (`drmSystem`、必須)
 - `CmsfDrmSystem` は次を持つ。
   - `system_id` (`systemID`、必須)
-  - `la_url` (`laURL`)
-  - `cert_url` (`certURL`)
+  - `la_url` (`laURL`、`Option<CmsfDrmUrl>`)
+  - `cert_url` (`certURL`、`Option<CmsfDrmUrl>`)
   - `pssh`
 
-  `laURL` / `certURL` は、`url` (必須) と `type` (任意) を持つ object とする。
+  `laURL` / `certURL` の object は `CmsfDrmUrl { url: String, kind: Option<String> }` とする。`url` は必須、JSON key `type` は任意である。`type` は Rust の予約語なので、既存の `MsfInitData` と同じくフィールド名を `kind` にする。
 - 値の検証は次のとおりにする。
   - UUID (`defaultKID` の各要素と `systemID`) は `8-4-4-4-12` の 16 進表記であることを検証する。大文字小文字は問わない (実装判断)。
   - `pssh` は Base64 として decode できることを検証する。
+  - CMSF §4.1.1.4.3 は certURL を「REQUIRED for DRM systems that require a server certificate (e.g., FairPlay Streaming)」と定める。`systemID` が FairPlay (`94ce86fb-07ff-4f43-adb8-93d2fa968ca2`、Table 4) で `certURL` がなければ `InvalidCatalog` にする。
+    - FairPlay かどうかの判定でも、UUID の検証と同じく大文字小文字を区別せずに比べる。大文字で書いた systemID でこの検査をすり抜けられないようにするためである。
+    - それ以外の DRM がサーバー証明書を要するかは、カタログからは判定できない。CMSF も対象を「e.g.」で示すだけで列挙していないので、検証しない。
 - `MsfTrack` に `content_protection_ref_ids: Option<Vec<String>>` (`contentProtectionRefIDs`) を追加する。
-  - CMSF §4.1.2 は「When this field is present, the track content is encrypted」としている。そのため、key がない状態と空配列を区別する。空配列は `InvalidCatalog` にする。空配列を受理すると、保護 track を非保護として選んでしまうためである。
+  - CMSF §4.1.2 は「When this field is present, the track content is encrypted」としている。そのため、key がない状態と空配列を区別する。
+  - cmaf の track の空配列は `InvalidCatalog` にする。空配列は「暗号化されているが、どの Content Protection entry も参照しない」状態になる。ライセンスを取得する手がかりがなく、`defaultKID` の空配列と同じく意味を持たないためである。
   - 各要素は root の `refID` に解決できなければならない。解決できない catalog は `InvalidCatalog` にする。
   - 解決の検証は、initRef と同じく、完全カタログの decode / encode と delta 適用後に行う。対象は `tracks` と `publishTracks` の両方である。
 - `contentProtectionRefIDs` は、cmaf 以外の track では解釈しない。0467 の SAP starting type と同じ規則 (共通の判定関数) を使う。
+  - 判定の順序: packaging による判定を先に行う。cmaf 以外の track では、型・空配列・解決のいずれも検証せずに捨てる (decode)。そのため、このフィールドは packaging を見ずに共通フィールドを読む `decode_common_track_fields` には入れず、packaging を判定した後に読む。
   - decode では捨てる。encode では拒否する。
   - clone / update の `MsfCloneTrack` には `content_protection_ref_ids: Option<Vec<String>>` を追加し、`None` を親からの継承とする。packaging が明示されていて cmaf 以外のときだけ、捨てる / 拒否する。
   - 継承の解決後に cmaf でなければ落とす。
-- clone / update でも空配列は `InvalidCatalog` にする。decode / encode の時点で拒否する。
-  - 空配列を「非保護への上書き」として受理すると、保護された親から非保護の track を作れてしまい、0472 の moq-sub がそれを選ぶためである。
-  - 保護の有無を変えたいときは、`contentProtectionRefIDs` を持たない track を add する。
+- clone / update の断片での空配列も、packaging が cmaf と明示されているか、省略されている場合は `InvalidCatalog` にする。decode / encode の時点で拒否する。
+  - packaging を省略した場合も拒否するのは、継承によって cmaf になり得るためである。
+  - 空配列は「保護を外す」上書きとしては受け付けない。保護の有無を変えたいときは、`contentProtectionRefIDs` を持たない track を add する。
+  - packaging が cmaf 以外と明示されている場合は、上の順序のとおり検証せずに捨てる。
 - CMSF §4.1.1 は「Content protection information MUST NOT be duplicated at the track level」と定めている。
   - cmaf の track object に `contentProtections` key があれば、`InvalidCatalog` にする。この key は本実装が理解する root field なので、MSF-02 §5 の MUST ignore とは衝突しない。
   - 対象は次のとおりである。
@@ -76,9 +82,14 @@ key 名の出典は次のとおりである。
   - packaging が cmaf 以外と明示された track object では、CMSF のフィールドを解釈しない規則に従い、未知フィールドとして無視する。
 - `decode_delta` の root field 拒否一覧に `contentProtections` を加える。
 - `Debug` では、`laURL` / `certURL` の `url` と `pssh` の値を伏せ、バイト長だけを表示する。URL は token を含み得るためで、既存の `connection_uri` / `track_base_key` と同じ扱いである。
-- 次の 2 つは検証しない。どちらも ISO BMFF の解析が要る。
-  - ClearKey (§4.3) の SHOULD (laURL、version 1 の PSSH)
-  - 保護 track の init data に sinf / schm / schi / tenc を含める MUST (§4.2)
+  - 伏せる処理は、値を持つ型自身の手書きの `Debug` に置く。既存の `MsfAuthInfo` と同じ流儀である。
+    - `CmsfDrmUrl` の `Debug` は `url` を伏せる。
+    - `CmsfDrmSystem` の `Debug` は `pssh` を伏せる。
+  - `CmsfDrmUrl` を単独で `Debug` 出力しても値が漏れないようにするため、`derive(Debug)` は使わない。
+- 次は検証しない。
+  - ClearKey (§4.3) の laURL: SHOULD である。サーバーが EME ClearKey を実装しているかどうかも、カタログからは判定できない。
+  - ClearKey (§4.3) の version 1 の PSSH: PSSH box の version を読むには ISO BMFF の解析が要る。
+  - 保護 track の init data に sinf / schm / schi / tenc を含める MUST (§4.2): ISO BMFF の解析が要る。
 - CENC による暗号化・復号と、DRM のライセンス取得は範囲外とする。
 - `docs/msf.md` の CMSF の節に、次を追記する。
   - Content Protection の扱い
@@ -96,14 +107,16 @@ key 名の出典は次のとおりである。
   - `scheme` が `cenc` / `cbcs` 以外
   - UUID の書式違反
   - `pssh` が Base64 でない
-  - `contentProtectionRefIDs` が空配列 (`tracks` / `publishTracks` / delta の add / clone / update)
+  - `systemID` が FairPlay で `certURL` がない (大文字の systemID を含む)
+  - `contentProtectionRefIDs` が空配列 (cmaf の `tracks` / `publishTracks` / delta の add、および packaging が cmaf または省略の clone / update)
   - `contentProtectionRefIDs` が解決できない
   - cmaf の track object の `contentProtections` (`tracks` / `publishTracks` / delta の add、および packaging が cmaf または省略の clone / update)
 - `contentProtections` を含む delta update が拒否されること。delta で追加した cmaf track の `contentProtectionRefIDs` が、既存カタログに対して解決されること。
 - packaging が cmaf 以外と明示された track object の `contentProtections` が無視されること。
-- cmaf 以外の track の `contentProtectionRefIDs` について、次のとおりになること。
-  - decode では捨てられ、encode では拒否されること
+- packaging が cmaf 以外の track の `contentProtectionRefIDs` について、次のとおりになること。clone / update では、packaging を cmaf 以外と明示した断片だけが対象である。packaging を省略した断片は値を保持し、空配列なら上記のとおり拒否する。
+  - decode では捨てられること。空配列、配列でない値、文字列でない要素も、検証せずに捨てられること
+  - encode では拒否されること
   - clone / update の継承規則が 0467 と同じであること
-- `Debug` 出力に、`laURL` / `certURL` の `url` と `pssh` の値が出ないこと。
+- `Debug` 出力に、`laURL` / `certURL` の `url` と `pssh` の値が出ないこと。`CmsfDrmUrl` を単独で `Debug` 出力した場合も同様であること。
 - 上記を `tests/test_msf` で固定し、`pbt/tests/prop_msf.rs` の生成器に `contentProtections` を加えること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
