@@ -127,6 +127,5 @@
 
 ## 未対応
 
-- §5.5 / §12.1 (MSF_COMPRESSION property signaling)：-01 では Track Property ID が TBD、Object Property のレジストリ登録も未定義のため wire 実装を行わない (Timeline の圧縮は gzip magic byte 検出による従来動作のまま)
 - §9 / §10 (Log / Metrics track)：payload codec (`msf::log` / `msf::metrics`) は実装済み。publishTracks への配置、role の MUST ペア検証、example への統合は未実装
-- §4.3 (Content protection)：catalog の signaling は扱うが、Secure Objects による暗号化と復号は未実装
+- §4.4 (Content protection and encryption)：catalog の signaling は扱うが、Secure Objects による暗号化と復号は未実装
