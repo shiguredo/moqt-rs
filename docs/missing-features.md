@@ -90,7 +90,7 @@ C4M draft-02 の `moqt` クレームの map 化と未知キーの fail-closed、
 | `PRIOR_GROUP_ID_GAP` | `ObjectProperties::prior_group_id_gap` | §10.8 / MSF §6.1 | moq-pub は前回の Group ID を永続化しないため gap を宣言できない (SHOULD の前提を満たさない) |
 | `END_OF_GROUP` | Subgroup Header / Object Datagram のフラグ | §11.2.1 / §11.3.1 | moq-pub は常に false を送る。音声は 1 Group = 1 Object のため、終端を早期に通知できない |
 | `publishTracks` | `MsfCatalog::publish_tracks` | MSF §5.1.5 / §5.6.17 | 逆方向 track (Log / Metrics) を告知できず、QoE メトリクスの返送経路が無い |
-| `initDataList` / `initRef` / `buffers` | `MsfInitData` / `MsfBuffers` | MSF §5.1.7 / §5.2.10 / §5.2.14 | moq-sub は in-band の Video Config / Audio Config 前提で、initData 経由の構成情報を扱わない |
+| `initDataList` の `inline` / `track-property` 型、`initRef` の読み取り | `MsfInitDataKind::Inline` / `TrackProperty`、`MsfTrack::init_ref` | MSF §5.1.7 / §5.2.14 / §12.2 | moq-pub は `object-property` 型の entry と initRef だけを載せる (5.14)。moq-sub は initRef を読まず、in-band の Video Config / Audio Config を使う |
 | `buffers` / `maxGopDuration` / `maxGroupDuration` | `MsfBuffers` / `MsfTrack` | MSF §5.2.10 / §5.2.25 / §5.2.26 | moq-pub は宣言するが moq-sub は読まない。バッファ下限 / 上限の指示が再生に反映されない |
 | `altGroup` | `MsfTrack::alt_group` | MSF §5.2.13 / §4.2 | 品質切替 (ABR) の告知も選択もできない |
 | Audio Level | `PROP_AUDIO_LEVEL` | LOC §2.3.3.2 | moq-pub が送らず moq-sub も読まない |
@@ -353,6 +353,19 @@ channelConfig / authInfo である。必須と条件付き必須は満たすが�
 
 MSF §5.1.5 の `publishTracks` を出さないため、subscriber 側から Log / Metrics を
 publish する経路が無い (§5.6.17、§10)。
+
+### 5.14 音声の Audio Config を各 Group の先頭に載せない (MSF §12.2)
+
+MSF §12.2 は、初期化データを Object property で送る track について「Publishers SHOULD add
+this Object property to the first Object in each Group.」とし、initRef が type `object-property`
+の initDataList entry を指すことを MUST とする。moq-pub は映像の Video Config をキーフレーム
+(Group の先頭) ごとに載せ、映像 / 音声の track に `object-property` 型の entry を指す initRef を
+載せる (`crates/moq-pub/src/catalog.rs`)。一方、音声の Audio Config は最初の Object (と移行後の
+最初の Object) にだけ載せる (`crates/moq-pub/src/pipeline.rs`)。音声は 1 Object = 1 Group のため、
+relay 経由で途中から購読した subscriber は Audio Config を受け取れない (moq-pub へ直接 SUBSCRIBE
+した購読者には、その購読の最初の Object に載せる)。moq-sub は音声デコーダを catalog の
+codec / samplerate / channelConfig から作るため再生できるが、Audio Config を必要とする
+subscriber は SHOULD の前提を満たさない。
 
 ## 6. subscriber (moq-sub) に足りない機能
 

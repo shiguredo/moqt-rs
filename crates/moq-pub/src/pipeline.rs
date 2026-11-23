@@ -409,6 +409,8 @@ struct CatalogVideoTrack {
     max_group_duration_ms: Option<u64>,
     /// LOC packaging の Object を MOQT Stream へ割り当てるモード
     stream_mapping: StreamMapping,
+    /// キーフレームの Object に Video Config を載せるか (catalog の initRef の判定に使う)
+    video_config_in_objects: bool,
 }
 
 /// カタログに載せる音声トラックの値
@@ -421,6 +423,8 @@ struct CatalogAudioTrack {
     channel_config: String,
     /// 単位は kbps。
     bitrate: u32,
+    /// Object に Audio Config を載せるか (catalog の initRef の判定に使う)
+    audio_config_in_objects: bool,
 }
 
 impl CatalogContext {
@@ -444,6 +448,7 @@ impl CatalogContext {
             bitrate: video.bitrate,
             max_group_duration_ms: video.max_group_duration_ms,
             stream_mapping: video.stream_mapping,
+            video_config_in_objects: video.video_config_in_objects,
         });
         let audio = self.audio.as_ref().map(|audio| catalog::AudioTrackParams {
             track_name: AUDIO_TRACK_NAME,
@@ -452,6 +457,7 @@ impl CatalogContext {
             samplerate: audio.samplerate,
             channel_config: &audio.channel_config,
             bitrate: audio.bitrate,
+            audio_config_in_objects: audio.audio_config_in_objects,
         });
         (video, audio)
     }
@@ -475,6 +481,12 @@ impl CatalogContext {
 ///
 /// `stream_mapping` は配信設定 `--stream-mapping` の値であり、Group 長の宣言とは独立して
 /// catalog の `packagingMetadata` に載るため、呼び出し側から受け取る。
+/// `video_config_in_objects` はエンコーダがキーフレームに Video Config を載せるかであり、
+/// catalog の initRef (draft-ietf-moq-msf-02 §12.2) の判定に使う。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "catalog の映像 track に載せる値を 1 つずつ受け取るため"
+)]
 fn catalog_video_track(
     codec: String,
     width: u32,
@@ -483,6 +495,7 @@ fn catalog_video_track(
     bitrate: u32,
     gop_duration_ms: u32,
     stream_mapping: StreamMapping,
+    video_config_in_objects: bool,
 ) -> CatalogVideoTrack {
     CatalogVideoTrack {
         codec,
@@ -494,6 +507,7 @@ fn catalog_video_track(
         // 境界の 1 フレーム分を見込んだ値にする
         max_group_duration_ms: Some(gop::catalog_max_duration_ms(fps, gop_duration_ms)),
         stream_mapping,
+        video_config_in_objects,
     }
 }
 
@@ -4824,6 +4838,9 @@ fn prepare_catalog_tracks(
                     // 算出するには VideoTrackInfo に値を持たせる必要がある (本変更の範囲外)
                     max_group_duration_ms: None,
                     stream_mapping: config.stream_mapping,
+                    // MP4 パススルーが扱う avc1 / hvc1 / hev1 / av01 は、sample entry の構成情報を
+                    // キーフレームの Object に Video Config として載せる
+                    video_config_in_objects: true,
                 })
             }
             (None, Some(enc)) => Some(catalog_video_track(
@@ -4834,6 +4851,7 @@ fn prepare_catalog_tracks(
                 config.bitrate,
                 config.gop_duration_ms,
                 config.stream_mapping,
+                enc.carries_video_config(),
             )),
             (None, None) => None,
         },
@@ -4842,6 +4860,8 @@ fn prepare_catalog_tracks(
             samplerate: AUDIO_SAMPLE_RATE,
             channel_config: AUDIO_CHANNEL_CONFIG.to_string(),
             bitrate: config.audio_bitrate,
+            // Opus (OpusHead) / AAC (AudioSpecificConfig) とも、Audio Config を Object に載せる
+            audio_config_in_objects: true,
         }),
     }
 }
@@ -8423,6 +8443,7 @@ mod tests {
                     codec: "opus".to_string(),
                     samplerate: AUDIO_SAMPLE_RATE,
                     channel_config: AUDIO_CHANNEL_CONFIG.to_string(),
+                    audio_config_in_objects: true,
                     bitrate: 64,
                 }),
             }
@@ -8478,11 +8499,13 @@ mod tests {
                     bitrate: 5_000,
                     max_group_duration_ms: Some(2_000),
                     stream_mapping: StreamMapping::Group,
+                    video_config_in_objects: true,
                 }),
                 audio: Some(CatalogAudioTrack {
                     codec: "opus".to_string(),
                     samplerate: AUDIO_SAMPLE_RATE,
                     channel_config: AUDIO_CHANNEL_CONFIG.to_string(),
+                    audio_config_in_objects: true,
                     bitrate: 64,
                 }),
             };
@@ -8706,6 +8729,7 @@ mod tests {
                 1_500,
                 2_000,
                 StreamMapping::Group,
+                true,
             );
             assert_eq!(
                 track.max_group_duration_ms,
@@ -10421,6 +10445,7 @@ mod tests {
                     bitrate: 200,
                     max_group_duration_ms: Some(u64::from(DEFAULT_GOP_DURATION_MS)),
                     stream_mapping: StreamMapping::Group,
+                    video_config_in_objects: true,
                 }),
                 None,
                 crate::catalog::CatalogSyncParams {

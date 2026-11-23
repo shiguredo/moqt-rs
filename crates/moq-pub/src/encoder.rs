@@ -84,6 +84,22 @@ impl VideoEncoder {
         }
     }
 
+    /// キーフレームに Video Config (VIDEO_CONFIG Object property) を載せるかどうか
+    ///
+    /// AV1 / H.264 / H.265 はデコーダの構成情報 (Sequence Header OBU / avcC / hvcC) を
+    /// キーフレームの Object に載せる。VP8 / VP9 は構成情報をビットストリームに持つため載せない。
+    /// catalog の initRef (draft-ietf-moq-msf-02 §12.2) を載せるかの判定に使う。
+    pub fn carries_video_config(&self) -> bool {
+        match self {
+            VideoEncoder::Av1(_) => true,
+            #[cfg(target_os = "macos")]
+            VideoEncoder::H264(_) => true,
+            #[cfg(target_os = "macos")]
+            VideoEncoder::H265(_) => true,
+            VideoEncoder::Vp8(_) | VideoEncoder::Vp9(_) => false,
+        }
+    }
+
     /// MSF catalog に載せる RFC 6381 形式の codec 文字列
     pub fn catalog_codec_string(&self) -> &str {
         match self {

@@ -3,13 +3,13 @@
 //! video / audio track の情報から MSF カタログを組み立て、catalog track に送信する。
 //! draft-ietf-moq-msf-02 §5 (Catalog) に準拠する。
 
-use shiguredo_moqt::loc::LocProperties;
+use shiguredo_moqt::loc::{LocProperties, PROP_AUDIO_CONFIG, PROP_VIDEO_CONFIG};
 use shiguredo_moqt::message::common::Location;
 use shiguredo_moqt::message_parameter::{LocationFilter, LocationFilterContext};
 use shiguredo_moqt::stream::subgroup::SubgroupIdMode;
 use shiguredo_moqt::{
-    msf::MSF_VERSION, msf::MsfAuthInfo, msf::MsfCatalog, msf::MsfCatalogDocument,
-    msf::MsfPackaging, msf::MsfTrack, msf::StreamMapping,
+    msf::MSF_VERSION, msf::MsfAuthInfo, msf::MsfCatalog, msf::MsfCatalogDocument, msf::MsfInitData,
+    msf::MsfInitDataKind, msf::MsfPackaging, msf::MsfTrack, msf::StreamMapping,
 };
 
 use crate::error::{Error, Result};
@@ -33,6 +33,14 @@ const MSF_AUTH_SCHEME_CAT: &str = "cat";
 /// `%cat%` の end-to-end な解決は、moq-sub に変数置換の呼び出し経路が無いため本実装の
 /// 範囲外である (catalog は未解決の参照を載せたまま送る)。
 const CAT_AUTH_INFO_VALUE: &str = "\"%cat%\"";
+
+/// 映像の Video Config を指す initDataList entry の id
+///
+/// draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List): id は catalog の中で一意である。
+const VIDEO_CONFIG_INIT_DATA_ID: &str = "video-config";
+
+/// 音声の Audio Config を指す initDataList entry の id
+const AUDIO_CONFIG_INIT_DATA_ID: &str = "audio-config";
 
 /// 映像トラックの catalog 情報
 pub struct VideoTrackParams<'a> {
@@ -58,6 +66,11 @@ pub struct VideoTrackParams<'a> {
     /// draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) / §5.2.5 (Packaging
     /// metadata): `packagingMetadata` の `streamMapping` キーで per-track に通知する。
     pub stream_mapping: StreamMapping,
+    /// キーフレームの Object に Video Config (VIDEO_CONFIG Object property) を載せるか
+    ///
+    /// 載せる track には、draft-ietf-moq-msf-02 §12.2 (Initialization properties) の MUST に
+    /// 従い、type `object-property` の initDataList entry を指す initRef を載せる。
+    pub video_config_in_objects: bool,
 }
 
 /// 音声トラックの catalog 情報
@@ -73,6 +86,11 @@ pub struct AudioTrackParams<'a> {
     pub channel_config: &'a str,
     /// 単位は kbps。
     pub bitrate: u32,
+    /// Object に Audio Config (AUDIO_CONFIG Object property) を載せるか
+    ///
+    /// 載せる track には、draft-ietf-moq-msf-02 §12.2 (Initialization properties) の MUST に
+    /// 従い、type `object-property` の initDataList entry を指す initRef を載せる。
+    pub audio_config_in_objects: bool,
 }
 
 /// publisher が音声・映像の両トラックへ共通で載せる同期用のメタデータ
@@ -158,6 +176,11 @@ fn build_catalog(
     auth_info: Option<&[MsfAuthInfo]>,
 ) -> Result<MsfCatalogDocument> {
     let mut tracks = Vec::new();
+    // draft-ietf-moq-msf-02 §12.2 (Initialization properties): 初期化データを Object property で
+    // 送る track は、type `object-property` の initDataList entry を指す initRef を持たなければ
+    // ならない (MUST)。この publisher は Video Config / Audio Config を Object property で送り、
+    // track の途中で変わり得るものとして扱う (Track property では送らない)
+    let mut init_data_list = Vec::new();
 
     if let Some(v) = video {
         let mut track = MsfTrack::new(v.track_name.to_string(), MsfPackaging::Loc, true);
@@ -181,6 +204,13 @@ fn build_catalog(
         // への割り当てモードを per-track に通知する。キーが無い場合は `group` と仮定される
         // ため、`group` でも publisher が選んだモードを明示する
         track.packaging_metadata = Some(format!("streamMapping={}", v.stream_mapping.as_str()));
+        if v.video_config_in_objects {
+            track.init_ref = Some(VIDEO_CONFIG_INIT_DATA_ID.to_string());
+            init_data_list.push(object_property_init_data(
+                VIDEO_CONFIG_INIT_DATA_ID,
+                PROP_VIDEO_CONFIG,
+            ));
+        }
         tracks.push(track);
     }
 
@@ -197,6 +227,13 @@ fn build_catalog(
         track.target_latency = Some(sync.target_latency_ms);
         track.render_group = Some(sync.render_group);
         track.auth_info = auth_info.map(|infos| infos.to_vec());
+        if a.audio_config_in_objects {
+            track.init_ref = Some(AUDIO_CONFIG_INIT_DATA_ID.to_string());
+            init_data_list.push(object_property_init_data(
+                AUDIO_CONFIG_INIT_DATA_ID,
+                PROP_AUDIO_CONFIG,
+            ));
+        }
         tracks.push(track);
     }
 
@@ -213,8 +250,20 @@ fn build_catalog(
         tracks,
         publish_tracks: Vec::new(),
         removed_tracks: Default::default(),
-        init_data_list: Vec::new(),
+        init_data_list,
     }))
+}
+
+/// Object property で送る初期化データを指す initDataList entry を作る
+///
+/// draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List) Table 3: type `object-property` の
+/// data は Object property type の hex notation である。
+fn object_property_init_data(id: &str, property_type: u64) -> MsfInitData {
+    MsfInitData {
+        id: id.to_string(),
+        kind: MsfInitDataKind::ObjectProperty,
+        data: format!("0x{property_type:02X}"),
+    }
 }
 
 /// MSF カタログの JSON を組み立てる
@@ -432,6 +481,7 @@ mod tests {
             bitrate: 5_000,
             max_group_duration_ms: None,
             stream_mapping: StreamMapping::Group,
+            video_config_in_objects: true,
         };
         let audio = AudioTrackParams {
             track_name: "audio",
@@ -439,6 +489,7 @@ mod tests {
             codec: OPUS_CATALOG_CODEC_STRING,
             samplerate: 48_000,
             channel_config: "2",
+            audio_config_in_objects: true,
             bitrate: 128,
         };
         let catalog = build_catalog(Some(&video), Some(&audio), TEST_SYNC, None)
@@ -466,6 +517,7 @@ mod tests {
             bitrate: 5_000,
             max_group_duration_ms: None,
             stream_mapping: StreamMapping::Group,
+            video_config_in_objects: true,
         };
         let audio = AudioTrackParams {
             track_name: "audio",
@@ -473,6 +525,7 @@ mod tests {
             codec: OPUS_CATALOG_CODEC_STRING,
             samplerate: 48_000,
             channel_config: "1",
+            audio_config_in_objects: true,
             bitrate: 64,
         };
         let catalog = build_catalog(Some(&video), Some(&audio), TEST_SYNC, None)
@@ -541,6 +594,7 @@ mod tests {
                 bitrate: 5_000,
                 max_group_duration_ms: None,
                 stream_mapping: mapping,
+                video_config_in_objects: true,
             };
             let catalog = build_catalog(Some(&video), None, TEST_SYNC, None)
                 .expect("カタログを構築できること");
@@ -580,6 +634,7 @@ mod tests {
             bitrate: 5_000,
             max_group_duration_ms: Some(2_034),
             stream_mapping: StreamMapping::Group,
+            video_config_in_objects: true,
         };
         let catalog =
             build_catalog(Some(&video), None, TEST_SYNC, None).expect("カタログを構築できること");
@@ -638,6 +693,7 @@ mod tests {
             codec: "mp4a.40.2",
             samplerate: 48_000,
             channel_config: "1",
+            audio_config_in_objects: true,
             bitrate: 64,
         };
         let catalog =
@@ -663,6 +719,7 @@ mod tests {
             bitrate: 5_000,
             max_group_duration_ms: None,
             stream_mapping: StreamMapping::Group,
+            video_config_in_objects: true,
         };
         let audio = AudioTrackParams {
             track_name: "audio",
@@ -670,6 +727,7 @@ mod tests {
             codec: OPUS_CATALOG_CODEC_STRING,
             samplerate: 48_000,
             channel_config: "2",
+            audio_config_in_objects: true,
             bitrate: 128,
         };
         let catalog = build_catalog(Some(&video), Some(&audio), TEST_SYNC, None)
@@ -751,6 +809,7 @@ mod tests {
                 bitrate: 5_000,
                 max_group_duration_ms: None,
                 stream_mapping: StreamMapping::Group,
+                video_config_in_objects: true,
             };
             let catalog = build_catalog(Some(&video), None, TEST_SYNC, None)
                 .expect("カタログを構築できること");
@@ -758,6 +817,113 @@ mod tests {
                 .encode(shiguredo_moqt::msf::MsfCompression::None)
                 .expect("代替の video codec でも encode に成功すること");
         }
+    }
+
+    /// Video Config / Audio Config を Object に載せる track が、object-property の initRef を持つこと
+    ///
+    /// draft-ietf-moq-msf-02 §12.2 (Initialization properties): "Tracks which choose to transmit
+    /// initialization data using this Object property MUST include an initRef Section 5.2.14
+    /// field referencing an Initialization Data List Section 5.1.7 entry with a type of
+    /// 'object-property'."
+    #[test]
+    fn tracks_with_config_in_objects_reference_object_property_init_data() {
+        let video = VideoTrackParams {
+            track_name: "video",
+            namespace: "ns",
+            codec: DEFAULT_AVC_CATALOG_CODEC_STRING,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate: 5_000,
+            max_group_duration_ms: None,
+            stream_mapping: StreamMapping::Group,
+            video_config_in_objects: true,
+        };
+        let audio = AudioTrackParams {
+            track_name: "audio",
+            namespace: "ns",
+            codec: "opus",
+            samplerate: 48_000,
+            channel_config: "1",
+            bitrate: 64,
+            audio_config_in_objects: true,
+        };
+        let MsfCatalogDocument::Full(catalog) =
+            build_catalog(Some(&video), Some(&audio), TEST_SYNC, None)
+                .expect("カタログを構築できること")
+        else {
+            panic!("独立カタログが期待される");
+        };
+        assert_eq!(
+            catalog.tracks[0].init_ref.as_deref(),
+            Some(VIDEO_CONFIG_INIT_DATA_ID),
+            "映像 track は Video Config の entry を指すこと"
+        );
+        assert_eq!(
+            catalog.tracks[1].init_ref.as_deref(),
+            Some(AUDIO_CONFIG_INIT_DATA_ID),
+            "音声 track は Audio Config の entry を指すこと"
+        );
+        let entries: Vec<(&str, MsfInitDataKind, &str)> = catalog
+            .init_data_list
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry.kind, entry.data.as_str()))
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                (
+                    VIDEO_CONFIG_INIT_DATA_ID,
+                    MsfInitDataKind::ObjectProperty,
+                    "0x0D"
+                ),
+                (
+                    AUDIO_CONFIG_INIT_DATA_ID,
+                    MsfInitDataKind::ObjectProperty,
+                    "0x0F"
+                ),
+            ],
+            "VIDEO_CONFIG (0x0D) / AUDIO_CONFIG (0x0F) を指す object-property の entry を持つこと"
+        );
+        // ライブラリの検証 (initRef の参照先の存在、data の hex notation) を通ること
+        let encoded = MsfCatalogDocument::Full(catalog)
+            .encode(shiguredo_moqt::msf::MsfCompression::None)
+            .expect("encode できること");
+        MsfCatalogDocument::decode(&encoded, shiguredo_moqt::msf::MsfCompression::None)
+            .expect("自分が出したカタログを decode できること");
+    }
+
+    /// Video Config を Object に載せない映像 track (VP8 / VP9) は initRef を持たないこと
+    ///
+    /// 初期化データを Object property で送らない track には §12.2 の MUST は掛からない。
+    /// 送らない property を指す entry を載せると、購読者に誤った手がかりを与える。
+    #[test]
+    fn video_track_without_config_in_objects_has_no_init_ref() {
+        let video = VideoTrackParams {
+            track_name: "video",
+            namespace: "ns",
+            codec: "vp8",
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate: 5_000,
+            max_group_duration_ms: None,
+            stream_mapping: StreamMapping::Group,
+            video_config_in_objects: false,
+        };
+        let MsfCatalogDocument::Full(catalog) =
+            build_catalog(Some(&video), None, TEST_SYNC, None).expect("カタログを構築できること")
+        else {
+            panic!("独立カタログが期待される");
+        };
+        assert_eq!(
+            catalog.tracks[0].init_ref, None,
+            "Video Config を載せない track は initRef を持たないこと"
+        );
+        assert!(
+            catalog.init_data_list.is_empty(),
+            "参照されない entry を載せないこと"
+        );
     }
 
     /// トラックが 1 つも無い場合はカタログを構築しないこと
@@ -805,6 +971,7 @@ mod tests {
             codec: OPUS_CATALOG_CODEC_STRING,
             samplerate: 48_000,
             channel_config: "1",
+            audio_config_in_objects: true,
             bitrate: 64,
         };
 
@@ -869,6 +1036,7 @@ mod tests {
             bitrate: 5_000,
             max_group_duration_ms: None,
             stream_mapping: StreamMapping::Group,
+            video_config_in_objects: true,
         };
         let audio = AudioTrackParams {
             track_name: "audio",
@@ -876,6 +1044,7 @@ mod tests {
             codec: OPUS_CATALOG_CODEC_STRING,
             samplerate: 48_000,
             channel_config: "2",
+            audio_config_in_objects: true,
             bitrate: 128,
         };
 
@@ -1073,6 +1242,7 @@ mod tests {
             bitrate: 5_000,
             max_group_duration_ms: None,
             stream_mapping: StreamMapping::Group,
+            video_config_in_objects: true,
         };
         let json = build_catalog_json(Some(&video), None, TEST_SYNC, &[])
             .expect("v02 の namespace でカタログを組み立てられること");
@@ -1110,6 +1280,7 @@ mod tests {
             codec: OPUS_CATALOG_CODEC_STRING,
             samplerate: 48_000,
             channel_config: "1",
+            audio_config_in_objects: true,
             bitrate: 64,
         };
         assert!(
@@ -1140,6 +1311,7 @@ mod tests {
             codec: OPUS_CATALOG_CODEC_STRING,
             samplerate: 48_000,
             channel_config: "1",
+            audio_config_in_objects: true,
             bitrate: 64,
         };
         let json = build_catalog_json(None, Some(&audio), TEST_SYNC, &[])
