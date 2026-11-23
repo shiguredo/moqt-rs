@@ -42,3 +42,12 @@ draft-ietf-moq-msf-02 §8.2 (Event Timeline data format) は、index key を小�
 - `tests/test_msf/event_timeline.rs` / `error_cases.rs` と `pbt/tests/prop_msf.rs` を大文字 key と任意 JSON 値に更新し、§8.6 相当の往復テストを追加した。`docs/msf.md` と `MsfEventIndex` の doc も更新した。
 
 確認コマンド: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check` が通ることを確認した。
+
+## reopened にした理由
+
+完了条件の「公開 doc が `T` / `L` / `M` と任意 JSON 値になっていること」を満たしていない箇所が残っていた。
+
+- `src/msf.rs` の `MsfEventTimeline` の doc が、フォーマットを小文字の `[{"t"/"l"/"m": ..., "data": ...}, ...]` のまま書いている。
+- `MsfEventTimeline::encode` と `validate_event_data_raw` の doc が、`data_raw` を「単一の JSON object」としてパース可能であることを要求している。実装は任意の JSON 値を受理する。
+- `tests/test_msf/event_timeline.rs` の `data_object_with_nested_values` のコメントが「§8.1 (Event Timeline data format): data は Object でなければならない」のままで、節番号も内容も古い。
+- `decode_rejects_deeply_nested_document` と `decode_rejects_deeply_nested_array_document` が、小文字の `t` で入力を作っている。index 欠如で先に `InvalidCatalog` になるため、深さ制限がなくなっても検出できない。後者の doc も、削除済みの「event data MUST be a JSON object」の検証を前提にしている。
