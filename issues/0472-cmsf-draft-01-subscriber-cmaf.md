@@ -3,7 +3,7 @@
 - Created: 2026-11-23
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-cmsf-draft-01
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-11-23
 
 ## 目的
 
@@ -67,6 +67,9 @@ moq-sub は `loc` 以外の track を購読対象から外している。その�
     - media の trak (handler が vide か soun) が 1 つだけで、role (映像 / 音声) と handler が一致する。CMSF §3.1 は CMAF header を「associated with a CMAF track」とする
     - stsd の entry が 1 つだけで、moq-sub が扱える種類 (avc1 / hev1 / hvc1 / av01 / vp08 / vp09 / Opus / mp4a。shiguredo_mp4 の `SampleEntry` の variant と、moq-sub のデコーダが扱う codec に合わせる) である
     - sample entry の codec の種類が、catalog の `codec` の種類と一致する。デコーダは catalog の codec から作るためである
+    - avc1 は avcC に SPS / PPS が、hev1 / hvc1 は hvcC に VPS / SPS / PPS がある。
+      - moq-sub のデコーダ (`crates/moq-codec` の `parse_avc_config` / `parse_hvc_config`) は、パラメータセットのない設定を拒否する。
+      - パラメータセットを in-band でだけ運ぶ track (`SampleEntry::Hev1` の doc にある「パラメータセットが in-band 前提」) には対応しない。moq-pub も、パラメータセットのない sample entry の MP4 を拒否している (`has_hevc_parameter_sets`)
   - 満たさない場合は、既存の `extract_video_info` の失敗と同じく、英語のエラーで起動を失敗させる。
   - 同じ init segment で `Fmp4SegmentDemuxer::handle_init_segment` を一度だけ呼び、初期化済みの demuxer を track ごとに保持する。stream ごとの task は、それを clone して使う。`handle_media_segment` は `&mut self` を取るので、共有して lock するより clone のほうが既存の stream ごとの処理と合う。
   - カタログの更新はメディアの経路に届かない (現状どおり)。そのため、購読中に init segment が変わる場合は扱わない。
@@ -85,7 +88,23 @@ moq-sub は `loc` 以外の track を購読対象から外している。その�
     - track の init segment 由来の情報 (mdhd の timescale、sample entry)
     - Object の位置 (Group ID / Object ID)。音声の重複と購読境界の判定に使う
     - MOQT の Object Properties から解決した Prior Object ID Gap。復号順の判定 (`VideoObjectPosition`) に使う。この値は LOC ではなく MOQT の Object Properties (`prior_object_id_gap_of`) から読むので、cmaf の Object にも載りうる。渡さずに 0 とすると、publisher が意図して Object ID を飛ばした後の Object が `MissingReference` になり、次の keyframe まで復号されない
-  - 重複・購読境界・復号順の判定、復号、送出、録画の処理は、LOC 経路と共有する内部の関数を呼ぶ。
+  - 重複・購読境界・復号順の判定、復号、送出、録画の処理は、LOC 経路と共有する内部の関数を呼ぶ。現状では、`AudioDelivery::deliver` はこれらを 1 つのメソッドにまとめているので、共有できる単位に分ける。
+  - cmaf の track では、次の 5 つの呼び出し元が cmaf の入口を呼ぶように分岐させる。
+    - 映像: `decode_video_stream` (group モードの live) と `read_video_fetch_stream` (FETCH 応答)。映像の FETCH は、起動時・session の移行時・request の移行時に `fetch_recent_video_groups` で発行される (SUBSCRIBE_OK に Largest Object がない場合は発行しない)。そのため FETCH 応答の経路を漏らすと、FETCH で取得した keyframe が LOC 経路で捨てられる。それでも次の GOP からはフレームが出るので、E2E では気づけない
+    - 音声: `decode_audio_stream` (subgroup)、`deliver_datagram` (main ループの datagram)、`run_side_session` (request 移行の side session の datagram)
+  - `ObjectModeVideo::deliver_object` (object モード) は通らない。0468 により、cmaf の track は `StreamMapping::Group` になるためである。
+  - track 単位の状態は、種類ごとに作る場所と配り方を分ける。
+    - 対応外の状態:
+      - `prepare_delivery_state` で track ごとに 1 つ作り、既存の `audio_delivery_order` / `video_delivery_order` と同じ経路で、同じインスタンスを配る。
+      - 別のインスタンスを作ると、経路をまたいで「エラーを 1 回だけ出す」と「以後すべて破棄する」が成り立たなくなる。
+      - 音声 track の状態は、次の 4 つの組み立て箇所に配る。datagram で届くのは音声だけ (`plan_datagram`) なので、映像 track の状態は `DatagramTaskContext` を除く 3 か所に配る。`video_delivery_order` と同じである。
+        - main ループの `StreamTaskContext`
+        - `run_side_session` の `StreamTaskContext`
+        - `spawn_datagram_receiver` が組み立てる `DatagramTaskContext` (`deliver_datagram` が参照する)
+        - `build_side_session_shared` が作る `RequestMigrationShared` (`run_side_session` の datagram 分岐が `AudioDelivery` を組み立てるときに使う)
+    - 初期化済みの demuxer:
+      - カタログを解決する時点で、`extract_video_info` / `extract_audio_info` と同じ段で init segment を検証して作る。失敗は既存と同じく `receive_catalog` の `.transpose()?` で起動の失敗にする。`prepare_delivery_state` は失敗を返せないためである。
+      - 作った demuxer は `ChannelSetupInputs` に載せ、対応外の状態と同じ経路で、各 task が clone する元として配る。共有して lock はしない (上記のとおり clone して使う)。
 - 1 Object に複数の sample がある場合の処理単位:
   - 重複・購読境界・復号順 (`VideoDecodeOrder`) の判定は、現状どおり Object 単位とする。Object の keyframe には、先頭 sample の `keyframe` を使う。
   - 映像の復号と時刻付けは sample ごとに行う。sample を順に復号し、得たフレームにはその sample の時刻を載せる。
@@ -100,7 +119,10 @@ moq-sub は `loc` 以外の track を購読対象から外している。その�
   - 0471 の moq-pub は composition offset を書かない。moq-pub は B フレームを含む MP4 のパススルーも拒否している。
   - 録画器は PTS 順に並べて `composition_time_offset` を書かず、MediaTime の映像は届いた順 (復号順) に表示される。そのため、offset が 0 でない sample は正しく扱えない。
   - composition offset が 0 でない sample を、上の検証と同じ段で検出する。検出したら、その track を「対応外」とし、英語のエラーを 1 回だけ出す。以後、その track の Object はすべて破棄する。
-    - 「対応外」の状態は track 単位で共有する。映像は Group ごとに別の stream task になり、音声は datagram と subgroup の両方から届くので、stream task の中に置くと「1 回だけ」も「以後すべて」も満たせないためである。既存の `prepare_delivery_state` が track ごとの状態を `Arc<Mutex<..>>` で持つのと同じ置き方にし、起動時に解決した track の寿命 (moq-sub のプロセスの間) だけ保つ。
+    - 「対応外」の状態は track 単位で共有する。映像は Group ごとに別の stream task になり、音声は datagram と subgroup の両方から届くので、stream task の中に置くと「1 回だけ」も「以後すべて」も満たせないためである。
+      - 状態は、`AudioDeliveryOrder` と同じく I/O を持たない専用の型にする。この型は「対応外か」を返すメソッドと、「対応外にする」メソッドを持つ。「対応外にする」メソッドは、初めて対応外になったときだけ真を返す。
+      - 型は、既存の `prepare_delivery_state` が track ごとの状態を `Arc<Mutex<..>>` で持つのと同じ置き方で共有し、起動時に解決した track の寿命 (moq-sub のプロセスの間) だけ保つ。
+      - 呼び出し側 (cmaf の入口の前段) は、分割の前に「対応外か」を確かめ、対応外なら Object を破棄する。分割と検証の関数が「track を対応外にする」を返したら「対応外にする」を呼び、真が返ったときだけ英語のエラーを出す。
     - 分割と検証の関数は、結果を 3 通りに分けて返す。sample の列を返して続ける場合、この Object だけを破棄して続ける場合 (§3.3 / §3.4 の違反)、track を対応外にする場合 (composition offset) である。
     - session は閉じない。B フレームは CMSF の違反ではないので、PROTOCOL_VIOLATION などで peer との session を閉じるのは誤りになる。
     - stream task から session を閉じる既存の経路 (`termination_tx` → `request_session_termination`) は、peer のプロトコル違反用で、既定のコードは `SESSION_PROTOCOL_VIOLATION` である。そのため、この経路は使わない。
@@ -125,11 +147,12 @@ moq-sub は `loc` 以外の track を購読対象から外している。その�
 ## 完了条件
 
 - cmaf の映像 / 音声 track を選択し、デコードできること。
-- init segment の前提 (media trak が 1 つ、stsd の entry が 1 つで扱える種類、catalog の codec と一致) を満たさない track で、英語のエラーで起動が失敗すること。
+- init segment の前提 (media trak が 1 つ、stsd の entry が 1 つで扱える種類、catalog の codec と一致、avcC / hvcC にパラメータセットがある) を満たさない track で、英語のエラーで起動が失敗すること。
 - I/O を持たない関数の単体テストで、次を固定すること。入力は `shiguredo_mp4::boxes` で組み立てた実際のバイト列とする。
   - 複数の CMAF Chunk (moof + mdat の組) を持つ payload の分割と demux、prft を含む組の分割
   - §3.3 / §3.4 の違反 (moof / mdat の欠如、track_ID の不一致、Group 先頭の非 keyframe) で Object を破棄すること
-  - composition offset が 0 でない sample の検出と、その track を対応外として以後の Object を破棄すること (分割と検証の関数が 3 通りの結果を返すこと)
+  - composition offset が 0 でない sample を検出したときに、分割と検証の関数が「track を対応外にする」を返すこと (3 通りの結果を返すこと)
+  - 対応外の状態の型で、初めて対応外にしたときだけ真が返ること、対応外になった後は「対応外か」が真を返し続けること (以後すべて破棄することと、エラーを 1 回だけ出すことの根拠)
   - media trak 以外の track_ID の traf を含む Object を破棄すること (同じ track の traf が複数あるだけなら受理すること)
   - DTS のマイクロ秒換算 (live capture の epoch マイクロ秒と timescale 1,000,000 で桁があふれないこと)
 - 1 Object に複数の sample がある場合に、sample ごとに復号・時刻付け・録画され、復号順の判定は Object 単位で行われること。これは cmaf の入口の関数のテストで固定する。
@@ -137,6 +160,7 @@ moq-sub は `loc` 以外の track を購読対象から外している。その�
   - 映像は実デコーダ (`build_video_decoder("vp8")` など)、録画は実録画器 (`Recorder::start`)、音声は実際の Opus エンコーダの出力を使う。既存の LOC 経路のテストと同じである。
   - 0471 の moq-pub は 1 Object に 1 sample しか載せないので、E2E では確かめられないためである。
 - cmaf の Object の時刻が `TimestampKind::MediaTime` になること。
+- cmaf の track で、5 つの呼び出し元 (`decode_video_stream` / `read_video_fetch_stream` / `decode_audio_stream` / `deliver_datagram` / `run_side_session`) がすべて cmaf の入口を呼ぶこと。対応外の状態が、音声は 4 か所、映像は `DatagramTaskContext` を除く 3 か所に、同じインスタンスとして配られていること。初期化済みの demuxer が、カタログの解決時に作られ、同じ経路で clone の元として配られていること。この分岐と配り方は配線の要件で、テストで経路ごとに観測しにくいので、コードレビューで確認する。
 - `--mp4` 録画で、demux した sample と init segment の sample entry から MP4 を書けること。cmaf の track では AV1 / AAC / VP8 / VP9 も録画されること。映像の track が最初の keyframe より前に対応外になっても、音声が録画されること。
 - `contentProtectionRefIDs` を持つ track を選ばないこと。
 - `e2e-tests/tests/roundtrip.rs` に、0471 の moq-pub で cmaf を publish し、moq-sub で subscribe する E2E テストを `#[ignore]` 付きで追加すること。
