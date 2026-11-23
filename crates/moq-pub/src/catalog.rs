@@ -193,8 +193,8 @@ fn build_catalog(
         track.height = Some(v.height as u64);
         track.framerate = Some(v.fps as f64);
         track.bitrate = Some(v.bitrate as u64 * 1000);
-        // Group 長の宣言。Group = 1 GOP のため maxGopDuration (§5.2.24) と
-        // maxGroupDuration (§5.2.25) に同じ値を載せる。購読者はバッファ量の見積もりに使う
+        // Group 長の宣言。Group = 1 GOP のため maxGopDuration (§5.2.25) と
+        // maxGroupDuration (§5.2.26) に同じ値を載せる。購読者はバッファ量の見積もりに使う
         track.max_gop_duration = v.max_group_duration_ms;
         track.max_group_duration = v.max_group_duration_ms;
         track.target_latency = Some(sync.target_latency_ms);
@@ -621,7 +621,7 @@ mod tests {
     /// 時間ベースの判定が境界の 1 フレームぶん遅れ得ることを見込んだ Group 長 + 1 フレーム
     /// (30 fps / 2000 ms なら 2034 ms) である。Group 長を宣言できない経路ではどちらも
     /// 載せない。draft-ietf-moq-msf-02 §5.2.25 (Maximum GOP Duration) /
-    /// §5.2.25 (Maximum Group Duration)
+    /// §5.2.26 (Maximum Group Duration)
     #[test]
     fn publisher_catalog_sets_max_gop_and_group_duration() {
         let mut video = VideoTrackParams {
