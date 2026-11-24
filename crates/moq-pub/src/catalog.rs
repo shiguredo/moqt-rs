@@ -464,6 +464,14 @@ mod tests {
         target_latency_ms: 200,
     };
 
+    /// テストで使う AVC の codec 文字列
+    ///
+    /// `DEFAULT_AVC_CATALOG_CODEC_STRING` は macOS 専用の H.264 エンコーダモジュール
+    /// (`crate::encoder::h264`) で定義されるため、macOS 以外では参照できない。カタログの構造だけを
+    /// 検証するテストは codec 文字列の値に依存しないので、同じ値をプラットフォーム非依存の
+    /// テスト用定数として持つ。
+    const TEST_AVC_CATALOG_CODEC_STRING: &str = "avc1.640028";
+
     /// publisher が生成する video / audio の構成のカタログが encode に成功すること
     ///
     /// codec 文字列が audio / video と判定されること自体は、library 側の登録名テストで
@@ -830,7 +838,7 @@ mod tests {
         let video = VideoTrackParams {
             track_name: "video",
             namespace: "ns",
-            codec: DEFAULT_AVC_CATALOG_CODEC_STRING,
+            codec: TEST_AVC_CATALOG_CODEC_STRING,
             width: 1920,
             height: 1080,
             fps: 30,
