@@ -6,11 +6,11 @@ Multipath QUIC は 1 つの QUIC 接続に複数のネットワークパスを�
 
 ## 利用できるビルドと経路
 
-Multipath QUIC を利用できるのは、`quic-tobi` バックエンドを選んだ Windows 以外のビルドの native QUIC 経路 (`--transport quic`) だけである。
+Multipath QUIC を利用できるのは、既定の `quic-tobi` バックエンドの native QUIC 経路 (`--transport quic`) だけである。Windows では tobi-quic を使えないため、Multipath も使えない。
 
 | バックエンド / 経路 | Multipath QUIC |
 | --- | --- |
-| `quic-tobi` (Windows 以外) | 利用できる |
+| `quic-tobi` (既定、Windows 以外) | 利用できる |
 | `quic-s2n` | 利用できない (s2n-quic が Multipath QUIC を実装していない) |
 | `quic-ngtcp2` | 利用できない (このバックエンドは Multipath QUIC の API を公開していない) |
 | `wt-h3` / `wt-h2` / `qmux` | 利用できない (Multipath は native QUIC の機能である) |
@@ -19,8 +19,8 @@ Multipath QUIC を利用できるのは、`quic-tobi` バックエンドを選�
 `--transport auto` は WebTransport / QMux の候補も競争するため、Multipath を指定した場合はエラーになる。`--transport quic` を明示すること。
 
 ```bash
-# Multipath を使うには quic-tobi ビルドにする
-cargo run -p moq-sub --no-default-features --features quic-tobi -- \
+# 既定の tobi-quic ビルドで Multipath を使う
+cargo run -p moq-sub -- \
   --url moqt://127.0.0.1:4443 --namespace moq-example --multipath handover
 ```
 
@@ -88,7 +88,7 @@ let params = ConnectParams {
 
 `MultipathOptions::default()` は `mode: MultipathMode::Off` であり、Multipath を広告しない。`mode` を `Off` 以外にした場合は、接続前に次を検証する。
 
-- `quic-tobi` バックエンドの Windows 以外のビルドであること
+- `quic-tobi` バックエンド (既定) の Windows 以外のビルドであること
 - `transport` が `Transport::Quic` であること
 - `max_paths` が 1〜64、`initial_max_path_id` が 1〜64 であること
 - 監視間隔と keep-alive 間隔が 0 でないこと
@@ -115,7 +115,7 @@ Multipath を有効にすると、接続確立後にパスイベントを観測�
 
 ## 制約
 
-- Windows では使えない。tobi-quic を依存に含めないため、`quic-tobi` も選べない
+- Windows では使えない。Windows ビルドでは `--no-default-features --features quic-s2n` (または `quic-ngtcp2`) を指定するため、Multipath も使えない
 - s2n-quic / ngtcp2 バックエンドでは使えない。`--multipath` を指定すると接続前にエラーになる
 - WebTransport over HTTP/3 / HTTP/2 と QMux では使えない。native QUIC だけの機能である
 - `--transport auto` とは併用できない。`--transport quic` を明示する
@@ -128,11 +128,11 @@ Multipath を有効にすると、接続確立後にパスイベントを観測�
 tokio-moq の `quic::tobi_backend` のテストが、ループバックで実際に Multipath をネゴシエーションし、追加パスを開いて `PathState::Active` になることと、その状態でストリームのデータが届くことを検証する。
 
 ```bash
-cargo test -p tokio-moq --no-default-features --features quic-tobi multipath
+cargo test -p tokio-moq multipath
 ```
 
-moq-pub / moq-sub の CLI テストも同じ feature で実行する。
+moq-pub / moq-sub の CLI テストも同じ既定ビルドで実行する。
 
 ```bash
-cargo test -p moq-pub -p moq-sub --no-default-features --features quic-tobi multipath
+cargo test -p moq-pub -p moq-sub multipath
 ```

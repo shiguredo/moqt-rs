@@ -58,8 +58,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # テストで WebTransport の終了コード (ErrorCode::AlpnError) を使う
 shiguredo_http3 = "2026.1.0-canary.14"
 # in-process の peer harness (実 QUIC 接続で peer 役を駆動する) を統合テストから使う。
-# default-features = false は必須である。省略すると tokio-moq の既定 quic-s2n が有効になり、
-# --no-default-features --features quic-tobi / quic-ngtcp2 のテストビルドで
+# default-features = false は必須である。省略すると tokio-moq の既定 quic-tobi が有効になり、
+# --no-default-features --features quic-s2n / quic-ngtcp2 のテストビルドで
 # crates/tokio-moq/src/quic.rs の compile_error! に当たる
 tokio-moq = { path = "../tokio-moq", default-features = false, features = ["test-support"] }
 
@@ -76,11 +76,12 @@ shiguredo_video_toolbox = "2026.2.0-canary.4"
 
 [features]
 # ネイティブ QUIC のバックエンド。ちょうど 1 つだけを有効にする。
+# 既定は quic-tobi (tobi-quic) である。tobi-quic は Windows 非対応のため、
+# Windows ビルドでは --no-default-features --features quic-s2n を指定するか
+# quic-ngtcp2 を選ぶこと (既定のままではコンパイルエラーになる)。
 # s2n-quic は RESET_STREAM_AT を実装しておらず wt-h3 を提供できないため、
 # quic-s2n を選んだビルドでは wt-h3 を選択できないものとして扱う。
-# quic-tobi は tobi-quic を使うため Windows 非対応である。Windows ビルドでは
-# quic-s2n / quic-ngtcp2 のいずれかを選ぶこと (quic-tobi を選ぶとコンパイルエラーになる)。
-default = ["quic-s2n"]
+default = ["quic-tobi"]
 quic-ngtcp2 = ["tokio-moq/quic-ngtcp2"]
 quic-s2n = ["tokio-moq/quic-s2n"]
 quic-tobi = ["tokio-moq/quic-tobi"]

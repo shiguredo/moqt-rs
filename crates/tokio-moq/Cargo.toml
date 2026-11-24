@@ -76,14 +76,15 @@ tobi_quic = { git = "https://github.com/shiguredo/tobi-quic", branch = "main" }
 
 [features]
 # ネイティブ QUIC のバックエンド。ちょうど 1 つだけを有効にする。
-# tobi-quic を使う quic-tobi は Windows 非対応である。Windows ビルドでは quic-s2n か
-# quic-ngtcp2 を選ぶこと (quic-tobi を選ぶとコンパイルエラーになる)。
+# 既定は quic-tobi (tobi-quic) である。tobi-quic は Windows 非対応のため、
+# Windows ビルドでは --no-default-features --features quic-s2n を指定するか
+# quic-ngtcp2 を選ぶこと (既定のままではコンパイルエラーになる)。
 # WebTransport over HTTP/3 は tobi-quic を直接使うため、この選択の対象外である。
 # ただし s2n-quic は RESET_STREAM_AT を実装しておらず wt-h3 を提供できないため、
 # quic-s2n を選んだビルドと Windows ビルドでは wt-h3 を選択できないものとして扱う。
 # Multipath QUIC (RFC 10069) も tobi-quic の実装を使うため、quic-tobi の Windows 以外の
 # ビルドだけで提供する。
-default = ["quic-s2n"]
+default = ["quic-tobi"]
 quic-ngtcp2 = ["dep:shiguredo_ngtcp2_tokio"]
 quic-s2n = ["dep:s2n-quic"]
 quic-tobi = []

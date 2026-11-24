@@ -6,7 +6,7 @@
 //! URL の scheme は `moqt://` に統一し、トランスポートは [`Transport`] (`--transport`) で選ぶ。
 //! `--transport` を省略した場合は `--url` の MSF fragment の `connection` で決める
 //! ([`resolve_transport`])。
-//! ネイティブ QUIC のバックエンドは cargo feature で選ぶ (既定は s2n-quic)。
+//! ネイティブ QUIC のバックエンドは cargo feature で選ぶ (既定は tobi-quic)。
 //! WebTransport over HTTP/3 は tobi-quic の実装を使うため、s2n-quic を選んだビルドと
 //! Windows ビルドでは利用できない ([`is_wt_h3_available`] を参照する)。
 //! `--url` の `moqt://` URI は [`parse_url`] でパースし、`--namespace` と `--url` の MSF fragment

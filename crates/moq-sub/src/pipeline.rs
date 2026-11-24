@@ -19178,7 +19178,7 @@ mod tests {
     ///
     /// pipeline の private 関数 (`receive_catalog` / `resubscribe_tracks` / `run`) を
     /// クレート内から直接呼ぶ。peer 役は `tokio_moq::peer_harness` の `TestPeer` が
-    /// sans-I/O の `Session` と、選択した QUIC バックエンド (既定は s2n-quic) の実サーバーで
+    /// sans-I/O の `Session` と、選択した QUIC バックエンド (既定は tobi-quic) の実サーバーで
     /// 駆動する (モック / スタブは使わない)。
     /// 待ち合わせはすべて `tokio::time::timeout` とイベント待ちで上限を設け、`sleep` で
     /// タイミングを合わせない。

@@ -4,13 +4,14 @@
 //!
 //! QUIC の実装は cargo feature で選ぶ。3 つから 1 つだけを有効にすること。
 //!
-//! - `quic-s2n` (既定): s2n-quic
-//! - `quic-tobi`: tobi-quic
+//! - `quic-tobi` (既定): tobi-quic
+//! - `quic-s2n`: s2n-quic
 //! - `quic-ngtcp2`: ngtcp2 (shiguredo_ngtcp2_tokio)
 //!
 //! WebTransport over HTTP/3 は `tobi` を直接使うため、この選択の対象外である。
 //! そのため `tobi_quic` は Windows 以外のビルドでは常に依存に含まれる。
 //! tobi-quic は Windows 非対応のため、Windows ビルドでは `quic-tobi` と wt-h3 を提供しない。
+//! Windows ビルドでは `--no-default-features --features quic-s2n` を指定する。
 //! また s2n-quic は RESET_STREAM_AT を実装しておらず wt-h3 を提供できないため、
 //! `quic-s2n` を選んだビルドでも wt-h3 を選択できないものとして扱う。
 //! Multipath QUIC (RFC 10069) も `quic-tobi` の Windows 以外のビルドだけで使える。

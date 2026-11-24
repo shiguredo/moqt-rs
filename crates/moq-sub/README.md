@@ -18,27 +18,28 @@ publisher / subscriber の接続先となる MoQ リレーは別途用意する�
 
 ## QUIC バックエンド
 
-moq-sub の QUIC の実装は既定で s2n-quic を使う。cargo feature で tobi-quic / ngtcp2-rs も
-選べる (`--no-default-features` と `--features quic-tobi` / `--features quic-ngtcp2` を
+moq-sub の QUIC の実装は既定で tobi-quic を使う。cargo feature で s2n-quic / ngtcp2-rs も
+選べる (`--no-default-features` と `--features quic-s2n` / `--features quic-ngtcp2` を
 組み合わせる)。
-WebTransport over HTTP/3 の QUIC 層は tobi-quic 固定であり、s2n-quic は RESET_STREAM_AT を
-実装していないため、既定の s2n-quic ビルドでは `--transport wt-h3` を選べない。使う場合は
-`--no-default-features --features quic-tobi` でビルドする。
+WebTransport over HTTP/3 の QUIC 層は tobi-quic 固定であり、既定の tobi-quic ビルドでは
+`--transport wt-h3` を選べる。s2n-quic は RESET_STREAM_AT を実装していないため、s2n-quic を
+選んだビルドでは `--transport wt-h3` を選べない。
 tobi-quic は Windows 非対応のため、Windows ビルドでは tobi-quic を依存に含めず、`quic-tobi` と
-`--transport wt-h3` を提供しない。Windows ビルドでは `quic-s2n` / `quic-ngtcp2` のバックエンドと
-`quic` / `wt-h2` / `qmux` / `auto` の経路を使う。詳細は [tokio-moq](../tokio-moq/README.md) を参照すること。
+`--transport wt-h3` を提供しない。Windows ビルドでは
+`--no-default-features --features quic-s2n` (または `quic-ngtcp2`) を指定し、`quic` / `wt-h2` /
+`qmux` / `auto` の経路を使う。詳細は [tokio-moq](../tokio-moq/README.md) を参照すること。
 
 ```bash
-# 既定の s2n-quic
+# 既定の tobi-quic
 cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
 
-# tobi-quic に切り替える
-cargo run -p moq-sub --no-default-features --features quic-tobi -- --url moqt://127.0.0.1:4443 --namespace moq-example
+# s2n-quic に切り替える
+cargo run -p moq-sub --no-default-features --features quic-s2n -- --url moqt://127.0.0.1:4443 --namespace moq-example
 ```
 
 ## Multipath QUIC
 
-`quic-tobi` バックエンドの Windows 以外のビルドでは、native QUIC 経路で Multipath QUIC (RFC 10069) を使える。既定は無効であり、`--multipath` を指定したときだけ `initial_max_path_id` を広告する。
+既定の tobi-quic バックエンドの Windows 以外のビルドでは、native QUIC 経路で Multipath QUIC (RFC 10069) を使える。既定は無効であり、`--multipath` を指定したときだけ `initial_max_path_id` を広告する。
 
 - `handover` は最良の 1 本で送り、回線が使えなくなったときに切り替える
 - `aggregate` は送信に使えるすべてのパスで同時に送る。tobi-quic の `WeightedRoundRobin` スケジューラーと BBRv3 を組み合わせる
@@ -49,12 +50,12 @@ cargo run -p moq-sub --no-default-features --features quic-tobi -- --url moqt://
 s2n-quic / ngtcp2 バックエンド、WebTransport、QMux、Windows では使えない。`--transport auto` とも併用できず、`--transport quic` を明示する必要がある。詳細は [docs/multipath.md](../../docs/multipath.md) を参照すること。
 
 ```bash
-# Multipath QUIC の Handover で接続する (tobi-quic ビルドが必要)
-cargo run -p moq-sub --no-default-features --features quic-tobi -- \
+# Multipath QUIC の Handover で接続する
+cargo run -p moq-sub -- \
   --url moqt://127.0.0.1:4443 --namespace moq-example --multipath handover
 
 # Wi-Fi とモバイル回線を監視し、自動でパスを開閉する
-cargo run -p moq-sub --no-default-features --features quic-tobi -- \
+cargo run -p moq-sub -- \
   --url moqt://127.0.0.1:4443 --namespace moq-example \
   --multipath handover --multipath-network-monitor-ms 1000 \
   --multipath-keep-alive-ms 10000
@@ -69,8 +70,8 @@ cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
 # 自己署名証明書を使うローカル relay で試す (開発用。証明書検証をスキップする)
 cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --insecure
 
-# WebTransport over HTTP/3 で起動する (tobi-quic ビルドが必要)
-cargo run -p moq-sub --no-default-features --features quic-tobi -- --url moqt://127.0.0.1:4443 --namespace moq-example --transport wt-h3
+# WebTransport over HTTP/3 で起動する
+cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --transport wt-h3
 
 # QMux (TCP+TLS。UDP が使えない環境向け。experimental) で起動する
 cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --transport qmux
@@ -98,7 +99,7 @@ cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --re
 | `--transport` | (省略時は `--url` の `msf` fragment の `connection`、無ければ `quic`) | 接続経路 (`quic` / `wt-h3` / `wt-h2` / `qmux` / `auto`)。`wt-h3` は s2n-quic バックエンドのビルドと Windows ビルドでは選べない。`qmux` は experimental。`auto` は Happy Eyeballs v3 で候補を競争する (詳細は [tokio-moq](../tokio-moq/README.md) を参照する) |
 | `--cert` | | TLS CA 証明書パス。省略時は OS のシステムルートストアで検証する |
 | `--insecure` | | 証明書検証をスキップする (開発用。接続時に警告ログが出る。`--cert` と同時には指定できない) |
-| `--multipath` | `off` | Multipath QUIC のパスの使い方 (`off` / `handover` / `aggregate` / `backup`)。`off` 以外で `initial_max_path_id` を広告する。`quic-tobi` バックエンドの native QUIC 経路だけで使える |
+| `--multipath` | `off` | Multipath QUIC のパスの使い方 (`off` / `handover` / `aggregate` / `backup`)。`off` 以外で `initial_max_path_id` を広告する。tobi-quic (既定) の native QUIC 経路だけで使える |
 | `--multipath-interface` | (すべて) | 自動でパスを開くインターフェース名のカンマ区切り |
 | `--multipath-interface-deny` | | 自動でパスを開かないインターフェース名のカンマ区切り |
 | `--multipath-max-paths` | `2` | 自動で開くパスの同時数の上限 (1〜64) |
@@ -137,7 +138,7 @@ moq-sub は catalog / 映像 / 音声の SUBSCRIBE に `RENDEZVOUS_TIMEOUT` (`0x
 - `--no-play` を `--mp4` なしで指定した場合は受信したメディアを破棄する (警告ログが出る)
 
 WebTransport 経路 (`--transport wt-h3` / `--transport wt-h2`) は Extended CONNECT でセッションを確立する。
-`wt-h3` は s2n-quic バックエンドのビルドと Windows ビルドでは選べない (s2n-quic は RESET_STREAM_AT を実装しておらず、tobi-quic は Windows 非対応であるため)。
+`wt-h3` は s2n-quic バックエンドのビルドと Windows ビルドでは選べない (s2n-quic は RESET_STREAM_AT を実装しておらず、tobi-quic は Windows 非対応であるため)。既定の tobi-quic ビルドでは選べる。
 `wt-h2` は reset を `WT_RESET_STREAM` capsule で行うため、MoQ リレーの capsule 対応に依存する。
 詳細は [tokio-moq](../tokio-moq/README.md) を参照すること。
 

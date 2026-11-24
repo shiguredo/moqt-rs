@@ -45,14 +45,22 @@ test publish_and_subscribe_audio_redundancy_roundtrip ... ok
 test publish_and_subscribe_roundtrip ... ok
 ```
 
-既定のビルドは s2n-quic である。WebTransport over HTTP/3 (`wt-h3`) を試すときは
-`--no-default-features --features quic-tobi` を付ける。s2n-quic は RESET_STREAM_AT を
-実装していないため、既定のビルドでは `--transport wt-h3` がエラーになる。tobi-quic は
-Windows 非対応のため、Windows では `wt-h3` を試せない。
+既定のビルドは tobi-quic である。WebTransport over HTTP/3 (`wt-h3`) も既定のビルドで試せる。
+s2n-quic は RESET_STREAM_AT を実装していないため、s2n-quic を選んだビルド
+(`--no-default-features --features quic-s2n`) では `--transport wt-h3` がエラーになる。
+tobi-quic は Windows 非対応のため、Windows では `--no-default-features --features quic-s2n`
+を使い、`wt-h3` は試せない。
 
 ```console
 $ MOQT_E2E_TRANSPORT=wt-h3 MOQT_E2E_URL=moqt://<HOST>/ \
-    cargo test -p e2e-tests --no-default-features --features quic-tobi -- --ignored
+    cargo test -p e2e-tests -- --ignored
+```
+
+s2n-quic で試す場合は、既定 feature を外して `quic-s2n` を選ぶ。
+
+```console
+$ MOQT_E2E_URL=moqt://<HOST>/ \
+    cargo test -p e2e-tests --no-default-features --features quic-s2n -- --ignored
 ```
 
 ## 環境変数
@@ -60,7 +68,7 @@ $ MOQT_E2E_TRANSPORT=wt-h3 MOQT_E2E_URL=moqt://<HOST>/ \
 | 変数 | 既定 | 内容 |
 | --- | --- | --- |
 | `MOQT_E2E_URL` | (必須) | 接続先 URL (`moqt://host[:port]/path`) |
-| `MOQT_E2E_TRANSPORT` | `quic` | トランスポート (`quic` / `wt-h3` / `wt-h2`)。`wt-h3` は s2n-quic 以外のバックエンドのビルドで選べる |
+| `MOQT_E2E_TRANSPORT` | `quic` | トランスポート (`quic` / `wt-h3` / `wt-h2`)。`wt-h3` は既定の tobi-quic ビルドで選べる。s2n-quic を選んだビルドと Windows では選べない |
 | `MOQT_E2E_INSECURE` | (未設定) | `1` を指定すると publisher / subscriber に `--insecure` を渡す (relay が自己署名証明書を使う場合だけ設定する) |
 | `MOQT_E2E_KEEP` | (未設定) | `1` を指定すると受信した MP4 を残す (残した場所は `--nocapture` を付けたときに表示される) |
 

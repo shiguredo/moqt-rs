@@ -4,7 +4,12 @@
 
 QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux の接続確立と、Sans I/O な `shiguredo_moqt::session::core::Session` を Tokio の I/O と結線する `MoqtClient` を提供する。`--url` と `--transport` の解釈もこのクレートが担う。`--transport auto` では、候補の経路を Happy Eyeballs v3 (draft-ietf-happy-happyeyeballs-v3-05) の考え方で競争させ、最初に確立した経路を使う。
 
-tobi-quic は Windows 非対応のため、Windows ビルドでは tobi-quic を依存に含めず、WebTransport over HTTP/3 (`wt-h3`) と `quic-tobi` バックエンドを提供しない。Windows ビルドで選べるネイティブ QUIC のバックエンドは `quic-s2n` / `quic-ngtcp2` であり、接続経路は `quic` / `wt-h2` / `qmux` / `auto` になる。
+ネイティブ QUIC の既定のバックエンドは tobi-quic である。tobi-quic は Windows 非対応の
+ため、Windows ビルドでは `--no-default-features --features quic-s2n` (または `quic-ngtcp2`)
+を指定する。Windows ビルドでは tobi-quic を依存に含めず、WebTransport over HTTP/3
+(`wt-h3`) と `quic-tobi` バックエンドを提供しない。Windows ビルドで選べるネイティブ QUIC の
+バックエンドは `quic-s2n` / `quic-ngtcp2` であり、接続経路は `quic` / `wt-h2` / `qmux` /
+`auto` になる。
 
 ## 提供する範囲
 
@@ -16,7 +21,7 @@ tobi-quic は Windows 非対応のため、Windows ビルドでは tobi-quic を
 - 接続確立：`quic` / `webtransport_h3` / `webtransport_h2` / `qmux` の各モジュールが TLS とハンドシェイクを行う (`webtransport_h3` は Windows ビルドでは提供しない)。`happy-eyeballs` クレートの Sans I/O スケジューラが `--transport auto` の候補の並びと開始時刻を決め、`tokio-moq` のアダプタが接続 future とタイマーを駆動する
 - `transport`：4 経路を統一的に扱う `SendStream` / `RecvStream` / `StreamHandle` / `StreamAcceptor` / `BidiStreamAcceptor`
 - `happy_eyeballs::Config`：`--transport auto` と複数アドレスの競争に使う Connection Attempt Delay、最小値、最大値、倍率、Preferred Address Family Count を設定する
-- `multipath`：Multipath QUIC (RFC 10069) のモード、インターフェースのフィルタ、パス数の上限、ネットワーク監視、keep-alive を設定する。`quic-tobi` バックエンドの native QUIC 経路だけで使える
+- `multipath`：Multipath QUIC (RFC 10069) のモード、インターフェースのフィルタ、パス数の上限、ネットワーク監視、keep-alive を設定する。既定の `quic-tobi` バックエンドの native QUIC 経路だけで使える
 - `moqt_client::MoqtClient`：control stream と bidi request stream を駆動する。`establish_quic` /
   `establish_wt` (wt-h3) / `establish_wt_h2` / `establish_qmux` (qmux) で確立し、`publish_track` /
   `subscribe_track` / `send_subscribe_ok` / `send_request_error` / `next_event` / `tick` などで
@@ -92,7 +97,7 @@ scheme は RFC 3986 §3.1 に従い大文字小文字を区別しない (`MOQT:/
 | `--transport` | `Transport` | 接続経路 | 備考 |
 | --- | --- | --- | --- |
 | `quic` | `Transport::Quic` | QUIC 直接接続 | ALPN は `moqt-23` |
-| `wt-h3` | `Transport::WtH3` | WebTransport over HTTP/3 | QUIC 上の ALPN は `h3`。s2n-quic バックエンドのビルドと Windows ビルドでは選べない |
+| `wt-h3` | `Transport::WtH3` | WebTransport over HTTP/3 | QUIC 上の ALPN は `h3`。既定の tobi-quic ビルドでは選べる。s2n-quic バックエンドのビルドと Windows ビルドでは選べない |
 | `wt-h2` | `Transport::WtH2` | WebTransport over HTTP/2 | TCP+TLS 上の ALPN は `h2` |
 | `qmux` | `Transport::Qmux` | QMux | TCP+TLS 上の ALPN は `moqt-23`。UDP が使えない環境向け。experimental |
 | `auto` | `Transport::Auto` | Happy Eyeballs v3 による自動選択 | `connection` が無ければ `quic` → `wt-h3` → `qmux` → `wt-h2` を競争する。`connection=q` は `quic` だけ、`connection=wt` は `wt-h3` → `wt-h2` |
@@ -133,35 +138,36 @@ Connection Attempt Delay などの値は `ConnectParams::happy_eyeballs`
 
 ### QUIC バックエンド
 
-ネイティブ QUIC (`--transport quic`) の実装は cargo feature で選ぶ。既定は s2n-quic である。
-tobi-quic / ngtcp2-rs も選べる。ちょうど 1 つだけを有効にすること。
+ネイティブ QUIC (`--transport quic`) の実装は cargo feature で選ぶ。既定は tobi-quic である。
+s2n-quic / ngtcp2-rs も選べる。ちょうど 1 つだけを有効にすること。
 
 | feature | QUIC 実装 | 備考 |
 | --- | --- | --- |
-| `quic-s2n` | s2n-quic | 既定。`RESET_STREAM_AT` を実装していないため `wt-h3` は選べない |
-| `quic-tobi` | tobi-quic | crates.io 未公開のため git の main を追う。`wt-h3` と Multipath QUIC (RFC 10069) もこのビルドで使う。Windows では選べない |
+| `quic-s2n` | s2n-quic | `RESET_STREAM_AT` を実装していないため `wt-h3` は選べない |
+| `quic-tobi` | tobi-quic | 既定。crates.io 未公開のため git の main を追う。`wt-h3` と Multipath QUIC (RFC 10069) もこのビルドで使う。Windows では選べない |
 | `quic-ngtcp2` | ngtcp2-rs | `shiguredo_ngtcp2_tokio` 経由。初回ビルドで ngtcp2 本体を取得・ビルドする |
 
 ```bash
-# 既定の s2n-quic
+# 既定の tobi-quic
 cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example
 
-# tobi-quic / ngtcp2-rs に切り替える (-p の crate と依存の既定 feature を同時に外す)
-cargo run -p moq-pub --no-default-features --features quic-tobi -- --url moqt://127.0.0.1:4443 --namespace moq-example
+# s2n-quic / ngtcp2-rs に切り替える (-p の crate の既定 feature を外す)
+cargo run -p moq-pub --no-default-features --features quic-s2n -- --url moqt://127.0.0.1:4443 --namespace moq-example
 cargo run -p moq-sub --no-default-features --features quic-ngtcp2 -- --url moqt://127.0.0.1:4443 --namespace moq-example
 ```
 
 WebTransport over HTTP/3 (`wt-h3`) の QUIC 層は tobi-quic 固定である。s2n-quic と ngtcp2-rs は
 ネイティブ QUIC にだけ使う。このため tobi-quic は Windows 以外のビルドではバックエンドの選択に
-関わらず依存に含まれる。s2n-quic は `RESET_STREAM_AT` を実装していないため、`quic-s2n` を選んだ
-ビルドでは `wt-h3` を選べない (`Transport::parse` / `resolve_transport` が拒否する)。`wt-h3` を
-使うときは `--no-default-features --features quic-tobi` でビルドする。
+関わらず依存に含まれる。既定の tobi-quic ビルドでは `wt-h3` をそのまま使える。s2n-quic は
+`RESET_STREAM_AT` を実装していないため、`quic-s2n` を選んだビルドでは `wt-h3` を選べない
+(`Transport::parse` / `resolve_transport` が拒否する)。
 tobi-quic は Windows 非対応のため、Windows ビルドでは tobi-quic を依存に含めず、`quic-tobi` と
-`wt-h3` を提供しない (`quic-tobi` を選ぶとコンパイルエラーになる)。
+`wt-h3` を提供しない (既定のままではコンパイルエラーになるため、`--no-default-features
+--features quic-s2n` を指定する)。
 
 ### Multipath QUIC
 
-`quic-tobi` バックエンドの Windows 以外のビルドでは、native QUIC 経路で Multipath QUIC (RFC 10069) を使える。既定は無効であり、`ConnectParams::multipath` (`tokio_moq::multipath::MultipathOptions`) の `mode` を `Off` 以外にしたときだけ `initial_max_path_id` を広告する。moq-pub / moq-sub では `--multipath` などで指定する。
+既定の quic-tobi バックエンドの Windows 以外のビルドでは、native QUIC 経路で Multipath QUIC (RFC 10069) を使える。既定は無効であり、`ConnectParams::multipath` (`tokio_moq::multipath::MultipathOptions`) の `mode` を `Off` 以外にしたときだけ `initial_max_path_id` を広告する。moq-pub / moq-sub では `--multipath` などで指定する。
 
 - パスの使い方は `handover` / `aggregate` / `backup` から選ぶ
 - `network_monitor_interval` を指定すると、インターフェースの増減に追従してパスを自動で開閉する
@@ -226,8 +232,8 @@ cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --in
 
 QMux のハーネス (`QmuxTestPeerServer` / `TestPeer::wait_qmux_closed` など) はこの crate 自身の `#[cfg(test)]` テスト専用で、他クレートからは参照できない。`QmuxTestPeerServer` が TCP + TLS (ALPN `moqt-23`) を 127.0.0.1 に立て、`qmux` モジュールのテストが SETUP の交換、PUBLISH / SUBSCRIBE、subgroup stream と datagram の往復、ピアの STOP_SENDING の観測を実行で検証する。
 
-Multipath QUIC のテストは tobi-quic バックエンドのビルドだけで実行する。ループバックで実際に Multipath をネゴシエーションし、追加パスが `PathState::Active` になることと、その状態でストリームのデータが届くことを検証する。
+Multipath QUIC のテストは既定の tobi-quic ビルドで実行する。ループバックで実際に Multipath をネゴシエーションし、追加パスが `PathState::Active` になることと、その状態でストリームのデータが届くことを検証する。
 
 ```bash
-cargo test -p tokio-moq --no-default-features --features quic-tobi multipath
+cargo test -p tokio-moq multipath
 ```
