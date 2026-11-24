@@ -2,7 +2,12 @@
 //!
 //! noargs でオプションを定義し、[`Config`] にまとめる。
 
+use std::time::Duration;
+
 use shiguredo_moqt::message::common::TrackNamespace;
+use tokio_moq::multipath::{
+    InterfaceFilter, MultipathMode, MultipathOptions, parse_interface_names,
+};
 use tokio_moq::{ServerUrl, Transport};
 
 /// CLI オプション
@@ -24,6 +29,11 @@ pub struct Config {
     ///
     /// 接続時に警告ログを出す。`cert` と同時には指定できない。
     pub insecure: bool,
+    /// Multipath QUIC (RFC 10069) の設定
+    ///
+    /// `mode` が `Off` 以外のときだけ Multipath QUIC を広告する。有効にできるのは
+    /// `quic-tobi` バックエンドのネイティブ QUIC 経路だけである。
+    pub multipath: MultipathOptions,
     /// Track Namespace (draft-ietf-moq-transport-23 §8.8 表現をパースしたもの)
     pub namespace: TrackNamespace,
     /// 映像トラックを受信するかどうか
@@ -196,6 +206,127 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         ));
     }
 
+    // Multipath QUIC (RFC 10069) は tobi-quic のネイティブ QUIC 経路だけで使える。
+    // 既定は無効であり、--multipath を指定したときだけ有効にする。
+    let multipath_mode: MultipathMode = noargs::opt("multipath")
+        .ty("MODE")
+        .doc("Multipath QUIC mode (off | handover | aggregate | backup; default off; aggregate uses WeightedRoundRobin and BBRv3; requires the quic-tobi backend and --transport quic)")
+        .default("off")
+        .take(&mut args)
+        .then(|o| MultipathMode::parse(o.value()))?;
+    let multipath_interface: Option<Vec<String>> = noargs::opt("multipath-interface")
+        .ty("NAMES")
+        .doc("Comma-separated network interface names to use for automatic multipath path management (default: all interfaces)")
+        .take(&mut args)
+        .present_and_then(|o| parse_interface_names(o.value()))?;
+    let multipath_interface_deny: Option<Vec<String>> = noargs::opt("multipath-interface-deny")
+        .ty("NAMES")
+        .doc("Comma-separated network interface names to exclude from automatic multipath path management")
+        .take(&mut args)
+        .present_and_then(|o| parse_interface_names(o.value()))?;
+    if multipath_interface.is_some() && multipath_interface_deny.is_some() {
+        return Err(noargs::Error::other(
+            &args,
+            "--multipath-interface and --multipath-interface-deny cannot be used together",
+        ));
+    }
+    let multipath_max_paths: Option<usize> = noargs::opt("multipath-max-paths")
+        .ty("N")
+        .doc("Maximum number of automatically opened multipath paths (1-64, default 2)")
+        .take(&mut args)
+        .present_and_then(|o| {
+            let value: usize = o
+                .value()
+                .parse()
+                .map_err(|_| format!("--multipath-max-paths must be an integer: {}", o.value()))?;
+            if !(1..=64).contains(&value) {
+                return Err("--multipath-max-paths must be between 1 and 64".to_string());
+            }
+            Ok(value)
+        })?;
+    let multipath_network_monitor_ms: Option<u64> = noargs::opt("multipath-network-monitor-ms")
+        .ty("MS")
+        .doc("Poll the network interfaces every MS milliseconds and open or close multipath paths automatically (requires --multipath)")
+        .take(&mut args)
+        .present_and_then(|o| {
+            let value: u64 = o.value().parse().map_err(|_| {
+                format!(
+                    "--multipath-network-monitor-ms must be an integer: {}",
+                    o.value()
+                )
+            })?;
+            if value == 0 {
+                return Err(
+                    "--multipath-network-monitor-ms must be greater than zero".to_string()
+                );
+            }
+            Ok(value)
+        })?;
+    let multipath_keep_alive_ms: Option<u64> = noargs::opt("multipath-keep-alive-ms")
+        .ty("MS")
+        .doc("Send keep-alives on multipath standby paths every MS milliseconds (requires --multipath)")
+        .take(&mut args)
+        .present_and_then(|o| {
+            let value: u64 = o.value().parse().map_err(|_| {
+                format!(
+                    "--multipath-keep-alive-ms must be an integer: {}",
+                    o.value()
+                )
+            })?;
+            if value == 0 {
+                return Err("--multipath-keep-alive-ms must be greater than zero".to_string());
+            }
+            Ok(value)
+        })?;
+    if !multipath_mode.is_enabled()
+        && (multipath_interface.is_some()
+            || multipath_interface_deny.is_some()
+            || multipath_max_paths.is_some()
+            || multipath_network_monitor_ms.is_some()
+            || multipath_keep_alive_ms.is_some())
+    {
+        return Err(noargs::Error::other(
+            &args,
+            "multipath options require --multipath <off|handover|aggregate|backup>",
+        ));
+    }
+    let interface_filter = match (multipath_interface, multipath_interface_deny) {
+        (Some(names), None) => InterfaceFilter::Allow(names),
+        (None, Some(names)) => InterfaceFilter::Deny(names),
+        (None, None) => InterfaceFilter::All,
+        (Some(_), Some(_)) => {
+            return Err(noargs::Error::other(
+                &args,
+                "--multipath-interface and --multipath-interface-deny cannot be used together",
+            ));
+        }
+    };
+    // 自動で開くパス数の上限に合わせて、Path ID の上限も少なくとも 4 にする。
+    // Path ID は接続中に使い回さないため、同時数より小さいと開き直しで枯渇する。
+    let max_paths = multipath_max_paths.unwrap_or(2);
+    let multipath = MultipathOptions {
+        mode: multipath_mode,
+        interface_filter,
+        max_paths,
+        initial_max_path_id: (max_paths as u32).max(4),
+        network_monitor_interval: multipath_network_monitor_ms.map(Duration::from_millis),
+        keep_alive_interval: multipath_keep_alive_ms.map(Duration::from_millis),
+    };
+    if multipath.mode.is_enabled() {
+        if let Some(reason) = tokio_moq::multipath_unavailable_reason() {
+            return Err(noargs::Error::other(&args, reason));
+        }
+        if transport != Transport::Quic {
+            return Err(noargs::Error::other(
+                &args,
+                "multipath QUIC requires --transport quic (it is not available for WebTransport or QMux)",
+            ));
+        }
+        multipath
+            .validate()
+            .map_err(|e| noargs::Error::other(&args, e))?;
+    }
+
     // `--namespace` は省略可能で、省略した場合は `--url` の msf fragment
     // (draft-ietf-moq-msf-02 §11.1 (URL construction and interpretation)) の
     // track-identifier が示す namespace を使う。どちらにも無い場合はエラーになる。
@@ -307,6 +438,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         transport,
         cert,
         insecure,
+        multipath,
         namespace,
         video_enabled,
         audio_enabled,
@@ -880,5 +1012,144 @@ mod tests {
                 "エラーにオプション名が含まれること: {message}"
             );
         }
+    }
+
+    /// Multipath の既定が無効であること
+    #[test]
+    fn multipath_defaults_to_off() {
+        let config = parse_args(BASE_ARGS)
+            .expect("パースできること")
+            .expect("設定が返ること");
+        assert_eq!(config.multipath.mode, MultipathMode::Off);
+        assert_eq!(config.multipath.interface_filter, InterfaceFilter::All);
+        assert_eq!(config.multipath.max_paths, 2);
+        assert_eq!(config.multipath.initial_max_path_id, 4);
+        assert!(config.multipath.network_monitor_interval.is_none());
+        assert!(config.multipath.keep_alive_interval.is_none());
+    }
+
+    /// Multipath の付随オプションはモードの指定を要求すること
+    #[test]
+    fn multipath_options_require_the_mode() {
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--multipath-max-paths", "3"]);
+        let error = match parse_args(&args) {
+            Ok(_) => panic!("--multipath の無い Multipath オプションを受理しないこと"),
+            Err(error) => error,
+        };
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("require --multipath"),
+            "モードの指定が必要であることを示すこと: {message}"
+        );
+    }
+
+    /// 未知の Multipath モードを拒否すること
+    #[test]
+    fn multipath_rejects_unknown_modes() {
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--multipath", "redundant"]);
+        let error = match parse_args(&args) {
+            Ok(_) => panic!("未知の Multipath モードを受理しないこと"),
+            Err(error) => error,
+        };
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("off, handover, aggregate, backup"),
+            "受け付けるモードの一覧を含めること: {message}"
+        );
+    }
+
+    /// インターフェースの許可と拒否を同時に指定できないこと
+    #[test]
+    fn multipath_rejects_allow_and_deny_interfaces_together() {
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&[
+            "--multipath",
+            "handover",
+            "--multipath-interface",
+            "en0",
+            "--multipath-interface-deny",
+            "wlan0",
+        ]);
+        let error = match parse_args(&args) {
+            Ok(_) => panic!("許可と拒否の同時指定を受理しないこと"),
+            Err(error) => error,
+        };
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("cannot be used together"),
+            "同時指定できないことを示すこと: {message}"
+        );
+    }
+
+    /// Multipath の各オプションを設定へ反映すること
+    #[cfg(feature = "quic-tobi")]
+    #[test]
+    fn multipath_options_are_parsed() {
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&[
+            "--multipath",
+            "aggregate",
+            "--multipath-interface",
+            "en0, wlan0",
+            "--multipath-max-paths",
+            "3",
+            "--multipath-network-monitor-ms",
+            "1000",
+            "--multipath-keep-alive-ms",
+            "5000",
+        ]);
+        let config = parse_args(&args)
+            .expect("パースできること")
+            .expect("設定が返ること");
+        assert_eq!(config.multipath.mode, MultipathMode::Aggregate);
+        assert_eq!(
+            config.multipath.interface_filter,
+            InterfaceFilter::Allow(vec!["en0".to_string(), "wlan0".to_string()])
+        );
+        assert_eq!(config.multipath.max_paths, 3);
+        assert_eq!(
+            config.multipath.network_monitor_interval,
+            Some(Duration::from_millis(1000))
+        );
+        assert_eq!(
+            config.multipath.keep_alive_interval,
+            Some(Duration::from_millis(5000))
+        );
+    }
+
+    /// Multipath は native QUIC 以外の経路では指定できないこと
+    #[cfg(feature = "quic-tobi")]
+    #[test]
+    fn multipath_requires_native_quic() {
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--multipath", "handover", "--transport", "wt-h2"]);
+        let error = match parse_args(&args) {
+            Ok(_) => panic!("WebTransport 経路の Multipath を受理しないこと"),
+            Err(error) => error,
+        };
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("--transport quic"),
+            "native QUIC が必要であることを示すこと: {message}"
+        );
+    }
+
+    /// Multipath を提供しないビルドでは指定できないこと
+    #[cfg(not(feature = "quic-tobi"))]
+    #[test]
+    fn multipath_is_rejected_when_unavailable() {
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--multipath", "handover"]);
+        let error = match parse_args(&args) {
+            Ok(_) => panic!("Multipath を提供しないビルドで指定を受理しないこと"),
+            Err(error) => error,
+        };
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("multipath QUIC is not available"),
+            "Multipath を利用できないことを示すこと: {message}"
+        );
     }
 }

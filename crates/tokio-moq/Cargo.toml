@@ -81,6 +81,8 @@ tobi_quic = { git = "https://github.com/shiguredo/tobi-quic", branch = "main" }
 # WebTransport over HTTP/3 は tobi-quic を直接使うため、この選択の対象外である。
 # ただし s2n-quic は RESET_STREAM_AT を実装しておらず wt-h3 を提供できないため、
 # quic-s2n を選んだビルドと Windows ビルドでは wt-h3 を選択できないものとして扱う。
+# Multipath QUIC (RFC 10069) も tobi-quic の実装を使うため、quic-tobi の Windows 以外の
+# ビルドだけで提供する。
 default = ["quic-s2n"]
 quic-ngtcp2 = ["dep:shiguredo_ngtcp2_tokio"]
 quic-s2n = ["dep:s2n-quic"]

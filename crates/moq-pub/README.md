@@ -32,6 +32,30 @@ cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example
 cargo run -p moq-pub --no-default-features --features quic-tobi -- --url moqt://127.0.0.1:4443 --namespace moq-example
 ```
 
+## Multipath QUIC
+
+`quic-tobi` バックエンドの Windows 以外のビルドでは、native QUIC 経路で Multipath QUIC (RFC 10069) を使える。既定は無効であり、`--multipath` を指定したときだけ `initial_max_path_id` を広告する。
+
+- `handover` は最良の 1 本で送り、回線が使えなくなったときに切り替える
+- `aggregate` は送信に使えるすべてのパスで同時に送る。tobi-quic の `WeightedRoundRobin` スケジューラーと BBRv3 を組み合わせる
+- `backup` は最初のパスで送り続け、使えなくなったときだけ待機パスへ切り替える
+- `--multipath-network-monitor-ms` を指定すると、インターフェースの増減に追従してパスを開閉する
+- `--multipath-keep-alive-ms` を指定すると、待機パスを keep-alive で維持する
+
+s2n-quic / ngtcp2 バックエンド、WebTransport、QMux、Windows では使えない。`--transport auto` とも併用できず、`--transport quic` を明示する必要がある。詳細は [docs/multipath.md](../../docs/multipath.md) を参照すること。
+
+```bash
+# Multipath QUIC の Handover で接続する (tobi-quic ビルドが必要)
+cargo run -p moq-pub --no-default-features --features quic-tobi -- \
+  --url moqt://127.0.0.1:4443 --namespace moq-example \
+  --multipath handover --fake-capture-device
+
+# 複数回線の帯域を集約する
+cargo run -p moq-pub --no-default-features --features quic-tobi -- \
+  --url moqt://127.0.0.1:4443 --namespace moq-example \
+  --multipath aggregate --multipath-max-paths 4 --fake-capture-device
+```
+
 ## 実行例
 
 ```bash
@@ -69,6 +93,12 @@ cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video' --f
 | `--transport` | (省略時は `--url` の `msf` fragment の `connection`、無ければ `quic`) | 接続経路 (`quic` / `wt-h3` / `wt-h2` / `qmux` / `auto`)。`wt-h3` は s2n-quic バックエンドのビルドと Windows ビルドでは選べない。`qmux` は experimental。`auto` は Happy Eyeballs v3 で候補を競争する (詳細は [tokio-moq](../tokio-moq/README.md) を参照する) |
 | `--cert` | | TLS CA 証明書パス。省略時は OS のシステムルートストアで検証する |
 | `--insecure` | | 証明書検証をスキップする (開発用。接続時に警告ログが出る。`--cert` と同時には指定できない) |
+| `--multipath` | `off` | Multipath QUIC のパスの使い方 (`off` / `handover` / `aggregate` / `backup`)。`off` 以外で `initial_max_path_id` を広告する。`quic-tobi` バックエンドの native QUIC 経路だけで使える |
+| `--multipath-interface` | (すべて) | 自動でパスを開くインターフェース名のカンマ区切り |
+| `--multipath-interface-deny` | | 自動でパスを開かないインターフェース名のカンマ区切り |
+| `--multipath-max-paths` | `2` | 自動で開くパスの同時数の上限 (1〜64) |
+| `--multipath-network-monitor-ms` | (監視しない) | ネットワークインターフェースの増減を監視する間隔 (ms) |
+| `--multipath-keep-alive-ms` | (アイドルタイムアウトから算出) | 待機パスに keep-alive を送る間隔 (ms) |
 | `--device-id` | | カメラデバイス ID |
 | `--width` | `1280` | 映像幅 (px) |
 | `--height` | `720` | 映像高さ (px) |

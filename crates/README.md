@@ -40,6 +40,7 @@ cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --in
 - `auto` は Happy Eyeballs v3 で複数の経路を競争する experimental な指定である。候補の並びは [tokio-moq](tokio-moq/README.md) を参照する
 - `wt-h3` / `wt-h2` は `--transport wt-h3` / `--transport wt-h2` で選ぶ。`wt-h3` は s2n-quic バックエンドのビルドと Windows ビルドでは選べない。`wt-h2` は `WT_RESET_STREAM` capsule を使うため MoQ リレーの capsule 対応に依存する
 - `qmux` は TCP + TLS 上で QUIC のストリームと DATAGRAM を多重化する経路で、TCP の再送による遅延や DATAGRAM の破棄があり得る
+- `quic-tobi` バックエンドの Windows 以外のビルドでは、native QUIC 経路で Multipath QUIC (RFC 10069) を使える。既定は無効で、`--multipath` (`off` / `handover` / `aggregate` / `backup`) を指定したときだけ有効になる。詳細は [docs/multipath.md](../docs/multipath.md) を参照する
 - WebTransport (`wt-h3`) の QUIC 層は tobi-quic 固定である。s2n-quic は RESET_STREAM_AT を実装していないため、既定の s2n-quic ビルドでは `wt-h3` を選べない。使う場合は `--no-default-features --features quic-tobi` でビルドする (Windows ビルドでは tobi-quic 非対応のため `wt-h3` を選べない)
 - `--namespace` を省略すると MSF fragment の track-identifier の namespace を使う。どちらも無ければエラー
 - MSF fragment の `cat` は SETUP と PUBLISH / SUBSCRIBE / FETCH / REQUEST_UPDATE の AUTHORIZATION_TOKEN として送信する

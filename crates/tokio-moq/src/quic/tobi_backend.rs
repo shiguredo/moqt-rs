@@ -14,6 +14,7 @@ use super::tobi;
 pub use super::tobi::RecvStream;
 use super::{ALPN, QuicError, StopSendingReceiver};
 use crate::error::{Result, TransportError};
+use crate::multipath::{MultipathMode, MultipathOptions};
 
 /// 接続を確立する前の接続
 ///
@@ -246,23 +247,36 @@ impl StreamAcceptor {
 /// `cert_path` が指定された場合はその CA 証明書で検証し、`insecure` が true の場合は
 /// 検証をスキップする (開発用)。どちらも指定されない場合は OS のシステムルートストアで
 /// 検証する。
+///
+/// `multipath.mode` が [`MultipathMode::Off`](crate::multipath::MultipathMode::Off) 以外の
+/// 場合は Multipath QUIC を広告し、パスの使用方針とネットワーク監視を設定する。
 pub(crate) async fn connect(
     socket_addr: SocketAddr,
     server_name: &str,
     cert_path: Option<&str>,
     insecure: bool,
+    multipath: &MultipathOptions,
 ) -> Result<(Connected, StopSendingReceiver)> {
     let tls = crate::tls::build_quic_client_config(cert_path, insecure, ALPN)?;
 
     // qlog は QLOGDIR が設定されているときだけ有効にする (診断用)
     let qlog_factory = crate::quic::qlog::DirFactory::from_env();
 
+    // Multipath を有効にする場合だけ、Path ID の上限と keep-alive を設定した
+    // transport parameter を使う。パスの使い方とインターフェースのフィルタは
+    // `with_multipath` の `MultipathConfig` が上書きする。
+    let transport = if multipath.mode.is_enabled() {
+        tobi::build_multipath_transport_config(multipath)
+    } else {
+        tobi::build_transport_config()
+    };
+
     // ビルダーに保持した設定は `start()` で固定順に適用されるため、呼ぶ順序に
     // 依存しない
-    let builder = Client::builder()
+    let mut builder = Client::builder()
         .with_tls(ClientTlsConfig::new(tls))
         .with_io(IoConfig::new(crate::local_bind_addr(socket_addr)))
-        .with_transport(tobi::build_transport_config())
+        .with_transport(transport)
         .with_datagram(tobi::datagram_config())
         // s2n-quic の endpoint は Server / Client のハンドルとは独立したタスクで常時
         // ソケットを駆動していた。tobi-quic の既定はコマンド駆動であり、アプリが API を
@@ -270,6 +284,21 @@ pub(crate) async fn connect(
         // からバックグラウンド駆動を有効にする。無効のままだと、MOQT 層が受信待ちに
         // 入っている間に ACK や再送が止まる。
         .with_background_driver(true);
+    if let Some(config) = tobi::build_multipath_config(multipath) {
+        builder = builder.with_multipath(config);
+    }
+    if multipath.mode == MultipathMode::Aggregate {
+        // 既定の MinRtt は 1 本のパスにしかデータを載せないため、Aggregate モードでは
+        // 複数パスへ振り分けるスケジューラーと BBR 系の輻輳制御を使う。
+        builder = builder
+            .with_scheduler(tobi::aggregate_scheduler_config())
+            .with_congestion_control(tobi_quic::CongestionControlAlgorithm::BbrV3);
+    }
+    if multipath.mode.is_enabled()
+        && let Some(interval) = multipath.network_monitor_interval
+    {
+        builder = builder.with_network_monitor(interval);
+    }
     let client = match qlog_factory {
         Some(factory) => builder.with_qlog_writer_factory(factory),
         None => builder,
@@ -294,6 +323,18 @@ pub(crate) async fn connect(
 
     tobi::spawn_packet_diagnostics(&connection);
     let stop_sending_rx = tobi::spawn_connection_observer(&connection);
+
+    if multipath.mode.is_enabled() {
+        // 待機パスを middlebox のタイムアウトで失わないよう、すべてのパスに
+        // keep-alive を設定する (RFC 10069 Section 5.9)。間隔を指定しない場合は
+        // transport parameter の max_idle_timeout から間隔を決める。
+        connection
+            .keep_alive(true)
+            .await
+            .map_err(|e| TransportError::Quic(format!("failed to enable keep-alive: {e}")))?;
+        // パスの開設・検証・切り替えは診断ログに出す。MOQT 層はパスを意識しない
+        tobi::spawn_path_observer(&connection);
+    }
 
     tracing::info!("Connected to {socket_addr}");
     let close_guard = Arc::new(CloseGuard::new(connection.clone()));
@@ -336,6 +377,19 @@ impl Server {
 /// テスト用の QUIC サーバーを起動する
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn start_server(tls: ServerTls, bind_addr: SocketAddr) -> Result<Server> {
+    start_server_with_multipath(tls, bind_addr, &MultipathOptions::default()).await
+}
+
+/// テスト用の QUIC サーバーを Multipath の設定付きで起動する
+///
+/// `multipath.mode` が `Off` 以外の場合は、クライアントから追加パスを受け付ける。
+/// テストで Multipath のネゴシエーションと追加パスの検証を確かめるために使う。
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) async fn start_server_with_multipath(
+    tls: ServerTls,
+    bind_addr: SocketAddr,
+    multipath: &MultipathOptions,
+) -> Result<Server> {
     let mut config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(
@@ -345,13 +399,200 @@ pub(crate) async fn start_server(tls: ServerTls, bind_addr: SocketAddr) -> Resul
         .map_err(|e| TransportError::Internal(format!("failed to set certificate: {e}")))?;
     config.alpn_protocols = tls.alpn;
 
-    let server = TobiServer::builder()
+    let transport = if multipath.mode.is_enabled() {
+        tobi::build_multipath_transport_config(multipath)
+    } else {
+        tobi::build_transport_config()
+    };
+    let mut builder = TobiServer::builder()
         .with_tls(ServerTlsConfig::new(Arc::new(config)))
         .with_io(IoConfig::new(bind_addr))
-        .with_transport(tobi::build_transport_config())
+        .with_transport(transport)
         .with_datagram(tobi::datagram_config())
-        .with_background_driver(true)
+        .with_background_driver(true);
+    if let Some(config) = tobi::build_multipath_config(multipath) {
+        builder = builder.with_multipath(config);
+    }
+    if multipath.mode == MultipathMode::Aggregate {
+        // クライアントと同じく、Aggregate モードでは複数パスへ振り分けるスケジューラーと
+        // BBR 系の輻輳制御を使う。
+        builder = builder
+            .with_scheduler(tobi::aggregate_scheduler_config())
+            .with_congestion_control(tobi_quic::CongestionControlAlgorithm::BbrV3);
+    }
+    if multipath.mode.is_enabled()
+        && let Some(interval) = multipath.network_monitor_interval
+    {
+        builder = builder.with_network_monitor(interval);
+    }
+    let server = builder
         .start()
         .map_err(|e| TransportError::Internal(format!("failed to start server: {e}")))?;
     Ok(Server { inner: server })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::multipath::MultipathOptions;
+    use std::time::Duration;
+    use tobi_quic::{NewPath, PathState};
+
+    /// テスト用のサーバー証明書を作る
+    fn test_server_tls() -> ServerTls {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("自己署名証明書を生成できること");
+        ServerTls {
+            cert_der: certified.cert.der().to_vec(),
+            key_der: certified.signing_key.serialize_der(),
+            alpn: vec![ALPN.to_vec()],
+        }
+    }
+
+    /// Multipath を有効にした接続を確立する
+    async fn connect_multipath_pair(options: &MultipathOptions) -> (Connected, Connected) {
+        let mut server = start_server_with_multipath(
+            test_server_tls(),
+            "127.0.0.1:0"
+                .parse()
+                .expect("ループバックアドレスのリテラルを解析できること"),
+            options,
+        )
+        .await
+        .expect("Multipath のサーバーを起動できること");
+        let addr = server.local_addr();
+        let (client, accepted) = tokio::join!(
+            connect(addr, "localhost", None, true, options),
+            server.accept(),
+        );
+        let (client, _stop_sending_rx) = client.expect("クライアントが接続できること");
+        let accepted = accepted.expect("サーバーが接続を受理できること");
+        (client, accepted)
+    }
+
+    /// Multipath を有効にすると Path ID の上限を広告し、追加パスが検証されること
+    ///
+    /// パスの使い方 (Handover / Aggregate) によらず、追加パスの検証とデータ転送が
+    /// 成立することを確かめる。
+    async fn assert_multipath_round_trip(options: MultipathOptions) {
+        let (client, server) = connect_multipath_pair(&options).await;
+
+        let params = client
+            .inner
+            .peer_transport_params()
+            .await
+            .expect("ハンドシェイクが完了していること");
+        assert!(
+            params.initial_max_path_id.is_some(),
+            "Multipath を有効にしたサーバーが initial_max_path_id を広告すること"
+        );
+
+        // 別のループバックポートから追加パスを開く。サーバーは同じ接続で受理する
+        let path = client
+            .inner
+            .open_path(NewPath::with_local_addr(
+                "127.0.0.1:0"
+                    .parse()
+                    .expect("ループバックアドレスのリテラルを解析できること"),
+            ))
+            .await
+            .expect("追加パスを開けること");
+
+        // パスイベントは接続の観測タスクが消費するため、状態の遷移を paths() で待つ
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let paths = client.inner.paths().await;
+            if paths
+                .iter()
+                .any(|snapshot| snapshot.handle == path && snapshot.state == PathState::Active)
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "追加パスが検証されて Active になること"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // パスを追加した後もストリームでデータを送受信できること
+        let mut send = client
+            .inner
+            .open_send_stream()
+            .await
+            .expect("単方向ストリームを開けること");
+        send.send_all(b"multipath")
+            .await
+            .expect("追加パスを経由してデータを送れること");
+        send.finish().await.expect("ストリームを FIN できること");
+
+        let mut recv = server
+            .inner
+            .accept_receive_stream()
+            .await
+            .expect("サーバーが単方向ストリームを受理できること");
+        let chunk = recv
+            .receive_vec(1024)
+            .await
+            .expect("Multipath 接続でデータを受信できること");
+        assert_eq!(
+            chunk.data, b"multipath",
+            "追加パスの検証後もデータが欠けずに届くこと"
+        );
+    }
+
+    /// Handover モードで追加パスを検証し、データを送受信できること
+    #[tokio::test(flavor = "multi_thread")]
+    async fn multipath_handover_validates_an_additional_path() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            assert_multipath_round_trip(MultipathOptions {
+                mode: MultipathMode::Handover,
+                initial_max_path_id: 4,
+                keep_alive_interval: Some(Duration::from_secs(10)),
+                ..MultipathOptions::default()
+            })
+            .await;
+        })
+        .await
+        .expect("Handover の Multipath が制限時間内に完了すること");
+    }
+
+    /// Aggregate モードでも追加パスを検証し、データを送受信できること
+    ///
+    /// Aggregate モードでは複数パスへ振り分けるスケジューラーと BBR 系の輻輳制御を
+    /// 使う。設定が接続の確立とデータ転送を壊さないことを確かめる。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn multipath_aggregate_validates_an_additional_path() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            assert_multipath_round_trip(MultipathOptions {
+                mode: MultipathMode::Aggregate,
+                initial_max_path_id: 4,
+                keep_alive_interval: Some(Duration::from_secs(10)),
+                ..MultipathOptions::default()
+            })
+            .await;
+        })
+        .await
+        .expect("Aggregate の Multipath が制限時間内に完了すること");
+    }
+
+    /// Multipath を無効にすると Path ID の上限を広告しないこと
+    #[tokio::test(flavor = "multi_thread")]
+    async fn multipath_off_does_not_advertise_path_ids() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let options = MultipathOptions::default();
+            let (client, _server) = connect_multipath_pair(&options).await;
+            let params = client
+                .inner
+                .peer_transport_params()
+                .await
+                .expect("ハンドシェイクが完了していること");
+            assert!(
+                params.initial_max_path_id.is_none(),
+                "Multipath を無効にした接続では initial_max_path_id を広告しないこと"
+            );
+        })
+        .await
+        .expect("Multipath を無効にした接続が制限時間内に確立すること");
+    }
 }

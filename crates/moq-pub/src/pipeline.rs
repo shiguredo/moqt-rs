@@ -581,6 +581,7 @@ fn publisher_connect_params<'a>(config: &'a Config, url: &'a ServerUrl) -> Conne
         // datagram を送らない設定では確認しない (`--datagram-max-size` が使われないため)
         datagram_max_size: (config.audio_enabled && config.audio_datagram)
             .then_some(config.datagram_max_size),
+        multipath: config.multipath.clone(),
         happy_eyeballs: happy_eyeballs::Config::default(),
     }
 }

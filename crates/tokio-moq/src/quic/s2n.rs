@@ -18,6 +18,7 @@ use super::CloseReason;
 use super::ServerTls;
 use super::{ALPN, QuicError, StopSendingObserved, StopSendingReceiver};
 use crate::error::{Result, TransportError};
+use crate::multipath::MultipathOptions;
 
 /// peer の STOP_SENDING と受信パケットの内訳を観測する購読者
 ///
@@ -500,7 +501,17 @@ pub(crate) async fn connect(
     server_name: &str,
     cert_path: Option<&str>,
     insecure: bool,
+    multipath: &MultipathOptions,
 ) -> Result<(Connected, StopSendingReceiver)> {
+    // s2n-quic は Multipath QUIC (RFC 10069) を実装していない。設定を黙って無視すると
+    // 利用者が有効になったと誤解するため、接続の試行前に拒否する。
+    if multipath.mode.is_enabled() {
+        return Err(TransportError::Unsupported(
+            "multipath QUIC is not available with the s2n-quic backend \
+             (build with --no-default-features --features quic-tobi)"
+                .to_string(),
+        ));
+    }
     let tls = crate::tls::build_quic_client_config(cert_path, insecure, ALPN)?;
     let tls = s2n_rustls::Client::from(tls);
 

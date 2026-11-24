@@ -835,6 +835,7 @@ use tokio_moq::moqt_client::{
     ClientEvent, DataPlaneHandle, FetchHeaderRegistration, FetchHeaderResolution, MoqtClient,
     StreamRead, SubscribeResult,
 };
+use tokio_moq::multipath::MultipathOptions;
 use tokio_moq::same_session_url;
 use tokio_moq::transport;
 use tokio_moq::webtransport::WtSessionState;
@@ -2155,6 +2156,8 @@ struct MigrationRequest {
     cert: Option<String>,
     /// 証明書検証をスキップするか (現在の接続と同じものを使う)
     insecure: bool,
+    /// Multipath QUIC の設定 (現在の接続と同じものを使う)
+    multipath: MultipathOptions,
     /// 移行先で張り直す購読の指定
     plan: ResubscribePlan,
     /// 再購読の Location Filter に使う、track ごとの最後の Location
@@ -2236,6 +2239,7 @@ async fn migrate_to_target(
         receive_datagrams: true,
         // subscriber は datagram を送らない
         datagram_max_size: None,
+        multipath: request.multipath.clone(),
         happy_eyeballs: happy_eyeballs::Config::default(),
     };
     let mut attempt: u32 = 0;
@@ -2755,6 +2759,8 @@ struct SideSessionRequest {
     cert: Option<String>,
     /// 証明書検証をスキップするか (現在の接続と同じものを使う)
     insecure: bool,
+    /// Multipath QUIC の設定 (現在の接続と同じものを使う)
+    multipath: MultipathOptions,
     /// 接続の期限 (最初の再発行要求の GOAWAY の Timeout から作る)
     ///
     /// 追加の要求は確立済みの session に相乗りするため、接続の期限は最初の要求で決まる。
@@ -2881,6 +2887,8 @@ struct SideSessionRuntime<'a> {
     cert: Option<String>,
     /// 証明書検証をスキップするか (現在の接続と同じものを使う)
     insecure: bool,
+    /// Multipath QUIC の設定 (現在の接続と同じものを使う)
+    multipath: MultipathOptions,
 }
 
 /// side session へ渡す共有状態を main ループの状態から組み立てる
@@ -2963,6 +2971,7 @@ fn start_side_session(
             transport: runtime.transport,
             cert: runtime.cert.clone(),
             insecure: runtime.insecure,
+            multipath: runtime.multipath.clone(),
             deadline,
             initial,
         },
@@ -3247,6 +3256,7 @@ async fn run_side_session(
         receive_datagrams: true,
         // subscriber は datagram を送らない
         datagram_max_size: None,
+        multipath: request.multipath.clone(),
         happy_eyeballs: happy_eyeballs::Config::default(),
     };
     let (mut client, mut recv_acceptor) = match tokio_moq::connect_with_retry(
@@ -4035,6 +4045,7 @@ async fn connect_subscriber(
             receive_datagrams: true,
             // subscriber は datagram を送らない
             datagram_max_size: None,
+            multipath: config.multipath.clone(),
             happy_eyeballs: happy_eyeballs::Config::default(),
         },
         task_monitor,
@@ -5543,6 +5554,7 @@ fn build_pipeline_state(
         transport: inputs.config.transport,
         cert: inputs.config.cert.clone(),
         insecure: inputs.config.insecure,
+        multipath: inputs.config.multipath.clone(),
         subscribe_tracks: inputs.config.subscribe_tracks,
         task_monitor: inputs.task_monitor.clone(),
         shutdown_monitor: inputs.shutdown_monitor,
@@ -5638,6 +5650,8 @@ struct PipelineState {
     cert: Option<String>,
     /// 証明書検証をスキップするか
     insecure: bool,
+    /// Multipath QUIC の設定
+    multipath: MultipathOptions,
     /// SUBSCRIBE_TRACKS を送るか
     subscribe_tracks: bool,
     /// 生成するタスクのメトリクスを収集する monitor
@@ -6064,6 +6078,7 @@ async fn handle_session_goaway(
         transport,
         cert,
         insecure,
+        multipath,
         task_monitor,
         publish_done_pending,
         permanently_ended_tracks,
@@ -6117,6 +6132,7 @@ async fn handle_session_goaway(
             transport: *transport,
             cert: cert.clone(),
             insecure: *insecure,
+            multipath: multipath.clone(),
             plan: {
                 let (plan, resolve_as_ended) = plan_for_migration(
                     resubscribe_plan,
@@ -6191,6 +6207,7 @@ async fn dispatch_subscribe_migration(
         transport,
         cert,
         insecure,
+        multipath,
         task_monitor,
         resubscribe_plan,
         last_received_locations,
@@ -6222,6 +6239,7 @@ async fn dispatch_subscribe_migration(
         transport: *transport,
         cert: cert.clone(),
         insecure: *insecure,
+        multipath: multipath.clone(),
     };
     dispatch_side_session_command(
         &mut side_session_runtime,
@@ -6585,6 +6603,7 @@ async fn handle_goaway_fetch(
         transport,
         cert,
         insecure,
+        multipath,
         task_monitor,
         client,
         permanently_ended_tracks,
@@ -6622,6 +6641,7 @@ async fn handle_goaway_fetch(
             transport: *transport,
             cert: cert.clone(),
             insecure: *insecure,
+            multipath: multipath.clone(),
         };
         dispatch_side_session_command(
             &mut side_session_runtime,
@@ -8332,6 +8352,7 @@ fn start_transport_drain_migration(state: &mut PipelineState) {
         transport,
         cert,
         insecure,
+        multipath,
         task_monitor,
         publish_done_pending,
         permanently_ended_tracks,
@@ -8366,6 +8387,7 @@ fn start_transport_drain_migration(state: &mut PipelineState) {
                 transport: *transport,
                 cert: cert.clone(),
                 insecure: *insecure,
+                multipath: multipath.clone(),
                 plan: {
                     let (plan, resolve_as_ended) = plan_for_migration(
                         resubscribe_plan,
@@ -19285,6 +19307,7 @@ mod tests {
                 impl_name: "moq-sub-test",
                 receive_datagrams: true,
                 datagram_max_size: None,
+                multipath: tokio_moq::multipath::MultipathOptions::default(),
                 happy_eyeballs: happy_eyeballs::Config::default(),
             };
             let (connected, peer) =
@@ -20027,6 +20050,7 @@ mod tests {
                 transport: Transport::Quic,
                 cert: None,
                 insecure: true,
+                multipath: tokio_moq::multipath::MultipathOptions::default(),
                 namespace: test_track_namespace(),
                 video_enabled: true,
                 audio_enabled: true,

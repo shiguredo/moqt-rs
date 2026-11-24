@@ -13,6 +13,7 @@
 //! tobi-quic は Windows 非対応のため、Windows ビルドでは `quic-tobi` と wt-h3 を提供しない。
 //! また s2n-quic は RESET_STREAM_AT を実装しておらず wt-h3 を提供できないため、
 //! `quic-s2n` を選んだビルドでも wt-h3 を選択できないものとして扱う。
+//! Multipath QUIC (RFC 10069) も `quic-tobi` の Windows 以外のビルドだけで使える。
 
 use tokio::sync::mpsc;
 
@@ -357,9 +358,18 @@ mod tests {
     /// ハングを「失敗」として観測するため、待ち合わせに上限を置く。
     async fn expect_connect_error(addr: std::net::SocketAddr, message: &str) -> TransportError {
         // テスト peer は自己署名証明書を使うため、証明書検証をスキップする
-        let result = tokio::time::timeout(TEST_TIMEOUT, connect(addr, "localhost", None, true))
-            .await
-            .expect("上限時間以内に完了すること");
+        let result = tokio::time::timeout(
+            TEST_TIMEOUT,
+            connect(
+                addr,
+                "localhost",
+                None,
+                true,
+                &crate::multipath::MultipathOptions::default(),
+            ),
+        )
+        .await
+        .expect("上限時間以内に完了すること");
         result.expect_err(message)
     }
 

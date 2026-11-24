@@ -37,6 +37,7 @@ use shiguredo_moqt::message_parameter::AuthorizationToken;
 use shiguredo_moqt::msf::uri::{MsfConnectionType, MsfFragment, parse_msf_fragment};
 
 use crate::error::TransportError;
+use crate::multipath::MultipathOptions;
 
 /// peer が内容を制御できる文字列をログ出力用にサニタイズする
 ///
@@ -146,6 +147,7 @@ mod connection_race;
 pub mod error;
 pub mod metrics;
 pub mod moqt_client;
+pub mod multipath;
 pub mod qmux;
 pub mod quic;
 pub mod transport;
@@ -219,6 +221,37 @@ pub fn wt_h3_unavailable_reason() -> Option<&'static str> {
 /// 利用できない理由は [`wt_h3_unavailable_reason`] で取得できる。
 pub fn is_wt_h3_available() -> bool {
     wt_h3_unavailable_reason().is_none()
+}
+
+/// Multipath QUIC を提供しないビルドで接続を試みたときのエラー
+///
+/// Multipath QUIC は tobi-quic の実装だけを使い、Windows では使えないため、
+/// `quic-tobi` 以外のバックエンドと Windows ビルドでは提供しない。
+#[cfg(not(all(not(windows), feature = "quic-tobi")))]
+const MULTIPATH_UNAVAILABLE: &str = "multipath QUIC is not available with this build: \
+     it requires the quic-tobi backend on a non-Windows platform \
+     (build with --no-default-features --features quic-tobi)";
+
+/// Multipath QUIC (RFC 10069) がこのビルドで利用できない理由
+///
+/// 利用できる場合は `None` を返す。`quic-tobi` バックエンドを選んだ Windows 以外の
+/// ビルドだけが Multipath QUIC を提供する。
+pub fn multipath_unavailable_reason() -> Option<&'static str> {
+    #[cfg(all(not(windows), feature = "quic-tobi"))]
+    {
+        None
+    }
+    #[cfg(not(all(not(windows), feature = "quic-tobi")))]
+    {
+        Some(MULTIPATH_UNAVAILABLE)
+    }
+}
+
+/// Multipath QUIC をこのビルドで利用できるか
+///
+/// 利用できない理由は [`multipath_unavailable_reason`] で取得できる。
+pub fn is_multipath_available() -> bool {
+    multipath_unavailable_reason().is_none()
 }
 
 /// トランスポート種別
@@ -1695,6 +1728,13 @@ pub struct ConnectParams<'a> {
     /// `max_datagram_frame_size` に収まるかを接続確立時に確認して警告する。`None` は
     /// datagram を送らない経路 (subscriber) を表す。
     pub datagram_max_size: Option<usize>,
+    /// Multipath QUIC (RFC 10069) の設定
+    ///
+    /// [`MultipathOptions::mode`] が [`MultipathMode::Off`](crate::multipath::MultipathMode::Off)
+    /// の場合は Multipath QUIC を広告しない。有効にできるのは `quic-tobi` バックエンドの
+    /// ネイティブ QUIC 経路だけであり、ほかのバックエンドや WebTransport / QMux を選ぶと
+    /// [`TransportError::Unsupported`] になる。
+    pub multipath: MultipathOptions,
     /// Happy Eyeballs v3 の設定
     ///
     /// [`Transport::Auto`] と、アドレスが複数ある場合の競争に使う。既定値は
@@ -1753,6 +1793,23 @@ pub async fn connect(
     {
         return Err(TransportError::Unsupported(reason.to_string()));
     }
+    // Multipath QUIC は tobi-quic のネイティブ QUIC 経路だけが使う。設定の誤りを接続の
+    // 試行より前に返し、候補の競争で無駄に接続しないようにする。mode が Off の場合も、
+    // Multipath 固有の設定が残っていないことを検証する。
+    params
+        .multipath
+        .validate()
+        .map_err(TransportError::InvalidState)?;
+    if params.multipath.mode.is_enabled() {
+        if let Some(reason) = multipath_unavailable_reason() {
+            return Err(TransportError::Unsupported(reason.to_string()));
+        }
+        if params.transport != Transport::Quic {
+            return Err(TransportError::Unsupported(
+                "multipath QUIC is only available for native QUIC (--transport quic)".to_string(),
+            ));
+        }
+    }
     let addrs = resolve_socket_addrs(&params.url.authority).await?;
     connect_resolved(params, task_monitor, &addrs).await
 }
@@ -1797,6 +1854,8 @@ struct AttemptContext {
     insecure: bool,
     /// WebTransport 経路で datagram の継続受信を有効にするか
     receive_datagrams: bool,
+    /// Multipath QUIC の設定
+    multipath: MultipathOptions,
 }
 
 /// URL の `msf` fragment の `connection` から q / wt の要求を取り出す
@@ -1888,6 +1947,7 @@ async fn connect_resolved(
         cert: params.cert.map(str::to_string),
         insecure: params.insecure,
         receive_datagrams: params.receive_datagrams,
+        multipath: params.multipath.clone(),
     });
     let config = params.happy_eyeballs.clone().sanitized();
     let transports = candidate_transports(params.transport, url)?;
@@ -1991,6 +2051,7 @@ async fn connect_transport(
                 server_name,
                 context.cert.as_deref(),
                 context.insecure,
+                &context.multipath,
             )
             .await?;
             Ok(ConnectedTransport::Quic(connection, stop_sending_rx))
@@ -3615,6 +3676,7 @@ mod tests {
             impl_name: "impl",
             receive_datagrams: false,
             datagram_max_size: None,
+            multipath: MultipathOptions::default(),
             happy_eyeballs: happy_eyeballs::Config::default(),
         };
         let debug = format!("{params:?}");
@@ -4158,7 +4220,8 @@ mod tests {
             async move {
                 counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 // テスト peer は自己署名証明書を使うため、証明書検証をスキップする
-                crate::quic::connect(addr, "localhost", None, true).await
+                crate::quic::connect(addr, "localhost", None, true, &MultipathOptions::default())
+                    .await
             }
         })
         .await
@@ -4196,6 +4259,7 @@ mod tests {
             impl_name: "test-client",
             receive_datagrams: false,
             datagram_max_size: None,
+            multipath: MultipathOptions::default(),
             happy_eyeballs: happy_eyeballs::Config::default(),
         };
         let monitor = tokio_metrics::TaskMonitor::new();
@@ -4211,6 +4275,147 @@ mod tests {
         assert!(
             message.contains("cert") && message.contains("insecure"),
             "どちらも指定できないことを示すこと: {message}"
+        );
+    }
+
+    /// Multipath を無効にしたまま Multipath 固有の設定を渡すと接続前にエラーになること
+    ///
+    /// 設定が無視されたと誤解しないよう、mode が Off のときは既定以外の値を拒否する。
+    #[tokio::test]
+    async fn connect_rejects_multipath_settings_with_off_mode() {
+        let url = parse_url("moqt://127.0.0.1:4443/").expect("URL を解釈できること");
+        let params = ConnectParams {
+            url: &url,
+            transport: Transport::Quic,
+            cert: None,
+            insecure: false,
+            impl_name: "test-client",
+            receive_datagrams: false,
+            datagram_max_size: None,
+            multipath: MultipathOptions {
+                keep_alive_interval: Some(Duration::from_secs(10)),
+                ..MultipathOptions::default()
+            },
+            happy_eyeballs: happy_eyeballs::Config::default(),
+        };
+        let monitor = tokio_metrics::TaskMonitor::new();
+        let error = match connect(&params, &monitor).await {
+            Ok(_) => panic!("mode が Off の Multipath 設定はエラーになること"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, TransportError::InvalidState(_)),
+            "設定の矛盾として返ること: {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("multipath") && message.contains("off"),
+            "mode が必要であることを示すこと: {message}"
+        );
+    }
+
+    /// Multipath を提供しないビルドでは接続前にエラーになること
+    #[cfg(not(feature = "quic-tobi"))]
+    #[tokio::test]
+    async fn connect_rejects_multipath_when_unavailable() {
+        let url = parse_url("moqt://127.0.0.1:4443/").expect("URL を解釈できること");
+        let params = ConnectParams {
+            url: &url,
+            transport: Transport::Quic,
+            cert: None,
+            insecure: false,
+            impl_name: "test-client",
+            receive_datagrams: false,
+            datagram_max_size: None,
+            multipath: MultipathOptions {
+                mode: crate::multipath::MultipathMode::Handover,
+                ..MultipathOptions::default()
+            },
+            happy_eyeballs: happy_eyeballs::Config::default(),
+        };
+        let monitor = tokio_metrics::TaskMonitor::new();
+        let error = match connect(&params, &monitor).await {
+            Ok(_) => panic!("Multipath を提供しないビルドではエラーになること"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, TransportError::Unsupported(_)),
+            "未対応として返ること: {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("multipath QUIC is not available"),
+            "Multipath を利用できないことを示すこと: {message}"
+        );
+    }
+
+    /// Multipath は native QUIC 以外の経路では指定できないこと
+    #[cfg(feature = "quic-tobi")]
+    #[tokio::test]
+    async fn connect_rejects_multipath_for_non_quic_transport() {
+        let url = parse_url("moqt://127.0.0.1:4443/").expect("URL を解釈できること");
+        let params = ConnectParams {
+            url: &url,
+            transport: Transport::WtH2,
+            cert: None,
+            insecure: false,
+            impl_name: "test-client",
+            receive_datagrams: false,
+            datagram_max_size: None,
+            multipath: MultipathOptions {
+                mode: crate::multipath::MultipathMode::Handover,
+                ..MultipathOptions::default()
+            },
+            happy_eyeballs: happy_eyeballs::Config::default(),
+        };
+        let monitor = tokio_metrics::TaskMonitor::new();
+        let error = match connect(&params, &monitor).await {
+            Ok(_) => panic!("WebTransport 経路の Multipath はエラーになること"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, TransportError::Unsupported(_)),
+            "未対応として返ること: {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("--transport quic"),
+            "native QUIC が必要であることを示すこと: {message}"
+        );
+    }
+
+    /// 範囲外の Multipath 設定は接続前にエラーになること
+    #[cfg(feature = "quic-tobi")]
+    #[tokio::test]
+    async fn connect_rejects_invalid_multipath_options() {
+        let url = parse_url("moqt://127.0.0.1:4443/").expect("URL を解釈できること");
+        let params = ConnectParams {
+            url: &url,
+            transport: Transport::Quic,
+            cert: None,
+            insecure: false,
+            impl_name: "test-client",
+            receive_datagrams: false,
+            datagram_max_size: None,
+            multipath: MultipathOptions {
+                mode: crate::multipath::MultipathMode::Handover,
+                max_paths: 0,
+                ..MultipathOptions::default()
+            },
+            happy_eyeballs: happy_eyeballs::Config::default(),
+        };
+        let monitor = tokio_metrics::TaskMonitor::new();
+        let error = match connect(&params, &monitor).await {
+            Ok(_) => panic!("範囲外の Multipath 設定はエラーになること"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, TransportError::InvalidState(_)),
+            "設定の誤りとして返ること: {error:?}"
+        );
+        assert!(
+            error.to_string().contains("max_paths"),
+            "誤りのある設定を示すこと: {error}"
         );
     }
 
@@ -4239,6 +4444,7 @@ mod tests {
                 impl_name: "test-client",
                 receive_datagrams: false,
                 datagram_max_size: None,
+                multipath: MultipathOptions::default(),
                 happy_eyeballs: happy_eyeballs::Config::default(),
             };
             let monitor = tokio_metrics::TaskMonitor::new();
@@ -4316,6 +4522,7 @@ mod tests {
                 impl_name: "test-client",
                 receive_datagrams: false,
                 datagram_max_size: None,
+                multipath: MultipathOptions::default(),
                 happy_eyeballs: happy_eyeballs::Config::default(),
             };
             let monitor = tokio_metrics::TaskMonitor::new();

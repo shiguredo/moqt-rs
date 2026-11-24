@@ -33,6 +33,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::ServerTls;
 use super::{ALPN, CloseReason, QuicError, StopSendingObserved, StopSendingReceiver};
 use crate::error::{Result, TransportError};
+use crate::multipath::MultipathOptions;
 
 /// 操作を依頼するチャネルの容量
 const COMMAND_CHANNEL_CAPACITY: usize = 256;
@@ -1125,7 +1126,17 @@ pub(crate) async fn connect(
     server_name: &str,
     cert_path: Option<&str>,
     insecure: bool,
+    multipath: &MultipathOptions,
 ) -> Result<(Connected, StopSendingReceiver)> {
+    // ngtcp2 のこのバックエンドは Multipath QUIC (RFC 10069) の API を公開していない。
+    // 設定を黙って無視すると利用者が有効になったと誤解するため、接続の試行前に拒否する。
+    if multipath.mode.is_enabled() {
+        return Err(TransportError::Unsupported(
+            "multipath QUIC is not available with the ngtcp2 backend \
+             (build with --no-default-features --features quic-tobi)"
+                .to_string(),
+        ));
+    }
     let mut config = ClientConfig::new(&[ALPN])
         .with_transport_params(build_transport_params())
         .with_datagram(datagram_config());

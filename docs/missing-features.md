@@ -100,6 +100,11 @@ C4M draft-02 の `moqt` クレームの map 化と未知キーの fail-closed、
 | FETCH_OK 前の Object 送信 | `send_fetch_header` が `FetchState::Established` を要求する | §3.2 (MAY) | 応答範囲の終端 (LARGEST_OBJECT が要求範囲内か) が確定するまで FETCH 応答 Object を送れない。fill fetch は `Pending` を許容するため非対称 |
 | moqt URI のパース | `msf::uri` は `moqt://authority/path?query#msf:...` を分解し、authority / path / query を RFC 3986 で検証する。`validate_moqt_endpoint_uri` は fragment なしの endpoint URI も検証し、catalog の `connectionURI` は decode / encode で検証される | §6.1 / §6.1.1 / §6.1.2 | 新規接続の確立は transport / example 層の責務である |
 
+Multipath QUIC (RFC 10069) は MOQT の仕様ではなく QUIC の拡張である。`quic-tobi` バックエンドの
+Windows 以外のビルドでは `tokio_moq::multipath::MultipathOptions` と moq-pub / moq-sub の
+`--multipath` から利用できる。s2n-quic / ngtcp2 バックエンド、WebTransport、QMux、Windows では
+使えない。詳細と制約は [multipath.md](multipath.md) にまとめている。
+
 ## 4. MUST 未達 / 仕様違反になりうる箇所
 
 ### 4.1 Object 側 `IMMUTABLE_PROPERTIES` の LOC 値域検証 (§10.7 / §8.3、ライブラリ)

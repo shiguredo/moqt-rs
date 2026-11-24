@@ -1205,8 +1205,9 @@ mod tests {
 
         // 接続と受理は並行に進める。tobi-quic のサーバーは `accept()` の poll で
         // ハンドシェイクを進めるため、client の `connect()` を先に待つと停止する
+        let multipath = crate::multipath::MultipathOptions::default();
         let (connection, peer) = tokio::join!(
-            crate::quic::connect(addr, "localhost", None, true),
+            crate::quic::connect(addr, "localhost", None, true, &multipath),
             server.accept(),
         );
         let (connection, stop_sending_rx) = connection.expect("接続できること");
@@ -1992,8 +1993,9 @@ mod tests {
 
         // 接続と受理は並行に進める。tobi-quic のサーバーは `accept()` の poll で
         // ハンドシェイクを進めるため、client の `connect()` を先に待つと停止する
+        let multipath = crate::multipath::MultipathOptions::default();
         let (connection, peer) = tokio::join!(
-            crate::quic::connect(addr, "localhost", None, true),
+            crate::quic::connect(addr, "localhost", None, true, &multipath),
             server.accept(),
         );
         let (connection, stop_sending_rx) = connection.expect("接続できること");
@@ -2460,6 +2462,7 @@ mod tests {
                         receive_datagrams: false,
                         // QMux 経路は使わない (QUIC 直接接続の試験基盤)
                         datagram_max_size: None,
+                        multipath: crate::multipath::MultipathOptions::default(),
                         happy_eyeballs: happy_eyeballs::Config::default(),
                     },
                     &connect_monitor,
@@ -2569,6 +2572,7 @@ mod tests {
                         receive_datagrams: false,
                         // QMux 経路は使わない (QUIC 直接接続の試験基盤)
                         datagram_max_size: None,
+                        multipath: crate::multipath::MultipathOptions::default(),
                         happy_eyeballs: happy_eyeballs::Config::default(),
                     },
                     &connect_monitor,
@@ -2643,6 +2647,7 @@ mod tests {
                         receive_datagrams: false,
                         // QMux 経路は使わない (QUIC 直接接続の試験基盤)
                         datagram_max_size: None,
+                        multipath: crate::multipath::MultipathOptions::default(),
                         happy_eyeballs: happy_eyeballs::Config::default(),
                     },
                     &connect_monitor,
@@ -2740,6 +2745,7 @@ mod tests {
                         receive_datagrams: false,
                         // QMux 経路は使わない (QUIC 直接接続の試験基盤)
                         datagram_max_size: None,
+                        multipath: crate::multipath::MultipathOptions::default(),
                         happy_eyeballs: happy_eyeballs::Config::default(),
                     },
                     deadline,
@@ -3716,6 +3722,7 @@ mod tests {
                     impl_name: "test-peer",
                     receive_datagrams: false,
                     datagram_max_size: None,
+                    multipath: crate::multipath::MultipathOptions::default(),
                     happy_eyeballs: happy_eyeballs::Config::default(),
                 },
                 deadline,
