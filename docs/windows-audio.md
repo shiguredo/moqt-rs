@@ -125,7 +125,7 @@ Copy for LLM の JSON で次の値を見ると、どの経路かを切り分け�
 
 ### 7.3 検証
 
-- Windows の CI はコンパイル確認のみで、実デバイスの実行をしない (`.github/workflows/ci-windows.yml`)。実マイクを使う手動 E2E の手順を用意する。
+- Windows の CI はコンパイル確認のみで、実デバイスの実行をしない (`ci.yml` の `build-clients` ジョブ)。実マイクを使う手動 E2E の手順を用意する。
 - 修正後は `--fake-capture-device` と実マイクの両方で、moqt-devtools の 5.3 の統計が正常値に戻ることを確認する。
 
 ## 8. 未確定点

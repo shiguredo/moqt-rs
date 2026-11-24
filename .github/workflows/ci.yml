@@ -3,6 +3,9 @@
 # - prek ジョブ: prek.toml のフック (fmt / clippy / tombi 等) を実行する
 # - test ジョブ: cargo test --workspace を実行する (pre-push フックと同範囲)。
 #   C4M の暗号実装は optional feature のため、aws-lc-rs feature の clippy / test / rustdoc も実行する
+# - build-clients ジョブ: moq-pub / moq-sub を Ubuntu 26.04 / Xcode 27 / Windows Server 2025 で
+#   ビルドする。3 プラットフォームのデバイス API と prebuilt ライブラリの組み合わせを
+#   継続的に確認する
 # - no-std-doc ジョブ: no_std ビルドと rustdoc の警告を検査する
 # - runner:
 #   - prek / test は workspace 全体を対象にするため macos-15 を使う。crates 配下の crate が
@@ -10,6 +13,9 @@
 #     Linux runner では workspace 全体をビルドできない (ubuntu-slim には Rust 自体がなく、
 #     ubuntu-latest では shiguredo_audio_device のビルドスクリプトが失敗する)。
 #     crates 配下の crate の単体テストは純粋なロジックのためヘッドレスでも実行できる
+#   - build-clients は moq-pub / moq-sub だけを対象に、Ubuntu 26.04 / Xcode 27 /
+#     Windows Server 2025 の 3 つでビルドする。Ubuntu では PulseAudio の開発パッケージと
+#     bindgen が参照する C ヘッダが必要なため、ジョブ内で apt からインストールする
 #   - no-std-doc は shiguredo_moqt のみを対象にするため crates 配下の crate の macOS 専用依存を
 #     ビルドせず、ubuntu-latest を使う (ubuntu-slim には Rust が無い)
 # - MSRV 検証は含めない。crates 配下の crate が rust-version 1.95 を要求するため
@@ -59,6 +65,30 @@ jobs:
         run: cargo test -p shiguredo_moqt --features aws-lc-rs
       - name: aws-lc-rs feature の rustdoc を検査する
         run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt --features aws-lc-rs
+
+  build-clients:
+    name: "Build moq-pub / moq-sub (${{ matrix.name }})"
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubuntu-26.04
+            runner: ubuntu-26.04
+          - name: xcode-27
+            runner: xcode-27
+          - name: windows-2025-vs2026
+            runner: windows-2025-vs2026
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Linux のビルド依存をインストールする
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libclang-dev libpulse-dev pkg-config linux-libc-dev
+      - name: moq-pub / moq-sub とそのテストをビルドする
+        run: cargo build -p moq-pub -p moq-sub --all-targets
 
   no-std-doc:
     runs-on: ubuntu-latest
