@@ -57,6 +57,9 @@ MOQT のクライアントやサーバーを実装する場合に利用できま
 MOQT では、接続の確立や購読の開始などを「制御メッセージ」という単位でやり取りします。
 このライブラリは、メッセージをバイト列に変換して送信できるようにし、受信したバイト列からメッセージを取り出せるようにします。
 
+制御ストリーム (単方向) の先頭 varint は SETUP メッセージの Type (`0x2F00`) であり、stream type を兼ねます。
+このライブラリは SETUP の Type を 1 回だけ書き出します。
+
 ```rust,no_run
 use shiguredo_moqt::error::MessageError;
 use shiguredo_moqt::{message::{ControlMessage, Setup}, parameter::SetupOptions};
@@ -69,7 +72,8 @@ fn main() -> Result<(), MessageError> {
     });
     // peer の SETUP 受信前は既定値 (65535) が送信上限になる
     let bytes = msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)?;
-    // bytes を制御ストリームに書き出す...
+    // 制御ストリームの先頭 varint は SETUP の Type が stream type を兼ねるため、
+    // bytes をそのまま制御ストリームへ書き出す...
 
     // 受信バイト列からデコード
     let (decoded, consumed) = ControlMessage::decode(&bytes)?;
@@ -123,6 +127,7 @@ fn main() -> Result<(), SessionError> {
         match event {
             SessionEvent::SendControl(msg) => {
                 // 制御ストリームに msg.encode(peer の MAX_CONTROL_MESSAGE_SIZE) を書き出す
+                // (SETUP の Type が stream type を兼ねる)
                 let _ = msg;
             }
             SessionEvent::Established => {

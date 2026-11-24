@@ -1057,11 +1057,13 @@ impl Session {
         }
     }
 
-    /// peer から受け取った control stream の stream type を検証する
+    /// peer から受け取った control stream の先頭 varint を検証する
     ///
-    /// draft §6.4.1 (Unidirectional Streams): control stream の stream type は
-    /// `SETUP_STREAM_TYPE` (0x2F00) でなければならない。
-    /// 受信した stream type が異なる場合は `INVALID_STREAM_HEADER` でセッションを閉じる
+    /// draft §6.4.1 (Unidirectional Streams): control stream の先頭 varint は SETUP メッセージの
+    /// Type である `SETUP_STREAM_TYPE` (0x2F00) でなければならず、この値が stream type を兼ねる。
+    /// I/O 層は SETUP を消費せずに peek した値を渡すこと。この検証の後、同じ varint を
+    /// SETUP メッセージの Type として [`Self::recv_control`] が読む。
+    /// 受信した値が異なる場合は `INVALID_STREAM_HEADER` でセッションを閉じる
     /// (draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams) / §12.2
     /// (Session Termination Codes))。
     ///

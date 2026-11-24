@@ -3345,10 +3345,13 @@ mod tests {
                             _ => {}
                         }
                     }
+                    // 先頭 varint は SETUP メッセージの Type が stream type を兼ねる。
+                    // peek して検証するだけなので、続く try_decode_message が同じ varint を
+                    // SETUP の Type として読む。
                     if !stream_type_read
                         && let Some(stream_type) = decoder
-                            .try_decode_varint()
-                            .expect("ストリーム種別を読み取れること")
+                            .try_peek_varint()
+                            .expect("先頭 varint を peek できること")
                     {
                         moqt.recv_control_stream_type(stream_type)
                             .expect("MOQT の制御ストリームであること");

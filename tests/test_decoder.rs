@@ -190,6 +190,51 @@ fn test_decode_varint_insufficient() {
     assert_eq!(result, Some(0x2F00));
 }
 
+/// `try_peek_varint` はバッファを消費せず、同じ varint を SETUP の Type として再デコードできる
+///
+/// 制御ストリームの先頭 varint は SETUP メッセージの Type が stream type を兼ねるため、
+/// stream type の検証と SETUP のデコードで同じ varint を 2 回デコードする。peek が消費すると
+/// 2 回目のデコードで Type が失われることを、同じ値を 2 回 peek してから
+/// `try_decode_message` が SETUP を 1 通読めることで固定する。
+#[test]
+fn test_peek_varint_does_not_consume_setup_type() {
+    let encoded = setup_frame();
+    let mut decoder = decoder();
+
+    // varint が揃うまではデータ不足として None を返す
+    decoder.push(&encoded[..1]);
+    assert!(
+        decoder
+            .try_peek_varint()
+            .expect("テストフィクスチャの前提条件を満たす")
+            .is_none(),
+        "2 バイト目の到着前はデータ不足として扱うこと"
+    );
+
+    decoder.push(&encoded[1..]);
+
+    // 同じ varint を 2 回 peek しても同じ値が返る
+    for _ in 0..2 {
+        assert_eq!(
+            decoder
+                .try_peek_varint()
+                .expect("テストフィクスチャの前提条件を満たす"),
+            Some(0x2F00),
+            "peek は同じ varint を繰り返し返し、バッファを消費しないこと"
+        );
+    }
+
+    // peek した varint が残っているため、SETUP を 1 通デコードできる
+    let message = decoder
+        .try_decode_message()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("SETUP を 1 通デコードできること");
+    assert!(
+        matches!(message, ControlMessage::Setup(_)),
+        "先頭 varint が SETUP の Type として読まれること"
+    );
+}
+
 #[test]
 fn test_decode_multiple_messages() {
     let setup1 = ControlMessage::Setup(Setup {

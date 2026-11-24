@@ -75,3 +75,6 @@ mod encoder;
 
 #[path = "test_stream/decoder.rs"]
 mod decoder;
+
+#[path = "test_stream/control_stream.rs"]
+mod control_stream;

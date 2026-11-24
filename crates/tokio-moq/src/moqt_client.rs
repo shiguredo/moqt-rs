@@ -519,10 +519,16 @@ impl ControlStream {
         }
     }
 
-    /// ストリーム先頭のストリームタイプ varint を読む (draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams))
+    /// 制御ストリーム先頭の varint を peek して返す
+    ///
+    /// 制御ストリームの先頭 varint は SETUP メッセージの Type (0x2F00) が stream type を
+    /// 兼ねる (draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams) / §9.1 (SETUP))。
+    /// バッファを消費しないため、続く [`Self::recv_message`] が同じ varint を SETUP の Type と
+    /// して改めてデコードできる。ワイヤ上の 0x2F00 は 1 回、デコードは stream type の検証と
+    /// message type の読み取りで 2 回になる。
     pub async fn read_stream_type(&mut self) -> Result<StreamRead<u64>> {
         loop {
-            if let Some(val) = self.decoder.try_decode_varint()? {
+            if let Some(val) = self.decoder.try_peek_varint()? {
                 return Ok(StreamRead::Value(val));
             }
             match self.stream.receive_chunk().await? {
@@ -4241,13 +4247,16 @@ fn take_close_session(session: &mut Session) -> Option<SessionError> {
     None
 }
 
-/// peer の control stream の先頭から stream type を読み、session へ通知する
+/// peer の control stream の先頭 varint を peek して stream type を検証する
 ///
-/// SETUP 交換中の失敗は終了コード付きで閉じる。control stream の先頭は
-/// `SETUP_STREAM_TYPE` (0x2F00) であり、未知の stream type の受信は
-/// `INVALID_STREAM_HEADER` で閉じる (draft-ietf-moq-transport-23 §6.4.1 (Unidirectional
-/// Streams) / §12.2 (Session Termination Codes))。ストリームが stream type を読む前に終端した
-/// 場合も同じである。既知だが control stream でない型を先頭に置く peer は、本 example が
+/// SETUP 交換中の失敗は終了コード付きで閉じる。control stream の先頭 varint は
+/// SETUP メッセージの Type `SETUP_STREAM_TYPE` (0x2F00) が stream type を兼ね、
+/// 未知の値の受信は `INVALID_STREAM_HEADER` で閉じる (draft-ietf-moq-transport-23 §6.4.1
+/// (Unidirectional Streams) / §12.2 (Session Termination Codes))。ストリームが先頭 varint を
+/// 読む前に終端した場合も同じである。検証する値は [`ControlStream::read_stream_type`] が
+/// peek したものであり、バッファは消費されない。したがって直後の
+/// [`ControlStream::recv_message`] が同じ varint を SETUP の Type としてデコードする。
+/// 既知だが control stream でない型を先頭に置く peer は、本 example が
 /// 最初の uni stream を control stream として受理するため同じ経路で閉じる。
 async fn recv_control_stream_type(
     session: &mut Session,

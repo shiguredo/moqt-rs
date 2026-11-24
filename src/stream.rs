@@ -2,6 +2,11 @@
 //!
 //! ストリーム型 ID はビットフラグを含む varint で表される。
 //!
+//! 制御ストリーム (単方向) の先頭 varint は SETUP メッセージの Type (0x2F00) であり、
+//! stream type を兼ねる (draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams) Table 2 /
+//! §9.1 (SETUP) Figure 7)。このため制御ストリームでは stream type を別途前置せず、
+//! SETUP メッセージの Type を 1 回だけ書く。
+//!
 //! サブモジュール構成:
 //! - `subgroup`: SUBGROUP_HEADER / SUBGROUP_OBJECT (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header))
 //! - `fetch`: FETCH_HEADER / FETCH_STREAM_OBJECT (draft-ietf-moq-transport-23 §11.4.1 (Fetch Header))
@@ -53,8 +58,10 @@ pub const PADDING_DATAGRAM_TYPE: u64 = 0x132B_3E29;
 
 /// SETUP 制御ストリームの stream type (draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams) Table 2)
 ///
-/// draft-ietf-moq-transport-23 §9.1 (SETUP) Figure 7 の SETUP メッセージ type と同じ値だが、
-/// stream type と message type は異なる名前空間である。
+/// この値は draft-ietf-moq-transport-23 §9.1 (SETUP) Figure 7 の SETUP メッセージの Type と
+/// 同じ 0x2F00 であり、制御ストリームでは SETUP の Type が stream type を兼ねる。したがって
+/// 制御ストリームの先頭 varint は 1 回だけ書き、stream type を前置したうえに SETUP の Type を
+/// 書く、という 2 回の表現にはしない。
 pub const SETUP_STREAM_TYPE: u64 = 0x2F00;
 
 /// uni data stream の先頭 varint から種別を判定する
@@ -68,7 +75,8 @@ pub const SETUP_STREAM_TYPE: u64 = 0x2F00;
 /// それらは後続の [`crate::stream::subgroup::SubgroupHeader`] デコードが
 /// `INVALID_STREAM_HEADER` として reject する。
 pub fn classify_data_stream_type(type_id: u64) -> Option<DataStreamType> {
-    // control stream (SETUP_STREAM_TYPE = 0x2F00) は data stream ではないため除外する
+    // 制御ストリームの先頭 varint は SETUP メッセージの Type (SETUP_STREAM_TYPE = 0x2F00) が
+    // stream type を兼ねるため、data stream として扱わない
     // (draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams) Table 2 で制御ストリームは別扱い)
     if type_id == SETUP_STREAM_TYPE {
         return None;
@@ -86,11 +94,14 @@ pub fn classify_data_stream_type(type_id: u64) -> Option<DataStreamType> {
     None
 }
 
-/// 新規制御ストリームの先頭メッセージを stream type prefix 込みでエンコードする
+/// 新規制御ストリームの先頭メッセージ (SETUP) をエンコードする
 ///
-/// [`crate::stream::subgroup::SubgroupHeader::encode`] や [`crate::stream::fetch::FetchHeader::encode`] が stream type を
-/// 内包するのと同様に、制御ストリーム開設時の初回メッセージ (SETUP) も
-/// stream type prefix を自動で前置する。
+/// 制御ストリームの先頭 varint は SETUP メッセージの Type (0x2F00) が stream type を兼ねる
+/// (draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams) / §9.1 (SETUP))。
+/// 本関数は [`ControlMessage::encode`] の結果をそのまま返す。stream type を別途前置しては
+/// ならない (前置すると 0x2F00 がワイヤに 2 回現れ、1 回だけ送る実装と相互運用できない)。
+///
+/// `msg` には [`ControlMessage::Setup`] を渡すこと。
 ///
 /// `max_control_message_size` は peer が広告した `MAX_CONTROL_MESSAGE_SIZE`
 /// (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE))。peer の SETUP を
@@ -100,10 +111,7 @@ pub fn encode_control_stream_setup(
     msg: &ControlMessage,
     max_control_message_size: u64,
 ) -> Result<Vec<u8>, MessageError> {
-    let mut buf = Vec::new();
-    crate::varint::encode(SETUP_STREAM_TYPE, &mut buf);
-    buf.extend_from_slice(&msg.encode(max_control_message_size)?);
-    Ok(buf)
+    msg.encode(max_control_message_size)
 }
 
 /// Object Status: Normal (通常の Object) (draft-ietf-moq-transport-23 §11.1.1 (Object Status))

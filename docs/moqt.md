@@ -2,6 +2,22 @@
 
 [draft-ietf-moq-transport-23](https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-23) の実装状況です。
 
+## ストリーム
+
+MOQT の単方向ストリームは先頭の varint で種別を表します。制御ストリームの先頭 varint は
+SETUP メッセージの Type (`0x2F00`) であり、stream type を兼ねます (§6.4.1 Table 2 / §9.1 Figure 7)。
+SETUP の Type を別に前置しないため、`0x2F00` はワイヤに 1 回だけ現れます。
+`stream::encode_control_stream_setup` は SETUP の Type から始まるバイト列を返します。
+
+受信側は `MessageDecoder::try_peek_varint` でバッファを消費せずに先頭 varint を読み、
+stream type として検証します。続く `MessageDecoder::try_decode_message` が同じ varint を
+SETUP の Type として改めてデコードします。data stream の先頭 varint は種別そのものであり、
+`MessageDecoder::try_decode_varint` で消費しながら読みます。
+
+未知の単方向ストリーム種別、2 本目の制御ストリーム、SETUP 以外で始まる制御ストリーム、
+SETUP の二重受信は拒否します。制御ストリームの FIN / RESET は `CLOSED_CONTROL_STREAM`
+(`0x306`) として扱います。
+
 ## コントロールメッセージ
 
 - SETUP

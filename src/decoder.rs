@@ -119,11 +119,37 @@ impl MessageDecoder {
         }
     }
 
-    /// バッファから varint のデコードを試みる
+    /// バッファ先頭の varint をデコードする (バッファは消費しない)
     ///
-    /// ストリームタイプの読み取りに使用する。
-    /// draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams):
-    /// 全ての MOQT 単方向ストリームは先頭にストリームタイプ varint を持つ。
+    /// 制御ストリームの先頭 varint は SETUP メッセージの Type (0x2F00) が stream type を
+    /// 兼ねる (draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams) / §9.1 (SETUP))。
+    /// I/O 層は本関数で stream type を検証し、その後に呼ぶ
+    /// [`Self::try_decode_message`] が同じ varint を SETUP の Type として改めてデコードする。
+    /// 本関数がバッファを消費しないため、同じ varint を 2 回デコードしてもワイヤ上は 1 回である。
+    ///
+    /// - `Ok(Some(val))` — デコード成功、バッファは未消費
+    /// - `Ok(None)` — データ不足、追加データが必要
+    /// - `Err(e)` — デコードエラー
+    pub fn try_peek_varint(&self) -> Result<Option<u64>, MessageError> {
+        if self.buffer.is_empty() {
+            return Ok(None);
+        }
+        match varint::decode(self.buffer.available()) {
+            Ok((val, _)) => Ok(Some(val)),
+            Err(MessageError::UnexpectedEof) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// バッファ先頭の varint をデコードして消費する
+    ///
+    /// data stream の先頭 stream type の読み取りに使用する。
+    /// draft-ietf-moq-transport-23 §11 (Data Streams and Datagrams):
+    /// data stream は先頭に stream type varint を持つ。
+    ///
+    /// 制御ストリームの先頭 varint は SETUP メッセージの Type が stream type を兼ね、後続の
+    /// [`Self::try_decode_message`] が同じ varint を Type として読むため、消費してはならない。
+    /// 制御ストリームでは [`Self::try_peek_varint`] を使う。
     ///
     /// - `Ok(Some(val))` — デコード成功、バッファから消費済み
     /// - `Ok(None)` — データ不足、追加データが必要

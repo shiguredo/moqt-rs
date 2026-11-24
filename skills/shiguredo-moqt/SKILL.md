@@ -188,13 +188,17 @@ fn new(max_control_message_size: u64) -> MessageDecoder
 fn push(&mut self, data: &[u8])
 fn try_decode_message(&mut self) -> Result<Option<ControlMessage>, MessageError>
 fn try_decode_varint(&mut self) -> Result<Option<u64>, MessageError>
+fn try_peek_varint(&self) -> Result<Option<u64>, MessageError>
 ```
 
-- `Ok(Some)` = デコード成功 / バッファから消費済み
+- `Ok(Some)` = デコード成功 / バッファから消費済み (`try_peek_varint` は消費しない)
 - `Ok(None)` = データ不足 (追加の `push` が必要)
 - `Err` = デコードエラー
 
-`try_decode_varint` は受信 uni stream の先頭 stream type の読み取りに使う。
+`try_peek_varint` は制御ストリーム先頭の varint を消費せずに読み、stream type として検証する。
+制御ストリームの先頭 varint は SETUP メッセージの Type (`0x2F00`) が stream type を兼ねるため、
+続く `try_decode_message` が同じ varint を SETUP の Type として読む。
+`try_decode_varint` は data stream の先頭 stream type を消費しながら読む。
 
 ## セッション (`session`)
 

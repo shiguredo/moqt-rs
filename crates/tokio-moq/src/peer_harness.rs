@@ -108,9 +108,10 @@ fn pop_send_control(session: &mut Session) -> Result<ControlMessage> {
 
 /// 新規制御ストリームの先頭に SETUP を書き出す
 ///
-/// 制御ストリームの先頭には stream type prefix が必要である
-/// (draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams))。prefix を前置する
-/// `encode_control_stream_setup` を使う。ストリームを開くのは呼び出し側である。
+/// 制御ストリームの先頭 varint は SETUP メッセージの Type (0x2F00) が stream type を兼ねる
+/// (draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams) / §9.1 (SETUP))。
+/// `encode_control_stream_setup` は SETUP の Type から始まるバイト列を返す。
+/// ストリームを開くのは呼び出し側である。
 async fn send_control_stream_setup(
     control_send: &mut SendStream,
     setup: &ControlMessage,
@@ -423,12 +424,12 @@ impl TestPeer {
     /// 取り込まないと session は `Established` にならず、`Session::recv_request` が
     /// `BeforeSessionEstablished` を返す。
     pub async fn establish(&mut self) -> Result<()> {
-        // 新規制御ストリームの先頭には stream type prefix が必要である
+        // 制御ストリームの先頭 varint は SETUP メッセージの Type が stream type を兼ねる
         let setup = pop_send_control(&mut self.session)?;
         let mut control_send = self.handle.open_send_stream().await?;
         send_control_stream_setup(&mut control_send, &setup).await?;
 
-        // client の control stream を受理し、stream type を検証してから SETUP を取り込む
+        // client の control stream を受理し、先頭 varint を peek して検証してから SETUP を取り込む
         let recv = self
             .recv_acceptor
             .accept_recv_stream()
@@ -930,7 +931,7 @@ impl TestPeer {
 
     /// 確立済みの control stream に control message を書く
     ///
-    /// stream type prefix は付けない (control stream の先頭で送信済みのため)。確立後に届く
+    /// 先頭メッセージではないため SETUP の Type は stream type を兼ねない。確立後に届く
     /// 2 通目の SETUP など、本来送られない control message を再現するために使う。
     /// 新しい uni stream を開く [`TestPeer::send_setup`] / [`TestPeer::send_control_stream_head`]
     /// は既存の control stream を FIN するため、この用途には使えない。
@@ -1041,13 +1042,13 @@ impl TestPeer {
 
     /// 自側 control stream の先頭に書く完全なバイト列を送る
     ///
-    /// `ControlMessage::encode` は stream type prefix を含まないため、SETUP を差し替える
-    /// テストは prefix を含むバイト列
-    /// (`shiguredo_moqt::stream::encode_control_stream_setup`) を作って渡す。prefix を誤らせて
+    /// 制御ストリームの先頭 varint は SETUP メッセージの Type (0x2F00) が stream type を兼ねる
+    /// ため、SETUP を差し替えるテストは SETUP の Type から始まるバイト列
+    /// (`shiguredo_moqt::stream::encode_control_stream_setup`) を作って渡す。Type を誤らせて
     /// `Session::recv_control_stream_type` の失敗を再現することもできる。
     ///
-    /// 受け取った側は先頭の varint を stream type として読むため、空のバイト列を送ると
-    /// stream type を読む前に終端する (FIN は [`Self::finish_control_stream`] で送る)。
+    /// 受け取った側は先頭の varint を stream type として peek するため、空のバイト列を送ると
+    /// 先頭 varint を読む前に終端する (FIN は [`Self::finish_control_stream`] で送る)。
     #[cfg(test)]
     pub(crate) async fn send_control_stream_head(&mut self, head: Vec<u8>) -> Result<()> {
         let mut control_send = self.handle.open_send_stream().await?;
@@ -1636,7 +1637,8 @@ mod tests {
         run_with_timeout(async {
             let (mut peer, mut client) = connect_pair().await;
 
-            // 既存の control stream に 2 通目の SETUP を書く (stream type prefix は付けない)
+            // 既存の control stream に 2 通目の SETUP を書く (先頭メッセージではないため
+            // この Type は stream type を兼ねない)
             peer.send_control_message(ControlMessage::Setup(Setup {
                 options: SetupOptions::new(),
             }))
@@ -1965,15 +1967,13 @@ mod tests {
     /// 生の Setup Options を載せた SETUP を control stream の先頭に書くバイト列
     ///
     /// `ControlMessage::Setup` は `SetupOptions` の型付き API しか受け付けないため、型では
-    /// 表現できない不正な Setup Options は、control stream の prefix と SETUP の message type
-    /// (どちらも 0x2F00) + vi64 長 + body を生バイト列で書き出す。body は
+    /// 表現できない不正な Setup Options は、SETUP メッセージの Type (0x2F00、control stream の
+    /// stream type を兼ねる) + vi64 長 + body を生バイト列で書き出す。body は
     /// draft-ietf-moq-transport-23 §9.1 (SETUP) の「カウントプレフィックスなしのデルタ
     /// エンコードされた KVP」である。
     fn setup_head(body: Vec<u8>) -> Vec<u8> {
         let mut buf = Vec::new();
-        // control stream の stream type prefix
-        shiguredo_moqt::varint::encode(shiguredo_moqt::stream::SETUP_STREAM_TYPE, &mut buf);
-        // 先頭メッセージ (SETUP) の message type
+        // SETUP メッセージの Type (制御ストリームの stream type を兼ねる)
         shiguredo_moqt::varint::encode(shiguredo_moqt::stream::SETUP_STREAM_TYPE, &mut buf);
         shiguredo_moqt::varint::encode(body.len() as u64, &mut buf);
         buf.extend_from_slice(&body);
@@ -2252,10 +2252,9 @@ mod tests {
         run_with_timeout(async {
             let (mut peer, establish) = connect_handshake().await;
 
-            // stream type prefix (control stream) と SETUP の Type / Length のみを書く
+            // SETUP の Type (stream type を兼ねる) と Length のみを書く
             let mut head = Vec::new();
             shiguredo_moqt::varint::encode(shiguredo_moqt::stream::SETUP_STREAM_TYPE, &mut head);
-            shiguredo_moqt::varint::encode(0x2F00, &mut head);
             shiguredo_moqt::varint::encode(65_536, &mut head);
             peer.send_control_stream_head(head)
                 .await
@@ -2296,7 +2295,7 @@ mod tests {
         run_with_timeout(async {
             let (mut peer, establish) = connect_handshake().await;
 
-            // 誤った stream type prefix (control stream は 0x2F00)
+            // 誤った先頭 varint (control stream は SETUP の Type である 0x2F00)
             let mut head = Vec::new();
             shiguredo_moqt::varint::encode(0x2F01, &mut head);
             peer.send_control_stream_head(head)
@@ -2328,7 +2327,7 @@ mod tests {
         run_with_timeout(async {
             let (mut peer, establish) = connect_handshake().await;
 
-            // 何も書かずに control stream を終端する (client は stream type を読めない)
+            // 何も書かずに control stream を終端する (client は先頭 varint を peek できない)
             peer.send_control_stream_head(Vec::new())
                 .await
                 .expect("control stream を開けること");
@@ -2389,11 +2388,12 @@ mod tests {
         .await;
     }
 
-    /// stream type の直後に control stream が終端すると CLOSED_CONTROL_STREAM を送ること
+    /// SETUP の Type だけを書いて control stream を終端すると CLOSED_CONTROL_STREAM を送ること
     ///
-    /// stream type は正当だが SETUP を送らずに終端する場合であり、`finish_handshake` の
-    /// 「control stream closed before SETUP」経路を通る (stream type を読む前に終端する
-    /// [`control_stream_finished_before_setup_closes_with_protocol_violation`] とは別の経路)。
+    /// SETUP の Type (0x2F00) は control stream の stream type を兼ねるため、先頭 varint は
+    /// 正当だが SETUP の Length と本文を送らずに終端する場合であり、`finish_handshake` の
+    /// 「control stream closed before SETUP」経路を通る (先頭 varint を読む前に終端する
+    /// [`control_stream_finished_before_setup_closes_with_closed_control_stream`] とは別の経路)。
     /// draft-ietf-moq-transport-23 §6.3 (Session initialization) は control stream を
     /// セッション中に閉じることを禁じ、§12.2 (Session Termination Codes) の
     /// CLOSED_CONTROL_STREAM (0x306) で閉じる。
@@ -2402,7 +2402,7 @@ mod tests {
         run_with_timeout(async {
             let (mut peer, establish) = connect_handshake().await;
 
-            // 正当な stream type prefix だけを書いて SETUP を送らずに終端する
+            // 正当な SETUP の Type だけを書いて Length と本文を送らずに終端する
             let mut head = Vec::new();
             shiguredo_moqt::varint::encode(shiguredo_moqt::stream::SETUP_STREAM_TYPE, &mut head);
             peer.send_control_stream_head(head)

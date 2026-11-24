@@ -49,7 +49,9 @@ const MSG_FETCH: u64 = 0x16;
 // 未知のメッセージ型として UNEXPECTED_MESSAGE でセッションを閉じる (§9 の MUST)。
 const MSG_PUBLISH: u64 = 0x1D;
 const MSG_PUBLISH_STATE_NOTIFY: u64 = 0x22;
-const MSG_SETUP: u64 = 0x2F00; // src/stream.rs の SETUP_STREAM_TYPE と同じ値 (異なる名前空間)
+// src/stream.rs の SETUP_STREAM_TYPE と同じ値。制御ストリームの先頭ではこの Type が
+// stream type を兼ねるため、制御ストリームの 0x2F00 はワイヤに 1 回だけ書く。
+const MSG_SETUP: u64 = 0x2F00;
 // namespace 発見・告知機構 (draft-ietf-moq-transport-23 §4 Namespace Discovery)
 const MSG_PUBLISH_NAMESPACE: u64 = 0x06;
 const MSG_NAMESPACE: u64 = 0x08;

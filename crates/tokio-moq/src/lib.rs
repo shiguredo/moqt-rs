@@ -4249,18 +4249,19 @@ mod tests {
                         .accept()
                         .await
                         .expect("最初の QUIC 接続を受理できること");
-                    // 制御ストリームの種別は正しく、SETUP だけが欠けるように FIN で終端する。
-                    let mut prefix = Vec::new();
+                    // SETUP の Type (0x2F00) だけを送り、Length と本文を欠いたまま FIN で
+                    // 終端する。先頭 varint は SETUP の Type が stream type を兼ねる。
+                    let mut setup_type = Vec::new();
                     shiguredo_moqt::varint::encode(
                         shiguredo_moqt::stream::SETUP_STREAM_TYPE,
-                        &mut prefix,
+                        &mut setup_type,
                     );
-                    peer.send_control_stream_head(prefix)
+                    peer.send_control_stream_head(setup_type)
                         .await
-                        .expect("制御ストリームの種別を送信できること");
+                        .expect("SETUP の Type を送信できること");
                     peer.finish_control_stream()
                         .await
-                        .expect("SETUP を送らずに制御ストリームを終端できること");
+                        .expect("SETUP の続きを送らずに制御ストリームを終端できること");
                     // クライアントが MOQT の終了コードを送るまでサーバーを生かしておく。
                     assert_eq!(
                         peer.recv_close_code()
