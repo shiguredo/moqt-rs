@@ -10153,8 +10153,15 @@ mod tests {
         }
 
         /// テスト本体を上限時間で実行する
+        ///
+        /// Windows の映像キャプチャは COM の初期化スレッドに縛られて `!Send` であり、
+        /// `run` の future も `!Send` になる。テストでは `spawn_local` で `run` を起動する
+        /// ため、テスト本体を `LocalSet` 上で実行する。本番の `run` は直接 `.await` するので
+        /// `Send` を要求しない。
         async fn run_with_timeout(future: impl Future<Output = ()>) {
-            tokio::time::timeout(TEST_TIMEOUT, future)
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(tokio::time::timeout(TEST_TIMEOUT, future))
                 .await
                 .expect("統合テストが上限時間以内に完了すること");
         }
@@ -10843,7 +10850,11 @@ mod tests {
             fn start(config: Config) -> Self {
                 let shutdown = tokio_utils::ShutdownController::new();
                 let monitor = shutdown.subscribe();
-                let task = tokio::spawn(run(config, tokio_metrics::TaskMonitor::new(), monitor));
+                let task = tokio::task::spawn_local(run(
+                    config,
+                    tokio_metrics::TaskMonitor::new(),
+                    monitor,
+                ));
                 Self { shutdown, task }
             }
 

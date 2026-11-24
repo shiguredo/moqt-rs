@@ -15,7 +15,9 @@
 #     crates 配下の crate の単体テストは純粋なロジックのためヘッドレスでも実行できる
 #   - build-clients は moq-pub / moq-sub だけを対象に、Ubuntu 26.04 / Xcode 27 /
 #     Windows Server 2025 の 3 つでビルドする。Ubuntu では PulseAudio の開発パッケージと
-#     bindgen が参照する C ヘッダが必要なため、ジョブ内で apt からインストールする
+#     bindgen が参照する C ヘッダが必要なため、ジョブ内で apt からインストールする。
+#     Windows の映像キャプチャは COM の初期化スレッドに縛られて !Send だが、テスト側は
+#     LocalSet と spawn_local で受けるため、3 環境とも --all-targets でビルドする
 #   - no-std-doc は shiguredo_moqt のみを対象にするため crates 配下の crate の macOS 専用依存を
 #     ビルドせず、ubuntu-latest を使う (ubuntu-slim には Rust が無い)
 # - MSRV 検証は含めない。crates 配下の crate が rust-version 1.95 を要求するため
