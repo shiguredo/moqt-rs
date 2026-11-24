@@ -1,6 +1,6 @@
 # MSRV は Cargo.toml の rust-version (1.95) と揃えている。
 # crates 配下の crate と e2e-tests も 1.95 を要求する
-# (QUIC バックエンドの s2n-quic / tobi-quic、moq-pub の raden)。
+# (tobi-quic、moq-pub の raden)。
 # workspace の最大 rust-version を上げたら channel も同時に更新すること。
 [toolchain]
 channel = "1.95"

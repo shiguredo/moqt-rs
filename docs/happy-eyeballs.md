@@ -69,7 +69,6 @@ MUST である 10 ms の下限は守る。
 | `q` | `quic` | draft-ietf-moq-msf-02 §11.1.1 が Native QUIC を MUST で要求する。QMux は TCP+TLS 上で QUIC のストリーム操作を多重化する経路であり、Native QUIC ではない |
 | `wt` | `wt-h3` → `wt-h2` | WebTransport の実装を指定しない `wt` の既定を HTTP/3 とし、HTTP/2 をフォールバックにする |
 
-`wt-h3` を提供しないビルド (s2n-quic バックエンド / Windows) では `wt-h3` を候補から外す。
 `connection=q` と `connection=wt` の併記は従来どおりエラーである。
 
 `connection=q` で QMux を競争させないのは、仕様の MUST を守るためである。QMux を

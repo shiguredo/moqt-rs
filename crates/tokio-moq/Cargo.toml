@@ -2,7 +2,7 @@
 name = "tokio-moq"
 version = "2026.0.0"
 edition = "2024"
-# 依存の QUIC バックエンド (s2n-quic / tobi-quic) が MSRV 1.95 を要求するため、それに合わせる
+# 依存の tobi-quic が MSRV 1.95 を要求するため、それに合わせる
 rust-version = "1.95"
 publish = false
 
@@ -17,8 +17,6 @@ shiguredo_http2 = "2026.1.0-canary.17"
 shiguredo_http3 = "2026.1.0-canary.14"
 # MOQT 本体 (ローカル参照)
 shiguredo_moqt = { path = "../../" }
-# QUIC 実装 (ngtcp2)。quic-ngtcp2 feature で有効にする
-shiguredo_ngtcp2_tokio = { version = "2026.1.0-canary.5", optional = true }
 # QMux (draft-ietf-quic-qmux-02) の Sans I/O 実装
 #
 # qmux-rs は当面タグを打つ予定が無く、crates.io にも公開されていない (shiguredo_tokio_qmux は
@@ -27,6 +25,12 @@ shiguredo_ngtcp2_tokio = { version = "2026.1.0-canary.5", optional = true }
 shiguredo_qmux = { git = "https://github.com/shiguredo/qmux-rs", rev = "aedb7001415a9387c6b01d25624316a4aad50521" }
 # QMux の tokio ラッパー
 shiguredo_tokio_qmux = { git = "https://github.com/shiguredo/qmux-rs", rev = "aedb7001415a9387c6b01d25624316a4aad50521" }
+# QUIC 実装 (tobi-quic)。native QUIC と WebTransport over HTTP/3 の両方で使う
+#
+# crates.io に公開されていないため git で参照する。このリポジトリの main は
+# 公開のたびに 1 コミットへ作り直される (履歴を積まない) ため、rev ではなく
+# branch を指定する。
+tobi_quic = { git = "https://github.com/shiguredo/tobi-quic", branch = "main" }
 # 外部クレート
 
 # Base64 デコード (MSF fragment の cat パラメータ)
@@ -43,8 +47,6 @@ rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs"], 
 rustls = "0.23"
 # OS のシステムルートストアから TLS のルート証明書を読み込む (--cert 省略時の既定の検証)
 rustls-native-certs = "0.8"
-# QUIC 実装 (s2n-quic)。quic-s2n feature で有効にする
-s2n-quic = { version = "1.91", default-features = false, features = ["provider-address-token-default", "provider-tls-rustls", "unstable-provider-datagram"], optional = true }
 # 非同期ランタイム
 tokio = { version = "1.54", features = ["full"] }
 # Tokio タスクメトリクス計測
@@ -61,33 +63,7 @@ rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs"] }
 # full は通常依存で有効なため、ここでは足りない feature だけを足す
 tokio = { version = "1.54", features = ["test-util"] }
 
-# QUIC 実装 (tobi-quic)
-#
-# crates.io に公開されていないため git で参照する。このリポジトリの main は
-# 公開のたびに 1 コミットへ作り直される (履歴を積まない) ため、rev ではなく
-# branch を指定する。
-#
-# tobi-quic は Unix 系のソケット API (libc の pktinfo / CMSG / UDP_GRO) を直接使うため
-# Windows ではビルドできない。Windows ビルドでは依存に含めず、tobi-quic を使う
-# ネイティブ QUIC のバックエンド (quic-tobi) と WebTransport over HTTP/3 (wt-h3) を
-# 提供しない。Windows 以外ではどちらの経路でも使うため、常に依存に含める。
-[target."cfg(not(windows))".dependencies]
-tobi_quic = { git = "https://github.com/shiguredo/tobi-quic", branch = "main" }
-
 [features]
-# ネイティブ QUIC のバックエンド。ちょうど 1 つだけを有効にする。
-# 既定は quic-tobi (tobi-quic) である。tobi-quic は Windows 非対応のため、
-# Windows ビルドでは --no-default-features --features quic-s2n を指定するか
-# quic-ngtcp2 を選ぶこと (既定のままではコンパイルエラーになる)。
-# WebTransport over HTTP/3 は tobi-quic を直接使うため、この選択の対象外である。
-# ただし s2n-quic は RESET_STREAM_AT を実装しておらず wt-h3 を提供できないため、
-# quic-s2n を選んだビルドと Windows ビルドでは wt-h3 を選択できないものとして扱う。
-# Multipath QUIC (RFC 10069) も tobi-quic の実装を使うため、quic-tobi の Windows 以外の
-# ビルドだけで提供する。
-default = ["quic-tobi"]
-quic-ngtcp2 = ["dep:shiguredo_ngtcp2_tokio"]
-quic-s2n = ["dep:s2n-quic"]
-quic-tobi = []
 # in-process の peer harness (`peer_harness`) を他クレートへ公開する。
 #
 # `crates/moq-pub` / `crates/moq-sub` の `#[cfg(test)] mod tests` から参照するために使う。

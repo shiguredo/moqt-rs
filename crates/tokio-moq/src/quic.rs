@@ -1,20 +1,8 @@
 //! QUIC クライアント接続の確立
 //!
-//! TLS / ALPN / DATAGRAM を設定し、選択した QUIC 実装で接続を確立する。
-//!
-//! QUIC の実装は cargo feature で選ぶ。3 つから 1 つだけを有効にすること。
-//!
-//! - `quic-tobi` (既定): tobi-quic
-//! - `quic-s2n`: s2n-quic
-//! - `quic-ngtcp2`: ngtcp2 (shiguredo_ngtcp2_tokio)
-//!
-//! WebTransport over HTTP/3 は `tobi` を直接使うため、この選択の対象外である。
-//! そのため `tobi_quic` は Windows 以外のビルドでは常に依存に含まれる。
-//! tobi-quic は Windows 非対応のため、Windows ビルドでは `quic-tobi` と wt-h3 を提供しない。
-//! Windows ビルドでは `--no-default-features --features quic-s2n` を指定する。
-//! また s2n-quic は RESET_STREAM_AT を実装しておらず wt-h3 を提供できないため、
-//! `quic-s2n` を選んだビルドでも wt-h3 を選択できないものとして扱う。
-//! Multipath QUIC (RFC 10069) も `quic-tobi` の Windows 以外のビルドだけで使える。
+//! TLS / ALPN / DATAGRAM を設定し、tobi-quic で接続を確立する。
+//! WebTransport over HTTP/3 も同じ tobi-quic の実装を使う。
+//! Multipath QUIC (RFC 10069) は Windows 以外のビルドで使える。
 
 use tokio::sync::mpsc;
 
@@ -25,77 +13,27 @@ use crate::error::TransportError;
 /// WebTransport の `WT-Available-Protocols` と共通の定数を使う。
 pub(crate) const ALPN: &[u8] = crate::MOQT_PROTOCOL.as_bytes();
 
-#[cfg(not(any(
-    all(
-        feature = "quic-tobi",
-        not(feature = "quic-s2n"),
-        not(feature = "quic-ngtcp2")
-    ),
-    all(
-        feature = "quic-s2n",
-        not(feature = "quic-tobi"),
-        not(feature = "quic-ngtcp2")
-    ),
-    all(
-        feature = "quic-ngtcp2",
-        not(feature = "quic-tobi"),
-        not(feature = "quic-s2n")
-    ),
-)))]
-compile_error!("exactly one QUIC backend must be selected: quic-tobi / quic-s2n / quic-ngtcp2");
-
-/// tobi-quic をネイティブ QUIC のバックエンドに選んだ Windows ビルドは拒否する
-///
-/// tobi-quic は Windows 非対応であり、Windows ビルドでは依存に含まれない。
-/// `quic-tobi` を選んだままビルドすると `tobi_quic` を参照するコードが消えるため、
-/// 何が問題なのか分かるようにここで止める。
-#[cfg(all(windows, feature = "quic-tobi"))]
-compile_error!(
-    "the quic-tobi backend is not available on Windows: tobi-quic does not support Windows \
-     (select the quic-s2n or quic-ngtcp2 backend instead)"
-);
-
 /// tobi-quic を使うヘルパー
 ///
-/// WebTransport over HTTP/3 と `quic-tobi` バックエンドが使う。tobi-quic は Windows
-/// 非対応のため、Windows ビルドではコンパイルしない。
-#[cfg(not(windows))]
+/// native QUIC と WebTransport over HTTP/3 が共有する。
 pub(crate) mod tobi;
 
 /// tobi-quic の qlog 出力
 ///
 /// tobi-quic を使う経路 (native QUIC / WebTransport over HTTP/3) から使う。
-/// tobi-quic は Windows 非対応のため、Windows ビルドではコンパイルしない。
-#[cfg(not(windows))]
 pub(crate) mod qlog;
 
-#[cfg(all(feature = "quic-tobi", not(windows)))]
-mod tobi_backend;
+mod connection;
 
-#[cfg(feature = "quic-s2n")]
-mod s2n;
-
-#[cfg(feature = "quic-ngtcp2")]
-mod ngtcp2;
-
-#[cfg(all(feature = "quic-tobi", not(windows)))]
-use tobi_backend as backend;
-
-#[cfg(feature = "quic-s2n")]
-use s2n as backend;
-
-#[cfg(feature = "quic-ngtcp2")]
-use ngtcp2 as backend;
-
-// バックエンドの型は `transport` の公開 enum のフィールドとして外部へ現れるため、
-// 型の到達可能性を保つ必要がある。選択されたバックエンドの型だけを再エクスポートする。
-pub use backend::{Connected, Connection, RecvStream, SendStream, StreamAcceptor};
-pub(crate) use backend::{close_application, connect};
+// 実装の型は `transport` の公開 enum のフィールドとして外部へ現れるため、
+// 型の到達可能性を保つ必要がある。
+pub use connection::{Connected, Connection, RecvStream, SendStream, StreamAcceptor};
+pub(crate) use connection::{close_application, connect};
 
 // `peer_harness` の `TestPeerServer` が使う。`test-support` feature で harness を
 // 他クレートへ公開するビルドでは `cfg(test)` が立たないため、feature でも有効にする。
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use backend::{Server, start_server};
+pub(crate) use connection::{Server, start_server};
 
 /// peer から受信した STOP_SENDING の観測結果
 ///
@@ -119,10 +57,10 @@ pub struct StopSendingObserved {
 /// 観測を止めること (閉じた receiver を poll し続けると待たずに `None` が返り続ける)。
 pub type StopSendingReceiver = mpsc::UnboundedReceiver<StopSendingObserved>;
 
-/// QUIC バックエンドのエラー
+/// QUIC 実装のエラー
 ///
-/// バックエンドごとにエラー型が異なるため、MOQT 層が必要とする分類だけを持つ共通型に
-/// 写す。バックエンド固有のメッセージは [`QuicError::Other`] に文字列で保持する。
+/// tobi-quic のエラー型を、MOQT 層が必要とする分類だけを持つ共通型に写す。
+/// 実装固有のメッセージは [`QuicError::Other`] に文字列で保持する。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuicError {
     /// peer が STOP_SENDING で送信方向を終端した (RFC 9000 §19.5)
@@ -146,7 +84,7 @@ pub enum QuicError {
     /// RFC 9000 §19.19 の `CONNECTION_CLOSE` (type 0x1d) が運ぶ application error code を
     /// 保持する。draft-ietf-moq-transport-23 §6.6 (Termination) の transport 層の終了であり、
     /// コードは §12.2 (Session Termination Codes) の値として扱える。理由 (reason phrase) は
-    /// バックエンドの公開 API から取得できないため保持しない。
+    /// tobi-quic の公開 API から取得できないため保持しない。
     PeerClosed {
         /// peer が載せた application error code
         error_code: u64,
@@ -193,9 +131,6 @@ impl From<QuicError> for TransportError {
 }
 
 /// tobi-quic のエラーを共通の QUIC エラーへ写す
-///
-/// Windows ビルドでは tobi-quic を依存に含めないため、この impl もコンパイルしない。
-#[cfg(not(windows))]
 impl From<tobi_quic::Error> for QuicError {
     fn from(e: tobi_quic::Error) -> Self {
         match e {
@@ -225,7 +160,6 @@ impl From<tobi_quic::Error> for QuicError {
 /// application error による終了は起点を問わず [`QuicError::PeerClosed`] にする。
 /// 自側の close 後にこの値が現れても、`Session` は既に Closing / Closed であり
 /// I/O 層は新しいセッション終了イベントを発行しない。
-#[cfg(not(windows))]
 fn connection_lost(reason: tobi_quic::ConnectionError) -> QuicError {
     match reason {
         tobi_quic::ConnectionError::Application { code, .. } => {
@@ -300,8 +234,7 @@ pub(crate) fn is_connection_closed(error: &QuicError) -> bool {
 
 /// テスト用サーバーの TLS 材料
 ///
-/// バックエンドによって TLS 実装が異なる (rustls / BoringSSL) ため、DER と PEM の
-/// 両方を渡す。各バックエンドは必要な方だけを使う。
+/// tobi-quic に渡す証明書と秘密鍵を DER で保持する。
 ///
 /// `peer_harness` の `TestPeerServer` が使う。`test-support` feature では `cfg(test)` が
 /// 立たないため、feature でも有効にする。

@@ -967,9 +967,8 @@ impl WtClient {
             // 依存しない
             .with_transport(crate::quic::tobi::build_webtransport_transport_config())
             .with_datagram(crate::quic::tobi::datagram_config())
-            // s2n-quic の endpoint は接続とは独立に常時ソケットを駆動していた。tobi-quic の
-            // 既定はコマンド駆動であり、API を呼んでいない間は受信とタイマーを処理しない
-            // ため、同じ挙動になるよう接続の生成時からバックグラウンド駆動を有効にする
+            // tobi-quic の既定はコマンド駆動であり、API を呼んでいない間は受信とタイマーを
+            // 処理しないため、接続の生成時からバックグラウンド駆動を有効にする
             .with_background_driver(true);
         // qlog は QLOGDIR が設定されているときだけ有効にする (診断用)
         let client = match crate::quic::qlog::DirFactory::from_env() {
@@ -1831,8 +1830,8 @@ impl WtSession {
     /// 単方向送信ストリームを開く
     pub async fn open_uni_stream(&mut self) -> Result<WtSendStream> {
         self.ensure_new_stream_allowed()?;
-        // s2n-quic の `open_send_stream` は枠が空くまで待っていたため、待たない
-        // `open_send_stream` ではなく `open_send_stream_wait` を使う
+        // ストリーム枠が空くまで待つ必要があるため、`open_send_stream` ではなく
+        // `open_send_stream_wait` を使う
         let stream = self
             .handle
             .open_send_stream_wait()
@@ -3013,8 +3012,7 @@ fn close_connection_with_h3_error(
         "closing connection with HTTP/3 error code"
     );
     // HTTP/3 のエラーコードは QUIC の application error code の範囲に収まる。
-    // 送出は非同期であり、この関数は呼び出し元の処理を止めない (s2n-quic の `close` も
-    // 送出をキューに積むだけだった)
+    // 送出は非同期であり、この関数は呼び出し元の処理を止めない
     let handle = handle.clone();
     tokio::spawn(async move {
         if let Err(e) = handle.close_application(error_code, &[]).await {

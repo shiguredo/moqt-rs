@@ -6,9 +6,7 @@
 //! URL の scheme は `moqt://` に統一し、トランスポートは [`Transport`] (`--transport`) で選ぶ。
 //! `--transport` を省略した場合は `--url` の MSF fragment の `connection` で決める
 //! ([`resolve_transport`])。
-//! ネイティブ QUIC のバックエンドは cargo feature で選ぶ (既定は tobi-quic)。
-//! WebTransport over HTTP/3 は tobi-quic の実装を使うため、s2n-quic を選んだビルドと
-//! Windows ビルドでは利用できない ([`is_wt_h3_available`] を参照する)。
+//! ネイティブ QUIC と WebTransport over HTTP/3 は tobi-quic を使う。
 //! `--url` の `moqt://` URI は [`parse_url`] でパースし、`--namespace` と `--url` の MSF fragment
 //! からの Track Namespace の解決は [`resolve_namespace`] が担う。
 //!
@@ -153,8 +151,6 @@ pub mod quic;
 pub mod transport;
 pub mod webtransport;
 pub mod webtransport_h2;
-// WebTransport over HTTP/3 は tobi-quic を使うため、tobi-quic 非対応の Windows ではコンパイルしない
-#[cfg(not(windows))]
 pub mod webtransport_h3;
 
 // TCP + TLS のクライアント設定 (QMux と WebTransport over HTTP/2 が共有する)
@@ -170,80 +166,26 @@ pub mod peer_harness;
 // 型はサブモジュールパス (`error::...` / `transport::...` / `webtransport_h3::...` / `quic::...`) 経由で
 // 参照する。最上位再エクスポートは設けない。
 
-/// s2n-quic バックエンドのビルドで wt-h3 を選んだときのエラー
+/// Multipath QUIC を提供しないプラットフォームで接続を試みたときのエラー
 ///
-/// WebTransport over HTTP/3 は data stream の reset に `RESET_STREAM_AT`
-/// (draft-ietf-quic-reliable-stream-reset-11) を使う。s2n-quic は `RESET_STREAM_AT` を
-/// 実装していないため、s2n-quic をネイティブ QUIC のバックエンドに選んだビルドでは
-/// wt-h3 を提供しない。
-#[cfg(not(windows))]
-const WT_H3_UNAVAILABLE_S2N: &str = "transport 'wt-h3' is not available with the s2n-quic backend: \
-     WebTransport over HTTP/3 requires RESET_STREAM_AT, which s2n-quic does not implement \
-     (use --transport wt-h2, or build with --no-default-features --features quic-tobi)";
-
-/// Windows ビルドで wt-h3 を選んだときのエラー
-///
-/// WebTransport over HTTP/3 の QUIC 層は tobi-quic を使うが、tobi-quic は Windows 非対応で
-/// あり、Windows ビルドでは依存に含めない。
+/// tobi-quic は Windows では Multipath QUIC を実装していないため、Windows ビルドだけが
+/// 利用できない。
 #[cfg(windows)]
-const WT_H3_UNAVAILABLE_WINDOWS: &str = "transport 'wt-h3' is not available on Windows: \
-     WebTransport over HTTP/3 uses tobi-quic, which does not support Windows \
-     (use --transport wt-h2)";
-
-/// wt-h3 がこのビルドで利用できない理由
-///
-/// 利用できる場合は `None` を返す。[`Transport::parse`] などの利用者向けエラーに、
-/// ビルドごとの理由をそのまま載せるために使う。
-///
-/// WebTransport over HTTP/3 は data stream の reset に `RESET_STREAM_AT`
-/// (draft-ietf-quic-reliable-stream-reset-11) を使う。s2n-quic は `RESET_STREAM_AT` を
-/// 実装していないため、s2n-quic をネイティブ QUIC のバックエンドに選んだビルドでは
-/// `wt-h3` を提供しない。tobi-quic / ngtcp2 を選んだビルドでは tobi-quic の実装を使って
-/// `wt-h3` を提供する。ただし tobi-quic は Windows 非対応のため、Windows ビルドでは
-/// バックエンドの選択に関わらず `wt-h3` を提供しない。
-pub fn wt_h3_unavailable_reason() -> Option<&'static str> {
-    #[cfg(windows)]
-    {
-        Some(WT_H3_UNAVAILABLE_WINDOWS)
-    }
-    #[cfg(not(windows))]
-    {
-        if cfg!(feature = "quic-s2n") {
-            Some(WT_H3_UNAVAILABLE_S2N)
-        } else {
-            None
-        }
-    }
-}
-
-/// WebTransport over HTTP/3 をこのビルドで利用できるか
-///
-/// 利用できない理由は [`wt_h3_unavailable_reason`] で取得できる。
-pub fn is_wt_h3_available() -> bool {
-    wt_h3_unavailable_reason().is_none()
-}
-
-/// Multipath QUIC を提供しないビルドで接続を試みたときのエラー
-///
-/// Multipath QUIC は tobi-quic の実装だけを使い、Windows では使えないため、
-/// `quic-tobi` 以外のバックエンドと Windows ビルドでは提供しない。
-#[cfg(not(all(not(windows), feature = "quic-tobi")))]
-const MULTIPATH_UNAVAILABLE: &str = "multipath QUIC is not available with this build: \
-     it requires the quic-tobi backend on a non-Windows platform \
-     (build with --no-default-features --features quic-tobi)";
+const MULTIPATH_UNAVAILABLE: &str = "multipath QUIC is not supported on Windows: \
+     tobi-quic does not implement Multipath QUIC on Windows";
 
 /// Multipath QUIC (RFC 10069) がこのビルドで利用できない理由
 ///
-/// 利用できる場合は `None` を返す。`quic-tobi` バックエンドを選んだ Windows 以外の
-/// ビルドだけが Multipath QUIC を提供する。
+/// 利用できる場合は `None` を返す。tobi-quic は Windows 以外のビルドで Multipath QUIC を
+/// 提供する。
 pub fn multipath_unavailable_reason() -> Option<&'static str> {
-    #[cfg(all(not(windows), feature = "quic-tobi"))]
-    {
-        None
-    }
-    #[cfg(not(all(not(windows), feature = "quic-tobi")))]
+    #[cfg(windows)]
     {
         Some(MULTIPATH_UNAVAILABLE)
+    }
+    #[cfg(not(windows))]
+    {
+        None
     }
 }
 
@@ -266,8 +208,6 @@ pub enum Transport {
     /// draft-17 の `SETTINGS_WT_ENABLED` (`0x20b8933b`) だけを広告する。旧 codepoint
     /// (`0x2c7cf000`) だけを広告するサーバーとは共通版が無いため、
     /// `TransportError::InvalidState` で接続に失敗する (draft-ietf-webtrans-http3-17 §7.1)。
-    /// s2n-quic バックエンドのビルドと Windows ビルドでは提供しない
-    /// ([`is_wt_h3_available`] を参照する)。
     WtH3,
     /// WebTransport over HTTP/2 (TCP+TLS 上の ALPN `h2`)
     ///
@@ -293,15 +233,14 @@ pub enum Transport {
     /// 採用する。候補は URL の `msf` fragment の `connection` とビルドで利用できる経路から
     /// 決める。
     ///
-    /// - `connection` が無い場合: `quic`、`wt-h3`、`qmux`、`wt-h2` の順に競争する
-    ///   (`wt-h3` を提供しないビルドでは `quic`、`qmux`、`wt-h2`)。QUIC を TCP より優先し
+    /// - `connection` が無い場合: `quic`、`wt-h3`、`qmux`、`wt-h2` の順に競争する。
+    ///   QUIC を TCP より優先し
     ///   (draft-ietf-happy-happyeyeballs-v3-05 §3)、同一の QUIC 系では層の少ない
     ///   native QUIC を先にする
     /// - `connection=q` の場合: `quic` だけを使う。draft-ietf-moq-msf-02 §11.1.1 は `q` に
     ///   Native QUIC を MUST で対応づけるため、QMux (TCP+TLS 上の QUIC 多重化) は候補に
     ///   含めない
-    /// - `connection=wt` の場合: `wt-h3`、`wt-h2` の順に競争する (`wt-h3` を提供しない
-    ///   ビルドでは `wt-h2` だけ)
+    /// - `connection=wt` の場合: `wt-h3`、`wt-h2` の順に競争する
     ///
     /// MOQT の SETUP は最初に確立した候補だけで交換する。SETUP の失敗は別の候補への
     /// フォールバックを起こさない (`connect` の doc を参照する)。
@@ -311,20 +250,13 @@ pub enum Transport {
 impl Transport {
     /// `--transport` の値からトランスポート種別を解決する
     ///
-    /// `wt-h3` は s2n-quic バックエンドのビルドと Windows ビルドでは受理しない
-    /// ([`is_wt_h3_available`] を参照する)。
-    ///
     /// # Errors
     ///
-    /// `quic` / `wt-h3` / `wt-h2` / `qmux` / `auto` 以外の値と、`wt-h3` を提供しない
-    /// ビルドでの `wt-h3` はエラーになる。
+    /// `quic` / `wt-h3` / `wt-h2` / `qmux` / `auto` 以外の値はエラーになる。
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
             "quic" => Ok(Self::Quic),
-            "wt-h3" => match wt_h3_unavailable_reason() {
-                Some(reason) => Err(reason.to_string()),
-                None => Ok(Self::WtH3),
-            },
+            "wt-h3" => Ok(Self::WtH3),
             "wt-h2" => Ok(Self::WtH2),
             "qmux" => Ok(Self::Qmux),
             "auto" => Ok(Self::Auto),
@@ -674,9 +606,7 @@ pub fn resolve_namespace(
 /// WebTransport) を既定にし、`wt-h2` は `--transport wt-h2` を明示したときだけ使う。WebTransport の
 /// 主経路は HTTP/3 であり、`wt-h2` は relay の capsule 対応に依存する経路である
 /// (draft-ietf-moq-transport-23 §6.2 (Session establishment) は HTTP/2 上の WebTransport も
-/// 許容する)。ただし s2n-quic バックエンドのビルドと Windows ビルドでは `wt-h3` を提供しない
-/// ため、それらのビルドで `--transport` を省略して `connection=wt` を指定するとエラーになる
-/// ([`wt_h3_unavailable_reason`] を参照する)。
+/// 許容する)。tobi-quic はすべての対応プラットフォームで `wt-h3` を提供する。
 ///
 /// 解決の規則は次のとおりである。
 ///
@@ -706,9 +636,6 @@ pub fn resolve_namespace(
 /// - `connection` に `q` / `wt` 以外の値がある: fragment の解釈エラー
 /// - `connection` と `--transport` が矛盾する: どちらを優先するかを決められないためエラー
 /// - `connection=q` と `connection=wt` が同時に指定されている: 両立しないためエラー
-/// - `wt-h3` を提供しないビルド (s2n-quic バックエンド / Windows) で `wt-h3` を明示した、
-///   または `connection=wt` の既定として `wt-h3` が必要になった: そのビルドでは `wt-h3` を
-///   提供しないためエラー
 pub fn resolve_transport(
     explicit: Option<Transport>,
     url: &ServerUrl,
@@ -731,13 +658,6 @@ pub fn resolve_transport(
                 .to_string(),
         );
     }
-    // s2n-quic バックエンドと Windows では wt-h3 を提供しない。`--transport wt-h3` の明示は
-    // ここで拒否し、`connection=wt` の既定として選ばれる場合は後段の分岐で拒否する。
-    if explicit == Some(Transport::WtH3)
-        && let Some(reason) = wt_h3_unavailable_reason()
-    {
-        return Err(reason.to_string());
-    }
     // fragment が要求する接続種別。`wt` は WebTransport の実装を指定しないため WebTransport と
     // して扱い、実装は `explicit` (省略時は `wt-h3`) で選ぶ
     let required = if requires_quic {
@@ -759,12 +679,7 @@ pub fn resolve_transport(
              parameter)",
             explicit.as_str()
         )),
-        (Some(MsfConnectionType::WebTransport), None) => match wt_h3_unavailable_reason() {
-            None => Ok(Transport::WtH3),
-            Some(reason) => Err(format!(
-                "'connection=wt' in --url requires WebTransport, but {reason}"
-            )),
-        },
+        (Some(MsfConnectionType::WebTransport), None) => Ok(Transport::WtH3),
         (
             Some(MsfConnectionType::WebTransport),
             Some(explicit @ (Transport::WtH3 | Transport::WtH2 | Transport::Auto)),
@@ -1709,9 +1624,7 @@ pub struct ConnectParams<'a> {
     /// TLS の CA 証明書パス
     ///
     /// 指定すると、その証明書だけをルートとしてサーバー証明書を検証する。省略した場合は
-    /// OS のシステムルートストアで検証する (native QUIC の ngtcp2 バックエンドだけは
-    /// aws-lc-sys の SSL の既定のトラストストアを使う)。[`Self::insecure`] と同時には
-    /// 指定できない。
+    /// OS のシステムルートストアで検証する。[`Self::insecure`] と同時には指定できない。
     pub cert: Option<&'a str>,
     /// 証明書検証をスキップする (開発用)
     ///
@@ -1731,9 +1644,9 @@ pub struct ConnectParams<'a> {
     /// Multipath QUIC (RFC 10069) の設定
     ///
     /// [`MultipathOptions::mode`] が [`MultipathMode::Off`](crate::multipath::MultipathMode::Off)
-    /// の場合は Multipath QUIC を広告しない。有効にできるのは `quic-tobi` バックエンドの
-    /// ネイティブ QUIC 経路だけであり、ほかのバックエンドや WebTransport / QMux を選ぶと
-    /// [`TransportError::Unsupported`] になる。
+    /// の場合は Multipath QUIC を広告しない。有効にできるのは tobi-quic のネイティブ QUIC
+    /// 経路だけであり、WebTransport / QMux を選ぶと [`TransportError::Unsupported`] になる。
+    /// Windows では tobi-quic が Multipath QUIC を実装していないため使えない。
     pub multipath: MultipathOptions,
     /// Happy Eyeballs v3 の設定
     ///
@@ -1758,8 +1671,8 @@ pub struct ConnectParams<'a> {
 /// §6.1 は成功判定をアプリケーションに委ねる)。
 ///
 /// 証明書の検証方法は [`ConnectParams`] で決める。`cert` も `insecure` も指定されない
-/// 場合は OS のシステムルートストアで検証する (ngtcp2 バックエンドは aws-lc-sys の SSL の
-/// 既定のトラストストア)。`insecure` を指定したときだけ検証をスキップし、その旨を
+/// 場合は OS のシステムルートストアで検証する。`insecure` を指定したときだけ検証を
+/// スキップし、その旨を
 /// 試行ごとに警告する。`cert` と `insecure` を同時に指定すると、名前解決より前に
 /// エラーを返す。
 ///
@@ -1786,13 +1699,6 @@ pub async fn connect(
                 .to_string(),
         ));
     }
-    // wt-h3 を提供しないビルドでは確立しない。CLI は Transport::parse /
-    // resolve_transport で拒否するが、ConnectParams を直接組み立てる呼び出し側にも対処する。
-    if params.transport == Transport::WtH3
-        && let Some(reason) = wt_h3_unavailable_reason()
-    {
-        return Err(TransportError::Unsupported(reason.to_string()));
-    }
     // Multipath QUIC は tobi-quic のネイティブ QUIC 経路だけが使う。設定の誤りを接続の
     // 試行より前に返し、候補の競争で無駄に接続しないようにする。mode が Off の場合も、
     // Multipath 固有の設定が残っていないことを検証する。
@@ -1817,7 +1723,6 @@ pub async fn connect(
 /// アドレス試行で確立した、MOQT SETUP 未交換のトランスポート
 enum ConnectedTransport {
     Quic(crate::quic::Connected, crate::quic::StopSendingReceiver),
-    #[cfg(not(windows))]
     WtH3(crate::webtransport_h3::WtSession),
     WtH2(crate::webtransport_h2::WtH2Session),
     Qmux(crate::qmux::QmuxSession),
@@ -1827,12 +1732,11 @@ impl ConnectedTransport {
     /// 競争に負けた確立済みの接続を閉じる
     ///
     /// 競争の勝者が決まったとき、`JoinSet` にはすでに確立まで完了した負け候補が残って
-    /// いることがある。それを drop するだけでは、バックエンドによっては接続を保持する
+    /// いることがある。それを drop するだけでは、経路によっては接続を保持する
     /// タスクが残り、idle timeout までソケットとドライバが残る。ここで明示的に閉じる。
     fn close(self) {
         match self {
             Self::Quic(connection, _) => connection.close(),
-            #[cfg(not(windows))]
             Self::WtH3(session) => session.discard(),
             Self::WtH2(session) => session.discard(),
             Self::Qmux(session) => session.discard(),
@@ -1909,15 +1813,11 @@ fn candidate_transports(
     if requires_quic {
         transports.push(Transport::Quic);
     } else if requires_webtransport {
-        if is_wt_h3_available() {
-            transports.push(Transport::WtH3);
-        }
+        transports.push(Transport::WtH3);
         transports.push(Transport::WtH2);
     } else {
         transports.push(Transport::Quic);
-        if is_wt_h3_available() {
-            transports.push(Transport::WtH3);
-        }
+        transports.push(Transport::WtH3);
         transports.push(Transport::Qmux);
         transports.push(Transport::WtH2);
     }
@@ -2005,7 +1905,6 @@ async fn connect_resolved(
             )
             .await
         }
-        #[cfg(not(windows))]
         ConnectedTransport::WtH3(session) => {
             MoqtClient::establish_wt(session, params.impl_name, &url.cat_tokens, task_monitor).await
         }
@@ -2057,34 +1956,24 @@ async fn connect_transport(
             Ok(ConnectedTransport::Quic(connection, stop_sending_rx))
         }
         Transport::WtH3 => {
-            #[cfg(not(windows))]
-            {
-                // draft-ietf-webtrans-http3-17 §3.1 / §9.2: draft-17 の codepoint だけを
-                // 広告する。旧 codepoint だけの peer は wait_for_peer_settings が
-                // InvalidState で拒否する。
-                let mut client_config =
-                    crate::webtransport_h3::ClientConfig::new(socket_addr, server_name)
-                        // :authority は target URI の表記どおり渡す
-                        // (draft-ietf-webtrans-http3-16 §3.2)。
-                        .authority(&url.authority)
-                        .enable_webtransport(crate::webtransport_h3::wt_h3_settings());
-                if context.receive_datagrams {
-                    // subscriber は datagram を継続受信するためバックグラウンドタスクを起動する。
-                    client_config = client_config.receive_datagrams();
-                }
-                client_config =
-                    apply_tls_config_h3(client_config, context.cert.as_deref(), context.insecure)?;
-                let session =
-                    crate::webtransport_h3::WtClient::connect(client_config, &url.path).await?;
-                Ok(ConnectedTransport::WtH3(session))
+            // draft-ietf-webtrans-http3-17 §3.1 / §9.2: draft-17 の codepoint だけを
+            // 広告する。旧 codepoint だけの peer は wait_for_peer_settings が
+            // InvalidState で拒否する。
+            let mut client_config =
+                crate::webtransport_h3::ClientConfig::new(socket_addr, server_name)
+                    // :authority は target URI の表記どおり渡す
+                    // (draft-ietf-webtrans-http3-16 §3.2)。
+                    .authority(&url.authority)
+                    .enable_webtransport(crate::webtransport_h3::wt_h3_settings());
+            if context.receive_datagrams {
+                // subscriber は datagram を継続受信するためバックグラウンドタスクを起動する。
+                client_config = client_config.receive_datagrams();
             }
-            #[cfg(windows)]
-            {
-                // 公開 API の事前検査に加えて、Windows では存在しない経路を型で除外する。
-                Err(TransportError::Unsupported(
-                    WT_H3_UNAVAILABLE_WINDOWS.to_string(),
-                ))
-            }
+            client_config =
+                apply_tls_config_h3(client_config, context.cert.as_deref(), context.insecure)?;
+            let session =
+                crate::webtransport_h3::WtClient::connect(client_config, &url.path).await?;
+            Ok(ConnectedTransport::WtH3(session))
         }
         Transport::WtH2 => {
             let mut client_config =
@@ -2126,8 +2015,6 @@ async fn connect_transport(
 /// 証明書検証をスキップする (開発用)。どちらも指定されない場合は WebTransport over
 /// HTTP/3 の connect が OS のシステムルートストアで検証する。両方が指定された場合は
 /// [`connect`] が事前にエラーにするため、ここでは `insecure` を優先する。
-/// Windows では `webtransport_h3` をコンパイルしないため、この関数もコンパイルしない。
-#[cfg(not(windows))]
 fn apply_tls_config_h3(
     client_config: crate::webtransport_h3::ClientConfig,
     cert: Option<&str>,
@@ -2416,25 +2303,18 @@ mod tests {
     }
 
     /// `--transport` の値からトランスポート種別を解決する
-    ///
-    /// `wt-h3` は wt-h3 を提供しないビルドでは受理しない。
     #[test]
     fn transport_parses_supported_values() {
         assert_eq!(
             Transport::parse("quic").expect("quic は受理されること"),
             Transport::Quic
         );
-        if is_wt_h3_available() {
-            assert_eq!(
-                Transport::parse("wt-h3").expect("wt-h3 は受理されること"),
-                Transport::WtH3
-            );
-        } else {
-            let reason = wt_h3_unavailable_reason().expect("wt-h3 が利用できないビルドであること");
-            let err =
-                Transport::parse("wt-h3").expect_err("wt-h3 を提供しないビルドでは受理しないこと");
-            assert_eq!(err, reason, "受理しない理由がそのまま返ること");
-        }
+
+        assert_eq!(
+            Transport::parse("wt-h3").expect("wt-h3 は受理されること"),
+            Transport::WtH3
+        );
+
         assert_eq!(
             Transport::parse("wt-h2").expect("wt-h2 は受理されること"),
             Transport::WtH2
@@ -2765,9 +2645,6 @@ mod tests {
     }
 
     /// `Transport::as_str` は `Transport::parse` の逆写像である
-    ///
-    /// `wt-h3` は wt-h3 を提供しないビルドでは受理しないため、利用できるビルドだけ
-    /// 往復を検証する。
     #[test]
     fn transport_as_str_is_the_inverse_of_parse() {
         for transport in [
@@ -2783,18 +2660,12 @@ mod tests {
                 transport.as_str()
             );
         }
-        if is_wt_h3_available() {
-            assert_eq!(
-                Transport::parse(Transport::WtH3.as_str()).expect("解釈できること"),
-                Transport::WtH3,
-                "as_str の結果を parse すると元の値に戻ること: wt-h3"
-            );
-        } else {
-            assert!(
-                Transport::parse(Transport::WtH3.as_str()).is_err(),
-                "wt-h3 を提供しないビルドでは wt-h3 を受理しないこと"
-            );
-        }
+
+        assert_eq!(
+            Transport::parse(Transport::WtH3.as_str()).expect("解釈できること"),
+            Transport::WtH3,
+            "as_str の結果を parse すると元の値に戻ること: wt-h3"
+        );
     }
 
     /// `connection=q` / `connection=wt` と `--transport qmux` は矛盾する
@@ -2848,68 +2719,44 @@ mod tests {
             Transport::Quic,
             "整合する明示はそのまま使われること"
         );
-        // WebTransport を明示すると 2 つの MUST が両立しない。ただし wt-h3 を提供しない
-        // ビルドでは wt-h3 自体を提供しないため、その理由を優先して返す
+        // WebTransport を明示すると 2 つの MUST が両立しない
         let error = resolve_transport(Some(Transport::WtH3), &url)
             .expect_err("connection=q と --transport wt-h3 はエラーになること");
-        if is_wt_h3_available() {
-            assert!(
-                error.contains("connection=q"),
-                "fragment が要求する接続種別が理由として分かること: {error}"
-            );
-        } else {
-            let reason = wt_h3_unavailable_reason().expect("wt-h3 が利用できないビルドであること");
-            assert_eq!(error, reason, "wt-h3 を提供しない理由が分かること");
-        }
+
+        assert!(
+            error.contains("connection=q"),
+            "fragment が要求する接続種別が理由として分かること: {error}"
+        );
     }
 
-    /// `connection=wt` は WebTransport を要求し、利用できるビルドでは既定が `wt-h3` になる
+    /// `connection=wt` は WebTransport を要求し、既定が `wt-h3` になる
     ///
     /// `wt` は WebTransport の実装 (HTTP/3 / HTTP/2) を指定しないため、本実装は `wt-h3` を
-    /// 既定にする。ただし `wt-h3` を提供しないビルドでは、`--transport` を省略した
-    /// `connection=wt` はエラーになる。
+    /// 既定にする。
     #[test]
     fn resolve_transport_requires_webtransport_and_defaults_to_wt_h3() {
         let url = parse_url("moqt://example.com/app#msf:moq-example--video&connection=wt")
             .expect("URL を解釈できること");
-        if is_wt_h3_available() {
-            assert_eq!(
-                resolve_transport(None, &url).expect("接続種別を解決できること"),
-                Transport::WtH3,
-                "connection=wt の既定は wt-h3 であること"
-            );
-        } else {
-            let reason = wt_h3_unavailable_reason().expect("wt-h3 が利用できないビルドであること");
-            let error = resolve_transport(None, &url).expect_err(
-                "wt-h3 を提供しないビルドでは connection=wt の既定 wt-h3 を提供しないこと",
-            );
-            assert!(
-                error.contains(reason),
-                "wt-h3 を提供しない理由が分かること: {error}"
-            );
-            assert!(
-                error.contains("--transport wt-h2"),
-                "代替の指定方法が分かること: {error}"
-            );
-        }
+
+        assert_eq!(
+            resolve_transport(None, &url).expect("接続種別を解決できること"),
+            Transport::WtH3,
+            "connection=wt の既定は wt-h3 であること"
+        );
+
         // WebTransport の実装は `--transport` で選べる
         assert_eq!(
             resolve_transport(Some(Transport::WtH2), &url).expect("接続種別を解決できること"),
             Transport::WtH2,
             "connection=wt と --transport wt-h2 は整合すること"
         );
-        if is_wt_h3_available() {
-            assert_eq!(
-                resolve_transport(Some(Transport::WtH3), &url).expect("接続種別を解決できること"),
-                Transport::WtH3,
-                "connection=wt と --transport wt-h3 は整合すること"
-            );
-        } else {
-            assert!(
-                resolve_transport(Some(Transport::WtH3), &url).is_err(),
-                "wt-h3 を提供しないビルドでは --transport wt-h3 を拒否すること"
-            );
-        }
+
+        assert_eq!(
+            resolve_transport(Some(Transport::WtH3), &url).expect("接続種別を解決できること"),
+            Transport::WtH3,
+            "connection=wt と --transport wt-h3 は整合すること"
+        );
+
         // native QUIC を明示すると 2 つの MUST が両立しない
         let error = resolve_transport(Some(Transport::Quic), &url)
             .expect_err("connection=wt と --transport quic はエラーになること");
@@ -2941,18 +2788,12 @@ mod tests {
             Transport::Quic,
             "fragment が無ければ既定は native QUIC であること"
         );
-        if is_wt_h3_available() {
-            assert_eq!(
-                resolve_transport(Some(Transport::WtH3), &url).expect("接続種別を解決できること"),
-                Transport::WtH3,
-                "fragment が無ければ明示がそのまま使われること"
-            );
-        } else {
-            assert!(
-                resolve_transport(Some(Transport::WtH3), &url).is_err(),
-                "wt-h3 を提供しないビルドでは wt-h3 を明示しても拒否すること"
-            );
-        }
+
+        assert_eq!(
+            resolve_transport(Some(Transport::WtH3), &url).expect("接続種別を解決できること"),
+            Transport::WtH3,
+            "fragment が無ければ明示がそのまま使われること"
+        );
     }
 
     /// `--transport auto` は `connection` の要求と両立する
@@ -2986,18 +2827,17 @@ mod tests {
         );
     }
 
-    /// `auto` の候補集合は `connection` とビルドの提供状況で決まる
+    /// `auto` の候補集合は `connection` で決まる
     ///
     /// `connection` が無い場合は QUIC を TCP より優先し、`connection=q` は native QUIC だけ、
-    /// `connection=wt` は `wt-h3` / `wt-h2` にする。`wt-h3` を提供しないビルドでは候補から
-    /// 外す。
+    /// `connection=wt` は `wt-h3` / `wt-h2` にする。
     #[test]
     fn candidate_transports_expands_auto() {
         let url = parse_url("moqt://example.com/app").expect("URL を解釈できること");
         let mut expected = vec![Transport::Quic];
-        if is_wt_h3_available() {
-            expected.push(Transport::WtH3);
-        }
+
+        expected.push(Transport::WtH3);
+
         expected.push(Transport::Qmux);
         expected.push(Transport::WtH2);
         assert_eq!(
@@ -3017,14 +2857,9 @@ mod tests {
 
         let url = parse_url("moqt://example.com/app#msf:moq-example--video&connection=wt")
             .expect("URL を解釈できること");
-        let mut expected = Vec::new();
-        if is_wt_h3_available() {
-            expected.push(Transport::WtH3);
-        }
-        expected.push(Transport::WtH2);
         assert_eq!(
             candidate_transports(Transport::Auto, &url).expect("候補を展開できること"),
-            expected,
+            vec![Transport::WtH3, Transport::WtH2],
             "connection=wt は wt-h3 / wt-h2 を候補にすること"
         );
 
@@ -3089,18 +2924,13 @@ mod tests {
         let url =
             parse_url("moqt://example.com/app#msf:moq-example--video&connection=wt&connection=wt")
                 .expect("URL を解釈できること");
-        if is_wt_h3_available() {
-            assert_eq!(
-                resolve_transport(None, &url).expect("接続種別を解決できること"),
-                Transport::WtH3,
-                "connection=wt の重複は WebTransport (既定 wt-h3) になること"
-            );
-        } else {
-            assert!(
-                resolve_transport(None, &url).is_err(),
-                "wt-h3 を提供しないビルドでは connection=wt の重複も拒否すること"
-            );
-        }
+
+        assert_eq!(
+            resolve_transport(None, &url).expect("接続種別を解決できること"),
+            Transport::WtH3,
+            "connection=wt の重複は WebTransport (既定 wt-h3) になること"
+        );
+
         assert_eq!(
             resolve_transport(Some(Transport::WtH2), &url).expect("接続種別を解決できること"),
             Transport::WtH2,
@@ -4314,8 +4144,8 @@ mod tests {
         );
     }
 
-    /// Multipath を提供しないビルドでは接続前にエラーになること
-    #[cfg(not(feature = "quic-tobi"))]
+    /// Windows では Multipath を提供しないため接続前にエラーになること
+    #[cfg(windows)]
     #[tokio::test]
     async fn connect_rejects_multipath_when_unavailable() {
         let url = parse_url("moqt://127.0.0.1:4443/").expect("URL を解釈できること");
@@ -4335,7 +4165,7 @@ mod tests {
         };
         let monitor = tokio_metrics::TaskMonitor::new();
         let error = match connect(&params, &monitor).await {
-            Ok(_) => panic!("Multipath を提供しないビルドではエラーになること"),
+            Ok(_) => panic!("Windows では Multipath がエラーになること"),
             Err(error) => error,
         };
         assert!(
@@ -4344,13 +4174,12 @@ mod tests {
         );
         let message = error.to_string();
         assert!(
-            message.contains("multipath QUIC is not available"),
-            "Multipath を利用できないことを示すこと: {message}"
+            message.contains("multipath QUIC is not supported on Windows"),
+            "Windows では Multipath を利用できないことを示すこと: {message}"
         );
     }
 
     /// Multipath は native QUIC 以外の経路では指定できないこと
-    #[cfg(feature = "quic-tobi")]
     #[tokio::test]
     async fn connect_rejects_multipath_for_non_quic_transport() {
         let url = parse_url("moqt://127.0.0.1:4443/").expect("URL を解釈できること");
@@ -4385,7 +4214,6 @@ mod tests {
     }
 
     /// 範囲外の Multipath 設定は接続前にエラーになること
-    #[cfg(feature = "quic-tobi")]
     #[tokio::test]
     async fn connect_rejects_invalid_multipath_options() {
         let url = parse_url("moqt://127.0.0.1:4443/").expect("URL を解釈できること");

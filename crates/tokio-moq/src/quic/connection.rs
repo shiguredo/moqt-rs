@@ -1,4 +1,4 @@
-//! tobi-quic をネイティブ QUIC のバックエンドとして使う実装
+//! tobi-quic でネイティブ QUIC 接続を確立する実装
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -146,7 +146,7 @@ impl Connection {
     /// peer 起点のセッション終了コード (取得できた場合のみ)
     ///
     /// tobi-quic の接続ハンドルからは peer の application error code を同期的に取得できない。
-    /// 本バックエンドではストリーム受信 / 受理 API のエラー (`QuicError::PeerClosed`) が
+    /// tobi-quic ではストリーム受信 / 受理 API のエラー (`QuicError::PeerClosed`) が
     /// コードを運ぶため、ここでは保持しない。
     pub(crate) fn peer_session_close(&self) -> Option<u64> {
         None
@@ -278,11 +278,9 @@ pub(crate) async fn connect(
         .with_io(IoConfig::new(crate::local_bind_addr(socket_addr)))
         .with_transport(transport)
         .with_datagram(tobi::datagram_config())
-        // s2n-quic の endpoint は Server / Client のハンドルとは独立したタスクで常時
-        // ソケットを駆動していた。tobi-quic の既定はコマンド駆動であり、アプリが API を
-        // 呼んでいない間は受信とタイマーを処理しないため、同じ挙動になるよう接続の生成時
-        // からバックグラウンド駆動を有効にする。無効のままだと、MOQT 層が受信待ちに
-        // 入っている間に ACK や再送が止まる。
+        // tobi-quic の既定はコマンド駆動であり、アプリが API を呼んでいない間は受信と
+        // タイマーを処理しない。そのままでは MOQT 層が受信待ちに入っている間に ACK や
+        // 再送が止まるため、接続の生成時からバックグラウンド駆動を有効にする。
         .with_background_driver(true);
     if let Some(config) = tobi::build_multipath_config(multipath) {
         builder = builder.with_multipath(config);
@@ -434,8 +432,11 @@ pub(crate) async fn start_server_with_multipath(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(windows))]
+    use crate::multipath::MultipathMode;
     use crate::multipath::MultipathOptions;
     use std::time::Duration;
+    #[cfg(not(windows))]
     use tobi_quic::{NewPath, PathState};
 
     /// テスト用のサーバー証明書を作る
@@ -474,6 +475,7 @@ mod tests {
     ///
     /// パスの使い方 (Handover / Aggregate) によらず、追加パスの検証とデータ転送が
     /// 成立することを確かめる。
+    #[cfg(not(windows))]
     async fn assert_multipath_round_trip(options: MultipathOptions) {
         let (client, server) = connect_multipath_pair(&options).await;
 
@@ -542,6 +544,7 @@ mod tests {
     }
 
     /// Handover モードで追加パスを検証し、データを送受信できること
+    #[cfg(not(windows))]
     #[tokio::test(flavor = "multi_thread")]
     async fn multipath_handover_validates_an_additional_path() {
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -561,6 +564,7 @@ mod tests {
     ///
     /// Aggregate モードでは複数パスへ振り分けるスケジューラーと BBR 系の輻輳制御を
     /// 使う。設定が接続の確立とデータ転送を壊さないことを確かめる。
+    #[cfg(not(windows))]
     #[tokio::test(flavor = "multi_thread")]
     async fn multipath_aggregate_validates_an_additional_path() {
         tokio::time::timeout(Duration::from_secs(10), async {

@@ -1,20 +1,14 @@
 //! tobi-quic を使うヘルパー
 //!
-//! ネイティブ QUIC のバックエンドと、WebTransport over HTTP/3 の QUIC 層が共有する。
-//! WebTransport は常に tobi-quic で接続するため、このモジュールはバックエンドの
-//! 選択に関わらずコンパイルされる。
+//! ネイティブ QUIC と、WebTransport over HTTP/3 の QUIC 層が共有する。
 
-#[cfg(feature = "quic-tobi")]
 use tobi_quic::PathEvent;
 use tobi_quic::core::connection::ConnectionConfig;
-#[cfg(feature = "quic-tobi")]
 use tobi_quic::core::time::Duration as TobiDuration;
 use tobi_quic::{Connection, DatagramConfig, ReceiveStream};
 
 use super::{QuicError, StopSendingObserved, StopSendingReceiver};
-#[cfg(feature = "quic-tobi")]
 use crate::error::{Result, TransportError};
-#[cfg(feature = "quic-tobi")]
 use crate::multipath::{InterfaceFilter, MultipathMode, MultipathOptions};
 
 /// 接続で広告する transport parameter を構築する
@@ -64,8 +58,8 @@ pub(crate) fn build_transport_config() -> ConnectionConfig {
     // ピアが追加パスを開けるとパス検証のためのソケットとタスクが増える。Multipath を
     // 使う場合だけ build_multipath_transport_config が上書きする。
     config.transport_params.initial_max_path_id = None;
-    // s2n-quic の既定 (30 秒) に合わせる。tobi-quic の既定は 0 (無効) であり、
-    // そのままでは応答しない peer との接続が残り続ける。
+    // 応答しない peer との接続が残り続けないよう、30 秒でアイドルタイムアウトする。
+    // tobi-quic の既定は 0 (無効) であるため明示する。
     config.transport_params.max_idle_timeout = 30_000;
     config
 }
@@ -75,7 +69,6 @@ pub(crate) fn build_transport_config() -> ConnectionConfig {
 /// `build_transport_config` を基に、Path ID の上限と待機パスの keep-alive を設定する。
 /// パスの使い方とインターフェースのフィルタは `ClientBuilder::with_multipath` が
 /// `MultipathConfig` で上書きするため、ここでは設定しない。
-#[cfg(feature = "quic-tobi")]
 pub(crate) fn build_multipath_transport_config(options: &MultipathOptions) -> ConnectionConfig {
     let mut config = build_transport_config();
     config.transport_params.initial_max_path_id = Some(options.initial_max_path_id);
@@ -88,7 +81,6 @@ pub(crate) fn build_multipath_transport_config(options: &MultipathOptions) -> Co
 /// std の Duration を tobi-quic の Duration へ変換する
 ///
 /// tobi-quic はマイクロ秒の u64 で保持する。u64 に収まらない値は上限へ飽和させる。
-#[cfg(feature = "quic-tobi")]
 fn tobi_duration(duration: std::time::Duration) -> TobiDuration {
     let micros = u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
     TobiDuration::from_micros(micros)
@@ -98,7 +90,6 @@ fn tobi_duration(duration: std::time::Duration) -> TobiDuration {
 ///
 /// `MultipathMode::Off` の場合は `None` を返す。呼び出し側は `Some` のときだけ
 /// `ClientBuilder::with_multipath` を呼ぶ。
-#[cfg(feature = "quic-tobi")]
 pub(crate) fn build_multipath_config(
     options: &MultipathOptions,
 ) -> Option<tobi_quic::MultipathConfig> {
@@ -131,7 +122,6 @@ pub(crate) fn build_multipath_config(
 /// 振り分ける WeightedRoundRobin と、データを受信したパスで ACK を返す SamePath を
 /// 組み合わせる。帯域を使うスケジューラーは BBR 系の輻輳制御と組み合わせる必要がある
 /// (tobi-quic の Multipath の資料を参照)。
-#[cfg(feature = "quic-tobi")]
 pub(crate) fn aggregate_scheduler_config() -> tobi_quic::SchedulerConfig {
     tobi_quic::SchedulerConfig {
         data: tobi_quic::DataSchedulerKind::WeightedRoundRobin,
@@ -143,7 +133,7 @@ pub(crate) fn aggregate_scheduler_config() -> tobi_quic::SchedulerConfig {
 /// WebTransport over HTTP/3 用の transport parameter を構築する
 ///
 /// draft-ietf-webtrans-http3-17 §3.1: WebTransport の端点は空の `reset_stream_at`
-/// transport parameter を広告する。ネイティブ QUIC のバックエンドは従来の
+/// transport parameter を広告する。ネイティブ QUIC は従来の
 /// [`build_transport_config`] を使い、この設定を広告しない。
 pub(crate) fn build_webtransport_transport_config() -> ConnectionConfig {
     let mut config = build_transport_config();
@@ -175,7 +165,6 @@ impl RecvStream {
     }
 
     /// ストリーム ID を返す
-    #[cfg(feature = "quic-tobi")]
     pub(crate) fn id(&self) -> u64 {
         self.inner.id()
     }
@@ -255,7 +244,6 @@ pub(crate) fn spawn_connection_observer(connection: &Connection) -> StopSendingR
 ///
 /// タスクは接続が終了すると終わる。パスの検証失敗と peer のパス廃棄は、接続が継続して
 /// いても通信品質に影響しうるため警告で出す (RFC 10069 Section 3.4)。
-#[cfg(feature = "quic-tobi")]
 pub(crate) fn spawn_path_observer(connection: &Connection) {
     let connection = connection.clone();
     tokio::spawn(async move {
@@ -270,7 +258,6 @@ pub(crate) fn spawn_path_observer(connection: &Connection) {
 ///
 /// Path ID は接続内で一意な識別子であり、ローカル / リモートのアドレスと合わせて
 /// どの回線が使われているかを追えるようにする。
-#[cfg(feature = "quic-tobi")]
 fn log_path_event(event: PathEvent) {
     match event {
         PathEvent::Opened {
@@ -370,12 +357,10 @@ pub(crate) fn spawn_packet_diagnostics(connection: &Connection) {
 /// 接続をアプリケーションエラーで閉じる
 ///
 /// tobi-quic の `close_application` は 62 ビット varint に収まらないコードを拒否する。
-/// MOQT のコードは §13 (Grease) の greasing 値を含み u64 全域を取り得るため、s2n-quic の
-/// `application::Error::new(code).unwrap_or(UNKNOWN)` と同じく、収まらないコードは
-/// `UNKNOWN` (0) で閉じる。
+/// MOQT のコードは §13 (Grease) の greasing 値を含み u64 全域を取り得るため、
+/// 収まらないコードは `UNKNOWN` (0) で閉じる。
 ///
 /// 戻り値は実際に載せたコードである。
-#[cfg(feature = "quic-tobi")]
 pub(crate) async fn close_application(connection: &Connection, code: u64) -> Result<u64> {
     let code = if code <= MAX_VARINT { code } else { 0 };
     connection
@@ -386,7 +371,6 @@ pub(crate) async fn close_application(connection: &Connection, code: u64) -> Res
 }
 
 /// QUIC の可変長整数で表せる最大値 (RFC 9000 §16)
-#[cfg(feature = "quic-tobi")]
 const MAX_VARINT: u64 = (1 << 62) - 1;
 
 /// tobi-quic のエラーを共通の QUIC エラーへ写す

@@ -4,12 +4,8 @@
 
 QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux の接続確立と、Sans I/O な `shiguredo_moqt::session::core::Session` を Tokio の I/O と結線する `MoqtClient` を提供する。`--url` と `--transport` の解釈もこのクレートが担う。`--transport auto` では、候補の経路を Happy Eyeballs v3 (draft-ietf-happy-happyeyeballs-v3-05) の考え方で競争させ、最初に確立した経路を使う。
 
-ネイティブ QUIC の既定のバックエンドは tobi-quic である。tobi-quic は Windows 非対応の
-ため、Windows ビルドでは `--no-default-features --features quic-s2n` (または `quic-ngtcp2`)
-を指定する。Windows ビルドでは tobi-quic を依存に含めず、WebTransport over HTTP/3
-(`wt-h3`) と `quic-tobi` バックエンドを提供しない。Windows ビルドで選べるネイティブ QUIC の
-バックエンドは `quic-s2n` / `quic-ngtcp2` であり、接続経路は `quic` / `wt-h2` / `qmux` /
-`auto` になる。
+ネイティブ QUIC と WebTransport over HTTP/3 は tobi-quic を使う。tobi-quic は Linux /
+macOS / Windows に対応する。Multipath QUIC (RFC 10069) は Windows では使えない。
 
 ## 提供する範囲
 
@@ -18,10 +14,10 @@ QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux の接続確�
   - `resolve_transport`：`--transport` の指定と `msf` fragment の `connection` から `Transport` を解決する。`auto` は候補の展開を `connect` に委ねる
   - `resolve_namespace`：`--namespace` の指定と `msf` fragment の track-identifier から Track Namespace を解決する
   - `ServerUrl`：authority / path / fragment / MSF fragment の解釈結果 / C4M 認可トークン (`cat_tokens`) を保持する
-- 接続確立：`quic` / `webtransport_h3` / `webtransport_h2` / `qmux` の各モジュールが TLS とハンドシェイクを行う (`webtransport_h3` は Windows ビルドでは提供しない)。`happy-eyeballs` クレートの Sans I/O スケジューラが `--transport auto` の候補の並びと開始時刻を決め、`tokio-moq` のアダプタが接続 future とタイマーを駆動する
+- 接続確立：`quic` / `webtransport_h3` / `webtransport_h2` / `qmux` の各モジュールが TLS とハンドシェイクを行う。`happy-eyeballs` クレートの Sans I/O スケジューラが `--transport auto` の候補の並びと開始時刻を決め、`tokio-moq` のアダプタが接続 future とタイマーを駆動する
 - `transport`：4 経路を統一的に扱う `SendStream` / `RecvStream` / `StreamHandle` / `StreamAcceptor` / `BidiStreamAcceptor`
 - `happy_eyeballs::Config`：`--transport auto` と複数アドレスの競争に使う Connection Attempt Delay、最小値、最大値、倍率、Preferred Address Family Count を設定する
-- `multipath`：Multipath QUIC (RFC 10069) のモード、インターフェースのフィルタ、パス数の上限、ネットワーク監視、keep-alive を設定する。既定の `quic-tobi` バックエンドの native QUIC 経路だけで使える
+- `multipath`：Multipath QUIC (RFC 10069) のモード、インターフェースのフィルタ、パス数の上限、ネットワーク監視、keep-alive を設定する。tobi-quic の native QUIC 経路だけで使える (Windows では使えない)
 - `moqt_client::MoqtClient`：control stream と bidi request stream を駆動する。`establish_quic` /
   `establish_wt` (wt-h3) / `establish_wt_h2` / `establish_qmux` (qmux) で確立し、`publish_track` /
   `subscribe_track` / `send_subscribe_ok` / `send_request_error` / `next_event` / `tick` などで
@@ -84,20 +80,18 @@ scheme は RFC 3986 §3.1 に従い大文字小文字を区別しない (`MOQT:/
 接続経路は `--transport` で選ぶ。`--transport` を省略した場合は `--url` の `msf` fragment の
 `connection` (`q`: native QUIC / `wt`: WebTransport) を使い、それも無ければ `quic` になる
 (draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters))。`connection=wt` の
-ときの既定は `wt-h3` (HTTP/2 にする場合は `--transport wt-h2` を明示する)。ただし `wt-h3` を
-提供しないビルド (s2n-quic バックエンド / Windows) では、`--transport` を省略した `connection=wt` は
-エラーになる。`connection` と矛盾する `--transport`、`connection=q` と `connection=wt` の
+ときの既定は `wt-h3` (HTTP/2 にする場合は `--transport wt-h2` を明示する)。
+`connection` と矛盾する `--transport`、`connection=q` と `connection=wt` の
 併記、`connection=q` / `connection=wt` と `--transport qmux` の組み合わせはエラーになる。
 
 `--transport auto` は候補の経路を Happy Eyeballs v3 で競争させ、最初に確立した経路を採用する。
-`connection` が無ければ `quic` → `wt-h3` → `qmux` → `wt-h2` の順に候補を並べる (`wt-h3` を
-提供しないビルドでは `quic` → `qmux` → `wt-h2`)。`connection=q` は `quic` だけ、`connection=wt`
+`connection` が無ければ `quic` → `wt-h3` → `qmux` → `wt-h2` の順に候補を並べる。`connection=q` は `quic` だけ、`connection=wt`
 は `wt-h3` → `wt-h2` を競争する。
 
 | `--transport` | `Transport` | 接続経路 | 備考 |
 | --- | --- | --- | --- |
 | `quic` | `Transport::Quic` | QUIC 直接接続 | ALPN は `moqt-23` |
-| `wt-h3` | `Transport::WtH3` | WebTransport over HTTP/3 | QUIC 上の ALPN は `h3`。既定の tobi-quic ビルドでは選べる。s2n-quic バックエンドのビルドと Windows ビルドでは選べない |
+| `wt-h3` | `Transport::WtH3` | WebTransport over HTTP/3 | QUIC 上の ALPN は `h3` |
 | `wt-h2` | `Transport::WtH2` | WebTransport over HTTP/2 | TCP+TLS 上の ALPN は `h2` |
 | `qmux` | `Transport::Qmux` | QMux | TCP+TLS 上の ALPN は `moqt-23`。UDP が使えない環境向け。experimental |
 | `auto` | `Transport::Auto` | Happy Eyeballs v3 による自動選択 | `connection` が無ければ `quic` → `wt-h3` → `qmux` → `wt-h2` を競争する。`connection=q` は `quic` だけ、`connection=wt` は `wt-h3` → `wt-h2` |
@@ -136,44 +130,25 @@ Connection Attempt Delay などの値は `ConnectParams::happy_eyeballs`
 一次資料は [`refs/happy/draft-ietf-happy-happyeyeballs-v3-05.txt`](../../refs/happy/draft-ietf-happy-happyeyeballs-v3-05.txt)
 に置く。設計の詳細は [`docs/happy-eyeballs.md`](../../docs/happy-eyeballs.md) を参照する。
 
-### QUIC バックエンド
+### QUIC 実装
 
-ネイティブ QUIC (`--transport quic`) の実装は cargo feature で選ぶ。既定は tobi-quic である。
-s2n-quic / ngtcp2-rs も選べる。ちょうど 1 つだけを有効にすること。
-
-| feature | QUIC 実装 | 備考 |
-| --- | --- | --- |
-| `quic-s2n` | s2n-quic | `RESET_STREAM_AT` を実装していないため `wt-h3` は選べない |
-| `quic-tobi` | tobi-quic | 既定。crates.io 未公開のため git の main を追う。`wt-h3` と Multipath QUIC (RFC 10069) もこのビルドで使う。Windows では選べない |
-| `quic-ngtcp2` | ngtcp2-rs | `shiguredo_ngtcp2_tokio` 経由。初回ビルドで ngtcp2 本体を取得・ビルドする |
+ネイティブ QUIC (`--transport quic`) と WebTransport over HTTP/3 (`--transport wt-h3`) は
+tobi-quic を使う。tobi-quic は Linux / macOS / Windows に対応する。
 
 ```bash
-# 既定の tobi-quic
 cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example
-
-# s2n-quic / ngtcp2-rs に切り替える (-p の crate の既定 feature を外す)
-cargo run -p moq-pub --no-default-features --features quic-s2n -- --url moqt://127.0.0.1:4443 --namespace moq-example
-cargo run -p moq-sub --no-default-features --features quic-ngtcp2 -- --url moqt://127.0.0.1:4443 --namespace moq-example
+cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --transport wt-h3
 ```
-
-WebTransport over HTTP/3 (`wt-h3`) の QUIC 層は tobi-quic 固定である。s2n-quic と ngtcp2-rs は
-ネイティブ QUIC にだけ使う。このため tobi-quic は Windows 以外のビルドではバックエンドの選択に
-関わらず依存に含まれる。既定の tobi-quic ビルドでは `wt-h3` をそのまま使える。s2n-quic は
-`RESET_STREAM_AT` を実装していないため、`quic-s2n` を選んだビルドでは `wt-h3` を選べない
-(`Transport::parse` / `resolve_transport` が拒否する)。
-tobi-quic は Windows 非対応のため、Windows ビルドでは tobi-quic を依存に含めず、`quic-tobi` と
-`wt-h3` を提供しない (既定のままではコンパイルエラーになるため、`--no-default-features
---features quic-s2n` を指定する)。
 
 ### Multipath QUIC
 
-既定の quic-tobi バックエンドの Windows 以外のビルドでは、native QUIC 経路で Multipath QUIC (RFC 10069) を使える。既定は無効であり、`ConnectParams::multipath` (`tokio_moq::multipath::MultipathOptions`) の `mode` を `Off` 以外にしたときだけ `initial_max_path_id` を広告する。moq-pub / moq-sub では `--multipath` などで指定する。
+Windows 以外のビルドでは、native QUIC 経路で Multipath QUIC (RFC 10069) を使える。既定は無効であり、`ConnectParams::multipath` (`tokio_moq::multipath::MultipathOptions`) の `mode` を `Off` 以外にしたときだけ `initial_max_path_id` を広告する。moq-pub / moq-sub では `--multipath` などで指定する。
 
 - パスの使い方は `handover` / `aggregate` / `backup` から選ぶ
 - `network_monitor_interval` を指定すると、インターフェースの増減に追従してパスを自動で開閉する
 - `keep_alive_interval` を指定すると、待機パスを keep-alive で維持する。未指定の場合はアイドルタイムアウトから間隔を決める
 - 接続確立後にパスの開設・検証・切り替えを観測し、ログに出す
-- s2n-quic / ngtcp2 バックエンド、WebTransport、QMux、Windows では使えない。Multipath を有効にした接続は `--transport quic` を要求する
+- WebTransport、QMux、Windows では使えない。Multipath を有効にした接続は `--transport quic` を要求する
 
 詳細は [docs/multipath.md](../../docs/multipath.md) を参照する。
 
@@ -211,7 +186,7 @@ cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video&cat=
 
 接続時の TLS は次の規則で検証する。
 
-- `--cert` も `--insecure` も指定しない場合は、OS のシステムルートストアでサーバー証明書を検証する。rustls を使う経路 (native QUIC の s2n-quic / tobi-quic、WebTransport over HTTP/3 / HTTP/2、QMux) は `rustls-native-certs` でシステムルートを読み込む。ngtcp2 バックエンドだけは rustls を使わず、aws-lc-sys の SSL の既定のトラストストア (既定の CA パスと `SSL_CERT_FILE` / `SSL_CERT_DIR`) で検証する
+- `--cert` も `--insecure` も指定しない場合は、OS のシステムルートストアでサーバー証明書を検証する。rustls を使う経路 (native QUIC の tobi-quic、WebTransport over HTTP/3 / HTTP/2、QMux) は `rustls-native-certs` でシステムルートを読み込む
 - `--cert` を指定した場合は、その CA 証明書だけをルートとして検証する
 - `--insecure` を指定した場合だけ証明書検証をスキップする。接続時に警告ログが出る。`--cert` との同時指定はエラーになる
 - システムルートを 1 つも読み込めない場合は接続をエラーにする。検証をスキップする経路へはフォールバックしない
@@ -228,11 +203,11 @@ cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --in
 
 ## テスト
 
-`peer_harness` はテスト専用の in-process ハーネスである。`test-support` feature を有効にすると、他クレート (`moq-pub` / `moq-sub`) の統合テストから `tokio_moq::peer_harness` を参照できる。ハーネスはビルドで選んだ QUIC バックエンドのサーバーを 127.0.0.1 に立て、in-process で MOQT peer を駆動する。モックやスタブは使わず、ライブラリの公開 API だけを使う。対象は QUIC 直接接続と QMux である。
+`peer_harness` はテスト専用の in-process ハーネスである。`test-support` feature を有効にすると、他クレート (`moq-pub` / `moq-sub`) の統合テストから `tokio_moq::peer_harness` を参照できる。ハーネスは tobi-quic のサーバーを 127.0.0.1 に立て、in-process で MOQT peer を駆動する。モックやスタブは使わず、ライブラリの公開 API だけを使う。対象は QUIC 直接接続と QMux である。
 
 QMux のハーネス (`QmuxTestPeerServer` / `TestPeer::wait_qmux_closed` など) はこの crate 自身の `#[cfg(test)]` テスト専用で、他クレートからは参照できない。`QmuxTestPeerServer` が TCP + TLS (ALPN `moqt-23`) を 127.0.0.1 に立て、`qmux` モジュールのテストが SETUP の交換、PUBLISH / SUBSCRIBE、subgroup stream と datagram の往復、ピアの STOP_SENDING の観測を実行で検証する。
 
-Multipath QUIC のテストは既定の tobi-quic ビルドで実行する。ループバックで実際に Multipath をネゴシエーションし、追加パスが `PathState::Active` になることと、その状態でストリームのデータが届くことを検証する。
+Multipath QUIC のテストは tobi-quic ビルドで実行する。ループバックで実際に Multipath をネゴシエーションし、追加パスが `PathState::Active` になることと、その状態でストリームのデータが届くことを検証する。
 
 ```bash
 cargo test -p tokio-moq multipath

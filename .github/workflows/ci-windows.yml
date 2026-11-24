@@ -7,8 +7,7 @@
 #   tokio::spawn(pipeline::run) が型検査で失敗する) ため対象外にする
 # - aom / dav1d / opus / SDL3 は既定で GitHub Releases の prebuilt を使うため、
 #   runner に meson などのビルドツールを追加する必要はない
-# - 既定の QUIC バックエンドは tobi-quic だが、tobi-quic は Windows 非対応であるため
-#   Windows では --no-default-features --features quic-s2n で s2n-quic を選ぶ
+# - QUIC 実装は tobi-quic であり、Windows でもビルドできる
 # - 実デバイス (WASAPI / Media Foundation) の実行は行わず、コンパイルだけを確認する
 # - runner は windows-2025-vs2026 を使う
 
@@ -30,4 +29,4 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: moq-pub / moq-sub とそのテストをビルドする
-        run: cargo build -p moq-pub -p moq-sub --all-targets --no-default-features --features quic-s2n
+        run: cargo build -p moq-pub -p moq-sub --all-targets

@@ -2,15 +2,15 @@
 name = "e2e-tests"
 version = "0.0.0"
 edition = "2024"
-# moq-pub / moq-sub の依存 (QUIC バックエンド) が MSRV 1.95 を要求するため、それに合わせる
+# moq-pub / moq-sub の依存 (tobi-quic) が MSRV 1.95 を要求するため、それに合わせる
 rust-version = "1.95"
 publish = false
 
 [dev-dependencies]
 # publisher (ローカル参照)
-moq-pub = { path = "../crates/moq-pub", default-features = false }
+moq-pub = { path = "../crates/moq-pub" }
 # subscriber (ローカル参照)
-moq-sub = { path = "../crates/moq-sub", default-features = false }
+moq-sub = { path = "../crates/moq-sub" }
 # 非同期ランタイム
 tokio = { version = "1.54", features = ["full"] }
 # Tokio タスクメトリクス計測
@@ -18,14 +18,3 @@ tokio-metrics = "0.5"
 # 非同期ユーティリティ (graceful shutdown)
 tokio-utils = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[features]
-# ネイティブ QUIC のバックエンド。ちょうど 1 つだけを有効にする。
-# テスト対象の publisher / subscriber に同じバックエンドを選ぶ。
-# 既定は quic-tobi であり、wt-h3 もこの既定で試せる。Windows ビルドでは
-# --no-default-features --features quic-s2n にする (s2n-quic は RESET_STREAM_AT を
-# 実装しておらず wt-h3 を提供できない)。
-default = ["quic-tobi"]
-quic-ngtcp2 = ["moq-pub/quic-ngtcp2", "moq-sub/quic-ngtcp2"]
-quic-s2n = ["moq-pub/quic-s2n", "moq-sub/quic-s2n"]
-quic-tobi = ["moq-pub/quic-tobi", "moq-sub/quic-tobi"]

@@ -71,7 +71,6 @@ pub(crate) fn build_client_config(
 /// `insecure` が true の場合は証明書検証をスキップする (開発用)。どちらも指定されない
 /// 場合は OS のシステムルートストアで検証する。`alpn` は QUIC の ALPN に載せる
 /// 識別子 (`moqt-23` / `h3`) である。
-#[cfg(any(feature = "quic-tobi", feature = "quic-s2n"))]
 pub(crate) fn build_quic_client_config(
     cert_path: Option<&str>,
     insecure: bool,

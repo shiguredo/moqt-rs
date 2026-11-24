@@ -2,8 +2,7 @@
 name = "moq-pub"
 version = "2026.0.0"
 edition = "2024"
-# 依存の QUIC バックエンド (s2n-quic / tobi-quic) が MSRV 1.95 を要求するため、
-# それに合わせる (raden の 1.94 要求も包含する)
+# 依存の tobi-quic が MSRV 1.95 を要求するため、それに合わせる (raden の 1.94 要求も包含する)
 rust-version = "1.95"
 description = "MOQT publisher client"
 publish = false
@@ -35,7 +34,7 @@ shiguredo_opus = "2026.4"
 shiguredo_video_device = "2026.4"
 
 # crates 配下で共有するトランスポート crate (QUIC / WebTransport / QMux)
-tokio-moq = { path = "../tokio-moq", default-features = false }
+tokio-moq = { path = "../tokio-moq" }
 
 # 外部クレート
 
@@ -57,11 +56,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 # テストで WebTransport の終了コード (ErrorCode::AlpnError) を使う
 shiguredo_http3 = "2026.1.0-canary.14"
-# in-process の peer harness (実 QUIC 接続で peer 役を駆動する) を統合テストから使う。
-# default-features = false は必須である。省略すると tokio-moq の既定 quic-tobi が有効になり、
-# --no-default-features --features quic-s2n / quic-ngtcp2 のテストビルドで
-# crates/tokio-moq/src/quic.rs の compile_error! に当たる
-tokio-moq = { path = "../tokio-moq", default-features = false, features = ["test-support"] }
+# in-process の peer harness (実 QUIC 接続で peer 役を駆動する) を統合テストから使う
+tokio-moq = { path = "../tokio-moq", features = ["test-support"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # AAC-LC エンコーダ (Apple Audio Toolbox)
@@ -73,15 +69,3 @@ shiguredo_audio_toolbox = "2026.2.0-canary.2"
 # 必ず "plane copy dimensions exceed CVPixelBuffer plane bounds" で失敗するため、
 # 修正が入った canary を使う
 shiguredo_video_toolbox = "2026.2.0-canary.4"
-
-[features]
-# ネイティブ QUIC のバックエンド。ちょうど 1 つだけを有効にする。
-# 既定は quic-tobi (tobi-quic) である。tobi-quic は Windows 非対応のため、
-# Windows ビルドでは --no-default-features --features quic-s2n を指定するか
-# quic-ngtcp2 を選ぶこと (既定のままではコンパイルエラーになる)。
-# s2n-quic は RESET_STREAM_AT を実装しておらず wt-h3 を提供できないため、
-# quic-s2n を選んだビルドでは wt-h3 を選択できないものとして扱う。
-default = ["quic-tobi"]
-quic-ngtcp2 = ["tokio-moq/quic-ngtcp2"]
-quic-s2n = ["tokio-moq/quic-s2n"]
-quic-tobi = ["tokio-moq/quic-tobi"]

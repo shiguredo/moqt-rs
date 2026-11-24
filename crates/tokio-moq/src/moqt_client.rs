@@ -53,9 +53,6 @@ use crate::transport::{
     StreamHandle,
 };
 use crate::webtransport_h2::WtH2Session;
-// WebTransport over HTTP/3 は tobi-quic を使うため、tobi-quic 非対応の Windows では
-// webtransport_h3 をコンパイルしない。establish_wt も Windows では持たない。
-#[cfg(not(windows))]
 use crate::webtransport_h3::WtSession;
 
 /// デフォルトの Subscriber Priority
@@ -1394,7 +1391,7 @@ fn is_notable_event(event: &SessionEvent) -> bool {
 ///
 /// native QUIC はストリーム受信 / 受理 API のエラーに `CONNECTION_CLOSE` の
 /// application error code を載せる ([`TransportError::PeerSessionClosed`])。
-/// 理由はバックエンドの公開 API から取得できないため空文字列になる。
+/// 理由は tobi-quic の公開 API から取得できないため空文字列になる。
 /// WebTransport 経路はこの variant を使わず、[`StreamHandle::peer_session_close`] で
 /// `WT_CLOSE_SESSION` の終了コードと理由を取得する。
 fn peer_session_close_from_error(error: &TransportError) -> Option<PeerSessionClose> {
@@ -1975,8 +1972,6 @@ impl MoqtClient {
     /// peer 起動の request stream は MoqtClient 内部の受理タスクが受け取るため、
     /// publisher も本 API を使える。
     ///
-    /// Windows ビルドでは WebTransport over HTTP/3 を提供しないため、この API も持たない。
-    #[cfg(not(windows))]
     pub async fn establish_wt(
         wt_session: WtSession,
         impl_name: &str,

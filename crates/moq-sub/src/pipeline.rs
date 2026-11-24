@@ -3331,8 +3331,8 @@ async fn run_side_session(
     // datagram の受信には handle を直接使う (client を借用しないため select の腕に置ける)
     let handle = client.handle();
     // datagram の受信は専用タスクへ分ける。100 ms の tick と同じ `select!` で
-    // `handle.recv_datagrams()` を待つと、tick のたびに future が捨てられ、
-    // ngtcp2 の driver が受け取り待ちの datagram を破棄してしまう。
+    // `handle.recv_datagrams()` を待つと、tick のたびに future が捨てられ、datagram の
+    // 受信を待ち直すことになる。
     //
     // side session に音声の購読が相乗りすることがあるため、移行対象の種別によらず受ける
     // (音声の購読が無ければ `plan_datagram` が配送先なしとして捨てる)
@@ -19178,14 +19178,14 @@ mod tests {
     ///
     /// pipeline の private 関数 (`receive_catalog` / `resubscribe_tracks` / `run`) を
     /// クレート内から直接呼ぶ。peer 役は `tokio_moq::peer_harness` の `TestPeer` が
-    /// sans-I/O の `Session` と、選択した QUIC バックエンド (既定は tobi-quic) の実サーバーで
+    /// sans-I/O の `Session` と、tobi-quic の実サーバーで
     /// 駆動する (モック / スタブは使わない)。
     /// 待ち合わせはすべて `tokio::time::timeout` とイベント待ちで上限を設け、`sleep` で
     /// タイミングを合わせない。
     ///
     /// run を駆動する async テストはそれぞれ独立した multi_thread runtime を作る。テストが
     /// 並列に走ると、runtime ごとの既定 worker 数 (CPU 数) が積み上がって CPU が過剰に分割
-    /// され、QUIC バックエンド (特に ngtcp2) の受信が数秒遅延することがあった。そのため
+    /// され、QUIC の受信が数秒遅延することがあった。そのため
     /// これらのテストは `worker_threads` を 2 に抑える (同期テスト `#[test]` には runtime が
     /// 無いため関係しない)。
     mod peer_harness_integration_tests {

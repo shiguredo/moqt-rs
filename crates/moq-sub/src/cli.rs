@@ -32,7 +32,7 @@ pub struct Config {
     /// Multipath QUIC (RFC 10069) の設定
     ///
     /// `mode` が `Off` 以外のときだけ Multipath QUIC を広告する。有効にできるのは
-    /// `quic-tobi` バックエンドのネイティブ QUIC 経路だけである。
+    /// tobi-quic のネイティブ QUIC 経路だけである。
     pub multipath: MultipathOptions,
     /// Track Namespace (draft-ietf-moq-transport-23 §8.8 表現をパースしたもの)
     pub namespace: TrackNamespace,
@@ -145,23 +145,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
 
     // `--transport` が省略された場合は `--url` の msf fragment の `connection` を使う
     // (draft-ietf-moq-msf-02 §11.1.1)。解決の規則は `tokio_moq::resolve_transport` を参照
-    //
-    // wt-h3 を提供しないビルドではヘルプの選択肢もビルドに合わせる。理由はビルドで異なる
-    // (s2n-quic は RESET_STREAM_AT 未実装、Windows は tobi-quic 非対応) ため、Windows を先に
-    // 判定する。noargs の doc は &'static str しか取れないため、定数を選ぶ。
-    let transport_doc: &'static str = if cfg!(windows) {
-        "Transport (quic | wt-h2 | qmux | auto; wt-h3 is not available on Windows because \
-         its QUIC layer uses tobi-quic, which does not support Windows. qmux (QMux over \
-         TCP+TLS) is experimental; wt-h2 depends on relay support for WT_RESET_STREAM \
-         capsules). auto races the available routes with Happy Eyeballs v3 \
-         (draft-ietf-happy-happyeyeballs-v3); with 'connection=q' only native QUIC is \
-         raced, and with 'connection=wt' the available WebTransport routes are raced. If --transport is \
-         omitted, uses the 'connection' parameter of the --url MSF fragment (q: native \
-         QUIC; wt requires --transport wt-h2 because wt-h3 is unavailable); otherwise \
-         defaults to quic. A conflicting --transport, or 'connection=q' with \
-         'connection=wt', is an error"
-    } else if tokio_moq::is_wt_h3_available() {
-        "Transport (quic | wt-h3 | wt-h2 | qmux | auto; qmux (QMux over TCP+TLS) is \
+    let transport_doc: &'static str = "Transport (quic | wt-h3 | wt-h2 | qmux | auto; qmux (QMux over TCP+TLS) is \
          experimental; wt-h2 depends on relay support for WT_RESET_STREAM capsules). \
          auto races the available routes with Happy Eyeballs v3 \
          (draft-ietf-happy-happyeyeballs-v3); with 'connection=q' only native QUIC is \
@@ -169,19 +153,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
          omitted, uses the 'connection' parameter of the --url MSF fragment (q: native \
          QUIC, wt: WebTransport over HTTP/3, or wt-h2 with --transport wt-h2 for \
          HTTP/2); otherwise defaults to quic. A conflicting --transport, or \
-         'connection=q' with 'connection=wt', is an error"
-    } else {
-        "Transport (quic | wt-h2 | qmux | auto; wt-h3 is not available with the s2n-quic \
-         backend because it requires RESET_STREAM_AT. qmux (QMux over TCP+TLS) is \
-         experimental; wt-h2 depends on relay support for WT_RESET_STREAM capsules). \
-         auto races the available routes with Happy Eyeballs v3 \
-         (draft-ietf-happy-happyeyeballs-v3); with 'connection=q' only native QUIC is \
-         raced, and with 'connection=wt' the available WebTransport routes are raced. If --transport is \
-         omitted, uses the 'connection' parameter of the --url MSF fragment (q: native \
-         QUIC; wt requires --transport wt-h2 because wt-h3 is unavailable); otherwise \
-         defaults to quic. A conflicting --transport, or 'connection=q' with \
-         'connection=wt', is an error"
-    };
+         'connection=q' with 'connection=wt', is an error";
     let transport_opt: Option<Transport> = noargs::opt("transport")
         .ty("TYPE")
         .doc(transport_doc)
@@ -210,7 +182,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     // 既定は無効であり、--multipath を指定したときだけ有効にする。
     let multipath_mode: MultipathMode = noargs::opt("multipath")
         .ty("MODE")
-        .doc("Multipath QUIC mode (off | handover | aggregate | backup; default off; aggregate uses WeightedRoundRobin and BBRv3; requires the quic-tobi backend and --transport quic)")
+        .doc("Multipath QUIC mode (off | handover | aggregate | backup; default off; aggregate uses WeightedRoundRobin and BBRv3; requires --transport quic)")
         .default("off")
         .take(&mut args)
         .then(|o| MultipathMode::parse(o.value()))?;
@@ -520,34 +492,22 @@ mod tests {
     ///
     /// draft-ietf-moq-msf-02 §11.1.1 (Reserved fragment parameters) の `connection` は client に
     /// 接続種別を MUST で指定する (`q` は native QUIC、`wt` は WebTransport)。`wt` は WebTransport の
-    /// 実装を指定しないため `wt-h3` を既定にする。ただし `wt-h3` を提供しないビルドでは
-    /// `connection=wt` がエラーになる。
+    /// 実装を指定しないため `wt-h3` を既定にする。
     #[test]
     fn transport_follows_the_msf_fragment_connection() {
         let args = [
             "--url",
             "moqt://127.0.0.1:4443#msf:spam-egg--video&connection=wt",
         ];
-        if tokio_moq::is_wt_h3_available() {
-            let config = parse_args(&args)
-                .expect("オプションの解析に成功すること")
-                .expect("設定が返ること");
-            assert_eq!(
-                config.transport,
-                Transport::WtH3,
-                "connection=wt は WebTransport (既定 wt-h3) になること"
-            );
-        } else {
-            let reason = tokio_moq::wt_h3_unavailable_reason()
-                .expect("wt-h3 が利用できないビルドであること");
-            let Err(error) = parse_args(&args) else {
-                panic!("wt-h3 を提供しないビルドでは connection=wt の既定 wt-h3 を提供しないこと");
-            };
-            assert!(
-                format!("{error:?}").contains(reason),
-                "wt-h3 を提供しない理由が分かること: {error:?}"
-            );
-        }
+
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            config.transport,
+            Transport::WtH3,
+            "connection=wt は WebTransport (既定 wt-h3) になること"
+        );
 
         let args = [
             "--url",
@@ -673,21 +633,10 @@ mod tests {
         let Err(error) = parse_args(&args) else {
             panic!("connection=q と --transport wt-h3 はエラーになること");
         };
-        // wt-h3 を提供しないビルドでは wt-h3 自体を提供しないため、
-        // fragment との矛盾より先に wt-h3 が利用できない理由を返す
-        if tokio_moq::is_wt_h3_available() {
-            assert!(
-                format!("{error:?}").contains("connection=q"),
-                "矛盾した fragment が理由として分かること: {error:?}"
-            );
-        } else {
-            let reason = tokio_moq::wt_h3_unavailable_reason()
-                .expect("wt-h3 が利用できないビルドであること");
-            assert!(
-                format!("{error:?}").contains(reason),
-                "wt-h3 を提供しない理由が分かること: {error:?}"
-            );
-        }
+        assert!(
+            format!("{error:?}").contains("connection=q"),
+            "矛盾した fragment が理由として分かること: {error:?}"
+        );
     }
 
     /// `connection=q` と `connection=wt` の同時指定はエラーにする
@@ -1084,7 +1033,6 @@ mod tests {
     }
 
     /// Multipath の各オプションを設定へ反映すること
-    #[cfg(feature = "quic-tobi")]
     #[test]
     fn multipath_options_are_parsed() {
         let mut args = BASE_ARGS.to_vec();
@@ -1120,7 +1068,6 @@ mod tests {
     }
 
     /// Multipath は native QUIC 以外の経路では指定できないこと
-    #[cfg(feature = "quic-tobi")]
     #[test]
     fn multipath_requires_native_quic() {
         let mut args = BASE_ARGS.to_vec();
@@ -1136,20 +1083,20 @@ mod tests {
         );
     }
 
-    /// Multipath を提供しないビルドでは指定できないこと
-    #[cfg(not(feature = "quic-tobi"))]
+    /// Windows では Multipath を指定できないこと
+    #[cfg(windows)]
     #[test]
-    fn multipath_is_rejected_when_unavailable() {
+    fn multipath_is_rejected_on_windows() {
         let mut args = BASE_ARGS.to_vec();
         args.extend_from_slice(&["--multipath", "handover"]);
         let error = match parse_args(&args) {
-            Ok(_) => panic!("Multipath を提供しないビルドで指定を受理しないこと"),
+            Ok(_) => panic!("Windows で Multipath を受理しないこと"),
             Err(error) => error,
         };
         let message = format!("{error:?}");
         assert!(
-            message.contains("multipath QUIC is not available"),
-            "Multipath を利用できないことを示すこと: {message}"
+            message.contains("multipath QUIC is not supported on Windows"),
+            "Windows では Multipath を利用できないことを示すこと: {message}"
         );
     }
 }

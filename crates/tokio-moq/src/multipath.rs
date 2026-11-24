@@ -77,8 +77,8 @@ pub enum InterfaceFilter {
 /// Multipath QUIC の設定
 ///
 /// [`MultipathMode::Off`] の場合は Multipath QUIC を広告しない。有効にできるのは
-/// `quic-tobi` バックエンドのネイティブ QUIC 経路だけであり、ほかのバックエンドや
-/// WebTransport / QMux では接続時にエラーになる。
+/// tobi-quic のネイティブ QUIC 経路だけであり、WebTransport / QMux では接続時に
+/// エラーになる。Windows では tobi-quic が Multipath QUIC を実装していないため使えない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MultipathOptions {
     /// パスの使い方

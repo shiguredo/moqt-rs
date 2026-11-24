@@ -6,20 +6,18 @@ Multipath QUIC は 1 つの QUIC 接続に複数のネットワークパスを�
 
 ## 利用できるビルドと経路
 
-Multipath QUIC を利用できるのは、既定の `quic-tobi` バックエンドの native QUIC 経路 (`--transport quic`) だけである。Windows では tobi-quic を使えないため、Multipath も使えない。
+Multipath QUIC を利用できるのは、tobi-quic の native QUIC 経路 (`--transport quic`) だけである。tobi-quic は Windows でも動作するが、Multipath QUIC は Windows では実装されていない。
 
-| バックエンド / 経路 | Multipath QUIC |
+| 経路 / プラットフォーム | Multipath QUIC |
 | --- | --- |
-| `quic-tobi` (既定、Windows 以外) | 利用できる |
-| `quic-s2n` | 利用できない (s2n-quic が Multipath QUIC を実装していない) |
-| `quic-ngtcp2` | 利用できない (このバックエンドは Multipath QUIC の API を公開していない) |
+| native QUIC (`--transport quic`、Windows 以外) | 利用できる |
 | `wt-h3` / `wt-h2` / `qmux` | 利用できない (Multipath は native QUIC の機能である) |
-| Windows ビルド | 利用できない (tobi-quic が Windows 非対応である) |
+| Windows ビルド | 利用できない (tobi-quic が Windows で Multipath QUIC を実装していない) |
 
 `--transport auto` は WebTransport / QMux の候補も競争するため、Multipath を指定した場合はエラーになる。`--transport quic` を明示すること。
 
 ```bash
-# 既定の tobi-quic ビルドで Multipath を使う
+# Multipath を使う
 cargo run -p moq-sub -- \
   --url moqt://127.0.0.1:4443 --namespace moq-example --multipath handover
 ```
@@ -88,7 +86,7 @@ let params = ConnectParams {
 
 `MultipathOptions::default()` は `mode: MultipathMode::Off` であり、Multipath を広告しない。`mode` を `Off` 以外にした場合は、接続前に次を検証する。
 
-- `quic-tobi` バックエンド (既定) の Windows 以外のビルドであること
+- tobi-quic の Windows 以外のビルドであること
 - `transport` が `Transport::Quic` であること
 - `max_paths` が 1〜64、`initial_max_path_id` が 1〜64 であること
 - 監視間隔と keep-alive 間隔が 0 でないこと
@@ -115,8 +113,7 @@ Multipath を有効にすると、接続確立後にパスイベントを観測�
 
 ## 制約
 
-- Windows では使えない。Windows ビルドでは `--no-default-features --features quic-s2n` (または `quic-ngtcp2`) を指定するため、Multipath も使えない
-- s2n-quic / ngtcp2 バックエンドでは使えない。`--multipath` を指定すると接続前にエラーになる
+- Windows では使えない。tobi-quic は Windows で Multipath QUIC を実装していないため、`--multipath` を指定すると接続前にエラーになる
 - WebTransport over HTTP/3 / HTTP/2 と QMux では使えない。native QUIC だけの機能である
 - `--transport auto` とは併用できない。`--transport quic` を明示する
 - 送信パスを指定する API はない。どのパスで送るかはモードと QUIC 層のスケジューラーが決める
@@ -125,7 +122,7 @@ Multipath を有効にすると、接続確立後にパスイベントを観測�
 
 ## テスト
 
-tokio-moq の `quic::tobi_backend` のテストが、ループバックで実際に Multipath をネゴシエーションし、追加パスを開いて `PathState::Active` になることと、その状態でストリームのデータが届くことを検証する。
+tokio-moq の `quic::connection` のテストが、ループバックで実際に Multipath をネゴシエーションし、追加パスを開いて `PathState::Active` になることと、その状態でストリームのデータが届くことを検証する。
 
 ```bash
 cargo test -p tokio-moq multipath

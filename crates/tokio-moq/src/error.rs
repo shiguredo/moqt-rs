@@ -151,7 +151,7 @@ impl TransportError {
 
     /// ストリーム送信 API のエラーを transport エラーへ写す
     ///
-    /// peer が STOP_SENDING で送信方向を閉じた場合、QUIC バックエンドは送信 API を
+    /// peer が STOP_SENDING で送信方向を閉じた場合、QUIC 実装は送信 API を
     /// STOP_SENDING 由来のエラーで失敗させる。セッションは継続し、該当ストリームだけが
     /// 終端するため、アプリがセッション終了と切り分けられるよう [`Self::StreamReset`] にする
     /// (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))。

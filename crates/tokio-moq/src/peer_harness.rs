@@ -2,7 +2,7 @@
 //!
 //! example の I/O 経路 (ハンドシェイク、peer 起点 request stream への送信、client 起点 request
 //! stream の受理) を実行で検証するためのテスト専用モジュールである。ビルドで選んだ QUIC
-//! バックエンドのサーバーを 127.0.0.1 で立て、sans-I/O な `Session` を `Session::new_server`
+//! tobi-quic のサーバーを 127.0.0.1 で立て、sans-I/O な `Session` を `Session::new_server`
 //! で駆動する。モック /
 //! スタブは使わない。
 //!
@@ -530,7 +530,7 @@ impl TestPeer {
     ///
     /// 記録は `Session::send_object_datagram` が行う。このハーネスは Session が積む
     /// datagram 送信イベントを transport へ書き出さないため、wire には何も送られない
-    /// (バックエンドが datagram に対応しているかどうかには依存しない)。
+    /// (tobi-quic が datagram に対応しているかどうかには依存しない)。
     ///
     /// # Errors
     ///
@@ -1105,8 +1105,7 @@ impl TestPeer {
     pub async fn recv_close_code(&mut self) -> Result<u64> {
         let connection = match &self.handle {
             StreamHandle::Quic(connection) => connection,
-            // WebTransport (h3 / h2) と QMux は接続の終了コードをこの API では観測しない。
-            // Windows ビルドでは WtH3 variant 自体が無いため、ワイルドカードで受ける
+            // WebTransport (h3 / h2) と QMux は接続の終了コードをこの API では観測しない
             _ => {
                 return Err(TransportError::Internal(
                     "recv_close_code is only available for the QUIC transport".into(),
@@ -1263,7 +1262,7 @@ mod tests {
     /// 受理待ちをキャンセルしても、その後に届いた uni stream を失わないこと
     ///
     /// example の main loop は `tokio::select!` で受理待ちの future を頻繁に破棄する。
-    /// バックエンドの受理待ちがキャンセル安全でないと、キャンセル直後に到着した stream が
+    /// tobi-quic の受理待ちがキャンセル安全でないと、キャンセル直後に到着した stream が
     /// 失われ、次の accept が返らない。キャンセル → 到着 → 再 accept の順で固定する。
     #[tokio::test(flavor = "multi_thread")]
     async fn cancelled_uni_stream_accept_does_not_lose_the_stream() {
@@ -1342,109 +1341,6 @@ mod tests {
                     .expect("引き渡し済みの stream が失われていないこと")
                     .expect("受理がエラーにならないこと");
             assert!(received.is_some(), "受理した stream を取り出せること");
-        })
-        .await;
-    }
-
-    /// open 待ちを破棄しても、開いたストリームが閉じられること
-    ///
-    /// open の待ち手へ結果を渡せない場合、開いたストリームを閉じないとピアが広告した
-    /// `MAX_STREAMS` の枠を消費したまま残る。ピア側でストリームが RESET_STREAM として
-    /// 観測できることを確認する。
-    ///
-    /// この閉じる処理は ngtcp2 バックエンドのドライバが行うため、ngtcp2 ビルドでだけ検証する。
-    /// 単一スレッドの runtime を使い、1 回目の poll ではドライバが動かないことを保証する。
-    #[cfg(feature = "quic-ngtcp2")]
-    #[tokio::test(flavor = "current_thread")]
-    async fn cancelled_open_closes_the_stream() {
-        run_with_timeout(async {
-            let (peer, _client, mut acceptor) = connect_pair_with_acceptor().await;
-
-            // open 待ちを 1 回だけ poll してコマンドを送らせ、結果を受け取らずに破棄する。
-            // ドライバは待ち手へ渡せないため、開いたストリームを閉じる
-            let mut open = Box::pin(peer.handle.open_send_stream());
-            assert!(
-                poll_once(open.as_mut()).is_pending(),
-                "結果を受け取る前の open 待ちは完了しないこと"
-            );
-            drop(open);
-
-            // 相手側ではストリームが開かれ、すぐ終端される
-            let mut stream =
-                tokio::time::timeout(Duration::from_secs(5), acceptor.accept_recv_stream())
-                    .await
-                    .expect("開かれたストリームを受理できること")
-                    .expect("受理がエラーにならないこと")
-                    .expect("接続が閉じていないこと");
-            loop {
-                match tokio::time::timeout(Duration::from_secs(5), stream.receive_chunk())
-                    .await
-                    .expect("ストリームの終端を観測できること")
-                    .expect("ストリームを読み出せること")
-                {
-                    // データは書いていないため通常は来ない
-                    crate::transport::RecvChunk::Data(_) => continue,
-                    crate::transport::RecvChunk::End(RequestStreamEnd::Reset {
-                        error_code,
-                        ..
-                    }) => {
-                        assert_eq!(
-                            error_code,
-                            Some(0),
-                            "使わないまま閉じたストリームは NO_ERROR で reset されること"
-                        );
-                        return;
-                    }
-                    crate::transport::RecvChunk::End(end) => {
-                        panic!("RESET_STREAM で閉じること: {end:?}")
-                    }
-                }
-            }
-        })
-        .await;
-    }
-
-    /// 受信待ちが保留のまま破棄されても、受信済みの datagram を失わないこと
-    ///
-    /// datagram の受信待ちを 1 回だけ poll して待ち手として登録し、ドライバが datagram を
-    /// 引き渡したあとに値を受け取らず破棄する。oneshot で直接渡していると、oneshot に
-    /// 格納された datagram ごと破棄される。
-    ///
-    /// 待ち行列で受け渡すのは ngtcp2 バックエンドのため、ngtcp2 ビルドでだけ検証する。
-    /// 単一スレッドの runtime を使い、1 回目の poll ではドライバが動かないことを保証する。
-    #[cfg(feature = "quic-ngtcp2")]
-    #[tokio::test(flavor = "current_thread")]
-    async fn dropping_a_pending_datagram_receive_does_not_lose_the_datagram() {
-        run_with_timeout(async {
-            let (peer, client, _acceptor) = connect_pair_with_acceptor().await;
-            let handle = client.handle();
-
-            // 受信待ちを 1 回だけ poll して待ち手として登録し、保留のまま保持する
-            let mut receive = Box::pin(handle.recv_datagrams());
-            assert!(
-                poll_once(receive.as_mut()).is_pending(),
-                "datagram が無い間は受信待ちが完了しないこと"
-            );
-
-            // peer が datagram を送る。ドライバは登録済みの待ち手へ引き渡す
-            peer.send_datagram(b"pending-datagram")
-                .await
-                .expect("datagram を送れること");
-
-            // 引き渡しが起きるまで待ってから、値を受け取らずに受信待ちを破棄する
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            drop(receive);
-
-            // 失われていなければ、次の受信で取り出せる
-            let datagrams = tokio::time::timeout(Duration::from_secs(5), handle.recv_datagrams())
-                .await
-                .expect("引き渡し済みの datagram が失われていないこと")
-                .expect("datagram を受信できること");
-            assert_eq!(
-                datagrams,
-                vec![b"pending-datagram".to_vec()],
-                "引き渡し済みの datagram が取り出せること"
-            );
         })
         .await;
     }

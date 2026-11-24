@@ -86,7 +86,7 @@ C4M draft-02 の `moqt` クレームの map 化と未知キーの fail-closed、
 | `MAX_REQUEST_UPDATES` / `MAX_AUTH_TOKEN_CACHE_SIZE` | `SETUP_OPTION_*` | §9.1.7 / §9.1.3 | 既定値で実害は無いが、上限を宣言しない |
 | パディング | `send_padding_stream` / `send_padding_datagram` / `recv_padding_datagram` | §11.5 | 帯域の押し上げや MTU 探索に使えない (優先度は低い) |
 | RESET_STREAM_AT | `reset_outgoing_data_stream_at` | webtrans-http3 §4.4 | WtH3 は data stream の reset で送出できる。WtH2 / QUIC / QMux は未対応 (`Unsupported`) |
-| `wt-h3` の選択 | `Transport::WtH3` | webtrans-http3 §4.4 | s2n-quic は RESET_STREAM_AT を実装しないため、s2n-quic を選んだビルドでは `wt-h3` を選べない (`Transport::parse` / `resolve_transport` が拒否する)。tobi-quic は Windows 非対応のため、Windows ビルドでも選べない。既定の tobi-quic ビルド (Windows 以外) では選べる |
+| `wt-h3` の選択 | `Transport::WtH3` | webtrans-http3 §4.4 | tobi-quic を使うため、すべての対応プラットフォームで選べる |
 | `PRIOR_GROUP_ID_GAP` | `ObjectProperties::prior_group_id_gap` | §10.8 / MSF §6.1 | moq-pub は前回の Group ID を永続化しないため gap を宣言できない (SHOULD の前提を満たさない) |
 | `END_OF_GROUP` | Subgroup Header / Object Datagram のフラグ | §11.2.1 / §11.3.1 | moq-pub は常に false を送る。音声は 1 Group = 1 Object のため、終端を早期に通知できない |
 | `publishTracks` | `MsfCatalog::publish_tracks` | MSF §5.1.5 / §5.6.17 | 逆方向 track (Log / Metrics) を告知できず、QoE メトリクスの返送経路が無い |
@@ -100,11 +100,10 @@ C4M draft-02 の `moqt` クレームの map 化と未知キーの fail-closed、
 | FETCH_OK 前の Object 送信 | `send_fetch_header` が `FetchState::Established` を要求する | §3.2 (MAY) | 応答範囲の終端 (LARGEST_OBJECT が要求範囲内か) が確定するまで FETCH 応答 Object を送れない。fill fetch は `Pending` を許容するため非対称 |
 | moqt URI のパース | `msf::uri` は `moqt://authority/path?query#msf:...` を分解し、authority / path / query を RFC 3986 で検証する。`validate_moqt_endpoint_uri` は fragment なしの endpoint URI も検証し、catalog の `connectionURI` は decode / encode で検証される | §6.1 / §6.1.1 / §6.1.2 | 新規接続の確立は transport / example 層の責務である |
 
-Multipath QUIC (RFC 10069) は MOQT の仕様ではなく QUIC の拡張である。既定の `quic-tobi`
-バックエンドの Windows 以外のビルドでは `tokio_moq::multipath::MultipathOptions` と
-moq-pub / moq-sub の `--multipath` から利用できる。s2n-quic / ngtcp2 バックエンド、
-WebTransport、QMux、Windows では使えない。詳細と制約は [multipath.md](multipath.md) に
-まとめている。
+Multipath QUIC (RFC 10069) は MOQT の仕様ではなく QUIC の拡張である。Windows 以外の
+ビルドでは `tokio_moq::multipath::MultipathOptions` と moq-pub / moq-sub の `--multipath`
+から利用できる。WebTransport、QMux、Windows では使えない。詳細と制約は
+[multipath.md](multipath.md) にまとめている。
 
 ## 4. MUST 未達 / 仕様違反になりうる箇所
 
@@ -574,11 +573,7 @@ example 側の `crates/moq-sub` が `playout::buffer` と `playout::timeline` �
 
 - `wt-h3` は data stream の reset で `RESET_STREAM_AT` を送出できる。request stream の
   cancel は `reliable_size: None` のため従来の `RESET_STREAM` を使う。`wt-h2` / QUIC /
-  QMux は Reliable Size 付き reset に未対応で `Unsupported` を返す。ただし s2n-quic は
-  `RESET_STREAM_AT` を実装していないため、s2n-quic を選んだビルドでは `wt-h3` 自体を
-  選べない (`Transport::parse` / `resolve_transport` が拒否する)。tobi-quic は Windows
-  非対応のため Windows ビルドでも選べない。既定の tobi-quic ビルド (Windows 以外) では
-  選べる
+  QMux は Reliable Size 付き reset に未対応で `Unsupported` を返す
 - `wt-h2` の reset は `WT_RESET_STREAM` capsule に依存し、リレーの対応が要る。
   また §6.2 により datagram が reliable / ordered になるため、音声を datagram で
   送る既定の遅延特性が変わる
@@ -601,7 +596,7 @@ example 側の `crates/moq-sub` が `playout::buffer` と `playout::timeline` �
   MUST で要求するためである。DNS の非同期解決と SVCB/HTTPS レコードの解釈は対象外であり、
   SETUP は勝者だけで交換するため SETUP の失敗は別経路へのフォールバックを起こさない
   (`docs/happy-eyeballs.md`)
-- 証明書検証は既定で OS のシステムルートストアを使う。`--cert` で CA 証明書を指定した場合はその証明書だけで検証し、`--insecure` を明示したときだけ検証をスキップする。ngtcp2 バックエンドだけは aws-lc-sys の SSL の既定のトラストストアを使う。mTLS (§15.3.1) には対応しない
+- 証明書検証は既定で OS のシステムルートストアを使う。`--cert` で CA 証明書を指定した場合はその証明書だけで検証し、`--insecure` を明示したときだけ検証をスキップする。mTLS (§15.3.1) には対応しない
 - 0-RTT (§6.3.1) と再接続 / セッション再開は未対応 (`rg 'early_data|0-rtt|resumption' crates/` が 0 件)
 - 無通信時の切断対策が無い。§15.6.1 が挙げる 3 つの選択肢 (transport の keep-alive、
   定期 control message、切断後の再接続) のいずれも実装していない
