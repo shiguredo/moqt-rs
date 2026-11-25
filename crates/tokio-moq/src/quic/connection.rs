@@ -270,6 +270,7 @@ pub(crate) async fn connect(
     } else {
         tobi::build_transport_config()
     };
+    let scheduler = tobi::client_scheduler_config(multipath, transport.scheduler);
 
     // ビルダーに保持した設定は `start()` で固定順に適用されるため、呼ぶ順序に
     // 依存しない
@@ -285,12 +286,12 @@ pub(crate) async fn connect(
     if let Some(config) = tobi::build_multipath_config(multipath) {
         builder = builder.with_multipath(config);
     }
+    if let Some(scheduler) = scheduler {
+        builder = builder.with_scheduler(scheduler);
+    }
     if multipath.mode == MultipathMode::Aggregate {
-        // 既定の MinRtt は 1 本のパスにしかデータを載せないため、Aggregate モードでは
-        // 複数パスへ振り分けるスケジューラーと BBR 系の輻輳制御を使う。
-        builder = builder
-            .with_scheduler(tobi::aggregate_scheduler_config())
-            .with_congestion_control(tobi_quic::CongestionControlAlgorithm::BbrV3);
+        // 輻輳制御はデータスケジューラーを明示した場合も従来どおりにする。
+        builder = builder.with_congestion_control(tobi_quic::CongestionControlAlgorithm::BbrV3);
     }
     if multipath.mode.is_enabled()
         && let Some(interval) = multipath.network_monitor_interval
@@ -318,6 +319,35 @@ pub(crate) async fn connect(
         .await
         .map_err(|e| TransportError::Quic(format!("failed to read the negotiated ALPN: {e}")))?;
     super::verify_alpn(selected.as_deref())?;
+    let close_guard = Arc::new(CloseGuard::new(connection.clone()));
+
+    if multipath.has_scheduler_overrides() || multipath.loss_detection.is_some() {
+        // RFC 10069 Section 2.1: Multipath 専用の方針を明示したときは、単一パスへ
+        // フォールバックしないようにピアの Multipath 広告も確かめる。
+        let peer = connection
+            .peer_transport_params()
+            .await
+            .ok_or(TransportError::ConnectionClosed)?;
+        if peer.initial_max_path_id.is_none() {
+            return Err(TransportError::Unsupported(
+                "the peer did not negotiate Multipath QUIC required by the explicit transmission policy"
+                    .to_string(),
+            ));
+        }
+    }
+    if let Some(scheduler) = scheduler
+        && multipath.has_scheduler_overrides()
+    {
+        tracing::info!(
+            data_scheduler = scheduler.data.name(),
+            ack_path = scheduler.ack.name(),
+            retransmission = scheduler.retx.name(),
+            "Configured Multipath QUIC scheduling"
+        );
+    }
+    if let Some(loss_detection) = multipath.loss_detection {
+        tracing::info!(?loss_detection, "Configured Multipath QUIC loss detection");
+    }
 
     tobi::spawn_packet_diagnostics(&connection);
     let stop_sending_rx = tobi::spawn_connection_observer(&connection);
@@ -335,7 +365,6 @@ pub(crate) async fn connect(
     }
 
     tracing::info!("Connected to {socket_addr}");
-    let close_guard = Arc::new(CloseGuard::new(connection.clone()));
     Ok((
         Connected {
             inner: connection,
@@ -578,6 +607,76 @@ mod tests {
         })
         .await
         .expect("Aggregate の Multipath が制限時間内に完了すること");
+    }
+
+    /// 送信と再送の方針を両方指定した状態でも、実 QUIC 接続で追加パスとデータ転送が成立すること
+    #[cfg(not(windows))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn multipath_overrides_allow_additional_path() {
+        use crate::multipath::{DataScheduler, RetransmissionPolicy};
+
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            assert_multipath_round_trip(MultipathOptions {
+                mode: MultipathMode::Aggregate,
+                data_scheduler: Some(DataScheduler::Redundant),
+                retransmission: Some(RetransmissionPolicy::EarliestRecoveryPath),
+                ..MultipathOptions::default()
+            }),
+        )
+        .await
+        .expect("方針を指定した Multipath 接続の転送が制限時間内に完了すること");
+    }
+
+    /// ピアが Multipath を広告しない接続は、方針を明示した場合に限り拒否すること
+    #[cfg(not(windows))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn multipath_overrides_require_peer_negotiation() {
+        use crate::multipath::{LossDetection, RetransmissionPolicy};
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut server = start_server(test_server_tls(), SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .expect("Multipath を無効にしたサーバーを起動できること");
+            let addr = server.local_addr();
+            let defaults = MultipathOptions {
+                mode: MultipathMode::Aggregate,
+                ..MultipathOptions::default()
+            };
+            // モードだけを指定した接続は、従来どおり単一パスにフォールバックできる。
+            let (client, accepted) = tokio::join!(
+                connect(addr, "localhost", None, true, &defaults),
+                server.accept(),
+            );
+            let (client, _stop_sending) = client.expect("従来の接続は確立できること");
+            let _accepted = accepted.expect("従来の接続を受理できること");
+            client.close();
+
+            // 再送ポリシーまたは損失検出の単独指定でも、Multipath を広告しないピアは拒否する。
+            for options in [
+                MultipathOptions {
+                    retransmission: Some(RetransmissionPolicy::CrossPathImmediate),
+                    ..defaults.clone()
+                },
+                MultipathOptions {
+                    loss_detection: Some(LossDetection::Rfc9002),
+                    ..defaults
+                },
+            ] {
+                let (client, _accepted) = tokio::join!(
+                    connect(addr, "localhost", None, true, &options),
+                    server.accept(),
+                );
+                let error = client.expect_err("方針の指定時は単一パス接続を拒否すること");
+                assert!(
+                    matches!(error, TransportError::Unsupported(ref message)
+                        if message.contains("did not negotiate Multipath QUIC")),
+                    "Multipath のネゴシエーションが必要であることを示すこと: {error}"
+                );
+            }
+        })
+        .await
+        .expect("接続の可否が制限時間内に判明すること");
     }
 
     /// Multipath を無効にすると Path ID の上限を広告しないこと

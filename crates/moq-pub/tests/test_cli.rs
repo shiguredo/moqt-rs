@@ -46,6 +46,16 @@ fn help_prints_help_and_exits_successfully() {
             stdout.contains("--audio-redundancy"),
             "--audio-redundancy の説明が表示されること ({flag}): {stdout}"
         );
+        for option in [
+            "--multipath-data-scheduler",
+            "--multipath-retransmission",
+            "--multipath-loss-detection",
+        ] {
+            assert!(
+                stdout.contains(option),
+                "{option} の説明が表示されること ({flag}): {stdout}"
+            );
+        }
         assert!(
             stdout.contains("MOQT publisher client"),
             "アプリの説明が表示されること ({flag}): {stdout}"

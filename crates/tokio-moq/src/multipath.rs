@@ -74,6 +74,37 @@ pub enum InterfaceFilter {
     Deny(Vec<String>),
 }
 
+/// ネイティブ QUIC クライアントが新規データを送信するパスの選択
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataScheduler {
+    /// パスの帯域推定に比例して送信を振り分ける
+    WeightedRoundRobin,
+    /// 送信完了時間の推定値が最小のパスを選ぶ
+    MinCompletionTime,
+    /// 同じ STREAM データを送信可能な最大 2 本のパスに送る
+    Redundant,
+}
+
+/// ネイティブ QUIC クライアントが損失を回復する際の再送パスの選択
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetransmissionPolicy {
+    /// 元のパスを優先し、PTO 超過時に別のパスへ再送する
+    SamePathThenCrossPath,
+    /// 損失を検知した時点で別のパスを優先して再送する
+    CrossPathImmediate,
+    /// 回復完了時間の推定値が最小のパスへ再送する
+    EarliestRecoveryPath,
+}
+
+/// Multipath QUIC のパケット損失検出の閾値の選択
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LossDetection {
+    /// tobi-quic の既定の再順序トレランスを使う
+    Tolerant,
+    /// 再順序トレランスを外し、RFC 9002 Section 6.1.1 / 6.1.2 の推奨閾値を使う
+    Rfc9002,
+}
+
 /// Multipath QUIC の設定
 ///
 /// [`MultipathMode::Off`] の場合は Multipath QUIC を広告しない。有効にできるのは
@@ -106,6 +137,12 @@ pub struct MultipathOptions {
     /// ように keep-alive を送る (RFC 10069 Section 5.9)。`None` の場合は接続のアイドル
     /// タイムアウトから間隔を決める。アイドルタイムアウトも無効な場合は keep-alive が動かない。
     pub keep_alive_interval: Option<Duration>,
+    /// クライアントの新規データ送信パスの選択。`None` はモードの既定を維持する。
+    pub data_scheduler: Option<DataScheduler>,
+    /// クライアントの再送パスの選択。`None` はモードの既定を維持する。
+    pub retransmission: Option<RetransmissionPolicy>,
+    /// 損失検出の閾値の選択。`None` は tobi-quic の既定を維持する。
+    pub loss_detection: Option<LossDetection>,
 }
 
 impl Default for MultipathOptions {
@@ -117,11 +154,19 @@ impl Default for MultipathOptions {
             initial_max_path_id: 4,
             network_monitor_interval: None,
             keep_alive_interval: None,
+            data_scheduler: None,
+            retransmission: None,
+            loss_detection: None,
         }
     }
 }
 
 impl MultipathOptions {
+    /// クライアントのスケジューラーの一部が明示的に指定されているかを返す
+    pub(crate) fn has_scheduler_overrides(&self) -> bool {
+        self.data_scheduler.is_some() || self.retransmission.is_some()
+    }
+
     /// 設定値を検証する
     ///
     /// 範囲外の値や、空のインターフェース名を含む場合はエラーを返す。`mode` が `Off` の
@@ -137,6 +182,8 @@ impl MultipathOptions {
                 || self.initial_max_path_id != defaults.initial_max_path_id
                 || self.network_monitor_interval.is_some()
                 || self.keep_alive_interval.is_some()
+                || self.has_scheduler_overrides()
+                || self.loss_detection.is_some()
             {
                 return Err(
                     "multipath settings require a multipath mode other than off".to_string()

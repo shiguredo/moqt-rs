@@ -32,7 +32,24 @@ Windows 以外のビルドでは、native QUIC 経路で Multipath QUIC (RFC 100
 - `--multipath-network-monitor-ms` を指定すると、インターフェースの増減に追従してパスを開閉する
 - `--multipath-keep-alive-ms` を指定すると、待機パスを keep-alive で維持する
 
-WebTransport、QMux、Windows では使えない。`--transport auto` とも併用できず、`--transport quic` を明示する必要がある。詳細は [docs/multipath.md](../../docs/multipath.md) を参照すること。
+WebTransport、QMux、Windows では使えない。`--transport auto` とは併用できない。接続経路の解決結果が `quic` である必要がある。詳細は [docs/multipath.md](../../docs/multipath.md) を参照すること。
+
+パブリッシャーの送信パスの選択と損失検出の閾値は、Multipath QUIC を有効にしたうえで個別に指定できる。いずれかを指定すると、接続先との Multipath QUIC のネゴシエーションにも成功する必要がある。`--multipath off` とは併用できない。
+指定しなかった項目、ACK の返送パス、輻輳制御は、モードの既定から変わらない。複数のパスで同時に送るには `aggregate` を使う。
+
+- `--multipath-data-scheduler` は新規データの送信パスを選ぶ
+  - `weighted-round-robin`: パスの推定帯域に比例して送信を振り分ける (`aggregate` の既定)
+  - `min-completion-time`: 送信完了時間の推定値が最小のパスを選ぶ
+  - `redundant`: 送信可能な最大 2 本のパスへ同じ STREAM データを送る。帯域の消費が増え、DATAGRAM は複製しない
+- `--multipath-retransmission` は STREAM データの損失を回復する再送パスを選ぶ
+  - `same-path-then-cross-path`: 元のパスを優先し、PTO 超過時や元のパスが使えないときは代替パスを選ぶ (既定)
+  - `cross-path-immediate`: 損失を検知すると代替パスを優先する
+  - `earliest-recovery-path`: 回復完了時間の推定値に基づいてパスを選ぶ
+
+`--multipath-loss-detection` は、パケットを損失と判定する閾値を選ぶ。
+
+- `tolerant` (既定): tobi-quic の再順序トレランス (パケット番号差 32、時間閾値の下限 250 ms) を維持する
+- `rfc9002`: 再順序トレランスを外し、RFC 9002 §6.1.1 / §6.1.2 の推奨値 (パケット番号差 3、時間閾値の RTT 係数 9/8) を使う。実際の損失を早く検出して回復できる一方、到着順の入れ替わりを損失と誤判定し、不要な再送や輻輳ウィンドウの減少を招くことがある
 
 ```bash
 # Multipath QUIC の Handover で接続する
@@ -44,6 +61,13 @@ cargo run -p moq-pub -- \
 cargo run -p moq-pub -- \
   --url moqt://127.0.0.1:4443 --namespace moq-example \
   --multipath aggregate --multipath-max-paths 4 --fake-capture-device
+
+# 送信完了時間と、損失検知後の別パス再送を優先する
+cargo run -p moq-pub -- \
+  --url moqt://127.0.0.1:4443 --namespace moq-example \
+  --transport quic --multipath aggregate --multipath-max-paths 4 \
+  --multipath-data-scheduler min-completion-time \
+  --multipath-retransmission cross-path-immediate --fake-capture-device
 ```
 
 ## 実行例
@@ -84,6 +108,9 @@ cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video' --f
 | `--cert` | | TLS CA 証明書パス。省略時は OS のシステムルートストアで検証する |
 | `--insecure` | | 証明書検証をスキップする (開発用。接続時に警告ログが出る。`--cert` と同時には指定できない) |
 | `--multipath` | `off` | Multipath QUIC のパスの使い方 (`off` / `handover` / `aggregate` / `backup`)。`off` 以外で `initial_max_path_id` を広告する。tobi-quic の native QUIC 経路だけで使える (Windows では使えない) |
+| `--multipath-data-scheduler` | (モードの既定) | 新規データの送信パスの選択 (`weighted-round-robin` / `min-completion-time` / `redundant`) |
+| `--multipath-retransmission` | `same-path-then-cross-path` | STREAM データの再送パスの選択 (`same-path-then-cross-path` / `cross-path-immediate` / `earliest-recovery-path`) |
+| `--multipath-loss-detection` | `tolerant` | パケット損失検出の閾値 (`tolerant` / `rfc9002`) |
 | `--multipath-interface` | (すべて) | 自動でパスを開くインターフェース名のカンマ区切り |
 | `--multipath-interface-deny` | | 自動でパスを開かないインターフェース名のカンマ区切り |
 | `--multipath-max-paths` | `2` | 自動で開くパスの同時数の上限 (1〜64) |

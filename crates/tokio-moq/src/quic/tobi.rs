@@ -9,7 +9,10 @@ use tobi_quic::{Connection, DatagramConfig, ReceiveStream};
 
 use super::{QuicError, StopSendingObserved, StopSendingReceiver};
 use crate::error::{Result, TransportError};
-use crate::multipath::{InterfaceFilter, MultipathMode, MultipathOptions};
+use crate::multipath::{
+    DataScheduler, InterfaceFilter, LossDetection, MultipathMode, MultipathOptions,
+    RetransmissionPolicy,
+};
 
 /// 接続で広告する transport parameter を構築する
 ///
@@ -66,7 +69,7 @@ pub(crate) fn build_transport_config() -> ConnectionConfig {
 
 /// Multipath QUIC を有効にする transport parameter を構築する
 ///
-/// `build_transport_config` を基に、Path ID の上限と待機パスの keep-alive を設定する。
+/// `build_transport_config` を基に、Path ID の上限、待機パスの keep-alive、損失検出を設定する。
 /// パスの使い方とインターフェースのフィルタは `ClientBuilder::with_multipath` が
 /// `MultipathConfig` で上書きするため、ここでは設定しない。
 pub(crate) fn build_multipath_transport_config(options: &MultipathOptions) -> ConnectionConfig {
@@ -75,6 +78,10 @@ pub(crate) fn build_multipath_transport_config(options: &MultipathOptions) -> Co
     // 待機パスを middlebox のタイムアウトで失わないよう keep-alive を設定する
     // (RFC 10069 Section 5.9)。未指定の場合は max_idle_timeout から間隔を決める。
     config.keep_alive_interval = options.keep_alive_interval.map(tobi_duration);
+    if options.loss_detection == Some(LossDetection::Rfc9002) {
+        // RFC 9002 Section 6.1.1 / 6.1.2 の閾値を使い、再順序許容による検出の遅れをなくす。
+        config.loss_detection.reorder_tolerance = None;
+    }
     config
 }
 
@@ -128,6 +135,43 @@ pub(crate) fn aggregate_scheduler_config() -> tobi_quic::SchedulerConfig {
         ack: tobi_quic::AckPathPolicyKind::SamePath,
         retx: tobi_quic::RetransmissionPolicyKind::SamePathThenCrossPath,
     }
+}
+
+/// クライアント用のスケジューラー構成をモードの既定から組み立てる
+///
+/// 明示された項目だけを上書きし、ACK 返送パスはモードの既定のままにする。
+/// `None` のときはビルダーのベース設定をそのまま使う。
+pub(crate) fn client_scheduler_config(
+    options: &MultipathOptions,
+    base: tobi_quic::SchedulerConfig,
+) -> Option<tobi_quic::SchedulerConfig> {
+    let mut config = match options.mode {
+        MultipathMode::Off => return None,
+        MultipathMode::Aggregate => aggregate_scheduler_config(),
+        _ if options.has_scheduler_overrides() => base,
+        _ => return None,
+    };
+    if let Some(data) = options.data_scheduler {
+        config.data = match data {
+            DataScheduler::WeightedRoundRobin => tobi_quic::DataSchedulerKind::WeightedRoundRobin,
+            DataScheduler::MinCompletionTime => tobi_quic::DataSchedulerKind::MinCompletionTime,
+            DataScheduler::Redundant => tobi_quic::DataSchedulerKind::Redundant { max_paths: 2 },
+        };
+    }
+    if let Some(retx) = options.retransmission {
+        config.retx = match retx {
+            RetransmissionPolicy::SamePathThenCrossPath => {
+                tobi_quic::RetransmissionPolicyKind::SamePathThenCrossPath
+            }
+            RetransmissionPolicy::CrossPathImmediate => {
+                tobi_quic::RetransmissionPolicyKind::CrossPathImmediate
+            }
+            RetransmissionPolicy::EarliestRecoveryPath => {
+                tobi_quic::RetransmissionPolicyKind::EarliestRecoveryPath
+            }
+        };
+    }
+    Some(config)
 }
 
 /// WebTransport over HTTP/3 用の transport parameter を構築する
@@ -381,6 +425,114 @@ pub(crate) fn map_error(error: tobi_quic::Error) -> QuicError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tobi_quic::{
+        AckPathPolicyKind, DataSchedulerKind, RetransmissionPolicyKind, SchedulerConfig,
+    };
+
+    /// RFC 9002 を明示した場合だけ再順序トレランスを外すこと
+    #[test]
+    fn multipath_loss_detection_changes_only_reorder_tolerance() {
+        let base = build_transport_config();
+        let default =
+            tobi_quic::core::recovery::ReorderTolerance::new(32, TobiDuration::from_millis(250));
+        for (loss_detection, expected) in [
+            (None, Some(default)),
+            (Some(LossDetection::Tolerant), Some(default)),
+            (Some(LossDetection::Rfc9002), None),
+        ] {
+            let options = MultipathOptions {
+                mode: MultipathMode::Aggregate,
+                loss_detection,
+                ..MultipathOptions::default()
+            };
+            let transport = build_multipath_transport_config(&options);
+            assert_eq!(
+                transport.loss_detection.reorder_tolerance, expected,
+                "損失検出の選択: {loss_detection:?}"
+            );
+            // 損失検出は ACK と輻輳制御の設定を書き換えない。
+            assert_eq!(transport.scheduler.ack, base.scheduler.ack);
+            assert_eq!(transport.delayed_ack, base.delayed_ack);
+            assert_eq!(transport.congestion_control, base.congestion_control);
+        }
+    }
+
+    /// スケジューラーを明示しない場合は、モードごとに従来の構成を使うこと
+    #[test]
+    fn multipath_scheduler_keeps_mode_defaults() {
+        let base = build_transport_config().scheduler;
+        for mode in [
+            MultipathMode::Off,
+            MultipathMode::Handover,
+            MultipathMode::Backup,
+        ] {
+            let options = MultipathOptions {
+                mode,
+                ..MultipathOptions::default()
+            };
+            assert_eq!(
+                client_scheduler_config(&options, base),
+                None,
+                "モード: {mode:?}"
+            );
+        }
+        let options = MultipathOptions {
+            mode: MultipathMode::Aggregate,
+            ..MultipathOptions::default()
+        };
+        assert_eq!(
+            client_scheduler_config(&options, base),
+            Some(SchedulerConfig {
+                data: DataSchedulerKind::WeightedRoundRobin,
+                ack: AckPathPolicyKind::SamePath,
+                retx: RetransmissionPolicyKind::SamePathThenCrossPath,
+            }),
+            "Aggregate の既定を維持すること"
+        );
+    }
+
+    /// 上書きは指定された項目だけに反映し、同時に指定しても独立して反映すること
+    #[test]
+    fn multipath_scheduler_overrides_only_requested_components() {
+        let base = build_transport_config().scheduler;
+        let aggregate = aggregate_scheduler_config();
+        let options = MultipathOptions {
+            mode: MultipathMode::Aggregate,
+            data_scheduler: Some(DataScheduler::Redundant),
+            ..MultipathOptions::default()
+        };
+        let redundant = SchedulerConfig {
+            data: DataSchedulerKind::Redundant { max_paths: 2 },
+            ..aggregate
+        };
+        assert_eq!(client_scheduler_config(&options, base), Some(redundant));
+
+        let options = MultipathOptions {
+            retransmission: Some(RetransmissionPolicy::EarliestRecoveryPath),
+            ..options
+        };
+        assert_eq!(
+            client_scheduler_config(&options, base),
+            Some(SchedulerConfig {
+                retx: RetransmissionPolicyKind::EarliestRecoveryPath,
+                ..redundant
+            })
+        );
+
+        let options = MultipathOptions {
+            mode: MultipathMode::Handover,
+            retransmission: Some(RetransmissionPolicy::CrossPathImmediate),
+            ..MultipathOptions::default()
+        };
+        assert_eq!(
+            client_scheduler_config(&options, base),
+            Some(SchedulerConfig {
+                retx: RetransmissionPolicyKind::CrossPathImmediate,
+                ..base
+            }),
+            "Aggregate 以外でも未指定の項目はモードの既定を維持すること"
+        );
+    }
 
     /// WtH3 の transport config だけが reset_stream_at を広告する
     ///

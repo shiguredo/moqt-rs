@@ -283,6 +283,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         initial_max_path_id: (max_paths as u32).max(4),
         network_monitor_interval: multipath_network_monitor_ms.map(Duration::from_millis),
         keep_alive_interval: multipath_keep_alive_ms.map(Duration::from_millis),
+        ..MultipathOptions::default()
     };
     if multipath.mode.is_enabled() {
         if let Some(reason) = tokio_moq::multipath_unavailable_reason() {

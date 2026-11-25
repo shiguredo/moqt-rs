@@ -1676,6 +1676,9 @@ pub struct ConnectParams<'a> {
 /// 試行ごとに警告する。`cert` と `insecure` を同時に指定すると、名前解決より前に
 /// エラーを返す。
 ///
+/// Multipath のデータスケジューラー、再送ポリシー、損失検出のいずれかを明示した場合、
+/// ピアが Multipath QUIC を広告しない接続は [`TransportError::Unsupported`] になる。
+///
 /// # Errors
 ///
 /// 名前解決に失敗した場合、接続の確立に失敗した場合、SETUP の交換に失敗した場合、

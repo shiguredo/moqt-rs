@@ -7,7 +7,8 @@ use std::time::Duration;
 use shiguredo_moqt::message::common::TrackNamespace;
 use shiguredo_moqt::msf::{MSF_CATALOG_TRACK_NAME, StreamMapping};
 use tokio_moq::multipath::{
-    InterfaceFilter, MultipathMode, MultipathOptions, parse_interface_names,
+    DataScheduler, InterfaceFilter, LossDetection, MultipathMode, MultipathOptions,
+    RetransmissionPolicy, parse_interface_names,
 };
 use tokio_moq::{ServerUrl, Transport};
 
@@ -317,10 +318,45 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     // 既定は無効であり、--multipath を指定したときだけ有効にする。
     let multipath_mode: MultipathMode = noargs::opt("multipath")
         .ty("MODE")
-        .doc("Multipath QUIC mode (off | handover | aggregate | backup; default off; aggregate uses WeightedRoundRobin and BBRv3; requires --transport quic)")
+        .doc("Multipath QUIC mode (off | handover | aggregate | backup; default off; aggregate defaults to WeightedRoundRobin with BBRv3; requires native QUIC)")
         .default("off")
         .take(&mut args)
         .then(|o| MultipathMode::parse(o.value()))?;
+    let multipath_data_scheduler: Option<DataScheduler> = noargs::opt("multipath-data-scheduler")
+        .ty("SCHEDULER")
+        .doc("Override the Multipath QUIC scheduler for new data (weighted-round-robin | min-completion-time | redundant; redundant uses up to 2 paths; requires enabled --multipath)")
+        .take(&mut args)
+        .present_and_then(|o| match o.value() {
+            "weighted-round-robin" => Ok(DataScheduler::WeightedRoundRobin),
+            "min-completion-time" => Ok(DataScheduler::MinCompletionTime),
+            "redundant" => Ok(DataScheduler::Redundant),
+            other => Err(format!(
+                "unsupported data scheduler: {other} (supported values: weighted-round-robin, min-completion-time, redundant)"
+            )),
+        })?;
+    let multipath_retransmission: Option<RetransmissionPolicy> = noargs::opt("multipath-retransmission")
+        .ty("POLICY")
+        .doc("Override the Multipath QUIC retransmission path policy (same-path-then-cross-path | cross-path-immediate | earliest-recovery-path; requires enabled --multipath)")
+        .take(&mut args)
+        .present_and_then(|o| match o.value() {
+            "same-path-then-cross-path" => Ok(RetransmissionPolicy::SamePathThenCrossPath),
+            "cross-path-immediate" => Ok(RetransmissionPolicy::CrossPathImmediate),
+            "earliest-recovery-path" => Ok(RetransmissionPolicy::EarliestRecoveryPath),
+            other => Err(format!(
+                "unsupported retransmission policy: {other} (supported values: same-path-then-cross-path, cross-path-immediate, earliest-recovery-path)"
+            )),
+        })?;
+    let multipath_loss_detection: Option<LossDetection> = noargs::opt("multipath-loss-detection")
+        .ty("MODE")
+        .doc("Multipath QUIC packet loss detection (tolerant | rfc9002; default: tolerant; requires enabled --multipath)")
+        .take(&mut args)
+        .present_and_then(|o| match o.value() {
+            "tolerant" => Ok(LossDetection::Tolerant),
+            "rfc9002" => Ok(LossDetection::Rfc9002),
+            other => Err(format!(
+                "unsupported loss detection mode: {other} (supported values: tolerant, rfc9002)"
+            )),
+        })?;
     let multipath_interface: Option<Vec<String>> = noargs::opt("multipath-interface")
         .ty("NAMES")
         .doc("Comma-separated network interface names to use for automatic multipath path management (default: all interfaces)")
@@ -390,11 +426,14 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
             || multipath_interface_deny.is_some()
             || multipath_max_paths.is_some()
             || multipath_network_monitor_ms.is_some()
-            || multipath_keep_alive_ms.is_some())
+            || multipath_keep_alive_ms.is_some()
+            || multipath_data_scheduler.is_some()
+            || multipath_retransmission.is_some()
+            || multipath_loss_detection.is_some())
     {
         return Err(noargs::Error::other(
             &args,
-            "multipath options require --multipath <off|handover|aggregate|backup>",
+            "multipath options require --multipath <handover|aggregate|backup>",
         ));
     }
     let interface_filter = match (multipath_interface, multipath_interface_deny) {
@@ -418,6 +457,9 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         initial_max_path_id: (max_paths as u32).max(4),
         network_monitor_interval: multipath_network_monitor_ms.map(Duration::from_millis),
         keep_alive_interval: multipath_keep_alive_ms.map(Duration::from_millis),
+        data_scheduler: multipath_data_scheduler,
+        retransmission: multipath_retransmission,
+        loss_detection: multipath_loss_detection,
     };
     if multipath.mode.is_enabled() {
         if let Some(reason) = tokio_moq::multipath_unavailable_reason() {
@@ -1763,22 +1805,121 @@ mod tests {
         assert_eq!(config.multipath.initial_max_path_id, 4);
         assert!(config.multipath.network_monitor_interval.is_none());
         assert!(config.multipath.keep_alive_interval.is_none());
+        assert!(config.multipath.data_scheduler.is_none());
+        assert!(config.multipath.retransmission.is_none());
+        assert!(config.multipath.loss_detection.is_none());
     }
 
-    /// Multipath の付随オプションはモードの指定を要求すること
+    /// Multipath の付随オプションは、未指定と明示的な `off` の両方で拒否すること
     #[test]
     fn multipath_options_require_the_mode() {
-        let mut args = BASE_ARGS.to_vec();
-        args.extend_from_slice(&["--multipath-max-paths", "3"]);
-        let error = match parse_args(&args) {
-            Ok(_) => panic!("--multipath の無い Multipath オプションを受理しないこと"),
-            Err(error) => error,
+        for mode_args in [&[][..], &["--multipath", "off"][..]] {
+            for (option, value) in [
+                ("--multipath-max-paths", "3"),
+                ("--multipath-data-scheduler", "redundant"),
+                ("--multipath-retransmission", "cross-path-immediate"),
+                ("--multipath-loss-detection", "rfc9002"),
+                ("--multipath-loss-detection", "tolerant"),
+            ] {
+                let mut args = BASE_ARGS.to_vec();
+                args.extend_from_slice(mode_args);
+                args.extend_from_slice(&[option, value]);
+                let error = parse_args(&args)
+                    .err()
+                    .expect("Multipath が無効な場合は付随オプションを拒否すること");
+                let message = format!("{error:?}");
+                assert!(
+                    message.contains("require --multipath"),
+                    "{option} は有効なモードの指定が必要であることを示すこと: {message}"
+                );
+            }
+        }
+    }
+
+    /// 公開する値が対応する設定に反映され、省略した項目を上書きしないこと
+    #[cfg(not(windows))]
+    #[test]
+    fn multipath_scheduler_options_are_independent() {
+        let parse = |option, value| {
+            let mut args = BASE_ARGS.to_vec();
+            args.extend_from_slice(&["--multipath", "aggregate", option, value]);
+            parse_args(&args)
+                .expect("パースできること")
+                .expect("設定が返ること")
+                .multipath
         };
-        let message = format!("{error:?}");
-        assert!(
-            message.contains("require --multipath"),
-            "モードの指定が必要であることを示すこと: {message}"
-        );
+        for (value, expected) in [
+            ("weighted-round-robin", DataScheduler::WeightedRoundRobin),
+            ("min-completion-time", DataScheduler::MinCompletionTime),
+            ("redundant", DataScheduler::Redundant),
+        ] {
+            let options = parse("--multipath-data-scheduler", value);
+            assert_eq!(options.data_scheduler, Some(expected), "入力値: {value}");
+            assert!(options.retransmission.is_none(), "再送の既定を維持すること");
+        }
+        for (value, expected) in [
+            (
+                "same-path-then-cross-path",
+                RetransmissionPolicy::SamePathThenCrossPath,
+            ),
+            (
+                "cross-path-immediate",
+                RetransmissionPolicy::CrossPathImmediate,
+            ),
+            (
+                "earliest-recovery-path",
+                RetransmissionPolicy::EarliestRecoveryPath,
+            ),
+        ] {
+            let options = parse("--multipath-retransmission", value);
+            assert_eq!(options.retransmission, Some(expected), "入力値: {value}");
+            assert!(
+                options.data_scheduler.is_none(),
+                "新規データの既定を維持すること"
+            );
+        }
+    }
+
+    /// 損失検出は等号付き構文でも指定でき、送信スケジューラーと再送方針を上書きしないこと
+    #[cfg(not(windows))]
+    #[test]
+    fn multipath_loss_detection_is_independent() {
+        for (option, expected) in [
+            ("--multipath-loss-detection=rfc9002", LossDetection::Rfc9002),
+            (
+                "--multipath-loss-detection=tolerant",
+                LossDetection::Tolerant,
+            ),
+        ] {
+            let mut args = BASE_ARGS.to_vec();
+            args.extend_from_slice(&["--multipath", "aggregate", option]);
+            let options = parse_args(&args)
+                .expect("パースできること")
+                .expect("設定が返ること")
+                .multipath;
+            assert_eq!(options.loss_detection, Some(expected));
+            assert!(options.data_scheduler.is_none());
+            assert!(options.retransmission.is_none());
+        }
+    }
+
+    /// 未知の値を無視せず、オプション名と選択肢を含むエラーを返すこと
+    #[test]
+    fn multipath_policy_options_reject_unknown_values() {
+        for (option, expected_value) in [
+            ("--multipath-data-scheduler", "min-completion-time"),
+            ("--multipath-retransmission", "cross-path-immediate"),
+            ("--multipath-loss-detection", "rfc9002"),
+        ] {
+            let mut args = BASE_ARGS.to_vec();
+            args.extend_from_slice(&["--multipath", "aggregate", option, "unknown"]);
+            let error = parse_args(&args).err().expect("未知の値は拒否すること");
+            let message = format!("{error:?}");
+            assert!(
+                message.contains(option) && message.contains(expected_value),
+                "オプション名と対応する値を示すこと: {message}"
+            );
+        }
     }
 
     /// 未知の Multipath モードを拒否すること
@@ -1821,6 +1962,7 @@ mod tests {
     }
 
     /// Multipath の各オプションを設定へ反映すること
+    #[cfg(not(windows))]
     #[test]
     fn multipath_options_are_parsed() {
         let mut args = BASE_ARGS.to_vec();
@@ -1853,22 +1995,33 @@ mod tests {
             config.multipath.keep_alive_interval,
             Some(Duration::from_millis(5000))
         );
+        assert!(config.multipath.data_scheduler.is_none());
+        assert!(config.multipath.retransmission.is_none());
+        assert!(config.multipath.loss_detection.is_none());
     }
 
-    /// Multipath は native QUIC 以外の経路では指定できないこと
+    /// Multipath 専用の設定を指定しても native QUIC 以外では使えないこと
+    #[cfg(not(windows))]
     #[test]
     fn multipath_requires_native_quic() {
-        let mut args = BASE_ARGS.to_vec();
-        args.extend_from_slice(&["--multipath", "handover", "--transport", "wt-h2"]);
-        let error = match parse_args(&args) {
-            Ok(_) => panic!("WebTransport 経路の Multipath を受理しないこと"),
-            Err(error) => error,
-        };
-        let message = format!("{error:?}");
-        assert!(
-            message.contains("--transport quic"),
-            "native QUIC が必要であることを示すこと: {message}"
-        );
+        for transport in ["wt-h2", "wt-h3", "qmux", "auto"] {
+            let mut args = BASE_ARGS.to_vec();
+            args.extend_from_slice(&[
+                "--multipath",
+                "aggregate",
+                "--transport",
+                transport,
+                "--multipath-loss-detection=rfc9002",
+            ]);
+            let error = parse_args(&args)
+                .err()
+                .expect("native QUIC でない経路の Multipath を拒否すること");
+            let message = format!("{error:?}");
+            assert!(
+                message.contains("--transport quic"),
+                "native QUIC が必要であることを示すこと ({transport}): {message}"
+            );
+        }
     }
 
     /// Windows では Multipath を指定できないこと
