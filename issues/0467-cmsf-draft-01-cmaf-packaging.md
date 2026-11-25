@@ -1,7 +1,7 @@
 # MSF カタログで CMSF-01 の cmaf packaging を扱う
 
 - Created: 2026-11-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-26
 - Branch: feature/add-cmsf-draft-01
 - Polished: 2026-11-23
 
@@ -94,3 +94,26 @@ CMSF-01 が規範参照しているのは MSF-01 / MoQT-18 / LOC-02 である。
 - 上記を `tests/test_msf` の単体テストで固定し、`pbt/tests/prop_msf.rs` の生成器に cmaf track を加えること。
 - `docs/msf.md` に CMSF の節があること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `src/msf.rs`
+  - `MsfPackaging` に `Cmaf` (`"cmaf"`) を追加し、`as_str` / `from_packaging_str` の両方向で扱う。
+  - `MsfTrack` と `MsfCloneTrack` に `max_grp_sap_starting_type` / `max_obj_sap_starting_type` (`Option<u64>`) を追加する。`Debug` / `DisplayJson` / `MsfTrack::new` / `MsfCloneTrack::new` / `TrackJsonParts` / `write_track_json` / `decode_common_track_fields` も追従する。
+  - `validate_init_refs` で cmaf の track の initRef を必須にし、参照先の `MsfInitDataKind` が `Inline` であることを要求する。`tracks` と `publishTracks` の両方を対象にする。
+  - `CmsfFieldScope` (`Cmaf` / `NotCmaf` / `PackagingUnknown`) と `cmsf_field_scope` を追加し、packaging による「捨てる / 拒否する」の判定を 1 箇所に集約する。0467 の後続で追加する `contentProtectionRefIDs` も同じ判定を使う。
+  - `validate_cmsf_sap_starting_type_ranges` で値域 (`maxGrpSapStartingType` は 1〜2、`maxObjSapStartingType` は 1 以上) を、`validate_cmsf_sap_starting_type_order` で `maxObjSapStartingType` ≥ `maxGrpSapStartingType` を検証する。大小関係は継承を解決した後だけ判定し、断片では値域だけを見る。
+  - `MsfCloneTrack::into_track` で継承を解決し、解決後の packaging が cmaf でなければ継承した値も明示した値も捨てる。
+  - `decode_track` / `decode_clone_track` は cmaf 以外と確定した track の CMSF フィールドを読み取らない。型が数値でなくても未知フィールドとして捨て、カタログを拒否しない (MSF-02 §5 の MUST ignore)。
+  - `validate_full_track` は cmaf の track の値域と大小関係を検証し、cmaf 以外の track に値があれば拒否する。`validate_clone_track_fragment` は packaging を明示した断片だけを検証する。
+  - `validate_after_delta` に initDataList の id の一意性検査を加え、参照先の kind が入力順に依存しないようにする。
+  - `MsfCatalog::apply_delta` と `MsfCloneTrack::into_track` の `# Errors` に CMSF の拒否条件を追記する。
+- `tests/test_msf/cmaf_packaging.rs` (新規) に 34 件の単体テストを追加する。packaging の往復、CMSF-01 §5.1 の例 (4 track) の往復、initRef の欠如 / 未解決 / 非 inline、SAP starting type の値域と大小関係、cmaf 以外での破棄と拒否、delta の add / clone / update 適用後検証と巻き戻し、clone 断片の decode / encode を固定する。
+- `pbt/tests/prop_msf.rs` の `sample_packaging` に cmaf を加え、`sample_track` で cmaf の track に値域と大小関係を満たす SAP starting type を生成する。`satisfy_cmaf_init_refs` で cmaf の track に inline の initDataList entry を割り当てる。`sample_clone_track` は packaging を cmaf と明示した断片にだけ値を生成する。
+- `docs/msf.md` に CMSF の節を新設する。「CMSF-01 と MSF-02 / MoQT-23 のずれ」の表、`track フィールド` の仕様、ライブラリが検証しない規則を記載する。後続の issue はこの節に追記する。
+
+### レビューで確認したこと
+
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通る。
+- CMSF-01 §3.1 / §3.4 / §3.5.1 / §3.5.2 / §3.6.1 / §5.1 と MSF-02 §5 / §5.1.6 / §5.1.7 / §5.2.4 / §5.2.4.1 / §5.2.14 の引用が `refs/` の一次資料と一致する。
+- `crates/moq-pub` / `crates/moq-sub` はまだ cmaf の track を選ばない。配信と購読は後続の issue で扱う。
