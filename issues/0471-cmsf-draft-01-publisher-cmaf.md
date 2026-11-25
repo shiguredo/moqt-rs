@@ -3,14 +3,16 @@
 - Created: 2026-11-23
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-cmsf-draft-01
-- Polished: 2026-11-23
+- Polished: 2026-11-26
 - Refreshed: 2026-11-23
 
 ## 目的
 
 0467 でライブラリのカタログが cmaf packaging (CMSF-01) を扱えるようになる。本 issue では、moq-pub が CMAF で media を配信できるようにする。0472 の moq-sub と組み合わせれば、CMSF の送受信を example で確かめられる。
 
-前提は 0467 である。CMSF 対応全体の方針は 0467 を参照すること。配信開始時は [MSF-02 §11.3 (Initiating a broadcast)](../refs/moq/draft-ietf-moq-msf-02.txt) に従い、初期化ヘッダーを含む完全カタログを最初の映像・音声 Object より先に公開する。壁時計の同期 (prft) は 0473 で扱う。それまでは、moq-sub は cmaf の Object を `TimestampKind::MediaTime` として、届いた順に表示する。
+前提は 0467 である。CMSF 対応全体の方針は 0467 を参照すること。配信開始時は [MSF-02 §11.3 (Initiating a broadcast)](../refs/moq/draft-ietf-moq-msf-02.txt) と [CMSF-01 §3.1 (Initialization headers)](../refs/moq/draft-ietf-moq-cmsf-01.txt) に従い、初期化ヘッダーを含む完全カタログを最初の映像・音声 Object より先に公開する。
+MSF-02 §11.3 の規範は「メディアの Object より先にカタログ track の Object を publish する」であり、初期化ヘッダーを `initDataList` に載せる要求は CMSF-01 §3.1 が定める。
+壁時計の同期 (prft) は 0473 で扱う。それまでは、moq-sub は cmaf の Object を `TimestampKind::MediaTime` として、届いた順に表示する。
 
 ## 現状
 
@@ -103,10 +105,12 @@
 
 - CLI に `--packaging <loc|cmaf>` を追加する。既定は `loc` である。cmaf は、moq-pub が扱う全 codec (AV1 / H.264 / H.265 / VP8 / VP9 / Opus / AAC) を対象にする。
 - cmaf の Object は 1 sample 分の CMAF chunk とし、LOC と同じく 1 sample を 1 Object にする。
-  - 映像は 1 GOP を 1 Group とし、Group 先頭の Object を keyframe にする (CMSF §3.4)。Group の境界と CMAF Fragment の境界は一致する。
+  - 映像は 1 GOP を 1 Group とし、Group 先頭の Object を keyframe にする。Group の境界と CMAF Fragment の境界は一致する。
+    - CMSF §3.4 が求めるのは「Group が SAP type 1 か 2 の Object で始まること」であり、SAP type 2 は先行ピクチャを許すため keyframe より広い。
+    - 本実装は B フレームを扱わない (エンコーダは `allow_frame_reordering: Some(false)`、`--input-mp4` のパススルーは B フレームを含む MP4 を拒否する) ので先行ピクチャが現れず、keyframe は SAP type 1 か 2 のいずれかになる。どちらでも §3.4 の条件を満たす。
   - 音声は現状どおり 1 フレームを 1 Object・1 Group にし、すべての sample を sync sample にする。
-  - 映像と音声は別の CMAF track にする (CMSF §3.3 の single track)。
-  - cmaf の Object には LOC property を付けない。
+  - 映像と音声は別の CMAF track にする (CMSF §3.2 の CMAF Track と MOQT track の直接対応)。
+  - cmaf の Object には LOC property を付けない。Subgroup の PROPERTIES ビットを立てず、Object に Properties Length も載せない (MoQT-23 §11.3.1)。既存の `SubgroupWriter::new` の `has_properties` には `false` を渡し、`media_cache` と FETCH 応答も同じ形に揃える (`serve_fetch_entries` は現在 `has_properties: true` を固定しているので、packaging で分ける)。
 - Object はすべて Subgroup 0 に置く (MSF-02 §6)。
   - cmaf では、既存の警告判定より前に音声の datagram 配送を無効にする。`--audio-subgroup` の指定がなくても、音声は subgroup で送る。明示された `--datagram-max-size` / `--audio-redundancy` は、subgroup 配送のときと同じく警告して無視する。
   - `--stream-mapping` が明示されていれば (`is_explicit` で判定する)、エラーにする。
@@ -126,7 +130,8 @@
 - そのため moq-pub は `Fmp4SegmentMuxer` を init segment の生成にだけ使い、各 chunk は `shiguredo_mp4::boxes` の box で組み立てる。
 - init segment は track ごとに `Fmp4SegmentMuxer` を作って生成する。
   - 最初の sample を `create_media_segment_metadata` に 1 回渡して sample entry と timescale を学習させ、`init_segment_bytes` で init segment を得る。このとき返る media segment は使わない。
-  - 映像の最初の sample は keyframe である。VP9 の sample entry は keyframe の header から作る必要があるため、この順序が必要になる。
+  - 映像の最初の sample は keyframe であることを前提とする (`--input-mp4` は `Mp4VideoReader::open` が最初のキーフレームまで読み飛ばし、ライブキャプチャと `--input-mp4-reencode` は実エンコーダの先頭フレームがキーフレームになる)。VP9 の sample entry は keyframe の header から作る必要があるため、この順序が必要になる。
+    - 前提が崩れた場合 (先頭の映像 sample がキーフレームでない) は、その sample を捨て、キーフレームが届くまで保持しない。キーフレームが届かないまま入力が尽きた場合は、確定できないため英語のエラーを返す。
 - sample entry の出どころは次のとおりである。
   - `--input-mp4`: 元の MP4 の sample entry を使う。`Mp4VideoReader::open` が読んだ最初の sample entry を保持してループへ渡す。sample entry が 2 種類以上ある MP4 は、cmaf では `open` の時点で拒否する。
   - live capture と `--input-mp4-reencode`: エンコーダ出力から作る。
@@ -182,8 +187,9 @@ init segment を作るには sample entry が要る。H.264 / H.265 / AV1 / VP9 
   - `CatalogContext` の組み立てを `prepare_catalog` から切り出す。現状の `prepare_catalog` と同じく、`start_input_tasks` より前に `prepare_catalog_tracks` の結果から作り、ループまで持ち越す。init segment の欄は空にしておく。
 - 初回カタログ公開までのメディアの扱い:
   - 初期化に必要な sample entry を得るための取得・エンコードは行う。最初の sample から順に保持し、カタログの初回送出が完了するまでメディア Object の採番、送出、`media_cache` への登録は行わない。`flush_audio_fade` からも未公開のメディアを送出しない。
-  - カタログ確定までは、保持する sample 数と合計バイト数に上限を設ける。`--input-mp4-reencode` は 1 つのリーダーが映像・音声を供給するため、片方の最初の sample が来たことだけを理由にその入力を止めない。上限を超えるか、必要な sample を揃えられないまま入力が尽きた場合は、メディアを公開せず英語のエラーを返す。
+  - カタログ確定までは、保持する sample 数と合計バイト数に上限を設ける。上限は設定値から一意に導けないため、実装時に定数として決める (目安は sample 数 600 件、合計 64 MiB)。この上限は、relay が catalog の購読を PAUSED にしたまま戻らない場合に publisher が待ち続けないための期限でもある。`--input-mp4-reencode` は 1 つのリーダーが映像・音声を供給するため、片方の最初の sample が来たことだけを理由にその入力を止めない。上限を超えるか、必要な sample を揃えられないまま入力が尽きた場合は、メディアを公開せず英語のエラーを返す。
   - カタログ確定後に初回送出を待つ間は、制御イベントとカタログの再送を引き続き処理し、新たなメディア入力は読み出さない。`run_publisher_loop` は、初回送出が完了したら新規入力の到着を待たず、保持した sample を track ごとに元の順序で通常の送出経路に渡してから新規入力の処理を再開する。最初に公開する映像 Group はキーフレームから始める。
+    - 「新たなメディア入力を読み出さない」は、`run_publisher_loop` の `select!` の映像 / 音声の入力分岐に、初回送出完了を条件とするガードを付けて実現する。`--input-mp4-reencode` は 1 つのリーダーが両 track を供給するため、映像だけを止めずに両方の分岐を同時に止める。
   - この順序は publisher の送出処理の順序である。別々のストリームを流れる Object の受信順序は保証しない。
 - 確定の契機: 配信する全 track の最初の sample がループに届いた時点とする。
   - 配信する track は、映像と音声のうち有効なもの (`config` の映像・音声の有効フラグ) である。`--no-video` / `--no-audio` で外した track、`--input-mp4` の音声 (映像のみを配信する)、再エンコードで対応する音声がない場合の音声は待たない。
@@ -200,7 +206,7 @@ init segment を作るには sample entry が要る。H.264 / H.265 / AV1 / VP9 
   1. init segment を作り、`CatalogContext` に入れる。
   2. その時点の `cat_tokens` で `CatalogContext::json` を組み立てる。
   3. 現状の `prepare_catalog` と同じく、`group_id::allocate_initial_group_id` で Group ID を払い出す。`json` と `group_id` を `Some` にする。ここでカタログは確定する。
-     - 手順 1〜3 のいずれかが失敗した場合 (init segment の生成、`CatalogContext::json`、Group ID の払い出し) は、英語のエラーで終了する。カタログを組めないまま続けても、購読者は起動できないためである。Skip を終了扱いにしない次の判断とは別で、こちらは組み立ての失敗である。
+     - 手順 1〜3 のいずれかが失敗した場合 (init segment の生成、`CatalogContext::json`、Group ID の払い出し) は、英語のエラーで終了する。カタログを組めないまま続けても、購読者は起動できないためである。こちらは組み立ての失敗であり、手順 4 の Skip とは扱いを分ける (理由は手順 5 に書く)。
   4. `catalog_sink` → `republish_catalog_at_group` の経路で、その Group にカタログを送る。この経路を使うのは、確定前に catalog の PUBLISH が request 単位で移行していても、現在の送り先に送るためである。
      - 送出の結果は、`Result` ではなく次の情報を持つ結果型 (例: `CatalogPublishResult`) で返す。`Result` にすると、`Err` のときに filter の結果を呼び出し元へ渡せないためである。
        - PUBLISH 購読の filter の結果 (filter の判定まで進まなかった場合は「なし」)
@@ -224,6 +230,7 @@ init segment を作るには sample entry が要る。H.264 / H.265 / AV1 / VP9 
   5. カタログ送出の結果は次のように扱う。カタログの送出エラーは media の結果処理に渡さない。
      - 完全カタログを PUBLISH または受信 SUBSCRIBE の購読に正常に送出したら、初回送出完了とする。初回の試行だけでなく、送り直しで初めて正常に送出した場合も同じである。
      - 全購読で Skip した場合は `location` を更新しない。PAUSED などで初回送出が完了していなければ、メディアを公開せずに定期再送や catalog の SUBSCRIBE 受理時の送り直しを待つ。Skip はエラーにしない。
+       - Skip をエラーにしない理由は、cmaf の確定がループの中で起きるためである。relay が catalog の購読を PAUSED にした後に確定し得るので、そこで終了すると loc 経路には無い終了経路ができる。loc は `prepare_catalog` → `send_catalog` が Skip をエラーにするが、それはループに入る前に公開する経路だからである。
      - 確定時に PUBLISH 側で送出エラーが起きた場合は、`handle_catalog_republish` と同じに分類する。`is_transport_session_end` なら `session_ended` を立てて `LoopFlow::Break` を返す。`is_peer_stream_reset` なら英語のログを出して続ける。それ以外は `close_on_message_error` の後にエラーを返す。filter を通過して `location` が更新されても、正常なカタログ送出が一度もなければメディアは公開しない。
 - 初回カタログ公開待ちの制御要求は保留しない。
   - catalog とメディアの SUBSCRIBE は受理できる。対象の track に Largest Object がなければ、SUBSCRIBE_OK の LARGEST_OBJECT は省略する (MoQT-23 §9.19.17)。カタログ確定前なら catalog の購読者には確定時に、確定済みなら受理時の送り直しでカタログ Object を送る。初回カタログ公開前はメディア Object を送らない。
@@ -253,6 +260,11 @@ init segment を作るには sample entry が要る。H.264 / H.265 / AV1 / VP9 
   - 1 つの track が持てる initRef は 1 つ (MSF-02 §5.2.14) なので、cmaf の track の initRef は CMSF-01 §3.1 の inline entry だけを指す。0467 は、cmaf の track の initRef が inline 以外の entry を指すカタログを `InvalidCatalog` にする。
   - moq-pub は Base64 の crate に依存していないので、`base64ct` を加える (shiguredo-rust の選定に従う)。
   - catalog の track には `packaging: "cmaf"` と `initRef` を載せる。`CatalogContext` が init segment を持つので、`cat_tokens_changed` で作り直すカタログにも initDataList と initRef が載る。
+  - packaging によるカタログの分岐は、`catalog::build_catalog` まで packaging を渡して行う。`build_catalog` は現在 `MsfPackaging::Loc` と `streamMapping` の設定を固定しているため、`VideoTrackParams` / `AudioTrackParams` に packaging を足して次のように分ける。
+    - `loc`: 現状どおり `MsfPackaging::Loc`、`packagingMetadata` に `streamMapping`、`video_config_in_objects` / `audio_config_in_objects` が真の track に object-property の initRef を載せる。
+    - `cmaf`: `MsfPackaging::Cmaf`、`packagingMetadata` を載せない、`video_config_in_objects` / `audio_config_in_objects` を常に偽にして object-property の entry と initRef を載せない、track ごとに inline entry を 1 つ `initDataList` に載せてその track の `initRef` から指す。
+    - 映像と音声で inline entry は分ける (track ごとに init segment が異なる)。
+    - `CatalogContext` は packaging と init segment の有無を持ち、`json` の組み立て時に `build_catalog` へ渡す。
 
 ### 範囲外
 
@@ -267,12 +279,15 @@ init segment を作るには sample entry が要る。H.264 / H.265 / AV1 / VP9 
 ## 完了条件
 
 - `--packaging cmaf` で、init segment を `initDataList` に載せたカタログを送ること。`cat_tokens` が変わる session 移行で作り直したカタログにも、init segment の inline entry とそれを指す initRef が載ること。cmaf のカタログの initDataList に object-property の entry がないこと。
-- 1 sample ごとの Object (moof + mdat) を Subgroup 0 で送ること。音声も subgroup で送り、Object に LOC property を付けないこと。
+  - loc のカタログが現状どおり `MsfPackaging::Loc` と `streamMapping` の `packagingMetadata` と object-property の initRef を持ち、挙動が変わらないこと。
+- 1 sample ごとの Object (moof + mdat) を Subgroup 0 で送ること。音声も subgroup で送り、Object に LOC property を付けないこと。cmaf の Object を送る Subgroup は PROPERTIES ビットが 0 で、Object に Properties Length を載せないこと。PUBLISH と FETCH 応答のどちらも同じ形であること。
 - tfdt と timescale が、LOC 経路で送る Timestamp / Timescale と一致すること。live capture では、tfdt が capture の Unix epoch マイクロ秒になること。例外は、Timestamp が直前の chunk の tfdt 以下になる場合だけである。その場合 tfdt は「直前の tfdt + 1」になり、track ごとに逆行しないこと。直前の tfdt より大きい Timestamp (間隔が名目の duration より短い場合を含む) は、そのまま使われること。
-- trun の duration / size / flags が sample ごとに、data_offset が trun ごとに書かれていること。`Fmp4SegmentDemuxer` で demux した sample の時刻・サイズ・keyframe 判定が、送信側と一致すること。
-- 同じ Location の media の Object のバイト列が、すべての経路で一致すること。経路は、PUBLISH、受信 SUBSCRIBE の購読者、FETCH (`media_cache`) である。音声の終了時のフェードの chunk が、同じ track の sequence_number と tfdt の続きで組まれ、PUBLISH と `media_cache` で同じバイト列になること。
+- trun の duration / size / flags が sample ごとに、data_offset が trun ごとに書かれていること。`Fmp4SegmentDemuxer` で demux した sample の size と keyframe 判定が送信側と一致し、時刻は送信側が決めた tfdt と一致すること。tfdt の揃えが発動した chunk では、demux した時刻が「直前の tfdt + 1」になること。
+- 同じ Location の media の Object の payload (moof + mdat) のバイト列が、すべての経路で一致すること。経路は、PUBLISH、受信 SUBSCRIBE の購読者、FETCH (`media_cache`) である。
+  - cmaf の Object は Properties を載せないので、Properties を含めた形でも経路ごとに一致すること (すべての経路で PROPERTIES ビットが 0)。
+  - 音声の終了時のフェードの chunk が、同じ track の sequence_number と tfdt の続きで組まれ、PUBLISH と `media_cache` で同じバイト列になること。
 - 完全カタログを正常に送出するまで、映像・音声の Object を採番・送出せず、`media_cache` にも記録しないこと。公開前の SUBSCRIBE は処理し、未公開のメディアの FETCH には INVALID_RANGE を返すこと。終了時の `flush_audio_fade` も公開前には送出しないこと。
-- 初回カタログ公開後は、保持した sample を track ごとに元の順序で送り、映像はキーフレームから始まること。保持量の上限超過や、初期化に必要な sample が揃う前の入力枯渇では、メディアを公開せずにエラーを返すこと。
+- 初回カタログ公開後は、保持した sample を track ごとに元の順序で送り、映像はキーフレームから始まること。保持量の上限超過や、初期化に必要な sample が揃う前の入力枯渇では、メディアを公開せずにエラーを返すこと。先頭の映像 sample がキーフレームでなく、キーフレームが届かないまま入力が尽きた場合も同じくエラーを返すこと。
 - 切り出した型の単体テストで、次の判断を固定すること。
   - 確定の契機: 有効な track の最初の sample が揃った時点で揃ったと返すこと (`--no-audio` と `--input-mp4` では音声を待たないこと)
   - カタログを送ってよいか・作り直してよいか: 確定前 (`json` がない) は否、確定後は可を返すこと
