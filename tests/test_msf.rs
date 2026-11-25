@@ -110,3 +110,6 @@ mod log;
 
 #[path = "test_msf/metrics.rs"]
 mod metrics;
+
+#[path = "test_msf/cmaf_packaging.rs"]
+mod cmaf_packaging;

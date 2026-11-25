@@ -470,6 +470,13 @@ pub enum MsfPackaging {
     /// draft-ietf-moq-msf-02 §5.2.4 (Packaging) の Table 5 が追加した値。トップレベルの
     /// カタログトラックだけが Track Name "catalog" を持つ必要がある (Appendix A.1.3)。
     Catalog,
+    /// CMAF パッケージング ("cmaf")
+    ///
+    /// draft-ietf-moq-cmsf-01 §3.5.1 (CMAF packaging type) の Table 1 が MSF の許容値に
+    /// 追加した値。CMAF でパッケージしたメディアを MSF のカタログ・タイムライン・ABR の
+    /// 枠組みで運ぶ。cmaf の track は initRef を必須とし、参照先の initDataList entry が
+    /// inline でなければならない (§3.1)。この仕様は将来変更される可能性がある。
+    Cmaf,
 }
 
 impl MsfPackaging {
@@ -481,11 +488,13 @@ impl MsfPackaging {
             Self::MoqLog => "moqlog",
             Self::MoqMetrics => "moqmetrics",
             Self::Catalog => "catalog",
+            Self::Cmaf => "cmaf",
         }
     }
 
     /// draft-ietf-moq-msf-02 §5.2.4 (Packaging): 許容値は loc / mediatimeline /
     /// eventtimeline / moqlog / moqmetrics / catalog
+    /// draft-ietf-moq-cmsf-01 §3.5.1 (CMAF packaging type): cmaf を追加する
     /// この仕様は将来変更される可能性がある。
     fn from_packaging_str(s: &str) -> Result<Self, MessageError> {
         match s {
@@ -495,6 +504,7 @@ impl MsfPackaging {
             "moqlog" => Ok(Self::MoqLog),
             "moqmetrics" => Ok(Self::MoqMetrics),
             "catalog" => Ok(Self::Catalog),
+            "cmaf" => Ok(Self::Cmaf),
             other => Err(MessageError::InvalidCatalog(format!(
                 "unknown packaging value '{other}'"
             ))),
@@ -894,6 +904,20 @@ pub struct MsfTrack {
     pub auth_info: Option<Vec<MsfAuthInfo>>,
     /// accessibility 記述子列 (draft-ietf-moq-msf-02 §5.2.44 (Accessibility))
     pub accessibility: Vec<MsfAccessibility>,
+    /// Group が始まる最大 SAP type (draft-ietf-moq-cmsf-01 §3.5.2.1)
+    ///
+    /// CMSF の track-level フィールド。cmaf の track でのみ意味を持つ
+    /// (draft-ietf-moq-msf-02 §5.2.4.1 の SHOULD NOT)。CMSF は値域を定めていないが、
+    /// §3.4 の MUST (Group は SAP type 1 か 2 で始まる) から 1〜2 に限る。
+    /// cmaf 以外の track では decode で捨て、encode で拒否する。
+    pub max_grp_sap_starting_type: Option<u64>,
+    /// Object が始まる最大 SAP type (draft-ietf-moq-cmsf-01 §3.5.2.2)
+    ///
+    /// CMSF の track-level フィールド。packaging による扱いは
+    /// [`Self::max_grp_sap_starting_type`] と同じ。track の Object には必ず Group
+    /// 先頭の Object (SAP type 1 か 2) が含まれるため 1 以上に限る。上限は課さない
+    /// (SAP type の値域を定める ISO/IEC 14496-12 を根拠資料にしていないため)。
+    pub max_obj_sap_starting_type: Option<u64>,
 }
 
 impl core::fmt::Debug for MsfTrack {
@@ -943,6 +967,8 @@ impl core::fmt::Debug for MsfTrack {
             track_base_key,
             auth_info,
             accessibility,
+            max_grp_sap_starting_type,
+            max_obj_sap_starting_type,
         } = self;
         f.debug_struct("MsfTrack")
             .field("name", name)
@@ -988,6 +1014,8 @@ impl core::fmt::Debug for MsfTrack {
             .field("track_base_key", &track_base_key.as_ref().map(String::len))
             .field("auth_info", auth_info)
             .field("accessibility", accessibility)
+            .field("max_grp_sap_starting_type", max_grp_sap_starting_type)
+            .field("max_obj_sap_starting_type", max_obj_sap_starting_type)
             .finish()
     }
 }
@@ -1039,6 +1067,8 @@ impl MsfTrack {
             track_base_key: None,
             auth_info: None,
             accessibility: Vec::new(),
+            max_grp_sap_starting_type: None,
+            max_obj_sap_starting_type: None,
         }
     }
 
@@ -1126,6 +1156,8 @@ struct TrackJsonParts<'a> {
     track_base_key: Option<&'a str>,
     auth_info: Option<&'a [MsfAuthInfo]>,
     accessibility: Option<&'a [MsfAccessibility]>,
+    max_grp_sap_starting_type: Option<u64>,
+    max_obj_sap_starting_type: Option<u64>,
     is_clone: bool,
 }
 
@@ -1281,6 +1313,16 @@ fn write_track_json(
     {
         f.member("accessibility", nojson::array(|f| f.elements(descs.iter())))?;
     }
+    // draft-ietf-moq-cmsf-01 §3.5.2 (Max SAP starting types): cmaf の track-level
+    // フィールド。cmaf 以外の track に値があれば encode 前の検証
+    // (validate_full_track / validate_clone_track_fragment) が拒否するため、
+    // ここでは値がある場合だけ書き出す。
+    if let Some(v) = p.max_grp_sap_starting_type {
+        f.member("maxGrpSapStartingType", v)?;
+    }
+    if let Some(v) = p.max_obj_sap_starting_type {
+        f.member("maxObjSapStartingType", v)?;
+    }
     Ok(())
 }
 
@@ -1334,6 +1376,8 @@ impl DisplayJson for MsfTrack {
                     track_base_key: self.track_base_key.as_deref(),
                     auth_info: self.auth_info.as_deref(),
                     accessibility: Some(self.accessibility.as_slice()),
+                    max_grp_sap_starting_type: self.max_grp_sap_starting_type,
+                    max_obj_sap_starting_type: self.max_obj_sap_starting_type,
                     is_clone: false,
                 },
             )
@@ -1462,6 +1506,18 @@ pub struct MsfCloneTrack {
     pub auth_info: Option<Vec<MsfAuthInfo>>,
     /// accessibility 記述子列 (draft-ietf-moq-msf-02 §5.2.44 (Accessibility)) - None は親から継承
     pub accessibility: Option<Vec<MsfAccessibility>>,
+    /// Group が始まる最大 SAP type (draft-ietf-moq-cmsf-01 §3.5.2.1) - None は親から継承
+    ///
+    /// cmaf の track でのみ意味を持つ (draft-ietf-moq-msf-02 §5.2.4.1 の SHOULD NOT)。packaging を省略した
+    /// 断片では親が cmaf かどうか分からないため値を保持し、継承の解決後に cmaf でなければ
+    /// 捨てる。packaging を cmaf 以外と明示した断片では decode で捨て、encode で拒否する。
+    pub max_grp_sap_starting_type: Option<u64>,
+    /// Object が始まる最大 SAP type (draft-ietf-moq-cmsf-01 §3.5.2.2) - None は親から継承
+    ///
+    /// cmaf の track でのみ意味を持つ (draft-ietf-moq-msf-02 §5.2.4.1 の SHOULD NOT)。扱いは
+    /// [`Self::max_grp_sap_starting_type`] と同じ。大小関係は片方の値を親から継承し得る
+    /// ため断片では検証せず、継承の解決後だけ判定する。
+    pub max_obj_sap_starting_type: Option<u64>,
 }
 
 impl core::fmt::Debug for MsfCloneTrack {
@@ -1512,6 +1568,8 @@ impl core::fmt::Debug for MsfCloneTrack {
             track_base_key,
             auth_info,
             accessibility,
+            max_grp_sap_starting_type,
+            max_obj_sap_starting_type,
         } = self;
         f.debug_struct("MsfCloneTrack")
             .field("name", name)
@@ -1558,6 +1616,8 @@ impl core::fmt::Debug for MsfCloneTrack {
             .field("track_base_key", &track_base_key.as_ref().map(String::len))
             .field("auth_info", auth_info)
             .field("accessibility", accessibility)
+            .field("max_grp_sap_starting_type", max_grp_sap_starting_type)
+            .field("max_obj_sap_starting_type", max_obj_sap_starting_type)
             .finish()
     }
 }
@@ -1613,6 +1673,8 @@ impl MsfCloneTrack {
             track_base_key: None,
             auth_info: None,
             accessibility: None,
+            max_grp_sap_starting_type: None,
+            max_obj_sap_starting_type: None,
         }
     }
 }
@@ -1667,6 +1729,8 @@ impl DisplayJson for MsfCloneTrack {
                     track_base_key: self.track_base_key.as_deref(),
                     auth_info: self.auth_info.as_deref(),
                     accessibility: self.accessibility.as_deref(),
+                    max_grp_sap_starting_type: self.max_grp_sap_starting_type,
+                    max_obj_sap_starting_type: self.max_obj_sap_starting_type,
                     is_clone: true,
                 },
             )
@@ -1690,6 +1754,10 @@ impl MsfCloneTrack {
     /// §8.2 (Event Timeline Catalog requirements) の制約に違反する場合、
     /// `InvalidCatalog` を返す。検証は `validate_full_track` に一本化しており、
     /// add 経路と同じ範囲を検査する。
+    ///
+    /// 継承先が cmaf のトラックなら、継承した maxGrpSapStartingType /
+    /// maxObjSapStartingType が値域または大小関係に違反する場合も `InvalidCatalog` を
+    /// 返す (draft-ietf-moq-cmsf-01 §3.5.2 (Max SAP starting types))。
     pub fn into_track(self, parent: &MsfTrack) -> Result<MsfTrack, MessageError> {
         // draft-ietf-moq-msf-02 §5.1.6 (Delta update): 再定義が無い属性は親から継承する
         let packaging = self.packaging.unwrap_or(parent.packaging);
@@ -1744,6 +1812,22 @@ impl MsfCloneTrack {
         let accessibility = self
             .accessibility
             .unwrap_or_else(|| parent.accessibility.clone());
+        // draft-ietf-moq-cmsf-01 §3.5.2 (Max SAP starting types): CMSF の track-level
+        // フィールド。clone 側で未指定なら親から継承する (§5.1.6)。
+        // 継承を解決した後の packaging が cmaf でなければ、継承した値も明示した値も
+        // 捨てる。cmaf の親を packaging: "loc" で clone する delta を、継承した CMSF
+        // フィールドを理由に拒否しないためである (draft-ietf-moq-msf-02 §5.2.4.1 の SHOULD NOT)。
+        let (max_grp_sap_starting_type, max_obj_sap_starting_type) =
+            if matches!(packaging, MsfPackaging::Cmaf) {
+                (
+                    self.max_grp_sap_starting_type
+                        .or(parent.max_grp_sap_starting_type),
+                    self.max_obj_sap_starting_type
+                        .or(parent.max_obj_sap_starting_type),
+                )
+            } else {
+                (None, None)
+            };
         // clone 自身の namespace 指定が無ければ親の namespace を継承する
         let namespace = self.namespace.or_else(|| parent.namespace.clone());
 
@@ -1859,6 +1943,8 @@ impl MsfCloneTrack {
             track_base_key,
             auth_info,
             accessibility,
+            max_grp_sap_starting_type,
+            max_obj_sap_starting_type,
         };
         // add 経路 (validate_full_track) と揃える。clone の継承結果にも
         // §5.2.33 (Language) などの検証を適用し、encode 時まで不正に気付けない
@@ -2386,6 +2472,11 @@ impl MsfCatalog {
     ///   (省略されたトラックは player の裁量 (MAY) のため比較対象外、`isLive=false` は無視)
     /// - 適用後の initRef が initDataList の id を指さない: `InvalidCatalog`
     ///   (§5.2.14 (Initialization reference))
+    /// - 適用後の cmaf のトラックが initRef を持たない、または参照先が `inline` でない:
+    ///   `InvalidCatalog` (draft-ietf-moq-cmsf-01 §3.1 (Initialization headers))
+    /// - 適用後の cmaf のトラックの maxGrpSapStartingType / maxObjSapStartingType が
+    ///   値域または大小関係に違反する: `InvalidCatalog`
+    ///   (draft-ietf-moq-cmsf-01 §3.5.2 (Max SAP starting types))
     /// - 削除済みの同じ Full Track Name を `isLive=false` から `true` で再追加する: `InvalidCatalog`
     ///   (§5.2.8 (Is Live))
     ///
@@ -2730,6 +2821,10 @@ impl MsfCatalog {
         // draft-ietf-moq-msf-02 §5.2.3 (Track name): Full Track Name は catalog 全体で一意。
         // "Within the catalog" のため tracks と publishTracks をまたいで検査する。
         self.validate_track_names(catalog_namespace)?;
+        // draft-ietf-moq-msf-02 §5.1.7 (Initialization Data List): id は catalog 内で一意。
+        // validate_init_refs は id を索引化するため、重複した id があると参照先の kind を
+        // 並び順で選んでしまい、cmaf の inline 判定が入力順に依存する。
+        validate_init_data_list_unique(&self.init_data_list)?;
         // draft-ietf-moq-msf-02 §5.2.14 (Initialization reference): 適用後の tracks /
         // publishTracks の initRef が initDataList の id を指すこと。
         validate_init_refs(&self.tracks, &self.publish_tracks, &self.init_data_list)?;
@@ -3545,6 +3640,10 @@ fn validate_init_data_list_unique(init_data_list: &[MsfInitData]) -> Result<(), 
 ///
 /// draft-ietf-moq-msf-02 §5.2.14 (Initialization reference): initRef は initDataList の
 /// id を指す。完全カタログ単体で参照整合性を検証する。
+///
+/// draft-ietf-moq-cmsf-01 §3.1 (Initialization headers): cmaf の track は initRef を
+/// 必須とし、参照先の initDataList entry の type が inline でなければならない。
+/// init segment の中身 (ftyp / moov) はコアが ISO BMFF に依存しないため検証しない。
 fn validate_init_refs(
     tracks: &[MsfTrack],
     publish_tracks: &[MsfTrack],
@@ -3553,11 +3652,36 @@ fn validate_init_refs(
     // initRef の解決は、initDataList の id を 1 回だけ索引化して O(1) で行う。
     // catalog のトラック数 M と initDataList の件数 D に対して O(M * D) だった
     // 線形探索を O(M + D) にする。
-    let ids: hashbrown::HashSet<&str> =
-        init_data_list.iter().map(|data| data.id.as_str()).collect();
+    // CMSF は参照先の type も見るため、id から entry への索引にする。
+    let entries: hashbrown::HashMap<&str, &MsfInitData> = init_data_list
+        .iter()
+        .map(|data| (data.id.as_str(), data))
+        .collect();
     for t in tracks.iter().chain(publish_tracks.iter()) {
+        if matches!(t.packaging, MsfPackaging::Cmaf) {
+            // draft-ietf-moq-cmsf-01 §3.1: cmaf の track は initRef 必須
+            let Some(ref init_ref) = t.init_ref else {
+                return Err(MessageError::InvalidCatalog(format!(
+                    "track '{}' with packaging 'cmaf' MUST specify initRef",
+                    t.name
+                )));
+            };
+            let Some(entry) = entries.get(init_ref.as_str()) else {
+                return Err(MessageError::InvalidCatalog(format!(
+                    "initRef '{init_ref}' does not match any initDataList id"
+                )));
+            };
+            // draft-ietf-moq-cmsf-01 §3.1: 参照先は inline でなければならない
+            if !matches!(entry.kind, MsfInitDataKind::Inline) {
+                return Err(MessageError::InvalidCatalog(format!(
+                    "track '{}' with packaging 'cmaf' MUST reference an inline initDataList entry, but '{init_ref}' is not inline",
+                    t.name
+                )));
+            }
+            continue;
+        }
         if let Some(ref init_ref) = t.init_ref
-            && !ids.contains(init_ref.as_str())
+            && !entries.contains_key(init_ref.as_str())
         {
             return Err(MessageError::InvalidCatalog(format!(
                 "initRef '{init_ref}' does not match any initDataList id"
@@ -3579,6 +3703,107 @@ fn validate_target_latency_buffers_exclusive(
         return Err(MessageError::InvalidCatalog(
             "targetLatency and buffers MUST NOT be present together".to_string(),
         ));
+    }
+    Ok(())
+}
+
+/// CMSF の track-level フィールドを扱うかの判定
+///
+/// draft-ietf-moq-msf-02 §5.2.4.1 (Required fields per packaging and track type) は、
+/// ある (packaging, role) の組で意味を持たないフィールドを SHOULD NOT で除外し、
+/// パーサは理解できないフィールドを無視するよう定める。
+/// draft-ietf-moq-cmsf-01 §3.5.2 が追加した maxGrpSapStartingType /
+/// maxObjSapStartingType は cmaf の track でのみ意味を持つ。
+///
+/// clone / update の断片は packaging を省略でき、その場合は親の packaging を継承する
+/// (§5.1.6)。そのため packaging だけでは「cmaf 以外」と確定できない場合がある。
+/// packaging が必須の完全カタログの track では `PackagingUnknown` は現れない。
+#[derive(Debug, Clone, Copy)]
+enum CmsfFieldScope {
+    /// cmaf の track なので値を扱う
+    Cmaf,
+    /// cmaf 以外と確定したので未知フィールドとして捨てる (encode では拒否する)
+    NotCmaf,
+    /// packaging が未確定 (断片で省略された) ので、親の継承解決まで判断を保留する
+    PackagingUnknown,
+}
+
+/// packaging から CMSF の track-level フィールドの扱いを決める
+fn cmsf_field_scope(packaging: Option<&MsfPackaging>) -> CmsfFieldScope {
+    match packaging {
+        Some(MsfPackaging::Cmaf) => CmsfFieldScope::Cmaf,
+        Some(_) => CmsfFieldScope::NotCmaf,
+        None => CmsfFieldScope::PackagingUnknown,
+    }
+}
+
+/// CMSF の SAP starting type の値域を検証する
+///
+/// draft-ietf-moq-cmsf-01 §3.5.2.1 / §3.5.2.2 は値域を定めていない。本実装は
+/// §3.4 の MUST (Group は SAP type 1 か 2 で始まる) から maxGrpSapStartingType を
+/// 1〜2 に限る。maxObjSapStartingType は、track の Object には必ず Group 先頭の
+/// Object (SAP type 1 か 2) が含まれることから 1 以上に限る。
+///
+/// 上限は課さない。SAP type の値域を定める ISO/IEC 14496-12 は根拠資料に置いておらず、
+/// 根拠のない上限を設けると他の publisher のカタログを丸ごと拒否してしまう。
+/// §3.6.1 の「0,1,2 or 3」は SAP Type timeline の data の値域であり、このフィールドの
+/// 値域ではない。
+fn validate_cmsf_sap_starting_type_ranges(
+    max_grp: Option<u64>,
+    max_obj: Option<u64>,
+) -> Result<(), MessageError> {
+    if let Some(value) = max_grp
+        && !(1..=2).contains(&value)
+    {
+        return Err(MessageError::InvalidCatalog(format!(
+            "maxGrpSapStartingType MUST be 1 or 2, got {value}"
+        )));
+    }
+    if let Some(value) = max_obj
+        && value == 0
+    {
+        return Err(MessageError::InvalidCatalog(format!(
+            "maxObjSapStartingType MUST be 1 or greater, got {value}"
+        )));
+    }
+    Ok(())
+}
+
+/// CMSF の SAP starting type の大小関係を検証する
+///
+/// draft-ietf-moq-cmsf-01 §3.5.2.1 / §3.5.2.2。Group 先頭の Object は track の Object の
+/// 一部なので、Object 全体の最大値は Group 先頭の最大値を下回らない。
+///
+/// 片方の値を親から継承し得る clone / update の断片では判定できないため、
+/// 継承を解決した後の track にだけ適用する。
+fn validate_cmsf_sap_starting_type_order(
+    max_grp: Option<u64>,
+    max_obj: Option<u64>,
+) -> Result<(), MessageError> {
+    if let (Some(obj), Some(grp)) = (max_obj, max_grp)
+        && obj < grp
+    {
+        return Err(MessageError::InvalidCatalog(format!(
+            "maxObjSapStartingType ({obj}) MUST NOT be less than maxGrpSapStartingType ({grp})"
+        )));
+    }
+    Ok(())
+}
+
+/// cmaf 以外の track / 断片が SAP starting type を持つのを拒否する
+///
+/// draft-ietf-moq-msf-02 §5.2.4.1 (Required fields per packaging and track type) の
+/// SHOULD NOT により、CMSF の SAP starting type は cmaf 以外の track では意味を持たない。
+/// decode では捨てるため、encode 側の手組みの値はここで拒否して往復を崩さないようにする。
+fn reject_cmsf_sap_starting_types_when_not_cmaf(
+    name: &str,
+    max_grp: Option<u64>,
+    max_obj: Option<u64>,
+) -> Result<(), MessageError> {
+    if max_grp.is_some() || max_obj.is_some() {
+        return Err(MessageError::InvalidCatalog(format!(
+            "track '{name}' MUST NOT specify maxGrpSapStartingType or maxObjSapStartingType unless packaging is 'cmaf'"
+        )));
     }
     Ok(())
 }
@@ -3964,6 +4189,8 @@ fn validate_loc_stream_mapping(metadata: Option<&str>) -> Result<(), MessageErro
 /// - §7.2 (Media Timeline Catalog requirements) / §8.2 (Event Timeline Catalog requirements)
 /// - §5.2.19 (Codec) / §5.2.23 (Maximum Bitrate) / §5.2.29 (Audio sample rate) /
 ///   §5.2.30 (Channel configuration)
+/// - draft-ietf-moq-cmsf-01 §3.5.2 (Max SAP starting types): cmaf のトラックの値域と
+///   大小関係、および cmaf 以外のトラックでの値の禁止
 fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
     // draft-ietf-moq-msf-02 §5.2.37 (Connection URI): connectionURI は
     // draft-ietf-moq-transport-23 §6.1 (MOQT URI Scheme) の endpoint URI でなければならない。
@@ -4081,6 +4308,28 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
         validate_lang_tag(lang)?;
     }
 
+    // draft-ietf-moq-cmsf-01 §3.5.2 (Max SAP starting types): CMSF の track-level
+    // フィールドは cmaf の track でのみ意味を持つ (draft-ietf-moq-msf-02 §5.2.4.1 の SHOULD NOT)。
+    // cmaf 以外の track に値があれば拒否し、cmaf なら値域と大小関係を検証する。
+    // この関数は decode 済みの track、delta の add、clone / update の継承解決結果、
+    // 完全カタログの encode のすべてに適用されるため、継承後の track もここで検証される。
+    if matches!(track.packaging, MsfPackaging::Cmaf) {
+        validate_cmsf_sap_starting_type_ranges(
+            track.max_grp_sap_starting_type,
+            track.max_obj_sap_starting_type,
+        )?;
+        validate_cmsf_sap_starting_type_order(
+            track.max_grp_sap_starting_type,
+            track.max_obj_sap_starting_type,
+        )?;
+    } else {
+        reject_cmsf_sap_starting_types_when_not_cmaf(
+            &track.name,
+            track.max_grp_sap_starting_type,
+            track.max_obj_sap_starting_type,
+        )?;
+    }
+
     validate_media_track_fields(track)
 }
 
@@ -4092,6 +4341,8 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
 /// - draft-ietf-moq-msf-02 §5.2.6 (Event timeline type)
 /// - §5.2.9 (Target latency) / §5.2.10 (Buffers)
 /// - §5.2.33 (Language) / §5.2.36 (Track duration)
+/// - draft-ietf-moq-cmsf-01 §3.5.2 (Max SAP starting types): packaging を cmaf と明示した
+///   断片の値域、および cmaf 以外と明示した断片での値の禁止
 fn validate_clone_track_fragment(track: &MsfCloneTrack) -> Result<(), MessageError> {
     // draft-ietf-moq-msf-02 §5.2.37 (Connection URI): clone で上書きする場合も
     // MOQT endpoint URI の構文を満たさなければならない。
@@ -4145,6 +4396,29 @@ fn validate_clone_track_fragment(track: &MsfCloneTrack) -> Result<(), MessageErr
     // draft-ietf-moq-msf-02 §5.2.33 (Language): BCP 47 言語タグ
     if let Some(ref lang) = track.lang {
         validate_lang_tag(lang)?;
+    }
+
+    // draft-ietf-moq-cmsf-01 §3.5.2 (Max SAP starting types): packaging を明示して
+    // cmaf 以外とした断片に値があれば拒否する。packaging を省略した断片は親が cmaf か
+    // どうか分からないため、継承の解決後 (MsfCloneTrack::into_track) に判定する。
+    // 値域は cmaf と明示された断片でだけ検証する。大小関係は片方の値を親から継承し得る
+    // ため断片では検証しない。
+    match cmsf_field_scope(track.packaging.as_ref()) {
+        CmsfFieldScope::Cmaf => {
+            validate_cmsf_sap_starting_type_ranges(
+                track.max_grp_sap_starting_type,
+                track.max_obj_sap_starting_type,
+            )?;
+        }
+        CmsfFieldScope::NotCmaf => {
+            reject_cmsf_sap_starting_types_when_not_cmaf(
+                &track.name,
+                track.max_grp_sap_starting_type,
+                track.max_obj_sap_starting_type,
+            )?;
+        }
+        // packaging 省略時は親の継承解決まで判断を保留する
+        CmsfFieldScope::PackagingUnknown => {}
     }
     Ok(())
 }
@@ -4463,13 +4737,23 @@ struct CommonTrackFields {
     parent_name: Option<String>,
     parent_namespace: Option<String>,
     packaging_metadata: Option<String>,
+    max_grp_sap_starting_type: Option<u64>,
+    max_obj_sap_starting_type: Option<u64>,
 }
 
 /// track / cloneTracks 共通フィールドを抽出する
 ///
 /// lang タグ検証まで含む (両者で同一)。必須可否は呼び出し側で判定する。
+///
+/// `cmsf_scope` は draft-ietf-moq-cmsf-01 §3.5.2 (Max SAP starting types) の
+/// track-level フィールドを読むかどうかを決める。`CmsfFieldScope::NotCmaf` のときは
+/// 値を読み取らない。packaging が cmaf 以外と確定している track にとってこの
+/// フィールドは未知フィールドであり、draft-ietf-moq-msf-02 §5 の MUST ignore に従って
+/// 型を問わず捨てなければならないためである。数値以外の値でパースを失敗させると、
+/// 他の publisher のカタログを丸ごと拒否してしまう。
 fn decode_common_track_fields(
     val: nojson::RawJsonValue<'_, '_>,
+    cmsf_scope: CmsfFieldScope,
 ) -> Result<CommonTrackFields, MessageError> {
     let fields = CommonTrackFields {
         namespace: val.to_member("namespace")?.map(|v| v.try_into())?,
@@ -4549,6 +4833,21 @@ fn decode_common_track_fields(
         },
         parent_name: val.to_member("parentName")?.map(|v| v.try_into())?,
         parent_namespace: val.to_member("parentNamespace")?.map(|v| v.try_into())?,
+        // draft-ietf-moq-cmsf-01 §3.5.2 (Max SAP starting types): cmaf の track-level
+        // フィールド。cmaf 以外と確定している track では未知フィールドとして捨てるため、
+        // 値の読み取り自体を行わない (型の不一致でカタログを拒否しない)。
+        max_grp_sap_starting_type: match cmsf_scope {
+            CmsfFieldScope::NotCmaf => None,
+            CmsfFieldScope::Cmaf | CmsfFieldScope::PackagingUnknown => {
+                val.to_member("maxGrpSapStartingType")?.map(parse_u64)?
+            }
+        },
+        max_obj_sap_starting_type: match cmsf_scope {
+            CmsfFieldScope::NotCmaf => None,
+            CmsfFieldScope::Cmaf | CmsfFieldScope::PackagingUnknown => {
+                val.to_member("maxObjSapStartingType")?.map(parse_u64)?
+            }
+        },
     };
     if let Some(ref lang) = fields.lang {
         validate_lang_tag(lang)?;
@@ -4603,7 +4902,9 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
     let packaging_str: String = val.to_member("packaging")?.required()?.try_into()?;
     let packaging = MsfPackaging::from_packaging_str(&packaging_str)?;
 
-    let f = decode_common_track_fields(val)?;
+    // 完全カタログの track は packaging が必須なので、CMSF フィールドの扱いも確定する
+    let cmsf_scope = cmsf_field_scope(Some(&packaging));
+    let f = decode_common_track_fields(val, cmsf_scope)?;
     let CommonTrackFields {
         namespace,
         packaging_metadata,
@@ -4646,9 +4947,28 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
         track_base_key,
         auth_info,
         accessibility,
+        max_grp_sap_starting_type,
+        max_obj_sap_starting_type,
     } = f;
     let depends = depends.unwrap_or_default();
     let accessibility = accessibility.unwrap_or_default();
+    // draft-ietf-moq-cmsf-01 §3.5.2 (Max SAP starting types): 完全カタログの track は
+    // packaging が必須なので、値域と大小関係の両方をここで検証できる。cmaf 以外の track は
+    // decode_common_track_fields が値を読んでいないため None のままとなる。
+    let (max_grp_sap_starting_type, max_obj_sap_starting_type) =
+        if matches!(cmsf_scope, CmsfFieldScope::Cmaf) {
+            validate_cmsf_sap_starting_type_ranges(
+                max_grp_sap_starting_type,
+                max_obj_sap_starting_type,
+            )?;
+            validate_cmsf_sap_starting_type_order(
+                max_grp_sap_starting_type,
+                max_obj_sap_starting_type,
+            )?;
+            (max_grp_sap_starting_type, max_obj_sap_starting_type)
+        } else {
+            (None, None)
+        };
     // draft-ietf-moq-msf-02 §4.1.1 (LOC to MOQT Stream mapping) / §5.2.5: loc の
     // streamMapping は group / object のみ。他の packaging では未知キーとして無視する。
     // clone / update の継承後は validate_full_track が同じ検査を行う。
@@ -4802,6 +5122,8 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
         track_base_key,
         auth_info,
         accessibility,
+        max_grp_sap_starting_type,
+        max_obj_sap_starting_type,
     };
     validate_media_track_fields(&track)?;
     Ok(track)
@@ -5091,7 +5413,10 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
         None => None,
     };
 
-    let f = decode_common_track_fields(val)?;
+    // clone / update の断片は packaging を省略でき、その場合は親が cmaf かどうか
+    // 分からないため値を保持する (CmsfFieldScope::PackagingUnknown)。
+    let cmsf_scope = cmsf_field_scope(packaging.as_ref());
+    let f = decode_common_track_fields(val, cmsf_scope)?;
     let CommonTrackFields {
         namespace,
         packaging_metadata,
@@ -5132,10 +5457,26 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
         track_base_key,
         auth_info,
         accessibility,
+        max_grp_sap_starting_type,
+        max_obj_sap_starting_type,
         parent_name: _,
         parent_namespace: _,
     } = f;
     let is_live: Option<bool> = val.to_member("isLive")?.map(bool::try_from)?;
+
+    // draft-ietf-moq-cmsf-01 §3.5.2 (Max SAP starting types): 値域は cmaf と明示された
+    // 断片でだけ検証する (継承後の値は validate_full_track が見る)。
+    let (max_grp_sap_starting_type, max_obj_sap_starting_type) = match cmsf_scope {
+        CmsfFieldScope::Cmaf => {
+            validate_cmsf_sap_starting_type_ranges(
+                max_grp_sap_starting_type,
+                max_obj_sap_starting_type,
+            )?;
+            (max_grp_sap_starting_type, max_obj_sap_starting_type)
+        }
+        CmsfFieldScope::NotCmaf => (None, None),
+        CmsfFieldScope::PackagingUnknown => (max_grp_sap_starting_type, max_obj_sap_starting_type),
+    };
 
     // 暗号化 signaling の欠如検証は行わない。clone は親の属性を継承するため、
     // 断片単体では MUST 違反と断定できない (decode_track のみで検証する)。
@@ -5235,6 +5576,8 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
         track_base_key,
         auth_info,
         accessibility,
+        max_grp_sap_starting_type,
+        max_obj_sap_starting_type,
     })
 }
 

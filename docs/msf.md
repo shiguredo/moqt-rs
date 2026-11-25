@@ -50,7 +50,7 @@
   - event timeline の depends は index が MediaPtsMs を参照する場合だけ必須で、`validate_event_timeline_depends(catalog, timeline)` で検証する (§8.3)
   - 両 timeline とも mimeType の値を要求しない。renderGroup の一部だけが対象という判定は catalog からできないため publisher の責務である
   - 削除用 `MsfRemoveTrack`
-  - `MsfInitData` / `MsfBuffers` / `MsfPackaging` (loc / mediatimeline / eventtimeline / moqlog / moqmetrics / catalog)
+  - `MsfInitData` / `MsfBuffers` / `MsfPackaging` (loc / mediatimeline / eventtimeline / moqlog / moqmetrics / catalog / cmaf)
 - multi-variant switching: `crates/moq-sub/src/track_switch.rs` の `select_initial_variant` が帯域と keyframeSpacing から初期購読先を選び、`switch_target` が `(G - G0) * S + N` の switch point 判定と target Group ID を返す。`TrackSwitchState::switch_to` は旧購読の解除、target の Object 0 からの受信、decoder 再初期化を含む action を返す (§6.3)
 - 優先度: カタログの publisher priority は 64、カタログ購読の SUBSCRIBER_PRIORITY は 64 とし、media の既定値 128 より高くする (Appendix A.1.3 の SHOULD)
 - 検証規則
@@ -71,6 +71,53 @@
   - encode 時は version が `draft-02` であり、framerate が有限値であること
   - `initDataList` の `inline` data と `trackBaseKey` は Base64 (RFC 4648 §4) であること
   - lang は RFC 5646 §2.1 の Language-Tag ABNF 全体で検証し、IANA Language Subtag Registry との照合は行わない (RFC 5646 §2.1 の grandfathered タグを含む。`irregular` は固定リスト、`regular` は langtag 規則で受理する)
+
+## CMSF
+
+[draft-ietf-moq-cmsf-01](https://datatracker.ietf.org/doc/html/draft-ietf-moq-cmsf-01) への対応状況である。CMSF は MSF を拡張し、CMAF でパッケージしたメディアを MSF のカタログ・タイムライン・ABR の枠組みで運ぶ。
+
+CMSF の型と定数には `Cmsf` / `CMSF_` の接頭辞を付ける。
+
+CMSF-01 が規範参照しているのは MSF-01 / MoQT-18 / LOC-02 だが、本実装は MSF-02 / MoQT-23 / LOC-05 に準拠している。CMSF-01 の記述をそのまま実装すると MSF-02 と矛盾する箇所や古い節番号を参照する箇所が出るため、そのような箇所では MSF-02 / MoQT-23 を優先する。判断は次の表に固定する。
+
+### CMSF-01 と MSF-02 / MoQT-23 のずれ
+
+| 項目 | CMSF-01 | MSF-02 / MoQT-23 | 本実装の扱い |
+| --- | --- | --- | --- |
+| カタログの version | §5 の例は `"version": "1"` | §5.1.1: `"draft-XX"` 形式 | CMSF のカタログも `MSF_VERSION` (`"draft-02"`) を名乗る。§5 の例は非規範として扱う |
+| MOQT Track の参照 | §3.2: `[MoQTransport] Sect 2.3` | MoQT-23 では §2.3 が Groups、§2.4 が Track | doc / コメントでは MoQT-23 §2.4 を参照する |
+| Table 6 の行 | cmaf の行を定義しない | §5.2.4.1: 新しい packaging を定義する仕様が role ごとの行を追加する | Table 6 由来の追加必須フィールドは cmaf に課さない。role / codec / mimeType から導く条件付き必須 (bitrate など) はこれまでどおり課す。initRef は CMSF §3.1 の MUST として必須にする |
+
+### track フィールド
+
+- packaging
+  - `MsfPackaging::Cmaf` (`"cmaf"`)：CMSF §3.5.1 の Table 1 が MSF の許容値に追加した値。decode と encode の両方向で扱う
+  - `"packaging": "cmaf"` の track が 1 つでも含まれるカタログを decode できる
+- cmaf の track の initRef (§3.1)
+  - initRef を必須とする。無ければ `InvalidCatalog` にする
+  - 参照先の initDataList entry の type が `inline` でなければ `InvalidCatalog` にする
+  - `tracks` と `publishTracks` の両方を対象にする
+  - 完全カタログの decode / encode と、delta 適用後のいずれでも検証する。delta update 単体は基底カタログの initDataList を持たないため、参照の解決と `inline` の判定はできない。initRef の欠如も、delta の add は継承しない完全な track であるにもかかわらず、この段階では検証せず delta 適用後に検出する
+  - init segment の中身 (ftyp / moov) はコアでは検証しない。コアの `shiguredo_moqt` は ISO BMFF に依存していないためである
+- SAP starting type (§3.5.2)
+  - `MsfTrack` と `MsfCloneTrack` に `max_grp_sap_starting_type` / `max_obj_sap_starting_type` (`Option<u64>`) を持つ。JSON のキーは `maxGrpSapStartingType` / `maxObjSapStartingType`
+  - 値域は CMSF が定めないため、本実装が §3.4 の MUST (Group は SAP type 1 か 2 で始まる) から決める。`maxGrpSapStartingType` は 1〜2、`maxObjSapStartingType` は 1 以上とする。上限は課さない。SAP type の値域を定める ISO/IEC 14496-12 は `refs/` に無く、根拠のない上限を設けると他の publisher のカタログを丸ごと拒否してしまうためである。§3.6.1 の「0,1,2 or 3」は SAP Type timeline の data の値域であり、このフィールドの値域ではない
+  - 両方あるときは `maxObjSapStartingType` ≥ `maxGrpSapStartingType` を要求する。Group 先頭の Object は track の Object の一部だからである
+  - 値域と大小関係は decode と `validate_full_track` で検証する。`validate_full_track` は delta の add (適用時と encode 時)、`MsfCloneTrack::into_track` の結果、update のマージ結果、完全カタログの encode に適用されるため、継承を解決した後の track にも同じ検証がかかる
+  - clone / update の断片 (`decode_clone_track` / `validate_clone_track_fragment`) では、packaging を cmaf と明示したときだけ値域を検証する。packaging を省略した断片では値域を検証しない。親が cmaf 以外なら値が継承の解決後に捨てられるためである
+  - 大小関係は片方の値を親から継承し得るため断片では検証せず、継承の解決後だけ判定する
+- cmaf 以外の track の SAP starting type
+  - 2 つのフィールドは cmaf 以外の track では意味を持たない (MSF-02 §5.2.4.1 の SHOULD NOT)
+  - decode では未知フィールドとして捨てる (MSF-02 §5 の MUST ignore)。値の型が数値でない場合も同様に捨て、カタログを拒否しない。encode では値があれば `InvalidCatalog` にする。こうすると decode → encode の往復が崩れない
+  - clone / update の断片では、packaging を明示して cmaf 以外としたときだけ値を捨てる。packaging を省略した場合は親が cmaf かどうか分からないので値を保持し、継承を解決した後の track が cmaf でなければ継承した値も明示した値も捨てる。cmaf の親を `packaging: "loc"` で clone する delta を、継承した CMSF フィールドを理由に拒否しないためである
+
+### ライブラリが検証しない CMSF の規則
+
+次の規則はカタログから判定できないため、ライブラリでは検証しない。
+
+- §3.2 の switching set：altGroup を共有し、Group 番号を media time で揃えること
+- §3.3 の Object Packaging：Object が moof と mdat を持ち、単一 track であること
+- §3.4 の Group Packaging：Group が SAP type 1 か 2 で始まり、Group 境界が CMAF Fragment 境界に揃うこと
 
 ## Log / Metrics payload
 

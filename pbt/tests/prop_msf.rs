@@ -79,7 +79,8 @@ fn sample_name(ctx: &mut noprop::TestCaseContext) -> String {
 
 /// MsfPackaging を生成する
 ///
-/// draft-ietf-moq-msf-02 §5.2.4 (Packaging): 許容値は loc / mediatimeline / eventtimeline / moqlog / moqmetrics
+/// draft-ietf-moq-msf-02 §5.2.4 (Packaging): 許容値は loc / mediatimeline / eventtimeline / moqlog / moqmetrics / catalog
+/// draft-ietf-moq-cmsf-01 §3.5.1 (CMAF packaging type): cmaf を追加する
 fn sample_packaging(ctx: &mut noprop::TestCaseContext) -> MsfPackaging {
     noprop::sample_choice(
         ctx,
@@ -90,6 +91,7 @@ fn sample_packaging(ctx: &mut noprop::TestCaseContext) -> MsfPackaging {
             MsfPackaging::MoqLog,
             MsfPackaging::MoqMetrics,
             MsfPackaging::Catalog,
+            MsfPackaging::Cmaf,
         ],
     )
 }
@@ -288,6 +290,25 @@ fn sample_track(ctx: &mut noprop::TestCaseContext) -> MsfTrack {
     if t.role.as_deref() == Some("audiodescription") {
         t.lang = Some("en".to_string());
     }
+    // draft-ietf-moq-cmsf-01 §3.5.2 (Max SAP starting types): cmaf の track でだけ生成する。
+    // 値域は cmaf の track でだけ検証され、cmaf 以外の track は decode で捨てられ encode で
+    // 拒否されるため、往復できる正規形として cmaf のときだけ値を入れる。
+    if matches!(packaging, MsfPackaging::Cmaf) {
+        // §3.4 の MUST から maxGrpSapStartingType は 1〜2、maxObjSapStartingType は
+        // 1 以上かつ maxGrpSapStartingType 以上という関係を守る
+        let grp = 1 + u64::from(noprop::sample_u32(ctx) % 2);
+        let obj = grp + u64::from(noprop::sample_u32(ctx) % 3);
+        t.max_grp_sap_starting_type = if noprop::sample_bool(ctx) {
+            Some(grp)
+        } else {
+            None
+        };
+        t.max_obj_sap_starting_type = if noprop::sample_bool(ctx) {
+            Some(obj)
+        } else {
+            None
+        };
+    }
     t
 }
 
@@ -419,6 +440,21 @@ fn sample_clone_track(ctx: &mut noprop::TestCaseContext) -> MsfCloneTrack {
         auth_info: sample_auth_info(ctx),
         accessibility: if noprop::sample_bool(ctx) {
             Some(sample_accessibility(ctx))
+        } else {
+            None
+        },
+        // draft-ietf-moq-cmsf-01 §3.5.2 (Max SAP starting types): packaging を cmaf と
+        // 明示した断片だけ値を生成する。cmaf 以外と明示した断片は encode で拒否され、
+        // packaging 省略時は親の継承解決まで値域が確定しないため、往復の対象にしない。
+        // 値域 (maxGrp は 1〜2、maxObj は 1 以上) と大小関係を満たす組だけを作る。
+        max_grp_sap_starting_type: if include_pkg && matches!(pkg, MsfPackaging::Cmaf) {
+            Some(1 + u64::from(noprop::sample_u32(ctx) % 2))
+        } else {
+            None
+        },
+        max_obj_sap_starting_type: if include_pkg && matches!(pkg, MsfPackaging::Cmaf) {
+            // maxGrpSapStartingType が 2 でも下回らないよう 2 以上にする
+            Some(2 + u64::from(noprop::sample_u32(ctx) % 2))
         } else {
             None
         },
@@ -592,6 +628,38 @@ fn sample_event_timeline_entry(ctx: &mut noprop::TestCaseContext) -> MsfEventTim
 }
 
 // ─── PBT (プロパティベーステスト) ─────────────────────────────────────────────────────────────────────
+
+/// cmaf の track の initRef を、inline の initDataList entry へ揃える
+///
+/// draft-ietf-moq-cmsf-01 §3.1 (Initialization headers): cmaf の track は initRef を
+/// 必須とし、参照先の initDataList entry は type が inline でなければならない。
+/// PBT の生成器は track と initDataList を独立に作るため、カタログ全体ができた後に
+/// cmaf の track へ専用の inline entry を割り当てる。
+fn satisfy_cmaf_init_refs(
+    tracks: &mut [MsfTrack],
+    publish_tracks: &mut [MsfTrack],
+    init_data_list: &mut Vec<MsfInitData>,
+) {
+    // cmaf の track だけを対象に、既存の entry と衝突しない id を 1 件ずつ作る。
+    // sample_name は [a-z][a-z0-9-]* しか生成しないため、`_` を含む接頭辞なら
+    // 既存の id と衝突しない。
+    for (index, track) in tracks
+        .iter_mut()
+        .chain(publish_tracks.iter_mut())
+        .enumerate()
+    {
+        if !matches!(track.packaging, MsfPackaging::Cmaf) {
+            continue;
+        }
+        let id = format!("_cmaf_init_{index}");
+        init_data_list.push(MsfInitData {
+            id: id.clone(),
+            kind: MsfInitDataKind::Inline,
+            data: "AAEC".to_string(),
+        });
+        track.init_ref = Some(id);
+    }
+}
 
 /// depends を、生成済みカタログ内で解決できる track name / renderGroup に置き換える
 ///
@@ -880,7 +948,7 @@ fn full_catalog_roundtrip() -> noprop::TestResult {
             .into_iter()
             .filter(|t| seen.insert((t.namespace.clone(), t.name.clone())))
             .collect();
-        let init_data_list = sample_init_data_list(ctx);
+        let mut init_data_list = sample_init_data_list(ctx);
         let generated_at = if noprop::sample_bool(ctx) {
             Some(noprop::sample_u32(ctx) as u64)
         } else {
@@ -897,6 +965,10 @@ fn full_catalog_roundtrip() -> noprop::TestResult {
         normalize_group_members(&mut unique_tracks);
         normalize_group_members(&mut publish_tracks);
         rewrite_dependencies(&mut unique_tracks, &mut publish_tracks, ctx);
+        // draft-ietf-moq-cmsf-01 §3.1 (Initialization headers): cmaf の track は initRef を
+        // 必須とし、参照先の initDataList entry は inline でなければならない。
+        // cmaf の track を生成したら、inline の entry を用意して initRef を揃える。
+        satisfy_cmaf_init_refs(&mut unique_tracks, &mut publish_tracks, &mut init_data_list);
         let doc = MsfCatalogDocument::Full(MsfCatalog {
             version: MSF_VERSION.to_string(),
             generated_at,

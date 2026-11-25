@@ -199,6 +199,8 @@ fn delta_all_operations() {
                     track_base_key: None,
                     auth_info: None,
                     accessibility: None,
+                    max_grp_sap_starting_type: None,
+                    max_obj_sap_starting_type: None,
                 }],
             },
         ],
@@ -415,6 +417,8 @@ fn clone_track_roundtrip_all_fields() {
                 track_base_key: Some("dGhpc2lzYXNhbXBsZWJhc2VrZXk=".to_string()),
                 auth_info: None,
                 accessibility: None,
+                max_grp_sap_starting_type: None,
+                max_obj_sap_starting_type: None,
                 width: Some(1920),
                 height: Some(1080),
                 samplerate: Some(48_000),
@@ -484,6 +488,8 @@ fn clone_track_roundtrip_with_target_latency() {
                 track_base_key: None,
                 auth_info: None,
                 accessibility: None,
+                max_grp_sap_starting_type: None,
+                max_obj_sap_starting_type: None,
             }],
         }],
     });
@@ -545,6 +551,8 @@ fn clone_track_roundtrip_with_track_duration() {
                 track_base_key: None,
                 auth_info: None,
                 accessibility: None,
+                max_grp_sap_starting_type: None,
+                max_obj_sap_starting_type: None,
             }],
         }],
     });
@@ -1327,6 +1335,8 @@ fn accessibility_empty_some_roundtrip() {
         track_base_key: None,
         auth_info: None,
         accessibility: Some(Vec::new()),
+        max_grp_sap_starting_type: None,
+        max_obj_sap_starting_type: None,
     };
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
         generated_at: 1,
@@ -1402,6 +1412,8 @@ fn accessibility_clone_none_omitted() {
                 track_base_key: None,
                 auth_info: None,
                 accessibility: None,
+                max_grp_sap_starting_type: None,
+                max_obj_sap_starting_type: None,
             }],
         }],
     });
